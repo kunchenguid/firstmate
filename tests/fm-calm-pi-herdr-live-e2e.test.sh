@@ -9,7 +9,7 @@ fm_live_gate opt-in FM_CALM_PI_HERDR_LIVE_E2E herdr jq pi python3
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
-HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name calm-live-rotation-counter)
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name calm-commentary-layout)
 TMP_ROOT=$(fm_test_tmproot fm-calm-pi-herdr-live-e2e)
 PROJECT="$TMP_ROOT/project"
 HOME_DIR="$TMP_ROOT/home"
@@ -224,6 +224,8 @@ for i in $(seq 1 120); do
   sleep 0.1
 done
 [ "$reloaded" -eq 1 ] || fail "real Pi did not reload the current Calm adapter over the legacy live wrapper"
+wait_for_text "Reloaded keybindings, extensions, skills, prompts, themes, and context files" \
+  || fail "real Pi did not finish the reload before the live probe"
 "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-text "$PANE" '/calm-live-probe' >/dev/null
 "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-keys "$PANE" enter >/dev/null
 
@@ -236,71 +238,55 @@ plan_step_three=
 seen_one=0
 seen_two=0
 seen_three=0
-step_one=
-step_two=
-step_three=
 final_text=
-for i in $(seq 1 160); do
+assert_current_layout() { # <frame> <exact step text>
+  local frame=$1 step=$2 step_line ship_line
+  step_line=$(printf '%s\n' "$frame" | grep -Fn "$step" | tail -1 | cut -d: -f1)
+  ship_line=$(printf '%s\n' "$frame" | grep -Fn '╲▁▁▁╱' | tail -1 | cut -d: -f1)
+  [ -n "$step_line" ] && [ -n "$ship_line" ] && [ "$step_line" -lt "$ship_line" ] \
+    || fail "$step was not above the sailing ship"
+}
+assert_commentary_layout() { # <frame> <commentary number>
+  local frame=$1 number=$2 count commentary_line step_line ship_line
+  count=$(printf '%s\n' "$frame" | grep -Fc "COMMENTARY_$number")
+  [ "$count" -eq 1 ] || fail "COMMENTARY_$number appeared $count times"
+  step_line=$(printf '%s\n' "$frame" | grep -En 'Step [0-9]+:' | tail -1 | cut -d: -f1)
+  [ -n "$step_line" ] || return 0
+  commentary_line=$(printf '%s\n' "$frame" | grep -Fn "COMMENTARY_$number" | tail -1 | cut -d: -f1)
+  ship_line=$(printf '%s\n' "$frame" | grep -Fn '╲▁▁▁╱' | tail -1 | cut -d: -f1)
+  [ -n "$ship_line" ] && [ "$commentary_line" -lt "$step_line" ] && [ "$step_line" -lt "$ship_line" ] \
+    || fail "COMMENTARY_$number, the current step, and the ship were not ordered top to bottom"
+}
+for i in $(seq 1 200); do
   final_text=$(pane_text)
+  step_count=$( (printf '%s\n' "$final_text" | grep -Eo 'Step [0-9]+:' || true) | wc -l | tr -d ' ')
+  [ "$step_count" -le 1 ] || fail "live frame $i rendered $step_count numbered rows"
   if printf '%s' "$final_text" | grep -Eq 'Step [0-9]+: LIVE_PLAN_ONE'; then
     seen_plan_one=1
     plan_step_one=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+: LIVE_PLAN_ONE' | sed -E 's/Step ([0-9]+).*/\1/' | tail -1)
-    step_count=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+:' | wc -l | tr -d ' ')
-    [ "$step_count" -eq 1 ] || fail "first planning frame rendered $step_count numbered rows"
-    if printf '%s' "$final_text" | grep -Eq 'LIVE_PLAN_[23]|COMMENTARY_'; then
-      printf '%s\n' "$final_text" >&2
-      fail "first planning frame accumulated another planning or commentary row"
-    fi
+    assert_current_layout "$final_text" "Step $plan_step_one: LIVE_PLAN_ONE"
   fi
   if printf '%s' "$final_text" | grep -Eq 'Step [0-9]+: LIVE_PLAN_TWO'; then
     seen_plan_two=1
     plan_step_two=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+: LIVE_PLAN_TWO' | sed -E 's/Step ([0-9]+).*/\1/' | tail -1)
-    step_count=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+:' | wc -l | tr -d ' ')
-    [ "$step_count" -eq 1 ] || fail "second planning frame rendered $step_count numbered rows"
-    if printf '%s' "$final_text" | grep -Eq 'LIVE_PLAN_ONE|LIVE_PLAN_THREE|COMMENTARY_'; then
-      printf '%s\n' "$final_text" >&2
-      fail "second planning frame retained another planning or commentary row"
-    fi
+    assert_current_layout "$final_text" "Step $plan_step_two: LIVE_PLAN_TWO"
   fi
   if printf '%s' "$final_text" | grep -Eq 'Step [0-9]+: LIVE_PLAN_THREE'; then
     seen_plan_three=1
     plan_step_three=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+: LIVE_PLAN_THREE' | sed -E 's/Step ([0-9]+).*/\1/' | tail -1)
-    step_count=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+:' | wc -l | tr -d ' ')
-    [ "$step_count" -eq 1 ] || fail "third planning frame rendered $step_count numbered rows"
-    if printf '%s' "$final_text" | grep -Eq 'LIVE_PLAN_[12]|COMMENTARY_'; then
-      printf '%s\n' "$final_text" >&2
-      fail "third planning frame retained another planning or commentary row"
-    fi
+    assert_current_layout "$final_text" "Step $plan_step_three: LIVE_PLAN_THREE"
   fi
-  if printf '%s' "$final_text" | grep -Eq 'Step [0-9]+: COMMENTARY_1'; then
+  if printf '%s' "$final_text" | grep -Fq 'COMMENTARY_1'; then
     seen_one=1
-    step_one=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+: COMMENTARY_1' | sed -E 's/Step ([0-9]+).*/\1/' | tail -1)
-    step_count=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+:' | wc -l | tr -d ' ')
-    [ "$step_count" -eq 1 ] || fail "first frame rendered $step_count numbered rows"
-    if printf '%s' "$final_text" | grep -Eq 'LIVE_PLAN_|COMMENTARY_[23]'; then
-      printf '%s\n' "$final_text" >&2
-      fail "first frame accumulated a later planning or commentary row"
-    fi
+    assert_commentary_layout "$final_text" 1
   fi
-  if printf '%s' "$final_text" | grep -Eq 'Step [0-9]+: COMMENTARY_2'; then
+  if printf '%s' "$final_text" | grep -Fq 'COMMENTARY_2'; then
     seen_two=1
-    step_two=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+: COMMENTARY_2' | sed -E 's/Step ([0-9]+).*/\1/' | tail -1)
-    step_count=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+:' | wc -l | tr -d ' ')
-    [ "$step_count" -eq 1 ] || fail "second frame rendered $step_count numbered rows"
-    if printf '%s' "$final_text" | grep -Eq 'LIVE_PLAN_ONE|COMMENTARY_[13]'; then
-      printf '%s\n' "$final_text" >&2
-      fail "second frame retained an earlier or later planning or commentary row"
-    fi
+    assert_commentary_layout "$final_text" 2
   fi
-  if printf '%s' "$final_text" | grep -Eq 'Step [0-9]+: COMMENTARY_3'; then
+  if printf '%s' "$final_text" | grep -Fq 'COMMENTARY_3'; then
     seen_three=1
-    step_three=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+: COMMENTARY_3' | sed -E 's/Step ([0-9]+).*/\1/' | tail -1)
-    step_count=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+:' | wc -l | tr -d ' ')
-    [ "$step_count" -eq 1 ] || fail "third frame rendered $step_count numbered rows"
-    if printf '%s' "$final_text" | grep -Eq 'LIVE_PLAN_[12]|COMMENTARY_[12]'; then
-      printf '%s\n' "$final_text" >&2
-      fail "third frame retained an earlier planning or commentary row"
-    fi
+    assert_commentary_layout "$final_text" 3
   fi
   printf '%s' "$final_text" | grep -Fq 'CALM_LIVE_HERDR_FINAL' && break
   sleep 0.1
@@ -308,20 +294,21 @@ done
 [ "$seen_plan_one" -eq 1 ] || { printf '%s\n' "$final_text" >&2; fail "real Pi/Herdr never displayed the first planning step"; }
 [ "$seen_plan_two" -eq 1 ] || { printf '%s\n' "$final_text" >&2; fail "real Pi/Herdr never displayed the second planning step"; }
 [ "$seen_plan_three" -eq 1 ] || { printf '%s\n' "$final_text" >&2; fail "real Pi/Herdr never displayed the third planning step"; }
-[ "$seen_one" -eq 1 ] || { printf '%s\n' "$final_text" >&2; fail "real Pi/Herdr never displayed the first commentary step"; }
-[ "$seen_two" -eq 1 ] || { printf '%s\n' "$final_text" >&2; fail "real Pi/Herdr never displayed the second commentary step"; }
-[ "$seen_three" -eq 1 ] || { printf '%s\n' "$final_text" >&2; fail "real Pi/Herdr never displayed the third commentary step"; }
+[ "$seen_one" -eq 1 ] || { printf '%s\n' "$final_text" >&2; fail "real Pi/Herdr never displayed the first durable commentary row"; }
+[ "$seen_two" -eq 1 ] || { printf '%s\n' "$final_text" >&2; fail "real Pi/Herdr never displayed the second durable commentary row"; }
+[ "$seen_three" -eq 1 ] || { printf '%s\n' "$final_text" >&2; fail "real Pi/Herdr never displayed the third durable commentary row"; }
 [ "$plan_step_one" -lt "$plan_step_two" ] && [ "$plan_step_two" -lt "$plan_step_three" ] \
-  && [ "$step_one" -lt "$step_two" ] && [ "$step_two" -lt "$step_three" ] \
-  || fail "Calm step numbers did not increase monotonically: plans $plan_step_one, $plan_step_two, $plan_step_three; commentary $step_one, $step_two, $step_three"
+  || fail "Calm step numbers did not increase monotonically: $plan_step_one, $plan_step_two, $plan_step_three"
 printf '%s' "$final_text" | grep -Fq 'CALM_LIVE_HERDR_FINAL' \
   || fail "real Pi/Herdr fixture did not settle its final response"
 printf '%s' "$final_text" | grep -Fq 'Step ' \
   && fail "final Pi response retained an intermediate-step row"
 printf '%s' "$final_text" | grep -Fq 'LIVE_PLAN_' \
   && fail "final Pi response retained planning narration"
-printf '%s' "$final_text" | grep -Fq 'COMMENTARY_' \
-  && fail "final Pi response retained intermediate commentary"
+for number in 1 2 3; do
+  [ "$(printf '%s\n' "$final_text" | grep -Fc "COMMENTARY_$number")" -eq 1 ] \
+    || fail "final Pi transcript did not retain COMMENTARY_$number exactly once"
+done
 
 session_file=$(find "$SESSIONS" -type f -name '*.jsonl' -exec grep -l 'CALM_LIVE_HERDR_FINAL' {} + 2>/dev/null | head -1)
 [ -n "$session_file" ] || fail "real Pi did not persist its session transcript"
@@ -331,4 +318,4 @@ grep -Fq 'LIVE_PLAN_THREE' "$session_file" || fail "third planning context was n
 grep -Fq 'COMMENTARY_1' "$session_file" || fail "first commentary context was not persisted"
 grep -Fq 'COMMENTARY_2' "$session_file" || fail "second commentary context was not persisted"
 grep -Fq 'COMMENTARY_3' "$session_file" || fail "third commentary context was not persisted"
-printf 'ok - real Pi %s in Herdr reloaded the current Calm adapter over the legacy process wrapper, displayed one replacing numbered step around three tool calls, settled to the final response, and preserved planning context\n' "$(pi --version)"
+printf 'ok - real Pi %s in Herdr reloaded the current Calm adapter over the legacy process wrapper, kept each commentary row once across three replacing numbered steps, ordered commentary and the current step above the ship, and settled without a transient step\n' "$(pi --version)"

@@ -2,9 +2,9 @@
 // updateContent method. installCalmAssistantLayout() probes that exact method and throws
 // if it is missing; fm-calm.ts catches that and skips only this adapter with a diagnostic
 // instead of blocking Calm or Pi.
-// This layout removes collapsed thinking and the mid-turn assistant text blocks
-// classified as "assistant-working-note" from a shallow presentation copy. The message
-// itself, model context, session storage, and export rendering are never touched.
+// This layout removes live and collapsed thinking from a shallow presentation copy
+// while leaving assistant text on Pi's ordinary transcript surface. The message itself,
+// model context, session storage, and export rendering are never touched.
 // ./fm-calm-visibility.ts owns which classes Calm hides.
 import type { AssistantMessageComponent as PiAssistantMessageComponent } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
@@ -32,20 +32,6 @@ type CalmAssistantLayoutController = {
   originalUpdateContent: PiAssistantMessageComponent["updateContent"];
   presentations: WeakMap<object, CalmAssistantPresentation>;
 };
-
-// A mid-turn assistant message is one the model did not end its response with: Pi's
-// agent loop runs its tool calls and then issues another assistant message. stopReason
-// is intrinsic to each settled message. Streaming content stays in the source message
-// while this adapter gives its transcript component zero height; fm-calm.ts presents
-// the latest line through one keyed widget until message_end identifies whether the
-// settled text is a working note to hide or a genuine final response to retain.
-function isMidTurnAssistantMessage(message: AssistantMessage): boolean {
-  if (message.stopReason === "toolUse") return true;
-  return (
-    message.stopReason === "length" &&
-    message.content.some((block) => block.type === "toolCall")
-  );
-}
 
 // The original adapter used this symbol without a mutable implementation delegate.
 // A long-lived Pi process kept that first wrapper across /reload, so source updates only
@@ -96,26 +82,13 @@ export function installCalmAssistantLayout(): void {
     const state = component as unknown as AssistantMessagePresentationState;
     const hideThinking =
       calmPresentationHides("assistant-thinking") &&
-      (state.hideThinkingBlock || prior?.streamed === true);
-    const hideWorkingNote = calmPresentationHides("assistant-working-note");
-    let renderedMessage = sourceMessage;
-
-    // Streaming narration is presented by fm-calm.ts's one keyed widget. Keeping the
-    // assistant component empty is what makes replacement robust even when this new
-    // controller had to wrap the stale first-generation adapter in a live process.
-    if (isStreaming && hideWorkingNote) {
-      renderedMessage = { ...sourceMessage, content: [] };
-    } else if (!isStreaming && (hideThinking || hideWorkingNote)) {
-      const midTurn = isMidTurnAssistantMessage(sourceMessage);
-      renderedMessage = {
-        ...sourceMessage,
-        content: sourceMessage.content.filter(
-          (block) =>
-            !(hideThinking && block.type === "thinking") &&
-            !(hideWorkingNote && midTurn && block.type === "text"),
-        ),
-      };
-    }
+      (isStreaming || state.hideThinkingBlock || prior?.streamed === true);
+    const renderedMessage = hideThinking
+      ? {
+          ...sourceMessage,
+          content: sourceMessage.content.filter((block) => block.type !== "thinking"),
+        }
+      : sourceMessage;
 
     activeController.presentations.set(component, {
       source: sourceMessage,

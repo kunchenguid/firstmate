@@ -183,7 +183,7 @@ Compaction and retry loaders remain stock because Pi exposes no supported replac
 
 `.pi/extensions/lib/fm-calm-visibility.ts` owns only the allowlist-style transcript presentation policy.
 `bin/fm-operational-input.sh` owns current cross-language operational-input construction and parsing, while the thin Pi adapter lives at `.pi/extensions/lib/fm-operational-input.ts`.
-Only `genuine-user-prompt`, `genuine-agent-response`, and `working-status` are policy-visible.
+Only `genuine-user-prompt`, `genuine-agent-response`, `assistant-working-note`, and `working-status` are policy-visible.
 Every other audited class is policy-hidden when Pi exposes a supported presentation boundary, but semantic input is never transformed to enforce that preference.
 The home-local persistence schema is owned by [`docs/configuration.md`](configuration.md#pi-calm-preference-configcalm).
 
@@ -224,8 +224,8 @@ The test fixture enumerates every class below through the centralized policy, an
 | --- | --- | --- |
 | `genuine-user-prompt` | `UserMessageComponent` | Visible, including every tested operational near miss. |
 | `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible. |
-| `assistant-working-note` | Assistant text in an `AssistantMessageComponent` message the model did not end its response with, identified by its own `stopReason` of `toolUse`, or of `length` with tool calls present | The assistant component stays at zero height while a keyed widget shows only its current text line as one numbered `Step N:` row; each new line replaces the previous widget content, while settled tool-use narration is removed from the shallow presentation copy (verified on Pi 0.84.1 and 0.85.1). |
-| `assistant-thinking` | Thinking content in `AssistantMessageComponent` | The assistant component stays at zero height while a keyed widget shows only its current thinking line as one numbered `Step N:` row; settled live planning is removed from the shallow presentation copy, and explicit expansion renders restored reasoning. |
+| `assistant-working-note` | Assistant text in an `AssistantMessageComponent` message that also carries a tool call | Visible through Pi's ordinary assistant component while streaming and after settlement, exactly once from the original message rather than a copied custom entry (verified on Pi 0.85.1). |
+| `assistant-thinking` | Thinking content in `AssistantMessageComponent` | The assistant component omits live thinking while a keyed widget shows only its current thinking line as one numbered `Step N:` row above the working ship; settled live planning is removed from the shallow presentation copy, and explicit expansion renders restored reasoning. |
 | `assistant-tool-call` | `ToolExecutionComponent` | Seven built-ins, `fm_watch_arm_pi`, and `fm_branch_outcomes` hidden; other arbitrary custom tools remain an unsupported boundary. |
 | `tool-result` | `ToolExecutionComponent` | Text results for the controlled tools hidden; other arbitrary custom results remain an unsupported boundary. |
 | `tool-image` | Image children appended outside tool renderer slots | Unsupported boundary; remains visible. |
@@ -283,7 +283,7 @@ Only Pi's Calm presentation implementation changed; every producer and non-Pi tr
 
 `tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers and verifies all seven built-ins plus `fm_watch_arm_pi`; `tests/fm-pi-branch-extension.test.sh` verifies `fm_branch_outcomes` Calm toggling, capability-probed all-line versus collapsed stock output, exact expanded output, and export rendering.
 Together they exercise redraw of already-rendered tool, thinking, current operational-user, and legacy synthetic rows, and cover every policy class.
-It covers persisted preference restoration across every session-start reason and a real restart, proves the working-ship presentation and Calm-off stock `Working...` row through a delayed deterministic provider, asserts repeated progress updates reuse one replace-in-place assistant row without accumulating transcript rows, verifies operational messages remain exact ordinary user-role session entries and complete exports, and drives genuine 100 by 44, 160 by 36, and 180 by 44 terminal fixtures.
+It covers persisted preference restoration across every session-start reason and a real restart, proves the working-ship presentation and Calm-off stock `Working...` row through a delayed deterministic provider, asserts repeated thinking updates reuse one transient component while assistant commentary remains once on the ordinary transcript across replacement, finalization, and reload, verifies operational messages remain exact ordinary user-role session entries and complete exports, and drives genuine 100 by 44, 160 by 36, and 180 by 44 terminal fixtures.
 A native deterministic `/skill:ahoy` turn produces thinking, tool-call, and tool-result blocks, asserts that the collapsed skill-to-final gap equals the two-row visible-only baseline, expands and re-collapses original thinking, restores Calm-off rendering, verifies persisted hidden history, and repeats the geometry assertion after restart with `terminal.clearOnShrink` explicitly off.
 The operational provider path covers Calm loaded on, loaded off, default preference, extension absent, exact watcher delivery, narrow bare-marker legacy input, persisted restart replay, a genuine captain prompt, and adjacent notifications coalesced into one intended processing turn.
 It asserts one persisted and rendered captain answer, exact user-role operational envelopes in order, no replacement custom messages, one processing result, zero operational transcript rows, and the two-row neighboring-assistant geometry for live, adjacent, and restart paths.
@@ -604,11 +604,11 @@ ok - a missing collapsed-thinking presentation API degrades only that Calm adapt
 ok - missing Pi presentation class exports reach the independent adapter degradation path
 ok - Calm registers none of its 7 built-in tool wrappers at load while config/calm is off, and all 7 synchronously at load while config/calm is on
 ok - Calm's first same-session /calm activation claims every uncontested built-in, leaves a foreign bash tool fully intact and callable, warns prominently and logs the contested name, and only rows constructed before that activation - the documented bound - fail to retroactively collapse
-ok - Pi calm centralizes transcript visibility, preserves execution/export data, keeps Pi's stock working row visible while no run is active, and persists its choice across session starts
-ok - Pi calm on collapses mid-turn assistant working notes to zero height while Calm off keeps them, leaves streaming, truncated-final, and genuine final replies untouched, never mutates the messages, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on
+ok - Pi Calm separates thinking into one current-step component above the ship, keeps assistant commentary on the transcript exactly once, preserves execution/export data, leaves Pi's stock working row visible while idle, and persists its choice across session starts
+ok - Pi Calm keeps assistant commentary on the ordinary transcript exactly once across step replacement, finalization, and reload; keeps only thinking as one transient step above the ship; preserves Calm-off, truncated, final-reply, and message-data behavior; ignores every /calm argument; and restores a legacy persisted max as ordinary Calm on
 ok - Pi operational follow-up E2E processes exact user-role notifications once while Calm hides current and adjacent rows, Calm off and absent render them, and restart preserves semantics
 ok - Pi Calm native /skill:ahoy geometry keeps every collapsed thinking and tool block at zero height while preserving expansion, history, restart, and Calm-off rendering
-ok - Pi Calm working ship moves on a slow independent cadence over faster fixed-cell blue water, paints the complete boat standard yellow with balanced resets, keeps ANSI-stripped width exact, flips the directional sail on the exact bounce at both edges and every width, clamps visible and hidden resizes, falls back deterministically when narrow, freezes and resumes column/direction across settle/start without hidden-time jumps or duplicate timers, resets only on a fresh session, and installs and removes one scheduler-owning widget across starts, settle, abort, failure, shutdown, reload, replacement, and Calm toggles while leaving Calm-off visibility untouched
+ok - Pi Calm working ship keeps its centered two-row asymmetric Unicode boat inside a deterministic long-wave trough, preserves blue water through the hull, uses standard blue/cyan/yellow/red with balanced resets, keeps ANSI-stripped width exact, reverses cleanly at both edges and every width, clamps visible and hidden resizes, falls back deterministically when narrow, freezes and resumes across settle/start without hidden-time jumps or duplicate timers, resets only on a fresh session, and leaves Calm-off visibility untouched
 ok - the rendered-export-DOM guard renders in one pass, retries a bounded number of Chrome start-up failures, and reports the Chrome binary, Chrome version, Pi version, exit status, and Chrome diagnostic when every attempt fails
 ok - Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior
 ```
@@ -617,27 +617,30 @@ ok - Pi calm native E2E replaces the stock working row with a moving, resize-cla
 
 The live Calm regression ran against Pi 0.85.1 in an isolated Herdr lab session.
 It first loaded the legacy assistant wrapper that a long-lived process retained, replaced the source with the current adapter, invoked Pi's real `/reload`, and then used a deterministic provider to stream three assistant messages containing thinking, commentary, and a tool call before a final response.
+Pi 0.85.1's interactive layout renders the transcript document before the above-editor widget container, while that widget container renders its keyed component map in insertion order and `setWidget()` removes a prior key before re-adding it.
+Calm therefore leaves assistant text in the original `AssistantMessageComponent`, installs one zero-height-until-needed step component before the ship at run start, and updates that component in place rather than appending a custom entry or calling `setWidget()` for each step.
 
 ```text
-$ NODE_NO_WARNINGS=1 FM_CALM_PI_HERDR_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-calm-pi-herdr-live-e2e.test.sh
-ok - real Pi 0.85.1 in Herdr reloaded the current Calm adapter over the legacy process wrapper, displayed one replacing numbered step around three tool calls, settled to the final response, and preserved planning context
+$ FM_CALM_PI_HERDR_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-calm-pi-herdr-live-e2e.test.sh
+ok - real Pi 0.85.1 in Herdr reloaded the current Calm adapter over the legacy process wrapper, kept each commentary row once across three replacing numbered steps, ordered commentary and the current step above the ship, and settled without a transient step
 ```
 
-The test observed one externally read numbered widget row at a time around all three tool calls, verified that settlement removed the step plus all planning and commentary rows, and verified that all planning and commentary text remained in the persisted session transcript.
+The deterministic test observed one externally read numbered thinking widget at a time around all three tool calls, verified that each assistant text block stayed on the ordinary transcript exactly once through later step replacement and finalization, and measured every commentary row above the current step with that step above the sailing ship.
+It also verified that settlement removed the transient step and planning thinking while retaining all three commentary rows, and that the original planning, commentary, and tool content remained in the persisted session transcript.
 The credentialed companion test uses the same four Firstmate extensions with the real `openai-codex/gpt-5.6-sol` model at `xhigh`, the existing authenticated user Pi configuration, and isolated Firstmate state plus session output.
-It externally reads every Herdr pane frame, refuses any frame with more than one numbered row, requires at least two distinct numbered steps, and requires the settled `REAL_MODEL_FINAL_RESPONSE` frame to contain no step row.
+It externally reads every Herdr pane frame, refuses any frame with more than one numbered row, requires at least two distinct numbered steps, proves earlier commentary remains exactly once during a later step, measures commentary above the current step and both above the ship, and requires the settled `REAL_MODEL_FINAL_RESPONSE` frame to retain all three commentary rows without the step or ship.
 
 ```text
-$ NODE_NO_WARNINGS=1 FM_CALM_PI_REAL_MODEL_E2E=1 bin/fm-test-run.sh tests/fm-calm-pi-real-model-live-e2e.test.sh
-proof - working Step 1:  Step 1: Planning sequential tool calls with watcher setup
-proof - working Step 3:  Step 3: I’ll start the required watcher cycle, then inspect
-proof - working Step 5:  Step 5: The watcher reports no live session lock. I
-proof - working Step 7:  Step 7: Plan for the first
-proof - working Step 8:  Step 8: Plan for the second file: read only `.calm-probe-b`, preserving the required order.
-proof - working Step 9:  Step 9: Plan for the third file: read only `.calm-pro
-proof - working Step 11:  Step 11: Plan for the final file: read `.calm-final`, then return its contents verbatim with nothing added.
+$ FM_CALM_PI_REAL_MODEL_E2E=1 bin/fm-test-run.sh tests/fm-calm-pi-real-model-live-e2e.test.sh
+proof - working Step 1:  Step 1: Clarifying single read call limit
+proof - working Step 2:  Step 2: Evaluating bash reading workaround
+proof - working Step 3:  Step 3: Planning multi-turn interaction flow
+proof - retained REAL_COMMENTARY_ONE once above later Step 3 and above the ship
+proof - working Step 4:  Step 4: Clarifying assistant turn boundaries
+proof - working Step 5:  Step 5: Planning single read call per turn
+proof - final commentary: REAL_COMMENTARY_ONE, REAL_COMMENTARY_TWO, REAL_COMMENTARY_THREE (one each)
 proof - final:  REAL_MODEL_FINAL_RESPONSE
-ok - real Pi 0.85.1 with gpt-5.6-sol xhigh and the full Firstmate extension set exposed one externally read numbered step at a time across 7 steps, then no step row after the final response
+ok - real Pi 0.85.1 with gpt-5.6-sol xhigh and the full Firstmate extension set externally showed one numbered step at a time across 5 steps, retained commentary exactly once across later transitions, ordered commentary and step above the ship, and cleared only the transient presentation at finalization
 ```
 
 The earlier live checks were false positives because both started fresh Pi processes after the latest source was already present; neither loaded a legacy process-global wrapper and then exercised `/reload`, which was the divergent captain-facing lifecycle.

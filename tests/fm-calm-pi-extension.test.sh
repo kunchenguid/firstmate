@@ -900,6 +900,7 @@ for (const itemClass of visibility.CALM_TRANSCRIPT_CLASSES) {
   const expected =
     itemClass === "genuine-user-prompt" ||
     itemClass === "genuine-agent-response" ||
+    itemClass === "assistant-working-note" ||
     itemClass === "working-status";
   if (visible !== expected) {
     throw new Error(`Calm allowlist classified ${itemClass} as visible=${visible}`);
@@ -1146,7 +1147,8 @@ const assistantThinkingTool = new AssistantMessageComponent({
 const assistantProgressMessage = {
   ...assistantBase,
   content: [
-    { type: "text", text: "CURRENT_STEP_FROM_ASSISTANT" },
+    { type: "thinking", thinking: "CURRENT_STEP_FROM_ASSISTANT" },
+    { type: "text", text: "DURABLE_COMMENTARY_FROM_ASSISTANT" },
     { type: "toolCall", id: "assistant-progress-tool", name: "read", arguments: { path: "sample.txt" } },
   ],
   stopReason: "toolUse",
@@ -1155,7 +1157,8 @@ const assistantProgress = new AssistantMessageComponent(assistantProgressMessage
 const nextAssistantProgressMessage = {
   ...assistantProgressMessage,
   content: [
-    { type: "text", text: "CURRENT_STEP_FROM_ASSISTANT\nNEXT_STEP_FROM_ASSISTANT" },
+    { type: "thinking", thinking: "CURRENT_STEP_FROM_ASSISTANT\nNEXT_STEP_FROM_ASSISTANT" },
+    { type: "text", text: "DURABLE_COMMENTARY_FROM_ASSISTANT" },
     { type: "toolCall", id: "assistant-progress-tool-2", name: "read", arguments: { path: "sample.txt" } },
   ],
 };
@@ -1205,8 +1208,9 @@ const commandContext = {
       workingVisible = value;
     },
     setWidget(key, value) {
-      if (value === undefined) widgets.delete(key);
-      else widgets.set(key, value);
+      // Pi removes an existing keyed widget before re-adding its replacement.
+      widgets.delete(key);
+      if (value !== undefined) widgets.set(key, value);
     },
   },
 };
@@ -1242,29 +1246,42 @@ await handlers.get("message_start")[0]({ message: assistantProgressMessage }, co
 assistantProgress.updateContent(assistantProgressMessage, true);
 await handlers.get("message_update")[0]({ message: assistantProgressMessage }, commandContext);
 let progressText = renderedWidget("firstmate-calm-current-step");
+let commentaryText = assistantProgress.render(100).join("\n");
 if (
   !progressText.includes("Step 1: CURRENT_STEP_FROM_ASSISTANT") ||
-  assistantProgress.render(100).length !== 0
+  !commentaryText.includes("DURABLE_COMMENTARY_FROM_ASSISTANT") ||
+  commentaryText.includes("CURRENT_STEP_FROM_ASSISTANT")
 ) {
-  throw new Error(`Calm did not render assistant progress as one keyed current-step widget: ${progressText}`);
+  throw new Error(`Calm did not separate the current thinking title from durable commentary: ${progressText} / ${commentaryText}`);
+}
+if (
+  JSON.stringify([...widgets.keys()]) !==
+  JSON.stringify(["firstmate-calm-current-step", "firstmate-calm-working-ship"])
+) {
+  throw new Error(`Calm did not install the current step above the working ship: ${[...widgets.keys()].join(",")}`);
 }
 assistantProgress.updateContent(nextAssistantProgressMessage, true);
 await handlers.get("message_update")[0]({ message: nextAssistantProgressMessage }, commandContext);
 progressText = renderedWidget("firstmate-calm-current-step");
+commentaryText = assistantProgress.render(100).join("\n");
 if (
   !progressText.includes("Step 2: NEXT_STEP_FROM_ASSISTANT") ||
   progressText.includes("CURRENT_STEP_FROM_ASSISTANT") ||
-  assistantProgress.render(100).length !== 0
+  (commentaryText.match(/DURABLE_COMMENTARY_FROM_ASSISTANT/g) || []).length !== 1 ||
+  [...widgets.keys()][0] !== "firstmate-calm-current-step"
 ) {
-  throw new Error(`Calm did not replace the prior assistant progress widget: ${progressText}`);
+  throw new Error(`Calm did not replace only the prior step while retaining commentary once: ${progressText} / ${commentaryText}`);
 }
+assistantProgress.updateContent(nextAssistantProgressMessage, false);
 await handlers.get("message_end")[0]({ message: nextAssistantProgressMessage }, commandContext);
 await handlers.get("agent_settled")[0]({}, commandContext);
+commentaryText = assistantProgress.render(100).join("\n");
 if (
   statuses.get("firstmate-calm") !== undefined ||
-  widgets.has("firstmate-calm-current-step")
+  widgets.has("firstmate-calm-current-step") ||
+  (commentaryText.match(/DURABLE_COMMENTARY_FROM_ASSISTANT/g) || []).length !== 1
 ) {
-  throw new Error("Calm left a separate current-step presentation after the run settled");
+  throw new Error("Calm finalization did not retain commentary once while clearing the transient step");
 }
 presentationComponent.setExpanded(!expanded);
 if (presentationComponent.hasContent() || presentationComponent.render(100).length !== 0) {
@@ -1497,7 +1514,7 @@ JS
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm renderer and lifecycle contract failed: $out"
   [ -z "$out" ] || fail "Pi calm renderer test printed output: $out"
-  pass "Pi calm centralizes transcript visibility, replaces assistant progress with one current-step row, preserves execution/export data, keeps Pi's stock working row visible while no run is active, and persists its choice across session starts"
+  pass "Pi Calm separates thinking into one current-step component above the ship, keeps assistant commentary on the transcript exactly once, preserves execution/export data, leaves Pi's stock working row visible while idle, and persists its choice across session starts"
 }
 
 test_calm_mid_turn_working_notes() {
@@ -1560,8 +1577,9 @@ const ui = {
   setToolsExpanded() {},
   setWorkingVisible() {},
   setWidget(key, value) {
-    if (value === undefined) widgets.delete(key);
-    else widgets.set(key, value);
+    // Pi removes an existing keyed widget before re-adding its replacement.
+    widgets.delete(key);
+    if (value !== undefined) widgets.set(key, value);
   },
   notify() {},
 };
@@ -1571,6 +1589,7 @@ async function loadCalmExtension() {
   const registeredTools = [];
   let sessionStart;
   let agentStart;
+  let agentSettled;
   let messageStart;
   let messageUpdate;
   let messageEnd;
@@ -1580,6 +1599,7 @@ async function loadCalmExtension() {
     on(event, handler) {
       if (event === "session_start") sessionStart = handler;
       if (event === "agent_start") agentStart = handler;
+      if (event === "agent_settled") agentSettled = handler;
       if (event === "message_start") messageStart = handler;
       if (event === "message_update") messageUpdate = handler;
       if (event === "message_end") messageEnd = handler;
@@ -1597,13 +1617,14 @@ async function loadCalmExtension() {
   };
   const extension = await import(`${pathToFileURL(process.env.EXT).href}?instance=${Date.now()}-${Math.random()}`);
   extension.default(pi);
-  if (!calmCommand || !sessionStart || !agentStart || !messageStart || !messageUpdate || !messageEnd) {
+  if (!calmCommand || !sessionStart || !agentStart || !agentSettled || !messageStart || !messageUpdate || !messageEnd) {
     throw new Error("Calm extension did not register its command and lifecycle handlers");
   }
   return {
     calmCommand,
     sessionStart,
     agentStart,
+    agentSettled,
     messageStart,
     messageUpdate,
     messageEnd,
@@ -1632,7 +1653,11 @@ const messages = {
   midTurn: {
     ...assistantBase,
     stopReason: "toolUse",
-    content: [{ type: "text", text: "MIDTURN_WORKING_NOTE" }, toolCall],
+    content: [
+      { type: "thinking", thinking: "MIDTURN_STEP_TITLE" },
+      { type: "text", text: "MIDTURN_WORKING_NOTE" },
+      toolCall,
+    ],
   },
   // The genuine reply that ends a response, which Calm never hides.
   finalReply: {
@@ -1650,7 +1675,11 @@ const messages = {
   truncatedMidTurn: {
     ...assistantBase,
     stopReason: "length",
-    content: [{ type: "text", text: "TRUNCATED_MIDTURN_NOTE" }, toolCall],
+    content: [
+      { type: "thinking", thinking: "TRUNCATED_STEP_TITLE" },
+      { type: "text", text: "TRUNCATED_MIDTURN_NOTE" },
+      toolCall,
+    ],
   },
   // Truncated without tool calls ended the response.
   truncatedFinal: {
@@ -1713,16 +1742,29 @@ let liveStepText = renderedWidget("firstmate-calm-current-step");
 if (!liveStepText.includes("Step 1: LIVE_STEP_ONE") || live.render(100).length !== 0) {
   throw new Error("live Calm thinking did not render as the first numbered widget");
 }
+liveMessage.content.push({ type: "text", text: "LIVE_DURABLE_COMMENTARY" });
+live.updateContent(liveMessage, true);
+await calm.messageUpdate({ message: liveMessage }, context);
+let liveCommentaryText = live.render(100).join("\n");
+liveStepText = renderedWidget("firstmate-calm-current-step");
+if (
+  !liveStepText.includes("Step 1: LIVE_STEP_ONE") ||
+  (liveCommentaryText.match(/LIVE_DURABLE_COMMENTARY/g) || []).length !== 1 ||
+  liveCommentaryText.includes("LIVE_STEP_ONE")
+) {
+  throw new Error(`live Calm did not separate assistant commentary from the thinking step: ${liveStepText} / ${liveCommentaryText}`);
+}
 liveMessage.content[0].thinking = "LIVE_STEP_ONE\nLIVE_STEP_TWO";
 live.updateContent(liveMessage, true);
 await calm.messageUpdate({ message: liveMessage }, context);
 liveStepText = renderedWidget("firstmate-calm-current-step");
+liveCommentaryText = live.render(100).join("\n");
 if (
   !liveStepText.includes("Step 2: LIVE_STEP_TWO") ||
   liveStepText.includes("LIVE_STEP_ONE") ||
-  live.render(100).length !== 0
+  (liveCommentaryText.match(/LIVE_DURABLE_COMMENTARY/g) || []).length !== 1
 ) {
-  throw new Error(`live Calm thinking did not replace the prior widget: ${liveStepText}`);
+  throw new Error(`live Calm did not replace only the prior thinking step: ${liveStepText} / ${liveCommentaryText}`);
 }
 if ((liveStepText.match(/Step [0-9]+:/g) || []).length !== 1) {
   throw new Error(`live Calm thinking rendered more than one current widget: ${liveStepText}`);
@@ -1734,6 +1776,7 @@ const finalMessage = {
 };
 live.updateContent(finalMessage, false);
 await calm.messageEnd({ message: finalMessage }, context);
+await calm.agentSettled({}, context);
 const settledLiveText = live.render(100).join("\n");
 if (
   !settledLiveText.includes("LIVE_FINAL_REPLY") ||
@@ -1742,15 +1785,13 @@ if (
 ) {
   throw new Error("settled final assistant response retained the live step widget");
 }
-if (rendered("midTurn").length !== 0) {
-  throw new Error(`Calm on left mid-turn working-note rows: ${JSON.stringify(rendered("midTurn"))}`);
+requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm on");
+requireHidden("midTurn", "MIDTURN_STEP_TITLE", "Calm on");
+if ((renderedText("midTurn").match(/MIDTURN_WORKING_NOTE/g) || []).length !== 1) {
+  throw new Error("Calm rendered settled assistant commentary more than once");
 }
-requireHidden("truncatedMidTurn", "TRUNCATED_MIDTURN_NOTE", "Calm on");
-// Pi owns the wording of its truncation notice; Calm must leave that row's own notice
-// standing rather than collapsing an incomplete response to nothing.
-if (rendered("truncatedMidTurn").length === 0) {
-  throw new Error("Calm on removed Pi's own truncation notice with the working note");
-}
+requireVisible("truncatedMidTurn", "TRUNCATED_MIDTURN_NOTE", "Calm on");
+requireHidden("truncatedMidTurn", "TRUNCATED_STEP_TITLE", "Calm on");
 requireVisible("streaming", "STREAMING_NOTE_TEXT", "Calm on");
 requireVisible("truncatedFinal", "TRUNCATED_FINAL_TEXT", "Calm on");
 requireVisible("finalReply", "FINAL_REPLY_TEXT", "Calm on");
@@ -1775,7 +1816,11 @@ for (const name of Object.keys(rows)) {
   }
 }
 await calm.calmCommand.handler("  MaX  ", context);
-if (readFileSync(calmPreferencePath, "utf8") !== "on\n" || rendered("midTurn").length !== 0) {
+if (
+  readFileSync(calmPreferencePath, "utf8") !== "on\n" ||
+  !renderedText("midTurn").includes("MIDTURN_WORKING_NOTE") ||
+  renderedText("midTurn").includes("MIDTURN_STEP_TITLE")
+) {
   throw new Error("a spaced, mixed-case argument did not fall through to the plain toggle");
 }
 await calm.calmCommand.handler("unrecognized", context);
@@ -1800,9 +1845,12 @@ for (const persisted of ["on\n", "max\n", "max"]) {
   }
   for (const reason of ["startup", "resume", "new", "fork", "reload"]) {
     await calm.sessionStart({ reason }, context);
-    if (rendered("midTurn").length !== 0) {
+    if (
+      (renderedText("midTurn").match(/MIDTURN_WORKING_NOTE/g) || []).length !== 1 ||
+      renderedText("midTurn").includes("MIDTURN_STEP_TITLE")
+    ) {
       throw new Error(
-        `a ${reason} session restored from ${JSON.stringify(persisted)} did not hide mid-turn working notes`,
+        `a ${reason} session restored from ${JSON.stringify(persisted)} did not restore commentary exactly once without the transient step`,
       );
     }
     requireVisible("finalReply", "FINAL_REPLY_TEXT", `${reason} session`);
@@ -1823,7 +1871,7 @@ JS
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm mid-turn contract failed: $out"
   [ -z "$out" ] || fail "Pi calm mid-turn test printed output: $out"
-  pass "Pi calm on collapses mid-turn assistant working notes to zero height, replaces their latest text with one current-step row until settlement, while Calm off keeps them, leaves streaming, truncated-final, and genuine final replies untouched, never mutates the messages, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on"
+  pass "Pi Calm keeps assistant commentary on the ordinary transcript exactly once across step replacement, finalization, and reload; keeps only thinking as one transient step above the ship; preserves Calm-off, truncated, final-reply, and message-data behavior; ignores every /calm argument; and restores a legacy persisted max as ordinary Calm on"
 }
 
 test_operational_followup_turn_e2e() {
@@ -3131,12 +3179,17 @@ check(liveTimers === 0, "toggling Calm on while idle started an animation timer"
 reset();
 await fire("agent_start");
 check(
-  ui.widgetOps.length === 1 &&
-    ui.widgetOps[0].key === CALM_WORKING_SHIP_WIDGET_KEY &&
-    ui.widgetOps[0].action === "set",
-  `Calm on did not install exactly one working widget: ${JSON.stringify(ui.widgetOps)}`,
+  ui.widgetOps.length === 2 &&
+    ui.widgetOps[0].key === "firstmate-calm-current-step" &&
+    ui.widgetOps[0].action === "set" &&
+    ui.widgetOps[1].key === CALM_WORKING_SHIP_WIDGET_KEY &&
+    ui.widgetOps[1].action === "set",
+  `Calm on did not install the transient step before the working ship: ${JSON.stringify(ui.widgetOps)}`,
 );
-check(ui.widgetOps[0].placement === undefined, "Calm working widget asked for a non-default placement");
+check(
+  ui.widgetOps.every((operation) => operation.placement === undefined),
+  "Calm working presentation asked for a non-default placement",
+);
 check(
   ui.workingVisible[ui.workingVisible.length - 1] === false,
   "Calm on did not hide Pi's stock working row",
@@ -3162,7 +3215,7 @@ reset();
 for (let repeat = 0; repeat < 5; repeat += 1) await fire("agent_start");
 check(ui.widgetOps.length === 0, `repeated starts churned the working widget: ${JSON.stringify(ui.widgetOps)}`);
 check(liveTimers === 1, `repeated starts left ${liveTimers} animation timers`);
-check(ui.widgets.size === 1, `repeated starts left ${ui.widgets.size} widgets`);
+check(ui.widgets.size === 2, `repeated starts left ${ui.widgets.size} widgets`);
 check(shipWidget() === widget, "repeated starts replaced the running widget");
 
 // --- The animation drives Pi's renderer -------------------------------------------
@@ -3189,10 +3242,12 @@ check(freezeColumn > 0, `lifecycle continuity setup never left the left edge: ${
 reset();
 await fire("agent_settled");
 check(
-  ui.widgetOps.length === 1 &&
-    ui.widgetOps[0].key === CALM_WORKING_SHIP_WIDGET_KEY &&
-    ui.widgetOps[0].action === "clear",
-  `settling did not clear the working widget: ${JSON.stringify(ui.widgetOps)}`,
+  ui.widgetOps.length === 2 &&
+    ui.widgetOps[0].key === "firstmate-calm-current-step" &&
+    ui.widgetOps[0].action === "clear" &&
+    ui.widgetOps[1].key === CALM_WORKING_SHIP_WIDGET_KEY &&
+    ui.widgetOps[1].action === "clear",
+  `settling did not clear the working presentation: ${JSON.stringify(ui.widgetOps)}`,
 );
 check(liveTimers === 0, `settling left ${liveTimers} animation timers`);
 check(ui.widgets.size === 0, "settling left a residual widget");
@@ -3214,7 +3269,7 @@ check(
 reset();
 await fire("agent_start");
 check(liveTimers === 1, `resume start left ${liveTimers} animation timers instead of one`);
-check(ui.widgets.size === 1, "resume start did not install exactly one working widget");
+check(ui.widgets.size === 2, "resume start did not install the step and working-ship widgets");
 const resumedWidget = shipWidget();
 const resumeColumn = hullColumn(resumedWidget);
 const resumeSail = sailOf(resumedWidget.render(40));
@@ -3229,7 +3284,7 @@ for (let cycle = 0; cycle < 3; cycle += 1) {
   check(ui.widgets.size === 0, `cycle ${cycle} settle left a residual widget`);
   await fire("agent_start");
   check(liveTimers === 1, `cycle ${cycle} start left ${liveTimers} timers`);
-  check(ui.widgets.size === 1, `cycle ${cycle} start left ${ui.widgets.size} widgets`);
+  check(ui.widgets.size === 2, `cycle ${cycle} start left ${ui.widgets.size} widgets`);
   check(
     hullColumn(shipWidget()) >= freezeColumn,
     `cycle ${cycle} lost continuity after repeated settle/start`,
@@ -3710,7 +3765,7 @@ JSON
     # on screen through this whole redraw rather than disappearing with it.
     if ! grep -Fq "Thinking..." "$hidden_snapshot" &&
       ! grep -Fq "/calm" "$hidden_snapshot" &&
-      ! grep -Fq "I will run one command." "$hidden_snapshot" &&
+      grep -Fq "I will run one command." "$hidden_snapshot" &&
       grep -Fq "FIRSTMATE WATCHER WAKE: can you explain this phrase?" "$hidden_snapshot" &&
       grep -Fq "The deterministic tool example is complete." "$hidden_snapshot"; then
       break
@@ -3747,9 +3802,11 @@ JSON
   do
     assert_contains "$(cat "$hidden_snapshot")" "$near_miss" "/calm hid the genuine operational near miss $near_miss"
   done
-  # Mid-turn narration emitted alongside the tool call is a working note, which Calm
-  # hides against the real Pi renderer; the genuine reply that ended the response stays.
-  assert_not_contains "$(cat "$hidden_snapshot")" "I will run one command." "/calm left a mid-turn assistant working note in the transcript"
+  # Assistant commentary emitted alongside a tool call stays on Pi's ordinary
+  # transcript surface; only its thinking title is transient.
+  assert_contains "$(cat "$hidden_snapshot")" "I will run one command." "/calm removed durable assistant commentary from the transcript"
+  [ "$(grep -Fc "I will run one command." "$hidden_snapshot")" -eq 1 ] \
+    || fail "/calm duplicated durable assistant commentary"
   assert_contains "$(cat "$hidden_snapshot")" "The deterministic tool example is complete." "/calm removed assistant conversation after a tool"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-diagnostic-e2e"
@@ -3910,8 +3967,10 @@ JS
     "/export left a synthetic Firstmate user-role presentation in the Calm transcript"
   assert_not_contains "$(cat "$export_settled_snapshot")" "Thinking..." \
     "/export left collapsed thinking labels in the Calm transcript"
-  assert_not_contains "$(cat "$export_settled_snapshot")" "I will run one command." \
-    "/export left a mid-turn assistant working note in the Calm transcript"
+  assert_contains "$(cat "$export_settled_snapshot")" "I will run one command." \
+    "/export removed durable assistant commentary from the Calm transcript"
+  [ "$(grep -Fc "I will run one command." "$export_settled_snapshot")" -eq 1 ] \
+    || fail "/export duplicated durable assistant commentary in the Calm transcript"
   for hidden in \
     CURRENT_WATCHER_E2E \
     CURRENT_TURN_END_E2E \
@@ -3948,7 +4007,7 @@ JS
   assert_contains "$(cat "$restored_snapshot")" " Error:" "second /calm dropped the synthetic delivery diagnostic"
   assert_not_contains "$(cat "$restored_snapshot")" "Navigated to selected point" "second /calm added a navigation status row"
   assert_contains "$(cat "$restored_snapshot")" "Thinking..." "second /calm did not restore Pi's collapsed thinking labels"
-  assert_contains "$(cat "$restored_snapshot")" "I will run one command." "second /calm did not restore the mid-turn assistant working note"
+  assert_contains "$(cat "$restored_snapshot")" "I will run one command." "second /calm removed durable assistant commentary"
   assert_contains "$(cat "$restored_snapshot")" "escape to interrupt" "/calm changed the active Ctrl+O expansion state"
 
   hash_after=$(shasum -a 256 "$session_file" | awk '{print $1}')

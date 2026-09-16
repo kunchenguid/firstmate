@@ -9,7 +9,7 @@ fm_live_gate opt-in FM_CALM_PI_REAL_MODEL_E2E herdr jq pi python3
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
-HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name calm-real-model-pane)
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name calm-commentary-layout)
 TMP_ROOT=$(fm_test_tmproot fm-calm-pi-real-model-live-e2e)
 PROJECT="$TMP_ROOT/project"
 HOME_DIR="$TMP_ROOT/home"
@@ -69,11 +69,14 @@ for _ in $(seq 1 300); do
 done
 [ "$ready" -eq 1 ] || { printf '%s\n' "$text" >&2; fail "authenticated Pi did not reach its ready composer"; }
 
-PROMPT='Read .calm-probe-a, then .calm-probe-b, then .calm-probe-c, one call at a time. Narrate a new plan before each. Then read .calm-final and reply with its exact content.'
+PROMPT='Use exactly one read call per assistant turn. Before reading .calm-probe-a, output as commentary the exact token formed by concatenating REAL_, COMMENTARY_, ONE. Before reading .calm-probe-b, output as commentary the exact token formed by concatenating REAL_, COMMENTARY_, TWO. Before reading .calm-probe-c, output as commentary the exact token formed by concatenating REAL_, COMMENTARY_, THREE. Then read .calm-final and reply with its exact content.'
 "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-text "$PANE" "$PROMPT" >/dev/null
 "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-keys "$PANE" enter >/dev/null
 
 seen_step_numbers=
+first_commentary_step=
+commentary_persisted_after_transition=0
+ordered_frame_count=0
 settled_polls=0
 final_text=
 frame=0
@@ -93,6 +96,33 @@ for _ in $(seq 1 1200); do
       seen_step_numbers=$(printf '%s\n%s' "$seen_step_numbers" "$step_number")
       printf 'proof - working Step %s: %s\n' "$step_number" "$step_line"
     fi
+    printf '%s\n' "$step_line" | grep -Fq 'REAL_COMMENTARY_' \
+      && fail "real assistant commentary was promoted into the transient step title"
+
+    ship_line_number=$(printf '%s\n' "$text" | grep -Fn '╲▁▁▁╱' | tail -1 | cut -d: -f1)
+    step_line_number=$(printf '%s\n' "$text" | grep -En 'Step [0-9]+:' | tail -1 | cut -d: -f1)
+    [ -n "$ship_line_number" ] && [ "$step_line_number" -lt "$ship_line_number" ] \
+      || fail "external pane frame $frame did not place the current step above the sailing ship"
+
+    for word in ONE TWO THREE; do
+      marker="REAL_COMMENTARY_$word"
+      if printf '%s' "$text" | grep -Fq "$marker"; then
+        marker_count=$(printf '%s\n' "$text" | grep -Fc "$marker")
+        [ "$marker_count" -eq 1 ] || fail "external pane frame $frame showed $marker $marker_count times"
+        marker_line_number=$(printf '%s\n' "$text" | grep -Fn "$marker" | tail -1 | cut -d: -f1)
+        [ "$marker_line_number" -lt "$step_line_number" ] \
+          || fail "external pane frame $frame placed $marker below the current step"
+        ordered_frame_count=$((ordered_frame_count + 1))
+      fi
+    done
+    if printf '%s' "$text" | grep -Fq 'REAL_COMMENTARY_ONE'; then
+      if [ -z "$first_commentary_step" ]; then
+        first_commentary_step=$step_number
+      elif [ "$step_number" -gt "$first_commentary_step" ] && [ "$commentary_persisted_after_transition" -eq 0 ]; then
+        commentary_persisted_after_transition=1
+        printf 'proof - retained REAL_COMMENTARY_ONE once above later Step %s and above the ship\n' "$step_number"
+      fi
+    fi
   fi
   if printf '%s' "$text" | grep -Fq 'REAL_MODEL_FINAL_RESPONSE' && [ "$step_count" -eq 0 ]; then
     settled_polls=$((settled_polls + 1))
@@ -107,6 +137,17 @@ done
 unique_steps=$(printf '%s\n' "$seen_step_numbers" | grep -Ec '^[0-9]+$' || true)
 [ "$unique_steps" -ge 2 ] \
   || fail "external pane observed only $unique_steps distinct numbered steps"
+[ "$commentary_persisted_after_transition" -eq 1 ] \
+  || fail "external pane never retained first commentary across a later step transition"
+[ "$ordered_frame_count" -ge 2 ] \
+  || fail "external pane produced only $ordered_frame_count commentary/step/ship ordering observations"
+for word in ONE TWO THREE; do
+  marker="REAL_COMMENTARY_$word"
+  [ "$(printf '%s\n' "$final_text" | grep -Fc "$marker")" -eq 1 ] \
+    || fail "settled real-model transcript did not retain $marker exactly once"
+done
+printf '%s' "$final_text" | grep -Fq '╲▁▁▁╱' \
+  && fail "settled real-model transcript retained the sailing animation"
 
 session_file=$(find "$SESSIONS" -type f -name '*.jsonl' \
   -exec grep -l 'REAL_MODEL_FINAL_RESPONSE' {} + 2>/dev/null | head -1)
@@ -114,7 +155,13 @@ session_file=$(find "$SESSIONS" -type f -name '*.jsonl' \
 grep -Fq '.calm-probe-a' "$session_file" || fail "first real-model tool turn was not persisted"
 grep -Fq '.calm-probe-b' "$session_file" || fail "second real-model tool turn was not persisted"
 grep -Fq '.calm-probe-c' "$session_file" || fail "third real-model tool turn was not persisted"
+for word in ONE TWO THREE; do
+  marker="REAL_COMMENTARY_$word"
+  [ "$(grep -Fo "$marker" "$session_file" | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "real-model session history did not preserve $marker exactly once"
+done
 
+printf 'proof - final commentary: REAL_COMMENTARY_ONE, REAL_COMMENTARY_TWO, REAL_COMMENTARY_THREE (one each)\n'
 printf 'proof - final: %s\n' "$(printf '%s\n' "$final_text" | grep -F 'REAL_MODEL_FINAL_RESPONSE' | tail -1)"
-printf 'ok - real Pi %s with gpt-5.6-sol xhigh and the full Firstmate extension set exposed one externally read numbered step at a time across %s steps, then no step row after the final response\n' \
+printf 'ok - real Pi %s with gpt-5.6-sol xhigh and the full Firstmate extension set externally showed one numbered step at a time across %s steps, retained commentary exactly once across later transitions, ordered commentary and step above the ship, and cleared only the transient presentation at finalization\n' \
   "$(pi --version)" "$unique_steps"

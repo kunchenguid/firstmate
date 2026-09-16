@@ -4,7 +4,7 @@ Calm is a Pi-only conversation presentation toggle.
 It is off by default, and the last `/calm` choice persists for the effective Firstmate home across Pi session starts and resumes.
 
 While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a small two-row animated boat in its place.
-Each in-progress assistant update is rendered as one replacing numbered `Step N:` row, so the latest planning or commentary update replaces the prior one without adding transcript rows.
+Each in-progress assistant thinking update is rendered as one replacing numbered `Step N:` row immediately above the boat, while assistant commentary remains on Pi's ordinary transcript surface above both.
 The water fills the usable width with low one-cell Unicode bars, using standard ANSI blue for troughs and cyan for crests.
 The asymmetric three-cell `◿│◣` sail is centered over the five-cell `╲▁▁▁╱` hull, with a smaller standard ANSI yellow quarter sail, a larger standard ANSI red right sail, and a blue zero-height interior that keeps the water visible through the boat.
 The boat is deliberately calm: it moves one column every 880ms, while the long smooth wave advances one quarter-cell every 220ms so the surface stays alive between boat steps.
@@ -15,14 +15,15 @@ Hidden elapsed time does not advance the animation, and a resize while hidden cl
 A fresh Pi session or new Calm extension lifetime starts at the normal initial position.
 Very narrow terminals fall back to a smaller deterministic sprite.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
-Calm hides collapsed thinking labels, mid-turn assistant working notes, routine supervision notes, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` and `fm_branch_outcomes` tool shells, and canonically classified Firstmate operational user rows.
-Calm shows one current live intermediate thinking or assistant-text update in a keyed widget, prefixed with an increasing `Step N:` counter, while the model is streaming.
-Each distinct streamed line replaces that same widget instead of accumulating assistant transcript rows on screen.
-A mid-turn working note is assistant text in a message the model did not end its response with, identified by that message's own `stopReason` of `toolUse`, or of `length` with tool calls present.
-When the response settles, intermediate tool-use narration and any live planning thinking are hidden while the genuine final response stays visible.
-Restored tool-use narration remains hidden, while explicit reasoning expansion still restores the original reasoning row.
-The narration and routine supervision notes are hidden only from the live transcript presentation, and remain in their messages, model context, session storage, and `/export` artifacts.
-The live intermediate row disappears when the main run settles, so the final answer remains the lasting transcript result.
+Calm hides collapsed thinking labels, routine supervision notes, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` and `fm_branch_outcomes` tool shells, and canonically classified Firstmate operational user rows.
+Calm shows the latest live thinking line in a keyed widget, prefixed with an increasing `Step N:` counter, while the model is streaming.
+Each distinct streamed thinking line updates that component in place instead of accumulating planning transcript rows, and the component is inserted before the ship so later updates cannot move it below the animation.
+Assistant text is commentary rather than a step title and renders through Pi's ordinary assistant transcript component as it streams.
+That commentary remains visible exactly once after its tool turn, across later step replacement, finalization, and session reload, without adding a custom entry or changing the assistant message.
+When the response settles, live planning thinking is hidden while assistant commentary and the genuine final response stay visible.
+Restored commentary remains visible, while explicit reasoning expansion still restores the original reasoning row.
+Hidden planning thinking and routine supervision notes remain in their messages, model context, session storage, and `/export` artifacts.
+The transient step disappears when the main run settles, so commentary and the final answer remain as ordinary transcript output.
 The operational inputs Calm classifies remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
 The session-start nudge remains on its existing non-displayed custom-message path.
 

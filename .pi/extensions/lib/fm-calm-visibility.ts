@@ -30,11 +30,12 @@ export const CALM_TRANSCRIPT_CLASSES = [
 
 export type CalmTranscriptClass = (typeof CALM_TRANSCRIPT_CLASSES)[number];
 
-// Calm is on or off. "assistant-working-note" is deliberately absent from the allowlist:
-// Calm hides mid-turn assistant working notes, keeping the genuine final reply.
+// Calm is on or off. Assistant text stays on Pi's ordinary transcript surface while
+// assistant thinking supplies the transient current-step title.
 const CALM_VISIBLE_CLASSES = new Set<CalmTranscriptClass>([
   "genuine-user-prompt",
   "genuine-agent-response",
+  "assistant-working-note",
   "working-status",
 ]);
 
