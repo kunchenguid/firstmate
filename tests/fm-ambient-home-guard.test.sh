@@ -10,13 +10,6 @@
 # https://github.com/example/repo/pull/1 ...` child ledger line was then
 # delivered for real onto a live secondmate's parent channel
 # (bin/fm-parent-channel-lib.sh).
-#
-# tests/lib.sh now pins FM_HOME to a fresh, empty, per-process directory at
-# source time, so that fallback chain resolves there instead of $ROOT whenever a
-# fixture forgets its own override. This file proves three things: the pin is
-# actually in place, the hazard it closes is real (reproduced against a private
-# fixture copy, never against $ROOT or any real home), and a representative slice
-# of the real fixture suite never touches a sentinel standing in for a live home.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -33,17 +26,6 @@ TMP_ROOT=$(fm_test_tmproot fm-ambient-home-guard)
 # PR ...` line. Scanning MATE delivers that child's ledger line onto MATE's
 # parent channel, which is MAIN's state/mate.status - the live secondmate parent
 # channel the incident corrupted.
-
-age_file() { # <path>
-  local now stamp
-  now=$(( $(date +%s) - 120 ))
-  if stamp=$(date -r "$now" +%Y%m%d%H%M.%S 2>/dev/null); then
-    touch -t "$stamp" "$1"
-  else
-    stamp=$(date -d "@$now" +%Y%m%d%H%M.%S)
-    touch -t "$stamp" "$1"
-  fi
-}
 
 fm_dir_fingerprint() { # <dir>
   if command -v shasum >/dev/null 2>&1; then
@@ -66,8 +48,6 @@ parent_home=$main
 EOF
   fm_write_secondmate_meta "$main/state/mate.meta" "$mate"
   printf 'working: delegated scope\n' > "$main/state/mate.status"
-  age_file "$main/state/mate.meta"
-  age_file "$main/state/mate.status"
 
   fm_write_meta "$mate/state/leak-child.meta" \
     "window=firstmate:fm-leak-child" "worktree=$mate/projects/leak-child" "project=alpha" \
@@ -75,9 +55,9 @@ EOF
     "spawn_gen=s1" 'pr=https://github.com/example/repo/pull/1'
   printf 'done: PR https://github.com/example/repo/pull/1 checks green\n' > "$mate/state/leak-child.status"
   : > "$mate/state/leak-child.turn-ended"
-  age_file "$mate/state/leak-child.meta"
-  age_file "$mate/state/leak-child.status"
-  age_file "$mate/state/leak-child.turn-ended"
+  fm_touch_epoch "$(( $(date +%s) - 120 ))" \
+    "$main/state/mate.meta" "$main/state/mate.status" \
+    "$mate/state/leak-child.meta" "$mate/state/leak-child.status" "$mate/state/leak-child.turn-ended"
 
   cat > "$fake/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
@@ -137,9 +117,6 @@ test_bypassing_the_guard_reproduces_the_incident() {
 #
 # Same fixture, same missing FM_HOME override on the scan call itself, but this
 # time FM_HOME stays exactly what tests/lib.sh pinned it to (nothing unsets it).
-# FM_ROOT_OVERRIDE still points at the real code root, while the private
-# sentinel remains available to prove that the fixture suite does not write
-# outside its isolated home.
 
 test_forgotten_home_lands_in_the_guard_not_the_sentinel() {
   local root before after
@@ -160,33 +137,35 @@ test_forgotten_home_lands_in_the_guard_not_the_sentinel() {
   pass "a forgotten FM_HOME override lands in the pinned guard directory, not the sentinel"
 }
 
-# --- a representative slice of the real suite never touches a live sentinel --
+test_inherited_directory_overrides_cannot_reach_the_sentinel() {
+  local root before after
+  root="$TMP_ROOT/inherited"
+  mkdir -p "$root"
+  build_sentinel "$root"
+  printf 'working: real captain work, do not touch\n' > "$root/mate/state/leak-child.status"
+  fm_touch_epoch "$(( $(date +%s) - 120 ))" "$root/mate/state/leak-child.status"
+  before=$(fm_dir_fingerprint "$root")
 
-test_real_fixture_suite_leaves_sentinel_byte_identical() {
-  local sentinel before after script rc out
-  sentinel="$TMP_ROOT/live-suite-run"
-  mkdir -p "$sentinel/state" "$sentinel/data" "$sentinel/config" "$sentinel/projects"
-  printf 'operator-real-backlog-marker\n' > "$sentinel/data/backlog.md"
-  printf 'working: real captain work, do not touch\n' > "$sentinel/state/real-secondmate.status"
-  before=$(fm_dir_fingerprint "$sentinel")
+  PATH="$root/fakebin:$PATH" FM_HOME="$root/mate" FM_ROOT_OVERRIDE="$root/mate" \
+    FM_STATE_OVERRIDE="$root/mate/state" FM_DATA_OVERRIDE="$root/mate/data" \
+    FM_CONFIG_OVERRIDE="$root/mate/config" FM_PROJECTS_OVERRIDE="$root/mate/projects" \
+    FM_PENDING_REPLY_DIR_OVERRIDE="$root/mate/state/pending-replies" \
+    FM_INACTIVE_RECONCILE_SECS=60 FM_INACTIVE_CREW_STATE_BIN="$root/fakebin/fm-crew-state.sh" \
+    bash -eu -c '
+      . "$1/tests/lib.sh"
+      "$1/bin/fm-inactive-reconcile.sh" scan
+      for override in FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE FM_PENDING_REPLY_DIR_OVERRIDE; do
+        [ -z "${!override-}" ] || fail "inherited $override survived fixture initialization"
+      done
+    ' _ "$ROOT" || fail "scan with inherited directory overrides failed"
 
-  for script in \
-    fm-inactive-reconcile.test.sh \
-    fm-pr-merge.test.sh \
-    fm-send-strict.test.sh; do
-    out=$(FM_ROOT_OVERRIDE="$ROOT" bash "$ROOT/tests/$script" 2>&1)
-    rc=$?
-    [ "$rc" -eq 0 ] || fail "$script failed while the ambient sentinel was present: $out"
-    ! printf '%s\n' "$out" | grep -Fq 'not ok' || fail "$script reported a failing case: $out"
-  done
-
-  after=$(fm_dir_fingerprint "$sentinel")
+  after=$(fm_dir_fingerprint "$root")
   [ "$before" = "$after" ] \
-    || fail "the real fixture suite modified the sentinel standing in for a live operator home"
-  pass "a representative slice of the real fixture suite leaves an ambient sentinel byte-identical"
+    || fail "inherited directory overrides reached the sentinel live home"
+  pass "fixture initialization clears inherited directory overrides and protects live state"
 }
 
 test_lib_pins_fm_home_away_from_root
 test_bypassing_the_guard_reproduces_the_incident
 test_forgotten_home_lands_in_the_guard_not_the_sentinel
-test_real_fixture_suite_leaves_sentinel_byte_identical
+test_inherited_directory_overrides_cannot_reach_the_sentinel

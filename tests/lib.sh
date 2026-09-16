@@ -263,6 +263,7 @@ fi
 # directory instead of silently writing into the operator's real checkout.
 # tests/fm-ambient-home-guard.test.sh pins this behavior and proves a sentinel
 # "live home" stays byte-identical across a run that never sets FM_HOME.
+unset FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE FM_PENDING_REPLY_DIR_OVERRIDE
 FM_TEST_AMBIENT_GUARD=$(fm_test_tmproot fm-ambient-guard) || return 1
 printf 'do-not-use: catches a forgotten FM_HOME override; see tests/lib.sh ambient-home poison guard\n' \
   > "$FM_TEST_AMBIENT_GUARD/.fm-ambient-guard" || return 1
