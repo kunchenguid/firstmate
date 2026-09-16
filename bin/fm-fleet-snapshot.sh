@@ -22,7 +22,8 @@
 #     hold_reason, and hold_until when tasks-axi emits it. They also carry
 #     normalized current_role, requires_child_metadata, blocked_by_ids,
 #     unresolved_blocker_ids, captain_actionable, hold_set, hold_age_days,
-#     and hold_bucket fields.
+#     hold_bucket, and report_present fields. report_present is true only when
+#     the canonical data/<id>/report.md path is recorded and exists at capture.
 #     Repeated blocker tokens remain ordered; a blocker resolves only when its
 #     structured record is Done, and missing ids stay open.
 #     There is no separate decision type: any captain-held task is the same
@@ -373,14 +374,14 @@ first_pr_url_in_file() {  # <file>
 }
 
 backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
-  local backlog=${1:-$BACKLOG}
+  local backlog=${1:-$BACKLOG} parsed availability_file order id report_path present rc
   if [ ! -f "$backlog" ]; then
     jq -n --arg path "$backlog" '{path:$path,present:false,records:[]}'
     return 0
   fi
 
   # shellcheck disable=SC2094
-  jq -Rn --arg path "$backlog" --arg today "$SNAPSHOT_TODAY" --arg now "$SNAPSHOT_NOW" \
+  parsed=$(jq -Rn --arg path "$backlog" --arg today "$SNAPSHOT_TODAY" --arg now "$SNAPSHOT_NOW" \
     --argjson age_days "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" '
     def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
     def timestamp_epoch($d):
@@ -561,7 +562,36 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
           | .captain_actionable = (.hold_bucket == "live")
         else . end)
     | del(.section,.order)
-  ' < "$backlog"
+  ' < "$backlog") || return 1
+
+  availability_file=$(mktemp "${TMPDIR:-/tmp}/fm-fleet-backlog-reports.XXXXXX") || return 1
+  while IFS=$'\t' read -r order id report_path; do
+    present=false
+    case "$id" in
+      ''|.*|*[!A-Za-z0-9._-]*) ;;
+      *)
+        if [ "$report_path" = "data/$id/report.md" ] && [ -f "$DATA/$id/report.md" ]; then
+          present=true
+        fi
+        ;;
+    esac
+    jq -cn --argjson order "$order" --argjson present "$present" '{order:$order,present:$present}' \
+      >> "$availability_file" || {
+        rm -f -- "$availability_file"
+        return 1
+      }
+  done < <(printf '%s\n' "$parsed" | jq -r '.records[] | select(.structured) | [.order, .id, (.report_path // "")] | @tsv')
+
+  printf '%s\n' "$parsed" | jq --slurpfile availability "$availability_file" '
+    .records |= map(
+      if .structured then
+        . as $record
+        | .report_present = ([ $availability[] | select(.order == $record.order) | .present ][0] // false)
+      else . end)
+  '
+  rc=$?
+  rm -f -- "$availability_file"
+  return "$rc"
 }
 
 SNAPSHOT_TASK_DIR=
@@ -1004,6 +1034,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             hold_kind:((.hold_kind // null) | if . == null then null else trunc(40) end),
             pr_url:((.pr_url // null) | if . == null then null else trunc(500) end),
             report_path:((.report_path // null) | if . == null then null else trunc(500) end),
+            report_present:(.report_present == true),
             local_note:((.local_note // null) | if . == null then null else trunc(120) end),completion} ]
        | sort_by([(.completion.date // ""), .id]) | reverse) as $landed_all
     | ([ $tasks[] | select(.current_state.state == "unknown") ]) as $unknown_children

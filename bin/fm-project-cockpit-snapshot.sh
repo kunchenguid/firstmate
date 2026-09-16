@@ -303,7 +303,7 @@ jq \
       blockers:$blockers[:$max_blockers],
       _truncated:(($blockers | length) > $max_blockers),
       gate:(if ((.unresolved_blocker_ids // []) | arr | length) > 0 then {status:"blocked",label:(((.unresolved_blocker_ids | map(text(80)) | join(", ")) | text(240)))} elif .hold_bucket != null then {status:.hold_bucket,label:((.hold_reason // "Captain hold") | text(240))} else {status:"unavailable",label:"Unavailable"} end),
-      artifacts:{pr_url:(.pr_url | https),report:{status:(if .report_path == null then "missing" else "available" end),path:(.report_path | text(500))}},
+      artifacts:{pr_url:(.pr_url | https),report:{status:(if .report_present == true and .report_path != null then "available" else "missing" end),path:(.report_path | text(500))}},
       runtime_evidence:{endpoint_status:"not_started",target:null,worktree:null,home:null},
       events:{status:"unavailable",items:[],reason:"No structured event chronology is available for queued work."},
       terminal:{status:"unavailable",reason:"Terminal observation is unavailable for queued work."}
@@ -316,7 +316,7 @@ jq \
       state_detail:null,state_detail_status:"unavailable",observed_at:null,completed_at:(.completion.date | date_or_time),started_at:null,elapsed_seconds:null,
       crew:{liveness:"complete",summary:"COMPLETE",kind:((.kind // "work") | text(40)),harness:null,backend:null},
       decisions:[],attention:false,attention_rank:2,hold:null,blockers:[],gate:{status:"complete",label:"Complete"},
-      artifacts:{pr_url:(.pr_url | https),report:{status:(if .report_path == null then "missing" else "available" end),path:(.report_path | text(500))}},
+      artifacts:{pr_url:(.pr_url | https),report:{status:(if .report_present == true and .report_path != null then "available" else "missing" end),path:(.report_path | text(500))}},
       runtime_evidence:{endpoint_status:"complete",target:null,worktree:null,home:null},
       events:{status:"unavailable",items:[],reason:"No structured event chronology is available for completed work."},
       terminal:{status:"unavailable",reason:"Terminal observation is omitted in version 1."}

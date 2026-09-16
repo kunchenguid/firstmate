@@ -445,12 +445,12 @@ __FM_PROJECT_COCKPIT_DATA__
         call.setAttribute("aria-label", "Captain hold context");
         call.append(el("strong", "", `${task.hold.classification} captain hold`), el("p", "", text(task.hold.question)));
         const context = el("dl", "hold-context");
-        const timing = task.hold.until
+        const timing = task.hold.classification === "dated" && task.hold.until
           ? `Deferred until ${text(task.hold.until)}`
           : Number.isInteger(task.hold.age_days) && task.hold.age_days >= 0
             ? `${task.hold.age_days} ${task.hold.age_days === 1 ? "day" : "days"}`
             : "Unavailable";
-        detailRow(context, "Hold timing", timing, task.hold.until ? "dated" : null);
+        detailRow(context, "Hold timing", timing, task.hold.classification === "dated" && task.hold.until ? "dated" : null);
         detailRow(context, "Evidence", task.hold.evidence);
         detailRow(context, "Report", upper(task.artifacts.report.status), task.artifacts.report.status);
         call.append(context);

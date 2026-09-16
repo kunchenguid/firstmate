@@ -619,7 +619,13 @@ EOF
       and .title == "Bold Task"
       and .body_excerpt == "Bold body survives."
       and .report_path == "data/bold-task/report.md"
+      and .report_present == true
   ' >/dev/null || fail "bold in-flight backlog row did not parse"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "reported-comma")
+    | .report_path == "data/reported-comma/report.md"
+      and .report_present == false
+  ' >/dev/null || fail "missing canonical report was presented as available"
   printf '%s' "$out" | jq -e '
     .backlog.records[] | select(.id == "queued-comma")
     | .repo == "beta" and .since == "2026-07-08"

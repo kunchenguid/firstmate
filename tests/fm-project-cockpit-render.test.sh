@@ -53,6 +53,8 @@ credential_json=$(jq -c '(.projects[].tasks[] | select(.id == "healthy-work")).a
 deferred_hold_json=$(jq -c '(.projects[].tasks[] | select(.id == "captain-call")) |= (
   .hold.classification="dated" | .hold.age_days=null | .hold.until="2026-09-20"
   | .artifacts.report.status="available")' "$states")
+expired_hold_json=$(jq -c '(.projects[].tasks[] | select(.id == "captain-call")) |= (
+  .hold.classification="live" | .hold.age_days=7 | .hold.until="2026-09-08")' "$states")
 unavailable_hold_json=$(jq -c '(.projects[].tasks[] | select(.id == "captain-call")) |= (
   .hold.age_days=null | .hold.until=null | .artifacts.report.path=null)' "$states")
 bounded_hold_json=$(jq -c '(.projects[].tasks[] | select(.id == "captain-call")).hold.evidence=("e" * 40)' "$states")
@@ -96,6 +98,10 @@ assert_eval '() => ({text:document.querySelector("[aria-label=\"Captain hold con
   '\"copyReport\":true' "desktop inspector hid an available report path action"
 assert_eval '() => ({reportAvailable:document.querySelector("[aria-label=\"Captain hold context\"]")?.innerText.includes("AVAILABLE")})' \
   '\"reportAvailable\":true' "desktop inspector omitted available-report status"
+assert_eval "() => {window.fmCockpit.replacePayload($expired_hold_json); return document.querySelector('[aria-label=\"Captain hold context\"]')?.innerText;}" \
+  '7 days' "desktop inspector rendered an expired hold date as an active deferral"
+assert_eval '() => document.querySelector("[aria-label=\"Captain hold context\"]")?.innerText.includes("Deferred until")' \
+  'false' "desktop inspector retained deferral wording for a live hold"
 assert_eval "() => {window.fmCockpit.replacePayload($unavailable_hold_json); const context=document.querySelector('[aria-label=\"Captain hold context\"]'); return {text:context?.innerText,copyReport:[...document.querySelectorAll('.copy-button')].some(x=>x.innerText==='Copy report path')};}" \
   'Unavailable' "desktop inspector omitted the unavailable timing fallback"
 assert_eval "() => {window.fmCockpit.replacePayload($bounded_hold_json); return document.querySelector('[aria-label=\"Captain hold context\"]')?.innerText;}" \
@@ -190,6 +196,10 @@ assert_eval '() => ({age:document.querySelector("[aria-label=\"Captain hold cont
   '\"age\":true' "mobile inspector omitted present hold context"
 assert_eval "() => {window.fmCockpit.replacePayload($deferred_hold_json); return document.querySelector('[aria-label=\"Captain hold context\"]')?.innerText;}" \
   'Deferred until 2026-09-20' "mobile inspector omitted dated hold context"
+assert_eval "() => {window.fmCockpit.replacePayload($expired_hold_json); return document.querySelector('[aria-label=\"Captain hold context\"]')?.innerText;}" \
+  '7 days' "mobile inspector rendered an expired hold date as an active deferral"
+assert_eval '() => document.querySelector("[aria-label=\"Captain hold context\"]")?.innerText.includes("Deferred until")' \
+  'false' "mobile inspector retained deferral wording for a live hold"
 assert_eval "() => {window.fmCockpit.replacePayload($unavailable_hold_json); return document.querySelector('[aria-label=\"Captain hold context\"]')?.innerText;}" \
   'Unavailable' "mobile inspector omitted unavailable hold timing"
 assert_eval "() => {window.fmCockpit.replacePayload($bounded_hold_json); return {text:document.querySelector('[aria-label=\"Captain hold context\"]')?.innerText,overflow:document.querySelector('[aria-label=\"Captain hold context\"]').scrollWidth<=document.querySelector('[aria-label=\"Captain hold context\"]').clientWidth};}" \

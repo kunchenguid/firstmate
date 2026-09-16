@@ -69,6 +69,36 @@ test_projection_is_deterministic_and_allowlisted() {
   pass "projection is deterministic, stably ordered, semantically faithful, and allowlisted"
 }
 
+test_canonical_report_availability_requires_owner_evidence() {
+  local unavailable=$TMP_ROOT/canonical-report-unavailable.json available=$TMP_ROOT/canonical-report-available.json
+  jq '(.backlog.records[] | select(.id == "queued-work")) += {
+        report_path:"data/queued-work/report.md"
+      }
+      | (.backlog.records[] | select(.id == "done-work")) += {
+        report_path:"data/done-work/report.md",report_present:false
+      }' "$FIXTURES/states.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$unavailable"
+  jq -e '
+    ([.projects[].tasks[] | select(.id == "queued-work")][0].artifacts.report
+      == {status:"missing",path:"data/queued-work/report.md"})
+    and ([.projects[].tasks[] | select(.id == "done-work")][0].artifacts.report
+      == {status:"missing",path:"data/done-work/report.md"})
+  ' "$unavailable" >/dev/null || fail "canonical report paths bypassed upstream availability evidence"
+
+  jq '(.backlog.records[] | select(.id == "queued-work")) += {
+        report_path:"data/queued-work/report.md",report_present:true
+      }
+      | (.backlog.records[] | select(.id == "done-work")) += {
+        report_path:"data/done-work/report.md",report_present:true
+      }' "$FIXTURES/states.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$available"
+  jq -e '
+    ([.projects[].tasks[] | select(.id == "queued-work")][0].artifacts.report.status == "available")
+    and ([.projects[].tasks[] | select(.id == "done-work")][0].artifacts.report.status == "available")
+  ' "$available" >/dev/null || fail "canonical report availability evidence was not projected"
+  pass "canonical report availability consumes only owner evidence"
+}
+
 test_main_open_decisions_are_bounded_deduplicated_and_actionable() {
   local model=$TMP_ROOT/main-decision.json held=$TMP_ROOT/main-decision-held.json
   local held_shared=$TMP_ROOT/main-decision-held-shared.json
@@ -612,6 +642,7 @@ test_builder_is_fail_closed_and_atomic() {
     '.projects[0].tasks[0] |= (.identity_scope="snapshot" | .spawn_gen="unexpected")' \
     '(.projects[].tasks[] | select(.id == "captain-call")).hold.evidence=("e" * 41)' \
     '(.projects[].tasks[] | select(.id == "captain-call")).hold.age_days=-1' \
+    '(.projects[].tasks[] | select(.id == "captain-call")).artifacts.report |= (.status="available" | .path=null)' \
     '(.projects[].tasks[] | select(.id == "captain-call")).artifacts.report.status="unavailable"'; do
     jq "$mutation" "$model" > "$altered"
     set +e
@@ -817,6 +848,7 @@ SH
 }
 
 test_projection_is_deterministic_and_allowlisted
+test_canonical_report_availability_requires_owner_evidence
 test_main_open_decisions_are_bounded_deduplicated_and_actionable
 test_secondmate_generation_and_terminal_elapsed_fail_closed
 test_stale_partial_invalid_empty_and_replacement_states
