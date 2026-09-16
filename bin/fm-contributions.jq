@@ -48,7 +48,8 @@ def projected($input; $saved; $now; $max_age):
     | (if $record.error == null and $record.observation != null and ($o.head | sha) then $o.head else null end) as $observed_head
     | (($record.checked_at // "") | try fromdateiso8601 catch null) as $checked
     | ($checked != null and ($now - $checked) >= 0 and ($now - $checked) <= $max_age
-       and $observed_head != null
+       and (if $record.kind == "pr" then $observed_head != null
+            else $record.error == null and $record.observation != null end)
        and ($k.url | startswith("https://github.com/"))) as $fresh
     | (($o.checks // []) | latest_checks) as $checks
     | [$checks[] | select(.status == "completed" and (.conclusion == null or .conclusion == ""))] as $no_verdict

@@ -201,6 +201,19 @@ test_ready_issue_wake() {
   pass 'ready-for-pr on a filed issue becomes a planning wake'
 }
 
+test_fresh_issue_requires_maintainer() {
+  local home
+  home=$(new_home fresh-issue)
+  forge_home "$home"
+  printf -- '- [ ] filed - Measured defect https://github.com/o/r/issues/9 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'could not observe filed issue'
+  bearings "$home" | jq -e '.contributions.known == 2 and .contributions.checked == 2
+    and .contributions.counts.maintainer == 2 and .contributions.counts.fleet == 0
+    and .contributions.complete == true and .contributions.proven_clear == true' >/dev/null \
+    || fail 'a fresh open issue did not remain measured maintainer triage'
+  pass 'a fresh open issue remains measured maintainer triage'
+}
+
 test_comment_wake() { test_incoming_signal comment; }
 test_review_wake() { test_incoming_signal review; }
 test_inline_wake() { test_incoming_signal inline; }
@@ -402,7 +415,7 @@ test_unreadable_pending_is_not_empty() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_home_summary_coverage test_unreadable_pending_is_not_empty; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_home_summary_coverage test_unreadable_pending_is_not_empty; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
