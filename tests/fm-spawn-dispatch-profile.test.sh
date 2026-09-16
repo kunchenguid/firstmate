@@ -713,6 +713,12 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity() {
   assert_contains "$ext" "\"--gen\", \"$gen\"" "pi extension does not carry the armed incarnation gen"
   assert_contains "$ext" '"--source", "pi-ext"' "pi extension does not attribute its semantic source"
   assert_contains "$ext" 'pi.on("turn_end"' "pi extension lost the turn-end notification touch"
+  assert_contains "$ext" 'pi.on("before_provider_request"' "pi extension lost the native route-receipt hook"
+  assert_contains "$ext" 'pi.appendEntry("fm-routing-request"' "pi extension does not persist native route proof"
+  assert_contains "$ext" "taskId: \"$id\"" "pi extension route proof is not bound to the exact task"
+  assert_contains "$ext" 'payloadReasoningEffort:' "pi extension route proof omits effective provider effort"
+  assert_not_contains "$ext" 'payload.messages' "pi extension route proof attempts to persist prompt messages"
+  assert_not_contains "$ext" 'event.headers' "pi extension route proof attempts to persist provider headers"
   pass "pi-signed shares Pi launch semantics while preserving its configured and recorded identity"
 }
 

@@ -1,0 +1,124 @@
+# Model-routing outcome measurement
+
+`bin/fm-routing-outcomes.py` adds receipt-backed measurement to existing Firstmate tasks without becoming a dispatcher, scheduler, quota provider, grader, or task lifecycle.
+It records one exact task attempt at a time, records quota-informed shadow recommendations separately, and renders a compact descriptive scorecard.
+The task identifier remains the join to the configured task system, while quota-axi remains the allowance source and `quota-array-dispatch` remains the routing decision owner.
+
+## Rollout boundary
+
+Use the capability in three independent stages.
+
+1. In `measurement`, import native receipts and verify attribution, token accounting, timing, grading, pricing, and replay behavior without changing the route selected for work.
+2. In `shadow`, record the route that the existing eligibility, capability-class, runway-feasibility, and spend-priority procedure would recommend, but do not execute the recommendation.
+3. In `bounded`, route only after the same evidence is sufficient, retain one capable alternative on a genuinely different allowance pool, and reconcile side effects before any handoff.
+
+The importer itself never launches or switches a model.
+An operator can therefore stop after either of the first two stages without leaving a partially installed control plane.
+
+Initial paired comparisons are limited mechanically to two distinct low-risk pair identifiers per category in one outcome store.
+A comparison manifest must state that the work is non-time-critical, has no private external action, and performs no external action.
+A handoff manifest admits one alternative and requires explicit quality, privacy, and side-effect reconciliation evidence.
+These records do not make an external-action task safe by assertion; such tasks stay outside the initial comparison set.
+
+## Durable records
+
+The default append-only stores are private and gitignored:
+
+- `data/model-routing/outcomes.jsonl` holds full attempt revisions.
+- `data/model-routing/shadow-decisions.jsonl` holds full shadow-decision revisions.
+
+`FM_DATA_OVERRIDE` relocates both with the rest of the effective home.
+`--store` and `--shadow-store` provide explicit locations for fixtures and intentionally separate evidence sets.
+A compatible existing `data/dispatch-log.tsv` is read as pre-measurement history by default, or from `--legacy-log`; those rows remain visible with explicit telemetry gaps and are never mixed into receipt-backed totals.
+
+An import hashes its normalized record.
+Replaying an identical attempt is a no-op, while a changed attempt appends a new revision under the same task and attempt identity.
+Readers fold only the newest revision, so a restart, resume, or corrected grade does not duplicate tokens, costs, or accepted-task counts.
+Writers serialize and fsync each append.
+
+The script header and `--help` own the manifest fields and command syntax.
+Use `inspect --task <id>` for the folded machine record and `scorecard --format json` for stable machine output.
+The default scorecard is Markdown.
+
+## Native receipt boundary
+
+The importer copies route, timing, token, usage, and completeness facts only.
+It does not copy prompt text, response text, tool arguments, credentials, or provider headers from a source receipt.
+Each imported source is bound by SHA-256.
+A missing native field remains JSON `null` and contributes to the scorecard's unknown count rather than becoming zero.
+
+Supported source shapes are:
+
+- `pi-session` reads Pi v3 JSONL assistant usage and the sanitized `fm-routing-request` custom entry emitted by a Firstmate-spawned Pi worker.
+- `claude-result` reads Claude Code `--output-format json`, including every native `modelUsage` row so an auxiliary model is not silently omitted.
+- `claude-session` folds the latest copy of each native assistant message identifier in Claude Code JSONL, avoiding duplicate streaming snapshots.
+- `agy-result` reads agy `--output-format json`; an optional native log proves only the selected model label and its low, medium, or high variant.
+
+A Firstmate-spawned Pi worker writes one sanitized custom entry immediately before each provider request.
+The entry contains the task identifier, request sequence, timestamp, selected provider/model/thinking level/API, final payload model, and final payload reasoning effort.
+It contains no other payload field.
+That final-payload evidence can enforce an `effective_effort` requirement rather than trusting requested launch metadata.
+The associated assistant message remains Pi's native response/usage receipt.
+
+Claude Code's current result and session receipts do not prove effective reasoning effort.
+The importer therefore preserves requested effort and leaves effective effort unknown.
+Agy's one-shot result gives native usage, and its native selected-model log can prove a named effort variant, while the current interactive conversation store is not treated as a prompt-safe portable receipt.
+These limitations remain visible in `native.completeness` and in scorecard uncertainty.
+
+Token categories retain the native source's accounting.
+Reasoning tokens are reported separately but never added on top of output tokens for cost calculations, because the price catalog contract requires `reasoning: included_in_output`.
+Cache reads and cache writes remain separate.
+A receipt with a missing category yields unknown for that aggregate rather than a fabricated zero.
+
+## Time and grading
+
+The manifest records task start and finish plus observable queue, model, tool, review, retry, handoff, and human durations.
+Each attempt's end-to-end duration is computed from its timestamp pair rather than from model time alone.
+The accepted-task table spans the earliest recorded attempt start through the first accepted finish, so retries and one-alternative handoffs are counted without summing overlapping wall-clock attempts.
+Native API duration is retained separately where a tool emits it.
+
+An accepted outcome requires an independent deterministic or blind-review grade, a final pass, and at least one passing check receipt.
+The implementation route cannot self-assert acceptance by setting an outcome string alone.
+First-pass result, final result, defect count, fix count, retry count, grader duration, grader tokens, and grader incremental charge stay explicit.
+The importer does not create a second full review pipeline; callers attach the ordinary task's actual check receipts and use limited blind review only where subjective grading requires it.
+
+## Cost and allowance attribution
+
+Three money concepts remain separate:
+
+- `actual_incremental_usd` is an observed charge supplied by the caller.
+- `fixed_subscription_usd` is a fixed expense supplied by the caller and is never converted into a per-task charge by the tool.
+- `api_equivalent_usd` is computed only from a private `fm-routing-prices.v1` catalog.
+
+A price entry must match provider, exact model, context tier, service tier, and the attempt timestamp.
+It must name a timestamped HTTPS source and explicit input, output, cache-read, and cache-write rates in USD per million tokens.
+Every native model row must match exactly or the attempt's API-equivalent cost remains unknown.
+Provider-reported list-cost fields are retained as native evidence but never promoted into executable API-equivalent billing without that catalog match.
+
+Quota inputs are native quota-axi schema-version-5 snapshots taken before and after the attempt.
+The importer retains the selected provider's literal windows and normalized semantics.
+It computes a per-window consumption delta only when reset identity is unchanged, concurrent activity is explicitly absent, and attribution is exclusive.
+It never sums shared and model-window deltas, converts allowance percentages to dollars, relabels unresolved windows, or treats unknown authentication/headroom as zero.
+
+## Scorecard interpretation
+
+The scorecard groups exact attempts by category, task shape, harness, provider, effective model, and effective effort.
+When effective effort is unavailable, the route is labeled with requested effort rather than misrepresented as proven.
+It includes sample counts, outcomes, known token/cost/time totals, unknown counts, and unresolved or failed costs at the task level.
+It also prints each shadow recommendation and the evidence and uncertainty recorded for every candidate.
+Legacy dispatch rows are grouped separately by their existing shape, route, and outcome fields, with tokens, cost, quota, native effort, and end-to-end attribution labeled unknown.
+
+The scorecard is descriptive.
+It deliberately has no opaque weighted score and does not claim a statistical winner from a few heterogeneous tasks.
+Capability class and task fit remain routing gates rather than benchmark conclusions.
+
+## Verification
+
+Run the focused behavior suite with:
+
+```sh
+python3 tests/fm-routing-outcomes.test.py
+```
+
+The suite covers missing provider telemetry, refreshable-auth uncertainty, unresolved raw allowance windows, actual zero allowance, reset and concurrency boundaries, duplicate import/resume, exact price matching, native multi-model accounting, one-alternative handoff, comparison limits, independent grading, and quota/outage shadow fallback.
+`tests/fm-spawn-dispatch-profile.test.sh` verifies that a spawned Pi extension writes only the sanitized request-receipt fields.
