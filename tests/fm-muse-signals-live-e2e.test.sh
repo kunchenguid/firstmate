@@ -70,11 +70,11 @@ function applySgr(foreground, raw) {
 }
 
 function lastGlyphForeground(pane) {
-  const tokens = /\x1b\[([0-9;]*)m|⟩/gu;
+  const tokens = /\x1b\[([0-9;]*)m|[⟩❯]/gu;
   let foreground = null;
   let glyphForeground;
   for (const match of pane.matchAll(tokens)) {
-    if (match[0] === "⟩") {
+    if (match[0] === "⟩" || match[0] === "❯") {
       glyphForeground = foreground;
     } else {
       foreground = applySgr(foreground, match[1]);
@@ -91,10 +91,11 @@ function isBrightTruecolor(pane) {
 }
 
 const positive = "\x1b[38;2;90;160;255m\x1b[48;2;38;56;84m⟩";
+const positiveMuse13 = "\x1b[38;2;90;160;255m\x1b[48;2;38;56;84m❯";
 const brightThenDark = "\x1b[38;2;204;211;219mearlier bright\x1b[38;2;30;30;30m⟩";
 const brightThenMalformed = "\x1b[38;2;204;211;219mearlier bright\x1b[38;2m⟩";
 const brightThenOutOfRange = "\x1b[38;2;204;211;219mearlier bright\x1b[38;2;256;160;255m⟩";
-if (!isBrightTruecolor(positive) || isBrightTruecolor(brightThenDark) || isBrightTruecolor(brightThenMalformed) || isBrightTruecolor(brightThenOutOfRange)) process.exit(2);
+if (!isBrightTruecolor(positive) || !isBrightTruecolor(positiveMuse13) || isBrightTruecolor(brightThenDark) || isBrightTruecolor(brightThenMalformed) || isBrightTruecolor(brightThenOutOfRange)) process.exit(2);
 if (process.argv[2] === "--self-test") process.exit(0);
 
 const pane = fs.readFileSync(process.argv[2], "utf8");
