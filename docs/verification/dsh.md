@@ -61,9 +61,13 @@ Measured against synthetic homes:
 |---|---|
 | Bridge `0.0.1-rc.5` against `dsh-base` `0.1.5-rc.2` | FAIL, naming both versions and the reinstall command |
 | Bridge absent from the profile | FAIL, naming the install command at the running version |
-| `AGENTS.md` larger than the effective `maxBytes` that `dsh --dump-config` reports (65536, the `dsh-base` default) | FAIL, naming the patch file to raise |
+| The effective `agent-instructions` `maxBytes` (65536, the `dsh-base` default) below the rendered chain | FAIL, naming the row's file to raise |
+| A budget that covers `AGENTS.md` but not the rendered chain (every instruction file plus the frame) | FAIL |
+| The effective `agent-instructions` row absent, disabled, or not provably enabled, whatever its `maxBytes` | FAIL: a disabled row renders nothing |
 | Another plugin entry raises its `maxBytes` while `agent-instructions` stays at the default | FAIL: only the `agent-instructions` entry sets the budget |
 | A `--patch` overlay given to the launcher raises the budget | forwarded to `dsh --dump-config`, so the checked value is the one the host boots with |
+| A `web` composition (host row disabled) whose default agent preset, from the profile or `$DSH_HOME/settings.yaml`, is not `firstmate` | FAIL, naming the preset sessions compose from |
+| A `web` composition defaulting to the tracked `firstmate` preset | pass, from that preset's row; FAIL if the preset's row is absent or disabled |
 | `dsh --dump-config` fails, or reports no plain-number `agent-instructions` `maxBytes` | FAIL, naming the command to run and the patch file to set |
 | `ps` denied by the sandbox | FAIL, naming the permission preset |
 | Conforming home | pass, all required checks |
@@ -73,7 +77,13 @@ Measured against synthetic homes:
 Each of the three is silent in production, and all three were written into documentation before they were measured.
 The instruction budget is the clearest case: over budget, DSH omits `AGENTS.md` whole, as the [harness reference](../../.agents/skills/harness-adapters/references/harness/dsh.md#instruction-budget) states.
 Reproduced by calling the installed `@deepseek-ai/dsh-agent-instructions` 0.1.5-rc.2's own `discoverBaselineInstructionFiles` and `loadBaselineInstructions` with this checkout as the workspace: discovery returned `AGENTS.md` and `CLAUDE.md`; at `maxBytes` 65536 it omitted `AGENTS.md`, truncated nothing, and rendered a 455-byte `<system-reminder>` holding only the budget marker, the intro and the unexpanded `@AGENTS.md` pointer; at 262144 it omitted nothing.
-The captain profile sets 262144, and the preflight reads the effective value from `dsh --dump-config` and compares it against the live file size rather than a recorded constant.
+The captain profile sets 262144, but for the documented launch that raise was on the wrong row.
+Under `dsh-web-app` the host `agent-instructions` row is disabled and each session renders with its default agent preset's row, which for DSH's `standard` preset is 65536 and which no profile layer reaches, so a `web` launch dropped `AGENTS.md` whole while the preflight read 262144 off the disabled host row and reported ok.
+Every earlier live measurement of the budget was taken in a mode that masked this: the live guard composes its throwaway profile `--from-default-profile headless`, where the host row is live.
+The fix is the tracked `firstmate` agent preset, described in the [harness reference](../../.agents/skills/harness-adapters/references/harness/dsh.md#instruction-budget); it is a copy of `standard` because a preset has no patch layer to express "standard plus one change".
+The preflight now checks the effective composition instead: the default preset's row where an enabled `agent-presets` row exists, the host row otherwise, and never a disabled row.
+Measured on 2026-09-16 against the real dsh 0.1.5-rc.1 in a disposable `DSH_HOME`: the `web` composition with the tracked patch passes on the `firstmate` preset at 262144; without the patch it fails on `standard`; a `$DSH_HOME/settings.yaml` default of `minimal` fails; and `sdk` passes on its host row.
+`dsh-agent-presets`' own discovery reports the tracked preset healthy, and DSH's renderer at its budget omits nothing; the live guard's sixth contract repeats those `web` assertions.
 
 ## Session-start digest: `UserPromptSubmit`, delivered whole
 
@@ -240,7 +250,8 @@ Three dependencies surfaced, all now installed:
 
 ## Staying mergeable against upstream
 
-The adapter is shaped to stay mergeable rather than merely to work: 12 added files, which an upstream merge cannot conflict on, and 18 modified upstream files, which are the entire conflict surface.
+The adapter is shaped to stay mergeable rather than merely to work: 14 added files, which an upstream merge cannot conflict on, and 18 modified upstream files, which are the entire conflict surface.
+One added file is not merge-neutral against DSH itself: `.dsh/agent-presets/firstmate/agent.cordis.yml` is a copy of DSH's `standard` preset, so a DSH upgrade means re-copying it and re-applying its budget raise.
 Each modified file is modified additively — a case arm, a new mode, a new function or a call site, never a reorder or a rename — so an upstream change outside those 18 files cannot conflict, and one inside them conflicts at the added line rather than at a rewritten one.
 
 **First sync, 2026-09-16.** Upstream `main` had advanced by one commit (`7111081c`), touching four files, none of them on the conflict surface; the rebase replayed every commit with zero conflicts.
@@ -255,7 +266,7 @@ The adapter was again not actually fine.
 The fix is the documented refresh: both scripts now carry a measured hint (`fm-dsh-harness.test.sh` 15067 ms, `fm-dsh-live-e2e.test.sh` 143 ms, the latter because the live guard skips without its opt-in).
 A new test file is therefore not finished when it passes; it also has to be weighed, and the guard that says so lives in a suite the adapter does not otherwise run.
 
-The upstream changes most likely to break this adapter are the hooks bridge's supported events and payload fields, `bin/fm-harness.sh`'s marker/ancestry arbitration, `fm_watcher_supervision_verdict`'s model set, `bin/fm-spawn.sh`'s harness resolution (a third arm without the refusal would let a DSH crewmate spawn), and DSH renaming its own tools out from under the delegation guard's stems.
+The upstream changes most likely to break this adapter are the hooks bridge's supported events and payload fields, `bin/fm-harness.sh`'s marker/ancestry arbitration, `fm_watcher_supervision_verdict`'s model set, `bin/fm-spawn.sh`'s harness resolution (a third arm without the refusal would let a DSH crewmate spawn), DSH renaming its own tools out from under the delegation guard's stems, and DSH's shipped `standard` preset, which the `firstmate` preset copies.
 
 ## Not established, blocked, or out of scope
 
@@ -289,7 +300,8 @@ FM_DSH_LIVE_E2E=1 bash tests/fm-dsh-live-e2e.test.sh
 bin/fm-dsh-preflight.sh --profile <name>
 ```
 
-As measured on 2026-09-16 against dsh 0.1.5-rc.1 / dsh-base 0.1.5-rc.2: the portable suite passes 38 cases, and the live guard passes all five of its contracts — a matching bridge pin passes the preflight, `UserPromptSubmit` context reaches the FIRST request, a `bash`-matcher deny blocks the command (sentinel absent), a blocking `Stop` forces one bounded continuation (2 firings), and a hook subprocess inherits the host's harness marker.
+As measured on 2026-09-16 against dsh 0.1.5-rc.1 / dsh-base 0.1.5-rc.2: the portable suite passes 40 cases, and the live guard passed its five session contracts — a matching bridge pin passes the preflight, `UserPromptSubmit` context reaches the FIRST request, a `bash`-matcher deny blocks the command (sentinel absent), a blocking `Stop` forces one bounded continuation (2 firings), and a hook subprocess inherits the host's harness marker.
+Its sixth contract, that the documented `web` launch renders `AGENTS.md` whole through the `firstmate` preset, was added after that run; it needs no credentials, and it was run on its own against the same dsh.
 
 The live guard resolves the running `dsh-base` version beside the installed `dsh` and fails by name and version rather than degrading quietly; it needs `node`, `jq` and `pnpm`, and it keeps the real harness home on purpose.
 

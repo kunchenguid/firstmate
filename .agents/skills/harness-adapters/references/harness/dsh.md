@@ -30,11 +30,23 @@ Overriding `sandbox-policy.mode` alone is NOT equivalent: the composed sandbox a
 
 ## Instruction budget
 
-`dsh-agent-instructions` budgets the whole rendered instruction chain with `maxBytes`, which `dsh-base` ships as 65536.
+`dsh-agent-instructions` budgets the whole rendered instruction chain with `maxBytes`, which `dsh-base` and every agent preset DSH ships set to 65536.
 It discovers both `AGENTS.md` and `CLAUDE.md` at the workspace root, and firstmate tracks `CLAUDE.md` only as an `@AGENTS.md` pointer, which the renderer does not expand.
 When the rendered chain is over budget, DSH does not cut bytes: it omits the broadest file whole, which here is `AGENTS.md`, so the agent receives only the `CLAUDE.md` pointer and a model-visible marker (`Workspace instruction budget 65536 bytes: omitted AGENTS.md`), and the operator sees nothing.
-The captain profile raises `maxBytes` to 262144, which delivers `AGENTS.md` whole.
-`bin/fm-dsh-preflight.sh` reads the effective value from `dsh --profile <name> --dump-config` at every launch, so DSH's own layer composition decides it, and compares that with the live size of `AGENTS.md`. That is `AGENTS.md` alone, a few hundred bytes smaller than the rendered chain DSH budgets, so the two are not equivalent near the boundary; the 262144 raise is far from it.
+
+Which `agent-instructions` row sets that budget depends on the profile.
+Under `dsh-web-app`, the documented `web` launch, the host row is deliberately disabled ("the agent plane moves behind agent presets") and every session is composed from its default agent preset, whose own row governs.
+A preset is mounted from its own file, so no profile, home-level or `--patch` layer reaches that row, and raising the host row there changes nothing.
+Profiles without agent presets (`headless`, `sdk`) render with the host row.
+
+The fix is the tracked `firstmate` agent preset in `.dsh/agent-presets/firstmate`: DSH's shipped `standard` preset with `maxBytes` raised to 262144, which delivers `AGENTS.md` whole.
+`.dsh/profile.patch.yml` registers that directory as a `system` preset root (so DSH never writes a local preset copy into the checkout), makes `firstmate` the default preset, and still raises the host row for preset-less profiles.
+The preset is a copy, not an overlay: DSH mounts a preset from its own file with no patch layer, and its own README calls a copy "a snapshot that drifts", so on every DSH upgrade re-copy `standard`'s `agent.cordis.yml` and re-apply the raise.
+
+`bin/fm-dsh-preflight.sh` checks the row sessions actually render with, at every launch.
+From `dsh --profile <name> --dump-config` it reads whether an enabled `agent-presets` row exists; if one does, it resolves the default preset (a user default in `$DSH_HOME/settings.yaml` outranks the profile's), fails unless that is `firstmate`, and reads the tracked preset's row; otherwise it reads the host row.
+That row fails when it is absent, disabled or not provably enabled, or below the rendered chain: every instruction file DSH discovers plus a rounded-up allowance for the frame it wraps them in.
+A disabled row is never reported as a budget.
 
 ## Launch boundary
 

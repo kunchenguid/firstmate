@@ -1,11 +1,17 @@
 # Firstmate captain profile patch for DeepSeek Harness.
 #
 # Mounts the Claude-dialect hook bridge (DSH implements that dialect, so
-# firstmate's existing hook scripts are reused with corrected matchers), raises
-# the instruction budget so firstmate's AGENTS.md, larger than the default, is
-# injected whole, and selects the sandbox mode this supervisor needs:
-# firstmate's health model is built on `ps` process inspection, which
-# workspace-write denies.
+# firstmate's existing hook scripts are reused with corrected matchers), gives
+# the session agent an instruction budget that renders firstmate's AGENTS.md
+# whole, and selects the sandbox mode this supervisor needs: firstmate's health
+# model is built on `ps` process inspection, which workspace-write denies.
+#
+# Which row carries that budget depends on the profile. Under dsh-web-app the
+# host `agent-instructions` row is disabled and every session is composed from
+# an agent preset, so the budget is the tracked `firstmate` preset's
+# (.dsh/agent-presets/firstmate), made the default below; raising the host row
+# there changes nothing. Profiles without agent presets (headless, sdk) render
+# with the host row, which is raised below for them.
 #
 # Install the bridge at the version matching the running dsh-base. The
 # sub-packages' npm `latest` tag is stale (0.0.1-rc.x), and an old bridge reads
@@ -17,12 +23,13 @@
 # Launch the primary through bin/fm-dsh-launch.sh so FM_DSH_HARNESS, FM_HOME and
 # the locale are set at process start: a tool call cannot set them, and hook
 # subprocesses inherit whatever the host was given. That wrapper also runs
-# bin/fm-dsh-preflight.sh, which asserts this pin, the maxBytes raise below, and
-# that the sandbox still permits ps - all three fail silently otherwise.
+# bin/fm-dsh-preflight.sh, which asserts this pin, the budget of the row the
+# session actually renders with, and that the sandbox still permits ps - all
+# three fail silently otherwise.
 #
 # Applied over a base+web-app profile whose bundle list also carries this
 # checkout's own bundles. The launcher exports FM_ROOT as this checkout and
-# starts DSH from it, so both expressions below resolve here.
+# starts DSH from it, so every expression below resolves here.
 - insert:
     - id: hooks-claude-code
       name: '@deepseek-ai/dsh-hooks-claude-code'
@@ -33,6 +40,16 @@
 - id: agent-instructions
   config:
     maxBytes: 262144
+
+# A `system` root, so DSH never writes a locally authored preset copy into this
+# checkout; the writable root stays $DSH_HOME/.agent-presets. A patch replaces
+# the row's whole config, so the default is restated with the root.
+- id: agent-presets
+  config:
+    default: firstmate
+    roots:
+      - path: !!js (process.env.FM_ROOT || process.cwd()) + '/.dsh/agent-presets'
+        trust: system
 
 - id: permission
   config:

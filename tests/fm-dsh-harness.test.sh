@@ -259,6 +259,25 @@ write_dump() {  # <file> <agent-instructions maxBytes> [<other-plugin maxBytes>]
   } > "$1"
 }
 
+# The same dump as dsh-web-app composes it: the host agent-instructions row is
+# raised but disabled, and an agent-presets row names the default preset each
+# session is composed from instead.
+write_web_dump() {  # <file> <default preset>
+  {
+    printf '# == @deepseek-ai/dsh-base, patched by @deepseek-ai/dsh-web-app\n'
+    printf -- '- id: agent-instructions\n  name: "@deepseek-ai/dsh-agent-instructions"\n  config:\n    maxBytes: 262144\n  disabled: true\n'
+    printf '# == @deepseek-ai/dsh-web-app\n'
+    printf -- '- id: agent-presets\n  name: "@deepseek-ai/dsh-agent-presets"\n  config:\n    default: %s\n    roots:\n      - path: !!js process.cwd() + "/.dsh/agent-presets"\n        trust: system\n' "$2"
+  } > "$1"
+}
+
+# Install the tracked firstmate agent preset into a fixture home, so the
+# preflight checks the preset this checkout actually ships.
+install_fm_preset() {  # <dsh-home>
+  mkdir -p "$1/fmhome/.dsh/agent-presets"
+  cp -R "$ROOT/.dsh/agent-presets/firstmate" "$1/fmhome/.dsh/agent-presets/firstmate"
+}
+
 # A synthetic DSH home: <root>/profiles/node_modules holds dsh-base and the
 # named profile holds its own node_modules. A stand-in `dsh` on <root>/fakebin
 # answers `--profile p --dump-config` with <root>/dump.yml, or with
@@ -351,7 +370,61 @@ test_dsh_preflight_rejects_a_truncating_budget() {
   run_preflight "$home"
   [ "$PREFLIGHT_RC" -eq 3 ] || fail "an over-budget AGENTS.md must fail the preflight, got rc=$PREFLIGHT_RC"
   assert_contains "$PREFLIGHT_OUT" "maxBytes is 65536" "the insufficient budget was not named"
+  # DSH budgets the rendered chain - every instruction file plus its frame - so a
+  # budget that only just covers AGENTS.md is still over.
+  write_dump "$home/dump.yml" 81500
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a budget below the rendered chain must fail even when it covers AGENTS.md, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
   pass "fm-dsh-preflight.sh: an insufficient instruction budget fails loud"
+}
+
+test_dsh_preflight_never_passes_a_disabled_row() {
+  local home
+  # A disabled agent-instructions row renders nothing, whatever maxBytes it
+  # carries. Reading 262144 off one is how the web launch once reported ok while
+  # every session dropped AGENTS.md.
+  home=$(make_dsh_home "$TMP_ROOT/pre-disabled" 0.1.5-rc.2 0.1.5-rc.2 262144 81127)
+  printf -- '- id: agent-instructions\n  name: "@deepseek-ai/dsh-agent-instructions"\n  config:\n    maxBytes: 262144\n  disabled: true\n' \
+    > "$home/dump.yml"
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a disabled host row must fail the preflight, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "row is not enabled" "the disabled host row was not named"
+  write_web_dump "$home/dump.yml" firstmate
+  install_fm_preset "$home"
+  printf -- '- id: agent-instructions\n  name: "@deepseek-ai/dsh-agent-instructions"\n  disabled: true\n  config:\n    maxBytes: 262144\n' \
+    > "$home/fmhome/.dsh/agent-presets/firstmate/agent.cordis.yml"
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a disabled preset row must fail the preflight, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "firstmate agent preset's agent-instructions row is not enabled" "the disabled preset row was not named"
+  pass "fm-dsh-preflight.sh: a disabled agent-instructions row is never a budget"
+}
+
+test_dsh_preflight_checks_the_preset_sessions_compose_from() {
+  local home
+  # Under dsh-web-app the host row is disabled and each session renders with its
+  # default agent preset's row, which no profile layer reaches: DSH's standard
+  # preset renders at 65536, so only the tracked firstmate preset passes.
+  home=$(make_dsh_home "$TMP_ROOT/pre-preset" 0.1.5-rc.2 0.1.5-rc.2 262144 81127)
+  install_fm_preset "$home"
+  write_web_dump "$home/dump.yml" standard
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a web composition defaulting to standard must fail, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "agent preset 'standard'" "the preset sessions compose from was not named"
+  write_web_dump "$home/dump.yml" firstmate
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 0 ] || fail "the tracked firstmate preset must pass the web composition, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "in the firstmate agent preset" "the passing budget was not the preset's"
+  # A user default in the harness settings outranks the deployment default.
+  printf 'agent-presets:\n  modeSelectionEnabled: true\n  default: minimal\n' > "$home/settings.yaml"
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a user default preset must be the one checked, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "agent preset 'minimal'" "the user default preset was not named"
+  rm -f "$home/settings.yaml"
+  printf -- '- id: tool-bash\n  name: "@deepseek-ai/dsh-tool-bash"\n' > "$home/fmhome/.dsh/agent-presets/firstmate/agent.cordis.yml"
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a preset without an agent-instructions row must fail, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "has no agent-instructions row" "the missing preset row was not named"
+  pass "fm-dsh-preflight.sh: the budget checked is the default agent preset's under web"
 }
 
 test_dsh_preflight_reads_only_the_agent_instructions_entry() {
@@ -808,6 +881,8 @@ test_dsh_repair_line_and_seatbelt_agree_on_the_arm_command
 test_dsh_preflight_rejects_a_mismatched_bridge
 test_dsh_preflight_rejects_a_missing_bridge
 test_dsh_preflight_rejects_a_truncating_budget
+test_dsh_preflight_never_passes_a_disabled_row
+test_dsh_preflight_checks_the_preset_sessions_compose_from
 test_dsh_preflight_reads_only_the_agent_instructions_entry
 test_dsh_preflight_reads_the_budget_dsh_composes
 test_dsh_preflight_fails_loud_when_dsh_cannot_report_the_budget

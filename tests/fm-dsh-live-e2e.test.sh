@@ -22,6 +22,11 @@
 #      alarm turn is bounded rather than looping.
 #   4. A hook subprocess inherits the host's environment, which is the premise
 #      bin/fm-dsh-launch.sh's exported marker depends on.
+#   5. The documented `web` launch renders AGENTS.md whole. dsh-web-app disables
+#      the host agent-instructions row and composes each session from its
+#      default agent preset, so the budget that matters is the tracked firstmate
+#      preset's. The headless sessions above cannot see this: their host row is
+#      live, which is how a disabled web row once passed unnoticed.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -179,3 +184,48 @@ case "$hookenv" in
   "") fail "live dsh $BASE_VERSION: the UserPromptSubmit probe wrote no marker, so hook inheritance is UNPROVEN (inconclusive, not passing)" ;;
   *) fail "live dsh $BASE_VERSION: a hook subprocess saw FM_DSH_HARNESS='$hookenv', not the host's value; the launch boundary cannot reach the guards" ;;
 esac
+
+# --- 6. the documented web launch renders AGENTS.md whole --------------------
+# Composed in a disposable DSH_HOME: a config dump needs no credentials, and a
+# web profile initializes there from DSH's own template. The preflight must pass
+# on the firstmate preset with the tracked patch and fail on DSH's standard
+# preset without it, which proves it reads the composition sessions render with
+# rather than the disabled host row. DSH's own preset discovery must then find
+# the tracked preset healthy, and DSH's own renderer at the budget the preflight
+# reported must omit nothing.
+WEBHOME="$TMP_ROOT/web-dsh-home"
+mkdir -p "$WEBHOME"
+# Only the budget verdict: the disposable home has no hooks bridge, so the
+# preflight's bridge check fails there by construction and says nothing here.
+web_budget() {  # [preflight args...]
+  ( cd "$ROOT" && DSH_HOME="$WEBHOME" "$ROOT/bin/fm-dsh-preflight.sh" --profile web --home "$ROOT" "$@" 2>&1 ) \
+    | grep -A1 -e 'instruction budget' -e 'agent preset' -e 'agent-instructions' || true
+}
+out=$(web_budget --patch "$ROOT/.dsh/profile.patch.yml")
+budget=$(printf '%s\n' "$out" | sed -n 's/^ok    instruction budget \([0-9][0-9]*\) fits .* in the firstmate agent preset$/\1/p')
+[ -n "$budget" ] \
+  || fail "live dsh $BASE_VERSION: the documented web launch did not pass the budget check on the firstmate preset: $out"
+out=$(web_budget)
+case "$out" in
+  *"sessions compose from agent preset 'standard'"*) : ;;
+  *) fail "live dsh $BASE_VERSION: without the tracked patch the web budget check did not fail on DSH's standard preset: $out" ;;
+esac
+verdict=$(cd "$ROOT" && node --input-type=module -e '
+const [scope, root, dshHome, budget] = process.argv.slice(1);
+const { pathToFileURL } = await import("node:url");
+const { discoverPresets } = await import(pathToFileURL(scope + "/dsh-agent-presets/lib/index.js").href);
+const { loadBaselineInstructions } = await import(pathToFileURL(scope + "/dsh-agent-instructions/lib/index.js").href);
+const presets = await discoverPresets([{ path: root + "/.dsh/agent-presets", trust: "system" }], pathToFileURL(scope + "/dsh/lib/bin.js").href);
+const preset = presets.find((candidate) => candidate.id === "firstmate");
+if (preset === undefined) { console.log("DSH did not discover the firstmate preset"); process.exit(0); }
+if (preset.broken !== undefined) { console.log("DSH reports the firstmate preset broken: " + preset.broken); process.exit(0); }
+const rendered = await loadBaselineInstructions({ cwd: root, dshHome, maxBytes: Number(budget) });
+if (rendered === undefined || rendered.omitted.length > 0 || rendered.truncated.length > 0) {
+  console.log("DSH rendered the chain at " + budget + " with omitted " + JSON.stringify(rendered?.omitted?.map((file) => file.displayPath)) + " and truncated " + JSON.stringify(rendered?.truncated));
+  process.exit(0);
+}
+console.log("ok");
+' "$SCOPE_DIR" "$ROOT" "$WEBHOME" "$budget" 2>&1) || true
+[ "$verdict" = ok ] \
+  || fail "live dsh $BASE_VERSION: the firstmate preset does not deliver AGENTS.md whole under web: $verdict"
+pass "live dsh $BASE_VERSION: the documented web launch renders AGENTS.md whole through the firstmate preset (budget $budget)"

@@ -13,10 +13,12 @@
 #      so a bare `dsh plugin add @deepseek-ai/dsh-hooks-claude-code` installs
 #      the wrong build.
 #   2. INSTRUCTION BUDGET. `dsh-agent-instructions` budgets the whole rendered
-#      instruction chain at `maxBytes`, which dsh-base ships as 65536. Over
-#      budget it omits the broadest file whole, and firstmate's AGENTS.md is
-#      larger than that default, so the agent receives only the CLAUDE.md
-#      pointer and a budget marker the operator never sees.
+#      instruction chain at `maxBytes`, which dsh-base and DSH's shipped agent
+#      presets set to 65536. Over budget it omits the broadest file whole, and
+#      firstmate's AGENTS.md is larger than that, so the agent receives only the
+#      CLAUDE.md pointer and a budget marker the operator never sees. Under
+#      dsh-web-app the host row is disabled and the session's agent preset
+#      carries the budget, so a raise on the host row there is not a budget.
 #   3. PROCESS INSPECTION. `ps` is denied under the `workspace-write` sandbox.
 #      Harness ancestry, the PID-strict watcher lock and away-mode daemon
 #      ownership then read "unknown" or "down" rather than reporting a
@@ -85,44 +87,111 @@ else
   ok "hooks bridge $BRIDGE_VERSION matches dsh-base $BASE_VERSION"
 fi
 
-# --- 2. the instruction budget fits AGENTS.md --------------------------------
-AGENTS_MD="$FM_HOME_DIR/AGENTS.md"
-if [ -f "$AGENTS_MD" ]; then
-  AGENTS_BYTES=$(wc -c < "$AGENTS_MD" | tr -d ' ')
-  PATCH_FILE="$PROFILE_DIR/cordis.patch.yml"
-  # DSH composes the bundle, profile, home-level and --patch layers, and its
-  # config dump is the tree the host boots, so the effective value is read from
-  # there rather than re-deriving DSH's layer order and shipped default. Only
-  # the agent-instructions entry counts: another plugin's maxBytes says nothing
-  # about AGENTS.md. This compares AGENTS.md alone, while DSH budgets the whole
-  # rendered chain - AGENTS.md, the CLAUDE.md pointer and their frame - which
-  # is a few hundred bytes larger; the captain profile's 262144 is far from
-  # that margin.
-  MAX_BYTES=$(dsh --profile "$PROFILE" ${PATCH_ARGS[@]+"${PATCH_ARGS[@]}"} --dump-config 2>/dev/null | awk '
+# --- 2. the session agent's instruction budget fits the rendered chain -------
+# Print the lines of composition entry <id> read from stdin, indentation
+# stripped, so its own keys (config included) can be read with entry_value.
+entry_lines() {  # <id>
+  awk -v want="$1" '
     /^[[:space:]]*(#|$)/ { next }
     {
       indent = match($0, /[^[:space:]]/) - 1
       line = substr($0, indent + 1)
       if (line ~ /^-[[:space:]]+id:/ || line ~ /^id:/) {
         id = line; sub(/^-?[[:space:]]*id:[[:space:]]*/, "", id); gsub(/["'\'']|[[:space:]].*$/, "", id)
-        entry = id; entry_indent = indent; next
+        entry = id; entry_indent = indent
+      } else if (line ~ /^-/ && indent <= entry_indent) {
+        entry = ""
       }
-      if (line ~ /^-/ && indent <= entry_indent) entry = ""
-      if (entry == "agent-instructions" && line ~ /^maxBytes:[[:space:]]*[0-9]+[[:space:]]*(#.*)?$/) {
-        value = line; sub(/^maxBytes:[[:space:]]*/, "", value); sub(/[^0-9].*$/, "", value)
-      }
+      if (entry == want) print line
     }
-    END { if (value != "") print value }
-  ')
+  '
+}
+
+# Print the last plain value of <key> among entry lines on stdin.
+entry_value() {  # <key>
+  sed -n "s/^$1:[[:space:]]*//p" | sed 's/[[:space:]]*#.*$//' | tr -d "\"'" | tail -1
+}
+
+# enabled, disabled, or unknown for entry lines on stdin: a `disabled` that is
+# neither absent nor a literal boolean (a `!!js` gate) cannot be vouched for.
+entry_state() {
+  case "$(entry_value disabled)" in
+    ''|false) printf 'enabled\n' ;;
+    true) printf 'disabled\n' ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
+AGENTS_MD="$FM_HOME_DIR/AGENTS.md"
+FM_PRESET_ID=firstmate
+FM_PRESET="$FM_HOME_DIR/.dsh/agent-presets/$FM_PRESET_ID/agent.cordis.yml"
+SETTINGS_FILE="$DSH_HOME_DIR/settings.yaml"
+if [ -f "$AGENTS_MD" ]; then
+  # DSH budgets the whole rendered chain, not AGENTS.md: every instruction file
+  # it discovers (the harness-home AGENTS.md, then this workspace's AGENTS.md,
+  # CLAUDE.md and their .local overlays) plus the frame it wraps them in, which
+  # measured 336 bytes around AGENTS.md and CLAUDE.md and is rounded up here.
+  CHAIN_BYTES=1024
+  for f in "$DSH_HOME_DIR/AGENTS.md" "$FM_HOME_DIR/AGENTS.md" "$FM_HOME_DIR/CLAUDE.md" \
+    "$FM_HOME_DIR/AGENTS.local.md" "$FM_HOME_DIR/CLAUDE.local.md"; do
+    [ -f "$f" ] && CHAIN_BYTES=$((CHAIN_BYTES + $(wc -c < "$f")))
+  done
+  PATCH_FILE="$PROFILE_DIR/cordis.patch.yml"
   OMIT_NOTE="over budget, DSH omits AGENTS.md whole and only the model sees its one-line budget marker"
-  if [ -z "$MAX_BYTES" ]; then
-    fail "could not read the effective agent-instructions maxBytes from dsh --profile $PROFILE --dump-config" \
-      "run that command to see why, and raise the agent-instructions entry's maxBytes to a plain number in $PATCH_FILE, and on every DSH home: $OMIT_NOTE"
-  elif [ "$AGENTS_BYTES" -gt "$MAX_BYTES" ]; then
-    fail "AGENTS.md is $AGENTS_BYTES bytes but the effective maxBytes is $MAX_BYTES" \
-      "raise the agent-instructions entry's maxBytes in $PATCH_FILE, and on every DSH home: $OMIT_NOTE"
+  # The composition is DSH's own dump of the bundle, profile, home-level and
+  # --patch layers, not a re-derivation of its layer order. Which row it names
+  # depends on the profile: where an enabled agent-presets row exists
+  # (dsh-web-app), the host agent-instructions row is disabled and each session
+  # renders with its default preset's row, which no profile layer reaches;
+  # otherwise the host row governs.
+  ROW_SOURCE=
+  ROW=
+  DUMP=$(dsh --profile "$PROFILE" ${PATCH_ARGS[@]+"${PATCH_ARGS[@]}"} --dump-config 2>/dev/null) || DUMP=
+  PRESETS=$(printf '%s\n' "$DUMP" | entry_lines agent-presets)
+  if [ -z "$DUMP" ]; then
+    fail "could not read the effective agent-instructions maxBytes: dsh --profile $PROFILE --dump-config failed" \
+      "run that command to see why; $OMIT_NOTE"
+  elif [ -n "$PRESETS" ] && [ "$(printf '%s\n' "$PRESETS" | entry_state)" = unknown ]; then
+    fail "profile $PROFILE's agent-presets row is not provably enabled or disabled" \
+      "make its disabled field a literal boolean, so the composition sessions render with can be checked"
+  elif [ -n "$PRESETS" ] && [ "$(printf '%s\n' "$PRESETS" | entry_state)" = enabled ]; then
+    PRESET_ID=$(awk '/^[^[:space:]#]/ { section = $0 } section ~ /^agent-presets:/ && /^[[:space:]]+default:/' "$SETTINGS_FILE" 2>/dev/null \
+      | sed 's/^[[:space:]]*//' | entry_value default)
+    PRESET_FROM="$SETTINGS_FILE"
+    if [ -z "$PRESET_ID" ]; then
+      PRESET_ID=$(printf '%s\n' "$PRESETS" | entry_value default)
+      PRESET_FROM="profile $PROFILE"
+    fi
+    if [ "$PRESET_ID" != "$FM_PRESET_ID" ]; then
+      fail "sessions compose from agent preset '${PRESET_ID:-<none>}' ($PRESET_FROM), not the $FM_PRESET_ID preset" \
+        "make $FM_PRESET_ID the agent-presets default as .dsh/profile.patch.yml does, and clear any agent-presets default in $SETTINGS_FILE: another preset carries its own budget, DSH's standard preset renders at 65536, and $OMIT_NOTE"
+    else
+      ROW_SOURCE="the $FM_PRESET_ID agent preset"
+      ROW_FILE=$FM_PRESET
+      ROW=$(entry_lines agent-instructions < "$FM_PRESET" 2>/dev/null)
+    fi
   else
-    ok "instruction budget $MAX_BYTES fits AGENTS.md ($AGENTS_BYTES bytes)"
+    ROW_SOURCE="profile $PROFILE"
+    ROW_FILE=$PATCH_FILE
+    ROW=$(printf '%s\n' "$DUMP" | entry_lines agent-instructions)
+  fi
+  if [ -n "$ROW_SOURCE" ]; then
+    MAX_BYTES=$(printf '%s\n' "$ROW" | entry_value maxBytes)
+    if [ -z "$ROW" ]; then
+      fail "$ROW_SOURCE has no agent-instructions row" \
+        "add one with a raised maxBytes in $ROW_FILE: without it no workspace instructions reach the agent"
+    elif [ "$(printf '%s\n' "$ROW" | entry_state)" != enabled ]; then
+      fail "$ROW_SOURCE's agent-instructions row is not enabled, so no maxBytes on it is a budget" \
+        "enable the agent-instructions row in $ROW_FILE: a disabled row renders nothing, and $OMIT_NOTE"
+    elif ! [ "$MAX_BYTES" -gt 0 ] 2>/dev/null; then
+      fail "could not read the effective agent-instructions maxBytes from $ROW_SOURCE" \
+        "raise the agent-instructions entry's maxBytes to a plain number in $ROW_FILE, and on every DSH home: $OMIT_NOTE"
+    elif [ "$CHAIN_BYTES" -gt "$MAX_BYTES" ]; then
+      fail "the rendered instruction chain is about $CHAIN_BYTES bytes but $ROW_SOURCE's maxBytes is $MAX_BYTES" \
+        "raise the agent-instructions entry's maxBytes in $ROW_FILE, and on every DSH home: $OMIT_NOTE"
+    else
+      ok "instruction budget $MAX_BYTES fits the rendered instruction chain (about $CHAIN_BYTES bytes) in $ROW_SOURCE"
+    fi
   fi
 else
   warn "no AGENTS.md at $AGENTS_MD" "the digest will carry no operating contract for this home"
