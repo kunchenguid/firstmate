@@ -1145,6 +1145,8 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           captain_actionable:(.captain_actionable // false),
           repo:((.repo // null) | if . == null then null else trunc(120) end),
           kind:((.kind // null) | if . == null then null else trunc(40) end),
+          report_path:((.report_path // null) | if . == null then null else trunc(500) end),
+          report_present:(.report_present == true),
           since:((.since // null) | if . == null then null else trunc(40) end)}]
           | ((map(select(.captain_actionable != true)) | newest_filed_first)
              + (map(select(.captain_actionable == true)) | newest_filed_first))
@@ -1416,6 +1418,9 @@ length == 1 and (.[0] |
     (.spawn_gen == null or ((.spawn_gen | type) == "string" and (.spawn_gen | length) > 0))
     and (.started_at == null or ((.started_at | type) == "string" and (try (.started_at | fromdateiso8601) catch null) != null)))
   and (.holds | type) == "array" and (.queued | type) == "array"
+  and all(.queued[];
+    (.report_path == null or ((.report_path | type) == "string" and (.report_path | length) <= 500))
+    and (.report_present == null or (.report_present | type) == "boolean"))
   and (.landed | type) == "array" and (.endpoints | type) == "array"
   and all(.endpoints[];
     (.spawn_gen == null or ((.spawn_gen | type) == "string" and (.spawn_gen | length) > 0))

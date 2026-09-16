@@ -41,6 +41,7 @@ aged=$TMP_ROOT/aged.json
 secondmate_a=$TMP_ROOT/secondmate-a.json
 secondmate_b=$TMP_ROOT/secondmate-b.json
 attentive_terminal=$TMP_ROOT/attentive-terminal.json
+secondmate_hold=$TMP_ROOT/secondmate-hold.json
 home=$TMP_ROOT/home
 model states.json "$states" 2026-09-15T12:01:00Z
 model replacement.json "$replacement" 2026-09-15T12:06:00Z
@@ -68,6 +69,18 @@ jq '(.secondmate_current.records[0].endpoints[0].state)="done"
       }]' "$FIXTURES/secondmate-generation-b.json" \
   | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T13:00:00Z > "$attentive_terminal"
 attentive_terminal_json=$(jq -c . "$attentive_terminal")
+jq '.tasks=[] | .backlog.records=[]
+    | .secondmate_current={records:[{
+        id:"mate-report",home:"/fleet/mates/report",provenance:{selected:"structured-home"},
+        freshness:{observed_at:"2026-09-15T12:00:00Z"},
+        active_children:[{id:"held-child",spawn_gen:"gen-held-child",kind:"ship",state:"working",repo:"omega",name:"Held child",source:"structured-home"}],
+        endpoints:[],
+        decisions_open:[{id:"held-child",verb:"captain-hold",summary:"Choose route",reason:"Pick blue or green",hold_bucket:"live",source:"backlog"}],
+        queued:[{id:"held-child",title:"Held child",repo:"omega",kind:"ship",captain_actionable:true,hold_bucket:"live",hold_reason:"Pick blue or green",hold_age_days:2,unresolved_blocker_ids:[],report_path:"data/held-child/report.md",report_present:true}],
+        landed:[],omitted:[]
+      }],total:1,shown:1,truncated:0}' "$FIXTURES/states.json" \
+  | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$secondmate_hold"
+secondmate_hold_json=$(jq -c . "$secondmate_hold")
 FM_HOME="$home" "$BOARD" build "$states" >/dev/null || fail "could not build browser fixture"
 
 out=$(chrome-devtools-axi open "file://$home/.lavish/project-cockpit.html") || fail "could not open Project Cockpit in Chrome: $out"
@@ -98,6 +111,10 @@ assert_eval '() => ({text:document.querySelector("[aria-label=\"Captain hold con
   '\"copyReport\":true' "desktop inspector hid an available report path action"
 assert_eval '() => ({reportAvailable:document.querySelector("[aria-label=\"Captain hold context\"]")?.innerText.includes("AVAILABLE")})' \
   '\"reportAvailable\":true' "desktop inspector omitted available-report status"
+assert_eval "() => {window.fmCockpit.replacePayload($secondmate_hold_json); const task=document.querySelector('.task-button'); task.click(); const context=document.querySelector('[aria-label=\"Captain hold context\"]'); return {available:context?.innerText.includes('AVAILABLE'),copyReport:[...document.querySelectorAll('.copy-button')].some(x=>x.innerText==='Copy report path')};}" \
+  '\"available\":true' "desktop inspector omitted a secondmate hold report"
+assert_eval '() => ({copyReport:[...document.querySelectorAll(".copy-button")].some(x=>x.innerText==="Copy report path")})' \
+  '\"copyReport\":true' "desktop inspector hid the secondmate hold report path"
 assert_eval "() => {window.fmCockpit.replacePayload($expired_hold_json); return document.querySelector('[aria-label=\"Captain hold context\"]')?.innerText;}" \
   '7 days' "desktop inspector rendered an expired hold date as an active deferral"
 assert_eval '() => document.querySelector("[aria-label=\"Captain hold context\"]")?.innerText.includes("Deferred until")' \
@@ -204,6 +221,10 @@ assert_eval "() => {window.fmCockpit.replacePayload($unavailable_hold_json); ret
   'Unavailable' "mobile inspector omitted unavailable hold timing"
 assert_eval "() => {window.fmCockpit.replacePayload($bounded_hold_json); return {text:document.querySelector('[aria-label=\"Captain hold context\"]')?.innerText,overflow:document.querySelector('[aria-label=\"Captain hold context\"]').scrollWidth<=document.querySelector('[aria-label=\"Captain hold context\"]').clientWidth};}" \
   '\"overflow\":true' "mobile bounded hold context overflowed"
+assert_eval "() => {window.fmCockpit.replacePayload($secondmate_hold_json); const task=document.querySelector('.task-button'); task.click(); return {available:document.querySelector('[aria-label=\"Captain hold context\"]')?.innerText.includes('AVAILABLE'),copyReport:[...document.querySelectorAll('.copy-button')].some(x=>x.innerText==='Copy report path')};}" \
+  '\"available\":true' "mobile inspector omitted a secondmate hold report"
+assert_eval '() => ({copyReport:[...document.querySelectorAll(".copy-button")].some(x=>x.innerText==="Copy report path")})' \
+  '\"copyReport\":true' "mobile inspector hid the secondmate hold report path"
 assert_eval "() => {window.fmCockpit.replacePayload($states_json); [...document.querySelectorAll('.task-button')].find(x=>x.dataset.taskKey.startsWith('healthy-work')).click(); const absent=document.querySelectorAll('[aria-label=\"Captain hold context\"]').length; [...document.querySelectorAll('.task-button')].find(x=>x.dataset.taskKey.startsWith('captain-call')).click(); return {absent,restored:document.querySelectorAll('[aria-label=\"Captain hold context\"]').length};}" \
   '\"absent\":0' "mobile inspector invented hold context for a task without a hold"
 assert_eval '() => {const b=document.querySelector(".project-button[aria-current=\"true\"]"); b.focus(); return {project:b.dataset.projectId,focused:document.activeElement===b};}' \

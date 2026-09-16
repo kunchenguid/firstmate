@@ -489,7 +489,7 @@ test_secondmate_structured_surfaces_are_projected_once() {
             {id:"blocked-call",key:"access",verb:"blocked",summary:"Waiting on operator access",reason:null,source:"status"}
           ],
           queued:[
-            {id:"release-call",title:"Release preparation",repo:"omega",kind:"captain",captain_actionable:true,hold_bucket:"live",hold_reason:"Pick blue or green",unresolved_blocker_ids:[]},
+            {id:"release-call",title:"Release preparation",repo:"omega",kind:"captain",captain_actionable:true,hold_bucket:"live",hold_reason:"Pick blue or green",unresolved_blocker_ids:[],report_path:"data/release-call/report.md",report_present:true},
             {id:"queued-child",title:"Remote follow-up",repo:"omega",kind:"ship",captain_actionable:false,hold_bucket:null,unresolved_blocker_ids:[]},
             {id:"dated-hold",title:"Scheduled deployment",repo:"omega",kind:"ship",captain_actionable:false,hold_bucket:"dated",hold_reason:"Wait for the maintenance window",hold_until:"2026-09-20",hold_age_days:2,unresolved_blocker_ids:[]},
             {id:"blocked-hold",title:"External approval",repo:"omega",kind:"ship",captain_actionable:false,hold_bucket:"blocked",hold_reason:"Await security approval",hold_until:null,hold_age_days:4,unresolved_blocker_ids:["security-review"]}
@@ -506,7 +506,8 @@ test_secondmate_structured_surfaces_are_projected_once() {
         and .started_at == "2026-09-15T11:30:00Z" and .elapsed_seconds == 1860)
     and ([.projects[].tasks[] | select(.id == "mate-one:release-call")][0]
       | .lane == "waiting" and .attention == true and .hold.actionable == true
-        and .hold.question == "Pick blue or green" and .decisions == [])
+        and .hold.question == "Pick blue or green" and .decisions == []
+        and .artifacts.report == {status:"available",path:"data/release-call/report.md"})
     and ([.projects[].tasks[] | select(.id == "mate-one:status-call")][0]
       | .lane == "waiting" and .attention == true and .project_id == "omega"
         and .state == "working" and .state_source == "structured-home"
@@ -523,6 +524,7 @@ test_secondmate_structured_surfaces_are_projected_once() {
         and .runtime_evidence.home == "/fleet/mates/one"
         and .hold.classification == "dated" and .hold.actionable == false
         and .hold.question == "Wait for the maintenance window"
+        and .artifacts.report == {status:"missing",path:null}
         and .gate == {status:"dated",label:"Wait for the maintenance window"})
     and ([.projects[].tasks[] | select(.id == "mate-one:blocked-hold")][0]
       | .lane == "waiting" and .state == "unknown" and .state_source == "structured-home-hold"

@@ -368,7 +368,11 @@ jq \
           hold:$hold.hold,
           blockers:$hold.blockers,
           _truncated:(($base._truncated // false) or ($hold._truncated // false)),
-          gate:$hold.gate
+          gate:$hold.gate,
+          artifacts:{
+            pr_url:($hold.artifacts.pr_url // $base.artifacts.pr_url),
+            report:(if $hold.artifacts.report.status == "available" then $hold.artifacts.report else $base.artifacts.report end)
+          }
         }
       end;
   def secondmate_decision_projection($owner; $record; $summaries; $blocked_summaries; $queued; $active; $now):

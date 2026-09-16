@@ -208,6 +208,46 @@ test_fixture_snapshot_json() {
   pass "fixture snapshot covers task rows, backlog rows, pointers, and stable ordering"
 }
 
+test_home_summary_preserves_held_report_availability() {
+  local home fakebin out child_gen
+  home=$(make_home held-report-summary)
+  mkdir -p "$home/data/active-hold" "$home/projects/active-hold"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] active-hold - Active hold data/active-hold/report.md (repo: alpha) (kind: ship) (hold: choose route) (hold-kind: captain)
+  Captain hold set: 2026-09-14T00:00:00Z
+
+## Queued
+- [ ] missing-hold - Missing hold data/missing-hold/report.md (repo: alpha) (kind: captain) (hold: choose fallback) (hold-kind: captain)
+  Captain hold set: 2026-09-14T00:00:00Z
+
+## Done
+EOF
+  printf '# Active hold report\n' > "$home/data/active-hold/report.md"
+  fm_write_meta "$home/state/active-hold.meta" \
+    "window=firstmate:fm-active-hold" \
+    "worktree=$home/projects/active-hold" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship" \
+    "spawn_gen=gen-active-hold"
+  child_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" active-hold)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" active-hold busy --gen "$child_gen" \
+    --source claude-hook --event user-prompt-submit
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-09-15T12:00:00Z \
+    "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    ([.active_children[] | select(.id == "active-hold")] | length) == 1
+    and ([.queued[] | select(.id == "active-hold")][0]
+      | .report_path == "data/active-hold/report.md" and .report_present == true)
+    and ([.queued[] | select(.id == "missing-hold")][0]
+      | .report_path == "data/missing-hold/report.md" and .report_present == false)
+  ' >/dev/null || fail "home summary lost held report availability evidence: $out"
+  pass "home-summary preserves bounded held report availability evidence"
+}
+
 # R1 owner contract: main_inventory discloses orphan in-flight and unstructured
 # current rows without inventing task rows.
 test_hold_buckets_are_total_and_text_blind() {
@@ -1145,6 +1185,7 @@ EOF
 
 test_empty_fleet_json
 test_fixture_snapshot_json
+test_home_summary_preserves_held_report_availability
 test_home_summary_preserves_nonterminal_child_generations
 test_home_summary_excludes_secondmate_from_child_inventory
 test_undated_captain_hold_phrasing_and_aging
