@@ -27,15 +27,21 @@ while [ $# -gt 0 ]; do
 done
 status=running
 review=completed
+teststep=completed
 active=''
 case "$id" in
   RUNPASSED) status=completed ;;
-  RUNFIXING | RUNFIXING2)
+  RUNFIXING)
     review=fixing
     active='  active_steps[1]{step,status,active_for,round_active_for,last_activity,agent_pid,round}:
     review,fixing,12m3s,8s,8s,44121,"fix 1"'
     ;;
-  RUNROUND2)
+  RUNFIXING2)
+    review=fixing
+    active='  active_steps[1]{step,status,active_for,round_active_for,last_activity,agent_pid,round}:
+    review,fixing,12m3s,8s,8s,44121,"fix 2"'
+    ;;
+  RUNROUND2 | RUNROUND2LANDED)
     review=running
     active='  active_steps[1]{step,status,active_for,round_active_for,last_activity,agent_pid,round}:
     review,running,12m3s,8s,8s,44121,"round 2"'
@@ -44,6 +50,11 @@ case "$id" in
     review=running
     active='  active_steps[1]{step,status,active_for,round_active_for,last_activity,agent_pid,round}:
     review,running,12m3s,8s,8s,44121,"starting"'
+    ;;
+  RUNMANYFIX)
+    teststep=fixing
+    active='  active_steps[1]{step,status,active_for,round_active_for,last_activity,agent_pid,round}:
+    test,fixing,12m3s,8s,8s,44121,"auto-fix 1/3"'
     ;;
 esac
 block=run
@@ -65,7 +76,7 @@ $block:
     intent,completed,0,3
     rebase,completed,0,3510
     review,$review,0,1436878
-    test,completed,0,1000
+    test,$teststep,0,1000
     document,completed,0,1000
     lint,completed,0,1000
     push,completed,0,1000
@@ -106,6 +117,17 @@ INSERT INTO step_rounds VALUES ('r-starting-1', 's-starting-review', 1, 'initial
 INSERT INTO step_results VALUES ('s-fixing2-review', 'RUNFIXING2', 'review');
 INSERT INTO step_rounds VALUES ('r-fixing2-1', 's-fixing2-review', 1, 'initial');
 INSERT INTO step_rounds VALUES ('r-fixing2-2', 's-fixing2-review', 2, 'auto_fix');
+INSERT INTO step_results VALUES ('s-round2done-review', 'RUNROUND2LANDED', 'review');
+INSERT INTO step_rounds VALUES ('r-round2done-1', 's-round2done-review', 1, 'initial');
+INSERT INTO step_rounds VALUES ('r-round2done-2', 's-round2done-review', 2, 'auto_fix');
+INSERT INTO step_results VALUES ('s-manyfix-review', 'RUNMANYFIX', 'review');
+INSERT INTO step_results VALUES ('s-manyfix-test', 'RUNMANYFIX', 'test');
+INSERT INTO step_rounds VALUES ('r-manyfix-1', 's-manyfix-review', 1, 'initial');
+INSERT INTO step_rounds VALUES ('r-manyfix-2', 's-manyfix-review', 2, 'auto_fix');
+INSERT INTO step_rounds VALUES ('r-manyfix-3', 's-manyfix-review', 3, 'auto_fix');
+INSERT INTO step_rounds VALUES ('r-manyfix-4', 's-manyfix-review', 4, 'auto_fix');
+INSERT INTO step_rounds VALUES ('r-manyfix-5', 's-manyfix-review', 5, 'auto_fix');
+INSERT INTO step_rounds VALUES ('r-manyfix-t1', 's-manyfix-test', 1, 'initial');
 SQL
 
 panel() {
@@ -165,6 +187,16 @@ assert_contains "$OUT" '未返工' 'a running first pass is not rework'
 OUT=$(panel --run RUNFIXING2); CODE=$?
 expect_code 0 "$CODE" 'panel with stored rework plus an in-flight pass'
 assert_contains "$OUT" '返工 2 次' 'the in-flight pass is added to the stored count, not replaced'
+
+# The stored round and the label can disagree for one refresh while a round lands;
+# taking the further-along side per step keeps the panel stable either way.
+OUT=$(panel --run RUNROUND2LANDED); CODE=$?
+expect_code 0 "$CODE" 'panel when the running round is already stored'
+assert_contains "$OUT" '返工 1 次' 'a round already stored is not counted twice'
+
+OUT=$(panel --run RUNMANYFIX); CODE=$?
+expect_code 0 "$CODE" 'panel with stored rework on another step'
+assert_contains "$OUT" '返工 5 次' 'stored per-step passes sum with the in-flight pass on another step'
 
 OUT=$(panel --help)
 assert_contains "$OUT" '返工次数' 'help explains the rework count'

@@ -100,32 +100,46 @@ row "运行编号  $run_id" "$muted"
 # Rework count is the daemon's own record, never the run id or the number of log
 # folders: state.sqlite keeps one step_rounds row per round of every step, round 1
 # carries trigger_type "initial", and each later row (trigger_type "auto_fix",
-# captain-chosen or pipeline-chosen alike) is one rework pass. Those rows are
-# written when the round's review finishes, so a pass still in flight is not in
-# the table yet: a step the daemon marked fixing, or running on a round-2-or-later
-# review, adds exactly one pass on top of the stored count. NM_HOME is the
-# variable the daemon itself honours for its data directory; the read is
-# -readonly so it never contends with the daemon's writes, and a failed read is
-# shown, not zeroed.
+# captain-chosen or pipeline-chosen alike) is one rework pass. That row is written
+# only when the round's review finishes, so the count is taken per step by comparing
+# the stored rows with the round the active_steps label is on: a `round N` label is
+# round N itself, while `fix N` / `auto-fix N/M` repairs into round N+1. Whichever
+# side is further along is that step's count, so a refresh that reads the label
+# before or after the round's row lands still totals the same, and summing the
+# steps counts every step's passes. NM_HOME is the variable the daemon itself
+# honours for its data directory; the read is -readonly so it never contends with
+# the daemon's writes, and a failed read is shown, not zeroed.
 nm_db="${NM_HOME:-$HOME/.no-mistakes}/state.sqlite"
-rework=
+recorded=''
+rework_read=0
 if [[ $run_id =~ ^[0-9A-Za-z]+$ ]] && command -v sqlite3 >/dev/null 2>&1; then
-  rework=$(sqlite3 -readonly -cmd '.timeout 500' "$nm_db" \
-    "select count(*) from step_rounds r join step_results s on s.id = r.step_result_id where s.run_id = '$run_id' and r.trigger_type <> 'initial';" 2>/dev/null)
+  recorded=$(sqlite3 -readonly -cmd '.timeout 500' "$nm_db" \
+    "select s.step_name || ' ' || count(*) from step_rounds r join step_results s on s.id = r.step_result_id where s.run_id = '$run_id' and r.trigger_type <> 'initial' group by s.step_name;" 2>/dev/null) && rework_read=1
 fi
-in_flight=0
-for i in "${!keys[@]}"; do
-  case ${states[i]:-} in
-    fixing) in_flight=1 ;;
-    running)
-      if [[ ${active_rounds[i]:-} =~ ^round[[:space:]]+([0-9]+)$ ]] && ((BASH_REMATCH[1] >= 2)); then
-        in_flight=1
-      fi
-      ;;
-  esac
-done
-if [[ $rework =~ ^[0-9]+$ ]]; then
-  ((in_flight)) && rework=$((rework + 1))
+if ((rework_read)); then
+  recorded_steps=(); recorded_counts=(); rework=0
+  while read -r step n; do
+    [[ -n $step && $n =~ ^[0-9]+$ ]] || continue
+    recorded_steps+=("$step"); recorded_counts+=("$n"); rework=$((rework + n))
+  done <<< "$recorded"
+  for i in "${!keys[@]}"; do
+    label=${active_rounds[i]:-}
+    if [[ $label =~ ^round[[:space:]]+([0-9]+)$ ]]; then
+      active_round=${BASH_REMATCH[1]}
+    elif [[ $label =~ ^fix[[:space:]]+([0-9]+)$ ]]; then
+      active_round=$((BASH_REMATCH[1] + 1))
+    elif [[ $label =~ ^auto-fix[[:space:]]+([0-9]+)/[0-9]+$ ]]; then
+      active_round=$((BASH_REMATCH[1] + 1))
+    else
+      continue
+    fi
+    ((active_round > 1)) || continue
+    done_rounds=0
+    for j in "${!recorded_steps[@]}"; do
+      if [[ ${recorded_steps[j]} == "${keys[i]}" ]]; then done_rounds=${recorded_counts[j]}; break; fi
+    done
+    ((active_round - 1 > done_rounds)) && rework=$((rework + active_round - 1 - done_rounds))
+  done
   if ((rework > 0)); then row "返工 ${rework} 次"; else row '未返工'; fi
 else
   row '返工次数不可读，请检查 no-mistakes 数据目录与 sqlite3。' "$bad"
