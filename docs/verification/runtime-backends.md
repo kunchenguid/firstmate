@@ -920,9 +920,8 @@ The refusal is a JSON error on stderr with exit 1 and empty stdout, and both cli
 Measured 2026-09-16 on macOS arm64 against Herdr 0.8.2 protocol 20 in a generated non-default lab session.
 A controlled interactive zsh startup question used the same shell-owned one-character read as the reported Oh My Zsh update prompt.
 Herdr's `pane process-info` described that waiting question as one lone foreground zsh, so process identity cannot distinguish it from a settled prompt and is not a sufficient readiness barrier.
-Firstmate's fixed-command transport now places one sacrificial blank line before the complete command in the same atomic `pane run` request.
-The startup reader consumed the newline, `treehouse get` remained byte-complete, the isolated worktree was acquired, and the trivial worker command ran.
-A settled shell executes the same leading blank line as a no-op.
+Firstmate's fixed-command transport now retries a harmless split marker command until its output proves that input reaches the shell prompt, then sends the complete command in a separate atomic `pane run` request.
+Two consecutive startup readers consumed input before the readiness marker ran; afterward `treehouse get` remained byte-complete, the isolated worktree was acquired, and the trivial worker command ran.
 
 ```sh
 bin/fm-test-run.sh tests/fm-backend-herdr.test.sh
@@ -932,8 +931,8 @@ bin/fm-test-run.sh tests/fm-backend-autodetect-smoke.test.sh
 Bounded output:
 
 ```text
-ok - fm_backend_herdr_send_text_line: guards the command behind a leading blank line in one atomic pane run
-ok - real herdr: a zsh startup prompt consumes the sacrificial newline while treehouse get and the worker launch remain byte-complete
+ok - fm_backend_herdr_send_text_line: proves shell readiness before sending the command
+ok - real herdr: shell readiness survives consecutive startup readers before the byte-complete launch
 ok - real herdr: the auto-detected spawn's launch command actually ran in the herdr pane
 ok - real herdr: isolated lab session removed and default fleet session unchanged
 ```
@@ -943,14 +942,14 @@ The tmux, Zellij, Orca, and cmux launch paths do not call this adapter primitive
 
 Final current-session smoke procedure:
 
-1. Generate a non-default session with `LAB=$(bin/fm-herdr-lab.sh name launch-smoke)`, provision it with `bin/fm-herdr-lab.sh provision "$LAB"`, and create a disposable `FM_HOME`, project clone, scout brief, and task id inside the lab fixture.
-2. From a Firstmate pane in that named lab, launch the scout with `FM_HOME=<lab-home> bin/fm-spawn.sh <task-id> <lab-project> --scout --harness codex --backend herdr`; do not set model or effort overrides.
-3. Read the task's recorded Herdr endpoint, session, `herdr_workspace_id`, `herdr_tab_id`, and `herdr_pane_id`, then run `herdr agent get <pane-id> --session <session>` against that endpoint to confirm that the new Codex agent is native to the launcher's current workspace and appears in that workspace's sidebar.
-4. Run `FM_HOME=<lab-home> bin/fm-send.sh <task-id> '<unique smoke token>'`, confirm the worker acknowledges the token, and run `FM_HOME=<lab-home> bin/fm-peek.sh <task-id>` to confirm the same pane renders the acknowledgement.
-5. After the scout report and decision gate are complete, run `FM_HOME=<lab-home> bin/fm-teardown.sh <task-id>`, verify the recorded pane no longer exists, and finish with `bin/fm-herdr-lab.sh teardown "$LAB"`; the guarded helper must report that the default-session fleet-state tripwire is unchanged.
+1. From a Firstmate pane in the current Herdr session, use the ordinary guarded `bin/fm-spawn.sh` path to launch one small scout with backend `herdr`; do not set a lab session, model override, effort override, or environment override.
+2. Read the new task's recorded endpoint, `herdr_session`, `herdr_workspace_id`, `herdr_tab_id`, and `herdr_pane_id` from its metadata, and confirm that the session and workspace match the launching Firstmate pane.
+3. Against that recorded endpoint, run `herdr agent get <pane-id> --session <session>` and confirm that the native agent is registered in the recorded pane and visible in the current session's sidebar.
+4. Run `bin/fm-send.sh <task-id> '<unique smoke token>'`, confirm the worker acknowledges the token, and run `bin/fm-peek.sh <task-id>` to confirm that the same pane renders the acknowledgement.
+5. After the scout report and decision gate are complete, run `bin/fm-teardown.sh <task-id>` and verify that only the smoke task's recorded pane and metadata are removed.
 
-Abort cleanup uses only the generated lab session: stop the lab worker through `FM_HOME=<lab-home> bin/fm-control.sh <task-id> exit`, preserve any unlanded task worktree for inspection, and call the guarded lab teardown only after Firstmate teardown succeeds.
-Never address the ambient `default` session or any pre-existing task id during this smoke.
+Abort cleanup targets only this newly created smoke task: use `bin/fm-control.sh <task-id> exit`, preserve any unlanded task worktree for inspection, and let guarded Firstmate teardown remove the recorded endpoint after the task can be safely torn down.
+Do not stop or restart the ambient Herdr server, close the current session, or touch any pre-existing task.
 
 ### Submit confirmation
 

@@ -85,9 +85,8 @@ on_exit() {
 trap on_exit EXIT
 
 # Reproduce the operator-visible launch failure with a real interactive zsh.
-# The one-shot startup reader has the same decisive shape as the Oh My Zsh
-# update prompt: before the fix an immediate `treehouse get` donated its first
-# byte, and the shell later executed `reehouse get`.
+# Two consecutive startup readers reproduce the case where a fixed sacrificial
+# prefix still lets the next reader consume the first byte of `treehouse get`.
 # Scope the one-shot marker by Herdr pane id so Treehouse's nested shell in the
 # task pane does not ask twice while the independently seeded pane still stays
 # isolated.
@@ -99,13 +98,9 @@ marker="$ZDOTDIR/.startup-input-${HERDR_PANE_ID//:/-}"
 if [[ ! -e "$marker" ]]; then
   : > "$marker"
   printf 'oh-my-zsh update prompt: [Y/n] '
-  IFS= read -rk 1 consumed
-  if [[ "$consumed" == $'\n' ]]; then
-    consumed_name=newline
-  else
-    consumed_name=${(q)consumed}
-  fi
-  printf 'pane=%s consumed=%s\n' "$HERDR_PANE_ID" "$consumed_name" >> "$FM_HERDR_STARTUP_PROMPT_LOG"
+  IFS= read -rk 1 first
+  IFS= read -rk 1 second
+  printf 'pane=%s first=%q second=%q\n' "$HERDR_PANE_ID" "$first" "$second" >> "$FM_HERDR_STARTUP_PROMPT_LOG"
 fi
 ZSH
   SHELL="$ZSH_BIN" ZDOTDIR="$ZDOTDIR" FM_HERDR_STARTUP_PROMPT_LOG="$PROMPT_LOG" \
@@ -197,9 +192,9 @@ case "$CAPTURED" in
   *'command not found: reehouse'*) fail "the zsh startup prompt still consumed the leading byte of treehouse get"$'\n'"$CAPTURED" ;;
 esac
 if [ "$PROMPT_ARMED" -eq 1 ]; then
-  grep -Fxq "pane=$PANE consumed=newline" "$PROMPT_LOG" \
-    || fail "the task pane's zsh startup prompt did not consume the sacrificial blank line"$'\n'"$(cat "$PROMPT_LOG" 2>/dev/null)"
-  pass "real herdr: a zsh startup prompt consumes the sacrificial newline while treehouse get and the worker launch remain byte-complete"
+  grep -Fq "pane=$PANE " "$PROMPT_LOG" \
+    || fail "the task pane's consecutive zsh startup readers did not run"$'\n'"$(cat "$PROMPT_LOG" 2>/dev/null)"
+  pass "real herdr: shell readiness survives consecutive startup readers before the byte-complete launch"
 fi
 pass "real herdr: the auto-detected spawn's launch command actually ran in the herdr pane"
 

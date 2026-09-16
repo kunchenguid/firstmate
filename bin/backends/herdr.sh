@@ -2949,20 +2949,33 @@ fm_backend_herdr_current_path() {  # <target>
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
 }
 
+# fm_backend_herdr_wait_shell_ready: prove that pane input reaches a shell prompt
+# before sending a fixed spawn-time command. Startup readers can consume any
+# finite input prefix, so retry a harmless marker command and wait for its output
+# instead of guessing how many sacrificial bytes are enough.
+fm_backend_herdr_wait_shell_ready() {  # <pane-id>
+  local pane=$1 attempt=0 marker left right
+  marker="fm-herdr-ready-$$-${RANDOM:-0}"
+  left=${marker%????????}
+  right=${marker#"$left"}
+  while [ "$attempt" -lt 20 ]; do
+    fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$pane" \
+      "printf '%s%s\\n' '$left' '$right'" >/dev/null 2>&1 || return 1
+    if fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane wait-output "$pane" \
+      --regex "(^|\\n)${marker}(\\r?\\n|$)" --source recent-unwrapped --timeout 250 >/dev/null 2>&1; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
 # fm_backend_herdr_send_text_line: send one fixed spawn-time command through
-# Herdr's atomic text-plus-Enter primitive.
-#
-# A new interactive shell can still be inside startup UI when its pane-create
-# response arrives. A shell-owned prompt such as Oh My Zsh's update question
-# can therefore consume the first byte of an immediate `pane run`: observed
-# `treehouse get` became `reehouse get`. Prefix one blank line inside the SAME
-# atomic input request. A settled shell executes that blank as a no-op; a
-# startup line/character prompt consumes it while the intended command remains
-# byte-complete behind it. Keeping both in one pane-run request preserves their
-# ordering without a timing guess or a shell-specific readiness classifier.
+# Herdr's atomic text-plus-Enter primitive after the shell readiness proof.
 fm_backend_herdr_send_text_line() {  # <target> <text>
   fm_backend_herdr_target_ready "$1" || return 1
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" $'\n'"$2" >/dev/null 2>&1
+  fm_backend_herdr_wait_shell_ready "$FM_BACKEND_HERDR_PANE" || return 1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
 }
 
 # fm_backend_herdr_send_literal: send TEXT as literal, UNSUBMITTED input - the

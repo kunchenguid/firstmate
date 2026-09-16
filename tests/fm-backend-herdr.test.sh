@@ -66,6 +66,12 @@ if [ "${1:-}" = terminal ] && [ "${2:-}" = title ] && [ "${3:-}" = clear ]; then
   printf '{"result":{"reason":"%s"}}\n' "$reason"
   exit 0
 fi
+if [ "${1:-}" = pane ] && [ "${2:-}" = run ] && [[ "${4:-}" == *fm-herdr-ready-* ]]; then
+  exit 0
+fi
+if [ "${1:-}" = pane ] && [ "${2:-}" = wait-output ]; then
+  exit 0
+fi
 n=$next
 echo "$n" > "$COUNT_FILE"
 if [ -f "$RESP/$n.exit" ]; then
@@ -3652,17 +3658,18 @@ test_send_key_normalizes_and_targets_pane() {
   pass "fm_backend_herdr_send_key: normalizes the key and targets the right pane"
 }
 
-test_send_text_line_guards_command_from_shell_startup_input() {
-  local dir log resp fb expected
+test_send_text_line_waits_for_shell_readiness() {
+  local dir log resp fb ready_line command_line
   dir="$TMP_ROOT/sendline-startup-guard"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   fb=$(make_herdr_fakebin "$dir")
   PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_line default:w1:p2 "treehouse get"' "$ROOT"
   expect_code 0 $? "send_text_line should succeed"
-  expected=$'\x1f''pane'$'\x1f''run'$'\x1f''w1:p2'$'\x1f\ntreehouse get'$'\x1f''--session'$'\x1f''default'
-  assert_contains "$(cat "$log")" "$expected" \
-    "send_text_line did not put a sacrificial blank line before the byte-complete command in the same atomic pane run"
-  pass "fm_backend_herdr_send_text_line: guards the command behind a leading blank line in one atomic pane run"
+  ready_line=$(grep -n $'\x1f''pane'$'\x1f''wait-output'$'\x1f''w1:p2' "$log" | cut -d: -f1)
+  command_line=$(grep -n $'\x1f''pane'$'\x1f''run'$'\x1f''w1:p2'$'\x1f''treehouse get' "$log" | cut -d: -f1)
+  [ -n "$ready_line" ] && [ -n "$command_line" ] && [ "$ready_line" -lt "$command_line" ] \
+    || fail "send_text_line did not prove shell readiness before sending the byte-complete command"
+  pass "fm_backend_herdr_send_text_line: proves shell readiness before sending the command"
 }
 
 test_kill_is_best_effort() {
@@ -5350,7 +5357,7 @@ test_capture_calls_pane_read
 test_capture_works_around_small_lines_bug
 test_capture_preserves_pane_read_failure
 test_send_key_normalizes_and_targets_pane
-test_send_text_line_guards_command_from_shell_startup_input
+test_send_text_line_waits_for_shell_readiness
 test_kill_is_best_effort
 test_current_path_reads_cwd
 test_busy_state_working_maps_to_busy
