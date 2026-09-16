@@ -6,6 +6,10 @@
 #   fm-herdr-lab.sh name <label>
 #   fm-herdr-lab.sh prepare <session>
 #   fm-herdr-lab.sh provision <session>
+#   fm-herdr-lab.sh launchagent provision <session> <code-root>
+#   fm-herdr-lab.sh launchagent restart <session>
+#   fm-herdr-lab.sh launchagent kill <session> job|server <signal>
+#   fm-herdr-lab.sh launchagent print <session>
 #   fm-herdr-lab.sh run <session> <herdr arguments...>
 #   fm-herdr-lab.sh viewer start <session>
 #   fm-herdr-lab.sh viewer stop <session>
@@ -33,7 +37,28 @@
 # Stop signals only identity-matched recorded processes and retains its
 # ownership record until detach is confirmed or the session is stopped or
 # absent; teardown refuses when that stop cannot be confirmed.
+# The launchagent commands, on macOS only, run a lab session's server the way
+# bin/fm-remote-doctor.sh runs the fm-remote server, so a lab can observe
+# launchd supervision. Provision takes the same prepare step and tripwire as
+# provision, refuses a label already loaded in gui/<uid> or user/<uid>, renders
+# the fm-remote launch agent contract that bin/fm-remote-herdr-owner-lib.sh
+# owns around <code-root>/bin/fm-remote-herdr-guard.sh under the one label
+# dev.firstmate.herdr-lab.<session>, keeps its plist and log in the lab state
+# directory rather than ~/Library/LaunchAgents, and bootstraps it into
+# gui/<uid>. It also records the load state of the
+# dev.firstmate.herdr and dev.firstmate.herdr.fm-remote launch agents, which
+# teardown requires to be identical afterward. Restart, kill, and print act
+# only on a recorded lab label; kill signals the job process itself, or the
+# herdr server for the session whose parent is that job. Teardown boots the
+# recorded job out before its other steps, refuses to finish while the label
+# stays loaded or a server, supervisor, or guard of the session still runs, and
+# leaves the launch agent log in place as evidence. Plain provision refuses a
+# session that a lab launch agent runs.
 set -u
+
+FM_HERDR_LAB_BIN_DIR=$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+# shellcheck source=bin/fm-remote-herdr-owner-lib.sh
+. "$FM_HERDR_LAB_BIN_DIR/fm-remote-herdr-owner-lib.sh"
 
 fm_herdr_lab_error() {
   echo "fm-herdr-lab: $*" >&2
@@ -402,6 +427,10 @@ fm_herdr_lab_cancel_provision() { # <pid>
 fm_herdr_lab_provision() { # <session>
   local name=$1 sessions tripwire running attempt server_pid max_attempts timeout_seconds
   fm_herdr_lab_validate_name "$name" || return 1
+  [ ! -f "$(fm_herdr_lab_launchagent_record_path "$name")" ] || {
+    fm_herdr_lab_error "session '$name' is run by a lab launch agent; use launchagent restart instead of provision"
+    return 1
+  }
   command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
   command -v jq >/dev/null 2>&1 || { fm_herdr_lab_error "jq is required"; return 1; }
 
@@ -448,6 +477,250 @@ fm_herdr_lab_provision() { # <session>
   return 1
 }
 
+# --- launch agent lab ---------------------------------------------------------
+#
+# A server that provision starts is a child of the caller, so it cannot show
+# what launchd supervision does to a server. The launch agent lab runs a code
+# root's guard under launchd in gui/<uid>, rendered by the same
+# fm_remote_herdr_render_launch_agent that bin/fm-remote-doctor.sh installs
+# for the fm-remote server, so only the label, command, and log differ.
+
+fm_herdr_lab_launchagent_label() { # <session>
+  printf 'dev.firstmate.herdr-lab.%s' "$1"
+}
+
+fm_herdr_lab_launchagent_record_path() { # <session>
+  printf '%s/%s.launchagent' "$(fm_herdr_lab_state_dir)" "$1"
+}
+
+fm_herdr_lab_launchagent_plist_path() { # <session>
+  printf '%s/%s.launchagent.plist' "$(fm_herdr_lab_state_dir)" "$1"
+}
+
+fm_herdr_lab_launchagent_log_path() { # <session>
+  printf '%s/%s.launchagent.log' "$(fm_herdr_lab_state_dir)" "$1"
+}
+
+fm_herdr_lab_launchagent_agents_path() { # <session>
+  printf '%s/%s.launch-agents' "$(fm_herdr_lab_state_dir)" "$1"
+}
+
+# One line per domain for each Firstmate launch agent a lab must not disturb.
+fm_herdr_lab_launchagent_protected_state() {
+  local uid label domain job pid
+  uid=$(id -u)
+  for label in dev.firstmate.herdr dev.firstmate.herdr.fm-remote; do
+    for domain in gui user; do
+      if job=$(launchctl print "$domain/$uid/$label" 2>/dev/null); then
+        pid=$(printf '%s\n' "$job" | awk '$1 == "pid" && $2 == "=" { print $3; exit }')
+        printf '%s/%s loaded pid=%s\n' "$domain" "$label" "${pid:-none}"
+      else
+        printf '%s/%s absent\n' "$domain" "$label"
+      fi
+    done
+  done
+}
+
+fm_herdr_lab_shell_quote() { # <string>
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# Prints "<pid> <command>" for every process still running this session's
+# herdr server, its supervisor or watcher, or the guard that starts them. The
+# session name reaches awk through its environment, so the scan never lists
+# itself.
+fm_herdr_lab_launchagent_processes() { # <session>
+  ps -A -o pid=,command= 2>/dev/null | FM_HERDR_LAB_SCAN_SESSION=$1 awk '
+    BEGIN { session = ENVIRON["FM_HERDR_LAB_SCAN_SESSION"] }
+    {
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      padded = line " "
+      if (index(padded, " server --session " session " ") \
+        || (index(padded, "fm-remote-herdr-guard.sh ") && index(padded, " " session " "))) print line
+    }
+  '
+}
+
+fm_herdr_lab_launchagent_job_pid() { # <session>
+  launchctl print "gui/$(id -u)/$(fm_herdr_lab_launchagent_label "$1")" 2>/dev/null | awk '
+    $1 == "pid" && $2 == "=" && $3 ~ /^[0-9]+$/ { print $3; found = 1; exit }
+    END { exit found ? 0 : 1 }
+  '
+}
+
+# Prints the pid of the herdr server for <session> whose parent is <job-pid>.
+fm_herdr_lab_launchagent_server_pid() { # <session> <job-pid>
+  ps -A -o pid=,ppid=,command= 2>/dev/null | FM_HERDR_LAB_SCAN_SESSION=$1 awk -v parent="$2" '
+    BEGIN { session = ENVIRON["FM_HERDR_LAB_SCAN_SESSION"] }
+    $2 == parent {
+      argv0 = $3
+      sub(/.*\//, "", argv0)
+      if (argv0 == "herdr" && index($0 " ", " server --session " session " ")) { print $1; found = 1; exit }
+    }
+    END { exit found ? 0 : 1 }
+  '
+}
+
+fm_herdr_lab_launchagent_owned() { # <session>
+  local name=$1
+  fm_herdr_lab_validate_name "$name" || return 1
+  [ -f "$(fm_herdr_lab_tripwire_path "$name")" ] || {
+    fm_herdr_lab_error "missing fleet-state tripwire for '$name'; refusing to act on a launch agent this lab does not own"
+    return 1
+  }
+  [ -f "$(fm_herdr_lab_launchagent_record_path "$name")" ] || {
+    fm_herdr_lab_error "no lab launch agent is recorded for '$name'"
+    return 1
+  }
+  command -v launchctl >/dev/null 2>&1 || { fm_herdr_lab_error "launchctl is required"; return 1; }
+}
+
+fm_herdr_lab_launchagent_provision() { # <session> <code-root>
+  local name=$1 root='' uid label domain record plist log herdr_bin shell program attempt running tool
+  fm_herdr_lab_validate_name "$name" || return 1
+  [ "$(uname -s 2>/dev/null)" = Darwin ] || { fm_herdr_lab_error "launchagent needs macOS launchd"; return 1; }
+  for tool in herdr jq launchctl plutil; do
+    command -v "$tool" >/dev/null 2>&1 || { fm_herdr_lab_error "$tool is required"; return 1; }
+  done
+  [ -z "${2:-}" ] || root=$(CDPATH='' cd -- "$2" 2>/dev/null && pwd -P) || root=
+  [ -n "$root" ] && [ -f "$root/bin/fm-remote-herdr-guard.sh" ] || {
+    fm_herdr_lab_error "code root has no bin/fm-remote-herdr-guard.sh: ${2:-<empty>}"
+    return 1
+  }
+  uid=$(id -u)
+  label=$(fm_herdr_lab_launchagent_label "$name")
+  record=$(fm_herdr_lab_launchagent_record_path "$name")
+  [ ! -e "$record" ] || {
+    fm_herdr_lab_error "a lab launch agent is already recorded for '$name'; tear it down before provisioning again"
+    return 1
+  }
+  for domain in gui user; do
+    if launchctl print "$domain/$uid/$label" >/dev/null 2>&1; then
+      fm_herdr_lab_error "launch agent $label is already loaded in $domain/$uid; refusing to adopt it"
+      return 1
+    fi
+  done
+  fm_herdr_lab_prepare "$name" || return 1
+
+  herdr_bin=$(command -v herdr)
+  shell=${SHELL:-}
+  [ -n "$shell" ] && [ -x "$shell" ] || shell=/bin/sh
+  program="exec $(fm_herdr_lab_shell_quote "$root/bin/fm-remote-herdr-guard.sh") $(fm_herdr_lab_shell_quote "$herdr_bin") $(fm_herdr_lab_shell_quote "$name")"
+  plist=$(fm_herdr_lab_launchagent_plist_path "$name")
+  log=$(fm_herdr_lab_launchagent_log_path "$name")
+  fm_herdr_lab_launchagent_protected_state > "$(fm_herdr_lab_launchagent_agents_path "$name")" || return 1
+  # Recorded before bootstrap, so teardown boots the job out even when this
+  # provision stops partway.
+  printf 'code_root=%s\n' "$root" > "$record" || return 1
+  fm_remote_herdr_render_launch_agent "$label" "$shell" "$program" "$log" > "$plist" || return 1
+  plutil -lint "$plist" >/dev/null 2>&1 || {
+    fm_herdr_lab_error "the rendered launch agent is not a valid plist: $plist"
+    return 1
+  }
+  launchctl bootstrap "gui/$uid" "$plist" || {
+    fm_herdr_lab_error "launchctl bootstrap gui/$uid failed for $plist"
+    return 1
+  }
+  attempt=0
+  while [ "$attempt" -lt 300 ]; do
+    running=$(fm_herdr_lab_cli "$name" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null) || running=false
+    if [ "$running" = true ]; then
+      fm_herdr_lab_refuse_if_default "$name" || return 1
+      printf 'launch agent %s runs lab session %s (log %s)\n' "$label" "$name" "$log"
+      return 0
+    fi
+    sleep 0.2
+    attempt=$((attempt + 1))
+  done
+  fm_herdr_lab_error "lab session '$name' did not report running within 60 seconds of bootstrapping $label; see $log"
+  return 1
+}
+
+fm_herdr_lab_launchagent_restart() { # <session>
+  local name=$1
+  fm_herdr_lab_launchagent_owned "$name" || return 1
+  fm_herdr_lab_refuse_if_default "$name" || return 1
+  launchctl kickstart -k "gui/$(id -u)/$(fm_herdr_lab_launchagent_label "$name")"
+}
+
+fm_herdr_lab_launchagent_kill() { # <session> <job|server> <signal>
+  local name=$1 target=$2 signal=$3 job_pid server_pid
+  case "$target" in
+    job|server) ;;
+    *) fm_herdr_lab_error "launchagent kill targets job or server, not '$target'"; return 2 ;;
+  esac
+  case "$signal" in
+    HUP|INT|QUIT|TERM|KILL|USR1|USR2) ;;
+    *) fm_herdr_lab_error "launchagent kill sends HUP, INT, QUIT, TERM, KILL, USR1, or USR2, not '$signal'"; return 2 ;;
+  esac
+  fm_herdr_lab_launchagent_owned "$name" || return 1
+  fm_herdr_lab_refuse_if_default "$name" || return 1
+  job_pid=$(fm_herdr_lab_launchagent_job_pid "$name") || {
+    fm_herdr_lab_error "launch agent $(fm_herdr_lab_launchagent_label "$name") has no running process to signal"
+    return 1
+  }
+  if [ "$target" = job ]; then
+    launchctl kill "SIG$signal" "gui/$(id -u)/$(fm_herdr_lab_launchagent_label "$name")"
+    return
+  fi
+  server_pid=$(fm_herdr_lab_launchagent_server_pid "$name" "$job_pid") || {
+    fm_herdr_lab_error "no herdr server for '$name' runs as a child of launch agent pid $job_pid"
+    return 1
+  }
+  kill "-$signal" "$server_pid"
+}
+
+fm_herdr_lab_launchagent_print() { # <session>
+  local name=$1
+  fm_herdr_lab_launchagent_owned "$name" || return 1
+  launchctl print "gui/$(id -u)/$(fm_herdr_lab_launchagent_label "$name")"
+}
+
+# Boots out the lab launch agent recorded for <session>, if any, and succeeds
+# only once its label is unloaded and no process of the session remains.
+fm_herdr_lab_launchagent_bootout() { # <session>
+  local name=$1 uid label waited=0 remaining=''
+  [ -f "$(fm_herdr_lab_launchagent_record_path "$name")" ] || return 0
+  command -v launchctl >/dev/null 2>&1 || {
+    fm_herdr_lab_error "launchctl is required to boot out the lab launch agent for '$name'"
+    return 1
+  }
+  uid=$(id -u)
+  label=$(fm_herdr_lab_launchagent_label "$name")
+  if launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
+    launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
+  fi
+  while [ "$waited" -lt 100 ]; do
+    remaining=$(fm_herdr_lab_launchagent_processes "$name")
+    if [ -z "$remaining" ] && ! launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
+      rm -f "$(fm_herdr_lab_launchagent_plist_path "$name")" "$(fm_herdr_lab_launchagent_record_path "$name")"
+      return 0
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if launchctl print "gui/$uid/$label" >/dev/null 2>&1; then
+    fm_herdr_lab_error "launch agent $label is still loaded after bootout; refusing teardown of '$name'"
+  else
+    fm_herdr_lab_error "processes of lab session '$name' remain after bootout: $(printf '%s' "$remaining" | tr '\n' ';')"
+  fi
+  return 1
+}
+
+fm_herdr_lab_launchagent() { # <provision|restart|kill|print> <session> [arguments...]
+  case "${1:-} $#" in
+    "provision 3") fm_herdr_lab_launchagent_provision "$2" "$3" ;;
+    "restart 2") fm_herdr_lab_launchagent_restart "$2" ;;
+    "kill 4") fm_herdr_lab_launchagent_kill "$2" "$3" "$4" ;;
+    "print 2") fm_herdr_lab_launchagent_print "$2" ;;
+    *)
+      fm_herdr_lab_usage >&2
+      return 2
+      ;;
+  esac
+}
+
 fm_herdr_lab_check_tripwire() { # <session>
   local name=$1 tripwire before after
   tripwire=$(fm_herdr_lab_tripwire_path "$name")
@@ -466,8 +739,20 @@ fm_herdr_lab_check_tripwire() { # <session>
 }
 
 fm_herdr_lab_verify_tripwire() { # <session>
-  local name=$1 tripwire
+  local name=$1 tripwire agents before after
   fm_herdr_lab_check_tripwire "$name" || return 1
+  agents=$(fm_herdr_lab_launchagent_agents_path "$name")
+  if [ -f "$agents" ]; then
+    before=$(cat "$agents")
+    after=$(fm_herdr_lab_launchagent_protected_state)
+    [ "$before" = "$after" ] || {
+      fm_herdr_lab_error "LAUNCH-AGENT TRIPWIRE FAILED: a Firstmate launch agent changed during lab work"
+      fm_herdr_lab_error "before: $(printf '%s' "$before" | tr '\n' ';')"
+      fm_herdr_lab_error "after:  $(printf '%s' "$after" | tr '\n' ';')"
+      return 1
+    }
+    rm -f "$agents"
+  fi
   tripwire=$(fm_herdr_lab_tripwire_path "$name")
   rm -f "$tripwire"
 }
@@ -496,6 +781,7 @@ fm_herdr_lab_teardown() { # <session>
     fm_herdr_lab_error "refusing teardown of '$name' while this lab's viewer is still attached"
     return 1
   }
+  fm_herdr_lab_launchagent_bootout "$name" || return 1
   sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
     fm_herdr_lab_error "cannot list Herdr sessions before teardown"
     return 1
@@ -534,7 +820,7 @@ fm_herdr_lab_name() { # <label>
 }
 
 fm_herdr_lab_usage() {
-  sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 fm_herdr_lab_main() {
@@ -551,6 +837,10 @@ fm_herdr_lab_main() {
     provision)
       [ "$#" -eq 2 ] || { fm_herdr_lab_usage >&2; return 2; }
       fm_herdr_lab_provision "$2"
+      ;;
+    launchagent)
+      shift
+      fm_herdr_lab_launchagent "$@"
       ;;
     run)
       [ "$#" -ge 3 ] || { fm_herdr_lab_usage >&2; return 2; }
