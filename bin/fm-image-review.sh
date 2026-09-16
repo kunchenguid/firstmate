@@ -295,6 +295,7 @@ main() {
   fi
   OUT_DIR=$(cd "$(dirname "$OUT")" 2>/dev/null && pwd -P) \
     || die "--out parent directory does not exist: $(dirname "$OUT")"
+  OUT="$OUT_DIR/$(basename "$OUT")"
   if [ -d "$OUT" ]; then
     die "--out points at an existing directory: $OUT"
   fi
@@ -334,6 +335,27 @@ main() {
     fi
     collect_tab "$id_key" "$id_label"
   done
+
+  # Reorder so all images sharing a tab key are contiguous
+  local -a ORDERED_IDS=() ORDERED_IMGS=()
+  local j
+  for ((j = 0; j < ${#TAB_KEYS[@]}; j++)); do
+    for ((i = 0; i < count; i++)); do
+      IFS='/' read -r -a tsegs <<< "${IDS[$i]}"
+      nseg=${#tsegs[@]}
+      if [ "$nseg" -eq 1 ]; then
+        id_key=''
+      else
+        id_key=${IDS[$i]%%/*}
+      fi
+      if [ "$id_key" = "${TAB_KEYS[$j]}" ]; then
+        ORDERED_IDS+=("${IDS[$i]}")
+        ORDERED_IMGS+=("${IMGS[$i]}")
+      fi
+    done
+  done
+  IDS=("${ORDERED_IDS[@]}")
+  IMGS=("${ORDERED_IMGS[@]}")
 
   {
     cat <<HEAD
