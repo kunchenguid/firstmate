@@ -1,8 +1,8 @@
 # Calm mode
 
 Calm is Firstmate's conversation-only transcript presentation toggle.
-It is fully supported on Pi, and available on Claude Code behind that harness's default-off early-access function-hooks flag, as the [Claude Code](#claude-code) section below describes.
-It is off by default, and the last `/calm` choice persists for the effective Firstmate home across session starts and resumes on either harness, through the one shared preference file [`configuration.md`](configuration.md#calm-preference-configcalm) owns.
+It is fully supported on Pi, available on Claude Code behind that harness's default-off early-access function-hooks flag, as the [Claude Code](#claude-code) section below describes, and available on Cursor as a slash skill plus session-open policy injection, as the [Cursor](#cursor) section describes.
+It is off by default, and the last `/calm` choice persists for the effective Firstmate home across session starts and resumes, through the one shared preference file [`configuration.md`](configuration.md#calm-preference-configcalm) owns.
 
 ## Pi
 
@@ -95,4 +95,21 @@ Regression entry points:
 tests/fm-calm-claude-mod.test.sh
 tests/fm-calm-claude-mod-plugin.test.sh
 FM_CLAUDE_CALM_LIVE_E2E=1 tests/fm-calm-claude-mod-live-e2e.test.sh
+```
+
+## Cursor
+
+Calm on Cursor is the `/calm` skill at `.agents/skills/calm`, discovered as a project skill through `.cursor/skills/calm`.
+It toggles the same per-home `config/calm` file Pi and Claude Code use, through `bin/fm-calm-preference.sh`.
+Cursor Agent has no transcript-row filter, tool-shell override, or working-ship widget API, so Calm does not hide tool rows in the Cursor TUI and does not draw a boat in place of the working indicator.
+The supported surface is the preference plus Calm's conversation policy: quieter operational chatter, while genuine captain prompts and final assistant replies stay in the open.
+When the preference is on, Cursor's `sessionStart` hook injects that policy as `additional_context` for primaries and for crewmates that must not take the helm.
+Toggling `/calm` mid-session follows the same policy from that point; turning it off resumes ordinary replies.
+Delivery, tool execution, model context, session storage, and export stay unchanged.
+[`configuration.md`](configuration.md#calm-preference-configcalm) owns the file; this section owns only the Cursor gap against the Pi and Claude Code presentation contracts above.
+
+Regression entry point:
+
+```sh
+tests/fm-calm-cursor.test.sh
 ```

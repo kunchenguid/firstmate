@@ -286,7 +286,7 @@ family_for_basename() {
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-rovo-harness.test.sh|fm-agy-harness.test.sh|fm-omp-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-lint-workflows.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
-    fm-calm-claude-mod.test.sh|\
+    fm-calm-claude-mod.test.sh|fm-calm-cursor.test.sh|\
     fm-harness-adapter-references.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-subagent-pretool-check.test.sh|\
@@ -684,6 +684,7 @@ tests/fm-bootstrap.test.sh 25208
 tests/fm-branch-supervision.test.sh 5729
 tests/fm-busy-adapter-wiring.test.sh 49731
 tests/fm-busy-state.test.sh 2926
+tests/fm-calm-cursor.test.sh 1605
 tests/fm-calm-pi-extension.test.sh 256
 tests/fm-check-unregister.test.sh 481
 tests/fm-classify-corr-token.test.sh 38742
@@ -1454,6 +1455,13 @@ families_for_changed_path() {
       printf '%s\n' __script__:fm-calm-pi-extension.test.sh
       printf '%s\n' __script__:fm-pi-primary-types.test.sh
       printf '%s\n' live-harness-optin
+      ;;
+    bin/fm-calm-preference.sh|.agents/skills/calm/SKILL.md|.cursor/skills/calm)
+      printf '%s\n' __script__:fm-calm-cursor.test.sh
+      ;;
+    bin/fm-sessionstart-cursor.sh)
+      printf '%s\n' __script__:fm-calm-cursor.test.sh
+      printf '%s\n' __script__:fm-cursor-primary.test.sh
       ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\
     .pi/extensions/fm-primary-turnend-guard.ts)

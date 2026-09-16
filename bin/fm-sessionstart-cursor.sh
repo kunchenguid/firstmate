@@ -8,6 +8,9 @@
 # Cursor injects a hook's `additional_context` string straight into model
 # context, so the digest lands before the first turn and the helm is taken
 # without model discretion. Verified live on 2026.08.11-e8db854.
+# When home-local config/calm is on, the same object also carries Calm's
+# Cursor conversation policy from bin/fm-calm-preference.sh context, including
+# in a child worktree that must not take the helm. docs/calm.md owns that gap.
 #
 # Usage: fm-sessionstart-cursor.sh --source <source>
 # Cursor's payload has no Claude-style `source` field, so the registration
@@ -34,7 +37,17 @@ while [ $# -gt 0 ]; do
 done
 
 DIGEST=$("$SCRIPT_DIR/fm-sessionstart-run.sh" --source "$SOURCE" </dev/null 2>/dev/null || true)
-[ -n "$DIGEST" ] || exit 0
+CALM_CTX=$("$SCRIPT_DIR/fm-calm-preference.sh" context 2>/dev/null || true)
+if [ -z "$DIGEST" ] && [ -z "$CALM_CTX" ]; then
+  exit 0
+fi
+if [ -n "$DIGEST" ] && [ -n "$CALM_CTX" ]; then
+  COMBINED="$DIGEST"$'\n\n'"$CALM_CTX"
+elif [ -n "$DIGEST" ]; then
+  COMBINED=$DIGEST
+else
+  COMBINED=$CALM_CTX
+fi
 command -v jq >/dev/null 2>&1 || exit 0
-jq -n --arg c "$DIGEST" '{additional_context:$c}' 2>/dev/null || true
+jq -n --arg c "$COMBINED" '{additional_context:$c}' 2>/dev/null || true
 exit 0
