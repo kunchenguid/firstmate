@@ -59,6 +59,15 @@ fill_brief_subsections() {  # <file> <intent> <spec>
   printf '%s\n' "$content" > "$file"
 }
 
+# Resolve the generated intent interface without interpreting specification text.
+authorized_launch_intent() {  # <launch-brief>
+  if grep -Fq 'ending at the next unfenced heading' "$1"; then
+    bash -c '. "$1/bin/fm-dod-lib.sh"; fm_brief_task_heading_body "$2" "$3"' _ "$ROOT" "$1" "## Captain's intent"
+  else
+    awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit { print }' "$1"
+  fi
+}
+
 run_spawn() {  # <home> <fakebin> <spawn-args...>
   local home=$1 fakebin=$2
   shift 2
@@ -324,6 +333,10 @@ STUB
     printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
     FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null 2>&1 \
       || fail "$mode: scout brief generation should succeed"
+    assert_grep 'Never stop, restart, or update the shared' "$home/data/$id/brief.md" \
+      "scout lost daemon safety"
+    assert_no_grep 'no-mistakes daemon status' "$home/data/$id/brief.md" \
+      "scout received unused pipeline recovery guidance"
     fill_brief_subsections "$home/data/$id/brief.md" \
       "Ship the delivery-contract change." "Preserve the selected delivery mode."
     out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1) \
@@ -337,6 +350,15 @@ STUB
          eval "$(printf '%s\n' "$out" | sed -n 's/^next: //p' | grep 'fm-send\.sh')" ) \
       || fail "$mode: promotion's delivery command did not run"
     assert_present "$payload" "$mode: promotion delivered no message to the worker"
+    assert_grep 'Never stop, restart, or update the shared' "$payload" \
+      "$mode: promotion lost daemon safety"
+    if [ "$mode" = no-mistakes ]; then
+      assert_grep 'no-mistakes daemon status' "$payload" \
+        "pipeline promotion omitted recovery guidance"
+    else
+      assert_no_grep 'no-mistakes daemon status' "$payload" \
+        "$mode: promotion included unused pipeline recovery guidance"
+    fi
 
     grep -qx "Delivery contract: mode=$mode" "$payload" \
       || fail "$mode: promoted worker did not receive the machine-readable delivery contract"
@@ -511,7 +533,7 @@ EOF
   assert_grep "plus any later words the captain actually supplied" \
     "$home/data/$id/launch-brief.md" \
     "marked legacy launch contract excluded later captain clarifications"
-  authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit && /^$/ { exit } emit { print }' "$home/data/$id/launch-brief.md")
+  authorized=$(authorized_launch_intent "$home/data/$id/launch-brief.md")
   assert_contains "$authorized" "Fix the legacy dispatch boundary." \
     "marked legacy launch contract omitted captain words"
   assert_not_contains "$authorized" "Firstmate-authored constraint" \
@@ -534,7 +556,7 @@ EOF
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
   assert_present "$home/data/$id/launch-brief.md" \
     "migrated subsection brief did not receive the current launch contract"
-  authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit && /^$/ { exit } emit { print }' "$home/data/$id/launch-brief.md")
+  authorized=$(authorized_launch_intent "$home/data/$id/launch-brief.md")
   assert_contains "$authorized" "Fix the migrated dispatch boundary." \
     "migrated launch contract omitted Captain's intent"
   assert_not_contains "$authorized" "Preserve the existing compatibility path." \
@@ -762,14 +784,21 @@ test_authorized_intent_keeps_words_without_composed_address() {
 $rec
 EOF
   id='intent-plain'
-  words=$(printf '%s\n' 'Keep the original request intact.' '' "Preserve its provenance, punctuation, and \`literal code\`.")
+  words=$(printf '%s\n' 'Keep the original request intact.' '' "Preserve its provenance, punctuation, and \`literal code\`." \
+    '### Accepted behavior' 'Keep nested requirements.' '```markdown' "## Captain's intent" \
+    'This heading is a literal example.' '```' 'Keep the requirement after the example.')
   FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes >/dev/null 2>&1 \
     || fail "intent brief should scaffold"
   fill_brief_subsections "$home/data/$id/brief.md" "$words" 'This build constraint must not become intent.'
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
   assert_present "$home/data/$id/launch-brief.md" "plain intent was not serialized"
-  authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit { print }' "$home/data/$id/launch-brief.md")
+  authorized=$(authorized_launch_intent "$home/data/$id/launch-brief.md")
   [ "$authorized" = "$words" ] || fail "authorized --intent must contain exactly the request, without headings, address, or contract prose: $authorized"
+
+  [ "$(grep -Fc 'Keep the original request intact.' "$home/data/$id/launch-brief.md")" = 1 ] \
+    || fail "modern launch duplicated the intent body"
+  assert_no_grep '^## Captain intent authorized for --intent$' "$home/data/$id/launch-brief.md" \
+    "modern launch retained the duplicate intent section"
 
   # The request itself may discuss an address spelling. It is data, not an
   # invitation to scrub the user's words or synthesize a different request.
@@ -779,7 +808,7 @@ EOF
   printf '# Task\n## Captain'"'"'s intent\n%s\n\n## Firstmate spec\nDo not paraphrase.\n\n# Definition of done\nDelivery contract: mode=no-mistakes\n' "$words" > "$home/data/intent-literal/brief.md"
   out=$(run_spawn "$home" "$fakebin" intent-literal "$proj" claude --mode no-mistakes --yolo off)
   assert_not_contains "$out" "operator-address line" "labels mentioned mid-line were refused as address"
-  authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit { print }' "$home/data/intent-literal/launch-brief.md")
+  authorized=$(authorized_launch_intent "$home/data/intent-literal/launch-brief.md")
   [ "$authorized" = "$words" ] || fail "literal words in the request were scrubbed"
 
   # A body line that opens with operator address is refused, never rewritten.
@@ -823,7 +852,7 @@ EOF
       "$marker" 'Keep the original request intact.' "$marker" 'Preserve its provenance.' > "$home/data/$id/brief.md"
     out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
     assert_present "$home/data/$id/launch-brief.md" "$marker: provenance was not accepted"
-    authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit { print }' "$home/data/$id/launch-brief.md")
+    authorized=$(authorized_launch_intent "$home/data/$id/launch-brief.md")
     words=$(printf '%s\n' 'Keep the original request intact.' 'Preserve its provenance.')
     [ "$authorized" = "$words" ] || fail "$marker: legacy intent changed words or included provenance/build prose"
   done

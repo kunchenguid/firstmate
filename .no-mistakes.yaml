@@ -22,6 +22,16 @@ document:
     evidence destination, and unique safety facts, then review the complete
     branch diff again after every documentation or lint fix.
 
+# Trusted scope policy for reviews; matching uses basenames at every depth.
+review:
+  path_instructions:
+    - path: "*"
+      instructions: |
+        Read .agents/skills/ask-user-authority/SKILL.md for finding scope,
+        evidence, deferral, and review stopping policy only.
+        Remain the assigned validation-step agent; Firstmate owns gate decisions
+        and cumulative round accounting. Preserve accepted intent and exclusions.
+
 # Pin lint to the same owner CI invokes instead of leaving it to no-mistakes'
 # default handling, which does not invoke the repository's canonical lint gate.
 # `bin/fm-lint.sh` owns the context-sensitive ShellCheck modes and GitHub
