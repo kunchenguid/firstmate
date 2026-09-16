@@ -193,7 +193,7 @@ jq \
                and ((.key // null) | ident) != null
                and (.verb == "needs-decision" or .verb == "blocked"))
       | {key:(.key | ident),summary:((.summary // null) | text(240))}
-      | select(.summary != null and .summary != "")) as $decision
+      | select(.summary != null)) as $decision
       ({seen:{},items:[]};
        if .seen[$decision.key] then .
        else .seen[$decision.key] = true | .items += [$decision.summary]
@@ -263,7 +263,7 @@ jq \
           evidence:"structured backlog hold"
         } end),
         blockers:$blockers[:$max_blockers],
-        _truncated:(($blockers | length) > $max_blockers or ($open_decisions | length) > $max_decisions),
+        _truncated:(($blockers | length) > $max_blockers or ($decisions | length) > $max_decisions),
         gate:(if (($work.unresolved_blocker_ids // []) | arr | length) > 0 then
                  {status:"blocked",label:(((($work.unresolved_blocker_ids // []) | arr | map(text(80)) | join(", ")) | text(240)))}
               elif $hold_bucket != null then {status:$hold_bucket,label:(($work.hold_reason // "Captain hold") | text(240))}

@@ -73,6 +73,7 @@ test_main_open_decisions_are_bounded_deduplicated_and_actionable() {
   local held_shared=$TMP_ROOT/main-decision-held-shared.json
   local keyed=$TMP_ROOT/main-decisions-keyed.json exact=$TMP_ROOT/main-decisions-exact.json
   local over=$TMP_ROOT/main-decisions-over.json invalid=$TMP_ROOT/main-decision-invalid.json
+  local empty_summary=$TMP_ROOT/main-decision-empty-summary.json held_exact=$TMP_ROOT/main-decisions-held-exact.json
   project main-open-decision.json "$model"
   jq -e '
     .counts == {running:0,waiting:1,blocked:0,attention:1}
@@ -133,6 +134,30 @@ test_main_open_decisions_are_bounded_deduplicated_and_actionable() {
     || fail "an exactly-at-limit canonical main decision list was reported truncated"
   jq -e '.inventory.truncated == true and (.projects[0].tasks[0].decisions | length) == 20' "$over" >/dev/null \
     || fail "an over-limit canonical main decision list did not disclose its omitted item"
+
+  jq '.tasks[0].hints.open_decisions = [
+        {key:"route",verb:"needs-decision",summary:""}
+      ]' "$FIXTURES/main-open-decision.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$empty_summary"
+  jq -e '.counts.attention == 1 and .projects[0].attention_count == 1
+      and (.projects[0].tasks[0]
+        | .attention == true and .attention_rank == 0 and .decisions == [""]
+          and .gate == {status:"decision",label:""})' "$empty_summary" >/dev/null \
+    || fail "an empty-summary canonical decision disappeared from attention"
+
+  jq --argjson count 21 '
+      .tasks[0].backlog += {
+        captain_actionable:true,hold_bucket:"live",hold_reason:"Question 0",
+        hold_age_days:1,hold_until:null
+      }
+      | .tasks[0].hints.open_decisions = [range(0;$count) | {
+          key:("decision-" + tostring),verb:"needs-decision",summary:("Question " + tostring)
+        }]' "$FIXTURES/main-open-decision.json" \
+    | "$PROJECTOR" --from-snapshot - --observed-at 2026-09-15T12:01:00Z > "$held_exact"
+  jq -e '.inventory.truncated == false
+      and (.projects[0].tasks[0]
+        | .hold.question == "Question 0" and (.decisions | length) == 20)' "$held_exact" >/dev/null \
+    || fail "a fully represented hold plus 20 decisions was reported truncated"
 
   jq '.tasks[0].hints.open_decisions = [
         {key:"api",verb:"progress",summary:"Unrelated status prose"},

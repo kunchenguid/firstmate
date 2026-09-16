@@ -68,6 +68,12 @@ assert_eval "() => {window.fmCockpit.replacePayload($credential_json); document.
   '\"credentialLinks\":[]' "renderer exposed a credential-bearing HTTPS link"
 assert_eval "() => {window.fmCockpit.replacePayload($states_json); return window.fmCockpit.getState();}" \
   'healthy-work' "credential-link defense did not allow the safe fixture to be restored"
+assert_eval '() => [...document.querySelectorAll(".project-button")].map((button)=>button.dataset.projectId).join(",")' \
+  'alpha,beta,delta' "active view retained a history-only project"
+assert_eval '() => {const filter=document.getElementById("view-filter"); filter.value="all"; filter.dispatchEvent(new Event("change")); document.querySelector("[data-project-id=gamma]").click(); filter.value="active"; filter.dispatchEvent(new Event("change")); const state=window.fmCockpit.getState(); return `${state.projectId}|${state.taskKey}`;}' \
+  'alpha|captain-call' "active view did not advance selection past a hidden history project"
+assert_eval '() => `${!!document.querySelector("[data-project-id=gamma]")}|${document.getElementById("task-identity").innerText}`' \
+  'false|captain-call' "active view kept hidden history selected in the inspector"
 
 assert_eval '() => {const b=document.querySelector(".project-button"); b.focus(); return {project:b.dataset.projectId,focused:document.activeElement===b}}' \
   '\"focused\":true' "project navigation could not receive keyboard focus"

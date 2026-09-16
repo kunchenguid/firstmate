@@ -262,12 +262,21 @@ __FM_PROJECT_COCKPIT_DATA__
     const allTasks = (project) => project ? project.tasks : [];
     const currentProject = () => state.payload.projects.find((project) => project.id === state.projectId) || null;
     const currentTask = () => allTasks(currentProject()).find((task) => taskKey(task) === state.taskKey) || null;
-    const filteredProjects = () => {
+    const filteredTasks = (project) => {
       const q = state.query.trim().toLocaleLowerCase();
-      return state.payload.projects.filter((project) => {
-        const tasks = allTasks(project).filter((task) => state.filter === "all" || task.lane !== "recently_completed");
-        return !q || project.label.toLocaleLowerCase().includes(q) || tasks.some((task) => `${task.name} ${task.id} ${task.state}`.toLocaleLowerCase().includes(q));
-      });
+      const projectMatches = q && project.label.toLocaleLowerCase().includes(q);
+      return allTasks(project).filter((task) =>
+        (state.filter === "all" || task.lane !== "recently_completed")
+        && (!q || projectMatches || `${task.name} ${task.id} ${task.state}`.toLocaleLowerCase().includes(q)));
+    };
+    const filteredProjects = () => {
+      return state.payload.projects.filter((project) => filteredTasks(project).length > 0);
+    };
+    const reconcileVisibleSelection = () => {
+      const projects = filteredProjects();
+      if (!projects.some((project) => project.id === state.projectId)) state.projectId = projects[0]?.id || null;
+      const tasks = currentProject() ? filteredTasks(currentProject()) : [];
+      if (!tasks.some((task) => taskKey(task) === state.taskKey)) state.taskKey = tasks[0] ? taskKey(tasks[0]) : null;
     };
     const warningText = () => {
       const inventory = state.payload.inventory;
@@ -387,7 +396,7 @@ __FM_PROJECT_COCKPIT_DATA__
       byId("project-summary").textContent = `${project.active_count} active · ${project.blocker_count} blocked · oldest active ${duration(project.oldest_active_seconds)}`;
       lanes.forEach(([lane, label]) => {
         if (state.filter === "active" && lane === "recently_completed") return;
-        const tasks = project.tasks.filter((task) => task.lane === lane && (!state.query || `${task.name} ${task.id} ${task.state}`.toLocaleLowerCase().includes(state.query.toLocaleLowerCase())));
+        const tasks = filteredTasks(project).filter((task) => task.lane === lane);
         const section = el("section", "board-section");
         section.setAttribute("aria-labelledby", `lane-${lane}`);
         const heading = el("h3");
@@ -475,7 +484,8 @@ __FM_PROJECT_COCKPIT_DATA__
     const selectProject = (id, focusTask) => {
       state.projectId = id;
       const project = currentProject();
-      if (!project || !project.tasks.some((task) => taskKey(task) === state.taskKey)) state.taskKey = project?.tasks[0] ? taskKey(project.tasks[0]) : null;
+      const tasks = project ? filteredTasks(project) : [];
+      if (!tasks.some((task) => taskKey(task) === state.taskKey)) state.taskKey = tasks[0] ? taskKey(tasks[0]) : null;
       renderProjects(); renderBoard(); renderInspector();
       if (focusTask) requestAnimationFrame(() => byId("project-board").querySelector("button.task-button")?.focus());
       announce(`Selected project ${project?.label || id}`);
@@ -500,10 +510,8 @@ __FM_PROJECT_COCKPIT_DATA__
       const focusedProject = document.activeElement?.dataset?.projectId || null;
       const focusedTask = document.activeElement?.dataset?.taskKey || null;
       state.payload = validatePayload(next);
-      const projects = state.payload.projects;
-      if (!projects.some((project) => project.id === state.projectId)) state.projectId = projects[0]?.id || null;
-      const project = currentProject();
-      if (!project?.tasks.some((task) => taskKey(task) === previousKey)) state.taskKey = project?.tasks[0] ? taskKey(project.tasks[0]) : null;
+      state.taskKey = previousKey;
+      reconcileVisibleSelection();
       renderAll();
       const focusTarget = focusedTask
         ? [...byId("project-board").querySelectorAll("button.task-button")].find((button) => button.dataset.taskKey === focusedTask)
@@ -526,8 +534,9 @@ __FM_PROJECT_COCKPIT_DATA__
       state.payload = validatePayload(JSON.parse(byId("cockpit-data").textContent));
       state.projectId = state.payload.projects[0]?.id || null;
       state.taskKey = state.payload.projects[0]?.tasks[0] ? taskKey(state.payload.projects[0].tasks[0]) : null;
-      byId("search").addEventListener("input", (event) => { state.query = event.target.value; renderProjects(); renderBoard(); });
-      byId("view-filter").addEventListener("change", (event) => { state.filter = event.target.value; renderProjects(); renderBoard(); });
+      reconcileVisibleSelection();
+      byId("search").addEventListener("input", (event) => { state.query = event.target.value; reconcileVisibleSelection(); renderProjects(); renderBoard(); renderInspector(); });
+      byId("view-filter").addEventListener("change", (event) => { state.filter = event.target.value; reconcileVisibleSelection(); renderProjects(); renderBoard(); renderInspector(); });
       byId("inspector").addEventListener("keydown", inspectorKeydown);
       renderAll();
       setInterval(updateAge, 30000);
