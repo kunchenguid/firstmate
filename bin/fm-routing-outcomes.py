@@ -314,7 +314,18 @@ def total_tokens(models: list[dict[str, Any]]) -> dict[str, Any]:
 def parse_pi(source: dict[str, Any]) -> dict[str, Any]:
     raw, source_digest = read_private(source.get("path"), "native_receipt.path")
     rows = json_lines(raw, "native_receipt.path")
-    requests = [row for row in rows if row.get("type") == "custom" and row.get("customType") == "fm-routing-request" and isinstance(row.get("data"), dict)]
+    requests = [row for row in rows if row.get("type") == "custom" and row.get("customType") == "fm-routing-request"]
+    if not requests:
+        fail("native Pi session has no owned fm-routing-request.v1 entry")
+    request_ids: set[str] = set()
+    for index, row in enumerate(requests):
+        data = need_object(row.get("data"), f"native Pi request[{index}].data")
+        if data.get("schema") != "fm-routing-request.v1":
+            fail("native Pi request data.schema must be fm-routing-request.v1")
+        request_id = need_id(row.get("id"), f"native Pi request[{index}].id")
+        if request_id in request_ids:
+            fail("native Pi session has duplicate routing request ids")
+        request_ids.add(request_id)
     latest: dict[str, dict[str, Any]] = {}
     anonymous = 0
     for row in rows:
@@ -326,6 +337,12 @@ def parse_pi(source: dict[str, Any]) -> dict[str, Any]:
             anonymous += 1
             key = f"anonymous:{anonymous}"
         latest[key] = row
+    unmatched = [row for row in latest.values() if row.get("parentId") not in request_ids]
+    if unmatched:
+        fail("native Pi session has assistant response without a matching routing request")
+    response_parents = {row.get("parentId") for row in latest.values()}
+    if request_ids - response_parents:
+        fail("native Pi session has routing request without an assistant response")
     assistants = list(latest.values())
     models: list[dict[str, Any]] = []
     for row in assistants:
@@ -347,7 +364,7 @@ def parse_pi(source: dict[str, Any]) -> dict[str, Any]:
     assistant_model = one_observed((row["message"].get("model") for row in assistants), "assistant model")
     if payload_model is not None and assistant_model is not None and payload_model != assistant_model:
         fail("native Pi session has mixed effective model evidence")
-    timestamps = [row.get("timestamp") for row in rows if isinstance(row.get("timestamp"), str)]
+    timestamps = [row.get("timestamp") for row in [*requests, *assistants] if isinstance(row.get("timestamp"), str)]
     return {
         "kind": "pi-session",
         "source_sha256": source_digest,
@@ -547,7 +564,7 @@ def sanitize_quota(path_value: Any, provider: str, field: str) -> dict[str, Any]
     return {"source_sha256": source_digest, "generated_at": snapshot.get("generatedAt"), "provider": provider, "windows": windows, "quota_semantics": semantics}
 
 
-def quota_record(value: Any) -> Any:
+def quota_record(value: Any, started_at: str, finished_at: str) -> Any:
     if value is None:
         return None
     quota = need_object(value, "quota")
@@ -558,6 +575,7 @@ def quota_record(value: Any) -> Any:
     after_time = parse_time(after.get("generated_at"), "quota.after.generated_at")
     if after_time < before_time:
         fail("quota.after.generated_at must not precede quota.before.generated_at")
+    attempt_bracketed = before_time <= parse_time(started_at, "started_at") and after_time >= parse_time(finished_at, "finished_at")
     concurrent = quota.get("concurrent_activity")
     if concurrent not in (True, False, None):
         fail("quota.concurrent_activity must be true, false, or null")
@@ -574,12 +592,14 @@ def quota_record(value: Any) -> Any:
         if not same_reset:
             reset_crossed = True
         left_percent, right_percent = left.get("percentRemaining"), right.get("percentRemaining")
-        attributable = concurrent is False and attribution == "exclusive" and same_reset
+        attributable = concurrent is False and attribution == "exclusive" and same_reset and attempt_bracketed
         known_percentages = (isinstance(left_percent, (int, float)) and not isinstance(left_percent, bool)
                              and isinstance(right_percent, (int, float)) and not isinstance(right_percent, bool))
         delta = left_percent - right_percent if attributable and known_percentages and left_percent >= right_percent else None
         deltas.append({"window_id": window_id, "before_percent_remaining": left_percent, "after_percent_remaining": right_percent, "reset_crossed": not same_reset, "attributed_consumption_percent_points": delta})
-    return {"provider": provider, "before": before, "after": after, "concurrent_activity": concurrent, "attribution": attribution, "reset_crossed": reset_crossed, "window_deltas": deltas,
+    return {"provider": provider, "before": before, "after": after, "concurrent_activity": concurrent,
+            "attribution": attribution, "reset_crossed": reset_crossed,
+            "attempt_bracketed": attempt_bracketed, "window_deltas": deltas,
             "note": "Window deltas are never summed; shared and model windows may describe the same allowance use."}
 
 
@@ -921,7 +941,7 @@ def build_record(manifest: dict[str, Any], prices_path: Any) -> dict[str, Any]:
         "phase": phase, "category": category, "task_shape": task_shape,
         "route": route, "native": native, "requirements": copy.deepcopy(requirements),
         "started_at": started, "finished_at": finished, "time_ms": time_values,
-        "billing": billing_record, "quota": quota_record(manifest.get("quota")),
+        "billing": billing_record, "quota": quota_record(manifest.get("quota"), started, finished),
         "grading": validate_grading(manifest.get("grading"), outcome, task_id, task_binding["spawn_gen"], attempt_id),
         "comparison": validate_comparison(manifest.get("comparison")),
         "handoff": validate_handoff(manifest.get("handoff"), attempt_id),
@@ -1146,9 +1166,14 @@ def format_optional(value: Any) -> str:
 def format_quota_movement(quota: Any) -> str:
     if not isinstance(quota, dict):
         return "unknown"
+    before_semantics = ((quota.get("before") or {}).get("quota_semantics") or {}).get("status")
+    after_semantics = ((quota.get("after") or {}).get("quota_semantics") or {}).get("status")
     caveats = (f"attribution={format_optional(quota.get('attribution'))}; "
                f"concurrent={format_optional(quota.get('concurrent_activity')).lower()}; "
-               f"reset_crossed={format_optional(quota.get('reset_crossed')).lower()}")
+               f"reset_crossed={format_optional(quota.get('reset_crossed')).lower()}; "
+               f"attempt_bracketed={format_optional(quota.get('attempt_bracketed')).lower()}; "
+               f"before_semantics={format_optional(before_semantics)}; "
+               f"after_semantics={format_optional(after_semantics)}")
     windows = []
     for row in quota.get("window_deltas") or []:
         windows.append(

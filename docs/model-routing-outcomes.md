@@ -123,7 +123,7 @@ When effective model or effort is unavailable, the route uses an explicit `reque
 Multi-model native results use an explicit whole-session label.
 Task count reports unique task IDs, while task-incarnation count separately reports observed lifecycle incarnations.
 The scorecard includes sample counts, outcomes, known execution token/cost/time totals, unknown counts, and an individual observation for every task incarnation and attempt.
-Each individual observation includes its raw before/after quota snapshots, attribution, concurrency, reset caveats, and supported per-window delta in JSON, plus a concise non-aggregated rendering in Markdown.
+Each individual observation includes its raw before/after quota snapshots, native semantics status, attempt bracketing, attribution, concurrency, reset caveats, and supported per-window delta in JSON, plus a concise non-aggregated rendering in Markdown.
 Quota windows are never summed into route or task totals because they may overlap.
 It also prints each heuristic shadow suggestion, raw quota context when present, and the recorded eligibility, capability-class fit, runway, spend priority, explanation, and uncertainty.
 

@@ -30,7 +30,8 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.quota_after = self.dir / "quota-after.json"
         self.write_pi(self.pi)
         self.write_quota(self.quota_before, 100, "2030-01-02T00:00:00Z")
-        self.write_quota(self.quota_after, 95, "2030-01-02T00:00:00Z")
+        self.write_quota(self.quota_after, 95, "2030-01-02T00:00:00Z",
+                         generated_at="2030-01-01T00:02:00Z")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -100,6 +101,12 @@ class RoutingOutcomesTest(unittest.TestCase):
                                   "cost": {"total": 0.5}}},
         }
         rows.append(assistant)
+        if extra_request is not None:
+            paired = copy.deepcopy(assistant)
+            paired["id"] = "assistant-extra"
+            paired["parentId"] = "request-2"
+            paired["timestamp"] = "2030-01-01T00:00:04Z"
+            rows.append(paired)
         if second_response:
             second = copy.deepcopy(assistant)
             second["id"] = "assistant-2"
@@ -182,11 +189,12 @@ class RoutingOutcomesTest(unittest.TestCase):
         quota = score["observations"][0]["quota"]
         self.assertEqual(quota["attribution"], "exclusive")
         self.assertFalse(quota["concurrent_activity"])
+        self.assertTrue(quota["attempt_bracketed"])
         self.assertEqual(quota["window_deltas"][0]["attributed_consumption_percent_points"], 5)
         markdown = self.run_cli(
             "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
             "--format", "markdown").stdout
-        self.assertIn("attribution=exclusive; concurrent=false; reset_crossed=false", markdown)
+        self.assertIn("attribution=exclusive; concurrent=false; reset_crossed=false; attempt_bracketed=true; before_semantics=known; after_semantics=known", markdown)
         self.assertIn("weekly: 100 -> 95; consumption=5 pp; reset_crossed=false", markdown)
 
     def test_attempt_phase_and_pi_request_alias_are_rejected(self):
@@ -201,6 +209,29 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.pi.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
         result = self.import_manifest(self.manifest(), ok=False)
         self.assertIn("unsupported requestedModel", json.loads(result.stdout)["error"])
+
+    def test_pi_request_schema_and_response_pairing_are_required(self):
+        rows = [json.loads(line) for line in self.pi.read_text().splitlines()]
+        request = next(row for row in rows if row.get("customType") == "fm-routing-request")
+        request["data"]["schema"] = "fm-routing-request.v2"
+        self.pi.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        result = self.import_manifest(self.manifest(), ok=False)
+        self.assertIn("data.schema must be fm-routing-request.v1", json.loads(result.stdout)["error"])
+
+        self.write_pi(self.pi, extra_request={"requestSequence": 2})
+        rows = [json.loads(line) for line in self.pi.read_text().splitlines()]
+        rows = [row for row in rows if row.get("parentId") != "request-2"]
+        self.pi.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        result = self.import_manifest(self.manifest(), ok=False)
+        self.assertIn("routing request without an assistant response", json.loads(result.stdout)["error"])
+
+        self.write_pi(self.pi)
+        rows = [json.loads(line) for line in self.pi.read_text().splitlines()]
+        assistant = next(row for row in rows if row.get("type") == "message")
+        assistant["parentId"] = "unowned-request"
+        self.pi.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        result = self.import_manifest(self.manifest(), ok=False)
+        self.assertIn("without a matching routing request", json.loads(result.stdout)["error"])
 
     def test_concurrent_duplicate_import_is_one_revision(self):
         manifest = self.manifest()
@@ -317,7 +348,7 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.assertEqual(score["routes"][0]["tokens"]["input"]["known_total"], 200)
 
     def test_missing_provider_effort_stays_unknown_and_requirement_blocks(self):
-        self.write_pi(self.pi, custom=False)
+        self.write_pi(self.pi, effort=None)
         blocked = self.import_manifest(self.manifest(), ok=False)
         self.assertIn("effective effort requirement not proven", json.loads(blocked.stdout)["error"])
         allowed = self.manifest()
@@ -325,7 +356,7 @@ class RoutingOutcomesTest(unittest.TestCase):
         allowed["outcome"] = "unresolved"
         self.import_manifest(allowed)
         self.assertIsNone(self.latest_record()["native"]["effective_effort"])
-        self.assertEqual(self.latest_record()["native"]["completeness"]["request_payload"], "missing")
+        self.assertEqual(self.latest_record()["native"]["completeness"]["request_payload"], "complete")
 
     def test_mixed_pi_route_evidence_is_rejected(self):
         self.write_pi(self.pi, extra_request={"payloadReasoningEffort": None})
@@ -367,6 +398,10 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.assertEqual(quota["before"]["quota_semantics"]["unresolvedWindowIds"],
                          ["gemini_5h", "gemini_weekly"])
         self.assertIsNone(quota["window_deltas"][0]["attributed_consumption_percent_points"])
+        markdown = self.run_cli(
+            "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
+            "--format", "markdown").stdout
+        self.assertIn("before_semantics=unknown; after_semantics=unknown", markdown)
 
     def test_reset_and_concurrent_activity_prevent_quota_attribution(self):
         self.write_quota(self.quota_after, 100, "2030-01-09T00:00:00Z")
@@ -394,6 +429,16 @@ class RoutingOutcomesTest(unittest.TestCase):
         self.assertEqual(delta["before_percent_remaining"], 95)
         self.assertEqual(delta["after_percent_remaining"], 100)
         self.assertIsNone(delta["attributed_consumption_percent_points"])
+
+    def test_quota_snapshots_must_bracket_attempt_for_attribution(self):
+        self.write_quota(self.quota_before, 100, "2030-01-02T00:00:00Z",
+                         generated_at="2029-12-31T23:00:00Z")
+        self.write_quota(self.quota_after, 95, "2030-01-02T00:00:00Z",
+                         generated_at="2029-12-31T23:01:00Z")
+        self.import_manifest(self.manifest())
+        quota = self.latest_record()["quota"]
+        self.assertFalse(quota["attempt_bracketed"])
+        self.assertIsNone(quota["window_deltas"][0]["attributed_consumption_percent_points"])
 
     def test_refreshable_auth_uncertainty_is_not_converted_to_zero(self):
         self.write_quota(self.quota_before, None, "2030-01-02T00:00:00Z", status="unknown")
