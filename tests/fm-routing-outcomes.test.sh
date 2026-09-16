@@ -405,6 +405,27 @@ class RoutingOutcomesTest(unittest.TestCase):
         result = self.import_manifest(finishes_too_early, ok=False)
         self.assertIn("native receipt timestamps must fall within", json.loads(result.stdout)["error"])
 
+    def test_native_duration_must_fit_attempt_interval(self):
+        receipt = self.dir / "agy-long-duration.json"
+        self.write_json(receipt, {"conversation_id": "agy-long", "duration_seconds": 120,
+                                  "num_turns": 1,
+                                  "usage": {"input_tokens": 2, "output_tokens": 1,
+                                            "thinking_tokens": 0, "cache_read_tokens": 0,
+                                            "total_tokens": 3}})
+        manifest = self.manifest(
+            receipt={"kind": "agy-result", "path": str(receipt),
+                     "requested_model": "gemini-3.8-flash-medium",
+                     "requested_effort": "medium"}, outcome="unresolved")
+        manifest["route"].update({"harness": "agy", "provider": "google",
+                                  "auth_category": "oauth",
+                                  "requested_model": "gemini-3.8-flash-medium",
+                                  "requested_effort": "medium"})
+        manifest["requirements"] = None
+        manifest["finished_at"] = "2030-01-01T00:00:01Z"
+        self.bind_task("task-one", harness="agy")
+        result = self.import_manifest(manifest, ok=False)
+        self.assertIn("native receipt duration must not exceed", json.loads(result.stdout)["error"])
+
     def test_duplicate_native_message_id_is_not_double_counted(self):
         self.write_pi(self.pi, duplicate=True)
         self.import_manifest(self.manifest())
@@ -485,6 +506,20 @@ class RoutingOutcomesTest(unittest.TestCase):
         quota = self.latest_record()["quota"]
         self.assertTrue(quota["reset_crossed"])
         self.assertIsNone(quota["window_deltas"][0]["attributed_consumption_percent_points"])
+
+    def test_missing_reset_identity_prevents_quota_attribution(self):
+        self.write_pi(self.pi, assistant_provider="codex", request_provider="codex")
+        self.write_quota(self.quota_before, 100, None)
+        self.write_quota(self.quota_after, 95, None,
+                         generated_at="2030-01-01T00:02:00Z")
+        manifest = self.manifest()
+        manifest["route"]["provider"] = "codex"
+        self.import_manifest(manifest)
+        quota = self.latest_record()["quota"]
+        self.assertIsNone(quota["reset_crossed"])
+        self.assertIsNone(quota["window_deltas"][0]["reset_crossed"])
+        self.assertIsNone(
+            quota["window_deltas"][0]["attributed_consumption_percent_points"])
 
     def test_quota_chronology_and_increases_do_not_create_consumption(self):
         self.write_quota(self.quota_before, 95, "2030-01-02T00:00:00Z",
@@ -701,6 +736,36 @@ class RoutingOutcomesTest(unittest.TestCase):
         native = self.latest_record()["native"]
         self.assertEqual(native["effective_model"], "gemini-a")
         self.assertEqual(native["effective_effort"], "medium")
+
+    def test_agy_propagation_must_match_pending_resolution(self):
+        receipt = self.dir / "agy-mismatched-propagation.json"
+        log = self.dir / "agy-mismatched-propagation.log"
+        self.write_json(receipt, {"conversation_id": "agy-four", "duration_seconds": 1,
+                                  "num_turns": 1,
+                                  "usage": {"input_tokens": 2, "output_tokens": 1,
+                                            "thinking_tokens": 0, "cache_read_tokens": 0,
+                                            "total_tokens": 3}})
+        log.write_text(
+            "Resolving model gemini-a\n"
+            "Resolving model gemini-b\n"
+            "Propagating selected model override to backend: label=\"Gemini A (Medium)\"\n",
+            encoding="utf-8")
+        manifest = self.manifest(receipt={"kind": "agy-result", "path": str(receipt),
+                                         "native_log_path": str(log),
+                                         "requested_model": "gemini-b",
+                                         "requested_effort": "medium"}, outcome="unresolved")
+        manifest["route"].update({"harness": "agy", "provider": "google",
+                                  "auth_category": "oauth", "requested_model": "gemini-b",
+                                  "requested_effort": "medium"})
+        manifest["requirements"] = {"effective_model": "gemini-b"}
+        self.bind_task("task-one", harness="agy")
+        result = self.import_manifest(manifest, ok=False)
+        self.assertIn("effective model requirement not proven", json.loads(result.stdout)["error"])
+        manifest["requirements"] = None
+        self.import_manifest(manifest)
+        native = self.latest_record()["native"]
+        self.assertIsNone(native["effective_model"])
+        self.assertIsNone(native["effective_effort"])
 
     def test_price_requires_exact_timestamped_model_context_service_and_cache_rates(self):
         prices = self.dir / "prices.json"

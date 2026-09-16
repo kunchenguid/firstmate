@@ -294,6 +294,17 @@ def one_observed(values: Iterable[Any], field: str, source: str = "native Pi ses
     return items[0]
 
 
+def agy_model_label(label: str) -> tuple[set[str], Any]:
+    suffix = re.search(r"\((Low|Medium|High)\)$", label)
+    effort = suffix.group(1).lower() if suffix else None
+    base = label[:suffix.start()].strip() if suffix else label
+    base_key = re.sub(r"[^a-z0-9]+", "-", base.lower()).strip("-")
+    keys = {base_key}
+    if effort:
+        keys.add(f"{base_key}-{effort}")
+    return keys, effort
+
+
 def token_row(model: Any, provider: Any, usage: dict[str, Any], mapping: dict[str, str], *, service_tier: Any = None) -> dict[str, Any]:
     tokens: dict[str, Any] = {}
     for target, source in mapping.items():
@@ -517,9 +528,14 @@ def parse_agy(source: dict[str, Any]) -> dict[str, Any]:
                 continue
             label = AGY_MODEL_RE.fullmatch(line)
             if label and pending_model is not None:
-                effective_model = pending_model
-                suffix = re.search(r"\((Low|Medium|High)\)$", label.group(1))
-                effective_effort = suffix.group(1).lower() if suffix else None
+                model_key = re.sub(r"[^a-z0-9]+", "-", pending_model.lower()).strip("-")
+                label_keys, label_effort = agy_model_label(label.group(1))
+                if model_key in label_keys:
+                    effective_model = pending_model
+                    effective_effort = label_effort
+                else:
+                    effective_model = None
+                    effective_effort = None
                 pending_model = None
     model_row = token_row(effective_model, "google", usage, {
         "input": "input_tokens", "output": "output_tokens", "cache_read": "cache_read_tokens",
@@ -601,19 +617,23 @@ def quota_record(value: Any, started_at: str, finished_at: str, native_provider:
     before_windows = {row.get("id"): row for row in before["windows"] if row.get("id")}
     after_windows = {row.get("id"): row for row in after["windows"] if row.get("id")}
     deltas = []
-    reset_crossed = False
+    reset_states = []
     for window_id in sorted(before_windows.keys() & after_windows.keys()):
         left, right = before_windows[window_id], after_windows[window_id]
-        same_reset = left.get("resetsAt") == right.get("resetsAt")
-        if not same_reset:
-            reset_crossed = True
+        left_reset, right_reset = left.get("resetsAt"), right.get("resetsAt")
+        resets_known = (isinstance(left_reset, str) and bool(left_reset)
+                        and isinstance(right_reset, str) and bool(right_reset))
+        same_reset = resets_known and left_reset == right_reset
+        window_reset_crossed = None if not resets_known else not same_reset
+        reset_states.append(window_reset_crossed)
         left_percent, right_percent = left.get("percentRemaining"), right.get("percentRemaining")
         attributable = (concurrent is False and attribution == "exclusive" and same_reset
                         and attempt_bracketed and route_provider_binding == "exact-native-provider")
         known_percentages = (isinstance(left_percent, (int, float)) and not isinstance(left_percent, bool)
                              and isinstance(right_percent, (int, float)) and not isinstance(right_percent, bool))
         delta = left_percent - right_percent if attributable and known_percentages and left_percent >= right_percent else None
-        deltas.append({"window_id": window_id, "before_percent_remaining": left_percent, "after_percent_remaining": right_percent, "reset_crossed": not same_reset, "attributed_consumption_percent_points": delta})
+        deltas.append({"window_id": window_id, "before_percent_remaining": left_percent, "after_percent_remaining": right_percent, "reset_crossed": window_reset_crossed, "attributed_consumption_percent_points": delta})
+    reset_crossed = True if True in reset_states else (None if None in reset_states else False)
     return {"provider": provider, "before": before, "after": after, "concurrent_activity": concurrent,
             "attribution": attribution, "reset_crossed": reset_crossed,
             "attempt_bracketed": attempt_bracketed, "route_provider_binding": route_provider_binding,
@@ -648,6 +668,10 @@ def validate_time(manifest: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
 def validate_native_interval(native: dict[str, Any], started: str, finished: str) -> None:
     start_time = parse_time(started, "started_at")
     finish_time = parse_time(finished, "finished_at")
+    attempt_duration_ms = (finish_time - start_time).total_seconds() * 1000
+    native_duration_ms = nullable_number(native.get("native_duration_ms"), "native.native_duration_ms")
+    if native_duration_ms is not None and native_duration_ms > attempt_duration_ms:
+        fail("native receipt duration must not exceed started_at to finished_at interval")
     for field in ("first_native_at", "last_native_at"):
         value = native.get(field)
         if value is None:
