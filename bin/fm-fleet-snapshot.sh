@@ -80,9 +80,10 @@
 #     each home with explicit provenance, freshness, endpoint evidence, and unknown
 #     failure reasons. Parent status and bounded terminal evidence are historical,
 #     untrusted supplements only and never override readable structured-home facts.
-#     Each structured-home record carries active_children with canonical child
-#     spawn_gen identity, decisions_open, holds, queued, landed, endpoints,
-#     counts, and omitted. provenance.summary_source
+#     Each structured-home record carries active_children for nonterminal working,
+#     parked, paused, and blocked children, including canonical child spawn_gen
+#     identity and started_at timing when available, plus decisions_open, holds, queued,
+#     landed, endpoints, counts, and omitted. provenance.summary_source
 #     distinguishes "local-ledger", "remote-ledger", and "remote-ledger-cache";
 #     freshness is "cached" only for the cache source, and observed_at/age_seconds
 #     come from the selected summary's generation. Every successfully sampled home also carries
