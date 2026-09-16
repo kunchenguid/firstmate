@@ -116,9 +116,11 @@ class RoutingOutcomesTest(unittest.TestCase):
         path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
     def write_quota(self, path, remaining, reset, *, provider="codex", status="known", unresolved=None,
-                    effective_availability=None, generated_at="2030-01-01T00:00:00Z"):
+                    effective_availability=None, generated_at="2030-01-01T00:00:00Z",
+                    freshness_status="fresh", stale=False):
         row = {
             "provider": provider,
+            "state": {"status": freshness_status, "stale": stale},
             "windows": [{"id": "weekly", "label": "week", "kind": "weekly",
                          "resetsAt": reset, "percentRemaining": remaining}],
             "quotaSemantics": {"status": status,
@@ -212,6 +214,64 @@ class RoutingOutcomesTest(unittest.TestCase):
             "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
             "--format", "json").stdout)
         self.assertNotIn("quota attribution unknown", score["routes"][0]["uncertainty"])
+
+    def test_stale_or_missing_quota_freshness_prevents_attribution(self):
+        self.write_pi(self.pi, assistant_provider="codex", request_provider="codex")
+        self.write_quota(self.quota_before, 100, "2030-01-02T00:00:00Z",
+                         freshness_status="stale", stale=True)
+        manifest = self.manifest()
+        manifest["route"]["provider"] = "codex"
+        self.import_manifest(manifest)
+        quota = self.latest_record()["quota"]
+        self.assertEqual(quota["before"]["state"], {"status": "stale", "stale": True})
+        self.assertFalse(quota["snapshots_fresh"])
+        self.assertIsNone(
+            quota["window_deltas"][0]["attributed_consumption_percent_points"])
+        score = json.loads(self.run_cli(
+            "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
+            "--format", "json").stdout)
+        self.assertIn("quota attribution unknown", score["routes"][0]["uncertainty"])
+
+        for path in (self.quota_before, self.quota_after):
+            snapshot = json.loads(path.read_text())
+            snapshot["providers"][0].pop("state", None)
+            self.write_json(path, snapshot)
+        self.import_manifest(manifest)
+        quota = self.latest_record()["quota"]
+        self.assertIsNone(quota["before"]["state"])
+        self.assertFalse(quota["snapshots_fresh"])
+        self.assertIsNone(
+            quota["window_deltas"][0]["attributed_consumption_percent_points"])
+        score = json.loads(self.run_cli(
+            "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
+            "--format", "json").stdout)
+        self.assertIn("quota attribution unknown", score["routes"][0]["uncertainty"])
+
+    def test_partial_quota_windows_keep_route_uncertainty(self):
+        self.write_pi(self.pi, assistant_provider="codex", request_provider="codex")
+        before = json.loads(self.quota_before.read_text())
+        after = json.loads(self.quota_after.read_text())
+        before["providers"][0]["windows"].append({
+            "id": "daily", "label": "day", "kind": "daily",
+            "resetsAt": "2030-01-02T00:00:00Z", "percentRemaining": 50,
+        })
+        after["providers"][0]["windows"].append({
+            "id": "daily", "label": "day", "kind": "daily",
+            "resetsAt": "2030-01-02T00:00:00Z", "percentRemaining": None,
+        })
+        self.write_json(self.quota_before, before)
+        self.write_json(self.quota_after, after)
+        manifest = self.manifest()
+        manifest["route"]["provider"] = "codex"
+        self.import_manifest(manifest)
+        quota = self.latest_record()["quota"]
+        self.assertEqual(
+            [row["attributed_consumption_percent_points"] for row in quota["window_deltas"]],
+            [None, 5])
+        score = json.loads(self.run_cli(
+            "scorecard", "--store", self.store, "--shadow-store", self.shadow_store,
+            "--format", "json").stdout)
+        self.assertIn("quota attribution unknown", score["routes"][0]["uncertainty"])
 
     def test_attempt_phase_and_pi_request_alias_are_rejected(self):
         shadow_attempt = self.manifest()

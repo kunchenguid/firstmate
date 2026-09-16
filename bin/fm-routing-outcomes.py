@@ -607,7 +607,12 @@ def sanitize_quota(path_value: Any, provider: str, field: str) -> dict[str, Any]
             continue
         windows.append({key: window.get(key) for key in ("id", "label", "kind", "resetsAt", "percentRemaining")})
     semantics = row.get("quotaSemantics") if isinstance(row.get("quotaSemantics"), dict) else None
-    return {"source_sha256": source_digest, "generated_at": snapshot.get("generatedAt"), "provider": provider, "windows": windows, "quota_semantics": semantics}
+    raw_state = row.get("state") if isinstance(row.get("state"), dict) else None
+    state = ({key: raw_state.get(key) for key in ("status", "stale")}
+             if raw_state is not None else None)
+    return {"source_sha256": source_digest, "generated_at": snapshot.get("generatedAt"),
+            "provider": provider, "state": state, "windows": windows,
+            "quota_semantics": semantics}
 
 
 def quota_record(value: Any, started_at: str, finished_at: str, native_provider: Any) -> Any:
@@ -629,6 +634,10 @@ def quota_record(value: Any, started_at: str, finished_at: str, native_provider:
     if attribution not in {"exclusive", "shared", "unknown"}:
         fail("quota.attribution must be exclusive, shared, or unknown")
     route_provider_binding = "exact-native-provider" if provider == native_provider else "unbound"
+    before_state = before.get("state") if isinstance(before.get("state"), dict) else {}
+    after_state = after.get("state") if isinstance(after.get("state"), dict) else {}
+    snapshots_fresh = (before_state.get("status") == "fresh" and before_state.get("stale") is False
+                       and after_state.get("status") == "fresh" and after_state.get("stale") is False)
     before_windows = {row.get("id"): row for row in before["windows"] if row.get("id")}
     after_windows = {row.get("id"): row for row in after["windows"] if row.get("id")}
     deltas = []
@@ -642,7 +651,7 @@ def quota_record(value: Any, started_at: str, finished_at: str, native_provider:
         window_reset_crossed = None if not resets_known else not same_reset
         reset_states.append(window_reset_crossed)
         left_percent, right_percent = left.get("percentRemaining"), right.get("percentRemaining")
-        attributable = (concurrent is False and attribution == "exclusive" and same_reset
+        attributable = (snapshots_fresh and concurrent is False and attribution == "exclusive" and same_reset
                         and attempt_bracketed and route_provider_binding == "exact-native-provider")
         known_percentages = (isinstance(left_percent, (int, float)) and not isinstance(left_percent, bool)
                              and isinstance(right_percent, (int, float)) and not isinstance(right_percent, bool))
@@ -653,6 +662,7 @@ def quota_record(value: Any, started_at: str, finished_at: str, native_provider:
     reset_crossed = (True if True in reset_states else (None if None in reset_states else False)) if window_sets_match else None
     return {"provider": provider, "before": before, "after": after, "concurrent_activity": concurrent,
             "attribution": attribution, "reset_crossed": reset_crossed,
+            "snapshots_fresh": snapshots_fresh,
             "attempt_bracketed": attempt_bracketed, "route_provider_binding": route_provider_binding,
             "window_deltas": deltas,
             "note": "Window deltas are never summed; shared and model windows may describe the same allowance use."}
@@ -1157,12 +1167,15 @@ def quota_attribution_supported(quota: Any) -> bool:
     if (quota.get("attribution") != "exclusive"
             or quota.get("route_provider_binding") != "exact-native-provider"
             or quota.get("concurrent_activity") is not False
+            or quota.get("snapshots_fresh") is not True
             or quota.get("attempt_bracketed") is not True
             or quota.get("reset_crossed") is not False):
         return False
-    return any(isinstance(row.get("attributed_consumption_percent_points"), (int, float))
-               and not isinstance(row.get("attributed_consumption_percent_points"), bool)
-               for row in quota.get("window_deltas") or [])
+    deltas = quota.get("window_deltas") or []
+    return bool(deltas) and all(
+        isinstance(row.get("attributed_consumption_percent_points"), (int, float))
+        and not isinstance(row.get("attributed_consumption_percent_points"), bool)
+        for row in deltas)
 
 
 def route_name(record: dict[str, Any]) -> str:

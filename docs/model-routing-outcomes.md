@@ -111,8 +111,8 @@ Every native model row must match exactly or the attempt's API-equivalent cost r
 Provider-reported list-cost fields are retained as native evidence but never promoted into executable API-equivalent billing without that catalog match.
 
 Quota inputs are native quota-axi schema-version-5 snapshots taken before and after the attempt.
-The importer retains the selected provider's literal windows and normalized semantics.
-It computes a per-window consumption delta only when the quota provider exactly matches native provider evidence, the snapshots bracket the attempt, reset identity is unchanged, concurrent activity is explicitly absent, attribution is exclusive, and both percentage values are known.
+The importer retains the selected provider's freshness state, literal windows, and normalized semantics.
+It computes a per-window consumption delta only when both snapshots are explicitly fresh, the quota provider exactly matches native provider evidence, the snapshots bracket the attempt, reset identity is unchanged, concurrent activity is explicitly absent, attribution is exclusive, and both percentage values are known.
 When that exact native provider binding is absent, the raw dated provider observations remain visible as unbound and consumption stays unknown.
 It never sums shared and model-window deltas, converts allowance percentages to dollars, relabels unresolved windows, or treats unknown authentication/headroom as zero.
 A shadow candidate may attach one raw dated quota-axi provider snapshot.
@@ -141,5 +141,5 @@ Run the focused behavior suite with:
 tests/fm-routing-outcomes.test.sh
 ```
 
-The suite covers missing provider telemetry, native timestamp bounds, refreshable-auth uncertainty, unbound and exact-provider allowance evidence, unresolved raw allowance windows, actual zero allowance, reset and concurrency boundaries, duplicate import/resume, cross-representation whole-session receipt reuse, exact price matching, multi-model labeling, non-Pi outcome attribution, one-alternative handoff, comparison limits, independent grading, and heuristic shadow context.
+The suite covers missing provider telemetry, native timestamp bounds, refreshable-auth uncertainty, unbound and exact-provider allowance evidence, stale and partially known allowance evidence, unresolved raw allowance windows, actual zero allowance, reset and concurrency boundaries, duplicate import/resume, cross-representation whole-session receipt reuse, exact price matching, multi-model labeling, non-Pi outcome attribution, one-alternative handoff, comparison limits, independent grading, and heuristic shadow context.
 `tests/fm-spawn-dispatch-profile.test.sh` verifies that a spawned Pi extension writes only the sanitized request-receipt fields.
