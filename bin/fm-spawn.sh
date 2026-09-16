@@ -3791,7 +3791,19 @@ esac
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
 # later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
+# The root is private (0700) because it holds the staged launch command, and its
+# path is predictable under a shared /tmp: a root that already exists is reused
+# only as a real directory owned by this user and writable by nobody else, then
+# tightened, so no other local user can plant or swap a file in it.
 TASK_TMP="/tmp/fm-$ID"
+if ! (umask 077 && mkdir "$TASK_TMP") 2>/dev/null; then
+  if [ -L "$TASK_TMP" ] || [ ! -d "$TASK_TMP" ] || [ ! -O "$TASK_TMP" ] ||
+    [ -n "$(find "$TASK_TMP" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ] ||
+    ! chmod 700 "$TASK_TMP"; then
+    echo "error: task temp root $TASK_TMP already exists and is not a private directory owned by this user; refusing to stage the launch command there; inspect and remove it, then retry" >&2
+    exit 1
+  fi
+fi
 mkdir -p "$TASK_TMP/gotmp"
 
 # Per-harness turn-end hook where enabled: a file that touches
