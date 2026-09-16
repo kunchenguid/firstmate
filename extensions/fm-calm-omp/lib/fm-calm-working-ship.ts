@@ -31,7 +31,8 @@ type TUI = { requestRender: () => void };
 function visibleWidth(value: string): number { return value.replace(/\x1b\[[0-9;]*m/g, "").length; }
 
 // The asymmetric three-cell sail is centered over a five-cell hull. The one-cell
-// quarter triangle keeps the yellow left sail lighter than the full red right sail.
+// quarter triangle keeps the left sail lighter than the full right sail, and the whole
+// boat (both sail halves, mast, and hull) is one color so the sprite reads as one shape.
 // The hull's inner cells retain zero-height water glyphs instead of interrupting the trough.
 const LEFT_SAIL = "◿";
 const MAST = "│";
@@ -55,10 +56,10 @@ const WAVE_HALF_LENGTH_SPAN = 5;
 const WAVE_TROUGH_RADIUS = 5;
 
 // Standard ANSI foreground codes only: no theme lookup, bright variant, or 256/RGB.
+// Water is a single blue so the swell reads through glyph height alone; the boat is a
+// single yellow so its sail halves, mast, and hull read as one shape.
 const BLUE = "\u001b[34m";
-const CYAN = "\u001b[36m";
 const YELLOW = "\u001b[33m";
-const RED = "\u001b[31m";
 // Restores the default foreground so color never bleeds into padding or later frames.
 const RESET = "\u001b[39m";
 
@@ -204,17 +205,14 @@ export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
     let cells = "";
     for (let column = from; column < from + count; column += 1) {
       const level = waveLevel(column, hullCenter, direction, phase);
-      const color = level >= 2 ? CYAN : BLUE;
-      cells += `${color}${WAVE_BARS[level]}${RESET}`;
+      cells += `${BLUE}${WAVE_BARS[level]}${RESET}`;
     }
     return cells;
   };
 
   const boat = (text: string): string => `${YELLOW}${text}${RESET}`;
-  const sail = (): string =>
-    `${YELLOW}${LEFT_SAIL}${MAST}${RESET}${RED}${RIGHT_SAIL}${RESET}`;
-  const hull = (): string =>
-    `${boat(HULL_LEFT)}${BLUE}${HULL_WATER}${RESET}${boat(HULL_RIGHT)}`;
+  const sail = (): string => boat(SAIL);
+  const hull = (): string => boat(HULL);
 
   return {
     position: () => position,
