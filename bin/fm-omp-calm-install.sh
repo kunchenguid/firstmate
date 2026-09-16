@@ -11,8 +11,8 @@
 # realpath), so an identical legacy copy is removed and a divergent one is
 # renamed to .bak with a warning.
 # Unload with `omp plugin disable fm-calm-omp` (or delete the linked symlink).
-# `omp plugin uninstall fm-calm-omp` clears the lockfile entry but leaves the
-# symlink, so the extension still loads.
+# `omp plugin uninstall fm-calm-omp` also unloads the extension but leaves the
+# symlink; delete it or run this installer again to restore the link.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
