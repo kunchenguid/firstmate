@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Who owns a Herdr session socket, and was that process born in the Aqua
-# login session?
+# Who owns a Herdr session socket, was that process born in the Aqua login
+# session, and what launch agent makes that session own the server?
 #
 # Source this file; it defines functions only. It is the single owner of the
 # socket-owner discovery and birth classification shared by
 # bin/fm-remote-herdr-guard.sh (the launch agent's exec target) and
-# bin/fm-remote-doctor.sh (the readiness check for that session).
+# bin/fm-remote-doctor.sh (the readiness check for that session), and of the
+# launch agent contract render that bin/fm-remote-doctor.sh installs for the
+# fm-remote server and bin/fm-herdr-lab.sh loads under a lab label.
 #
 # Why birth matters: a herdr server, and every pane and agent it later spawns,
 # keeps the macOS audit session of whatever started it. Only the Aqua login
@@ -54,6 +56,14 @@
 #     Succeeds when <pid> leads its own POSIX session, read from the `s` flag
 #     of `ps -o stat=` on both darwin and Linux. Herdr requires that of a
 #     server before `herdr machine add` accepts it as a saved SSH machine.
+#   fm_remote_herdr_render_launch_agent <label> <login-shell> <shell-command> <log>
+#     Prints the launch agent property list that runs <shell-command> through
+#     <login-shell> with separate -l and -c arguments under <label>, with
+#     LimitLoadToSessionType=Aqua, RunAtLoad, KeepAlive={SuccessfulExit=false},
+#     ThrottleInterval=10, and both standard streams appended to <log>. The
+#     four arguments are the only differences between the fm-remote agent and
+#     a lab agent; every other key is this contract, and each value is escaped
+#     for XML here.
 
 fm_remote_herdr_socket_owner() { # <socket-path>
   local socket=$1 real pid='' line candidates='' candidate cmd
@@ -189,4 +199,48 @@ fm_remote_herdr_process_leads_session() { # <pid>
   stat=$(ps -o stat= -p "$pid" 2>/dev/null) || return 1
   case "$stat" in *s*) return 0 ;; esac
   return 1
+}
+
+fm_remote_herdr_xml_escape() { # <value>
+  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
+fm_remote_herdr_render_launch_agent() { # <label> <login-shell> <shell-command> <log>
+  local label shell command log
+  label=$(fm_remote_herdr_xml_escape "$1")
+  shell=$(fm_remote_herdr_xml_escape "$2")
+  command=$(fm_remote_herdr_xml_escape "$3")
+  log=$(fm_remote_herdr_xml_escape "$4")
+  cat <<XML
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>$label</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>$shell</string>
+		<string>-l</string>
+		<string>-c</string>
+		<string>$command</string>
+	</array>
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>StandardOutPath</key>
+	<string>$log</string>
+	<key>StandardErrorPath</key>
+	<string>$log</string>
+</dict>
+</plist>
+XML
 }

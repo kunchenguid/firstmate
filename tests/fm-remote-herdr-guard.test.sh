@@ -10,7 +10,9 @@
 # owner -> stop it, wait for the socket, start. It also pins how a started
 # server runs: leading its own session as the child of the process launchd
 # supervises, which carries the server's exit status and stop signals and
-# leaves no process of the server's group behind. Nothing here touches the
+# leaves no process of the server's group behind, and that without a perl able
+# to run the supervisor the guard starts nothing, stops nothing, and exits 1
+# naming the prerequisite. Nothing here touches the
 # runner's own herdr servers, launch agents, or login session, and no live
 # harness guard applies: the verdict comes from process environment, ancestry,
 # and session membership, which are kernel facts rather than vendor output.
@@ -374,22 +376,20 @@ BROKEN_PERL="$TMP_ROOT/broken-perl"
 mkdir -p "$BROKEN_PERL"
 printf '#!/bin/sh\nexit 2\n' > "$BROKEN_PERL/perl"
 chmod +x "$BROKEN_PERL/perl"
-for host in "no perl|$FAKE:$TOOLS" "a perl that cannot compile the supervisor|$FAKE:$BROKEN_PERL:$TOOLS"; do
+PERL_LESS_HOSTS=("no perl|$FAKE:$TOOLS" "a perl that cannot compile the supervisor|$FAKE:$BROKEN_PERL:$TOOLS")
+for host in "${PERL_LESS_HOSTS[@]}"; do
   new_case stopped
   CASE_PATH=${host#*|}
-  guard_background
-  wait_guard
-  expect_code 0 "$GUARD_RC" "the guard failed on a host with ${host%%|*}"
-  assert_started "the guard did not start the server on a host with ${host%%|*}"
-  assert_equals "$GUARD_PID" "$(started_field pid)" \
-    "on a host with ${host%%|*} the server did not run as the launch agent's own process"
-  case "$(started_field stat)" in
-    *s*) fail "on a host with ${host%%|*} the server leads its own session: $(cat "$CASE_STATE/started")" ;;
-  esac
-  assert_contains "$GUARD_OUT" 'Herdr saved SSH machines will refuse it' \
-    "the guard did not log what a host with ${host%%|*} costs"
+  guard
+  expect_code 1 "$GUARD_RC" "the guard did not exit 1 for a launchd retry on a host with ${host%%|*}"
+  assert_not_started "the guard started a server on a host with ${host%%|*}"
+  assert_not_contains "$(herdr_calls)" "server --session" "the guard ran herdr server on a host with ${host%%|*}"
+  assert_contains "$GUARD_OUT" "no perl on this PATH can run $SUPERVISOR" \
+    "the guard did not name the missing prerequisite on a host with ${host%%|*}"
+  assert_contains "$GUARD_OUT" 'exiting 1 without starting or stopping any server so launchd retries' \
+    "the guard did not say what its exit 1 means on a host with ${host%%|*}"
 done
-pass "without a perl that can run the supervisor, the server still starts in the launch agent's process and the log says what that costs"
+pass "without a perl that can run the supervisor, an empty session gets no server and the guard names the prerequisite for a launchd retry"
 
 # --- an Aqua-born owner is left alone ----------------------------------------
 
@@ -462,6 +462,33 @@ assert_stop_before_start
 assert_contains "$GUARD_OUT" "pid $SUPERVISED_PID born outside the Aqua login session (unknown)" \
   "a gui-domain job running an unrelated pid was trusted as the owner's parent"
 pass "a gui-domain launchd job proves the server it supervises, and only that server"
+
+# --- without perl, a running server is neither stopped nor replaced ---------
+
+for host in "${PERL_LESS_HOSTS[@]}"; do
+  new_case running
+  CASE_PATH=${host#*|}
+  printf '%s\n' "$LAUNCHD_PID" > "$CASE_OWNER"
+  load_job gui dev.firstmate.herdr.fm-remote "$LAUNCHD_PID"
+  guard
+  expect_code 0 "$GUARD_RC" "on a host with ${host%%|*} the guard did not leave an Aqua-born owner alone"
+  assert_not_started "on a host with ${host%%|*} the guard started a second server over an Aqua-born owner"
+  assert_not_contains "$(herdr_calls)" 'server stop' "on a host with ${host%%|*} the guard stopped an Aqua-born owner"
+  assert_contains "$GUARD_OUT" "pid $LAUNCHD_PID born in the Aqua login session (launchd); nothing to do" \
+    "on a host with ${host%%|*} the guard did not report the Aqua-born owner"
+
+  new_case running
+  CASE_PATH=${host#*|}
+  printf '%s\n' "$SSH_PID" > "$CASE_OWNER"
+  guard
+  expect_code 1 "$GUARD_RC" "on a host with ${host%%|*} the guard did not exit 1 for a launchd retry over a foreign owner"
+  assert_not_contains "$(herdr_calls)" 'server stop' \
+    "on a host with ${host%%|*} the guard stopped a foreign server it could not replace"
+  assert_not_started "on a host with ${host%%|*} the guard started a server over a foreign owner"
+  assert_contains "$GUARD_OUT" "no perl on this PATH can run $SUPERVISOR" \
+    "on a host with ${host%%|*} the guard did not name the missing prerequisite before the takeover"
+done
+pass "without a perl that can run the supervisor, an Aqua-born owner is left alone and a foreign one is not stopped"
 
 # --- a foreign owner is stopped, then the guard becomes the server -----------
 

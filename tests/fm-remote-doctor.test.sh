@@ -635,15 +635,30 @@ doctor --fix
 expect_code 0 "$DOCTOR_RC" "the Aqua-owner fixture could not be initialized"
 assert_contains "$DOCTOR_OUT" "check herdr-server=ok: session fm-remote is running in the Aqua login session (pid $AQUA_HOLDER_PID, launchd)" \
   "a launchd-born owner was not reported with its pid and birth"
-assert_contains "$DOCTOR_OUT" "(pid $AQUA_HOLDER_PID, launchd); it does not lead its own session, so Herdr saved SSH machines refuse it" \
-  "an owner that does not lead its own session was not reported as one Herdr saved SSH machines refuse"
+assert_contains "$DOCTOR_OUT" "check herdr-server=ok: session fm-remote is running in the Aqua login session (pid $AQUA_HOLDER_PID, launchd), which is all a remote second mate needs; that server does not lead its own session, so Herdr saved SSH machines refuse it until it is restarted" \
+  "an owner that does not lead its own session was not reported ready with the saved-machine difference"
+assert_contains "$DOCTOR_OUT" "run 'herdr server stop --session fm-remote && launchctl kickstart -k gui/$(id -u)/$LABEL' on that account" \
+  "the consent-required restart was not named with the account's uid and the agent label"
+assert_contains "$DOCTOR_OUT" 'neither updating Firstmate nor --fix restarts a running Aqua-born server because the restart closes its panes' \
+  "the report did not say that no automatic path restarts the server, or what the restart costs"
+assert_not_contains "$DOCTOR_OUT" 'action: herdr-server:' "a running Aqua-born server was presented as a readiness gap"
+: > "$CASE_LAUNCHCTL_LOG"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "--fix over a running Aqua-born server that does not lead its own session was not ready"
+assert_not_contains "$DOCTOR_OUT" 'fix herdr-server=' "--fix acted on a running Aqua-born server that does not lead its own session"
+assert_no_grep "kickstart -k gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" \
+  "--fix restarted a running Aqua-born server that does not lead its own session"
+assert_no_grep "bootout gui/$(id -u)/$LABEL" "$CASE_LAUNCHCTL_LOG" \
+  "--fix booted out the launch agent over a running Aqua-born server that does not lead its own session"
+assert_contains "$DOCTOR_OUT" "(pid $AQUA_HOLDER_PID, launchd), which is all a remote second mate needs" \
+  "--fix changed the verdict on a running Aqua-born server that does not lead its own session"
 
 printf '%s\n' "$SESSION_LEADER_HOLDER_PID" > "$CASE_STATE/socket-owner"
 doctor
 expect_code 0 "$DOCTOR_RC" "an Aqua-born owner that leads its own session was not reported ready"
 assert_contains "$DOCTOR_OUT" "check herdr-server=ok: session fm-remote is running in the Aqua login session (pid $SESSION_LEADER_HOLDER_PID, launchd); it leads its own session, as Herdr saved SSH machines require" \
   "an Aqua-born owner that leads its own session was not reported as Herdr saved SSH machines require"
-pass "session leadership is reported on an Aqua-born owner without changing its readiness"
+pass "session leadership is reported on an Aqua-born owner without changing its readiness, and the restart that would give it one is named, never applied"
 
 printf '%s\n' "$BACKGROUND_HOLDER_PID" > "$CASE_STATE/socket-owner"
 printf 'background job\n' > "$CASE_STATE/user-loaded-$LABEL"

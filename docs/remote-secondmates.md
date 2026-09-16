@@ -102,7 +102,19 @@ The Herdr agent runs [`bin/fm-remote-herdr-guard.sh`](../bin/fm-remote-herdr-gua
 The `gui/<uid>` domain, not the login shell, is what gives that server and every pane it spawns the Aqua audit session and login-keychain access; a server born in any other session cannot read the login keychain, and every claude pane under it falls back to a stale plaintext credentials file and reports "Login expired".
 Herdr's own SSH remote attach starts such a server when it finds none, and at boot it wins the `fm-remote` socket because sshd accepts connections before the login session exists, so the guard is what makes the launch agent converge: it starts the server when nothing owns the socket, exits 0 when an Aqua-born server already does, and otherwise stops the foreign server and takes the session over, closing its panes so the parent firstmate relaunches its mates into the Aqua-born server.
 `KeepAlive={SuccessfulExit=false}` lets that exit 0 rest instead of respawning against a held socket; the guard's header owns the decision table and [`bin/fm-remote-herdr-owner-lib.sh`](../bin/fm-remote-herdr-owner-lib.sh) owns the birth markers it reads.
-The guard starts the server through [`bin/fm-remote-herdr-supervisor.pl`](../bin/fm-remote-herdr-supervisor.pl), which stays the launchd-supervised foreground process while the server leads its own POSIX session, because `herdr machine add` refuses a server that does not; it needs a `perl` on the launch agent's PATH, and without one the guard runs the server directly and logs that Herdr saved SSH machines will refuse it.
+The guard starts the server through [`bin/fm-remote-herdr-supervisor.pl`](../bin/fm-remote-herdr-supervisor.pl), which stays the launchd-supervised foreground process while the server leads its own POSIX session, because `herdr machine add` refuses a server that does not; it needs a `perl` that can compile the supervisor on the launch agent's PATH, which macOS ships at `/usr/bin/perl`, and without one it starts no server and stops none, exiting 1 with the prerequisite named in `~/Library/Logs/dev.firstmate.herdr.fm-remote.log` so launchd retries once `perl` resolves.
+[`bin/fm-remote-herdr-owner-lib.sh`](../bin/fm-remote-herdr-owner-lib.sh) renders that launch agent contract for the doctor and for the lab in [`bin/fm-herdr-lab.sh`](../bin/fm-herdr-lab.sh), so the two cannot drift.
+
+A server the launch agent started before the supervisor existed keeps running as the launchd job itself and does not lead its own session.
+That server is all a remote second mate needs, so the doctor reports it `ok:` and names the one thing it cannot do: `herdr machine add` refuses it as a saved SSH machine until it is restarted.
+Neither updating the Firstmate code root nor `--fix` restarts a running Aqua-born server, because the restart closes every pane in the `fm-remote` session; the guard leaves an Aqua-born server alone whenever launchd runs it, and the readiness gate that spawn and sync run sees no gap.
+When closing those panes is acceptable, restart it yourself on that account:
+
+```sh
+herdr server stop --session fm-remote && launchctl kickstart -k gui/<uid>/dev.firstmate.herdr.fm-remote
+```
+
+The guard then starts a supervised server that leads its own session, and the parent firstmate's secondmate liveness sweep relaunches its mates into it.
 It starts the same workers directly on Linux, recreates the `~/.local/bin/fm-remote-entrypoint.sh` symlink when it is absent, and creates only Firstmate-owned required-tool wrappers that it can prove resolve to a version-manager target, stopping after one harness satisfies the at-least-one requirement.
 It never installs packages or overwrites a non-Firstmate file at a reserved wrapper path.
 The dedicated Herdr launch agent owns only the remote-secondmate `fm-remote` server and does not inspect, rewrite, start, stop, or require the user's interactive `default` session or its `dev.firstmate.herdr` launch agent.
@@ -113,7 +125,7 @@ These steps are never automated and are always reported rather than silently att
 - The first console login on that Mac, and automatic login in System Settings > Users & Groups when the machine runs headless and must come back on its own after a reboot.
 - FileVault, which holds a reboot at pre-boot authentication before any login session exists.
 - Installing any missing required tool that no safe wrapper can resolve.
-- The required remote tool set is `git`, `jq`, `herdr`, compatible `tasks-axi`, `treehouse`, and at least one of `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, or `kimi`; macOS additionally requires `lsof` so the doctor and guard can prove which process owns the session socket.
+- The required remote tool set is `git`, `jq`, `herdr`, compatible `tasks-axi`, `treehouse`, and at least one of `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, or `kimi`; macOS additionally requires `lsof` so the doctor and guard can prove which process owns the session socket, and a `perl` on the launch agent's PATH so the guard can start the server as the leader of its own session.
 - Each worker runtime's own `/login`, and any keychain password prompt that login needs.
 
 Firstmate never writes an auto-login password, never changes FileVault, and never stores an account password.

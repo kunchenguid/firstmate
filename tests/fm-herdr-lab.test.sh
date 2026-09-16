@@ -556,7 +556,7 @@ run_launchagent_fake() {
 }
 
 test_launchagent_provision_renders_and_tears_down() {
-  local name="fm-lab-agent-$$" uid label plist out root line
+  local name="fm-lab-agent-$$" uid label plist out root line shell
   install_launchagent_fakes
   uid=$(id -u)
   label="dev.firstmate.herdr-lab.$name"
@@ -593,6 +593,33 @@ PY
     assert_contains "$out" "session=Aqua run_at_load=True keep_alive={'SuccessfulExit': False} throttle=10" \
       "the plist does not carry the fm-remote launch agent contract"
     assert_contains "$out" "log=$TRIPWIRES/$name.launchagent.log" "the plist does not log into the lab state directory"
+    # The lab agent must be the fm-remote agent bin/fm-remote-doctor.sh
+    # installs, differing only in label, command, and log: compare the
+    # provisioned plist against that production shape as parsed plists.
+    shell=${SHELL:-}
+    [ -n "$shell" ] && [ -x "$shell" ] || shell=/bin/sh
+    fm_remote_herdr_render_launch_agent dev.firstmate.herdr.fm-remote "$shell" \
+      "exec '$root/bin/fm-remote-herdr-guard.sh' '$FAKEBIN/herdr' 'fm-remote'" \
+      "$TMP_ROOT/Library/Logs/dev.firstmate.herdr.fm-remote.log" > "$TMP_ROOT/$name.production.plist"
+    out=$(python3 - "$plist" "$TMP_ROOT/$name.production.plist" <<'PY'
+import plistlib
+import sys
+
+lab, production = (plistlib.load(open(path, "rb")) for path in sys.argv[1:3])
+lab_args, production_args = lab.pop("ProgramArguments"), production.pop("ProgramArguments")
+parameters = ("Label", "StandardOutPath", "StandardErrorPath")
+same_parameters = [key for key in parameters if lab.pop(key) == production.pop(key)]
+drift = sorted(key for key in set(lab) | set(production) if lab.get(key) != production.get(key))
+print("drift=" + (",".join(drift) or "none"))
+print("same_parameters=" + (",".join(same_parameters) or "none"))
+print("same_shell_and_flags=%s" % (lab_args[:3] == production_args[:3]))
+print("same_command=%s" % (lab_args[3] == production_args[3]))
+PY
+    ) || fail "the lab and production launch agents could not be compared as plists"
+    assert_contains "$out" "drift=none" "the lab launch agent differs from the fm-remote contract beyond label, command, and log: $out"
+    assert_contains "$out" "same_parameters=none" "the lab launch agent shares a label or log path with the fm-remote agent: $out"
+    assert_contains "$out" "same_shell_and_flags=True" "the lab launch agent does not run its command through the same login-shell flags: $out"
+    assert_contains "$out" "same_command=False" "the lab launch agent runs the fm-remote session's command: $out"
   fi
   if [ -x /usr/bin/plutil ]; then
     /usr/bin/plutil -lint "$plist" >/dev/null || fail "the rendered launch agent does not pass plutil -lint"

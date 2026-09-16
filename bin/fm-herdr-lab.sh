@@ -41,10 +41,11 @@
 # bin/fm-remote-doctor.sh runs the fm-remote server, so a lab can observe
 # launchd supervision. Provision takes the same prepare step and tripwire as
 # provision, refuses a label already loaded in gui/<uid> or user/<uid>, renders
-# that launch agent contract around <code-root>/bin/fm-remote-herdr-guard.sh
-# under the one label dev.firstmate.herdr-lab.<session>, keeps its plist and
-# log in the lab state directory rather than ~/Library/LaunchAgents, and
-# bootstraps it into gui/<uid>. It also records the load state of the
+# the fm-remote launch agent contract that bin/fm-remote-herdr-owner-lib.sh
+# owns around <code-root>/bin/fm-remote-herdr-guard.sh under the one label
+# dev.firstmate.herdr-lab.<session>, keeps its plist and log in the lab state
+# directory rather than ~/Library/LaunchAgents, and bootstraps it into
+# gui/<uid>. It also records the load state of the
 # dev.firstmate.herdr and dev.firstmate.herdr.fm-remote launch agents, which
 # teardown requires to be identical afterward. Restart, kill, and print act
 # only on a recorded lab label; kill signals the job process itself, or the
@@ -54,6 +55,10 @@
 # leaves the launch agent log in place as evidence. Plain provision refuses a
 # session that a lab launch agent runs.
 set -u
+
+FM_HERDR_LAB_BIN_DIR=$(CDPATH='' cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+# shellcheck source=bin/fm-remote-herdr-owner-lib.sh
+. "$FM_HERDR_LAB_BIN_DIR/fm-remote-herdr-owner-lib.sh"
 
 fm_herdr_lab_error() {
   echo "fm-herdr-lab: $*" >&2
@@ -476,9 +481,9 @@ fm_herdr_lab_provision() { # <session>
 #
 # A server that provision starts is a child of the caller, so it cannot show
 # what launchd supervision does to a server. The launch agent lab runs a code
-# root's guard under launchd in gui/<uid>, in the contract render_launch_agent
-# in bin/fm-remote-doctor.sh gives the fm-remote server; a change to that
-# contract must be mirrored in fm_herdr_lab_render_launch_agent.
+# root's guard under launchd in gui/<uid>, rendered by the same
+# fm_remote_herdr_render_launch_agent that bin/fm-remote-doctor.sh installs
+# for the fm-remote server, so only the label, command, and log differ.
 
 fm_herdr_lab_launchagent_label() { # <session>
   printf 'dev.firstmate.herdr-lab.%s' "$1"
@@ -518,45 +523,6 @@ fm_herdr_lab_launchagent_protected_state() {
 
 fm_herdr_lab_shell_quote() { # <string>
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
-}
-
-fm_herdr_lab_xml_escape() { # <string>
-  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
-}
-
-fm_herdr_lab_render_launch_agent() { # <label> <login-shell> <shell-command> <log>
-  cat <<XML
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Label</key>
-	<string>$(fm_herdr_lab_xml_escape "$1")</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>$(fm_herdr_lab_xml_escape "$2")</string>
-		<string>-l</string>
-		<string>-c</string>
-		<string>$(fm_herdr_lab_xml_escape "$3")</string>
-	</array>
-	<key>LimitLoadToSessionType</key>
-	<string>Aqua</string>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>KeepAlive</key>
-	<dict>
-		<key>SuccessfulExit</key>
-		<false/>
-	</dict>
-	<key>ThrottleInterval</key>
-	<integer>10</integer>
-	<key>StandardOutPath</key>
-	<string>$(fm_herdr_lab_xml_escape "$4")</string>
-	<key>StandardErrorPath</key>
-	<string>$(fm_herdr_lab_xml_escape "$4")</string>
-</dict>
-</plist>
-XML
 }
 
 # Prints "<pid> <command>" for every process still running this session's
@@ -647,7 +613,7 @@ fm_herdr_lab_launchagent_provision() { # <session> <code-root>
   # Recorded before bootstrap, so teardown boots the job out even when this
   # provision stops partway.
   printf 'code_root=%s\n' "$root" > "$record" || return 1
-  fm_herdr_lab_render_launch_agent "$label" "$shell" "$program" "$log" > "$plist" || return 1
+  fm_remote_herdr_render_launch_agent "$label" "$shell" "$program" "$log" > "$plist" || return 1
   plutil -lint "$plist" >/dev/null 2>&1 || {
     fm_herdr_lab_error "the rendered launch agent is not a valid plist: $plist"
     return 1

@@ -216,10 +216,6 @@ launch_agent_shell_quote() { # <value>
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
-launch_agent_xml_escape() { # <value>
-  printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
-}
-
 # Directory Services UserShell is the account's real login shell on darwin
 # (bash, fish, zsh, ...). Fall back without failing the render: $SHELL, then
 # /bin/sh. Separate -l and -c so fish accepts the flags.
@@ -259,6 +255,8 @@ resolve_launch_agent_shell() {
 # unconditional KeepAlive would respawn the job every throttle interval
 # forever while a foreign server holds the socket, exactly the loop this guard
 # replaces, and would never let the guard's "nothing to do" verdict rest.
+# bin/fm-remote-herdr-owner-lib.sh owns that contract's render, which the lab
+# in bin/fm-herdr-lab.sh loads under its own label.
 launch_agent_guard_path() {
   printf '%s/bin/fm-remote-herdr-guard.sh' "$FM_ROOT"
 }
@@ -271,41 +269,7 @@ launch_agent_exec_command() { # <resolved-herdr-path>
 }
 
 render_launch_agent() { # <resolved-herdr-path> <resolved-login-shell>
-  local herdr_bin=$1 shell=$2 exec_cmd shell_xml
-  shell_xml=$(launch_agent_xml_escape "$shell")
-  exec_cmd=$(launch_agent_exec_command "$herdr_bin")
-  cat <<XML
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Label</key>
-	<string>$LAUNCH_AGENT_LABEL</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>$shell_xml</string>
-		<string>-l</string>
-		<string>-c</string>
-		<string>$exec_cmd</string>
-	</array>
-	<key>LimitLoadToSessionType</key>
-	<string>Aqua</string>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>KeepAlive</key>
-	<dict>
-		<key>SuccessfulExit</key>
-		<false/>
-	</dict>
-	<key>ThrottleInterval</key>
-	<integer>10</integer>
-	<key>StandardOutPath</key>
-	<string>$LAUNCH_AGENT_LOG</string>
-	<key>StandardErrorPath</key>
-	<string>$LAUNCH_AGENT_LOG</string>
-</dict>
-</plist>
-XML
+  fm_remote_herdr_render_launch_agent "$LAUNCH_AGENT_LABEL" "$2" "$(launch_agent_exec_command "$1")" "$LAUNCH_AGENT_LOG"
 }
 
 launch_agent_contract_matches() { # <resolved-login-shell>
@@ -677,7 +641,7 @@ check_herdr_server() {
         if fm_remote_herdr_process_leads_session "${birth#* }"; then
           record herdr-server "ok: session $HERDR_SESSION_NAME is running in the Aqua login session (pid ${birth#* }, ${birth%% *}); it leads its own session, as Herdr saved SSH machines require"
         else
-          record herdr-server "ok: session $HERDR_SESSION_NAME is running in the Aqua login session (pid ${birth#* }, ${birth%% *}); it does not lead its own session, so Herdr saved SSH machines refuse it"
+          record herdr-server "ok: session $HERDR_SESSION_NAME is running in the Aqua login session (pid ${birth#* }, ${birth%% *}), which is all a remote second mate needs; that server does not lead its own session, so Herdr saved SSH machines refuse it until it is restarted, and neither updating Firstmate nor --fix restarts a running Aqua-born server because the restart closes its panes; when that is acceptable, run 'herdr server stop --session $HERDR_SESSION_NAME && launchctl kickstart -k gui/$UID_NUM/$LAUNCH_AGENT_LABEL' on that account and the parent firstmate relaunches its mates"
         fi
         ;;
       nolsof)
@@ -794,7 +758,7 @@ reload_launch_agent() { # <check-to-report-under>
     return 1
   fi
   if ! wait_for_herdr_server; then
-    fix_report "$report" failed "the herdr server for session $HERDR_SESSION_NAME did not come up inside the Aqua launch agent within 10s"
+    fix_report "$report" failed "the herdr server for session $HERDR_SESSION_NAME did not come up inside the Aqua launch agent within 10s; the guard's own reason is in $LAUNCH_AGENT_LOG"
     return 1
   fi
   fix_report "$report" applied "bootstrapped and started $LAUNCH_AGENT_LABEL in gui/$UID_NUM"

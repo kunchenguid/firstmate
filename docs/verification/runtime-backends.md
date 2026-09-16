@@ -901,7 +901,7 @@ Measured 2026-09-15 on macOS 15.7.3 (Darwin 24.6.0) aarch64 with Herdr 0.9.0 and
 Herdr advertises `detached_server_daemon` only for a server whose `getsid(0)` equals its own pid (`src/platform/mod.rs:157-159`, computed once at API start in `src/api/server.rs:70`), and `herdr machine add` refuses a saved SSH machine whose server lacks it.
 launchd starts every job as a process-group leader inside launchd's own session, where `setsid()` fails with `EPERM`, so a job can never take that shape in place.
 
-Each run used `bin/fm-herdr-lab.sh launchagent provision <session> <code root>`, which renders the fm-remote launch agent contract (login shell `-l -c 'exec <guard> <herdr> <session>'`, `LimitLoadToSessionType=Aqua`, `RunAtLoad`, `KeepAlive={SuccessfulExit=false}`, `ThrottleInterval=10`) under a lab-only label in `gui/501`, where `launchctl print` reported `exit timeout = 5`.
+Each run used `bin/fm-herdr-lab.sh launchagent provision <session> <code root>`, which renders the fm-remote launch agent contract through `bin/fm-remote-herdr-owner-lib.sh`, the same render the doctor installs (login shell `-l -c 'exec <guard> <herdr> <session>'`, `LimitLoadToSessionType=Aqua`, `RunAtLoad`, `KeepAlive={SuccessfulExit=false}`, `ThrottleInterval=10`), under a lab-only label in `gui/501`, where `launchctl print` reported `exit timeout = 5`.
 
 | Launch shape | launchd job | herdr server | `detached_server_daemon` |
 | --- | --- | --- | --- |
@@ -918,7 +918,7 @@ Each run used `bin/fm-herdr-lab.sh launchagent provision <session> <code root>`,
 - SIGKILL of the server made the supervisor exit 137, recorded as `last exit code = 137`, so `KeepAlive={SuccessfulExit=false}` still tells a clean stop from a crash.
 - `launchctl bootout` delivered the same forwarded SIGTERM and clean exit, and every run ended with the label unloaded, no process of the lab session left, the lab session deleted, and the `default` session's server pid unchanged.
 
-`bin/fm-test-run.sh tests/fm-remote-herdr-guard.test.sh` pins the supervised start, its session leadership, the preserved launchd label, exit-status and signal propagation, process-group cleanup, and the fallback without a usable perl; `tests/fm-remote-doctor.test.sh` pins the doctor's session-leader evidence; `tests/fm-herdr-lab.test.sh` pins the launch agent lab's confinement to its own label.
+`bin/fm-test-run.sh tests/fm-remote-herdr-guard.test.sh` pins the supervised start, its session leadership, the preserved launchd label, exit-status and signal propagation, process-group cleanup, and the refusal to start or take over without a usable perl; `tests/fm-remote-doctor.test.sh` pins the doctor's session-leader evidence and that the consent-required restart of an earlier-shape server is named, never applied; `tests/fm-herdr-lab.test.sh` pins the launch agent lab's confinement to its own label and that its plist matches the fm-remote contract in every key but label, command, and log.
 Refresh this record by rerunning `bin/fm-herdr-lab.sh launchagent provision` on a Mac with a GUI login whenever the launch agent contract or the supervisor changes.
 
 ### Client selection
