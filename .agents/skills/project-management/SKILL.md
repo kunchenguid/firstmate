@@ -82,6 +82,12 @@ Initialization configures the local gate and does not vendor a no-mistakes skill
 Do not create a commit merely because initialization ran.
 If doctor reports an environment, authentication, or daemon problem, resolve that blocker before dispatching work and never restart the shared daemon from a project operation.
 
+A freshly created GitHub repository can come back with zero commits, since `gh-axi repo create` does not auto-initialize with a README: git cannot create a worktree for a branch with zero commits, so an empty repo is otherwise a dead end no crewmate can reach.
+Run `bin/fm-seed-empty-repo.sh <project>` to seed exactly that first commit before attempting to clone or dispatch a crewmate against it.
+That script is the sixth sanctioned exception to `AGENTS.md` hard rule #1 and is narrow by construction: it verifies live against the GitHub API, never by trusting a flag or argument, that the repo genuinely has zero commits on every branch, then pushes one `git commit --allow-empty` and nothing else.
+This path applies strictly to a repo with zero commits.
+Once a project has any real history, this path never applies again, and every subsequent change goes through a crewmate as normal.
+
 ## Remove
 
 Project removal is destructive.
