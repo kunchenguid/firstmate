@@ -290,16 +290,15 @@ correct answer. Three things this run established that no amount of reading woul
    nothing about the crew layer depends on DSH. The captain's DSH ancestry does not leak into a
    tmux pane: a pane is a child of the tmux server, so the worker resolves its own harness (verified:
    `FM_DSH_HARNESS` is not in the tmux session environment).
-2. **The default Claude launch wedges on a dialog, and the readiness gate calls it success.** With
+2. **The readiness gate does not detect the already-documented bypass dialog.** With
    `--dangerously-skip-permissions` (the default when `config/claude-permission-mode` is absent),
-   Claude Code parks on its Bypass Permissions warning on any machine where it has not been accepted
-   before. Its cursor sits on **"No, exit"**, and firstmate's key plane carries only Enter/Escape/C-c
-   with no arrow navigation, so the dialog is unanswerable from the guard. `fm-claude-trust.sh`
-   pre-registers `hasTrustDialogAccepted`, which is the folder-trust dialog, not this one. The
-   spawn still reported `spawned`.
-   **Workaround, verified:** `printf 'auto\n' > config/claude-permission-mode`, which launches with
-   `--permission-mode auto`; the worker then started its brief immediately. The readiness gate not
-   noticing a blocking dialog is the part worth fixing.
+   Claude Code parks on its once-per-machine Bypass Permissions warning, whose cursor sits on
+   **"No, exit"** and which firstmate's Enter/Escape/C-c key plane cannot answer. This is NOT a new
+   finding: [`references/harness/claude.md`](../.agents/skills/harness-adapters/references/harness/claude.md)
+   documents the dialog, the refusal to send Enter, and the `config/claude-permission-mode=auto`
+   remedy in full. The gap is that the spawn's readiness gate reported `spawned` while the worker
+   sat on that dialog, where the trust-flag path is explicitly refused instead. Verified the remedy:
+   with `auto` set, the worker started its brief immediately and produced its deliverable.
 3. **The primary checkout must be on its default branch.** The spawn warned `WORKTREE TANGLE` because
    this adapter is being developed on `feat/dsh-primary-adapter` in the primary checkout. Advisory
    here, but it is the intended check working.
