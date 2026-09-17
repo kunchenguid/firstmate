@@ -467,6 +467,8 @@ STUB
       fm_dod_block "$mode" "$id"
     ) > "$brief_dod"
     awk '/^# Definition of done$/ { emit=1 } emit' "$payload" > "$delivered_dod"
+    # shellcheck disable=SC2031 # fm_dod_block's own "local mode" parameter shadows this loop
+    # variable only inside the subshell above; this loop's $mode is never reassigned.
     cmp -s "$brief_dod" "$delivered_dod" \
       || fail "$mode: promotion and ordinary ship launches delivered different Definitions of done"
   done
