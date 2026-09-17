@@ -55,7 +55,8 @@ make_secondmate_dir() {
 }
 
 # A genuine linked git worktree: the shape every crewmate/scout task worktree
-# has (git-dir != git-common-dir), which must keep the hook inert.
+# has (git-dir != git-common-dir). It is a child while no session owns its own
+# state/.lock, and a linked-worktree primary home once this session does.
 make_crewmate_worktree_dir() {
   local base=$1 dir=$2
   fm_git_worktree "$base" "$dir" fm/autoarm-test-branch
@@ -66,13 +67,15 @@ make_crewmate_worktree_dir() {
 }
 
 # Run the hook as a child of the fake harness holding the fixture home's
-# session lock. $1 = fixture dir. Any extra env assignments must be exported
-# before invocation. Captures stdout+stderr; exit code on stdout of the caller.
+# session lock. $1 = fixture dir; $2 (optional) replaces the fake harness pid in
+# state/.lock, for a lock this session does not own. Any extra env assignments
+# must be exported before invocation. Captures stdout+stderr; exit code on
+# stdout of the caller.
 run_autoarm() {
-  local dir=$1 rc=0
+  local dir=$1 lock=${2:-} rc=0
   printf '%s\n' '{"session_id":"sess-autoarm","stop_hook_active":false}' \
-    | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
-        printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+    | FM_HOME="$dir" FM_TEST_LOCK_PID="$lock" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "${FM_TEST_LOCK_PID:-$$}" > "$FM_HOME/state/.lock"
         "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
       ' 2>&1 || rc=$?
   printf 'RC=%s\n' "$rc" >&2
@@ -241,6 +244,9 @@ record_watcher_lock() {
 
 # --- scope and gates ----------------------------------------------------------
 
+# A child task worktree never owns a session lock: nothing in it runs session
+# start. A dead recorded pid proves scope refuses before the stale-lock reclaim
+# path, which would otherwise adopt the child as a home.
 test_inert_in_child_worktree() {
   local base dir out status
   base="$TMP_ROOT/crew-base"
@@ -248,11 +254,28 @@ test_inert_in_child_worktree() {
   make_crewmate_worktree_dir "$base" "$dir" >/dev/null
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" actionable
-  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  out=$(run_autoarm "$dir" 9999999 2>/dev/null); status=$?
   expect_code 0 "$status" "hook must stay inert in a child task worktree"
   [ ! -e "$dir/state/arm-ran" ] || fail "hook armed inside a child worktree"
   [ ! -e "$dir/state/.claude-autoarm-epoch" ] || fail "hook wrote an epoch inside a child worktree"
+  [ "$(cat "$dir/state/.lock")" = 9999999 ] || fail "hook reclaimed a lock inside a child worktree"
   pass "auto-arm: inert in a linked child worktree even when in-flight"
+}
+
+# The same linked worktree is a primary home once this session owns its own
+# state/.lock (upstream #1809): the hook arms exactly as in a plain checkout.
+test_active_in_linked_worktree_primary_owning_lock() {
+  local base dir out status
+  base="$TMP_ROOT/linked-primary-base"
+  dir="$TMP_ROOT/linked-primary-home"
+  make_crewmate_worktree_dir "$base" "$dir" >/dev/null
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "an unmarked linked-worktree primary whose lock this session owns must get the same active auto-arm as a plain checkout"
+  [ -e "$dir/state/arm-ran" ] || fail "hook did not arm in a linked-worktree primary home"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "linked-worktree primary epoch must record outcome=rewake"
+  pass "auto-arm: active in an unmarked linked-worktree primary home on lock evidence"
 }
 
 test_inert_without_session_lock() {
@@ -1234,6 +1257,7 @@ test_fm_lock_status_still_works_with_shared_lib() {
 }
 
 test_inert_in_child_worktree
+test_active_in_linked_worktree_primary_owning_lock
 test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
 test_inert_when_lock_held_by_other_harness

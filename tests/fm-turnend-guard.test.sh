@@ -226,7 +226,8 @@ make_secondmate_dir() {
 
 # A genuine linked `git worktree` of a base repo - the shape bin/fm-spawn.sh
 # always hands crewmate/scout tasks working on firstmate itself. git-dir and
-# git-common-dir differ here, unlike a plain checkout.
+# git-common-dir differ here, unlike a plain checkout. With no state/.lock this
+# session owns it stays a child; the linked-primary tests below add that lock.
 make_crewmate_worktree_dir() {
   local base=$1 dir=$2
   fm_git_worktree "$base" "$dir" fm/turnend-guard-test-branch
@@ -239,8 +240,8 @@ make_crewmate_worktree_dir() {
 # A secondmate home's OWN child crew/scout worktree: a genuine linked git
 # worktree of the secondmate home, so git-dir != git-common-dir exactly as for a
 # main-home child worktree. A child worktree never carries the gitignored
-# .fm-secondmate-home marker, so the marker force-include never fires for it and
-# it stays exempt through the linked-worktree git-dir test.
+# .fm-secondmate-home marker and owns no state/.lock, so neither the marker
+# force-include nor the lock evidence brings it into scope.
 make_secondmate_child_worktree_dir() {
   local home=$1 dir=$2
   git -C "$home" worktree add --quiet -b fm/turnend-secondmate-child "$dir"
@@ -269,6 +270,14 @@ run_hook() {
   local dir=$1 stop_active=$2 home
   home=$(cd "$dir" && pwd)
   printf '{"stop_hook_active":%s}' "$stop_active" | PATH="$BLIND_BIN:$PATH" CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+}
+
+# Same as run_hook with the real process table, for cases whose scope decision
+# is the hook's own ancestry: the blind shim answers every parent query with 1.
+run_hook_with_ancestry() {
+  local dir=$1 stop_active=$2 home
+  home=$(cd "$dir" && pwd)
+  printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
 }
 
 nonexistent_pid() {
@@ -604,9 +613,8 @@ test_hook_secondmate_reinvoke_recovery_loop() {
 }
 
 # The marker force-include must guard only the secondmate's OWN home, never its
-# children: a secondmate's linked crew/scout worktree carries no marker, so it
-# stays exempt by the same git-dir/git-common-dir test that exempts the main
-# home's children.
+# children: a secondmate's linked crew/scout worktree carries no marker and owns
+# no lock, so it stays exempt exactly like the main home's children.
 test_hook_silent_in_secondmate_child_worktree() {
   local home dir out status
   home=$(make_secondmate_dir "$TMP_ROOT/hook-sm-child-home")
@@ -642,8 +650,8 @@ test_hook_blocks_in_treehouse_leased_secondmate_home() {
 
 # Anti-spoof: a linked worktree with an INVALID (empty) marker must NOT be
 # force-included. Marker validation rejects it, so it falls through to the
-# linked-worktree exemption and stays exempt - a stray/empty marker file can
-# never spoof a child worktree into being guarded.
+# lock-evidence test, which an unowned child fails - a stray/empty marker file
+# can never spoof a child worktree into being guarded.
 test_hook_exempts_linked_worktree_with_stray_marker() {
   local base dir out status
   base="$TMP_ROOT/hook-stray-marker-base"
@@ -660,7 +668,7 @@ test_hook_exempts_linked_worktree_with_stray_marker() {
 # Anti-spoof under any locale: a NON-ASCII marker id must be REJECTED by the
 # ASCII-only (C-collation) allowlist, so it can never force-include a linked
 # worktree even where the ambient locale's collation would treat it as a letter.
-# Rejection -> git-dir exemption -> the linked worktree stays exempt.
+# Rejection -> lock-evidence test -> the unowned linked worktree stays exempt.
 test_hook_exempts_linked_worktree_with_non_ascii_marker() {
   local base dir out status
   base="$TMP_ROOT/hook-nonascii-marker-base"
@@ -684,6 +692,42 @@ test_hook_silent_in_crewmate_worktree() {
   expect_code 0 "$status" "hook must never block inside a crewmate task worktree"
   [ -z "$out" ] || fail "hook produced output inside a crewmate task worktree: $out"
   pass "fm-turnend-guard: inert in a crewmate/scout task worktree (linked git worktree) even when unhealthy"
+}
+
+# A primary home that is itself a linked worktree carries no marker. It is in
+# scope on evidence: the state dir is its own state/ and this session owns
+# state/.lock (the hook runs beneath this test shell, whose pid the lock names).
+test_hook_blocks_in_linked_worktree_primary_owning_lock() {
+  local base dir gd gcd out status
+  base="$TMP_ROOT/hook-linked-primary-base"
+  dir="$TMP_ROOT/hook-linked-primary-home"
+  make_crewmate_worktree_dir "$base" "$dir" >/dev/null
+  gd=$(git -C "$dir" rev-parse --git-dir)
+  gcd=$(git -C "$dir" rev-parse --git-common-dir)
+  [ "$gd" != "$gcd" ] || fail "linked-primary fixture must be a linked worktree (git-dir != git-common-dir), got equal: $gd"
+  printf '%s\n' "$$" > "$dir/state/.lock"
+  : > "$dir/state/task1.meta"
+  out=$(run_hook_with_ancestry "$dir" false); status=$?
+  expect_code 2 "$status" "hook must guard an unmarked linked-worktree primary whose lock this session owns"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  assert_contains "$out" "TURN WOULD END BLIND" "block banner must read as an alarm"
+  pass "fm-turnend-guard: blocks a blind turn end in an unmarked linked-worktree primary home on lock evidence"
+}
+
+# The same linked worktree with a lock another session holds is not primary
+# evidence for this session: the hook stays inert rather than guarding a home
+# it does not own.
+test_hook_silent_in_linked_worktree_with_foreign_lock() {
+  local base dir out status
+  base="$TMP_ROOT/hook-linked-foreign-base"
+  dir="$TMP_ROOT/hook-linked-foreign-home"
+  make_crewmate_worktree_dir "$base" "$dir" >/dev/null
+  nonexistent_pid > "$dir/state/.lock"
+  : > "$dir/state/task1.meta"
+  out=$(run_hook_with_ancestry "$dir" false); status=$?
+  expect_code 0 "$status" "hook must stay inert in a linked worktree whose lock this session does not own"
+  [ -z "$out" ] || fail "hook produced output in a linked worktree with a foreign lock: $out"
+  pass "fm-turnend-guard: inert in an unmarked linked worktree whose state/.lock belongs to another session"
 }
 
 test_hook_silent_without_jq() {
@@ -2235,6 +2279,8 @@ test_hook_blocks_in_treehouse_leased_secondmate_home
 test_hook_exempts_linked_worktree_with_stray_marker
 test_hook_exempts_linked_worktree_with_non_ascii_marker
 test_hook_silent_in_crewmate_worktree
+test_hook_blocks_in_linked_worktree_primary_owning_lock
+test_hook_silent_in_linked_worktree_with_foreign_lock
 test_hook_silent_without_jq
 test_hook_silent_without_stdin
 test_hook_runs_fast

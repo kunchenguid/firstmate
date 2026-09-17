@@ -7,9 +7,11 @@
 # deduplication across firings. It owns routine tokenless watcher continuity
 # for Claude primaries (main home and marked secondmate homes):
 #
-#   - Scope: only a genuine primary checkout (plain checkout or validly marked
-#     secondmate home) with AGENTS.md, bin/, and the effective state dir - the
-#     exact fm-turnend-guard.sh scope. Child crew/scout worktrees stay inert.
+#   - Scope: only a genuine primary home (plain checkout, validly marked
+#     secondmate home, or linked worktree owning its own state/.lock) with
+#     AGENTS.md, bin/, and the effective state dir - the exact
+#     fm-turnend-guard.sh scope (bin/fm-primary-scope-lib.sh). Child crew/scout
+#     worktrees stay inert.
 #   - Identity: only when THIS session's harness ancestor holds state/.lock.
 #     When an existing numeric owner fails the shared harness-liveness predicate,
 #     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies

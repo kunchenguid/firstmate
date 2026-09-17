@@ -23,6 +23,7 @@ let restorationInFlight = null;
 let armClose = new WeakMap();
 let armReadiness = new WeakMap();
 let armRecovery = new WeakMap();
+const notPrimaryReported = new Set();
 
 function positiveInteger(name, fallback) {
   const value = Number(process.env[name]);
@@ -90,15 +91,43 @@ function effectivePaths(root) {
   return { root: fmRoot, home: fmHome, state, config };
 }
 
-async function isPrimaryRoot(root, home) {
-  if (!root) return false;
-  if (!existsSync(`${root}/AGENTS.md`) || !existsSync(`${root}/bin`)) return false;
-  if (existsSync(`${root}/.fm-secondmate-home`)) return false;
-  if (home && home !== root && existsSync(`${home}/.fm-secondmate-home`)) return false;
-  const gitDir = await runProcess("git", ["-C", root, "rev-parse", "--git-dir"]);
-  const commonDir = await runProcess("git", ["-C", root, "rev-parse", "--git-common-dir"]);
-  if (gitDir.code !== 0 || commonDir.code !== 0) return false;
-  return gitDir.stdout.trim() === commonDir.stdout.trim();
+// bin/fm-primary-scope-lib.sh owns the primary-home rule for every tracked
+// hook; asking it through bash keeps this plugin on that one rule. Its
+// FM_PRIMARY_SCOPE_REASON names the failed check for the diagnostic below.
+async function primaryScope(paths) {
+  if (!paths.root) return { primary: false, reason: "no root resolved" };
+  const lib = `${paths.root}/bin/fm-primary-scope-lib.sh`;
+  if (!existsSync(lib)) return { primary: false, reason: `${lib} is missing` };
+  const result = await runProcess("bash", [
+    "-c",
+    '. "$1" && if fm_primary_scope_matches "$2" "$3"; then exit 0; fi; printf "%s\n" "$FM_PRIMARY_SCOPE_REASON"; exit 1',
+    "fm-primary-scope",
+    lib,
+    paths.root,
+    paths.state,
+  ]);
+  if (result.code === 0) return { primary: true, reason: "" };
+  const reason = result.stdout.trim() || result.stderr.trim() || `fm_primary_scope_matches exited ${result.code}`;
+  return { primary: false, reason };
+}
+
+function looksLikeFirstmateHome(paths) {
+  return existsSync(`${paths.root}/AGENTS.md`) && existsSync(`${paths.root}/bin`) && existsSync(paths.state);
+}
+
+// Once per session: a firstmate-shaped root that is refused says why, so a
+// primary home in a linked worktree never idles unsupervised in silence. A
+// child task worktree has no state dir and stays silent.
+function reportNotPrimary(paths, client, sessionID, reason) {
+  if (notPrimaryReported.has(sessionID)) return;
+  if (!looksLikeFirstmateHome(paths)) return;
+  notPrimaryReported.add(sessionID);
+  surfaceFailure(
+    paths,
+    client,
+    sessionID,
+    `watcher: FAILED - OpenCode did not arm primary supervision because ${paths.root} is not a primary home: ${reason}`,
+  );
 }
 
 function shouldArm(paths) {
@@ -445,7 +474,11 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
 
 async function beginArm(paths, sessionID, client, predecessorArmPid) {
   if (!sessionID) return { status: "skipped", armChild: null };
-  if (!(await isPrimaryRoot(paths.root, paths.home))) return { status: "not-primary", armChild: null };
+  const scope = await primaryScope(paths);
+  if (!scope.primary) {
+    reportNotPrimary(paths, client, sessionID, scope.reason);
+    return { status: "not-primary", armChild: null };
+  }
   if (!(await sessionOwnsLock(paths))) return { status: "read-only", armChild: null };
   if (child) return { status: "existing", armChild: child };
   if (retryTimer) return { status: "retrying", armChild: null };
