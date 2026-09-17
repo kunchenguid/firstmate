@@ -5,7 +5,9 @@
 # lock, and does the current process descend from that same harness?" decision.
 # bin/fm-lock.sh uses it to acquire and inspect state/.lock;
 # bin/fm-claude-stop-autoarm.sh uses it to prove a Stop hook fires inside the
-# lock-owning primary session before it may arm or rewake.
+# lock-owning primary session before it may arm or rewake; bin/fm-turnend-guard.sh
+# uses it to recognize a read-only session whose fleet lock another live session
+# holds.
 # This file is sourced by scripts and has no side effects on source.
 
 # Cursor process identity is NOT expressible as a command-name pattern and is
@@ -180,4 +182,27 @@ fm_session_lock_owned_by_self() {
 $pids
 EOF
   return 1
+}
+
+# Print the lock pid and return 0 only with positive proof that a DIFFERENT live
+# session owns state dir $1's fleet lock: this process's harness ancestry
+# resolved, the lock pid is none of those ancestors, and it is a live verified
+# harness. That is the read-only session: it may not arm, drain, or repair
+# supervision, so recovery belongs to the holder. A missing or malformed lock, a
+# dead or non-harness holder, and an unresolvable ancestry all return 1, because
+# none of them proves someone else is responsible.
+fm_session_lock_held_by_other_harness() {
+  local state=$1 lock_pid pids pid
+  lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
+  case "$lock_pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  pids=$(fm_harness_ancestry_pids) || return 1
+  while IFS= read -r pid; do
+    [ "$pid" = "$lock_pid" ] && return 1
+  done <<EOF
+$pids
+EOF
+  fm_harness_pid_alive "$lock_pid" || return 1
+  printf '%s\n' "$lock_pid"
 }
