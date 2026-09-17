@@ -769,6 +769,66 @@ test_watcher_poll_delivers_child_ledger_line_to_parent() {
   pass "the real watcher poll delivers a child's terminal ledger line to the parent channel"
 }
 
+test_project_firstmate_absorbs_worker_outcomes_at_its_parent_hop() {
+  local repo_identity authority_id project_home parent_channel line
+  make_world project-firstmate-hop; bind_secondmate local; write_mate_meta
+  project_home=$(cd "$MATE" && pwd -P)
+  repo_identity="sha256:$(printf '%s' alpha | shasum -a 256 | awk '{print $1}')"
+  authority_id="sha256:$(printf '%s' "$project_home\\nalpha\\n$repo_identity" | shasum -a 256 | awk '{print $1}')"
+  printf 'schema=fm-project-firstmate.v1\nproject=alpha\nrepo_identity=%s\nauthority_id=%s\nrepo_path=%s/projects/alpha\n' \
+    "$repo_identity" "$authority_id" "$project_home" > "$MATE/.fm-project-firstmate"
+  cat > "$MATE/.fm-secondmate-parent" <<EOF
+schema=fm-secondmate-parent.v1
+route=local
+parent_home=$MAIN
+parent_role=project-firstmate
+repo_authority_home=$project_home
+repo_authority_id=$authority_id
+repo_identity=$repo_identity
+EOF
+  # shellcheck source=bin/fm-parent-channel-lib.sh disable=SC1091
+  . "$ROOT/bin/fm-parent-channel-lib.sh"
+  parent_channel="$MAIN/state/mate.status"
+  for line in \
+    'done [key=child-outcome-ship-done-12345678]: child ship done: all green' \
+    'failed [key=child-outcome-scout-failed-12345678]: child scout failed: incomplete' \
+    'done [key=inactive-outcome-mate-scout-done]: inactive terminal child=scout fingerprint=abc' \
+    'done [key=child-pr-ship]: child ship PR ready: https://example.test/repo/pull/1' \
+    'done [key=merged-ship]: merged ship https://example.test/repo/pull/1'; do
+    fm_parent_channel_report "$MATE" "$MATE/state" "$line" \
+      || fail "project Firstmate could not absorb a local worker outcome: $line"
+  done
+  assert_no_grep 'child-outcome-' "$parent_channel" \
+    "project Firstmate terminal outcomes reached the root's persistent-supervisor status file"
+  assert_no_grep 'inactive-outcome-' "$parent_channel" \
+    "project Firstmate inactive outcomes reached the root's persistent-supervisor status file"
+  assert_no_grep 'child-pr-' "$parent_channel" \
+    "project Firstmate PR-ready outcomes reached the root's persistent-supervisor status file"
+  assert_no_grep 'merged-' "$parent_channel" \
+    "project Firstmate merged-PR outcomes reached the root's persistent-supervisor status file"
+  fm_parent_channel_report "$MATE" "$MATE/state" \
+    'done [corr=abcdef0123456789]: request-correlated project status summary' \
+    || fail "project Firstmate correlated summary did not reach root"
+  FM_HOME="$MATE" "$ROOT/bin/fm-secondmate-report.sh" "done" fedcba9876543210 \
+    "request-correlated helper summary" \
+    || fail "project Firstmate correlated report helper did not reach root"
+  fm_parent_channel_report "$MATE" "$MATE/state" \
+    'needs-decision [key=captain-hold-rollout-1]: captain hold rollout: choose the launch window' \
+    || fail "project Firstmate captain decision did not reach root"
+  fm_parent_channel_report "$MATE" "$MATE/state" \
+    'blocked [key=project-blocker-release]: project blocker: release access is missing' \
+    || fail "project Firstmate blocker summary did not reach root"
+  assert_grep 'request-correlated project status summary' "$parent_channel" \
+    "request-correlated project summary was not forwarded"
+  assert_grep 'request-correlated helper summary (via-helper)' "$parent_channel" \
+    "request-correlated helper summary was not forwarded through the guarded publisher"
+  assert_grep 'captain hold rollout' "$parent_channel" \
+    "captain decision was not forwarded"
+  assert_grep 'project blocker: release access is missing' "$parent_channel" \
+    "project blocker summary was not forwarded"
+  pass "project Firstmate outcomes stay hop-local except correlated summaries and captain decisions"
+}
+
 # A stalled authoritative state read consumes only the aggregate scan budget.
 # The durable scan position lets the next invocation reach the following child.
 test_stalled_state_read_is_bounded_and_scan_progresses() {
@@ -920,6 +980,7 @@ test_scan_marker_replaces_symlink_safely
 test_nonterminal_and_captain_held_states_do_not_report
 test_watcher_hook_and_idle_secondmate_exemption
 test_watcher_poll_delivers_child_ledger_line_to_parent
+test_project_firstmate_absorbs_worker_outcomes_at_its_parent_hop
 test_stalled_state_read_is_bounded_and_scan_progresses
 test_full_scan_budget_includes_wake_lock_wait
 test_notice_recovery_does_not_duplicate_wake

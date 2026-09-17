@@ -15,6 +15,10 @@ A PR-ready report was the observed symptom, but a finding, a decision, a blocker
 
 The design goal is therefore: the parent channel must not depend on the model remembering to write to it.
 
+Project Firstmates add a bounded routing hop: worker terminal, PR-ready, and merged outcomes stay in the project home's own task ledgers and are absorbed rather than appended to the root Firstmate's persistent-supervisor status file.
+Only correlated replies, captain holds, and explicit project summary, decision, blocker, or milestone keys cross that boundary, while the project Firstmate remains responsible for classifying its own workers locally.
+`bin/fm-parent-channel-lib.sh` owns this allowlist, and `tests/fm-inactive-reconcile.test.sh` covers both the suppressed worker facts and the permitted upward summaries.
+
 ## The design
 
 The delivery rule has one sentence: the scripts report facts, the mate reports judgement.

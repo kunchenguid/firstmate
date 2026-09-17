@@ -96,6 +96,27 @@ FM_HOME="$PFM"
 . "$ROOT/bin/fm-wake-lib.sh"
 # shellcheck source=bin/fm-repo-concurrency-lib.sh disable=SC1091
 . "$ROOT/bin/fm-repo-concurrency-lib.sh"
+identity_repo="$TMP_ROOT/identity-repo"
+identity_remote="$TMP_ROOT/identity-origin.git"
+mkdir -p "$TMP_ROOT/identity-origins"
+fm_git_init_commit "$identity_repo"
+identity_remote="$TMP_ROOT/identity-origins/alpha.git"
+git -C "$identity_repo" remote add origin "$identity_remote"
+path_identity=$(fm_repo_scope_canonical_origin_identity "$identity_repo") \
+  || fail "plain file-path origin could not be normalized"
+git -C "$identity_repo" remote set-url origin "file://$identity_remote"
+file_identity=$(fm_repo_scope_canonical_origin_identity "$identity_repo") \
+  || fail "file URL origin could not be normalized"
+[ "$path_identity" = "$file_identity" ] \
+  || fail "equivalent local path and file URL origins had different identities"
+git -C "$identity_repo" remote set-url origin 'https://Example.COM/Owner/Repo.git'
+https_identity=$(fm_repo_scope_canonical_origin_identity "$identity_repo") \
+  || fail "HTTPS origin could not be normalized"
+git -C "$identity_repo" remote set-url origin 'git@example.com:Owner/Repo.git'
+ssh_identity=$(fm_repo_scope_canonical_origin_identity "$identity_repo") \
+  || fail "SSH origin could not be normalized"
+[ "$https_identity" = "$ssh_identity" ] \
+  || fail "equivalent HTTPS and SSH origins had different identities"
 limit=$(fm_repo_scope_limit "$PFM") || fail "configured repository limit was rejected"
 [ "$limit" = 2 ] || fail "repository limit parser returned $limit instead of 2"
 printf '2\n\n' > "$PFM/config/repo-concurrency"
@@ -184,6 +205,10 @@ TASKS_AXI_BACKEND=markdown tasks-axi add "$spawn_id" "capacity refusal stays que
   --kind scout --file "$spawn_home/data/backlog.md" >/dev/null \
   || fail "could not seed a queued backlog row for the spawn admission test"
 before_backlog=$(cksum "$spawn_home/data/backlog.md")
+before_brief=$(cksum "$spawn_home/data/$spawn_id/brief.md")
+before_data_files=$(find "$spawn_home/data/$spawn_id" -type f -print | sort)
+before_project_entries=$(find "$spawn_home/projects" -mindepth 1 -maxdepth 1 -print | sort)
+before_worktrees=$(git -C "$spawn_home/projects/alpha" worktree list --porcelain)
 fakebin=$(fm_test_make_spawn_fakebin "$TMP_ROOT/spawn-admission-fake" codex)
 launch_log="$TMP_ROOT/spawn-admission.launch"
 : > "$launch_log"
@@ -198,7 +223,50 @@ fi
 printf '%s\n' "$output" | grep -F 'queued: repository subtree has 2 active ship/scout tasks' >/dev/null \
   || fail "real spawn did not explain its queue-capacity refusal"
 [ ! -e "$spawn_home/state/$spawn_id.meta" ] || fail "capacity refusal published task metadata"
+[ ! -e "$spawn_home/data/$spawn_id/launch-brief.md" ] \
+  || fail "capacity refusal published the launch-brief overlay"
+[ "$(find "$spawn_home/data/$spawn_id" -type f -print | sort)" = "$before_data_files" ] \
+  || fail "capacity refusal changed files in the task data directory"
+[ "$(cksum "$spawn_home/data/$spawn_id/brief.md")" = "$before_brief" ] \
+  || fail "capacity refusal changed the source task brief"
+[ "$(find "$spawn_home/projects" -mindepth 1 -maxdepth 1 -print | sort)" = "$before_project_entries" ] \
+  || fail "capacity refusal changed the home project/worktree entries"
+[ "$(git -C "$spawn_home/projects/alpha" worktree list --porcelain)" = "$before_worktrees" ] \
+  || fail "capacity refusal created or removed a repository worktree"
 [ ! -s "$launch_log" ] || fail "capacity refusal created an endpoint or delivered a worker launch"
 [ "$(cksum "$spawn_home/data/backlog.md")" = "$before_backlog" ] \
   || fail "capacity refusal changed the queued backlog row"
+
+external_home="$TMP_ROOT/external/alpha"
+mkdir -p "$(dirname "$external_home")"
+git clone --quiet "$ORIGIN_URL" "$external_home"
+external_id=external-clone-refusal
+fm_test_spawn_brief "$spawn_home" "$external_id" "reject an external clone alias"
+TASKS_AXI_BACKEND=markdown tasks-axi add "$external_id" "external clone path refusal" \
+  --kind scout --file "$spawn_home/data/backlog.md" >/dev/null \
+  || fail "could not seed the external clone-path refusal backlog row"
+before_backlog=$(cksum "$spawn_home/data/backlog.md")
+before_brief=$(cksum "$spawn_home/data/$external_id/brief.md")
+before_worktrees=$(git -C "$spawn_home/projects/alpha" worktree list --porcelain)
+launch_log="$TMP_ROOT/external-clone-refusal.launch"
+: > "$launch_log"
+if output=$(FM_FAKE_LAUNCH_LOG="$launch_log" \
+    fm_test_run_spawn "$spawn_home" "$external_home" "$fakebin" \
+      "$external_id" "$external_home" --scout); then
+  fail "real fm-spawn accepted an external same-origin clone alias"
+else
+  status=$?
+fi
+[ "$status" = 1 ] || fail "external clone-path refusal returned status $status instead of 1"
+printf '%s\n' "$output" | grep -F "task project path must be the task home's canonical owned clone" >/dev/null \
+  || fail "external clone-path refusal did not explain the home-owned clone requirement"
+[ ! -e "$spawn_home/state/$external_id.meta" ] || fail "external clone-path refusal published task metadata"
+[ ! -e "$spawn_home/data/$external_id/launch-brief.md" ] || fail "external clone-path refusal published a launch overlay"
+[ ! -s "$launch_log" ] || fail "external clone-path refusal created an endpoint"
+[ "$(git -C "$spawn_home/projects/alpha" worktree list --porcelain)" = "$before_worktrees" ] \
+  || fail "external clone-path refusal created or removed a repository worktree"
+[ "$(cksum "$spawn_home/data/$external_id/brief.md")" = "$before_brief" ] \
+  || fail "external clone-path refusal changed the source brief"
+[ "$(cksum "$spawn_home/data/backlog.md")" = "$before_backlog" ] \
+  || fail "external clone-path refusal changed the backlog"
 echo "ok - repository subtree capacity serializes sibling homes, repairs leases, reuses relaunch claims, and releases on teardown"

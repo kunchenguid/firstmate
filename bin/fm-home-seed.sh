@@ -769,6 +769,45 @@ refuse_populated_projectless_home() {
   return 1
 }
 
+refuse_project_firstmate_multiple_projects() {
+  local home=$1 project=$2 registry_entries
+  local project_path project_names=() registry_projects=()
+  if [ -L "$home/projects" ] || { [ -e "$home/projects" ] && [ ! -d "$home/projects" ]; }; then
+    echo "error: project Firstmate projects directory is not a real directory: $home/projects" >&2
+    return 1
+  fi
+  for project_path in "$home/projects"/* "$home/projects"/.[!.]* "$home/projects"/..?*; do
+    [ -e "$project_path" ] || [ -L "$project_path" ] || continue
+    project_names+=("$(basename "$project_path")")
+  done
+  if [ "${#project_names[@]}" -gt 0 ]; then
+    for project_path in "${project_names[@]}"; do
+      [ "$project_path" = "$project" ] || {
+        echo "error: project Firstmate home $home contains unrelated project data ($project_path); it must own exactly one repository" >&2
+        return 1
+      }
+    done
+  fi
+  if [ -e "$home/data/projects.md" ] || [ -L "$home/data/projects.md" ]; then
+    [ -f "$home/data/projects.md" ] && [ ! -L "$home/data/projects.md" ] || {
+      echo "error: project Firstmate registry is not a regular file: $home/data/projects.md" >&2
+      return 1
+    }
+    registry_entries=$(awk '$1 == "-" && $2 != "" { print $2 }' "$home/data/projects.md") || {
+      echo "error: cannot inspect project Firstmate registry at $home/data/projects.md" >&2
+      return 1
+    }
+    while IFS= read -r project_path; do
+      [ -n "$project_path" ] && registry_projects+=("$project_path")
+    done <<< "$registry_entries"
+  fi
+  if [ "${#registry_projects[@]}" -gt 1 ] ||
+    { [ "${#registry_projects[@]}" -eq 1 ] && [ "${registry_projects[0]}" != "$project" ]; }; then
+    echo "error: project Firstmate home $home has multiple or mismatched registered repositories; it must own exactly $project" >&2
+    return 1
+  fi
+}
+
 refuse_projectful_projectless_charter() {
   local id=$1 brief=$2 project_clones
   project_clones=$(brief_section_text "$brief" "Project clones")
@@ -782,21 +821,27 @@ refuse_projectful_projectless_charter() {
 }
 
 refuse_duplicate_project_authority() {
-  local candidate_repo_id=$1 candidate_home=$2 line existing_id existing_home
+  local candidate_repo_key=$1 candidate_home=$2 line existing_id existing_home existing_key
   [ -f "$REG" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in "- "*) ;; *) continue ;; esac
     secondmate_registry_parse_line "$line" || return 1
     existing_id=$SECONDMATE_REGISTRY_ID
     existing_home=$SECONDMATE_REGISTRY_HOME
-    [ "$existing_home" = "$candidate_home" ] && continue
-    [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
     if [ -f "$existing_home/$PROJECT_FIRSTMATE_MARKER" ] || [ -L "$existing_home/$PROJECT_FIRSTMATE_MARKER" ]; then
       fm_repo_scope_marker_parse "$existing_home" || {
         echo "error: registered project Firstmate $existing_id has an invalid authority marker; cannot prove repository uniqueness" >&2
         return 1
       }
-      if [ "$FM_REPO_SCOPE_REPO_ID" = "$candidate_repo_id" ]; then
+      [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || {
+        echo "error: project Firstmate $existing_id has a remote route; cannot prove repository uniqueness" >&2
+        return 1
+      }
+      existing_key=$(fm_repo_scope_canonical_origin_identity "$existing_home/projects/$FM_REPO_SCOPE_PROJECT") || {
+        echo "error: registered project Firstmate $existing_id has no verifiable repository origin" >&2
+        return 1
+      }
+      if [ "$existing_key" = "$candidate_repo_key" ] && [ "$existing_home" != "$candidate_home" ]; then
         echo "error: repository already has project Firstmate authority $existing_id at $existing_home" >&2
         return 1
       fi
@@ -942,6 +987,9 @@ seed_home() {
   validate_home_assignment "$id" "$home"
   validate_operational_dirs "$home" || return 1
   validate_seed_leaf_files "$home" || return 1
+  if [ "$requested_role" = project-firstmate ]; then
+    refuse_project_firstmate_multiple_projects "$home" "$1" || return 1
+  fi
   if [ -e "$home/config/$PROJECT_CONCURRENCY_CONFIG" ] || [ -L "$home/config/$PROJECT_CONCURRENCY_CONFIG" ]; then
     fm_repo_scope_limit "$home" >/dev/null || {
       echo "error: existing project repository concurrency config is invalid: $FM_REPO_SCOPE_LAST_ERROR" >&2
@@ -984,7 +1032,7 @@ seed_home() {
   SEED_HOME_BACKED_UP=1
 
   if [ "$requested_role" = project-firstmate ]; then
-    repo_identity_candidate="sha256:$(fm_repo_scope_clone_identity "$PROJECTS/$1")" || {
+    repo_identity_candidate=$(fm_repo_scope_canonical_origin_identity "$PROJECTS/$1") || {
       echo "error: cannot establish stable repository identity for $1 at $PROJECTS/$1" >&2
       return 1
     }
