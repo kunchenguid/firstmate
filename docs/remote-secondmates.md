@@ -408,7 +408,7 @@ Launch or recover the remote second mate with the same command used for a local 
 bin/fm-spawn.sh <id> --secondmate
 ```
 
-The `remote=1` registration in `data/secondmates.md` selects remote placement; there is no `--remote` flag.
+Remote placement is selected by the route's recorded `host:` field in `data/secondmates.md`, never by a `--remote` flag.
 Oh My Pi (`omp`) is supported by both the ordinary remote spawn path and host-local `launch` and `relaunch`, using the same host-local secondmate launch contract as a local omp secondmate.
 The primary then takes these steps:
 
