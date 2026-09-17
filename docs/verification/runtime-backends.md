@@ -2026,7 +2026,7 @@ The evidence below was produced on 2026-09-05 against omp 18.1.11 (`~/.local/bin
 ### Process identity and markers
 
 `ps -o comm=` reports the bare name `omp` for the agent process, from both its `!` bash path and the model's bash tool, so identity is the anchored name; `ompd` and `comp` never match.
-omp publishes no harness marker: `PI_CODING_AGENT` is absent from the binary, and the default profile sets neither `PI_CODING_AGENT_DIR` nor `OMP_PROFILE` in the process environment.
+In the 18.1.11 observation, omp published no harness marker: `PI_CODING_AGENT` was absent from the binary, and the default profile set neither `PI_CODING_AGENT_DIR` nor `OMP_PROFILE` in the process environment.
 `FM_OMP_HARNESS=omp` is Firstmate's own launch marker and wins over an inherited `CLAUDECODE` only under a real omp ancestor; `tests/fm-omp-harness.test.sh` pins both directions with real processes.
 
 On 2026-09-14 against omp 18.1.22 on macOS 26 arm64 the launcher shape changed: `~/.bun/bin/omp` is a `#!/usr/bin/env bun` script, so `ps -o comm=` reports `bun` and the argv carries the launcher path, while omp sets `OMPCODE=1` for its child/tool processes alongside `CLAUDECODE=1` for compatibility (both absent from the launching shell).
