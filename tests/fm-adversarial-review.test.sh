@@ -50,6 +50,9 @@
 #   (ag) everything posted into the PR reads on another machine: no host-local
 #     path reaches the forge, and each lens report is inlined rather than
 #     pointed at
+#   (ah) an inlined lens report reaches the PR verbatim: the markup it quotes
+#     and its line structure survive the renderer, and its own code fence does
+#     not end the block it is posted in
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -173,6 +176,80 @@ write_lens_report() {
     printf '%s' "$findings"
     printf 'blind_spots: none seen\n'
   } > "$file"
+}
+
+# Normalize a posted comment body the way a CommonMark renderer reads it, and
+# print one `<kind>\t<line>` record per line: `code` for a line inside a fenced
+# block (rendered verbatim - tags, markup and line breaks all survive), `fence`
+# for the fence lines themselves, `text` for markdown prose, where the renderer
+# consumes tags and folds single newlines away. The contract under test is the
+# comment body the loop hands the forge, so it is parsed into what the markup
+# means rather than grepped for the characters it happens to use.
+md_fence_view() {
+  awk '
+    {
+      line = $0
+      s = line
+      sub(/^ {0,3}/, "", s)
+      run = 0
+      if (s ~ /^`{3,}/) {
+        match(s, /^`+/)
+        run = RLENGTH
+        rest = substr(s, RLENGTH + 1)
+      }
+      if (open == 0) {
+        # An opening backtick fence may not carry a backtick in its info string.
+        if (run > 0 && index(rest, "`") == 0) {
+          open = run
+          printf "fence\t%s\n", line
+          next
+        }
+        printf "text\t%s\n", line
+        next
+      }
+      # Only a run at least as long as the opening one closes the block; a
+      # shorter run is content.
+      if (run >= open && rest ~ /^[ \t]*$/) {
+        open = 0
+        printf "fence\t%s\n", line
+        next
+      }
+      printf "code\t%s\n", line
+    }
+    END { if (open != 0) printf "unclosed\t\n" }
+  '
+}
+
+# assert_rendered_verbatim <posted-body> <report-file> <msg>: every line of the
+# report must appear in the posted body in order, unmodified, and inside one
+# fenced block - which is what "a reader of the PR sees the report the lens
+# wrote" means once the renderer has had it.
+assert_rendered_verbatim() {
+  local posted=$1 report=$2 msg=$3
+  md_fence_view < "$posted" | awk -v rf="$report" '
+    BEGIN {
+      n = 0
+      while ((getline l < rf) > 0) { n++; want[n] = l }
+      close(rf)
+      if (n == 0) exit 2
+    }
+    {
+      m++
+      tab = index($0, "\t")
+      kind[m] = substr($0, 1, tab - 1)
+      text[m] = substr($0, tab + 1)
+    }
+    END {
+      for (i = 1; i + n - 1 <= m; i++) {
+        ok = 1
+        for (j = 1; j <= n; j++) {
+          if (kind[i + j - 1] != "code" || text[i + j - 1] != want[j]) { ok = 0; break }
+        }
+        if (ok) exit 0
+      }
+      exit 1
+    }
+  ' || fail "$msg"
 }
 
 test_condition_needs_a_pr_open_line() {
@@ -1787,6 +1864,89 @@ test_posted_evidence_is_readable_from_the_pr_alone() {
   pass "everything posted into the PR is readable from the PR alone"
 }
 
+# A lens that reviews UI writes about markup, so its report quotes markup. The
+# report is evidence only if the reader gets it as written: posted as prose, a
+# quoted `<div>` disappears into the renderer, a quoted `</details>` closes the
+# collapsible and spills the rest of the finding out of it, and the report's
+# per-field lines fold into one paragraph.
+test_inlined_lens_reports_render_verbatim() {
+  local case_dir="$TMP_ROOT/rendered" wt dir posted
+  local fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$fakebin"
+  read -r base head wt < <(make_repo "$case_dir/wt")
+  add_fake_gh "$fakebin"
+  add_capturing_gh_axi "$fakebin"
+  export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
+  export FAKE_GH_title='Add the banner' FAKE_GH_body='It works.'
+  posted="$case_dir/posted.md"
+  export FM_TEST_GH_AXI_BODIES="$posted"
+  : > "$case_dir/state/gh-axi.log"
+  : > "$posted"
+  seed_lane_meta "$case_dir/state" task-a "$wt"
+  run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --tier T2 --ui-impacting --wt "$wt" --base "$base" --head "$head" \
+    --seat frontier=fable-5.1 --seat deep=opus-5 \
+    --seat advisory:design-ux=astra >/dev/null \
+    || fail "rendered: dispatch failed"
+  dir="$case_dir/state/task-a.adversarial-review/round-1"
+  # The quoted tags a UI reviewer cannot avoid writing, plus a fenced snippet:
+  # the report's own fence must not be what ends the block it is posted in.
+  write_lens_report "$case_dir/design.md" GREEN "  - id: u1
+    severity: MINOR
+    claim: raw markup in the banner template
+    evidence: banner.tsx:1
+    problem: the template emits <div class=\"banner\"> with raw text, and </details> in caller text ends the block
+    fix: escape it, so that
+\`\`\`
+<div class=\"banner\">{escape(text)}</div>
+\`\`\`
+    is what ships
+"
+  # A report quoting a fenced block that itself quotes one. The same escape
+  # hole, one quoting level up.
+  write_lens_report "$case_dir/frontier.md" GREEN "  - id: f1
+    severity: NIT
+    claim: the docs example is quoted wrong
+    evidence: README.md:4
+    problem: it shows
+\`\`\`\`
+\`\`\`sh
+run it
+\`\`\`
+\`\`\`\`
+    which is the fence, not the command
+    fix: quote the command alone
+"
+  write_lens_report "$case_dir/clean.md" GREEN ''
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens advisory:design-ux --report "$case_dir/design.md" >/dev/null \
+    || fail "rendered: design record failed"
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens frontier --report "$case_dir/frontier.md" >/dev/null \
+    || fail "rendered: frontier record failed"
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens deep --report "$case_dir/clean.md" >/dev/null \
+    || fail "rendered: deep record failed"
+  out=$(run_adv "$case_dir/state" "$fakebin" reconcile task-a --round 1) \
+    || fail "rendered: reconcile failed to post"
+  assert_contains "$out" "round-1 GREEN" "rendered: the clean round did not reconcile GREEN"
+  assert_rendered_verbatim "$posted" "$case_dir/design.md" \
+    "rendered: the design lens report does not reach the PR verbatim - its markup or its line structure is at the renderer's mercy"
+  assert_rendered_verbatim "$posted" "$case_dir/frontier.md" \
+    "rendered: a report quoting a four-backtick block does not reach the PR verbatim"
+  assert_rendered_verbatim "$posted" "$case_dir/clean.md" \
+    "rendered: a plain lens report does not reach the PR verbatim"
+  # The comment is still a whole, readable comment: the report's quoted closing
+  # tag did not end the collapsible it sits in, so the loop's own verdict and
+  # findings lines are outside the report and readable as markdown.
+  md_fence_view < "$posted" > "$case_dir/view.txt"
+  assert_no_grep 'unclosed' "$case_dir/view.txt" \
+    "rendered: the posted comment leaves a code fence open"
+  assert_grep "$(printf 'text\t- advisory:design-ux: GREEN (advisory, seat astra)')" "$case_dir/view.txt" \
+    "rendered: the lens table line is not readable markdown outside the report"
+  pass "an inlined lens report reaches the PR as the lens wrote it"
+}
+
 test_condition_needs_a_pr_open_line
 test_watch_fires_on_pr_open_line
 test_dispatch_stages_evidence_and_posts
@@ -1819,3 +1979,4 @@ test_reconciling_an_earlier_round_sees_later_rounds
 test_a_placeholder_model_lane_still_refuses_self_seating
 test_the_prompt_teaches_a_report_shape_record_lens_accepts
 test_posted_evidence_is_readable_from_the_pr_alone
+test_inlined_lens_reports_render_verbatim

@@ -852,6 +852,36 @@ CLASSIFY
   printf 'dispatched: %s %s round-%s tier=%s head=%s\n' "$id" "$url" "$round" "$tier" "$head"
 }
 
+# Print a code fence long enough to hold a lens report verbatim.
+#
+# A lens report is prose a reviewer wrote about markup, so it quotes markup:
+# posted into the PR as markdown, GitHub's renderer eats the quoted tags (a
+# `<div>` vanishes, a quoted `</details>` closes the collapsible the report sits
+# in and spills the rest of the finding out of it) and folds the report's
+# one-field-per-line shape into a run-on paragraph. Inside a fence all of it
+# renders as written. The fence is one backtick longer than the longest run the
+# report itself opens a line with, and never shorter than four, because a fence
+# the report's own content can match is a fence the report breaks out of -
+# which is this same defect again, one quoting level up.
+report_fence() {
+  awk '
+    BEGIN { longest = 3 }
+    {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      if (line ~ /^`{3,}/) {
+        match(line, /^`+/)
+        if (RLENGTH > longest) longest = RLENGTH
+      }
+    }
+    END {
+      fence = ""
+      while (length(fence) <= longest) fence = fence "`"
+      print fence
+    }
+  ' "$1"
+}
+
 # Validate a structured lens report: one verdict line, then a findings list
 # where every finding carries an id and a severity. The boundary_class line the
 # dispatch prompt asks for is prose for the reviewer, not a field this reads.
@@ -1202,9 +1232,14 @@ cmd_reconcile() {
     # The report itself goes into the PR, not a pointer to where it sits on this
     # machine: a reader on another host has nothing else to read it from, and
     # the loop's own evidence is only evidence if it is retrievable from the PR.
+    # It is fenced so the reader gets the report the lens wrote rather than what
+    # the renderer makes of it; see report_fence.
+    fence=$(report_fence "$report")
     lens_reports="$lens_reports<details><summary>lens $slot report - ${verdict:-unreadable} ($kind, seat ${seat:-unassigned})</summary>
 
+$fence text
 $(cat "$report")
+$fence
 
 </details>
 
