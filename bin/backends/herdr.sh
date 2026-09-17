@@ -3492,9 +3492,9 @@ fm_backend_herdr_layout_attempt_reconcile() { # <file>
   fi
   case "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" in
     fresh)
-      if ! fm_backend_herdr_explicit_close_pane_confirmed \
+      if ! fm_backend_herdr_projection_close_pane_focus_preserving \
         "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" "$candidate"; then
-        echo "error: exact Herdr structural replacement was not confirmed gone after close; refusing duplicate launch" >&2
+        echo "error: exact Herdr structural replacement was not safely confirmed gone after close; refusing duplicate launch" >&2
         return 1
       fi
       fm_backend_herdr_layout_attempt_resolve "$file" removed "$new_tab" "$candidate"
@@ -3517,8 +3517,8 @@ fm_backend_herdr_layout_attempt_reconcile() { # <file>
 fm_backend_herdr_layout_discard_response_pane() { # <session> <pane>
   local session=$1 pane=$2
   [ -n "$session" ] && [ -n "$pane" ] || return 1
-  if ! fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane"; then
-    echo "warning: Herdr structural launch could not confirm the unconfirmed response pane '$pane' was removed" >&2
+  if ! fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane"; then
+    echo "warning: Herdr structural launch could not safely confirm the unconfirmed response pane '$pane' was removed" >&2
     return 1
   fi
 }

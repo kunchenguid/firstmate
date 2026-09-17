@@ -1091,7 +1091,7 @@ parse_orca_worktree_result() {
 }
 
 spawn_abort_cleanup() {
-  local status=$?
+  local status=$? journal
   if [ -n "$HERDR_LAYOUT_ATTEMPT" ] \
     && { [ -e "$HERDR_LAYOUT_ATTEMPT" ] || [ -L "$HERDR_LAYOUT_ATTEMPT" ]; }; then
     if fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" \
@@ -1101,7 +1101,18 @@ spawn_abort_cleanup() {
       && fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" \
       && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 6 ] \
       && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = removed ]; then
-      rm -f -- "$HERDR_LAYOUT_ATTEMPT" || HERDR_LAYOUT_QUARANTINED=1
+      journal=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+      if { [ ! -e "$journal" ] && [ ! -L "$journal" ]; } \
+        || fm_backend_herdr_projection_journal_retire_removed_attempt \
+          "$journal" "$ID" "$HERDR_LAYOUT_ATTEMPT"; then
+        if rm -f -- "$HERDR_LAYOUT_ATTEMPT"; then
+          HERDR_PROJECTION_ABORT_CLEANUP=0
+        else
+          HERDR_LAYOUT_QUARANTINED=1
+        fi
+      else
+        HERDR_LAYOUT_QUARANTINED=1
+      fi
     else
       HERDR_LAYOUT_QUARANTINED=1
       SPAWN_FRESH_COMMIT_PENDING=0
@@ -3445,6 +3456,13 @@ EOF
       exit 1
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
+    if [ "$HARNESS" = pi ] && [ "$RELAUNCH" -eq 0 ] \
+      && [ "$HERDR_PROJECTED" -ne 1 ]; then
+      HERDR_PROJECTION_ABORT_CLEANUP=1
+      HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
+      HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
+      HERDR_PROJECTION_ABORT_SEEDED_PANE=
+    fi
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
@@ -4779,6 +4797,12 @@ print(json.dumps(["/bin/sh", "-c", sys.stdin.read()], separators=(",", ":")))
     HERDR_LAYOUT_LEASE_HOLDER=$SPAWN_TREEHOUSE_LEASE_HOLDER
   fi
   HERDR_LAYOUT_ATTEMPT_ID=$(python3 -c 'import os; print(os.urandom(16).hex())') || exit 1
+  if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
+    spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
+      echo "error: structural Herdr launch could not acquire its named-session mutation lock" >&2
+      exit 1
+    }
+  fi
   if HERDR_LAYOUT_BINDING=$(fm_backend_herdr_layout_apply "$T" "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
     "$WT" "$HERDR_LAYOUT_ENV" "$HERDR_LAYOUT_COMMAND" "$HERDR_LAYOUT_ATTEMPT" "$HERDR_LAYOUT_ATTEMPT_ID" \
     "$HERDR_LAYOUT_OWNERSHIP_MODE" "$ID" "$HERDR_LAYOUT_LEASE_HOLDER"); then
@@ -4798,17 +4822,8 @@ print(json.dumps(["/bin/sh", "-c", sys.stdin.read()], separators=(",", ":")))
   T="$HERDR_SES:$HERDR_PANE_ID"
   META_WINDOW=$T
   # After layout.apply succeeds, every later refusal must target the returned
-  # replacement identity. Flat layouts opt into the same exact-pane abort
-  # cleanup for this post-mutation interval; projected layouts retain their
-  # already-armed seeded-pane cleanup.
-  if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
-    HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
-  else
-    HERDR_PROJECTION_ABORT_CLEANUP=1
-    HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
-    HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
-    HERDR_PROJECTION_ABORT_SEEDED_PANE=
-  fi
+  # replacement identity.
+  HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
   if ! spawn_wait_herdr_layout_process; then
     echo "error: structural Herdr launch did not produce the expected Pi process in its replacement pane" >&2
     exit 1
@@ -4861,7 +4876,7 @@ fi
 if [ "$BACKEND" = herdr ] && [ "$HERDR_LAYOUT_ENDPOINT_COMMITTED" != 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
 fi
-if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 if [ "$HARNESS" = kimi ]; then

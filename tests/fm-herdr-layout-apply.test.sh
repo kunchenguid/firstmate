@@ -123,8 +123,10 @@ fm_backend_herdr_cli() { # <session> <args...>
         printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w9"}]}}'
       elif [ "$MODE" = reconcile_retain ] || [ "$MODE" = reconcile_shell ] || [ "$MODE" = remove_original ]; then
         printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"anchor","focused":true,"active_tab_id":"anchor:t1"},{"workspace_id":"w1","focused":false,"active_tab_id":"w1:t3"}]}}'
+      elif [ "$MODE" = focused_cleanup ]; then
+        printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","focused":true,"active_tab_id":"w1:t3"}]}}'
       else
-        printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1"}]}}'
+        printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","focused":true,"active_tab_id":"w1:t2"}]}}'
       fi
       ;;
     "tab get w1:t2")
@@ -140,7 +142,7 @@ fm_backend_herdr_cli() { # <session> <args...>
         return 0
       fi
       case "$MODE" in
-        reconcile|reconcile_duplicate|reconcile_missing|reconcile_retain|reconcile_shell) return 1 ;;
+        reconcile|reconcile_duplicate|reconcile_missing|reconcile_retain|reconcile_shell|focused_cleanup) return 1 ;;
         pane) printf '%s\n' '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t9","pane_id":"w1:p2"}}}' ;;
         *) printf '%s\n' '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2"}}}' ;;
       esac
@@ -180,10 +182,18 @@ fm_backend_herdr_cli() { # <session> <args...>
       printf '%s\n' '{"result":{"tabs":[{"workspace_id":"anchor","tab_id":"anchor:t1","focused":true}]}}'
       ;;
     "tab list --workspace w1")
-      printf '%s\n' '{"result":{"tabs":[{"workspace_id":"w1","tab_id":"w1:t2","focused":false},{"workspace_id":"w1","tab_id":"w1:t3","focused":true}]}}'
+      if [ "$MODE" = focused_cleanup ]; then
+        printf '%s\n' '{"result":{"tabs":[{"workspace_id":"w1","tab_id":"w1:t2","focused":false},{"workspace_id":"w1","tab_id":"w1:t3","focused":true}]}}'
+      else
+        printf '%s\n' '{"result":{"tabs":[{"workspace_id":"w1","tab_id":"w1:t2","focused":true},{"workspace_id":"w1","tab_id":"w1:t3","focused":false}]}}'
+      fi
       ;;
     "terminal title clear")
-      printf '%s\n' '{"result":{"reason":"no_foreground_client"}}'
+      if [ "$MODE" = focused_cleanup ]; then
+        printf '%s\n' '{"result":{"reason":"cleared"}}'
+      else
+        printf '%s\n' '{"result":{"reason":"no_foreground_client"}}'
+      fi
       ;;
     "tab get w1:t4")
       printf '%s\n' '{"result":{"tab":{"workspace_id":"w1","tab_id":"w1:t4"}}}'
@@ -197,7 +207,7 @@ fm_backend_herdr_cli() { # <session> <args...>
           printf '%s\n' '{"result":{"panes":[{"workspace_id":"w1","tab_id":"w1:t3","pane_id":"w1:p3","label":"fm-launch-0123456789abcdef0123456789abcdef"},{"workspace_id":"w1","tab_id":"w1:t4","pane_id":"w1:p4","label":"fm-launch-0123456789abcdef0123456789abcdef"}]}}'
           ;;
         reconcile_missing) printf '%s\n' '{"result":{"panes":[]}}' ;;
-        reconcile_retain|reconcile_shell)
+        reconcile_retain|reconcile_shell|focused_cleanup)
           printf '%s\n' '{"result":{"panes":[{"workspace_id":"w1","tab_id":"w1:t3","pane_id":"w1:p3","label":"fm-launch-0123456789abcdef0123456789abcdef"}]}}'
           ;;
         *)
@@ -359,6 +369,27 @@ fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
 rm -f "$ATTEMPT"
 pass "layout.apply cleans only the exact returned pane after a post-mutation identity refusal"
 MODE=ok
+
+MODE=focused_cleanup
+rm -f "$CLOSED"
+if fm_backend_herdr_layout_discard_response_pane lab-structural w1:p3 >/dev/null 2>&1; then
+  fail "post-response cleanup closed the active tab viewed by a foreground client"
+fi
+[ ! -e "$CLOSED" ] || fail "post-response focus refusal still closed its target pane"
+fm_backend_herdr_layout_attempt_write "$ATTEMPT" 4 0123456789abcdef0123456789abcdef \
+  fresh task-z1 "$TMP_ROOT/worktree" fm-task-z1 \
+  lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef
+if fm_backend_herdr_layout_attempt_reconcile "$ATTEMPT" >/dev/null 2>&1; then
+  fail "quarantine reconciliation closed the active tab viewed by a foreground client"
+fi
+[ ! -e "$CLOSED" ] || fail "quarantine focus refusal still closed its target pane"
+fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
+  || fail "focus refusal lost its durable structural attempt"
+[ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 4 ] \
+  || fail "focus refusal advanced structural ownership without cleanup"
+rm -f "$ATTEMPT"
+MODE=ok
+pass "structural cleanup preserves quarantine while its target tab is actively viewed"
 
 MODE=reconcile_retain
 CLOSE_READBACK=dead
@@ -921,6 +952,197 @@ fm_backend_herdr_process_matches_expected pi node pi-signed '["pi-signed","--mod
 fm_backend_herdr_process_matches_expected pi codex codex '["codex"]' \
   && fail "an unrelated recognized agent was accepted as plain Pi"
 pass "exact harness confirmation distinguishes plain Pi from pi-signed and other agents"
+
+STRUCT_HOME="$TMP_ROOT/structural-home"
+STRUCT_PROJECT="$TMP_ROOT/structural-project"
+STRUCT_POOL="$TMP_ROOT/structural-pool"
+STRUCT_WT="$STRUCT_POOL/slot/repo"
+STRUCT_FAKEBIN=$(fm_fakebin "$TMP_ROOT/structural-bin")
+STRUCT_TASK_CREATED="$TMP_ROOT/structural-task-created"
+STRUCT_TASK_LABEL="$TMP_ROOT/structural-task-label"
+STRUCT_CLOSED="$TMP_ROOT/structural-closed"
+STRUCT_CLOSE_LOG="$TMP_ROOT/structural-close.log"
+STRUCT_TREEHOUSE_LOG="$TMP_ROOT/structural-treehouse.log"
+fm_test_spawn_home "$STRUCT_HOME" pi
+printf 'off\n' > "$STRUCT_HOME/config/herdr-presentation-spaces"
+fm_git_worktree "$STRUCT_PROJECT" "$STRUCT_WT" structural-worktree
+printf '{}\n' > "$STRUCT_POOL/treehouse-state.json"
+STRUCT_WORKSPACE_LABEL=$(FM_HOME="$STRUCT_HOME" fm_backend_herdr_workspace_label)
+cat > "$STRUCT_FAKEBIN/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_STRUCT_TREEHOUSE_LOG:?}"
+case "${1:-}" in
+  get) printf '%s\n' "${FM_FAKE_STRUCT_WT:?}" ;;
+  return) ;;
+esac
+SH
+cat > "$STRUCT_FAKEBIN/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "$#" -ge 2 ] && [ "${*: -2:1}" = --session ]; then
+  set -- "${@:1:$#-2}"
+fi
+pane=${3:-}
+case "$*" in
+  "status --json")
+    printf '%s\n' '{"client":{"version":"0.8.2","protocol":20},"server":{"version":"0.8.2","protocol":20,"running":true,"compatible":true}}'
+    ;;
+  "server start") ;;
+  "session list --json")
+    printf '{"sessions":[{"name":"lab-structural","running":true,"socket_path":"%s"}]}\n' "${FM_FAKE_STRUCT_SOCKET:?}"
+    ;;
+  "workspace list")
+    if [ -e "${FM_FAKE_STRUCT_APPLIED:?}" ]; then active=w1:t3; else active=w1:t2; fi
+    printf '{"result":{"workspaces":[{"workspace_id":"w1","label":"%s","focused":true,"active_tab_id":"%s"}]}}\n' \
+      "${FM_FAKE_STRUCT_WORKSPACE_LABEL:?}" "$active"
+    ;;
+  "tab list --workspace w1")
+    if [ ! -e "${FM_FAKE_STRUCT_TASK_CREATED:?}" ] || [ -e "${FM_FAKE_STRUCT_CLOSED:?}" ]; then
+      printf '%s\n' '{"result":{"tabs":[]}}'
+    elif [ -e "${FM_FAKE_STRUCT_APPLIED:?}" ]; then
+      printf '{"result":{"tabs":[{"workspace_id":"w1","tab_id":"w1:t3","label":"%s","focused":true}]}}\n' "$(cat "${FM_FAKE_STRUCT_TASK_LABEL:?}")"
+    else
+      printf '{"result":{"tabs":[{"workspace_id":"w1","tab_id":"w1:t2","label":"%s","focused":true}]}}\n' "$(cat "${FM_FAKE_STRUCT_TASK_LABEL:?}")"
+    fi
+    ;;
+  "tab create --workspace w1 "*)
+    label=
+    args=("$@")
+    for ((i=0; i<${#args[@]}; i++)); do
+      [ "${args[$i]}" != --label ] || label=${args[$((i+1))]}
+    done
+    printf '%s\n' "$label" > "${FM_FAKE_STRUCT_TASK_LABEL:?}"
+    : > "${FM_FAKE_STRUCT_TASK_CREATED:?}"
+    printf '%s\n' '{"result":{"tab":{"workspace_id":"w1","tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}'
+    ;;
+  "tab get w1:t2")
+    printf '%s\n' '{"result":{"tab":{"workspace_id":"w1","tab_id":"w1:t2"}}}'
+    ;;
+  "tab get w1:t3")
+    printf '%s\n' '{"result":{"tab":{"workspace_id":"w1","tab_id":"w1:t3"}}}'
+    ;;
+  "pane get w1:p2")
+    if [ -e "${FM_FAKE_STRUCT_APPLIED:?}" ] || [ -e "${FM_FAKE_STRUCT_CLOSED:?}" ]; then
+      printf '%s\n' '{"error":{"code":"pane_not_found"}}'
+      exit 1
+    else
+      printf '%s\n' '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2"}}}'
+    fi
+    ;;
+  "pane get w1:p3")
+    if [ -e "${FM_FAKE_STRUCT_CLOSED:?}" ]; then
+      printf '%s\n' '{"error":{"code":"pane_not_found"}}'
+      exit 1
+    else
+      label=$(jq -r '.params.root.label' "${FM_FAKE_STRUCT_REQUEST:?}")
+      printf '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t3","pane_id":"w1:p3","label":"%s"}}}\n' "$label"
+    fi
+    ;;
+  "pane list --workspace w1")
+    if [ ! -e "${FM_FAKE_STRUCT_TASK_CREATED:?}" ] || [ -e "${FM_FAKE_STRUCT_CLOSED:?}" ]; then
+      printf '%s\n' '{"result":{"panes":[]}}'
+    elif [ -e "${FM_FAKE_STRUCT_APPLIED:?}" ]; then
+      label=$(jq -r '.params.root.label' "${FM_FAKE_STRUCT_REQUEST:?}")
+      printf '{"result":{"panes":[{"workspace_id":"w1","tab_id":"w1:t3","pane_id":"w1:p3","label":"%s"}]}}\n' "$label"
+    else
+      printf '%s\n' '{"result":{"panes":[{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2","label":null}]}}'
+    fi
+    ;;
+  "pane layout --pane w1:p2")
+    printf '%s\n' '{"result":{"layout":{"workspace_id":"w1","tab_id":"w1:t2","focused_pane_id":"w1:p2","panes":[{"pane_id":"w1:p2","focused":true,"rect":{}}],"splits":[]}}}'
+    ;;
+  "pane process-info --pane w1:p2")
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_processes":[{"pid":%s,"name":"bash","argv0":"bash","argv":["bash"]}]}}}\n' \
+      "${FM_FAKE_STRUCT_PARENT_PID:?}" "${FM_FAKE_STRUCT_PARENT_PID:?}"
+    ;;
+  "pane process-info --pane w1:p3")
+    printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p3","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"codex","argv0":"codex","argv":["codex"]}]}}}'
+    ;;
+  "agent get w1:p2"|"agent get w1:p3")
+    printf '%s\n' '{"error":{"code":"agent_not_found"}}'
+    ;;
+  "terminal title clear")
+    printf '%s\n' '{"result":{"reason":"no_foreground_client"}}'
+    ;;
+  "pane close w1:p2"|"pane close w1:p3")
+    printf '%s\n' "$pane" >> "${FM_FAKE_STRUCT_CLOSE_LOG:?}"
+    : > "${FM_FAKE_STRUCT_CLOSED:?}"
+    printf '{"result":{"type":"pane_close","pane_id":"%s"}}\n' "$pane"
+    ;;
+  "api schema --json")
+    if [ "${FM_FAKE_STRUCT_MODE:?}" = preapply ]; then
+      printf '%s\n' '{"schemas":{"request":{}}}'
+    else
+      cat <<'JSON'
+{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"layout.apply"}}}],"$defs":{"LayoutApplyParams":{"required":["root"],"properties":{"workspace_id":{"type":["string","null"]},"tab_id":{"type":["string","null"]}}},"LayoutNode":{"oneOf":[{"properties":{"type":{"const":"pane"},"command":{"type":["array","null"]},"cwd":{"type":["string","null"]},"env":{"type":"object"},"label":{"type":["string","null"]},"pane_id":{"type":["string","null"]}}}]}}}}}
+JSON
+    fi
+    ;;
+  *)
+    printf 'unexpected structural fake Herdr call: %s\n' "$*" >&2
+    exit 92
+    ;;
+esac
+SH
+fm_fake_exit0 "$STRUCT_FAKEBIN" pi
+fm_test_fake_sleep_noop "$STRUCT_FAKEBIN"
+chmod +x "$STRUCT_FAKEBIN/treehouse" "$STRUCT_FAKEBIN/herdr"
+: > "$STRUCT_TREEHOUSE_LOG"
+: > "$STRUCT_CLOSE_LOG"
+rm -f "$STRUCT_TASK_CREATED" "$STRUCT_TASK_LABEL" "$STRUCT_CLOSED" "$APPLIED" "$REQUEST"
+fm_test_spawn_brief "$STRUCT_HOME" preapply-z1 "Clean a flat structural pane after pre-apply refusal."
+set +e
+struct_pre_out=$(HERDR_SESSION=lab-structural \
+  FM_FAKE_STRUCT_MODE=preapply FM_FAKE_STRUCT_SOCKET="$SOCK" \
+  FM_FAKE_STRUCT_APPLIED="$APPLIED" FM_FAKE_STRUCT_REQUEST="$REQUEST" \
+  FM_FAKE_STRUCT_TASK_CREATED="$STRUCT_TASK_CREATED" FM_FAKE_STRUCT_TASK_LABEL="$STRUCT_TASK_LABEL" \
+  FM_FAKE_STRUCT_CLOSED="$STRUCT_CLOSED" FM_FAKE_STRUCT_CLOSE_LOG="$STRUCT_CLOSE_LOG" \
+  FM_FAKE_STRUCT_TREEHOUSE_LOG="$STRUCT_TREEHOUSE_LOG" FM_FAKE_STRUCT_WT="$STRUCT_WT" \
+  FM_FAKE_STRUCT_WORKSPACE_LABEL="$STRUCT_WORKSPACE_LABEL" FM_FAKE_STRUCT_PARENT_PID="$$" \
+  fm_test_run_spawn "$STRUCT_HOME" "$STRUCT_WT" "$STRUCT_FAKEBIN" \
+    preapply-z1 "$STRUCT_PROJECT" --scout --harness pi --backend herdr)
+struct_pre_status=$?
+set -e
+[ "$struct_pre_status" -ne 0 ] || fail "pre-apply schema refusal unexpectedly launched a worker"
+assert_contains "$struct_pre_out" "failed before worker readiness" \
+  "pre-apply schema refusal did not reach structural launch"
+[ "$(cat "$STRUCT_CLOSE_LOG")" = w1:p2 ] \
+  || fail "pre-apply refusal did not close exactly its original flat pane"
+[ ! -e "$STRUCT_HOME/state/preapply-z1.meta" ] \
+  || fail "pre-apply cleanup retained task metadata after confirming pane removal"
+assert_grep 'return --force --if-lease-holder fm-preapply-z1' "$STRUCT_TREEHOUSE_LOG" \
+  "pre-apply cleanup did not return its exact Treehouse lease"
+pass "flat structural pre-apply refusals close their original pane and release ownership"
+
+rm -f "$STRUCT_TASK_CREATED" "$STRUCT_TASK_LABEL" "$STRUCT_CLOSED" "$APPLIED" "$REQUEST"
+: > "$STRUCT_CLOSE_LOG"
+fm_test_spawn_brief "$STRUCT_HOME" postapply-z1 "Reconcile a post-apply refusal exactly once."
+start_server success
+set +e
+struct_post_out=$(HERDR_SESSION=lab-structural \
+  FM_FAKE_STRUCT_MODE=postapply FM_FAKE_STRUCT_SOCKET="$SOCK" \
+  FM_FAKE_STRUCT_APPLIED="$APPLIED" FM_FAKE_STRUCT_REQUEST="$REQUEST" \
+  FM_FAKE_STRUCT_TASK_CREATED="$STRUCT_TASK_CREATED" FM_FAKE_STRUCT_TASK_LABEL="$STRUCT_TASK_LABEL" \
+  FM_FAKE_STRUCT_CLOSED="$STRUCT_CLOSED" FM_FAKE_STRUCT_CLOSE_LOG="$STRUCT_CLOSE_LOG" \
+  FM_FAKE_STRUCT_TREEHOUSE_LOG="$STRUCT_TREEHOUSE_LOG" FM_FAKE_STRUCT_WT="$STRUCT_WT" \
+  FM_FAKE_STRUCT_WORKSPACE_LABEL="$STRUCT_WORKSPACE_LABEL" FM_FAKE_STRUCT_PARENT_PID="$$" \
+  fm_test_run_spawn "$STRUCT_HOME" "$STRUCT_WT" "$STRUCT_FAKEBIN" \
+    postapply-z1 "$STRUCT_PROJECT" --scout --harness pi --backend herdr)
+struct_post_status=$?
+set -e
+wait_server
+[ "$struct_post_status" -ne 0 ] || fail "post-apply process refusal unexpectedly launched a worker"
+assert_contains "$struct_post_out" "did not produce the expected Pi process" \
+  "post-apply refusal did not reach exact process validation"
+[ "$(cat "$STRUCT_CLOSE_LOG")" = w1:p3 ] \
+  || fail "post-apply reconciliation did not close its replacement exactly once"
+[ ! -e "$STRUCT_HOME/state/postapply-z1.meta" ] \
+  || fail "post-apply reconciliation retained metadata after confirmed cleanup"
+[ ! -e "$STRUCT_HOME/state/postapply-z1.herdr-launch" ] \
+  || fail "post-apply reconciliation retained its resolved attempt"
+assert_grep 'return --force --if-lease-holder fm-postapply-z1' "$STRUCT_TREEHOUSE_LOG" \
+  "post-apply reconciliation did not return its exact Treehouse lease"
+pass "post-apply abort reconciliation owns cleanup without a duplicate close"
 
 NON_PI="$TMP_ROOT/non-pi"
 NON_PI_HOME="$NON_PI/home"
