@@ -39,10 +39,6 @@
       "target": "docs/documentation-audiences.md"
     },
     {
-      "source": ".no-mistakes.yaml",
-      "target": "docs/documentation-audiences.md"
-    },
-    {
       "source": "CONTRIBUTING.md",
       "target": "docs/documentation-audiences.md"
     },

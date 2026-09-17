@@ -13,7 +13,6 @@ new_home() {
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects" "$home/fakebin"
   printf '# Backlog\n\n## Queued\n' > "$home/data/backlog.md"
   printf '#!/bin/sh\nexit 1\n' > "$home/fakebin/tmux"
-  printf '#!/bin/sh\nexit 0\n' > "$home/fakebin/no-mistakes"
   chmod +x "$home/fakebin/"*
   printf '%s\n' "$home"
 }

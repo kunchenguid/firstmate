@@ -142,8 +142,8 @@ test_fields_record_the_captain_wording_verbatim() {
     --action Merge --object 'task y PR' --when 'red on nm-ci-windows'
   compile_accept '1. merge task y PR when even if nm-ci-windows is red stop the captain returns' 'stop field' \
     --action merge --object 'task y PR' --when 'even if nm-ci-windows is red' --stop 'the captain returns'
-  compile_accept '1. abort-run no-mistakes run for task nm-ci-windows-git-shard-split-r1 when install deadlocks' 'named event' \
-    --action abort-run --object 'no-mistakes run for task nm-ci-windows-git-shard-split-r1' --when 'install deadlocks'
+  compile_accept '1. abort-run active validation for task ci-windows-git-shard-split-r1 when install deadlocks' 'named event' \
+    --action abort-run --object 'active validation for task ci-windows-git-shard-split-r1' --when 'install deadlocks'
   compile_accept '1. wake-me task fix-windows when at 2026-09-08T08:00Z' 'time precondition' \
     --action wake-me --object 'task fix-windows' --when 'at 2026-09-08T08:00Z'
   compile_accept '1. discard the worktree of task w when its rerun fails twice' 'named discard' \
@@ -701,4 +701,3 @@ test_legacy_record_without_merge_grants_reads_empty
 test_malformed_merge_grants_refuse_validation
 test_archive_drops_live_grants
 test_record_changes_refuse_while_a_reader_holds_the_lock
-

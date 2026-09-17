@@ -394,7 +394,7 @@ path_hits() {
 }
 
 # Ask one copy for its own version. Combined output, because tools answer on
-# either stream, and no-mistakes announces its update on stderr.
+# either stream, and some tools announce updates on stderr.
 probe_output() {
   local path=$1
   shift
@@ -448,8 +448,7 @@ EOF
 
   if [ -n "$announce" ] && [ -n "$resolved_path" ]; then
     # A tool does not have to announce its update on the command that reports its
-    # version: no-mistakes prints its version for --version but announces a new
-    # release on its other commands. So announce_args may name a second command,
+    # version. So announce_args may name a second command,
     # and it is asked of the copy PATH actually resolves.
     announce_out=$resolved_out
     if [ "$announce_args" != "$args_joined" ]; then

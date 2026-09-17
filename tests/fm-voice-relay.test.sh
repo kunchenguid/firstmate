@@ -64,7 +64,7 @@ seed_home() {
 EOF
 
   fm_write_meta "$HOME_FIXTURE/state/alpha-one.meta" \
-    kind=ship mode=no-mistakes window=firstmate:fm-alpha-one \
+    kind=ship mode=direct-PR window=firstmate:fm-alpha-one \
     pr=https://github.com/example/alpha/pull/7
   fm_write_meta "$HOME_FIXTURE/state/gamma-three.meta" kind=ship mode=direct-PR
   printf 'working: reading the failing test\n' > "$HOME_FIXTURE/state/alpha-one.status"
@@ -3776,7 +3776,7 @@ cat > "$E2E/home/data/backlog.md" <<EOF
 ## Done
 - [x] old-six - Shipped the $NEVER_TOKEN integration (repo: alpha) (done 2026-07-01)
 EOF
-fm_write_meta "$E2E/home/state/alpha-one.meta" kind=ship mode=no-mistakes \
+fm_write_meta "$E2E/home/state/alpha-one.meta" kind=ship mode=direct-PR \
   pr=https://github.com/example/alpha/pull/7
 printf 'working: reading the failing test\n' > "$E2E/home/state/alpha-one.status"
 printf '%s\n' "$E2E_REGION" > "$E2E/home/config/voice-region"
