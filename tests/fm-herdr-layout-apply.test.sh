@@ -358,10 +358,21 @@ rm -f "$ATTEMPT"
 pass "layout.apply cleans only the exact returned pane after a post-mutation identity refusal"
 MODE=ok
 
-CLOSE_READBACK=unreadable
+MODE=reconcile_retain
+CLOSE_READBACK=dead
 rm -f "$CLOSED"
+: > "$OLD_CLOSED"
+fm_backend_herdr_projection_cleanup_exact lab-structural w1:p3 w1:p2 1 \
+  || fail "spawn abort cleanup quarantined an already-pruned seeded pane"
+[ -e "$CLOSED" ] || fail "spawn abort cleanup skipped its live task pane"
+rm -f "$CLOSED"
+if fm_backend_herdr_projection_cleanup_exact lab-structural w1:p3 w1:p2 0 >/dev/null 2>&1; then
+  fail "spawn abort cleanup ignored an unconfirmed seeded pane"
+fi
+rm -f "$CLOSED" "$OLD_CLOSED"
+CLOSE_READBACK=unreadable
 if fm_backend_herdr_projection_cleanup_exact lab-structural w1:p3 '' >/dev/null 2>&1; then
-  fail "spawn abort cleanup accepted an unreadable post-close pane response"
+  fail "spawn abort cleanup accepted an unreadable post-close task pane response"
 fi
 rm -f "$CLOSED"
 if fm_backend_herdr_layout_discard_response_pane lab-structural w1:p3 >/dev/null 2>&1; then
@@ -864,6 +875,7 @@ NON_PI_WT="$NON_PI/worktree"
 NON_PI_LOG="$NON_PI/herdr.log"
 NON_PI_STATE="$NON_PI/herdr-state.json"
 NON_PI_SEND_FAIL="$NON_PI/send-fail"
+NON_PI_TREEHOUSE_LOG="$NON_PI/treehouse.log"
 NON_PI_FAKEBIN=$(fm_fakebin "$NON_PI/bin")
 fm_test_spawn_home "$NON_PI_HOME" pi-signed
 printf 'off\n' > "$NON_PI_HOME/config/herdr-presentation-spaces"
@@ -875,21 +887,49 @@ install_remote_herdr_fixture "$NON_PI" "$NON_PI_STATE" "$NON_PI_LOG" "$NON_PI_SE
 ln -s ../herdr "$NON_PI_FAKEBIN/herdr"
 cat > "$NON_PI_FAKEBIN/treehouse" <<'SH'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_TREEHOUSE_LOG:?}"
 printf '%s\n' "${FM_FAKE_PANE_PATH:?}"
 SH
 fm_fake_exit0 "$NON_PI_FAKEBIN" pi-signed
+fm_test_fake_sleep_noop "$NON_PI_FAKEBIN"
 chmod +x "$NON_PI_FAKEBIN/treehouse"
+: > "$NON_PI_TREEHOUSE_LOG"
 set +e
-non_pi_out=$(HERDR_SESSION=lab-structural \
+non_pi_out=$(HERDR_SESSION=lab-structural FM_FAKE_TREEHOUSE_LOG="$NON_PI_TREEHOUSE_LOG" \
   fm_test_run_spawn "$NON_PI_HOME" "$NON_PI_WT" "$NON_PI_FAKEBIN" \
     non-pi-z1 "$NON_PI_PROJECT" --scout --harness pi-signed --backend herdr)
 non_pi_status=$?
 set -e
 [ "$non_pi_status" -eq 0 ] || fail "non-Pi Herdr launch no longer reaches its existing interactive path: $non_pi_out"
+assert_grep 'treehouse get' "$NON_PI_LOG" \
+  "non-Pi Herdr launch did not enter its isolated worktree interactively"
 assert_grep 'pane send-text' "$NON_PI_LOG" "non-Pi Herdr launch did not type its launch command"
 assert_grep 'pane send-keys' "$NON_PI_LOG" "non-Pi Herdr launch did not submit through the existing key path"
+assert_no_grep 'get --lease' "$NON_PI_TREEHOUSE_LOG" \
+  "non-Pi Herdr launch acquired the structural path's direct lease"
+assert_grep "worktree=$NON_PI_WT" "$NON_PI_HOME/state/non-pi-z1.meta" \
+  "non-Pi Herdr launch did not record its interactive isolated worktree"
 assert_not_contains "$non_pi_out" "structural Herdr launch" \
   "non-Pi Herdr launch was incorrectly routed through plain-Pi structural handling"
-pass "non-Pi Herdr harnesses retain interactive launch behavior without Pi normalization"
+NON_PI_PANE=$(sed -n 's/^herdr_pane_id=//p' "$NON_PI_HOME/state/non-pi-z1.meta")
+jq --arg pane "$NON_PI_PANE" --arg cwd "$NON_PI_PROJECT" '
+  .typed = {} | .working = {}
+  | .tabs |= map(if .pane_id == $pane then .foreground_cwd = $cwd else . end)
+' "$NON_PI_STATE" > "$NON_PI_STATE.tmp"
+mv "$NON_PI_STATE.tmp" "$NON_PI_STATE"
+: > "$NON_PI_LOG"
+set +e
+non_pi_relaunch_out=$(HERDR_SESSION=lab-structural FM_FAKE_TREEHOUSE_LOG="$NON_PI_TREEHOUSE_LOG" \
+  fm_test_run_spawn "$NON_PI_HOME" "$NON_PI_WT" "$NON_PI_FAKEBIN" \
+    non-pi-z1 --relaunch --harness pi-signed)
+non_pi_relaunch_status=$?
+set -e
+[ "$non_pi_relaunch_status" -eq 0 ] \
+  || fail "non-Pi Herdr relaunch did not restore its interactive worktree cwd: $non_pi_relaunch_out"
+assert_grep 'cd -- ' "$NON_PI_LOG" \
+  "non-Pi Herdr relaunch did not correct its shell cwd before launch"
+assert_grep 'pane send-text' "$NON_PI_LOG" \
+  "non-Pi Herdr relaunch did not retain interactive launch submission"
+pass "non-Pi Herdr harnesses retain interactive isolated-worktree launch and relaunch behavior"
 
 printf '# all fm-herdr-layout-apply tests passed\n'

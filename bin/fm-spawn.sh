@@ -1029,6 +1029,7 @@ HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
+HERDR_PROJECTION_ABORT_SEEDED_PRUNED=0
 HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
@@ -1145,7 +1146,8 @@ spawn_abort_cleanup() {
     if fm_backend_herdr_projection_cleanup_exact \
       "$HERDR_PROJECTION_ABORT_SESSION" \
       "$HERDR_PROJECTION_ABORT_TASK_PANE" \
-      "$HERDR_PROJECTION_ABORT_SEEDED_PANE"; then
+      "$HERDR_PROJECTION_ABORT_SEEDED_PANE" \
+      "$HERDR_PROJECTION_ABORT_SEEDED_PRUNED"; then
       HERDR_PROJECTION_ABORT_CLEANUP=0
     else
       echo "warning: exact Herdr endpoint cleanup could not be confirmed; retaining the task record and Treehouse lease" >&2
@@ -3389,6 +3391,7 @@ else
             HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
             HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
             HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+            HERDR_PROJECTION_ABORT_SEEDED_PRUNED=1
             fm_backend_herdr_projection_order_best_effort \
               "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID"
             HERDR_HOME_ID=$(fm_backend_herdr_projection_home_identity "$HERDR_LABEL_HOME" 2>/dev/null || true)
@@ -3734,10 +3737,10 @@ agy_spawn_fail() {  # <detail>
 }
 
 if [ "$RELAUNCH" -eq 1 ]; then
-  # No worktree is acquired: the recorded one is reused as-is. Herdr addresses
-  # that path in layout.apply and never types a corrective cd into the shell
-  # that is about to be replaced.
-  if [ "$BACKEND" != herdr ]; then
+  # No worktree is acquired: the recorded one is reused as-is. Structural Pi
+  # addresses that path in layout.apply; every interactive launch first proves
+  # that its shell is in the recorded worktree.
+  if [ "$BACKEND" != herdr ] || [ "$HARNESS" != pi ]; then
     relaunch_wt_real=$(real_path_or_raw "$WT")
     relaunch_seen=
     for _ in $(seq 1 10); do
@@ -3746,13 +3749,29 @@ if [ "$RELAUNCH" -eq 1 ]; then
       sleep 0.5
     done
     if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then
-      echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}', not its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
-      exit 1
+      if [ "$BACKEND" != herdr ]; then
+        echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}', not its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
+        exit 1
+      fi
+      relaunch_cd_path=${WT//\'/\'\\\'\'}
+      spawn_send_text_line "$WT_TARGET" "cd -- '$relaunch_cd_path'" || {
+        echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}' and could not be told to return to its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
+        exit 1
+      }
+      for _ in $(seq 1 10); do
+        relaunch_seen=$(spawn_current_path "$WT_TARGET" || true)
+        [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ] || break
+        sleep 0.5
+      done
+      if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then
+        echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}' and did not return to its recorded worktree '$WT' when told to; refusing to relaunch an agent outside the copy holding its work" >&2
+        exit 1
+      fi
     fi
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  if [ "$BACKEND" = herdr ]; then
+  if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ]; then
     SPAWN_TREEHOUSE_LEASE_HOLDER="fm-$ID"
     WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$SPAWN_TREEHOUSE_LEASE_HOLDER") || {
       echo "error: treehouse could not lease an isolated worktree for structural Herdr launch" >&2

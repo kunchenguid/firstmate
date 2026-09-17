@@ -61,7 +61,7 @@ case "${1:-} ${2:-}" in
     jq_state --arg wsid "$wsid" --arg wlabel "$label" --arg cwd "$cwd" \
       --arg tabid "$wsid:t$dn" --arg paneid "$wsid:p$dn" \
       '.workspaces += [{workspace_id:$wsid, label:$wlabel, cwd:$cwd}]
-       | .tabs += [{tab_id:$tabid, label:"1", workspace_id:$wsid, pane_id:$paneid}]
+       | .tabs += [{tab_id:$tabid, label:"1", workspace_id:$wsid, pane_id:$paneid, cwd:$cwd, foreground_cwd:$cwd}]
        | .next = (.next + 2)' | save
     printf '{"result":{"workspace":{"workspace_id":"%s","label":"%s"},"tab":{"tab_id":"%s"},"root_pane":{"pane_id":"%s"}}}\n' \
       "$wsid" "$label" "$wsid:t$dn" "$wsid:p$dn"
@@ -70,7 +70,7 @@ case "${1:-} ${2:-}" in
   "tab create")
     n=$(jq_state -r '.next'); tabid="$ws:t$n"; paneid="$ws:p$n"
     jq_state --arg w "$ws" --arg wlabel "$label" --arg cwd "$cwd" --arg tabid "$tabid" --arg paneid "$paneid" \
-      '.tabs += [{tab_id:$tabid, label:$wlabel, workspace_id:$w, pane_id:$paneid, cwd:$cwd}]
+      '.tabs += [{tab_id:$tabid, label:$wlabel, workspace_id:$w, pane_id:$paneid, cwd:$cwd, foreground_cwd:$cwd}]
        | .next = (.next + 1)' | save
     printf '{"result":{"tab":{"tab_id":"%s"},"root_pane":{"pane_id":"%s"}}}\n' "$tabid" "$paneid"
     ;;
@@ -83,7 +83,8 @@ case "${1:-} ${2:-}" in
     if [ "$(jq_state -r --arg p "$pane" '[.tabs[]|select(.pane_id==$p)]|length')" = 0 ]; then
       printf '{"error":{"code":"pane_not_found","message":"%s"}}\n' "$pane"
     else
-      printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "$pane"
+      jq_state -c --arg p "$pane" \
+        '{result:{pane:(.tabs[] | select(.pane_id==$p) | {pane_id, foreground_cwd})}}'
     fi
     ;;
   "pane close")
@@ -91,6 +92,18 @@ case "${1:-} ${2:-}" in
       '.tabs |= [.[]|select(.pane_id != $p)]
        | .typed |= with_entries(select(.key != $p))
        | .working |= with_entries(select(.key != $p))' | save ;;
+  "pane run")
+    [ ! -f "$SEND_FAIL" ] || exit 1
+    command=${4:-}
+    case "$command" in
+      "treehouse get"|"cd -- "*)
+        [ -n "${FM_FAKE_PANE_PATH:-}" ] || exit 1
+        jq_state --arg p "${3:-}" --arg cwd "$FM_FAKE_PANE_PATH" \
+          '.tabs |= map(if .pane_id == $p then .foreground_cwd = $cwd else . end)' | save
+        ;;
+      *) jq_state --arg p "${3:-}" '.typed[$p] = true | .working[$p] = true' | save ;;
+    esac
+    ;;
   "pane send-text")
     [ ! -f "$SEND_FAIL" ] || exit 1
     jq_state --arg p "${3:-}" '.typed[$p] = true' | save ;;
