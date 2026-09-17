@@ -137,7 +137,7 @@ pi --list-models gpt-9.9-nonexistent
 No models matching "gpt-9.9-nonexistent"
 ```
 
-A listing that reaches the account and returns no row is the authoritative negative that does block a candidate.
+A listing that reaches the account and returns no row is the authoritative negative only for providers whose auth is configured: `--list-models` hides every provider with no configured auth, including extension-registered providers whose models `--model` still resolves, so an empty listing for an unauthenticated provider is missing evidence, not a block (verified 2026-09-17 on Pi 0.85.1).
 
 ## Credential sources are independent per provider
 
