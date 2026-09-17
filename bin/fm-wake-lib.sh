@@ -1102,7 +1102,11 @@ fm_lock_try_acquire() {
     return 1
   fi
 
+  # Only a lock that is really there records downtime: reaching the steal path
+  # with no lock at all means creation itself was refused, and no watcher went
+  # down for that.
   if [ "$lockdir" = "$STATE/.watch.lock" ] \
+    && { [ -e "$lockdir" ] || [ -L "$lockdir" ]; } \
     && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime; then
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$cur

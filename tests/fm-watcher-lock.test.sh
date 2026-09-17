@@ -1532,7 +1532,52 @@ test_watch_lock_is_not_published_without_an_identity() {
   [ "$rc" -eq 3 ] || fail "watch lock acquire did not fail loudly without an identity (rc=$rc)"
   [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] \
     || fail "an unconfirmable watch lock was published without a pid-identity"
+  # No watcher ever held the lock, so nothing went down and no downtime episode
+  # may be opened against a watcher that never ran.
+  [ ! -e "$state/.watcher-down" ] \
+    || fail "a failed lock creation published a downtime marker: $(cat "$state/.watcher-down")"
   pass "watch lock creation fails loudly instead of publishing an empty identity"
+}
+
+test_watcher_fails_loud_when_the_lock_cannot_be_created() {
+  local dir state lockdir fakebin out rc
+  dir=$(make_case watch-no-identity-refusal)
+  state="$dir/state"
+  lockdir="$state/.watch.lock"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  # Deny both identity sources for the watcher process: no readable /proc tree,
+  # and a ps that refuses the portable lstart query. Every other ps call still
+  # works, so only the identity lookup is disabled.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+for arg in "$@"; do
+  case "$arg" in
+    *lstart*) exit 1 ;;
+  esac
+done
+for real in /bin/ps /usr/bin/ps; do
+  [ -x "$real" ] || continue
+  exec "$real" "$@"
+done
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  rc=0
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_PROC_ROOT_OVERRIDE="$dir/no-such-proc" FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "watcher exited 0 when it could not create the lock: $(cat "$out")"
+  grep -q '^watcher: FAILED' "$out" \
+    || fail "watcher did not emit the typed failure line: $(cat "$out")"
+  grep -q 'already running' "$out" \
+    && fail "watcher claimed a peer that does not exist: $(cat "$out")"
+  [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] \
+    || fail "a watcher that refused to arm left a lock behind"
+  [ ! -e "$state/.watcher-down" ] \
+    || fail "a watcher that never armed published a downtime marker: $(cat "$state/.watcher-down")"
+  pass "watcher that cannot create its lock fails loudly instead of reporting a peer"
 }
 
 test_wait_deadline_reaps_a_stopped_child
@@ -1574,3 +1619,4 @@ test_foreign_home_watch_lock_with_fresh_beacon_is_not_reclaimed
 test_foreign_home_dead_watch_lock_with_stale_beacon_is_reclaimed
 test_pid_identity_is_non_empty_on_this_host
 test_watch_lock_is_not_published_without_an_identity
+test_watcher_fails_loud_when_the_lock_cannot_be_created
