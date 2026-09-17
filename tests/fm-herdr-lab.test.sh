@@ -21,12 +21,25 @@ set -eu
 printf '%s\n' "$*" >> "$FM_FAKE_HERDR_LOG"
 state=$FM_FAKE_HERDR_STATE
 last=
+previous=
+separator=0
+session=
 for arg in "$@"; do
+  if [ "$separator" = 0 ] && [ "$arg" = -- ]; then
+    [ "$previous" = --session ] && [ "$last" = "${FM_EXPECT_HERDR_SESSION:-}" ] \
+      || { echo "fake herdr: session must immediately precede --" >&2; exit 90; }
+    session=$last
+    separator=1
+    continue
+  fi
   previous=$last
   last=$arg
 done
-[ "${previous:-}" = --session ] || { echo "fake herdr: missing trailing --session" >&2; exit 90; }
-session=$last
+if [ "$separator" = 0 ]; then
+  [ "${previous:-}" = --session ] || { echo "fake herdr: missing trailing --session" >&2; exit 90; }
+  session=$last
+fi
+[ -n "$session" ] || { echo "fake herdr: missing session" >&2; exit 90; }
 default_socket=$(cat "$state/default-socket")
 lab_state=absent
 [ ! -f "$state/$session" ] || lab_state=$(cat "$state/$session")
@@ -116,6 +129,14 @@ test_provision_run_and_guarded_teardown() {
   assert_present "$TRIPWIRES/$name.fleet-state.json" "provision did not record the fleet-state tripwire"
 
   run_with_fake fm_herdr_lab_cli "$name" workspace list >/dev/null || fail "safe run command failed"
+  FM_EXPECT_HERDR_SESSION="$name" run_with_fake fm_herdr_lab_cli "$name" \
+    agent start proof-pi --kind pi --pane w1:p2 -- --model test --session agent-argument >/dev/null \
+    || fail "agent start with arguments after -- failed"
+  grep -Fx "agent start proof-pi --kind pi --pane w1:p2 --session $name -- --model test --session agent-argument" "$FAKE_LOG" >/dev/null \
+    || fail "agent start did not place the lab selector before -- and preserve every agent argument"
+  status=0
+  run_with_fake fm_herdr_lab_cli "$name" agent start proof-pi --kind pi --pane w1:p2 --session default >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "caller-supplied agent-start selector must be refused"
   run_with_fake fm_herdr_lab_cli "$name" server >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "bare server start outside provision must be refused"
   status=0
@@ -146,6 +167,9 @@ test_provision_run_and_guarded_teardown() {
 
   while IFS= read -r line; do
     case "$line" in
+      *' -- '*)
+        case "$line" in *"--session $name -- "*) : ;; *) fail "Herdr agent call lacks a lab selector immediately before --: $line" ;; esac
+        ;;
       *"--session $name") : ;;
       *) fail "Herdr call lacks a trailing lab session: $line" ;;
     esac

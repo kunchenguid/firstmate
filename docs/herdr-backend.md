@@ -1,7 +1,9 @@
 # Herdr runtime backend
 
 Herdr is an agent-native terminal backend with native per-pane agent state and push events.
-Firstmate requires Herdr protocol 14 or newer; broad backend verification covers versions 0.7.1, 0.7.3, 0.7.4, 0.7.5, and 0.8.0, while protocol-16 features remain gated by availability.
+Firstmate requires Herdr protocol 14 or newer for the backend generally.
+Plain-Pi worker launch additionally requires protocol 20 because it uses the structural launch path described below.
+Broad backend verification covers versions 0.7.1, 0.7.3, 0.7.4, 0.7.5, and 0.8.0, while protocol-16 features remain gated by availability.
 Default-on presentation spaces have a higher floor of Herdr 0.8.0 for the reason given under [Presentation spaces](#presentation-spaces).
 Herdr provides the terminal session while Treehouse continues to provide task worktrees.
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared backend selection and metadata semantics.
@@ -15,7 +17,7 @@ Prerequisites:
 - Herdr protocol 14 or newer, installed from [herdr.dev](https://herdr.dev).
 - `jq` for JSON responses.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
-- `python3` only for optional protocol-16 presentation-space ordering and native event subscription.
+- `python3` for plain-Pi structural worker launch, optional protocol-16 presentation-space ordering, and native event subscription.
 
 Herdr is dual-licensed AGPL-3.0-or-later or commercial.
 Firstmate invokes its CLI as a separate process.
@@ -76,6 +78,26 @@ Recovery and list-live still scan the first workspace matching the home label, b
 Existing task operations use recorded endpoint ids and do not move a live task when labels change.
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
+
+## Plain-Pi structural launch
+
+A plain `pi` worker on Herdr protocol 20 starts by replacing the fresh task tab's single shell pane through the bundled `layout.apply` schema instead of typing a command into that shell.
+This avoids treating terminal input acceptance as worker-process readiness and prevents pending shell-editor text from joining or delaying the launch command.
+Firstmate acquires the isolated Treehouse copy directly, validates the exact named session, protocol, live schema, workspace, single-pane tab, pane, foreground shell, and Unix socket, then sends one argv array with the exact working directory and launch environment through `bin/backends/herdr-layout-apply.py`.
+The local client exposes no general Herdr control surface and accepts only that one request shape.
+It binds a random request id, rejects protocol errors and mismatched responses, and returns only replacement ids that Firstmate re-reads from the same named session.
+
+The worker counts as launched only after the replacement pane reports the exact plain-Pi process, Herdr's public `pane report-agent` operation registers it as Pi, and a fresh inventory read confirms that registration is live.
+Only then do the task record and any presentation journal advance from the old tab and pane ids to the returned replacement ids.
+A failure after replacement targets the returned pane for exact cleanup and never reports spawn success.
+Generic Enter behavior for post-launch interaction is unchanged.
+
+This structural path currently supports only the exact `pi` harness.
+`pi-signed` and every other harness refuse before endpoint or worktree creation rather than being normalized to Pi or falling back to interactive-shell submission.
+Protocol versions other than 20, a missing method or schema field, an ambiguous identity, a non-shell foreground, an unrecognized replacement process, or an inventory mismatch also refuse.
+
+`tests/fm-herdr-layout-apply.test.sh` pins the portable protocol, identity, metadata, inventory, and refusal contract.
+`tests/fm-herdr-lab.test.sh` pins the named-lab selector placement used for guarded real validation.
 
 ## Presentation spaces
 

@@ -1937,6 +1937,15 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = rovo ]; then
   exit 1
 fi
 
+# Protocol-20 structural replacement is deliberately proven only for plain Pi.
+# Refuse every other Herdr harness before creating an endpoint or local copy;
+# in particular, pi-signed is a distinct executable identity and is never
+# silently normalized to pi.
+if [ "$BACKEND" = herdr ] && [ "$HARNESS" != pi ]; then
+  echo "error: structural Herdr launch supports only the exact plain pi harness; '$HARNESS' is not safely mappable" >&2
+  exit 1
+fi
+
 case "$HARNESS" in
 pi | pi-signed)
   PI_BIN=$(resolve_pi_executable "$HARNESS") || {
@@ -2989,6 +2998,7 @@ else
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
+    HERDR_PRESENTATION_JOURNAL_OPTIONAL=0
     if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
@@ -3101,6 +3111,7 @@ else
                 "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W"; then
               :
             else
+              HERDR_PRESENTATION_JOURNAL_OPTIONAL=1
               echo "warning: herdr presentation could not publish an exact restart binding; this task will use flat fallback after a restart" >&2
             fi
           fi
@@ -3431,40 +3442,39 @@ agy_spawn_fail() {  # <detail>
 }
 
 if [ "$RELAUNCH" -eq 1 ]; then
-  # No worktree is acquired: the recorded one is reused as-is. What must be
-  # proven instead is that the adopted endpoint's shell is actually sitting in
-  # that worktree, so the replacement agent starts where the work is rather
-  # than wherever the pane happened to drift.
-  relaunch_wt_real=$(real_path_or_raw "$WT")
-  relaunch_seen=
-  for _ in $(seq 1 10); do
-    relaunch_seen=$(spawn_current_path "$WT_TARGET" || true)
-    [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ] || break
-    sleep 0.5
-  done
-  if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then
-    if [ "$BACKEND" != herdr ]; then
-      echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}', not its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
-      exit 1
-    fi
-    relaunch_cd_path=${WT//\'/\'\\\'\'}
-    spawn_send_text_line "$WT_TARGET" "cd -- '$relaunch_cd_path'" || {
-      echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}' and could not be told to return to its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
-      exit 1
-    }
+  # No worktree is acquired: the recorded one is reused as-is. Herdr addresses
+  # that path in layout.apply and never types a corrective cd into the shell
+  # that is about to be replaced.
+  if [ "$BACKEND" != herdr ]; then
+    relaunch_wt_real=$(real_path_or_raw "$WT")
+    relaunch_seen=
     for _ in $(seq 1 10); do
       relaunch_seen=$(spawn_current_path "$WT_TARGET" || true)
       [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ] || break
       sleep 0.5
     done
     if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then
-      echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}' and did not return to its recorded worktree '$WT' when told to; refusing to relaunch an agent outside the copy holding its work" >&2
+      echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}', not its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
       exit 1
     fi
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  if [ "$BACKEND" = herdr ]; then
+    WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "fm-$ID") || {
+      echo "error: treehouse could not lease an isolated worktree for structural Herdr launch" >&2
+      exit 1
+    }
+    validate_spawn_worktree "treehouse lease" "$T"
+    if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+      if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
+        echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing structural Herdr launch" >&2
+        exit 1
+      fi
+      SPAWN_SLOT_CLAIMED=1
+    fi
+  else
+    spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -3543,6 +3553,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       exit 1
     fi
     SPAWN_SLOT_CLAIMED=1
+  fi
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
@@ -4312,35 +4323,98 @@ spawn_record_traceparent() {
   return "$status"
 }
 
-# Export GOTMPDIR into the crewmate's pane shell so the agent and every child
-# process (go build, go test, ...) inherit it. Sent before the launch command so
-# the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
-# Mark the pane as a task worker so bin/fm-test-run.sh can refuse to run the
-# suite in the repository's primary checkout. Ship and scout workers are the
-# ones assigned an isolated worktree; a secondmate runs its own home instead.
-# The id reached a validated bare-slug charset above, so it carries no shell
-# syntax of its own.
-if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
-  spawn_send_text_line "$T" "export FM_TASK_ID=$ID"
-fi
-# Send through the exact channel that already ships GOTMPDIR, so every backend
-# and harness - ship, scout, and secondmate - gets it before launch. Skipped
-# entirely when trace context is off.
-if [ -n "$SPAWN_TRACEPARENT" ]; then
-  if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
-    if ! spawn_record_traceparent; then
+# Non-Herdr backends still drive their fresh interactive shell exactly as
+# before. Herdr never types setup text into that shell: layout.apply replaces
+# it structurally, and the same values travel as explicit process environment.
+if [ "$BACKEND" != herdr ]; then
+  # Export GOTMPDIR into the worker shell so the agent and every child process
+  # (go build, go test, ...) inherit it.
+  spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+  # Ship and scout workers are assigned an isolated local copy. A secondmate
+  # runs its own home and therefore receives no FM_TASK_ID marker.
+  if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+    spawn_send_text_line "$T" "export FM_TASK_ID=$ID"
+  fi
+  if [ -n "$SPAWN_TRACEPARENT" ]; then
+    if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
+      if ! spawn_record_traceparent; then
+        LAUNCH="unset TRACEPARENT; $LAUNCH"
+      fi
+    else
+      TRACE_SEND_STATUS=$?
+      if [ "$TRACE_SEND_STATUS" -eq 2 ]; then
+        echo "error: trace-context input could not be cleared for $W; refusing to append the launch command" >&2
+        exit 1
+      fi
       LAUNCH="unset TRACEPARENT; $LAUNCH"
     fi
-  else
-    TRACE_SEND_STATUS=$?
-    if [ "$TRACE_SEND_STATUS" -eq 2 ]; then
-      echo "error: trace-context input could not be cleared for $W; refusing to append the launch command" >&2
-      exit 1
-    fi
-    LAUNCH="unset TRACEPARENT; $LAUNCH"
   fi
+elif [ -n "$SPAWN_TRACEPARENT" ] && ! spawn_record_traceparent; then
+  LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
+
+spawn_herdr_layout_environment() {
+  local name task_id=
+  local -a names=(HOME PATH USER LOGNAME SHELL TERM COLORTERM LANG LC_ALL LC_CTYPE TMPDIR TMP TEMP TMUX TMUX_PANE)
+  for name in $LAUNCH_ENV_NAMES; do names+=("$name"); done
+  if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+    task_id=$ID
+  fi
+  python3 - "$TASK_TMP/gotmp" "$task_id" "$SPAWN_TRACEPARENT" "${names[@]}" <<'PY'
+import json
+import os
+import sys
+
+gotmp, task_id, traceparent = sys.argv[1:4]
+env = {name: os.environ[name] for name in sys.argv[4:] if name in os.environ}
+env["GOTMPDIR"] = gotmp
+if task_id:
+    env["FM_TASK_ID"] = task_id
+if traceparent:
+    env["TRACEPARENT"] = traceparent
+print(json.dumps(env, separators=(",", ":")))
+PY
+}
+
+spawn_rebind_herdr_layout_pane() { # <new-tab> <new-pane>
+  local new_tab=$1 new_pane=$2 tmp
+  tmp=$(mktemp "$STATE/.${ID}.meta.layout.XXXXXX") || return 1
+  if ! fm_backend_herdr_layout_rebind_meta \
+    "$STATE/$ID.meta" "$tmp" "$HERDR_SES" "$new_tab" "$new_pane"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! fm_backlog_atomic_transition publish "$tmp" "$STATE/$ID.meta" "task record" "$STATE"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+spawn_wait_herdr_layout_process() {
+  local i=0
+  while [ "$i" -lt 120 ]; do
+    fm_backend_herdr_pane_matches_harness "$HERDR_SES" "$HERDR_PANE_ID" pi && return 0
+    i=$((i + 1))
+    sleep 0.25
+  done
+  return 1
+}
+
+spawn_wait_herdr_layout_ready() {
+  local state agent i=0
+  while [ "$i" -lt 120 ]; do
+    state=$(fm_backend_herdr_pane_agent_state "$HERDR_SES" "$HERDR_PANE_ID")
+    if [ "$state" = live ]; then
+      agent=$(fm_backend_herdr_cli "$HERDR_SES" agent get "$HERDR_PANE_ID" 2>/dev/null \
+        | jq -r '.result.agent.agent // .result.agent.kind // empty' 2>/dev/null)
+      [ "$agent" = pi ] && return 0
+    fi
+    i=$((i + 1))
+    sleep 0.25
+  done
+  return 1
+}
+
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH_ENV_PREFIX='/usr/bin/env -i'
   for env_name in HOME PATH USER LOGNAME SHELL TERM COLORTERM LANG LC_ALL LC_CTYPE \
@@ -4361,14 +4435,89 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
-sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
-sleep 0.3
-if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+if [ "$BACKEND" = herdr ]; then
+  if [ "$HARNESS" != pi ]; then
+    echo "error: structural Herdr launch currently supports only the exact plain pi harness; '$HARNESS' is not safely mappable" >&2
+    exit 1
+  fi
+  HERDR_LAYOUT_ENV=$(spawn_herdr_layout_environment) || exit 1
+  HERDR_LAYOUT_COMMAND=$(python3 - "$LAUNCH" <<'PY'
+import json
+import sys
+print(json.dumps(["/bin/sh", "-c", sys.argv[1]], separators=(",", ":")))
+PY
+) || exit 1
+  HERDR_LAYOUT_OLD_TAB_ID=$HERDR_TAB_ID
+  HERDR_LAYOUT_OLD_PANE_ID=$HERDR_PANE_ID
+  HERDR_LAYOUT_BINDING=$(fm_backend_herdr_layout_apply "$T" "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
+    "$WT" "$HERDR_LAYOUT_ENV" "$HERDR_LAYOUT_COMMAND") || {
+    echo "error: structural Herdr launch failed before worker readiness; refusing to report a worker start" >&2
+    exit 1
+  }
+  HERDR_TAB_ID=${HERDR_LAYOUT_BINDING%%$'\t'*}
+  HERDR_PANE_ID=${HERDR_LAYOUT_BINDING#*$'\t'}
+  [ -n "$HERDR_TAB_ID" ] && [ -n "$HERDR_PANE_ID" ] && [ "$HERDR_TAB_ID" != "$HERDR_PANE_ID" ] || exit 1
+  T="$HERDR_SES:$HERDR_PANE_ID"
+  # After layout.apply succeeds, every later refusal must target the returned
+  # replacement identity. Flat layouts opt into the same exact-pane abort
+  # cleanup for this post-mutation interval; projected layouts retain their
+  # already-armed seeded-pane cleanup.
+  if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+    HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
+  else
+    HERDR_PROJECTION_ABORT_CLEANUP=1
+    HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
+    HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
+    HERDR_PROJECTION_ABORT_SEEDED_PANE=
+  fi
+  if ! spawn_wait_herdr_layout_process; then
+    echo "error: structural Herdr launch did not produce the expected Pi process in its replacement pane" >&2
+    exit 1
+  fi
+  if ! fm_backend_herdr_layout_report_pi "$T"; then
+    echo "error: structural Herdr launch could not register its confirmed Pi in Herdr inventory" >&2
+    exit 1
+  fi
+  if ! spawn_wait_herdr_layout_ready; then
+    echo "error: structural Herdr launch did not produce a live registered plain Pi in its exact task pane" >&2
+    exit 1
+  fi
+  if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+    if [ "${HERDR_PRESENTATION_JOURNAL_OPTIONAL:-0}" -eq 1 ]; then
+      # The one legitimate unbound state is the exact version-1 attempt journal
+      # left when restart binding was explicitly downgraded above. It contains
+      # no endpoint ids to rebind. Missing, linked, malformed, mismatched, or
+      # already-bound records still refuse instead of masking lost authority.
+      if ! fm_backend_herdr_projection_journal_snapshot "$HERDR_PRESENTATION_JOURNAL" "$ID" \
+        || [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" != 1 ] \
+        || [ "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" != "$HERDR_PROJECTION_ID" ]; then
+        echo "error: structural Herdr launch lost its exact unbound presentation attempt before endpoint rebinding" >&2
+        exit 1
+      fi
+    elif ! fm_backend_herdr_projection_journal_replace_endpoint \
+      "$HERDR_PRESENTATION_JOURNAL" "$ID" \
+      "$HERDR_LAYOUT_OLD_TAB_ID" "$HERDR_LAYOUT_OLD_PANE_ID" \
+      "$HERDR_TAB_ID" "$HERDR_PANE_ID"; then
+      echo "error: structural Herdr launch could not rebind its exact presentation record" >&2
+      exit 1
+    fi
+  fi
+  if ! spawn_rebind_herdr_layout_pane "$HERDR_TAB_ID" "$HERDR_PANE_ID"; then
+    echo "error: structural Herdr launch returned a replacement pane but its task record could not be rebound" >&2
+    exit 1
+  fi
+else
+  sleep 0.3
+  spawn_send_literal "$T" "$LAUNCH"
+  sleep 0.3
+  spawn_send_key "$T" Enter
+fi
+if [ "$BACKEND" = herdr ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
+fi
+if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

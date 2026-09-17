@@ -94,6 +94,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-agent-process-lib.sh"
 
 FM_BACKEND_HERDR_MIN_PROTOCOL=14
+FM_BACKEND_HERDR_LAYOUT_APPLY_PROTOCOL=20
 # events.subscribe (the native pane.agent_status_changed push stream) and its
 # subscription_event schema first shipped at protocol 16 (verified: herdr
 # 0.7.3). Below this, or with the events surface absent from `herdr api schema`,
@@ -2201,6 +2202,43 @@ EOF
   printf 'shell'
 }
 
+fm_backend_herdr_process_matches_expected() { # <harness> <name> <argv0> <argv-json>
+  local harness=$1 name=${2:-} argv0=${3:-} argv_json=${4:-}
+  local name_base argv0_base path_name
+  name_base=${name##*/}; name_base=${name_base#-}
+  argv0_base=${argv0##*/}; argv0_base=${argv0_base#-}
+  path_name=$(fm_harness_path_name "$name" 2>/dev/null || fm_harness_path_name "$argv0" 2>/dev/null || true)
+  case "$harness" in
+    pi)
+      case "$name_base:$argv0_base:$path_name" in pi:*|Pi:*|*:pi) return 0 ;; esac
+      # Script installs run under an interpreter, so process name and argv[0]
+      # can both name node, Python, or a shell. Only an exact `pi` executable
+      # or script basename in the first two argv boundaries carries identity;
+      # later user arguments and `pi-signed` never do.
+      [ -n "$argv_json" ] && printf '%s' "$argv_json" | jq -e '
+        any(.[0:2][]?; (split("/")[-1] | sub("^-"; "")) == "pi")
+      ' >/dev/null 2>&1 && return 0
+      ;;
+  esac
+  return 1
+}
+
+fm_backend_herdr_pane_matches_harness() { # <session> <pane> <harness>
+  local session=$1 pane=$2 harness=$3 info count i name argv0 argv_json
+  info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg pane "$pane" '.result.process_info.pane_id == $pane' >/dev/null 2>&1 || return 1
+  count=$(printf '%s' "$info" | jq -er '.result.process_info.foreground_processes | length' 2>/dev/null) || return 1
+  i=0
+  while [ "$i" -lt "$count" ]; do
+    name=$(printf '%s' "$info" | jq -r --argjson i "$i" '.result.process_info.foreground_processes[$i].name // empty' 2>/dev/null)
+    argv0=$(printf '%s' "$info" | jq -r --argjson i "$i" '(.result.process_info.foreground_processes[$i].argv // [])[0] // empty' 2>/dev/null)
+    argv_json=$(printf '%s' "$info" | jq -c --argjson i "$i" '.result.process_info.foreground_processes[$i].argv // []' 2>/dev/null) || argv_json=
+    fm_backend_herdr_process_matches_expected "$harness" "$name" "$argv0" "$argv_json" && return 0
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # fm_backend_herdr_pane_agent_state: classify <pane_id> in <session> as one of
 # dead|no-agent|stale-agent|live|unknown, from the JSON body of two read-only
 # calls plus, for a registered agent, the pane's process-level view - never
@@ -2949,9 +2987,161 @@ fm_backend_herdr_current_path() {  # <target>
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
 }
 
+# fm_backend_herdr_layout_discard_response_pane: after layout.apply has
+# replaced the old shell, discard only the pane id returned by that response
+# when a later identity check fails. Never target the stale pre-apply pane.
+fm_backend_herdr_layout_discard_response_pane() { # <session> <pane>
+  local session=$1 pane=$2
+  [ -n "$session" ] && [ -n "$pane" ] || return 1
+  if ! fm_backend_herdr_cli "$session" pane close "$pane" >/dev/null 2>&1; then
+    echo "warning: Herdr structural launch could not clean the unconfirmed response pane '$pane'" >&2
+    return 1
+  fi
+}
+
+# fm_backend_herdr_layout_apply: replace one exact fresh pane through the
+# schema-pinned protocol-20 layout.apply operation, never through shell input.
+fm_backend_herdr_layout_apply() { # <target> <workspace> <tab> <pane> <cwd> <env-json> <command-json>
+  local target=$1 workspace=$2 tab=$3 pane=$4 cwd=$5 env_json=$6 command_json=$7
+  local protocol schema socket info layout out new_tab new_pane
+  fm_backend_herdr_parse_target "$target" || return 1
+  [ "$FM_BACKEND_HERDR_PANE" = "$pane" ] || return 1
+  command -v python3 >/dev/null 2>&1 || {
+    echo "error: Herdr structural launch requires python3 for its protocol-20 layout.apply transport" >&2
+    return 1
+  }
+  protocol=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" status --json 2>/dev/null \
+    | jq -r '[.client.protocol, .server.protocol] | if length == 2 and all(.[]; type == "number") then map(tostring) | join("/") else empty end' 2>/dev/null)
+  [ "$protocol" = "$FM_BACKEND_HERDR_LAYOUT_APPLY_PROTOCOL/$FM_BACKEND_HERDR_LAYOUT_APPLY_PROTOCOL" ] || {
+    echo "error: Herdr structural launch requires protocol $FM_BACKEND_HERDR_LAYOUT_APPLY_PROTOCOL on the selected client and server (got ${protocol:-unreadable})" >&2
+    return 1
+  }
+  schema=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" api schema --json 2>/dev/null) || {
+    echo "error: Herdr structural launch could not read the protocol schema" >&2
+    return 1
+  }
+  printf '%s' "$schema" | jq -e '
+    any(.schemas.request.oneOf[]?; .properties.method.const == "layout.apply")
+    and .schemas.request["$defs"].LayoutApplyParams.required == ["root"]
+    and .schemas.request["$defs"].LayoutApplyParams.properties.workspace_id.type == ["string", "null"]
+    and .schemas.request["$defs"].LayoutApplyParams.properties.tab_id.type == ["string", "null"]
+    and (.schemas.request["$defs"].LayoutNode.oneOf[]?
+      | select(.properties.type.const == "pane")
+      | .properties.command.type == ["array", "null"]
+      and .properties.cwd.type == ["string", "null"]
+      and .properties.env.type == "object"
+      and .properties.pane_id.type == ["string", "null"])
+  ' >/dev/null 2>&1 || {
+    echo "error: Herdr structural launch refused because the live protocol schema does not match the pinned layout.apply pane contract" >&2
+    return 1
+  }
+  info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" workspace list 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg workspace "$workspace" \
+    '([.result.workspaces[]? | select(.workspace_id == $workspace)] | length) == 1' >/dev/null 2>&1 || return 1
+  info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" tab get "$tab" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg workspace "$workspace" --arg tab "$tab" \
+    '.result.tab.workspace_id == $workspace and .result.tab.tab_id == $tab' >/dev/null 2>&1 || return 1
+  info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$pane" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg workspace "$workspace" --arg tab "$tab" --arg pane "$pane" \
+    '.result.pane.workspace_id == $workspace and .result.pane.tab_id == $tab and .result.pane.pane_id == $pane' >/dev/null 2>&1 || return 1
+  layout=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane layout --pane "$pane" 2>/dev/null) || return 1
+  printf '%s' "$layout" | jq -e --arg workspace "$workspace" --arg tab "$tab" --arg pane "$pane" '
+    .result.layout
+    | .workspace_id == $workspace
+      and .tab_id == $tab
+      and .focused_pane_id == $pane
+      and (.panes | length) == 1
+      and .panes[0].pane_id == $pane
+      and .panes[0].focused == true
+      and .splits == []
+  ' >/dev/null 2>&1 || {
+    echo "error: Herdr structural launch requires the exact fresh single-pane tab Firstmate created" >&2
+    return 1
+  }
+  [ "$(fm_backend_herdr_pane_process_state "$FM_BACKEND_HERDR_SESSION" "$pane")" = shell ] || {
+    echo "error: Herdr structural launch refused to replace a pane that is not one verified foreground shell" >&2
+    return 1
+  }
+  socket=$(fm_backend_herdr_presentation_session_socket_path "$FM_BACKEND_HERDR_SESSION") || {
+    echo "error: Herdr structural launch could not bind the selected session to one live socket" >&2
+    return 1
+  }
+  out=$(python3 "$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-layout-apply.py" \
+    "$socket" "$workspace" "$tab" "$pane" "$cwd" "$env_json" "$command_json") || return 1
+  [ -n "$out" ] || return 1
+  new_tab=$(printf '%s' "$out" | jq -r '.layout.tab_id // empty' 2>/dev/null) || new_tab=
+  new_pane=$(printf '%s' "$out" | jq -r '.layout.root | select(.type == "pane") | .pane_id // empty' 2>/dev/null) || new_pane=
+  if ! printf '%s' "$out" | jq -e --arg workspace "$workspace" '
+    .type == "layout_apply" and .layout.workspace_id == $workspace
+  ' >/dev/null 2>&1 || [ -z "$new_tab" ] || [ -z "$new_pane" ]; then
+    fm_backend_herdr_layout_discard_response_pane "$FM_BACKEND_HERDR_SESSION" "$new_pane" || true
+    echo "error: Herdr structural launch response did not return one bound replacement tab and pane id" >&2
+    return 1
+  fi
+  if ! info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" tab get "$new_tab" 2>/dev/null) \
+    || ! printf '%s' "$info" | jq -e --arg workspace "$workspace" --arg tab "$new_tab" \
+      '.result.tab.workspace_id == $workspace and .result.tab.tab_id == $tab' >/dev/null 2>&1; then
+    fm_backend_herdr_layout_discard_response_pane "$FM_BACKEND_HERDR_SESSION" "$new_pane" || true
+    return 1
+  fi
+  if ! info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$new_pane" 2>/dev/null) \
+    || ! printf '%s' "$info" | jq -e --arg workspace "$workspace" --arg tab "$new_tab" --arg pane "$new_pane" \
+      '.result.pane.workspace_id == $workspace and .result.pane.tab_id == $tab and .result.pane.pane_id == $pane' >/dev/null 2>&1; then
+    fm_backend_herdr_layout_discard_response_pane "$FM_BACKEND_HERDR_SESSION" "$new_pane" || true
+    return 1
+  fi
+  printf '%s\t%s' "$new_tab" "$new_pane"
+}
+
+# fm_backend_herdr_layout_rebind_meta: rewrite only the three endpoint fields
+# after layout.apply has returned and the adapter has re-read the replacement
+# from the same named session. The caller owns atomic publication.
+fm_backend_herdr_layout_rebind_meta() { # <input> <output> <session> <tab> <pane>
+  local input=$1 output=$2 session=$3 tab=$4 pane=$5 key count
+  [ -f "$input" ] && [ ! -L "$input" ] && [ -n "$session" ] && [ -n "$tab" ] && [ -n "$pane" ] || return 1
+  for key in window backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id; do
+    count=$(grep -c "^${key}=" "$input" 2>/dev/null || true)
+    [ "$count" = 1 ] || return 1
+  done
+  [ "$(grep '^backend=' "$input" | cut -d= -f2-)" = herdr ] || return 1
+  [ "$(grep '^herdr_session=' "$input" | cut -d= -f2-)" = "$session" ] || return 1
+  case "$(grep '^window=' "$input" | cut -d= -f2-)" in
+    "$session":*) ;;
+    *) return 1 ;;
+  esac
+  awk -F= -v session="$session" -v tab="$tab" -v pane="$pane" '
+    $1 == "window" { print "window=" session ":" pane; next }
+    $1 == "herdr_tab_id" { print "herdr_tab_id=" tab; next }
+    $1 == "herdr_pane_id" { print "herdr_pane_id=" pane; next }
+    { print }
+  ' "$input" > "$output"
+}
+
+fm_backend_herdr_layout_report_pi() { # <target>
+  local target=$1 protocol schema agent
+  fm_backend_herdr_parse_target "$target" || return 1
+  fm_backend_herdr_pane_matches_harness \
+    "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" pi || return 1
+  protocol=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" status --json 2>/dev/null \
+    | jq -r '[.client.protocol, .server.protocol] | if length == 2 and all(.[]; type == "number") then map(tostring) | join("/") else empty end' 2>/dev/null)
+  [ "$protocol" = "$FM_BACKEND_HERDR_LAYOUT_APPLY_PROTOCOL/$FM_BACKEND_HERDR_LAYOUT_APPLY_PROTOCOL" ] || return 1
+  schema=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" api schema --json 2>/dev/null) || return 1
+  printf '%s' "$schema" | jq -e '
+    any(.schemas.request.oneOf[]?; .properties.method.const == "pane.report_agent")
+    and .schemas.request["$defs"].PaneReportAgentParams.required == ["pane_id", "source", "agent", "state"]
+    and .schemas.request["$defs"].PaneReportAgentParams.properties.agent.type == "string"
+    and .schemas.request["$defs"].PaneReportAgentParams.properties.state["$ref"] == "#/schemas/request/$defs/PaneAgentState"
+  ' >/dev/null 2>&1 || return 1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane report-agent \
+    "$FM_BACKEND_HERDR_PANE" --source firstmate-layout-apply --agent pi --state working \
+    >/dev/null 2>&1 || return 1
+  agent=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" agent get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
+    | jq -r '.result.agent | select(.pane_id == $pane and .agent == "pi") | .agent' --arg pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null)
+  [ "$agent" = pi ]
+}
+
 # fm_backend_herdr_send_text_line: send one line of TEXT then submit,
-# ATOMICALLY - mirrors tmux's `send-keys -t T text Enter`. Used for the fixed
-# spawn-time commands (treehouse get, the GOTMPDIR export). `pane run` types
+# ATOMICALLY - mirrors tmux's `send-keys -t T text Enter`. `pane run` types
 # the command and submits it in one call (verified).
 fm_backend_herdr_send_text_line() {  # <target> <text>
   fm_backend_herdr_target_ready "$1" || return 1

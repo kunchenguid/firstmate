@@ -35,6 +35,25 @@ mkdir -p "$TMP_ROOT/ambient-home"
 export FM_HOME="$TMP_ROOT/ambient-home"
 export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 
+make_agent_named_sleep() { # <path> <sleep-binary>
+  local path=$1 sleep_bin=$2
+  if [ "$(uname -s)" = Linux ]; then
+    cat > "$path" <<'PY'
+#!/usr/bin/env python3
+import ctypes
+import sys
+import time
+ctypes.CDLL(None).prctl(15, b"pi", 0, 0, 0)
+time.sleep(float(sys.argv[1]))
+PY
+    chmod +x "$path"
+  else
+    # Darwin's process identity follows the symlink basename and its signed
+    # system sleep remains executable through that link.
+    ln -sf "$sleep_bin" "$path"
+  fi
+}
+
 # make_herdr_fakebin: a `herdr` stub that logs every invocation (one line,
 # unit-separated args, to $FM_HERDR_LOG) and returns the canned response for
 # that call read from $FM_HERDR_RESPONSES/<n>.out, consumed IN ORDER (call 1
@@ -569,9 +588,10 @@ test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_aliv
   local lab sleep_bin shell_pid out shell_verdict
   sleep_bin=$(command -v sleep) || fail "sleep not found"
   lab="$TMP_ROOT/stale-reg-descendant-bin"; mkdir -p "$lab"
-  # A symlink to a real long-running binary so the kernel records `pi` as the
-  # executable identity (a copied platform binary fails code signing on macOS).
-  ln -sf "$sleep_bin" "$lab/pi"
+  # Use a process whose kernel identity is `pi`. Linux Nix coreutils is a
+  # multicall binary that rejects a `pi` symlink, while Darwin's signed system
+  # binary cannot be copied, so the fixture owns one portable constructor.
+  make_agent_named_sleep "$lab/pi" "$sleep_bin"
   # A real shell whose child is that agent-named process, while the canned
   # foreground view shows only the shell (a suspended or backgrounded agent).
   sh -c "'$lab/pi' 300; :" &
@@ -601,7 +621,7 @@ test_agent_descendant_under_a_spaced_install_path_stays_alive() {
   # `/Library/Application Support/...` shape), so a field-split read of the
   # process table sees only a fragment of the name.
   lab="$TMP_ROOT/stale-reg-spaced-bin/Application Support/Some Dir"; mkdir -p "$lab"
-  ln -sf "$sleep_bin" "$lab/pi"
+  make_agent_named_sleep "$lab/pi" "$sleep_bin"
   sh -c "'$lab/pi' 300; :" &
   shell_pid=$!
   sleep 0.3
