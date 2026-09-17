@@ -168,8 +168,8 @@ else
   MUSE_TARGET="$SESSION:$MUSE_PANE"
   # The launch shape here is the launch bin/fm-spawn.sh actually composes for
   # muse minus its positional brief, since this guard needs an idle composer to
-  # steer: the shared outer marker scrub (bin/fm-spawn.sh:3898) wrapping the
-  # verified muse template (bin/fm-spawn.sh:1625), the same absolute resolved
+  # steer: the shared outer marker scrub (bin/fm-spawn.sh:4271) wrapping the
+  # verified muse template (bin/fm-spawn.sh:1857), the same absolute resolved
   # binary, and MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on as the
   # privacy control, which is the control used because the interactive TUI
   # rejects exec mode's --no-foreign-personal-context flag.
