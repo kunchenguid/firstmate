@@ -5,7 +5,42 @@
 # PID of any one tool call, which is dead moments after it is written.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
+#        fm-lock.sh -h|--help print usage; exit 0 without touching the lock
+# Any other argument is refused with exit 2 and the lock left untouched, so a
+# probe like `--help` can never claim the home's session lock as a side effect.
 set -u
+
+usage() {
+  cat <<'USAGE'
+Usage: fm-lock.sh           acquire the session lock; exit 1 unless ownership is verified
+       fm-lock.sh status    print holder and liveness; always exits 0
+       fm-lock.sh -h|--help print this usage; exit 0 without touching the lock
+USAGE
+}
+
+# Parse before any state is touched: an unrecognized argument must leave the
+# lock, and the state directory, exactly as it found them.
+MODE=acquire
+if [ "$#" -gt 0 ]; then
+  case "$1" in
+    status) MODE=status ;;
+    -h | --help) MODE=help ;;
+    *)
+      echo "error: unrecognized argument '$1'" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+  if [ "$#" -gt 1 ]; then
+    echo "error: unexpected extra argument '$2'" >&2
+    usage >&2
+    exit 2
+  fi
+  if [ "$MODE" = help ]; then
+    usage
+    exit 0
+  fi
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -23,7 +58,7 @@ mkdir -p "$STATE" 2>/dev/null || {
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
-if [ "${1:-}" = "status" ]; then
+if [ "$MODE" = status ]; then
   if [ ! -f "$LOCK" ]; then echo "lock: free"; exit 0; fi
   old=$(cat "$LOCK" 2>/dev/null) || {
     echo "lock: unreadable"
