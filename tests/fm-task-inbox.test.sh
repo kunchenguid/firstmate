@@ -26,6 +26,10 @@
 #   6. Dead panes: the doorbell line is a shell no-op when executed by a bare
 #      shell, the ring skips an agent the backend classifies dead, and the
 #      watcher surfaces such a record exactly once instead of re-ringing.
+#   7. Kimi queued-input steer: a rung doorbell that leaves Kimi's queue block on
+#      screen is followed by exactly one Ctrl-S, from the ring and from a real
+#      watcher re-ring alike; no block, any other harness, or any backend but
+#      tmux sends no key at all.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -53,7 +57,8 @@ inbox_lib() {  # <state> <function> [args...]
 
 # A fake tmux for the watcher cases: capture-pane replays FM_FAKE_TMUX_CAPTURE,
 # display-message yields a numeric cursor row, and every literal send-keys is
-# logged to FM_SEND_LOG so a doorbell ring is observable. With
+# logged to FM_SEND_LOG so a doorbell ring is observable, and every named key
+# to FM_KEY_LOG. With
 # FM_FAKE_TMUX_AGENT set, the inventory lists window fm-t1 and its
 # #{pane_current_command} answers with that value, so `zsh` makes
 # fm_backend_tmux_agent_state read the pane as a dead bare shell.
@@ -79,6 +84,8 @@ case "${1:-}" in
       if [ -n "${FM_ACK_RECORD:-}" ] && [ -f "$FM_ACK_RECORD" ]; then
         mv "$FM_ACK_RECORD" "${FM_ACK_RECORD%/*}/handled/"
       fi
+    else
+      printf '%s\n' "${1:-}" >> "${FM_KEY_LOG:-/dev/null}"
     fi
     exit 0 ;;
   display-message)
@@ -277,6 +284,121 @@ test_ring_skips_dead_agent() {
   [ "$rc" = 0 ] || fail "an endpoint the classifier cannot see should still be rung, got $rc"
   grep -qF 'Firstmate instruction waiting' "$log" || fail "an unclassifiable endpoint did not receive the doorbell"
   pass "inbox: the ring skips dead or missing endpoints and still rings live or unclassifiable endpoints"
+}
+
+# The bottom rows of a real Kimi Code 0.43.1 pane with one doorbell queued
+# mid-turn; tests/fm-composer-lib.test.sh pins the match itself.
+kimi_queued_capture() {  # <dir>
+  cat > "$1/kimi-queued.capture" <<'CAP'
+ ● Running a command · $ sleep 90
+  🌕 · Tip: /plugins: manage plugins — try the "Kimi Datasource" for reliable financial, economic, and academic data
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ❯ : Firstmate instruction waiting: list '/tmp/x.inbox'/*.msg and, in numeric order, read and act on each.
+   ↑ to edit · ctrl-s to steer immediately
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ >                                                                                                                  │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ Never Ask  K3 thinking: high  …/scratchpad/kimi-verify  main
+CAP
+  printf '%s\n' "$1/kimi-queued.capture"
+}
+
+kimi_idle_capture() {  # <dir>
+  cat > "$1/kimi-idle.capture" <<'CAP'
+ ● FINISHED.
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ >                                                                                                                  │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ Never Ask  K3 thinking: high  …/scratchpad/kimi-verify  main
+CAP
+  printf '%s\n' "$1/kimi-idle.capture"
+}
+
+ctrl_s_count() {  # <key-log>
+  grep -c '^C-s$' "$1" 2>/dev/null || true
+}
+
+test_ring_steers_queued_kimi_once() {
+  local dir state rec log keys rc queued idle harness
+  dir="$TMP_ROOT/ring-kimi"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_watch_stubs "$dir" >/dev/null
+  queued=$(kimi_queued_capture "$dir")
+  idle=$(kimi_idle_capture "$dir")
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  log="$dir/send.log"; keys="$dir/keys.log"
+
+  : > "$log"; : > "$keys"; rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_KEY_LOG="$keys" FM_FAKE_TMUX_CAPTURE="$queued" \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 kimi || rc=$?
+  [ "$rc" = 0 ] || fail "a rung kimi doorbell should return 0, got $rc"
+  grep -qF 'Firstmate instruction waiting' "$log" || fail "the kimi doorbell was not typed"
+  [ "$(ctrl_s_count "$keys")" = 1 ] \
+    || fail "a queued kimi doorbell should get exactly one Ctrl-S:"$'\n'"$(cat "$keys")"
+  [ "$(tail -n 1 "$keys")" = C-s ] \
+    || fail "Ctrl-S must follow the doorbell's own submit:"$'\n'"$(cat "$keys")"
+
+  : > "$log"; : > "$keys"; rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_KEY_LOG="$keys" FM_FAKE_TMUX_CAPTURE="$idle" \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 kimi || rc=$?
+  [ "$rc" = 0 ] || fail "an idle kimi should still be rung, got $rc"
+  grep -qF 'Firstmate instruction waiting' "$log" || fail "an idle kimi did not receive the doorbell"
+  [ "$(ctrl_s_count "$keys")" = 0 ] \
+    || fail "no queue block on screen must mean no Ctrl-S:"$'\n'"$(cat "$keys")"
+
+  # The same queue block under any other recorded harness, or none, is ignored.
+  for harness in claude grok pi ''; do
+    : > "$log"; : > "$keys"; rc=0
+    PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_KEY_LOG="$keys" FM_FAKE_TMUX_CAPTURE="$queued" \
+      inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 "$harness" || rc=$?
+    [ "$rc" = 0 ] || fail "harness '$harness' should still be rung, got $rc"
+    grep -qF 'Firstmate instruction waiting' "$log" || fail "harness '$harness' did not receive the doorbell"
+    [ "$(ctrl_s_count "$keys")" = 0 ] \
+      || fail "harness '$harness' must never receive Ctrl-S:"$'\n'"$(cat "$keys")"
+  done
+
+  # A backend whose key path does not carry a verified C-s is left alone.
+  : > "$keys"; rc=0
+  PATH="$dir/fakebin:$PATH" FM_KEY_LOG="$keys" FM_FAKE_TMUX_CAPTURE="$queued" \
+    inbox_lib "$state" fm_task_inbox_kimi_steer herdr sess:fm-t1 fm-t1 kimi || rc=$?
+  [ "$rc" = 1 ] || fail "a non-tmux backend should report nothing sent (1), got $rc"
+  [ ! -s "$keys" ] || fail "a non-tmux backend received a key:"$'\n'"$(cat "$keys")"
+  pass "inbox: a queued kimi doorbell gets exactly one Ctrl-S; no block, another harness, or another backend gets none"
+}
+
+test_watcher_rering_steers_queued_kimi() {
+  local dir state out log keys pid rec i=0
+  dir=$(setup_watch_case kimi-rering)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; keys="$dir/keys.log"
+  : > "$log"; : > "$keys"
+  fm_write_meta "$state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=kimi"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_KEY_LOG="$keys" FM_FAKE_TMUX_CAPTURE="$(kimi_queued_capture "$dir")" \
+    FM_TASK_INBOX_RING_MAX=99
+  pid=$!
+  while [ "$i" -lt 100 ]; do
+    [ "$(ctrl_s_count "$keys")" = 0 ] || break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -0 "$pid" 2>/dev/null \
+    || fail "a steered re-ring must not wake firstmate (watcher exited):"$'\n'"$(cat "$out")"
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  grep -qF 'Firstmate instruction waiting' "$log" \
+    || fail "the watcher never re-rang the kimi doorbell:"$'\n'"$(cat "$log")"
+  [ "$(ctrl_s_count "$keys")" -ge 1 ] \
+    || fail "the watcher's kimi re-ring sent no Ctrl-S:"$'\n'"$(cat "$keys")"
+  # The watcher is killed mid-cycle, so the last re-ring may not have reached
+  # its key yet; what must never happen is more keys than doorbells.
+  [ "$(ctrl_s_count "$keys")" -le "$(grep -cF 'Firstmate instruction waiting' "$log")" ] \
+    || fail "a re-ring must never send more than one Ctrl-S:"$'\n'"$(cat "$keys")"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "a steered re-ring queued a wake:"$'\n'"$(cat "$state/.wake-queue")"
+  pass "watcher: a kimi re-ring that lands in the queue block is steered with one Ctrl-S and stays quiet"
 }
 
 test_idempotent_write_dedups_exact_body() {
@@ -696,6 +818,7 @@ test_write_is_durable_and_exact
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
+test_ring_steers_queued_kimi_once
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence
@@ -705,6 +828,7 @@ test_ladder_writes_ignore_vanished_inbox
 test_fire_and_forget_records_never_enter_the_ladder
 test_ring_ladder_policy
 test_watcher_rerings_idle_pane_quietly
+test_watcher_rering_steers_queued_kimi
 test_watcher_waits_on_busy_pane
 test_watcher_quiet_on_healthy_inbox
 test_watcher_ack_silences_unwritable_ladder

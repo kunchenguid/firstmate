@@ -399,6 +399,42 @@ fm_busy_lines_match() {  # [harness]
   [ -n "$regex" ] && printf '%s' "$lines" | grep -qiE "$regex"
 }
 
+# Kimi's queued-input block, read from a plain capture on stdin. While a turn
+# runs, Kimi queues submitted input instead of reading it and draws, directly
+# above the composer's top border, one `❯ <text>` row per queued line (a long
+# line is truncated with `…`, never wrapped) followed by one hint row (verified
+# live, Kimi Code 0.43.1):
+#      ❯ : Firstmate instruction waiting: list '/…
+#      ↑ to edit · ctrl-s to steer immediately
+#    ╭──────────────╮
+# The match is STRUCTURAL and deliberately strict, because its only consumer
+# answers a positive verdict with a keystroke (fm_task_inbox_kimi_steer in
+# bin/fm-task-inbox-lib.sh): the hint must be the nearest nonblank row above the
+# LAST composer border and a `❯ ` row must sit directly above the hint, so
+# worker output or a diff that merely quotes the hint text, and Kimi's own
+# `❯`-cursored dialogs, never match. A miss is harmless there - the ordinary
+# re-ring ladder still applies - so unobserved spellings are not matched.
+# Like the busy footers above, this is a DELIVERY guard and never a worker-state
+# source. Bytes are compared under LC_ALL=C so the verdict does not depend on
+# the caller's locale.
+FM_DELIVERY_KIMI_QUEUED_HINT_REGEX_DEFAULT='^[[:space:]]*↑ to edit · ctrl-s to steer immediately[[:space:]]*$'
+
+fm_composer_kimi_queued_input() {
+  LC_ALL=C awk -v hint="$FM_DELIVERY_KIMI_QUEUED_HINT_REGEX_DEFAULT" '
+    {
+      sub(/\r$/, "")
+      if ($0 !~ /^[[:space:]]*$/) row[++n] = $0
+    }
+    END {
+      for (i = n; i >= 1; i--) if (row[i] ~ /^[[:space:]]*╭─/) break
+      if (i < 3) exit 1
+      if (row[i - 1] !~ hint) exit 1
+      if (row[i - 2] !~ /^[[:space:]]*❯ /) exit 1
+      exit 0
+    }
+  '
+}
+
 # The prompt glyphs, each declared exactly once (see THE SAFETY RULE above).
 # AGENT glyphs are a genuine empty agent composer on any row, bordered or bare.
 # SHELL glyphs are one only INSIDE a composer container; on a bare row they are

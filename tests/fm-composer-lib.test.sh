@@ -833,6 +833,139 @@ test_queued_enter_verdict_does_not_convert_other_states() {
   pass "fm_composer_queued_enter_verdict: only proven pending is converted"
 }
 
+# Kimi's queued-input block (fm_composer_kimi_queued_input). The positive
+# fixtures are the bottom rows of real `tmux capture-pane -p` reads of Kimi
+# Code 0.43.1 with one and with two doorbells queued mid-turn; the negatives
+# are the same session after Ctrl-S, idle, and constructed near-misses.
+kimi_queued_one() {
+  cat <<'CAP'
+ ● Running a command · $ sleep 90
+  🌕 · Tip: /plugins: manage plugins — try the "Kimi Datasource" for reliable financial, economic, and academic data
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ❯ : Firstmate instruction waiting: list '/tmp/x.inbox'/*.msg and, in numeric order, read and act on each.
+   ↑ to edit · ctrl-s to steer immediately
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ >                                                                                                                  │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ Never Ask  K3 thinking: high  …/1330ebde-4029-49e8-af69-5d09c6807309/scratchpad/kimi-verify  main
+                                                                                                 context: 3% (21.9k/1M)
+CAP
+}
+
+kimi_queued_two_truncated() {
+  cat <<'CAP'
+ ● Running a command · $ sleep 45
+   Press Ctrl+B to run in background
+  🌔 · Tip: ask Kimi to schedule tasks, e.g. "remind me at 5pm"
+ ────────────────────────────────────────────────────────────────────────────────────────
+   ❯ : Firstmate instruction waiting: list '/private/tmp/claude-501/-Users-lele--treehou…
+   ❯ : Firstmate instruction waiting: list '/private/tmp/claude-501/-Users-lele--treehou…
+   ↑ to edit · ctrl-s to steer immediately
+ ╭──────────────────────────────────────────────────────────────────────────────────────╮
+ │ >                                                                                    │
+ ╰──────────────────────────────────────────────────────────────────────────────────────╯
+ Never Ask  K3 thinking: high  …/1330ebde-4029-49e8-af69-5d09c6807309/scratchpad/kimi-ve…
+                                                                   context: 3% (21.9k/1M)
+CAP
+}
+
+kimi_after_ctrl_s() {
+  cat <<'CAP'
+ ● Running a command · $ sleep 90
+   Press Ctrl+B to run in background
+ ✨ : Firstmate instruction waiting: list '/tmp/x.inbox'/*.msg and, in numeric order, read and act on each.
+  🌘 · Tip: /plugins: manage plugins — try the "Kimi Datasource" for reliable financial, economic, and academic data
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ >                                                                                                                  │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ Never Ask  K3 thinking: high  …/1330ebde-4029-49e8-af69-5d09c6807309/scratchpad/kimi-verify  main
+                                                                                                 context: 3% (21.9k/1M)
+CAP
+}
+
+kimi_idle() {
+  cat <<'CAP'
+ ● /tmp/x.inbox/ does not exist — there are no .msg files to read or act on.
+   Also, for the earlier request: FINISHED.
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ >                                                                                                                  │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ Never Ask  K3 thinking: high  …/1330ebde-4029-49e8-af69-5d09c6807309/scratchpad/kimi-verify  main
+                                                                                                 context: 3% (22.2k/1M)
+CAP
+}
+
+# Worker output quoting the whole block (a diff of this very repo, say) while
+# the real composer below it has nothing queued.
+kimi_quoted_block_in_output() {
+  cat <<'CAP'
+ ● The capture shows:
+   ❯ : Firstmate instruction waiting: list '/tmp/x.inbox'/*.msg
+   ↑ to edit · ctrl-s to steer immediately
+  🌘 · Tip: /tasks to check progress and status for background tasks
+ ╭──────────────────────────────────────────╮
+ │ >                                        │
+ ╰──────────────────────────────────────────╯
+ Never Ask  K3 thinking: high  …/kimi-verify  main
+CAP
+}
+
+# Kimi 0.43.1's folder-trust dialog: a `❯` cursor row and no composer at all.
+kimi_trust_dialog() {
+  cat <<'CAP'
+ ──────────────────────────────────────────────────────────────────────
+  Trust this folder?
+  ↑↓ navigate · Enter select · Esc exit
+
+   ❯ Trust this folder
+     Enable project MCP servers. Remembered for this folder.
+
+     Don't trust
+     Exit Kimi Code. Asked again next launch.
+
+ ──────────────────────────────────────────────────────────────────────
+CAP
+}
+
+kimi_hint_without_queued_row() {
+  cat <<'CAP'
+  🌘 · Tip: /tasks to check progress and status for background tasks
+   ↑ to edit · ctrl-s to steer immediately
+ ╭──────────────────────────────────────────╮
+ │ >                                        │
+ ╰──────────────────────────────────────────╯
+CAP
+}
+
+test_kimi_queued_input_matches_live_block() {
+  local name
+  for name in kimi_queued_one kimi_queued_two_truncated; do
+    "$name" | fm_composer_kimi_queued_input \
+      || fail "$name: the live queued-input block must match"
+    "$name" | LC_ALL=C fm_composer_kimi_queued_input \
+      || fail "$name: the match must not depend on the caller's locale"
+    "$name" | sed 's/$/\r/' | fm_composer_kimi_queued_input \
+      || fail "$name: a carriage-return-terminated capture must still match"
+  done
+  pass "fm_composer_kimi_queued_input: the live Kimi 0.43.1 queue block matches, one line or several, in any locale"
+}
+
+test_kimi_queued_input_rejects_everything_else() {
+  local name
+  for name in kimi_after_ctrl_s kimi_idle kimi_quoted_block_in_output \
+    kimi_trust_dialog kimi_hint_without_queued_row; do
+    if "$name" | fm_composer_kimi_queued_input; then
+      fail "$name: must not read as a queued-input block"
+    fi
+  done
+  if printf '' | fm_composer_kimi_queued_input; then
+    fail "an empty capture must not read as a queued-input block"
+  fi
+  pass "fm_composer_kimi_queued_input: injected, idle, quoted, dialog, and partial screens never match"
+}
+
 test_queued_enter_verdict_busy_pending_is_empty
 test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
+test_kimi_queued_input_matches_live_block
+test_kimi_queued_input_rejects_everything_else

@@ -609,6 +609,41 @@ Two findings from the run shaped the shipped behavior: an OpenCode vendor update
 Kimi was not installed on the verification machine; its receive path is the same one-line-plus-shell contract, and the portable ladder and enqueue regressions in `tests/fm-task-inbox.test.sh` and `tests/fm-send-inbox.test.sh` cover every harness-independent half.
 This guard is the refresh command after any harness upgrade; it spends a small number of real tokens per installed harness, reports an absent harness explicitly, and refuses a run that verified nothing.
 
+### Kimi mid-turn steer
+
+A standalone Kimi that is mid-turn queues the doorbell instead of reading it, so the guard also steers a Kimi that is inside a long tool call.
+Verified on 2026-09-17 with Kimi Code 0.43.1, tmux 3.7c, macOS arm64, on an isolated private socket, in a throwaway folder, driving the real `bin/fm-send.sh`:
+
+```sh
+FM_SEND_INBOX_LIVE_E2E=1 FM_SEND_INBOX_LIVE_HARNESSES=kimi FM_SEND_INBOX_LIVE_KIMI_CWD=<folder Kimi already trusts> tests/fm-send-inbox-doorbell-live-e2e.test.sh
+```
+
+```text
+ok - kimi (0.43.1): the doorbell reached a real worker, which acted and acked with the mv
+ok - kimi (0.43.1) mid-turn steer: the queued doorbell was injected into the running turn, acted on, and acked without a re-ring
+```
+
+The queue block Kimi 0.43.1 draws directly above its composer, as `tmux capture-pane -p` reads it, and the same rows after `tmux send-keys C-s`:
+
+```text
+   ❯ : Firstmate instruction waiting: list '/tmp/x.inbox'/*.msg and, in numeric order, read and act on each.
+   ↑ to edit · ctrl-s to steer immediately
+ ╭──────────────────────────────────────────────────────────────╮
+ │ >                                                            │
+```
+
+```text
+ ✨ : Firstmate instruction waiting: list '/tmp/x.inbox'/*.msg and, in numeric order, read and act on each.
+  🌘 · Tip: /plugins: manage plugins
+ ╭──────────────────────────────────────────────────────────────╮
+ │ >                                                            │
+```
+
+The colon after `❯` is the doorbell's own shell no-op prefix, not part of Kimi's rendering.
+Two queued lines render as two `❯` rows above one hint row, a line wider than the pane is truncated with `…` rather than wrapped, and one Ctrl-S injects every queued line.
+A Ctrl-S sent with nothing queued changed nothing on screen, both idle and mid-turn.
+Only tmux's key path was exercised; no other backend sends the key.
+
 ## Gemini
 
 The Gemini crewmate adapter was verified on 2026-09-04 with gemini-cli 0.58.0 on Linux, Node v24.20.0, tmux 3.4.

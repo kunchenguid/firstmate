@@ -25,6 +25,9 @@
 #  10. An empty or whitespace-only text steer is refused before anything is
 #      marked, recorded, or typed - on the marked secondmate path that means
 #      no marker-only record and no pending-reply expectation.
+#  11. A doorbell that lands in a standalone Kimi's queued-input block is
+#      followed by exactly one Ctrl-S; the same screen under any other harness
+#      gets no key (bin/fm-task-inbox-lib.sh owns the decision).
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
 # shellcheck disable=SC2016
@@ -42,7 +45,9 @@ TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 
 # Stub tmux: logs literal typed text to FM_SEND_LOG and lets the submit and
 # composer paths reach clean verdicts. FM_FAKE_TMUX_COMPOSER=pending renders a
-# composer visibly holding text; FM_FAKE_TMUX_SEND_FAIL=1 fails send-keys.
+# composer visibly holding text and kimi-queued renders Kimi's queued-input
+# block above an empty composer; FM_FAKE_TMUX_SEND_FAIL=1 fails send-keys.
+# Named keys are logged to FM_KEY_LOG when set.
 make_stubs() { # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -63,6 +68,8 @@ case "${1:-}" in
     done
     if [ "$literal" = 1 ]; then
       printf '%s\n' "${1:-}" >> "$FM_SEND_LOG"
+    else
+      printf '%s\n' "${1:-}" >> "${FM_KEY_LOG:-/dev/null}"
     fi
     exit 0 ;;
   display-message)
@@ -71,6 +78,9 @@ case "${1:-}" in
   capture-pane)
     if [ "${FM_FAKE_TMUX_COMPOSER:-}" = pending ]; then
       printf '╭──────────────╮\n│ leftover txt │\n╰──────────────╯\n'
+    elif [ "${FM_FAKE_TMUX_COMPOSER:-}" = kimi-queued ]; then
+      printf '  🌕 · Tip: /tasks\n ──────\n   ❯ : Firstmate instruction waiting: list …\n'
+      printf '   ↑ to edit · ctrl-s to steer immediately\n ╭────╮\n │ >  │\n ╰────╯\n'
     else
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
@@ -411,6 +421,32 @@ test_empty_message_refused() {
   pass "fm-send: an empty or whitespace-only text steer refuses before marking, recording, or typing"
 }
 
+test_kimi_queued_doorbell_is_steered() {
+  local dir err rc keys harness
+  dir=$(setup_case kimi-steer kimi)
+  err="$dir/send.err"; keys="$dir/keys.log"; : > "$keys"
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=kimi-queued FM_KEY_LOG="$keys" -- t1 "please rebase onto main"
+  rc=$?
+  expect_code 0 "$rc" "a steer to a busy kimi should exit 0 at enqueue"
+  assert_contains "$(cat "$dir/send.log")" "Firstmate instruction waiting" "the kimi doorbell should be typed"
+  [ "$(grep -c '^C-s$' "$keys")" = 1 ] \
+    || fail "a queued kimi doorbell should get exactly one Ctrl-S:"$'\n'"$(cat "$keys")"
+  : > "$keys"
+  run_send "$dir" "$err" FM_KEY_LOG="$keys" -- t1 "and then push"
+  if grep -q '^C-s$' "$keys"; then
+    fail "an idle kimi must not receive Ctrl-S:"$'\n'"$(cat "$keys")"
+  fi
+  for harness in claude grok; do
+    dir=$(setup_case "kimi-steer-$harness" "$harness")
+    keys="$dir/keys.log"; : > "$keys"
+    run_send "$dir" "$dir/send.err" FM_FAKE_TMUX_COMPOSER=kimi-queued FM_KEY_LOG="$keys" -- t1 "please rebase onto main"
+    if grep -q '^C-s$' "$keys"; then
+      fail "$harness must never receive Ctrl-S:"$'\n'"$(cat "$keys")"
+    fi
+  done
+  pass "fm-send inbox: a doorbell queued by a busy kimi gets one Ctrl-S; an idle kimi and other harnesses get none"
+}
+
 test_text_steer_rides_inbox
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
@@ -424,3 +460,4 @@ test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
 test_empty_message_refused
+test_kimi_queued_doorbell_is_steered

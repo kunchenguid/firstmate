@@ -58,6 +58,14 @@
 # crash or marker failure may produce a rare duplicate rather than silently lose
 # a wake.
 #
+# Kimi queued-input steer (fm_task_inbox_kimi_steer): a standalone Kimi mid-turn
+# queues the doorbell instead of reading it, so a ring that leaves Kimi's queue
+# block on screen is followed by exactly one Ctrl-S, which Kimi binds to "steer
+# immediately" and which injects the queued doorbell into the running turn.
+# It is delivery help only and changes no ladder rule: the acknowledgement move
+# stays the only delivery signal, so a swallowed key just leaves the ladder to
+# re-ring as before.
+#
 # Inbox paths containing bytes outside printable ASCII are unsupported. The
 # doorbell refuses them rather than sending terminal control bytes to a pane.
 #
@@ -282,8 +290,8 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # CONSTANT line the worker recovers semantically, while skipping on ambiguous
 # verdicts would starve a harness whose idle screen the classifier cannot
 # positively identify (that classifier is advisory here by design).
-fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [harness]
+  local backend=$1 target=$2 rec=$3 label=${4:-} harness=${5:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac
@@ -304,7 +312,38 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   # The verdict is read only to report a failed keystroke; every other value
   # (empty, pending, unknown, ...) is deliberately ignored, never proof.
   [ "$verdict" != send-failed ] || return 2
+  fm_task_inbox_kimi_steer "$backend" "$target" "$label" "$harness" || true
   return 0
+}
+
+# After a rung doorbell, inject it into a running standalone Kimi turn: when the
+# pane shows Kimi's queued-input block (fm_composer_kimi_queued_input in
+# bin/fm-composer-lib.sh owns the match), send Ctrl-S once.
+# Returns 0 key sent, 1 nothing sent, 2 the key send failed; no value is
+# delivery proof and fm_task_inbox_ring ignores all three.
+# The key is sent ONLY on a positive match read after the ring, so an idle
+# Kimi, which reads the doorbell at once and never draws the block, receives
+# nothing. It is scoped to a recorded harness of exactly `kimi` - Kimi behind
+# Pi records `pi` - and to tmux, the one backend whose key path carries C-s
+# verified; every other harness and backend returns 1 untouched. A stray Ctrl-S
+# was verified a no-op on Kimi both idle and busy with nothing queued. The
+# block can trail the submit by a render, hence the short bounded re-read.
+fm_task_inbox_kimi_steer() {  # <backend> <target> [expected-label] [harness]
+  local backend=$1 target=$2 label=${3:-} harness=${4:-} cap tries=0
+  [ "$harness" = kimi ] || return 1
+  [ "$backend" = tmux ] || return 1
+  # Load the backend here, not only inside the capture's command substitution,
+  # so the matcher it brings with it (bin/fm-composer-lib.sh) exists in this shell.
+  fm_backend_source "$backend" 2>/dev/null || return 1
+  while [ "$tries" -lt 3 ]; do
+    [ "$tries" -eq 0 ] || sleep 0.3
+    tries=$((tries + 1))
+    cap=$(fm_backend_capture "$backend" "$target" 40 "$label" 2>/dev/null) || continue
+    printf '%s\n' "$cap" | fm_composer_kimi_queued_input || continue
+    fm_backend_send_key "$backend" "$target" C-s "$label" >/dev/null 2>&1 || return 2
+    return 0
+  done
+  return 1
 }
 
 fm_task_inbox_is_fire_and_forget() {  # <record-path>
