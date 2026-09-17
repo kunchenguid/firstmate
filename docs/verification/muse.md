@@ -215,7 +215,7 @@ FM_HERDR_SUBMIT_CONFIRM_LIVE=1 bin/fm-test-run.sh tests/fm-herdr-submit-confirm-
 
 The Muse signals guard requires a real `muse` binary and tmux but uses `--provider echo`, so it does not require `META_API_KEY` and cannot re-check the real-model turn-to-run relationship on its own.
 It follows SGR state through the final prompt glyph and rejects both bright-then-dark and malformed-RGB negative controls before accepting that glyph's effective luminance.
-The Herdr submit-confirm guard covers both of those surfaces on the Herdr runtime, with different weight: the styled `⟩` composer is what decides a Muse steer's delivery verdict, while the `muse-bin-*` process anchoring only backs that guard's own readiness gate, which refuses to steer a bare shell prompt.
+The Herdr submit-confirm guard covers both of those surfaces on the Herdr runtime, with different weight: the styled composer is what decides a Muse steer's delivery verdict, while the `muse-bin-*` process anchoring only backs that guard's own readiness gate, which refuses to steer a bare shell prompt.
 Its gate requires `herdr`, `jq`, and `claude`, and with `FM_HERDR_SUBMIT_CONFIRM_LIVE=1` set a missing one of those is a red failure rather than a skip, which is why the imperative above is qualified to Herdr-capable hosts.
 `muse` itself is optional to that gate: its Muse leg needs no credential, and a host without `muse` reports that leg unverified rather than passing silently.
 [`runtime-backends.md`](runtime-backends.md#submit-confirmation) owns that leg's shape and still marks it authored and not yet executed, so the first guarded run is what turns it into a measurement.

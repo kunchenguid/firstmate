@@ -302,7 +302,7 @@ Zellij has no verified recovery-grade agent process probe, while Orca and cmux d
 The current classifier matrix and its refresh guard are recorded in [Composer classification matrix](#composer-classification-matrix), with portable shape coverage in `tests/fm-composer-lib.test.sh` and `tests/fm-composer-ghost.test.sh`.
 Kimi pointer delivery and OpenCode 1.18.4 busy-queue behavior remain pinned by `tests/fm-kimi-harness.test.sh`, `tests/fm-tmux-submit-busy.test.sh`, and `tests/fm-composer-lib.test.sh`.
 Herdr's Claude idle-native submit confirmation is pinned by `tests/fm-backend-herdr.test.sh` and refreshed by `FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh`.
-Herdr's Muse unreadable-native submit confirmation is pinned by the portable regression in `tests/fm-backend-herdr.test.sh`, while the live Muse leg of that same guard is authored but not yet executed, as recorded in [Submit confirmation](#submit-confirmation).
+Herdr's Muse submit confirmation is pinned by the portable regressions in `tests/fm-backend-herdr.test.sh` for both the unreadable-native fallback and the idle-native route Herdr 0.9.0 takes, while the live Muse leg of that same guard is authored but not yet executed, as recorded in [Submit confirmation](#submit-confirmation).
 
 ### Cleanup endpoint identity
 
@@ -640,6 +640,17 @@ tests/fm-composer-codex-idle-live-e2e.test.sh
 
 The verification machine runs its fleet on Herdr and has no tmux installed, so on 2026-09-15 that guard reported `skip: live: tmux absent` there, and the Herdr capture above is this entry's live evidence.
 The guard also notes whether the starfield and the placeholder were actually drawn during its read, because codex need not animate them under every model or mode; a refresh on a tmux host should record that note beside the verdict rather than assume the starfield was exercised.
+
+### 2026-09-17 Muse Code 1.3.0 titled composer rule
+
+Captured 2026-09-17 from a live Muse Code 1.3.0 pane on herdr 0.9.0 while reproducing the Muse-on-Herdr send false negative.
+Muse 1.3.0 draws its composer as a rule PAIR rather than the bare prompt row earlier builds showed: a titled opening rule (`── Voice input (⌥ + v to start) ───…───`), the truecolor `❯` prompt row, then the solid closing rule above the provider/path status footer.
+Only solid `─` rules counted as separators, so the titled opening rule never opened a pair; the closing rule then read as an unpaired separator below the prompt row, invalidated the candidate, and left every idle Muse composer classifying `unknown`.
+`unknown` is a refusal rather than proof of delivery, so a landed steer reported delivery unconfirmed while the pane showed the whole message and Muse started working.
+`_fm_composer_titled_separator_row` in `bin/fm-composer-lib.sh` now admits a rule that carries a label written INTO it, the same tolerance a box's titled bottom border already had: the rule must open the row and close it at the width floor, and the label between the two runs must be spaced away from both and carry no further structure, so prose that merely contains dashes still cannot pass.
+`test_matrix_muse_bordered_composer_closes_its_rule_pair` in `tests/fm-composer-lib.test.sh` carries the idle and typed shapes across the styled, identity-less, plain, and tmux-cursor profiles, and keeps both bare `⟩` and bare `❯` rows reading `empty`; typed text inside the same pair stays `pending`, so the fix is not a relaxation of the separated shape.
+The captured pane bytes are also driven end to end through `fm_backend_herdr_send_text_submit` and `fm_backend_herdr_composer_state` in `tests/fm-backend-herdr.test.sh`.
+The live matrix table above still names Muse Code 0.1.0, so this capture is not live matrix evidence for 1.3.0; rerun `FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh` on a host carrying the current build and update that table.
 
 ## Steering-inbox doorbell
 
@@ -994,16 +1005,18 @@ ok - live Herdr submit confirm: Claude Code (2.1.236 (Claude Code)) on herdr 0.8
 
 #### Muse on Herdr, authored and not yet executed
 
-Muse registers no Herdr agent state, so its steers take the same fallback with an unreadable native probe, and the shared classifier's bare `⟩` row is what proves the composer cleared.
-That shape is current fact: the portable regression in `tests/fm-backend-herdr.test.sh` drives it end to end and passes, asserting the confirmed verdict and that exactly one Enter was sent.
+Herdr 0.9.0 registers a native agent for a Muse pane and reports it `idle` across a landed steer, measured 2026-09-17 against Muse Code 1.3.0, so the composer verdict alone decides that steer's delivery; where Herdr registers nothing, the same steer reaches the same composer verdict through the unreadable-native fallback instead.
+Either route reads Muse's composer through the shared classifier, whose Muse shapes - a bare prompt row, and the titled rule pair 1.3.0 draws around that row - are owned by [Composer classification matrix](#composer-classification-matrix).
+Both routes are current fact: the portable regressions in `tests/fm-backend-herdr.test.sh` drive them end to end and pass, asserting the confirmed verdict and that exactly one Enter was sent.
 The live Muse leg of `tests/fm-herdr-submit-confirm-live-e2e.test.sh` is authored and registered but has NOT been executed, so no measured Muse-on-Herdr claim exists here and none of the 2026-08-19 Claude measurement above extends to Muse.
 That leg skips with an explicit unverified line when muse is not installed, and otherwise drives a real Muse on `--provider echo` under an isolated `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and workspace, the same credential-free shape `tests/fm-muse-signals-live-e2e.test.sh` already uses.
-What it will prove when it runs is bounded: its readiness gate requires the pane to carry a live `muse-bin-<version>` argv identity and the shared classifier to read Muse's idle bare `⟩` row as empty before it steers, and it then requires the steer to confirm empty and the token to come back in the reply.
+What it will prove when it runs is bounded: its readiness gate requires the pane to carry a live `muse-bin-<version>` argv identity and the shared classifier to read Muse's idle composer as empty before it steers, and it then requires the steer to confirm empty and the token to come back in the reply.
 The `muse-bin-` identity is part of that gate rather than a later read because `command -v muse` is the launcher, whose bare `muse` argv[0] the shared classifier already owns as an agent name, so the process signal alone would let the gate open on the launcher and steer a pane that is not yet the Muse TUI.
 That requirement is conditioned on the host publishing argv at all: [`herdr-backend.md`](../herdr-backend.md) records the argv-bearing `foreground_processes` shape as verified live only on Herdr 0.9.0 while the supported floor sits far below it, and the adapter already falls back to `.name` there, so on an argv-less body the gate degrades to the process and composer signals and runs the leg with `version-unknown` rather than failing a healthy Muse red after 90s.
 A body that could not be read at all degrades nothing and keeps waiting, so the launcher-cannot-open guarantee holds on every Herdr where argv is present.
 It does not prove which branch of `fm_backend_herdr_send_text_submit` produced that verdict, because `fm_backend_herdr_agent_status_raw` returns the same empty string for a pane with no registered agent and for a failed read, and a rendered busy footer can also carry a pending composer to the same verdict.
 Its unreadable-native pre-check is a route preference rather than a proof that the composer branch decided a given verdict: when a Herdr release starts registering a native agent for Muse panes, that pre-check reports the leg unverified and skips it, exactly as an absent Muse is reported, rather than failing a gate over an upstream improvement.
+Herdr 0.9.0 does register that agent, so on that pairing the leg reports unverified and skips rather than measuring anything, which is why a run there still leaves this entry unexecuted.
 The Muse version in its reported line is that same gate-read identity, so a reported line either names the build that actually ran or says `version-unknown`; it can never name a build that did not run.
 The truncated kernel `.name` is deliberately not a version surface: a 15/16-byte cut of a real `muse-bin-<version>` still carries the prefix, so accepting it would name a build that never existed.
 `version-unknown` in a passing line therefore means the host published no argv to read the build from, not that the version was lost.
