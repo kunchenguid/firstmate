@@ -130,9 +130,9 @@ done
   || fail "Claude Code ($VERSION) on $HERDR_VER: submit reported '$verdict' but the expected reply never rendered"
 pass "live Herdr submit confirm: Claude Code ($VERSION) on $HERDR_VER reports empty and renders the requested reply in isolated session $SESSION"
 
-# Muse normally has no registered Herdr agent state, so this probes the exact
-# fallback path that once reported a false unconfirmed send despite a visible
-# Muse turn. The installed-harness rule is deliberate: an absent Muse is
+# Herdr 0.9.0 registers a native idle agent for Muse panes (measured 2026-09-17
+# against Muse Code 1.3.0), so on current Herdr this leg's pre-check reports it
+# unverified and skips. The installed-harness rule is deliberate: an absent Muse is
 # reported rather than fabricated as a pass, while an installed Muse must prove
 # its current renderer and send behavior before it can be trusted.
 # The leg drives a real Muse with --provider echo under an isolated XDG lab,
