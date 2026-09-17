@@ -104,7 +104,11 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  cp "$(command -v bash)" "$fakebin/muse-bin-test-version"
+  # Symlink, not a copy: macOS AMFI kills a renamed bash binary whose path does
+  # not match its code signature, but a symlink resolves to the signed binary
+  # while still presenting the renamed name to ps -o comm= -p $$, which is the
+  # ancestry evidence harness_process_verdict reads.
+  ln -sf "$(command -v bash)" "$fakebin/muse-bin-test-version"
   cat > "$fakebin/muse" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -181,7 +185,12 @@ test_detects_versioned_process_ancestor() {
   dir="$TMP_ROOT/detect"
   mkdir -p "$dir"
   for bin in muse-bin-0.1.0-R708.1 muse-bin-9.9.9-RZZZ.9 muse; do
-    cp "$(command -v bash)" "$dir/$bin"
+    # Symlink to bash with the harness's expected basename. macOS AMFI kills
+    # a renamed bash binary whose path does not match its code signature, so
+    # a copy breaks the test there; a symlink resolves to the signed binary
+    # while still presenting the renamed name to ps -o comm=, which is the
+    # ancestry evidence harness_process_verdict reads.
+    ln -sf "$(command -v bash)" "$dir/$bin"
     out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
       -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
       "$dir/$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
@@ -197,7 +206,9 @@ test_detection_is_anchored() {
   dir="$TMP_ROOT/detect-neg"
   mkdir -p "$dir"
   for bin in musescore amuse notmuse-bin muse-binary muse-bind; do
-    cp "$(command -v bash)" "$dir/$bin"
+    # Symlink to bash under a name that is NOT anchored to muse. See
+    # test_detects_versioned_process_ancestor for why symlink, not copy.
+    ln -sf "$(command -v bash)" "$dir/$bin"
     out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
       -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
       "$dir/$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
