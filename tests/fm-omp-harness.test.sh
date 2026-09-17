@@ -89,6 +89,39 @@ test_detection_anchored_name_and_marker_precedence() {
   pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
 }
 
+test_detection_through_startup_wrappers() {
+  local dir bin out marker
+  dir="$TMP_ROOT/startup-depth"
+  bin=$(make_named_shells "$dir/named")
+  cat > "$dir/wrapper.sh" <<'SH'
+#!/usr/bin/env bash
+depth=$1
+shift
+if [ "$depth" -gt 0 ]; then
+  bash "$0" "$((depth - 1))" "$@"
+else
+  result=$("$@")
+  printf '%s\n' "$result"
+fi
+:
+SH
+  for marker in '' omp; do
+    # shellcheck disable=SC2016 # Preserve the named parent rather than exec it away.
+    out=$(env -u PI_CODING_AGENT -u GROK_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+      -u GEMINI_CLI -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI \
+      CLAUDECODE=1 FM_OMP_HARNESS="$marker" \
+      "$bin/omp" -c 'bash "$1" 7 "$2"; :' _ "$dir/wrapper.sh" "$HARNESS")
+    [ "$out" = omp ] || fail "startup wrappers hid omp behind retained CLAUDECODE (marker='$marker'): '$out'"
+  done
+  # No marker must still find omp, rather than silently selecting unknown.
+  # shellcheck disable=SC2016
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    -u GEMINI_CLI -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u FM_OMP_HARNESS \
+    "$bin/omp" -c 'bash "$1" 7 "$2"; :' _ "$dir/wrapper.sh" "$HARNESS")
+  [ "$out" = omp ] || fail "markerless startup wrappers resolved '$out', expected omp"
+  pass "fm-harness: startup wrappers preserve omp with and without inherited markers"
+}
+
 test_lock_identity_and_liveness_classification() {
   fm_harness_process_matches omp '' || fail "session-lock identity must accept the exact omp name"
   fm_harness_process_matches /usr/local/bin/omp 'omp --cwd /x' || fail "session-lock identity must accept an omp path"
@@ -860,6 +893,7 @@ EOF
 }
 
 test_detection_anchored_name_and_marker_precedence
+test_detection_through_startup_wrappers
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
 test_spawn_model_validation_scoped_to_listed_providers
