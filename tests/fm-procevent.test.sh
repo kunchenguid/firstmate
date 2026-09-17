@@ -671,8 +671,7 @@ store, artifact = sys.argv[1:]
 with open(store, "w", encoding="utf-8") as fh:
     json.dump({"sessions": {"recovery": {
         "file": artifact,
-        "status": "feedback",
-        "session_ended": True,
+        "status": "ended",
         "prompts": [{
             "uid": "",
             "prompt": "survive destructive poll",

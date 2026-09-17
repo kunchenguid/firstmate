@@ -471,6 +471,8 @@ print("session:")
 print("  file: " + clean_line(session.get("file")))
 print("  status: feedback")
 ended = session.get("session_ended")
+if session.get("status") == "ended":
+    ended = True
 if isinstance(ended, bool):
     print("  session_ended: " + ("true" if ended else "false"))
 fields = ("uid", "selector", "tag", "prompt", "text", "attachments")
