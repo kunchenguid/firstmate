@@ -167,6 +167,12 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+# Resolve this home's optional config/tools helpers before ANY tool detection
+# below, so an installed helper is never reported MISSING just because this
+# pane's ambient PATH never received the launcher's prepend.
+# shellcheck source=bin/fm-tools-path-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-tools-path-lib.sh"
+fm_tools_path_prepend "$CONFIG"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh disable=SC1091

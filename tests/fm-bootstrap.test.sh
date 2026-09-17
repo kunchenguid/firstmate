@@ -892,6 +892,61 @@ test_routine_bootstrap_contract_runs_under_system_bash() {
   pass "bootstrap routine contract runs under system /bin/bash"
 }
 
+# config/tools is the optional home-local helper location. Bootstrap must
+# resolve the helpers installed there even when the ambient PATH never received
+# the launcher's prepend, and must still report them missing when the location
+# is absent from that same stripped PATH.
+test_home_local_tools_path() {
+  local case_dir home base out first second override_dir helper
+  case_dir="$TMP_ROOT/home-local-tools"
+  home="$case_dir/home"
+  mkdir -p "$home/config/tools/bin" "$home/config/tools/node_modules/.bin"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  base=$(make_fake_toolchain "$case_dir")
+  # Only config/tools carries the helpers; the ambient PATH keeps the rest.
+  mv "$base/no-mistakes" "$home/config/tools/bin/no-mistakes"
+  for helper in gh-axi chrome-devtools-axi lavish-axi tasks-axi quota-axi; do
+    mv "$base/$helper" "$home/config/tools/node_modules/.bin/$helper"
+  done
+
+  out=$(PATH="$base:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "config/tools helpers must satisfy bootstrap without a launcher PATH, got: $out"
+  pass "bootstrap resolves home-local config/tools helpers a pane PATH never received"
+
+  # Same stripped PATH with no config/tools: every helper is genuinely missing.
+  rm -rf "$home/config/tools"
+  out=$(PATH="$base:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  for helper in no-mistakes gh-axi chrome-devtools-axi tasks-axi quota-axi; do
+    assert_contains "$out" "MISSING: $helper (install: " "without config/tools bootstrap must report $helper missing"
+  done
+  assert_contains "$out" 'PRESENTATION_UNAVAILABLE: lavish-axi (requires >=0.1.46; install: ' \
+    'without config/tools bootstrap must still report lavish unavailable'
+  pass "bootstrap still reports the same helpers missing without config/tools"
+
+  # The prepend owns the order, skips entries PATH already carries, is
+  # idempotent, and honors FM_CONFIG_OVERRIDE like every other config/ item.
+  override_dir="$case_dir/override"
+  mkdir -p "$override_dir/tools/bin" "$override_dir/tools/node_modules/.bin"
+  out=$(
+    export FM_CONFIG_OVERRIDE="$override_dir"
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-tools-path-lib.sh"
+    PATH="/usr/bin:$override_dir/tools/node_modules/.bin:/bin"
+    fm_tools_path_prepend
+    printf '%s\n' "$PATH"
+    fm_tools_path_prepend
+    printf '%s\n' "$PATH"
+  )
+  first=$(printf '%s\n' "$out" | sed -n 1p)
+  second=$(printf '%s\n' "$out" | sed -n 2p)
+  assert_equals "$override_dir/tools/bin:/usr/bin:$override_dir/tools/node_modules/.bin:/bin" "$first" \
+    "the helper prepend must lead with tools/bin and keep an already-present entry once"
+  assert_equals "$first" "$second" "a repeated helper prepend must change nothing"
+  pass "the home-local helper prepend is ordered, deduplicated, and idempotent"
+}
+
 # FM_BOOTSTRAP_NETWORK splits one bootstrap run into its local and network
 # halves so a session start can compose its digest from the local half alone and
 # run the network half concurrently. The property that has to hold is that the
@@ -1255,6 +1310,7 @@ test_fleet_sync_timeout_empty_override_uses_default
 test_fleet_sync_timeout_is_computed_before_launch
 test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash
+test_home_local_tools_path
 test_network_phase_partitions_the_run
 test_network_sweeps_recheck_lock_ownership
 test_network_phases_record_per_step_elapsed_times

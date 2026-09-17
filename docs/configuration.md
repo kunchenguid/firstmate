@@ -26,6 +26,16 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Home-local tool PATH (config/tools)
+
+`config/tools/` is an optional gitignored helper location that keeps a home's own copies of the toolchain out of the global directories: `config/tools/bin` holds standalone executables and `config/tools/node_modules/.bin` holds the npm-installed package shims.
+A launcher that exports those directories covers only the panes it starts, so a pane restored or started without the launcher - a Herdr pane on a server started from an unlaunched shell, or a hand-opened terminal - sees an ambient `PATH` without them and bootstrap would report installed helpers as missing.
+[`bin/fm-tools-path-lib.sh`](../bin/fm-tools-path-lib.sh) is the single owner of that directory list and its order: it prepends `config/tools/bin` and then `config/tools/node_modules/.bin` to `PATH` when each exists as a directory, skips an entry already present anywhere in `PATH`, and exports the result, so repeated calls are idempotent.
+`FM_CONFIG_OVERRIDE` selects the config directory here exactly as it does for every other `config/` item.
+[`bin/fm-bootstrap.sh`](../bin/fm-bootstrap.sh) calls it before its tool detection, and [`bin/fm-session-start.sh`](../bin/fm-session-start.sh), [`bin/fm-tasks-axi.sh`](../bin/fm-tasks-axi.sh), and [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) call it so the digest, the backlog wrapper, and spawned workers resolve the same helpers.
+The helper directories therefore take precedence over the rest of `PATH`, which is what lets a home pin its own helper versions.
+This location changes only where firstmate looks for its tools: it never installs anything globally, a home without `config/tools` is unaffected, and the printed install recipe for a genuinely missing tool is unchanged.
+
 ## Calm preference (config/calm)
 
 The Pi Calm extension and the Claude Code Calm mod share the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, so one `/calm` choice applies on either harness.

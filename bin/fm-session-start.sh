@@ -343,6 +343,12 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# Resolve this home's optional config/tools helpers before the digest composes
+# its backlog listing or spawns its bootstrap child, both of which resolve the
+# same helpers.
+# shellcheck source=bin/fm-tools-path-lib.sh
+. "$SCRIPT_DIR/fm-tools-path-lib.sh"
+fm_tools_path_prepend "$CONFIG"
 
 # One tasks-axi compatibility verdict per session start. The probe costs three
 # tasks-axi subprocesses and this digest needs the same answer twice - here for
