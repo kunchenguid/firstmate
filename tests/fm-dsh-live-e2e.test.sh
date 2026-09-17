@@ -38,10 +38,12 @@
 #      replaces a row's whole config, so a permission row carrying only its
 #      default silently drops the read-only preset from every picker.
 #   9. A session takes a free fleet lock as its own, and a session finding the
-#      lock held refuses into read-only. DSH gives hooks no session identity, so
-#      a session finds itself and a live peer only by the launcher shape in argv;
-#      if that stops matching, every session is read-only or two captains share
-#      one home, and the refusal alone cannot tell which.
+#      lock held by another DSH host process refuses into read-only. DSH gives
+#      hooks no session identity, so a session finds itself and a live peer only
+#      by the launcher shape in argv; if that stops matching, every session is
+#      read-only or two captains share one home, and the refusal alone cannot
+#      tell which. Only separate host processes are covered: sessions inside one
+#      `dsh web` host share its pid, and nothing here refuses the second of them.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -65,7 +67,6 @@ HOOKENV="$WORK/hook-env"
 mkdir -p "$WORK" "$PROBE"
 
 cleanup() {
-  tmux kill-session -t firstmate 2>/dev/null || true
   rm -rf "$PROFILE_DIR" 2>/dev/null || true
   [ -n "${LOCK_PROFILE_DIR:-}" ] && rm -rf "$LOCK_PROFILE_DIR" 2>/dev/null
   [ -n "${LOCK_HOLDER_PID:-}" ] && kill "$LOCK_HOLDER_PID" 2>/dev/null
@@ -303,7 +304,7 @@ case "$presets" in
   *) fail "live dsh $BASE_VERSION: $presets" ;;
 esac
 
-# --- 9. a second concurrent session is refused into read-only ----------------
+# --- 9. a second DSH host process is refused into read-only ------------------
 # The fleet lock matches its holder by launcher path in argv, and DSH gives hook
 # and tool subprocesses no session identity of their own, so the question is
 # whether a live DSH session is recognizable as the lock owner at all.
@@ -315,7 +316,10 @@ esac
 # would refuse the next session there whatever the holder is. The holder is a
 # live node whose argv carries a dsh launcher shape, which is what
 # bin/fm-session-lock-lib.sh's fm_harness_pid_alive demands of a lock holder, so
-# it stands in for another live session without needing two real ones.
+# it stands in for another live host process without needing two real ones. Each
+# session here is its own headless host, so this proves refusal between separate
+# host processes only. Sessions inside one `dsh web` host resolve to the same
+# pid, and bin/fm-lock.sh then reports the lock as already their own.
 CONTROL_HOME="$TMP_ROOT/lock-control-home"
 LOCK_HOME="$TMP_ROOT/lock-home"
 LOCK_WORK="$TMP_ROOT/lock-work"
@@ -378,4 +382,4 @@ held=$(cat "$LOCK_HOME/state/.lock" 2>/dev/null || true)
   || fail "live dsh $BASE_VERSION: a session took a lock already held by a live dsh (pid $LOCK_HOLDER_PID -> ${held:-<empty>}); the refusal the fleet lock depends on did not happen"
 [ -f "$LOCK_HOME/state/.dsh-sessionstart-delivered" ] \
   || fail "live dsh $BASE_VERSION: the second session left the lock alone but delivered no digest at all, so the read-only path was never exercised"
-pass "live dsh $BASE_VERSION: a session takes a free fleet lock as its own and refuses a held one into read-only"
+pass "live dsh $BASE_VERSION: a session takes a free fleet lock as its own, and a separate host process refuses a held one into read-only"

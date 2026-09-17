@@ -138,7 +138,7 @@ Two more defects surfaced when the digest was driven through a real DSH host:
 | Inside the digest the host is the ninth process above `fm-harness.sh` (hooks wrapper, adapter and its command substitution, `fm-session-start.sh` and its timeout wrapper), but the DSH ancestry walk stopped at eight, so `FM_DSH_HARNESS` was refused and the digest named no harness | `fm_dsh_ancestry` walks sixteen parents, the depth the session lock already walks |
 DSH supplies **no session-open `source` field**, so the digest always runs as a first startup and cannot re-emit after a compaction — a real limitation, not a design choice.
 
-## The fleet lock refuses a second session
+## The fleet lock refuses a second DSH host process
 
 The lock records its owner as a pid and matches it against the caller's harness ancestry, and DSH gives hook and tool subprocesses no session identity of their own — the host reports `comm=node`, so identity rests on the launcher shape in its argv.
 Both halves were measured on 2026-09-17 with the tracked hooks mounted, a throwaway `FM_HOME` and `FM_STATE_OVERRIDE`, and the real checkout as `FM_ROOT`, so the real `bin/fm-dsh-sessionstart.sh` and `bin/fm-session-start.sh` ran:
@@ -154,7 +154,10 @@ A separate home keeps the control session's detached startup sweep, which holds 
 The control is what makes the refusal mean something, because `bin/fm-lock.sh` exits before touching the lock when a session cannot resolve its own harness ancestry, and the digest still carries the read-only banner, so a session that cannot identify itself would otherwise pass the refusal half too.
 What the contract proves is that a real DSH session resolves an identity inside itself from its ancestry and that a session refuses a live harness-shaped holder; the holder is a synthetic process with a fixed argv, not a second real session.
 
-Forking a session while one is live therefore produces a read-only session, not a second captain.
+That is refusal between SEPARATE DSH host processes: the holder is its own node process and each session is its own headless `dsh`.
+It does not cover the documented launch, which is one `dsh web` process: `dsh-api-session-controller` creates its sessions in-process, and its fork only copies session logs and workspaces.
+Every session in that host resolves `me` to the same host pid, so a second session matches `[ "$old" = "$me" ]` in `bin/fm-lock.sh`, prints `lock acquired` and receives the full locked digest — two captains on one home.
+Opening or forking a second session inside a live `dsh web` host therefore does NOT produce a read-only session; see Not established, blocked, or out of scope.
 
 ## PreToolUse: deny blocks, but only with a matched bridge
 
@@ -326,11 +329,12 @@ Ranked by how likely each is to be mistaken for working.
 
 | Item | State |
 |---|---|
+| Two sessions inside one `dsh web` host are distinguishable | **unproven, and by construction not refused.** The documented launch runs every session in one host process, so each session's hooks resolve the same host pid; `bin/fm-lock.sh` reports the lock as already held by that pid and the second session receives the full locked digest, and `fm_session_lock_owned_by_self` treats both sessions as the owner. The ninth live contract cannot see this layout, because each of its sessions is a separate headless host. Closing it needs session-id-aware locking, which is new machinery in `bin/fm-session-lock-lib.sh`, a lib every harness shares, and is out of scope for this change |
 | The DSH state files and teardown | **not applicable, by ownership.** `state/.dsh-sessionstart-delivered`, `state/.turnend-dsh-blocks` (+ lock) and `state/.dsh-turnend-fail-open` are home-scoped and session-keyed, and each is self-healing: the gate holds the delivered session id and the next session rewrites it, the budget ledger is discarded once the episode ages past `FM_DSH_TURNEND_BUDGET_WINDOW`, and the alarm latch is cleared by the guard's healthy reset. `bin/fm-teardown.sh`'s volatile sweep is per-task (`$STATE/$ID.*`), and DSH never produces per-task state because it never runs as a crewmate — the same shape as Claude's own `state/.turnend-claude-blocks`, which teardown does not name either. `state/` is gitignored, so no exclude rule is missing |
 | The session-death blind window | **unclosable from inside DSH.** No `Stop` fires, so nothing re-arms; recovery happens at the NEXT session start via `state/.watcher-down` → `check: rearm-resurface`, and the only out-of-band closure is an OS-level scheduler. [`docs/supervision-protocols/dsh.md`](../supervision-protocols/dsh.md) states this rather than papering over it |
 | Away mode (`/afk`, `/quiet`) | **blocked.** The daemon's only delivery is typing a batched digest into the supervisor's pane after proving the composer empty; DSH has no pane and no inject-into-session primitive, so escalations would buffer forever. Registering it without a delivery channel is worse than not having it: a leftover `state/.afk` makes `fm_afk_daemon_owns_supervision` prove "supervision healthy" and silently redefines the guard's predicate |
 | DSH-subagent crewmates | **blocked.** No per-delegation working directory and no child-dispose path, and DSH's own pre-stable tool surface is not a steering endpoint |
-| Session identity for the lock | **measured for the live case.** The lock owner is matched by `ps` ancestry against the launcher shape in argv, and the refusal was driven live (see The fleet lock refuses a second session) |
+| Session identity for the lock | **measured between separate host processes only.** The lock owner is matched by `ps` ancestry against the launcher shape in argv, and the refusal was driven live between separate headless hosts (see The fleet lock refuses a second DSH host process); the identity is the host's, not the session's, so it does not separate sessions inside one host (first row) |
 | Relay (X/Discord) | **out of scope for this deployment.** No pairing token, and it needs `curl`, `jq` and a wake-into-session path |
 | Calm, voice, Lavish board | **out of scope.** Module hooks, a TTY with PortAudio, and a live `lavish-axi` session respectively |
 | In-process extension hosts (Pi, omp, OpenCode) | **out of scope.** DSH's bridge is command-only |
@@ -365,9 +369,10 @@ As measured on 2026-09-17, the portable suite passes 46 cases, and against dsh 0
 6. the documented `web` launch renders `AGENTS.md` whole through the `firstmate` preset at budget 262144;
 7. the launcher's own `web` exec loads the plugin tree with the tracked patch applied once;
 8. the tracked patch keeps every permission preset `dsh-base` offers, `read-only` included;
-9. a session takes a free fleet lock as its own pid, and a session finding the lock held by a live dsh-shaped process refuses into read-only.
+9. a session takes a free fleet lock as a pid gone once it exits, and a separate headless host finding the lock held by a live dsh-shaped process refuses into read-only.
 
-Contracts 6 through 9 were each added after an earlier run and were exercised on their own first; the run above is the first covering all nine together, and its contract 9 ran the control before the refusal.
+Contracts 6 through 9 were each added after an earlier run and were exercised on their own first.
+The run above is of the guard as it now stands, started from inside a Claude Code session: contract 9 ran its control and its refusal in separate homes, and the pid the control recorded was gone once the session exited, so the session resolved its own DSH host rather than the harness above the guard.
 The first contract was also run with `DSH_PERMISSION_MODE` unset once the `sandbox-policy` pin landed, and the preflight read `danger-full-access` from the pin alone.
 The guard no longer unsets that variable, because the preflight now refuses every `!!js` mode whatever the environment holds, so a pin removed from the tracked patch cannot pass on a value inherited from the caller's shell.
 
