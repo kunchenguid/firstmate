@@ -370,7 +370,20 @@ sync_project() {
     # non-default named branch, a detached HEAD with unique commits, a dirty tree,
     # or <default> already checked out elsewhere - may hold real work, so it is
     # reported loudly and left untouched.
-    if [ -z "$cur" ] && [ "$dirty" = no ] \
+    tracking=$(git -C "$PROJ" rev-parse --abbrev-ref --symbolic-full-name "$cur@{u}" 2>/dev/null || true)
+    if [ -n "$cur" ] && [ "$dirty" = no ] && [ -n "$tracking" ] \
+        && git -C "$PROJ" rev-parse --verify --quiet "$tracking^{commit}" >/dev/null; then
+      # On a clean NON-default named branch that tracks a remote (e.g. the
+      # checkout lives on `staging`, not the default). Fast-forward THAT branch
+      # to its OWN upstream, not just the default - otherwise a checkout parked
+      # off the default silently drifts behind while nothing ever syncs it. This
+      # is the bug that let a `staging` checkout fall dozens of commits behind
+      # while the "stuck" warning compared it to origin/<default> (0 behind) and
+      # masked the real drift. Retarget the fast-forward below at the current
+      # branch and its own upstream.
+      DEFAULT="$cur"
+      BASE="$tracking"
+    elif [ -z "$cur" ] && [ "$dirty" = no ] \
         && git -C "$PROJ" merge-base --is-ancestor HEAD "$BASE" 2>/dev/null \
         && ! default_checked_out_elsewhere \
         && local_default_safe_for_recovery; then
