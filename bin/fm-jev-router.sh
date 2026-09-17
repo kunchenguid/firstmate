@@ -42,7 +42,9 @@
 #   JEV_LOW            low-confidence threshold, escalate on < (default 0.4)
 #   JEV_HIGH and JEV_LOW are numbers in 0..1.
 #
-# The six-question set (names, types, and instructions) is the shipped default.
+# The six routing dimensions (names, types, and instructions) are the shipped
+# default; the safety dimension is three atomic Noul judgments (destructive,
+# irreversible, security-sensitive), and a high value on any one escalates.
 # Project and worker criteria are deliberately neutral placeholders - no fleet
 # project or secondmate name is hard-coded here, so a not-yet-wired router
 # escalates on every project and routes the worker to "main". Registry-driven
@@ -100,8 +102,10 @@ fi
 [[ -n "$STATE" ]] || die "no request text provided (use --state, --file, argv, or stdin)"
 
 # ---------------------------------------------------------------------------
-# The six routing questions. Each is one atomic snap judgment; Jev evaluates
-# them all in parallel against the same state.
+# The routing questions: six dimensions, with the safety dimension expressed as
+# three atomic Noul judgments (destructive, irreversible, security-sensitive).
+# Each question is one snap judgment; Jev evaluates them all in parallel against
+# the same state.
 # ---------------------------------------------------------------------------
 QUESTIONS_JSON='{
   "project": {
@@ -128,9 +132,17 @@ QUESTIONS_JSON='{
       "xhigh": "ambiguous investigation, open-ended design, or high uncertainty"
     }
   },
-  "safety": {
+  "safety_destructive": {
     "type": "noul",
-    "instructions": "Does this request involve destructive, irreversible, or security-sensitive action such as deleting data, rotating credentials, merging sensitive changes, or changing access control?"
+    "instructions": "Does this request delete, overwrite, or destroy data, state, or resources?"
+  },
+  "safety_irreversible": {
+    "type": "noul",
+    "instructions": "Is this request impossible or impractical to undo once performed?"
+  },
+  "safety_security": {
+    "type": "noul",
+    "instructions": "Does this request touch credentials, secrets, access control, or security-sensitive changes?"
   },
   "secondmate_scope": {
     "type": "choice",
@@ -172,13 +184,15 @@ band() {  # <confidence> -> high|medium|low
 # ---------------------------------------------------------------------------
 render_decision() {  # <response-file>
   local resp="$1"
-  local pc pd pe ss sf sn pc_conf sc_conf pband dest route
+  local pc pd pe ss sf sdest sirrev ssec pc_conf sc_conf pband dest route high_flags
   pc=$(jq -r '.answers.project.choice // "?"' "$resp")
   pd=$(jq -r '.answers.deliverable.choice // "?"' "$resp")
   pe=$(jq -r '.answers.effort_class.choice // "?"' "$resp")
   ss=$(jq -r '.answers.secondmate_scope.choice // "?"' "$resp")
   sf=$(jq -r '.answers.surface.choice // "?"' "$resp")
-  sn=$(jq -r '.answers.safety.noul // 0' "$resp")
+  sdest=$(jq -r '.answers.safety_destructive.noul // 0' "$resp")
+  sirrev=$(jq -r '.answers.safety_irreversible.noul // 0' "$resp")
+  ssec=$(jq -r '.answers.safety_security.noul // 0' "$resp")
   pc_conf=$(jq -r '.answers.project.confidence // 0' "$resp")
   sc_conf=$(jq -r '.answers.secondmate_scope.confidence // 0' "$resp")
 
@@ -188,11 +202,17 @@ render_decision() {  # <response-file>
   printf 'effort class   : %s\n' "$pe"
   printf 'worker         : %s  (confidence %s)\n' "$ss" "$(printf '%.2f' "$sc_conf")"
   printf 'surface        : %s\n' "$sf"
-  printf 'safety flag    : %s\n' "$(printf '%.2f' "$sn")"
+  printf 'safety         : destructive %s, irreversible %s, security %s\n' \
+    "$(printf '%.2f' "$sdest")" "$(printf '%.2f' "$sirrev")" "$(printf '%.2f' "$ssec")"
 
-  # Escalation gates first, in priority order.
-  if awk -v n="$sn" -v f="$SAFETY_FLAG" 'BEGIN{exit !(n+0 >= f+0)}'; then
-    printf '\n%s\n' 'DECISION: ESCALATE - safety flag is high (destructive/irreversible/security-sensitive). Route to the captain.'
+  # Escalation gates first, in priority order. Any atomic safety judgment at or
+  # above SAFETY_FLAG escalates.
+  high_flags=""
+  if awk -v n="$sdest" -v f="$SAFETY_FLAG" 'BEGIN{exit !(n+0 >= f+0)}'; then high_flags="${high_flags:+$high_flags, }destructive"; fi
+  if awk -v n="$sirrev" -v f="$SAFETY_FLAG" 'BEGIN{exit !(n+0 >= f+0)}'; then high_flags="${high_flags:+$high_flags, }irreversible"; fi
+  if awk -v n="$ssec" -v f="$SAFETY_FLAG" 'BEGIN{exit !(n+0 >= f+0)}'; then high_flags="${high_flags:+$high_flags, }security-sensitive"; fi
+  if [[ -n "$high_flags" ]]; then
+    printf '\n%s\n' "DECISION: ESCALATE - safety flag is high ($high_flags). Route to the captain."
     return 2
   fi
   if [[ "$pc" == "other" ]]; then
@@ -235,7 +255,7 @@ if [[ "$DRY" == "1" ]]; then
   jq . <<<"$REQUEST"
   echo
   echo "--- routing rules (applied once answers return) ---"
-  echo "safety >= $SAFETY_FLAG             -> ESCALATE (security-sensitive)"
+  echo "any safety flag >= $SAFETY_FLAG    -> ESCALATE (destructive/irreversible/security)"
   echo "project == 'other'        -> ESCALATE (unknown project)"
   echo "project|worker conf < $LOW -> ESCALATE (too unsure to route)"
   echo "conf >= $HIGH             -> ROUTE"
@@ -268,9 +288,16 @@ HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE
 jq -e '
   (.answers.project.choice | type) == "string" and
   (.answers.project.confidence | type) == "number" and
+  .answers.project.confidence >= 0 and .answers.project.confidence <= 1 and
   (.answers.secondmate_scope.choice | type) == "string" and
   (.answers.secondmate_scope.confidence | type) == "number" and
-  (.answers.safety.noul | type) == "number"
+  .answers.secondmate_scope.confidence >= 0 and .answers.secondmate_scope.confidence <= 1 and
+  (.answers.safety_destructive.noul | type) == "number" and
+  .answers.safety_destructive.noul >= 0 and .answers.safety_destructive.noul <= 1 and
+  (.answers.safety_irreversible.noul | type) == "number" and
+  .answers.safety_irreversible.noul >= 0 and .answers.safety_irreversible.noul <= 1 and
+  (.answers.safety_security.noul | type) == "number" and
+  .answers.safety_security.noul >= 0 and .answers.safety_security.noul <= 1
 ' "$RESP_FILE" >/dev/null 2>&1 || die "response is not a well-formed routing answer"
 
 printf 'model: %s\n' "$(jq -r '.model // "unknown"' "$RESP_FILE")"

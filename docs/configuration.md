@@ -511,9 +511,10 @@ The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`]
 
 `bin/fm-jev-router.sh` routes one captain request through typesafe.ai's System One model (Jev) in a single typed call, then applies confidence-gated routing so a confident route proceeds and a low-confidence or safety-flagged request escalates instead of guessing.
 It sends the request text plus six typed routing questions (project, deliverable, effort class, worker, surface, safety) and turns the answers into an inspectable suggestion plus a machine-readable exit code: 0 for a route, 2 for an escalation, and 1 for an error.
+The safety question is three atomic Noul judgments (destructive, irreversible, security-sensitive), and a high value on any one of them escalates.
 A high safety flag, an unknown project, or low confidence on the project or worker escalates; a missing key, missing input, transport error, or malformed response is an error, so the router never fabricates a route.
 The router is advisory only: it publishes a suggestion and never spawns, merges, or mutates anything.
-The script header owns its exact flags, output lines, and question wording; the six-question set is the shipped default, and the project and worker criteria are neutral placeholders because registry-driven criteria are a later phase.
+The script header owns its exact flags, output lines, and question wording; the six routing dimensions are the shipped default, and the project and worker criteria are neutral placeholders because registry-driven criteria are a later phase.
 
 ```sh
 bin/fm-jev-router.sh --state "add a pricing page to the marketing site"
