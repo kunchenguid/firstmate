@@ -66,8 +66,8 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # cmux is EXPERIMENTAL and spawn-capable, session-provider-only like
 # herdr/zellij - verified against the real 0.64.17 binary (docs/cmux-backend.md).
 # codex-app remains deliberately absent; see docs/codex-app-backend.md.
-FM_BACKEND_KNOWN="tmux herdr zellij orca cmux"
-FM_BACKEND_SPAWN="tmux herdr zellij orca cmux"
+FM_BACKEND_KNOWN="tmux herdr zellij orca cmux hermes"
+FM_BACKEND_SPAWN="tmux herdr zellij orca cmux hermes"
 
 # fm_backend_list_contains: whitespace-delimited membership without relying on
 # shell word splitting. fm-backend.sh is normally sourced by bash scripts, but
@@ -636,6 +636,13 @@ fm_backend_source() {  # <name>
         _FM_BACKEND_CMUX_SOURCED=1
       fi
       ;;
+    hermes)
+      if [ -z "${_FM_BACKEND_HERMES_SOURCED:-}" ]; then
+        # shellcheck source=/dev/null
+        . "$FM_BACKEND_LIB_DIR/backends/hermes.sh" || return 1
+        _FM_BACKEND_HERMES_SOURCED=1
+      fi
+      ;;
   esac
 }
 
@@ -910,6 +917,7 @@ fm_backend_agent_state() {  # <backend> <target>
   case "$backend" in
     tmux) fm_backend_tmux_agent_state "$target" ;;
     herdr) fm_backend_herdr_agent_state "$target" ;;
+    hermes) fm_backend_hermes_agent_state "$target" ;;
     *) printf 'unverified' ;;
   esac
 }
