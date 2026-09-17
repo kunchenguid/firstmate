@@ -201,6 +201,49 @@ test_completed_turn_no_report_triggers_one_recovery() {
   pass "completed turn with no report triggers exactly one recovery"
 }
 
+test_recovery_message_is_report_request_not_reissue() {
+  local home state corr rec msg summary
+  home=$(setup_parent recovery-wording)
+  state="$home/state"
+  export FM_PENDING_REPLY_NOW=2100
+  # This input fails on the pre-fix text.
+  # The old message read "Original request: <body>" with no replay marking,
+  # so a withdrawn instruction re-appeared as a live order.
+  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "Dispatch one crewmate each, both on --model opencode/union-alpha")
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  msg=$(fm_pending_reply_recovery_message "$rec")
+  summary=$(fm_pending_reply_get "$rec" request_summary)
+  case "$msg" in
+    *"corr=$corr"*) : ;;
+    *) fail "recovery message must carry the correlation token"$'\n'"$msg" ;;
+  esac
+  case "$msg" in
+    *"does NOT re-issue"*) : ;;
+    *) fail "recovery message must state it does not re-issue the request"$'\n'"$msg" ;;
+  esac
+  case "$msg" in
+    *"Do not act on the quoted original"*) : ;;
+    *) fail "recovery message must forbid acting on the quoted text"$'\n'"$msg" ;;
+  esac
+  case "$msg" in
+    *"only to identify which request"*) : ;;
+    *) fail "recovery message must present the quote as identification"$'\n'"$msg" ;;
+  esac
+  case "$msg" in
+    *"identification only"*) : ;;
+    *) fail "recovery message must label the quote identification-only"$'\n'"$msg" ;;
+  esac
+  case "$msg" in
+    *"later instruction stands"*) : ;;
+    *) fail "recovery message must let a later instruction supersede the quote"$'\n'"$msg" ;;
+  esac
+  case "$msg" in
+    *"$summary"*) : ;;
+    *) fail "recovery message must still quote the stored summary for identification"$'\n'"$msg" ;;
+  esac
+  pass "recovery message asks for the report without re-issuing the request"
+}
+
 test_recovery_attempt_is_never_reinjected() {
   local home state corr rec hook_log lines live_corr live_rec live_pid live_identity
   home=$(setup_parent recovery-at-most-once)
@@ -1597,6 +1640,7 @@ test_escalated_undelivered_correlation_stays_retryable() {
 
 test_normal_correlated_reply_resolves_once
 test_completed_turn_no_report_triggers_one_recovery
+test_recovery_message_is_report_request_not_reissue
 test_recovery_attempt_is_never_reinjected
 test_recovery_reply_resolves_original
 test_second_missed_turn_escalates_once_and_stays_durable

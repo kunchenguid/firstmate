@@ -907,12 +907,16 @@ fm_pending_reply_missing_report_is_evidence() {  # <state-dir> <task_id> <since-
 }
 
 # Build the one automatic recovery message for a pending record.
+# The message asks only for the missing report. It never re-issues the quoted
+# request, and a later instruction always supersedes the quoted text.
+# The summary stays at its stored bound: trimming it further could conflate
+# two similar requests, so identification keeps the full stored text.
 fm_pending_reply_recovery_message() {  # <record-path>
   local rec=$1 corr summary token msg
   corr=$(fm_pending_reply_get "$rec" corr_id)
   summary=$(fm_pending_reply_get "$rec" request_summary)
   token=$(fm_pending_reply_corr_token "$corr")
-  msg="REPOST REQUIRED: previous marked request had no correlated parent report. Reply on the parent status channel including ${token}. Original request: ${summary}"
+  msg="REPOST REQUIRED: previous marked request had no correlated parent report. This message asks only for the missing report, and does NOT re-issue the request below. Do not act on the quoted original. It is quoted only to identify which request is missing. Quoted original for identification only: ${summary}. Reply on the parent status channel including ${token}. If a later instruction changed or withdrew that request, the later instruction stands and the quoted text must not be acted on."
   fm_pending_reply_embed_corr "$msg" "$corr" msg
   printf '%s' "$msg"
 }
