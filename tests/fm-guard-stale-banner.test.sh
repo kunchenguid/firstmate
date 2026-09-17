@@ -125,8 +125,15 @@ run_guard_case_extension_as_branch() {
 #   omit         "" | watch | turnend - skip that extension's marker
 #   drift        "" | watch | turnend - write a marker whose version is not the
 #                current build, i.e. the session loaded an older extension
+#   clobber      "" | watch | turnend | both - record that marker with a pid that
+#                has already exited instead of the session pid, i.e. the leftover of
+#                a short-lived Pi CLI invocation in this home. Written before the
+#                session lock, which is what a marker a previous lock owner left
+#                behind looks like; a test that wants the clobber to land INSIDE the
+#                live session's tenure re-writes the marker after the lock, through
+#                clobber_pi_marker below.
 record_pi_extension_session() {
-  local dir=$1 session_pid=${2:-} omit=${3:-} drift=${4:-} home root pair source marker version
+  local dir=$1 session_pid=${2:-} omit=${3:-} drift=${4:-} clobber=${5:-} home root pair source marker version marker_pid
   home=$(case_home "$dir")
   root=$(case_root "$dir")
   mkdir -p "$root/.pi/extensions"
@@ -143,10 +150,38 @@ record_pi_extension_session() {
       version=$(FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_pi_extension_version "$2"' \
         _ "$ROOT/bin/fm-wake-lib.sh" "$root/.pi/extensions/$source") || return 1
     fi
-    printf '%s\n%s\n' "$version" "$session_pid" > "$home/state/$marker"
+    marker_pid=$session_pid
+    if [ "$clobber" = "${pair##*:}" ] || [ "$clobber" = both ]; then
+      marker_pid=$(dead_pid)
+    fi
+    printf '%s\n%s\n' "$version" "$marker_pid" > "$home/state/$marker"
   done
   [ -n "$session_pid" ] && printf '%s\n' "$session_pid" > "$home/state/.lock"
   return 0
+}
+
+# A pid of a process that has already exited, i.e. exactly what a completed
+# short-lived `pi --help` probe leaves in the markers it rewrote.
+dead_pid() {
+  local p
+  sleep 0 &
+  p=$!
+  wait "$p" 2>/dev/null || true
+  printf '%s\n' "$p"
+}
+
+# Rewrite one marker with a pid that has already exited, keeping its current build
+# line and leaving the session lock untouched: the exact state a short-lived Pi CLI
+# invocation leaves behind when it loads this home's tracked extensions.
+clobber_pi_marker() {  # <dir> <watch|turnend>
+  local dir=$1 which=$2 home marker dead
+  home=$(case_home "$dir")
+  case "$which" in
+  watch) marker="$home/state/.pi-watch-extension-loaded" ;;
+  turnend) marker="$home/state/.pi-turnend-extension-loaded" ;;
+  esac
+  dead=$(dead_pid)
+  printf '%s\n%s\n' "$(sed -n '1p' "$marker")" "$dead" > "$marker"
 }
 
 count_text() {
@@ -613,6 +648,69 @@ test_extension_handoff_with_live_session_is_healthy() {
   pass "fm-guard stale banner: extension-owned hand-off with a live session is healthy"
 }
 
+# The reproduced false alarm. The markers record the pid of the process that loaded
+# the extension, and any short-lived Pi CLI invocation in this home (bin/fm-spawn.sh
+# probes `pi --help` before every Pi spawn) loads the same tracked project extensions
+# and re-writes both markers with its own pid, which is gone by the time a guarded
+# command reads the home. The live session still holds the lock and still owns
+# continuity, so the hand-off must stay silent instead of painting the banner.
+test_extension_handoff_survives_short_lived_marker_clobber() {
+  local dir home out pid case_name
+  for case_name in turnend watch both; do
+    dir=$(make_guard_case "extension-clobber-$case_name")
+    home=$(case_home "$dir")
+    sleep 60 &
+    pid=$!
+    record_pi_extension_session "$dir" "$pid" \
+      || fail "could not record the Pi extension session for $case_name"
+    case "$case_name" in
+    both)
+      clobber_pi_marker "$dir" watch
+      clobber_pi_marker "$dir" turnend
+      ;;
+    *) clobber_pi_marker "$dir" "$case_name" ;;
+    esac
+    touch "$home/state/.last-watcher-beat"
+    out=$(run_guard_case_extension "$dir")
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    [ -z "$out" ] \
+      || fail "a marker a short-lived descendant re-wrote during the live session's tenure must stay silent ($case_name), got: $out"
+    assert_absent "$home/state/.guard-watcher-stale-banner" \
+      "a healthy hand-off must not open a down-episode ($case_name)"
+  done
+  pass "fm-guard stale banner: a short-lived marker clobber during the live session's tenure stays healthy"
+}
+
+# The other direction, unchanged: ownership evidence older than the lock this home
+# holds now proves nothing about the session holding it. That is a previous
+# session's leftover marker, or a probe that ran while the lock was free, and it
+# must alarm rather than vouch for a home whose extensions never loaded.
+test_extension_marker_from_before_the_lock_stays_alarm() {
+  local dir home out pid case_name marker
+  for case_name in watch turnend both; do
+    dir=$(make_guard_case "extension-pre-tenure-$case_name")
+    home=$(case_home "$dir")
+    sleep 60 &
+    pid=$!
+    record_pi_extension_session "$dir" "$pid" "" "" "$case_name" \
+      || fail "could not record the clobbered Pi session for $case_name"
+    for marker in "$home/state/.pi-watch-extension-loaded" "$home/state/.pi-turnend-extension-loaded"; do
+      [ -f "$marker" ] || continue
+      touch -t 200001010000 "$marker"
+    done
+    touch "$home/state/.last-watcher-beat"
+    out=$(run_guard_case_extension "$dir")
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    [ "$(count_text "$out" "WATCHER DOWN - SUPERVISION IS OFF")" -eq 1 ] \
+      || fail "ownership evidence older than the current lock must alarm ($case_name): $out"
+    assert_contains "$out" "no live watcher process holds this home lock" \
+      "a pre-lock marker must report no-watcher ($case_name)"
+  done
+  pass "fm-guard stale banner: ownership evidence older than the current lock stays loud"
+}
+
 # A released owner may leave the lock directory briefly before cleanup. It is
 # still genuinely unheld when it records no pid, so the hand-off stays benign.
 test_extension_handoff_with_empty_lock_is_healthy() {
@@ -895,6 +993,8 @@ test_full_banner_names_quiet_mode_when_active
 test_repeated_same_episode_prints_reminder_only
 test_pi_harness_routes_itself_to_the_extension_model
 test_extension_handoff_with_live_session_is_healthy
+test_extension_handoff_survives_short_lived_marker_clobber
+test_extension_marker_from_before_the_lock_stays_alarm
 test_extension_handoff_with_empty_lock_is_healthy
 test_extension_held_unhealthy_locks_stay_alarm
 test_extension_without_ownership_evidence_stays_alarm

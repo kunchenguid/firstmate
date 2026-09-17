@@ -216,9 +216,11 @@ fm_supervision_model() {
 }
 
 # Pi primary supervision evidence. The Pi extensions record, in their state
-# markers, the exact build they loaded and the session process that loaded it, so
-# "a live Pi session owns supervision" is provable from durable state without a
-# watcher process and without reading any vendor-rendered surface.
+# markers, the exact build they loaded and the pid of the process that loaded it,
+# so "a live Pi session owns supervision" is provable from durable state without
+# a watcher process and without reading any vendor-rendered surface. That pid is
+# normally the session itself, and fm_pi_extension_loaded below owns why it
+# cannot be the only accepted evidence.
 #
 # fm_pi_extension_version <file>
 # Print the marker version string the Pi extensions record for <file>. Must stay
@@ -239,8 +241,30 @@ fm_pi_extension_version() {
 }
 
 # fm_pi_extension_loaded <marker> <expected-version> <session-lock>
-# True when <marker> records <expected-version> and names the session process in
-# <session-lock>, i.e. the session holding this home loaded exactly this build.
+# True when <marker> proves this home's lock-owning session loaded
+# <expected-version>. The marker records that build plus the pid of the process
+# that loaded it, and that pid is normally the session itself - but it cannot be
+# the only accepted evidence. Any short-lived Pi CLI invocation in this home
+# loads the same tracked project extensions and rewrites both markers with its
+# own pid moments before exiting: bin/fm-spawn.sh probes `pi --help` before every
+# Pi spawn, and a nested `pi -p`, a smoke test, or a one-shot `pi` run does the
+# same. The live session's extension host writes nothing again until it restarts
+# (the watch extension refreshes on every arm, the turn-end guard only at load),
+# so a single probe used to leave the recorded pid permanently dead and every
+# hand-off reading as "no watcher".
+# So a marker is trusted when it records <expected-version> AND either
+#   - records the pid <session-lock> names, or
+#   - was written at or after <session-lock>'s current acquisition.
+# The second case is ownership evidence, not a weakening: an extension writes a
+# marker only when it can prove it belongs to the lock-owning session (both
+# writers walk their own ancestry to the pid in state/.lock) or sees no live
+# owner at all, and state/.lock is written once per acquisition, so a marker at
+# least as new as that file was written by this lock owner's own process family
+# while it held the lock. A marker older than the current lock - a previous
+# session's evidence, or a probe that ran before this session took the lock - is
+# still refused, and every caller still requires the lock's own pid to be alive,
+# so an unloaded session, an exited session, and a version-drifted build all
+# stay exactly as loud as before.
 fm_pi_extension_loaded() {
   local marker=$1 expected_version=$2 lock=$3 marker_version marker_pid lock_pid
   [ -f "$marker" ] && [ -f "$lock" ] && [ -n "$expected_version" ] || return 1
@@ -248,13 +272,35 @@ fm_pi_extension_loaded() {
   marker_pid=$(sed -n '2p' "$marker")
   lock_pid=$(sed -n '1p' "$lock")
   [ -n "$marker_pid" ] || return 1
-  [ "$marker_version" = "$expected_version" ] && [ "$marker_pid" = "$lock_pid" ]
+  [ "$marker_version" = "$expected_version" ] || return 1
+  [ "$marker_pid" = "$lock_pid" ] && return 0
+  fm_extension_marker_since_lock "$marker" "$lock"
+}
+
+# fm_extension_marker_since_lock <marker> <lock>
+# True when <marker> was written during <lock>'s current acquisition: the
+# pid-independent half of the ownership evidence fm_pi_extension_loaded
+# describes. state/.lock is written once per acquisition and is never rewritten
+# for a re-acquire by the same session (bin/fm-lock.sh), so a marker that is not
+# older than that file was written while this same owner held the lock; requiring
+# that owner to be a live process keeps a stale lock with stale evidence down.
+# Bash's own -nt comparison resolves nanoseconds where the filesystem records
+# them, and equal timestamps count as "during" because a marker cannot be shown
+# to predate the acquisition it ties with.
+fm_extension_marker_since_lock() {
+  local marker=$1 lock=$2 lock_pid
+  lock_pid=$(sed -n '1p' "$lock")
+  [ -n "$lock_pid" ] || return 1
+  fm_pid_alive "$lock_pid" || return 1
+  [ "$marker" -nt "$lock" ] || [ ! "$lock" -nt "$marker" ]
 }
 
 # fm_pi_extension_owns_supervision <state> <root>
 # True when a LIVE Pi session owns supervision continuity for this home: both
-# primary extensions are loaded at their current on-disk builds by the process
-# recorded in this home's session lock, and that process is still alive.
+# primary extensions are recorded at their current on-disk builds as evidence
+# this home's lock-owning session left during that lock's current acquisition
+# (the exact pid, or a marker not older than the lock - fm_pi_extension_loaded),
+# and the process named in the session lock is still alive.
 # Requiring the turn-end guard extension too is deliberate - it is the structural
 # backstop that catches a cycle the watch extension failed to restore, so a home
 # missing it has no benign hand-off to tolerate.
