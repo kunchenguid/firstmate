@@ -13,6 +13,7 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 | Resume | `codex resume <session-id>`, using the id printed on quit. |
 | Model flag | `--model <model>`. |
 | Effort flag | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh\|max>"'`, verified on codex-cli 0.142.1 whose installed schema contains `model_reasoning_effort`, active config uses it, and bundled catalog advertised only the first four values while omitting `max`; current codex-cli 0.153.4 catalog data at `${CODEX_HOME:-~/.codex}/models_cache.json` advertises `max` for `gpt-5.6-luna`, which Firstmate passes for that model. |
+| Memory | Canonical crewmate and scout launches receive `--disable memories`, while raw launch commands retain their supplied flags and secondmate launches and personal configuration keep their existing defaults; verified on 2026-09-09 with codex-cli 0.153.4: `codex features list --disable memories` and `codex -c 'features.memories=false' features list` both report `memories stable false`. |
 | Model discovery | Open the current interactive session's `/model` picker. |
 | Marker | None; identity comes from ancestry, and `../../../bin/fm-harness.sh` is what keeps a retained foreign `CLAUDECODE` from renaming it. Verified on 2026-09-01 with codex-cli 0.152.0: the pane process is the `node` npm shim and the native `codex` binary runs as its foreground child, so a tool subprocess reaches the native name directly while the shim itself is identified from its script path. |
 
