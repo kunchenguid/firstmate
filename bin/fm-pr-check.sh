@@ -5,6 +5,9 @@
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
+# After registration it asks bin/fm-workspace.sh to release a GitHub task's
+# local workspace; that cleanup is optional and never changes the exit status
+# (see the release block below).
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
