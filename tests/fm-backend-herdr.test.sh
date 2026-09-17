@@ -4367,11 +4367,16 @@ test_send_text_submit_idle_native_empty_composer_confirms_delivery() {
   pass "fm_backend_herdr_send_text_submit: idle native agent-state plus empty composer reports empty (landed Claude turn)"
 }
 
-# Regression for the Muse-on-Herdr false negative: the native agent probe was
-# unreadable, but the submitted message visibly started Muse thinking. The
-# post-Enter bare Muse prompt is the shared classifier's structural proof that
-# the composer cleared. It must confirm delivery without a second Enter; a
-# local Herdr pattern that does not know Muse's glyph would return unknown.
+# End-to-end cover for the unreadable-native fallback route on Muse's bare
+# prompt shape: the native probe fails, so the rendered footer supplies the
+# baseline and the composer verdict alone decides. The post-Enter bare Muse
+# prompt is the shared classifier's structural proof that the composer cleared,
+# and it must confirm delivery without a second Enter; a local Herdr pattern
+# that does not know Muse's glyph would return unknown.
+# This capture carries no rule pair, so it is not what pins the titled-rule
+# false negative: the bordered capture in
+# test_send_text_submit_idle_native_muse_bordered_composer_confirms_delivery
+# below is the case that returned unknown before the composer-owner repair.
 test_send_text_submit_unknown_native_muse_empty_composer_confirms_delivery() {
   local dir log resp fb out enter_count
   dir="$TMP_ROOT/submit-muse-unknown-native-empty-composer"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"

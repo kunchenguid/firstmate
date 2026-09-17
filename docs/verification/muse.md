@@ -215,10 +215,12 @@ FM_HERDR_SUBMIT_CONFIRM_LIVE=1 bin/fm-test-run.sh tests/fm-herdr-submit-confirm-
 
 The Muse signals guard requires a real `muse` binary and tmux but uses `--provider echo`, so it does not require `META_API_KEY` and cannot re-check the real-model turn-to-run relationship on its own.
 It follows SGR state through the final prompt glyph and rejects both bright-then-dark and malformed-RGB negative controls before accepting that glyph's effective luminance.
-The Herdr submit-confirm guard covers both of those surfaces on the Herdr runtime, with different weight: the styled composer is what decides a Muse steer's delivery verdict, while the `muse-bin-*` process anchoring only backs that guard's own readiness gate, which refuses to steer a bare shell prompt.
+The Herdr submit-confirm guard's Muse leg is written to cover both of those surfaces on the Herdr runtime, with different weight: the styled composer is what decides a Muse steer's delivery verdict, while the `muse-bin-*` process anchoring only backs that leg's own readiness gate, which refuses to steer a bare shell prompt.
+Whether a run reaches either surface depends on the Herdr underneath: the leg measures only where Herdr registers no native agent for a Muse pane, because a registered agent would route the steer through the native branch instead of the composer one.
+Herdr 0.9.0 does register that agent (measured 2026-09-17 against Muse Code 1.3.0), so on that pairing the leg reports unverified and skips before it steers, and the run re-verifies only the Claude leg.
 Its gate requires `herdr`, `jq`, and `claude`, and with `FM_HERDR_SUBMIT_CONFIRM_LIVE=1` set a missing one of those is a red failure rather than a skip, which is why the imperative above is qualified to Herdr-capable hosts.
 `muse` itself is optional to that gate: its Muse leg needs no credential, and a host without `muse` reports that leg unverified rather than passing silently.
-[`runtime-backends.md`](runtime-backends.md#submit-confirmation) owns that leg's shape and still marks it authored and not yet executed, so the first guarded run is what turns it into a measurement.
+[`runtime-backends.md`](runtime-backends.md#submit-confirmation) owns that leg's shape and still marks it authored and not yet executed; only a run on a Herdr that leaves Muse panes without a native agent can turn it into a measurement, so on current Herdr that entry stays unexecuted no matter how often the command above is run.
 
 muse's launcher can replace the running binary underneath the fleet, so an upgrade that changes the session protocol also invalidates the credentialed evidence above.
 Repeat that smoke after a protocol-affecting upgrade: run one real multi-step tool-loop turn with credentials in place, confirm the run-scoped `started`/`terminal` counts are still exactly one each, and confirm an Escape still yields `terminal` with `cancelled`.
