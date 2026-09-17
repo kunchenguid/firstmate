@@ -589,7 +589,7 @@ test_sole_slot_record_still_tears_down() {
   assert_absent "$dir/home/state/$id.meta" "uncontested teardown left the task record"
   assert_present "$dir/home/state/neighbour.meta" "uncontested teardown removed the neighbour's record"
   kill -0 "$worker" 2>/dev/null || fail "uncontested teardown killed a worker in a different slot"
-  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+  grep -Fq "<return> <--force>" "$dir/runtime.log" \
     || fail "uncontested teardown did not return its own pool slot: $(cat "$dir/runtime.log")"
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
@@ -625,7 +625,7 @@ SH
   assert_absent "$dir/home/state/$id.meta" "moved-endpoint teardown left the task record"
   grep -Fq "tmux <kill-window> <-t> <=firstmate:=fm-$id>" "$dir/runtime.log" \
     || fail "moved-endpoint teardown did not stop the exact recorded worker: $(cat "$dir/runtime.log")"
-  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+  grep -Fq "<return> <--force>" "$dir/runtime.log" \
     || fail "moved-endpoint teardown did not return its uncontested pool slot: $(cat "$dir/runtime.log")"
 
   pass "fm-teardown: an exact recorded endpoint still tears down after changing cwd outside its worktree"
@@ -743,7 +743,7 @@ test_remote_seeded_home_returns_its_uncontested_slot() {
   [ "$rc" -eq 0 ] \
     || fail "teardown in a remote-seeded home refused its own uncontested slot: $(cat "$dir/stderr")"
   assert_absent "$dir/home/state/$id.meta" "remote-seeded teardown left the task record"
-  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+  grep -Fq "<return> <--force>" "$dir/runtime.log" \
     || fail "remote-seeded teardown did not return its own pool slot: $(cat "$dir/runtime.log")"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf '# remote-seeded Treehouse teardown command\n'
@@ -872,7 +872,7 @@ assert_reassigned_slot_left_alone() {  # <case> <id> <other> <description>
   assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" "task=$other" \
     "$description: another task's slot claim was rewritten"
   assert_present "$dir/pool/1/project/.git" "$description: the reassigned slot's checkout was removed"
-  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+  ! grep -Fq "<return> <--force>" "$dir/runtime.log" \
     || fail "$description: the reassigned slot was returned to the pool: $(cat "$dir/runtime.log")"
   assert_contains "$(cat "$dir/stderr")" "$other" \
     "$description: the warning should name the task the slot was reassigned to"
@@ -982,7 +982,7 @@ test_own_and_absent_slot_claims_still_tear_down() {
     || fail "teardown of a task holding its own slot claim failed: $(cat "$dir/stderr")"
   assert_absent "$dir/home/state/$id.meta" "own-claim teardown left the task record"
   assert_absent "$dir/pool/1/.fm-slot-owner" "own-claim teardown left its spent slot claim behind"
-  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+  grep -Fq "<return> <--force>" "$dir/runtime.log" \
     || fail "own-claim teardown did not return its own pool slot: $(cat "$dir/runtime.log")"
 
   dir=$(make_case slot-claim-absent)
@@ -994,7 +994,7 @@ test_own_and_absent_slot_claims_still_tear_down() {
   run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
     || fail "teardown of an unclaimed slot failed: $(cat "$dir/stderr")"
   assert_absent "$dir/home/state/$id.meta" "unclaimed-slot teardown left the task record"
-  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+  grep -Fq "<return> <--force>" "$dir/runtime.log" \
     || fail "unclaimed-slot teardown did not return its pool slot: $(cat "$dir/runtime.log")"
 
   pass "fm-teardown: a task's own slot claim, and an unclaimed slot, both still tear down"

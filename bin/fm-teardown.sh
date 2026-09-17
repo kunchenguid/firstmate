@@ -2166,6 +2166,7 @@ require_orca_worktree_path_match_if_present() {
 # record with nothing live to return skips them rather than refusing.
 teardown_live_slot_path() {
   [ "$KIND" != secondmate ] || return 1
+  [ "$WORKSPACE_STATE" != released ] || return 1
   fm_treehouse_pool_slot "$PROJ" "$WT" || return 1
   canonical_existing_dir "$WT"
 }
@@ -2229,6 +2230,10 @@ require_exclusive_worktree_slot_record() {
       for field in worktree home; do
         other_path=$(fm_meta_get "$other" "$field")
         [ -n "$other_path" ] || continue
+        if [ "$field" = worktree ] \
+           && [ "$(fm_meta_get "$other" workspace_state)" = released ]; then
+          continue
+        fi
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
         echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
@@ -2309,7 +2314,7 @@ require_owned_task_worktree_slot() {
 }
 
 teardown_owns_worktree() {
-  [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ]
+  [ "$WORKSPACE_STATE" != released ] && [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ]
 }
 
 firstmate_home_has_treehouse_slot() {
@@ -3466,16 +3471,17 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
   }
+  # The slot is back in the pool, so this task's claim on it is spent. Dropping
+  # it here - and only after a return that succeeded - keeps a returned slot
+  # unclaimed until its next holder claims it, and leaves the claim in place
+  # whenever the return did not actually happen. It precedes the destroy because
+  # the claim is located through the worktree directory the destroy removes.
+  fm_treehouse_slot_owner_release "$WT" "$ID"
   if [ -n "$WORKSPACE_ROOT" ] \
      && ! fm_workspace_treehouse_destroy_idle "$WORKSPACE_ROOT" "$WT"; then
     echo "error: worktree $WT was returned but exact idle-workspace destruction failed; teardown aborted for a safe retry" >&2
     exit 1
   fi
-  # The slot is back in the pool, so this task's claim on it is spent. Dropping
-  # it here - and only after a return that succeeded - keeps a returned slot
-  # unclaimed until its next holder claims it, and leaves the claim in place
-  # whenever the return did not actually happen.
-  fm_treehouse_slot_owner_release "$WT" "$ID"
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
@@ -3648,6 +3654,8 @@ if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
   echo "teardown $ID complete (window $T, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
 elif teardown_owns_worktree; then
   echo "teardown $ID complete (window $T, worktree $WT)"
+elif [ "$WORKSPACE_STATE" = released ]; then
+  echo "teardown $ID complete (window $T; workspace already released, no local worktree to remove)"
 else
   echo "teardown $ID complete (window $T; pool slot $WT left to task $TEARDOWN_SLOT_REASSIGNED_TO${TEARDOWN_SLOT_REASSIGNED_HOME:+ (home $TEARDOWN_SLOT_REASSIGNED_HOME)}, which it was reassigned to)"
 fi

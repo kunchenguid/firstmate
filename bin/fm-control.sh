@@ -801,13 +801,18 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line restored_unverified=0
   local -a spawn_args
 
-  if [ "$WORKSPACE_STATE" != restored ]; then
+  # A workspace reconstructed by bin/fm-workspace.sh is the one relaunch an
+  # unverified backend may run: that transaction durably recorded the exact
+  # agent-free endpoint. A verified backend still proves the agent is dead.
+  if [ "$WORKSPACE_STATE" = restored ] && ! fm_control_backend_state_verified "$BACKEND"; then
+    restored_unverified=1
+    fm_backend_target_exists "$BACKEND" "$T" "$LABEL" \
+      || die "task $ID's reconstructed workspace has no recorded endpoint; run bin/fm-workspace.sh restore $ID again before relaunch"
+  else
     require_state_verified_backend relaunch
-  elif ! fm_backend_target_exists "$BACKEND" "$T" "$LABEL"; then
-    die "task $ID's reconstructed workspace has no recorded endpoint; run bin/fm-workspace.sh restore $ID again before relaunch"
   fi
   resolve_relaunch_profile
 
@@ -843,7 +848,7 @@ do_relaunch() {
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
-  if [ "$WORKSPACE_STATE" = restored ]; then
+  if [ "$restored_unverified" = 1 ]; then
     exit_result='workspace-restored-agent-absent'
   else
     exit_result=$(do_exit)
@@ -866,8 +871,7 @@ do_relaunch() {
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
   fi
 
-  if [ "$WORKSPACE_STATE" = restored ] \
-     && ! fm_control_backend_state_verified "$BACKEND"; then
+  if [ "$restored_unverified" = 1 ]; then
     sleep "$POLL"
     fm_backend_target_exists "$BACKEND" "$T" "$LABEL" \
       || die "the replacement endpoint for $ID disappeared after launch on unverified backend $BACKEND"

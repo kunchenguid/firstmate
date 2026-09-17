@@ -83,8 +83,11 @@ fm_backlog_record_present "$META" "task record" "$STATE" || fail "$FM_BACKLOG_TR
 LOCK=$(fm_meta_lock_path "$META") || fail "cannot resolve task metadata lock"
 fm_lock_acquire_wait "$LOCK" || fail "cannot lock task metadata"
 LOCK_HELD=1
+PROJECT_LOCK=
+PROJECT_LOCK_HELD=0
 cleanup() {
   local rc=$?
+  if [ "${PROJECT_LOCK_HELD:-0}" = 1 ]; then fm_lock_release "$PROJECT_LOCK" || true; fi
   if [ "${LOCK_HELD:-0}" = 1 ]; then fm_lock_release "$LOCK" || true; fi
   return "$rc"
 }
@@ -103,6 +106,16 @@ WORKSPACE_STATE=$(meta_get workspace_state)
 [ "$MODE" != local-only ] || fail "local-only work is not remotely reconstructable and keeps its workspace until landing"
 [ -n "$PR" ] || fail "task $ID has no recorded PR"
 [ -d "$PROJ" ] || fail "recorded project is unavailable: ${PROJ:-missing}"
+# Slot return, destruction, allocation, and the slot-owner claim share the one
+# Treehouse project lock that bin/fm-spawn.sh and bin/fm-teardown.sh hold, so a
+# slot is never claimed or dropped while another task is taking or returning it.
+if [ "$BACKEND" != orca ]; then
+  PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ") \
+    || fail "cannot resolve the shared Treehouse project lock for $PROJ"
+  fm_lock_acquire_wait "$PROJECT_LOCK" \
+    || fail "cannot lock Treehouse slot allocation and return for $PROJ"
+  PROJECT_LOCK_HELD=1
+fi
 
 pr_number() {
   local n=${PR##*/pull/}
@@ -146,25 +159,32 @@ fetch_remote_head() {  # <worktree>
 }
 
 meta_rewrite() {  # state worktree [extra owned endpoint lines...]
-  local state=$1 worktree=$2 tmp line
+  local state=$1 worktree=$2 tmp line part
   shift 2
   tmp=$(mktemp "$STATE/.fm-workspace-meta.XXXXXX") || fail "cannot stage task metadata"
-  awk -F= '
-    BEGIN { split("worktree workspace_state workspace_head workspace_branch workspace_base workspace_root workspace_lease_holder workspace_released_at window endpoint_task_id backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id", k, " "); for (i in k) owned[k[i]]=1 }
-    !($1 in owned)
-  ' "$META" > "$tmp" || { rm -f "$tmp"; fail "cannot preserve task metadata"; }
-  {
-    printf 'worktree=%s\n' "$worktree"
-    printf 'workspace_state=%s\n' "$state"
-    printf 'workspace_head=%s\n' "$REMOTE_HEAD"
-    printf 'workspace_branch=%s\n' "$REMOTE_BRANCH"
-    printf 'workspace_base=%s\n' "$REMOTE_BASE"
-    [ -z "${WORKSPACE_ROOT:-}" ] || printf 'workspace_root=%s\n' "$WORKSPACE_ROOT"
-    [ -z "${LEASE_HOLDER:-}" ] || printf 'workspace_lease_holder=%s\n' "$LEASE_HOLDER"
-    if [ "$state" = released ]; then printf 'workspace_released_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; fi
-    printf 'endpoint_task_id=%s\n' "$ID"
-    for line in "$@"; do printf '%s\n' "$line"; done
-  } >> "$tmp" || { rm -f "$tmp"; fail "cannot stage task workspace metadata"; }
+  # bin/fm-pr-lib.sh's identity parser accepts only PR-owned lines from pr=
+  # onward, so the record's pr= tail stays last and the owned lines go before it.
+  for part in head tail; do
+    awk -F= -v part="$part" '
+      BEGIN { split("worktree workspace_state workspace_head workspace_branch workspace_base workspace_root workspace_lease_holder workspace_released_at window endpoint_task_id backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id", k, " "); for (i in k) owned[k[i]]=1 }
+      $1 == "pr" { in_tail=1 }
+      ($1 in owned) { next }
+      (part == "tail") == (in_tail == 1)
+    ' "$META" >> "$tmp" || { rm -f "$tmp"; fail "cannot preserve task metadata"; }
+    [ "$part" = head ] || break
+    {
+      printf 'worktree=%s\n' "$worktree"
+      printf 'workspace_state=%s\n' "$state"
+      printf 'workspace_head=%s\n' "$REMOTE_HEAD"
+      printf 'workspace_branch=%s\n' "$REMOTE_BRANCH"
+      printf 'workspace_base=%s\n' "$REMOTE_BASE"
+      [ -z "${WORKSPACE_ROOT:-}" ] || printf 'workspace_root=%s\n' "$WORKSPACE_ROOT"
+      [ -z "${LEASE_HOLDER:-}" ] || printf 'workspace_lease_holder=%s\n' "$LEASE_HOLDER"
+      if [ "$state" = released ]; then printf 'workspace_released_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"; fi
+      printf 'endpoint_task_id=%s\n' "$ID"
+      for line in "$@"; do printf '%s\n' "$line"; done
+    } >> "$tmp" || { rm -f "$tmp"; fail "cannot stage task workspace metadata"; }
+  done
   chmod 0600 "$tmp" || { rm -f "$tmp"; fail "cannot protect task workspace metadata"; }
   mv -f -- "$tmp" "$META" || { rm -f "$tmp"; fail "cannot publish task workspace metadata"; }
 }
@@ -180,12 +200,24 @@ current_endpoint_lines() {
   esac
 }
 
+# Ignored project-local secret or runtime material is not reconstructable from
+# the remote, so it refuses release.  Generated dependency, build, and cache
+# trees are reconstructable and routinely bundle test keys and credentials
+# modules, so nothing below them counts.
 likely_ignored_secret_present() {  # <worktree>
   local wt=$1 path base
   while IFS= read -r -d '' path; do
+    case "/$path" in
+      */node_modules/*|*/bower_components/*|*/.pnpm-store/*|*/.yarn/*) continue ;;
+      */.venv/*|*/venv/*|*/virtualenv/*|*/.virtualenvs/*|*/site-packages/*|*/__pycache__/*|*/.tox/*|*/.nox/*|*/*.egg-info/*) continue ;;
+      */build/*|*/dist/*|*/out/*|*/target/*|*/.build/*|*/.next/*|*/.nuxt/*|*/.svelte-kit/*|*/.turbo/*|*/.parcel-cache/*) continue ;;
+      */.dart_tool/*|*/.gradle/*|*/Pods/*|*/DerivedData/*) continue ;;
+      */.cache/*|*/cache/*|*/.mypy_cache/*|*/.pytest_cache/*|*/.ruff_cache/*) continue ;;
+    esac
     base=${path##*/}
     case "$base" in
-      .env|.env.*|*.pem|*.key|*credential*|*secret*) return 0 ;;
+      .env|.env.*|*.pem|*.key|*.p12|*.pfx|*.jks|*.keystore|*credential*|*secret*) return 0 ;;
+      *.sqlite|*.sqlite3|*.db|*.log|*.pid|*.tfstate|*.tfstate.*) return 0 ;;
     esac
   done < <(git -C "$wt" ls-files --others --ignored --exclude-standard -z 2>/dev/null)
   return 1
@@ -203,6 +235,7 @@ release_treehouse() {
   if ! fm_workspace_treehouse_return "$root" "$PROJ" "$WT" "$holder"; then
     fail "Treehouse return failed for $WT; remote proof is recorded and retry is safe, but the local workspace was retained"
   fi
+  fm_treehouse_slot_owner_release "$WT" "$ID"
   if ! fm_workspace_treehouse_destroy_idle "$root" "$WT"; then
     current_endpoint_lines
     meta_rewrite reclaim-pending "$WT" "${CURRENT_ENDPOINT_LINES[@]}"
@@ -224,7 +257,25 @@ release_orca() {
   meta_rewrite released "$WT" "window=$(meta_get window)" "backend=orca" "orca_worktree_id=$wid" "terminal=$terminal"
 }
 
+# An interrupted release may have completed `treehouse return` before dying in
+# `releasing`.  Return leaves the slot clean and detached at a trunk commit that
+# need not be an ancestor of the PR head, so re-proving containment there would
+# refuse forever.  The journaled proof already covers the task's work; such a
+# slot only needs the same exact destroy a reclaim-pending record gets.
+interrupted_return_completed() {
+  [ "$BACKEND" != orca ] && [ -d "$WT" ] || return 1
+  [ -n "$(meta_get workspace_head)" ] && [ -n "$(meta_get workspace_branch)" ] || return 1
+  git -C "$WT" rev-parse --verify -q HEAD >/dev/null 2>&1 || return 1
+  ! git -C "$WT" symbolic-ref -q HEAD >/dev/null 2>&1 || return 1
+  [ -n "$(git -C "$WT" for-each-ref --count=1 --contains HEAD refs/remotes 2>/dev/null)" ] || return 1
+  [ -z "$(git -C "$WT" status --porcelain --untracked-files=all 2>/dev/null || echo unreadable)" ] || return 1
+  ! likely_ignored_secret_present "$WT"
+}
+
 if [ "$ACTION" = release ]; then
+  if [ "$WORKSPACE_STATE" = releasing ] && interrupted_return_completed; then
+    WORKSPACE_STATE=reclaim-pending
+  fi
   case "$WORKSPACE_STATE" in
     released)
       printf 'workspace %s already released\n' "$ID"
@@ -240,6 +291,7 @@ if [ "$ACTION" = release ]; then
       else
         WORKSPACE_ROOT=$(fm_workspace_meta_root "$META" "$WT") || fail "cannot identify retained Treehouse root"
         LEASE_HOLDER=$(meta_get workspace_lease_holder)
+        fm_treehouse_slot_owner_release "$WT" "$ID"
         fm_workspace_treehouse_destroy_idle "$WORKSPACE_ROOT" "$WT" \
           || fail "exact idle-workspace destruction still fails for $WT"
       fi
@@ -310,6 +362,7 @@ restore_cleanup() {
       [ -z "${NEW_ORCA_ID:-}" ] || fm_backend_remove_worktree orca "$NEW_ORCA_ID" >/dev/null 2>&1 || true
     else
       fm_workspace_treehouse_return "$WORKSPACE_ROOT" "$PROJ" "$ALLOCATED" "$LEASE_HOLDER" >/dev/null 2>&1 || true
+      fm_treehouse_slot_owner_release "$ALLOCATED" "$ID" || true
       fm_workspace_treehouse_destroy_idle "$WORKSPACE_ROOT" "$ALLOCATED" >/dev/null 2>&1 || true
     fi
   fi
@@ -322,13 +375,14 @@ W="fm-$ID"
 ENDPOINT_LINES=()
 if [ "$BACKEND" = orca ]; then
   fm_backend_source orca || fail "Orca backend is unavailable"
-  RAW=$(fm_backend_orca_worktree_create "$PROJ" "$W") || fail "could not reconstruct Orca worktree"
+  RAW=$(fm_backend_orca_worktree_create "$PROJ" "$W") \
+    || fail "could not reconstruct Orca worktree${RAW:+; Orca kept unremovable worktree ${RAW%%$'\t'*}, remove it before retrying}"
   NEW_ORCA_ID=${RAW%%$'\t'*}; REST=${RAW#*$'\t'}; NEW_WT=${REST%%$'\t'*}; NEW_TERMINAL=${REST#*$'\t'}
-  [ "$NEW_ORCA_ID" != "$RAW" ] && [ -n "$NEW_WT" ] || fail "Orca returned incomplete worktree identity"
   [ "$NEW_TERMINAL" != "$REST" ] || NEW_TERMINAL=
+  ALLOCATED=${NEW_WT:-$NEW_ORCA_ID}
+  [ "$NEW_ORCA_ID" != "$RAW" ] && [ -n "$NEW_WT" ] || fail "Orca returned incomplete worktree identity"
   [ -n "$NEW_TERMINAL" ] || NEW_TERMINAL=$(fm_backend_orca_terminal_create "$NEW_ORCA_ID" "$W") \
     || fail "could not create reconstructed Orca terminal"
-  ALLOCATED=$NEW_WT
   WORKSPACE_ROOT=; LEASE_HOLDER=
   ENDPOINT_LINES=("window=$W" "backend=orca" "orca_worktree_id=$NEW_ORCA_ID" "terminal=$NEW_TERMINAL")
 else
@@ -341,6 +395,8 @@ else
     || fail "could not allocate reconstructed workspace from $WORKSPACE_ROOT"
   [ -n "$NEW_WT" ] && [ -d "$NEW_WT" ] || fail "Treehouse did not return a reconstructed workspace"
   ALLOCATED=$NEW_WT
+  fm_treehouse_slot_owner_claim "$NEW_WT" "$ID" "$FM_HOME" \
+    || fail "could not claim reconstructed Treehouse slot $NEW_WT for task $ID"
 fi
 
 [ -z "$(git -C "$NEW_WT" status --porcelain --untracked-files=all 2>/dev/null)" ] \

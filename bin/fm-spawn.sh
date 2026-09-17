@@ -1491,9 +1491,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # shell after the old workspace return synchronously terminated its worker,
   # and records workspace_state=restored only after the exact endpoint is in the
   # reconstructed path. This durable proof makes review-fix continuation
-  # available on zellij, Orca, and cmux without weakening ordinary relaunches.
+  # available on zellij, Orca, and cmux without weakening ordinary relaunches;
+  # a backend with a classifier (tmux, Herdr) still proves its restored endpoint
+  # dead, since a reused endpoint may have had something launched in it since.
   RELAUNCH_WORKSPACE_STATE=$(fm_meta_get "$RELAUNCH_META" workspace_state)
-  if [ "$RELAUNCH_WORKSPACE_STATE" = restored ]; then
+  if [ "$RELAUNCH_WORKSPACE_STATE" = restored ] \
+     && ! fm_control_backend_state_verified "$BACKEND"; then
     fm_backend_target_exists "$BACKEND" "$RELAUNCH_TARGET" "fm-$ID" || {
       echo "error: task $ID's reconstructed endpoint is missing; run bin/fm-workspace.sh restore $ID again" >&2
       exit 1
@@ -1536,6 +1539,19 @@ if [ "$RELAUNCH" -eq 1 ]; then
     HERDR_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_workspace_id)
     HERDR_TAB_ID=$(fm_meta_get "$RELAUNCH_META" herdr_tab_id)
     HERDR_PANE_ID=$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)
+  fi
+  if [ "$BACKEND" = zellij ]; then
+    ZELLIJ_SES=$(fm_meta_get "$RELAUNCH_META" zellij_session)
+    ZELLIJ_TAB_ID=$(fm_meta_get "$RELAUNCH_META" zellij_tab_id)
+    ZELLIJ_PANE_ID=$(fm_meta_get "$RELAUNCH_META" zellij_pane_id)
+  fi
+  if [ "$BACKEND" = orca ]; then
+    ORCA_WORKTREE_ID=$(fm_meta_get "$RELAUNCH_META" orca_worktree_id)
+    ORCA_TERMINAL=$(fm_meta_get "$RELAUNCH_META" terminal)
+  fi
+  if [ "$BACKEND" = cmux ]; then
+    CMUX_WORKSPACE_ID=$(fm_meta_get "$RELAUNCH_META" cmux_workspace_id)
+    CMUX_SURFACE_ID=$(fm_meta_get "$RELAUNCH_META" cmux_surface_id)
   fi
   # With no explicit harness, a relaunch reuses the harness already recorded
   # for this task. It must NOT fall through to the fresh-spawn config
@@ -3490,11 +3506,23 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # than wherever the pane happened to drift.
   relaunch_wt_real=$(real_path_or_raw "$WT")
   relaunch_seen=
-  for _ in $(seq 1 10); do
-    relaunch_seen=$(spawn_current_path "$WT_TARGET" || true)
-    [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ] || break
-    sleep 0.5
-  done
+  if [ "$BACKEND" = orca ]; then
+    # Orca exposes no live terminal cwd. Its terminal belongs to the recorded
+    # Orca worktree, so the proof is that Orca still binds that worktree id to
+    # the recorded path, plus an explicit cd of the terminal into it.
+    relaunch_seen=$(fm_backend_worktree_path orca "$ORCA_WORKTREE_ID" 2>/dev/null || true)
+    relaunch_cd_path=${WT//\'/\'\\\'\'}
+    if [ -n "$relaunch_seen" ] && [ "$(real_path_or_raw "$relaunch_seen")" = "$relaunch_wt_real" ] \
+       && ! spawn_send_text_line "$WT_TARGET" "cd -- '$relaunch_cd_path'"; then
+      relaunch_seen=
+    fi
+  else
+    for _ in $(seq 1 10); do
+      relaunch_seen=$(spawn_current_path "$WT_TARGET" || true)
+      [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ] || break
+      sleep 0.5
+    done
+  fi
   if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then
     if [ "$BACKEND" != herdr ]; then
       echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}', not its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
