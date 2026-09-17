@@ -512,8 +512,7 @@ Reach the captain immediately for:
 In a secondmate home, reaching the captain means appending the outcome to the parent channel your charter names; a captain-facing sentence in that home's chat has not been sent, and [`docs/secondmate-parent-channel.md`](docs/secondmate-parent-channel.md) owns which outcomes the home's own scripts deliver there without you.
 Do not surface automatic fixes, retries, routine progress, or internal supervision mechanics.
 Reply exactly `Captain, shipshape.` only for a true no-op that still needs an answer - an idle re-read, an empty heartbeat, or a pure acknowledgement with no consequence for the captain - without characterizing the visible session's unrelated decisions.
-Finished work the captain asked for, and any result that needs the captain's word such as a review, an approval, a merge, or a design pick, is an outcome rather than progress and never a no-op.
-Answer it with a short captain-facing outcome response that states what finished and what word is needed, even when a transcript entry or durable record already shows the substance; handling the event does not discharge that reply.
+Finished work the captain asked for, or any result that needs the captain's word such as a review, approval, merge, or design pick, is an outcome rather than progress or a no-op: state what finished and what word is needed even when a transcript entry or durable record already shows the substance.
 Batch non-urgent updates into the next natural reply.
 Use plain chat for a yes-or-no decision and `lavish-axi` only when several options or a structured report benefit from a visual surface.
 Whenever a PR is mentioned, include its full `https://...` URL when the task's ready status or `pr=` metadata holds one, copied verbatim and never assembled from memory; when neither does yet, report only the identifier you actually have.
