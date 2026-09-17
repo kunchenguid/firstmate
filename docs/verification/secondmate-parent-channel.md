@@ -9,7 +9,7 @@ Date: 2026-09-03.
 Tree: this change's branch on macOS with tmux 3.6a, bash 3.2 as `/bin/bash`, and the repo's own scripts.
 Fixture: two isolated homes under a scratch directory, `$P` (parent) and `$M` (mate), with `config/backend` set to `tmux` in both.
 The mate home carries `.fm-secondmate-home` (`mate`) and a local `.fm-secondmate-parent` binding to `$P`; the parent home carries `state/mate.meta` (`kind=secondmate`, `home=$M`).
-The mate's child task `child` is a real tmux pane (`fmlive:fm-child`) recorded in `$M/state/child.meta` with `mode=no-mistakes` and `yolo=off`; the mate itself is a second real pane (`fmlive:fm-mate`).
+The mate's child task `child` is a real tmux pane (`fmlive:fm-child`) recorded in `$M/state/child.meta` with `mode=direct-PR` and `yolo=off`; the mate itself is a second real pane (`fmlive:fm-mate`).
 Both homes run the real `bin/fm-watch.sh` (`FM_POLL=2`), re-armed after every wake through `bin/fm-wake-drain.sh` acknowledgement, exactly as fleet supervision re-arms a watcher after a handled turn.
 No agent harness and no model runs anywhere in the fixture.
 
@@ -31,7 +31,7 @@ done: PR https://github.com/kunchenguid/firstmate/pull/9999 checks green
 
 $ cat $P/state/mate.status   (the parent channel)
 working: delegated scope
-done [key=child-outcome-child-done-05b032a1]: child child done: PR https://github.com/kunchenguid/firstmate/pull/9999 checks green pr=https://github.com/kunchenguid/firstmate/pull/9999 mode=no-mistakes yolo=off
+done [key=child-outcome-child-done-05b032a1]: child child done: PR https://github.com/kunchenguid/firstmate/pull/9999 checks green pr=https://github.com/kunchenguid/firstmate/pull/9999 mode=direct-PR yolo=off
 
 $ mate watcher wakes so far
 signal: $M/state/child.status
@@ -46,8 +46,8 @@ armed: state/child.check.sh
 
 $ cat $P/state/mate.status
 working: delegated scope
-done [key=child-outcome-child-done-05b032a1]: child child done: PR https://github.com/kunchenguid/firstmate/pull/9999 checks green pr=https://github.com/kunchenguid/firstmate/pull/9999 mode=no-mistakes yolo=off
-done [key=child-pr-child]: child child PR ready: https://github.com/kunchenguid/firstmate/pull/9999 mode=no-mistakes yolo=off
+done [key=child-outcome-child-done-05b032a1]: child child done: PR https://github.com/kunchenguid/firstmate/pull/9999 checks green pr=https://github.com/kunchenguid/firstmate/pull/9999 mode=direct-PR yolo=off
+done [key=child-pr-child]: child child PR ready: https://github.com/kunchenguid/firstmate/pull/9999 mode=direct-PR yolo=off
 
 $ parent watcher wakes so far (2 signals)
 signal: $P/state/mate.status
@@ -65,8 +65,8 @@ answered: child-call
 
 $ cat $P/state/mate.status   (final parent channel)
 working: delegated scope
-done [key=child-outcome-child-done-05b032a1]: child child done: PR https://github.com/kunchenguid/firstmate/pull/9999 checks green pr=https://github.com/kunchenguid/firstmate/pull/9999 mode=no-mistakes yolo=off
-done [key=child-pr-child]: child child PR ready: https://github.com/kunchenguid/firstmate/pull/9999 mode=no-mistakes yolo=off
+done [key=child-outcome-child-done-05b032a1]: child child done: PR https://github.com/kunchenguid/firstmate/pull/9999 checks green pr=https://github.com/kunchenguid/firstmate/pull/9999 mode=direct-PR yolo=off
+done [key=child-pr-child]: child child PR ready: https://github.com/kunchenguid/firstmate/pull/9999 mode=direct-PR yolo=off
 needs-decision [key=captain-hold-child-call-1]: captain hold child-call: rollout window choice pending
 resolved [key=captain-hold-child-call-1]: captain hold child-call: answered
 

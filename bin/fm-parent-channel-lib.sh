@@ -59,6 +59,8 @@
 _FM_PARENT_CHANNEL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$_FM_PARENT_CHANNEL_LIB_DIR/fm-secondmate-parent-lib.sh"
+# shellcheck source=bin/fm-repo-concurrency-lib.sh
+. "$_FM_PARENT_CHANNEL_LIB_DIR/fm-repo-concurrency-lib.sh"
 
 # shellcheck disable=SC2034 # Output globals read by sourcing callers.
 FM_PARENT_CHANNEL_ID=
@@ -142,9 +144,27 @@ fm_parent_channel_append_once() {  # <path> <line>
   printf '%s\n' "$line" >> "$path"
 }
 
+# Project Firstmates are a hop boundary for child worker outcomes.
+# Only correlated answers, captain holds, and explicit supervisor summaries
+# are allowed to cross the project-home boundary.
+fm_parent_channel_absorb_descendant_line() {  # <home> <line>
+  local home=$1 line=$2
+  if [ ! -e "$home/.fm-project-firstmate" ] && [ ! -L "$home/.fm-project-firstmate" ]; then
+    return 1
+  fi
+  fm_repo_scope_marker_parse "$home" || return 2
+  case "$line" in
+    *'[corr='*|*'[key=captain-hold-'*|*'[key=project-summary-'*|*'[key=project-decision-'*|*'[key=project-blocker-'*|*'[key=project-milestone-'*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 # Publish one parent-facing line from <home>. See the return codes above.
 fm_parent_channel_report() {  # <home> <state> <line>
-  local home=$1 state=$2 line=$3 destination rc=0
+  local home=$1 state=$2 line=$3 destination rc=0 absorb_rc=0
+  fm_parent_channel_absorb_descendant_line "$home" "$line" || absorb_rc=$?
+  [ "$absorb_rc" -eq 0 ] && return 0
+  [ "$absorb_rc" -ne 2 ] || return 3
   destination=$(fm_parent_channel_destination "$home" "$state") || rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
   fm_parent_channel_append_once "$destination" "$line" || return 4

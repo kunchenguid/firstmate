@@ -139,6 +139,8 @@ EOF
 
 test_project_firstmate_seed_has_one_repository_authority() {
   local home first duplicate ordinary child err origin fakebin launch_log output spawn_rc remote_child
+  local root_id before_backlog overlap overlap_id overlap_before convert convert_id before_convert
+  local root_brief_before root_data_before
   home="$TMP_ROOT/project-firstmate-seed-home"
   first="$TMP_ROOT/project-firstmate-seed-first"
   duplicate="$TMP_ROOT/project-firstmate-seed-duplicate"
@@ -173,19 +175,102 @@ test_project_firstmate_seed_has_one_repository_authority() {
   [ "$(git -C "$first/projects/alpha" remote get-url origin)" = "$(git -C "$home/projects/alpha" remote get-url origin)" ] \
     || fail "project Firstmate clone did not preserve the repository identity"
 
+  first_origin=$(git -C "$first/projects/alpha" remote get-url origin)
+  root_origin=$(git -C "$home/projects/alpha" remote get-url origin)
+  git -C "$first/projects/alpha" remote set-url origin 'git@example.com:owner/alpha.git'
+  git -C "$home/projects/alpha" remote set-url origin 'https://Example.com/owner/alpha.git'
   if FM_HOME="$home" FM_SECONDMATE_CHARTER='duplicate alpha authority' \
     "$ROOT/bin/fm-home-seed.sh" alpha-pfm-duplicate "$duplicate" --project-firstmate alpha >/dev/null 2>"$err"; then
     fail "a second project Firstmate authority was allowed for the same repository"
   fi
   grep -F 'repository already has project Firstmate authority alpha-pfm' "$err" >/dev/null \
-    || fail "duplicate project Firstmate refusal did not identify the existing authority"
+    || fail "SSH and HTTPS aliases did not identify the existing repository authority"
+  git -C "$first/projects/alpha" remote set-url origin "$first_origin"
+  git -C "$home/projects/alpha" remote set-url origin "$root_origin"
   [ ! -e "$duplicate" ] || fail "duplicate project Firstmate refusal left a new home behind"
 
+  printf '%s\n' '- beta [direct-PR] - beta project (added 2026-06-22)' >> "$home/data/projects.md"
   FM_HOME="$home" FM_SECONDMATE_CHARTER='root level ordinary alpha domain' \
     "$ROOT/bin/fm-home-seed.sh" alpha-ordinary "$ordinary" alpha >/dev/null \
-    || fail "root-level ordinary secondmate route was not preserved"
+    || fail "root-level ordinary clone overlap was not preserved"
   [ ! -e "$ordinary/.fm-project-firstmate" ] \
     || fail "ordinary secondmate was accidentally marked as a project Firstmate"
+
+  fm_test_spawn_home "$home" codex
+  printf 'backend = "markdown"\n\n[markdown]\npath = "data/backlog.md"\narchive = "data/done-archive.md"\ndone_keep = 10\n' \
+    > "$home/.tasks.toml"
+  root_id=root-alpha-bypass
+  fm_test_spawn_brief "$home" "$root_id" "root dispatch must respect the alpha project authority"
+  TASKS_AXI_BACKEND=markdown tasks-axi add "$root_id" "root route guard" --kind scout \
+    --file "$home/data/backlog.md" >/dev/null || fail "could not seed the root route-guard backlog row"
+  before_backlog=$(cksum "$home/data/backlog.md")
+  root_brief_before=$(cksum "$home/data/$root_id/brief.md")
+  root_data_before=$(find "$home/data/$root_id" -type f -print | sort)
+  fakebin=$(fm_test_make_spawn_fakebin "$TMP_ROOT/project-firstmate-root-spawn")
+  launch_log="$TMP_ROOT/project-firstmate-root-spawn.launch"
+  : > "$launch_log"
+  if output=$(FM_FAKE_LAUNCH_LOG="$launch_log" \
+    fm_test_run_spawn "$home" "$home/projects/alpha" "$fakebin" \
+      "$root_id" "$home/projects/alpha" --scout); then
+    fail "root spawned work directly for a repository already owned by a project Firstmate"
+  else
+    spawn_rc=$?
+  fi
+  [ "$spawn_rc" -ne 0 ] || fail "root project-authority route refusal returned success"
+  printf '%s\n' "$output" | grep -F 'route this work through that authority instead of spawning it from this home' >/dev/null \
+    || fail "root bypass refusal did not provide project Firstmate route guidance"
+  [ ! -e "$home/state/$root_id.meta" ] || fail "root bypass refusal published task metadata"
+  [ ! -e "$home/data/$root_id/launch-brief.md" ] || fail "root bypass refusal published a launch overlay"
+  [ "$(find "$home/data/$root_id" -type f -print | sort)" = "$root_data_before" ] \
+    || fail "root bypass refusal changed task data files"
+  [ "$(cksum "$home/data/$root_id/brief.md")" = "$root_brief_before" ] \
+    || fail "root bypass refusal changed the source brief"
+  [ "$(cksum "$home/data/backlog.md")" = "$before_backlog" ] \
+    || fail "root bypass refusal changed the backlog"
+  [ ! -s "$launch_log" ] || fail "root bypass refusal created a worker endpoint"
+
+  overlap=$ordinary
+  overlap_id='ordinary-alpha-bypass'
+  fm_test_spawn_home "$overlap" codex
+  printf 'backend = "markdown"\n\n[markdown]\npath = "data/backlog.md"\narchive = "data/done-archive.md"\ndone_keep = 10\n' \
+    > "$overlap/.tasks.toml"
+  fm_test_spawn_brief "$overlap" "$overlap_id" "ordinary overlap must not bypass project authority"
+  TASKS_AXI_BACKEND=markdown tasks-axi add "$overlap_id" "ordinary child route guard" --kind scout \
+    --file "$overlap/data/backlog.md" >/dev/null || fail "could not seed the ordinary-child route-guard backlog row"
+  overlap_before=$(cksum "$overlap/data/backlog.md")
+  launch_log="$TMP_ROOT/project-firstmate-overlap-ordinary.launch"
+  : > "$launch_log"
+  if output=$(FM_FAKE_LAUNCH_LOG="$launch_log" \
+    fm_test_run_spawn "$overlap" "$overlap/projects/alpha" "$fakebin" \
+      "$overlap_id" "$overlap/projects/alpha" --scout); then
+    fail "overlapping ordinary secondmate spawned outside the project Firstmate"
+  else
+    spawn_rc=$?
+  fi
+  [ "$spawn_rc" -ne 0 ] || fail "ordinary-child project-authority route refusal returned success"
+  printf '%s\n' "$output" | grep -F 'route this work through that authority instead of spawning it from this home' >/dev/null \
+    || fail "ordinary-child overlap refusal did not provide route guidance"
+  [ ! -e "$overlap/state/$overlap_id.meta" ] || fail "ordinary-child overlap refusal published task metadata"
+  [ ! -e "$overlap/data/$overlap_id/launch-brief.md" ] || fail "ordinary-child overlap refusal published a launch overlay"
+  [ "$(cksum "$overlap/data/backlog.md")" = "$overlap_before" ] \
+    || fail "ordinary-child overlap refusal changed the backlog"
+  [ ! -s "$launch_log" ] || fail "ordinary-child overlap refusal created an endpoint"
+
+  convert="$TMP_ROOT/project-firstmate-conversion-home"
+  convert_id='convert-multiple-project-home'
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='existing ordinary home with two repositories' \
+    FM_SECONDMATE_SCOPE='alpha and beta domain work' \
+    "$ROOT/bin/fm-home-seed.sh" "$convert_id" "$convert" alpha beta >/dev/null \
+    || fail "could not seed the multi-project ordinary home conversion fixture"
+  before_convert=$(find "$convert" -type f -exec cksum {} + | sort)
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='convert one repository home' \
+    "$ROOT/bin/fm-home-seed.sh" "$convert_id" "$convert" --project-firstmate beta >/dev/null 2>"$err"; then
+    fail "project Firstmate conversion retained unrelated registered repositories"
+  fi
+  grep -F 'contains unrelated project data' "$err" >/dev/null \
+    || fail "multiple-project conversion refusal did not identify the extra repository: $(cat "$err")"
+  [ "$(find "$convert" -type f -exec cksum {} + | sort)" = "$before_convert" ] \
+    || fail "multiple-project conversion refusal mutated the existing ordinary home"
   if FM_HOME="$first" FM_SECONDMATE_CHARTER='bad child authority' \
     "$ROOT/bin/fm-home-seed.sh" nested-pfm "$TMP_ROOT/project-firstmate-seed-nested" --project-firstmate alpha >/dev/null 2>"$err"; then
     fail "project Firstmate was allowed to recursively create another project Firstmate"
@@ -238,7 +323,7 @@ test_project_firstmate_seed_has_one_repository_authority() {
   fi
   grep -F 'ordinary secondmates cannot seed further supervisor homes' "$err" >/dev/null \
     || fail "ordinary secondmate recursion refusal did not explain the bounded topology"
-  pass "project Firstmate seeding enforces one authority per repository and preserves ordinary root routes"
+  pass "project Firstmate seeding enforces one authority, bounded child scope, and non-overlapping root routes"
 }
 
 test_home_seed_validate_rejects_unparseable_registry_entry() {

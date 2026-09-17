@@ -15,6 +15,8 @@ FM_REPO_SCOPE_LEASE_AUTHORITY_ID=
 FM_REPO_SCOPE_LEASE_REPO_ID=
 FM_REPO_SCOPE_LEASE_TASK_HOME=
 FM_REPO_SCOPE_LEASE_TASK_ID=
+FM_REPO_SCOPE_ROOT_LOCK=
+FM_REPO_SCOPE_ROOT_LOCK_HELD=0
 
 fm_repo_scope_hash() {  # <text>
   if command -v shasum >/dev/null 2>&1; then
@@ -40,6 +42,165 @@ fm_repo_scope_clone_identity() {  # <git-repository>
   origin=$(git -C "$repo" remote get-url origin 2>/dev/null) || return 1
   [ -n "$origin" ] || return 1
   fm_repo_scope_hash "$origin"
+}
+
+fm_repo_scope_canonical_origin() {  # <git-repository>
+  local repo=$1 origin scheme rest host path prefix canonical_path source_path
+  origin=$(git -C "$repo" remote get-url origin 2>/dev/null) || return 1
+  [ -n "$origin" ] || return 1
+  case "$origin" in
+    file://*)
+      path=${origin#file://}
+      case "$path" in localhost/*) path=${path#localhost} ;; esac
+      case "$path" in
+        /*) ;;
+        *) path="/$path" ;;
+      esac
+      canonical_path=$(cd "$(dirname "$path")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$path")") || return 1
+      printf 'file:%s\n' "$canonical_path"
+      ;;
+    *://*)
+      scheme=${origin%%://*}
+      rest=${origin#*://}
+      host=${rest%%/*}
+      path=${rest#*/}
+      case "$host" in *@*) host=${host##*@} ;; esac
+      [ -n "$path" ] && [ "$path" != "$rest" ] || return 1
+      host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')
+      path=${path%/}
+      path=${path%.git}
+      case "$scheme" in
+        http|https|ssh|git) printf 'host:%s/%s\n' "$host" "$path" ;;
+        *) printf 'url:%s\n' "$origin" ;;
+      esac
+      ;;
+    *)
+      prefix=${origin%%:*}
+      if [ "$prefix" != "$origin" ] && [[ "$prefix" != */* ]]; then
+        host=$(printf '%s' "$prefix" | sed -E 's/^.*@//' | tr '[:upper:]' '[:lower:]')
+        path=${origin#*:}
+        path=${path#/}
+        path=${path%/}
+        path=${path%.git}
+        [ -n "$host" ] && [ -n "$path" ] || return 1
+        printf 'host:%s/%s\n' "$host" "$path"
+      else
+        case "$origin" in /*) source_path=$origin ;; *) source_path="$repo/$origin" ;; esac
+        if [ -d "$source_path" ]; then
+          canonical_path=$(cd "$source_path" && pwd -P) || return 1
+        else
+          canonical_path=$(cd "$(dirname "$source_path")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$source_path")") || return 1
+        fi
+        printf 'file:%s\n' "$canonical_path"
+      fi
+      ;;
+  esac
+}
+
+fm_repo_scope_canonical_origin_identity() {  # <git-repository>
+  local canonical
+  canonical=$(fm_repo_scope_canonical_origin "$1") || return 1
+  fm_repo_scope_hash "$canonical"
+}
+
+fm_repo_scope_root_route_lock_release() {
+  [ "$FM_REPO_SCOPE_ROOT_LOCK_HELD" = 1 ] || return 0
+  fm_lock_release "$FM_REPO_SCOPE_ROOT_LOCK"
+  FM_REPO_SCOPE_ROOT_LOCK_HELD=0
+}
+
+fm_repo_scope_root_route_guard() {  # <task-home> <project-path>
+  local task_home=$1 project_path=$2 authority_status root_home parent_file registry line entry_id entry_home entry_projects
+  local target_identity entry_identity matched_id matched_home projects_list project
+  FM_REPO_SCOPE_LAST_ERROR=
+  if fm_repo_scope_authority_for_home "$task_home"; then
+    return 0
+  else
+    authority_status=$?
+    [ "$authority_status" -eq 1 ] || return 1
+  fi
+  if [ -f "$task_home/.fm-secondmate-home" ] || [ -L "$task_home/.fm-secondmate-home" ]; then
+    parent_file="$task_home/.fm-secondmate-parent"
+    # shellcheck source=bin/fm-secondmate-parent-lib.sh
+    . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-secondmate-parent-lib.sh"
+    fm_secondmate_parent_record_parse "$parent_file" || return 0
+    [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] &&
+      { [ -z "$FM_SECONDMATE_PARENT_ROLE" ] || [ "$FM_SECONDMATE_PARENT_ROLE" = root ]; } || return 0
+    root_home=$(cd "$FM_SECONDMATE_PARENT_HOME" 2>/dev/null && pwd -P) || return 0
+  else
+    root_home=$(cd "$task_home" 2>/dev/null && pwd -P) || return 0
+  fi
+  if [ -e "$root_home/.fm-project-firstmate" ] || [ -L "$root_home/.fm-project-firstmate" ] ||
+    [ -e "$root_home/.fm-secondmate-home" ] || [ -L "$root_home/.fm-secondmate-home" ]; then
+    return 0
+  fi
+  local root_data="$root_home/data" root_state="$root_home/state"
+  if [ "$root_home" = "$(cd "${FM_HOME:-$root_home}" 2>/dev/null && pwd -P)" ]; then
+    root_data=${FM_DATA_OVERRIDE:-$root_data}
+    root_state=${FM_STATE_OVERRIDE:-$root_state}
+  fi
+  registry="$root_data/secondmates.md"
+  # shellcheck source=bin/fm-secondmate-registry-lib.sh
+  . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-secondmate-registry-lib.sh"
+  FM_REPO_SCOPE_ROOT_LOCK=$(secondmate_registry_lock_path "$root_state")
+  fm_lock_acquire_wait "$FM_REPO_SCOPE_ROOT_LOCK" || {
+    FM_REPO_SCOPE_LAST_ERROR="could not serialize repository routing with the root secondmate registry"
+    return 1
+  }
+  FM_REPO_SCOPE_ROOT_LOCK_HELD=1
+  [ -e "$registry" ] || [ -L "$registry" ] || return 0
+  secondmate_registry_validate_bindings "$registry" secondmate_registry_path_key || {
+    FM_REPO_SCOPE_LAST_ERROR="root secondmate registry is unsafe while routing repository work: $SECONDMATE_REGISTRY_ERROR"
+    fm_repo_scope_root_route_lock_release || true
+    return 1
+  }
+  target_identity=$(fm_repo_scope_canonical_origin_identity "$project_path") || {
+    FM_REPO_SCOPE_LAST_ERROR="cannot establish the canonical origin identity for $project_path"
+    fm_repo_scope_root_route_lock_release || true
+    return 1
+  }
+  matched_id=
+  matched_home=
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in "- "*) ;; *) continue ;; esac
+    secondmate_registry_parse_line "$line" || {
+      FM_REPO_SCOPE_LAST_ERROR="root secondmate registry contains an invalid route while checking repository ownership"
+      fm_repo_scope_root_route_lock_release || true
+      return 1
+    }
+    entry_id=$SECONDMATE_REGISTRY_ID
+    entry_home=$SECONDMATE_REGISTRY_HOME
+    entry_projects=$SECONDMATE_REGISTRY_PROJECTS
+    if [ -e "$entry_home/.fm-project-firstmate" ] || [ -L "$entry_home/.fm-project-firstmate" ]; then
+      [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || {
+        FM_REPO_SCOPE_LAST_ERROR="project Firstmate $entry_id has a remote route that cannot be verified locally"
+        fm_repo_scope_root_route_lock_release || true
+        return 1
+      }
+      fm_repo_scope_marker_parse "$entry_home" || {
+        FM_REPO_SCOPE_LAST_ERROR="registered project Firstmate $entry_id has an invalid authority marker"
+        fm_repo_scope_root_route_lock_release || true
+        return 1
+      }
+      entry_identity=$(fm_repo_scope_canonical_origin_identity "$entry_home/projects/$FM_REPO_SCOPE_PROJECT") || {
+        FM_REPO_SCOPE_LAST_ERROR="cannot verify the repository identity of project Firstmate $entry_id"
+        fm_repo_scope_root_route_lock_release || true
+        return 1
+      }
+      if [ "$entry_identity" = "$target_identity" ]; then
+        matched_id=$entry_id
+        matched_home=$entry_home
+      fi
+    else
+      projects_list=", $entry_projects, "
+      case "$projects_list" in *", $(basename "$project_path"), "*) ;; *) continue ;; esac
+    fi
+  done < "$registry"
+  if [ -n "$matched_id" ]; then
+    FM_REPO_SCOPE_LAST_ERROR="repository $(basename "$project_path") is owned by project Firstmate $matched_id at $matched_home; route this work through that authority instead of spawning it from this home"
+    fm_repo_scope_root_route_lock_release || true
+    return 2
+  fi
 }
 
 fm_repo_scope_marker_parse() {  # <project-firstmate-home>
@@ -135,7 +296,7 @@ fm_repo_scope_authority_for_home() {  # <task-home>
 }
 
 fm_repo_scope_validate_project() {  # <task-home> <project-path>
-  local task_home=$1 project_path=$2 repo_id project_name
+  local task_home=$1 project_path=$2 repo_id project_name task_home_real project_real expected_project
   fm_repo_scope_authority_for_home "$task_home" || return $?
   project_name=$(basename "$project_path")
   [ "$project_name" = "$FM_REPO_SCOPE_PROJECT" ] || {
@@ -144,6 +305,28 @@ fm_repo_scope_validate_project() {  # <task-home> <project-path>
   }
   [ -d "$project_path" ] || {
     FM_REPO_SCOPE_LAST_ERROR="owned repository clone is unavailable: $project_path"
+    return 2
+  }
+  task_home_real=$(cd "$task_home" 2>/dev/null && pwd -P) || {
+    FM_REPO_SCOPE_LAST_ERROR="task home is unavailable: $task_home"
+    return 2
+  }
+  [ ! -L "$task_home_real/projects" ] || {
+    FM_REPO_SCOPE_LAST_ERROR="task home's projects directory must be a real directory: $task_home_real/projects"
+    return 2
+  }
+  expected_project="$task_home_real/projects/$FM_REPO_SCOPE_PROJECT"
+  [ ! -L "$expected_project" ] && [ -d "$expected_project" ] || {
+    FM_REPO_SCOPE_LAST_ERROR="task home has no real owned repository clone at $expected_project"
+    return 2
+  }
+  project_real=$(cd "$project_path" 2>/dev/null && pwd -P) || {
+    FM_REPO_SCOPE_LAST_ERROR="owned repository clone is unavailable: $project_path"
+    return 2
+  }
+  expected_project=$(cd "$expected_project" 2>/dev/null && pwd -P) || return 2
+  [ "$project_real" = "$expected_project" ] || {
+    FM_REPO_SCOPE_LAST_ERROR="task project path must be the task home's canonical owned clone at $expected_project"
     return 2
   }
   repo_id=$(fm_repo_scope_clone_identity "$project_path") || {

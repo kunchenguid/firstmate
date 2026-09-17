@@ -1038,6 +1038,7 @@ SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
 SPAWN_REPO_SCOPE_ACTIVE=0
 SPAWN_REPO_LEASE_CREATED=0
+SPAWN_ROOT_ROUTE_LOCK_ACTIVE=0
 SPAWN_REPO_AUTHORITY_HOME=
 SPAWN_REPO_AUTHORITY_ID=
 SPAWN_REPO_PROJECT=
@@ -1179,6 +1180,10 @@ spawn_abort_cleanup() {
     fm_repo_scope_lock_release || true
     SPAWN_REPO_SCOPE_ACTIVE=0
     SPAWN_REPO_LEASE_CREATED=0
+  fi
+  if [ "$SPAWN_ROOT_ROUTE_LOCK_ACTIVE" = 1 ]; then
+    fm_repo_scope_root_route_lock_release || true
+    SPAWN_ROOT_ROUTE_LOCK_ACTIVE=0
   fi
   if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
     SPAWN_META_LOCK_HELD=0
@@ -2614,25 +2619,6 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     echo "error: $BRIEF ## Captain's intent has an operator-address line: $ADDRESS_LINE; write the captain's actual words without a Captain label or address before spawn, since the heading already records provenance" >&2
     exit 1
   fi
-  # Use the existing launch-brief overlay for every worker kind, including
-  # pre-scope briefs and relaunches. Charters never enter this worker path.
-  SOURCE_BRIEF=$BRIEF
-  BRIEF="$DATA/$ID/launch-brief.md"
-  BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
-  {
-    fm_brief_worker_role "$STATE" "$ID" &&
-      printf '\n' &&
-      cat "$SOURCE_BRIEF"
-  } >"$BRIEF_TMP" || {
-    rm -f -- "$BRIEF_TMP"
-    echo "error: could not render current launch contract for $SOURCE_BRIEF" >&2
-    exit 1
-  }
-  if ! mv "$BRIEF_TMP" "$BRIEF"; then
-    rm -f -- "$BRIEF_TMP"
-    echo "error: could not publish current launch contract for $SOURCE_BRIEF" >&2
-    exit 1
-  fi
 fi
 
 delivery_rigor_rank() { # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
@@ -2664,9 +2650,6 @@ if [ "$KIND" = ship ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
   fi
 fi
-
-BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
-BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
@@ -2999,6 +2982,16 @@ if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
 fi
 
 if [ "$KIND" != secondmate ]; then
+  # Arm cleanup before the guard: it may acquire the root registry lock before
+  # returning, and an interrupted shell must still release that lock.
+  SPAWN_ROOT_ROUTE_LOCK_ACTIVE=1
+  if fm_repo_scope_root_route_guard "$FM_HOME" "$PROJ_ABS"; then
+    :
+  else
+    [ -n "$FM_REPO_SCOPE_LAST_ERROR" ] || FM_REPO_SCOPE_LAST_ERROR="repository route admission failed"
+    echo "error: $FM_REPO_SCOPE_LAST_ERROR" >&2
+    exit 1
+  fi
   if fm_repo_scope_acquire_task "$FM_HOME" "$ID" "$PROJ_ABS" "$RELAUNCH"; then
     REPO_SCOPE_STATUS=0
   else
@@ -3019,6 +3012,29 @@ if [ "$KIND" != secondmate ]; then
     SPAWN_REPO_LEASE_CREATED=$FM_REPO_SCOPE_LEASE_CREATED
   fi
 fi
+
+if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+  # Publish this worker-role overlay only after authority admission succeeds.
+  SOURCE_BRIEF=$BRIEF
+  BRIEF="$DATA/$ID/launch-brief.md"
+  BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
+  {
+    fm_brief_worker_role "$STATE" "$ID" &&
+      printf '\n' &&
+      cat "$SOURCE_BRIEF"
+  } >"$BRIEF_TMP" || {
+    rm -f -- "$BRIEF_TMP"
+    echo "error: could not render current launch contract for $SOURCE_BRIEF" >&2
+    exit 1
+  }
+  if ! mv "$BRIEF_TMP" "$BRIEF"; then
+    rm -f -- "$BRIEF_TMP"
+    echo "error: could not publish current launch contract for $SOURCE_BRIEF" >&2
+    exit 1
+  fi
+fi
+BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
+BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 
 W="fm-$ID"
 if [ "$RELAUNCH" -eq 1 ]; then
@@ -4594,6 +4610,12 @@ if [ "$SPAWN_REPO_SCOPE_ACTIVE" = 1 ]; then
   }
   SPAWN_REPO_SCOPE_ACTIVE=0
   SPAWN_REPO_LEASE_CREATED=0
+fi
+if [ "$SPAWN_ROOT_ROUTE_LOCK_ACTIVE" = 1 ]; then
+  fm_repo_scope_root_route_lock_release || {
+    echo "warning: root repository route lock could not be released cleanly" >&2
+  }
+  SPAWN_ROOT_ROUTE_LOCK_ACTIVE=0
 fi
 
 SPAWN_DELIVERY=
