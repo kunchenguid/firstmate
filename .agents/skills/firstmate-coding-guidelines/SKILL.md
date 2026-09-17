@@ -40,8 +40,9 @@ The machine-consumed inventory in [`docs/documentation-audiences.json`](../../..
 
 ## One-owner rule
 
-Every contract - a data format, a state machine, a decision procedure - is stated in full exactly once.
+Every topic or contract - a data format, a state machine, a decision procedure - has one authoritative owner, not one giant instruction file.
 Every other mention of it is a one-line cross-reference, never a restatement.
+For specialized agent guidance, that reference must state when to load the owner; a bare link is insufficient.
 A single deliberate one-line reinforcement at a genuine risk point is allowed, for example a "don't forget X" placed exactly where forgetting X is costly.
 Restating the contract's substance a second time is not allowed: the two copies will drift the moment only one is edited.
 When you touch a contract, patch, replace, or prune the owner's existing language rather than appending a new clause or paragraph wherever possible, then grep the repo for its other mentions and update the cross-references, not duplicate the change into a second full copy.
@@ -60,7 +61,8 @@ The model to copy is `AGENTS.md` section 8's "Away-mode and quiet-mode stub": it
 Apply the decision tree above to every line you are about to add to `AGENTS.md`.
 If an addition needs more than a few lines of conditional detail (detail that matters only in a specific situation) or reference detail (a wire format, an exact schema, historical rationale), you are almost certainly adding it to the wrong file.
 `AGENTS.md`'s token cost is paid by every session of every fleet member, every time, whether or not that session ever hits the situation the new lines describe.
-A skill's cost is paid only by the sessions that actually load it.
+Before claiming context savings from moving text to a skill, verify that the actual harness does not preload its body.
+Otherwise report file-size reductions and conditional estimates, not realized context savings.
 When in doubt, write the fact into the skill or doc first by patching that owner's existing language, and add only the one-line trigger to `AGENTS.md`.
 
 ## Trigger hygiene

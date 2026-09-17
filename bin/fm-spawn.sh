@@ -16,10 +16,11 @@
 #   placeholders, an empty Task, an incomplete pair of Task subsections, or a
 #   `## Captain's intent` line opening with a Captain label or address.
 #   Every ship or scout spawn renders `launch-brief.md`; for a no-mistakes ship
-#   it also carries the current `--intent` contract and the extracted captain
-#   intent. A legacy mixed Task is accepted there only under bin/fm-dod-lib.sh's
-#   provenance-marking rules; unmarked legacy Tasks stop for migration rather
-#   than becoming intent. That library owns the parsing and intent rules. When
+#   its current `--intent` contract points to the source brief's single
+#   `## Captain's intent` body. A legacy mixed Task instead receives one
+#   extracted marked-intent block under bin/fm-dod-lib.sh's provenance rules;
+#   unmarked legacy Tasks stop for migration rather than becoming intent. That
+#   library owns the parsing and intent rules. When
 #   the explicit mode carries less rigor than the project's standing posture, a
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
@@ -2577,7 +2578,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       printf '\n' &&
       cat "$SOURCE_BRIEF" &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
-        fm_brief_intent_overlay "$CAPTAIN_INTENT"
+        fm_brief_intent_overlay "$CAPTAIN_INTENT" "$SOURCE_BRIEF"
       fi
   } >"$BRIEF_TMP" || {
     rm -f -- "$BRIEF_TMP"

@@ -14,6 +14,31 @@ Sweep this session for durable knowledge and open-work record state that exist o
 Memory entries are tiered and decay between passes, and stale material retires to a cold archive instead of being deleted.
 This skill writes only through the existing Firstmate ownership and write boundaries.
 
+## Instruction maintenance at checkpoints
+
+At an already-required stow, task handoff, or accepted scope change, inspect only instruction surfaces touched by that work when a concrete duplicate, contradiction, stale instruction, or measured budget excess is visible.
+This subsection alone does not invoke a full stow or its cascade.
+Use the per-topic placement and load-trigger rules in `firstmate-coding-guidelines` before changing instruction placement; keep current task state in the task record and historical evidence behind references.
+Preserve exact user decisions, active exclusions, unresolved findings, and safety/authority facts.
+
+Propose one bounded consolidation with its owner and approximate before/after bytes or estimated tokens.
+Apply only edits already authorized for that layer; an agent may not rewrite its own authority.
+Firstmate may maintain private operational records within existing authority; the primary alone owns shared captain preferences and their propagation.
+Shared tracked rules require the repository delivery path and delegation while crew is live; global/user rules require explicit approval.
+Existing pinned-memory, offload, and unresolved-decision protections remain in force.
+
+Mark superseded instructions with the replacing decision and date, retaining a provenance link instead of repeating history in live context.
+Scaffold briefs with the existing generator, then fill and update them under AGENTS section 11.
+When an authorized change supersedes a live worker instruction, update the current task summary, retain dated provenance, and send a durable steer through its existing inbox.
+Use `--resolve-key` only for an actually open matching key; do not re-ask a settled decision.
+Consolidate live wording in this bounded pass so relaunches cannot revive stale instructions.
+
+Make one pass over the named surfaces and check changed pointers and surviving constraints once, then stop.
+If authority or a necessary fact is unclear, preserve it.
+Record residual excess or staleness as one specific follow-up; do not scan another project, start a timer, or repeat an audit merely to reduce line count.
+This checkpoint does not waive the startup-memory budget contract or justify a reset-safe claim while that contract remains unmet.
+Report any remaining budget obligation without deleting mandatory rules to satisfy it.
+
 ## Memory tiers and entry markers
 
 Markers are compact trailing HTML comments, deliberately cheap because marker bytes are counted content:
