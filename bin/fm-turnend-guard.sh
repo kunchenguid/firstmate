@@ -85,6 +85,24 @@
 #      re-block (budget_account_current_epoch owns that rule), so an inert
 #      hook that leaves the ledger frozen cannot hold the guard in an
 #      unbounded re-block loop below that override.
+#
+# Lock-refused sessions: a session whose home lock is held by a DIFFERENT live
+# harness is read-only (AGENTS.md section 3), so it must not arm a watcher and
+# bin/fm-claude-stop-autoarm.sh is permanently inert in it. Neither of the
+# bounds above can then be reached in --claude mode: the block counter only
+# advances when the auto-arm epoch moves, a frozen ledger pins it at 1, and the
+# attended fail-open additionally needs a verified failure episode that never
+# exists there, so the guard re-blocked every turn end forever (upstream issue
+# #3425; observed ~20 consecutive blocks with count=1). Such a session gets its
+# own terminal path instead: at most FM_CLAUDE_TURNEND_READONLY_ADVISORIES
+# (default 2) read-only advisories naming the live lock holder, counted per
+# block rather than per epoch, and then it stands down for the rest of that
+# session. The advisory wording replaces this guard's repair banner in every
+# mode, because no mode may demand a repair the session is forbidden to
+# perform; Grok, OpenCode, Pi, and omp forward that stderr after their own
+# generic prefix and keep their existing per-turn follow-up bound, and Cursor's
+# park adapter already stands down before reaching this guard when another live
+# harness holds the lock.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -99,9 +117,13 @@ CURSOR_MODE=0
 SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
 BLOCK_BUDGET=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
+READONLY_ADVISORIES=${FM_CLAUDE_TURNEND_READONLY_ADVISORIES:-2}
 case "$SYNC_WAIT_MS" in ''|*[!0-9]*) SYNC_WAIT_MS=800 ;; esac
 case "$EPOCH_FRESH" in ''|*[!0-9]*|0) EPOCH_FRESH=15 ;; esac
 case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
+# 0 is a legal setting here and means "stand down immediately", unlike the
+# block budget above, where 0 would disable the bound it exists to enforce.
+case "$READONLY_ADVISORIES" in ''|*[!0-9]*) READONLY_ADVISORIES=2 ;; esac
 
 for arg in "$@"; do
   case "$arg" in
@@ -167,6 +189,8 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 
 BUDGET_FILE="$STATE/.turnend-claude-blocks"
 BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
@@ -216,15 +240,57 @@ if [ "$(fm_path_age "$STATE/.last-watcher-beat")" -lt "$AFK_GRACE" ] \
   allow_supervised_stop
 fi
 
+# The home's session lock names a live verified harness that is not in this
+# session's own harness ancestry: this session is read-only and may not arm a
+# watcher or repair supervision here, which is also exactly why
+# bin/fm-claude-stop-autoarm.sh stays inert and the auto-arm epoch never moves.
+# The cheap file and liveness tests run first so an ordinary session pays no
+# ancestry walk. A missing, malformed, or dead-owner lock is NOT this state: the
+# session may legitimately claim or reclaim that lock, so it keeps the ordinary
+# repair path.
+LOCK_REFUSED_PID=
+session_is_lock_refused() {
+  local lock_pid
+  lock_pid=$(cat "$STATE/.lock" 2>/dev/null || true)
+  case "$lock_pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  fm_harness_pid_alive "$lock_pid" || return 1
+  fm_session_lock_owned_by_self "$STATE" && return 1
+  LOCK_REFUSED_PID=$lock_pid
+  return 0
+}
+
+LOCK_REFUSED=0
+session_is_lock_refused && LOCK_REFUSED=1
+
 block_stop() {
   local afk x_mode reason rule
+  rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  if [ "$LOCK_REFUSED" -eq 1 ]; then
+    {
+      printf '●%s\n' "$rule"
+      printf '●  SUPERVISION IS DOWN AND IS NOT THIS SESSION'"'"'S TO REPAIR\n'
+      printf '●  %s task(s) in flight, %s event source(s), %s custom check(s); no live watcher holds this home lock (last beat: %s).\n' \
+        "$FM_SUP_IN_FLIGHT" "$FM_SUP_SOURCES" "$FM_SUP_CHECKS" "$FM_SUP_BEACON_DESC"
+      printf '●  Another live session (process %s) holds this home lock, so this session is read-only: do not arm a watcher, spawn, steer, or otherwise repair supervision here.\n' \
+        "$LOCK_REFUSED_PID"
+      if [ "$CLAUDE_MODE" -eq 1 ]; then
+        printf '●  Report the gap to that session or the captain. This guard stands down after %s of these advisories in this session rather than blocking every turn end.\n' \
+          "$READONLY_ADVISORIES"
+      else
+        printf '●  Report the gap to that session or the captain rather than repairing supervision from here.\n'
+      fi
+      printf '●%s\n' "$rule"
+    } >&2
+    exit 2
+  fi
   afk=0
   [ -e "$STATE/.afk" ] && afk=1
   x_mode=0
   [ -f "$CONFIG/x-mode.env" ] && x_mode=1
   reason=$("$SCRIPT_DIR/fm-supervision-instructions.sh" --afk "$afk" --x-mode "$x_mode" --repair-line 2>/dev/null \
     || printf '%s\n' 'tasks in flight, no live watcher - repair missing watcher supervision according to the session-start operating block before ending the turn')
-  rule='━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
   {
     printf '●%s\n' "$rule"
     printf '●  TURN WOULD END BLIND - SUPERVISION IS OFF\n'
@@ -263,14 +329,15 @@ fi
 # before the block decision. Across Stops the two callers differ:
 #   - observe (the allow paths in autoarm_owns_recovery): seeing an
 #     already-charged epoch again is free - it is the same claim, seen again.
-#   - block (the re-block path): a re-block against the epoch the previous
-#     re-block already charged is a new consumed continuation, because the
-#     auto-arm advanced nothing between the two Stops - it did not participate
-#     at all, which is exactly the absence this budget bounds. Charging only
-#     epoch changes let an inert hook (identity-gated, never fired, or failing
-#     before its generation claim) freeze the ledger and the count together,
-#     so the guard re-blocked without limit and the attended fail-open below
-#     never became reachable.
+#   - block (the re-block path, including the lock-refused path below): a
+#     re-block against the epoch the previous re-block already charged is a
+#     new consumed continuation, because the auto-arm advanced nothing
+#     between the two Stops - it did not participate at all, which is
+#     exactly the absence this budget bounds. Charging only epoch changes
+#     let an inert hook (identity-gated, never fired, or failing before its
+#     generation claim) freeze the ledger and the count together, so the
+#     guard re-blocked without limit and the attended fail-open below never
+#     became reachable.
 BUDGET_CHARGED_EPOCH=
 budget_account_current_epoch() {  # [observe|block]
   local mode=${1:-observe} current_epoch outcome old_session old_count old_epoch tmp initialized charged
@@ -302,17 +369,21 @@ budget_account_current_epoch() {  # [observe|block]
   fi
   if [ ! -f "$BUDGET_FILE" ] || [ "${old_session:-}" != "$SESSION_ID" ]; then
     charged=1
-    case "$outcome" in
-      failed|failed-suppressed)
-        if [ -e "$FAILURE_NOTICE" ]; then
-          initialized=1
-          COUNT=0
-        else
-          COUNT=1
-        fi
-        ;;
-      *) COUNT=1 ;;
-    esac
+    if [ "$mode" = observe ]; then
+      case "$outcome" in
+        failed|failed-suppressed)
+          if [ -e "$FAILURE_NOTICE" ]; then
+            initialized=1
+            COUNT=0
+          else
+            COUNT=1
+          fi
+          ;;
+        *) COUNT=1 ;;
+      esac
+    else
+      COUNT=1
+    fi
   fi
   tmp="$BUDGET_FILE.tmp.$$"
   if ! printf 'session=%s\ncount=%s\nepoch=%s\n' "$SESSION_ID" "$COUNT" "$current_epoch" > "$tmp" 2>/dev/null \
@@ -465,6 +536,18 @@ failure_episode_verified() {
     *) return 1 ;;
   esac
 }
+
+# A lock-refused session may not repair supervision here, and the Stop-owned
+# auto-arm is inert in it, so the cooperative wait below has nothing to wait for
+# and neither of its bounds can ever be reached. Give this session a small
+# bounded number of read-only advisories counted per block, then stand down for
+# the rest of it. A contended budget lock stands down for this turn too: the
+# whole point of this path is never to wedge a session that cannot act.
+if [ "$LOCK_REFUSED" -eq 1 ]; then
+  budget_account_current_epoch block || exit 0
+  [ "$COUNT" -le "$READONLY_ADVISORIES" ] || exit 0
+  block_stop
+fi
 
 i=0
 while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
