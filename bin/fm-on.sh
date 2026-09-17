@@ -5,7 +5,8 @@
 #   fm-on.sh [--stdin] <secondmate-id|unambiguous-ssh-alias> <fm-command> [args...]
 #
 # Routes come only from remote records in data/secondmates.md. A record names an
-# SSH config alias, remote Firstmate code root, and remote FM_HOME. A host alias
+# SSH config alias, remote Firstmate code root, remote FM_HOME, and remote Herdr
+# session. Legacy records resolve to fm-remote. A host alias
 # may be used directly only when exactly one record selects it; an ambiguous
 # alias is refused. The command must be a genuine executable in this checkout's
 # bin/fm-*.sh namespace. No per-command table exists.
@@ -24,6 +25,9 @@
 # This command explicitly disables agent forwarding, forwarding setup, and
 # configured SendEnv patterns. The remote entrypoint executes the selected
 # command under an empty environment with only its fixed runtime values.
+# For a non-legacy route, this transport injects the persisted session argument
+# into the two session-owning remote commands, doctor and secondmate control.
+# Legacy fm-remote calls stay byte-compatible with older remote checkouts.
 #
 # ServerAliveInterval/ServerAliveCountMax arm dead-peer detection so a vanished
 # peer (a reboot, a dropped link) becomes a bounded ssh failure (exit 255)
@@ -78,6 +82,7 @@ MATCHES=0
 HOST=
 ROOT=
 HOME_PATH=
+HERDR_SESSION=
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in '- '*) ;; *) continue ;; esac
   secondmate_registry_parse_line "$line" || die "malformed secondmate registry entry: $line"
@@ -87,6 +92,7 @@ while IFS= read -r line || [ -n "$line" ]; do
     HOST=$SECONDMATE_REGISTRY_HOST
     ROOT=$SECONDMATE_REGISTRY_ROOT
     HOME_PATH=$SECONDMATE_REGISTRY_HOME
+    HERDR_SESSION=$SECONDMATE_REGISTRY_SESSION
   fi
 done < "$REG"
 [ "$MATCHES" -gt 0 ] || die "no remote secondmate or SSH alias matches '$ROUTE'"
@@ -94,15 +100,23 @@ done < "$REG"
 case "$HOST" in ''|-*|*[!A-Za-z0-9._-]*) die "configured SSH alias is unsafe: $HOST" ;; esac
 case "$ROOT" in /*) ;; *) die "configured remote root is not absolute: $ROOT" ;; esac
 case "$HOME_PATH" in /*) ;; *) die "configured remote home is not absolute: $HOME_PATH" ;; esac
-case "$ROOT$HOME_PATH" in *$'\n'*|*$'\r'*|*$'\t'*) die "configured remote root or home contains control characters" ;; esac
+case "$ROOT$HOME_PATH$HERDR_SESSION" in *$'\n'*|*$'\r'*|*$'\t'*) die "configured remote root, home, or Herdr session contains control characters" ;; esac
 for configured_path in "$ROOT" "$HOME_PATH"; do
   case "/$configured_path/" in */../*|*/./*) die "configured remote root or home contains traversal components" ;; esac
   case "$configured_path" in *'//'*) die "configured remote root or home contains an empty path component" ;; esac
 done
 
+COMMAND_ARGS=("$@")
+if [ "$HERDR_SESSION" != "$FM_REMOTE_HERDR_LEGACY_SESSION" ]; then
+  case "$COMMAND" in
+    fm-remote-doctor.sh|fm-remote-secondmate-control.sh)
+      COMMAND_ARGS=(--herdr-session "$HERDR_SESSION" "${COMMAND_ARGS[@]}")
+      ;;
+  esac
+fi
 ROOT_B64=$(printf '%s' "$ROOT" | encode_base64)
 HOME_B64=$(printf '%s' "$HOME_PATH" | encode_base64)
-ARGV_B64=$(printf '%s\0' "$COMMAND" "$@" | encode_base64)
+ARGV_B64=$(printf '%s\0' "$COMMAND" "${COMMAND_ARGS[@]}" | encode_base64)
 SSH_BIN=${FM_SSH_BIN:-ssh}
 ALIVE_INTERVAL=${FM_SSH_ALIVE_INTERVAL:-15}
 ALIVE_COUNT_MAX=${FM_SSH_ALIVE_COUNT_MAX:-3}

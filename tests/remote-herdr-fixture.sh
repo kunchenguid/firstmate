@@ -41,7 +41,7 @@ SH
 printf '%s\n' "$*" >> "$LOG"
 jq_state() { jq "$@" "$STATE"; }
 save() { tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
-ws=""; label=""; cwd=""; pane=""
+ws=""; label=""; cwd=""; pane=""; session=${HERDR_SESSION:-default}
 args=("$@")
 for ((i=0; i<${#args[@]}; i++)); do
   case "${args[$i]}" in
@@ -49,6 +49,7 @@ for ((i=0; i<${#args[@]}; i++)); do
     --label) label=${args[$((i+1))]:-} ;;
     --cwd) cwd=${args[$((i+1))]:-} ;;
     --pane) pane=${args[$((i+1))]:-} ;;
+    --session) session=${args[$((i+1))]:-} ;;
   esac
 done
 case "${1:-} ${2:-}" in
@@ -113,7 +114,11 @@ case "${1:-} ${2:-}" in
     fi
     ;;
   "session list"*)
-    printf '{"sessions":[{"name":"default","running":true,"socket_path":"%s"},{"name":"fm-remote","running":true,"socket_path":"%s"}]}\n' "$SOCKET" "$SOCKET" ;;
+    if [ "$session" = default ]; then
+      printf '{"sessions":[{"name":"default","running":true,"socket_path":"%s"}]}\n' "$SOCKET"
+    else
+      printf '{"sessions":[{"name":"default","running":true,"socket_path":"%s"},{"name":"%s","running":true,"socket_path":"%s"}]}\n' "$SOCKET" "$session" "$SOCKET"
+    fi ;;
 esac
 exit 0
 SH

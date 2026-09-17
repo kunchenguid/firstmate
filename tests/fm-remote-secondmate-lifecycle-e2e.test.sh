@@ -25,6 +25,7 @@ HERDR_STATE="$TMP_ROOT/remote-herdr.state"
 HERDR_LOG="$TMP_ROOT/remote-herdr.log"
 TMUX_LOG="$TMP_ROOT/remote-tmux.log"
 TMUX_STATE="$TMP_ROOT/remote-tmux.state"
+REMOTE_SESSION=fm-remote-personal
 CLAIMS="$TMP_ROOT/claims"
 mkdir -p "$PARENT/data" "$PARENT/state" "$PARENT/config" "$PARENT/projects" "$REMOTE_ROOT" "$CLAIMS"
 cleanup() {
@@ -143,7 +144,9 @@ argv_b64=$4
 command_fields=$(perl -MMIME::Base64=decode_base64 -e '
   my $data=decode_base64($ARGV[0]);
   my @args=split(/\0/, $data);
-  print join("\t", map { defined $_ ? $_ : "" } @args[0..2]);
+  my $command=shift @args;
+  splice(@args, 0, 2) if @args >= 2 && $args[0] eq "--herdr-session";
+  print join("\t", map { defined $_ ? $_ : "" } ($command, @args[0..1]));
 ' "$argv_b64")
 IFS=$'\t' read -r command_name _command_action command_rel <<EOF
 $command_fields
@@ -650,11 +653,13 @@ rm -f "$REMOTE_ROOT/bin/git"
 pass "seeding carries bitbucket, self-hosted, and scp-like origins through to the remote clone"
 
 # Provision and register the remote route from the captain-facing primary.
+printf '%s\n' "$REMOTE_SESSION" > "$PARENT/config/remote-herdr-session"
 out=$(FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
   FM_SECONDMATE_SCOPE='iOS implementation and Xcode validation' \
   remote_env "$ROOT/bin/fm-remote-home-seed.sh" ios remote-mac "$REMOTE_ROOT" "$REMOTE_HOME" alpha)
 assert_contains "$out" "home=remote-mac:$REMOTE_HOME" "remote seed did not report the host-qualified home"
 assert_grep 'host: remote-mac; root:' "$PARENT/data/secondmates.md" "registry did not record the remote host dimension"
+assert_grep "session: $REMOTE_SESSION" "$PARENT/data/secondmates.md" "registry did not persist the route's Herdr session"
 assert_present "$REMOTE_HOME/.fm-secondmate-home" "remote provisioning did not publish the identity marker"
 assert_present "$REMOTE_HOME/projects/alpha/.git" "remote provisioning did not clone the project on that host"
 assert_grep "$REMOTE_HOME/state/parent-replies.status" "$REMOTE_HOME/data/charter.md" "remote charter did not use its append-only reply log"
@@ -722,10 +727,10 @@ out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate)
 assert_contains "$out" 'remote=remote-mac backend=herdr' "remote spawn did not report separate host and backend dimensions"
 assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata omitted the remote host"
 assert_grep 'remote_backend=herdr' "$PARENT/state/ios.meta" "parent metadata omitted the remote-local backend"
-assert_grep 'remote_herdr_session=fm-remote' "$PARENT/state/ios.meta" "parent metadata omitted the pinned remote Herdr session"
-assert_grep 'remote_target=fm-remote:' "$PARENT/state/ios.meta" "parent metadata did not record an fm-remote endpoint"
-assert_grep 'herdr_session=fm-remote' "$REMOTE_HOME/state/parent-route/ios.meta" "remote metadata did not record the pinned Herdr session"
-assert_grep '--session fm-remote' "$HERDR_LOG" "remote launch did not target the fm-remote session"
+assert_grep "remote_herdr_session=$REMOTE_SESSION" "$PARENT/state/ios.meta" "parent metadata omitted the pinned remote Herdr session"
+assert_grep "remote_target=$REMOTE_SESSION:" "$PARENT/state/ios.meta" "parent metadata did not record the route's remote endpoint"
+assert_grep "herdr_session=$REMOTE_SESSION" "$REMOTE_HOME/state/parent-route/ios.meta" "remote metadata did not record the pinned Herdr session"
+assert_grep "--session $REMOTE_SESSION" "$HERDR_LOG" "remote launch did not target the persisted route session"
 assert_no_grep '--session default' "$HERDR_LOG" "remote launch targeted the interactive default session"
 assert_grep 'window=remote:ios' "$PARENT/state/ios.meta" "parent metadata pretended the endpoint was local"
 assert_present "$PARENT/state/procevent/remote-reply-ios.source" "remote spawn did not arm its reply source"
@@ -795,7 +800,7 @@ FM_FAKE_SSH_MODE=launch-default-session-route remote_env "$ROOT/bin/fm-spawn.sh"
 default_session_parent_rc=$?
 set -e
 [ "$default_session_parent_rc" -ne 0 ] || fail "parent accepted an interactive default-session remote route"
-assert_grep "remote launch returned Herdr session 'default', expected 'fm-remote'" "$TMP_ROOT/spawn-default-session-route.out" \
+assert_grep "remote launch returned Herdr session 'default', expected '$REMOTE_SESSION'" "$TMP_ROOT/spawn-default-session-route.out" \
   "parent refusal did not name the default session"
 cmp -s "$TMP_ROOT/parent-ios-before-nonherdr.meta" "$PARENT/state/ios.meta" \
   || fail "parent rewrote its endpoint metadata after a default-session route refusal"
@@ -1037,7 +1042,7 @@ FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LOCAL_HOME" \
 remote_env "$ROOT/bin/fm-on.sh" ios fm-home-summary-refresh.sh >/dev/null \
   || fail "remote fixture did not publish its home ledger"
 SNAPSHOT=$(remote_env "$ROOT/bin/fm-fleet-snapshot.sh" --json)
-if ! printf '%s' "$SNAPSHOT" | jq -e '.secondmate_current.records | any(.id == "ios" and .remote == true and .host == "remote-mac" and .provenance.selected == "structured-home")' >/dev/null; then
+if ! printf '%s' "$SNAPSHOT" | jq -e --arg session "$REMOTE_SESSION" '.secondmate_current.records | any(.id == "ios" and .remote == true and .host == "remote-mac" and .session == $session and .provenance.selected == "structured-home")' >/dev/null; then
   printf 'secondmate projection:\n%s\n' "$(printf '%s' "$SNAPSHOT" | jq '.secondmate_current')" >&2
   fail "fleet snapshot did not select the remote structured-home projection"
 fi
@@ -1116,7 +1121,7 @@ make_herdr_client_pair "$TMP_ROOT/client-pair" 0.7.1 14 0.7.5 16
 export FM_HERDR_PAIR_DIR="$TMP_ROOT/client-pair"
 SHADOWED_STATE=$(FM_HOME="$REMOTE_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
   PATH="$TMP_ROOT/client-pair/stale:$REMOTE_ROOT/bin:$TMP_ROOT/client-pair/tools:/usr/bin:/bin" \
-  "$REMOTE_ROOT/bin/fm-remote-secondmate-control.sh" state ios 2>"$TMP_ROOT/shadowed-state.err")
+  "$REMOTE_ROOT/bin/fm-remote-secondmate-control.sh" --herdr-session "$REMOTE_SESSION" state ios 2>"$TMP_ROOT/shadowed-state.err")
 [ "$SHADOWED_STATE" = alive ] \
   || fail "a live endpoint behind a stale shadowing client must still read alive, got: $SHADOWED_STATE ($(cat "$TMP_ROOT/shadowed-state.err"))"
 assert_contains "$(cat "$TMP_ROOT/client-pair/stale.log")" 'pane get' "the stale client was not the one the job PATH resolved first"
@@ -1184,14 +1189,14 @@ pass "unreachable no-ledger remote state remains explicit with no local respawn 
 
 # Retirement delegates its safety check to the remote home. An in-flight child
 # record refuses cleanup and preserves both machines' durable routes.
-# A sibling remote secondmate workspace shares fm-remote and must survive every
+# A sibling remote secondmate workspace shares the route session and must survive every
 # refusal and the eventual successful retirement of ios.
 # This fixture overrides FM_ROOT for transport, so teardown's root-owned guard
 # sees the fixture root rather than the source script path used by fm-send.
 publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$REMOTE_ROOT/bin/fm-watch.sh"
 resolve_ios_pending
 SIBLING_CREATE=$("$REMOTE_ROOT/bin/herdr" workspace create --cwd "$REMOTE_ROOT" \
-  --label 2ndmate-macos --no-focus --session fm-remote)
+  --label 2ndmate-macos --no-focus --session "$REMOTE_SESSION")
 SIBLING_WORKSPACE=$(printf '%s' "$SIBLING_CREATE" | jq -r '.result.workspace.workspace_id')
 SIBLING_PANE=$(printf '%s' "$SIBLING_CREATE" | jq -r '.result.root_pane.pane_id')
 [ -n "$SIBLING_WORKSPACE" ] && [ "$SIBLING_WORKSPACE" != null ] \
@@ -1304,9 +1309,9 @@ jq -e --arg workspace "$SIBLING_WORKSPACE" --arg pane "$SIBLING_PANE" '
   any(.workspaces[]; .workspace_id == $workspace and .label == "2ndmate-macos")
   and any(.tabs[]; .workspace_id == $workspace and .pane_id == $pane)
 ' "$HERDR_STATE" >/dev/null \
-  || fail "remote retirement removed the sibling secondmate workspace or pane from fm-remote"
-assert_no_grep 'session stop' "$HERDR_LOG" "remote retirement stopped the shared fm-remote session"
-assert_no_grep 'server stop' "$HERDR_LOG" "remote retirement stopped the shared fm-remote server"
+  || fail "remote retirement removed the sibling secondmate workspace or pane from the route session"
+assert_no_grep 'session stop' "$HERDR_LOG" "remote retirement stopped the shared route session"
+assert_no_grep 'server stop' "$HERDR_LOG" "remote retirement stopped the shared route server"
 pass "remote retirement refuses child work, then removes only its own endpoint while a shared-session sibling survives"
 
 echo "ALL TESTS PASSED"

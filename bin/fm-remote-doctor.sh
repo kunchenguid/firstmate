@@ -2,16 +2,17 @@
 # Check, and optionally repair, one remote account's second-mate readiness.
 #
 # Usage:
-#   bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh [--fix]
+#   bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh [--herdr-session <name>] [--fix]
 #
 # Run it through fm-on.sh so the fixed entrypoint invokes this readiness owner
 # over its plain SSH bootstrap. The command reports the same filesystem-composed
 # PATH used by worker jobs while retaining authority to inspect and repair the
 # worker itself.
 #
-# A remote second mate always runs on the Herdr backend in the dedicated
-# fm-remote session. Its account therefore needs the Firstmate-owned Aqua Herdr
-# agent plus the sibling dev.firstmate.remote-job worker that runs normal fm-on
+# A remote second mate always runs on the Herdr backend in its route's dedicated
+# session. Missing session input remains the legacy fm-remote lane. Its account
+# therefore needs one Firstmate-owned Aqua Herdr agent per session plus the
+# sibling dev.firstmate.remote-job worker that runs normal fm-on
 # commands through the Aqua or Linux job-worker path. On darwin, that Herdr
 # agent runs bin/fm-remote-herdr-guard.sh through the remote account's login
 # shell (`-l -c`) so the server inherits the account's own environment; the
@@ -67,34 +68,50 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-remote-herdr-owner-lib.sh
 . "$SCRIPT_DIR/fm-remote-herdr-owner-lib.sh"
+# shellcheck source=bin/fm-herdr-session-lib.sh
+. "$SCRIPT_DIR/fm-herdr-session-lib.sh"
 REQUIRED_TOOLS=(git jq herdr tasks-axi treehouse)
 HARNESS_TOOLS=(claude codex opencode pi pi-signed grok kimi)
 OPTIONAL_TOOLS=(tmux no-mistakes gh)
-LAUNCH_AGENT_LABEL=dev.firstmate.herdr.fm-remote
-# The dedicated remote-secondmate session. The user's interactive Herdr work
-# remains in the separate default session, which this readiness check never
+
+usage() { sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+
+MODE=check
+HERDR_SESSION_NAME=$FM_REMOTE_HERDR_LEGACY_SESSION
+SESSION_SET=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --herdr-session)
+      [ "$SESSION_SET" -eq 0 ] && [ "$#" -ge 2 ] || usage
+      HERDR_SESSION_NAME=$2
+      SESSION_SET=1
+      shift 2
+      ;;
+    --fix)
+      [ "$MODE" = check ] || usage
+      MODE=fix
+      shift
+      ;;
+    --worker-tool-probe)
+      [ "$MODE" = check ] || usage
+      [ "${FM_REMOTE_JOB_ACTIVE:-}" = 1 ] || { printf 'error: worker tool probe requires the remote job worker\n' >&2; exit 64; }
+      MODE='worker-tool-probe'
+      shift
+      ;;
+    *) usage ;;
+  esac
+done
+fm_remote_herdr_session_validate "$HERDR_SESSION_NAME" \
+  || { printf 'error: %s: %s\n' "$FM_HERDR_SESSION_ERROR" "$HERDR_SESSION_NAME" >&2; exit 2; }
+LAUNCH_AGENT_LABEL=$(fm_remote_herdr_launch_agent_label "$HERDR_SESSION_NAME")
+# The route's dedicated remote-secondmate session. The user's interactive Herdr
+# work remains in the separate default session, which this readiness check never
 # requires or changes.
-HERDR_SESSION_NAME=fm-remote
 LAUNCH_AGENT_DIR="${HOME:-}/Library/LaunchAgents"
 LAUNCH_AGENT_PLIST="$LAUNCH_AGENT_DIR/$LAUNCH_AGENT_LABEL.plist"
 LAUNCH_AGENT_LOG_DIR="${HOME:-}/Library/Logs"
 LAUNCH_AGENT_LOG="$LAUNCH_AGENT_LOG_DIR/$LAUNCH_AGENT_LABEL.log"
 ENTRYPOINT_LINK="${HOME:-}/.local/bin/fm-remote-entrypoint.sh"
-
-usage() { sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
-
-MODE=check
-case "${1:-}" in
-  '') ;;
-  --fix) MODE=fix; shift ;;
-  --worker-tool-probe)
-    [ "${FM_REMOTE_JOB_ACTIVE:-}" = 1 ] || { printf 'error: worker tool probe requires the remote job worker\n' >&2; exit 64; }
-    MODE='worker-tool-probe'
-    shift
-    ;;
-  *) usage ;;
-esac
-[ "$#" -eq 0 ] || usage
 
 PLATFORM=$(fm_remote_job_platform)
 UID_NUM=$(id -u 2>/dev/null) || UID_NUM=
@@ -886,6 +903,7 @@ if [ "$MODE" = worker-tool-probe ]; then
 fi
 
 printf 'mode=%s\n' "$MODE"
+printf 'herdr_session=%s\n' "$HERDR_SESSION_NAME"
 printf 'path=%s\n' "${PATH:-}"
 if [ -n "${FM_ROOT_OVERRIDE:-}" ] && [ "${PATH%%:*}" = "$FM_ROOT_OVERRIDE/bin" ]; then
   printf 'entrypoint=yes\n'

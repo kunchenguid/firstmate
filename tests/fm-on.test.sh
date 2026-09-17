@@ -68,12 +68,17 @@ case "\${1:-}:\${2:-}" in
 esac
 SH
 cp "$ROOT/bin/fm-remote-doctor.sh" "$ROOT/bin/fm-tasks-axi-lib.sh" \
-  "$ROOT/bin/fm-remote-herdr-owner-lib.sh" "$ROOT/bin/fm-backend.sh" "$REMOTE_ROOT/bin/"
+  "$ROOT/bin/fm-remote-herdr-owner-lib.sh" "$ROOT/bin/fm-herdr-session-lib.sh" \
+  "$ROOT/bin/fm-backend.sh" "$REMOTE_ROOT/bin/"
 mkdir -p "$REMOTE_ROOT/bin/backends"
 cp "$ROOT/bin/backends/herdr.sh" "$REMOTE_ROOT/bin/backends/herdr.sh"
 cat > "$REMOTE_ROOT/bin/fm-mutate.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'mutation\n' >> "$1"
+SH
+cat > "$REMOTE_ROOT/bin/fm-remote-secondmate-control.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arg=%s\n' "$@"
 SH
 chmod +x "$REMOTE_ROOT/bin"/*.sh
 chmod +x "$REMOTE_ROOT/bin/tasks-axi"
@@ -213,6 +218,26 @@ assert_contains "$out" "root=$REMOTE_ROOT" "remote root was not explicit"
 assert_contains "$out" 'secret=absent' "the primary ambient environment crossed the transport"
 assert_contains "$out" 'worker=1' "the fixed entrypoint executed outside the remote job worker"
 pass "the fixed entrypoint runs every command in the worker's explicit environment"
+
+legacy_control=$(fm_on ios fm-remote-secondmate-control.sh state ios)
+assert_contains "$legacy_control" 'arg=state' "legacy route lost the control verb"
+assert_not_contains "$legacy_control" 'arg=--herdr-session' "legacy route stopped being byte-compatible with an older remote control"
+cat > "$LOCAL_HOME/data/secondmates.md" <<EOF
+- ios - iOS delivery (host: remote-mac; root: $REMOTE_ROOT; home: $REMOTE_HOME; session: fm-remote-personal; scope: iOS work; projects: alpha; added 2026-08-02)
+EOF
+personal_control=$(fm_on ios fm-remote-secondmate-control.sh state ios)
+[ "$personal_control" = $'arg=--herdr-session\narg=fm-remote-personal\narg=state\narg=ios' ] \
+  || fail "non-legacy route did not inject its persisted Herdr session into remote control: $personal_control"
+cat > "$LOCAL_HOME/data/secondmates.md" <<EOF
+- ios - iOS delivery (host: remote-mac; root: $REMOTE_ROOT; home: $REMOTE_HOME; session: default; scope: iOS work; projects: alpha; added 2026-08-02)
+EOF
+ssh_before_invalid_session=$(cat "$SSH_COUNT")
+if fm_on ios fm-remote-secondmate-control.sh state ios >/dev/null 2>&1; then
+  fail "remote route accepted Herdr's interactive default session"
+fi
+[ "$(cat "$SSH_COUNT")" -eq "$ssh_before_invalid_session" ] || fail "invalid remote Herdr session reached SSH"
+write_registry
+pass "fm-on carries a non-legacy route's Herdr session, rejects default, and preserves legacy fm-remote argv"
 
 # The child PATH is the entrypoint's own composition, so it is asserted on the
 # PATH a real child receives rather than on the script that builds it. The

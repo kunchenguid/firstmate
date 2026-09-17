@@ -37,14 +37,16 @@ ln -sf "$(command -v git)" "$TOOLS/git"
 ln -sf "$(command -v jq)" "$TOOLS/jq"
 BASE_PATH="$TOOLS:/usr/bin:/bin:/usr/sbin:/sbin"
 
-# Real socket-owner holders for the Darwin birth check: jq blocked on a fifo
-# this test keeps open, with exactly the marker environment each birth needs.
-JQ=$(command -v jq)
+# Real socket-owner holders for the Darwin birth check: a non-platform Python
+# blocked on a fifo this test keeps open, with exactly the marker environment
+# each birth needs. macOS hides process environments for Apple platform binaries,
+# including the system jq supplied on newer releases.
+HOLDER_PYTHON=$(command -v python3)
 HOLDER_FD=5
 hold() { # <marker-env...> -> HOLDER_PID
   local fifo="$TMP_ROOT/holder-$HOLDER_FD.fifo"
   mkfifo "$fifo"
-  env -i "$@" "$JQ" . "$fifo" &
+  env -i "$@" "$HOLDER_PYTHON" -c 'open(__import__("sys").argv[1]).read()' "$fifo" &
   HOLDER_PID=$!
   HOLDER_PIDS+=("$HOLDER_PID")
   eval "exec ${HOLDER_FD}>\"\$fifo\""
@@ -52,6 +54,8 @@ hold() { # <marker-env...> -> HOLDER_PID
 }
 hold XPC_SERVICE_NAME=dev.firstmate.herdr.fm-remote
 AQUA_HOLDER_PID=$HOLDER_PID
+hold XPC_SERVICE_NAME=dev.firstmate.herdr.fm-remote-personal
+PERSONAL_AQUA_HOLDER_PID=$HOLDER_PID
 hold XPC_SERVICE_NAME=dev.firstmate.herdr.fm-remote
 BACKGROUND_HOLDER_PID=$HOLDER_PID
 hold XPC_SERVICE_NAME=0
@@ -154,6 +158,7 @@ properties = keepalive | runatload | inferred program
 EOF
         ;;
       *)
+        session=${label#dev.firstmate.herdr.}
         cat > "$loaded" <<EOF
 path = $FM_FAKE_PLIST
 program = $FM_FAKE_LOGIN_SHELL
@@ -161,7 +166,7 @@ arguments = {
 	$FM_FAKE_LOGIN_SHELL
 	-l
 	-c
-	exec '$FM_FAKE_GUARD' '$FM_FAKE_HERDR_BIN' 'fm-remote'
+	exec '$FM_FAKE_GUARD' '$FM_FAKE_HERDR_BIN' '$session'
 }
 stdout path = $FM_FAKE_LAUNCH_AGENT_LOG
 stderr path = $FM_FAKE_LAUNCH_AGENT_LOG
@@ -361,7 +366,8 @@ plist_first_value() { # <plist> <array-key>
 }
 
 assert_herdr_launch_agent_contract() { # <plist> <herdr-bin> [login-shell]
-  local plist=$1 herdr_bin=$2 expected_shell=${3:-$CASE_LOGIN_SHELL} json argv0 argv1 argv2 cmd
+  local plist=$1 herdr_bin=$2 expected_shell=${3:-$CASE_LOGIN_SHELL} json argv0 argv1 argv2 cmd expected_session
+  expected_session=${LABEL#dev.firstmate.herdr.}
   json=$(python3 -c 'import json,plistlib,sys; print(json.dumps(plistlib.load(open(sys.argv[1], "rb"))))' "$plist") \
     || fail "could not parse $plist as a plist"
   argv0=$(printf '%s' "$json" | jq -r '.ProgramArguments[0]')
@@ -371,8 +377,8 @@ assert_herdr_launch_agent_contract() { # <plist> <herdr-bin> [login-shell]
   [ "$argv0" = "$expected_shell" ] || fail "ProgramArguments[0] is $argv0, not the resolved login shell $expected_shell"
   [ "$argv1" = -l ] || fail "ProgramArguments[1] is $argv1, not -l"
   [ "$argv2" = -c ] || fail "ProgramArguments[2] is $argv2, not -c"
-  [ "$cmd" = "exec '$GUARD' '$herdr_bin' 'fm-remote'" ] \
-    || fail "ProgramArguments[3] is not exec of the guard with $herdr_bin for session fm-remote: $cmd"
+  [ "$cmd" = "exec '$GUARD' '$herdr_bin' '$expected_session'" ] \
+    || fail "ProgramArguments[3] is not exec of the guard with $herdr_bin for session $expected_session: $cmd"
   [ "$(printf '%s' "$json" | jq -r '.LimitLoadToSessionType')" = Aqua ] \
     || fail "LimitLoadToSessionType is not Aqua"
   [ "$(printf '%s' "$json" | jq -r '.RunAtLoad')" = true ] \
@@ -484,6 +490,22 @@ assert_not_contains "$DOCTOR_OUT" 'fix launchagent-loaded=applied:' "a second --
 [ ! -s "$CASE_LAUNCHCTL_LOG" ] || assert_not_contains "$(cat "$CASE_LAUNCHCTL_LOG")" bootstrap \
   "a second --fix re-bootstrapped a loaded launch agent"
 pass "--fix is idempotent once the host is ready"
+
+LEGACY_LABEL=$LABEL
+LEGACY_AQUA_HOLDER_PID=$AQUA_HOLDER_PID
+LABEL=dev.firstmate.herdr.fm-remote-personal
+AQUA_HOLDER_PID=$PERSONAL_AQUA_HOLDER_PID
+new_case Darwin with-herdr gui
+doctor --herdr-session fm-remote-personal --fix
+expect_code 0 "$DOCTOR_RC" "--fix left a custom remote Herdr session unready"
+assert_contains "$DOCTOR_OUT" 'herdr_session=fm-remote-personal' "doctor did not report the selected route session"
+assert_contains "$DOCTOR_OUT" "check herdr-server=ok: session fm-remote-personal" "doctor checked the legacy session instead of the selected route session"
+assert_herdr_launch_agent_contract "$CASE_PLIST" "$CASE_BIN/herdr"
+[ "$(plist_value "$CASE_PLIST" Label)" = "$LABEL" ] || fail "custom session used the wrong launch-agent label"
+assert_absent "$CASE_HOME/Library/LaunchAgents/$LEGACY_LABEL.plist" "custom-session repair rewrote the legacy work launch agent"
+LABEL=$LEGACY_LABEL
+AQUA_HOLDER_PID=$LEGACY_AQUA_HOLDER_PID
+pass "doctor isolates each route session behind its own Aqua launch agent"
 
 # --- a loaded, running launch agent with contract drift is repaired ----------
 

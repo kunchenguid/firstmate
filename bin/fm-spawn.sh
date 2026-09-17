@@ -737,7 +737,7 @@ else
 fi
 
 spawn_remote_secondmate() {
-  local id=$1 remote host root home harness positional model effort backend out rc meta tmp
+  local id=$1 remote host root home route_herdr_session harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc
   local -a launch_args
@@ -770,6 +770,7 @@ spawn_remote_secondmate() {
   host=$(secondmate_registry_field "$DATA/secondmates.md" "$id" host)
   root=$(secondmate_registry_field "$DATA/secondmates.md" "$id" root)
   home=$(secondmate_registry_field "$DATA/secondmates.md" "$id" home)
+  route_herdr_session=$(secondmate_registry_field "$DATA/secondmates.md" "$id" session)
   positional=${POS[1]:-}
   if [ "${#POS[@]}" -gt 2 ]; then
     fm_lock_release "$registry_lock" || true
@@ -838,7 +839,8 @@ spawn_remote_secondmate() {
       [ "$(fm_meta_get "$meta" kind)" != secondmate ] ||
       [ "$(fm_meta_get "$meta" remote_host)" != "$host" ] ||
       [ "$(fm_meta_get "$meta" remote_root)" != "$root" ] ||
-      [ "$(fm_meta_get "$meta" home)" != "$home" ]; then
+      [ "$(fm_meta_get "$meta" home)" != "$home" ] ||
+      [ "$(fm_meta_get "$meta" remote_herdr_session)" != "$route_herdr_session" ]; then
       fm_lock_release "$registry_lock" || true
       fm_lock_release "$SPAWN_TASK_LOCK" || true
       echo "error: existing metadata for $id does not identify this remote secondmate route" >&2
@@ -957,11 +959,11 @@ spawn_remote_secondmate() {
     echo "error: remote launch returned malformed route metadata; preserving the remote route for reconciliation" >&2
     return 1
   }
-  if [ "$remote_herdr_session" != fm-remote ] || [ "${remote_target%%:*}" != "$remote_herdr_session" ]; then
+  if [ "$remote_herdr_session" != "$route_herdr_session" ] || [ "${remote_target%%:*}" != "$remote_herdr_session" ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
-    echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected 'fm-remote'; preserving the remote route for reconciliation" >&2
+    echo "error: remote launch returned Herdr session '${remote_herdr_session:-missing}', expected '$route_herdr_session'; preserving the remote route for reconciliation" >&2
     return 1
   fi
   # Record what the remote endpoint ACTUALLY carries, read back from its own

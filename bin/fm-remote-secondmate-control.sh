@@ -2,7 +2,7 @@
 # Host-local lifecycle control for the remote secondmate home selected by fm-on.
 #
 # Usage:
-#   fm-remote-secondmate-control.sh launch <id> <harness> <model|-> <effort|-> herdr [traceparent]
+#   fm-remote-secondmate-control.sh [--herdr-session <name>] launch <id> <harness> <model|-> <effort|-> herdr [traceparent]
 #   fm-remote-secondmate-control.sh relaunch <id> <harness> <model|default|-> <effort|default|->
 #   fm-remote-secondmate-control.sh state <id>
 #   fm-remote-secondmate-control.sh route <id>
@@ -15,8 +15,9 @@
 #   fm-remote-secondmate-control.sh retire <id> [--force]
 #
 # Remote placement ends here, but the second-mate agent always runs on the
-# Herdr backend in the dedicated fm-remote session, so launch refuses any other
-# selection rather than reading this home's config/backend. The interactive
+# Herdr backend in the route's dedicated session, so launch refuses any other
+# selection rather than reading this home's config/backend. A missing option
+# remains the legacy fm-remote lane. The interactive
 # default session remains for the user's work.
 # fm-spawn/fm-send/fm-teardown keep owning the local endpoint mechanics.
 # The home's own workers keep their ordinary backend selection.
@@ -36,7 +37,7 @@
 # agent's endpoint record; the home's own
 # state/*.meta remains reserved for workers the secondmate supervises.
 # Retirement closes only this secondmate's panes or workspace and never
-# stops fm-remote or removes a sibling secondmate's workspace or panes.
+# stops its Herdr session or removes a sibling secondmate's workspace or panes.
 #
 # Relaunch is not a second lifecycle implementation: it runs the ORDINARY local
 # control plane here, because from this host the mate is a plain local
@@ -55,8 +56,10 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 TARGET_HOME=${FM_HOME:?FM_HOME is required}
 CONTROL_STATE="$TARGET_HOME/state/parent-route"
 CONTROL_DATA="$TARGET_HOME/data/.parent-route"
-REMOTE_HERDR_SESSION=fm-remote
 
+# shellcheck source=bin/fm-herdr-session-lib.sh
+. "$SCRIPT_DIR/fm-herdr-session-lib.sh"
+REMOTE_HERDR_SESSION=$FM_REMOTE_HERDR_LEGACY_SESSION
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-ff-lib.sh
@@ -243,7 +246,7 @@ cmd_relaunch() {
   [ "$effort" != - ] || effort=default
   control_args=("$id" relaunch --harness "$harness" --model "$model" --effort "$effort")
   # The same launch-boundary facts cmd_launch establishes: the endpoint lives in
-  # the dedicated fm-remote session, and the parent already owns both convergence
+  # its dedicated route session, and the parent already owns both convergence
   # legs, so the host-local spawn must not re-sync or re-inherit against this
   # host's own Firstmate copy.
   HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
@@ -418,6 +421,14 @@ cmd_retire() {
       "$SCRIPT_DIR/fm-teardown.sh" "$id"
   fi
 }
+
+if [ "${1:-}" = --herdr-session ]; then
+  [ "$#" -ge 2 ] || usage
+  REMOTE_HERDR_SESSION=$2
+  shift 2
+fi
+fm_remote_herdr_session_validate "$REMOTE_HERDR_SESSION" \
+  || die "$FM_HERDR_SESSION_ERROR: $REMOTE_HERDR_SESSION"
 
 case "${1:-}" in
   launch) shift; [ "$#" -ge 5 ] && [ "$#" -le 6 ] || usage; cmd_launch "$@" ;;

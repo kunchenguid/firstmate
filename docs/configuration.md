@@ -262,11 +262,22 @@ The flag is per home and is not inherited by secondmate homes, because stow cade
 Only the file's presence is read, so its contents are ignored; remove it to return to the default contract on the next pass.
 The skill text owns the marker spelling, the tick order, and the reinforcement rule.
 
+## Remote Herdr session (config/remote-herdr-session)
+
+`config/remote-herdr-session` is an optional one-line default used only when this primary home seeds a remote secondmate route.
+An absent file preserves the legacy `fm-remote` session.
+The value must be a non-default Herdr session name of at most 64 ASCII bytes containing only letters, numbers, dots, underscores, and dashes.
+`fm-remote-home-seed.sh --herdr-session <name>` overrides the file for one route.
+The resolved session is persisted in `data/secondmates.md`, so later config edits cannot silently retarget an existing endpoint.
+This primary-owned setting is local, gitignored, and not inherited into secondmate homes.
+[`remote-secondmates.md`](remote-secondmates.md) owns the remote server, launch-agent, migration, and saved-machine prerequisites.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.
 The concise single-line route contract is owned by the [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md#routing-table), including the parser-compatible fields, one-sentence summary requirement, `home:` pointer to the seeded charter, and limit on extra registry prose.
-A remote route adds `host:` and `root:` before the existing fields and places the whole secondmate home on that SSH host; it does not make ordinary workers remotely placeable.
+A remote route adds `host:`, `root:`, and `session:` before the existing fields and places the whole secondmate home on that SSH host; it does not make ordinary workers remotely placeable.
+Legacy remote records without `session:` resolve to `fm-remote`.
 [`remote-secondmates.md`](remote-secondmates.md) owns current remote setup, operation, and safety behavior.
 Use `fm-home-seed.sh validate` to check the complete operational registry contract documented by the command itself.
 The main first mate routes by reading those scopes with judgment; the project list is provisioning data, not exclusive ownership.

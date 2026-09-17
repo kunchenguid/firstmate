@@ -2,7 +2,7 @@
 # Register and provision a whole secondmate home on an SSH-reachable host.
 #
 # Usage:
-#   fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> {<project>[=<origin-url>]...|--no-projects}
+#   fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> [--herdr-session <name>] {<project>[=<origin-url>]...|--no-projects}
 #
 # The SSH alias must already reach a host whose non-interactive PATH exposes the
 # fixed fm-remote-entrypoint.sh from <remote-root>. The command records the
@@ -20,6 +20,8 @@
 # unregistered or local-only project is refused rather than provisioned.
 # Seeding writes nothing under projects/ and needs no fleet sync first.
 #
+# The route persists its remote Herdr session. --herdr-session wins, then the
+# optional config/remote-herdr-session default, then the legacy fm-remote lane.
 # Known provisioning failure rolls the registry back. SSH status 255 preserves
 # the route and any newly scaffolded brief because completion is unknown and a same-route rerun converges.
 set -eu
@@ -30,6 +32,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 REG="$DATA/secondmates.md"
 MAX_MANIFEST_BYTES=1048576
 
@@ -79,25 +82,51 @@ done
 case "$REMOTE_HOME/" in "$REMOTE_ROOT/"*) die "remote home must not be inside the remote code root" ;; esac
 case "$REMOTE_ROOT/" in "$REMOTE_HOME/"*) die "remote code root must not be inside the remote home" ;; esac
 
+REMOTE_HERDR_SESSION=
+SESSION_SET=0
 NO_PROJECTS=0
 PROJECT_NAMES=()
 PROJECT_ORIGINS=()
-for arg in "$@"; do
-  if [ "$arg" = --no-projects ]; then
-    NO_PROJECTS=1
-  else
-    name=${arg%%=*}
-    origin=
-    case "$arg" in *=*) origin=${arg#*=} ;; esac
-    safe_id "$name" || die "invalid project name: $name"
-    case "$arg" in
-      *=*) fm_project_origin_safe "$origin" \
-        || die "project $name origin is not an accepted clone URL: $origin" ;;
-    esac
-    PROJECT_NAMES+=("$name")
-    PROJECT_ORIGINS+=("$origin")
-  fi
+while [ "$#" -gt 0 ]; do
+  arg=$1
+  shift
+  case "$arg" in
+    --herdr-session)
+      [ "$SESSION_SET" -eq 0 ] || die "--herdr-session may be passed only once"
+      [ "$#" -gt 0 ] || usage
+      REMOTE_HERDR_SESSION=$1
+      shift
+      SESSION_SET=1
+      continue
+      ;;
+    --no-projects)
+      NO_PROJECTS=1
+      continue
+      ;;
+  esac
+  name=${arg%%=*}
+  origin=
+  case "$arg" in *=*) origin=${arg#*=} ;; esac
+  safe_id "$name" || die "invalid project name: $name"
+  case "$arg" in
+    *=*) fm_project_origin_safe "$origin" \
+      || die "project $name origin is not an accepted clone URL: $origin" ;;
+  esac
+  PROJECT_NAMES+=("$name")
+  PROJECT_ORIGINS+=("$origin")
 done
+if [ "$SESSION_SET" -eq 0 ]; then
+  SESSION_CONFIG="$CONFIG/remote-herdr-session"
+  if [ -e "$SESSION_CONFIG" ] || [ -L "$SESSION_CONFIG" ]; then
+    [ -f "$SESSION_CONFIG" ] && [ ! -L "$SESSION_CONFIG" ] \
+      || die "remote Herdr session config is unavailable or unsafe: $SESSION_CONFIG"
+    REMOTE_HERDR_SESSION=$(cat "$SESSION_CONFIG")
+  else
+    REMOTE_HERDR_SESSION=$FM_REMOTE_HERDR_LEGACY_SESSION
+  fi
+fi
+fm_remote_herdr_session_validate "$REMOTE_HERDR_SESSION" \
+  || die "$FM_HERDR_SESSION_ERROR: $REMOTE_HERDR_SESSION"
 if [ "$NO_PROJECTS" -eq 1 ]; then
   [ "${#PROJECT_NAMES[@]}" -eq 0 ] || die "--no-projects cannot be combined with project names"
 else
@@ -118,7 +147,8 @@ if [ -e "$REG" ] || [ -L "$REG" ]; then
       && [ "$SECONDMATE_REGISTRY_HOST" = "$HOST" ] \
       && [ "$SECONDMATE_REGISTRY_ROOT" = "$REMOTE_ROOT" ] \
       && [ "$SECONDMATE_REGISTRY_HOME" = "$REMOTE_HOME" ] \
-      || die "secondmate $ID is already registered to a different local or remote home"
+      && [ "$SECONDMATE_REGISTRY_SESSION" = "$REMOTE_HERDR_SESSION" ] \
+      || die "secondmate $ID is already registered to a different local or remote home or Herdr session"
   fi
 fi
 
@@ -210,8 +240,8 @@ MANIFEST_BYTES=$(LC_ALL=C wc -c < "$TMP/manifest" | tr -d ' ')
 TODAY=$(date +%F)
 REG_TMP="$TMP/secondmates.next"
 if [ -f "$REG" ]; then grep -vE "^- $ID( |$)" "$REG" > "$REG_TMP" || true; else : > "$REG_TMP"; fi
-printf -- '- %s - %s (host: %s; root: %s; home: %s; scope: %s; projects: %s; added %s)\n' \
-  "$ID" "$SUMMARY" "$HOST" "$REMOTE_ROOT" "$REMOTE_HOME" "$SCOPE" "$PROJECTS_CSV" "$TODAY" >> "$REG_TMP"
+printf -- '- %s - %s (host: %s; root: %s; home: %s; session: %s; scope: %s; projects: %s; added %s)\n' \
+  "$ID" "$SUMMARY" "$HOST" "$REMOTE_ROOT" "$REMOTE_HOME" "$REMOTE_HERDR_SESSION" "$SCOPE" "$PROJECTS_CSV" "$TODAY" >> "$REG_TMP"
 mv -f -- "$REG_TMP" "$REG"
 if ! secondmate_registry_validate_bindings "$REG" secondmate_registry_path_key "$ID" "$REMOTE_HOME"; then
   if [ "$REG_EXISTED" -eq 1 ]; then cp "$TMP/registry.before" "$REG"; else rm -f -- "$REG"; fi
