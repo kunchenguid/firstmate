@@ -1573,6 +1573,11 @@ const assistantBase = {
 const toolCall = { type: "toolCall", id: "calm-mid-turn-tool", name: "read", arguments: { path: "sample.txt" } };
 const substantiveLongText = "SUBSTANTIVE_LONG_MIDTURN_REPORT " + "context ".repeat(35);
 const substantiveMultilineText = "SUBSTANTIVE_MIDTURN_REPORT\nAdditional context needed to continue.";
+const belowThresholdText = "b".repeat(preservation.CALM_PRESERVE_MIN_CHARS - 1);
+const atThresholdText = "t".repeat(preservation.CALM_PRESERVE_MIN_CHARS);
+if (preservation.CALM_PRESERVE_MIN_CHARS !== 240) {
+  throw new Error(`Pi Calm preservation threshold changed to ${preservation.CALM_PRESERVE_MIN_CHARS}`);
+}
 const messages = {
   // The reported incident: narration emitted in the same assistant message as a tool call.
   midTurn: {
@@ -1590,6 +1595,16 @@ const messages = {
     ...assistantBase,
     stopReason: "toolUse",
     content: [{ type: "text", text: substantiveMultilineText }, toolCall],
+  },
+  belowThreshold: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{ type: "text", text: belowThresholdText }, toolCall],
+  },
+  atThreshold: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{ type: "text", text: atThresholdText }, toolCall],
   },
   mixedBlocks: {
     ...assistantBase,
@@ -1669,6 +1684,8 @@ if (rendered("midTurn").length !== 0) {
 }
 requireVisible("substantiveLong", "SUBSTANTIVE_LONG_MIDTURN_REPORT", "Calm on");
 requireVisible("substantiveMultiline", "SUBSTANTIVE_MIDTURN_REPORT", "Calm on");
+requireHidden("belowThreshold", belowThresholdText.slice(0, 32), "Calm on");
+requireVisible("atThreshold", atThresholdText.slice(0, 32), "Calm on");
 requireHidden("mixedBlocks", "MIXED_SHORT_WORKING_NOTE", "Calm on");
 requireVisible("mixedBlocks", "SUBSTANTIVE_LONG_MIDTURN_REPORT", "Calm on");
 requireHidden("truncatedMidTurn", "TRUNCATED_MIDTURN_NOTE", "Calm on");
