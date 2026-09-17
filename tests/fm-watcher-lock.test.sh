@@ -198,7 +198,7 @@ test_guard_warnings() {
   printf 'project=x\n' > "$state/task.meta"
   printf 'project=y\n' > "$state/task2.meta"
   append_wake "$state" heartbeat heartbeat heartbeat || fail "guard heartbeat append failed"
-  PATH="$blind:$PATH" CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  PATH="$blind:$PATH" CLAUDECODE=1 CURSOR_AGENT='' CURSOR_INVOKED_AS='' PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   first=$(grep -v '^[[:space:]]*$' "$err" | head -1)
   case "$first" in
     '●'*) ;;
@@ -224,7 +224,7 @@ test_guard_warnings() {
   mkdir -p "$dir/config"
   printf 'project=x\n' > "$state/task.meta"
   : > "$dir/config/x-mode.env"
-  PATH="$blind:$PATH" CLAUDECODE=1 PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
+  PATH="$blind:$PATH" CLAUDECODE=1 CURSOR_AGENT='' CURSOR_INVOKED_AS='' PI_CODING_AGENT='' GROK_AGENT='' FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=1 "$ROOT/bin/fm-guard.sh" 2> "$err" >/dev/null || fail "guard failed"
   grep -F "source '$dir/config/x-mode.env' first" "$err" >/dev/null || fail "guard repair line did not source the X-mode cadence config"
 
   # (2) live watcher plus fresh beacon, empty queue -> silence.
@@ -251,11 +251,12 @@ test_guard_warnings() {
 }
 
 test_lock_single_winner_under_concurrency() {
-  local dir state lockdir marker i pids pid wins
+  local dir state lockdir marker stop i pids pid wins live
   dir=$(make_case lock-concurrency)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   marker="$dir/wins"
+  stop="$dir/stop"
   : > "$marker"
   pids=
   i=1
@@ -264,18 +265,32 @@ test_lock_single_winner_under_concurrency() {
       . "$1"
       if fm_lock_try_acquire "$2"; then
         printf "%s\n" "$$" >> "$3"
-        # Stay alive so the held lock names a live pid for the whole window;
-        # otherwise a late contender could legitimately reclaim a dead-pid lock.
-        sleep 1
+        # Hold until the parent counts winners. A wall-clock sleep can end
+        # before a late child even starts, which then legitimately steals.
+        while [ ! -f "$4" ]; do sleep 0.05; done
       fi
-    ' _ "$LIB" "$lockdir" "$marker" &
+    ' _ "$LIB" "$lockdir" "$marker" "$stop" &
     pids="$pids $!"
     i=$((i + 1))
   done
+  i=0
+  while [ "$i" -lt 200 ]; do
+    wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
+    live=0
+    for pid in $pids; do
+      is_live_non_zombie "$pid" && live=$((live + 1))
+    done
+    if [ "$wins" -ge 1 ] && [ "$live" -eq "$wins" ]; then
+      break
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
+  : > "$stop"
   for pid in $pids; do
     wait "$pid" 2>/dev/null || true
   done
-  wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
   [ "$wins" -eq 1 ] || fail "expected exactly one lock winner under concurrency, got $wins"
   pass "concurrent fm_lock_try_acquire yields exactly one winner"
 }
@@ -300,11 +315,12 @@ test_lock_steals_dead_pid_lock() {
 }
 
 test_lock_stale_steal_single_winner_under_concurrency() {
-  local dir state lockdir dead marker i pids pid wins
+  local dir state lockdir dead marker stop i pids pid wins live
   dir=$(make_case lock-stale-concurrency)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   marker="$dir/wins"
+  stop="$dir/stop"
   dead=$(dead_pid)
   mkdir "$lockdir"
   printf '%s\n' "$dead" > "$lockdir/pid"
@@ -316,16 +332,30 @@ test_lock_stale_steal_single_winner_under_concurrency() {
       . "$1"
       if fm_lock_try_acquire "$2"; then
         printf "%s\n" "${BASHPID:-$$}" >> "$3"
-        sleep 1
+        while [ ! -f "$4" ]; do sleep 0.05; done
       fi
-    ' _ "$LIB" "$lockdir" "$marker" &
+    ' _ "$LIB" "$lockdir" "$marker" "$stop" &
     pids="$pids $!"
     i=$((i + 1))
   done
+  i=0
+  while [ "$i" -lt 200 ]; do
+    wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
+    live=0
+    for pid in $pids; do
+      is_live_non_zombie "$pid" && live=$((live + 1))
+    done
+    if [ "$wins" -ge 1 ] && [ "$live" -eq "$wins" ]; then
+      break
+    fi
+    sleep 0.05
+    i=$((i + 1))
+  done
+  wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
+  : > "$stop"
   for pid in $pids; do
     wait "$pid" 2>/dev/null || true
   done
-  wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
   [ "$wins" -eq 1 ] || fail "expected exactly one stale-lock stealer, got $wins"
   pass "concurrent stale-lock steal yields exactly one winner"
 }
@@ -1162,6 +1192,238 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+plant_partial_watch_lock() {  # <state> <pid>
+  local state=$1 pid=$2 owner
+  owner=$(mktemp -d "$state/.watch.lock.owner.XXXXXX") || return 1
+  printf '%s\n' "$pid" > "$owner/pid" || return 1
+  ln -s "$owner" "$state/.watch.lock"
+}
+
+watch_lock_files_complete() {  # <lockdir>
+  local lockdir=$1
+  [ -s "$lockdir/pid" ] || return 1
+  [ -s "$lockdir/fm-home" ] || return 1
+  [ -s "$lockdir/watcher-path" ] || return 1
+  [ -s "$lockdir/pid-identity" ] || return 1
+}
+
+test_watch_lock_publish_is_complete() {
+  local dir state lockdir out
+  dir=$(make_case watch-lock-complete-publish)
+  state="$dir/state"
+  lockdir="$state/.watch.lock"
+  out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+    complete=no
+    [ -s "$2/pid" ] && [ -s "$2/fm-home" ] && [ -s "$2/watcher-path" ] && [ -s "$2/pid-identity" ] && complete=yes
+    printf "complete=%s home=%s path=%s\n" "$complete" "$(cat "$2/fm-home")" "$(cat "$2/watcher-path")"
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir") || fail "watch lock acquire failed: $out"
+  case "$out" in
+    *"complete=yes"*) ;;
+    *) fail "published watch lock was missing ownership files: $out" ;;
+  esac
+  case "$out" in
+    *"home=$dir"*) ;;
+    *) fail "published watch lock fm-home was not this home: $out" ;;
+  esac
+  case "$out" in
+    *"path=$WATCH"*) ;;
+    *) fail "published watch lock watcher-path was not this watcher: $out" ;;
+  esac
+  [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] \
+    || fail "watch lock was not released after complete publish"
+  pass "watch lock publish writes a complete owner record before it is visible"
+}
+
+test_watch_lock_crash_before_publish_leaves_no_lock() {
+  local dir state owner lockdir
+  dir=$(make_case watch-lock-crash-before-publish)
+  state="$dir/state"
+  lockdir="$state/.watch.lock"
+  owner=$(mktemp -d "$state/.watch.lock.owner.XXXXXX") \
+    || fail "could not create unpublished owner dir"
+  printf '%s\n' "$(dead_pid)" > "$owner/pid" || fail "could not write unpublished pid"
+  [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] \
+    || fail "unpublished owner dir became the visible watch lock"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+    [ -s "$2/pid" ] && [ -s "$2/fm-home" ] && [ -s "$2/watcher-path" ] && [ -s "$2/pid-identity" ] || exit 8
+    fm_lock_release "$2"
+  ' _ "$LIB" "$lockdir" || fail "acquire after crash-before-publish left a wedged lock"
+  [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] \
+    || fail "complete acquire did not release the watch lock"
+  pass "crash before symlink publish leaves no visible partial watch lock"
+}
+
+test_half_written_dead_watch_lock_is_reclaimed() {
+  local dir state lockdir dead out newpid
+  dir=$(make_case half-written-dead)
+  state="$dir/state"
+  lockdir="$state/.watch.lock"
+  dead=$(dead_pid)
+  plant_partial_watch_lock "$state" "$dead" || fail "could not plant pid-only watch lock"
+  [ -s "$lockdir/pid" ] || fail "planted lock has no pid"
+  [ ! -e "$lockdir/fm-home" ] || fail "planted lock unexpectedly has fm-home"
+  [ ! -e "$lockdir/pid-identity" ] || fail "planted lock unexpectedly has pid-identity"
+  out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    abandoned=no
+    foreign=no
+    fm_watch_lock_abandoned_own_home "$STATE" "$2" "$FM_HOME" && abandoned=yes
+    fm_watch_lock_foreign_home "$3" && foreign=yes
+    if fm_lock_try_acquire "$3"; then
+      printf "acquired abandoned=%s foreign=%s recovered=%s newpid=%s home=%s ident=%s\n" \
+        "$abandoned" "$foreign" "${FM_LOCK_RECOVERED_PID:-}" "$(cat "$3/pid")" \
+        "$(cat "$3/fm-home")" "$(cat "$3/pid-identity")"
+      fm_lock_release "$3"
+    else
+      printf "refused abandoned=%s foreign=%s held=%s\n" \
+        "$abandoned" "$foreign" "${FM_LOCK_HELD_PID:-}"
+      exit 7
+    fi
+  ' _ "$LIB" "$WATCH" "$lockdir") || fail "pid-only dead watch lock was not reclaimed: $out"
+  case "$out" in
+    *"abandoned=yes"*) ;;
+    *) fail "pid-only dead own-home lock was not classified abandoned: $out" ;;
+  esac
+  case "$out" in
+    *"foreign=no"*) ;;
+    *) fail "pid-only lock was classified as another home: $out" ;;
+  esac
+  case "$out" in
+    *"recovered=$dead"*) ;;
+    *) fail "reclaim did not report the dead pid as recovered: $out" ;;
+  esac
+  newpid=${out#*newpid=}
+  newpid=${newpid%% *}
+  [ -n "$newpid" ] && [ "$newpid" != "$dead" ] || fail "dead pid was not replaced: $out"
+  case "$out" in
+    *"home=$dir"*) ;;
+    *) fail "reclaimed lock did not publish this home: $out" ;;
+  esac
+  pass "pid-only dead watch lock in this home is reclaimed by liveness"
+}
+
+test_arm_reclaims_half_written_dead_watch_lock() {
+  local dir state fakebin armout armpid i lock_pid
+  dir=$(make_case arm-half-written-dead)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  plant_partial_watch_lock "$state" "$(dead_pid)" || fail "could not plant pid-only watch lock"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  armpid=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    if grep -qF 'check: rearm-resurface' "$armout" 2>/dev/null; then
+      wait "$armpid" 2>/dev/null || true
+      pass "arm reclaims a pid-only dead watch lock and surfaces recovery"
+      return
+    fi
+    if grep -qF 'watcher: started pid=' "$armout" 2>/dev/null; then
+      lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+      watch_lock_files_complete "$state/.watch.lock" \
+        || fail "arm started over a pid-only lock without publishing ownership"
+      grep -qF "watcher: started pid=$lock_pid" "$armout" \
+        || fail "arm started line did not name the live watcher"
+      kill "$armpid" 2>/dev/null || true
+      wait "$armpid" 2>/dev/null || true
+      pass "arm reclaims a pid-only dead watch lock and starts a watcher"
+      return
+    fi
+    is_live_non_zombie "$armpid" || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  wait "$armpid" 2>/dev/null || true
+  fail "arm did not reclaim pid-only dead watch lock: $(cat "$armout")"
+}
+
+test_half_written_live_watch_lock_is_refused() {
+  local dir state lockdir live out lockpid
+  dir=$(make_case half-written-live)
+  state="$dir/state"
+  lockdir="$state/.watch.lock"
+  sleep 300 &
+  live=$!
+  plant_partial_watch_lock "$state" "$live" || fail "could not plant live pid-only watch lock"
+  out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    abandoned=no
+    fm_watch_lock_abandoned_own_home "$STATE" "$2" "$FM_HOME" && abandoned=yes
+    if fm_lock_try_acquire "$3"; then
+      printf "acquired abandoned=%s heldpid=%s\n" "$abandoned" "$(cat "$3/pid")"
+      fm_lock_release "$3"
+      exit 7
+    fi
+    printf "refused abandoned=%s held=%s\n" "$abandoned" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$WATCH" "$lockdir") || fail "live pid-only lock acquire crashed: $out"
+  case "$out" in
+    *"abandoned=no"*) ;;
+    *) fail "live pid-only lock was classified abandoned: $out" ;;
+  esac
+  case "$out" in
+    *"refused"*"held=$live"*) ;;
+    *) fail "live pid-only lock was not refused: $out" ;;
+  esac
+  lockpid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ "$lockpid" = "$live" ] || fail "live pid-only lock pid was clobbered (got '$lockpid')"
+  kill -0 "$live" 2>/dev/null || fail "live pid-only lock holder was killed"
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  pass "live pid-only watch lock is not reclaimed"
+}
+
+test_foreign_home_watch_lock_is_not_reclaimed() {
+  local dir state lockdir dead owner out lockpid
+  dir=$(make_case foreign-home-lock)
+  state="$dir/state"
+  lockdir="$state/.watch.lock"
+  dead=$(dead_pid)
+  owner=$(mktemp -d "$state/.watch.lock.owner.XXXXXX") || fail "could not create foreign owner dir"
+  printf '%s\n' "$dead" > "$owner/pid"
+  printf '%s\n' "/not/this/home" > "$owner/fm-home"
+  printf '%s\n' "$WATCH" > "$owner/watcher-path"
+  printf '%s\n' "foreign watcher identity" > "$owner/pid-identity"
+  ln -s "$owner" "$lockdir"
+  out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    abandoned=no
+    foreign=no
+    fm_watch_lock_abandoned_own_home "$STATE" "$2" "$FM_HOME" && abandoned=yes
+    fm_watch_lock_foreign_home "$3" && foreign=yes
+    if fm_lock_try_acquire "$3"; then
+      printf "acquired abandoned=%s foreign=%s newpid=%s\n" \
+        "$abandoned" "$foreign" "$(cat "$3/pid")"
+      fm_lock_release "$3"
+      exit 7
+    fi
+    printf "refused abandoned=%s foreign=%s held=%s\n" \
+      "$abandoned" "$foreign" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$WATCH" "$lockdir") || fail "foreign-home lock acquire crashed: $out"
+  case "$out" in
+    *"abandoned=no"*) ;;
+    *) fail "other-home lock was classified abandoned: $out" ;;
+  esac
+  case "$out" in
+    *"foreign=yes"*) ;;
+    *) fail "other-home lock was not classified foreign: $out" ;;
+  esac
+  case "$out" in
+    *"refused"*) ;;
+    *) fail "other-home watch lock was reclaimed: $out" ;;
+  esac
+  lockpid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  [ "$lockpid" = "$dead" ] || fail "other-home lock pid was clobbered (got '$lockpid')"
+  [ "$(cat "$lockdir/fm-home")" = "/not/this/home" ] \
+    || fail "other-home lock fm-home was rewritten"
+  pass "watch lock naming another home is not reclaimed"
+}
+
 test_wait_deadline_reaps_a_stopped_child
 test_singleton_start
 test_pid_identity_is_locale_invariant
@@ -1192,3 +1454,9 @@ test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
+test_watch_lock_publish_is_complete
+test_watch_lock_crash_before_publish_leaves_no_lock
+test_half_written_dead_watch_lock_is_reclaimed
+test_arm_reclaims_half_written_dead_watch_lock
+test_half_written_live_watch_lock_is_refused
+test_foreign_home_watch_lock_is_not_reclaimed

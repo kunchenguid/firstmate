@@ -34,7 +34,8 @@
 #                                                          verified healthy successor
 # It NEVER reports started/attached/healthy off a stale beacon or a dead/reused pid: a
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
-# dead lock per the singleton self-eviction/steal path and is confirmed) or this
+# dead lock per the singleton self-eviction/steal path, including a pid-only
+# lock whose identity is missing, and is confirmed) or this
 # returns the FAILED line. On started it waits the child and propagates the wake
 # reason; on attached it stays live across identity-matched successors. A cycle
 # that ends with no reason line and no healthy successor is resolved against the
@@ -224,6 +225,10 @@ cycle_mark_predecessor_successor() {
 
 clear_stale_recorded_watcher_lock() {
   local lock_home lock_path lock_identity
+  if fm_watch_lock_abandoned_own_home "$STATE" "$WATCH" "$FM_HOME"; then
+    fm_recovery_transition "$STATE/.watcher-down" clear-stale-lock "$WATCH_LOCK" downtime
+    return
+  fi
   lock_home=$(cat "$WATCH_LOCK/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$WATCH_LOCK/watcher-path" 2>/dev/null || true)
   lock_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
@@ -427,6 +432,9 @@ if [ "$mode" = restart ]; then
         exit 1
       fi
     fi
+  elif ! clear_stale_recorded_watcher_lock; then
+    echo "watcher: FAILED - stale watcher recovery state could not be persisted" >&2
+    exit 1
   fi
 fi
 
@@ -440,6 +448,13 @@ if [ "$mode" = arm ] && healthy_watcher; then
   report_attached
   attach_and_wait "$HEALTHY_PID"
   exit $?
+fi
+
+if [ "$mode" = arm ] && fm_watch_lock_abandoned_own_home "$STATE" "$WATCH" "$FM_HOME"; then
+  if ! clear_stale_recorded_watcher_lock; then
+    echo "watcher: FAILED - stale watcher recovery state could not be persisted" >&2
+    exit 1
+  fi
 fi
 
 # Start a watcher as a tracked child and confirm it before settling in. The child
