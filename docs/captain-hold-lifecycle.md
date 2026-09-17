@@ -31,6 +31,10 @@ Scout teardown calls the read-only `verify` subcommand after checking for the re
 `verify` requires the recorded attestation, requires every recorded inventory entry to still be durable (actively captain-held, or carrying a recorded answer), and fails on any keyed status decision that opened after the last `complete`, which makes re-running `complete` the repair.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
+The read-only `answered` subcommand is the mirror image of `open`: it asks whether the captain actually spoke on a row rather than whether the row is still waiting, so an evidence-backed `reconcile close` is a moot call and answers no like any unresolved row.
+Each `--names <text>` narrows it further, requiring the newest record's captain decision to contain that literal text, and the matched region is recovered by the record's own decision digest so it can never run on into the preserved prose the party who raised the call wrote below it.
+It exists for gates that act on captain authority and cannot settle for "not currently held", which every ordinary task also satisfies; the adversarial-review T0 waiver is the first such caller, and `bin/fm-captain-hold.sh --help` owns the predicate's contract.
+
 ## Cleanup never closes a captain call
 
 The policy prefers holding the very work item a question gates, so the backlog row a finished task's cleanup is about to close is routinely the captain's own call.
