@@ -2264,8 +2264,10 @@ assert_adapter_prerequisite_teardown() (
   code="$case_dir/test-root"
   mkdir -p "$code" "$case_dir/primary-home" "$case_dir/tasktmp" "$case_dir/before"
   cp -R "$ROOT/bin" "$code/bin"
+  # shellcheck disable=SC2016 # FM_FIXTURE expands when the fixture adapter runs.
   printf '\nfm_backend_herdr_presentation_lock_namespace() { printf "%%s" "$FM_FIXTURE/herdr-locks"; }\n' \
     >> "$code/bin/backends/herdr.sh"
+  # shellcheck disable=SC2016 # FM_FIXTURE expands when the fixture reaper runs.
   printf '#!/usr/bin/env bash\nprintf "orphan sweep\\n" >> "${FM_FIXTURE:?}/mutations"\n' \
     > "$code/bin/fm-remote-job-reap-orphans.sh"
   case "$route" in
@@ -2409,7 +2411,7 @@ SH
       task|forced-task)
         assert_absent "$case_dir/wt" "$backend $route: copy was not removed"
         assert_absent "$case_dir/tasktmp" "$backend $route: tasktmp was not removed"
-        [ "$(backlog_row_state "$case_dir")" = done ] || fail "$backend $route: backlog was not closed"
+        [ "$(backlog_row_state "$case_dir")" = "done" ] || fail "$backend $route: backlog was not closed"
         kill -0 "$wt_pid" 2>/dev/null && fail "$backend $route: worktree process survived cleanup"
         kill -0 "$tmp_pid" 2>/dev/null && fail "$backend $route: tasktmp process survived cleanup"
         if git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1; then
