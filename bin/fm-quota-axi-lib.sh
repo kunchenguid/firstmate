@@ -10,6 +10,7 @@
 # what keeps an older build from reaching a dispatch intake at all.
 
 FM_QUOTA_AXI_MIN=0.1.29
+FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
 
 fm_quota_axi_compatible() {
   local timeout=${1:-} output parts major minor patch extra
@@ -42,7 +43,7 @@ fm_quota_axi_compatible() {
 }
 
 fm_quota_json_valid() {
-  jq -se '
+  jq -se --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
     length == 1 and
     (.[0] | type) == "object" and
     (.[0] |
@@ -51,7 +52,7 @@ fm_quota_json_valid() {
       (([.providers[].provider] | length) == ([.providers[].provider] | unique | length)) and
       all(.providers[];
       (.provider | type) == "string" and
-      (.provider | test("^[a-z0-9]+(-[a-z0-9]+)*$")) and
+      (.provider | test($provider_re)) and
       (.quotaSemantics | type) == "object" and
       (.quotaSemantics.status as $semantics_status |
         (["known", "partial", "unknown"] | index($semantics_status)) != null and
@@ -90,4 +91,47 @@ fm_quota_json_valid() {
     )
     )
   ' >/dev/null 2>&1
+}
+
+fm_quota_single_provider_table() {
+  printf '%s\n' \
+    'claude claude' \
+    'codex codex' \
+    'grok grok' \
+    'kimi kimi' \
+    'cursor cursor' \
+    'agy agy' \
+    'muse meta'
+}
+
+fm_quota_single_provider_for_harness() {
+  local harness provider
+  while read -r harness provider; do
+    if [ "$harness" = "$1" ]; then
+      printf '%s\n' "$provider"
+      return 0
+    fi
+  done < <(fm_quota_single_provider_table)
+  return 1
+}
+
+fm_quota_provider_for_harness() {
+  case "$1" in
+    omp)
+      case "${2:-}" in
+        openai-codex/*)  printf 'codex\n' ;;
+        claude-bridge/*) printf 'claude\n' ;;
+        *)               return 1 ;;
+      esac
+      ;;
+    claude)       printf 'claude\n' ;;
+    codex)        printf 'codex\n' ;;
+    opencode)     printf 'codex\n' ;;
+    pi|pi-signed) printf 'pi\n' ;;
+    grok)         printf 'grok\n' ;;
+    kimi)         printf 'kimi\n' ;;
+    cursor)       printf 'cursor\n' ;;
+    muse)         printf 'meta\n' ;;
+    *)            return 1 ;;
+  esac
 }
