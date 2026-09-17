@@ -1,6 +1,6 @@
 # Kimi Code
 
-Verified on 2026-07-25 with Kimi Code CLI 0.29.1.
+Verified on 2026-07-25 with Kimi Code CLI 0.29.1 unless a fact gives a newer version.
 
 ## Operating facts
 
@@ -10,6 +10,7 @@ Verified on 2026-07-25 with Kimi Code CLI 0.29.1.
 | Launch | Bare interactive TUI with `--auto`, followed by readiness-gated pointer delivery; positional prompts are rejected. |
 | Models | Observed default `kimi-code/kimi-for-coding`, `kimi-code/kimi-for-coding-highspeed`, `kimi-code/k3`, and `kimi-code/k3-256k`; use `kimi provider list --json` for current configuration. |
 | Busy state | Standalone Kimi is unknown pending a live-verified semantic source, preferring Wire's `prompt` lifetime then documented hooks including `Interrupt`; Kimi behind Pi uses Pi lifecycle, and the moon-phase spinner is never a state source. |
+| Steering | Mid-turn, Kimi queues submitted input above the composer instead of reading it and binds Ctrl-S to "steer immediately"; a steering doorbell that lands there is followed by one Ctrl-S, tmux only, and the watcher's re-ring ladder spends no attempt budget on such a steered ring, since the queue block is mid-turn proof the unknown busy state lacks; verified 2026-09-17 on Kimi Code 0.43.1 and 2.0.0 (`../../../bin/fm-task-inbox-lib.sh` owns the decision and the ladder rule, `../../../bin/fm-composer-lib.sh` the queue-block match). |
 | Exit command | `/exit`. |
 | Interrupt | Single Escape, which prints `Interrupted by user`. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; Firstmate skills are discovered. |

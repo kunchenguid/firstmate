@@ -50,13 +50,30 @@
 # FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
 # caller owns the busy and recovery-grade endpoint checks: a busy pane waits,
 # while a positively dead or missing endpoint skips delivery and the ladder and
-# escalates directly. This library owns only the schedule and escalation marker.
+# escalates directly. An attempt that a mid-turn Kimi queued and that was
+# steered into its running turn (the Kimi steer below) keeps the attempt spacing
+# but spends no budget, so escalation counts only attempts that found an idle
+# pane. This library owns only the schedule and escalation marker.
 # If attempt bookkeeping cannot be persisted while the record remains unhandled,
 # the caller surfaces that failure instead of retrying silently; a concurrently
 # removed inbox is a quiet no-op. Escalation deliberately queues the wake before
 # writing the deduplication marker: normal polls surface a message once, while a
 # crash or marker failure may produce a rare duplicate rather than silently lose
 # a wake.
+#
+# Kimi queued-input steer (fm_task_inbox_kimi_steer): a standalone Kimi mid-turn
+# queues the doorbell instead of reading it, so a ring that leaves Kimi's queue
+# block on screen is followed by exactly one Ctrl-S, which Kimi binds to "steer
+# immediately" and which injects the queued doorbell into the running turn.
+# The key goes out only when the doorbell's own submit read the composer
+# empty, so a composer still holding the doorbell (a swallowed Enter under a
+# transcript that merely quotes the queue block) never receives it. The ring
+# reports that outcome distinctly (4, steered). It is not delivery proof - the
+# acknowledgement move stays the only delivery signal, so a swallowed key still
+# leaves the ladder to re-ring - but the queue block is proof the pane was
+# mid-turn, which the busy read cannot tell for standalone Kimi
+# (bin/fm-busy-lib.sh keeps it unknown), so the ladder treats a steered ring
+# as the wait a busy pane gets rather than as an idle-pane attempt.
 #
 # Inbox paths containing bytes outside printable ASCII are unsupported. The
 # doorbell refuses them rather than sending terminal control bytes to a pane.
@@ -274,16 +291,18 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
 # (the watcher re-rings later), 2 the backend send failed, 3 skipped because
 # the endpoint is positively dead or missing (nothing typed; recovery owns the
-# record). No return value is delivery proof; the acknowledgement move is the
-# only delivery signal.
+# record), 4 rang and the doorbell landed in a mid-turn Kimi's queue, where it
+# was steered into the running turn (fm_task_inbox_kimi_steer). No return
+# value is delivery proof; the acknowledgement move is the only delivery
+# signal. 4 is mid-turn evidence for the ladder, nothing more.
 # The skip is deliberately narrow: only an exact `pending` verdict defers,
 # because there our Enter could submit someone's real half-typed content.
 # `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
 # CONSTANT line the worker recovers semantically, while skipping on ambiguous
 # verdicts would starve a harness whose idle screen the classifier cannot
 # positively identify (that classifier is advisory here by design).
-fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
-  local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
+fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [harness]
+  local backend=$1 target=$2 rec=$3 label=${4:-} harness=${5:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
     dead|missing) return 3 ;;
   esac
@@ -301,10 +320,50 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 1 0.4 0.3 "$label" 2>/dev/null); then
     return 2
   fi
-  # The verdict is read only to report a failed keystroke; every other value
-  # (empty, pending, unknown, ...) is deliberately ignored, never proof.
+  # The verdict is read to report a failed keystroke and to admit the Kimi
+  # steer only behind a composer that PROVENLY cleared; every other value
+  # (pending, unknown, ...) is deliberately ignored, never proof, and `empty`
+  # is not delivery proof either - it only keeps Ctrl-S off a composer that
+  # still holds the doorbell.
   [ "$verdict" != send-failed ] || return 2
+  if [ "$verdict" = empty ] && fm_task_inbox_kimi_steer "$backend" "$target" "$label" "$harness"; then
+    return 4
+  fi
   return 0
+}
+
+# After a rung doorbell, inject it into a running standalone Kimi turn: when the
+# pane shows Kimi's queued-input block (fm_composer_kimi_queued_input in
+# bin/fm-composer-lib.sh owns the match), send Ctrl-S once.
+# Returns 0 key sent, 1 nothing sent, 2 the key send failed; no value is
+# delivery proof. fm_task_inbox_ring reports 0 as its steered outcome and
+# treats 1 and 2 as a plain ring.
+# The key is sent ONLY on a positive match read after the ring, so an idle
+# Kimi, which reads the doorbell at once and never draws the block, receives
+# nothing; fm_task_inbox_ring additionally calls this only when the doorbell's
+# submit read the composer empty, because an idle Kimi whose last message
+# quotes the block would otherwise match with the doorbell still in its
+# composer. It is scoped to a recorded harness of exactly `kimi` - Kimi behind
+# Pi records `pi` - and to tmux, the one backend whose key path carries C-s
+# verified; every other harness and backend returns 1 untouched. A stray Ctrl-S
+# was verified a no-op on Kimi both idle and busy with nothing queued. The
+# block can trail the submit by a render, hence the short bounded re-read.
+fm_task_inbox_kimi_steer() {  # <backend> <target> [expected-label] [harness]
+  local backend=$1 target=$2 label=${3:-} harness=${4:-} cap tries=0
+  [ "$harness" = kimi ] || return 1
+  [ "$backend" = tmux ] || return 1
+  # Load the backend here, not only inside the capture's command substitution,
+  # so the matcher it brings with it (bin/fm-composer-lib.sh) exists in this shell.
+  fm_backend_source "$backend" 2>/dev/null || return 1
+  while [ "$tries" -lt 3 ]; do
+    [ "$tries" -eq 0 ] || sleep 0.3
+    tries=$((tries + 1))
+    cap=$(fm_backend_capture "$backend" "$target" 40 "$label" 2>/dev/null) || continue
+    printf '%s\n' "$cap" | fm_composer_kimi_queued_input || continue
+    fm_backend_send_key "$backend" "$target" C-s "$label" >/dev/null 2>&1 || return 2
+    return 0
+  done
+  return 1
 }
 
 fm_task_inbox_is_fire_and_forget() {  # <record-path>
@@ -394,13 +453,16 @@ EOF
 
 # Advance the ladder after a delivery attempt. A failed ring or a composer-
 # protected skip still consumes budget so neither an unreadable pane nor a
-# permanently blocked composer can retry silently forever. A positively dead or
+# permanently blocked composer can retry silently forever. A steered ring
+# (fm_task_inbox_ring returned 4) keeps the attempt spacing but consumes no
+# budget: the queue block it found is proof the pane was mid-turn, and
+# escalation counts only attempts that found an idle pane. A positively dead or
 # missing endpoint never enters the ladder: the watcher escalates it directly.
 # A concurrently removed inbox is a successful no-op; otherwise failure means
 # the caller must surface the unwritable ladder while the record remains
 # unhandled.
-fm_task_inbox_record_ring() {  # <state-dir> <task-id> <record-path>
-  local dir base ladder rec_base count last
+fm_task_inbox_record_ring() {  # <state-dir> <task-id> <record-path> [ring-rc]
+  local dir base ladder rec_base count last rc=${4:-0}
   dir=$(fm_task_inbox_dir "$1" "$2")
   base=${3##*/}
   count=0
@@ -410,8 +472,9 @@ $ladder
 EOF
   [ "$rec_base" = "$base" ] || count=0
   case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  [ "$rc" = 4 ] || count=$((count + 1))
   [ -d "$dir" ] || return 0
-  if ! { printf '%s\t%s\t%s\n' "$base" "$((count + 1))" "$(date +%s)" > "$dir/.ring-state"; } 2>/dev/null; then
+  if ! { printf '%s\t%s\t%s\n' "$base" "$count" "$(date +%s)" > "$dir/.ring-state"; } 2>/dev/null; then
     [ -d "$dir" ] || return 0
     return 1
   fi

@@ -25,6 +25,14 @@
 #  10. An empty or whitespace-only text steer is refused before anything is
 #      marked, recorded, or typed - on the marked secondmate path that means
 #      no marker-only record and no pending-reply expectation.
+#  11. A doorbell that lands in a standalone Kimi's queued-input block is
+#      followed by exactly one Ctrl-S and reported as steered; the same screen
+#      under any other harness gets no key (bin/fm-task-inbox-lib.sh owns the
+#      decision).
+#  12. An idle Kimi whose last message merely quotes the queue block, and whose
+#      composer still holds the doorbell after a swallowed Enter, gets no
+#      Ctrl-S: the steer is admitted only behind a submit that read the
+#      composer empty.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
 # shellcheck disable=SC2016
@@ -42,13 +50,38 @@ TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 
 # Stub tmux: logs literal typed text to FM_SEND_LOG and lets the submit and
 # composer paths reach clean verdicts. FM_FAKE_TMUX_COMPOSER=pending renders a
-# composer visibly holding text; FM_FAKE_TMUX_SEND_FAIL=1 fails send-keys.
+# composer visibly holding text, kimi-queued renders Kimi's queued-input block
+# above an empty composer, and kimi-quoted renders an idle Kimi whose last
+# message quotes that block above a composer that holds the doorbell once it
+# has been typed (a swallowed Enter); FM_FAKE_TMUX_SEND_FAIL=1 fails send-keys.
+# The cursor row is the composer's content row, as tmux reports it. Named keys
+# are logged to FM_KEY_LOG when set.
 make_stubs() { # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
   cat >"$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+screen() {
+  case "${FM_FAKE_TMUX_COMPOSER:-}" in
+    pending)
+      printf '╭──────────────╮\n│ leftover txt │\n╰──────────────╯\n' ;;
+    kimi-queued)
+      printf '  🌕 · Tip: /tasks\n ──────\n   ❯ : Firstmate instruction waiting: list …\n'
+      printf '   ↑ to edit · ctrl-s to steer immediately\n ╭────╮\n │ >  │\n ╰────╯\n' ;;
+    kimi-quoted)
+      printf ' ● The fixture rows are:\n   ❯ : Firstmate instruction waiting: list …\n'
+      printf '   ↑ to edit · ctrl-s to steer immediately\n ╭──────────────────────────────╮\n'
+      if [ -s "${FM_SEND_LOG:-/dev/null}" ]; then
+        printf ' │ > : Firstmate instruction wa │\n'
+      else
+        printf ' │ >                            │\n'
+      fi
+      printf ' ╰──────────────────────────────╯\n' ;;
+    *)
+      printf '╭────╮\n│    │\n╰────╯\n' ;;
+  esac
+}
 case "${1:-}" in
   send-keys)
     [ "${FM_FAKE_TMUX_SEND_FAIL:-0}" = 1 ] && exit 1
@@ -63,18 +96,14 @@ case "${1:-}" in
     done
     if [ "$literal" = 1 ]; then
       printf '%s\n' "${1:-}" >> "$FM_SEND_LOG"
+    else
+      printf '%s\n' "${1:-}" >> "${FM_KEY_LOG:-/dev/null}"
     fi
     exit 0 ;;
   display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
+    for a in "$@"; do case "$a" in *cursor_y*) screen | awk 'BEGIN { row = 1 } /^[[:space:]]*│/ { row = NR - 1 } END { print row }'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
-  capture-pane)
-    if [ "${FM_FAKE_TMUX_COMPOSER:-}" = pending ]; then
-      printf '╭──────────────╮\n│ leftover txt │\n╰──────────────╯\n'
-    else
-      printf '╭────╮\n│    │\n╰────╯\n'
-    fi
-    exit 0 ;;
+  capture-pane) screen; exit 0 ;;
   list-windows) printf 'fm-t1\n'; exit 0 ;;
 esac
 exit 0
@@ -411,6 +440,54 @@ test_empty_message_refused() {
   pass "fm-send: an empty or whitespace-only text steer refuses before marking, recording, or typing"
 }
 
+test_kimi_queued_doorbell_is_steered() {
+  local dir err rc keys harness
+  dir=$(setup_case kimi-steer kimi)
+  err="$dir/send.err"; keys="$dir/keys.log"; : > "$keys"
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=kimi-queued FM_KEY_LOG="$keys" -- t1 "please rebase onto main"
+  rc=$?
+  expect_code 0 "$rc" "a steer to a busy kimi should exit 0 at enqueue"
+  assert_contains "$(cat "$dir/send.log")" "Firstmate instruction waiting" "the kimi doorbell should be typed"
+  [ "$(grep -c '^C-s$' "$keys")" = 1 ] \
+    || fail "a queued kimi doorbell should get exactly one Ctrl-S:"$'\n'"$(cat "$keys")"
+  assert_contains "$(cat "$err")" "steered into its running turn" \
+    "fm-send should report the doorbell was queued by a mid-turn kimi and steered"
+  : > "$keys"
+  run_send "$dir" "$err" FM_KEY_LOG="$keys" -- t1 "and then push"
+  if grep -q '^C-s$' "$keys"; then
+    fail "an idle kimi must not receive Ctrl-S:"$'\n'"$(cat "$keys")"
+  fi
+  if grep -q 'steered into its running turn' "$err"; then
+    fail "an idle kimi must not be reported as steered:"$'\n'"$(cat "$err")"
+  fi
+  for harness in claude grok; do
+    dir=$(setup_case "kimi-steer-$harness" "$harness")
+    keys="$dir/keys.log"; : > "$keys"
+    run_send "$dir" "$dir/send.err" FM_FAKE_TMUX_COMPOSER=kimi-queued FM_KEY_LOG="$keys" -- t1 "please rebase onto main"
+    if grep -q '^C-s$' "$keys"; then
+      fail "$harness must never receive Ctrl-S:"$'\n'"$(cat "$keys")"
+    fi
+  done
+  pass "fm-send inbox: a doorbell queued by a busy kimi gets one Ctrl-S and is reported steered; an idle kimi and other harnesses get none"
+}
+
+test_kimi_quoted_tail_with_pending_composer_is_not_steered() {
+  local dir err rc keys
+  dir=$(setup_case kimi-quoted kimi)
+  err="$dir/send.err"; keys="$dir/keys.log"; : > "$keys"
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=kimi-quoted FM_KEY_LOG="$keys" -- t1 "please rebase onto main"
+  rc=$?
+  expect_code 0 "$rc" "a steer whose doorbell stayed in the composer should still exit 0 at enqueue"
+  assert_contains "$(cat "$dir/send.log")" "Firstmate instruction waiting" "the doorbell should be typed into an idle kimi"
+  if grep -q '^C-s$' "$keys"; then
+    fail "a composer still holding the doorbell must never receive Ctrl-S, even under a quoted queue block:"$'\n'"$(cat "$keys")"
+  fi
+  if grep -q 'steered into its running turn' "$err"; then
+    fail "an unproven submit must not be reported as steered:"$'\n'"$(cat "$err")"
+  fi
+  pass "fm-send inbox: an idle kimi quoting the queue block above a composer that kept the doorbell gets no Ctrl-S"
+}
+
 test_text_steer_rides_inbox
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
@@ -424,3 +501,5 @@ test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
 test_empty_message_refused
+test_kimi_queued_doorbell_is_steered
+test_kimi_quoted_tail_with_pending_composer_is_not_steered

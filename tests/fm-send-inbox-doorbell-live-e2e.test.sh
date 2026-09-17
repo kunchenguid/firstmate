@@ -23,6 +23,14 @@
 # Record the dated per-harness result in
 # docs/verification/runtime-backends.md ("Steering-inbox doorbell").
 #
+# Kimi additionally gets a MID-TURN case, because a busy standalone Kimi queues
+# the doorbell instead of reading it: the real fm-send steers a Kimi that is
+# inside a long tool call, and the queued doorbell must leave Kimi's queue block
+# and enter the running turn through the Ctrl-S steer that
+# fm_task_inbox_kimi_steer (bin/fm-task-inbox-lib.sh) sends, with no re-ring.
+# It fails naming the Kimi version when the queue block or the key binding
+# drifts.
+#
 # Folder trust: harnesses launch with the repo root as cwd, which the
 # operator's machine has normally already trusted; a trust dialog is a real
 # unready state and correctly fails that harness's check.
@@ -185,6 +193,87 @@ check_harness_doorbell() {  # <name>
   tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
 }
 
+kimi_pane() {  # <window>
+  tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$1" 2>/dev/null || true
+}
+
+kimi_busy_fail() {  # <version> <window> <message>
+  FAILED=1
+  printf 'not ok - kimi (%s) mid-turn steer: %s\n' "$1" "$3" >&2
+  kimi_pane "$2" | grep '[^[:space:]]' | tail -12 | sed 's/^/#   /' >&2
+  tmux -L "$SOCKET" kill-window -t "$SESSION:$2" 2>/dev/null || true
+}
+
+check_kimi_busy_steer() {
+  local version win=hx-kimi-busy home task=live-kimi-busy acted rec handled i ready_rc
+  version=$(harness_version kimi)
+  home="$LAB/kimi-busy-home"
+  mkdir -p "$home/state"
+  acted="$LAB/acted-kimi-busy"
+  tmux -L "$SOCKET" new-window -d -t "$SESSION:" -n "$win" -c "$ROOT" \
+    -- bash -lc "$(launch_cmd kimi)" \
+    || { FAILED=1; printf 'not ok - kimi (%s) mid-turn steer: could not launch in the isolated tmux server\n' "$version" >&2; return 0; }
+  wait_ready "$win"; ready_rc=$?
+  if [ "$ready_rc" -ne 0 ]; then
+    kimi_busy_fail "$version" "$win" "the composer never read empty, so no turn could be started"
+    return 0
+  fi
+  # Kimi's startup input window can turn an early Enter into a newline
+  # (references/harness/kimi.md), so settle before the opening prompt.
+  sleep 6
+  tmux -L "$SOCKET" send-keys -t "$SESSION:$win" -l \
+    'Run the shell command: sleep 60 ; then reply with the single word FINISHED.'
+  sleep 1
+  tmux -L "$SOCKET" send-keys -t "$SESSION:$win" Enter
+  i=0
+  while [ "$i" -lt 60 ]; do
+    kimi_pane "$win" | grep -q 'sleep 60' && kimi_pane "$win" | fm_busy_lines_match kimi && \
+      kimi_pane "$win" | grep -q 'Running a command' && break
+    sleep 1
+    i=$((i + 1))
+  done
+  if [ "$i" -ge 60 ]; then
+    kimi_busy_fail "$version" "$win" "the long tool call never started, so no mid-turn state was reached"
+    return 0
+  fi
+  printf 'window=%s:%s\nkind=ship\nharness=kimi\n' "$SESSION" "$win" > "$home/state/$task.meta"
+  if ! FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-send.sh" "$task" \
+    "Firstmate live check: run exactly this shell command now: touch $acted - then follow the mv instruction you were given for this message. Reply with one short line." \
+    >/dev/null 2>&1; then
+    kimi_busy_fail "$version" "$win" "fm-send refused the live steer"
+    return 0
+  fi
+  rec="$home/state/$task.inbox/001.msg"
+  handled="$home/state/$task.inbox/handled/001.msg"
+  sleep 2
+  if kimi_pane "$win" | fm_composer_kimi_queued_input; then
+    kimi_busy_fail "$version" "$win" "the doorbell is still in Kimi's queue block after fm-send; the Ctrl-S steer did not inject it"
+    return 0
+  fi
+  if ! kimi_pane "$win" | grep -q '✨ : Firstmate instruction waiting'; then
+    kimi_busy_fail "$version" "$win" "the doorbell was not echoed into the running turn"
+    return 0
+  fi
+  if ! kimi_pane "$win" | fm_busy_lines_match kimi; then
+    kimi_busy_fail "$version" "$win" "the turn had already ended when the doorbell landed, so nothing mid-turn was proven"
+    return 0
+  fi
+  # No re-ring here on purpose: the injected doorbell alone must be honored.
+  i=0
+  while [ "$i" -lt "$TIMEOUT" ]; do
+    [ -f "$handled" ] && [ -e "$acted" ] && break
+    sleep 1
+    i=$((i + 1))
+  done
+  if [ -f "$handled" ] && [ -e "$acted" ]; then
+    CHECKED=$((CHECKED + 1))
+    pass "kimi ($version) mid-turn steer: the queued doorbell was injected into the running turn, acted on, and acked without a re-ring"
+    tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+  else
+    kimi_busy_fail "$version" "$win" "injected doorbell not honored within ${TIMEOUT}s (acted=$([ -e "$acted" ] && echo yes || echo no) acked=$([ -f "$handled" ] && echo yes || echo no), record $rec)"
+  fi
+}
+
 HARNESSES=${FM_SEND_INBOX_LIVE_HARNESSES:-'claude codex opencode pi grok kimi muse'}
 for h in $HARNESSES; do
   if command -v "$h" >/dev/null 2>&1; then
@@ -193,6 +282,16 @@ for h in $HARNESSES; do
     note "harness absent, not verified here: $h"
   fi
 done
+
+case " $HARNESSES " in
+  *" kimi "*)
+    if command -v kimi >/dev/null 2>&1; then
+      check_kimi_busy_steer
+    else
+      note "harness absent, mid-turn steer not verified here: kimi"
+    fi
+    ;;
+esac
 
 if [ "$FAILED" -ne 0 ]; then
   printf 'not ok - live steering-inbox doorbell guard found failures above\n' >&2

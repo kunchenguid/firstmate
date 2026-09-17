@@ -663,8 +663,60 @@ ok - muse (Muse Code 0.2.1 (0.2.1-R1215.1)): the doorbell reached a real worker,
 
 All six installed harnesses honored the doorbell contract with real model turns: each listed the inbox named by the doorbell, read its record, executed the instruction inside it, and acknowledged with the atomic `mv`.
 Two findings from the run shaped the shipped behavior: an OpenCode vendor update modal swallowed the first doorbell and the single re-ring recovered it, which is exactly the watcher ladder's job; and grok 1.0.5's idle composer never classifies `empty` (a classifier drift owned by the [Composer classification matrix](#composer-classification-matrix) guard, whose refresh for grok 1.0.5 is still owed), which is why the ring's advisory pre-check skips only on an exact proven `pending` verdict - a doorbell into an ambiguous composer is a recoverable constant line, while skipping on ambiguity would starve steering for any harness the classifier cannot positively identify.
-Kimi was not installed on the verification machine; its receive path is the same one-line-plus-shell contract, and the portable ladder and enqueue regressions in `tests/fm-task-inbox.test.sh` and `tests/fm-send-inbox.test.sh` cover every harness-independent half.
+Kimi was not installed on the verification machine; [Kimi mid-turn steer](#kimi-mid-turn-steer) below records its later live run, and the portable ladder and enqueue regressions in `tests/fm-task-inbox.test.sh` and `tests/fm-send-inbox.test.sh` cover every harness-independent half.
 This guard is the refresh command after any harness upgrade; it spends a small number of real tokens per installed harness, reports an absent harness explicitly, and refuses a run that verified nothing.
+
+### Kimi mid-turn steer
+
+A standalone Kimi that is mid-turn queues the doorbell instead of reading it, so the guard also steers a Kimi that is inside a long tool call.
+Verified on 2026-09-17 with Kimi Code 0.43.1, tmux 3.7c, macOS arm64, on an isolated private socket, both Kimi launches in the repo root like every other harness, driving the real `bin/fm-send.sh`, with `kimi` resolved from PATH (the guard's only resolution); complete output:
+
+```sh
+FM_SEND_INBOX_LIVE_E2E=1 FM_SEND_INBOX_LIVE_HARNESSES=kimi bash tests/fm-send-inbox-doorbell-live-e2e.test.sh
+```
+
+```text
+# kimi (0.43.1): idle composer never classified empty; proceeding as production does (advisory check skips only on pending)
+# kimi (0.43.1): re-rang the doorbell once (watcher's role) at 120s
+ok - kimi (0.43.1): the doorbell reached a real worker, which acted and acked with the mv
+ok - kimi (0.43.1) mid-turn steer: the queued doorbell was injected into the running turn, acted on, and acked without a re-ring
+ok - live steering-inbox doorbell guard: 2 harness(es) honored the doorbell contract
+```
+
+Kimi self-updated to 2.0.0 on the same machine later on 2026-09-17, and the same command, with `~/.kimi-code/bin` prepended to PATH, was re-run against it; complete output:
+
+```text
+ok - kimi (2.0.0): the doorbell reached a real worker, which acted and acked with the mv
+ok - kimi (2.0.0) mid-turn steer: the queued doorbell was injected into the running turn, acted on, and acked without a re-ring
+ok - live steering-inbox doorbell guard: 2 harness(es) honored the doorbell contract
+```
+
+An earlier 2.0.0 attempt proved nothing mid-turn because Kimi sat in `Retrying (2/10) · APIConnectionError` and never started its tool call, which the guard reported as a failure rather than a pass.
+
+In the 0.43.1 run no trust dialog appeared in this checkout; the idle check's composer did not classify empty within the readiness budget and its doorbell was honored after the guard's single watcher-role re-ring, while the mid-turn check's composer classified empty before the long tool call was started.
+
+The queue block Kimi 0.43.1 draws directly above its composer, as `tmux capture-pane -p` reads it, and the same rows after `tmux send-keys C-s`:
+
+```text
+   ❯ : Firstmate instruction waiting: list '/tmp/x.inbox'/*.msg and, in numeric order, read and act on each.
+   ↑ to edit · ctrl-s to steer immediately
+ ╭──────────────────────────────────────────────────────────────╮
+ │ >                                                            │
+```
+
+```text
+ ✨ : Firstmate instruction waiting: list '/tmp/x.inbox'/*.msg and, in numeric order, read and act on each.
+  🌘 · Tip: /plugins: manage plugins
+ ╭──────────────────────────────────────────────────────────────╮
+ │ >                                                            │
+```
+
+The colon after `❯` is the doorbell's own shell no-op prefix, not part of Kimi's rendering.
+Two queued lines render as two `❯` rows above one hint row, a line wider than the pane is truncated with `…` rather than wrapped, and one Ctrl-S injects every queued line.
+A Ctrl-S sent with nothing queued changed nothing on screen, both idle and mid-turn.
+Only tmux's key path was exercised; no other backend sends the key.
+The key is sent only when the doorbell's own submit read the composer empty, so a composer that kept the doorbell after a swallowed Enter never receives it even when the transcript above merely quotes the queue block (`tests/fm-send-inbox.test.sh` pins that with a fake pane); the mid-turn `ok` above was produced behind that gate.
+The ring reports a steered doorbell distinctly and the watcher's re-ring ladder spends no attempt budget on it, so a Kimi that stays mid-turn is re-rung and steered past the budget without a stale wake; `tests/fm-task-inbox.test.sh` pins that ladder behavior with a fake pane.
 
 ## Gemini
 
