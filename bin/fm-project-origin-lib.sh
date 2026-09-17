@@ -189,7 +189,7 @@ FM_PROJECT_FORGE=
 FM_PROJECT_FORGE_HOST=
 FM_PROJECT_FORGE_ERROR=
 
-fm_project_origin_host() { # <origin>; prints host, or local for local origins
+fm_project_origin_host() { # <origin>; prints bare host, or local for local origins
   local url=${1-} rest authority hostpart host
   fm_project_origin_safe "$url" || return 1
   case "$url" in
@@ -218,6 +218,59 @@ fm_project_origin_host() { # <origin>; prints host, or local for local origins
         *@*) rest=${rest##*@} ;;
       esac
       host=$rest
+      ;;
+  esac
+  [ -n "${host:-}" ] || return 1
+  printf '%s\n' "$host" | tr '[:upper:]' '[:lower:]'
+}
+
+fm_project_origin_endpoint() { # <origin>; prints host plus a relevant port
+  local url=${1-} rest authority hostpart host port scheme bracketed=0 default_port
+  fm_project_origin_safe "$url" || return 1
+  case "$url" in
+    /?*|file:///?*)
+      printf '%s\n' local
+      return 0
+      ;;
+    https://?*|http://?*|ssh://?*|git://?*)
+      scheme=${url%%://*}
+      rest=${url#*://}
+      authority=${rest%%/*}
+      hostpart=${authority##*@}
+      case "$hostpart" in
+        '['*']'*)
+          bracketed=1
+          host=${hostpart%%']'*}']'
+          host=${host#'['}
+          host=${host%']'}
+          port=${hostpart#*']'}
+          port=${port#:}
+          ;;
+        *)
+          host=${hostpart%%:*}
+          port=
+          case "$hostpart" in
+            *:*) port=${hostpart#*:} ;;
+          esac
+          ;;
+      esac
+      case "$scheme" in
+        https) default_port=443 ;;
+        http) default_port=80 ;;
+        ssh) default_port=22 ;;
+        git) default_port=9418 ;;
+        *) default_port= ;;
+      esac
+      if [ -n "$port" ] && [ "$port" != "$default_port" ]; then
+        if [ "$bracketed" -eq 1 ]; then
+          host="[$host]:$port"
+        else
+          host="$host:$port"
+        fi
+      fi
+      ;;
+    *)
+      host=$(fm_project_origin_host "$url") || return 1
       ;;
   esac
   [ -n "${host:-}" ] || return 1
@@ -274,7 +327,7 @@ fm_project_glab_config_has_host() { # <host>; local evidence only
 }
 
 fm_project_forge_from_origin() { # <origin>; sets FM_PROJECT_FORGE[_HOST]
-  local origin=${1-} host gitlab_host
+  local origin=${1-} host endpoint evidence_host gitlab_host
   FM_PROJECT_FORGE=
   FM_PROJECT_FORGE_HOST=
   FM_PROJECT_FORGE_ERROR=
@@ -282,8 +335,12 @@ fm_project_forge_from_origin() { # <origin>; sets FM_PROJECT_FORGE[_HOST]
     FM_PROJECT_FORGE_ERROR="origin is not an accepted clone URL: ${origin:-<empty>}"
     return 1
   }
-  FM_PROJECT_FORGE_HOST=$host
-  case "$host" in
+  endpoint=$(fm_project_origin_endpoint "$origin" 2>/dev/null) || {
+    FM_PROJECT_FORGE_ERROR="origin endpoint could not be established: ${origin:-<empty>}"
+    return 1
+  }
+  FM_PROJECT_FORGE_HOST=$endpoint
+  case "$endpoint" in
     local)
       FM_PROJECT_FORGE=local
       return 0
@@ -297,20 +354,24 @@ fm_project_forge_from_origin() { # <origin>; sets FM_PROJECT_FORGE[_HOST]
       return 0
       ;;
   esac
+  # A non-default port is part of the forge identity. Authentication evidence
+  # must name that exact endpoint rather than proving only that another service
+  # on the same hostname is configured.
+  evidence_host=$endpoint
   local gh_evidence=0 glab_evidence=0
-  if fm_project_gh_config_has_host "$host" ||
-    { command -v gh >/dev/null 2>&1 && gh auth status --hostname "$host" >/dev/null 2>&1; }; then
+  if fm_project_gh_config_has_host "$evidence_host" ||
+    { command -v gh >/dev/null 2>&1 && gh auth status --hostname "$evidence_host" >/dev/null 2>&1; }; then
     gh_evidence=1
   fi
   gitlab_host=${GITLAB_HOST:-}
   gitlab_host=$(printf '%s' "$gitlab_host" | tr '[:upper:]' '[:lower:]')
-  if fm_project_glab_config_has_host "$host" ||
-    { [ -n "$gitlab_host" ] && [ "$gitlab_host" = "$host" ]; } ||
-    { command -v glab >/dev/null 2>&1 && glab auth status --hostname "$host" >/dev/null 2>&1; }; then
+  if fm_project_glab_config_has_host "$evidence_host" ||
+    { [ -n "$gitlab_host" ] && [ "$gitlab_host" = "$evidence_host" ]; } ||
+    { command -v glab >/dev/null 2>&1 && glab auth status --hostname "$evidence_host" >/dev/null 2>&1; }; then
     glab_evidence=1
   fi
   if [ "$gh_evidence" -eq 1 ] && [ "$glab_evidence" -eq 1 ]; then
-    FM_PROJECT_FORGE_ERROR="origin host '$host' is configured as both GitHub and GitLab; the forge is ambiguous"
+    FM_PROJECT_FORGE_ERROR="origin host '$endpoint' is configured as both GitHub and GitLab; the forge is ambiguous"
     return 1
   fi
   if [ "$gh_evidence" -eq 1 ]; then
@@ -321,7 +382,7 @@ fm_project_forge_from_origin() { # <origin>; sets FM_PROJECT_FORGE[_HOST]
     FM_PROJECT_FORGE=gitlab
     return 0
   fi
-  FM_PROJECT_FORGE_ERROR="origin host '$host' is not recognized as GitHub or an authenticated GitLab instance"
+  FM_PROJECT_FORGE_ERROR="origin host '$endpoint' is not recognized as GitHub or an authenticated GitLab instance"
   return 1
 }
 
@@ -367,7 +428,7 @@ EOF
       return 1
     fi
   done <<EOF
-$(git -C "$repo" config --get-all remote.origin.pushurl 2>/dev/null || true)
+$(git -C "$repo" remote get-url --push --all origin 2>/dev/null || true)
 EOF
   [ "$found" -eq 1 ] || {
     FM_PROJECT_FORGE_ERROR="project has no usable origin URL, so its forge cannot be established"

@@ -211,14 +211,17 @@ EOF
 # Promotion is where a scout's ship contract is finally decided, so it requires the
 # same explicit values and writes them into the task's durable record.
 test_promote_requires_and_records_the_delivery_contract() {
-  local home meta out status blocked_data instructions_path
+  local home meta out status blocked_data instructions_path promotion_worktree
   home="$TMP_ROOT/promote/home"
-  mkdir -p "$home/state"
+  promotion_worktree="$home/promotion-worktree"
+  mkdir -p "$home/state" "$promotion_worktree"
+  git -C "$promotion_worktree" init -q
+  git -C "$promotion_worktree" remote add origin 'git@github.com:echo/firstmate.git'
   meta="$home/state/promote-d1.meta"
   write_brief "$home" promote-d1
 
   write_scout_meta() {
-    printf 'window=fm-promote-d1\nkind=scout\nworktree=/tmp/wt\n' > "$meta"
+    printf 'window=fm-promote-d1\nkind=scout\nworktree=%s\n' "$promotion_worktree" > "$meta"
   }
 
   write_scout_meta
@@ -272,6 +275,30 @@ test_promote_requires_and_records_the_delivery_contract() {
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
 }
 
+test_promote_direct_pr_refuses_local_origin() {
+  local home meta worktree out status
+  home="$TMP_ROOT/promote-local-forge/home"
+  worktree="$home/local-worktree"
+  mkdir -p "$home/state" "$worktree"
+  git -C "$worktree" init -q
+  git -C "$worktree" remote add origin "file://$worktree"
+  meta="$home/state/promote-local-forge.meta"
+  write_brief "$home" promote-local-forge
+  printf 'window=fm-promote-local-forge\nkind=scout\nworktree=%s\n' "$worktree" > "$meta"
+
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" \
+    promote-local-forge --mode direct-PR --yolo off 2>&1)
+  status=$?
+  expect_code 1 "$status" "direct-PR promotion with a local origin should refuse"
+  assert_contains "$out" "resolved to a local remote" \
+    "direct-PR promotion did not name the local route"
+  assert_grep 'kind=scout' "$meta" \
+    "direct-PR local-origin refusal changed the task kind"
+  assert_absent "$home/data/promote-local-forge/ship-instructions.md" \
+    "direct-PR local-origin refusal published ship instructions"
+  pass "fm-promote refuses direct-PR promotion when the current origin is local"
+}
+
 # A symlink at state/<id>.meta is the containment hazard the shared publisher
 # refuses: promotion must not rewrite the symlink target in place.
 test_promote_refuses_a_symlinked_task_record() {
@@ -307,10 +334,13 @@ test_promote_refuses_a_symlinked_task_record() {
 # prints against a capturing fm-send.sh, and asserts on the message the worker would
 # actually receive - for every supported mode.
 test_promotion_delivers_the_real_definition_of_done() {
-  local home meta out sendroot payload mode id brief_dod delivered_dod
+  local home meta out sendroot payload mode id brief_dod delivered_dod promotion_worktree
   home="$TMP_ROOT/promote-dod/home"
   sendroot="$TMP_ROOT/promote-dod/sendroot"
-  mkdir -p "$home/state" "$sendroot/bin"
+  promotion_worktree="$home/promotion-worktree"
+  mkdir -p "$home/state" "$sendroot/bin" "$promotion_worktree"
+  git -C "$promotion_worktree" init -q
+  git -C "$promotion_worktree" remote add origin 'git@github.com:echo/firstmate.git'
   cat > "$sendroot/bin/fm-send.sh" <<'STUB'
 #!/usr/bin/env bash
 # Capture the message a promoted worker would receive, instead of steering one.
@@ -321,7 +351,7 @@ STUB
   for mode in no-mistakes direct-PR local-only; do
     id="promote-dod-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
     meta="$home/state/$id.meta"
-    printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
+    printf 'window=fm-%s\nkind=scout\nworktree=%s\n' "$id" "$promotion_worktree" > "$meta"
     FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null 2>&1 \
       || fail "$mode: scout brief generation should succeed"
     fill_brief_subsections "$home/data/$id/brief.md" \
@@ -337,6 +367,8 @@ STUB
          eval "$(printf '%s\n' "$out" | sed -n 's/^next: //p' | grep 'fm-send\.sh')" ) \
       || fail "$mode: promotion's delivery command did not run"
     assert_present "$payload" "$mode: promotion delivered no message to the worker"
+    assert_grep "The project's origin identifies GitHub at github.com" "$payload" \
+      "$mode: promoted worker did not receive the current forge route"
 
     grep -qx "Delivery contract: mode=$mode" "$payload" \
       || fail "$mode: promoted worker did not receive the machine-readable delivery contract"
@@ -435,11 +467,15 @@ EOF
 # public brief/spawn/promote path. Filling both subsections lets the spawn
 # delivery checks proceed (the fake tmux still fails later).
 test_spawn_and_promote_require_filled_task_subsections() {
-  local rec home proj fakebin out status id brief meta intent_body spec_body authorized
+  local rec home proj fakebin out status id brief meta intent_body spec_body authorized promotion_worktree
   rec=$(make_home subsections)
   IFS='|' read -r home proj fakebin <<EOF
 $rec
 EOF
+  promotion_worktree="$home/promotion-worktree"
+  mkdir -p "$promotion_worktree"
+  git -C "$promotion_worktree" init -q
+  git -C "$promotion_worktree" remote add origin 'git@github.com:echo/firstmate.git'
 
   id=delivery-unfilled-ship
   FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes >/dev/null 2>&1 \
@@ -674,7 +710,7 @@ EOF
 
   id=promote-nested-spec
   meta="$home/state/$id.meta"
-  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=%s\n' "$id" "$promotion_worktree" > "$meta"
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<'EOF'
 # Task
@@ -713,7 +749,7 @@ EOF
 
   id=promote-legacy-e3
   meta="$home/state/$id.meta"
-  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=%s\n' "$id" "$promotion_worktree" > "$meta"
   mkdir -p "$home/data/$id"
   cat > "$home/data/$id/brief.md" <<'EOF'
 You are a crewmate.
@@ -888,6 +924,7 @@ test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
+test_promote_direct_pr_refuses_local_origin
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
 test_project_mode_maps_the_conditional_policy

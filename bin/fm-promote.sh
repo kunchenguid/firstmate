@@ -49,6 +49,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-project-origin-lib.sh
+. "$SCRIPT_DIR/fm-project-origin-lib.sh"
 
 MODE=
 YOLO=
@@ -168,6 +170,27 @@ if [ -z "$(printf '%s' "$INTENT_BODY" | tr -d '[:space:]')" ]; then
   exit 1
 fi
 
+# Promotion must refresh the forge route from the scout's current isolated copy;
+# a historical scout brief is not authoritative for a new ship delivery mode.
+PROMOTION_WORKTREE=$(sed -n 's/^worktree=//p' "$META" | head -n 1)
+PROMOTION_FORGE_ROUTE=
+if [ -n "$PROMOTION_WORKTREE" ] && [ -d "$PROMOTION_WORKTREE" ] && \
+    fm_project_forge_from_repo "$PROMOTION_WORKTREE"; then
+  if [ "$MODE" = direct-PR ] && [ "$FM_PROJECT_FORGE" = local ]; then
+    echo "error: direct-PR promotion resolved to a local remote for '$PROMOTION_WORKTREE'; refusing without a concrete GitHub or authenticated GitLab route" >&2
+    exit 1
+  fi
+  PROMOTION_FORGE_ROUTE=$(fm_project_forge_instructions resolved)
+else
+  [ -n "$FM_PROJECT_FORGE_ERROR" ] || \
+    FM_PROJECT_FORGE_ERROR="the scout's recorded isolated worktree is missing, so its forge cannot be established"
+  PROMOTION_FORGE_ROUTE=$(fm_project_forge_instructions ambiguous)
+  if [ "$MODE" = direct-PR ]; then
+    echo "error: direct-PR promotion forge routing is unresolved for '$PROMOTION_WORKTREE': $FM_PROJECT_FORGE_ERROR; refusing without a concrete GitHub or authenticated GitLab route" >&2
+    exit 1
+  fi
+fi
+
 # The promoted worker must receive the same delivery contract an ordinary ship
 # brief carries, so the mode-specific Definition of done is rendered from its
 # single owner (bin/fm-dod-lib.sh) rather than summarised into a hint line. A
@@ -204,6 +227,7 @@ EOF
     printf '\nThe no-mistakes ask-user escalation below supersedes the scout rule 6 escalation shape.\n'
     printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
   fi
+  printf '\n%s\n' "$PROMOTION_FORGE_ROUTE"
   printf '\n'
   fm_dod_block "$MODE" "$ID"
 }

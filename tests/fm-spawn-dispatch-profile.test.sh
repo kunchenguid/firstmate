@@ -100,6 +100,32 @@ run_spawn() {
     fm_test_run_spawn "$home" "$wt" "$fakebin" "$@"
 }
 
+make_github_route_fetch_stub() { # <fakebin> <worktree> <local-project>
+  local fakebin=$1 worktree=$2 project=$3 real_git local_origin
+  real_git=$(command -v git)
+  local_origin=$(git -C "$project" remote get-url origin)
+  git -C "$worktree" remote set-url origin 'git@github.com:echo/firstmate.git'
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+set -u
+is_remote_refresh=0
+for arg in "\$@"; do
+  case "\$arg" in
+    fetch|set-head) is_remote_refresh=1 ;;
+  esac
+done
+if [ "\$is_remote_refresh" -eq 1 ]; then
+  "$real_git" -C "$worktree" remote set-url origin "$local_origin"
+  "$real_git" "\$@"
+  status=\$?
+  "$real_git" -C "$worktree" remote set-url origin 'git@github.com:echo/firstmate.git'
+  exit "\$status"
+fi
+exec "$real_git" "\$@"
+SH
+  chmod +x "$fakebin/git"
+}
+
 # Ship spawns carry an explicit delivery contract (AGENTS.md section 7); these
 # tests are about profile resolution, so they pass a fixed valid one.
 run_ship_spawn() {
@@ -117,6 +143,23 @@ assert_meta_profile() {
   assert_grep "harness=$harness" "$meta" "meta missing harness=$harness"
   assert_grep "model=$model" "$meta" "meta missing model=$model"
   assert_grep "effort=$effort" "$meta" "meta missing effort=$effort"
+}
+
+test_direct_pr_refuses_a_local_origin() {
+  local rec id out status
+  id=profile-direct-local-z1a
+  rec=$(make_spawn_case profile-direct-local claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --mode direct-PR --yolo off)
+  status=$?
+  expect_code 1 "$status" "direct-PR with a local origin should refuse"
+  assert_contains "$out" "resolved to a local remote" \
+    "direct-PR local-origin refusal did not name the concrete route"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "direct-PR local-origin refusal wrote task metadata"
+  pass "direct-PR refuses a local origin that cannot produce a provider PR"
 }
 
 test_no_profile_keeps_claude_profile_defaults() {
@@ -662,6 +705,9 @@ test_native_pi_ultra_is_explicit_and_model_scoped() {
       id="ultra-$harness-$mode"
       rec=$(make_spawn_case "$id" "$harness" "$id")
       read_case_record "$rec"
+      if [ "$mode" = direct-PR ]; then
+        make_github_route_fetch_stub "$FAKEBIN_DIR" "$WT_DIR" "$PROJ_DIR"
+      fi
       out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
         --harness "$harness" --model codex-native/gpt-6-astra --effort ultra --mode "$mode" --yolo off)
       expect_code 0 "$?" "native Ultra spawn failed: $out"
@@ -1282,6 +1328,9 @@ SH
     if [ "$kind" = scout ]; then
       out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
     else
+      if [ "$kind" = direct-PR ]; then
+        make_github_route_fetch_stub "$FAKEBIN_DIR" "$WT_DIR" "$PROJ_DIR"
+      fi
       out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --mode "$kind" --yolo off)
     fi
     expect_code 0 "$?" "$kind worker spawn failed: $out"
@@ -1420,6 +1469,7 @@ test_non_claude_harness_ignores_claude_permission_mode() {
 }
 
 test_worker_launch_delivers_role_scope
+test_direct_pr_refuses_a_local_origin
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
 test_relative_home_overrides_launch_with_absolute_cross_process_paths

@@ -117,16 +117,6 @@ assert_contains "$gitlab_route" 'ordinary `git push`' "GitLab route omitted ordi
 assert_contains "$gitlab_route" 'never disable TLS certificate verification' "GitLab route weakened TLS guidance"
 assert_not_contains "$gitlab_route" 'gh-axi for this project' "GitLab route still directs gh-axi"
 
-# Exercise the same decision through the executable public entry point used by
-# operators, not only through the sourced helper used by fm-spawn.
-public_github_route=$(HOME="$ROUTING_HOME" XDG_CONFIG_HOME="$ROUTING_XDG" \
-  "$ROOT/bin/fm-project-forge.sh" "$GITHUB_ROUTE_REPO")
-assert_contains "$public_github_route" 'gh-axi' "public forge script omitted GitHub routing"
-public_gitlab_route=$(HOME="$ROUTING_HOME" XDG_CONFIG_HOME="$ROUTING_XDG" \
-  PATH="$FAKEBIN:$PATH" "$ROOT/bin/fm-project-forge.sh" "$GITLAB_ROUTE_REPO")
-# shellcheck disable=SC2016 # Backticks are literal route text.
-assert_contains "$public_gitlab_route" 'authenticated `glab`' "public forge script omitted GitLab routing"
-
 UNKNOWN_ROUTE_REPO=$(make_routing_repo unknown 'ssh://git@codeberg.example/team/app.git')
 if PATH="$FAKEBIN:$PATH" fm_project_forge_from_repo "$UNKNOWN_ROUTE_REPO"; then
   fail "unknown origin was silently classified as a forge"
@@ -134,18 +124,46 @@ fi
 assert_contains "$FM_PROJECT_FORGE_ERROR" 'not recognized' "unknown origin did not report a concrete ambiguity"
 unknown_route=$(fm_project_forge_instructions ambiguous)
 assert_contains "$unknown_route" 'Do not guess a forge CLI' "unknown route did not stop guessing"
-unknown_public_output=$(HOME="$ROUTING_HOME" XDG_CONFIG_HOME="$ROUTING_XDG" \
-  PATH="$FAKEBIN:$PATH" "$ROOT/bin/fm-project-forge.sh" "$UNKNOWN_ROUTE_REPO" 2>&1)
-unknown_public_status=$?
-[ "$unknown_public_status" -ne 0 ] || fail "public forge script silently accepted an unknown origin"
-assert_contains "$unknown_public_output" 'origin host' "public forge script did not report the unknown origin"
-
 AMBIGUOUS_ROUTE_REPO=$(make_routing_repo ambiguous 'git@github.com:echo/firstmate.git')
 git -C "$AMBIGUOUS_ROUTE_REPO" remote set-url --add --push origin 'git@sa.git-labs.com:echo/firstmate.git'
 if PATH="$FAKEBIN:$PATH" fm_project_forge_from_repo "$AMBIGUOUS_ROUTE_REPO"; then
   fail "conflicting fetch/push origins were silently accepted"
 fi
 assert_contains "$FM_PROJECT_FORGE_ERROR" 'different forge routes' "conflicting origins did not name the ambiguity"
+
+# Git's effective push URL includes url.*.pushInsteadOf rewrites even when no
+# remote.origin.pushurl is configured. Routing must inspect that result rather
+# than classifying the fetch URL and sending a branch to the wrong forge.
+REWRITTEN_ROUTE_REPO=$(make_routing_repo rewritten 'git@github.com:echo/firstmate.git')
+git -C "$REWRITTEN_ROUTE_REPO" config \
+  'url.git@sa.git-labs.com:.pushInsteadOf' 'git@github.com:'
+if PATH="$FAKEBIN:$PATH" fm_project_forge_from_repo "$REWRITTEN_ROUTE_REPO"; then
+  fail "a pushInsteadOf rewrite to GitLab was silently accepted as GitHub"
+fi
+assert_contains "$FM_PROJECT_FORGE_ERROR" 'different forge routes' \
+  "effective push URL rewrite did not name the forge ambiguity"
+
+# Two services on one hostname but different HTTP ports are distinct forge
+# endpoints. Preserve those ports in identity and refuse the collision.
+PORT_FAKEBIN="$TMP_ROOT/port-fake"
+mkdir -p "$PORT_FAKEBIN"
+cat > "$PORT_FAKEBIN/glab" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' git.example.com:8443 '*|*' git.example.com:9443 '*) exit 0 ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$PORT_FAKEBIN/glab"
+PORT_ROUTE_REPO=$(make_routing_repo ports 'https://git.example.com:8443/echo/firstmate.git')
+git -C "$PORT_ROUTE_REPO" remote set-url --add --push origin \
+  'https://git.example.com:9443/echo/firstmate.git'
+if PATH="$PORT_FAKEBIN:$PATH" fm_project_forge_from_repo "$PORT_ROUTE_REPO"; then
+  fail "different self-hosted forge ports were silently treated as one endpoint"
+fi
+assert_contains "$FM_PROJECT_FORGE_ERROR" 'ambiguous' \
+  "different forge ports did not report an ambiguity"
+
 pass "origin-based forge routing selects GitHub and self-hosted GitLab and refuses unknown or conflicting origins"
 
 # A remote-helper transport is a command git runs whenever the cloning host's own

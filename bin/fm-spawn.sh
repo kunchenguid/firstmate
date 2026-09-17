@@ -3581,6 +3581,10 @@ fi
 publish_forge_route() {
   local route route_tmp="$DATA/$ID/.launch-brief.forge.$$"
   if fm_project_forge_from_repo "$WT"; then
+    if [ "$KIND" = ship ] && [ "${MODE:-}" = direct-PR ] && [ "$FM_PROJECT_FORGE" = local ]; then
+      echo "error: direct-PR forge routing resolved to a local remote for '$WT'; refusing to launch without a concrete GitHub or authenticated GitLab route" >&2
+      return 1
+    fi
     route=$(fm_project_forge_instructions resolved)
   else
     route=$(fm_project_forge_instructions ambiguous)

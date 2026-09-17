@@ -977,6 +977,9 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
     dir=$(new_case "promoted-scout-$mode" "$id")
     home="$dir/home"
     fm_git_worktree "$dir/proj" "$dir/wt" "task-$id"
+    # Promotion now resolves the current worktree's forge; use a canonical
+    # GitHub origin here so the direct-PR case exercises the real route.
+    git -C "$dir/wt" remote set-url origin 'git@github.com:echo/firstmate.git'
     FM_HOME="$home" "$BRIEF" "$id" firstmate --scout >/dev/null \
       || fail "$mode: could not scaffold the scout brief"
     brief="$home/data/$id/brief.md"
