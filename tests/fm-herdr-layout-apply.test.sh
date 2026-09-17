@@ -1790,15 +1790,63 @@ fm_git_worktree "$NON_PI_PROJECT" "$NON_PI_WT" non-pi-worktree
 # shellcheck source=tests/remote-herdr-fixture.sh
 . "$ROOT/tests/remote-herdr-fixture.sh"
 install_remote_herdr_fixture "$NON_PI" "$NON_PI_STATE" "$NON_PI_LOG" "$NON_PI_SEND_FAIL" "$SOCK"
+mv "$NON_PI/bin/herdr" "$NON_PI/bin/herdr-base"
+cat > "$NON_PI/bin/herdr" <<SH
+#!/usr/bin/env bash
+set -u
+STATE='$NON_PI_STATE'
+LOG='$NON_PI_LOG'
+BASE='$NON_PI/bin/herdr-base'
+SOCKET='$SOCK'
+printf '%s\n' "\$*" >> "\$LOG"
+case "\$*" in
+  "session list --json"*)
+    printf '{"sessions":[{"name":"lab-structural","running":true,"socket_path":"%s"}]}\n' "\$SOCKET"
+    ;;
+  "pane get "*)
+    pane=\${3:-}
+    if [ "\$(jq -r --arg p "\$pane" '[.tabs[] | select(.pane_id == \$p)] | length' "\$STATE")" = 0 ]; then
+      printf '{"error":{"code":"pane_not_found","message":"%s"}}\n' "\$pane"
+    else
+      jq -c --arg p "\$pane" \
+        '{result:{pane:(.tabs[] | select(.pane_id == \$p) | {pane_id,tab_id,workspace_id,label,foreground_cwd})}}' "\$STATE"
+    fi
+    ;;
+  "tab get "*)
+    tab=\${3:-}
+    jq -c --arg t "\$tab" \
+      '{result:{tab:(.tabs[] | select(.tab_id == \$t) | {tab_id,workspace_id,label,focused})}}' "\$STATE"
+    ;;
+  "tab focus "*)
+    tab=\${3:-}
+    tmp="\$STATE.tmp.\$\$"
+    jq --arg t "\$tab" '
+      (.tabs[] | select(.tab_id == \$t) | .workspace_id) as \$w
+      | .tabs |= map(.focused = (.tab_id == \$t))
+      | .workspaces |= map(.focused = (.workspace_id == \$w) | if .workspace_id == \$w then .active_tab_id = \$t else . end)
+    ' "\$STATE" > "\$tmp" && mv "\$tmp" "\$STATE"
+    ;;
+  "terminal title clear"*)
+    printf '%s\n' '{"result":{"reason":"no_foreground_client"}}'
+    ;;
+  *) exec "\$BASE" "\$@" ;;
+esac
+SH
+chmod +x "$NON_PI/bin/herdr"
 ln -s ../herdr "$NON_PI_FAKEBIN/herdr"
 cat > "$NON_PI_FAKEBIN/treehouse" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${FM_FAKE_TREEHOUSE_LOG:?}"
 printf '%s\n' "${FM_FAKE_PANE_PATH:?}"
 SH
-fm_fake_exit0 "$NON_PI_FAKEBIN" pi-signed
+fm_fake_exit0 "$NON_PI_FAKEBIN" pi-signed kimi
 fm_test_fake_sleep_noop "$NON_PI_FAKEBIN"
 chmod +x "$NON_PI_FAKEBIN/treehouse"
+seed_non_pi_projection() {
+  cat > "$NON_PI_STATE" <<JSON
+{"next":2,"workspaces":[{"workspace_id":"parent","label":"firstmate","focused":true,"active_tab_id":"parent:t1"}],"tabs":[{"tab_id":"parent:t1","label":"shell","workspace_id":"parent","pane_id":"parent:p1","cwd":"$NON_PI_PROJECT","foreground_cwd":"$NON_PI_PROJECT","focused":true}],"typed":{},"working":{}}
+JSON
+}
 : > "$NON_PI_TREEHOUSE_LOG"
 set +e
 non_pi_out=$(HERDR_SESSION=lab-structural FM_FAKE_TREEHOUSE_LOG="$NON_PI_TREEHOUSE_LOG" \
@@ -1837,5 +1885,80 @@ assert_grep 'cd -- ' "$NON_PI_LOG" \
 assert_grep 'pane send-text' "$NON_PI_LOG" \
   "non-Pi Herdr relaunch did not retain interactive launch submission"
 pass "non-Pi Herdr harnesses retain interactive isolated-worktree launch and relaunch behavior"
+
+printf 'on\n' > "$NON_PI_HOME/config/herdr-presentation-spaces"
+seed_non_pi_projection
+: > "$NON_PI_LOG"
+fm_test_spawn_brief "$NON_PI_HOME" non-pi-kimi-fail "Clean a projected non-Pi endpoint after readiness fails."
+mkdir -p "$NON_PI_HOME/user-home/.kimi-code"
+printf '%s\n' 'default_model = "test"' > "$NON_PI_HOME/user-home/.kimi-code/config.toml"
+set +e
+non_pi_kimi_out=$(HERDR_SESSION=lab-structural HERDR_PANE_ID= \
+  FM_FAKE_TREEHOUSE_LOG="$NON_PI_TREEHOUSE_LOG" FM_KIMI_READY_POLLS=1 \
+  fm_test_run_spawn "$NON_PI_HOME" "$NON_PI_WT" "$NON_PI_FAKEBIN" \
+    non-pi-kimi-fail "$NON_PI_PROJECT" --scout --harness kimi --backend herdr)
+non_pi_kimi_status=$?
+set -e
+[ "$non_pi_kimi_status" -ne 0 ] || fail "projected Kimi readiness failure unexpectedly reported success"
+assert_contains "$non_pi_kimi_out" "kimi did not show a verified ready signal" \
+  "projected Kimi fixture did not reach its readiness failure"
+[ "$(jq -r '[.tabs[] | select(.label == "fm-non-pi-kimi-fail")] | length' "$NON_PI_STATE")" = 0 ] \
+  || fail "projected Kimi readiness failure orphaned its Herdr endpoint"
+[ ! -e "$NON_PI_HOME/state/non-pi-kimi-fail.meta" ] \
+  || fail "projected Kimi readiness failure retained its rolled-back task record"
+[ ! -e "$NON_PI_HOME/state/non-pi-kimi-fail.herdr-presentation" ] \
+  || fail "projected Kimi readiness failure retained its presentation journal"
+assert_grep 'pane close' "$NON_PI_LOG" \
+  "projected Kimi readiness failure did not close its exact endpoint"
+pass "non-Pi Herdr readiness failures clean projected endpoint ownership"
+
+if command -v tasks-axi >/dev/null 2>&1; then
+  BACKLOG_ID=non-pi-backlog-fail
+  seed_non_pi_projection
+  : > "$NON_PI_LOG"
+  fm_test_spawn_brief "$NON_PI_HOME" "$BACKLOG_ID" "Clean a projected non-Pi endpoint after backlog commit fails."
+  cat >> "$NON_PI_HOME/data/$BACKLOG_ID/brief.md" <<'EOF'
+
+# Definition of done
+Delivery contract: mode=no-mistakes
+EOF
+  cat > "$NON_PI_HOME/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+EOF
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$NON_PI_HOME/data/backlog.md"
+  tasks-axi add "$BACKLOG_ID" "Projected backlog failure" --kind ship \
+    --file "$NON_PI_HOME/data/backlog.md" >/dev/null
+  REAL_TASKS_AXI=$(command -v tasks-axi)
+  cat > "$NON_PI_FAKEBIN/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = start ]; then exit 75; fi
+exec '$REAL_TASKS_AXI' "\$@"
+SH
+  chmod +x "$NON_PI_FAKEBIN/tasks-axi"
+  set +e
+  non_pi_backlog_out=$(HERDR_SESSION=lab-structural HERDR_PANE_ID= \
+    FM_FAKE_TREEHOUSE_LOG="$NON_PI_TREEHOUSE_LOG" \
+    fm_test_run_spawn "$NON_PI_HOME" "$NON_PI_WT" "$NON_PI_FAKEBIN" \
+      "$BACKLOG_ID" "$NON_PI_PROJECT" --harness pi-signed --backend herdr \
+      --mode no-mistakes --yolo off)
+  non_pi_backlog_status=$?
+  set -e
+  [ "$non_pi_backlog_status" -ne 0 ] || fail "projected backlog failure unexpectedly reported success"
+  assert_contains "$non_pi_backlog_out" "backlog item could not be moved to In flight" \
+    "projected non-Pi fixture did not reach backlog commit failure"
+  [ "$(jq -r --arg label "fm-$BACKLOG_ID" '[.tabs[] | select(.label == $label)] | length' "$NON_PI_STATE")" = 0 ] \
+    || fail "projected backlog failure orphaned its Herdr endpoint"
+  [ ! -e "$NON_PI_HOME/state/$BACKLOG_ID.meta" ] \
+    || fail "projected backlog failure retained its rolled-back task record"
+  [ ! -e "$NON_PI_HOME/state/$BACKLOG_ID.herdr-presentation" ] \
+    || fail "projected backlog failure retained its presentation journal"
+  assert_grep 'pane close' "$NON_PI_LOG" \
+    "projected backlog failure did not close its exact endpoint"
+  rm -f "$NON_PI_FAKEBIN/tasks-axi" "$NON_PI_HOME/.tasks.toml" "$NON_PI_HOME/data/backlog.md"
+  pass "non-Pi Herdr backlog failures clean projected endpoint ownership"
+fi
 
 printf '# all fm-herdr-layout-apply tests passed\n'

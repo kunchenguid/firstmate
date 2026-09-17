@@ -5136,7 +5136,8 @@ else
   sleep 0.3
   spawn_send_key "$T" Enter
 fi
-if [ "$BACKEND" = herdr ] && [ "$HERDR_LAYOUT_ENDPOINT_COMMITTED" != 1 ]; then
+if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ] \
+  && [ "$HERDR_LAYOUT_ENDPOINT_COMMITTED" != 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
 fi
 if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
