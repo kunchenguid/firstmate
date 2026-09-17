@@ -261,10 +261,13 @@ Independently, `fm-spawn.sh`, `fm-send.sh`, `fm-control.sh`, and `fm-teardown.sh
 A normal primary checkout or crewmate worktree has neither signal and remains unaffected.
 The helper's header owns the exact signal detection, relocated-home limitation, test-harness bypass, and relationship to no-mistakes' HEAD-continuity guard.
 
-## Two task shapes
+## Three task shapes
 
 Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks leave standalone investigation reports at `data/<id>/report.md` and never push.
 The intake and authority contract in `AGENTS.md` owns when separate scout research is warranted.
+Executor tasks (`kind=executor`) are one-shot, non-interactive workers launched into an ordinary pooled task worktree on a pre-created `fm/<id>` branch, told through the short brief `bin/fm-brief.sh --executor` writes to close exactly one scoped GitHub issue and open a pull request, and expected to exit; the `executor-dispatch` skill owns when firstmate chooses that shape and how it reviews the result.
+Their state is structural by design: an executor writes no status line, arms no busy hook, and reads no steering inbox, so `bin/fm-executor-lib.sh` derives it from the pane shell's exit marker plus a live pull-request read on the task branch (exit with a pull request is ready, exit without one is failed, still running is working, running past `FM_EXECUTOR_MAX_RUNTIME` is stale), the byte-static `bin/fm-executor-poll.sh` runs in the watcher's slow-check sweep over the task's validated record, and `bin/fm-crew-state.sh` reads the same facts on demand.
+Everything vendor-specific about an executor (the CLI, the model, the provider) is a dispatch-profile choice in the captain's local `config/crew-dispatch.json`; the tracked code accepts only adapters with a verified headless one-shot form, and [`verification/executor.md`](verification/executor.md) owns that evidence.
 
 ## Dispatch profiles
 
@@ -323,6 +326,7 @@ The `data/secondmates.md` line contract is owned by the [`secondmate-provisionin
 
 `no-mistakes` tasks run the full validation pipeline, `direct-PR` tasks open PRs without that pipeline, and `local-only` tasks stay local until firstmate performs an approved fast-forward merge.
 Each task's mode and `yolo` merge posture are firstmate's decision at intake.
+An executor's delivery is inherently `direct-PR` and is recorded as such, so `bin/fm-spawn.sh --executor` refuses `--mode` and the rigor that replaces the pipeline is firstmate's own real-diff review before merge; `yolo` still governs merge authority exactly as for a ship task.
 The mode is passed explicitly to `bin/fm-brief.sh`, and both values are passed explicitly to `bin/fm-spawn.sh` and `bin/fm-promote.sh`; each command refuses to guess the values it consumes.
 A ship brief records its mode as a fixed machine-readable line and the spawn refuses to launch on a different one, so the worker's instructions and the recorded task delivery cannot diverge.
 `bin/fm-dod-lib.sh` is the one owner of that mode's definition of done, rendered into a generated ship brief, the ship instructions a promoted scout receives, and that scout's own `brief.md` so a later relaunch reads the same contract, so a promoted worker cannot be handed a weaker contract than a briefed one.

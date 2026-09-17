@@ -45,6 +45,9 @@ The clear is refused before anything is sent when the recorded backend cannot de
 
 `exit` reads the composer's state before typing the exit command and requires the exact `empty` verdict; a `pending` verdict refuses by naming the pending text, and any other verdict (`unknown`, `pending-unproven`, or an unreadable read) refuses as not proven empty, matching the fail-safe contract every other consumer that can overwrite composer input follows.
 
+A `kind=executor` task is a one-shot headless process rather than an interactive agent, so the verbs change shape for it: `interrupt` is refused because a one-shot has no turn to cancel while leaving it running, `exit` sends Ctrl-C and reads the pane shell's exit marker or the dead verdict (escalating to SIGTERM on the foreground process group where the backend exposes it, never the pane shell, and failing closed with `exit=unconfirmed` otherwise), and `relaunch` re-runs the one-shot in the same worktree on the same `fm/<id>` branch with an optional note, confirming the replacement when its process is alive or ambiguous or when it has already exited and written its marker.
+`bin/fm-control.sh`'s header owns those mechanics and `bin/fm-control-lib.sh` limits an executor relaunch to the adapters with a verified headless form.
+
 **Teardown and discard are not verbs and will not become verbs.**
 `exit` stops an agent and preserves everything else.
 Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
@@ -123,5 +126,5 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 ## Verification
 
 - `tests/fm-control.test.sh` - the adapter contract for its verified-harness lane (adapters outside the lane pin their control mechanics in their own harness suites), the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
-- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
+- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, rollback after a failed launch, and the executor relaunch that re-arms its poll in place; `tests/fm-control.test.sh` also carries the executor exit and refused-interrupt cases.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.
