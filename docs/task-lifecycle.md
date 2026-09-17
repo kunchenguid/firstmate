@@ -65,35 +65,41 @@ That path always selects `close` and still requires a candidate result with no u
 The closure archive embeds the complete acceptance and selected-route evidence before the live lifecycle record is retired.
 A durable lifecycle record also retains the task's short reference and current-task visibility after worker cleanup or bounded backlog-history rotation; guarded closure retires that live record and its reference can then follow the ordinary cooldown.
 
-## Human-action translation
+## Attention allocation
 
-Lifecycle projection and captain guidance have separate jobs.
-`bin/fm-next.sh` deterministically decides which fleet item deserves captain attention, but its card describes the physical or mental action rather than the transition that action may cause.
-The selection order is concrete captain actions that restart work, bounded actions that close high-value loops, unresolved decisions that release dependencies, other worthwhile captain attention, and closure only when no forward work can move.
+`/next` is an attention-allocation interface rather than a lifecycle interface.
+It operates in three phases: CHOOSE the fleet item that deserves attention, PREPARE that item as far as Firstmate safely can, then HAND OFF only the smallest useful action that still requires the captain.
+
+`bin/fm-next.sh` is the deterministic CHOOSE owner.
+It ranks concrete captain actions that restart work, bounded actions that close high-value loops, unresolved decisions that release dependencies, other worthwhile captain attention, and closure only when no forward work can move.
 Ordinary work Firstmate can continue without the captain is never eligible.
 Priority, downstream work released, active work, wait age, callsign, and canonical id break ties in that order.
+The model never re-ranks that result or substitutes a task from memory.
 
-The task brief is the durable owner of an optional `## Captain review plan` subsection and stays available after worker cleanup through task closure and archival.
+Schema `fm-next.v4` separates the selected task's `fm-next-prepare.v1` evidence packet from opt-in diagnostics.
+The preparation packet composes durable intent, the phase-specific plan, lifecycle evidence, artifacts, repository location and state, the existing result, and closure preflight evidence.
+The `/next` skill may use model judgment and read-only tools to inspect those inputs, run an already-authorized focused check, open an existing safe review surface, or reduce a decision before asking for attention.
+Preparation does not grant authority to edit code, change lifecycle state, accept, deliver, merge, close, start speculative work, or perform a destructive, irreversible, or security-sensitive action.
+If preparation proves the selected action obsolete, the skill reruns the same deterministic selector once against fresh state and never loops or hands off the stale action.
+
+The task brief remains the durable owner of the optional `## Captain review plan` subsection used as preparation input.
 The subsection uses one-line `Review`, `Delivery`, or `Monitoring` fields named `Action`, `Context`, `Check`, `Success`, `Failure`, `Continue`, and `Fix`; `Check` may repeat, and an unprefixed field belongs to review.
 For example:
 
 ```text
 ## Captain review plan
-Review Action: Run the root-level Firstmate launcher and verify its documented behavior
-Review Context: The launcher and README instructions are complete.
-Review Check: From the repository root, run the launcher.
-Review Check: Confirm it starts Firstmate in the intended repository context.
-Review Check: Verify the README instructions match what the launcher actually does.
-Review Success: The launcher starts in the intended context and the README matches reality.
-Review Failure: The launcher starts in the wrong context or the README differs from observed behavior.
-Review Fix: Name the first mismatch and return it as one concrete correction.
+Review Action: Test the new fm launcher
+Review Context: The launcher implementation, executable tests, and README are the bounded preparation targets.
+Review Check: From the repository root, run `./fm --mode text` and confirm the expected Firstmate extensions and repository context.
+Review Success: The launcher starts in the expected context.
+Review Failure: The launcher fails or starts in the wrong context.
 ```
 
-`bin/fm-task.sh` is the structured aggregation owner for that plan plus durable task intent, current outcome, artifact type, and artifact locations.
-`bin/fm-next.sh` may turn only that supplied evidence into checks and outcomes; it never invents acceptance criteria.
-When no specific plan or criterion exists, the card requests one concrete inspection and names the question it must answer.
-A review correction is a possible outcome of the selected inspection, never a competing action.
-At most two alternatives may be shown, and they are the next ranked eligible actions from the same immutable candidate set.
+`bin/fm-task.sh` is the structured aggregation owner for the plan plus durable task intent, current outcome, artifact type, and artifact locations.
+Normal `/next` output is limited to an action title, short reference and meaningful name, at most two short context sentences saying what preparation established, one exact command, location, choice, or physical check, and one simple response or observable done condition.
+It omits selection rationale, ranking and candidate counts, alternatives, lifecycle transitions, outcome taxonomies, raw requirements, raw revision hashes, delivery and worker mechanics, and task-detail detours.
+`/next --why` adds a concise human explanation after the action, while `/next --debug` returns structured ranking, candidate, and lifecycle diagnostics.
+Neither mode changes selection or state.
 
 ## Command surfaces
 
@@ -103,8 +109,8 @@ At most two alternatives may be shown, and they are the next ranked eligible act
   The approved Pi `/t` router is its compact alias: bare `/t` toggles this dashboard, while `/t <selector>` routes to `/task <selector>`.
   Its JSON also provides `next_action`, `route`, `close_ready`, and the durable lifecycle record.
 - `/task <selector>` shows the current or archived task, dates, result, acceptance evidence, selected route, artifacts, retained knowledge, follow-ups, and the exact next action.
-- `/next` identifies the highest-value concrete thing for the captain to do, explains why it outranks the rest, and separates the action from its possible outcomes.
-  Its ranking and evidence boundary are defined above, and it proposes archival closure only when no forward work can move and the selected route is complete.
+- `/next` chooses and prepares the highest-value use of captain attention, then returns only the smallest remaining action.
+  `/next --why` adds concise selection rationale and `/next --debug` exposes structured diagnostics without changing selection or state.
 - `/close` previews or performs guarded archival closure.
   It refuses incomplete review, acceptance, delivery, or monitoring and supports the explicit combined `--accept-close` form described above.
 - `/history [query]` searches closed tasks and displays their acceptance and route evidence; version-1 archives remain visible with `acceptance not recorded`.

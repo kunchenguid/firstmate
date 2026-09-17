@@ -22,7 +22,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-bearings-board.sh`   | Build and arm the stable interactive `/report lavish` fleet board                    |
 | `fm-task-lifecycle.sh`    | Project and guard the captain-facing review, acceptance, delivery, monitoring, and return-to-work lifecycle |
 | `fm-tasks.sh`             | Render the compact current-task table and maintain private short references and human names |
-| `fm-next.sh`              | Rank captain actions and render the highest-value one as concrete evidence-bound guidance |
+| `fm-next.sh`              | Deterministically choose the highest-value captain action, compose its preparation packet, and keep rationale and diagnostics opt-in |
 | `fm-task.sh`              | Compose one stable current-or-closed task detail card and JSON record from canonical sources |
 | `fm-close.sh`             | Verify completed tasks, compose guarded cleanup, archive private material, and remove closed rows through tasks-axi |
 | `fm-history.sh`           | Render and search durable private closed-task records by canonical id or human name |

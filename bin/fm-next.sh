@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# Select and render the highest-value concrete action for the captain.
+# Choose the highest-value captain action and compose its preparation packet.
 #
-# Usage: fm-next.sh [--json] [--snapshot <path>|-]
+# Usage: fm-next.sh [--json] [--why|--debug] [--snapshot <path>|-]
 #
-# docs/task-lifecycle.md owns the boundary between deterministic fleet ranking
-# and human-action translation. This command composes fm-task-lifecycle.sh,
-# excludes work Firstmate can continue autonomously, ranks every eligible action
-# without mutation, and then renders the selected action from durable task
-# intent, review-plan, completion, artifact, and blocker evidence. It never
-# treats a possible review outcome as an alternative action.
+# docs/task-lifecycle.md owns the boundary between deterministic fleet ranking,
+# bounded read-only preparation, and the final captain handoff. This command is
+# the deterministic CHOOSE owner: it composes fm-task-lifecycle.sh, excludes work
+# Firstmate can continue autonomously, and ranks every eligible action without
+# mutation. Schema fm-next.v4 keeps the selected task's PREPARE inputs separate
+# from diagnostics. Normal text is a terse deterministic handoff seed; --why
+# adds a concise selection explanation, while --debug emits structured ranking,
+# candidate, and lifecycle diagnostics. Neither flag changes selection or state.
 #
 # Ranking, in order:
 #   1. one concrete captain action that restarts work already under way;
@@ -17,13 +19,13 @@
 #   4. other captain attention that meaningfully advances authorized work;
 #   5. archival closure, only when no forward work can move.
 # Within one class: explicit priority, downstream work released, active before
-# inactive, oldest wait, callsign, then canonical id. At most two lower-ranked
-# candidates are shown as genuine alternative actions from that same set.
+# inactive, oldest wait, callsign, then canonical id.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SNAPSHOT_COMMAND="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 FORMAT=text
+MODE=normal
 SNAPSHOT_PATH=
 
 usage() {
@@ -33,6 +35,14 @@ usage() {
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --json) FORMAT=json ;;
+    --why)
+      [ "$MODE" = normal ] || { echo "fm-next: --why and --debug are mutually exclusive" >&2; exit 2; }
+      MODE=why
+      ;;
+    --debug)
+      [ "$MODE" = normal ] || { echo "fm-next: --why and --debug are mutually exclusive" >&2; exit 2; }
+      MODE=debug
+      ;;
     --snapshot)
       shift
       [ "$#" -gt 0 ] || { echo "fm-next: --snapshot requires a path or -" >&2; exit 2; }
@@ -119,6 +129,12 @@ RESULT=$(printf '%s\n' "$SNAPSHOT" | jq -e \
          review_plan:($record.review_plan // $row.lifecycle.reviewPlan // null),
          completion_evidence:($record.completion_evidence // $row.lifecycle.completionEvidence // null),
          requirements:{captainIntent:($record.captain_intent // null),firstmateSpec:($record.firstmate_spec // null)},
+         repository_state:{projectLabel:($record.repo // null),projectPath:($task.project // null),
+           worktreePath:($task.paths.worktree.path // null),worktreePresent:($task.paths.worktree.present // false),git:($record.repository_state.git // null)},
+         existing_result:{summary:($record.completion_evidence.summary // $row.outcome // $task.current_state.detail // null),
+           report:($task.paths.report // (if ($record.report_path // "") == "" then null else {path:$record.report_path,present:null} end)),
+           contentExcerpt:($record.existing_result.contentExcerpt // null)},
+         closure_review:($record.closure_review // null),
          durable_context:($record.body_excerpt // null)};
   def phase_kind($row):
       if $row.status == "done" then "review"
@@ -198,11 +214,11 @@ RESULT=$(printf '%s\n' "$SNAPSHOT" | jq -e \
            "The accepted result is complete and only archival closure remains.";false) ]) as $closures
   | (if ($forward | length) > 0 then $forward elif $autonomous_forward then [] else $closures end
      | sort_by([.rank_class,.priority_rank,(-.downstream_released),.active_rank,.actionable_since,.sort_callsign,.canonical_id])) as $ranked
-  | {schema:"fm-next.v3",generated:$snapshot.generated,selection:($ranked[0] // null),
-     alternatives:($ranked[1:3] // []),
-     ranking:{eligible:($ranked|length),forward_eligible:($forward|length),closure_eligible:($closures|length),
-       autonomous_forward_present:$autonomous_forward,
-       order:["captain_value_class","priority","downstream_released","active","oldest_actionable_wait","callsign","canonical_id"]}}
+  | {schema:"fm-next.v4",generated:$snapshot.generated,selection:($ranked[0] // null),
+     _candidates:$ranked,
+     _diagnostics:{ranking:{eligible:($ranked|length),forwardEligible:($forward|length),closureEligible:($closures|length),
+       autonomousForwardPresent:$autonomous_forward,
+       order:["captain_value_class","priority","downstream_released","active","oldest_actionable_wait","callsign","canonical_id"]}}}
 ' 2>&1) || { printf 'fm-next: %s\n' "$RESULT" >&2; exit 1; }
 
 # Live output enriches only the already-selected main-home task. The ranking is
@@ -231,18 +247,44 @@ if [ -z "$SNAPSHOT_PATH" ] && [ "$(printf '%s\n' "$RESULT" | jq -r '.selection !
          elif ($line | startswith("- Continue existing task ")) and .mode == "follow-ups" then .follow_ups += [($line | ltrimstr("- Continue existing task "))]
          else . end) | del(.mode)')
   fi
-  RESULT=$(printf '%s\n' "$RESULT" | jq --argjson detail "$DETAIL" --argjson closureReview "$CLOSURE_REVIEW" '
+  REPORT_EXCERPT=null
+  REPORT_FILE="${FM_DATA_OVERRIDE:-${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}/data}/$SELECTED_ID/report.md"
+  if [ -f "$REPORT_FILE" ] && [ ! -L "$REPORT_FILE" ]; then
+    REPORT_EXCERPT=$(head -c 16384 "$REPORT_FILE" | jq -R -s '.') \
+      || { echo "fm-next: could not read the selected result" >&2; exit 1; }
+  fi
+  REPOSITORY_GIT=null
+  WORKTREE=$(printf '%s\n' "$RESULT" | jq -r '.selection.repository_state.worktreePath // empty')
+  if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ] \
+     && git -C "$WORKTREE" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    BRANCH=$(git -C "$WORKTREE" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+    TRACKED_CHANGES=true
+    if git -C "$WORKTREE" --no-pager diff --quiet --no-ext-diff -- \
+       && git -C "$WORKTREE" --no-pager diff --cached --quiet --no-ext-diff --; then
+      TRACKED_CHANGES=false
+    fi
+    REPOSITORY_GIT=$(jq -n --arg branch "$BRANCH" --argjson trackedChanges "$TRACKED_CHANGES" \
+      '{branch:(if $branch == "" then null else $branch end),trackedChanges:$trackedChanges}')
+  fi
+  RESULT=$(printf '%s\n' "$RESULT" | jq --argjson detail "$DETAIL" --argjson closureReview "$CLOSURE_REVIEW" \
+    --argjson reportExcerpt "$REPORT_EXCERPT" --argjson repositoryGit "$REPOSITORY_GIT" '
     .selection.task_detail=$detail
     | .selection.artifact=(.selection.artifact // $detail.artifacts[0] // null)
     | .selection.artifact_type=($detail.completionEvidence.artifactType // .selection.artifact_type)
     | .selection.review_plan=(.selection.review_plan // $detail.reviewPlan)
     | .selection.completion_evidence=(.selection.completion_evidence // $detail.completionEvidence)
     | .selection.requirements=(.selection.requirements * ($detail.requirements // {}))
+    | .selection.repository_state.git=$repositoryGit
+    | .selection.existing_result=(.selection.existing_result * {summary:$detail.completionEvidence.summary,
+        report:(if ($detail.artifacts | map(select(test("/report\\.md$"))) | length) > 0
+          then {path:($detail.artifacts | map(select(test("/report\\.md$")))[0]),present:true}
+          else .selection.existing_result.report end),contentExcerpt:$reportExcerpt})
     | if .selection.kind == "closure" then .selection.closure_review=$closureReview else . end
+    | ._candidates[0]=.selection
   ') || { echo "fm-next: could not compose selected task evidence" >&2; exit 1; }
 fi
 
-RESULT=$(printf '%s\n' "$RESULT" | jq -e '
+RESULT=$(printf '%s\n' "$RESULT" | jq -e --arg mode "$MODE" '
   def text($value; $fallback):
     ($value // "") as $v
     | if ($v | type) != "string" or ($v | length) == 0 then $fallback
@@ -259,132 +301,163 @@ RESULT=$(printf '%s\n' "$RESULT" | jq -e '
      elif $c.kind == "delivery" then $c.review_plan.delivery
      elif $c.kind == "monitoring" then $c.review_plan.monitoring
      else null end) | meaningful_plan(.);
-  def evidence($c): ($c.completion_evidence // {}) as $e | text($e.summary; text($c.current_detail; $c.reason));
+  def evidence($c):
+    ($c.completion_evidence // {}) as $e
+    | text($e.summary; text($c.existing_result.summary; text($c.current_detail; $c.reason)));
   def intent($c): text($c.requirements.captainIntent; text($c.durable_context; $c.name));
+  def artifact_locations($c):
+    ([$c.artifact, $c.existing_result.report.path]
+      + ($c.completion_evidence.artifacts // []) + ($c.task_detail.artifacts // []))
+    | map(select(. != null and . != "")) | unique;
   def location($c):
-    if ($c.artifact // "") != "" then $c.artifact
-    elif $c.artifact_type == "local branch" then "the ready local branch"
-    else "the recorded task result" end;
-  def credential($c): ($c.reason | test("credential|token|log[ -]?in|authentication|api[ -]?key|secret"; "i"));
-  def approval($c): ($c.reason | test("approve|approval|authorize|permission|consent"; "i"));
+    (artifact_locations($c)) as $locations
+    | if ($locations | length) > 0 then $locations[0]
+      elif ($c.repository_state.worktreePath // "") != "" then $c.repository_state.worktreePath
+      else null end;
+  def credential($c):
+    (text($c.reason; "") | test("credential|token|log[ -]?in|authentication|api[ -]?key|secret"; "i"));
+  def approval($c):
+    (text($c.reason; "") | test("approve|approval|authorize|permission|consent"; "i"));
   def approval_action($c):
-    if ($c.reason | test("^approve[[:space:]]+"; "i")) then
-      "Approve or decline " + ($c.reason | sub("^[Aa]pprove[[:space:]]+"; ""))
-    elif ($c.reason | test("^authorize[[:space:]]+"; "i")) then
-      "Authorize or decline " + ($c.reason | sub("^[Aa]uthorize[[:space:]]+"; ""))
+    if (text($c.reason; "") | test("^approve[[:space:]]+"; "i")) then
+      "Approve or decline " + (text($c.reason; "") | sub("^[Aa]pprove[[:space:]]+"; ""))
+    elif (text($c.reason; "") | test("^authorize[[:space:]]+"; "i")) then
+      "Authorize or decline " + (text($c.reason; "") | sub("^[Aa]uthorize[[:space:]]+"; ""))
     else "Approve or decline " + $c.name end;
   def action($c):
     (phase_plan($c)) as $plan
     | if $c.kind == "captain_action" then
-        if credential($c) then "Provide the credential or login needed for " + $c.name
+        if credential($c) then "Complete the login for " + $c.name
         elif approval($c) then approval_action($c)
         else text($c.reason; "Answer the open question for " + $c.name) end
-      elif $c.kind == "queued_choice" then "Decide whether " + $c.name + " should start now"
-      elif $c.kind == "review" then text($plan.action; "Inspect the " + $c.artifact_type + " for " + $c.name)
-      elif $c.kind == "acceptance" then text($plan.action; "Finish checking " + $c.name)
+      elif $c.kind == "queued_choice" then "Choose whether to start " + $c.name
+      elif $c.kind == "review" or $c.kind == "acceptance" then
+        text($plan.action; if location($c) == null then "Locate the result for " + $c.name else "Check " + $c.name end)
       elif $c.kind == "delivery" then text($plan.action; "Approve or decline delivery of " + $c.name)
-      elif $c.kind == "monitoring" then text($plan.action; "Check " + $c.name + " after delivery")
-      else "Close " + $c.name end;
+      elif $c.kind == "monitoring" then text($plan.action; "Check " + $c.name)
+      else "Authorize closing " + $c.name end;
   def context($c):
     (phase_plan($c)) as $plan
     | if ($plan.context // "") != "" then text($plan.context; evidence($c))
-      elif $c.kind == "captain_action" then "Work has stopped because " + text($c.reason; evidence($c)) + "."
-      elif $c.kind == "queued_choice" then "The work is authorized but has not started; the remaining question is whether it is the best use of attention now."
-      elif $c.kind == "review" then evidence($c) + ". The " + $c.artifact_type + " is ready for the checks below."
-      elif $c.kind == "acceptance" then evidence($c) + ". Complete the checks below before choosing an outcome."
-      elif $c.kind == "delivery" then evidence($c) + ". The accepted result is waiting on the delivery decision below."
-      elif $c.kind == "monitoring" then evidence($c) + ". Use the recorded observation checks below to decide whether it is healthy."
-      else text($c.closure_review.result; evidence($c)) + ". The accepted work is complete and ready to archive." end;
-  def missing_review_check($c):
-    "Open " + location($c) + " and answer one question: does it satisfy this recorded intent - " + intent($c) + "?";
-  def checks($c):
+      elif $c.kind == "captain_action" then
+        if ($c.completion_evidence.summary // "") != "" then text($c.completion_evidence.summary; "")
+        else "I checked the task context; this input is the only remaining step before work can resume." end
+      elif $c.kind == "queued_choice" then "I checked the ready work; only the start choice remains."
+      elif $c.kind == "review" or $c.kind == "acceptance" then
+        if location($c) == null then "I found no readable result or task-specific review evidence, so I could not reduce the check further."
+        else "I gathered the available result and verification evidence; the remaining uncertainty is below." end
+      elif $c.kind == "delivery" then "I checked the accepted result and delivery evidence; only explicit approval remains."
+      elif $c.kind == "monitoring" then "I gathered the available post-delivery evidence; the remaining physical check is below."
+      else
+        "I preflighted retention and cleanup: "
+        + text($c.closure_review.result; evidence($c))
+        + (if ($c.closure_review.cleanup // "") == "" then "." else "; " + text($c.closure_review.cleanup; "") + "." end)
+      end;
+  def instruction($c):
     (phase_plan($c)) as $plan
-    | if (($plan.checks // []) | length) > 0 then $plan.checks | map(text(.; ""))
+    | if (($plan.checks // []) | length) > 0 then ($plan.checks | map(text(.; "")) | join(" "))
       elif $c.kind == "captain_action" and credential($c) then
-        [text($c.reason; "Complete the named login or credential step."), "Complete the credential step without pasting a secret into chat."]
-      elif $c.kind == "captain_action" and approval($c) then
-        [text($c.reason; "Review the approval request."), "Reply with approve or decline and name any constraint that must be preserved."]
-      elif $c.kind == "captain_action" then
-        [text($c.reason; "Read the open question."), "Reply with the exact choice or information needed to resume the work."]
-      elif $c.kind == "queued_choice" then
-        ["Compare this task with the work already under way.", "Reply with start " + $c.ref + ", or name the task that should come first."]
-      elif $c.kind == "review" or $c.kind == "acceptance" then [missing_review_check($c)]
+        text($c.reason; "Complete the named login.") + " Do not paste a secret into chat."
+      elif $c.kind == "captain_action" then text($c.reason; "Provide the exact choice needed to resume work.")
+      elif $c.kind == "queued_choice" then "Choose `start " + $c.ref + "` or name the work that should come first."
+      elif $c.kind == "review" or $c.kind == "acceptance" then
+        if location($c) == null then "Send the result location or result needed to check: " + intent($c)
+        else "At " + location($c) + ", check only this remaining uncertainty: " + intent($c) end
       elif $c.kind == "delivery" then
-        [(if ($c.artifact // "") != "" then "Open " + $c.artifact + " and confirm it is the accepted result." else "Confirm the accepted result matches the recorded task." end),
-         "Reply with approve or decline; if declining, name the first concrete correction."]
-      elif $c.kind == "monitoring" then
-        ["Inspect the recorded post-delivery evidence and answer whether the delivered behavior is healthy."]
-      else ["Run /task " + $c.ref + " and confirm the recorded scope is complete.", "Run /close " + $c.ref + "."] end;
-  def success($c):
-    (phase_plan($c)) as $plan
-    | if ($plan.success // "") != "" then text($plan.success; "")
-      elif $c.kind == "captain_action" then "The requested answer, approval, or credential step is complete and the stopped work can resume."
-      elif $c.kind == "queued_choice" then "The task either has a clear start instruction or a named reason to wait."
-      elif $c.kind == "review" or $c.kind == "acceptance" then "Every recorded requirement is visibly satisfied."
-      elif $c.kind == "delivery" then "The accepted result has an explicit deliver or do-not-deliver decision."
-      elif $c.kind == "monitoring" then "The recorded health checks pass for the required observation window."
-      else "The task is archived and its retained result remains available through /history." end;
-  def failure($c):
-    (phase_plan($c)) as $plan
-    | if ($plan.failure // "") != "" then text($plan.failure; "")
-      elif $c.kind == "captain_action" then "The requested action cannot be completed; state the missing access or unresolved choice."
-      elif $c.kind == "queued_choice" then "A higher-value prerequisite is identified and named instead."
-      elif $c.kind == "review" or $c.kind == "acceptance" then "A recorded requirement does not match the result; name the first concrete mismatch."
-      elif $c.kind == "delivery" then "Delivery should not proceed; name the first concrete correction."
-      elif $c.kind == "monitoring" then "A health check fails; name the observed regression."
-      else "The detail reveals unfinished accepted scope; keep it open and name that scope." end;
+        if location($c) == null then "Approve or decline delivery of the accepted result."
+        else "At " + location($c) + ", approve or decline delivery of the accepted result." end
+      elif $c.kind == "monitoring" then "Check the delivered behavior against the recorded health target."
+      else "Authorize closing and cleanup for " + $c.name + "." end;
+  def response($c):
+    (action($c) + " " + instruction($c)) as $surface
+    | if $c.kind == "captain_action" and credential($c) then "Reply `ready` when access works, or send the non-secret error."
+      elif $c.kind == "captain_action" and approval($c) then "Reply `approve` or `decline: <reason>`."
+      elif $c.kind == "captain_action" or $c.kind == "queued_choice" then "Reply with the choice."
+      elif ($c.kind == "review" or $c.kind == "acceptance") and ($surface | test("visual|browser|screen|layout|dashboard|lavish"; "i")) then
+        "Reply `looks good`, or name the first visible mismatch."
+      elif $c.kind == "review" or $c.kind == "acceptance" then "Reply `works`, or send the observed failure."
+      elif $c.kind == "delivery" then "Reply `approve` or `decline: <reason>`."
+      elif $c.kind == "monitoring" then "Reply `healthy`, or send the observed failure."
+      else "Reply `close` to authorize cleanup, or name what must stay open." end;
   def why($c; $other_count):
-    (if $c.class == "restart" then "It is the smallest captain action that restarts work already under way."
-     elif $c.class == "close_loop" then "It is a bounded check that can close a high-value open loop."
-     elif $c.class == "dependency_release" then "It resolves a decision that releases dependent work."
-     elif $c.class == "advance" then "It is the highest-value remaining action that moves authorized work forward."
+    (if $c.class == "restart" then "This is the smallest action that restarts work already under way."
+     elif $c.class == "close_loop" then "This bounded check can close the highest-value open loop."
+     elif $c.class == "dependency_release" then "This decision releases dependent work."
+     elif $c.class == "advance" then "This is the highest-value captain action that advances authorized work."
      else "No forward work can move, so closing completed work is the most useful remaining action." end)
-    + (if $c.downstream_released > 0 then " It unlocks \($c.downstream_released) dependent task(s)."
-       elif $c.class == "restart" then " Completing it lets the stopped work continue."
-       elif $c.class == "close_loop" then " Completing it decides whether the finished result can move on or needs one correction."
-       elif $c.class == "advance" then " Completing it moves the selected task to its next authorized step."
-       else " Completing it clears finished work from active attention." end)
-    + (if $other_count > 0 then " It outranks \($other_count) other action(s) available now."
-       else " No other captain action is available now." end);
-  def outcomes($c):
+    + (if $c.downstream_released > 0 then " It unlocks \($c.downstream_released) dependent task(s)." else "" end)
+    + (if $other_count > 0 then " It ranked ahead of \($other_count) other eligible action(s)."
+       else " No other captain action is eligible now." end);
+  def preparation($c):
     (phase_plan($c)) as $plan
-    | if $c.kind == "review" or $c.kind == "acceptance" then
-        [{label:"ACCEPT",text:(success($c) + " Record acceptance and let the selected follow-through proceed.")},
-         {label:"CONTINUE",text:text($plan.continue; "Keep inspecting only if the evidence is inconclusive, and name what is still missing.")},
-         {label:"FIX",text:text($plan.fix; failure($c))}]
-      elif $c.kind == "captain_action" then
-        [{label:"CONTINUE",text:success($c)},
-         {label:"DEFER",text:"State the deferral explicitly; the affected work stays stopped."}]
-      elif $c.kind == "queued_choice" then
-        [{label:"START",text:"Start this task now."},{label:"WAIT",text:"Name the higher-value work that should precede it."}]
-      elif $c.kind == "delivery" then
-        [{label:"DELIVER",text:success($c)},{label:"FIX",text:text($plan.fix; failure($c))}]
-      elif $c.kind == "monitoring" then
-        [{label:"HEALTHY",text:success($c)},
-         {label:"CONTINUE",text:text($plan.continue; "Continue observing because the evidence is not yet conclusive.")},
-         {label:"FIX",text:text($plan.fix; failure($c))}]
-      else [{label:"CLOSE",text:success($c)},{label:"KEEP OPEN",text:failure($c)}] end;
+    | (artifact_locations($c)) as $artifacts
+    | {schema:"fm-next-prepare.v1",
+       intent:$c.requirements,
+       plan:$plan,
+       lifecycle:{status:$c.status,currentState:$c.current_state,currentDetail:$c.current_detail,
+         route:$c.route,closeReady:$c.close_ready,evidence:$c.lifecycle},
+       artifacts:{type:$c.artifact_type,locations:$artifacts},
+       repository:$c.repository_state,
+       existingResult:(($c.existing_result // {}) + {summary:evidence($c),closurePreflight:$c.closure_review}),
+       missingEvidence:([
+         if ($c.requirements.captainIntent // "") == "" then "captain intent" else empty end,
+         if (($c.kind == "review" or $c.kind == "acceptance") and $plan == null) then "task-specific review plan" else empty end,
+         if (($c.kind == "review" or $c.kind == "acceptance") and ($artifacts | length) == 0) then "readable result location" else empty end
+       ])};
   def compact_alternative($c): {ref:$c.ref,name:$c.name,action:action($c)};
-  if .selection == null then .card="Fleet needs no captain action."
-  else
-    . as $root
-    | .selection as $selected
-    | ($root.ranking.eligible - 1) as $other_count
-    | .selection += {action:action($selected),context:context($selected),checks:checks($selected),
-        done_when:{success:success($selected),failure:failure($selected)},why:why($selected;$other_count),outcomes:outcomes($selected)}
-    | .alternatives |= map(compact_alternative(.))
-    | .selection as $card
-    | .card=("NEXT — " + $card.action
-      + "\nTASK " + $card.ref + " - " + $card.name
-      + "\n\n" + $card.context
-      + "\n\nDO THIS\n" + ($card.checks | to_entries | map("\(.key + 1). \(.value)") | join("\n"))
-      + "\n\nDONE WHEN\n- SUCCESS: " + $card.done_when.success
-      + "\n- FAILURE: " + $card.done_when.failure
-      + "\n\nWHY THIS\n" + $card.why
-      + "\n\nPOSSIBLE OUTCOMES\n" + ($card.outcomes | map("- " + .label + ": " + .text) | join("\n"))
-      + (if (.alternatives | length) == 0 then "" else
-          "\n\nOTHER WORTHWHILE ACTIONS\n" + (.alternatives | to_entries | map("\(.key + 1). \(.value.ref) - \(.value.action)") | join("\n")) end))
-  end
+  def diagnostic_candidate($c):
+    {ref:$c.ref,name:$c.name,canonicalId:$c.canonical_id,owner:$c.owner,kind:$c.kind,
+     rank:{class:$c.rank_class,valueClass:$c.class,priority:$c.priority,priorityRank:$c.priority_rank,
+       downstreamReleased:$c.downstream_released,active:$c.active,actionableSince:$c.actionable_since,
+       callsign:$c.sort_callsign,canonicalId:$c.canonical_id},
+     lifecycle:{status:$c.status,currentState:$c.current_state,currentDetail:$c.current_detail,
+       route:$c.route,closeReady:$c.close_ready,evidence:$c.lifecycle},reason:$c.reason};
+  . as $root
+  | if $root.selection == null then
+      .mode=$mode
+      | .selection=null
+      | .presentation={title:"Nothing needs your attention right now.",identity:null,context:[],instruction:null,response:null}
+      | .card="Nothing needs your attention right now."
+      | if $mode == "why" then
+          .explanation={summary:"No captain action is eligible now.",alternatives:[]}
+          | .card += "\n\nWhy this\nNo captain action is eligible now."
+        else . end
+      | if $mode == "debug" then
+          .diagnostics=(._diagnostics + {candidates:(._candidates | map(diagnostic_candidate(.)))})
+        else . end
+      | del(._candidates,._diagnostics)
+    else
+      ($root.selection) as $selected
+      | (action($selected)) as $title
+      | (context($selected)) as $context
+      | (instruction($selected)) as $instruction
+      | (response($selected)) as $response
+      | (preparation($selected)) as $preparation
+      | .mode=$mode
+      | .selection={ref:$selected.ref,name:$selected.name,canonicalId:$selected.canonical_id,
+          owner:$selected.owner,kind:$selected.kind,actionTitle:$title,preparation:$preparation}
+      | .presentation={title:$title,identity:($selected.ref + " · " + $selected.name),
+          context:[$context],instruction:$instruction,response:$response}
+      | .card=($title + "\n" + $selected.ref + " · " + $selected.name
+          + "\n\n" + $context + "\n\n" + $instruction + "\n\n" + $response)
+      | if $mode == "why" then
+          why($selected; (($root._diagnostics.ranking.eligible // 1) - 1)) as $reason
+          | ($root._candidates[1:3] | map(compact_alternative(.))) as $alternatives
+          | .explanation={summary:$reason,alternatives:$alternatives}
+          | .card += "\n\nWhy this\n" + $reason
+              + (if ($alternatives | length) == 0 then "" else
+                  "\nConsidered next: " + ($alternatives | map(.ref + " · " + .name) | join("; ")) end)
+        else . end
+      | if $mode == "debug" then
+          .diagnostics=($root._diagnostics + {candidates:($root._candidates | map(diagnostic_candidate(.)))})
+          | .selection |= del(.preparation)
+        else . end
+      | del(._candidates,._diagnostics)
+    end
 ' 2>&1) || { printf 'fm-next: %s\n' "$RESULT" >&2; exit 1; }
 
-if [ "$FORMAT" = json ]; then printf '%s\n' "$RESULT"; else printf '%s\n' "$RESULT" | jq -r '.card'; fi
+if [ "$FORMAT" = json ] || [ "$MODE" = debug ]; then
+  printf '%s\n' "$RESULT"
+else
+  printf '%s\n' "$RESULT" | jq -r '.card'
+fi

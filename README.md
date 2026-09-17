@@ -190,7 +190,7 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | `/bearings`        | Compatibility alias for `/report`, including the explicit `file`, `lavish`, and `include PRs` variants |
 | `/tasks`           | Toggle the live task table using the statuses and routes defined in the [captain-facing lifecycle](docs/task-lifecycle.md) |
 | `/t`               | Approved task router: bare `/t` toggles the task dashboard, while `/t <selector>` routes to `/task <selector>` |
-| `/next`            | Recommend the highest-value concrete action for you to take now, with task-specific checks, outcomes, and ranking rationale |
+| `/next`            | Choose and prepare the highest-value use of your attention, then hand off only the smallest action still requiring you; add `--why` or `--debug` for opt-in rationale or diagnostics |
 | `/task <selector>` | Show one current, recent, or closed task's purpose, lifecycle evidence, outcome, artifacts, attention, and next action |
 | `/close`           | Guardedly archive work only after its selected lifecycle route is complete, preserving acceptance and private task material |
 | `/history`         | Show or search closed work with its recorded acceptance and selected route |
@@ -202,7 +202,7 @@ Fleet command guide:
 - `/report` writes the readable, durable fleet briefing into normal conversation history; `/bearings` is its compatibility alias and produces the same report.
 - `/tasks` only toggles the live Pi dashboard and does not write a report into conversation history.
 - `/t` toggles that dashboard when bare and opens one task's durable detail when followed by a reference or name.
-- `/next` narrows the same lifecycle evidence to one highest-leverage action instead of showing the fleet.
+- `/next` chooses across the fleet, prepares the selected work from its durable evidence and artifacts, and returns one five-second handoff; `--why` adds concise rationale and `--debug` exposes structured diagnostics.
 - `/history` searches work that has already passed guarded archival closure; it is not a current-work view.
 - `/report include PRs` opts into live PR enrichment while remaining chat-only.
 - `/report file` explicitly replaces today's `data/status-report-<YYYY-MM-DD>.md` in addition to returning the report in chat.
