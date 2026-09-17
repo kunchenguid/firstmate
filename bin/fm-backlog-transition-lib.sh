@@ -335,7 +335,8 @@ fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
 # same way. When a bound was requested but no bounding mechanism exists at
 # all, the call fails closed instead of running unbounded. Must be the last
 # command of a subshell: the exec keeps the tasks-axi process exactly where
-# the plain call sat, and the bound kills the child, not the caller.
+# the plain call sat, and the bound kills the child's whole process group -
+# a grandchild holding its inherited pipes cannot outlive it - not the caller.
 fm_tasks_axi_timeout_expired() {  # <status>
   case $1 in
     124 | 137) return 0 ;;
