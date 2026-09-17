@@ -1051,15 +1051,21 @@ clear_write_tracking() {  # <window-key>
 # for different things.
 #
 # The marker is owned entirely by this function and records the verdict together
-# with the pane hash it was reported for: a repeat is absorbed only while BOTH
-# still match, a read that stops being gone still drops it, and no other reset
-# site has to know this file exists. The hash half re-arms a relaunch - a
-# replacement churns the pane, resetting the timer bookkeeping without any
-# threshold probe ever reading it alive - so its own later death is reported in
-# full, while a dead pane's static display still absorbs on every threshold.
+# with the agent incarnation it was reported for: the task's per-incarnation busy
+# gen (bin/fm-busy-lib.sh, state/<id>.busy-gen), which changes exactly when the
+# agent is replaced, so a repeat is absorbed only while BOTH still match, a read
+# that stops being gone still drops it, and no other reset site has to know this
+# file exists. The incarnation half re-arms a relaunch: a successor's own later
+# death is reported in full even when its dead display hashes identically to the
+# reported one. Only when no incarnation token is readable for the task does the
+# pane hash stand in as the discriminator - an unreadable token must never mean
+# re-report on every threshold, so that fallback keeps today's hash-keyed absorb,
+# with the residual that a record-less successor dying into a byte-identical dead
+# display stays absorbed. Under one unchanged incarnation a dead pane's static
+# display absorbs on every threshold either way.
 # Returns 0 when it has handled the window, 1 to escalate on the unchanged path.
-wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-hash>
-  local win=$1 since_file=$2 label=$3 age=$4 hash=$5 key marker agent_state detail reason
+wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-hash> <task>
+  local win=$1 since_file=$2 label=$3 age=$4 hash=$5 task=$6 key marker agent_state detail reason gen id
   key=$(window_key "$win")
   marker="$STATE/.dead-reported-$key"
   agent_state=$(fm_backend_agent_state "$(window_backend "$win")" "$win" 2>/dev/null) || agent_state=unreadable
@@ -1071,7 +1077,11 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
   # Re-arm the idle timer on BOTH paths below, so the backend probe above stays on
   # its once-per-STALE_ESCALATE_SECS budget instead of running on every poll.
   date +%s > "$since_file"
-  if [ "$(cat "$marker" 2>/dev/null || true)" = "$agent_state $hash" ]; then
+  id=$hash
+  if gen=$(fm_busy_current_gen "$STATE" "$task"); then
+    id=$gen
+  fi
+  if [ "$(cat "$marker" 2>/dev/null || true)" = "$agent_state $id" ]; then
     triage_log "absorbed $label (agent $agent_state, already reported once, idle ${age}s): $win"
     return 0
   fi
@@ -1081,7 +1091,7 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
   # absorb the retry - the one way this bound could swallow the report outright
   # rather than deliver it once.
   fm_wake_append stale "$win" "$reason" || exit 1
-  printf '%s %s' "$agent_state" "$hash" > "$marker"
+  printf '%s %s' "$agent_state" "$id" > "$marker"
   clear_write_tracking "$key"
   wake "$reason"
 }
@@ -1124,7 +1134,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
           return 0
         fi
-        if wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash"; then
+        if wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash" "$task"; then
           return 0
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))

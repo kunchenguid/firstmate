@@ -2827,9 +2827,10 @@ test_gone_report_rearms_when_the_endpoint_comes_back() {
 # resets the stale suppressor, wedge timer and escalation count while NO reset
 # site touches the once-marker - and then the replacement itself dies and the
 # pane settles static at ITS hash. The relaunch round ends before any threshold,
-# so no backend probe ever read the replacement alive; only the marker's pane
-# half can tell this death apart from the one already reported, so the second
-# death must report in full, while later thresholds on the SAME dead pane stay
+# so no backend probe ever read the replacement alive; no incarnation token is
+# armed for this fixture, so the marker's pane-hash fallback is all that can tell
+# this death apart from the one already reported, and the second death must
+# report in full, while later thresholds on the SAME dead pane stay
 # silent and never advance the escalation count.
 test_second_death_after_a_same_window_relaunch_reports_in_full() {
   local dir state fakebin out capture window key
@@ -2891,6 +2892,77 @@ test_second_death_after_a_same_window_relaunch_reports_in_full() {
     || fail "an unchanged dead pane advanced the escalation count"
   unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
   pass "a second death after a same-window relaunch reports in full without a live probe, and an unchanged dead pane stays silent"
+}
+
+# The collision the pane-hash discriminator cannot see: a successor whose dead
+# display is BYTE-IDENTICAL to the death already reported - the common case,
+# since a dead husk display is deterministic (a bare shell in the same cwd,
+# restored empty scrollback). The successor dies without any threshold probe
+# reading it alive, so the pane never churns and no hash change can announce the
+# replacement; only the busy incarnation, re-armed through the real writer
+# (bin/fm-busy-event.sh arm, exactly as a relaunch replaces the previous one),
+# can tell this death from the reported one. It must report in full, while later
+# thresholds on the same dead pane under the SAME incarnation still absorb and
+# never advance the escalation count.
+test_identical_dead_display_of_a_successor_still_reports() {
+  local dir state fakebin out capture window key
+  local failed='state: failed · source: run-step · run failed'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  dir=$(wedge_threshold_fixture identical-dead-display 'working: still compiling' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+
+  # The lane's busy contract is armed at spawn, so the first death's once-record
+  # is keyed on that incarnation.
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" wedge >/dev/null \
+    || fail "could not arm the lane's busy incarnation"
+
+  # Death #1: the endpoint is gone and reported once, in full.
+  gone_endpoint_env missing; export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
+    || fail "the first death was never reported: $(cat "$out")"
+  grep -F 'agent missing' "$out" >/dev/null \
+    || fail "the first death report did not name the endpoint verdict: $(cat "$out")"
+  [ -s "$state/.dead-reported-$key" ] || fail "the first death left no once-record"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 1 ] \
+    || fail "the first death queued $(wedge_stale_wakes "$state" "$window") wakes instead of one"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first death report"
+
+  # A successor occupies the lane: the relaunch re-arms the busy incarnation
+  # through the real writer, and the successor stays quiet under the threshold
+  # for a round, so no probe reads it alive and the pane never churns - the
+  # display captured here and in the death rounds is byte-identical throughout.
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" wedge >/dev/null \
+    || fail "could not re-arm the successor's busy incarnation"
+  : > "$out"
+  FM_TEST_STALE_ESCALATE=999 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" absorb \
+    || fail "the successor's quiet round was never absorbed: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "the successor's quiet round queued a wake: $(cat "$state/.wake-queue")"
+
+  # The successor dies into the same byte-identical display. A pane-hash marker
+  # absorbs this death silently; the incarnation half must report it in full.
+  : > "$out"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
+    || fail "a byte-identical dead display absorbed the successor's death: $(cat "$out")"
+  grep -F 'agent missing' "$out" >/dev/null \
+    || fail "the successor's death was not reported as a gone endpoint: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 1 ] \
+    || fail "the successor's death queued $(wedge_stale_wakes "$state" "$window") wakes instead of one"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "the successor's death advanced the wedge escalation count"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the successor's death report"
+
+  # Later thresholds on the same unchanged dead pane under the SAME incarnation
+  # stay silent: the once-only bound still holds within one incarnation.
+  : > "$out"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" absorb \
+    || fail "an unchanged dead pane re-alarmed under the same incarnation: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "an unchanged dead pane queued a repeat wake: $(cat "$state/.wake-queue")"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "an unchanged dead pane advanced the escalation count"
+  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  pass "a successor's byte-identical dead display reports in full, and the same incarnation still absorbs"
 }
 
 
@@ -5376,6 +5448,7 @@ test_gone_endpoint_reports_once_instead_of_escalating_forever
 test_live_and_unproven_endpoints_still_wedge_escalate
 test_gone_report_rearms_when_the_endpoint_comes_back
 test_second_death_after_a_same_window_relaunch_reports_in_full
+test_identical_dead_display_of_a_successor_still_reports
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
