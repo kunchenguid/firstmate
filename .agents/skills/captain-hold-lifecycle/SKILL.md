@@ -46,6 +46,18 @@ A retirement failure makes the command fail without reversing the already-durabl
 Never use `answer` for an evidence-only moot call: `answer` records what the captain said, while `reconcile close` records verified evidence.
 A captain-held task closed outside this owner leaves no durable answer, so the completion gate keeps failing until `answer` records the decision the captain actually gave.
 Resolved findings, recommendations that need no captain choice, and prose that merely sounds decision-like do not create held tasks.
+Captain-facing escalation uses one filter, and this skill owns it:
+
+- DO IT: no genuine human judgment remains; execute or resolve and report minimally, and do not create a live captain call.
+- DECIDE: a consequential choice remains after reasonable evidence retrieval, with more than one materially defensible option or a Captain-only truth; hold that as a live ask.
+- REVIEW: a finished or review-ready artifact genuinely needs Captain judgment, taste, or approval; hold that as a live ask.
+- PARK/HOLD is state, not a current Captain decision.
+
+A parked, standby, or otherwise deferred item must not appear as a current human decision merely because Captain authorization would eventually be required to resume it.
+Record that state with `hold --park` (optional `--until` when the park has a date) so the structured hold kind is `parked`.
+A live ask still uses `hold` without `--park`.
+Unnecessary escalation is observable friction.
+`ask-user-authority` maps ask-user findings onto this same filter and does not own a second procedure.
 Bearings reads the resulting structured state and must never compensate by scraping historical reports, visual-review artifacts, terminal output, chat, or other prose.
 
 A captain call can be written down twice - as the keyed status decision the fold reads, and as the backlog task held for the captain - and those two records can disagree without either surface saying so.
@@ -57,8 +69,8 @@ The absence of a routed work item is not a divergence and the guard never requir
 ## Operating sequence
 
 1. Read the complete investigation result and complete the visual review before declaring either complete.
-2. Inventory only genuine unresolved choices that require the captain, and find the task each one gates.
-3. Hold that task - or create one captain-held task for the review's open questions - with a concise reason carrying the question and options.
+2. Inventory only genuine unresolved choices that require the captain now, and find the task each one gates.
+3. Hold that task as a live ask - or create one captain-held task for the review's open questions - with a concise reason carrying the question and options; use `hold --park` for parked or standby state that is not a current ask.
 4. Run `complete` with the full captain-held inventory for that review pass.
 5. Relay the choices to the captain as decisions from Bearings' Captain's Call section under `AGENTS.md` section 9; do not use the word hold in captain chat.
 6. Close each call only through `answer` (or a channel that feeds `answers`), close a board-requested moot call through evidence-backed `reconcile close`, record a still-active reconciliation through `reconcile note`, use `--until` when the captain defers it, or confirm a channel already closed it.
