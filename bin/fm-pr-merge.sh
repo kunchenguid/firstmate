@@ -126,13 +126,17 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-afk-contract.sh"
 
 if [ "$#" -lt 2 ]; then
-  echo "error: invalid PR merge request" >&2
+  echo "error (caller): missing arguments; usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [-- <extra forge merge args>]" >&2
   exit 2
 fi
 ID=$1
 RAW_URL=$2
-if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL"; then
-  echo "error: invalid PR merge request" >&2
+if ! fm_pr_task_id_valid "$ID"; then
+  echo "error (caller): invalid task ID '$ID'; expected a path-safe identifier matching [A-Za-z0-9._-]+" >&2
+  exit 2
+fi
+if ! fm_pr_url_parse "$RAW_URL"; then
+  echo "error (caller): malformed PR URL '$RAW_URL'; expected https://github.com/<owner>/<repo>/pull/<number> or https://<host>/<path>/-/merge_requests/<number>" >&2
   exit 2
 fi
 URL=$FM_PR_URL
@@ -1199,7 +1203,7 @@ case "$PROVIDER" in
     [ "$gitlab_confirm_rc" -eq 0 ] || exit 0
     ;;
   *)
-    echo "error: invalid PR merge request" >&2
+    echo "error (internal): unrecognised provider '$PROVIDER' after URL parse; this is a bug in fm-pr-merge.sh" >&2
     exit 2
     ;;
 esac

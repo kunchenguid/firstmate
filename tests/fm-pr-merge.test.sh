@@ -1279,8 +1279,8 @@ test_malformed_url_refuses_before_merge() {
   set -e
 
   expect_code 2 "$rc" "malformed-url: fm-pr-merge should refuse a malformed merge request URL"
-  assert_grep 'error: invalid PR merge request' "$case_dir/stderr" \
-    "malformed-url: refusal was not fixed and non-probing"
+  assert_grep 'error (caller): malformed PR URL' "$case_dir/stderr" \
+    "malformed-url: refusal was not a self-describing caller error"
   assert_no_grep 'pr=https://gitlab.com/example/-/merge_requests/1' "$case_dir/state/task-x1.meta" \
     "malformed-url: malformed PR URL was recorded in meta"
   assert_absent "$case_dir/state/task-x1.check.sh" \
@@ -3006,6 +3006,92 @@ test_allow_red_refused_on_gitlab() {
   pass "fm-pr-merge refuses --allow-red on GitLab"
 }
 
+# Regression: a missing PR URL, an invalid task ID, and a malformed PR URL must
+# each produce a caller-error message that is visibly distinct from a merge
+# refusal, so one can never be confused with the other.  The incident on
+# 2026-09-16 showed exactly this confusion: a malformed URL was reported with
+# the same wording as a forge refusal, which fed a wrong diagnosis.
+test_caller_errors_are_distinguishable_from_refusals() {
+  local case_dir rc caller_stderr refusal_stderr head
+
+  # --- missing arguments (no task-id, no url) ---
+  case_dir=$(make_case caller-error-no-args)
+  set +e
+  run_pr_merge "$case_dir" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "caller-error-no-args: missing arguments must exit 2"
+  assert_grep 'error (caller):' "$case_dir/stderr" \
+    "caller-error-no-args: output must contain the caller-error tag"
+  assert_grep 'missing arguments' "$case_dir/stderr" \
+    "caller-error-no-args: output must name what is missing"
+  assert_no_grep 'refusing to merge' "$case_dir/stderr" \
+    "caller-error-no-args: a caller error must not read as a refusal"
+  assert_no_grep 'invalid PR merge request' "$case_dir/stderr" \
+    "caller-error-no-args: the old ambiguous wording must not appear"
+
+  # --- invalid task ID ---
+  case_dir=$(make_case caller-error-bad-task-id)
+  set +e
+  run_pr_merge "$case_dir" '../escape' https://github.com/example/repo/pull/1 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "caller-error-bad-task-id: an invalid task ID must exit 2"
+  assert_grep 'error (caller):' "$case_dir/stderr" \
+    "caller-error-bad-task-id: output must contain the caller-error tag"
+  assert_grep 'invalid task ID' "$case_dir/stderr" \
+    "caller-error-bad-task-id: output must name the problem"
+  assert_grep '../escape' "$case_dir/stderr" \
+    "caller-error-bad-task-id: output must echo the bad value"
+  assert_no_grep 'refusing to merge' "$case_dir/stderr" \
+    "caller-error-bad-task-id: a caller error must not read as a refusal"
+  assert_no_grep 'invalid PR merge request' "$case_dir/stderr" \
+    "caller-error-bad-task-id: the old ambiguous wording must not appear"
+
+  # --- malformed PR URL ---
+  case_dir=$(make_case caller-error-bad-url)
+  set +e
+  run_pr_merge "$case_dir" task-x1 'not-a-url' \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "caller-error-bad-url: a malformed URL must exit 2"
+  assert_grep 'error (caller):' "$case_dir/stderr" \
+    "caller-error-bad-url: output must contain the caller-error tag"
+  assert_grep 'malformed PR URL' "$case_dir/stderr" \
+    "caller-error-bad-url: output must name the problem"
+  assert_grep 'not-a-url' "$case_dir/stderr" \
+    "caller-error-bad-url: output must echo the bad value"
+  assert_no_grep 'refusing to merge' "$case_dir/stderr" \
+    "caller-error-bad-url: a caller error must not read as a refusal"
+  assert_no_grep 'invalid PR merge request' "$case_dir/stderr" \
+    "caller-error-bad-url: the old ambiguous wording must not appear"
+
+  # --- a real merge refusal (red checks) must NOT contain the caller tag ---
+  head=dddddddddddddddddddddddddddddddddddddddd
+  case_dir=$(make_case caller-vs-refusal)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_red_json "$case_dir" "$head" ci
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/99 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "caller-vs-refusal: a red-check refusal must exit 1"
+  refusal_stderr=$(cat "$case_dir/stderr")
+  assert_grep 'refusing to merge' "$case_dir/stderr" \
+    "caller-vs-refusal: a forge refusal must say 'refusing to merge'"
+  assert_no_grep 'error (caller):' "$case_dir/stderr" \
+    "caller-vs-refusal: a forge refusal must not carry the caller-error tag"
+  assert_no_grep 'invalid PR merge request' "$case_dir/stderr" \
+    "caller-vs-refusal: the old ambiguous wording must not appear on a refusal either"
+
+  pass "fm-pr-merge caller errors and forge refusals produce distinguishable output"
+}
+
 test_gitlab_head_override_args_refuse_before_recording
 test_secondmate_merge_reports_upward_once
 test_secondmate_merge_reports_on_the_local_route
@@ -3045,3 +3131,4 @@ test_away_record_cannot_change_between_the_authority_read_and_the_merge
 test_a_grant_revoked_before_the_merge_refuses_it
 test_merge_refuses_when_the_away_record_cannot_be_locked
 test_allow_red_refused_on_gitlab
+test_caller_errors_are_distinguishable_from_refusals
