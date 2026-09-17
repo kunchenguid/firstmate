@@ -3,8 +3,9 @@
 #
 # Herdr's native agent_status can stay idle for a whole landed Claude turn, and
 # a busy-queued Enter can keep proven pending text visible. Muse can also leave
-# the native probe unreadable while a bare U+27E9 composer proves its message
-# landed. A stub cannot prove any of those signals. This guard launches real
+# the native probe unreadable while its composer - a bare prompt row on older
+# builds, a titled rule pair around that row on Muse Code 1.3.0 - proves its
+# message landed. A stub cannot prove any of those signals. This guard launches real
 # Claude Code, and an installed Muse Code on its echo provider, in an isolated
 # Herdr lab, requiring fm_backend_herdr_send_text_submit to report empty for
 # each landed steer. It fails naming the harness and version rather than
@@ -312,7 +313,7 @@ else
     done
     [ "$muse_landed" = 1 ] \
       || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER: submit reported '$muse_verdict' but the expected reply never rendered"
-    pass "live Herdr submit confirm: Muse Code ($MUSE_VERSION) on $HERDR_VER: the shared classifier read its idle bare U+27E9 row as empty, the steer confirmed empty, and the echo provider rendered the requested reply in isolated session $SESSION"
+    pass "live Herdr submit confirm: Muse Code ($MUSE_VERSION) on $HERDR_VER: the shared classifier read its idle composer as empty, the steer confirmed empty, and the echo provider rendered the requested reply in isolated session $SESSION"
   fi
 fi
 

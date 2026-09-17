@@ -222,6 +222,33 @@ test_matrix_muse_truecolor_glyph_survives_signal_loss() {
   pass "matrix: muse's ⟩ reads empty everywhere and survives losing the styled-glyph signal"
 }
 
+test_matrix_muse_bordered_composer_closes_its_rule_pair() {
+  # Real idle Muse Code 1.3.0, captured from a live herdr pane: the composer is
+  # a rule PAIR - a TITLED opening rule, the `❯` prompt row, then the solid
+  # closing rule above the footer. Only the opening rule's title kept that pair
+  # from closing, so the closing rule read as an unpaired separator below the
+  # prompt row and invalidated the candidate: every idle Muse composer came back
+  # `unknown`, and a landed steer on herdr reported delivery unconfirmed.
+  local idle typed bare
+  idle=$'  Muse Code 1.3.0\n── Voice input (⌥ + v to start) ──────────────────────\n❯ \n──────────────────────────────────────────────────────\n  echo · /tmp/muse-workspace · YOLO'
+  typed=$'  Muse Code 1.3.0\n── Voice input (⌥ + v to start) ──────────────────────\n❯ reply with the token\n──────────────────────────────────────────────────────\n  echo · /tmp/muse-workspace · YOLO'
+  assert_screen "muse bordered idle on herdr" empty "$CAPS_STYLED" "$idle" '' $'muse\tidle'
+  assert_screen "muse bordered idle on zellij" empty "$CAPS_STYLED_NOID" "$idle"
+  assert_screen "muse bordered idle on cmux/orca" empty "$CAPS_PLAIN" "$idle"
+  assert_screen "muse bordered idle on tmux" empty "$CAPS_TMUX" "$idle" 2 $'muse\tidle'
+  # Typed text inside the same pair must still be proven input, so the fix
+  # cannot be read as a blanket relaxation of the separated shape.
+  assert_screen "muse bordered typed on herdr" pending "$CAPS_STYLED" "$typed" '' $'muse\tidle'
+  assert_screen "muse bordered typed on tmux" pending "$CAPS_TMUX" "$typed" 2 $'muse\tidle'
+  # The bare prompt row (no rules at all) keeps reading empty for both glyphs
+  # Muse has shipped.
+  bare=$'  ⟩ '
+  assert_screen "muse bare ⟩ on herdr" empty "$CAPS_STYLED" "$bare" '' $'muse\tidle'
+  bare=$'  ❯ '
+  assert_screen "muse bare ❯ on herdr" empty "$CAPS_STYLED" "$bare" '' $'muse\tidle'
+  pass "matrix: muse's titled opening rule closes its composer pair; typed text stays pending"
+}
+
 test_matrix_cursor_reverse_video_placeholder_remnant() {
   # Real idle cursor-agent (2026.08.11-e8db854), captured byte-for-byte from a
   # live pane: the `→ ` glyph and the placeholder tail are dim (SGR 2), but the
@@ -785,6 +812,7 @@ test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
+test_matrix_muse_bordered_composer_closes_its_rule_pair
 test_matrix_cursor_reverse_video_placeholder_remnant
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer

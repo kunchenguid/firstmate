@@ -682,17 +682,54 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # exact positive proof they require (`empty`), so unrecognized future verdicts
 # fail safe by default.
 
-# _fm_composer_pi_separator_row: a solid pi separator - nothing but `─`, at
-# least 8 columns wide. The width floor is a literal substring test so it is
-# byte-exact in every locale.
+# _fm_composer_pi_separator_row: a pi separator - a `─` rule at least 8
+# columns wide, either solid or carrying a label written INTO the rule. The
+# width floor is a literal substring test so it is byte-exact in every locale.
 _fm_composer_pi_separator_row() {  # <trimmed-row>
   local row=$1
   [ -n "$row" ] || return 1
-  [ -z "${row//─/}" ] || return 1
   case "$row" in
-    *────────*) return 0 ;;
+    *────────*) ;;
+    *) return 1 ;;
   esac
-  return 1
+  [ -n "${row//─/}" ] || return 0
+  _fm_composer_titled_separator_row "$row"
+}
+
+# _fm_composer_titled_separator_row: 0 when a rule row carries a TITLE rather
+# than being solid - the label is written INTO the rule instead of replacing
+# it, the same tolerance _fm_composer_titled_bottom_ok grants a box's bottom
+# border. Muse Code 1.3.0 draws its composer's opening rule this way
+# (`── Voice input (⌥ + v to start) ───…───`), and without this the pair never
+# closes: the composer's own closing rule then reads as an unpaired separator
+# below the prompt row, which invalidates the candidate and turns an idle Muse
+# composer into `unknown` - the Muse-on-Herdr send false negative (a landed
+# steer reported delivery unconfirmed).
+# The rule must still open the row and close it at the width floor, and the
+# label between the two runs must be spaced away from both and carry no
+# further structure, so prose that merely contains dashes can never pass.
+_fm_composer_titled_separator_row() {  # <trimmed-row>
+  local row=$1 rest title
+  case "$row" in
+    ─*────────) ;;
+    *) return 1 ;;
+  esac
+  rest=$row
+  while :; do case "$rest" in ─*) rest=${rest#─} ;; *) break ;; esac; done
+  while :; do case "$rest" in *─) rest=${rest%─} ;; *) break ;; esac; done
+  case "$rest" in
+    ' '*' ') ;;
+    *) return 1 ;;
+  esac
+  title=$rest
+  fm_composer_normalize_trim_var title
+  [ -n "$title" ] || return 1
+  case "$title" in
+    *─*|*━*|*═*|*│*|*┃*|*║*|*╭*|*╮*|*╰*|*╯*|*┌*|*┐*|*└*|*┘*|\
+    *╔*|*╗*|*╚*|*╝*|*┏*|*┓*|*┗*|*┛*|*▀*|*▄*)
+      return 1 ;;
+  esac
+  return 0
 }
 
 # Row-scan results are returned through FM_COMPOSER_SCAN_* globals (bash 3.2

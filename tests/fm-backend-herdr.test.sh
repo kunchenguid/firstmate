@@ -4390,6 +4390,52 @@ test_send_text_submit_unknown_native_muse_empty_composer_confirms_delivery() {
   pass "fm_backend_herdr_send_text_submit: unreadable native Muse state plus shared empty Muse composer confirms one landed Enter"
 }
 
+# The idle Muse Code 1.3.0 composer as herdr 0.9.0 renders it, captured from a
+# live pane: a TITLED opening rule, the `❯` prompt row, the solid closing rule,
+# and the model/path footer. Measured 2026-09-17 while reproducing the
+# Muse-on-Herdr false negative.
+herdr_muse_bordered_idle_ansi() {
+  printf '%b' '  Muse Code 1.3.0\r\n\r\n── Voice input (\xe2\x8c\xa5 + v to start) ──────────────────────────────\r\n\033[38;2;90;160;255m\xe2\x9d\xaf\033[0m \r\n──────────────────────────────────────────────────────────────\r\n  echo \xc2\xb7 /p/v/f/muse-workspace \xc2\xb7 YOLO\r\n'
+}
+
+# Regression for the live Muse-on-Herdr false negative measured against Muse
+# Code 1.3.0 and herdr 0.9.0: herdr DOES register the Muse pane's native agent
+# and reports it `idle` across a landed steer, so the composer verdict alone
+# decides delivery. Muse draws its composer as a rule pair whose opening rule
+# carries a title, which left the pair unclosed: the closing rule read as an
+# unpaired separator below the prompt row, the candidate was invalidated, and
+# ten consecutive landed steers all reported verdict=unknown.
+test_send_text_submit_idle_native_muse_bordered_composer_confirms_delivery() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-muse-bordered-composer"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # 1: literal send; 2 and 4: the idle native baseline herdr reports for a Muse
+  # pane; 5: the real bordered Muse composer, cleared, after it accepts Enter.
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  herdr_muse_bordered_idle_ansi > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "an idle native Muse state plus a cleared BORDERED Muse composer must confirm delivery, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "a cleared bordered Muse composer must not trigger duplicate Enter, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: Muse's real bordered composer confirms one landed Enter (no false negative)"
+}
+
+# Non-vacuity anchor: the same bordered shape holding typed text must stay
+# proven pending, so the confirmation above comes from a cleared composer and
+# never from a softened verdict.
+test_composer_state_muse_bordered_typed_reads_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-muse-bordered-typed"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%b' '  Muse Code 1.3.0\r\n\r\n── Voice input (\xe2\x8c\xa5 + v to start) ──────────────────────────────\r\n\033[38;2;90;160;255m\xe2\x9d\xaf\033[0m hello captain\r\n──────────────────────────────────────────────────────────────\r\n  echo \xc2\xb7 /p/v/f/muse-workspace \xc2\xb7 YOLO\r\n' > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "typed text in Muse's bordered composer must stay pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: typed text in Muse's bordered composer stays pending"
+}
+
 test_send_text_submit_idle_native_pending_plus_rendered_busy_is_queued() {
   local dir log resp fb out
   dir="$TMP_ROOT/submit-idle-native-rendered-busy-queued"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -5403,6 +5449,8 @@ test_send_text_submit_preexisting_working_does_not_confirm_failed_enter
 test_send_text_submit_idle_baseline_does_not_confirm_failed_enter
 test_send_text_submit_idle_native_empty_composer_confirms_delivery
 test_send_text_submit_unknown_native_muse_empty_composer_confirms_delivery
+test_send_text_submit_idle_native_muse_bordered_composer_confirms_delivery
+test_composer_state_muse_bordered_typed_reads_pending
 test_send_text_submit_idle_native_pending_plus_rendered_busy_is_queued
 test_composer_state_cursor_midturn_row_reads_pending
 test_rendered_busy_state_reads_the_cursor_busy_token
