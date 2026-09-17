@@ -96,7 +96,7 @@ else
   NOTE=$*
   line="$VERB [$token]: $(fm_parent_channel_clean_note "$NOTE") (via-helper)"
 fi
-fm_parent_channel_report "$HOME_DIR" "$STATE_DIR" "$line" || {
+fm_parent_channel_report_correlated "$HOME_DIR" "$STATE_DIR" "$line" || {
   echo "error: could not publish correlated report to the parent channel" >&2
   exit 1
 }

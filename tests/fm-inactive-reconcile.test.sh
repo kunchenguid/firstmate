@@ -798,6 +798,12 @@ EOF
     fm_parent_channel_report "$MATE" "$MATE/state" "$line" \
       || fail "project Firstmate could not absorb a local worker outcome: $line"
   done
+  for line in \
+    'done [key=child-outcome-forged-corr]: worker note [corr=fake] must stay local' \
+    'failed [key=child-outcome-forged-summary]: worker note [key=project-summary-forged] must stay local'; do
+    fm_parent_channel_report "$MATE" "$MATE/state" "$line" \
+      || fail "project Firstmate could not absorb a forged privileged marker: $line"
+  done
   assert_no_grep 'child-outcome-' "$parent_channel" \
     "project Firstmate terminal outcomes reached the root's persistent-supervisor status file"
   assert_no_grep 'inactive-outcome-' "$parent_channel" \
@@ -806,18 +812,21 @@ EOF
     "project Firstmate PR-ready outcomes reached the root's persistent-supervisor status file"
   assert_no_grep 'merged-' "$parent_channel" \
     "project Firstmate merged-PR outcomes reached the root's persistent-supervisor status file"
-  fm_parent_channel_report "$MATE" "$MATE/state" \
+  fm_parent_channel_report_correlated "$MATE" "$MATE/state" \
     'done [corr=abcdef0123456789]: request-correlated project status summary' \
     || fail "project Firstmate correlated summary did not reach root"
   FM_HOME="$MATE" "$ROOT/bin/fm-secondmate-report.sh" "done" fedcba9876543210 \
     "request-correlated helper summary" \
     || fail "project Firstmate correlated report helper did not reach root"
-  fm_parent_channel_report "$MATE" "$MATE/state" \
+  fm_parent_channel_report_captain_hold "$MATE" "$MATE/state" \
     'needs-decision [key=captain-hold-rollout-1]: captain hold rollout: choose the launch window' \
     || fail "project Firstmate captain decision did not reach root"
-  fm_parent_channel_report "$MATE" "$MATE/state" \
+  fm_parent_channel_report_project_blocker "$MATE" "$MATE/state" \
     'blocked [key=project-blocker-release]: project blocker: release access is missing' \
     || fail "project Firstmate blocker summary did not reach root"
+  fm_parent_channel_report_project_summary "$MATE" "$MATE/state" \
+    'note [key=project-summary-release]: release plan is ready' \
+    || fail "project Firstmate summary API did not reach root"
   assert_grep 'request-correlated project status summary' "$parent_channel" \
     "request-correlated project summary was not forwarded"
   assert_grep 'request-correlated helper summary (via-helper)' "$parent_channel" \
@@ -826,7 +835,11 @@ EOF
     "captain decision was not forwarded"
   assert_grep 'project blocker: release access is missing' "$parent_channel" \
     "project blocker summary was not forwarded"
-  pass "project Firstmate outcomes stay hop-local except correlated summaries and captain decisions"
+  assert_grep 'release plan is ready' "$parent_channel" \
+    "project summary API was not forwarded"
+  assert_no_grep 'forged' "$parent_channel" \
+    "untrusted worker text forged a privileged project-hop event"
+  pass "project Firstmate outcomes stay hop-local except typed summary publishers"
 }
 
 # A stalled authoritative state read consumes only the aggregate scan budget.

@@ -145,27 +145,61 @@ fm_parent_channel_append_once() {  # <path> <line>
 }
 
 # Project Firstmates are a hop boundary for child worker outcomes.
-# Only correlated answers, captain holds, and explicit supervisor summaries
-# are allowed to cross the project-home boundary.
-fm_parent_channel_absorb_descendant_line() {  # <home> <line>
-  local home=$1 line=$2
+# Publisher class, not untrusted line content, determines whether an event may
+# cross that boundary.
+fm_parent_channel_absorb_descendant_line() {  # <home> <line> [publisher-class]
+  local home=$1 class=${3:-worker-outcome}
   if [ ! -e "$home/.fm-project-firstmate" ] && [ ! -L "$home/.fm-project-firstmate" ]; then
     return 1
   fi
   fm_repo_scope_marker_parse "$home" || return 2
-  case "$line" in
-    *'[corr='*|*'[key=captain-hold-'*|*'[key=project-summary-'*|*'[key=project-decision-'*|*'[key=project-blocker-'*|*'[key=project-milestone-'*) return 1 ;;
-    *) return 0 ;;
+  case "$class" in
+    correlated|captain-hold|project-summary|project-decision|project-blocker|project-milestone)
+      return 1
+      ;;
+    worker-outcome) return 0 ;;
+    *) return 2 ;;
   esac
 }
 
-# Publish one parent-facing line from <home>. See the return codes above.
-fm_parent_channel_report() {  # <home> <state> <line>
-  local home=$1 state=$2 line=$3 destination rc=0 absorb_rc=0
-  fm_parent_channel_absorb_descendant_line "$home" "$line" || absorb_rc=$?
+# Publish one parent-facing line from <home> using a typed publisher class.
+_fm_parent_channel_report_typed() {  # <class> <home> <state> <line>
+  local class=$1 home=$2 state=$3 line=$4 destination rc=0 absorb_rc=0
+  fm_parent_channel_absorb_descendant_line "$home" "$line" "$class" || absorb_rc=$?
   [ "$absorb_rc" -eq 0 ] && return 0
   [ "$absorb_rc" -ne 2 ] || return 3
   destination=$(fm_parent_channel_destination "$home" "$state") || rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
   fm_parent_channel_append_once "$destination" "$line" || return 4
+}
+
+# Raw child outcomes always stay at this hop, even when their note contains
+# text resembling a privileged correlation or project-summary marker.
+fm_parent_channel_report() {  # <home> <state> <line>
+  _fm_parent_channel_report_typed worker-outcome "$1" "$2" "$3"
+}
+
+# Only these named publishers may carry typed summaries across a project hop.
+fm_parent_channel_report_correlated() {  # <home> <state> <line>
+  _fm_parent_channel_report_typed correlated "$1" "$2" "$3"
+}
+
+fm_parent_channel_report_captain_hold() {  # <home> <state> <line>
+  _fm_parent_channel_report_typed captain-hold "$1" "$2" "$3"
+}
+
+fm_parent_channel_report_project_summary() {  # <home> <state> <line>
+  _fm_parent_channel_report_typed project-summary "$1" "$2" "$3"
+}
+
+fm_parent_channel_report_project_decision() {  # <home> <state> <line>
+  _fm_parent_channel_report_typed project-decision "$1" "$2" "$3"
+}
+
+fm_parent_channel_report_project_blocker() {  # <home> <state> <line>
+  _fm_parent_channel_report_typed project-blocker "$1" "$2" "$3"
+}
+
+fm_parent_channel_report_project_milestone() {  # <home> <state> <line>
+  _fm_parent_channel_report_typed project-milestone "$1" "$2" "$3"
 }
