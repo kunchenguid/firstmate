@@ -290,9 +290,10 @@ Three firstmate-specific rules layer on top of that guidance:
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 - Fix rounds are capped at three per run, counted as a \`no-mistakes axi respond --action fix\` you send on your own judgment and never rounds the pipeline chains inside one drive call; \`ask-user-authority\` step 5 owns that cap and every criterion for what is fixed past it.
-  Applying a decision firstmate returned once the cap is already reached, and retrying an unfinished step such as a protected-path refusal, are not rounds you opened; before the cap every fix response you send counts, including one that carries a decision firstmate returned.
+  Applying a decision firstmate returned once the cap is already reached, and retrying a protected-path-refusal gate after the reported edit is resolved, open no round and do not count against the cap; before the cap every fix response counts, including one that carries a decision firstmate returned.
   Its proportionality half binds you on every gate you drive yourself: fix only what makes the deliverable wrong, and approve past wording, restatement, simplification, and documentation-polish findings even when the reviewer is right, unless the text is actually false.
   Once you have opened three, do not open a fourth on your own judgment: escalate a gate that still holds actionable findings you would otherwise open a round for to firstmate using rule 6's escalation format and stop, and keep answering gates that hold nothing actionable.
+  If you cannot establish how many fix rounds this run has already opened - after a context reset or a recovery, for instance - treat the run as already at the cap and escalate rather than opening another round.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
