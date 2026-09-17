@@ -1223,14 +1223,6 @@ fm_treehouse_repo_identity() {  # <project-dir>
   FM_TREEHOUSE_REPO_IDENTITY=$(dirname "$common")
   [ -d "$FM_TREEHOUSE_REPO_IDENTITY" ] || return 1
 }
-# The installed treehouse either supports atomic conditional return
-# (`return --if-lease-holder <holder>`) or it does not. A durable-lease release
-# must refuse without it: `return --force` resets before any holder check and
-# can destroy a slot reassigned outside Firstmate's cooperating lock domain.
-treehouse_supports_conditional_return() {
-  command -v treehouse >/dev/null 2>&1 || return 1
-  treehouse return --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--if-lease-holder([^[:alnum:]_-]|$)'
-}
 
 # The one lock serializing Treehouse slot allocation and return for a project.
 #

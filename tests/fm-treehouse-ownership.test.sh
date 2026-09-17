@@ -71,15 +71,6 @@ run_lock_path() {
   ' _ "$ROOT" "$2"
 }
 
-# run_conditional_return <fakebin> -> "0" or "1"
-run_conditional_return() {
-  PATH="$1:$PATH" bash -c '
-    set -u
-    . "$1/bin/fm-wake-lib.sh"
-    if treehouse_supports_conditional_return; then printf 0; else printf 1; fi
-  ' _ "$ROOT"
-}
-
 # --- canonical identity -----------------------------------------------------
 
 test_local_only_linked_root_shares_one_lock() {
@@ -119,34 +110,6 @@ test_origin_shared_clones_share_one_lock() {
   [ "$locka" = "$lockb" ] \
     || fail "two clones of one origin resolved different locks ('$locka' vs '$lockb')"
   pass "two clones of one origin resolve to the one shared lock"
-}
-
-# --- conditional-return capability -------------------------------------------
-
-test_conditional_return_capability_detection() {
-  local dir fb rc
-  dir="$TMP_ROOT/capability"
-  fb="$dir/fakebin"
-  mkdir -p "$fb"
-  cat > "$fb/treehouse" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-}" = return ] && [ "${2:-}" = --help ]; then
-  if [ "${FM_FAKE_HAVE_COND_RETURN:-0}" = 1 ]; then
-    printf 'Usage: treehouse return [--force] [--if-lease-holder <holder>]\n'
-  else
-    printf 'Usage: treehouse return [--force]\n'
-  fi
-  exit 0
-fi
-exit 0
-SH
-  chmod +x "$fb/treehouse"
-
-  rc=$(FM_FAKE_HAVE_COND_RETURN=0 run_conditional_return "$fb")
-  [ "$rc" = 1 ] || fail "treehouse without --if-lease-holder was reported as supporting conditional return"
-  rc=$(FM_FAKE_HAVE_COND_RETURN=1 run_conditional_return "$fb")
-  [ "$rc" = 0 ] || fail "treehouse advertising --if-lease-holder was not recognized"
-  pass "conditional-return capability is detected from treehouse return --help"
 }
 
 # --- guard refusals ---------------------------------------------------------
@@ -196,6 +159,44 @@ test_retained_record_with_matching_reservation_passes() {
   rc=${out%%|*}
   [ "$rc" = 0 ] || fail "a retained record with a durable reservation and matching claim was refused: ${out#*|}"
   pass "a retained slot with a durable reservation and matching claim is protected, not blocked"
+}
+
+test_claim_home_alias_passes() {
+  local dir home home_alias project out rc
+  dir="$TMP_ROOT/guard-home-alias"
+  make_pool_fixture "$dir"
+  home=$(make_home "$dir")
+  home_alias="$dir/home-alias"
+  ln -s "$home" "$home_alias"
+  project="$dir/project"
+  write_meta "$home" task-aliased "worktree=$SLOT" "allocation_id=alloc-456"
+  printf 'task=task-aliased\nhome=%s\nallocation_id=alloc-456\n' "$home_alias" > "$CLAIM"
+  printf '{"worktrees":[{"name":"1","path":"%s","leased":true,"lease_holder":"alloc-456"}]}\n' "$SLOT" > "$POOL/treehouse-state.json"
+
+  out=$(run_guard "$home" "$project")
+  rc=${out%%|*}
+  [ "$rc" = 0 ] || fail "a claim naming a symlinked alias of the retained home was refused: ${out#*|}"
+  pass "a claim home reached through a symlink alias is recognized as the same home"
+}
+
+test_claim_foreign_home_refuses() {
+  local dir home foreign project out rc refusal
+  dir="$TMP_ROOT/guard-home-foreign"
+  make_pool_fixture "$dir"
+  home=$(make_home "$dir")
+  foreign="$dir/foreign-home"
+  mkdir -p "$foreign"
+  project="$dir/project"
+  write_meta "$home" task-foreign "worktree=$SLOT"
+  printf 'task=task-foreign\nhome=%s\n' "$foreign" > "$CLAIM"
+
+  out=$(run_guard "$home" "$project")
+  rc=${out%%|*}
+  refusal=${out#*|}
+  [ "$rc" -ne 0 ] || fail "a claim naming a genuinely different home was not refused"
+  assert_contains "$refusal" "another home" \
+    "the refusal did not name the foreign-home mismatch"
+  pass "a claim naming a genuinely different home refuses the allocation"
 }
 
 test_missing_claim_refuses() {
@@ -298,10 +299,11 @@ test_local_only_linked_root_shares_one_lock
 test_originless_source_and_local_clone_share_one_lock
 test_origin_shared_clones_share_one_lock
 
-test_conditional_return_capability_detection
 test_fresh_pool_without_retained_records_passes
 test_retained_record_without_reservation_refuses
 test_retained_record_with_matching_reservation_passes
+test_claim_home_alias_passes
+test_claim_foreign_home_refuses
 test_missing_claim_refuses
 test_reassigned_claim_refuses
 test_unreadable_claim_refuses

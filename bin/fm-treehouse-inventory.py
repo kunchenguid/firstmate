@@ -143,7 +143,11 @@ def inventory(project, state_dirs):
                 task, home, record = owner
                 require(marker.exists() or marker.is_symlink(), f"task {task}'s slot has no owner claim: {path}")
                 claim = fields(marker)
-                require(claim.get("task") == task and claim.get("home") == str(home), f"slot claimed by {claim.get('task', 'unknown')} in another task/home: {path}")
+                require(claim.get("task") == task, f"slot claimed by {claim.get('task', 'unknown')} in another task: {path}")
+                claim_home = Path(claim.get("home", ""))
+                require(claim_home.is_absolute() and claim_home.is_dir(),
+                        f"slot claimed by {task} in an unreadable or relative home: {path}")
+                require(claim_home.resolve(strict=True) == home, f"slot claimed by {task} in another home: {path}")
                 token = record.get("allocation_id")
                 require(token and entry.get("leased") is True and entry.get("lease_holder") == token
                         and claim.get("allocation_id") == token,
