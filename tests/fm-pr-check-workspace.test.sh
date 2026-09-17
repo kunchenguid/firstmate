@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Behavioral coverage for the workspace release that bin/fm-pr-check.sh runs
-# after a PR is registered: a refused release must never undo or skip the
-# registration, a safe one reclaims the local workspace, an interrupted one is
-# retried idempotently, and a legacy record keeps its until-merge workspace.
+# after a PR is registered: a refused release must never undo, skip, or fail the
+# registration, a safe one reclaims the local workspace, an interrupted or
+# restored one is retried idempotently, a forge without a reconstruction proof
+# is skipped, and a legacy record keeps its until-merge workspace.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -109,11 +110,16 @@ EOF
 }
 
 # Runs the real script; sets OUT (stdout+stderr) and RC.
-run_pr_check() {
+run_pr_check() {  # [url]
   RC=0
   OUT=$(FM_ROOT_OVERRIDE="$D/root" FM_HOME="$HOME_DIR" \
     FM_WORKSPACE_ROOT_BASE="$D/scoped-base" FM_TEST_PROJECT="$PROJECT" \
-    PATH="$FAKEBIN:$PATH" "$PR_CHECK" "$ID" "$URL" 2>&1) || RC=$?
+    PATH="$FAKEBIN:$PATH" "$PR_CHECK" "$ID" "${1:-$URL}" 2>&1) || RC=$?
+}
+
+set_workspace_state() {  # <state>
+  sed -i.bak "s/^workspace_state=.*/workspace_state=$1/" "$META" && rm -f "$META.bak"
+  chmod 0600 "$META"
 }
 
 assert_registered() {  # <label>
@@ -132,15 +138,55 @@ test_refused_release_keeps_the_registration() {
   read_case "$rec"
   printf 'secret=keep\n' > "$WT/.env"
   run_pr_check
-  [ "$RC" -ne 0 ] || fail "a refused workspace release exited zero: $OUT"
+  [ "$RC" -eq 0 ] || fail "a refused optional workspace release failed a valid registration ($RC): $OUT"
   assert_registered refused
   assert_contains "$OUT" "dirty or untracked" "the preservation refusal was not reported"
-  assert_contains "$OUT" "PR $URL is registered and armed, but its local workspace could not be safely released" \
-    "the refusal did not say the registration stands"
+  assert_contains "$OUT" "warning: workspace retained; PR $URL is registered and armed, but its local workspace could not be safely released" \
+    "the refusal did not warn that the workspace was retained"
   [ -d "$WT" ] || fail "a refused release removed the worktree"
   [ -f "$WT/.env" ] || fail "a refused release removed the untracked file"
   assert_grep 'workspace_state=active' "$META" "a refused release rewrote lifecycle state"
-  pass "a refused workspace release fails fm-pr-check only after the PR is recorded, polled, armed, and reported upward"
+
+  rm -f "$WT/.env"
+  run_pr_check
+  [ "$RC" -eq 0 ] || fail "rerunning after the refusal was fixed failed ($RC): $OUT"
+  [ ! -d "$WT" ] || fail "the rerun did not release the now-clean workspace"
+  assert_grep 'workspace_state=released' "$META" "the rerun did not publish the release"
+  pass "a refused workspace release warns and keeps the workspace retryable without failing a valid registration"
+}
+
+test_gitlab_registration_skips_release() {
+  local rec mr=https://gitlab.com/example/repo/-/merge_requests/7
+  rec=$(make_case gitlab)
+  read_case "$rec"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKEBIN/glab"
+  chmod +x "$FAKEBIN/glab"
+  run_pr_check "$mr"
+  [ "$RC" -eq 0 ] || fail "a GitLab registration with an active workspace failed ($RC): $OUT"
+  assert_grep "pr=$mr" "$META" "the GitLab merge request was not recorded"
+  [ -f "$HOME_DIR/state/$ID.check.sh" ] || fail "the GitLab poll was not published"
+  assert_contains "$OUT" "workspace: retained; early release has no exact reconstruction proof for gitlab" \
+    "the GitLab skip was not reported"
+  assert_not_contains "$OUT" "REFUSED" "GitHub-only release logic ran against a GitLab merge request"
+  [ -d "$WT" ] || fail "a GitLab registration removed the worktree"
+  [ "$(git -C "$WT" rev-parse HEAD)" = "$HEAD" ] || fail "a GitLab registration moved the worktree HEAD"
+  [ "$(git -C "$WT" symbolic-ref --short HEAD)" = "fm/$ID" ] || fail "a GitLab registration detached the branch"
+  assert_grep 'workspace_state=active' "$META" "a GitLab registration rewrote lifecycle state"
+  assert_grep "worktree=$WT" "$META" "a GitLab registration cleared the worktree"
+  pass "a GitLab registration skips the GitHub-only release, keeps its workspace, and succeeds"
+}
+
+test_restored_workspace_is_released_again() {
+  local rec
+  rec=$(make_case restored)
+  read_case "$rec"
+  set_workspace_state restored
+  run_pr_check
+  [ "$RC" -eq 0 ] || fail "registering a restored task failed ($RC): $OUT"
+  assert_registered restored
+  [ ! -d "$WT" ] || fail "a clean restored workspace was not released"
+  assert_grep 'workspace_state=released' "$META" "the restored release was not durable"
+  pass "rerunning fm-pr-check releases a clean restored workspace that was never relaunched"
 }
 
 test_clean_preserved_workspace_is_released() {
@@ -188,7 +234,8 @@ test_interrupted_release_is_retried_by_rerunning() {
   export FM_TEST_DESTROY_FAIL_ONCE="$D/destroy-failed-once"
   run_pr_check
   unset FM_TEST_DESTROY_FAIL_ONCE
-  [ "$RC" -ne 0 ] || fail "a failed exact cleanup exited zero: $OUT"
+  [ "$RC" -eq 0 ] || fail "a failed optional cleanup failed a valid registration ($RC): $OUT"
+  assert_contains "$OUT" "warning: workspace retained" "the failed cleanup was not surfaced"
   assert_registered retry-first-run
   assert_grep 'workspace_state=reclaim-pending' "$META" "the failed cleanup did not retain its retry state"
   [ -d "$WT" ] || fail "the failed cleanup lost the idle worktree"
@@ -220,6 +267,8 @@ test_legacy_record_keeps_its_workspace() {
 }
 
 test_refused_release_keeps_the_registration
+test_gitlab_registration_skips_release
+test_restored_workspace_is_released_again
 test_clean_preserved_workspace_is_released
 test_rerun_on_a_released_record_keeps_pr_head_current
 test_interrupted_release_is_retried_by_rerunning

@@ -285,6 +285,25 @@ test_destroy_failure_aborts_with_record_intact_then_retry_succeeds() {
   pass "fm-teardown: a failed exact destroy aborts with the record intact, and a retry completes"
 }
 
+test_retained_workspace_still_refuses_final_cleanup() {
+  local dir id=task-a rc wt
+  dir=$(make_case retained-dirty fm/task-a)
+  wt="$dir/wsroot/pool/1/repo"
+  write_task_meta "$dir" "$id" active "pr=https://github.com/example/repo/pull/7"
+  claim_slot "$dir" "$id"
+  printf 'secret=keep\n' > "$wt/.env"
+
+  rc=$(run_teardown "$dir" "$id")
+  assert_not_equals 0 "$rc" "final cleanup discarded a workspace whose early release was refused: $(case_output "$dir")"
+  assert_contains "$(cat "$dir/stderr")" "REFUSED" "final cleanup did not report its refusal"
+  assert_present "$wt/.env" "final cleanup removed the untracked material"
+  assert_present "$dir/home/state/$id.meta" "a refused final cleanup erased the task record"
+  assert_grep "worktree=$wt" "$dir/home/state/$id.meta" "a refused final cleanup lost the retained worktree"
+  [ ! -s "$dir/treehouse.log" ] \
+    || fail "a refused final cleanup still ran treehouse: $(cat "$dir/treehouse.log")"
+  pass "fm-teardown: a workspace retained by a refused early release still refuses final cleanup and keeps its record pending"
+}
+
 # --- (b) released record sharing a reused slot path ---------------------------
 
 # Z released its workspace early; Treehouse reused <pool>/1/repo for X.
@@ -440,6 +459,7 @@ test_scoped_return_then_destroy_without_lease_holder
 test_released_record_with_cleared_worktree_tears_down
 test_teardown_retires_task_namespaced_refs
 test_destroy_failure_aborts_with_record_intact_then_retry_succeeds
+test_retained_workspace_still_refuses_final_cleanup
 test_released_record_leaves_reused_claimed_slot_untouched
 test_released_record_leaves_reused_unclaimed_slot_untouched
 test_released_record_force_still_leaves_reused_slot_untouched

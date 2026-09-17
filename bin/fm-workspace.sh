@@ -13,6 +13,8 @@
 # material, a local commit absent from that remote head, an unavailable forge,
 # or an uninspectable workspace refuse before removal.  The proof is journaled
 # in task metadata before cleanup, making interruption and retry idempotent.
+# A restored workspace that was never relaunched releases again under the same
+# proof as an active one.
 #
 # Treehouse tasks are returned and then destroyed exactly, leaving zero idle
 # task worktrees.  Orca tasks close their exact terminal and remove their exact
@@ -359,8 +361,8 @@ if [ "$ACTION" = release ]; then
         exit 0
       fi
       ;;
-    active|'') ;;
-    *) fail "task $ID workspace is '$WORKSPACE_STATE', not active or released" ;;
+    active|restored|'') ;;
+    *) fail "task $ID workspace is '$WORKSPACE_STATE', not active, restored, or released" ;;
   esac
   [ -d "$WT" ] || fail "recorded workspace is missing before remote-preservation proof: ${WT:-missing}"
   [ "$(git -C "$WT" rev-parse --show-toplevel 2>/dev/null)" = "$WT" ] \

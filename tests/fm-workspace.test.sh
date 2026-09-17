@@ -245,6 +245,42 @@ test_release_and_exact_stacked_restore() {
   pass "an open stacked PR releases locally and reconstructs its exact head and branch"
 }
 
+test_restored_workspace_releases_again_under_the_active_proof() {
+  local rec out rc restored
+  rec=$(make_case restored-rerelease)
+  read_case "$rec"
+  out=$(run_workspace release task-x1) || fail "fixture release failed: $out"
+  out=$(run_workspace restore task-x1) || fail "fixture restore failed: $out"
+  restored=$(meta_value worktree)
+  assert_grep 'workspace_state=restored' "$HOME_DIR/state/task-x1.meta" "fixture error: restore should publish restored"
+
+  printf 'scratch\n' > "$restored/untracked.txt"
+  rc=0; out=$(run_workspace release task-x1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a dirty restored workspace was released: $out"
+  assert_contains "$out" "dirty or untracked" "the restored refusal did not name the dirty files"
+  [ -f "$restored/untracked.txt" ] || fail "a refused restored release removed untracked work"
+  assert_grep 'workspace_state=restored' "$HOME_DIR/state/task-x1.meta" "a refused restored release rewrote lifecycle state"
+  rm -f "$restored/untracked.txt"
+
+  git -C "$restored" commit -q --allow-empty -m unpushed
+  rc=0; out=$(run_workspace release task-x1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a restored workspace with an unpushed commit was released: $out"
+  assert_contains "$out" "cleanup would lose unique commits" "the restored refusal did not name the unpushed commit"
+  [ -d "$restored" ] || fail "a refused restored release removed the workspace"
+  git -C "$restored" reset -q --hard "$HEAD"
+
+  out=$(run_workspace release task-x1) || fail "a clean restored workspace refused release: $out"
+  [ ! -d "$restored" ] || fail "the restored release retained the local workspace"
+  assert_grep 'workspace_state=released' "$HOME_DIR/state/task-x1.meta" "the restored release was not durable"
+  assert_grep "workspace_head=$HEAD" "$HOME_DIR/state/task-x1.meta" "the restored release lost the exact remote head"
+  assert_grep 'workspace_base=fm/lower-stack' "$HOME_DIR/state/task-x1.meta" "the restored release lost the stacked base"
+  assert_equals '' "$(meta_value worktree)" "the re-released record still names a local path"
+  pr_identity_readable || fail "the restored release left a record the PR merge monitor can no longer validate"
+  out=$(run_workspace release task-x1) || fail "repeating the restored release was not idempotent: $out"
+  assert_contains "$out" "already released" "the repeated release did not report completion"
+  pass "a restored workspace that was never relaunched releases again only under the full active-release proof"
+}
+
 test_dirty_and_unpushed_refuse() {
   local rec out local_head
   rec=$(make_case dirty)
@@ -688,6 +724,7 @@ test_orca_restore_and_terminal_failure_cleanup() {
 
 test_two_homes_are_collision_proof
 test_release_and_exact_stacked_restore
+test_restored_workspace_releases_again_under_the_active_proof
 test_dirty_and_unpushed_refuse
 test_release_cleanup_retry_is_idempotent
 test_backend_metadata_survives_release

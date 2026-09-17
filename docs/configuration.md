@@ -36,7 +36,10 @@ Orca remains its own worktree provider and participates in the same release/reco
 Idle-task retention is zero.
 Normal completion returns a Treehouse workspace and then destroys that exact clean idle slot; it never uses a pool-wide destructive flag.
 After `fm-pr-check.sh` has durably recorded an open or merged GitHub PR, armed its merge monitor and contribution observation, and published any secondmate PR-ready line, it automatically asks `fm-workspace.sh release <task-id>` to remove the local workspace before merge.
-A release refusal therefore never blocks registration: `fm-pr-check.sh` exits non-zero only to surface the retained workspace, and rerunning it retries an `active`, `releasing`, or `reclaim-pending` workspace idempotently.
+That release is optional cleanup, so a refusal never fails registration or the `fm-pr-merge.sh` metadata rerun: `fm-pr-check.sh` prints a `warning: workspace retained` line, keeps the workspace and its retryable state, and still exits zero, and rerunning it retries an `active`, `restored`, `releasing`, or `reclaim-pending` workspace idempotently.
+Only GitHub has an implemented exact head/base reconstruction proof, so a GitLab merge request skips the release with an explicit retained-workspace notice and keeps its workspace until landing.
+Final teardown is unchanged by a retained workspace: it still refuses dirty, secret-bearing, unverified, or non-reconstructable material and leaves the task record pending.
+A `restored` workspace that was never relaunched releases again, explicitly or through that rerun, under the same identity, clean-tree, ignored-secret, and remote-head containment proof as an `active` one.
 Release fetches `refs/pull/<number>/head`, requires the local workspace to be clean, requires local `HEAD` to be contained in that exact forge head, and records the PR head branch and base branch before cleanup.
 That preserves GitHub's stacked-PR contract: the bottom PR can target trunk, each higher PR can target the branch below it, and every layer remains reconstructable and independently reviewable.
 Dirty or untracked files, ignored secret or runtime material, a commit absent from the remote PR head, an unavailable or changing forge head, an unsafe record, or an incomplete cleanup proof is an explicit refusal and leaves the local copy available.

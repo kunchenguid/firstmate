@@ -185,18 +185,22 @@ printf 'armed: state/%s.check.sh\n' "$ID"
 # and poll are durable, release that local workspace at the earliest safe point:
 # bin/fm-workspace.sh independently proves a clean local HEAD is contained in the
 # fetched remote PR head before returning/removing anything. An interrupted
-# release (releasing, reclaim-pending) is retried here idempotently. A refusal
-# is an expected safety outcome that blocks only the cleanup, so it runs after
-# every registration above.
+# release (releasing, reclaim-pending) and a restored workspace are retried here
+# idempotently. The release is optional cleanup: a refusal keeps the workspace
+# and its retryable state, warns, and never fails the registration above, so
+# bin/fm-pr-merge.sh stays eligible and final teardown keeps its own checks.
+# Only GitHub has an implemented exact head/base reconstruction proof; any other
+# forge keeps its workspace until landing.
 # Legacy records omit workspace_state and retain their historical until-merge
 # behavior.
 WORKSPACE_STATE=$(grep '^workspace_state=' "$META" | tail -1 | cut -d= -f2- || true)
 case "$WORKSPACE_STATE" in
-  active|releasing|reclaim-pending)
-    if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+  active|restored|releasing|reclaim-pending)
+    if [ "$PROVIDER" != github ]; then
+      printf 'workspace: retained; early release has no exact reconstruction proof for %s, so the local workspace stays until landing\n' "$PROVIDER" >&2
+    elif ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
         "$SCRIPT_DIR/fm-workspace.sh" release "$ID"; then
-      echo "error: PR $URL is registered and armed, but its local workspace could not be safely released; fix the reported preservation refusal and rerun fm-pr-check.sh" >&2
-      exit 1
+      printf 'warning: workspace retained; PR %s is registered and armed, but its local workspace could not be safely released; fix the reported preservation refusal and rerun fm-pr-check.sh to retry the cleanup\n' "$URL" >&2
     fi
     ;;
 esac
