@@ -183,28 +183,8 @@ else
   lab pane run "$MUSE_PANE" "$MUSE_LAUNCH" >/dev/null \
     || fail "could not launch Muse Code ($MUSE_VERSION) in the isolated Herdr pane"
 
-  # An empty composer alone is not proof Muse is up: the shared classifier reads
-  # a bare shell prompt row as empty too, so a pane that never became Muse would
-  # be steered into its own shell. The process-level probe is what separates the
-  # two, and only both signals together open the leg.
-  muse_idle=0
-  i=0
-  muse_state=unread
-  muse_process=unread
-  while [ "$i" -lt 90 ]; do
-    muse_process=$(fm_backend_herdr_pane_process_state "$SESSION" "$MUSE_PANE")
-    if [ "$muse_process" = agent ]; then
-      muse_state=$(fm_backend_herdr_composer_state "$MUSE_TARGET")
-      [ "$muse_state" = empty ] && { muse_idle=1; break; }
-    fi
-    i=$((i + 1))
-    sleep 1
-  done
-  [ "$muse_idle" = 1 ] \
-    || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER never reached a live agent process with a shared empty composer in the lab pane (last process state '$muse_process', last composer state '$muse_state')"
-
-  # The build that ran is the build this record may name, and the pane's own
-  # process info carries it: muse's launcher execs a version-suffixed
+  # muse_pane_exec_name: the pane's live muse-bin-<version> identity, empty when
+  # the pane is not running one. muse's launcher execs a version-suffixed
   # muse-bin-<version>, which docs/verification/muse.md treats as muse's
   # authoritative version surface.
   # Only the argv surfaces are read, never the kernel process name: that name is
@@ -215,14 +195,46 @@ else
   # honest version-unknown placeholder instead.
   # The suffix is shape-checked for the same reason: only a non-empty version
   # after the prefix may name a build.
-  muse_proc_json=$(lab pane process-info --pane "$MUSE_PANE" 2>/dev/null || true)
-  muse_exec_name=$(printf '%s' "$muse_proc_json" | jq -r '
-    [.result.process_info.foreground_processes[]?
-     | ((.argv // [])[0] // empty), (.argv0 // empty)]
-    | map(split("/") | last)
-    | map(select(test("^muse-bin-.+$")))
-    | first // empty' 2>/dev/null || true)
-  [ -z "$muse_exec_name" ] || MUSE_VERSION=${muse_exec_name#muse-bin-}
+  muse_pane_exec_name() {
+    lab pane process-info --pane "$1" 2>/dev/null | jq -r '
+      [.result.process_info.foreground_processes[]?
+       | ((.argv // [])[0] // empty), (.argv0 // empty)]
+      | map(split("/") | last)
+      | map(select(test("^muse-bin-.+$")))
+      | first // empty' 2>/dev/null || true
+  }
+
+  # An empty composer alone is not proof Muse is up: the shared classifier reads
+  # a bare shell prompt row as empty too, so a pane that never became Muse would
+  # be steered into its own shell. Nor is the shared process probe enough on its
+  # own: `command -v muse` is the launcher, whose bare `muse` argv[0] the shared
+  # classifier already owns as an agent name, so the launcher window satisfies
+  # the process signal and a not-yet-painted row satisfies the composer signal on
+  # the very same tick. The exec'd muse-bin-<version> identity is what separates
+  # the launcher from the TUI it becomes, so readiness demands all three.
+  muse_idle=0
+  i=0
+  muse_state=unread
+  muse_process=unread
+  muse_exec_name=
+  while [ "$i" -lt 90 ]; do
+    muse_process=$(fm_backend_herdr_pane_process_state "$SESSION" "$MUSE_PANE")
+    if [ "$muse_process" = agent ]; then
+      muse_exec_name=$(muse_pane_exec_name "$MUSE_PANE")
+      if [ -n "$muse_exec_name" ]; then
+        muse_state=$(fm_backend_herdr_composer_state "$MUSE_TARGET")
+        [ "$muse_state" = empty ] && { muse_idle=1; break; }
+      fi
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+  [ "$muse_idle" = 1 ] \
+    || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER never reached a live muse-bin process with a shared empty composer in the lab pane (last process state '$muse_process', last exec identity '${muse_exec_name:-none}', last composer state '$muse_state')"
+
+  # The build that ran is the build this record may name, and the gate above
+  # already read it off the pane before opening.
+  MUSE_VERSION=${muse_exec_name#muse-bin-}
 
   # Best-effort route preference, not proof: a readable native status here means
   # fm_backend_herdr_send_text_submit would take its native branch instead of
