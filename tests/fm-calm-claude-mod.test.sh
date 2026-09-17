@@ -40,11 +40,25 @@ test_plugin_shape() {
   autoload="$ROOT/.claude/skills/firstmate-calm"
   [ -f "$autoload/.claude-plugin/plugin.json" ] || fail "the project's .claude/skills path does not reach the mod's manifest"
   [ -f "$autoload/hooks/hooks.json" ] || fail "the project's .claude/skills path does not reach the mod's hooks module declaration"
-  [ -L "$PI_SPRITE" ] || fail "the Pi sprite path is not a symlink to the shared core"
-  [ "$(node -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$PI_SPRITE")" = \
-    "$(node -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$MOD/lib/fm-calm-working-ship-sprite.ts")" ] \
-    || fail "the Pi sprite path does not resolve to the mod's shared core"
   [ ! -e "$MOD/SKILL.md" ] || fail "the mod carries a SKILL.md and would load as a skill on every harness"
+  # The Pi side reaches the shared core through a plain re-export rather than a git
+  # symlink (a tracked symlink checks out as an unusable text file on a filesystem/git
+  # configuration that does not materialize real symlinks), so single-sourcing is
+  # verified through import identity instead of filesystem symlink shape: a duplicated
+  # copy would still export the same names but never the same function reference.
+  cat >"$TMP_ROOT/sprite-reexport.mjs" <<JS
+import { pathToFileURL } from "node:url";
+const pi = await import(pathToFileURL(${PI_SPRITE@Q}).href);
+const core = await import(pathToFileURL(${MOD@Q} + "/lib/fm-calm-working-ship-sprite.ts").href);
+const check = (condition, message) => { if (!condition) throw new Error(message); };
+const piKeys = Object.keys(pi).sort();
+const coreKeys = Object.keys(core).sort();
+check(JSON.stringify(piKeys) === JSON.stringify(coreKeys), \`the Pi sprite module exports \${piKeys.join(", ")}, not the shared core's \${coreKeys.join(", ")}\`);
+check(pi.createCalmWorkingShipSprite === core.createCalmWorkingShipSprite, "the Pi sprite module is a separate copy of the shared core, not a re-export of it");
+console.log("reexport-ok");
+JS
+  out=$(run_node "$TMP_ROOT/sprite-reexport.mjs" 2>&1) || fail "sprite re-export: $out"
+  assert_contains "$out" "reexport-ok" "the sprite re-export check did not complete"
   cat >"$TMP_ROOT/shape.mjs" <<JS
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 const mod = ${MOD@Q};
@@ -68,7 +82,7 @@ console.log("shape-ok");
 JS
   out=$(run_node "$TMP_ROOT/shape.mjs" 2>&1) || fail "plugin shape: $out"
   assert_contains "$out" "shape-ok" "plugin shape check did not complete"
-  pass "the Calm mod is one hooks module, linked into the project's auto-load path, with no command, skill, agent, or classic hook path that bypasses its exact opt-in"
+  pass "the Calm mod is one hooks module, linked into the project's auto-load path, with no command, skill, agent, or classic hook path that bypasses its exact opt-in, and the Pi sprite re-export shares the same function identity as the mod's canonical core"
 }
 
 test_shared_sprite_and_pi_rendering() {

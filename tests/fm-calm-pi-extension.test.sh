@@ -11,7 +11,11 @@ ASSISTANT_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts"
 OPERATIONAL_USER_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
 VISIBILITY="$ROOT/.pi/extensions/lib/fm-calm-visibility.ts"
 WORKING_SHIP="$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts"
-WORKING_SHIP_SPRITE="$ROOT/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
+# The Pi tree's own copy is a plain re-export (see the file's header comment), which
+# only resolves when it sits inside the real repo tree; every fixture below flattens
+# files into an isolated directory that does not mirror that tree, so this points
+# straight at the mod's canonical, self-contained copy instead of the re-export shim.
+WORKING_SHIP_SPRITE="$ROOT/.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts"
 WATCH_EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 OPERATIONAL_INPUT="$ROOT/bin/fm-operational-input.sh"
 PI_OPERATIONAL_INPUT="$ROOT/.pi/extensions/lib/fm-operational-input.ts"
