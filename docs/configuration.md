@@ -1109,7 +1109,7 @@ FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainl
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
 FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
-TYPESAFE_API_KEY=       # typed routing opt-in (dispatch resolution and Jev intake router), from the environment or the home's gitignored .env; absent means both tools fail closed (docs/configuration.md "Typed dispatch resolution", "Jev intake router")
+TYPESAFE_API_KEY=       # typed routing opt-in (dispatch resolution and Jev intake router), from the environment or the home's gitignored .env; absent means dispatch resolution is off and the router fails closed (docs/configuration.md "Typed dispatch resolution", "Jev intake router")
 JEV_MODEL=jev-latest   # Jev intake router model id (bin/fm-jev-router.sh)
 JEV_HIGH=0.7           # Jev intake router high-confidence threshold; confidence >= this routes cleanly
 JEV_LOW=0.4            # Jev intake router low-confidence threshold; confidence < this escalates
