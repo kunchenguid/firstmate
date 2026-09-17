@@ -1058,6 +1058,8 @@ HERDR_LAYOUT_LEASE_HOLDER=-
 HERDR_LAYOUT_QUARANTINED=0
 HERDR_LAYOUT_ABORT_RESOLVED=0
 HERDR_LAYOUT_ENDPOINT_COMMITTED=0
+HERDR_LAYOUT_ENDPOINT_READY=0
+HERDR_LAYOUT_ABORT_RECONCILE=1
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1125,7 +1127,8 @@ spawn_abort_reconcile_fresh_herdr_layout() {
 
 spawn_abort_cleanup() {
   local status=$? journal seeded_pruned
-  if [ -n "$HERDR_LAYOUT_ATTEMPT" ] \
+  if [ "$HERDR_LAYOUT_ABORT_RECONCILE" = 1 ] \
+    && [ -n "$HERDR_LAYOUT_ATTEMPT" ] \
     && { [ -e "$HERDR_LAYOUT_ATTEMPT" ] || [ -L "$HERDR_LAYOUT_ATTEMPT" ]; }; then
     if ! spawn_abort_reconcile_fresh_herdr_layout; then
       HERDR_LAYOUT_QUARANTINED=1
@@ -5106,6 +5109,7 @@ print(json.dumps(["/bin/sh", "-c", sys.stdin.read()], separators=(",", ":")))
     echo "error: structural Herdr launch could not verify its exact attempt record" >&2
     exit 1
   }
+  HERDR_LAYOUT_ENDPOINT_READY=1
   if [ "$HERDR_LAYOUT_OWNERSHIP_MODE" = fresh ]; then
     HERDR_LAYOUT_ENDPOINT_COMMITTED=1
   fi
@@ -5241,8 +5245,9 @@ if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   fi
 fi
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -eq 0 ] \
-  && [ "$HERDR_LAYOUT_ENDPOINT_COMMITTED" = 1 ]; then
+  && [ "$HERDR_LAYOUT_ENDPOINT_READY" = 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
+  HERDR_LAYOUT_ABORT_RECONCILE=0
   if ! fm_backend_herdr_layout_attempt_commit "$HERDR_LAYOUT_ATTEMPT"; then
     echo "error: task $ID is committed In flight with its exact worker and lease preserved, but its structural launch receipt could not be retired; retry the spawn to finish receipt cleanup without launching another worker" >&2
     SPAWN_BACKLOG_COMMIT_STATUS=1

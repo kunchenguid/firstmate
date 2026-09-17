@@ -1924,6 +1924,34 @@ test_projection_create_retains_seed_prune_proof_after_late_failure() {
   pass "herdr presentation create: late failures preserve confirmed seeded-pane pruning"
 }
 
+test_seeded_prune_preserves_absence_proof_when_focus_restore_fails() {
+  local out
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      shift
+      case "$*" in
+        "tab list --workspace w9")
+          printf "%s\n" "{\"result\":{\"tabs\":[{\"tab_id\":\"w9:t1\",\"label\":\"1\"},{\"tab_id\":\"w9:t2\",\"label\":\"task\"}]}}"
+          ;;
+        "agent get w9:p1") printf "%s\n" "{\"error\":{\"code\":\"agent_not_found\"}}" ;;
+        *) return 1 ;;
+      esac
+    }
+    fm_backend_herdr_pane_for_tab() { printf "%s\n" w9:p1; }
+    fm_backend_herdr_projection_close_pane_focus_preserving() {
+      FM_BACKEND_HERDR_PROJECTION_CLOSE_CONFIRMED=1
+      return 2
+    }
+    status=0
+    fm_backend_herdr_workspace_prune_seeded_default_tab fmtest w9 w9:t1 focus-preserving || status=$?
+    printf "%s %s\n" "$status" "$FM_BACKEND_HERDR_SEEDED_PRUNE_CONFIRMED"
+  ' "$ROOT") || fail "seeded prune focus-failure probe did not complete"
+  [ "$out" = "1 1" ] \
+    || fail "seeded prune lost confirmed absence after focus restoration failed: $out"
+  pass "herdr seeded prune: confirmed absence survives later focus restoration failure"
+}
+
 test_projection_create_never_closes_a_concurrent_same_label_tab() {
   local dir log resp fb out status
   dir="$TMP_ROOT/projection-concurrent-tab"; mkdir -p "$dir/responses"
@@ -2091,11 +2119,19 @@ test_projection_close_reports_focus_restore_failure() {
   cp "$resp/8.out" "$resp/12.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2' "$ROOT" 2>&1)
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      status=0
+      fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2 || status=$?
+      printf "close-confirmed=%s\n" "$FM_BACKEND_HERDR_PROJECTION_CLOSE_CONFIRMED"
+      exit "$status"
+    ' "$ROOT" 2>&1)
   status=$?
   [ "$status" -eq 2 ] || fail "cleanup did not distinguish post-close focus uncertainty: $status"
   assert_contains "$out" "did not restore the exact prior workspace and tab" \
     "focus restoration failure was not reported"
+  assert_contains "$out" "close-confirmed=1" \
+    "focus restoration failure lost the prior confirmed pane removal"
   assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p2' \
     "focus restoration failure fixture did not reach the close boundary"
   pass "herdr presentation focus: pane close fails when exact focus restoration fails"
@@ -5333,6 +5369,7 @@ test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_journal_v2_binds_and_advances_exact_endpoint
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane
 test_projection_create_retains_seed_prune_proof_after_late_failure
+test_seeded_prune_preserves_absence_proof_when_focus_restore_fails
 test_projection_create_never_closes_a_concurrent_same_label_tab
 test_projection_focus_snapshot_requires_exact_workspace_and_tab
 test_projection_close_restores_exact_prior_focus

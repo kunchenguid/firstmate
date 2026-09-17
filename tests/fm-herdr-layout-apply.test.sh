@@ -130,6 +130,8 @@ fm_backend_herdr_cli() { # <session> <args...>
         printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"anchor","focused":true,"active_tab_id":"anchor:t1"},{"workspace_id":"w1","focused":false,"active_tab_id":"w1:t3"}]}}'
       elif [ "$MODE" = focused_cleanup ]; then
         printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","focused":true,"active_tab_id":"w1:t3"}]}}'
+      elif [ "$MODE" = token_workspace ]; then
+        printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"└ task-z1 · p:abcdefghijklmnopqrstuv","focused":true,"active_tab_id":"w1:t3"}]}}'
       else
         printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","focused":true,"active_tab_id":"w1:t2"}]}}'
       fi
@@ -528,6 +530,18 @@ fm_backend_herdr_projection_journal_retire_removed_attempt \
   "$JOURNAL" task-z1 "$ATTEMPT" \
   || fail "fresh recovery did not retire its exact removed endpoint's presentation journal"
 [ ! -e "$JOURNAL" ] || fail "fresh recovery left its correlated presentation journal behind"
+printf 'version=1\ntask_id=task-z1\nprojection_id=%s\n' "$TOKEN" > "$JOURNAL"
+MODE=token_workspace
+if fm_backend_herdr_projection_journal_retire_removed_attempt \
+  "$JOURNAL" task-z1 "$ATTEMPT" >/dev/null 2>&1; then
+  fail "fresh recovery retired an unbound presentation journal while its token workspace remained"
+fi
+[ -e "$JOURNAL" ] || fail "live token workspace lost its unbound presentation journal"
+MODE=ok
+fm_backend_herdr_projection_journal_retire_removed_attempt \
+  "$JOURNAL" task-z1 "$ATTEMPT" \
+  || fail "fresh recovery did not retire its absent token workspace's unbound presentation journal"
+[ ! -e "$JOURNAL" ] || fail "absent token workspace left its unbound presentation journal behind"
 printf 'version=1\ntask_id=task-z1\nprojection_id=%s\n' "$TOKEN" > "$JOURNAL"
 fm_backend_herdr_projection_journal_write_v2 \
   "$JOURNAL" task-z1 "$TOKEN" "$TMP_ROOT" lab-structural w1 w1:t3 w1:p3 \
@@ -1208,7 +1222,16 @@ esac
 SH
 fm_fake_exit0 "$STRUCT_FAKEBIN" pi
 fm_test_fake_sleep_noop "$STRUCT_FAKEBIN"
-chmod +x "$STRUCT_FAKEBIN/treehouse" "$STRUCT_FAKEBIN/herdr"
+cat > "$STRUCT_FAKEBIN/rm" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_FAKE_STRUCT_FAIL_LAUNCH_RECEIPT_RM:-0}" = 1 ]; then
+  for arg in "$@"; do
+    case "$arg" in *.herdr-launch) exit 75 ;; esac
+  done
+fi
+exec /bin/rm "$@"
+SH
+chmod +x "$STRUCT_FAKEBIN/treehouse" "$STRUCT_FAKEBIN/herdr" "$STRUCT_FAKEBIN/rm"
 export FM_FAKE_STRUCT_TREEHOUSE_LOG="$STRUCT_TREEHOUSE_LOG"
 export FM_FAKE_STRUCT_TREEHOUSE_STATE="$STRUCT_TREEHOUSE_STATE"
 export FM_FAKE_STRUCT_LEASE_ID="$STRUCT_LEASE_ID"
@@ -1489,6 +1512,123 @@ PATH="$STRUCT_FAKEBIN:$PATH" fm_treehouse_lease_transaction_return \
 fm_treehouse_slot_owner_release "$STRUCT_WT" success-z1 "$SUCCESS_HOLDER"
 rm -f "$SUCCESS_META" "$SUCCESS_TX"
 pass "successful structural launches retain their live lease after spawn exits"
+
+rm -f "$STRUCT_TASK_CREATED" "$STRUCT_TASK_LABEL" "$STRUCT_CLOSED" "$STRUCT_TREEHOUSE_STATE" "$APPLIED" "$REQUEST"
+: > "$STRUCT_CLOSE_LOG"
+: > "$STRUCT_TREEHOUSE_LOG"
+fm_test_spawn_brief "$STRUCT_HOME" receipt-fail-z1 "Preserve a committed worker when receipt retirement fails."
+start_server success
+set +e
+receipt_fail_out=$(HERDR_SESSION=lab-structural \
+  FM_FAKE_STRUCT_MODE=success FM_FAKE_STRUCT_SOCKET="$SOCK" \
+  FM_FAKE_STRUCT_APPLIED="$APPLIED" FM_FAKE_STRUCT_REQUEST="$REQUEST" \
+  FM_FAKE_STRUCT_TASK_CREATED="$STRUCT_TASK_CREATED" FM_FAKE_STRUCT_TASK_LABEL="$STRUCT_TASK_LABEL" \
+  FM_FAKE_STRUCT_CLOSED="$STRUCT_CLOSED" FM_FAKE_STRUCT_CLOSE_LOG="$STRUCT_CLOSE_LOG" \
+  FM_FAKE_STRUCT_TREEHOUSE_LOG="$STRUCT_TREEHOUSE_LOG" FM_FAKE_STRUCT_TREEHOUSE_STATE="$STRUCT_TREEHOUSE_STATE" \
+  FM_FAKE_STRUCT_LEASE_ID="$STRUCT_LEASE_ID" FM_FAKE_STRUCT_WT="$STRUCT_WT" \
+  FM_FAKE_STRUCT_WORKSPACE_LABEL="$STRUCT_WORKSPACE_LABEL" FM_FAKE_STRUCT_PARENT_PID="$$" \
+  FM_FAKE_STRUCT_FAIL_LAUNCH_RECEIPT_RM=1 \
+  fm_test_run_spawn "$STRUCT_HOME" "$STRUCT_WT" "$STRUCT_FAKEBIN" \
+    receipt-fail-z1 "$STRUCT_PROJECT" --scout --harness pi --backend herdr)
+receipt_fail_status=$?
+set -e
+wait_server
+[ "$receipt_fail_status" -ne 0 ] || fail "receipt retirement failure unexpectedly reported a successful spawn"
+assert_contains "$receipt_fail_out" "receipt could not be retired" \
+  "receipt retirement failure did not report preserved retry authority"
+RECEIPT_FAIL_META="$STRUCT_HOME/state/receipt-fail-z1.meta"
+RECEIPT_FAIL_TX="$STRUCT_HOME/state/receipt-fail-z1.herdr-lease"
+RECEIPT_FAIL_ATTEMPT="$STRUCT_HOME/state/receipt-fail-z1.herdr-launch"
+RECEIPT_FAIL_HOLDER=$(sed -n 's/^treehouse_lease_holder=//p' "$RECEIPT_FAIL_META")
+[ -f "$RECEIPT_FAIL_META" ] && [ -f "$RECEIPT_FAIL_TX" ] \
+  && [ -f "$RECEIPT_FAIL_ATTEMPT" ] && [ -f "$STRUCT_TREEHOUSE_STATE" ] \
+  || fail "receipt retirement failure discarded committed worker recovery state"
+assert_grep 'herdr_pane_id=w1:p3' "$RECEIPT_FAIL_META" \
+  "receipt retirement failure lost the committed endpoint binding"
+assert_no_grep 'w1:p3' "$STRUCT_CLOSE_LOG" \
+  "receipt retirement failure closed the committed worker"
+fm_treehouse_lease_transaction_snapshot "$RECEIPT_FAIL_TX" \
+  && [ "$FM_TREEHOUSE_LEASE_TX_PHASE" = acquired ] \
+  || fail "receipt retirement failure changed the committed lease transaction"
+set +e
+receipt_retry_out=$(HERDR_SESSION=lab-structural \
+  FM_FAKE_STRUCT_MODE=success FM_FAKE_STRUCT_SOCKET="$SOCK" \
+  FM_FAKE_STRUCT_APPLIED="$APPLIED" FM_FAKE_STRUCT_REQUEST="$REQUEST" \
+  FM_FAKE_STRUCT_TASK_CREATED="$STRUCT_TASK_CREATED" FM_FAKE_STRUCT_TASK_LABEL="$STRUCT_TASK_LABEL" \
+  FM_FAKE_STRUCT_CLOSED="$STRUCT_CLOSED" FM_FAKE_STRUCT_CLOSE_LOG="$STRUCT_CLOSE_LOG" \
+  FM_FAKE_STRUCT_TREEHOUSE_LOG="$STRUCT_TREEHOUSE_LOG" FM_FAKE_STRUCT_TREEHOUSE_STATE="$STRUCT_TREEHOUSE_STATE" \
+  FM_FAKE_STRUCT_LEASE_ID="$STRUCT_LEASE_ID" FM_FAKE_STRUCT_WT="$STRUCT_WT" \
+  FM_FAKE_STRUCT_WORKSPACE_LABEL="$STRUCT_WORKSPACE_LABEL" FM_FAKE_STRUCT_PARENT_PID="$$" \
+  fm_test_run_spawn "$STRUCT_HOME" "$STRUCT_WT" "$STRUCT_FAKEBIN" \
+    receipt-fail-z1 "$STRUCT_PROJECT" --scout --harness pi --backend herdr)
+receipt_retry_status=$?
+set -e
+[ "$receipt_retry_status" -eq 0 ] || fail "receipt retirement retry failed: $receipt_retry_out"
+[ ! -e "$RECEIPT_FAIL_ATTEMPT" ] \
+  || fail "receipt retirement retry left the committed receipt behind"
+[ -f "$RECEIPT_FAIL_META" ] && [ -f "$RECEIPT_FAIL_TX" ] && [ -f "$STRUCT_TREEHOUSE_STATE" ] \
+  || fail "receipt retirement retry discarded committed worker ownership"
+assert_no_grep 'w1:p3' "$STRUCT_CLOSE_LOG" \
+  "receipt retirement retry closed the committed worker"
+PATH="$STRUCT_FAKEBIN:$PATH" fm_treehouse_lease_transaction_return \
+  "$RECEIPT_FAIL_TX" receipt-fail-z1 "$RECEIPT_FAIL_HOLDER" "$STRUCT_PROJECT" >/dev/null \
+  || fail "receipt retirement failure fixture cleanup could not return its lease"
+fm_treehouse_slot_owner_release "$STRUCT_WT" receipt-fail-z1 "$RECEIPT_FAIL_HOLDER"
+rm -f "$RECEIPT_FAIL_META" "$RECEIPT_FAIL_TX" "$RECEIPT_FAIL_ATTEMPT"
+pass "receipt retirement failures preserve committed workers and retry receipts"
+
+rm -f "$STRUCT_TASK_CREATED" "$STRUCT_TASK_LABEL" "$STRUCT_CLOSED" "$STRUCT_TREEHOUSE_STATE" "$APPLIED" "$REQUEST"
+: > "$STRUCT_CLOSE_LOG"
+: > "$STRUCT_TREEHOUSE_LOG"
+RETAINED_ID=retained-success-z1
+fm_test_spawn_brief "$STRUCT_HOME" "$RETAINED_ID" "Retire a successful retained launch receipt."
+cat > "$STRUCT_HOME/state/$RETAINED_ID.meta" <<EOF
+window=lab-structural:w1:p2
+endpoint_task_id=$RETAINED_ID
+worktree=$STRUCT_WT
+project=$STRUCT_PROJECT
+harness=pi
+kind=ship
+mode=no-mistakes
+yolo=off
+tasktmp=/tmp/fm-$RETAINED_ID
+model=default
+effort=default
+backend=herdr
+herdr_root=$ROOT
+herdr_session=lab-structural
+herdr_workspace_id=w1
+herdr_tab_id=w1:t2
+herdr_pane_id=w1:p2
+EOF
+start_server success
+set +e
+retained_success_out=$(HERDR_SESSION=lab-structural \
+  FM_FAKE_STRUCT_MODE=success FM_FAKE_STRUCT_SOCKET="$SOCK" \
+  FM_FAKE_STRUCT_APPLIED="$APPLIED" FM_FAKE_STRUCT_REQUEST="$REQUEST" \
+  FM_FAKE_STRUCT_TASK_CREATED="$STRUCT_TASK_CREATED" FM_FAKE_STRUCT_TASK_LABEL="$STRUCT_TASK_LABEL" \
+  FM_FAKE_STRUCT_CLOSED="$STRUCT_CLOSED" FM_FAKE_STRUCT_CLOSE_LOG="$STRUCT_CLOSE_LOG" \
+  FM_FAKE_STRUCT_TREEHOUSE_LOG="$STRUCT_TREEHOUSE_LOG" FM_FAKE_STRUCT_TREEHOUSE_STATE="$STRUCT_TREEHOUSE_STATE" \
+  FM_FAKE_STRUCT_LEASE_ID="$STRUCT_LEASE_ID" FM_FAKE_STRUCT_WT="$STRUCT_WT" \
+  FM_FAKE_STRUCT_WORKSPACE_LABEL="$STRUCT_WORKSPACE_LABEL" FM_FAKE_STRUCT_PARENT_PID="$$" \
+  fm_test_run_spawn "$STRUCT_HOME" "$STRUCT_WT" "$STRUCT_FAKEBIN" \
+    "$RETAINED_ID" --relaunch --harness pi)
+retained_success_status=$?
+set -e
+if [ -e "$APPLIED" ]; then
+  wait_server
+else
+  kill "$SERVER_PID" 2>/dev/null || true
+  wait "$SERVER_PID" 2>/dev/null || true
+  SERVER_PID=
+fi
+[ "$retained_success_status" -eq 0 ] || fail "successful retained structural launch failed: $retained_success_out"
+[ ! -e "$STRUCT_HOME/state/$RETAINED_ID.herdr-launch" ] \
+  || fail "successful retained structural launch left its receipt behind"
+assert_grep 'herdr_pane_id=w1:p3' "$STRUCT_HOME/state/$RETAINED_ID.meta" \
+  "successful retained structural launch did not publish its replacement endpoint"
+rm -f "$STRUCT_HOME/state/$RETAINED_ID.meta"
+pass "successful retained structural launches retire their verified receipts"
 
 rm -f "$STRUCT_TASK_CREATED" "$STRUCT_TASK_LABEL" "$STRUCT_CLOSED" "$STRUCT_TREEHOUSE_STATE" "$APPLIED" "$REQUEST"
 : > "$STRUCT_CLOSE_LOG"

@@ -1012,6 +1012,7 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
   local before active_tab info target_pane target_tab target_ws close_status state plan plan_shell_pid plan_move_record workspace_presence
   local skip_restore=0
   FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=""
+  FM_BACKEND_HERDR_PROJECTION_CLOSE_CONFIRMED=0
   [ -n "$pane_id" ] || return 0
   before=$(fm_backend_herdr_projection_focus_snapshot "$session") || {
     echo "warning: herdr presentation cleanup could not capture exact active workspace and tab; refusing focus-unsafe pane close" >&2
@@ -1094,6 +1095,9 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
     fi
   else
     close_status=1
+  fi
+  if [ "$close_status" -eq 0 ]; then
+    FM_BACKEND_HERDR_PROJECTION_CLOSE_CONFIRMED=1
   fi
   if [ "$close_status" -eq 0 ] && [ -n "$plan_move_record" ]; then
     workspace_presence=$(fm_backend_herdr_workspace_presence_state "$session" "$target_ws")
@@ -1897,7 +1901,11 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
   agent_status=$(printf '%s' "$agent_out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
   [ "$agent_status" = working ] && return 0
   if [ "$close_mode" = focus-preserving ]; then
-    fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane_id" || return 1
+    if ! fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane_id"; then
+      [ "${FM_BACKEND_HERDR_PROJECTION_CLOSE_CONFIRMED:-0}" != 1 ] \
+        || FM_BACKEND_HERDR_SEEDED_PRUNE_CONFIRMED=1
+      return 1
+    fi
   else
     fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1 || true
     return 0
@@ -3186,27 +3194,38 @@ fm_backend_herdr_layout_attempt_snapshot() { # <file>
 }
 
 fm_backend_herdr_projection_journal_retire_removed_attempt() { # <journal> <task-id> <attempt-file>
-  local journal=$1 id=$2 attempt_file=$3 journal_tab journal_pane
+  local journal=$1 id=$2 attempt_file=$3 journal_tab journal_pane list matches
   fm_backend_herdr_layout_attempt_snapshot "$attempt_file" || return 1
   [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 6 ] \
     && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" = fresh ] \
     && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_TASK" = "$id" ] \
     && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = removed ] || return 1
   fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
-  [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] \
-    && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" ] \
-    && [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" ] || return 1
-  journal_tab=$FM_BACKEND_HERDR_JOURNAL_TAB_ID
-  journal_pane=$FM_BACKEND_HERDR_JOURNAL_PANE_ID
-  case "$journal_tab:$journal_pane" in
-    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE"|\
-    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE") ;;
+  [ "$(fm_backend_herdr_pane_presence_state \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE")" = dead ] || return 1
+  case "$FM_BACKEND_HERDR_JOURNAL_VERSION" in
+    1)
+      list=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" workspace list 2>/dev/null) || return 1
+      printf '%s' "$list" | jq -e '(.result.workspaces | type) == "array"' >/dev/null 2>&1 || return 1
+      matches=$(printf '%s' "$list" | jq -r --arg suffix " · p:$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" \
+        '[.result.workspaces[]? | select((.label | type) == "string" and (.label | endswith($suffix)))] | length' 2>/dev/null) || return 1
+      [ "$matches" = 0 ] || return 1
+      ;;
+    2)
+      [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" ] \
+        && [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" ] || return 1
+      journal_tab=$FM_BACKEND_HERDR_JOURNAL_TAB_ID
+      journal_pane=$FM_BACKEND_HERDR_JOURNAL_PANE_ID
+      case "$journal_tab:$journal_pane" in
+        "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE"|\
+        "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE") ;;
+        *) return 1 ;;
+      esac
+      [ "$(fm_backend_herdr_pane_presence_state \
+        "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" "$journal_pane")" = dead ] || return 1
+      ;;
     *) return 1 ;;
   esac
-  [ "$(fm_backend_herdr_pane_presence_state \
-    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE")" = dead ] \
-    && [ "$(fm_backend_herdr_pane_presence_state \
-      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" "$journal_pane")" = dead ] || return 1
   rm -f -- "$journal"
 }
 
