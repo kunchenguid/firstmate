@@ -1571,6 +1571,8 @@ SH
   [ "$rc" -ne 0 ] || fail "watcher exited 0 when it could not create the lock: $(cat "$out")"
   grep -q '^watcher: FAILED' "$out" \
     || fail "watcher did not emit the typed failure line: $(cat "$out")"
+  grep -q 'verifiable process identity' "$out" \
+    || fail "typed failure did not name the identity cause: $(cat "$out")"
   grep -q 'already running' "$out" \
     && fail "watcher claimed a peer that does not exist: $(cat "$out")"
   [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] \
@@ -1578,6 +1580,39 @@ SH
   [ ! -e "$state/.watcher-down" ] \
     || fail "a watcher that never armed published a downtime marker: $(cat "$state/.watcher-down")"
   pass "watcher that cannot create its lock fails loudly instead of reporting a peer"
+}
+
+test_contended_steal_is_not_reported_as_an_identity_failure() {
+  local dir state fakebin out live owner rc
+  dir=$(make_case watch-steal-contended)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  sleep 300 &
+  live=$!
+  # A concurrent reclaimer caught mid-steal: it holds .watch.lock.steal while
+  # the watch lock itself is momentarily absent. fm_lock_claim refuses this
+  # process's fresh lock while that steal lock stands, so the acquire fails
+  # with no holder and no lock on disk - the same observable state an
+  # unobtainable identity produces. This race resolves into one healthy
+  # watcher, so it must stand down rather than blame identity and fail.
+  owner=$(mktemp -d "$state/.watch.lock.steal.owner.XXXXXX") \
+    || fail "could not create steal owner dir"
+  printf '%s\n' "$live" > "$owner/pid"
+  ln -s "$owner" "$state/.watch.lock.steal"
+  rc=0
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 || rc=$?
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "watcher failed over a contended steal (rc=$rc): $(cat "$out")"
+  grep -q 'verifiable process identity' "$out" \
+    && fail "a contended steal was blamed on process identity: $(cat "$out")"
+  grep -q '^watcher: FAILED' "$out" \
+    && fail "a contended steal was reported as a typed failure: $(cat "$out")"
+  grep -q 'already running' "$out" \
+    || fail "watcher did not stand down for the concurrent reclaimer: $(cat "$out")"
+  pass "a contended steal stands down instead of reporting an identity failure"
 }
 
 test_wait_deadline_reaps_a_stopped_child
@@ -1620,3 +1655,4 @@ test_foreign_home_dead_watch_lock_with_stale_beacon_is_reclaimed
 test_pid_identity_is_non_empty_on_this_host
 test_watch_lock_is_not_published_without_an_identity
 test_watcher_fails_loud_when_the_lock_cannot_be_created
+test_contended_steal_is_not_reported_as_an_identity_failure

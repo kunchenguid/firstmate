@@ -626,9 +626,16 @@ fm_lock_claim() {
   return 0
 }
 
+# FM_LOCK_IDENTITY_REFUSED distinguishes the one creation failure that no retry
+# can resolve - no verifiable process identity for the watcher - from losing a
+# creation or steal race, which resolves itself into a single healthy watcher.
+# Only a watch-lock creation attempt writes it, so the recursive steal-lock
+# acquire inside fm_lock_try_acquire cannot clobber it.
+FM_LOCK_IDENTITY_REFUSED=
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   FM_LOCK_OWNER_DIR=
+  [ "$lockdir" != "$STATE/.watch.lock" ] || FM_LOCK_IDENTITY_REFUSED=
   ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
@@ -640,6 +647,7 @@ fm_lock_try_create() {
   fi
   if [ "$lockdir" = "$STATE/.watch.lock" ] \
     && ! fm_lock_write_watch_ownership "$ownerdir"; then
+    FM_LOCK_IDENTITY_REFUSED=1
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
