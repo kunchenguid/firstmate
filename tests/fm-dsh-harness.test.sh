@@ -1,0 +1,1155 @@
+#!/usr/bin/env bash
+# Behavior tests for the DeepSeek Harness primary adapter.
+#
+# The facts pinned here are the ones a DSH release could silently change and the
+# ones a wrong guess would make dangerous:
+#   1. A live DSH host is a node process, so `ps` reports comm=node and the
+#      launcher name is visible ONLY in argv. Detection is therefore an anchored
+#      match on the dsh launcher path, never a bare *dsh* glob an unrelated node
+#      command could satisfy.
+#   2. DSH publishes no harness-identity marker, so FM_DSH_HARNESS=dsh is a
+#      Firstmate-OWNED precedence override, honored only when a genuine dsh
+#      process is in the ancestry (the FM_OMP_HARNESS contract).
+#   3. Because the ancestry verdict is `args` strength, an inherited CLAUDECODE
+#      outranks it; the launch marker is what keeps a DSH session identified as
+#      dsh. Pin both halves so neither can rot silently.
+#   4. DSH reports stop_hook_active=false on every Stop and has no async re-wake
+#      hook, so the guard owns a session-scoped block budget and emits one
+#      attended fail-open instead of re-blocking without limit.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+# bin/fm-harness.sh checks verified ENV markers before ancestry. A suite run
+# from inside another harness inherits those markers, which outrank the fake
+# ancestry these cases set up. Drop the ambient markers so the asserted verdict
+# does not depend on which harness launched the suite.
+unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS \
+  ATLASSIAN_AGENT_TYPE ROVODEV_CLI GEMINI_CLI AGENT FM_OMP_HARNESS FM_DSH_HARNESS
+
+HARNESS="$ROOT/bin/fm-harness.sh"
+TMP_ROOT=$(fm_test_tmproot fm-dsh-harness)
+
+# A fake `ps` answering per-pid comm/args/ppid, the fm-agy-harness shape. The
+# walk starts at the script's own pid, so the first answer must be the node
+# host and the second must end the walk.
+make_ps_fakebin() {  # <dir> <comm> <args>
+  local dir=$1 comm=$2 args=$3 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *"args="*) printf '%s\n' '$args'; exit 0 ;;
+  *"comm="*) printf '%s\n' '$comm'; exit 0 ;;
+  *"ppid="*) printf '1\n'; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  printf '%s\n' "$fakebin"
+}
+
+# A fake `ps` answering a parent chain <depth> processes tall: the script's own
+# pid, then synthetic ancestors above any real pid, the topmost of which is a
+# node process carrying <args>.
+make_ps_chain() {  # <dir> <depth> <args>
+  local dir=$1 depth=$2 args=$3 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+pid= field=
+while [ "\$#" -gt 0 ]; do
+  case "\$1" in -p) pid=\$2; shift ;; -o) field=\$2; shift ;; esac
+  shift
+done
+[ -n "\$pid" ] || exit 1
+hop=0
+[ "\$pid" -gt 7700000 ] && hop=\$((pid - 7700000))
+top=\$(($depth - 1))
+case "\$field" in
+  ppid=) if [ "\$hop" -lt "\$top" ]; then echo \$((7700001 + hop)); else echo 1; fi ;;
+  comm=) if [ "\$hop" -eq "\$top" ]; then echo node; else echo bash; fi ;;
+  args=) if [ "\$hop" -eq "\$top" ]; then echo '$args'; else echo 'bash /x/bin/fm-session-start.sh'; fi ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '%s\n' "$fakebin"
+}
+
+# A fake `ps` that answers nothing, so the ancestry walk finds no harness. The
+# suite itself frequently runs inside a real DSH session, whose genuine ancestry
+# would otherwise satisfy every dsh query - the same blinding the agy suite
+# needs for the same reason.
+make_ps_blind() {  # <dir>
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/ps"
+  chmod +x "$fakebin/ps"
+  printf '%s\n' "$fakebin"
+}
+
+test_dsh_session_lock_matcher_detects_launcher_paths() {
+  # state/.lock is acquired through this matcher, and a host that cannot be
+  # named there leaves every DSH session permanently read-only.
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  fm_harness_process_matches node "node /Users/x/.npm/_npx/abc/node_modules/.bin/dsh web" \
+    || fail "the npx .bin/dsh launcher must be a harness process"
+  fm_harness_process_matches node "node /g/node_modules/@deepseek-ai/dsh/lib/bin.js web" \
+    || fail "the installed dsh bin.js must be a harness process"
+  fm_harness_process_matches node "node /opt/homebrew/bin/dsh web" \
+    || fail "a global npm install's bin/dsh symlink must be a harness process"
+  fm_harness_process_matches node "/Users/x/apps/cli/src/bin.ts" \
+    || fail "the source-launch bin.ts must be a harness process"
+  pass "fm-session-lock-lib: dsh launcher paths are harness processes"
+}
+
+test_dsh_session_lock_matcher_rejects_firstmate_paths() {
+  # A bare `dsh` alternative would claim firstmate's own scripts and reopen the
+  # false positives the anchored pi/omp arms exist to prevent.
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-session-lock-lib.sh"
+  fm_harness_process_matches node "node /Users/x/bin/fm-dsh-sessionstart.sh" \
+    && fail "firstmate's own fm-dsh-*.sh path must not claim the dsh identity" || true
+  fm_harness_process_matches node "node /Users/x/dshish.js" \
+    && fail "an unrelated dshish path must not claim the dsh identity" || true
+  fm_harness_process_matches node "node /usr/local/bin/dshish.js" \
+    && fail "a dshish script in a bin directory must not claim the dsh identity" || true
+  fm_harness_process_matches claude claude || fail "claude must still be a harness process"
+  fm_harness_process_matches omp omp || fail "omp must still be a harness process"
+  pass "fm-session-lock-lib: dsh matching adds no false positives"
+}
+
+# A stub firstmate home whose session-start prints whatever the case wants.
+make_digest_home() {  # <name> <stdout-text>
+  local name=$1 text=$2 dir
+  dir="$TMP_ROOT/digest-$name"
+  mkdir -p "$dir/bin" "$dir/state"
+  cat > "$dir/bin/fm-session-start.sh" <<SH
+#!/usr/bin/env bash
+mkdir -p '$dir/state'
+printf '%s\n' '$text'
+exit 0
+SH
+  chmod +x "$dir/bin/fm-session-start.sh"
+  printf '%s\n' "$dir"
+}
+
+run_digest() {  # <home> <session-id> -> stdout in $DIGEST_OUT
+  local home=$1 sid=$2
+  DIGEST_OUT=$(printf '{"session_id":"%s"}' "$sid" \
+    | env -u CLAUDE_PROJECT_DIR FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$home/state" \
+      "$ROOT/bin/fm-dsh-sessionstart.sh" 2>/dev/null)
+}
+
+test_dsh_guard_healthy_reset_clears_the_alarm_latch() {
+  local home rc
+  home=$(make_guard_home guard-latch)
+  printf 'task\n' > "$home/state/t1.meta"
+  printf 'session=s1\ncount=99\n' > "$home/state/.turnend-dsh-blocks"
+  rc=0; run_dsh_stop "$home" s1 || rc=$?
+  expect_code 2 "$rc" "an exhausted budget must alarm"
+  [ -f "$home/state/.dsh-turnend-fail-open" ] || fail "the alarm was not latched"
+  rm -f "$home/state/t1.meta"
+  rc=0; run_dsh_stop "$home" s1 || rc=$?
+  expect_code 0 "$rc" "a stop needing no supervision is allowed"
+  [ -e "$home/state/.dsh-turnend-fail-open" ] \
+    && fail "a recovered home kept its alarm latch and could never alarm again" || true
+  pass "fm-turnend-guard --dsh: recovery clears the alarm latch with the budget"
+}
+
+test_dsh_digest_delivers_session_start_stdout_whole() {
+  local home
+  # The digest IS fm-session-start.sh's stdout: a refused-lock banner, the
+  # read-once contract and the operating block all ride it. Rendering only the
+  # operating block would hand the agent instructions without the diagnosis.
+  home=$(make_digest_home whole 'READ-ONLY SESSION - FLEET LOCK OWNERSHIP WAS NOT VERIFIED')
+  run_digest "$home" s1
+  assert_contains "$DIGEST_OUT" "READ-ONLY SESSION" \
+    "the digest did not carry the session-start banner"
+  assert_contains "$DIGEST_OUT" "additionalContext" \
+    "the digest was not emitted as UserPromptSubmit additionalContext"
+  assert_contains "$DIGEST_OUT" "UserPromptSubmit" \
+    "the emitted payload named the wrong hook event"
+  [ -f "$home/state/.dsh-sessionstart-delivered" ] \
+    || fail "a delivered digest did not record its once-per-session gate"
+  pass "fm-dsh-sessionstart.sh: the whole session-start stdout is delivered"
+}
+
+test_dsh_digest_surfaces_a_durable_alarm() {
+  local home
+  # A session that died before the agent relayed the guard's alarm must still
+  # report it: the latch is durable and the next digest carries it.
+  home=$(make_digest_home alarm 'DIGEST-BODY')
+  printf 'blocked 1789557000\n' > "$home/state/.dsh-turnend-fail-open"
+  run_digest "$home" s1
+  assert_contains "$DIGEST_OUT" "FIRSTMATE SUPERVISION ALARM" \
+    "a durable alarm was not surfaced in the next session-start digest"
+  assert_contains "$DIGEST_OUT" "DIGEST-BODY" \
+    "the alarm replaced the digest instead of preceding it"
+  [ -f "$home/state/.dsh-turnend-fail-open" ] \
+    || fail "the adapter cleared a latch the guard's healthy-reset owns"
+  pass "fm-dsh-sessionstart.sh: a durable alarm is surfaced, not lost"
+}
+
+test_dsh_digest_gate_is_per_session() {
+  local home
+  home=$(make_digest_home gate 'DIGEST-BODY')
+  run_digest "$home" s1
+  assert_contains "$DIGEST_OUT" "DIGEST-BODY" "the first prompt must receive the digest"
+  run_digest "$home" s1
+  [ -z "$DIGEST_OUT" ] || fail "a second prompt in the same session must not re-deliver the digest"
+  run_digest "$home" s2
+  assert_contains "$DIGEST_OUT" "DIGEST-BODY" "a new session must receive its own digest"
+  pass "fm-dsh-sessionstart.sh: the gate is per session and re-arms for a new one"
+}
+
+test_dsh_digest_retries_when_nothing_was_produced() {
+  local home
+  # fm-session-start.sh exits 0 on every path including a refused lock, so an
+  # empty digest is the only signal that nothing was produced. Recording the
+  # gate before the run would swallow the failure for the whole session.
+  home=$(make_digest_home empty '')
+  run_digest "$home" s1
+  [ -z "$DIGEST_OUT" ] || fail "an empty digest must emit nothing"
+  [ -e "$home/state/.dsh-sessionstart-delivered" ] \
+    && fail "an empty digest must not record the gate; the next prompt must retry" || true
+  pass "fm-dsh-sessionstart.sh: an empty digest leaves the gate unset and retries"
+}
+
+test_dsh_digest_reaches_a_home_without_state() {
+  local home
+  # state/ is gitignored and fm-session-start.sh's own lock creates it, so a
+  # fresh checkout has none until the digest runs. Gating on it first left a
+  # new home without a digest on every prompt.
+  home=$(make_digest_home fresh 'DIGEST-BODY')
+  rm -rf "$home/state"
+  run_digest "$home" s1
+  assert_contains "$DIGEST_OUT" "DIGEST-BODY" "a home without state/ must still receive the digest"
+  [ -f "$home/state/.dsh-sessionstart-delivered" ] \
+    || fail "the gate was not recorded once session start created state/"
+  pass "fm-dsh-sessionstart.sh: a fresh home without state/ receives the digest"
+}
+
+test_dsh_guard_alarms_when_the_budget_lock_is_unavailable() {
+  local home rc
+  # An unacquirable budget lock is not proof that budget remains. Falling
+  # through to block_stop made the loop unbounded exactly when the guard could
+  # prove the least; silently allowing lost the alarm instead.
+  home=$(make_guard_home guard-lockheld)
+  printf 'task\n' > "$home/state/t1.meta"
+  mkdir -p "$home/state/.turnend-dsh-blocks.lock"
+  printf '%s\n' "$$" > "$home/state/.turnend-dsh-blocks.lock/pid"
+  rc=0; run_dsh_stop "$home" s1 || rc=$?
+  expect_code 2 "$rc" "an unprovable budget must raise the alarm, never re-block silently"
+  assert_contains "$(cat "$home/stderr.txt")" "SUPERVISION IS GENUINELY DOWN" \
+    "the unprovable-budget alarm did not name the condition"
+  rc=0; run_dsh_stop "$home" s1 || rc=$?
+  expect_code 0 "$rc" "and then allow, so the loop stays bounded"
+  pass "fm-turnend-guard --dsh: an unavailable budget lock alarms once, then allows"
+}
+
+test_dsh_guard_budget_is_an_episode_not_a_session() {
+  local home rc
+  home=$(make_guard_home guard-episode)
+  printf 'task\n' > "$home/state/t1.meta"
+  # An exhausted ledger whose episode is older than the window starts over, so
+  # one lapse cannot leave a long-lived session permanently alarming.
+  printf 'session=s1\ncount=99\n' > "$home/state/.turnend-dsh-blocks"
+  touch -t 202001010000 "$home/state/.turnend-dsh-blocks"
+  rc=0; run_dsh_stop "$home" s1 || rc=$?
+  expect_code 2 "$rc" "an expired episode must start a fresh budget and block"
+  assert_grep 'count=1' "$home/state/.turnend-dsh-blocks" \
+    "the expired episode did not restart its count"
+  # The same ledger inside the window keeps its count: one alarm, then allow.
+  printf 'session=s1\ncount=99\n' > "$home/state/.turnend-dsh-blocks"
+  rc=0; run_dsh_stop "$home" s1 || rc=$?
+  expect_code 2 "$rc" "an exhausted ledger inside the window must alarm once"
+  rc=0; run_dsh_stop "$home" s1 || rc=$?
+  expect_code 0 "$rc" "and then allow"
+  pass "fm-turnend-guard --dsh: the budget is an episode window, not a session lifetime"
+}
+
+test_dsh_repair_line_and_seatbelt_agree_on_the_arm_command() {
+  local policy line
+  # The repair line an agent is actually shown and the PreToolUse seatbelt must
+  # name the same entry point. Naming bin/fm-watch.sh would be denied as
+  # watcher-direct, making the delivered instruction unrunnable.
+  policy=$(node "$ROOT/bin/fm-arm-command-policy.mjs" --root "$ROOT" --home "$ROOT" --command 'bin/fm-watch-arm.sh')
+  [ "$policy" = allow ] \
+    || fail "the protocol's arm command must pass the seatbelt, got '$policy'"
+  # ...and the direct form it replaced must still be denied, which is why the
+  # repair line cannot name it.
+  policy=$(node "$ROOT/bin/fm-arm-command-policy.mjs" --root "$ROOT" --home "$ROOT" --command 'bin/fm-watch.sh')
+  case "$policy" in deny*watcher-direct*) : ;; *) fail "a direct bin/fm-watch.sh must stay denied, got '$policy'" ;; esac
+  line=$("$ROOT/bin/fm-supervision-instructions.sh" --harness dsh --afk 0 --x-mode 0 --repair-line 2>/dev/null | tail -1)
+  assert_contains "$line" "bin/fm-watch-arm.sh" \
+    "the dsh repair line must name the blessed arm script"
+  pass "dsh repair line and arm seatbelt agree on bin/fm-watch-arm.sh"
+}
+
+# The composed permission row, with the preset new sessions default to, or
+# none when DSH would infer it from the sandbox knobs.
+permission_row() {  # <default preset|->
+  printf -- '- id: permission\n  name: "@deepseek-ai/dsh-permission-presets"\n  config:\n    presets:\n      workspace-write:\n        sandbox: workspace-write\n        approval: ask\n'
+  [ "$1" = - ] || printf -- '    defaultPreset: %s\n' "$1"
+}
+
+# The composed sandbox-policy row as dsh-base ships it, or with a literal <mode>
+# as the tracked patch pins it.
+sandbox_row() {  # [<mode>]
+  printf -- '- id: sandbox-policy\n  name: "@deepseek-ai/dsh-sandbox-policy"\n  config:\n'
+  if [ -n "${1:-}" ]; then
+    printf -- '    mode: %s\n' "$1"
+  else
+    printf -- "    mode: !!js process.env.DSH_PERMISSION_MODE ?? 'workspace-write'\n"
+  fi
+  printf -- '    workspaceRoot: !!js process.cwd()\n'
+}
+
+# The composed tree `dsh --dump-config` prints, reduced to the entries the
+# checks have to tell apart.
+write_dump() {  # <file> <agent-instructions maxBytes> [<other-plugin maxBytes>] [<default permission preset|->]
+  {
+    printf '# == @deepseek-ai/dsh-base\n'
+    printf -- '- id: agent-instructions\n  name: "@deepseek-ai/dsh-agent-instructions"\n  config:\n    maxBytes: %s\n' "$2"
+    [ -z "${3:-}" ] || printf -- '- id: other-plugin\n  name: other-plugin\n  config:\n    maxBytes: %s\n' "$3"
+    sandbox_row danger-full-access
+    permission_row "${4:-danger-full-access}"
+    printf -- '- id: skill\n  name: "@deepseek-ai/dsh-skill"\n'
+  } > "$1"
+}
+
+# The same dump as dsh-web-app composes it: the host agent-instructions row is
+# raised but disabled, and an agent-presets row names the default preset each
+# session is composed from instead.
+write_web_dump() {  # <file> <default preset>
+  {
+    printf '# == @deepseek-ai/dsh-base, patched by @deepseek-ai/dsh-web-app\n'
+    printf -- '- id: agent-instructions\n  name: "@deepseek-ai/dsh-agent-instructions"\n  config:\n    maxBytes: 262144\n  disabled: true\n'
+    printf '# == @deepseek-ai/dsh-web-app\n'
+    printf -- '- id: agent-presets\n  name: "@deepseek-ai/dsh-agent-presets"\n  config:\n    default: %s\n    roots:\n      - path: !!js process.cwd() + "/.dsh/agent-presets"\n        trust: system\n' "$2"
+    sandbox_row danger-full-access
+    permission_row danger-full-access
+  } > "$1"
+}
+
+# Install the tracked firstmate agent preset into a fixture home, so the
+# preflight checks the preset this checkout actually ships.
+install_fm_preset() {  # <dsh-home>
+  mkdir -p "$1/fmhome/.dsh/agent-presets"
+  cp -R "$ROOT/.dsh/agent-presets/firstmate" "$1/fmhome/.dsh/agent-presets/firstmate"
+}
+
+# A synthetic DSH home: <root>/install is the dsh installation, holding dsh-base
+# beside a stand-in `dsh` that <root>/fakebin links to, and the named profile
+# holds its own node_modules. There is no <root>/profiles/node_modules mirror,
+# which DSH only creates when a host boots, so every fixture is a fresh home.
+# The stand-in records its argv, one argument per line, in <root>/dsh-dump-argv
+# for a --dump-config invocation and in <root>/dsh-argv for any other, then
+# keeps DSH's argv grammar: a parent option before the `web` or `plugin`
+# subcommand exits 1, and so does a --patch after web's first unknown token. It
+# answers `--profile p|web --dump-config` with <root>/dump.yml, or with
+# <root>/dump-patched.yml when a --patch overlay is forwarded, and fails for any
+# other profile or a missing dump; any other invocation records the environment
+# it booted with in <root>/dsh-env.
+make_dsh_home() {  # <dir> <base-version> <bridge-version|-> <maxBytes|-> <agents-bytes>
+  local dir=$1 base=$2 bridge=$3 maxb=$4 agents=$5 fakebin
+  mkdir -p "$dir/install/node_modules/@deepseek-ai/dsh-base" "$dir/install/lib" "$dir/profiles/p" "$dir/fmhome"
+  printf '{"name":"@deepseek-ai/dsh-base","version":"%s"}\n' "$base" \
+    > "$dir/install/node_modules/@deepseek-ai/dsh-base/package.json"
+  if [ "$bridge" != - ]; then
+    mkdir -p "$dir/profiles/p/node_modules/@deepseek-ai/dsh-hooks-claude-code"
+    printf '{"name":"@deepseek-ai/dsh-hooks-claude-code","version":"%s"}\n' "$bridge" \
+      > "$dir/profiles/p/node_modules/@deepseek-ai/dsh-hooks-claude-code/package.json"
+  fi
+  [ "$maxb" = - ] || write_dump "$dir/dump.yml" "$maxb"
+  head -c "$agents" /dev/zero | tr '\0' 'x' > "$dir/fmhome/AGENTS.md"
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$dir/install/lib/dsh" <<SH
+#!/usr/bin/env bash
+case " \$* " in *" --dump-config "*) argv='$dir/dsh-dump-argv' ;; *) argv='$dir/dsh-argv' ;; esac
+printf '%s\n' "\$@" > "\$argv"
+parent= sub= value= inner=
+for a in "\$@"; do
+  if [ -n "\$value" ]; then value=; continue; fi
+  if [ -n "\$inner" ]; then
+    if [ "\$sub" = web ] && [ "\$a" = --patch ]; then echo "error: unknown option '--patch'" >&2; exit 1; fi
+    continue
+  fi
+  case "\$a" in
+    --profile|--patch|--from-default-profile) value=1; [ -n "\$sub" ] || parent=1 ;;
+    --dump-config|--dump-default-config) [ -n "\$sub" ] || parent=1 ;;
+    web|plugin)
+      [ -z "\$sub" ] || { inner=1; continue; }
+      [ -z "\$parent" ] || { echo "error: \$a takes none of parent --profile, --from-default-profile, --patch, --dump-config, or --dump-default-config" >&2; exit 1; }
+      sub=\$a ;;
+    *) inner=1 ;;
+  esac
+done
+case " \$* " in
+  *" --dump-config "*) ;;
+  *) printf 'root=%s\npwd=%s\n' "\$FM_ROOT" "\$PWD" > '$dir/dsh-env'; exit 0 ;;
+esac
+case " \$* " in *" --profile p "*|*" --profile web "*) ;; *) exit 1 ;; esac
+dump='$dir/dump.yml'
+case " \$* " in *" --patch "*) dump='$dir/dump-patched.yml' ;; esac
+[ -f "\$dump" ] && cat "\$dump"
+SH
+  chmod +x "$dir/install/lib/dsh"
+  ln -s "$dir/install/lib/dsh" "$fakebin/dsh"
+  printf '%s\n' "$dir"
+}
+
+run_preflight() {  # <dsh-home> [preflight args...] -> stdout in $PREFLIGHT_OUT, exit in $PREFLIGHT_RC
+  local home=$1
+  shift
+  PREFLIGHT_RC=0
+  PREFLIGHT_OUT=$(DSH_HOME="$home" PATH="$home/fakebin:$PATH" \
+    "$ROOT/bin/fm-dsh-preflight.sh" --profile p --home "$home/fmhome" "$@" 2>&1) || PREFLIGHT_RC=$?
+}
+
+test_dsh_launcher_roots_the_host_in_its_checkout() {
+  local dir elsewhere rc
+  # .dsh/profile.patch.yml resolves the bridge's configPath and projectDir from
+  # FM_ROOT or the cwd, and DSH takes the cwd as its workspace root. Launched
+  # from anywhere else, the bridge finds no hooks file and runs with no guards,
+  # so the launcher must hand the host this checkout whatever the caller's cwd.
+  # The documented argv is driven, because DSH refuses a parent --patch before
+  # `web`, and the preflight runs through the launcher too, so the budget DSH
+  # reports accounts for the tracked patch the host boots with.
+  dir=$(make_dsh_home "$TMP_ROOT/launch" 0.1.5-rc.2 0.1.5-rc.2 65536 1)
+  write_dump "$dir/dump-patched.yml" 262144
+  ln -s p "$dir/profiles/web"
+  elsewhere="$dir/elsewhere"; mkdir -p "$elsewhere"
+  rc=0
+  ( cd "$elsewhere" && FM_ROOT=/not/this/checkout DSH_HOME="$dir" PATH="$dir/fakebin:$PATH" \
+      "$ROOT/bin/fm-dsh-launch.sh" web --port 3080 >/dev/null 2>&1 ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "the documented web launch must pass the preflight and boot, got rc=$rc"
+  assert_equals "root=$ROOT" "$(sed -n 1p "$dir/dsh-env")" "the host did not receive this checkout as FM_ROOT"
+  assert_equals "pwd=$ROOT" "$(sed -n 2p "$dir/dsh-env")" "the host was not started from this checkout"
+  assert_equals "$(printf '%s\n' web --patch "$ROOT/.dsh/profile.patch.yml" --port 3080)" "$(cat "$dir/dsh-argv")" \
+    "the host must get the tracked patch after web and the operator's arguments once"
+  pass "fm-dsh-launch.sh: the documented web launch boots rooted in its checkout whatever the caller's cwd"
+}
+
+# The --patch values in a recorded argv, in order.
+patch_values() {  # <argv file>
+  awk 'take { print; take = 0; next } $0 == "--patch" { take = 1 }' "$1"
+}
+
+test_dsh_launcher_applies_each_patch_once() {
+  local dir rc tracked="$ROOT/.dsh/profile.patch.yml" respelled="$ROOT/.dsh/../.dsh/profile.patch.yml"
+  # DSH applies every overlay it is given, and a second insert of the hooks
+  # bridge fails the host at boot with "duplicate loader entry id" while a
+  # config dump composes it without complaint, so the host must boot exactly
+  # the overlays the preflight checked: the tracked patch first, then the
+  # operator's, each once.
+  dir=$(make_dsh_home "$TMP_ROOT/launch-patches" 0.1.5-rc.2 0.1.5-rc.2 65536 1)
+  write_dump "$dir/dump-patched.yml" 262144
+  ln -s p "$dir/profiles/web"
+  : > "$dir/overlay.yml"
+  rc=0
+  ( DSH_HOME="$dir" PATH="$dir/fakebin:$PATH" \
+      "$ROOT/bin/fm-dsh-launch.sh" --profile p --patch "$dir/overlay.yml" >/dev/null 2>&1 ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a launch with an operator overlay must pass the preflight and boot, got rc=$rc"
+  assert_equals "$(printf '%s\n' "$tracked" "$dir/overlay.yml")" "$(patch_values "$dir/dsh-dump-argv")" \
+    "the preflight must compose the tracked patch first and the operator overlay after it"
+  assert_equals "$(patch_values "$dir/dsh-dump-argv")" "$(patch_values "$dir/dsh-argv")" \
+    "the host must boot the overlays the preflight checked, each once"
+  # An operator --patch naming the tracked file, however spelled, is that file.
+  rc=0
+  ( DSH_HOME="$dir" PATH="$dir/fakebin:$PATH" \
+      "$ROOT/bin/fm-dsh-launch.sh" web --patch "$respelled" --port 3080 >/dev/null 2>&1 ) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a web launch naming the tracked patch must pass the preflight and boot, got rc=$rc"
+  assert_equals "$respelled" "$(patch_values "$dir/dsh-dump-argv")" "the preflight must compose the tracked patch once"
+  assert_equals "$respelled" "$(patch_values "$dir/dsh-argv")" "the host must apply the tracked patch once"
+  pass "fm-dsh-launch.sh: the host boots the preflight's overlays, each once"
+}
+
+test_dsh_launcher_leaves_a_misplaced_patch_to_dsh() {
+  local dir out rc tracked="$ROOT/.dsh/profile.patch.yml"
+  # DSH's web subcommand stops reading its own options at the first argument it
+  # does not recognise, so a --patch after --port is handed to the web app,
+  # which refuses it. It is no overlay: the preflight must not compose it, and
+  # when it names the tracked file the tracked patch must still be placed where
+  # web reads it.
+  dir=$(make_dsh_home "$TMP_ROOT/launch-misplaced" 0.1.5-rc.2 0.1.5-rc.2 65536 1)
+  write_dump "$dir/dump-patched.yml" 262144
+  ln -s p "$dir/profiles/web"
+  : > "$dir/overlay.yml"
+  rc=0
+  out=$(DSH_HOME="$dir" PATH="$dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-dsh-launch.sh" web --port 3080 --patch "$dir/overlay.yml" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "a --patch after a web app option must be refused by dsh, got rc=$rc: $out"
+  assert_contains "$out" "unknown option '--patch'" "the misplaced --patch was not refused as a web app option"
+  assert_equals "$tracked" "$(patch_values "$dir/dsh-dump-argv")" "the preflight must not compose an overlay dsh never applies"
+  rc=0
+  out=$(DSH_HOME="$dir" PATH="$dir/fakebin:$PATH" \
+    "$ROOT/bin/fm-dsh-launch.sh" web --port 3080 --patch "$tracked" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "a tracked --patch after a web app option must be refused by dsh, got rc=$rc: $out"
+  assert_equals "$(printf '%s\n' web --patch "$tracked" --port 3080 --patch "$tracked")" "$(cat "$dir/dsh-argv")" \
+    "the tracked patch must still follow web when the operator's copy is misplaced"
+  pass "fm-dsh-launch.sh: a --patch after a web app option is left to dsh, which refuses it"
+}
+
+test_dsh_preflight_rejects_a_mismatched_bridge() {
+  local home
+  # A stale bridge reads a deprecated session.events and makes EVERY tool call
+  # fail while the guards go inert, so the pin must be asserted, not documented.
+  # The fixture is a fresh home with no profiles/node_modules mirror, the first
+  # launch where a bridge installed from the stale npm tag is most likely.
+  home=$(make_dsh_home "$TMP_ROOT/pre-badbridge" 0.1.5-rc.2 0.0.1-rc.5 262144 81127)
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a mismatched bridge must fail the preflight, got rc=$PREFLIGHT_RC"
+  assert_contains "$PREFLIGHT_OUT" "does not match dsh-base" "the mismatch was not named"
+  assert_contains "$PREFLIGHT_OUT" "0.1.5-rc.2" "the remedy did not name the running version"
+  pass "fm-dsh-preflight.sh: a mismatched hooks bridge fails loud"
+}
+
+test_dsh_preflight_rejects_a_missing_bridge() {
+  local home
+  home=$(make_dsh_home "$TMP_ROOT/pre-nobridge" 0.1.5-rc.2 - 262144 81127)
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a missing bridge must fail the preflight, got rc=$PREFLIGHT_RC"
+  assert_contains "$PREFLIGHT_OUT" "not installed" "the missing bridge was not named"
+  pass "fm-dsh-preflight.sh: a missing hooks bridge fails loud"
+}
+
+test_dsh_preflight_rejects_a_truncating_budget() {
+  local home
+  # Over the dsh-base default, DSH omits AGENTS.md whole and leaves the agent
+  # only the CLAUDE.md pointer.
+  home=$(make_dsh_home "$TMP_ROOT/pre-budget" 0.1.5-rc.2 0.1.5-rc.2 65536 81127)
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "an over-budget AGENTS.md must fail the preflight, got rc=$PREFLIGHT_RC"
+  assert_contains "$PREFLIGHT_OUT" "maxBytes is 65536" "the insufficient budget was not named"
+  # DSH budgets the rendered chain - every instruction file plus its frame - so a
+  # budget that only just covers AGENTS.md is still over.
+  write_dump "$home/dump.yml" 81500
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a budget below the rendered chain must fail even when it covers AGENTS.md, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  pass "fm-dsh-preflight.sh: an insufficient instruction budget fails loud"
+}
+
+test_dsh_preflight_never_passes_a_disabled_row() {
+  local home
+  # A disabled agent-instructions row renders nothing, whatever maxBytes it
+  # carries. Reading 262144 off one is how the web launch once reported ok while
+  # every session dropped AGENTS.md.
+  home=$(make_dsh_home "$TMP_ROOT/pre-disabled" 0.1.5-rc.2 0.1.5-rc.2 262144 81127)
+  printf -- '- id: agent-instructions\n  name: "@deepseek-ai/dsh-agent-instructions"\n  config:\n    maxBytes: 262144\n  disabled: true\n' \
+    > "$home/dump.yml"
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a disabled host row must fail the preflight, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "row is not enabled" "the disabled host row was not named"
+  write_web_dump "$home/dump.yml" firstmate
+  install_fm_preset "$home"
+  printf -- '- id: agent-instructions\n  name: "@deepseek-ai/dsh-agent-instructions"\n  disabled: true\n  config:\n    maxBytes: 262144\n' \
+    > "$home/fmhome/.dsh/agent-presets/firstmate/agent.cordis.yml"
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a disabled preset row must fail the preflight, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "firstmate agent preset's agent-instructions row is not enabled" "the disabled preset row was not named"
+  pass "fm-dsh-preflight.sh: a disabled agent-instructions row is never a budget"
+}
+
+test_dsh_preflight_checks_the_preset_sessions_compose_from() {
+  local home
+  # Under dsh-web-app the host row is disabled and each session renders with its
+  # default agent preset's row, which no profile layer reaches: DSH's standard
+  # preset renders at 65536, so only the tracked firstmate preset passes.
+  home=$(make_dsh_home "$TMP_ROOT/pre-preset" 0.1.5-rc.2 0.1.5-rc.2 262144 81127)
+  install_fm_preset "$home"
+  write_web_dump "$home/dump.yml" standard
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a web composition defaulting to standard must fail, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "agent preset 'standard'" "the preset sessions compose from was not named"
+  write_web_dump "$home/dump.yml" firstmate
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 0 ] || fail "the tracked firstmate preset must pass the web composition, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "in the firstmate agent preset" "the passing budget was not the preset's"
+  # A user default in the harness settings outranks the deployment default.
+  printf 'agent-presets:\n  modeSelectionEnabled: true\n  default: minimal\n' > "$home/settings.yaml"
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a user default preset must be the one checked, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "agent preset 'minimal'" "the user default preset was not named"
+  rm -f "$home/settings.yaml"
+  printf -- '- id: tool-bash\n  name: "@deepseek-ai/dsh-tool-bash"\n' > "$home/fmhome/.dsh/agent-presets/firstmate/agent.cordis.yml"
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a preset without an agent-instructions row must fail, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "has no agent-instructions row" "the missing preset row was not named"
+  pass "fm-dsh-preflight.sh: the budget checked is the default agent preset's under web"
+}
+
+test_dsh_preflight_reads_only_the_agent_instructions_entry() {
+  local home
+  # Another plugin's larger maxBytes says nothing about AGENTS.md, wherever it
+  # sits in the composed tree.
+  home=$(make_dsh_home "$TMP_ROOT/pre-otherentry" 0.1.5-rc.2 0.1.5-rc.2 65536 81127)
+  write_dump "$home/dump.yml" 65536 262144
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "another entry's maxBytes must not satisfy the budget, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "maxBytes is 65536" "the insufficient agent-instructions budget was not named"
+  pass "fm-dsh-preflight.sh: only the agent-instructions entry sets the budget"
+}
+
+test_dsh_preflight_reads_the_budget_dsh_composes() {
+  local home
+  # DSH owns the composition of its bundle, profile, home-level and --patch
+  # layers, so the preflight asks it for the effective value with the same
+  # profile and overlays the host boots with instead of re-deriving the order.
+  home=$(make_dsh_home "$TMP_ROOT/pre-composed" 0.1.5-rc.2 0.1.5-rc.2 65536 81127)
+  write_dump "$home/dump-patched.yml" 262144
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "without the overlay DSH reports the default, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  : > "$home/overlay.yml"
+  run_preflight "$home" --patch "$home/overlay.yml"
+  [ "$PREFLIGHT_RC" -eq 0 ] || fail "the overlay's composed raise must pass, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "instruction budget 262144 fits" "the passing budget was not the value DSH composed"
+  pass "fm-dsh-preflight.sh: the budget is the one DSH composes for this profile and overlay"
+}
+
+test_dsh_preflight_fails_loud_when_dsh_cannot_report_the_budget() {
+  local home
+  # An unreadable budget is not a passing one: a failed dump, or a maxBytes
+  # that is not a plain number, must fail rather than assume a default.
+  home=$(make_dsh_home "$TMP_ROOT/pre-unknown" 0.1.5-rc.2 0.1.5-rc.2 - 81127)
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a failed config dump must fail the preflight, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "could not read the composed configuration" "a failed dump was not named"
+  printf -- '- id: agent-instructions\n  config:\n    maxBytes: !!js Number(process.env.FM_BUDGET)\n' > "$home/dump.yml"
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a computed maxBytes must fail the preflight, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "could not read the effective agent-instructions maxBytes" "an unreadable budget was not named"
+  pass "fm-dsh-preflight.sh: a budget DSH cannot report fails loud"
+}
+
+test_dsh_preflight_checks_the_permission_preset_sessions_default_to() {
+  local home
+  # The preflight runs in the launching shell before DSH starts, where nothing
+  # is sandboxed, so probing ps there always succeeded. What launch can see is
+  # the permission preset a new session is seeded with: the harness settings'
+  # default, else the profile's. Anything but danger-full-access denies ps.
+  home=$(make_dsh_home "$TMP_ROOT/pre-permission" 0.1.5-rc.2 0.1.5-rc.2 - 81127)
+  write_dump "$home/dump.yml" 262144 "" workspace-write
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a workspace-write default must fail the preflight, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "permission preset 'workspace-write' (profile p)" "the profile's sandboxing default was not named"
+  write_dump "$home/dump.yml" 262144 "" -
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "an inferred default preset must fail the preflight, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  write_dump "$home/dump.yml" 262144
+  printf 'permission:\n  defaultPreset: workspace-write\n' > "$home/settings.yaml"
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a settings default must outrank the profile's, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "permission preset 'workspace-write' ($home/settings.yaml)" "the settings default was not named"
+  rm -f "$home/settings.yaml"
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 0 ] || fail "a danger-full-access default must pass, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "new sessions default to the danger-full-access permission preset" "the passing default was not reported"
+  pass "fm-dsh-preflight.sh: the permission preset new sessions default to must permit ps"
+}
+
+test_dsh_preflight_checks_the_sandbox_mode_hooks_run_under() {
+  local home rc out
+  # The hooks bridge runs a hook with no session, so the hook gets the host's
+  # sandbox-policy mode, not the session's permission preset. The tracked patch
+  # pins that mode literally, the only mechanism. dsh-base's own row computes it
+  # from DSH_PERMISSION_MODE, so an expression must fail as unpinned even from a
+  # shell that happens to carry danger-full-access, as must a literal other mode.
+  home=$(make_dsh_home "$TMP_ROOT/pre-hookmode" 0.1.5-rc.2 0.1.5-rc.2 262144 81127)
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 0 ] || fail "a literally pinned danger-full-access mode must pass, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "hooks run under the danger-full-access sandbox mode" "the pinned hook mode was not reported"
+  { sandbox_row; permission_row danger-full-access
+    printf -- '- id: agent-instructions\n  config:\n    maxBytes: 262144\n'; } > "$home/dump.yml"
+  rc=0
+  out=$(DSH_PERMISSION_MODE=danger-full-access DSH_HOME="$home" PATH="$home/fakebin:$PATH" \
+    "$ROOT/bin/fm-dsh-preflight.sh" --profile p --home "$home/fmhome" 2>&1) || rc=$?
+  [ "$rc" -eq 3 ] || fail "dsh-base's expression must fail even under an ambient danger-full-access, got rc=$rc: $out"
+  assert_contains "$out" "hooks run under an unpinned sandbox mode (!!js process.env.DSH_PERMISSION_MODE" "dsh-base's expression was not named as unpinned"
+  { sandbox_row workspace-write; permission_row danger-full-access
+    printf -- '- id: agent-instructions\n  config:\n    maxBytes: 262144\n'; } > "$home/dump.yml"
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "a profile pinning workspace-write must fail, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "hooks run under sandbox mode 'workspace-write'" "the pinned mode was not named"
+  { sandbox_row '!!js ctx.loader.mode'; permission_row danger-full-access
+    printf -- '- id: agent-instructions\n  config:\n    maxBytes: 262144\n'; } > "$home/dump.yml"
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 3 ] || fail "an expression only DSH's loader can evaluate must fail, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "hooks run under an unpinned sandbox mode (!!js ctx.loader.mode)" "the loader expression was not named as unpinned"
+  pass "fm-dsh-preflight.sh: hooks must run under a literally pinned sandbox mode that permits ps"
+}
+
+test_dsh_preflight_passes_a_conforming_home() {
+  local home
+  home=$(make_dsh_home "$TMP_ROOT/pre-good" 0.1.5-rc.2 0.1.5-rc.2 262144 81127)
+  run_preflight "$home"
+  [ "$PREFLIGHT_RC" -eq 0 ] || fail "a conforming home must pass the preflight, got rc=$PREFLIGHT_RC: $PREFLIGHT_OUT"
+  assert_contains "$PREFLIGHT_OUT" "all required checks passed" "a passing preflight did not say so"
+  pass "fm-dsh-preflight.sh: a conforming home passes"
+}
+
+test_dsh_ancestry_detects_the_launcher_path() {
+  local fakebin out
+  fakebin=$(make_ps_fakebin "$TMP_ROOT/anc-node" node \
+    'node /Users/x/.npm/_npx/abc/node_modules/.bin/dsh web')
+  out=$(PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = dsh ] \
+    || fail "a DSH host must be detected from its launcher path in argv, got '$out'"
+  pass "fm-harness.sh: ancestry detects the dsh launcher path"
+}
+
+test_dsh_ancestry_detects_the_installed_bin_js() {
+  local fakebin out
+  fakebin=$(make_ps_fakebin "$TMP_ROOT/anc-binjs" node \
+    'node /g/node_modules/@deepseek-ai/dsh/lib/bin.js web')
+  out=$(PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = dsh ] \
+    || fail "a DSH host must be detected from its installed bin.js path, got '$out'"
+  pass "fm-harness.sh: ancestry detects the installed dsh bin.js"
+}
+
+test_dsh_ancestry_detects_a_global_install() {
+  local fakebin out
+  # npm i -g links <prefix>/bin/dsh to lib/bin.js, and the interpreter is handed
+  # the symlink path it ran through, not the resolved target.
+  fakebin=$(make_ps_fakebin "$TMP_ROOT/anc-global" node 'node /opt/homebrew/bin/dsh web')
+  out=$(PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = dsh ] \
+    || fail "a DSH host must be detected from a global install's bin/dsh symlink, got '$out'"
+  pass "fm-harness.sh: ancestry detects a global npm install of dsh"
+}
+
+test_dsh_ancestry_rejects_unrelated_node_commands() {
+  local fakebin out
+  fakebin=$(make_ps_fakebin "$TMP_ROOT/anc-neg" node 'node /x/other-tool.js --dsh-flavoured')
+  out=$(PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" != dsh ] \
+    || fail "an unrelated node command mentioning dsh must not be detected, got '$out'"
+  fakebin=$(make_ps_fakebin "$TMP_ROOT/anc-neg2" node 'node /x/dshish.js run')
+  out=$(PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" != dsh ] \
+    || fail "a bare dsh fragment in a path must not be detected, got '$out'"
+  fakebin=$(make_ps_fakebin "$TMP_ROOT/anc-neg3" node 'node /usr/local/bin/dshish.js run')
+  out=$(PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" != dsh ] \
+    || fail "a dshish script in a bin directory must not be detected, got '$out'"
+  pass "fm-harness.sh: ancestry rejects unrelated dsh mentions"
+}
+
+test_dsh_marker_requires_real_ancestry() {
+  local fakebin out
+  # The marker is a precedence override, never evidence: with no dsh ancestor it
+  # must not claim the identity on its own.
+  fakebin=$(make_ps_blind "$TMP_ROOT/anc-blind")
+  out=$(FM_DSH_HARNESS=dsh PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" != dsh ] \
+    || fail "FM_DSH_HARNESS without a dsh ancestor must not claim the identity, got '$out'"
+  pass "fm-harness.sh: the DSH launch marker is not evidence on its own"
+}
+
+test_dsh_marker_reaches_the_host_above_the_digest_chain() {
+  local fakebin out
+  # Inside the session-start digest the DSH host is the ninth process above
+  # fm-harness.sh: the hooks.json bash -lc wrapper, the adapter and its command
+  # substitution, and fm-session-start.sh with its timeout wrapper sit between.
+  # A shorter walk refuses the launch marker and the digest names no harness.
+  fakebin=$(make_ps_chain "$TMP_ROOT/anc-deep" 9 'node /x/node_modules/.bin/dsh web')
+  out=$(FM_DSH_HARNESS=dsh PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = dsh ] \
+    || fail "the launch marker must be honored with the host nine processes up, got '$out'"
+  pass "fm-harness.sh: the DSH marker reaches a host above the digest hook chain"
+}
+
+test_dsh_marker_outranks_an_inherited_claudecode() {
+  local fakebin out
+  # A DSH host launched from a Claude pane retains CLAUDECODE, and because the
+  # dsh verdict is args strength that marker would otherwise rename the session.
+  # The Firstmate-owned launch marker is what keeps it identified as dsh.
+  fakebin=$(make_ps_fakebin "$TMP_ROOT/anc-claude" node 'node /x/.bin/dsh web')
+  out=$(FM_DSH_HARNESS=dsh CLAUDECODE=1 PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = dsh ] \
+    || fail "the DSH launch marker must outrank an inherited CLAUDECODE, got '$out'"
+  pass "fm-harness.sh: the DSH launch marker outranks an inherited CLAUDECODE"
+}
+
+# --- the bounded Stop guard --------------------------------------------------
+
+# A primary-shaped checkout: plain (non-worktree) git repo, AGENTS.md, bin/,
+# state/ - everything the guard's scoping check requires to treat it as primary.
+# The whole bin/ tree is copied so the guard's own library sourcing resolves
+# inside the fixture rather than back into the real checkout.
+make_guard_home() {  # <name> -> dir with AGENTS.md, bin/, state/
+  local name=$1 dir
+  dir="$TMP_ROOT/$name"
+  mkdir -p "$dir/state"
+  git init -q "$dir"
+  git -C "$dir" commit -q --allow-empty -m init
+  : > "$dir/AGENTS.md"
+  cp -R "$ROOT/bin" "$dir/bin"
+  printf '%s\n' "$dir"
+}
+
+run_dsh_stop() {  # <home> <session-id> -> exit code, stderr in $STOP_ERR
+  local home=$1 sid=$2
+  STOP_ERR="$home/stderr.txt"
+  ( cd "$home" && printf '{"session_id":"%s"}' "$sid" \
+    | FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      "$home/bin/fm-turnend-guard.sh" --dsh 2>"$STOP_ERR" )
+}
+
+test_dsh_guard_blocks_then_alarms_then_allows() {
+  local home rc
+  home=$(make_guard_home guard-budget)
+  printf 'task\n' > "$home/state/t1.meta"
+  rc=0; run_dsh_stop "$home" s1 || rc=$?
+  expect_code 2 "$rc" "a blind turn end under budget must block"
+  assert_contains "$(cat "$home/stderr.txt")" "TURN WOULD END BLIND" \
+    "the blocked stop did not carry its banner"
+  rc=0; run_dsh_stop "$home" s1 || rc=$?
+  expect_code 2 "$rc" "the second stop must still block under budget"
+  rc=0; run_dsh_stop "$home" s1 || rc=$?
+  expect_code 2 "$rc" "the third stop must still block under budget"
+  # A spent budget raises ONE model-visible alarm rather than silently allowing:
+  # DSH's bridge logs and drops a non-blocking systemMessage, so exiting 0 here
+  # produced no operator-visible record at all.
+  rc=0; run_dsh_stop "$home" s1 || rc=$?
+  expect_code 2 "$rc" "a spent budget must raise one visible alarm turn"
+  assert_contains "$(cat "$home/stderr.txt")" "SUPERVISION IS GENUINELY DOWN" \
+    "the alarm turn did not carry the alarm text"
+  assert_contains "$(cat "$home/stderr.txt")" "Tell the captain" \
+    "the alarm did not tell the agent to inform the captain"
+  [ -f "$home/state/.dsh-turnend-fail-open" ] \
+    || fail "the alarm was not latched durably"
+  rc=0; run_dsh_stop "$home" s1 || rc=$?
+  expect_code 0 "$rc" "after the alarm the guard must stop blocking"
+  pass "fm-turnend-guard --dsh: blocks under budget, alarms once, then allows"
+}
+
+test_dsh_guard_budget_is_session_scoped() {
+  local home rc
+  home=$(make_guard_home guard-session)
+  printf 'task\n' > "$home/state/t1.meta"
+  rc=0; run_dsh_stop "$home" s1 || rc=$?
+  expect_code 2 "$rc" "the first session's stop must block"
+  rc=0; run_dsh_stop "$home" s2 || rc=$?
+  expect_code 2 "$rc" "a new session must start its own budget and block"
+  assert_grep 'session=s2' "$home/state/.turnend-dsh-blocks" \
+    "the budget file did not adopt the new session id"
+  pass "fm-turnend-guard --dsh: the block budget is session-scoped"
+}
+
+test_dsh_guard_clears_the_budget_when_supervision_is_not_needed() {
+  local home rc
+  home=$(make_guard_home guard-cleared)
+  printf 'task\n' > "$home/state/t1.meta"
+  rc=0; run_dsh_stop "$home" s1 || rc=$?
+  expect_code 2 "$rc" "a stop with work in flight must block"
+  rm -f "$home/state/t1.meta"
+  rc=0; run_dsh_stop "$home" s1 || rc=$?
+  expect_code 0 "$rc" "a stop needing no supervision must be allowed"
+  [ -e "$home/state/.turnend-dsh-blocks" ] \
+    && fail "the budget was not cleared once supervision was no longer needed" || true
+  pass "fm-turnend-guard --dsh: the budget clears when supervision is not needed"
+}
+
+test_dsh_guard_fails_open_on_unusable_input() {
+  local home rc
+  home=$(make_guard_home guard-input)
+  printf 'task\n' > "$home/state/t1.meta"
+  rc=0
+  ( cd "$home" && : | FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$home/state" "$home/bin/fm-turnend-guard.sh" --dsh 2>/dev/null ) || rc=$?
+  expect_code 0 "$rc" "empty stdin must fail open"
+  rc=0
+  ( cd "$home" && printf 'not json' | FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$home/state" "$home/bin/fm-turnend-guard.sh" --dsh 2>/dev/null ) || rc=$?
+  expect_code 0 "$rc" "an unreadable payload must fail open"
+  pass "fm-turnend-guard --dsh: unusable input fails open"
+}
+
+test_dsh_stop_wrapper_fails_open_without_a_root() {
+  local rc
+  rc=0
+  printf '{"session_id":"s1"}' | env -u FM_ROOT_OVERRIDE -u CLAUDE_PROJECT_DIR \
+    "$ROOT/bin/fm-turnend-guard-dsh.sh" >/dev/null 2>&1 || rc=$?
+  expect_code 0 "$rc" "an unresolvable root must fail open"
+  pass "fm-turnend-guard-dsh.sh: an unresolvable root fails open"
+}
+
+verdict() {  # <state-dir> <model> -> FM_WATCHER_VERDICT_OK
+  FM_SUPERVISION_MODEL=$2 FM_HOME=$1 FM_STATE_OVERRIDE=$1/state FM_ROOT_OVERRIDE="$ROOT" \
+    bash -c '. "$0/bin/fm-wake-lib.sh"; fm_watcher_supervision_verdict "$FM_STATE_OVERRIDE" "$0/bin/fm-watch.sh" 300 "$FM_HOME" "$FM_ROOT_OVERRIDE"; printf "%s" "$FM_WATCHER_VERDICT_OK"' "$ROOT"
+}
+
+test_dsh_supervision_model_is_job() {
+  local fakebin model
+  fakebin=$(make_ps_fakebin "$TMP_ROOT/model-job" node 'node /Users/x/.bin/dsh web')
+  model=$(PATH="$fakebin:$PATH" FM_DSH_HARNESS=dsh bash -c '. "$0/bin/fm-wake-lib.sh"; fm_supervision_model' "$ROOT")
+  [ "$model" = job ] \
+    || fail "a dsh home must resolve the job supervision model, got '$model'"
+  pass "fm-wake-lib: a dsh home resolves the job supervision model"
+}
+
+test_dsh_job_verdict_tolerates_the_between_cycles_gap() {
+  local dir
+  # The DSH watcher is a background job that exits on every actionable wake, so
+  # "no live watcher, fresh beacon" is its ordinary mid-turn state. The
+  # persistent model calls that a lapse, which is what made the drain and every
+  # guarded command cry WATCHER DOWN.
+  dir="$TMP_ROOT/verdict-fresh"; mkdir -p "$dir/state"
+  touch "$dir/state/.last-watcher-beat"
+  [ "$(verdict "$dir" job)" = true ] \
+    || fail "the job model must accept a fresh beacon with no live watcher"
+  [ "$(verdict "$dir" persistent)" = false ] \
+    || fail "the persistent model must still call that a lapse"
+  pass "fm-wake-lib: the job model tolerates the between-cycles gap"
+}
+
+test_dsh_job_verdict_still_alarms_a_real_lapse() {
+  local dir
+  dir="$TMP_ROOT/verdict-lapse"; mkdir -p "$dir/state"
+  printf '●  TURN WOULD END BLIND\n' > "$dir/state/probe.log"
+  # Stale beacon, no delivery evidence at all: nothing re-armed and nothing was
+  # delivered, which is exactly the silence the alarm exists for.
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  [ "$(verdict "$dir" job)" = false ] || fail "a stale beacon with no delivery proof must read down"
+  # A delivery ledger OLDER than the beacon proves no wake ended that cycle.
+  touch -t 202006010000 "$dir/state/.last-watcher-beat"
+  touch -t 202001010000 "$dir/state/.watch-deliveries.log"
+  [ "$(verdict "$dir" job)" = false ] || fail "a ledger older than the beacon must read down"
+  # A ledger at-or-after the beacon but past the handling window is a lapse too.
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  touch -t 202006010000 "$dir/state/.watch-deliveries.log"
+  [ "$(verdict "$dir" job)" = false ] || fail "a delivery past the handling window must read down"
+  # Inside the window it is a wake still being handled.
+  touch "$dir/state/.watch-deliveries.log"
+  [ "$(verdict "$dir" job)" = true ] || fail "a delivery inside the handling window must read healthy"
+  pass "fm-wake-lib: the job model still alarms a genuine lapse"
+}
+
+test_dsh_seatbelt_denies_a_detached_watcher() {
+  local policy cmd
+  # The death window cannot be closed from inside DSH, and the two workarounds
+  # the protocol forbids - a nohup or & detached watcher - must actually be
+  # denied, or the protocol describes a safety property the seatbelt does not
+  # hold.
+  for cmd in 'nohup bin/fm-watch-arm.sh' 'bin/fm-watch-arm.sh &'; do
+    policy=$(node "$ROOT/bin/fm-arm-command-policy.mjs" --root "$ROOT" --home "$ROOT" --command "$cmd")
+    case "$policy" in
+      deny*watcher-background*) : ;;
+      *) fail "the protocol forbids '$cmd' but the seatbelt answers '$policy'" ;;
+    esac
+  done
+  pass "dsh arm seatbelt: a detached watcher is denied as watcher-background"
+}
+
+test_dsh_delegation_guard_classifies_real_tool_names() {
+  local rc
+  # The guard matches lowercase substrings of the normalized tool name. Two DSH
+  # names were misclassified in opposite directions: ralph - the fresh-agent
+  # loop driver - creates work no state/<id>.meta records and was ALLOWED, while
+  # list_agents and interrupt_agent were DENIED, stranding a runaway child with
+  # no way to inspect or end it.
+  # The guard is inert outside a primary home, and this checkout may itself be a
+  # linked worktree, so it is scoped to a primary-shaped fixture.
+  local home
+  home=$(make_guard_home guard-classify)
+  assert_denied() {
+    rc=0
+    printf '{"tool_name":"%s"}' "$1" | FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      "$ROOT/bin/fm-subagent-pretool-check.sh" --claude >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 2 ] || fail "$1 must be denied by the delegation guard, got rc=$rc"
+  }
+  assert_allowed() {
+    rc=0
+    printf '{"tool_name":"%s"}' "$1" | FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      "$ROOT/bin/fm-subagent-pretool-check.sh" --claude >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 0 ] || fail "$1 must be allowed, got rc=$rc"
+  }
+  assert_denied subagent
+  assert_denied subagent_fork
+  assert_denied workflow
+  assert_denied send_message
+  assert_denied ralph
+  assert_allowed list_agents
+  assert_allowed interrupt_agent
+  assert_allowed job_output
+  assert_allowed job_kill
+  assert_allowed job_list
+  assert_allowed todo_write
+  assert_allowed bash
+  pass "fm-subagent-pretool-check: DSH tool names classify as intended"
+}
+
+test_dsh_is_refused_as_a_crewmate() {
+  local home out rc
+  # dsh has no endpoint, interrupt, exit or busy-state control plane, so a
+  # dispatched worker could not be steered, inspected or stopped. The refusal
+  # must name that property rather than reporting an unknown harness, which
+  # would read as a gap in the launch table.
+  home="$TMP_ROOT/refuse-crew"; mkdir -p "$home/config"
+  rc=0
+  out=$(HOME="$home" FM_HOME="$home" "$ROOT/bin/fm-spawn.sh" t1 "$home" --harness dsh --mode direct-PR --yolo off 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an explicit dsh crewmate must be refused"
+  assert_contains "$out" "verified PRIMARY adapter only" "the explicit refusal did not name the reason"
+  printf 'dsh\n' > "$home/config/crew-harness"
+  rc=0
+  out=$(HOME="$home" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-spawn.sh" t2 "$home" --mode direct-PR --yolo off 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a config-resolved dsh crewmate must be refused"
+  assert_contains "$out" "verified PRIMARY adapter only" "the config-resolved refusal did not name the reason"
+  pass "fm-spawn: dsh is refused as a crewmate on both paths"
+}
+
+test_dsh_refusal_covers_scout_and_secondmate() {
+  local home kind out rc
+  # The refusal is a property of the harness, not of the kind: a scout and a
+  # secondmate need the same absent control plane as a ship. Both kinds resolve
+  # their harness through the same arms, so a kind that skipped the refusal would
+  # stand up an unsteerable worker. Mode flags are omitted: fm-spawn rejects
+  # --mode before harness resolution for non-ship kinds, which would mask the
+  # refusal this case exists to pin.
+  home="$TMP_ROOT/refuse-kinds"; mkdir -p "$home/config"
+  for kind in --scout --secondmate; do
+    rc=0
+    out=$(HOME="$home" FM_HOME="$home" "$ROOT/bin/fm-spawn.sh" "t-${kind#--}" "$home" "$kind" --harness dsh 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "$kind with --harness dsh must be refused"
+    assert_contains "$out" "verified PRIMARY adapter only" "$kind did not name the refusal reason"
+  done
+  pass "fm-spawn: dsh is refused for scout and secondmate too"
+}
+
+test_dsh_refusal_is_an_exact_harness_match() {
+  local home out rc
+  # The refusal must fire on the harness NAME dsh and nothing else. A substring
+  # match would also refuse a raw launch command that merely mentions dsh - or a
+  # future harness whose name contains it - and would report a capability gap
+  # where the real failure is an unusable launch command.
+  home="$TMP_ROOT/refuse-exact"; mkdir -p "$home/config"
+  rc=0
+  out=$(HOME="$home" FM_HOME="$home" "$ROOT/bin/fm-spawn.sh" t1 "$home" --harness dshx --mode direct-PR --yolo off 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unknown harness must still fail"
+  assert_contains "$out" "unknown harness" "a near-miss harness name must fall through to the launch-table error"
+  assert_not_contains "$out" "verified PRIMARY adapter only" "a harness merely containing 'dsh' must not get the primary-adapter refusal"
+  rc=0
+  out=$(HOME="$home" FM_HOME="$home" "$ROOT/bin/fm-spawn.sh" t2 "$home" --mode direct-PR --yolo off 'cd /tmp && dsh-status-helper' 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unusable raw launch command must still fail"
+  assert_not_contains "$out" "verified PRIMARY adapter only" "a raw launch command mentioning dsh must not get the primary-adapter refusal"
+  pass "fm-spawn: the dsh refusal matches the harness name exactly"
+}
+
+test_dsh_tracked_hooks_dispatch_and_fail_safe() {
+  local hooks cmd rc n out home
+  # .dsh/hooks.json is the tracked registration the captain profile mounts, so it
+  # is the file that must actually work. Each command is a self-verifying wrapper
+  # (the .codex/hooks.json idiom): it re-checks that this file still registers
+  # that very script and that the resolved root looks like a firstmate checkout,
+  # and exits 0 when either is untrue. A malformed jq expression inside that
+  # check makes the wrapper a silent no-op, which no live run would distinguish
+  # from a hook that fired and allowed - so prove dispatch through observable
+  # script behavior instead of trusting the file's shape.
+  hooks="$ROOT/.dsh/hooks.json"
+  [ -f "$hooks" ] || fail "$hooks is missing"
+  jq -e . "$hooks" >/dev/null 2>&1 || fail "$hooks is not valid JSON"
+
+  # Dispatch proof: the catch-all PreToolUse row denies a delegation tool. If the
+  # wrapper's jq self-check is malformed this exits 0 instead of 2, which is the
+  # exact failure the escaping bug produced.
+  cmd=$(jq -r '[.hooks.PreToolUse[]?.hooks[]?.command? | select(type == "string" and contains("fm-subagent-pretool-check.sh"))][0]' "$hooks")
+  [ -n "$cmd" ] && [ "$cmd" != null ] || fail "the tracked hooks register no delegation guard"
+  # The wrapper resolves this checkout, but the guard it reaches is inert outside
+  # a primary home and this checkout may be a linked worktree, so the guard's own
+  # scope is a primary-shaped fixture.
+  local scope
+  scope=$(make_guard_home guard-dispatch)
+  rc=0
+  printf '{"tool_name":"subagent"}' | CLAUDE_PROJECT_DIR="$ROOT" FM_ROOT_OVERRIDE="$scope" FM_HOME="$scope" FM_STATE_OVERRIDE="$scope/state" \
+    bash -c "$cmd" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "the tracked delegation guard must deny through its wrapper (got rc=$rc); a malformed self-check makes it a silent no-op"
+  rc=0
+  printf '{"tool_name":"bash"}' | CLAUDE_PROJECT_DIR="$ROOT" FM_ROOT_OVERRIDE="$scope" FM_HOME="$scope" FM_STATE_OVERRIDE="$scope/state" \
+    bash -c "$cmd" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || fail "the tracked delegation guard must allow an ordinary tool (got rc=$rc)"
+
+  # Fail-safe proof, for every registered wrapper (digest, arm, cd, delegation
+  # and Stop): a wrong root, and an empty payload, are both silent no-ops rather
+  # than a broken tool call the agent cannot act on. Neither case reaches a
+  # script, so the live checkout's state/ is never touched.
+  n=0
+  while IFS= read -r cmd; do
+    n=$((n + 1))
+    rc=0
+    out=$(printf '{"tool_name":"subagent","session_id":"s1"}' | CLAUDE_PROJECT_DIR="$TMP_ROOT" bash -c "$cmd" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] && [ -z "$out" ] \
+      || fail "a hook pointed at the wrong root must be a silent no-op (rc=$rc, output '$out'): $cmd"
+    rc=0
+    out=$(CLAUDE_PROJECT_DIR="$ROOT" bash -c "$cmd" </dev/null 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] && [ -z "$out" ] \
+      || fail "a hook with no payload must be a silent no-op (rc=$rc, output '$out'): $cmd"
+  done < <(jq -r '.hooks[]?[]?.hooks[]?.command? | select(type == "string")' "$hooks")
+  [ "$n" -gt 0 ] || fail "$hooks registers no commands"
+
+  # Stop dispatch proof, against a fixture home so the live state/ is untouched:
+  # a blind turn end with work in flight must reach the real guard and block.
+  cmd=$(jq -r '[.hooks.Stop[]?.hooks[]?.command? | select(type == "string" and contains("fm-turnend-guard-dsh.sh"))][0]' "$hooks")
+  [ -n "$cmd" ] && [ "$cmd" != null ] || fail "the tracked hooks register no Stop guard"
+  home=$(make_guard_home hooks-stop)
+  mkdir -p "$home/.dsh"
+  cp "$hooks" "$home/.dsh/hooks.json"
+  printf 'task\n' > "$home/state/t1.meta"
+  rc=0
+  ( cd "$home" && printf '{"session_id":"s1"}' | env -u FM_ROOT_OVERRIDE CLAUDE_PROJECT_DIR="$home" \
+      FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" bash -c "$cmd" >/dev/null 2>&1 ) || rc=$?
+  [ "$rc" -eq 2 ] || fail "the tracked Stop guard must block a blind turn end through its wrapper (got rc=$rc)"
+  pass "dsh tracked hooks: wrappers dispatch, self-verify, and fail safe"
+}
+
+test_dsh_session_lock_matcher_detects_launcher_paths
+test_dsh_session_lock_matcher_rejects_firstmate_paths
+test_dsh_guard_healthy_reset_clears_the_alarm_latch
+test_dsh_digest_delivers_session_start_stdout_whole
+test_dsh_digest_surfaces_a_durable_alarm
+test_dsh_digest_gate_is_per_session
+test_dsh_digest_retries_when_nothing_was_produced
+test_dsh_digest_reaches_a_home_without_state
+test_dsh_guard_alarms_when_the_budget_lock_is_unavailable
+test_dsh_guard_budget_is_an_episode_not_a_session
+test_dsh_repair_line_and_seatbelt_agree_on_the_arm_command
+test_dsh_preflight_rejects_a_mismatched_bridge
+test_dsh_preflight_rejects_a_missing_bridge
+test_dsh_preflight_rejects_a_truncating_budget
+test_dsh_preflight_never_passes_a_disabled_row
+test_dsh_preflight_checks_the_preset_sessions_compose_from
+test_dsh_preflight_reads_only_the_agent_instructions_entry
+test_dsh_preflight_reads_the_budget_dsh_composes
+test_dsh_preflight_fails_loud_when_dsh_cannot_report_the_budget
+test_dsh_preflight_checks_the_permission_preset_sessions_default_to
+test_dsh_preflight_checks_the_sandbox_mode_hooks_run_under
+test_dsh_preflight_passes_a_conforming_home
+test_dsh_launcher_roots_the_host_in_its_checkout
+test_dsh_launcher_applies_each_patch_once
+test_dsh_launcher_leaves_a_misplaced_patch_to_dsh
+test_dsh_ancestry_detects_the_launcher_path
+test_dsh_ancestry_detects_the_installed_bin_js
+test_dsh_ancestry_detects_a_global_install
+test_dsh_ancestry_rejects_unrelated_node_commands
+test_dsh_marker_requires_real_ancestry
+test_dsh_marker_reaches_the_host_above_the_digest_chain
+test_dsh_marker_outranks_an_inherited_claudecode
+test_dsh_guard_blocks_then_alarms_then_allows
+test_dsh_guard_budget_is_session_scoped
+test_dsh_guard_clears_the_budget_when_supervision_is_not_needed
+test_dsh_guard_fails_open_on_unusable_input
+test_dsh_stop_wrapper_fails_open_without_a_root
+test_dsh_supervision_model_is_job
+test_dsh_job_verdict_tolerates_the_between_cycles_gap
+test_dsh_job_verdict_still_alarms_a_real_lapse
+test_dsh_seatbelt_denies_a_detached_watcher
+test_dsh_delegation_guard_classifies_real_tool_names
+test_dsh_is_refused_as_a_crewmate
+test_dsh_refusal_covers_scout_and_secondmate
+test_dsh_refusal_is_an_exact_harness_match
+test_dsh_tracked_hooks_dispatch_and_fail_safe

@@ -1638,6 +1638,17 @@ agy_model_validate() {  # <agy-bin> <model>
 
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy-state source, exit command, dialogs, quirks) lives in the harness-adapters skill.
+# dsh is verified as a PRIMARY adapter only: it exposes no endpoint, no interrupt
+# key, no exit command and no per-task busy-state source, so a dispatched worker
+# could not be steered, inspected or stopped. Refusing with that reason is the
+# honest answer; the generic unknown-adapter message would read as a gap in the
+# table rather than a property of the harness.
+refuse_dsh_crewmate() {  # <harness>
+  [ "$1" = dsh ] || return 0
+  echo "error: dsh is a verified PRIMARY adapter only and cannot run a crewmate, scout or secondmate; it has no endpoint, interrupt, exit or busy-state control plane. See docs/supervision-protocols/dsh.md." >&2
+  exit 1
+}
+
 launch_template() {
   local harness=$1 kind=${2:-ship}
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
@@ -1919,6 +1930,7 @@ case "$ARG3" in
     HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
     harness_src='config/crew-harness'
   fi
+  refuse_dsh_crewmate "$HARNESS"
   LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
     echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2
     exit 1
@@ -1926,12 +1938,14 @@ case "$ARG3" in
   ;;
 *)
   HARNESS=$ARG3
+  refuse_dsh_crewmate "$HARNESS"
   LAUNCH=$(launch_template "$HARNESS" "$KIND") || {
     echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2
     exit 1
   }
   ;;
 esac
+
 
 # muse, gemini, and agy are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
@@ -4293,6 +4307,8 @@ if [ "$KIND" = secondmate ]; then
   case "$HARNESS" in
   claude | cursor) supervision_model=autoarm ;;
   pi | pi-signed | omp) supervision_model=extension ;;
+  # dsh has no arm here: it is a primary adapter only, and the refusal above
+  # stops a dsh secondmate before this table is reached.
   *) supervision_model=persistent ;;
   esac
   # Deliver the primary's EFFECTIVE trace-context decision as a normalized on/off
@@ -4302,7 +4318,7 @@ if [ "$KIND" = secondmate ]; then
   # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+  LAUNCH="FM_ROOT= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"

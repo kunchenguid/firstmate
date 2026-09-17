@@ -251,6 +251,7 @@ The blocking and bounded-follow-up mechanisms were validated across seven harnes
 | omp | 18.1.11 | Blocking `session_stop` hook returning `{ continue: true, additionalContext }` | In the isolated rpc lab (2026-09-05), the successor watcher was frozen with `SIGSTOP` until its beacon passed the lab `FM_GUARD_GRACE` of 20s while its arm child stayed attached (a killed watcher closes its arm child and the extension re-arms before the guard can fire); the next turn end raised the guard, the guard spy recorded `rc=2` followed by a stop carrying `stop_hook_active: true`, omp compelled a continuation carrying the `turn-end-guard` operational text, the `fm_watch_arm_omp` invocation count then rose to at least two, and a live watcher held the home lock after the thaw; the flagged stop was allowed, so exactly one continuation ran. `session_stop` never fired for an interrupted turn. |
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
 | Cursor | 2026.08.11-e8db854 | Awaited `stop` hook park returning one `followup_message` | Exit 2 ended the turn normally, proving it cannot block; a returned follow-up ran a genuine second turn; a sleeping hook held the boundary open and the wake landed after it; `loop_limit` stopped the hook being invoked at its ceiling. |
+| DSH | 0.1.5-rc.1 (dsh-base 0.1.5-rc.2) | Blocking `Stop` hook with an adapter-owned, session-scoped block budget | Exit 2 plus stderr forced exactly one continuation carrying the reason as steering; five consecutive blind stops over one in-flight task returned `2, 2, 2, 2, 0` in the unit fixture (three budget blocks, one alarm turn, then allow). A live SDK-driven turn blocked three times, failed open once, and settled, but it predates the alarm turn and does not cover the shipped `budget + 1` shape. |
 
 ### Cursor primary park, 2026-08-13
 
@@ -444,6 +445,132 @@ Observed output:
 ```text
 fm-claude-stop-autoarm: ok
 ```
+
+### DSH primary adapter, 2026-09-16
+
+DeepSeek Harness was validated as a primary on 2026-09-16 against the installed
+CLI on macOS with a scratch `headless` profile, never against a live home.
+
+Mechanism facts established first, with a probe hook registered through
+`dsh-hooks-claude-code`:
+
+| Question | Method | Result |
+| --- | --- | --- |
+| Can `Stop` block and force a step? | hook exits 2 with a reason on stderr | Yes. The hook fired twice, the model received the reason as steering and complied, and the second firing was allowed. |
+| Is `stop_hook_active` usable? | read the field from the payload | No. DSH reports `false` on every Stop, so the field cannot bound a re-block loop. |
+| Does `SessionStart` context reach the first request? | hook emits `additionalContext`, prompt asks for the token | No. The context arrived AFTER the first request, injected as a user-shaped message the model read as something the user had just sent. |
+| Does `UserPromptSubmit` reach the first request? | same token, delivered from `UserPromptSubmit` | Yes. The model saw the token on its first look, with no tools used. |
+| Does DSH provide process inspection? | `ps -o comm= -p \$\$` inside a hook | No under the default `workspace-write` sandbox (`Operation not permitted`); yes under `danger-full-access`. |
+| Is the launcher identifiable? | `ps -o pid=,comm=,args=` on the host | `comm=node`, argv carrying the dsh launcher path, so detection is `args` strength. |
+
+Bounded-guard behaviour was then measured through the adapter as it stood before
+the alarm turn, with one task in flight and no live watcher: stops 1-3 returned 2
+and wrote the reason banner to stderr, stop 4 returned 0 with the attended
+fail-open `systemMessage` (the shipped guard instead blocks stop 4 with one alarm
+turn and allows stop 5),
+a new session id reset the counter, and removing the in-flight work cleared the
+budget file and allowed the stop.
+
+Live acceptance was then driven over `dsh --profile sdk` (stdio JSON-RPC)
+on 2026-09-16, because a one-shot headless run cannot exercise an idle session:
+
+| Criterion | Method | Observed |
+| --- | --- | --- |
+| An actionable event wakes an IDLE captain | prompt the session to arm `sleep 12; echo FM-WAKE-PROBE-FIRED` as a background job and end its turn, then hold the notification subscription open | The agent reported idle 5.0s in, stayed idle through 13.0s, and resumed at 19.0s when the job settled - the completion opened a turn on the idle session. |
+| The block budget cannot loop without limit | mount the real hooks over an SDK profile in the firstmate checkout with one task in flight and no live watcher, then run a tool-free turn to completion | The guard ran four times: three blocking continuations and one attended fail-open, leaving `state/.turnend-dsh-blocks` at `session=fm-guard-probe\ncount=4`, after which the session settled instead of re-blocking. This predates the alarm turn, so it evidences the bound, not the shipped `budget + 1` terminal shape. |
+
+### DSH Phase 1a corrections, 2026-09-16
+
+The full-repository audit (180 bin scripts, 30 docs, 21 skills, 16 AGENTS.md sections, 7 harness
+integrations) invalidated four claims this record previously carried. Each is now fixed and
+regression-tested in `tests/fm-dsh-harness.test.sh`.
+
+| Claim | Reality found | Fix |
+| --- | --- | --- |
+| "Detection done" | `bin/fm-session-lock-lib.sh` keeps its own registry with no dsh arm, so `state/.lock` could never be acquired and every session ran read-only | dsh matched by anchored launcher path in the lock registry, with false-positive cases pinned |
+| "`FM_DSH_HARNESS=dsh`" | The marker had NO producer; every test set it by hand | `bin/fm-dsh-launch.sh` is the launch boundary: marker, explicit `FM_HOME`, pinned locale, cleared foreign markers |
+| "Digest adapter done" | It discarded `bin/fm-session-start.sh`'s stdout, which owns the read-only and STARTUP TRUNCATED banners, and emitted only the operating block - so the agent got instructions without the diagnosis governing them | The digest is delivered whole; the once-per-session gate is recorded only after a digest was produced, so a refused or empty startup retries |
+| "One loud attended fail-open" | `systemMessage` is logged and DROPPED by the bridge, so the terminal state was silent | One alarm turn carrying the reason as steering, then allow (`budget + 1`), plus a durable latch the next digest surfaces |
+
+The shipped supervision protocol also contradicted the arm seatbelt: it told the agent to run
+`bin/fm-watch.sh`, which `bin/fm-arm-command-policy.mjs` denies as `watcher-direct`. Both the
+protocol and the renderer's repair line now name `bin/fm-watch-arm.sh` - the script whose own header
+documents `run_in_background` as its designed mechanism - and a cross-file test keeps the protocol,
+the repair line and the seatbelt in agreement.
+
+### DSH startup preflight, 2026-09-16
+
+`bin/fm-dsh-preflight.sh`, run by `bin/fm-dsh-launch.sh` before the session starts, asserts the three misconfigurations that fail silently.
+The [DSH record](dsh.md#preflight-three-silent-misconfigurations-asserted-rather-than-documented) owns its measured conditions and results.
+
+### DSH PreToolUse deny, 2026-09-16
+
+The resolution above proved only that matchers FIRE. Deny was still unverified, and the whole
+delegation guard plus both seatbelts rest on it. Measured through an SDK-driven turn with a
+`bash`-matcher hook that exits 2 with a reason on stderr:
+
+| Question | Result |
+| --- | --- |
+| Does a deny block the call? | Yes. The tool result was `Error: FM-DENY-PROBE: this shell command is refused by policy` with `isError: true`. |
+| Did the command still run? | No. The command's sentinel file was **never created**, which is the only proof that matters. |
+| Is the reason model-visible? | Yes. The model's next reasoning step quoted the refusal and stated it must not retry. |
+
+The hook wrote nothing to stdout, matching the `--claude` path the guards use, so DSH's
+empty-stdout-on-deny behaviour is not exercised either way by this result.
+
+The same pass found two DSH tool names misclassified by the delegation guard in OPPOSITE
+directions, so both were fixed together:
+
+| Tool | Was | Now | Reason |
+| --- | --- | --- | --- |
+| `ralph` | allow | DENY | Its rounds spawn autonomous agents that write no `state/<id>.meta` - exactly the unaccounted-work class the guard exists for |
+| `list_agents` | DENY | allow | Its normalized name matches the `agent` stem, but denying it strands a runaway child with no way to inspect it |
+| `interrupt_agent` | DENY | allow | Same, for the stop path - the hazard `OBSERVE_ONLY_TOOLS` exists to prevent |
+
+`subagent`, `subagent_fork`, `workflow` and `send_message` remain denied as intended;
+`job_output`, `job_kill`, `job_list`, `todo_write` and `bash` remain allowed.
+
+### DSH live guard, 2026-09-16
+
+The measurements above were one-off. `tests/fm-dsh-live-e2e.test.sh` makes them repeatable: it builds
+a throwaway profile, installs the hooks bridge at the running dsh-base version, and drives real
+headless sessions, failing by name and version rather than degrading quietly. Run it with
+`FM_DSH_LIVE_E2E=1` after a dsh upgrade.
+
+The [DSH record](dsh.md#refreshing-this-record) owns its contracts and their latest live results.
+
+Two mistakes this guard made on its first run are worth keeping in view, because both read like real
+failures: it initially isolated `DSH_HOME` to a temp directory, which also isolated the CREDENTIAL
+store, so every session died with `MISSING_CREDENTIAL` and the UserPromptSubmit assertion failed as
+though context delivery had regressed; and its first throwaway profile omitted the `maxBytes` raise,
+so `fm-dsh-preflight.sh` correctly rejected it. The guard now keeps the real harness home and makes
+only the profile disposable.
+
+### DSH PreToolUse resolution, 2026-09-16
+
+PreToolUse initially appeared broken: registering any PreToolUse hook made every
+tool call fail with `Error: agent.session.events is not iterable`. The cause was
+a version mismatch, not a DSH limitation - the profile had resolved the bridge
+through the sub-packages' stale npm `latest` tag (`0.0.1-rc.5`) against a
+`0.1.5-rc.2` runtime, and that old build reads `session.events` synchronously, a
+read DSH deprecated after rc.5. The old bridge throws inside `lastTurn()` before
+any hook is matched, so the guards were simultaneously inert and tool-breaking.
+
+With the bridge pinned to the matching version
+(`dsh plugin --profile <name> add @deepseek-ai/dsh-hooks-claude-code@0.1.5-rc.2`),
+measured through an SDK-driven turn that calls the shell tool:
+
+| Hook registered | Matcher | Observed |
+| --- | --- | --- |
+| `UserPromptSubmit` | - | fired |
+| `PreToolUse` | `.*` | fired |
+| `PreToolUse` | `bash` | fired |
+
+The shell tool executed normally alongside the hooks, so the lowercase `bash`
+matcher is correct and the guards are usable. Three earlier "no hook fired"
+readings were test-harness faults, not adapter faults: a hook writing outside
+the session workspace root (silently sandbox-denied), and a reused persisted
+session id that made `session/prompt` reject the run.
 
 ## Watcher continuity
 

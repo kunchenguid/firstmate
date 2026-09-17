@@ -38,6 +38,20 @@ FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=3666
 Before that boundary existed, a Codex session started from an environment that had retained `CLAUDECODE=1` reported `claude`, and session start emitted Claude's Stop-owned supervision protocol to a Codex primary.
 The same live shape, reproduced with a real process named `codex` and no installed harness, now reports `codex` with the marker present and `claude` with the marker present and ancestry blinded, which is what proves the case is not vacuous.
 
+### A DSH host launched from a Claude pane, holding a retained Claude marker
+
+DeepSeek Harness publishes no marker of its own and its host process reports `comm=node`, so its ancestry verdict is only `args` strength - the same weakness as the interpreter-shim case above, and one an inherited marker wins against.
+Verified on 2026-09-16 through the portable regression, which builds the dsh process tree from a renamed `node` and no installed harness:
+
+```sh
+bin/fm-test-run.sh tests/fm-dsh-harness.test.sh
+```
+
+Two cases carry it.
+With `FM_DSH_HARNESS=dsh` and no dsh ancestor, `bin/fm-harness.sh` does not answer `dsh`: the marker is a precedence override and never evidence on its own.
+With a real `node .../.bin/dsh web` ancestor AND a retained `CLAUDECODE=1`, it answers `dsh`, because `bin/fm-harness.sh` evaluates the Firstmate-owned marker arm ahead of the inherited-marker arms.
+That ordering is what `bin/fm-dsh-launch.sh` depends on: it exports the marker at process start and clears the foreign harness markers, since a tool call cannot set either afterwards and hook subprocesses inherit whatever the host was given.
+
 ### A real Codex session holding a retained Claude marker
 
 The portable regression builds its process tree from renamed executables, so the same guarantee is proven again against the real installed Codex.

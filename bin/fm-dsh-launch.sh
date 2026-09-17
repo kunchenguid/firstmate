@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# Launch DeepSeek Harness as a firstmate PRIMARY, with the launch-time
+# environment the DSH adapter requires.
+#
+# Every value here must exist at process start: a DSH tool call cannot set an
+# environment variable for its own host, and hook and tool subprocesses inherit
+# whatever the host process was given. Setting them in documentation instead of
+# at a launch boundary is how a home silently identifies as the wrong harness.
+#
+#   FM_DSH_HARNESS=dsh  DeepSeek Harness publishes NO identity marker of its own
+#                       (the host is a node process, so `ps` reports comm=node
+#                       and only argv identifies it). This Firstmate-owned
+#                       marker is what lets bin/fm-harness.sh identify the home
+#                       instead of a retained fallback marker.
+#   FM_HOME             the home this session owns, which bin/fm-send.sh and the
+#                       session lock both need explicitly.
+#   FM_ROOT             this checkout. .dsh/profile.patch.yml resolves the hooks
+#                       bridge's configPath and projectDir from it, so it is set
+#                       from this script's own location, never inherited.
+#   LC_ALL / LC_CTYPE   a locale. Unset, bin/fm-line-cap-lib.sh's character cap
+#                       becomes a byte cap and slices UTF-8 mid-character.
+#
+# The hook sandbox mode is not exported: the tracked patch pins the
+# sandbox-policy row literally, so it travels with the composed configuration.
+#
+# DSH takes the invoking directory as its workspace root, so the host is started
+# from this checkout whatever directory the operator launched from.
+#
+# Foreign harness markers are cleared so a session started from another
+# harness's pane cannot inherit its identity. bin/fm-spawn.sh does the same at
+# its own launch boundaries.
+#
+# Usage: bin/fm-dsh-launch.sh web [web app arguments...]     e.g. ... web --port 3080
+#        bin/fm-dsh-launch.sh --profile <name> [dsh arguments...]
+set -u
+
+ROOT=$(cd "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$ROOT" || exit 1
+
+export FM_DSH_HARNESS=dsh
+export FM_ROOT="$ROOT"
+export FM_HOME="${FM_HOME:-$ROOT}"
+export LC_ALL="${LC_ALL:-en_US.UTF-8}"
+export LC_CTYPE="${LC_CTYPE:-en_US.UTF-8}"
+
+unset CLAUDECODE CURSOR_AGENT CURSOR_INVOKED_AS GEMINI_CLI ATLASSIAN_AGENT_TYPE \
+  ROVODEV_CLI PI_CODING_AGENT FM_PI_HARNESS FM_OMP_HARNESS 2>/dev/null || true
+# GROK_* are checked by name so an unset variable never trips `set -u`.
+unset GROK_AGENT GROK_HOOK_EVENT GROK_SESSION_ID GROK_WORKSPACE_ROOT 2>/dev/null || true
+
+# The tracked patch is the install step: it mounts the hooks bridge, raises the
+# instruction budget and pins the hook sandbox mode. Adding it here rather than
+# documenting a copy is what makes the documented launch correct on its own. It
+# comes first, and it is added even when the preflight is skipped, because
+# skipping the checks must not also drop the configuration they check.
+#
+# DSH reads its own options only up to the first argument it does not
+# recognise and hands the rest to the booted app, so an operator --patch is an
+# overlay - following the tracked patch and able to override it - only when it
+# comes before any app argument: immediately after `web`, or among the root
+# options. A --patch after that is not collected here, because DSH never applies
+# it; the web app refuses it as an unknown option. An operator overlay naming
+# the tracked file replaces the tracked one rather than repeating it: DSH
+# applies every overlay it is given, and a second insert of the bridge fails the
+# host at boot with "duplicate loader entry id".
+TRACKED_PATCH="$ROOT/.dsh/profile.patch.yml"
+TRACKED=(--patch "$TRACKED_PATCH")
+PROFILE=web
+PATCHES=()
+want=
+SUBCOMMAND=
+if [ "${1:-}" = web ]; then SUBCOMMAND=web; shift; fi
+for arg in "$@"; do
+  case "$want" in
+    profile) PROFILE=$arg; want=; continue ;;
+    patch) PATCHES+=(--patch "$arg"); want=; continue ;;
+    value) want=; continue ;;
+  esac
+  case "$arg" in
+    --profile) want='profile' ;;
+    --profile=*) PROFILE=${arg#--profile=} ;;
+    --patch) want='patch' ;;
+    --patch=*) PATCHES+=(--patch "${arg#--patch=}") ;;
+    --from-default-profile) want='value' ;;
+    --from-default-profile=*|--dump-config|--dump-default-config) ;;
+    *) break ;;
+  esac
+done
+for arg in ${PATCHES[@]+"${PATCHES[@]}"}; do
+  [ "$arg" -ef "$TRACKED_PATCH" ] && TRACKED=()
+done
+
+# Assert the DSH misconfigurations that fail silently, before a session starts
+# depending on them. FM_DSH_SKIP_PREFLIGHT=1 is the escape hatch for a
+# deliberately degraded home. The preflight composes with the root form, which
+# takes every overlay; the host gets the operator's arguments untouched, once.
+if [ "${FM_DSH_SKIP_PREFLIGHT:-}" != 1 ] && [ -x "$ROOT/bin/fm-dsh-preflight.sh" ]; then
+  "$ROOT/bin/fm-dsh-preflight.sh" --profile "$PROFILE" --home "$ROOT" \
+    ${TRACKED[@]+"${TRACKED[@]}"} ${PATCHES[@]+"${PATCHES[@]}"} || exit 3
+fi
+
+# DSH refuses a parent --patch before the `web` subcommand, so there the
+# tracked patch goes immediately after `web`.
+exec dsh ${SUBCOMMAND:+"$SUBCOMMAND"} ${TRACKED[@]+"${TRACKED[@]}"} "$@"

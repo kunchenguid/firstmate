@@ -1,0 +1,93 @@
+# Firstmate captain profile patch for DeepSeek Harness.
+#
+# Mounts the Claude-dialect hook bridge (DSH implements that dialect, so
+# firstmate's existing hook scripts are reused with corrected matchers), gives
+# the session agent an instruction budget that renders firstmate's AGENTS.md
+# whole, and selects the permission preset this supervisor needs: firstmate's
+# health model is built on `ps` process inspection, which workspace-write denies.
+# That preset covers a session's tool calls only. Hooks run with no session and
+# get the host's sandbox-policy mode instead, so that mode is pinned below in
+# this patch rather than left to the ambient DSH_PERMISSION_MODE: a value the
+# composed configuration carries cannot be lost by a caller that forgets to
+# export it, and dsh-base's own `!!js process.env.DSH_PERMISSION_MODE ??
+# 'workspace-write'` default is what silently denies `ps` in every hook.
+#
+# Which row carries that budget depends on the profile. Under dsh-web-app the
+# host `agent-instructions` row is disabled and every session is composed from
+# an agent preset, so a new session's budget is the tracked `firstmate` preset's
+# (.dsh/agent-presets/firstmate), made the default below; raising the host row
+# there changes nothing. Profiles without agent presets (headless, sdk) render
+# with the host row, which is raised below for them.
+#
+# Install the bridge at the version matching the running dsh-base. The
+# sub-packages' npm `latest` tag is stale (0.0.1-rc.x), and an old bridge reads
+# `session.events` synchronously - deprecated after that release - which makes
+# every tool call fail with "agent.session.events is not iterable":
+#
+#   dsh plugin --profile <name> add @deepseek-ai/dsh-hooks-claude-code@<dsh-base version>
+#
+# Launch the primary through bin/fm-dsh-launch.sh, which applies this patch
+# itself with --patch, so no manual install step is needed. It sets
+# FM_DSH_HARNESS, FM_HOME and the locale at process start: a tool call cannot
+# set them, and hook subprocesses inherit whatever the host was given. The hook
+# sandbox mode is not among them: the literal pin below is the only thing that
+# decides it. The launcher also runs
+# bin/fm-dsh-preflight.sh, which asserts the bridge pin, the
+# budget of the row a new session renders with, and that new sessions
+# default to the danger-full-access permission preset and hooks run under the
+# danger-full-access sandbox mode, both of which permit ps - each of these
+# fails silently otherwise.
+#
+# Applied over a base+web-app profile whose bundle list also carries this
+# checkout's own bundles. The launcher exports FM_ROOT as this checkout and
+# starts DSH from it, so every expression below resolves here.
+- insert:
+    - id: hooks-claude-code
+      name: '@deepseek-ai/dsh-hooks-claude-code'
+      config:
+        configPath: !!js (process.env.FM_ROOT || process.cwd()) + '/.dsh/hooks.json'
+        projectDir: !!js process.env.FM_ROOT || process.cwd()
+
+- id: agent-instructions
+  config:
+    maxBytes: 262144
+
+# A `system` root, so DSH never writes a locally authored preset copy into this
+# checkout; the writable root stays $DSH_HOME/.agent-presets. A patch replaces
+# the row's whole config, so the default is restated with the root.
+- id: agent-presets
+  config:
+    default: firstmate
+    roots:
+      - path: !!js (process.env.FM_ROOT || process.cwd()) + '/.dsh/agent-presets'
+        trust: system
+
+# A patch replaces the row's whole config, so dsh-base's preset table is
+# restated verbatim with the default: without it dsh-permission-presets falls
+# back to its schema default, which has no read-only preset. The copy drifts on
+# a DSH upgrade the same way the firstmate preset copy does; the live guard
+# compares it with dsh-base's own table, and bin/fm-dsh-preflight.sh checks only
+# the default preset, not the rest of the table.
+- id: permission
+  config:
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
+    defaultPreset: danger-full-access
+
+# The sandbox mode hooks run under. Pinned literally so it travels with the
+# composed configuration: a session's permission preset does not reach a hook,
+# because the bridge runs hooks with no session. It is set alongside
+# defaultPreset because sandbox-policy.mode on its own leaves the composed
+# sandbox and approval defaults matching no preset, which dsh-permission-presets
+# refuses at load.
+- id: sandbox-policy
+  config:
+    mode: danger-full-access

@@ -66,6 +66,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$SCRIPT_DIR/fm-gemini-lib.sh"
+# shellcheck source=bin/fm-dsh-lib.sh
+. "$SCRIPT_DIR/fm-dsh-lib.sh"
 
 # Print the harness named by a verified environment marker, or nothing when no
 # marker is present. Markers only report what the environment CLAIMS; detect_own
@@ -116,6 +118,17 @@ harness_marker() {
   # anchored ancestry arm below covers a plain hand-started `omp` by itself.
   if [ "${FM_OMP_HARNESS:-}" = omp ] && ancestry_names_omp; then
     echo omp
+    return
+  fi
+  # dsh (DeepSeek Harness) publishes NO harness-identity marker of its own: a
+  # live DSH host is a node process (ps reports comm=node) whose only launcher
+  # evidence is its argv, and it hands tool and hook subprocesses no DSH_* or
+  # FM_* identity variable. FM_DSH_HARNESS=dsh is therefore a Firstmate-OWNED
+  # launch marker and a PRECEDENCE override, never evidence on its own: it wins
+  # over an inherited CLAUDECODE only when a genuine dsh process is in the
+  # ancestry, exactly as FM_OMP_HARNESS does above.
+  if [ "${FM_DSH_HARNESS:-}" = dsh ] && fm_dsh_ancestry; then
+    echo dsh
     return
   fi
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
@@ -241,7 +254,8 @@ harness_process_verdict() {  # <pid>
         *opencode*) echo "args opencode"; return ;;
         *grok*) echo "args grok"; return ;;
         *" pi "*|*/pi) echo "args pi"; return ;;
-      esac ;;
+      esac
+      fm_dsh_args_are_dsh "$args" && { echo "args dsh"; return; } ;;
   esac
 }
 

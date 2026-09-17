@@ -96,6 +96,7 @@ GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 CLAUDE_MODE=0
 CURSOR_MODE=0
+DSH_MODE=0
 SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
 BLOCK_BUDGET=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
@@ -107,7 +108,8 @@ for arg in "$@"; do
   case "$arg" in
     --claude) CLAUDE_MODE=1 ;;
     --cursor) CURSOR_MODE=1 ;;
-    *) echo "usage: $(basename "$0") [--claude|--cursor]" >&2; exit 2 ;;
+    --dsh) DSH_MODE=1 ;;
+    *) echo "usage: $(basename "$0") [--claude|--cursor|--dsh]" >&2; exit 2 ;;
   esac
 done
 
@@ -146,7 +148,7 @@ STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '
   else false
   end
 ' 2>/dev/null) || exit 0
-if [ "$CLAUDE_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
+if [ "$CLAUDE_MODE" -eq 0 ] && [ "$DSH_MODE" -eq 0 ] && [ "$STOP_HOOK_ACTIVE" = "true" ]; then
   exit 0
 fi
 
@@ -169,6 +171,8 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 BUDGET_FILE="$STATE/.turnend-claude-blocks"
+DSH_BUDGET_FILE="$STATE/.turnend-dsh-blocks"
+DSH_BUDGET_LOCK="$STATE/.turnend-dsh-blocks.lock"
 BUDGET_LOCK="$STATE/.turnend-claude-blocks.lock"
 OWNER_LOCK="$STATE/.claude-autoarm.lock"
 FAILURE_NOTICE="$STATE/.claude-autoarm-failure-notified"
@@ -181,14 +185,31 @@ budget_reset() {
   fm_lock_release "$BUDGET_LOCK"
 }
 
+# Clear the DSH bounded-block counter whenever supervision is proven healthy or
+# not needed, so the budget bounds one continuous lapse rather than a session.
+dsh_budget_reset() {
+  [ "$DSH_MODE" -eq 1 ] || return 0
+  fm_lock_try_acquire "$DSH_BUDGET_LOCK" || return 0
+  rm -f "$DSH_BUDGET_FILE" 2>/dev/null || true
+  # The alarm latch belongs to the same episode: a recovered home must be able
+  # to alarm again on a later lapse.
+  rm -f "$STATE/.dsh-turnend-fail-open" 2>/dev/null || true
+  fm_lock_release "$DSH_BUDGET_LOCK"
+}
+
 fm_supervision_status "$STATE" "$GRACE"
 if [ "$FM_SUP_NEEDED" = false ]; then
   [ -e "$FAILURE_NOTICE" ] || budget_reset
+  dsh_budget_reset
   exit 0
 fi
 # One owner of the "supervision is on, let this turn end" exit contract, shared
 # by every proof of supervision below.
 allow_supervised_stop() {
+  if [ "$DSH_MODE" -eq 1 ]; then
+    dsh_budget_reset
+    exit 0
+  fi
   [ "$CLAUDE_MODE" -eq 1 ] || exit 0
   fm_failure_episode_reset "$STATE" && exit 0
   exit 2
@@ -246,7 +267,73 @@ block_stop() {
   exit 2
 }
 
-if [ "$CLAUDE_MODE" -eq 0 ]; then
+if [ "$CLAUDE_MODE" -eq 0 ] && [ "$DSH_MODE" -eq 0 ]; then
+  block_stop
+fi
+
+# --- --dsh bounded path ------------------------------------------------------
+# DSH reports stop_hook_active=false on every Stop, so that field cannot bound a
+# re-block loop the way the default mode relies on, and DSH has no async re-wake
+# hook for the --claude auto-arm to ride. The budget is owned here, with three
+# properties a plain counter lacks:
+#
+#   EPISODE, NOT SESSION. The ledger is discarded once it is older than
+#   FM_DSH_TURNEND_BUDGET_WINDOW, so one exhausted lapse does not leave a
+#   long-lived session permanently fail-open.
+#   ALWAYS BOUNDED. A budget lock that cannot be acquired is NOT proof that the
+#   budget is available. Falling through to block_stop made the loop unbounded
+#   exactly when the guard was least able to reason; it now fails open with the
+#   same attended banner.
+#   DURABLE BEFORE DELIVERY. The incremented count is written before the stop is
+#   blocked or allowed, so a killed hook cannot lose a consumed continuation.
+if [ "$DSH_MODE" -eq 1 ]; then
+  DSH_BUDGET=${FM_DSH_TURNEND_BLOCK_BUDGET:-3}
+  case "$DSH_BUDGET" in ''|*[!0-9]*|0) DSH_BUDGET=3 ;; esac
+  DSH_WINDOW=${FM_DSH_TURNEND_BUDGET_WINDOW:-900}
+  case "$DSH_WINDOW" in ''|*[!0-9]*|0) DSH_WINDOW=900 ;; esac
+  DSH_ALARM="$STATE/.dsh-turnend-fail-open"
+  # The terminal state is ONE ALARM TURN, then allow.
+  #
+  # DSH's bridge logs and DROPS a non-blocking \`systemMessage\` ("not yet
+  # surfaced (ignored)"), so exiting 0 with one - what the Claude path does,
+  # where systemMessage IS surfaced - produced no operator-visible record at
+  # all. The only channel DSH surfaces is a blocking Stop decision whose reason
+  # is model-visible steering, so the alarm rides that exactly once per episode
+  # and every later stop is allowed. The bound is therefore budget+1 blocks, and
+  # the durable latch below survives a session that dies before it is read.
+  dsh_conclude() {
+    local detail=$1
+    if [ ! -e "$DSH_ALARM" ]; then
+      printf 'blocked %s\n' "$(date +%s)" > "$DSH_ALARM" 2>/dev/null || true
+      {
+        printf '●  FIRSTMATE SUPERVISION IS GENUINELY DOWN\n'
+        printf '●  %s\n' "$detail"
+        printf '●  The DSH Stop-hook block budget (%s) is spent, so this session is no longer supervised.\n' "$DSH_BUDGET"
+        printf '●  Tell the captain now that supervision is down, then end the turn.\n'
+      } >&2
+      exit 2
+    fi
+    exit 0
+  }
+  DSH_COUNT=
+  if fm_lock_try_acquire "$DSH_BUDGET_LOCK"; then
+    old_session=$(sed -n '1s/^session=//p' "$DSH_BUDGET_FILE" 2>/dev/null || true)
+    old_count=$(sed -n '2s/^count=//p' "$DSH_BUDGET_FILE" 2>/dev/null || true)
+    case "$old_count" in ''|*[!0-9]*) old_count=0 ;; esac
+    # fm_path_age reports 999999 for a missing file, so an absent ledger starts
+    # a fresh episode rather than being read as one.
+    if [ "$old_session" = "$SESSION_ID" ] \
+      && [ "$(fm_path_age "$DSH_BUDGET_FILE")" -lt "$DSH_WINDOW" ]; then
+      DSH_COUNT=$((old_count + 1))
+    else
+      DSH_COUNT=1
+    fi
+    printf 'session=%s\ncount=%s\n' "$SESSION_ID" "$DSH_COUNT" > "$DSH_BUDGET_FILE" 2>/dev/null || true
+    fm_lock_release "$DSH_BUDGET_LOCK"
+  else
+    dsh_conclude "the block budget could not be read: its lock is held and the consumed continuations are unprovable."
+  fi
+  [ "$DSH_COUNT" -le "$DSH_BUDGET" ] || dsh_conclude "$(printf '%s task(s) in flight, no live watcher holds this home lock' "${FM_SUP_IN_FLIGHT:-0}")"
   block_stop
 fi
 
