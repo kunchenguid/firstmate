@@ -156,6 +156,14 @@ wt_commit() {
     commit -q --allow-empty -m "$msg"
 }
 
+# Land a shippable commit on the task branch and push it to origin.
+land_shippable_commit() {
+  local case_dir=$1
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+}
+
 # Add a fork bare repo and register it as a remote on the project, then push
 # the worktree's task branch to it and fetch into the project so the worktree
 # sees the remote-tracking ref. Args: case_dir
@@ -2111,7 +2119,7 @@ test_herdr_flat_teardown_refuses_records_on_unparseable_presence() {
 }
 
 assert_herdr_teardown_preflight_refuses_before_changes() {
-  local mode=$1 case_dir log closed rc thlog teardown_bin
+  local mode=$1 case_dir log closed rc thlog teardown_bin teardown_root
   case_dir=$(make_case "herdr-preflight-$mode")
   write_meta "$case_dir" local-only ship
   configure_flat_herdr_teardown_case "$case_dir"
@@ -2128,6 +2136,7 @@ SH
   chmod +x "$case_dir/fakebin/treehouse"
 
   teardown_bin=$TEARDOWN
+  teardown_root=$ROOT
   case "$mode" in
     missing-adapter|missing-parser|missing-explicit-close-helper)
       mkdir -p "$case_dir/test-root"
@@ -2144,10 +2153,11 @@ SH
         rm -f "$case_dir/test-root/bin/backends/herdr.sh.bak"
       fi
       teardown_bin="$case_dir/test-root/bin/fm-teardown.sh"
+      teardown_root="$case_dir/test-root"
       ;;
   esac
   rc=0
-  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_ROOT_OVERRIDE="$teardown_root" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
     FM_CONFIG_OVERRIDE="$case_dir/config" FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" \
     FM_FAKE_HERDR_SESSION_LIST_GARBAGE="$([ "$mode" = unresolvable-lock ] && printf 1 || printf 0)" \
     PATH="$case_dir/fakebin:$PATH" \
