@@ -450,6 +450,18 @@ jobs:
             exit 1
           }
 
+          # Same shape for the watcher's churn-deferral regression: an already-
+          # marked churn window expands an empty array that only stock Bash
+          # treats as an unbound variable under set -u.
+          churn_output=$(FM_TEST_ONLY=test_turn_ended_churn_existing_marker_absorbed \
+            /bin/bash tests/fm-watch-triage.test.sh)
+          printf '%s\n' "$churn_output"
+          churn_count=$(printf '%s\n' "$churn_output" | grep -c '^ok - ')
+          [ "$churn_count" -eq 1 ] || {
+            echo "::error::expected 1 watcher churn-deferral bash 3.2 regression, got $churn_count"
+            exit 1
+          }
+
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest
