@@ -1,0 +1,7 @@
+{
+  "clones": [
+    { "name": "missive-axi", "path": "~/dev/missive-axi", "build": "npm install && npm run build" },
+    { "name": "review-axi", "path": "~/dev/review-axi", "build": "npm install && npm run build" },
+    { "name": "ahrefs-axi", "path": "~/dev/ahrefs-axi", "build": "npm install && npm run build" }
+  ]
+}

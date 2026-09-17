@@ -612,6 +612,40 @@ The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the 
 So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 A budget that is not a whole number from 1 to 120 is still refused outright.
 
+## Deployed CLI clones (config/deploy-clones.json)
+
+`config/deploy-clones.json` is an optional local, gitignored registry that opts a project into automatic redeployment of a machine-local installed CLI clone when that project's PR merges.
+It exists because tools like `missive-axi`, `review-axi`, and `ahrefs-axi` run from npm-linked working clones under `~/dev/<name>` (for example `which missive` resolves to `~/dev/missive-axi/dist/bin/missive.js`).
+Merging a PR to such a tool's main does not update the installed command; the live CLI silently lags main until someone manually pulls and rebuilds.
+When a merge lands for a registered project, firstmate fast-forwards that project's deployed clone to its default branch and rebuilds it, so the live command always tracks main with no manual step.
+
+This section is the single owner of the canonical schema.
+[`bin/fm-deploy-clone.sh`](../bin/fm-deploy-clone.sh) owns the redeploy mechanics, and [`bin/fm-merge-outcome-lib.sh`](../bin/fm-merge-outcome-lib.sh) owns wiring it into the merge-landed path.
+
+```json
+{
+  "clones": [
+    {
+      "name": "<project name, matching the merged project's registry/clone name>",
+      "path": "<path to the deployed clone; a leading ~ is expanded to $HOME>",
+      "build": "<build command run in the clone after a fast-forward>"
+    }
+  ]
+}
+```
+
+Each entry needs all three of `name`, `path`, and `build`.
+`name` matches the project firstmate resolves for the merged PR, which is the basename of the task's project worktree root, so a project cloned at `projects/missive-axi` matches the registry entry named `missive-axi`.
+`path` is the deployed clone that the installed command resolves to, distinct from firstmate's own `projects/<name>` clone; a leading `~` or `~/` is expanded to `$HOME`.
+`build` runs in the clone after the fast-forward, through a shell, so `npm install && npm run build` is one command.
+
+An absent or empty registry is a complete no-op, and a project not in the registry is never touched.
+The redeploy is guarded and never destructive: a clone with uncommitted changes, a pull that is not a fast-forward, or a build that fails is reported as a concrete failure through the durable wake queue and is never reported as deployed, and nothing is ever forced, stashed, or discarded.
+The redeploy is launched detached so a slow rebuild never blocks merge handling, and it fires exactly once per merge; a successful redeploy is silent.
+Adding, removing, or changing a registered clone is an edit to this file and needs no code change.
+Redeploy one clone by hand with `bin/fm-deploy-clone.sh run <name>`, and list the registered clones with `bin/fm-deploy-clone.sh list`.
+See [`docs/examples/deploy-clones.json`](examples/deploy-clones.json) for a starting point to copy into local `config/deploy-clones.json`.
+
 ## Mail plane (.env)
 
 The mail plane (bin/fm-mail.sh) reads unseen IMAP messages and sends one SMTP message.

@@ -108,5 +108,21 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [autho
       "$provider" "$host" "$path" "$number" || status=1
   fi
   fm_lock_release "$lock"
+  # Auto-redeploy a registered, machine-local deployed CLI clone for this merge.
+  # Fired exactly once per canonical merge (the marker above deduplicates), only
+  # when the opt-in registry exists, and launched detached so a slow rebuild
+  # never blocks this path (the watcher poll loop or the merge command). A
+  # redeploy launch failure must not fail the recorded merge outcome, so it is
+  # best-effort here; the redeploy itself reports its own failures through the
+  # durable wake queue. Registry schema: docs/configuration.md "Deployed CLI
+  # clones"; mechanics: bin/fm-deploy-clone.sh.
+  if [ "$status" -eq 0 ]; then
+    local config_dir="${FM_CONFIG_OVERRIDE:-$home/config}"
+    if [ -f "$config_dir/deploy-clones.json" ]; then
+      FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+        "$_FM_MERGE_OUTCOME_LIB_DIR/fm-deploy-clone.sh" on-merge "$id" \
+        >/dev/null 2>&1 || true
+    fi
+  fi
   return "$status"
 }
