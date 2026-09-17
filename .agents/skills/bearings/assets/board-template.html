@@ -140,16 +140,52 @@ a { color: inherit; text-decoration: none; }
   padding: 26px 28px 72px; display: flex; flex-direction: column; gap: 22px;
 }
 
-/* stat strip */
+/* stat strip - each tile is a real button that jumps to its section */
 .bb-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
 .bb-stat {
   display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; min-width: 0;
   background: var(--surface-card-warm); border: 1px solid var(--border-soft); border-radius: var(--radius-md);
+  font: inherit; color: inherit; text-align: left; cursor: pointer; transition: border-color 120ms, background 120ms;
 }
+.bb-stat:hover { border-color: var(--ink-300); }
+.bb-stat:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .bb-stat--call { background: var(--rust-050); border: 2px solid var(--rust-500); }
+.bb-section:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: var(--radius-md); }
 .bb-stat__num { font-family: var(--font-mono); font-size: var(--fs-h3); font-weight: 600; line-height: 1; color: var(--text-strong); }
 .bb-stat--call .bb-stat__num { color: var(--rust-600); }
 .bb-stat__label { font-family: var(--font-mono); font-size: var(--fs-2xs); letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); }
+
+/* ---- filter bar (project / card type) ---- */
+.bb-filterbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px;
+  padding: 12px 16px; background: var(--surface-card-warm);
+  border: 1px solid var(--border-soft); border-radius: var(--radius-md);
+}
+.bb-filterbar[hidden] { display: none; }
+.bb-filter__group { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.bb-filter__label {
+  font-family: var(--font-mono); font-size: var(--fs-2xs); font-weight: 800;
+  text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-faint);
+  margin-right: 2px; white-space: nowrap;
+}
+.bb-chip {
+  display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
+  font-family: var(--font-sans); font-weight: 700; font-size: var(--fs-xs);
+  padding: 5px 10px 4px; background: var(--surface-card);
+  border: 1.5px solid var(--border-default); border-radius: var(--radius-pill);
+  color: var(--text-body); transition: border-color 120ms, background 120ms, color 120ms;
+}
+.bb-chip:hover { border-color: var(--ink-300); }
+.bb-chip:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.bb-chip.is-active { border-color: var(--rust-500); background: var(--rust-050); color: var(--rust-700); }
+.bb-chip__count { font-family: var(--font-mono); color: var(--text-faint); }
+.bb-chip.is-active .bb-chip__count { color: var(--rust-500); }
+.bb-filter__clear {
+  margin-left: auto; font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 700;
+  color: var(--ocean-600); background: none; border: none; cursor: pointer; padding: 4px 6px;
+}
+.bb-filter__clear:hover { text-decoration: underline; }
+.bb-filter__clear[hidden] { display: none; }
 
 .bb-section { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .bb-section__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
@@ -227,11 +263,25 @@ a { color: inherit; text-decoration: none; }
   border-radius: var(--radius-xs); padding: 5px 9px 4px;
 }
 .is-queued .bb-queued { display: inline-flex; }
+/* A card the composer left in poor shape is still dealt; the flag says so on
+   the card's face rather than keeping the question off the board. */
+.bb-flag {
+  display: flex; align-items: baseline; gap: 8px;
+  background: var(--status-warn-soft); border: 1px solid var(--gold-500);
+  border-radius: var(--radius-sm); padding: 7px 10px;
+}
+.bb-flag__k { flex: none; font-family: var(--font-mono); font-size: var(--fs-2xs); font-weight: 800;
+  text-transform: uppercase; letter-spacing: 0.07em; color: var(--status-warn); }
+.bb-flag__v { font-size: var(--fs-xs); line-height: 1.4; color: var(--text-body); }
 .bb-limit { display: none; font-size: var(--fs-xs); font-weight: 700; color: var(--status-danger); }
 .bb-limit.is-visible { display: inline; }
-.bb-freeform { width: 100%; font-family: var(--font-sans); font-size: var(--fs-sm); color: var(--text-strong);
+/* The write-my-own box is the body of the last option, not a field below the
+   list, so choosing it deselects any other pick the way any radio does. */
+.bb-freeform { width: 100%; margin-top: 6px; font-family: var(--font-sans); font-size: var(--fs-sm);
+  color: var(--text-strong);
   background: var(--surface-card); border: 1.5px solid var(--border-default); border-radius: var(--radius-sm); padding: 8px 11px; }
 .bb-freeform:focus { outline: none; border-color: var(--rust-400); box-shadow: var(--focus-ring); }
+.bb-opt--own .bb-freeform { margin: -2px 0; }
 
 /* ---- compact rows (Underway / Landed / Charted) ---- */
 .bb-rows { display: flex; flex-direction: column; }
@@ -251,6 +301,23 @@ a { color: inherit; text-decoration: none; }
 .bb-row__check { width: 26px; height: 26px; border-radius: var(--radius-sm); display: grid; place-items: center; flex: none;
   background: var(--status-online-soft); color: var(--status-online); border: 1.5px solid var(--sea-200); }
 .bb-row__check svg { width: 15px; height: 15px; }
+/* ---- Charted Next rows: a native <details>/<summary> disclosure so a click
+   opens the full item instead of being caught by Lavish's annotation editor
+   (native disclosure controls are exempt from that, the way buttons and
+   radios already are on this board). ---- */
+.bb-row--chart { display: block; padding: 0; }
+.bb-row--chart > summary { list-style: none; cursor: pointer; }
+.bb-row--chart > summary::-webkit-details-marker { display: none; }
+.bb-row--chart > summary::marker { content: ""; }
+.bb-row__summary {
+  display: flex; align-items: center; gap: 12px; padding: 11px 18px; min-width: 0;
+}
+.bb-row--chart > summary:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.bb-row__full { padding: 0 18px 14px 46px; display: flex; flex-direction: column; gap: 4px; }
+.bb-row__full-title { font-size: var(--fs-sm); font-weight: 700; color: var(--text-strong); line-height: 1.35; }
+.bb-row__full-reason, .bb-row__full-repo, .bb-row__full-detail {
+  font-size: var(--fs-xs); color: var(--text-muted); line-height: 1.4;
+}
 .bb-morechip {
   display: inline-flex; align-items: center; gap: 6px; margin: 10px 18px 12px;
   font-size: var(--fs-xs); font-weight: 800; color: var(--text-muted);
@@ -296,8 +363,10 @@ a { color: inherit; text-decoration: none; }
 
   <div class="bb-stats" id="bb-stats"></div>
 
+  <div class="bb-filterbar" id="bb-filterbar" hidden></div>
+
   <div class="bb-cols">
-  <section class="bb-section">
+  <section class="bb-section" id="bb-section-call" tabindex="-1">
     <div class="bb-section__head">
       <span class="fm-sign fm-sign--eyebrow">
         <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg>
@@ -321,7 +390,7 @@ a { color: inherit; text-decoration: none; }
     </div>
   </section>
 
-  <section class="bb-section">
+  <section class="bb-section" id="bb-section-charted" tabindex="-1">
     <div class="bb-section__head">
       <span class="fm-sign fm-sign--eyebrow">
         <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
@@ -344,7 +413,7 @@ a { color: inherit; text-decoration: none; }
   </div>
 
   <div class="bb-cols">
-    <section class="bb-section">
+    <section class="bb-section" id="bb-section-underway" tabindex="-1">
       <div class="bb-section__head">
         <span class="fm-sign fm-sign--eyebrow">
           <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 10.189V14"/><path d="M12 2v3"/><path d="M19 13V7a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2v6"/><path d="M19.38 20A11.6 11.6 0 0 0 21 14l-8.188-3.639a2 2 0 0 0-1.624 0L3 14a11.6 11.6 0 0 0 2.81 7.76"/><path d="M2 21c.6.5 1.2 1 2.5 1 2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1s1.2 1 2.5 1c2.5 0 2.5-2 5-2 1.3 0 1.9.5 2.5 1"/></svg>
@@ -354,7 +423,7 @@ a { color: inherit; text-decoration: none; }
       <div class="fm-card"><div class="bb-rows" id="bb-underway"></div></div>
     </section>
 
-    <section class="bb-section">
+    <section class="bb-section" id="bb-section-landed" tabindex="-1">
       <div class="bb-section__head">
         <span class="fm-sign fm-sign--eyebrow">
           <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.801 10A10 10 0 1 1 17 3.335"/><path d="m9 11 3 3L22 4"/></svg>
@@ -457,23 +526,145 @@ __FM_BEARINGS_BOARD_DATA__
 
   document.getElementById("bb-provenance").textContent = data.schema + " · " + data.generated;
 
-  /* stat strip */
+  /* stat strip - each tile is a button that jumps the captain to its section,
+     using a native control so Lavish's annotation editor leaves it alone */
   var callTotal = data.captains_call.length;
   var stats = [
-    { n: callTotal, l: "need you", call: true },
-    { n: data.underway.length, l: "underway" },
-    { n: data.landed.length, l: "landed recently" },
-    { n: chartedQueued(data.charted).length + chartedMoreQueued, l: "charted next" }
+    { n: callTotal, l: "need you", call: true, target: "bb-section-call" },
+    { n: data.underway.length, l: "underway", target: "bb-section-underway" },
+    { n: data.landed.length, l: "landed recently", target: "bb-section-landed" },
+    { n: chartedQueued(data.charted).length + chartedMoreQueued, l: "charted next", target: "bb-section-charted" }
   ];
   var strip = document.getElementById("bb-stats");
   stats.forEach(function (s) {
-    var t = el("div", "bb-stat" + (s.call ? " bb-stat--call" : ""));
+    var t = el("button", "bb-stat" + (s.call ? " bb-stat--call" : ""));
+    t.type = "button";
     t.appendChild(el("span", "bb-stat__num", String(s.n)));
     t.appendChild(el("span", "bb-stat__label", s.l));
+    t.addEventListener("click", function () {
+      var section = document.getElementById(s.target);
+      if (!section) return;
+      section.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (typeof section.focus === "function") section.focus({ preventScroll: true });
+    });
     strip.appendChild(t);
   });
   document.getElementById("bb-call-sub").textContent =
     callTotal ? callTotal + " item" + (callTotal === 1 ? "" : "s") + " wait on you, captain" : "nothing needs you, captain";
+
+  /* ---- project / type filter bar ----
+     Counts are drawn from Captain's Call, since that pile - not the other
+     three sections - is what becomes unusable at scale. A repo that only
+     shows up in Underway/Landed/Charted still gets a chip (count 0) so the
+     project filter can narrow those sections too. */
+  var REPO_NONE_LABEL = "no repo";
+  function repoKey(repo) { return repo || REPO_NONE_LABEL; }
+  var repoCounts = {};
+  var typeCounts = {};
+  data.captains_call.forEach(function (item) {
+    var rk = repoKey(item.repo);
+    repoCounts[rk] = (repoCounts[rk] || 0) + 1;
+    typeCounts[item.type] = (typeCounts[item.type] || 0) + 1;
+  });
+  [data.underway, data.landed, data.charted].forEach(function (list) {
+    list.forEach(function (item) {
+      var rk = repoKey(item.repo);
+      if (!(rk in repoCounts)) repoCounts[rk] = 0;
+    });
+  });
+  var repoOrder = Object.keys(repoCounts).sort(function (a, b) {
+    if (a === REPO_NONE_LABEL) return 1;
+    if (b === REPO_NONE_LABEL) return -1;
+    return repoCounts[b] - repoCounts[a] || a.localeCompare(b);
+  });
+  var TYPE_LABELS = { decision: "decision", merge: "merge", credential: "credential" };
+  var typeOrder = ["decision", "merge", "credential"].filter(function (t) { return typeCounts[t]; });
+
+  var activeRepos = new Set();
+  var activeTypes = new Set();
+  var filterBar = document.getElementById("bb-filterbar");
+  var clearBtn = el("button", "bb-filter__clear", "Show everything");
+  clearBtn.type = "button";
+  clearBtn.hidden = true;
+
+  function refreshClearVisibility() {
+    clearBtn.hidden = activeRepos.size === 0 && activeTypes.size === 0;
+  }
+  function makeChip(group, key, label, count) {
+    var chip = el("button", "bb-chip");
+    chip.type = "button";
+    chip.dataset.group = group;
+    chip.dataset.key = key;
+    chip.appendChild(el("span", null, label));
+    chip.appendChild(el("span", "bb-chip__count", "(" + count + ")"));
+    chip.addEventListener("click", function () {
+      var set = group === "repo" ? activeRepos : activeTypes;
+      if (set.has(key)) { set.delete(key); } else { set.add(key); }
+      chip.classList.toggle("is-active", set.has(key));
+      refreshClearVisibility();
+      applyFilters();
+    });
+    return chip;
+  }
+  var hasFilterGroups = repoOrder.length > 1 || typeOrder.length > 1;
+  if (repoOrder.length > 1) {
+    var repoGroup = el("div", "bb-filter__group");
+    repoGroup.appendChild(el("span", "bb-filter__label", "project"));
+    repoOrder.forEach(function (rk) { repoGroup.appendChild(makeChip("repo", rk, rk, repoCounts[rk])); });
+    filterBar.appendChild(repoGroup);
+  }
+  if (typeOrder.length > 1) {
+    var typeGroup = el("div", "bb-filter__group");
+    typeGroup.appendChild(el("span", "bb-filter__label", "type"));
+    typeOrder.forEach(function (t) { typeGroup.appendChild(makeChip("type", t, TYPE_LABELS[t], typeCounts[t])); });
+    filterBar.appendChild(typeGroup);
+  }
+  clearBtn.addEventListener("click", function () {
+    activeRepos.clear();
+    activeTypes.clear();
+    Array.prototype.forEach.call(filterBar.querySelectorAll(".bb-chip.is-active"), function (c) {
+      c.classList.remove("is-active");
+    });
+    refreshClearVisibility();
+    applyFilters();
+  });
+  filterBar.appendChild(clearBtn);
+  filterBar.hidden = !hasFilterGroups;
+
+  /* section registry filled in below as each section's rows are built;
+     applyFilters() (defined once every section exists) re-derives what is
+     visible from activeRepos/activeTypes without ever rebuilding the DOM. */
+  var sectionFilterables = [];
+  function registerSectionFilterable(container, rows, label) {
+    sectionFilterables.push({ container: container, rows: rows, label: label, filteredEmptyNode: null });
+  }
+  function refreshSectionFilterable(entry) {
+    var visibleCount = 0;
+    var pickCleared = false;
+    entry.rows.forEach(function (row) {
+      var ok = activeRepos.size === 0 || activeRepos.has(row.dataset.repo);
+      row.hidden = !ok;
+      if (ok) {
+        visibleCount++;
+        return;
+      }
+      /* a filtered-out row must never keep an invisible dispatch pick: the
+         captain would otherwise queue work from a project he can no longer
+         see on the screen. Only Charted rows ever carry a .bb-pick, so this
+         is a no-op for Underway/Landed. */
+      var hiddenPick = row.querySelectorAll(".bb-pick:checked")[0];
+      if (hiddenPick) {
+        hiddenPick.checked = false;
+        pickCleared = true;
+      }
+    });
+    if (entry.filteredEmptyNode) { entry.filteredEmptyNode.remove(); entry.filteredEmptyNode = null; }
+    if (entry.rows.length && visibleCount === 0) {
+      entry.filteredEmptyNode = el("div", "bb-empty", "No " + entry.label + " match this project.");
+      entry.container.appendChild(entry.filteredEmptyNode);
+    }
+    if (pickCleared) refreshBar();
+  }
 
   /* Captain's Call deck: every item renders as the same full card */
   var deck = document.getElementById("bb-call");
@@ -484,8 +675,35 @@ __FM_BEARINGS_BOARD_DATA__
     return row;
   }
 
+  /* Marks, never gates. Every question the composer hands the board reaches the
+     captain; a card in poor shape reaches him carrying a plain statement of
+     what is wrong with it. A question he never sees is the one outcome the
+     board must never produce, so nothing below removes, hides or defers a
+     card - it only writes on it. */
+  var BUNDLE_OPTION =
+    /walk me through|one by one|one at a time|take my recommendation|all (?:of them|of these|three|four|five|six)\b|go through (?:them|these)/i;
+  function bundleFault(it) {
+    if ((String(it.title).match(/\?/g) || []).length > 1) {
+      return "this card asks more than one question - split it, one question per card";
+    }
+    var meta = (it.options || []).some(function (o) { return BUNDLE_OPTION.test(String(o.label)); });
+    if (meta) {
+      return "these options answer how to work through the card rather than the question itself" +
+        " - split it, one question per card";
+    }
+    return "";
+  }
+  function flag(kind, text) {
+    var f = el("div", "bb-flag");
+    f.appendChild(el("span", "bb-flag__k", kind));
+    f.appendChild(el("span", "bb-flag__v", text));
+    return f;
+  }
+
   data.captains_call.forEach(function (item) {
     var card = el("div", "fm-card fm-card--poster bb-decision");
+    card.dataset.repo = repoKey(item.repo);
+    card.dataset.type = item.type;
     var pad = el("div", "bb-decision__pad");
 
     var top = el("div", "bb-decision__top");
@@ -499,6 +717,16 @@ __FM_BEARINGS_BOARD_DATA__
     pad.appendChild(top);
 
     pad.appendChild(el("h3", "bb-decision__title", item.title));
+
+    var bundle = bundleFault(item);
+    if (bundle) pad.appendChild(flag("bundle", bundle));
+    /* `missing` is the composer's own admission that it published a thin card.
+       It is shown as given and never checked, because a card whose gaps are
+       named still asks its question, and one whose gaps are not named still
+       has to be asked. */
+    if (typeof item.missing === "string" && item.missing.trim()) {
+      pad.appendChild(flag("incomplete", item.missing.trim()));
+    }
 
     if (item.type === "merge") {
       if (item.detail) pad.appendChild(el("p", "bb-decision__detail", item.detail));
@@ -532,14 +760,25 @@ __FM_BEARINGS_BOARD_DATA__
       }
       opts.appendChild(lab);
     });
-    form.appendChild(opts);
-
     if (item.allow_freeform) {
+      /* the write-your-own is an OPTION ROW carrying its own radio, never a
+         box below the list: the captain must be able to pick it like any
+         other answer, including after changing his mind about one. */
+      var ownLab = el("label", "bb-opt bb-opt--own");
+      var ownRadio = document.createElement("input");
+      ownRadio.type = "radio"; ownRadio.name = "answer"; ownRadio.value = "own";
+      ownLab.appendChild(ownRadio);
+      var ownBody = el("span", "bb-opt__body");
       var ff = document.createElement("input");
       ff.type = "text"; ff.name = "note"; ff.className = "bb-freeform";
-      ff.placeholder = item.freeform_hint || "or answer in your own words…";
-      form.appendChild(ff);
+      ff.placeholder = item.freeform_hint || "None of these \u2014 write your own answer here";
+      ff.addEventListener("focus", function () { ownRadio.checked = true; });
+      ff.addEventListener("input", function () { if (ff.value.trim()) ownRadio.checked = true; });
+      ownBody.appendChild(ff);
+      ownLab.appendChild(ownBody);
+      opts.appendChild(ownLab);
     }
+    form.appendChild(opts);
 
     var foot = el("div", "bb-decision__foot");
     var btn = el("button", "fm-btn fm-btn--sm " + (item.type === "merge" ? "fm-btn--gold" : "fm-btn--primary"), "Queue answer");
@@ -559,8 +798,21 @@ __FM_BEARINGS_BOARD_DATA__
       var fd = new FormData(form);
       var value = fd.get("answer");
       var note = (fd.get("note") || "").trim();
-      var displayAnswer = value ? (note ? value + " - " + note : value) : note;
-      if (!displayAnswer) return;
+      /* picked option, optionally annotated; a bare note is itself the answer */
+      /* "own" is the write-your-own row: the note IS the answer, unprefixed */
+      var displayAnswer = value === "own" ? note : (value ? (note ? value + " - " + note : value) : note);
+      if (!displayAnswer) {
+        /* Never fail silently here: an unexplained dead button is what makes a
+           captain believe the box needs an option ticked before it will take
+           his words. Say what is missing instead. */
+        answerLimit.textContent = value === "own"
+          ? "Type your answer, then queue it."
+          : item.allow_freeform
+            ? "Type your answer, or pick an option, then queue it."
+            : "Pick an option, then queue it.";
+        answerLimit.classList.add("is-visible");
+        return;
+      }
       if (utf8ByteLength(displayAnswer) > 512) {
         answerLimit.textContent = "Answer is too long to queue (512 bytes maximum).";
         answerLimit.classList.add("is-visible");
@@ -579,12 +831,14 @@ __FM_BEARINGS_BOARD_DATA__
         window.lavish.queuePrompt(
           "Captain's Call answer - " + item.title + ": " + displayAnswer,
           { tag: "choice", text: item.title + " -> " + displayAnswer, element: form,
-            data: ctxData }
+            /* keyed on the card, so changing an answer replaces it rather than
+               queueing a second, contradictory one */
+            queueKey: item.key, data: ctxData }
         );
       }
       card.classList.add("is-queued");
       /* deal the next card once this one is answered */
-      setTimeout(function () { showCard(active < cards.length - 1 ? active + 1 : active); }, 450);
+      setTimeout(function () { showCard(active < visibleCards.length - 1 ? active + 1 : active); }, 450);
     });
 
     pad.appendChild(form);
@@ -592,40 +846,81 @@ __FM_BEARINGS_BOARD_DATA__
     deck.appendChild(card);
   });
 
-  /* stack navigation: one card at a time, dealt off the pile */
-  var cards = Array.prototype.slice.call(deck.children);
+  /* stack navigation: one card at a time, dealt off the pile.
+     allCards never changes after this point; visibleCards is re-derived by
+     refreshDeck() whenever a filter chip toggles, and active always indexes
+     into visibleCards so the counter reads "card N of the filtered pile". */
+  var allCards = Array.prototype.slice.call(deck.children);
+  var visibleCards = allCards.slice();
   var active = 0;
+  var deckEmptyNode = null;
   var stackCount = document.getElementById("bb-stack-count");
   var stackPrev = document.getElementById("bb-stack-prev");
   var stackNext = document.getElementById("bb-stack-next");
   var stackNav = stackCount.parentNode;
   function showCard(i) {
-    active = Math.max(0, Math.min(cards.length - 1, i));
-    cards.forEach(function (c, j) { c.hidden = j !== active; });
+    active = Math.max(0, Math.min(visibleCards.length - 1, i));
+    allCards.forEach(function (c) { c.hidden = true; });
+    visibleCards.forEach(function (c, j) { c.hidden = j !== active; });
     var answered = deck.querySelectorAll(".is-queued").length;
-    stackCount.textContent = "card " + (active + 1) + " of " + cards.length +
+    stackCount.textContent = "card " + (active + 1) + " of " + visibleCards.length +
       (answered ? " · " + answered + " answered" : "");
     stackPrev.disabled = active === 0;
-    stackNext.disabled = active === cards.length - 1;
+    stackNext.disabled = active === visibleCards.length - 1;
     /* the pile thins as the deal approaches the bottom */
-    deck.classList.toggle("bb-call--penult", active === cards.length - 2);
-    deck.classList.toggle("bb-call--last", active === cards.length - 1);
+    deck.classList.toggle("bb-call--penult", active === visibleCards.length - 2);
+    deck.classList.toggle("bb-call--last", active === visibleCards.length - 1);
+    /* Put the caret in the dealt card's own answer box. The board is embedded
+       in a review tool whose annotation popup also takes typing, and words
+       typed there are a comment on the card, not an answer to it. Owning the
+       caret keeps the captain's words in the field that answers the question. */
+    var dealt = visibleCards[active];
+    var noteBox = dealt && dealt.querySelectorAll(".bb-freeform")[0];
+    if (noteBox && typeof noteBox.focus === "function") {
+      try { noteBox.focus({ preventScroll: true }); } catch (e) { noteBox.focus(); }
+    }
   }
-  if (cards.length) {
+  function cardVisible(card) {
+    var repoOk = activeRepos.size === 0 || activeRepos.has(card.dataset.repo);
+    var typeOk = activeTypes.size === 0 || activeTypes.has(card.dataset.type);
+    return repoOk && typeOk;
+  }
+  function refreshDeck() {
+    visibleCards = allCards.filter(cardVisible);
+    deck.classList.remove("bb-call--empty", "bb-call--penult", "bb-call--last");
+    if (deckEmptyNode) { deckEmptyNode.remove(); deckEmptyNode = null; }
+    if (!visibleCards.length) {
+      deck.classList.add("bb-call--empty");
+      deckEmptyNode = el("div", "bb-empty", allCards.length
+        ? "No Captain's Call cards match these filters."
+        : "Nothing needs your action right now.");
+      deck.appendChild(deckEmptyNode);
+      stackNav.hidden = true;
+      stackCount.textContent = allCards.length ? "card 0 of " + allCards.length : "-";
+      return;
+    }
+    stackNav.hidden = false;
+    showCard(0);
+  }
+  if (allCards.length) {
     stackPrev.addEventListener("click", function () { showCard(active - 1); });
     stackNext.addEventListener("click", function () { showCard(active + 1); });
-    showCard(0);
-  } else {
-    deck.classList.add("bb-call--empty");
-    deck.appendChild(el("div", "bb-empty", "Nothing needs your action right now."));
-    stackNav.hidden = true;
+  }
+
+  /* Every filter chip and the clear-all button funnel through here so the
+     deck and the three project-scoped sections always agree. */
+  function applyFilters() {
+    refreshDeck();
+    sectionFilterables.forEach(refreshSectionFilterable);
   }
 
   /* Underway */
   var uw = document.getElementById("bb-underway");
   if (!data.underway.length) uw.appendChild(el("div", "bb-empty", "Nothing is underway."));
+  var uwRows = [];
   data.underway.forEach(function (t) {
     var row = el("div", "bb-row");
+    row.dataset.repo = repoKey(t.repo);
     row.appendChild(badge(t.state === "working" ? "online" : "info", t.state));
     var main = el("div", "bb-row__main");
     /* the snapshot's durable name-or-id label leads the row so a scan says
@@ -637,13 +932,17 @@ __FM_BEARINGS_BOARD_DATA__
       t.doing + " · " + t.kind + " · " + (t.repo || t.id)));
     row.appendChild(main);
     uw.appendChild(row);
+    uwRows.push(row);
   });
+  registerSectionFilterable(uw, uwRows, "underway tasks");
 
   /* Landed */
   var ld = document.getElementById("bb-landed");
   if (!data.landed.length) ld.appendChild(el("div", "bb-empty", "No recent completions are in the current baseline."));
+  var ldRows = [];
   data.landed.forEach(function (t) {
     var row = el("div", "bb-row");
+    row.dataset.repo = repoKey(t.repo);
     var chk = el("span", "bb-row__check");
     chk.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
     row.appendChild(chk);
@@ -657,7 +956,9 @@ __FM_BEARINGS_BOARD_DATA__
       row.appendChild(a);
     }
     ld.appendChild(row);
+    ldRows.push(row);
   });
+  registerSectionFilterable(ld, ldRows, "landed items");
 
   /* Charted Next + dispatch picker */
   var ch = document.getElementById("bb-charted");
@@ -678,13 +979,23 @@ __FM_BEARINGS_BOARD_DATA__
   if (!chartedQueued(data.charted).length && !chartedMoreQueued) {
     ch.appendChild(el("div", "bb-empty", "Nothing is queued."));
   }
+  var chRows = [];
   chartedOrder(data.charted).forEach(function (t) {
-    var row = el("div", "bb-row");
+    /* a native <details>/<summary> disclosure: the click that opens it is a
+       native interaction, so Lavish's annotation editor leaves it alone the
+       same way it already leaves buttons and radios alone, and the captain
+       gets the full title, reason, repo, and detail on open. */
+    var row = el("details", "bb-row bb-row--chart");
+    row.dataset.repo = repoKey(t.repo);
+    chRows.push(row);
+    var summary = el("summary", "bb-row__summary");
     if (t.dispatchable && !isWarning(t)) {
       anyPickable = true;
       var pick = document.createElement("input");
       pick.type = "checkbox"; pick.className = "bb-pick"; pick.value = t.id;
       pick.setAttribute("aria-label", "Pick " + t.id + " for dispatch");
+      /* the pick must toggle without also opening/closing the disclosure */
+      pick.addEventListener("click", function (ev) { ev.stopPropagation(); });
       pick.addEventListener("change", function () {
         if (pick.checked && utf8ByteLength(pickedIds().join(",")) > 512) {
           pick.checked = false;
@@ -693,18 +1004,27 @@ __FM_BEARINGS_BOARD_DATA__
         }
         refreshBar();
       });
-      row.appendChild(pick);
+      summary.appendChild(pick);
     } else {
-      row.appendChild(el("span", "bb-pick-spacer"));
+      summary.appendChild(el("span", "bb-pick-spacer"));
     }
     var main = el("div", "bb-row__main");
     main.appendChild(el("div", "bb-row__title", t.title));
     /* second line keeps the title uncrowded in the half-width column */
     var chSub = t.repo || t.id;
     main.appendChild(el("div", "bb-row__sub", t.reason ? t.reason + " · " + chSub : chSub));
-    row.appendChild(main);
-    if (isWarning(t)) row.appendChild(badge("danger", "needs repair"));
-    else if (t.reason) row.appendChild(badge("warn", "waiting"));
+    summary.appendChild(main);
+    if (isWarning(t)) summary.appendChild(badge("danger", "needs repair"));
+    else if (t.reason) summary.appendChild(badge("warn", "waiting"));
+    row.appendChild(summary);
+
+    var full = el("div", "bb-row__full");
+    full.appendChild(el("div", "bb-row__full-title", t.title));
+    if (t.reason) full.appendChild(el("div", "bb-row__full-reason", t.reason));
+    if (t.repo) full.appendChild(el("div", "bb-row__full-repo", t.repo));
+    if (t.detail) full.appendChild(el("div", "bb-row__full-detail", t.detail));
+    row.appendChild(full);
+
     ch.appendChild(row);
   });
   var chartedShown = chartedQueued(data.charted).length;
@@ -717,6 +1037,7 @@ __FM_BEARINGS_BOARD_DATA__
   if (chartedMoreWarnings) {
     ch.appendChild(el("span", "bb-morechip", "+" + chartedMoreWarnings + " more repair warning" + (chartedMoreWarnings === 1 ? "" : "s") + " - ask firstmate for the full chart"));
   }
+  registerSectionFilterable(ch, chRows, "charted work");
 
   if (anyPickable) {
     bar.hidden = false;
@@ -740,6 +1061,10 @@ __FM_BEARINGS_BOARD_DATA__
       bar.classList.add("is-queued");
     });
   }
+
+  /* initial render: with no filter chips active this reproduces the
+     unfiltered layout exactly, so it doubles as the empty-fleet path too */
+  applyFilters();
   } catch (e) {
     renderBoardError("The board data could not be rendered");
   }

@@ -367,7 +367,7 @@ family_for_basename() {
     fm-tmux-agent-liveness.test.sh|\
     fm-control.test.sh|fm-control-relaunch.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
-    fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
+    fm-send-inbox.test.sh|fm-spawn-batch.test.sh|fm-spawn-base-branch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|fm-claude-trust.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
@@ -812,6 +812,33 @@ tests/fm-watch-checkpoint.test.sh 5779
 tests/fm-watch-recovery-loop.test.sh 58731
 tests/fm-watch-triage.test.sh 262626
 tests/fm-watcher-lock.test.sh 88554
+tests/fm-backlog-read-bound.test.sh 27647
+tests/fm-bearings-board-lavish-live-e2e.test.sh 23476
+tests/fm-calm-claude-mod-live-e2e.test.sh 195
+tests/fm-calm-claude-mod-plugin.test.sh 4662
+tests/fm-calm-claude-mod.test.sh 4826
+tests/fm-ci-workflow.test.sh 283
+tests/fm-claude-trust.test.sh 21079
+tests/fm-codex-hook-layer-live-e2e.test.sh 6885
+tests/fm-composer-codex-idle-live-e2e.test.sh 55957
+tests/fm-contributions.test.sh 116682
+tests/fm-gemini-harness.test.sh 2207
+tests/fm-harness-precedence.test.sh 15496
+tests/fm-herdr-pi-stale-registration-live-e2e.test.sh 13217
+tests/fm-mail-check.test.sh 15439
+tests/fm-mail.test.sh 45169
+tests/fm-nm-test-contract.test.sh 365
+tests/fm-omp-primary-live-e2e.test.sh 294
+tests/fm-pi-codex-native.test.sh 338
+tests/fm-pr-reviewers.test.sh 747
+tests/fm-pr-state-live-e2e.test.sh 363
+tests/fm-pr-state.test.sh 1844
+tests/fm-rovo-harness.test.sh 27764
+tests/fm-rovo-signals-live-e2e.test.sh 552
+tests/fm-send-agy-confirm.test.sh 13237
+tests/fm-spawn-base-branch.test.sh 31610
+tests/fm-stat-shadowing.test.sh 373
+tests/fm-tasks-axi.test.sh 5199
 EOF
 }
 

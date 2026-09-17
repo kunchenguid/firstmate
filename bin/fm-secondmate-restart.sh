@@ -142,9 +142,15 @@ first_reported_line() {  # <text>
 # Send the ordinary re-read steer to a mate this pass will not restart, and say
 # plainly which it was. A nudge is a partial reload and is never reported as more.
 fall_back_to_nudge() {  # <id> <reason>
-  local id=$1 reason=$2 out
+  local id=$1 reason=$2 out did
+  if ! did=$(fm_secondmate_nudge_delivery_id "$id" "$RESULT_DIR"); then
+    unreached_count=$((unreached_count + 1))
+    printf 'unreached: %s: %s; the re-read message could not be delivered either: cannot compute delivery id\n' \
+      "$id" "$reason"
+    return
+  fi
   if out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-send.sh" "$id" "$FM_SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+    "$SCRIPT_DIR/fm-send.sh" "$id" --fire-and-forget "$did" "$FM_SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
     nudged_count=$((nudged_count + 1))
     printf 'nudged: %s: %s\n' "$id" "$reason"
   else

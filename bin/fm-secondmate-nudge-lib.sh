@@ -14,6 +14,25 @@ fm_secondmate_nudge_marker_path() { # <state-dir> <id>
   printf '%s/.secondmate-nudge-pending/%s.pending\n' "$state" "$id"
 }
 
+# Delivery id for a reread nudge sent on fm-send's fire-and-forget plane. The
+# nudge has no reply protocol - the mate re-reads and keeps idling, so nothing
+# would ever write a corr= line back - and a marked send would durably expect a
+# report that can never arrive. Deterministic per (id, seed) so a retry of the
+# same nudge reuses the id fm-send names in its unconfirmed-delivery error.
+fm_secondmate_nudge_delivery_id() { # <id> <seed>
+  local seed="$1:$2" digest
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$seed" | shasum -a 256 | awk '{print $1}') || return 1
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$seed" | sha256sum | awk '{print $1}') || return 1
+  elif command -v openssl >/dev/null 2>&1; then
+    digest=$(printf '%s' "$seed" | openssl dgst -sha256 2>/dev/null | awk '{print $NF}') || return 1
+  else
+    return 1
+  fi
+  printf '%s' "$digest" | cut -c1-16
+}
+
 fm_remote_inherit_transaction_lock_path() { # <state-dir> <id>
   local state=$1 id=$2
   case "$id" in *[!/A-Za-z0-9._-]*|''|*/*) return 1 ;; esac

@@ -52,6 +52,8 @@ The optional `+yolo` posture changes merge authority only and does not change th
 Default it off for every project and every posture, and enable it only on the captain's explicit instruction.
 `AGENTS.md` section 7 owns the merge-authority contract.
 
+Record the project's base branch in the same registry entry whenever the project is developed off a branch other than its repository default, so a freshly allocated task worktree does not start a worker on a stale tree.
+
 ## Add or clone an existing project
 
 Confirm the source URL, local project name, delivery posture, and autonomy posture, stating the resolved default for each rather than asking the captain to invent one.
