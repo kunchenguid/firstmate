@@ -620,6 +620,77 @@ test_conflicting_slot_record_is_decided_by_the_slot_claim() {
   pass "fm-teardown: a slot claim naming the conflicting record's task retires the stale record and leaves the claimant alone"
 }
 
+# Several older records can name one slot - the pool hands a slot on without the
+# earlier record ever being retired, so stale records accumulate - and the claim
+# must decide among all of them, not only the first the scan reaches, or the older
+# records stay unretirable whenever the claimant does not sort first.
+stage_several_slot_records() {  # <case> <stale-a-id> <stale-b-id> <claimant-id>
+  local dir=$1 first=$2 second=$3 claimant=$4
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$first.meta" \
+    "window=firstmate:fm-$first" "endpoint_task_id=$first" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+  fm_write_meta "$dir/home/state/$second.meta" \
+    "window=firstmate:fm-$second" "endpoint_task_id=$second" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship"
+  fm_write_meta "$dir/home/state/$claimant.meta" \
+    "window=firstmate:fm-$claimant" "endpoint_task_id=$claimant" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+}
+
+test_slot_claim_decides_among_several_conflicting_records() {
+  local dir first=alpha-stale second=beta-stale claimant=zeta-claimant worker rc
+
+  dir=$(make_case slot-conflict-many-claim-reassigned)
+  stage_several_slot_records "$dir" "$first" "$second" "$claimant"
+  claim_pool_slot "$dir" "$claimant" "$dir/other-home"
+  # Staged in this shell, not a command substitution: a background child of a
+  # $(...) subshell does not outlive it, and the point of this worker is to be
+  # alive in the slot while teardown runs.
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  set +e
+  run_case "$dir" "$first" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "teardown refused a record the claim proves stale behind an earlier conflicting record: $(cat "$dir/stderr")"
+  kill -0 "$worker" 2>/dev/null || fail "teardown killed the worker holding the reassigned pool slot"
+  assert_absent "$dir/home/state/$first.meta" "the first conflicting stale record was not retired"
+  assert_present "$dir/home/state/$second.meta" "teardown removed another task's record"
+  assert_present "$dir/home/state/$claimant.meta" "teardown removed the claimant's record"
+  assert_reassigned_slot_left_alone "$dir" "$first" "$claimant" "three-record reassignment"
+
+  # The second stale record now conflicts only with the claimant, so it retires
+  # the same way: one cleanup never leaves the rest of the collision stranded.
+  set +e
+  run_case "$dir" "$second" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "teardown refused the second stale record the claim proves stale: $(cat "$dir/stderr")"
+  kill -0 "$worker" 2>/dev/null || fail "teardown killed the worker holding the reassigned pool slot"
+  assert_absent "$dir/home/state/$second.meta" "the second conflicting stale record was not retired"
+  assert_present "$dir/home/state/$claimant.meta" "teardown removed the claimant's record on the second cleanup"
+  assert_reassigned_slot_left_alone "$dir" "$second" "$claimant" "three-record reassignment, second pass"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+
+  # A claim naming no conflicting record still proves nothing, so the refusal
+  # stands and names the first conflict the scan reached.
+  dir=$(make_case slot-conflict-many-third-party-claim)
+  stage_several_slot_records "$dir" "$first" "$second" "$claimant"
+  claim_pool_slot "$dir" "third-party-task"
+  assert_refused_without_mutation "$dir" "$first" "many-record third-party-claim slot conflict"
+  assert_present "$dir/home/state/$second.meta" "many-record third-party conflict removed another record"
+  assert_present "$dir/home/state/$claimant.meta" "many-record third-party conflict removed the claimant's record"
+  assert_contains "$(cat "$dir/stderr")" "is also task $second" \
+    "many-record third-party conflict should keep the first-conflict refusal"
+
+  pass "fm-teardown: the slot claim decides among every record naming one slot, not only the first the scan reaches"
+}
+
 test_cross_home_pool_slot_collision_refuses() {
   local dir id=stale-task other=secondmate-task second_home second_project rc
   dir=$(make_case slot-reuse-cross-home)
@@ -1471,6 +1542,7 @@ test_already_gone_endpoint_still_completes_without_a_refusal
 test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
 test_conflicting_slot_record_is_decided_by_the_slot_claim
+test_slot_claim_decides_among_several_conflicting_records
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot

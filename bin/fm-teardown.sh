@@ -87,10 +87,13 @@
 # this home or any locally registered Firstmate home may name the same live path
 # in its worktree= or home=. One live path with two task records is the reuse
 # collision itself, whichever record is stale.
-# When that scan finds a conflicting record, the slot's own claim decides between
-# them: a claim naming THAT record's task proves the pool slot was reassigned to
-# it, so this record is the stale one and the reassignment path below runs instead
-# of stranding both records on one slot forever. A claim that is absent,
+# When that scan finds conflicting records, the slot's own claim decides between
+# them: a claim naming a conflicting record's task proves the pool slot was
+# reassigned to it, so this record is the stale one and the reassignment path
+# below runs instead of stranding every record that names the slot. The scan
+# therefore reads every conflicting record before deciding - several older records
+# can name one slot - and the first conflict the claim does not name supplies the
+# refusal text when no conflicting record is the claimant. A claim that is absent,
 # unreadable, or naming anything else - this task or a third party - leaves the
 # conflict unresolvable and keeps the refusal below.
 # That scan alone cannot prove THIS record is the current owner, because the task
@@ -2234,14 +2237,19 @@ note_slot_reassigned() {
 }
 
 # Record exclusivity: no OTHER task record may name this live slot. A conflict is
-# normally fatal, but when the slot's own claim names THAT record's task the slot
-# was provably reassigned to it, which makes this record the stale one and returns
-# TEARDOWN_SLOT_REASSIGNED_RC rather than stranding both records on one slot. The
-# script header owns why the claim decides and why refusing cannot be the answer
-# there.
+# normally fatal, but when the slot's own claim names ANY conflicting record's task
+# the slot was provably reassigned to that task, which makes this record the stale
+# one and returns TEARDOWN_SLOT_REASSIGNED_RC rather than stranding every record
+# that names the slot. That is why the whole scan runs before the verdict: more
+# than one older record can name one slot, and only the claim can say which of
+# them the pool handed it to. A conflict whose task the claim does not name is
+# remembered, not returned on, so the first such record supplies the refusal text
+# only when no conflicting record is the claimant. The script header owns why the
+# claim decides and why refusing cannot be the answer there.
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
   local slot state_dir other other_id field other_path other_slot
+  local conflict_id='' conflict_field=''
   slot=$(canonical_existing_dir "$worktree") || return 0
   collect_local_firstmate_states "$record_state" || return 1
   for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
@@ -2259,13 +2267,18 @@ require_exclusive_worktree_slot_record() {
           warn_slot_reassigned "$record_id" "$slot"
           return "$TEARDOWN_SLOT_REASSIGNED_RC"
         fi
-        echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
-        echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
-        echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
-        return 1
+        [ -n "$conflict_id" ] || {
+          conflict_id=$other_id
+          conflict_field=$field
+        }
       done
     done
   done
+  [ -n "$conflict_id" ] || return 0
+  echo "REFUSED: task $record_id's recorded worktree $slot is also task $conflict_id's recorded $conflict_field." >&2
+  echo "Returning that pool slot would kill $conflict_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
+  echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $conflict_id), then re-run teardown." >&2
+  return 1
 }
 
 require_exclusive_task_worktree_slot() {
