@@ -298,6 +298,7 @@ These steps are never automated and are always reported rather than silently att
 - The first console login on that Mac, and automatic login in System Settings > Users & Groups when the machine runs headless and must come back on its own after a reboot.
 - FileVault, which holds a reboot at pre-boot authentication before any login session exists.
 - Installing any missing required tool that no safe wrapper can resolve.
+
 - Each worker runtime's own `/login`, and any keychain password prompt that login needs.
 
 Firstmate never writes an auto-login password, never changes FileVault, and never stores an account password.
@@ -308,7 +309,7 @@ A file at `~/.local/bin/fm-remote-entrypoint.sh` that is not Firstmate's own sym
 | Requirement | Tools |
 | --- | --- |
 | Always required | `git`, `jq`, `herdr`, compatible `tasks-axi`, and `treehouse` |
-| At least one of | `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, or `kimi` |
+| At least one of | `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, or `omp` |
 | Additionally required on macOS | `lsof`, so the doctor and guard can prove which process owns the session socket |
 
 ## Provision a route
