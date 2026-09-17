@@ -145,6 +145,14 @@ PARK_CHILD='
   "$FM_HOME/bin/fm-turnend-guard-cursor.sh"
 '
 
+# The same body with state/.lock naming the fake harness itself, the forked
+# shell's parent. An unmarked linked-worktree home is in scope only when the
+# shared lock rule already credits that lock, before any stale-lock reclaim.
+PARK_CHILD_HARNESS_LOCK='
+  printf "%s\n" "$PPID" > "$FM_HOME/state/.lock"
+  "$FM_HOME/bin/fm-turnend-guard-cursor.sh"
+'
+
 # Run the park as a child of the fake cursor harness that holds the home lock.
 # Clear PI_CODING_AGENT so a Pi host session running this suite cannot make the
 # Cursor park stand down before the fixture under test is exercised.
@@ -610,7 +618,7 @@ test_park_active_in_linked_worktree_primary_owning_lock() {
   install_scripts "$home"
   : > "$home/state/task1.meta"
   write_arm_fixture "$home" actionable
-  out=$(run_park "$home")
+  out=$(PARK_CHILD=$PARK_CHILD_HARNESS_LOCK run_park "$home")
   [ "$(kind_of_followup "$out")" = watcher ] || fail "a linked-worktree primary owning its lock must deliver the wake, got: $out"
   [ -e "$home/state/arm-ran" ] || fail "the park did not arm in a linked-worktree primary home"
   pass "cursor park: active in an unmarked linked-worktree primary home on lock evidence"

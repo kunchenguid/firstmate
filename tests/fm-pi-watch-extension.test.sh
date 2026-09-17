@@ -24,6 +24,20 @@ export NODE_NO_WARNINGS=1
 # tests are sized against this number.
 ARM_READY_TIMEOUT_MS=2000
 
+# The OpenCode plugin runs inside the opencode process, and the shared lock rule
+# (bin/fm-session-lock-lib.sh) only credits a verified-harness ancestor. The
+# real node binary under the name opencode gives plugin probes that identity.
+FAKEBIN=$(fm_fakebin "$TMP_ROOT/fakebin")
+ln -s "$(node -p 'process.execPath')" "$FAKEBIN/opencode"
+FAKE_OPENCODE="$FAKEBIN/opencode"
+
+# bin/fm-primary-scope-lib.sh and the libraries it sources.
+install_primary_scope_lib() {
+  local repo=$1
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$ROOT/bin/fm-session-lock-lib.sh" \
+    "$ROOT/bin/fm-cursor-lib.sh" "$repo/bin/"
+}
+
 install_pi_watch_extension_fixture() {
   local repo=$1
   mkdir -p \
@@ -3028,7 +3042,7 @@ test_opencode_primary_watch_plugin_uses_effective_state_home() {
   home="$TMP_ROOT/opencode-effective-state-home"
   log="$TMP_ROOT/opencode-effective-state.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
-  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
+  install_primary_scope_lib "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -3079,7 +3093,7 @@ test_opencode_primary_watch_plugin_sources_effective_config() {
   home="$TMP_ROOT/opencode-effective-config-home"
   log="$TMP_ROOT/opencode-effective-config.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
-  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
+  install_primary_scope_lib "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   printf 'export FM_POLL=7\n' > "$home/config/x-mode.env"
@@ -3129,7 +3143,7 @@ test_opencode_primary_watch_plugin_requires_session_lock() {
   home="$TMP_ROOT/opencode-lock-home"
   log="$TMP_ROOT/opencode-lock.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
-  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
+  install_primary_scope_lib "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -3193,7 +3207,7 @@ test_opencode_watch_arm_coordinator_respects_primary_scope() {
   log="$TMP_ROOT/opencode-coordinator.log"
   fm_git_worktree "$base" "$repo" fm/opencode-coordinator
   mkdir -p "$repo/bin" "$home/state" "$home/config"
-  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
+  install_primary_scope_lib "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
@@ -3241,7 +3255,7 @@ install_opencode_scope_fixture() {
   local repo=$1
   mkdir -p "$repo/bin" "$repo/state" "$repo/config"
   : > "$repo/AGENTS.md"
-  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
+  install_primary_scope_lib "$repo"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'arm\n' >> "${FM_ARM_LOG:?}"
@@ -3252,16 +3266,18 @@ SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
 }
 
-# Drive one plugin instance rooted at WORKTREE with FM_HOME=WORKTREE: two idle
-# events, the coordinator's settled status, the arm log, and every prompt the
-# plugin sent to the session. LOCK_PID selects the state/.lock owner: "self"
-# writes the node pid (this session owns the lock), "none" writes no lock, and
-# anything else is written verbatim. Prints "status=<s> armed=<0|1> prompts=<n>"
-# and the prompt bodies, then releases the arm stub and exits.
+# Drive one plugin instance rooted at WORKTREE, inside a process named opencode:
+# two idle events, the coordinator's settled status, the arm log, and every
+# prompt the plugin sent to the session. FM_HOME is the optional fourth argument
+# and defaults to WORKTREE. LOCK_PID selects the $FM_HOME/state/.lock owner:
+# "self" writes the probe's own pid (this session owns the lock), "none" writes
+# no lock, and anything else is written verbatim. Prints
+# "status=<s> armed=<0|1> prompts=<n>" and the prompt bodies, then releases the
+# arm stub and exits.
 run_opencode_scope_probe() {
-  local repo=$1 lock_pid=$2 log=$3
-  PLUGIN="$ROOT/.opencode/plugins/fm-primary-watch-arm.js" WORKTREE="$repo" FM_HOME="$repo" \
-    FM_ARM_LOG="$log" FM_STOP_FILE="$log.stop" LOCK_PID="$lock_pid" node 2>&1 <<'EOF'
+  local repo=$1 lock_pid=$2 log=$3 home=${4:-$1}
+  PLUGIN="$ROOT/.opencode/plugins/fm-primary-watch-arm.js" WORKTREE="$repo" FM_HOME="$home" \
+    FM_ARM_LOG="$log" FM_STOP_FILE="$log.stop" LOCK_PID="$lock_pid" "$FAKE_OPENCODE" 2>&1 <<'EOF'
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -3369,6 +3385,48 @@ test_opencode_primary_watch_plugin_surfaces_not_primary_once() {
   pass "OpenCode watcher plugin surfaces a not-primary refusal once with its reason"
 }
 
+# A second OpenCode session in a linked-worktree primary home is read-only:
+# another live session holds state/.lock. Lock ownership is the only check it
+# fails, so it stays silent exactly like a read-only session in a plain
+# checkout, and never receives a watcher prompt that would drain the owner's
+# wakes.
+test_opencode_primary_watch_plugin_is_silent_in_read_only_linked_session() {
+  local base repo log out holder
+  base="$TMP_ROOT/opencode-read-only-base"
+  repo="$TMP_ROOT/opencode-read-only-home"
+  log="$TMP_ROOT/opencode-read-only.log"
+  fm_git_worktree "$base" "$repo" fm/opencode-read-only
+  install_opencode_scope_fixture "$repo"
+  : > "$repo/state/task.meta"
+  sleep 30 &
+  holder=$!
+  out=$(run_opencode_scope_probe "$repo" "$holder" "$log")
+  kill "$holder" 2>/dev/null
+  wait "$holder" 2>/dev/null
+  assert_contains "$out" "status=read-only/read-only armed=0 prompts=0" "a read-only second session must be refused silently"
+  pass "OpenCode watcher plugin stays silent in a read-only linked-worktree session"
+}
+
+# A crewmate worktree of the firstmate repo whose FM_HOME names its parent home:
+# AGENTS.md, bin/, and the parent's state all exist, but the worktree has no
+# state/ of its own, so the refusal is silent rather than a watcher prompt
+# aimed at the parent's queue.
+test_opencode_primary_watch_plugin_is_silent_in_crewmate_with_parent_home() {
+  local base parent repo log out
+  base="$TMP_ROOT/opencode-parent-home-base"
+  parent="$TMP_ROOT/opencode-parent-home"
+  repo="$TMP_ROOT/opencode-parent-home-crew"
+  log="$TMP_ROOT/opencode-parent-home.log"
+  fm_git_worktree "$base" "$repo" fm/opencode-parent-home-crew
+  install_opencode_scope_fixture "$repo"
+  rmdir "$repo/state"
+  mkdir -p "$parent/state" "$parent/config"
+  : > "$parent/state/task.meta"
+  out=$(run_opencode_scope_probe "$repo" none "$log" "$parent")
+  assert_contains "$out" "status=not-primary/not-primary armed=0 prompts=0" "a crewmate whose FM_HOME is its parent home must be refused silently"
+  pass "OpenCode watcher plugin stays silent in a crewmate worktree whose FM_HOME is its parent home"
+}
+
 test_opencode_primary_watch_plugin_rearms_after_wake() {
   local plugin repo home log stop out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -3377,7 +3435,7 @@ test_opencode_primary_watch_plugin_rearms_after_wake() {
   log="$TMP_ROOT/opencode-rearm.log"
   stop="$TMP_ROOT/opencode-rearm.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
-  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
+  install_primary_scope_lib "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -3473,7 +3531,7 @@ test_opencode_pre_ready_actionable_close_preserves_its_successor() {
   retired="$TMP_ROOT/opencode-pre-ready-actionable.retired"
   stop="$TMP_ROOT/opencode-pre-ready-actionable.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
-  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
+  install_primary_scope_lib "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -3554,7 +3612,7 @@ test_opencode_hung_successor_falls_back_to_typed_wake() {
   home="$TMP_ROOT/opencode-hung-successor-home"
   log="$TMP_ROOT/opencode-hung-successor.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
-  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
+  install_primary_scope_lib "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -3626,7 +3684,7 @@ test_opencode_unretired_successor_falls_back_without_retry() {
   log="$TMP_ROOT/opencode-unretired-successor.log"
   release="$TMP_ROOT/opencode-unretired-successor.release"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
-  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
+  install_primary_scope_lib "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -3704,7 +3762,7 @@ test_opencode_late_unretired_close_resumes_supervision() {
     release="$TMP_ROOT/opencode-late-$kind.release"
     stop="$TMP_ROOT/opencode-late-$kind.stop"
     mkdir -p "$repo/bin" "$home/state" "$home/config"
-    cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
+    install_primary_scope_lib "$repo"
     git init -q "$repo"
     : > "$repo/AGENTS.md"
     : > "$home/state/task.meta"
@@ -3800,7 +3858,7 @@ test_opencode_empty_close_retries_instead_of_disappearing() {
   log="$TMP_ROOT/opencode-empty-close.log"
   stop="$TMP_ROOT/opencode-empty-close.stop"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
-  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
+  install_primary_scope_lib "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -3860,7 +3918,7 @@ test_opencode_established_empty_close_honors_retry_limit() {
   home="$TMP_ROOT/opencode-established-empty-close-home"
   log="$TMP_ROOT/opencode-established-empty-close.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
-  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
+  install_primary_scope_lib "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -3915,7 +3973,7 @@ test_opencode_actionable_close_rechecks_session_lock() {
   log="$TMP_ROOT/opencode-close-lock.log"
   release="$TMP_ROOT/opencode-close-lock.release"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
-  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
+  install_primary_scope_lib "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -3982,7 +4040,7 @@ test_opencode_watch_arm_coordinates_with_turnend_guard() {
   log="$TMP_ROOT/opencode-coordinate-arm.log"
   guard_log="$TMP_ROOT/opencode-coordinate-guard.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
-  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
+  install_primary_scope_lib "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -4056,7 +4114,7 @@ test_opencode_healthy_arm_output_does_not_suppress_guard() {
   log="$TMP_ROOT/opencode-external-healthy-arm.log"
   guard_log="$TMP_ROOT/opencode-external-healthy-guard.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
-  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$repo/bin/fm-primary-scope-lib.sh"
+  install_primary_scope_lib "$repo"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
   : > "$home/state/task.meta"
@@ -4167,6 +4225,8 @@ test_opencode_primary_watch_plugin_arms_in_marked_linked_secondmate_home
 test_opencode_primary_watch_plugin_arms_in_linked_worktree_primary_owning_lock
 test_opencode_primary_watch_plugin_is_silent_in_task_worktree
 test_opencode_primary_watch_plugin_surfaces_not_primary_once
+test_opencode_primary_watch_plugin_is_silent_in_read_only_linked_session
+test_opencode_primary_watch_plugin_is_silent_in_crewmate_with_parent_home
 test_opencode_primary_watch_plugin_rearms_after_wake
 test_opencode_pre_ready_actionable_close_preserves_its_successor
 test_opencode_hung_successor_falls_back_to_typed_wake

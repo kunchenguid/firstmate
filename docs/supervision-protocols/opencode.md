@@ -15,5 +15,6 @@ When this session owns supervision and away mode is not active:
 
 OpenCode's persistent TUI plugin runtime is the wake mechanism.
 The plugin applies in the main primary checkout, a secondmate's own home, and a primary home that is a linked worktree owning its own `state/.lock`; it asks `fm_primary_scope_matches` in `bin/fm-primary-scope-lib.sh`, the rule the turn-end guard shares (`docs/turnend-guard.md` "Guard predicates").
-It stays silent in child crewmate and scout worktrees, which have no state directory of their own.
-When a root that has `AGENTS.md`, `bin/`, and the effective state directory is still refused, the plugin sends the session one typed watcher failure naming the check that failed, once per session, so a home that cannot arm never idles unsupervised in silence.
+It stays silent in child crewmate and scout worktrees, which have no `state/` directory of their own even when their `FM_HOME` names the parent home.
+It also stays silent in a read-only second session, whose linked-worktree home is refused only because another live session holds `state/.lock`.
+When any other root that has `AGENTS.md`, `bin/`, and its own `state/` is refused, the plugin sends the session one typed watcher failure naming the check that failed, once per session, so a home that cannot arm never idles unsupervised in silence.

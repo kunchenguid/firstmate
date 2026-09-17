@@ -25,9 +25,9 @@ Every root needs `AGENTS.md`, `bin/`, and the effective state directory.
 A secondmate home runs its own primary Firstmate session, so a genuine `.fm-secondmate-home` marker includes it whether the home is a linked worktree or plain clone.
 The marker must be a regular non-symlink file whose whitespace-stripped first line is a non-empty identifier containing only letters, digits, dots, underscores, and dashes.
 An unmarked checkout or invalid marker falls through to the git-dir check: a plain checkout, where the git dir equals the git common dir, is primary.
-An unmarked linked worktree is primary only on evidence that it is its own operational home: the effective state directory is the root's own `state/` and the calling session owns `state/.lock`, meaning the recorded pid is the caller or one of at most sixteen ancestors.
+An unmarked linked worktree is primary only on evidence that it is its own operational home: the effective state directory is the root's own `state/` and the calling session owns `state/.lock`, meaning the recorded pid belongs to the caller's own verified-harness ancestry (`fm_session_lock_owned_by_self` in `bin/fm-session-lock-lib.sh`, the rule the Stop auto-arm and `bin/fm-lock.sh` share).
 Crewmate and scout linked worktrees never run session start, so no session owns a lock there and they stay inert; a child whose `FM_HOME` names its parent home fails the state-directory test instead.
-On refusal the predicate sets `FM_PRIMARY_SCOPE_REASON` to the check that failed, which the OpenCode plugin reports once per session (`docs/supervision-protocols/opencode.md`).
+On refusal the predicate sets `FM_PRIMARY_SCOPE_REASON` to the check that failed and returns 2 when lock ownership is the only failed check, 1 otherwise; the OpenCode plugin reports the reason once per session (`docs/supervision-protocols/opencode.md`).
 
 For an in-scope primary, the guard counts in-flight work from `state/*.meta`.
 Registered `state/procevent/*.source` records also require supervision even though they have no task metadata.

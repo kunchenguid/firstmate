@@ -30,6 +30,11 @@ AWAY_REQUIRED_REASON='Away mode owns watcher supervision'
 BLIND_BIN=$(fm_fakebin "$TMP_ROOT/blind-ancestry")
 fm_fake_blind_ancestry "$BLIND_BIN"
 
+# A bash named claude: the verified-harness ancestor the shared lock rule
+# credits for the linked-worktree primary cases.
+FAKE_CLAUDE="$(fm_fakebin "$TMP_ROOT/fake-claude")/claude"
+ln -s /bin/bash "$FAKE_CLAUDE"
+
 # --- PREDICATE: bin/fm-supervision-lib.sh -----------------------------------
 
 test_predicate_healthy_no_inflight() {
@@ -189,6 +194,8 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-supervision-instructions.sh" "$dir/bin/fm-supervision-instructions.sh"
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
+  cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
+  cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
@@ -274,10 +281,16 @@ run_hook() {
 
 # Same as run_hook with the real process table, for cases whose scope decision
 # is the hook's own ancestry: the blind shim answers every parent query with 1.
+# The hook runs beneath a fake claude harness that writes state/.lock first:
+# its own pid (this session owns the lock), or $3 when given.
 run_hook_with_ancestry() {
-  local dir=$1 stop_active=$2 home
+  local dir=$1 stop_active=$2 lock=${3:-} home
   home=$(cd "$dir" && pwd)
-  printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+  printf '{"stop_hook_active":%s}' "$stop_active" \
+    | CLAUDECODE=1 FM_HOME="$home" FM_TEST_LOCK_PID="$lock" "$FAKE_CLAUDE" -c '
+        printf "%s\n" "${FM_TEST_LOCK_PID:-$$}" > "$FM_HOME/state/.lock"
+        bash "$FM_HOME/bin/fm-turnend-guard.sh"
+      ' 2>&1
 }
 
 nonexistent_pid() {
@@ -696,7 +709,7 @@ test_hook_silent_in_crewmate_worktree() {
 
 # A primary home that is itself a linked worktree carries no marker. It is in
 # scope on evidence: the state dir is its own state/ and this session owns
-# state/.lock (the hook runs beneath this test shell, whose pid the lock names).
+# state/.lock (the hook runs beneath the fake claude harness the lock names).
 test_hook_blocks_in_linked_worktree_primary_owning_lock() {
   local base dir gd gcd out status
   base="$TMP_ROOT/hook-linked-primary-base"
@@ -705,7 +718,6 @@ test_hook_blocks_in_linked_worktree_primary_owning_lock() {
   gd=$(git -C "$dir" rev-parse --git-dir)
   gcd=$(git -C "$dir" rev-parse --git-common-dir)
   [ "$gd" != "$gcd" ] || fail "linked-primary fixture must be a linked worktree (git-dir != git-common-dir), got equal: $gd"
-  printf '%s\n' "$$" > "$dir/state/.lock"
   : > "$dir/state/task1.meta"
   out=$(run_hook_with_ancestry "$dir" false); status=$?
   expect_code 2 "$status" "hook must guard an unmarked linked-worktree primary whose lock this session owns"
@@ -722,9 +734,8 @@ test_hook_silent_in_linked_worktree_with_foreign_lock() {
   base="$TMP_ROOT/hook-linked-foreign-base"
   dir="$TMP_ROOT/hook-linked-foreign-home"
   make_crewmate_worktree_dir "$base" "$dir" >/dev/null
-  nonexistent_pid > "$dir/state/.lock"
   : > "$dir/state/task1.meta"
-  out=$(run_hook_with_ancestry "$dir" false); status=$?
+  out=$(run_hook_with_ancestry "$dir" false "$(nonexistent_pid)"); status=$?
   expect_code 0 "$status" "hook must stay inert in a linked worktree whose lock this session does not own"
   [ -z "$out" ] || fail "hook produced output in a linked worktree with a foreign lock: $out"
   pass "fm-turnend-guard: inert in an unmarked linked worktree whose state/.lock belongs to another session"

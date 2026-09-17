@@ -4,7 +4,12 @@
 # This file is sourced by hook entrypoints and has no side effects on source.
 # .opencode/plugins/fm-primary-watch-arm.js runs fm_primary_scope_matches
 # through bash and reports FM_PRIMARY_SCOPE_REASON, so the plugin and the shell
-# hooks share this one rule.
+# hooks share this one rule. Lock ownership is bin/fm-session-lock-lib.sh's
+# fm_session_lock_owned_by_self, the harness-filtered ancestry rule the Stop
+# auto-arm and bin/fm-lock.sh already use.
+
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-session-lock-lib.sh"
 
 # Return 0 when $1 carries a genuine secondmate-home marker.
 fm_root_is_secondmate_home() {
@@ -20,38 +25,17 @@ fm_root_is_secondmate_home() {
   return 0
 }
 
-# Return 0 when the pid recorded in $1/.lock is this process or one of its
-# ancestors, walking at most sixteen parents. The walk compares raw parent pids
-# with no harness-name filter, so it holds for a hook shell under the harness
-# and for a bash child of the OpenCode plugin alike. A missing, symlinked,
-# malformed, or pid-1 lock never matches.
-fm_primary_scope_session_owns_lock() {
-  local state=$1 lock_pid pid=$$ _
-  [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] || return 1
-  IFS= read -r lock_pid < "$state/.lock" 2>/dev/null || return 1
-  case "$lock_pid" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  [ "$lock_pid" -gt 1 ] || return 1
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
-    [ "$pid" = "$lock_pid" ] && return 0
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    case "$pid" in '' | *[!0-9]*) return 1 ;; esac
-    [ "$pid" -gt 1 ] || return 1
-  done
-  return 1
-}
-
 # Return 0 when $1 is a genuine primary root whose effective state dir is $2.
 # Every root needs AGENTS.md, bin/, and the state dir.
 # A valid secondmate marker force-includes a linked secondmate home.
 # A plain checkout (git-dir equals git-common-dir) is primary.
 # An unmarked linked worktree is primary only on evidence that it is its own
 # operational home: the state dir is the root's own state/ and this session
-# owns state/.lock. A crewmate or scout task worktree never has that lock, and a
+# owns state/.lock (fm_session_lock_owned_by_self). A crewmate or scout task worktree never has that lock, and a
 # child worktree whose FM_HOME points at its parent home fails the state-dir
 # test, so neither inherits primary scope.
-# On failure FM_PRIMARY_SCOPE_REASON names the check that failed.
+# On failure FM_PRIMARY_SCOPE_REASON names the check that failed, and the
+# status is 2 when lock ownership is the only check that failed, 1 otherwise.
 fm_primary_scope_matches() {
   local root=$1 state=$2 git_dir git_common_dir own_state resolved_state
   FM_PRIMARY_SCOPE_REASON=""
@@ -80,9 +64,9 @@ fm_primary_scope_matches() {
     FM_PRIMARY_SCOPE_REASON="$root is an unmarked linked worktree whose state dir $state is not its own state/"
     return 1
   fi
-  if ! fm_primary_scope_session_owns_lock "$state"; then
+  if ! fm_session_lock_owned_by_self "$state"; then
     FM_PRIMARY_SCOPE_REASON="$root is an unmarked linked worktree and this session does not own $state/.lock"
-    return 1
+    return 2
   fi
   return 0
 }
