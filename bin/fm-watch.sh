@@ -66,10 +66,11 @@
 #                          plain reason once per declaration, while captain-held
 #                          work stays silent until return
 #                          (busy_turn_bound_check owns that split);
-#                          every other pane goes through the same wedge timer and
-#                          surfaces with the identical "stale: ..." reason,
-#                          escalation count, and demand-deep-inspection marker,
-#                          for human inspection only - never an automatic
+#                          every other pane goes through the same wedge timer,
+#                          the dead-record probe above included, and surfaces
+#                          with the identical "stale: ..." reason, escalation
+#                          count, and demand-deep-inspection marker for a live
+#                          agent, for human inspection only - never an automatic
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
 #   stale: <window> (unread firstmate instruction: ...)
