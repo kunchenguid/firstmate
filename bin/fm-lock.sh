@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Acquire or inspect the per-home firstmate session lock.
-# Writes the harness (agent) process PID found by walking the shell's ancestry,
-# which lives as long as the firstmate session - unlike the transient subshell
-# PID of any one tool call, which is dead moments after it is written.
+# Writes the harness (agent) identity found by the shared session-lock lib: the
+# shell's ancestry walk on POSIX, or a Windows-tagged win:<pid> resolved from the
+# harness's published pid on a Cygwin-family host, because the Cygwin process
+# boundary severs that ancestry. The identity lives as long as the firstmate
+# session, unlike the transient subshell PID of any one tool call, which is dead
+# moments after it is written.
 # Usage: fm-lock.sh           acquire; exit 1 unless ownership is verified
 #        fm-lock.sh status    print holder and liveness; always exits 0
 set -u
@@ -33,7 +36,17 @@ if [ "${1:-}" = "status" ]; then
   exit 0
 fi
 
-me=$(fm_harness_ancestry_pid) || { echo "error: cannot locate harness process in ancestry" >&2; exit 1; }
+me=$(fm_harness_ancestry_pid) || {
+  if fm_win_boundary_applies; then
+    # Here the parent link does not reach the harness at all, so "not in the
+    # ancestry" would describe the wrong problem and send the reader hunting a
+    # process tree that can never contain the answer.
+    echo "error: cannot identify this harness session on Windows: it publishes no session pid this build recognizes (see FM_WIN_HARNESS_PID_VARS in bin/fm-session-lock-lib.sh); operate read-only until resolved" >&2
+  else
+    echo "error: cannot locate harness process in ancestry" >&2
+  fi
+  exit 1
+}
 probe=$(mktemp "$STATE/.lock-write.XXXXXX" 2>/dev/null) || {
   echo "error: cannot write session lock; operate read-only until resolved" >&2
   exit 1

@@ -138,6 +138,30 @@ rm "$SESSION_STATE"
   || fail "missing session state must fail independent and default off"
 pass "missing or invalid frozen session state defaults off"
 
+# A Windows session lock holds a tagged pid, so the binding must survive the
+# same round trip as a local one: a numeric-only reader here answered "no
+# adjacent session lock" for a correctly locked Windows home and silently
+# switched trace context off for all of it.
+printf 'win:4242\n' > "$SESSION_DIR/.lock"
+FM_TRACE_CONTEXT=on fm_trace_context_session_start "$CFG_ON" "$SESSION_STATE"
+[ "$(cat "$SESSION_STATE")" = 'win:4242 on' ] \
+  || fail "a tagged Windows lock was not bound into the frozen decision (got '$(cat "$SESSION_STATE")')"
+[ "$(fm_trace_context_session_effective "$SESSION_STATE")" = on ] \
+  || fail "trace context went off under a correctly tagged Windows session lock"
+printf 'win:9999\n' > "$SESSION_DIR/.lock"
+[ "$(fm_trace_context_session_effective "$SESSION_STATE")" = off ] \
+  || fail "a different tagged Windows holder reactivated a prior session's decision"
+pass "a Windows-tagged session lock binds the frozen decision and remains effective"
+
+# Fail closed on the shapes that name no usable holder, in either namespace.
+for bad in '0' '1' 'abc' 'win:' 'win:12abc' 'win:0x1'; do
+  printf '%s\n' "$bad" > "$SESSION_DIR/.lock"
+  FM_TRACE_CONTEXT=on fm_trace_context_session_start "$CFG_ON" "$SESSION_STATE"
+  [ "$(fm_trace_context_session_effective "$SESSION_STATE")" = off ] \
+    || fail "the unusable lock value '$bad' was treated as a locked home"
+done
+pass "trace context stays off for lock values that name no usable holder"
+
 # --- resolve: default-off omits; enabled mints ------------------------------
 
 NOMETA="$WORK/none.meta"

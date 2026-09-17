@@ -94,6 +94,11 @@
 #              persistent supervisor's environment cannot chain its unrelated
 #              routed tasks into one trace.
 
+# Sourced for the shared session-lock identity predicate (fm_session_pid_valid):
+# the lock this lib binds a frozen decision to is not always a local pid.
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-session-lock-lib.sh"
+
 # Strict W3C traceparent validator: version 00, 32-hex trace id, 16-hex span id,
 # 2-hex flags, with neither id all-zero. The regex lives in a variable because
 # bash 3.2 only honors an unquoted right-hand side for =~.
@@ -149,10 +154,13 @@ fm_trace_context_session_lock() {  # <effective-state-file>
   # attempted: an absent lock is an ordinary silent "not locked" answer, and a
   # trailing 2>/dev/null on the bare read would still leak the open failure.
   { IFS= read -r lock_pid < "$state_dir/.lock"; } 2>/dev/null || return 1
-  case "$lock_pid" in
-    '' | *[!0-9]*) return 1 ;;
-  esac
-  [ "$lock_pid" -gt 1 ] || return 1
+  # The lock's identity is a local pid or a Windows-tagged one, so this reader
+  # asks the shared predicate rather than testing for digits: a private numeric
+  # test here reads a correctly locked Windows home as unlocked and silently
+  # switches trace context off for the whole home. 0 and 1 name no usable
+  # holder, and the value is echoed whole so the binding keeps its namespace tag.
+  fm_session_pid_valid "$lock_pid" || return 1
+  case "$lock_pid" in 0|1) return 1 ;; esac
   printf '%s' "$lock_pid"
 }
 

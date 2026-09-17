@@ -25,8 +25,10 @@
 #     session-lock holder, or FM_LEASE_HOLDER_PID - see bin/fm-lease.sh), and
 #     both actors live inside that one pi process, so a dead recorded pid
 #     means the process died; the lease is cleared at the next claim, guard,
-#     or sweep. Liveness requires a Pi calling context plus state/.lock, and
-#     the recorded pid must BE its current holder, so a lease left by an exited
+#     or sweep. The recorded identity is a local pid or a Windows-tagged one,
+#     and liveness is namespace-aware for the tagged shape. Being live also
+#     requires a Pi calling context plus state/.lock, and the recorded pid must
+#     BE its current holder, so a lease left by an exited
 #     Pi session goes stale even if its pid was recycled by an unrelated
 #     process, and a non-Pi home never honors a leftover Pi lease. A lease held by the
 #     live current session but an abandoned branch conversation is recovered
@@ -62,6 +64,9 @@
 # bin/fm-pr-merge.sh, bin/fm-merge-local.sh, bin/fm-spawn.sh, and
 # bin/fm-lease.sh. Callers must have $STATE resolved before calling. No side
 # effects on source. set -u / set -e safe.
+
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-session-lock-lib.sh"
 
 # Distinct from usage errors (2), the gate refusal (3), and fm-send's
 # unconfirmed submit (3): recognizable as "the other supervision actor holds
@@ -126,9 +131,10 @@ fm_lease_read() {
     main|branch) ;;
     *) FM_LEASE_ACTOR= ;;
   esac
-  case "$FM_LEASE_PID" in
-    '' | *[!0-9]*) FM_LEASE_PID= ;;
-  esac
+  # The holder's identity, not just its digits: a Windows session lock holds a
+  # tagged pid (see bin/fm-session-lock-lib.sh), and reducing it here would
+  # discard the namespace that makes it safe to compare and probe.
+  fm_session_pid_valid "$FM_LEASE_PID" || FM_LEASE_PID=
   return 0
 }
 
@@ -143,10 +149,20 @@ fm_lease_live() {
   esac
   fm_lease_read "$1" || return 1
   [ -n "$FM_LEASE_ACTOR" ] || return 1
-  [ -n "$FM_LEASE_PID" ] || return 1
-  kill -0 "$FM_LEASE_PID" 2>/dev/null || return 1
+  fm_session_pid_valid "$FM_LEASE_PID" || return 1
+  # A tagged Windows holder is not in this process table at all, so kill -0
+  # answers "dead" for a process that is running. Ask the identity owner
+  # instead, which is the only thing that can read across that boundary; an
+  # ordinary local pid keeps the plain liveness test it always had.
+  if fm_win_untag_pid "$FM_LEASE_PID" >/dev/null; then
+    fm_harness_pid_alive "$FM_LEASE_PID" || return 1
+  else
+    kill -0 "$FM_LEASE_PID" 2>/dev/null || return 1
+  fi
   lock_pid=$(head -n 1 "$STATE/.lock" 2>/dev/null || true)
-  case "$lock_pid" in ''|0|1|*[!0-9]*) return 1 ;; esac
+  fm_session_pid_valid "$lock_pid" || return 1
+  # 0 and 1 are not a usable holder in either namespace.
+  case "$lock_pid" in 0|1) return 1 ;; esac
   [ "$FM_LEASE_PID" = "$lock_pid" ]
 }
 

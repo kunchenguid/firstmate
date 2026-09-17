@@ -346,6 +346,38 @@ test_stale_lock_recovery_preserves_afk_and_need_gates() {
   pass "auto-arm: stale-owner recovery leaves the AFK and supervision-need gates unchanged"
 }
 
+# On a native Windows/git-bash host, a prior session's harness identity in
+# state/.lock is a win:-tagged pid, not a plain numeric one (bin/fm-lock.sh,
+# bin/fm-session-lock-lib.sh). A dead prior session leaves that tagged pid
+# behind exactly as a plain numeric one would on any other platform, and the
+# hook must reclaim it the same way: fm_session_pid_valid must accept the
+# shape, fm_harness_pid_alive must resolve it against the Windows process
+# table rather than a numeric-only case check, and fm-lock.sh must rewrite the
+# lock to this session's own tagged identity before arming.
+test_reclaims_stale_windows_tagged_session_lock_before_arming() {
+  local dir fakebin out status win_table
+  dir=$(make_primary_dir "$TMP_ROOT/stale-lock-windows")
+  : > "$dir/state/task.meta"
+  fakebin=$(fm_cygwin_fakebin "$dir")
+  write_arm_fixture "$dir" actionable
+
+  # WINPID 7204 is this session's own published harness process (CLAUDE_PID).
+  # 9999999 is a prior session's dead recorded owner: never in this table, so
+  # fm_win_command cannot resolve it and it reads as dead rather than live.
+  win_table='  4201508       0       0       7204  ?              0 22:24:48 C:\Users\u\.local\bin\claude.exe'
+  printf 'win:9999999\n' > "$dir/state/.lock"
+
+  out=$(printf '%s\n' '{"session_id":"stale-win"}' \
+    | PATH="$fakebin:$PATH" FM_HOME="$dir" FM_TEST_WIN_TABLE="$win_table" CLAUDE_PID=7204 \
+      bash "$dir/bin/fm-claude-stop-autoarm.sh" 2>&1); status=$?
+  expect_code 2 "$status" "a dead Windows-tagged recorded session owner must be reclaimed before the actionable rewake"
+  [ "$(cat "$dir/state/.lock" 2>/dev/null)" = 'win:7204' ] \
+    || fail "stale Windows-tagged session lock was not claimed by the current harness: got $(cat "$dir/state/.lock" 2>/dev/null)"
+  [ -e "$dir/state/arm-ran" ] || fail "hook did not arm after reclaiming the stale Windows-tagged session lock"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "Windows-tagged stale-lock recovery must record outcome=rewake"
+  pass "auto-arm: a dead Windows-tagged recorded session owner is reclaimed through fm-lock.sh before arming"
+}
+
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain() {
   local dir out status inner_pid lock_pid
   dir=$(make_primary_dir "$TMP_ROOT/nested-chain")
@@ -1239,6 +1271,7 @@ test_reclaims_stale_session_lock_before_arming
 test_inert_when_lock_held_by_other_harness
 test_inert_when_afk
 test_stale_lock_recovery_preserves_afk_and_need_gates
+test_reclaims_stale_windows_tagged_session_lock_before_arming
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle
 test_actionable_close_rewakes_with_reason

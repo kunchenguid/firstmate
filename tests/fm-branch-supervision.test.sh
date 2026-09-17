@@ -650,6 +650,51 @@ test_lease_liveness_binds_to_the_session_lock() {
   pass "lease liveness requires an exact valid session-lock pid"
 }
 
+test_lease_liveness_accepts_a_tagged_windows_lock() {
+  local home fakebin out
+  local -x PI_CODING_AGENT=true
+  home="$TMP_ROOT/tagged-lock-home"
+  fakebin=$(fm_cygwin_fakebin "$TMP_ROOT/tagged-lock-bin")
+  mkdir -p "$home/state"
+  # WINPID 7204 is a verified claude.exe harness in the Windows table; 9999 is
+  # not in the table at all.
+  local win_table='  4201508       0       0       7204  ?              0 22:24:48 C:\Users\u\.local\bin\claude.exe'
+
+  # A Windows session lock holds a tagged pid, which lives in a different pid
+  # namespace from this process table: kill -0 cannot see it, and a numeric-only
+  # reader rejects it outright. A lease claimed under such a lock must record
+  # that identity and read live, or every claim is swept as stale the moment it
+  # is made.
+  printf 'win:7204\n' > "$home/state/.lock"
+  out=$(PATH="$fakebin:$PATH" FM_TEST_WIN_TABLE="$win_table" FM_HOME="$home" \
+    "$ROOT/bin/fm-lease.sh" claim task-win --actor main 2>&1) \
+    || fail "claim under a tagged Windows lock failed: $out"
+  [ "$(cut -f2 "$home/state/.lease-task-win")" = 'win:7204' ] \
+    || fail "the lease did not record the tagged lock holder: $(cat "$home/state/.lease-task-win")"
+  out=$(PATH="$fakebin:$PATH" FM_TEST_WIN_TABLE="$win_table" FM_HOME="$home" \
+    "$ROOT/bin/fm-lease.sh" check task-win) || fail "check missed the tagged-holder lease"
+  case "$out" in
+    "main win:7204 "*" live") ;;
+    *) fail "a tagged Windows lock holder's lease did not read live: $out" ;;
+  esac
+  PATH="$fakebin:$PATH" FM_TEST_WIN_TABLE="$win_table" FM_HOME="$home" \
+    "$ROOT/bin/fm-lease.sh" sweep || fail "sweep failed under a tagged Windows lock"
+  [ -e "$home/state/.lease-task-win" ] || fail "sweep removed a live lease under a tagged Windows lock"
+
+  # The same lease goes stale once the tagged holder is gone from the Windows
+  # table, so liveness really is being read across the boundary rather than
+  # assumed from the tag's shape.
+  printf 'main\twin:9999\t123\n' > "$home/state/.lease-task-win-dead"
+  printf 'win:9999\n' > "$home/state/.lock"
+  out=$(PATH="$fakebin:$PATH" FM_TEST_WIN_TABLE="$win_table" FM_HOME="$home" \
+    "$ROOT/bin/fm-lease.sh" check task-win-dead) || fail "check missed the dead-holder lease"
+  case "$out" in
+    *" stale") ;;
+    *) fail "a missing tagged holder read as live: $out" ;;
+  esac
+  pass "lease liveness accepts a tagged Windows lock holder and reads its real state"
+}
+
 test_concurrent_stale_lease_claims_have_one_winner() {
   local home fakebin real_mv branch_pid main_pid branch_status main_status
   local -x PI_CODING_AGENT=true
@@ -851,6 +896,7 @@ test_mutating_scripts_refuse_the_other_actors_lease
 test_main_owned_actions_refuse_the_branch_actor
 test_home_without_branch_is_untouched
 test_lease_liveness_binds_to_the_session_lock
+test_lease_liveness_accepts_a_tagged_windows_lock
 test_concurrent_stale_lease_claims_have_one_winner
 test_guard_stale_clear_cannot_delete_a_new_claim
 test_guard_holds_exclusivity_through_mutation
