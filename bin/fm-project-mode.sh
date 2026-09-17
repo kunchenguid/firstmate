@@ -2,6 +2,7 @@
 # Resolve a project's REGISTERED delivery posture from the data/projects.md registry.
 # Prints two words to stdout: "<mode> <yolo>" where mode is one of
 # no-mistakes|direct-PR|local-only and yolo is on|off.
+# `--source` prints the registered source relationship: ordinary or maintained-fork.
 #
 # MECHANICAL CONSUMERS ONLY. This answers "what posture did the captain register
 # for this project", never "how does this task ship". A task's delivery mode and
@@ -15,6 +16,7 @@
 #   - <name> - <desc> (added <date>)                  -> no-mistakes off  (legacy default)
 #   - <name> [<mode>] - <desc> (added <date>)          -> <mode> off
 #   - <name> [<mode> +yolo] - <desc> (added <date>)    -> <mode> on
+#   - <name> [<mode> +maintained-fork] - <desc> ...    -> maintained-fork source
 #
 # Registered modes:
 #   no-mistakes            full pipeline -> PR -> configured merge authority (default)
@@ -28,13 +30,15 @@
 #                          project as the remote-backed pipeline project it is.
 # yolo (orthogonal) = merge authority only: when on, firstmate merges green,
 #   in-scope work itself (AGENTS.md section 7).
+# +maintained-fork (orthogonal) = upstream integration is explicit and routine
+#   synchronization never adopts upstream changes.
 #
 # --raw prints the registered annotation unmapped, so a caller that must tell a
 # conditional policy apart from a flat mode sees "no-mistakes-prod-only" itself.
 #
 # An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns
 # to stderr, so a typo never silently drops the gate.
-# Usage: fm-project-mode.sh [--raw] <project-name>
+# Usage: fm-project-mode.sh [--raw] [--source] <project-name>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,42 +47,52 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REG="$DATA/projects.md"
 RAW=0
-if [ "${1:-}" = "--raw" ]; then
-  RAW=1
+SOURCE=0
+while [ "${1:-}" = "--raw" ] || [ "${1:-}" = "--source" ]; do
+  case "$1" in
+    --raw) RAW=1 ;;
+    --source) SOURCE=1 ;;
+  esac
   shift
-fi
-NAME=${1:?usage: fm-project-mode.sh [--raw] <project-name>}
+done
+NAME=${1:?usage: fm-project-mode.sh [--raw] [--source] <project-name>}
 
 if [ ! -f "$REG" ]; then
   echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
-  echo "no-mistakes off"
+  [ "$SOURCE" -eq 1 ] && echo ordinary || echo "no-mistakes off"
   exit 0
 fi
 
-# awk emits "<mode> <yolo>" (one line) or nothing if the project is absent.
+# awk emits "<mode> <yolo> <source>" (one line) or nothing if the project is absent.
 parsed=$(awk -v n="$NAME" '
   $1=="-" && $2==n {
-    mode="no-mistakes"; yolo="off";
+    mode="no-mistakes"; yolo="off"; source="ordinary";
     if ($3 ~ /^\[/) {
       s="";
       for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) break }
       gsub(/^\[|\]$/, "", s);           # strip the surrounding brackets
       k = split(s, a, " ");
       if (a[1] != "" && a[1] != "+yolo") mode = a[1];
-      for (j=1; j<=k; j++) if (a[j]=="+yolo") yolo="on";
+      for (j=1; j<=k; j++) {
+        if (a[j]=="+yolo") yolo="on";
+        if (a[j]=="+maintained-fork" || a[j]=="maintained-fork") source="maintained-fork";
+      }
     }
-    print mode, yolo; exit
+    print mode, yolo, source; exit
   }
 ' "$REG")
 
 if [ -z "$parsed" ]; then
   echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
-  echo "no-mistakes off"
+  [ "$SOURCE" -eq 1 ] && echo ordinary || echo "no-mistakes off"
   exit 0
 fi
 
 mode=${parsed%% *}
-yolo=${parsed##* }
+rest=${parsed#* }
+yolo=${rest%% *}
+source=${rest#* }
+[ "$source" = "$rest" ] && source=ordinary
 case "$mode" in
   no-mistakes|direct-PR|local-only|no-mistakes-prod-only) ;;
   *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off ;;
@@ -89,4 +103,8 @@ case "$yolo" in on|off) ;; *) yolo=off ;; esac
 if [ "$RAW" -eq 0 ] && [ "$mode" = no-mistakes-prod-only ]; then
   mode=no-mistakes
 fi
-echo "$mode $yolo"
+if [ "$SOURCE" -eq 1 ]; then
+  echo "$source"
+else
+  echo "$mode $yolo"
+fi

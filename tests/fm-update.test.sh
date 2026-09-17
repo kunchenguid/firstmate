@@ -464,6 +464,28 @@ test_registry_backstop_dedup_and_self_exclusion() {
   pass "T7 registry backstop resolves, dedups meta+registry, excludes the firstmate repo"
 }
 
+# --- T8: maintained-fork firstmate waits for explicit integration ------------
+test_maintained_fork_routes_without_fast_forward_or_restart() {
+  local w out before
+  w=$(new_world t8)
+  add_sm "$w" sm1
+  before=$(git -C "$w/main" rev-parse HEAD)
+  printf -- '- main [local-only +maintained-fork] - firstmate fork (added 2026-09-03)\n' \
+    > "$w/home/data/projects.md"
+  bump_origin "$w" instr
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "firstmate: maintained-fork; automatic update skipped" \
+    "maintained-fork Firstmate was fast-forwarded"
+  assert_contains "$out" "fm-maintained-fork.sh integrate <release>, then accept" \
+    "maintained-fork update did not route to explicit integration"
+  assert_contains "$out" "restart-secondmates: none" "maintained-fork update restarted a mate"
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "maintained-fork update adopted backup changes"
+  pass "maintained-fork Firstmate routes to explicit integration without updating or restarting"
+}
+
 # --- T9: firstmate repo on a feature branch is skipped ---------------------
 test_firstmate_wrong_branch_skipped() {
   local w out before
@@ -568,6 +590,7 @@ test_squash_merged_divergence_reconciles
 test_already_current_secondmate_still_restarts
 test_already_current_unprovable_mate_is_nudged
 test_registry_backstop_dedup_and_self_exclusion
+test_maintained_fork_routes_without_fast_forward_or_restart
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update

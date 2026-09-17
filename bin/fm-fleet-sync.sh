@@ -11,8 +11,9 @@
 # is left untouched and reported as a quantified, loud "STUCK: ... N commits behind
 # ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
 # stashed, or discarded.
-# Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
-# and fetch failures.
+# Still skips (benignly) local-only and maintained-fork projects, missing
+# remotes/branches, and fetch failures. Maintained forks advance only through
+# bin/fm-maintained-fork.sh's explicit release integration workflow.
 # A candidate under projects/ must be the root of its own work tree: git discovery
 # walks up, so a plain nested directory would otherwise resolve to the enclosing
 # repository (the firstmate checkout) and be synced under that directory's label.
@@ -326,6 +327,11 @@ sync_project() {
   fi
   mode_line=$("$FM_ROOT/bin/fm-project-mode.sh" "$label" 2>/dev/null || echo "no-mistakes off")
   mode=${mode_line%% *}
+  source=$("$FM_ROOT/bin/fm-project-mode.sh" --source "$label" 2>/dev/null || echo ordinary)
+  if [ "$source" = maintained-fork ]; then
+    echo "$label: skipped: maintained-fork requires explicit upstream integration"
+    return 0
+  fi
   if [ "$mode" = "local-only" ]; then
     echo "$label: skipped: local-only project"
     return 0

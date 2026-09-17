@@ -264,6 +264,16 @@ The flag is per home and is not inherited by secondmate homes, because stow cade
 Only the file's presence is read, so its contents are ignored; remove it to return to the default contract on the next pass.
 The skill text owns the marker spelling, the tick order, and the reinforcement rule.
 
+## Maintained-fork projects (data/projects.md and git remotes)
+
+A project registry annotation of `+maintained-fork` adds a source relationship without changing its delivery mode or `+yolo` merge authority.
+The project's local default branch is the deployed result, `origin` is the captain-owned backup remote, and `upstream` is the external fetch-only remote with an explicitly empty `remote.upstream.pushurl` configuration.
+Routine fleet synchronization skips maintained-fork projects, and `/updatefirstmate` skips automatic self-updates when the Firstmate installation itself carries this annotation.
+The guarded `bin/fm-maintained-fork.sh integrate <project> <release>` command fetches only the named upstream tag, creates a local merge candidate in an isolated worktree, runs built-in whitespace validation and any supplied `--test-command`, and never pushes.
+The separate `bin/fm-maintained-fork.sh accept <project>` command is the explicit local acceptance required before the candidate fast-forwards the deployed default branch.
+The workflow merges with a merge commit rather than rebasing or force-pushing, and backup pushes remain a separate operator action that this workflow never performs.
+The registry parser is [`bin/fm-project-mode.sh`](../bin/fm-project-mode.sh), which preserves the existing two-word mode output and exposes the source relationship through `--source`.
+
 ## Secondmate routes (data/secondmates.md)
 
 Persistent secondmate routes live locally in `data/secondmates.md`.

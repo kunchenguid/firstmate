@@ -410,6 +410,24 @@ test_local_only_skipped() {
   pass "local-only clone is skipped (benign), not flagged STUCK"
 }
 
+test_maintained_fork_skipped_without_adopting_backup() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" maintained)
+  advance_origin "$home" maintained C1
+  before=$(head_sha "$clone")
+  mkdir -p "$home/data"
+  printf -- '- maintained [local-only +maintained-fork] - test fork (added 2026-06-27)\n' \
+    > "$home/data/projects.md"
+
+  out=$(run_sync "$home" maintained)
+
+  assert_contains "$out" "maintained: skipped: maintained-fork requires explicit upstream integration" \
+    "maintained fork was not skipped by routine sync"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "routine sync adopted backup changes"
+  pass "maintained-fork routine sync leaves the deployed branch untouched"
+}
+
 test_single_project_by_bare_name_resolves() {
   local home out
   home=$(new_home)
@@ -704,6 +722,7 @@ test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped
 test_local_only_skipped
+test_maintained_fork_skipped_without_adopting_backup
 test_single_project_by_bare_name_resolves
 test_single_project_by_bare_name_ignores_cwd_shadow
 test_single_project_by_projects_relative_name_resolves

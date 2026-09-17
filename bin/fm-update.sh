@@ -85,6 +85,22 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
 fi
 [ $# -eq 0 ] || { usage; exit 1; }
 
+# A maintained-fork Firstmate installation is intentionally updated by an
+# explicitly selected upstream release, not by fast-forwarding its backup.
+# Keep this check before ff_target so routine update cannot adopt or publish
+# upstream changes, and do not restart mates when no tracked bytes changed.
+firstmate_name=$(basename "$(cd "$FM_ROOT" && pwd -P)")
+firstmate_source=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+  "$SCRIPT_DIR/fm-project-mode.sh" --source "$firstmate_name" 2>/dev/null || echo ordinary)
+if [ "$firstmate_source" = maintained-fork ]; then
+  echo "firstmate: maintained-fork; automatic update skipped"
+  echo "integration: run $SCRIPT_DIR/fm-maintained-fork.sh integrate <release>, then accept"
+  echo "reread-firstmate: no"
+  echo "restart-secondmates: none"
+  echo "nudge-secondmates: none"
+  exit 0
+fi
+
 # --- main firstmate repo ---------------------------------------------------
 
 reread_firstmate="no"
