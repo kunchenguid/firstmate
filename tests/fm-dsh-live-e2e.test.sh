@@ -37,10 +37,11 @@
 #   8. The tracked patch keeps every permission preset dsh-base offers. A patch
 #      replaces a row's whole config, so a permission row carrying only its
 #      default silently drops the read-only preset from every picker.
-#   9. A session holding the fleet lock refuses a second one into read-only. DSH
-#      gives hooks no session identity, so a live peer is recognized only by the
-#      launcher shape in its argv; if that stops matching, two captains share one
-#      home and every guard reads the wrong fleet.
+#   9. A session takes a free fleet lock as its own, and a session finding the
+#      lock held refuses into read-only. DSH gives hooks no session identity, so
+#      a session finds itself and a live peer only by the launcher shape in argv;
+#      if that stops matching, every session is read-only or two captains share
+#      one home, and the refusal alone cannot tell which.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -305,9 +306,12 @@ esac
 # --- 9. a second concurrent session is refused into read-only ----------------
 # The fleet lock matches its holder by launcher path in argv, and DSH gives hook
 # and tool subprocesses no session identity of their own, so the question is
-# whether a live DSH session is recognizable as the lock owner at all. The
-# positive half is proven by contract 2's own run; this is the refusal half. The
-# holder is a live node whose argv carries a dsh launcher shape, which is what
+# whether a live DSH session is recognizable as the lock owner at all. Both
+# halves run in one lock home. bin/fm-lock.sh exits before touching the lock
+# when a session cannot resolve its own harness ancestry, so the refusal half
+# alone would pass for a session that cannot identify itself; the control first
+# requires a session to take a free lock as its own pid. The holder is a live
+# node whose argv carries a dsh launcher shape, which is what
 # bin/fm-session-lock-lib.sh's fm_harness_pid_alive demands of a lock holder, so
 # it stands in for another live session without needing two real ones.
 LOCK_HOME="$TMP_ROOT/lock-home"
@@ -316,7 +320,7 @@ LOCK_PROFILE="${PROFILE}lock"
 LOCK_PROFILE_DIR="${DSH_HOME:-$HOME/.dsh}/profiles/$LOCK_PROFILE"
 mkdir -p "$LOCK_HOME/state" "$LOCK_WORK/holder/node_modules/.bin"
 
-# A dsh-shaped process that outlives the session below. comm is node and argv
+# A dsh-shaped process that outlives the sessions below. comm is node and argv
 # carries `/.bin/dsh`, the shape fm_dsh_args_evidence accepts.
 cat > "$LOCK_WORK/holder/node_modules/.bin/dsh" <<'SH'
 #!/usr/bin/env node
@@ -327,10 +331,6 @@ node "$LOCK_WORK/holder/node_modules/.bin/dsh" >/dev/null 2>&1 &
 LOCK_HOLDER_PID=$!
 sleep 2
 
-# The lock this session must find and refuse. Nothing writes it but us, so an
-# unchanged value after the run is proof the second session did not take it.
-printf '%s\n' "$LOCK_HOLDER_PID" > "$LOCK_HOME/state/.lock"
-
 # A profile that mounts the TRACKED hooks, because the refusal happens inside the
 # real session-start digest: the probe hooks above never run it. The tracked
 # patch supplies the bridge mount, so this profile's own patch stays empty.
@@ -340,14 +340,33 @@ dsh plugin --profile "$LOCK_PROFILE" add "@deepseek-ai/dsh-hooks-claude-code@$BA
   || fail "could not install @deepseek-ai/dsh-hooks-claude-code@$BASE_VERSION into '$LOCK_PROFILE'"
 printf -- '- id: permission\n  config:\n    defaultPreset: danger-full-access\n' > "$LOCK_PROFILE_DIR/cordis.patch.yml"
 
-( cd "$LOCK_WORK" && FM_DSH_HARNESS=dsh FM_ROOT="$ROOT" FM_HOME="$LOCK_HOME" \
-    FM_STATE_OVERRIDE="$LOCK_HOME/state" \
-    dsh --profile "$LOCK_PROFILE" --patch "$ROOT/.dsh/profile.patch.yml" \
-    "Without using any tools, reply with ONLY the word PING." >"$LOCK_WORK/out" 2>&1 ) || true
+lock_session() {
+  ( cd "$LOCK_WORK" && FM_DSH_HARNESS=dsh FM_ROOT="$ROOT" FM_HOME="$LOCK_HOME" \
+      FM_STATE_OVERRIDE="$LOCK_HOME/state" \
+      dsh --profile "$LOCK_PROFILE" --patch "$ROOT/.dsh/profile.patch.yml" \
+      "Without using any tools, reply with ONLY the word PING." >"$LOCK_WORK/out" 2>&1 ) || true
+}
+
+# Control: with the lock free, the session must write its own harness pid.
+rm -f "$LOCK_HOME/state/.lock"
+lock_session
+held=$(cat "$LOCK_HOME/state/.lock" 2>/dev/null || true)
+case "$held" in
+  '' | *[!0-9]*) fail "live dsh $BASE_VERSION: a session left a free lock as '${held:-<no lock>}' rather than its own harness pid, so it cannot resolve its own ancestry and the refusal below would prove nothing" ;;
+esac
+[ "$held" != "$LOCK_HOLDER_PID" ] \
+  || fail "live dsh $BASE_VERSION: a session took a free lock as the holder's pid $LOCK_HOLDER_PID, not its own"
+
+# The lock the next session must find and refuse. Only a session's acquisition
+# writes it, so an unchanged value after the run is proof the session did not
+# take it. The marker is cleared so the digest check below is this run's own.
+rm -f "$LOCK_HOME/state/.dsh-sessionstart-delivered"
+printf '%s\n' "$LOCK_HOLDER_PID" > "$LOCK_HOME/state/.lock"
+lock_session
 
 held=$(cat "$LOCK_HOME/state/.lock" 2>/dev/null || true)
 [ "$held" = "$LOCK_HOLDER_PID" ] \
   || fail "live dsh $BASE_VERSION: a session took a lock already held by a live dsh (pid $LOCK_HOLDER_PID -> ${held:-<empty>}); the refusal the fleet lock depends on did not happen"
 [ -f "$LOCK_HOME/state/.dsh-sessionstart-delivered" ] \
   || fail "live dsh $BASE_VERSION: the second session left the lock alone but delivered no digest at all, so the read-only path was never exercised"
-pass "live dsh $BASE_VERSION: a session holding the fleet lock refuses a second one into read-only"
+pass "live dsh $BASE_VERSION: a session takes a free fleet lock as its own and refuses a held one into read-only"

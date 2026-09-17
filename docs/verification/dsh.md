@@ -146,8 +146,11 @@ Both halves were measured on 2026-09-17 with the tracked hooks mounted, a throwa
 - **Acquisition.** A headless session wrote `state/.lock` with the harness pid and wrote the once-per-session gate afterwards, so the digest owned the fleet lock rather than falling into its read-only path.
 - **Refusal.** With `state/.lock` already holding a live node process whose argv carries a dsh launcher shape — which is what `fm_harness_pid_alive` demands of a lock holder — a second headless session delivered `READ-ONLY SESSION - FLEET LOCK OWNERSHIP WAS NOT VERIFIED` and left the lock untouched, so it did not take over the home.
 
-`tests/fm-dsh-live-e2e.test.sh` asserts the refusal as its ninth contract: it holds the lock with a live dsh-shaped process, runs a session against it, and fails if the lock changes hands or if no digest was delivered at all.
-That contract makes the lock owner's ancestry match a live, guarded property rather than an inference from the portable lock suite.
+`tests/fm-dsh-live-e2e.test.sh` asserts both halves, in one lock home, as its ninth contract.
+First a control: with the lock free, a session must leave `state/.lock` holding a numeric pid other than the holder's.
+Then the refusal: with the lock holding a live dsh-shaped process and the once-per-session gate cleared, a session must leave the lock unchanged and still deliver a digest.
+The control is what makes the refusal mean something, because `bin/fm-lock.sh` exits before touching the lock when a session cannot resolve its own harness ancestry, and the digest still carries the read-only banner, so a session that cannot identify itself would otherwise pass the refusal half too.
+What the contract proves is that a real DSH session resolves its own identity from its ancestry and then refuses a live harness-shaped holder; the holder is a synthetic process with a fixed argv, not a second real session.
 
 Forking a session while one is live therefore produces a read-only session, not a second captain.
 
@@ -325,7 +328,7 @@ Ranked by how likely each is to be mistaken for working.
 | The session-death blind window | **unclosable from inside DSH.** No `Stop` fires, so nothing re-arms; recovery happens at the NEXT session start via `state/.watcher-down` → `check: rearm-resurface`, and the only out-of-band closure is an OS-level scheduler. [`docs/supervision-protocols/dsh.md`](../supervision-protocols/dsh.md) states this rather than papering over it |
 | Away mode (`/afk`, `/quiet`) | **blocked.** The daemon's only delivery is typing a batched digest into the supervisor's pane after proving the composer empty; DSH has no pane and no inject-into-session primitive, so escalations would buffer forever. Registering it without a delivery channel is worse than not having it: a leftover `state/.afk` makes `fm_afk_daemon_owns_supervision` prove "supervision healthy" and silently redefines the guard's predicate |
 | DSH-subagent crewmates | **blocked.** No per-delegation working directory and no child-dispose path, and DSH's own pre-stable tool surface is not a steering endpoint |
-| Session identity for the lock | **measured for the live case.** The lock owner is matched by `ps` ancestry against the launcher shape in argv, and the refusal was driven live (see The fleet lock refuses a second session). `fm_pid_identity` still prefers `/proc`, which macOS does not provide, so that path remains unexercised here |
+| Session identity for the lock | **measured for the live case.** The lock owner is matched by `ps` ancestry against the launcher shape in argv, and the refusal was driven live (see The fleet lock refuses a second session) |
 | Relay (X/Discord) | **out of scope for this deployment.** No pairing token, and it needs `curl`, `jq` and a wake-into-session path |
 | Calm, voice, Lavish board | **out of scope.** Module hooks, a TTY with PortAudio, and a live `lavish-axi` session respectively |
 | In-process extension hosts (Pi, omp, OpenCode) | **out of scope.** DSH's bridge is command-only |
@@ -360,9 +363,9 @@ As measured on 2026-09-17, the portable suite passes 46 cases, and against dsh 0
 6. the documented `web` launch renders `AGENTS.md` whole through the `firstmate` preset at budget 262144;
 7. the launcher's own `web` exec loads the plugin tree with the tracked patch applied once;
 8. the tracked patch keeps every permission preset `dsh-base` offers, `read-only` included;
-9. a session holding the fleet lock refuses a second one into read-only.
+9. a session takes a free fleet lock as its own pid, and a session finding the lock held by a live dsh-shaped process refuses into read-only.
 
-Contracts 6 through 9 were each added after an earlier run and were exercised on their own first; the run above is the first covering all nine together.
+Contracts 6 through 9 were each added after an earlier run and were exercised on their own first; the run above is the first covering all nine together, and its contract 9 ran the control before the refusal.
 The first contract was also run with `DSH_PERMISSION_MODE` unset once the `sandbox-policy` pin landed, and the preflight read `danger-full-access` from the pin alone.
 The guard no longer unsets that variable, because the preflight now refuses every `!!js` mode whatever the environment holds, so a pin removed from the tracked patch cannot pass on a value inherited from the caller's shell.
 
