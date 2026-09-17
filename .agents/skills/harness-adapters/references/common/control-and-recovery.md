@@ -23,6 +23,7 @@ Cursor suppresses its dialog with launch-time `--trust`, and Muse suppresses its
 Grok dodges its gate instead of granting trust, because its project picker appears only outside a project and the spawn starts in the isolated git root.
 Pi gates the fresh-worktree case too, but unlike Claude its dialog is answered with Enter, and `references/harness/pi.md` owns that recipe and where the decision persists.
 Codex shows a directory-trust dialog on the first run for a repository root.
+Kimi 0.4x gates every fresh worktree too, and `references/harness/kimi.md` records the dialog and the preselected choice it observed per version.
 
 Use the tool's exact skill form, or natural language only when no separate command is verified or the form remains uncertain.
 A successful send or key return is not proof of submission; require the tool-specific postcondition.
