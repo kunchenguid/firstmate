@@ -1625,13 +1625,21 @@ launch_template() {
     # and hooks inside it, and admits the folder without the dialog and without
     # appending the disposable path to the machine-global trustedWorkspaces list
     # in ~/.gemini/antigravity-cli/settings.json that answering the dialog writes.
+    # --model takes effect in -i mode (verified on agy 1.2.2: with the host's
+    # persisted default set to Claude Opus 4.6 (Thinking), launching with
+    # --model claude-sonnet-4-6 renders a pane whose footer reads "Claude
+    # Sonnet 4.6 (Thinking)"), so __MODELFLAG__ is load-bearing here. An
+    # unsupported model fails loud in -p mode (exit 1, prints the catalog)
+    # but falls back silently to the host's persisted default in -i mode.
     # agy encodes effort in the model id (its catalog is gemini-3.8-flash-low|
     # medium|high, gemini-3.1-pro-low|high, and fixed-effort claude/gpt-oss
-    # entries), and --effort is not a defined flag: verified on agy 1.2.2, a
-    # --model/--effort pair is refused outright in -p mode ("--model
-    # gemini-3.8-flash-low conflicts with --effort=high") and, in the -i mode
-    # launched here, agy silently discards BOTH flags and runs the host's
-    # persisted default model. So no effort placeholder belongs here; the
+    # entries). --effort IS a defined, value-validated flag (verified on agy
+    # 1.2.2: "--effort bogus" is rejected as an invalid value, not an
+    # undefined flag), but every catalog entry refuses it outright: a
+    # flash/pro tier conflicts with a mismatched --effort ("--model
+    # gemini-3.8-flash-low conflicts with --effort=high") and the fixed-effort
+    # entries reject --effort entirely ("--effort is not supported for model
+    # claude-sonnet-4-6"). So no effort placeholder belongs here; the
     # requested effort stays in task metadata under the record-and-omit
     # contract and reaches agy only through the model id.
     agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI __AGYBIN__ --add-dir __WORKTREE__ __MODELFLAG__--dangerously-skip-permissions -i "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
