@@ -504,6 +504,7 @@ Two enforcement points:
 - `bin/fm-bootstrap.sh` checks the home's written configuration at session start and reports each finding as `MODEL_POLICY: <where>: <reason>`.
   It covers every model named by a `config/crew-dispatch.json` profile or by `config/secondmate-harness`, plus a dispatch profile that names no model at all, because such a profile is itself the home's dispatch choice.
 - `bin/fm-spawn.sh` checks the fully resolved profile before provisioning a worktree or endpoint, so a denied model, an unnamed model from any path, or a raw launch command carrying a denied fragment refuses the spawn instead of launching it.
+  Its refusal names the model, the entry that matched it, and whether the value came from the `--model` flag or from `config/secondmate-harness`, so the file to correct is in the message rather than somewhere among the home's configuration.
   A raw launch command is operator-written shell whose model flag cannot be parsed out, so its whole text is scanned for denied fragments and the unnamed-model rule cannot apply to it.
 
 The policy binds crewmate, scout, and secondmate launches alike, including relaunches through `bin/fm-control.sh`, so a task recorded without a model needs one named on its relaunch, or the directive present, before it can restart.

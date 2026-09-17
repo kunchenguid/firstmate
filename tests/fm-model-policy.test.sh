@@ -70,6 +70,24 @@ test_denied_fragment_matches_every_spelling() {
   pass "a denied fragment refuses every spelling that contains it, in any case"
 }
 
+test_refusal_names_where_the_value_came_from() {
+  local config out
+  config=$(make_config origin 'fable')
+  FM_MODEL_POLICY_ERROR=""
+  fm_model_policy_check "$config" claude-fable-5 'config/secondmate-harness' \
+    && fail "a denied model must be refused whatever its origin"
+  out=$FM_MODEL_POLICY_ERROR
+  assert_contains "$out" "model 'claude-fable-5' matches 'fable' in config/model-denylist" \
+    "the refusal must still name the model and the matched entry"
+  assert_contains "$out" "(model came from config/secondmate-harness)" \
+    "the refusal must name the origin it was given"
+  # A caller whose own prefix already says where omits the origin, and the
+  # reason must not grow an empty clause for it.
+  out=$(check "$config" claude-fable-5) && fail "a denied model must be refused with no origin given"
+  assert_not_contains "$out" "model came from" "an omitted origin must add no clause"
+  pass "a refusal names the matched entry, and the origin when the caller supplies one"
+}
+
 test_permitted_model_launches() {
   local config
   config=$(make_config permitted 'fable')
@@ -191,6 +209,7 @@ test_absent_file_leaves_the_launch_command_scan_off() {
 test_absent_file_is_no_policy
 test_denied_fragment_matches_every_spelling
 test_permitted_model_launches
+test_refusal_names_where_the_value_came_from
 test_unnamed_model_is_refused_by_default
 test_directive_accepts_harness_defaults_without_weakening_the_denylist
 test_comments_and_blank_lines_are_not_entries

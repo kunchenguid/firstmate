@@ -2047,7 +2047,16 @@ if [ "$RAW_LAUNCH" = 1 ]; then
     exit 1
   }
 else
-  fm_model_policy_check "$CONFIG" "$MODEL" || {
+  # Name where the refused value came from: by this point a model is either the
+  # explicit flag or the secondmate harness file's token, and an operator who is
+  # only told the model still has to work out which file to correct.
+  MODEL_ORIGIN=
+  if [ "$MODEL_SET" -eq 1 ]; then
+    MODEL_ORIGIN='the --model flag'
+  elif [ -n "$MODEL" ]; then
+    MODEL_ORIGIN='config/secondmate-harness'
+  fi
+  fm_model_policy_check "$CONFIG" "$MODEL" "$MODEL_ORIGIN" || {
     echo "error: spawn refused: $FM_MODEL_POLICY_ERROR" >&2
     exit 1
   }

@@ -109,11 +109,14 @@ EOF
   return 1
 }
 
-# fm_model_policy_check <config-dir> <model>
+# fm_model_policy_check <config-dir> <model> [<origin>]
 # The model gate. An empty model, or the "default" sentinel fm-spawn records for
 # one, is an unnamed model. Returns 1 with FM_MODEL_POLICY_ERROR set on refusal.
+# <origin> names where the refused value came from, for a caller that resolved
+# it from several places and would otherwise send the operator hunting through
+# config files; a caller whose own prefix already says where omits it.
 fm_model_policy_check() {
-  local config_dir=$1 model=$2 hit
+  local config_dir=$1 model=$2 origin=${3:-} hit
   fm_model_policy_load "$config_dir" || return 1
   [ "$FM_MODEL_POLICY_ACTIVE" = 1 ] || return 0
   model=${model#"${model%%[![:space:]]*}"}
@@ -127,6 +130,7 @@ fm_model_policy_check() {
   fi
   if hit=$(fm_model_policy_denied_entry "$model"); then
     FM_MODEL_POLICY_ERROR="model '$model' matches '$hit' in config/$FM_MODEL_POLICY_FILE"
+    [ -z "$origin" ] || FM_MODEL_POLICY_ERROR="$FM_MODEL_POLICY_ERROR (model came from $origin)"
     return 1
   fi
   return 0

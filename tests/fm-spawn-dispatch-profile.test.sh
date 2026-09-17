@@ -1044,6 +1044,8 @@ test_denied_model_refuses_before_endpoint_or_metadata() {
   expect_code 1 "$status" "a model denied by config/model-denylist must refuse the spawn"
   assert_contains "$out" "model 'claude-fable-5' matches 'fable' in config/model-denylist" \
     "refusal must name the model and the matched entry"
+  assert_contains "$out" "(model came from the --model flag)" \
+    "refusal must name where the refused value came from"
   [ ! -s "$LAUNCH_LOG" ] || fail "a denied model must launch nothing (got: $(cat "$LAUNCH_LOG"))"
   assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
   pass "a denied model refuses before any endpoint or metadata"
@@ -1129,6 +1131,8 @@ test_denied_secondmate_harness_model_token_refuses() {
   expect_code 1 "$status" "a denied model pinned in config/secondmate-harness must refuse the launch"
   assert_contains "$out" "model 'claude-fable-5' matches 'fable' in config/model-denylist" \
     "refusal must name the model resolved from the secondmate harness file"
+  assert_contains "$out" "(model came from config/secondmate-harness)" \
+    "refusal must name the file the refused value came from, not only the model"
   assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
   pass "the policy covers the model token config/secondmate-harness resolves"
 }
