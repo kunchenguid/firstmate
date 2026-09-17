@@ -11,6 +11,10 @@
 # from diagnostics. Normal text is a terse deterministic handoff seed; --why
 # adds a concise selection explanation, while --debug emits structured ranking,
 # candidate, and lifecycle diagnostics. Neither flag changes selection or state.
+# When live evidence is too thin for a truthful handoff, normal shell output is
+# an fm-next-skill-handoff.v1 request instead of a fabricated captain card; the
+# /next skill consumes the full JSON preparation packet and performs the bounded
+# read-only preparation. Selection remains complete before either path begins.
 #
 # Ranking, in order:
 #   1. one concrete captain action that restarts work already under way;
@@ -269,11 +273,11 @@ if [ -z "$SNAPSHOT_PATH" ] && [ "$(printf '%s\n' "$RESULT" | jq -r '.selection !
   RESULT=$(printf '%s\n' "$RESULT" | jq --argjson detail "$DETAIL" --argjson closureReview "$CLOSURE_REVIEW" \
     --argjson reportExcerpt "$REPORT_EXCERPT" --argjson repositoryGit "$REPOSITORY_GIT" '
     .selection.task_detail=$detail
-    | .selection.artifact=(.selection.artifact // $detail.artifacts[0] // null)
-    | .selection.artifact_type=($detail.completionEvidence.artifactType // .selection.artifact_type)
-    | .selection.review_plan=(.selection.review_plan // $detail.reviewPlan)
-    | .selection.completion_evidence=(.selection.completion_evidence // $detail.completionEvidence)
-    | .selection.requirements=(.selection.requirements * ($detail.requirements // {}))
+    | .selection.artifact=($detail.artifacts[0] // null)
+    | .selection.artifact_type=$detail.completionEvidence.artifactType
+    | .selection.review_plan=$detail.reviewPlan
+    | .selection.completion_evidence=$detail.completionEvidence
+    | .selection.requirements=$detail.requirements
     | .selection.repository_state.git=$repositoryGit
     | .selection.existing_result=(.selection.existing_result * {summary:$detail.completionEvidence.summary,
         report:(if ($detail.artifacts | map(select(test("/report\\.md$"))) | length) > 0
@@ -306,7 +310,8 @@ RESULT=$(printf '%s\n' "$RESULT" | jq -e --arg mode "$MODE" '
     | text($e.summary; text($c.existing_result.summary; text($c.current_detail; $c.reason)));
   def intent($c): text($c.requirements.captainIntent; text($c.durable_context; $c.name));
   def artifact_locations($c):
-    ([$c.artifact, $c.existing_result.report.path]
+    ([$c.artifact,
+       (if ($c.existing_result.report.present == false) then null else $c.existing_result.report.path end)]
       + ($c.completion_evidence.artifacts // []) + ($c.task_detail.artifacts // []))
     | map(select(. != null and . != "")) | unique;
   def location($c):
@@ -375,7 +380,7 @@ RESULT=$(printf '%s\n' "$RESULT" | jq -e --arg mode "$MODE" '
       elif $c.kind == "captain_action" or $c.kind == "queued_choice" then "Reply with the choice."
       elif ($c.kind == "review" or $c.kind == "acceptance") and ($surface | test("visual|browser|screen|layout|dashboard|lavish"; "i")) then
         "Reply `looks good`, or name the first visible mismatch."
-      elif $c.kind == "review" or $c.kind == "acceptance" then "Reply `works`, or send the observed failure."
+      elif $c.kind == "review" or $c.kind == "acceptance" then "Reply works, or send the observed failure"
       elif $c.kind == "delivery" then "Reply `approve` or `decline: <reason>`."
       elif $c.kind == "monitoring" then "Reply `healthy`, or send the observed failure."
       else "Reply `close` to authorize cleanup, or name what must stay open." end;
@@ -388,9 +393,17 @@ RESULT=$(printf '%s\n' "$RESULT" | jq -e --arg mode "$MODE" '
     + (if $c.downstream_released > 0 then " It unlocks \($c.downstream_released) dependent task(s)." else "" end)
     + (if $other_count > 0 then " It ranked ahead of \($other_count) other eligible action(s)."
        else " No other captain action is eligible now." end);
+  def unsafe_text($value):
+    ($value // "")
+    | test("check only this remaining uncertainty|(?:open|inspect)[[:space:]]+(?:the[[:space:]]+)?(?:record|recorded)|(^|[[:space:]`\\\"(])/[[:alnum:]_.-]+(?:/[[:alnum:]_.-]+)+"; "i");
+  def unsafe_handoff($plan):
+    ([$plan.action, $plan.context] + ($plan.checks // []))
+    | map(select(. != null and . != "")) | join(" ")
+    | unsafe_text(.);
   def preparation($c):
     (phase_plan($c)) as $plan
     | (artifact_locations($c)) as $artifacts
+    | (($artifacts | length) > 0 or ($c.repository_state.worktreePresent // false) == true) as $has_result_source
     | {schema:"fm-next-prepare.v1",
        intent:$c.requirements,
        plan:$plan,
@@ -400,10 +413,17 @@ RESULT=$(printf '%s\n' "$RESULT" | jq -e --arg mode "$MODE" '
        repository:$c.repository_state,
        existingResult:(($c.existing_result // {}) + {summary:evidence($c),closurePreflight:$c.closure_review}),
        missingEvidence:([
-         if ($c.requirements.captainIntent // "") == "" then "captain intent" else empty end,
-         if (($c.kind == "review" or $c.kind == "acceptance") and $plan == null) then "task-specific review plan" else empty end,
-         if (($c.kind == "review" or $c.kind == "acceptance") and ($artifacts | length) == 0) then "readable result location" else empty end
-       ])};
+         if (($c.kind == "review" or $c.kind == "acceptance") and $plan == null
+           and ($c.requirements.captainIntent // "") == "") then "captain intent" else empty end,
+         if (($c.kind == "review" or $c.kind == "acceptance") and $plan == null) then "task-specific review plan"
+         elif (($c.kind == "review" or $c.kind == "acceptance")
+           and (($plan.action // "") == "" or ($plan.context // "") == "" or (($plan.checks // []) | length) == 0))
+           then "complete task-specific review handoff" else empty end,
+         if (($c.kind == "review" or $c.kind == "acceptance") and ($has_result_source | not)) then "readable result source" else empty end,
+         if (($c.kind == "review" or $c.kind == "acceptance") and $plan != null and unsafe_handoff($plan))
+           then "captain-safe handoff wording" else empty end
+       ])}
+    | .requiresAgentPreparation=((.missingEvidence | length) > 0);
   def compact_alternative($c): {ref:$c.ref,name:$c.name,action:action($c)};
   def diagnostic_candidate($c):
     {ref:$c.ref,name:$c.name,canonicalId:$c.canonical_id,owner:$c.owner,kind:$c.kind,
@@ -433,31 +453,49 @@ RESULT=$(printf '%s\n' "$RESULT" | jq -e --arg mode "$MODE" '
       | (instruction($selected)) as $instruction
       | (response($selected)) as $response
       | (preparation($selected)) as $preparation
+      | ([$title,$context,$instruction,$response] | join(" ") | unsafe_text(.)) as $unsafePresentation
+      | ($preparation
+          | if $unsafePresentation then
+              .missingEvidence=([.missingEvidence[],"captain-safe handoff wording"] | unique)
+              | .requiresAgentPreparation=true
+            else . end) as $prepared
       | .mode=$mode
       | .selection={ref:$selected.ref,name:$selected.name,canonicalId:$selected.canonical_id,
-          owner:$selected.owner,kind:$selected.kind,actionTitle:$title,preparation:$preparation}
-      | .presentation={title:$title,identity:($selected.ref + " · " + $selected.name),
-          context:[$context],instruction:$instruction,response:$response}
-      | .card=($title + "\n" + $selected.ref + " · " + $selected.name
-          + "\n\n" + $context + "\n\n" + $instruction + "\n\n" + $response)
+          owner:$selected.owner,kind:$selected.kind,actionTitle:$title,preparation:$prepared}
+      | if $prepared.requiresAgentPreparation and $mode != "debug" then
+          .presentation=null
+          | .card=null
+          | .handoffRequest={schema:"fm-next-skill-handoff.v1",mode:$mode,request:"prepare",
+              selection:{ref:$selected.ref,name:$selected.name,canonicalId:$selected.canonical_id,kind:$selected.kind}}
+        else
+          .presentation={title:$title,identity:($selected.ref + " · " + $selected.name),
+            context:[$context],instruction:$instruction,response:$response}
+          | .card=($title + "\n" + $selected.ref + " · " + $selected.name
+              + "\n\n" + $context + "\n\n" + $instruction + "\n\n" + $response)
+        end
       | if $mode == "why" then
           why($selected; (($root._diagnostics.ranking.eligible // 1) - 1)) as $reason
           | ($root._candidates[1:3] | map(compact_alternative(.))) as $alternatives
           | .explanation={summary:$reason,alternatives:$alternatives}
-          | .card += "\n\nWhy this\n" + $reason
-              + (if ($alternatives | length) == 0 then "" else
-                  "\nConsidered next: " + ($alternatives | map(.ref + " · " + .name) | join("; ")) end)
+          | if .card != null then
+              .card += "\n\nWhy this\n" + $reason
+                + (if ($alternatives | length) == 0 then "" else
+                    "\nConsidered next: " + ($alternatives | map(.ref + " · " + .name) | join("; ")) end)
+            else . end
         else . end
       | if $mode == "debug" then
           .diagnostics=($root._diagnostics + {candidates:($root._candidates | map(diagnostic_candidate(.)))})
           | .selection |= del(.preparation)
         else . end
+      | if (.handoffRequest // null) == null then del(.handoffRequest) else . end
       | del(._candidates,._diagnostics)
     end
 ' 2>&1) || { printf 'fm-next: %s\n' "$RESULT" >&2; exit 1; }
 
 if [ "$FORMAT" = json ] || [ "$MODE" = debug ]; then
   printf '%s\n' "$RESULT"
+elif [ "$(printf '%s\n' "$RESULT" | jq -r '.handoffRequest != null')" = true ]; then
+  printf '%s\n' "$RESULT" | jq -c '.handoffRequest'
 else
   printf '%s\n' "$RESULT" | jq -r '.card'
 fi

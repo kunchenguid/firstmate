@@ -27,6 +27,8 @@ For normal mode, run `bin/fm-next.sh --json` once.
 For `--why`, run `bin/fm-next.sh --why --json` once.
 If collection fails, report the concrete failure instead of selecting from conversation memory or the latest visible event.
 If `selection` is null, return the supplied `card` exactly.
+An `fm-next-skill-handoff.v1` `handoffRequest` means the shell found insufficient structured evidence for a truthful handoff.
+Never return that request to the captain or use a null `card`; consume the full preparation packet and complete the bounded preparation below.
 
 ## CHOOSE
 
@@ -40,6 +42,9 @@ Treat `selection.canonicalId`, `selection.kind`, and the command invocation as o
 Read `selection.preparation` before writing the answer.
 It composes the selected task's durable intent, phase-specific plan, lifecycle evidence, artifacts, repository location and state, existing result, closure preflight, and explicit missing-evidence list.
 Use those facts and read-only tools to do every bounded step that can reasonably be done without the captain.
+When `requiresAgentPreparation` is true, preparation is mandatory: inspect the actual result source or repository copy and derive the concrete handoff before rendering anything.
+A result path marked `present:false` is unavailable evidence, not a location to show or ask the captain to inspect.
+If the project root and an isolated implementation copy differ, inspect both to establish where the result actually exists, but describe the usable location without exposing either private filesystem path.
 
 Preparation may include:
 
@@ -56,7 +61,8 @@ Stop when the remaining step genuinely requires captain judgment, presence, cred
 
 Do not tell the captain to open a recorded result, inspect a candidate artifact, reconstruct intent, compare raw requirements, or determine whether work satisfies the task when the result and evidence are available for Firstmate to inspect.
 Do not repeat the original specification when it can be translated into one concrete check.
-When evidence is genuinely unavailable, ask only for the exact missing location, credential, observation, or choice.
+When evidence is genuinely unavailable after bounded inspection, ask only for the exact missing location, credential, observation, or choice.
+Never fall back to a private path, raw task intent, `check only this remaining uncertainty`, or an instruction to inspect a task record.
 
 If preparation proves that the selected captain action is no longer necessary, rerun the same deterministic selector once against fresh state.
 Prepare the fresh selection if it changed.
@@ -78,8 +84,8 @@ Normal output contains only these elements, omitting any empty one:
 <one simple response instruction or observable done condition>
 ```
 
-Use the command's `presentation` and `card` only as deterministic seeds.
-Replace vague seed language with what preparation actually established, while staying within the supplied intent and evidence.
+Use a non-null command `presentation` and `card` only as deterministic seeds.
+A handoff request deliberately has neither and must be replaced entirely with what preparation established, while staying within the supplied intent and evidence.
 Do not add headings merely to label the five elements.
 
 A decision handoff gives Firstmate's recommendation and asks for the smallest concrete choice.
@@ -91,7 +97,8 @@ A delivery handoff identifies the exact accepted result and asks only for the re
 A monitoring handoff names the exact observation, location, threshold, and window.
 A closure handoff states that retention and cleanup were preflighted and asks only for explicit closure authorization.
 
-Normal output never includes selection justification, rank or candidate counts, alternative tasks, lifecycle transition names, state-machine consequences, possible-outcome menus, raw requirements, raw revision hashes, delivery-mode labels, worker mechanics, `/task` detours, or internal diagnostics.
+Normal output never includes selection justification, rank or candidate counts, alternative tasks, lifecycle transition names, state-machine consequences, possible-outcome menus, raw requirements, raw revision hashes, delivery-mode labels, worker mechanics, `/task` detours, private filesystem paths, preparation requests, or internal diagnostics.
+For an ordinary command review, end with `Reply works, or send the observed failure`.
 
 For `--why`, append one short `Why this` paragraph using only the command's `explanation.summary`.
 You may include its supplied bounded alternatives after that paragraph, in order, without scores or new analysis.

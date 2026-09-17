@@ -77,8 +77,10 @@ Priority, downstream work released, active work, wait age, callsign, and canonic
 The model never re-ranks that result or substitutes a task from memory.
 
 Schema `fm-next.v4` separates the selected task's `fm-next-prepare.v1` evidence packet from opt-in diagnostics.
-The preparation packet composes durable intent, the phase-specific plan, lifecycle evidence, artifacts, repository location and state, the existing result, and closure preflight evidence.
-The `/next` skill may use model judgment and read-only tools to inspect those inputs, run an already-authorized focused check, open an existing safe review surface, or reduce a decision before asking for attention.
+The preparation packet composes durable intent, the phase-specific plan, lifecycle evidence, verified artifact availability, repository location and state, the existing result, and closure preflight evidence.
+A report location explicitly marked absent is not preparation evidence.
+When the structured evidence cannot support a truthful handoff, shell-only normal output emits a compact `fm-next-skill-handoff.v1` request with no private path, raw intent, or fabricated review claim; the `/next` skill consumes the full JSON packet, inspects the actual result or repository with read-only tools, and writes the captain handoff.
+The `/next` skill may also run an already-authorized focused check, open an existing safe review surface, or reduce a decision before asking for attention.
 Preparation does not grant authority to edit code, change lifecycle state, accept, deliver, merge, close, start speculative work, or perform a destructive, irreversible, or security-sensitive action.
 If preparation proves the selected action obsolete, the skill reruns the same deterministic selector once against fresh state and never loops or hands off the stale action.
 
@@ -96,8 +98,8 @@ Review Failure: The launcher fails or starts in the wrong context.
 ```
 
 `bin/fm-task.sh` is the structured aggregation owner for the plan plus durable task intent, current outcome, artifact type, and artifact locations.
-Normal `/next` output is limited to an action title, short reference and meaningful name, at most two short context sentences saying what preparation established, one exact command, location, choice, or physical check, and one simple response or observable done condition.
-It omits selection rationale, ranking and candidate counts, alternatives, lifecycle transitions, outcome taxonomies, raw requirements, raw revision hashes, delivery and worker mechanics, and task-detail detours.
+Normal captain-facing `/next` output is limited to an action title, short reference and meaningful name, at most two short context sentences saying what preparation established, one exact command, location, choice, or physical check, and one simple response or observable done condition.
+It omits private filesystem paths, selection rationale, ranking and candidate counts, alternatives, lifecycle transitions, outcome taxonomies, raw requirements, raw revision hashes, delivery and worker mechanics, and task-detail detours.
 `/next --why` adds a concise human explanation after the action, while `/next --debug` returns structured ranking, candidate, and lifecycle diagnostics.
 Neither mode changes selection or state.
 

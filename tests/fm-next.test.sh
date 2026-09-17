@@ -59,6 +59,9 @@ assert_five_second_card() {  # <card> <label>
   assert_not_contains "$card" "DO THIS" "$label added an empty workflow heading"
   assert_not_contains "$card" "DONE WHEN" "$label added lifecycle framing"
   assert_not_contains "$card" "Next lifecycle action" "$label exposed lifecycle language"
+  assert_not_contains "$card" "check only this remaining uncertainty" "$label used an unprepared fallback"
+  assert_not_contains "$card" "/Users/" "$label exposed a private filesystem path"
+  assert_not_contains "$card" "/home/" "$label exposed a private filesystem path"
 }
 
 test_choose_is_deterministic_and_diagnostics_are_opt_in() {
@@ -120,8 +123,8 @@ test_t5_prepared_handoff_golden() {
       completion_evidence:{summary:"The launcher implementation, executable tests, and README agree at revision abcdef1234567890",artifactType:"local branch",artifacts:["fm","tests/fm-launcher.test.sh","README.md"]},
       repository_state:{git:{branch:"fm/fm-firstmate-local-startup",trackedChanges:false}},
       review_plan:{source:"data/launcher-review/brief.md",
-        review:{action:"Test the new fm launcher",context:"I already inspected the launcher implementation, executable tests, and README; they agree on the expected Firstmate extensions/context and argument forwarding.",
-          checks:["From the Firstmate repository root, run `./fm --mode text`; confirm it opens with the expected Firstmate extensions and repository context."],
+        review:{action:"Test the new fm launcher",context:"I inspected the launcher, focused tests, and README; they agree on extension loading and argument forwarding. The launcher is in the prepared implementation copy, not the current repository root.",
+          checks:["In the prepared implementation copy, run `./fm --mode text`."],
           success:"The launcher opens correctly.",failure:"The launcher fails or opens the wrong context.",continue:null,fix:null},
         delivery:null,monitoring:null}
     }]
@@ -134,11 +137,11 @@ test_t5_prepared_handoff_golden() {
 Test the new fm launcher
 t5 · root-level-fm
 
-I already inspected the launcher implementation, executable tests, and README; they agree on the expected Firstmate extensions/context and argument forwarding.
+I inspected the launcher, focused tests, and README; they agree on extension loading and argument forwarding. The launcher is in the prepared implementation copy, not the current repository root.
 
-From the Firstmate repository root, run `./fm --mode text`; confirm it opens with the expected Firstmate extensions and repository context.
+In the prepared implementation copy, run `./fm --mode text`.
 
-Reply `works`, or send the observed failure.
+Reply works, or send the observed failure
 EOF
 )
   [ "$card" = "$expected" ] || fail "t5 normal handoff changed from the hard golden:$'\n'$card"
@@ -230,7 +233,7 @@ test_visual_delivery_and_monitoring_handoffs() {
 }
 
 test_closure_preflight_and_missing_evidence() {
-  local closure missing card out
+  local closure missing card out expected
   rm -f "$LIFECYCLE_DATA/task-lifecycle/delivery.json" "$LIFECYCLE_DATA/task-lifecycle/monitor.json"
   closure="$TMP_ROOT/closure.json"
   base_snapshot | jq '.backlog.records = [{
@@ -253,14 +256,20 @@ test_closure_preflight_and_missing_evidence() {
   out=$(FM_NEXT_CALLSIGNS_JSON='[{"id":"thin-result","ref":"t9","name":"retry-order"}]' run_json "$missing")
   card=$(printf '%s\n' "$out" | jq -r '.card')
   printf '%s\n' "$out" | jq -e '
-    .selection.preparation.missingEvidence == ["task-specific review plan","readable result location"]
-  ' >/dev/null || fail "missing evidence was not explicit in the preparation packet: $out"
-  assert_contains "$card" "Locate the result for retry-order" "missing evidence invented a review"
-  assert_contains "$card" "Send the result location or result needed to check" "missing evidence did not ask for the smallest useful input"
-  assert_contains "$card" "retries preserve request ordering" "missing evidence lost the precise uncertainty"
-  assert_not_contains "$card" "open the recorded result" "missing evidence used the prohibited vague instruction"
-  assert_five_second_card "$card" "missing-evidence handoff"
-  pass "closure is preflighted and absent evidence produces one precise request"
+    .selection.preparation.missingEvidence == ["task-specific review plan","readable result source"]
+    and .selection.preparation.requiresAgentPreparation == true
+    and .card == null
+    and .presentation == null
+    and .handoffRequest.schema == "fm-next-skill-handoff.v1"
+    and .handoffRequest.request == "prepare"
+  ' >/dev/null || fail "missing evidence did not route to skill-side preparation: $out"
+  card=$(FM_NEXT_CALLSIGNS_JSON='[{"id":"thin-result","ref":"t9","name":"retry-order"}]' run_card "$missing")
+  expected='{"schema":"fm-next-skill-handoff.v1","mode":"normal","request":"prepare","selection":{"ref":"t9","name":"retry-order","canonicalId":"thin-result","kind":"review"}}'
+  [ "$card" = "$expected" ] || fail "missing evidence did not emit the compact preparation request: $card"
+  assert_not_contains "$card" "retries preserve request ordering" "preparation request exposed raw durable intent"
+  assert_not_contains "$card" "report.md" "preparation request pointed at a record"
+  assert_not_contains "$card" "$TMP_ROOT" "preparation request exposed a private path"
+  pass "closure is preflighted and absent evidence routes safely to skill-side preparation"
 }
 
 test_obsolete_preparation_reranks_once() {
@@ -286,20 +295,20 @@ test_obsolete_preparation_reranks_once() {
   pass "an action proven obsolete during preparation is replaced by one fresh deterministic selection"
 }
 
-test_live_preparation_reads_result_and_repository_state() {
-  local home fakebin project worktree out busy_gen
-  home="$TMP_ROOT/live-home"
+test_live_t5_shape_routes_to_repository_preparation() {
+  local home fakebin project worktree out request busy_gen
+  home="$TMP_ROOT/live-t5-home"
   fakebin="$home/fakebin"
-  project="$home/projects/sample"
-  worktree="$home/projects/prepared-copy"
-  mkdir -p "$home/data/prepared" "$home/state" "$home/config" "$home/projects" "$fakebin"
+  project="$home/projects/firstmate"
+  worktree="$home/projects/fm-firstmate-local-startup"
+  mkdir -p "$home/data/fm-firstmate-local-startup" "$home/state" "$home/config" "$home/projects" "$fakebin"
 
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
   display-message) printf '%%1\n' ;;
   capture-pane) printf 'idle\n' ;;
-  list-windows) printf 'fm-prepared\n' ;;
+  list-windows) printf 'fm-fm-firstmate-local-startup\n' ;;
 esac
 SH
   cat > "$fakebin/no-mistakes" <<'SH'
@@ -311,62 +320,92 @@ SH
   git init -q -b main "$project"
   git -C "$project" config user.name fixture
   git -C "$project" config user.email fixture@example.test
-  printf 'base\n' > "$project/sample.txt"
-  git -C "$project" add sample.txt
+  printf '# Firstmate\n' > "$project/README.md"
+  git -C "$project" add README.md
   git -C "$project" commit -qm base
-  git -C "$project" worktree add -q -b fm/prepared "$worktree"
+  git -C "$project" worktree add -q -b fm/fm-firstmate-local-startup "$worktree"
+  mkdir -p "$worktree/tests"
+  cat > "$worktree/fm" <<'SH'
+#!/usr/bin/env bash
+exec pi --no-extensions "$@"
+SH
+  chmod +x "$worktree/fm"
+  cat > "$worktree/tests/fm-launcher.test.sh" <<'SH'
+#!/usr/bin/env bash
+./fm --mode text
+SH
+  cat >> "$worktree/README.md" <<'EOF'
+
+Run `./fm`; normal Pi arguments are forwarded.
+EOF
+  git -C "$worktree" add fm tests/fm-launcher.test.sh README.md
+  git -C "$worktree" commit -qm 'Complete local Pi launcher defaults'
 
   cat > "$home/data/backlog.md" <<'EOF'
 ## In flight
+- [ ] fm-firstmate-local-startup - Add root-level fm launcher (repo: firstmate) (kind: ship) (priority: 2) (since 2026-09-15)
+  Implement the approved firstmate-local downstream workflow. Add a tracked root-level executable named fm that runs Pi with extension discovery disabled and explicitly loads all current top-level Firstmate extensions, automatically including future fm-*.ts additions, while forwarding normal Pi arguments. Add concise operator documentation and executable tests where the repository pattern requires them. Document ./fm as the invocation from the repository directory, with bare fm requiring that directory on PATH. Do not add speculative custom extensions. The long-lived firstmate-local branch already exists as the downstream customization branch; keep main as the upstream base. Delivery mode is no-mistakes with yolo off because this repository is unregistered and shared tracked changes require the full review path. Failure recorded: implementation commit f8e51870 and focused tests pass, but the required no-mistakes review could not start; Codex now reports 0.154.0, yet the existing worker remained stuck with a pending command and two safe relaunch attempts were refused. Work is preserved and requires a fresh review attempt.
 
 ## Queued
 
 ## Done
-- [x] prepared - Prepared report data/prepared/report.md (repo: sample) (kind: scout) (reported 2026-09-16)
 EOF
-  cat > "$home/state/prepared.meta" <<EOF
-window=firstmate:fm-prepared
-endpoint_task_id=prepared
+  cat > "$home/state/fm-firstmate-local-startup.meta" <<EOF
+window=firstmate:fm-fm-firstmate-local-startup
+endpoint_task_id=fm-firstmate-local-startup
 worktree=$worktree
 project=$project
 harness=claude
-kind=scout
-mode=local-only
+kind=ship
+mode=no-mistakes
 yolo=off
-spawn_gen=s100.prepared
-started_at=2026-09-15T10:00:00Z
+model=openai-codex/gpt-5.6-luna
+effort=high
+spawn_gen=s100.t5
+backend=tmux
 EOF
-  cat > "$home/data/prepared/brief.md" <<'EOF'
+  cat > "$home/data/fm-firstmate-local-startup/brief.md" <<'EOF'
 ## Captain's intent
-Confirm the prepared report's finding.
+Create a new long-lived downstream branch named `firstmate-local` for local Firstmate customizations instead of using `main` directly. Add a root-level executable named `fm` so Pi starts from this checkout with only the Firstmate project extensions enabled, including future top-level `fm-*.ts` files, while forwarding normal Pi arguments. Keep `main` as the upstream base so `firstmate-local` can be rebased onto `main` when updates are released. Add support for future Firstmate-specific extensions, but do not add speculative extensions now.
 
 ## Firstmate spec
-Keep the handoff narrow.
-
-## Captain review plan
-Review Action: Confirm the prepared report
-Review Context: The report is ready for a focused check.
-Review Check: Confirm the report says RESULT_FROM_REPORT.
+Implement the tracked root-level `fm` launcher, concise operator documentation, and focused executable tests needed for this behavior. The launcher must disable extension discovery, enumerate the current top-level `.pi/extensions/fm-*.ts` files, pass each as its own repeated `-e` argument, and preserve arbitrary caller arguments without unsafe word splitting. Document that it is invoked as `./fm` from the repository directory unless that directory is explicitly placed on `PATH`. The `firstmate-local` branch already exists in the primary repository; do not try to modify the primary checkout or add branch-management automation.
 EOF
-  printf '# Result\nRESULT_FROM_REPORT\n' > "$home/data/prepared/report.md"
-  printf 'done: report ready\n' > "$home/state/prepared.status"
-  busy_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" prepared)
-  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" prepared idle --gen "$busy_gen" \
+  printf 'done: local-only implementation remains clean at 654e7a24; focused launcher test and documentation check pass\n' \
+    > "$home/state/fm-firstmate-local-startup.status"
+  busy_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" fm-firstmate-local-startup)
+  "$ROOT/bin/fm-busy-event.sh" apply "$home/state" fm-firstmate-local-startup idle --gen "$busy_gen" \
     --source claude-hook --event stop
 
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$NEXT" --json) \
-    || fail "live preparation packet failed"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_NEXT_CALLSIGNS_JSON='[{"id":"fm-firstmate-local-startup","ref":"t5","name":"root-level-fm"}]' \
+    "$NEXT" --json) || fail "live t5 preparation packet failed"
   printf '%s\n' "$out" | jq -e --arg project "$project" --arg worktree "$worktree" '
-    .selection.canonicalId == "prepared"
+    .selection.canonicalId == "fm-firstmate-local-startup"
     and .selection.preparation.repository.projectPath == $project
     and .selection.preparation.repository.worktreePath == $worktree
-    and .selection.preparation.repository.git.branch == "fm/prepared"
+    and .selection.preparation.repository.git.branch == "fm/fm-firstmate-local-startup"
     and .selection.preparation.repository.git.trackedChanges == false
-    and (.selection.preparation.existingResult.contentExcerpt | contains("RESULT_FROM_REPORT"))
-    and (.selection.preparation.artifacts.locations | index("data/prepared/report.md") != null)
-  ' >/dev/null || fail "live preparation omitted the bounded result or repository evidence: $out"
-  assert_five_second_card "$(printf '%s\n' "$out" | jq -r '.card')" "live preparation handoff"
-  pass "live PREPARE input includes a bounded existing result and current repository state"
+    and .selection.preparation.existingResult.report.present == false
+    and .selection.preparation.artifacts.locations == []
+    and (.selection.preparation.missingEvidence | index("task-specific review plan") != null)
+    and (.selection.preparation.missingEvidence | index("captain-safe handoff wording") != null)
+    and .selection.preparation.requiresAgentPreparation == true
+    and .presentation == null
+    and .card == null
+    and .handoffRequest.schema == "fm-next-skill-handoff.v1"
+  ' >/dev/null || fail "live t5 shape did not route missing structured evidence to repository preparation: $out"
+
+  request=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_NEXT_CALLSIGNS_JSON='[{"id":"fm-firstmate-local-startup","ref":"t5","name":"root-level-fm"}]' \
+    "$NEXT") || fail "live t5 shell handoff failed"
+  [ "$request" = '{"schema":"fm-next-skill-handoff.v1","mode":"normal","request":"prepare","selection":{"ref":"t5","name":"root-level-fm","canonicalId":"fm-firstmate-local-startup","kind":"review"}}' ] \
+    || fail "live t5 shell handoff was not compact and structured: $request"
+  assert_not_contains "$request" "$home" "live t5 shell handoff exposed a private path"
+  assert_not_contains "$request" "Create a new long-lived" "live t5 shell handoff exposed raw intent"
+  assert_not_contains "$request" "report.md" "live t5 shell handoff exposed the absent report"
+  assert_not_contains "$request" "check only this remaining uncertainty" "live t5 shell handoff pretended preparation occurred"
+  pass "the real live t5 record shape requires skill-side inspection of its implementation copy"
 }
 
 test_no_action_and_option_validation() {
@@ -396,7 +435,7 @@ test_decision_and_credential_handoffs
 test_visual_delivery_and_monitoring_handoffs
 test_closure_preflight_and_missing_evidence
 test_obsolete_preparation_reranks_once
-test_live_preparation_reads_result_and_repository_state
+test_live_t5_shape_routes_to_repository_preparation
 test_no_action_and_option_validation
 
 echo "fm-next tests passed"
