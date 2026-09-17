@@ -1,11 +1,15 @@
 projects/
 state/
 data/
+scratchpad*
 .no-mistakes/
 .lavish/
 .fm-secondmate-home
+.fm-secondmate-parent
 .DS_Store
 __pycache__/
 *.pyc
 .env
 config/
+
+.tools/

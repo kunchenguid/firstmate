@@ -1,6 +1,27 @@
 #!/usr/bin/env bash
-# Behavior and tracked-registration tests for the native session-start nudge.
+# Behavior tests for both native session-open tiers: the nudge wrapper that
+# only asks the agent to take the helm, and the run wrapper that takes it.
+#
+# The run-wrapper cases drive the REAL bin/fm-session-start.sh against a
+# throwaway home, so they prove routing by the digest that actually appears,
+# not by inspecting the wrapper's source. docs/sessionstart-nudge.md owns the
+# tier assignment and the source table these pin.
 set -u
+
+# Run the whole suite beneath one long-lived fixture harness, matching the real
+# lifecycle in which startup and later clear/compact hooks share one harness
+# ancestor. This also prevents a developer's ambient harness from making the
+# portable regression pass locally while failing on a harness-free CI runner.
+if [ "${FM_SESSIONSTART_TEST_HARNESS:-0}" != 1 ]; then
+  HARNESS_FIXTURE=$(mktemp -d "${TMPDIR:-/tmp}/fm-sessionstart-harness.XXXXXX") || exit 1
+  ln -s /bin/bash "$HARNESS_FIXTURE/codex" || exit 1
+  # shellcheck disable=SC2016 # Expand in the fixture shell, not this parent.
+  FM_SESSIONSTART_TEST_HARNESS=1 "$HARNESS_FIXTURE/codex" \
+    -c '"$@"; rc=$?; :; exit "$rc"' _ "$0" "$@"
+  HARNESS_STATUS=$?
+  rm -rf "$HARNESS_FIXTURE"
+  exit "$HARNESS_STATUS"
+fi
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -9,6 +30,7 @@ unset NO_MISTAKES_GATE
 
 TMP_ROOT=$(fm_test_tmproot fm-sessionstart-nudge)
 NUDGE="$ROOT/bin/fm-sessionstart-nudge.sh"
+RUN="$ROOT/bin/fm-sessionstart-run.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-operational-input.sh"
 NUDGE_TEXT="Run \`bin/fm-session-start.sh\` now, exactly once, before executing any other instructions."
@@ -109,6 +131,40 @@ test_owned_lock_is_silent() {
   pass "fm-sessionstart-nudge: a lock holder in process ancestry is already run"
 }
 
+# A firstmate running inside a PID namespace - a container, or `codex sandbox` -
+# holds its home lock from a harness that IS pid 1, so this hook must recognize
+# that owner. The old walk rejected a lock pid of 1 outright and stopped before
+# comparing pid 1, so the hook nudged a session that had already run.
+# A fake ps cannot reach this path: `kill -0` is a shell builtin gating the lock
+# pid, and on a host `kill -0 1` fails for an unprivileged user, so the case
+# needs a real namespace where pid 1 is this user's own process.
+test_namespace_pid1_lock_holder_is_silent() {
+  local root="$TMP_ROOT/namespace-pid1" out status=0
+  if ! command -v unshare >/dev/null 2>&1 \
+    || ! unshare -rpf --mount-proc true >/dev/null 2>&1; then
+    printf '# skip: unprivileged PID namespaces are unavailable here, so the namespace pid 1 lock owner is unverified\n'
+    return 0
+  fi
+  make_primary "$root"
+
+  # Non-vacuity: inside the same namespace, with no lock at all, the hook must
+  # still produce its nudge, so silence below means the owner was recognized.
+  out=$(unshare -rpf --mount-proc bash -c \
+    "FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE='$root' FM_HOME='$root' '$NUDGE'; exit \$?") || status=$?
+  expect_code 0 "$status" "namespace nudge without a lock"
+  [ "$out" = "$NUDGE_LINE" ] \
+    || fail "the namespace fixture did not nudge without a lock, so its silence proves nothing: $out"
+
+  printf '1\n' > "$root/state/.lock"
+  status=0
+  out=$(unshare -rpf --mount-proc bash -c \
+    "FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE='$root' FM_HOME='$root' '$NUDGE'; exit \$?") || status=$?
+  expect_code 0 "$status" "namespace pid 1 lock nudge"
+  [ -z "$out" ] \
+    || fail "a lock held by the harness at namespace pid 1 was not recognized, got: $out"
+  pass "fm-sessionstart-nudge: a lock holder that is pid 1 of its own namespace is already run"
+}
+
 test_opencode_plugin_delivers_exact_nudge_once() {
   local root="$TMP_ROOT/opencode-primary" out status=0
   make_primary "$root"
@@ -148,6 +204,850 @@ EOF
   pass "OpenCode session.created delivers the exact wrapper nudge once per session"
 }
 
+# --- run tier ----------------------------------------------------------------
+#
+# make_run_primary builds a primary the run wrapper accepts and the REAL
+# fm-session-start.sh can execute: a git repo on main so the tangle check
+# behaves, plus the home directories the digest reads. The deliberately bare
+# PATH keeps every bootstrap probe fast and hermetic - it reports missing tools
+# instead of reaching the host's real gh/tmux/tasks-axi.
+RUN_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
+
+make_run_primary() {
+  local dir=$1
+  mkdir -p "$dir/bin" "$dir/state" "$dir/data" "$dir/config"
+  git init -q -b main "$dir"
+  git -C "$dir" commit -q --allow-empty -m init
+  : > "$dir/AGENTS.md"
+}
+
+run_hook() {  # <root> [args...]
+  local root=$1
+  shift
+  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
+}
+
+run_hook_pi() {  # <root> [args...]
+  local root=$1
+  shift
+  env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS=pi \
+    FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
+}
+
+# Every run-tier assertion keys off the digest banner, which fm-session-start.sh
+# prints before the lock result, so routing is proven whether or not the lock
+# was won in the test environment.
+FULL_BANNER="SESSION START - "
+REEMIT_BANNER="SESSION START (CONTEXT RE-EMIT) - "
+
+test_run_startup_runs_the_full_digest() {
+  local root="$TMP_ROOT/run-startup" out status=0
+  make_run_primary "$root"
+  out=$(run_hook "$root" --source startup </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper startup"
+  assert_contains "$out" "$FULL_BANNER$root" "startup did not run the full digest"
+  assert_contains "$out" "lock acquired: harness pid" \
+    "the portable startup fixture did not supply a real harness process"
+  assert_not_contains "$out" "$REEMIT_BANNER" "startup was misrouted to a context re-emit"
+  assert_not_contains "$out" "FIRSTMATE_OP" "a run-tier open also emitted the nudge instruction"
+  assert_contains "$out" "NEXT STEP" "the run wrapper did not deliver a complete digest"
+  pass "run wrapper: startup runs the full digest and never also nudges"
+}
+
+test_run_clear_and_compact_reemit() {
+  local root out source status
+  for source in clear compact; do
+    root="$TMP_ROOT/run-$source"
+    make_run_primary "$root"
+    run_hook "$root" --source startup </dev/null >/dev/null
+    assert_present "$root/state/.session-start-complete" \
+      "startup did not publish the completion proof needed by $source"
+    status=0
+    out=$(run_hook "$root" --source "$source" </dev/null) || status=$?
+    expect_code 0 "$status" "run wrapper $source"
+    assert_contains "$out" "$REEMIT_BANNER$root" "$source did not re-emit the digest"
+    assert_contains "$out" "are NOT repeated" "$source did not report the skipped startup sweeps"
+    assert_contains "$out" "Queued wakes ARE still drained" "$source did not preserve the wake-queue drain"
+    assert_not_contains "$out" "FIRSTMATE_OP" "a $source open also emitted the nudge instruction"
+  done
+  pass "run wrapper: clear and compact re-emit the digest without repeating startup sweeps"
+}
+
+test_run_rebuild_forwards_source_to_drifted_instruction_refresh() {
+  local root="$TMP_ROOT/run-instruction-refresh" baseline compact_out clear_out resume_out
+  make_run_primary "$root"
+  printf '%s\n' 'RUN_TIER_AGENTS=original' > "$root/AGENTS.md"
+  run_hook_pi "$root" --source startup </dev/null >/dev/null
+  assert_present "$root/state/.session-start-agents-baseline" \
+    "run-tier startup did not record an instruction baseline"
+  baseline=$(cat "$root/state/.session-start-agents-baseline")
+
+  printf '%s\n' 'RUN_TIER_AGENTS=updated' > "$root/AGENTS.md"
+  compact_out=$(run_hook_pi "$root" --source compact </dev/null)
+  clear_out=$(run_hook_pi "$root" --source clear </dev/null)
+  resume_out=$(run_hook_pi "$root" --source resume </dev/null)
+
+  assert_contains "$compact_out" "RUN_TIER_AGENTS=updated" \
+    "the compact run wrapper did not forward its source to instruction refresh"
+  assert_not_contains "$clear_out" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
+    "the clear run wrapper emitted a replacement contract despite Pi's fresh runtime"
+  [ "$baseline" = "$(cat "$root/state/.session-start-agents-baseline")" ] \
+    || fail "a run-tier rebuild rewrote the true-start instruction baseline"
+  [ -z "$resume_out" ] \
+    || fail "an already-owned resume should preserve context without re-running the digest"
+
+  pass "run wrapper forwards only stale-cache rebuild sources to immutable-baseline instruction refresh"
+}
+
+test_run_compact_without_completion_refreshes_before_finishing_startup() {
+  local root="$TMP_ROOT/run-compact-incomplete" out status=0 refresh_line bootstrap_line
+  make_run_primary "$root"
+  printf '%s\n' 'INCOMPLETE_START_AGENTS=current' > "$root/AGENTS.md"
+
+  out=$(run_hook_pi "$root" --source compact </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper compact without completion proof"
+  assert_contains "$out" "$FULL_BANNER$root" \
+    "compact skipped full startup when no completed startup could be proven"
+  assert_contains "$out" "INCOMPLETE_START_AGENTS=current" \
+    "compact after an incomplete startup did not conservatively inject current instructions"
+  refresh_line=$(printf '%s\n' "$out" | grep -n '^CURRENT AGENTS.md - INSTRUCTION REFRESH$' | head -1 | cut -d: -f1)
+  bootstrap_line=$(printf '%s\n' "$out" | grep -n '^BOOTSTRAP$' | head -1 | cut -d: -f1)
+  [ -n "$refresh_line" ] && [ -n "$bootstrap_line" ] && [ "$refresh_line" -lt "$bootstrap_line" ] \
+    || fail "compact recovery did not emit current instructions before the bulky digest"
+  assert_absent "$root/state/.session-start-agents-baseline" \
+    "compact recovery fabricated a true-start instruction baseline"
+
+  pass "run wrapper refreshes a compact even when startup completion is unproven"
+}
+
+test_run_clear_without_completion_finishes_startup() {
+  local root="$TMP_ROOT/run-clear-incomplete" out status=0
+  make_run_primary "$root"
+  out=$(run_hook "$root" --source clear </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper clear without completion proof"
+  assert_contains "$out" "$FULL_BANNER$root" \
+    "clear skipped full startup when no completed startup could be proven"
+  assert_not_contains "$out" "$REEMIT_BANNER" \
+    "clear trusted lock ownership as proof that startup completed"
+  assert_present "$root/state/.session-start-complete" \
+    "the recovery full startup did not publish completion proof"
+  pass "run wrapper: clear falls back to full startup when completion is unproven"
+}
+
+test_run_clear_rejects_previous_owner_completion() {
+  local root="$TMP_ROOT/run-clear-previous-owner" out status=0 previous_pid
+  make_run_primary "$root"
+  sleep 0 &
+  previous_pid=$!
+  wait "$previous_pid"
+  printf '%s\n' "$previous_pid" > "$root/state/.lock"
+  printf '%s\n' "$previous_pid" > "$root/state/.session-start-complete"
+
+  out=$(run_hook "$root" --source clear </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper clear with previous owner completion"
+  assert_contains "$out" "$FULL_BANNER$root" \
+    "clear treated a previous session's completion as current"
+  assert_not_contains "$out" "$REEMIT_BANNER" \
+    "clear skipped startup sweeps completed only by a previous session"
+  [ "$(cat "$root/state/.lock")" != "$previous_pid" ] \
+    || fail "the recovery startup did not replace the previous session's stale lock"
+  pass "run wrapper: clear accepts completion only from the current harness"
+}
+
+test_pi_startup_classifies_cli_continuations() {
+  local fixture out expected actual status=0
+  command -v node >/dev/null 2>&1 || {
+    echo "skip: node not found for Pi continuation classification test"
+    return 0
+  }
+  fixture="$TMP_ROOT/pi-continuation-source"
+  mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
+    "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$fixture/.pi/extensions/lib/"
+  cat > "$fixture/bin/fm-sessionstart-run.sh" <<'SH'
+#!/usr/bin/env bash
+source_name=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --source) source_name=${2:-}; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '%s\n' "$source_name" >> "${FM_HOME:?}/state/sources"
+SH
+  cat > "$fixture/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fixture/bin/"*.sh
+
+  out=$(EXT="$fixture/.pi/extensions/fm-primary-turnend-guard.ts" \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
+    node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+const handlers = new Map();
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  sendMessage() {},
+};
+const extension = await import(`${pathToFileURL(process.env.EXT).href}?continuation=${Date.now()}`);
+extension.default(pi);
+let sessionNumber = 0;
+const fire = async (args, entries = [], timestamp = new Date().toISOString()) => {
+  process.argv.splice(1, process.argv.length, "pi", ...args);
+  const sessionId = `continuation-${++sessionNumber}`;
+  const ctx = {
+    sessionManager: {
+      getEntries: () => entries,
+      getHeader: () => ({ timestamp }),
+      getSessionId: () => sessionId,
+    },
+  };
+  handlers.get("session_start")({ reason: "startup" }, ctx);
+  await handlers.get("before_agent_start")({ prompt: "test" }, ctx);
+};
+const oldTimestamp = "2000-01-01T00:00:00.000Z";
+const nameEntry = [{ type: "session_info", name: "named" }];
+await fire([]);
+await fire(["-c"]);
+await fire(["--continue"], [{ type: "message" }], oldTimestamp);
+await fire(["--resume"]);
+await fire(["-r"], [{ type: "message" }], oldTimestamp);
+await fire(["--session", "new-session"]);
+await fire(["--session=existing-session"], [{ type: "message" }], oldTimestamp);
+await fire(["--session-id", "new-id"]);
+await fire(["--session-id=existing-id"], [{ type: "message" }], oldTimestamp);
+await fire(["--session-id", "empty-existing-id"], [], oldTimestamp);
+await fire(["-c", "--name", "new-named"], nameEntry);
+await fire(["-c", "--name", "restored-named"], nameEntry, oldTimestamp);
+await fire(["--session-id", "new-named-id", "--name", "new-named"], nameEntry);
+await fire(["--session", "existing-named", "--name", "restored-named"], nameEntry, oldTimestamp);
+await fire(["--fork=session-id"]);
+await fire([], [{ type: "message" }], oldTimestamp);
+JS
+  ) || status=$?
+  expect_code 0 "$status" "Pi continuation classification"
+  [ -z "$out" ] || fail "Pi continuation classification printed output: $out"
+  expected=$(printf '%s\n' \
+    'startup' \
+    'startup' \
+    'resume' \
+    'startup' \
+    'resume' \
+    'startup' \
+    'resume' \
+    'startup' \
+    'resume' \
+    'resume' \
+    'startup' \
+    'resume' \
+    'startup' \
+    'resume' \
+    'fork' \
+    'startup')
+  actual=$(cat "$fixture/state/sources")
+  [ "$actual" = "$expected" ] \
+    || fail "Pi continuation classification produced unexpected sources: $actual"
+  pass "Pi distinguishes header-proven restored CLI sessions from named create-if-missing startups"
+}
+
+test_pi_sessionstart_generation_prerequisite() {
+  local fixture out status=0
+  command -v node >/dev/null 2>&1 || {
+    echo "skip: node not found for Pi session-start generation prerequisite test"
+    return 0
+  }
+  fixture="$TMP_ROOT/pi-sessionstart-generation"
+  mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
+    "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$fixture/.pi/extensions/lib/"
+  cp "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/"
+  cat > "$fixture/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fixture/bin/fm-sessionstart-run.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+state=${FM_HOME:?}/state
+source_name=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --source) source_name=${2:-}; shift 2 ;;
+    *) shift ;;
+  esac
+done
+count=$(( $(wc -l < "$state/launches" 2>/dev/null || printf '0') + 1 ))
+behavior=$(cat "$state/behavior-$count")
+printf 'launch:%s:%s:%s:%s:%s\n' \
+  "$count" "$behavior" "$source_name" "$$" "${FM_SESSIONSTART_SUPERVISOR_PID:-}" >> "$state/launches"
+printf 'launch:%s\n' "$count" >> "$state/events"
+case "$behavior" in
+  success)
+    printf 'GENERATION_DIGEST_%s source=%s\n' "$count" "$source_name"
+    : > "$state/completed-$count"
+    ;;
+  slow|timeout)
+    (
+      trap '' TERM INT
+      while :; do sleep 30; done
+    ) </dev/null >/dev/null 2>&1 &
+    grandchild=$!
+    printf '%s\n' "$grandchild" > "$state/grandchild-$count"
+    trap 'printf "term:'"$count"'\n" >> "$state/events"; exit 143' TERM INT
+    : > "$state/started-$count"
+    while [ ! -f "$state/release-$count" ]; do sleep 0.02; done
+    if [ "$behavior" = timeout ]; then
+      printf 'STARTUP TRUNCATED - stage=bootstrap generation=%s\n' "$count"
+    else
+      printf 'GENERATION_DIGEST_%s source=%s\n' "$count" "$source_name"
+    fi
+    : > "$state/completed-$count"
+    kill -KILL "$grandchild" 2>/dev/null || true
+    wait "$grandchild" 2>/dev/null || true
+    ;;
+  stale)
+    trap 'printf "stale-close:'"$count"'\n" >> "$state/events"; printf "STALE_DIGEST_'"$count"'\n"; : > "$state/completed-'"$count"'"; exit 0' TERM INT
+    : > "$state/started-$count"
+    while [ ! -f "$state/release-$count" ]; do sleep 0.02; done
+    printf 'STALE_DIGEST_%s\n' "$count"
+    : > "$state/completed-$count"
+    ;;
+  empty)
+    : > "$state/completed-$count"
+    ;;
+  ineligible)
+    : > "$state/completed-$count"
+    exit 3
+    ;;
+  error)
+    : > "$state/completed-$count"
+    exit 7
+    ;;
+  truncate)
+    printf 'TRUNCATION_PREFIX_%s\n' "$count"
+    i=0
+    while [ "$i" -lt 700 ]; do
+      printf '%01024d' 0
+      i=$((i + 1))
+    done
+    printf '\nTRUNCATION_SUFFIX_%s\n' "$count"
+    : > "$state/completed-$count"
+    ;;
+  *)
+    exit 9
+    ;;
+esac
+SH
+  chmod +x "$fixture/bin/"*.sh
+  : > "$fixture/state/launches"
+  : > "$fixture/state/events"
+
+  out=$(EXT="$fixture/.pi/extensions/fm-primary-turnend-guard.ts" \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
+    node --input-type=module 2>&1 <<'JS'
+import {
+  existsSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const state = `${process.env.FM_HOME}/state`;
+const runner = `${process.env.FM_HOME}/bin/fm-sessionstart-run.sh`;
+const handlers = new Map();
+const sent = [];
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  sendMessage(message) { sent.push(message); },
+};
+const extension = await import(`${pathToFileURL(process.env.EXT).href}?generation=${Date.now()}`);
+extension.default(pi);
+process.argv.splice(1, process.argv.length, "pi");
+
+const assert = (condition, message) => {
+  if (!condition) throw new Error(message);
+};
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const waitFor = async (predicate, message) => {
+  for (let i = 0; i < 400; i += 1) {
+    if (predicate()) return;
+    await delay(5);
+  }
+  throw new Error(message);
+};
+const alive = (pid) => {
+  try { process.kill(Number(pid), 0); return true; } catch { return false; }
+};
+const waitDead = async (pid, message) => {
+  await waitFor(() => !alive(pid), message);
+};
+const ctx = (sessionId) => ({
+  sessionManager: {
+    getHeader: () => ({ timestamp: new Date().toISOString() }),
+    getSessionId: () => sessionId,
+  },
+});
+const begin = (reason, sessionId) => {
+  const current = ctx(sessionId);
+  handlers.get("session_start")({ reason }, current);
+  return current;
+};
+const providerCalls = [];
+const providerCall = async (current, prompt) => {
+  const preflight = await handlers.get("before_agent_start")({ prompt }, current);
+  providerCalls.push({ prompt, message: preflight?.message });
+  return preflight;
+};
+const plan = (index, behavior) => {
+  writeFileSync(`${state}/behavior-${index}`, `${behavior}\n`);
+};
+const release = (index) => writeFileSync(`${state}/release-${index}`, "\n");
+const launchLines = () => readFileSync(`${state}/launches`, "utf8").trim().split("\n").filter(Boolean);
+const pidFor = (index) => Number(launchLines().find((line) => line.startsWith(`launch:${index}:`))?.split(":")[4]);
+const supervisorFor = (index) => Number(launchLines().find((line) => line.startsWith(`launch:${index}:`))?.split(":")[5]);
+const grandchildFor = (index) => Number(readFileSync(`${state}/grandchild-${index}`, "utf8").trim());
+const startupMessages = () => providerCalls.map((call) => call.message).filter(Boolean);
+
+// The failing immediate-prompt path is now a prerequisite: no provider call is
+// observable until the matching slow native generation settles.
+plan(1, "slow");
+const immediate = begin("startup", "session-immediate");
+await waitFor(() => existsSync(`${state}/started-1`), "immediate generation never started");
+const immediateCall = providerCall(immediate, "immediate prompt");
+await delay(100);
+assert(providerCalls.length === 0, "provider call escaped before the startup prerequisite settled");
+release(1);
+const immediateResult = await immediateCall;
+assert(immediateResult?.message?.content.includes("GENERATION_DIGEST_1"), "first payload lost matching startup context");
+assert(launchLines().length === 1, "immediate generation executed more than once");
+assert((await handlers.get("before_agent_start")({ prompt: "second prompt" }, immediate)) === undefined,
+  "one generation delivered startup context more than once");
+assert(startupMessages().length === 1, "immediate generation produced more than one model-visible startup context");
+assert(sent.length === 0, "session start still used asynchronous sendMessage delivery");
+
+// Proven non-racing path: native completion before submission produces the same
+// first-payload guarantee without a manual fallback.
+plan(2, "success");
+const proven = begin("new", "session-proven");
+await waitFor(() => existsSync(`${state}/completed-2`), "proven generation never completed");
+const provenResult = await providerCall(proven, "proven prompt");
+assert(provenResult?.message?.content.includes("GENERATION_DIGEST_2"), "proven path lost startup context");
+assert(!provenResult.message.content.includes("Run `bin/fm-session-start.sh`"), "proven path used manual fallback");
+const provenSupervisor = supervisorFor(2);
+assert(alive(provenSupervisor), "completed generation lost its stable supervisor owner");
+const originalKill = process.kill;
+let ownedGroupSignalCount = 0;
+process.kill = (pid, signal) => {
+  if (pid === -provenSupervisor && signal !== 0) ownedGroupSignalCount += 1;
+  return Reflect.apply(originalKill, process, [pid, signal]);
+};
+
+// Shutdown owns interruption and the whole child process group. The pending
+// preflight settles without stale delivery.
+plan(3, "slow");
+const interrupted = begin("new", "session-interrupted");
+process.kill = originalKill;
+assert(ownedGroupSignalCount > 0, "replacement did not retire the completed generation's stable owner");
+await waitFor(() => existsSync(`${state}/started-3`) && existsSync(`${state}/grandchild-3`),
+  "interrupted generation never started its process tree");
+const interruptedCall = handlers.get("before_agent_start")({ prompt: "interrupted" }, interrupted);
+const interruptedPid = pidFor(3);
+const interruptedGrandchild = grandchildFor(3);
+await handlers.get("session_shutdown")({ reason: "new" }, interrupted);
+assert((await interruptedCall) === undefined, "shutdown delivered cancelled startup context");
+await waitDead(interruptedPid, "shutdown left the startup child alive");
+await waitDead(interruptedGrandchild, "shutdown left a startup grandchild alive");
+
+// Two rapid replacements serialize retirement. The middle generation never
+// starts, stale completion is ignored, and only the newest generation delivers.
+plan(4, "stale");
+plan(5, "success");
+const stale = begin("new", "session-stale");
+await waitFor(() => existsSync(`${state}/started-4`), "stale generation never started");
+const staleCall = handlers.get("before_agent_start")({ prompt: "stale" }, stale);
+begin("new", "session-replaced-once");
+const newest = begin("new", "session-replaced-twice");
+const newestResult = await providerCall(newest, "newest");
+assert(newestResult?.message?.content.includes("GENERATION_DIGEST_5"), "newest replacement lost its context");
+assert((await staleCall) === undefined, "stale generation delivered after replacement");
+assert(launchLines().length === 5, "rapid replacements launched the cancelled middle generation");
+assert(!startupMessages().some((message) => message.content.includes("STALE_DIGEST_4")),
+  "stale completion reached model context");
+const events = readFileSync(`${state}/events`, "utf8");
+assert(events.indexOf("stale-close:4") < events.indexOf("launch:5"),
+  "newest generation started before stale child retirement completed");
+
+// Empty output and spawn failure settle first, then inject the existing exact
+// manual instruction. Intentional ineligibility remains silent.
+plan(6, "empty");
+const empty = begin("new", "session-empty");
+const emptyResult = await providerCall(empty, "empty");
+assert(existsSync(`${state}/completed-6`), "empty attempt had not settled before fallback delivery");
+assert(emptyResult?.message?.content.includes("Run `bin/fm-session-start.sh` now, exactly once, before executing any other instructions."),
+  "empty output lost the exact manual fallback");
+
+renameSync(runner, `${runner}.missing`);
+const spawnError = begin("new", "session-spawn-error");
+const spawnErrorResult = await providerCall(spawnError, "spawn error");
+renameSync(`${runner}.missing`, runner);
+assert(spawnErrorResult?.message?.content.includes("Run `bin/fm-session-start.sh` now, exactly once"),
+  "spawn error lost the manual fallback");
+
+plan(7, "ineligible");
+const ineligible = begin("new", "session-ineligible");
+assert((await providerCall(ineligible, "ineligible")) === undefined,
+  "intentional gate/scope stand-down injected a manual fallback");
+
+plan(8, "error");
+const failed = begin("new", "session-failed");
+const failedResult = await providerCall(failed, "failed");
+assert(failedResult?.message?.content.includes("Run `bin/fm-session-start.sh` now, exactly once"),
+  "failed eligible attempt lost the manual fallback");
+
+plan(9, "error");
+const failedResume = begin("resume", "session-failed-resume");
+const failedResumeResult = await providerCall(failedResume, "failed resume");
+assert(failedResumeResult?.message?.content.includes("Run `bin/fm-session-start.sh` now, exactly once"),
+  "failed eligible resume lost the manual fallback");
+
+plan(10, "error");
+const failedFork = begin("fork", "session-failed-fork");
+const failedForkResult = await providerCall(failedFork, "failed fork");
+assert(failedForkResult?.message?.content.includes("Run `bin/fm-session-start.sh` now, exactly once"),
+  "failed eligible fork lost the manual fallback");
+
+plan(11, "empty");
+const emptyResume = begin("resume", "session-empty-resume");
+assert((await providerCall(emptyResume, "empty resume")) === undefined,
+  "empty context-restored resume injected a manual fallback");
+
+plan(12, "empty");
+const emptyFork = begin("fork", "session-empty-fork");
+assert((await providerCall(emptyFork, "empty fork")) === undefined,
+  "empty context-restored fork injected a manual fallback");
+
+// The wrapper's bounded timeout result and the extension's 512 KiB containment
+// remain loud provider prerequisites rather than falling back or going stale.
+plan(13, "timeout");
+const timed = begin("new", "session-timeout");
+await waitFor(() => existsSync(`${state}/started-13`), "timeout generation never started");
+const timedCall = providerCall(timed, "timeout");
+await delay(100);
+assert(!providerCalls.some((call) => call.prompt === "timeout"), "timeout provider call escaped before settlement");
+release(13);
+const timedResult = await timedCall;
+assert(timedResult?.message?.content.includes("STARTUP TRUNCATED - stage=bootstrap"), "timeout banner was lost");
+assert(!timedResult.message.content.includes("Run `bin/fm-session-start.sh`"), "bounded timeout incorrectly used manual fallback");
+
+plan(14, "truncate");
+const truncated = begin("new", "session-truncated");
+const truncatedResult = await providerCall(truncated, "truncated");
+assert(truncatedResult?.message?.content.includes("TRUNCATION_PREFIX_14"), "truncated digest lost its prefix");
+assert(truncatedResult.message.content.includes("PI SESSION-START DELIVERY TRUNCATED"), "truncated digest was not loud");
+assert(!truncatedResult.message.content.includes("TRUNCATION_SUFFIX_14"), "truncated digest exceeded its bound");
+
+// Compaction keeps its supported asynchronous transport for retry-without-
+// preflight, but it shares the same generation cancellation and exactly-once claim.
+plan(15, "success");
+const compactContext = ctx("session-truncated");
+await handlers.get("session_compact")({}, compactContext);
+assert(sent.length === 1 && sent[0].content.includes("GENERATION_DIGEST_15"),
+  "compaction lost its existing persistent delivery");
+assert((await handlers.get("before_agent_start")({ prompt: "post compact" }, compactContext)) === undefined,
+  "compaction delivered the same context twice");
+
+plan(16, "slow");
+const compactPending = handlers.get("session_compact")({}, compactContext);
+await waitFor(() => existsSync(`${state}/started-16`) && existsSync(`${state}/grandchild-16`),
+  "cancelled compaction generation never started");
+const compactPid = pidFor(16);
+const compactGrandchild = grandchildFor(16);
+await handlers.get("session_shutdown")({ reason: "quit" }, compactContext);
+await compactPending;
+assert(sent.length === 1, "cancelled compaction delivered stale context");
+await waitDead(compactPid, "shutdown left the compaction child alive");
+await waitDead(compactGrandchild, "shutdown left a compaction grandchild alive");
+JS
+  ) || status=$?
+  expect_code 0 "$status" "Pi session-start generation prerequisite"
+  [ -z "$out" ] || fail "Pi session-start generation prerequisite printed output: $out"
+  pass "Pi provider preflight owns one generation-bound startup prerequisite with deterministic fallback, replacement, cancellation, timeout, and truncation"
+}
+
+test_pi_reload_releases_sessionstart_exit_listener() {
+  local fixture out status=0
+  command -v node >/dev/null 2>&1 || {
+    echo "skip: node not found for Pi reload exit-listener test"
+    return 0
+  }
+  fixture="$TMP_ROOT/pi-reload-exit-listener"
+  mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
+    "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$fixture/.pi/extensions/lib/"
+  cp "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/"
+  cat > "$fixture/bin/fm-turnend-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fixture/bin/fm-sessionstart-run.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+state=${FM_HOME:?}/state
+index=$(( $(wc -l < "$state/launches" 2>/dev/null || printf '0') + 1 ))
+printf '%s:%s:%s\n' "$index" "$$" "${FM_SESSIONSTART_SUPERVISOR_PID:-}" >> "$state/launches"
+(
+  trap '' TERM INT HUP
+  while :; do sleep 30; done
+) </dev/null >/dev/null 2>&1 &
+grandchild=$!
+printf '%s\n' "$grandchild" > "$state/grandchild-$index"
+: > "$state/started-$index"
+if [ "$index" -eq 3 ]; then
+  exit 0
+fi
+trap 'exit 143' TERM INT
+while :; do sleep 30; done
+SH
+  chmod +x "$fixture/bin/"*.sh
+  : > "$fixture/state/launches"
+
+  out=$(EXT="$fixture/.pi/extensions/fm-primary-turnend-guard.ts" \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" \
+    node --input-type=module 2>&1 <<'JS'
+import { existsSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
+
+const state = `${process.env.FM_HOME}/state`;
+const baselineListeners = process.listeners("exit");
+const baselineCount = baselineListeners.length;
+const assert = (condition, message) => {
+  if (!condition) throw new Error(message);
+};
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const waitFor = async (predicate, message) => {
+  for (let i = 0; i < 600; i += 1) {
+    if (predicate()) return;
+    await delay(5);
+  }
+  throw new Error(message);
+};
+const alive = (pid) => {
+  try { process.kill(Number(pid), 0); } catch { return false; }
+  const status = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" });
+  return status.status === 0 && !status.stdout.trim().startsWith("Z");
+};
+const ctx = (sessionId) => ({
+  sessionManager: {
+    getHeader: () => ({ timestamp: new Date().toISOString() }),
+    getSessionId: () => sessionId,
+  },
+});
+
+let launchIndex = 0;
+for (let instance = 1; instance <= 2; instance += 1) {
+  const handlers = new Map();
+  const pi = {
+    on(event, handler) { handlers.set(event, handler); },
+    sendMessage() {},
+  };
+  const extension = await import(
+    `${pathToFileURL(process.env.EXT).href}?reload=${instance}-${Date.now()}`
+  );
+  extension.default(pi);
+  assert(process.listenerCount("exit") === baselineCount + 1,
+    `reload ${instance} did not own exactly one exit listener`);
+  const sessionCount = instance === 1 ? 2 : 1;
+  for (let session = 1; session <= sessionCount; session += 1) {
+    launchIndex += 1;
+    const current = ctx(`reload-${instance}-session-${session}`);
+    handlers.get("session_start")({ reason: "new" }, current);
+    assert(process.listenerCount("exit") === baselineCount + 1,
+      `reload ${instance} session ${session} did not own exactly one exit listener`);
+    await waitFor(() => existsSync(`${state}/started-${launchIndex}`),
+      `reload ${instance} session ${session} startup generation never started`);
+    const launch = readFileSync(`${state}/launches`, "utf8").trim().split("\n")[launchIndex - 1];
+    const child = Number(launch.split(":")[1]);
+    const supervisor = Number(launch.split(":")[2]);
+    const grandchild = Number(readFileSync(`${state}/grandchild-${launchIndex}`, "utf8").trim());
+    if (launchIndex === 3) {
+      await waitFor(() => !alive(child), "leader did not close before process-exit cleanup");
+      assert(alive(grandchild), "TERM-resistant descendant exited with its leader");
+      assert(alive(supervisor), "leader close lost the stable supervisor owner");
+      assert(process.listenerCount("exit") === baselineCount + 1,
+        "leader close removed the active instance exit listener");
+      const ownedListener = process.listeners("exit").find(
+        (listener) => !baselineListeners.includes(listener)
+      );
+      assert(ownedListener, "active reload had no process-exit cleanup listener");
+      ownedListener(0);
+      await waitFor(() => !alive(grandchild),
+        "active process-exit cleanup left the leaderless process group alive");
+    }
+    await handlers.get("session_shutdown")({ reason: "reload" }, current);
+    assert(process.listenerCount("exit") === baselineCount,
+      `reload ${instance} session ${session} retained its exit listener after shutdown`);
+    assert((await handlers.get("before_agent_start")({ prompt: "stale" }, current)) === undefined,
+      `reload ${instance} session ${session} retained model-visible startup context after shutdown`);
+    assert(!alive(child) && !alive(grandchild),
+      `reload ${instance} session ${session} retained its stale startup process group`);
+    if (session < sessionCount) {
+      assert(process.listenerCount("exit") === baselineCount,
+        "same-instance replacement started with a stale exit listener");
+    }
+  }
+}
+JS
+  ) || status=$?
+  [ -z "$out" ] || fail "Pi reload exit-listener ownership printed output: $out"
+  expect_code 0 "$status" "Pi reload exit-listener ownership"
+  pass "Pi reload shutdown releases its exit listener and stale startup generation"
+}
+
+test_pi_large_sessionstart_digest_is_delivered_loudly() {
+  local fixture out status=0
+  command -v node >/dev/null 2>&1 || {
+    echo "skip: node not found for Pi large session-start delivery test"
+    return 0
+  }
+  fixture="$TMP_ROOT/pi-large-digest"
+  mkdir -p "$fixture/.pi/extensions/lib" "$fixture/bin" "$fixture/state" "$fixture/data" "$fixture/config"
+  git init -q -b main "$fixture"
+  git -C "$fixture" commit -q --allow-empty -m init
+  : > "$fixture/AGENTS.md"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
+    "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$fixture/.pi/extensions/lib/"
+  cp "$ROOT/bin/fm-sessionstart-run.sh" "$ROOT/bin/fm-sessionstart-nudge.sh" \
+    "$ROOT/bin/fm-primary-scope-lib.sh" "$ROOT/bin/fm-gate-refuse-lib.sh" \
+    "$ROOT/bin/fm-hook-host-lib.sh" \
+    "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/"
+  cat > "$fixture/bin/fm-session-start.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'PI_LARGE_DIGEST_PREFIX\n'
+i=0
+while [ "$i" -lt 700 ]; do
+  printf '%01024d' 0
+  i=$((i + 1))
+done
+printf '\nPI_LARGE_DIGEST_SUFFIX\n'
+SH
+  chmod +x "$fixture/bin/"*.sh
+
+  out=$(EXT="$fixture/.pi/extensions/fm-primary-turnend-guard.ts" \
+    FM_HOME="$fixture" FM_ROOT_OVERRIDE="$fixture" FM_GATE_REFUSE_BYPASS=1 \
+    node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+const handlers = new Map();
+const pi = {
+  on(event, handler) { handlers.set(event, handler); },
+  sendMessage() { throw new Error("session start must use provider preflight"); },
+};
+const extension = await import(`${pathToFileURL(process.env.EXT).href}?large=${Date.now()}`);
+extension.default(pi);
+const ctx = { sessionManager: { getEntries: () => [], getSessionId: () => "large-digest" } };
+handlers.get("session_start")({ reason: "startup" }, ctx);
+const result = await handlers.get("before_agent_start")({ prompt: "test" }, ctx);
+if (!result?.message) throw new Error("expected one persistent preflight message");
+const content = result.message.content;
+if (!content.includes("PI_LARGE_DIGEST_PREFIX")) throw new Error("digest prefix was lost");
+if (!content.includes("PI SESSION-START DELIVERY TRUNCATED")) throw new Error("truncation marker was lost");
+if (content.includes("PI_LARGE_DIGEST_SUFFIX")) throw new Error("delivery exceeded its declared bound");
+if (!content.includes("FIRSTMATE_OP: v1 session-start:")) throw new Error("operational provenance was lost");
+JS
+  ) || status=$?
+  expect_code 0 "$status" "Pi large session-start delivery"
+  [ -z "$out" ] || fail "Pi large session-start delivery printed output: $out"
+  pass "Pi retains a bounded digest prefix and loudly marks oversized preflight delivery"
+}
+
+test_run_resume_delegates_to_the_nudge() {
+  local root="$TMP_ROOT/run-resume" out status=0
+  make_run_primary "$root"
+  out=$(run_hook "$root" --source resume </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper resume"
+  [ "$out" = "$NUDGE_LINE" ] || fail "resume did not delegate to the exact nudge line, got: $out"
+  assert_absent "$root/state/.lock" "resume acquired the fleet lock instead of delegating"
+  pass "run wrapper: resume delegates to the nudge instead of re-running the digest"
+}
+
+test_run_reads_source_from_the_hook_payload() {
+  local root="$TMP_ROOT/run-payload" out status=0
+  make_run_primary "$root"
+  run_hook "$root" --source startup </dev/null >/dev/null
+  out=$(printf '{"session_id":"s1","hook_event_name":"SessionStart","source":"compact"}' |
+    run_hook "$root") || status=$?
+  expect_code 0 "$status" "run wrapper payload compact"
+  assert_contains "$out" "$REEMIT_BANNER$root" "a compact hook payload was not routed to a re-emit"
+
+  # A fresh root, because the compact case above legitimately took the lock and
+  # an owned lock is exactly when the nudge is supposed to stay silent.
+  root="$TMP_ROOT/run-payload-resume"
+  make_run_primary "$root"
+  status=0
+  out=$(printf '{"source":"resume","cwd":"/nowhere"}' | run_hook "$root") || status=$?
+  expect_code 0 "$status" "run wrapper payload resume"
+  assert_contains "$out" "FIRSTMATE_OP" "a resume hook payload did not delegate to the nudge"
+  assert_not_contains "$out" "SESSION START" "a resume hook payload still ran the digest"
+  pass "run wrapper: the hook payload's source field drives routing with no explicit argument"
+}
+
+test_run_unknown_source_takes_the_helm() {
+  local root="$TMP_ROOT/run-unknown" out status=0
+  make_run_primary "$root"
+  out=$(run_hook "$root" --source somethingnew </dev/null) || status=$?
+  expect_code 0 "$status" "run wrapper unknown source"
+  assert_contains "$out" "$FULL_BANNER$root" "an unrecognized source did not fall through to the full digest"
+
+  status=0
+  out=$(printf '{"hook_event_name":"SessionStart"}' | run_hook "$root") || status=$?
+  expect_code 0 "$status" "run wrapper sourceless payload"
+  assert_contains "$out" "$FULL_BANNER$root" "a payload with no source did not fall through to the full digest"
+  pass "run wrapper: an unrecognized or absent source takes the helm rather than skipping it"
+}
+
+test_run_gate_and_scope_are_silent() {
+  local root="$TMP_ROOT/run-gate" base="$TMP_ROOT/run-linked-base" linked="$TMP_ROOT/run-linked"
+  local out status=0
+  make_run_primary "$root"
+  expect_silent_zero "gate env run" env NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS=0 \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" --source startup
+  assert_absent "$root/state/.lock" "a gate agent's session open still took the fleet lock"
+  out=$(env NO_MISTAKES_GATE=1 FM_GATE_REFUSE_BYPASS=0 \
+    FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" \
+    "$RUN" --source startup --pi-prerequisite 2>&1) || status=$?
+  expect_code 3 "$status" "gate env Pi prerequisite stand-down"
+  [ -z "$out" ] || fail "gate env Pi prerequisite stand-down must be silent, got: $out"
+
+  fm_git_worktree "$base" "$linked" fm/run-linked
+  mkdir -p "$linked/bin" "$linked/state"
+  : > "$linked/AGENTS.md"
+  expect_silent_zero "linked worktree run" run_hook "$linked" --source startup
+  status=0
+  out=$(run_hook "$linked" --source startup --pi-prerequisite 2>&1) || status=$?
+  expect_code 3 "$status" "linked worktree Pi prerequisite stand-down"
+  [ -z "$out" ] || fail "linked worktree Pi prerequisite stand-down must be silent, got: $out"
+  assert_absent "$linked/state/.lock" "an unmarked task worktree still took the fleet lock"
+  pass "run wrapper: ordinary ineligible opens stay silent-zero and Pi preflight gets an explicit silent stand-down"
+}
+
+test_run_reports_a_failed_session_start_as_digest_text() {
+  local root="$TMP_ROOT/run-unwritable" out status=0
+  make_run_primary "$root"
+  chmod 0500 "$root/state"
+  out=$(run_hook "$root" --source startup </dev/null) || status=$?
+  chmod 0700 "$root/state"
+  expect_code 0 "$status" "run wrapper with an unwritable state directory"
+  assert_contains "$out" "READ-ONLY SESSION" "a failed lock did not reach the agent as digest text"
+  pass "run wrapper: a session start that cannot take the lock still opens the session and says so"
+}
+
 test_genuine_primary_nudges
 test_gate_env_is_silent
 test_gate_common_dir_is_silent
@@ -155,4 +1055,20 @@ test_unmarked_linked_worktree_is_silent
 test_linked_secondmate_primary_nudges
 test_missing_state_is_silent
 test_owned_lock_is_silent
+test_namespace_pid1_lock_holder_is_silent
 test_opencode_plugin_delivers_exact_nudge_once
+test_run_startup_runs_the_full_digest
+test_run_clear_and_compact_reemit
+test_run_rebuild_forwards_source_to_drifted_instruction_refresh
+test_run_compact_without_completion_refreshes_before_finishing_startup
+test_run_clear_without_completion_finishes_startup
+test_run_clear_rejects_previous_owner_completion
+test_run_resume_delegates_to_the_nudge
+test_run_reads_source_from_the_hook_payload
+test_run_unknown_source_takes_the_helm
+test_run_gate_and_scope_are_silent
+test_run_reports_a_failed_session_start_as_digest_text
+test_pi_startup_classifies_cli_continuations
+test_pi_sessionstart_generation_prerequisite
+test_pi_reload_releases_sessionstart_exit_listener
+test_pi_large_sessionstart_digest_is_delivered_loudly

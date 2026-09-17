@@ -10,6 +10,8 @@ EXT="$ROOT/.pi/extensions/fm-calm.ts"
 ASSISTANT_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts"
 OPERATIONAL_USER_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
 VISIBILITY="$ROOT/.pi/extensions/lib/fm-calm-visibility.ts"
+WORKING_SHIP="$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts"
+WORKING_SHIP_SPRITE="$ROOT/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
 WATCH_EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 OPERATIONAL_INPUT="$ROOT/bin/fm-operational-input.sh"
 PI_OPERATIONAL_INPUT="$ROOT/.pi/extensions/lib/fm-operational-input.ts"
@@ -38,7 +40,10 @@ trap cleanup EXIT
 wait_for_text() {
   local file=$1 text=$2 i=0
   while [ "$i" -lt 120 ]; do
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - >"$file" 2>/dev/null || true
+    # Include recent scrollback: expanding a long restored transcript can move
+    # the asserted tool output above the current viewport while the footer and
+    # editor remain visible.
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$file" 2>/dev/null || true
     grep -Fq "$text" "$file" 2>/dev/null && return 0
     sleep 0.05
     i=$((i + 1))
@@ -67,6 +72,82 @@ find_chrome() {
   return 1
 }
 
+# Render an exported session in real Chrome and leave the DOM in <out_file>.
+#
+# Rendering is a vendor-tool step, not a Calm guarantee: the DOM assertions the
+# caller runs afterwards are what protect the contract. Headless Chrome start-up
+# is the part that fails intermittently on a loaded CI runner - it can exit
+# before writing any DOM at all - and the original single unattended attempt
+# discarded both Chrome's stderr and its exit status, so a CI break surfaced as
+# a bare "could not render" with nothing in the log to tell a Chrome start-up
+# crash apart from a real change in Pi's export shape.
+#
+# So: retry the render a bounded number of times on a fresh profile, and when
+# every attempt fails, print the Chrome binary, its version, the installed Pi
+# version, and each attempt's exit status, stderr tail, and whether the helper
+# timed the attempt out - when it did, the exit status is only this helper's own
+# kill signal. The extra flags remove Chrome's background-network and /dev/shm
+# dependencies, which are the start-up surfaces that fail on a runner; neither
+# changes the rendered DOM of a local file.
+render_export_dom() {
+  local chrome=$1 source_file=$2 out_file=$3 pi_version=$4
+  local attempt pid status wait_count wait_limit reap_wait log profile report timed_out
+  report="$TMP_ROOT/chrome-render-report.txt"
+  wait_limit=${FM_CHROME_RENDER_WAIT_TICKS:-300}
+  : >"$report"
+  for attempt in 1 2 3; do
+    log="$TMP_ROOT/chrome-render-$attempt.err"
+    profile="$TMP_ROOT/chrome-profile-$attempt"
+    rm -rf "$profile"
+    : >"$out_file"
+    "$chrome" \
+      --headless=new \
+      --disable-gpu \
+      --no-sandbox \
+      --disable-dev-shm-usage \
+      --disable-background-networking \
+      --user-data-dir="$profile" \
+      --virtual-time-budget=2000 \
+      --dump-dom \
+      "file://$source_file" >"$out_file" 2>"$log" &
+    pid=$!
+    # Check the DOM before Chrome's liveness, so an attempt that writes the
+    # complete dump and exits immediately is still read as a success.
+    wait_count=0
+    while [ "$wait_count" -lt "$wait_limit" ]; do
+      grep -Fq '</html>' "$out_file" 2>/dev/null && break
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+      wait_count=$((wait_count + 1))
+    done
+    timed_out=no
+    if [ "$wait_count" -ge "$wait_limit" ]; then
+      timed_out=yes
+    fi
+    kill "$pid" 2>/dev/null || true
+    # Chrome can retain --headless=new after --dump-dom completes and ignore TERM,
+    # so an unbounded wait can hang after the complete DOM has been captured.
+    reap_wait=0
+    while kill -0 "$pid" 2>/dev/null && [ "$reap_wait" -lt 20 ]; do
+      sleep 0.1
+      reap_wait=$((reap_wait + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    status=0
+    wait "$pid" 2>/dev/null || status=$?
+    grep -Fq '</html>' "$out_file" 2>/dev/null && return 0
+    printf 'attempt %s: exit=%s timed_out=%s bytes=%s stderr=%s\n' \
+      "$attempt" "$status" "$timed_out" "$(wc -c <"$out_file" | tr -d ' ')" \
+      "$(tail -c 400 "$log" 2>/dev/null | tr '\n' ' ')" >>"$report"
+  done
+  printf 'chrome=%s chrome_version=%s pi=%s; %s' \
+    "$chrome" "$("$chrome" --version 2>&1 | head -1)" "$pi_version" \
+    "$(tr '\n' ' ' <"$report")"
+  return 1
+}
+
 test_home_resolution() {
   local fixture out status version
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
@@ -90,6 +171,8 @@ test_home_resolution() {
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
+  cp "$WORKING_SHIP_SPRITE" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
@@ -122,6 +205,9 @@ function registerCalm() {
     },
     registerEntryRenderer() {},
     registerTool() {},
+    getAllTools() {
+      return [];
+    },
   };
   extension.default(pi);
   if (!calmCommand || !handlers.has("session_start")) {
@@ -145,6 +231,7 @@ const context = {
     setStatus() {},
     setToolsExpanded() {},
     setWorkingVisible() {},
+    notify() {},
   },
 };
 
@@ -207,6 +294,8 @@ test_pi_compat_degraded_adapter() {
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
+  cp "$WORKING_SHIP_SPRITE" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
@@ -305,6 +394,8 @@ test_pi_compat_missing_adapter_exports() {
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
+  cp "$WORKING_SHIP_SPRITE" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
   cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
   printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
   printf '%s\n' \
@@ -343,8 +434,312 @@ JS
   pass "missing Pi presentation class exports reach the independent adapter degradation path"
 }
 
+test_builtin_gate_load_time() {
+  local fixture out output_file status
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "skip: node or npm not found for Pi calm gate test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+
+  fixture="$TMP_ROOT/gate-load-time"
+  mkdir -p \
+    "$fixture/project/.pi/extensions/lib" \
+    "$fixture/project/node_modules/@earendil-works" \
+    "$fixture/home-off/config" \
+    "$fixture/home-on/config"
+  cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
+  cp "$WORKING_SHIP_SPRITE" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
+  printf '%s\n' on >"$fixture/home-on/config/calm"
+
+  output_file="$fixture/node-output"
+  (cd "$fixture/project" && \
+    EXT="$fixture/project/.pi/extensions/fm-calm.ts" \
+    HOME_OFF="$fixture/home-off" \
+    HOME_ON="$fixture/home-on" \
+    node --input-type=module) >"$output_file" 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+
+function fakePi() {
+  const tools = [];
+  const handlers = new Map();
+  const pi = {
+    events: { emit() {}, on() {} },
+    on(event, handler) {
+      handlers.set(event, handler);
+    },
+    registerCommand() {},
+    registerEntryRenderer() {},
+    registerTool(tool) {
+      tools.push(tool);
+    },
+    getAllTools() {
+      return tools.map((tool) => ({ name: tool.name, sourceInfo: { source: "extension", path: "self" } }));
+    },
+  };
+  return { pi, tools, handlers };
+}
+
+// Calm-off (config/calm absent for this home): load-time registration must be
+// entirely skipped, so a non-Calm user contests nothing.
+process.env.FM_HOME = process.env.HOME_OFF;
+const offRun = fakePi();
+const extensionOff = await import(`${pathToFileURL(process.env.EXT).href}?gate-off=${Date.now()}`);
+extensionOff.default(offRun.pi);
+if (offRun.tools.length !== 0) {
+  throw new Error(`Calm registered ${offRun.tools.length} built-ins while config/calm was absent: ${offRun.tools.map((t) => t.name).join(",")}`);
+}
+
+// Calm-on (config/calm="on" for this home): registration must happen synchronously,
+// during this same factory call, exactly the timing /reload's pre-session_start
+// transcript render depends on - not deferred to session_start or later.
+process.env.FM_HOME = process.env.HOME_ON;
+const onRun = fakePi();
+const extensionOn = await import(`${pathToFileURL(process.env.EXT).href}?gate-on=${Date.now()}`);
+extensionOn.default(onRun.pi);
+const names = onRun.tools.map((t) => t.name).sort();
+const expected = ["bash", "edit", "find", "grep", "ls", "read", "write"];
+if (JSON.stringify(names) !== JSON.stringify(expected)) {
+  throw new Error(`Calm registered ${JSON.stringify(names)} synchronously at load with config/calm=on, expected ${JSON.stringify(expected)}`);
+}
+JS
+  status=$?
+  out=$(cat "$output_file")
+  [ "$status" -eq 0 ] || fail "Pi calm gate-at-load-time path failed: $out"
+  [ -z "$out" ] || fail "Pi calm gate-at-load-time test printed output: $out"
+  pass "Calm registers none of its 7 built-in tool wrappers at load while config/calm is off, and all 7 synchronously at load while config/calm is on"
+}
+
+test_calm_activation_collision_and_regression_bound() {
+  local fixture out output_file status
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "skip: node or npm not found for Pi calm activation test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+
+  fixture="$TMP_ROOT/activation-collision"
+  mkdir -p \
+    "$fixture/project/.pi/extensions/lib" \
+    "$fixture/project/node_modules/@earendil-works" \
+    "$fixture/home/config"
+  cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
+  cp "$WORKING_SHIP_SPRITE" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
+  printf '%s\n' 'export default function () {}' >"$fixture/project/foreign-bash-extension.ts"
+
+  output_file="$fixture/node-output"
+  (cd "$fixture/project" && \
+    EXT="$fixture/project/.pi/extensions/fm-calm.ts" \
+    FOREIGN_EXT="$fixture/project/foreign-bash-extension.ts" \
+    FM_HOME="$fixture/home" \
+    PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+    node --input-type=module) >"$output_file" 2>&1 <<'JS'
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const { ToolExecutionComponent } = await import(
+  pathToFileURL(`${packageRoot}/dist/modes/interactive/components/tool-execution.js`).href
+);
+const { initTheme } = await import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href);
+const { setCapabilities } = await import(
+  pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href
+);
+initTheme("dark");
+setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+
+// Reproduces the collision: a different, earlier-loaded extension already owns
+// "bash" by the time Calm's first activation runs, exactly as Pi's real
+// ExtensionRunner resolves same-name pi.registerTool() calls (first-registered-
+// extension-per-name wins, verified in the installed Pi package's
+// ExtensionRunner.getAllRegisteredTools).
+const foreignPath = fileURLToPath(pathToFileURL(process.env.FOREIGN_EXT).href);
+const FOREIGN_MARKER = "FOREIGN_BASH_EXECUTED";
+const foreignBash = {
+  name: "bash",
+  label: "Foreign bash",
+  description: "A different extension's own bash override, e.g. an approval gate.",
+  parameters: { type: "object", properties: {} },
+  async execute() {
+    return { content: [{ type: "text", text: FOREIGN_MARKER }], details: {}, isError: false };
+  },
+};
+
+const registry = new Map([["bash", { tool: foreignBash, ownerPath: foreignPath }]]);
+const notifications = [];
+const diagnostics = [];
+const originalConsoleError = console.error;
+console.error = (...args) => diagnostics.push(args.join(" "));
+
+const handlers = new Map();
+let calmCommand;
+const extPath = fileURLToPath(pathToFileURL(process.env.EXT).href);
+const pi = {
+  events: { emit() {}, on() {} },
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand(name, command) {
+    if (name === "calm") calmCommand = command;
+  },
+  registerEntryRenderer() {},
+  // Mirrors Pi's own arbitration: first registrant for a name keeps it, silently.
+  registerTool(tool) {
+    if (!registry.has(tool.name)) {
+      registry.set(tool.name, { tool, ownerPath: extPath });
+    }
+  },
+  getAllTools() {
+    return Array.from(registry.entries()).map(([name, { ownerPath }]) => ({
+      name,
+      sourceInfo: { source: "extension", path: ownerPath },
+    }));
+  },
+};
+
+let threw = false;
+try {
+  const extension = await import(`${pathToFileURL(process.env.EXT).href}?activation=${Date.now()}`);
+  extension.default(pi);
+} catch {
+  threw = true;
+}
+if (threw) throw new Error("Calm's own factory threw while config/calm was absent and another extension already owned bash");
+if (registry.size !== 1) {
+  throw new Error(`Calm registered built-ins at load time despite config/calm being absent: ${JSON.stringify(Array.from(registry.keys()))}`);
+}
+if (!calmCommand || !handlers.has("session_start")) {
+  throw new Error("Calm did not finish registering its command and session handler");
+}
+
+// A row constructed before Calm's first-ever activation this session: this is the
+// captain-accepted, documented bound on the gate-at-load fix (see fm-calm.ts's file
+// header and docs/calm.md) - Pi gives no way to re-point an already-constructed
+// ToolExecutionComponent at a definition registered later, so this row can never
+// retroactively collapse. Lock that in explicitly rather than let it regress further.
+const renderUi = { requestRender() {} };
+const preToggleReadArgs = { path: "sample.txt" };
+const preToggleRead = new ToolExecutionComponent(
+  "read",
+  "pre-toggle-read",
+  preToggleReadArgs,
+  { showImages: false },
+  registry.get("read")?.tool,
+  renderUi,
+  process.cwd(),
+);
+preToggleRead.markExecutionStarted();
+preToggleRead.setArgsComplete();
+preToggleRead.updateResult({ content: [{ type: "text", text: "PRE_TOGGLE_READ_OUTPUT" }], details: {}, isError: false });
+const preToggleRenderedBefore = preToggleRead.render(100);
+if (preToggleRenderedBefore.length === 0) {
+  throw new Error("a tool row rendered as hidden before Calm was ever activated");
+}
+
+const ctx = {
+  ui: {
+    getEditorText: () => "",
+    getToolsExpanded: () => false,
+    onTerminalInput: () => () => {},
+    setHiddenThinkingLabel() {},
+    setStatus() {},
+    setToolsExpanded() {},
+    setWorkingVisible() {},
+    notify(message, type) {
+      notifications.push({ message, type });
+    },
+  },
+};
+console.error = (...args) => diagnostics.push(args.join(" "));
+await calmCommand.handler("", ctx);
+console.error = originalConsoleError;
+
+const bashEntry = registry.get("bash");
+if (bashEntry.tool !== foreignBash) {
+  throw new Error("Calm replaced the foreign extension's bash registration instead of leaving it alone");
+}
+const bashResult = await bashEntry.tool.execute();
+if (bashResult.content[0]?.text !== FOREIGN_MARKER) {
+  throw new Error("the foreign extension's bash tool no longer executes its own real behavior");
+}
+for (const name of ["read", "edit", "write", "grep", "find", "ls"]) {
+  const entry = registry.get(name);
+  if (!entry || entry.ownerPath !== extPath) {
+    throw new Error(`Calm failed to claim the uncontested built-in "${name}" on first activation`);
+  }
+}
+
+// Part C: a single, prominent, user-facing warning naming the contested tool, not
+// merely a console diagnostic.
+if (notifications.length !== 1) {
+  throw new Error(`expected exactly one contested-tool notification, saw ${JSON.stringify(notifications)}`);
+}
+if (notifications[0].type !== "warning") {
+  throw new Error(`contested-tool notification was not type "warning": ${JSON.stringify(notifications[0])}`);
+}
+if (!notifications[0].message.includes("bash") || !notifications[0].message.toLowerCase().includes("calm")) {
+  throw new Error(`contested-tool notification did not name the tool clearly: ${JSON.stringify(notifications[0])}`);
+}
+const sawBashDiagnostic = diagnostics.some((line) => line.includes("bash"));
+if (!sawBashDiagnostic) {
+  throw new Error(`expected a console diagnostic naming the skipped built-in too; saw: ${JSON.stringify(diagnostics)}`);
+}
+
+// The documented bound itself: still non-empty after Calm is now active, because it
+// was constructed before Calm ever claimed anything.
+if (preToggleRead.render(100).length === 0) {
+  throw new Error("a pre-activation tool row retroactively hid after Calm turned on; the documented bound regressed");
+}
+
+// A row for the same tool constructed after activation behaves normally: it does hide.
+const postToggleRead = new ToolExecutionComponent(
+  "read",
+  "post-toggle-read",
+  preToggleReadArgs,
+  { showImages: false },
+  registry.get("read")?.tool,
+  renderUi,
+  process.cwd(),
+);
+postToggleRead.markExecutionStarted();
+postToggleRead.setArgsComplete();
+postToggleRead.updateResult({ content: [{ type: "text", text: "POST_TOGGLE_READ_OUTPUT" }], details: {}, isError: false });
+if (postToggleRead.render(100).length !== 0) {
+  throw new Error("a tool row constructed after Calm's activation did not hide");
+}
+JS
+  status=$?
+  out=$(cat "$output_file")
+  [ "$status" -eq 0 ] || fail "Pi calm activation/collision/regression-bound path failed: $out"
+  [ -z "$out" ] || fail "Pi calm activation/collision/regression-bound test printed output: $out"
+  pass "Calm's first same-session /calm activation claims every uncontested built-in, leaves a foreign bash tool fully intact and callable, warns prominently and logs the contested name, and only rows constructed before that activation - the documented bound - fail to retroactively collapse"
+}
+
 test_rendering_and_session_lifecycle() {
-  local fixture out status version
+  local fixture out output_file status version
   if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
     echo "skip: node or npm not found for Pi calm renderer test"
     return 0
@@ -362,7 +757,12 @@ test_rendering_and_session_lifecycle() {
   cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
+  cp "$WORKING_SHIP_SPRITE" "$fixture/lib/fm-calm-working-ship-sprite.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$fixture/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$fixture/lib/fm-native-contract.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$fixture/lib/fm-async-exec.ts"
   cp "$WATCH_EXT" "$fixture/fm-primary-pi-watch.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
@@ -375,12 +775,19 @@ exec "$FM_OPERATIONAL_INPUT_OWNER" "$@"
 SH
   chmod +x "$fixture/operational-input-probe.sh"
 
-  out=$(cd "$fixture" && EXT="$fixture/fm-calm.ts" WATCH_EXT="$fixture/fm-primary-pi-watch.ts" FM_HOME="$fixture/home" FM_OPERATIONAL_INPUT_SCRIPT="$fixture/operational-input-probe.sh" FM_OPERATIONAL_INPUT_OWNER="$OPERATIONAL_INPUT" FM_OPERATIONAL_INPUT_CALLS="$fixture/operational-input-calls" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module 2>&1 <<'JS'
+  output_file="$fixture/node-output"
+  (cd "$fixture" && EXT="$fixture/fm-calm.ts" WATCH_EXT="$fixture/fm-primary-pi-watch.ts" FM_HOME="$fixture/home" FM_OPERATIONAL_INPUT_SCRIPT="$fixture/operational-input-probe.sh" FM_OPERATIONAL_INPUT_OWNER="$OPERATIONAL_INPUT" FM_OPERATIONAL_INPUT_CALLS="$fixture/operational-input-calls" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module) >"$output_file" 2>&1 <<'JS'
 import { readFileSync, writeFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+// fm-calm.ts derives its own identity the same way (fileURLToPath(import.meta.url)),
+// which normalizes away irregularities like a symlinked TMPDIR (macOS /tmp, /var);
+// comparing against the raw env var would spuriously read this fixture's own
+// registration as foreign.
+const extPath = fileURLToPath(pathToFileURL(process.env.EXT).href);
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
-const [{ AssistantMessageComponent }, { CustomEntryComponent }, { ToolExecutionComponent }, { UserMessageComponent }, { InteractiveMode }, { initTheme, theme }, { Text, getKeybindings, setCapabilities }, { createToolHtmlRenderer }] = await Promise.all([
+const [{ AssistantMessageComponent }, { CustomEntryComponent }, { ToolExecutionComponent }, { UserMessageComponent }, { InteractiveMode }, { initTheme, theme }, { Text, getKeybindings, setCapabilities }, { createToolHtmlRenderer }, { createReadToolDefinition, createBashToolDefinition, createEditToolDefinition, createWriteToolDefinition, createGrepToolDefinition, createFindToolDefinition, createLsToolDefinition }] = await Promise.all([
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/assistant-message.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/custom-entry.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/tool-execution.js`).href),
@@ -389,7 +796,22 @@ const [{ AssistantMessageComponent }, { CustomEntryComponent }, { ToolExecutionC
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
   import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/core/export-html/tool-renderer.js`).href),
+  // The calm-off equivalence baseline needs each built-in's REAL stock renderers.
+  // Pi 0.84 and older silently substituted the built-in definition when a
+  // ToolExecutionComponent was constructed without one, so a definition-less
+  // baseline used to read as stock; Pi 0.85 removed that substitution and the
+  // definition-less row now renders the generic text fallback instead.
+  import(pathToFileURL(`${packageRoot}/dist/core/tools/index.js`).href),
 ]);
+const stockDefinitions = {
+  read: createReadToolDefinition,
+  bash: createBashToolDefinition,
+  edit: createEditToolDefinition,
+  write: createWriteToolDefinition,
+  grep: createGrepToolDefinition,
+  find: createFindToolDefinition,
+  ls: createLsToolDefinition,
+};
 initTheme("dark");
 setCapabilities({ images: null, trueColor: true, hyperlinks: false });
 
@@ -421,13 +843,46 @@ const pi = {
     entryRenderers.set(customType, renderer);
   },
   registerTool(tool) {
-    tools.push(tool);
+    const existingIndex = tools.findIndex((existing) => existing.name === tool.name);
+    if (existingIndex === -1) tools.push(tool);
+    else tools[existingIndex] = tool;
+  },
+  getAllTools() {
+    // Only Calm itself has registered anything in this fixture, so every entry
+    // reports Calm's own extension path; the dedicated collision fixture below is
+    // what exercises a foreign extension already owning a name.
+    return tools.map((tool) => ({
+      name: tool.name,
+      sourceInfo: { source: "extension", path: extPath },
+    }));
   },
 };
 const extension = await import(`${pathToFileURL(process.env.EXT).href}?test=${Date.now()}`);
 extension.default(pi);
 const visibility = await import(`${pathToFileURL(`${process.cwd()}/lib/fm-calm-visibility.ts`).href}?policy=${Date.now()}`);
 const operationalInput = await import(`${pathToFileURL(`${process.cwd()}/lib/fm-operational-input.ts`).href}?input=${Date.now()}`);
+
+// Registration is gated on config/calm at load (see fm-calm.ts's file header); this
+// fixture has no config/calm file, so nothing is registered yet. Every render-
+// equivalence assertion below needs the wrapped definitions the way a user who kept
+// Calm on across a previous session would already have them, so force that here via
+// the same /calm command path a real activation uses, then round-trip back off so the
+// rest of this fixture's own off/on toggle sequence still observes its usual starting
+// state. This does not touch the calm-off/toggle-on assertions further down: those
+// exercise activateBuiltInsIfNeeded's own contested-name skip and warning through the
+// dedicated fixture below, not this one.
+const earlyActivationUi = {
+  getEditorText: () => "",
+  getToolsExpanded: () => false,
+  onTerminalInput: () => () => {},
+  setHiddenThinkingLabel() {},
+  setStatus() {},
+  setToolsExpanded() {},
+  setWorkingVisible() {},
+  notify() {},
+};
+await calmCommand.handler("", { ui: earlyActivationUi });
+await calmCommand.handler("", { ui: earlyActivationUi });
 
 const names = tools.map((tool) => tool.name);
 const expectedNames = ["read", "bash", "edit", "write", "grep", "find", "ls"];
@@ -472,6 +927,10 @@ const operationalChat = {
 const operationalMode = {
   chatContainer: operationalChat,
   editor: { addToHistory: (value) => operationalHistory.push(value) },
+  // Pi builds user rows with the registered markdown transformers from 0.83 onward and
+  // without them before that; the stub answers both shapes with the empty list Pi and
+  // Firstmate both use today.
+  getMarkdownTransformers: () => [],
   getMarkdownThemeWithSettings: () => undefined,
   getUserMessageText: (message) => typeof message.content === "string"
     ? message.content
@@ -528,7 +987,7 @@ const renderUi = { requestRender() {} };
 const rows = [];
 for (const [name, args, result] of cases) {
   const wrapped = tools.find((tool) => tool.name === name);
-  const baseline = new ToolExecutionComponent(name, `baseline-${name}`, args, { showImages: false }, undefined, renderUi, process.cwd());
+  const baseline = new ToolExecutionComponent(name, `baseline-${name}`, args, { showImages: false }, stockDefinitions[name](process.cwd()), renderUi, process.cwd());
   const actual = new ToolExecutionComponent(name, `wrapped-${name}`, args, { showImages: false }, wrapped, renderUi, process.cwd());
   for (const row of [baseline, actual]) {
     row.markExecutionStarted();
@@ -980,7 +1439,6 @@ for (const reason of ["startup", "new", "resume", "fork", "reload"]) {
 await calmCommand.handler("", commandContext);
 
 const readWrapper = tools.find((tool) => tool.name === "read");
-const { createReadToolDefinition } = await import(pathToFileURL(`${packageRoot}/dist/index.js`).href);
 const originalRead = createReadToolDefinition(process.cwd());
 const executeContext = { cwd: process.cwd() };
 const [originalResult, wrappedResult] = await Promise.all([
@@ -991,11 +1449,272 @@ if (JSON.stringify(wrappedResult) !== JSON.stringify(originalResult)) {
   throw new Error("calm wrapper changed built-in read execution or result data");
 }
 JS
-)
   status=$?
+  out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm renderer and lifecycle contract failed: $out"
   [ -z "$out" ] || fail "Pi calm renderer test printed output: $out"
-  pass "Pi calm centralizes transcript visibility, preserves execution/export data, keeps native working visible, and persists its choice across session starts"
+  pass "Pi calm centralizes transcript visibility, preserves execution/export data, keeps Pi's stock working row visible while no run is active, and persists its choice across session starts"
+}
+
+test_calm_mid_turn_working_notes() {
+  local fixture out output_file status version
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "skip: node or npm not found for Pi calm mid-turn renderer test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+  version=$(node -p "require('$PI_PACKAGE_DIR/package.json').version")
+  record_pi_version_evidence "$version" "Pi calm mid-turn presentation"
+
+  fixture="$TMP_ROOT/calm-mid-turn"
+  mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
+  cp "$EXT" "$fixture/fm-calm.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
+  cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
+  cp "$WORKING_SHIP_SPRITE" "$fixture/lib/fm-calm-working-ship-sprite.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/lib/fm-operational-input.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
+
+  output_file="$fixture/node-output"
+  (cd "$fixture" && EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module) >"$output_file" 2>&1 <<'JS'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const [{ AssistantMessageComponent }, { initTheme }, { setCapabilities }] = await Promise.all([
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/assistant-message.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
+  import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
+]);
+initTheme("dark");
+setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+
+// Both extension instances below resolve their own relative "./lib/..." specifiers to
+// the same module URLs, so they share one live visibility policy exactly the way a
+// single Pi process does.
+const visibility = await import(pathToFileURL(`${process.cwd()}/lib/fm-calm-visibility.ts`).href);
+const calmPreferencePath = `${process.env.FM_HOME}/config/calm`;
+const components = [];
+const ui = {
+  getEditorText: () => "",
+  getToolsExpanded: () => false,
+  onTerminalInput: () => () => {},
+  setHiddenThinkingLabel(value) {
+    // Pi's own fan-out: every mounted assistant row re-runs its layout.
+    for (const component of components) component.setHiddenThinkingLabel(value ?? "Thinking...");
+  },
+  setStatus() {},
+  setToolsExpanded() {},
+  setWorkingVisible() {},
+  notify() {},
+};
+const context = { ui };
+
+async function loadCalmExtension() {
+  const registeredTools = [];
+  let sessionStart;
+  let calmCommand;
+  const pi = {
+    events: { emit() {}, on() {} },
+    on(event, handler) {
+      if (event === "session_start") sessionStart = handler;
+    },
+    registerCommand(name, command) {
+      if (name === "calm") calmCommand = command;
+    },
+    registerEntryRenderer() {},
+    registerTool(tool) {
+      registeredTools.push(tool.name);
+    },
+    getAllTools() {
+      return [];
+    },
+  };
+  const extension = await import(`${pathToFileURL(process.env.EXT).href}?instance=${Date.now()}-${Math.random()}`);
+  extension.default(pi);
+  if (!calmCommand || !sessionStart) {
+    throw new Error("Calm extension did not register its command and session handler");
+  }
+  return { calmCommand, sessionStart, registeredTools };
+}
+
+const assistantBase = {
+  role: "assistant",
+  api: "calm-mid-turn-test",
+  provider: "calm-mid-turn-test",
+  model: "deterministic",
+  usage: {
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  },
+  timestamp: 1,
+};
+const toolCall = { type: "toolCall", id: "calm-mid-turn-tool", name: "read", arguments: { path: "sample.txt" } };
+const messages = {
+  // The reported incident: narration emitted in the same assistant message as a tool call.
+  midTurn: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{ type: "text", text: "MIDTURN_WORKING_NOTE" }, toolCall],
+  },
+  // The genuine reply that ends a response, which Calm never hides.
+  finalReply: {
+    ...assistantBase,
+    stopReason: "stop",
+    content: [{ type: "text", text: "FINAL_REPLY_TEXT" }],
+  },
+  // Still streaming: finality is unknown, and hiding here would stop a real reply.
+  streaming: {
+    ...assistantBase,
+    stopReason: "pending",
+    content: [{ type: "text", text: "STREAMING_NOTE_TEXT" }],
+  },
+  // Truncated with tool calls is mid-turn; Pi's own truncation notice stays.
+  truncatedMidTurn: {
+    ...assistantBase,
+    stopReason: "length",
+    content: [{ type: "text", text: "TRUNCATED_MIDTURN_NOTE" }, toolCall],
+  },
+  // Truncated without tool calls ended the response.
+  truncatedFinal: {
+    ...assistantBase,
+    stopReason: "length",
+    content: [{ type: "text", text: "TRUNCATED_FINAL_TEXT" }],
+  },
+};
+const messagesBefore = JSON.stringify(messages);
+const rows = {};
+for (const [name, message] of Object.entries(messages)) {
+  rows[name] = new AssistantMessageComponent(message, true);
+  components.push(rows[name]);
+}
+const rendered = (name) => rows[name].render(100);
+const renderedText = (name) => rendered(name).join("\n");
+const snapshot = () => {
+  const shot = {};
+  for (const name of Object.keys(rows)) shot[name] = JSON.stringify(rendered(name));
+  return shot;
+};
+const requireVisible = (name, needle, context) => {
+  if (rendered(name).length === 0 || !renderedText(name).includes(needle)) {
+    throw new Error(`${context}: ${name} lost ${needle}`);
+  }
+};
+const requireHidden = (name, needle, context) => {
+  if (renderedText(name).includes(needle)) {
+    throw new Error(`${context}: ${name} still rendered ${needle}`);
+  }
+};
+
+let calm = await loadCalmExtension();
+if (calm.registeredTools.length !== 0) {
+  throw new Error("Calm claimed built-in tools with no persisted preference");
+}
+await calm.sessionStart({ reason: "startup" }, context);
+const stockRows = snapshot();
+for (const name of Object.keys(rows)) {
+  if (rendered(name).length === 0) throw new Error(`Calm-off rendering hid ${name}`);
+}
+requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm off");
+
+await calm.calmCommand.handler("", context);
+if (readFileSync(calmPreferencePath, "utf8") !== "on\n") {
+  throw new Error("plain /calm from off did not persist on");
+}
+if (rendered("midTurn").length !== 0) {
+  throw new Error(`Calm on left mid-turn working-note rows: ${JSON.stringify(rendered("midTurn"))}`);
+}
+requireHidden("truncatedMidTurn", "TRUNCATED_MIDTURN_NOTE", "Calm on");
+// Pi owns the wording of its truncation notice; Calm must leave that row's own notice
+// standing rather than collapsing an incomplete response to nothing.
+if (rendered("truncatedMidTurn").length === 0) {
+  throw new Error("Calm on removed Pi's own truncation notice with the working note");
+}
+requireVisible("streaming", "STREAMING_NOTE_TEXT", "Calm on");
+requireVisible("truncatedFinal", "TRUNCATED_FINAL_TEXT", "Calm on");
+requireVisible("finalReply", "FINAL_REPLY_TEXT", "Calm on");
+if (JSON.stringify(rendered("finalReply")) !== stockRows.finalReply) {
+  throw new Error("Calm on changed the genuine final reply row");
+}
+if (JSON.stringify(messages) !== messagesBefore) {
+  throw new Error("Calm on mutated the assistant messages instead of a presentation copy");
+}
+
+// The removed third level: /calm parses no argument, so every invocation is the plain
+// on/off toggle and no third literal is ever persisted.
+await calm.calmCommand.handler("max", context);
+if (readFileSync(calmPreferencePath, "utf8") !== "off\n") {
+  throw new Error("/calm max was still read as a level instead of the plain toggle");
+}
+requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm off after /calm max");
+const restoredRows = snapshot();
+for (const name of Object.keys(rows)) {
+  if (restoredRows[name] !== stockRows[name]) {
+    throw new Error(`turning Calm off did not restore byte-identical ${name} rendering`);
+  }
+}
+await calm.calmCommand.handler("  MaX  ", context);
+if (readFileSync(calmPreferencePath, "utf8") !== "on\n" || rendered("midTurn").length !== 0) {
+  throw new Error("a spaced, mixed-case argument did not fall through to the plain toggle");
+}
+await calm.calmCommand.handler("unrecognized", context);
+if (readFileSync(calmPreferencePath, "utf8") !== "off\n") {
+  throw new Error("an unrecognized /calm argument did not fall back to the plain toggle");
+}
+
+// Restart from each persisted value, including the legacy "max" a home upgraded from
+// the removed third level still carries: every one restores ordinary Calm, never off.
+for (const persisted of ["on\n", "max\n", "max"]) {
+  writeFileSync(calmPreferencePath, persisted, "utf8");
+  // Scramble the live state the way a fresh process starts, then let a newly loaded
+  // extension restore from the persisted file alone.
+  visibility.setCalmPresentation(false);
+  ui.setHiddenThinkingLabel(undefined);
+  requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "scrambled live state");
+  calm = await loadCalmExtension();
+  if (calm.registeredTools.length !== 7) {
+    throw new Error(
+      `a session restored from ${JSON.stringify(persisted)} claimed ${calm.registeredTools.length} built-in tools instead of 7`,
+    );
+  }
+  for (const reason of ["startup", "resume", "new", "fork", "reload"]) {
+    await calm.sessionStart({ reason }, context);
+    if (rendered("midTurn").length !== 0) {
+      throw new Error(
+        `a ${reason} session restored from ${JSON.stringify(persisted)} did not hide mid-turn working notes`,
+      );
+    }
+    requireVisible("finalReply", "FINAL_REPLY_TEXT", `${reason} session`);
+  }
+  // A session restored as on toggles to off; one that had wrongly dropped to off would
+  // persist "on" here instead.
+  await calm.calmCommand.handler("", context);
+  if (readFileSync(calmPreferencePath, "utf8") !== "off\n") {
+    throw new Error(`${JSON.stringify(persisted)} did not restore as ordinary Calm on`);
+  }
+  requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm toggled off after restore");
+}
+if (!existsSync(calmPreferencePath)) {
+  throw new Error("Calm stopped persisting its preference file");
+}
+JS
+  status=$?
+  out=$(cat "$output_file")
+  [ "$status" -eq 0 ] || fail "Pi calm mid-turn contract failed: $out"
+  [ -z "$out" ] || fail "Pi calm mid-turn test printed output: $out"
+  pass "Pi calm on collapses mid-turn assistant working notes to zero height while Calm off keeps them, leaves streaming, truncated-final, and genuine final replies untouched, never mutates the messages, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on"
 }
 
 test_operational_followup_turn_e2e() {
@@ -1017,6 +1736,8 @@ test_operational_followup_turn_e2e() {
   cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
+  cp "$WORKING_SHIP_SPRITE" "$project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
   cp "$PI_OPERATIONAL_INPUT" "$project/.pi/extensions/lib/fm-operational-input.ts"
   printf '%s\n' '{"followUpMode":"all"}' >"$config/settings.json"
 
@@ -1197,7 +1918,18 @@ TS
       fail "Pi follow-up $label case did not process the monitoring notification"
     fi
 
-    pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+    # The session file is written before the TUI repaints, so wait for the
+    # rendered rows themselves instead of capturing the pane right away.
+    i=0
+    while [ "$i" -lt 240 ]; do
+      pane=$(tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S - 2>/dev/null || true)
+      if printf '%s\n' "$pane" | grep -Fq "CAPTAIN_ANSWER_$label" &&
+        printf '%s\n' "$pane" | grep -Fq "MONITOR_HANDLED_${label}_ONE"; then
+        break
+      fi
+      sleep 0.05
+      i=$((i + 1))
+    done
     [ "$(printf '%s\n' "$pane" | grep -Fc "CAPTAIN_ANSWER_$label" || true)" -eq 1 ] \
       || fail "Pi follow-up $label case rendered a duplicate captain answer"
     assert_contains "$pane" "CAPTAIN_PROMPT_$label" "Pi follow-up $label case hid the genuine captain prompt"
@@ -1379,6 +2111,8 @@ test_hidden_block_geometry_e2e() {
   cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
+  cp "$WORKING_SHIP_SPRITE" "$project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
   cp "$PI_OPERATIONAL_INPUT" "$project/.pi/extensions/lib/fm-operational-input.ts"
   printf '%s\n' on >"$home/config/calm"
   printf '%s\n' '{"hideThinkingBlock":true,"terminal":{"clearOnShrink":false}}' >"$config/settings.json"
@@ -1514,7 +2248,9 @@ TS
   i=0
   while [ "$i" -lt 120 ]; do
     capture_geometry_viewport "$snapshot"
-    tail -12 "$snapshot" | grep -Fq "Working..." || break
+    # Pi <=0.84 rendered a "Working..." transcript row; Pi >=0.85 embeds the
+    # indicator in the editor border as "Working". Match either spelling.
+    tail -12 "$snapshot" | grep -Eq "Working(\\.\\.\\.)?([[:space:]]|─|$)" || break
     sleep 0.05
     i=$((i + 1))
   done
@@ -1591,8 +2327,1013 @@ TS
   pass "Pi Calm native /skill:ahoy geometry keeps every collapsed thinking and tool block at zero height while preserving expansion, history, restart, and Calm-off rendering"
 }
 
+test_working_ship_geometry_and_lifecycle() {
+  local fixture out status version
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "skip: node or npm not found for Pi Calm working-ship test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+  version=$(node -p "require('$PI_PACKAGE_DIR/package.json').version")
+  record_pi_version_evidence "$version" "Pi Calm working-ship assumptions"
+
+  fixture="$TMP_ROOT/working-ship"
+  mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
+  cp "$EXT" "$fixture/fm-calm.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
+  cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
+  cp "$WORKING_SHIP_SPRITE" "$fixture/lib/fm-calm-working-ship-sprite.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/lib/fm-operational-input.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
+
+  out=$(cd "$fixture" && EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const [{ initTheme, theme }, { visibleWidth, setCapabilities }] = await Promise.all([
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
+  import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
+]);
+initTheme("dark");
+setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+
+const ship = await import(
+  `${pathToFileURL(`${process.cwd()}/lib/fm-calm-working-ship.ts`).href}?ship=${Date.now()}`
+);
+const {
+  CALM_WORKING_SHIP_WIDGET_KEY,
+  CALM_WORKING_SHIP_TICK_MS,
+  CALM_WORKING_SHIP_TICKS_PER_MOVE,
+  createCalmWorkingShipAnimation,
+  createCalmWorkingShipWidget,
+} = ship;
+
+const ESC = "\u001b";
+const BLUE = `${ESC}[34m`;
+const YELLOW = `${ESC}[33m`;
+const RESET = `${ESC}[39m`;
+const SAIL = "◿│◣";
+const HULL = "╲▁▁▁╱";
+const WAVE_BARS = "▁▂▃▄";
+const strip = (text) => text.replace(new RegExp(`${ESC}\\[[0-9;]*m`, "g"), "");
+const check = (condition, message) => {
+  if (!condition) throw new Error(message);
+};
+const sailOf = (frame) => strip(frame[0]).includes(SAIL) ? SAIL : "none";
+
+// --- Calm cadence: the boat is materially slower than the water ------------------
+{
+  // The pre-revision boat moved one column every 140ms. The revised boat must be
+  // plainly slower in real use while the water keeps rippling between its steps.
+  const msPerColumn = CALM_WORKING_SHIP_TICK_MS * CALM_WORKING_SHIP_TICKS_PER_MOVE;
+  check(msPerColumn >= 700, `boat cadence ${msPerColumn}ms per column is not materially slower`);
+  check(
+    CALM_WORKING_SHIP_TICKS_PER_MOVE >= 2,
+    "the water cadence is not independent of and faster than the boat cadence",
+  );
+  check(
+    CALM_WORKING_SHIP_TICK_MS < msPerColumn,
+    "the water does not animate faster than the boat moves",
+  );
+}
+
+// --- Water phases loop independently while the boat stays put --------------------
+{
+  const width = 40;
+  const animation = createCalmWorkingShipAnimation();
+  animation.render(width);
+  const startPosition = animation.position();
+  const waterRows = new Set();
+  const phases = new Set();
+  for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE - 1; step += 1) {
+    animation.tick();
+    check(
+      animation.position() === startPosition,
+      `the boat moved on tick ${step + 1} instead of waiting for its own cadence`,
+    );
+    waterRows.add(strip(animation.render(width)[1]));
+    phases.add(animation.waterPhase());
+  }
+  check(waterRows.size > 1, "the water did not animate while the boat was stationary");
+  check(phases.size > 1, "the water phase did not advance between boat movements");
+  // The boat then moves on its own cadence tick.
+  animation.tick();
+  check(
+    animation.position() !== startPosition,
+    "the boat never moved on its own cadence tick",
+  );
+  // Water motion alone must not change the hull column.
+  const beforeHull = strip(animation.render(width)[1]).indexOf(HULL);
+  animation.tick();
+  const afterHull = strip(animation.render(width)[1]).indexOf(HULL);
+  check(beforeHull === afterHull, "advancing only the water appeared to move the boat");
+}
+
+// --- Water phases are bounded, fixed-cell, and never change geometry -------------
+{
+  const width = 30;
+  const animation = createCalmWorkingShipAnimation();
+  const seenPhases = new Set();
+  for (let step = 0; step < 64; step += 1) {
+    const frame = animation.render(width);
+    seenPhases.add(animation.waterPhase());
+    check(frame.length === 2, `water phase ${animation.waterPhase()} changed the row count`);
+    check(
+      visibleWidth(frame[1]) === width,
+      `water phase ${animation.waterPhase()} changed the visible width`,
+    );
+    animation.tick();
+  }
+  check(seenPhases.size > 1 && seenPhases.size <= 8, `water phase set is not bounded: ${seenPhases.size}`);
+}
+
+// --- Long low waves are smooth, deterministic, and non-repeating -----------------
+{
+  const first = createCalmWorkingShipAnimation();
+  const second = createCalmWorkingShipAnimation();
+  for (let step = 0; step < 24; step += 1) {
+    const firstFrame = first.render(240);
+    const secondFrame = second.render(240);
+    check(
+      JSON.stringify(firstFrame) === JSON.stringify(secondFrame),
+      `deterministic animations diverged at step ${step}`,
+    );
+    const row = strip(firstFrame[1]).replace(HULL, "▁".repeat(5));
+    check(/^[▁▂▃▄]+$/.test(row), `wave left its low four-glyph scale: ${row}`);
+    const levels = [...row].map((cell) => WAVE_BARS.indexOf(cell));
+    for (let index = 1; index < levels.length; index += 1) {
+      check(
+        Math.abs(levels[index] - levels[index - 1]) <= 1,
+        `wave jumped from ${row[index - 1]} to ${row[index]} at column ${index}`,
+      );
+    }
+    const sample = row.slice(24);
+    for (let period = 1; period <= 18; period += 1) {
+      check(
+        sample.slice(0, -period) !== sample.slice(period),
+        `wave collapsed into a fixed ${period}-cell cycle`,
+      );
+    }
+    if (step === 0) {
+      const crestCenters = [];
+      let crestStart = -1;
+      for (let index = 0; index <= row.length; index += 1) {
+        if (row[index] === "▄" && crestStart < 0) crestStart = index;
+        if (row[index] !== "▄" && crestStart >= 0) {
+          crestCenters.push((crestStart + index - 1) / 2);
+          crestStart = -1;
+        }
+      }
+      const wavelengths = crestCenters.slice(1).map((center, index) => center - crestCenters[index]);
+      check(wavelengths.length >= 6, "wide render did not expose enough wave periods");
+      check(
+        wavelengths.every((length) => length >= 17.5 && length <= 26.5),
+        `visible wavelengths left their bounded long range: ${wavelengths.join(",")}`,
+      );
+      check(new Set(wavelengths).size > 1, "visible wavelengths lost deterministic variation");
+    }
+    first.tick();
+    second.tick();
+  }
+}
+
+// --- Standard ANSI colors, with resets that prevent bleed ------------------------
+{
+  const width = 24;
+  const animation = createCalmWorkingShipAnimation();
+  for (let step = 0; step < 12; step += 1) {
+    const [sailRow, waterRow] = animation.render(width);
+
+    // Standard codes only: no bright variants, no 256-color, no RGB.
+    for (const row of [sailRow, waterRow]) {
+      const codes = row.match(new RegExp(`${ESC}\\[[0-9;]*m`, "g")) ?? [];
+      for (const code of codes) {
+        check(
+          code === BLUE || code === YELLOW || code === RESET,
+          `non-standard ANSI escape ${JSON.stringify(code)} in ${JSON.stringify(row)}`,
+        );
+      }
+      check(codes.length > 0, "a rendered row carried no color at all");
+      // Every colored run is closed, so nothing bleeds into padding or later frames.
+      check(
+        codes.filter((c) => c !== RESET).length === codes.filter((c) => c === RESET).length,
+        `unbalanced color/reset pairs in ${JSON.stringify(row)}`,
+      );
+      check(codes[codes.length - 1] === RESET, `row does not end color-reset: ${JSON.stringify(row)}`);
+    }
+
+    // Sail-row padding must be plain spaces outside any color run.
+    const leading = sailRow.slice(0, sailRow.indexOf(ESC));
+    check(/^ *$/.test(leading), `sail row padding was colored: ${JSON.stringify(leading)}`);
+
+    // Both sail halves and the mast are one yellow run, so the sail never splits into
+    // mismatched colors, and the hull is one yellow run whose interior is not blue.
+    check(
+      sailRow.includes(`${YELLOW}◿│◣${RESET}`),
+      `sail was not painted as one unified yellow run: ${JSON.stringify(sailRow)}`,
+    );
+    check(
+      visibleWidth("◿") === 1 && visibleWidth(SAIL) === 3,
+      "the width-safe smaller sail broke the three-cell sprite",
+    );
+    check(
+      waterRow.includes(`${YELLOW}╲▁▁▁╱${RESET}`),
+      `hull was not painted as one unified yellow run: ${JSON.stringify(waterRow)}`,
+    );
+    // Every water cell outside the hull is blue whatever its height, so the swell
+    // reads through glyph height alone rather than a crest-versus-trough color split.
+    const waterCells = waterRow.replace(`${YELLOW}╲▁▁▁╱${RESET}`, "").match(/\u001b\[\d+m[▁▂▃▄]\u001b\[39m/g) ?? [];
+    check(waterCells.length > 0, "no colored water cells surrounded the hull");
+    check(
+      waterCells.every((cell) => cell.startsWith(BLUE)),
+      `water was not all blue: ${JSON.stringify(waterCells.filter((cell) => !cell.startsWith(BLUE)))}`,
+    );
+    check(
+      waterCells.some((cell) => cell.includes("▃") || cell.includes("▄")),
+      "the checked frame carried no crest cell, so the all-blue assertion proved nothing",
+    );
+    check(
+      /^[▁▂▃▄╲╱]+$/.test(strip(waterRow)),
+      `water row contained a non-wave glyph: ${JSON.stringify(strip(waterRow))}`,
+    );
+    animation.tick();
+  }
+}
+
+// --- ANSI-stripped visible width is exact at every width and phase ---------------
+for (let width = 1; width <= 120; width += 1) {
+  const animation = createCalmWorkingShipAnimation();
+  animation.render(width);
+  for (let step = 0; step <= width + 8; step += 1) {
+    const frame = animation.render(width);
+    const expectedRows = width >= 5 ? 2 : 1;
+    check(frame.length === expectedRows, `width ${width} rendered ${frame.length} rows`);
+    for (const line of frame) {
+      check(
+        visibleWidth(line) <= width,
+        `width ${width} rendered a ${visibleWidth(line)}-cell line and would wrap`,
+      );
+      check(
+        visibleWidth(line) === strip(line).length,
+        `width ${width} let ANSI bytes affect the measured geometry`,
+      );
+    }
+    // The water row always fills the complete usable width.
+    const waterRow = frame[frame.length - 1];
+    check(
+      visibleWidth(waterRow) === width,
+      `width ${width} water row was ${visibleWidth(waterRow)} cells instead of full width`,
+    );
+    animation.tick();
+  }
+}
+
+// --- Centered sail, broad trough, and exact bounce, including tiny spans ---------
+for (const width of [40, 16, 8, 6, 5, 4, 3, 2]) {
+  const animation = createCalmWorkingShipAnimation();
+  animation.render(width);
+  const span = width >= 5 ? width - 5 : width >= 3 ? width - 3 : 0;
+  const frames = [];
+  for (let step = 0; step < span * CALM_WORKING_SHIP_TICKS_PER_MOVE * 3 + 16; step += 1) {
+    const frame = animation.render(width);
+    const bare = frame.map(strip);
+    frames.push({
+      position: animation.position(),
+      direction: animation.direction(),
+      sail: sailOf(frame),
+    });
+    if (width >= 5) {
+      const sailStart = bare[0].indexOf(SAIL);
+      const hullStart = bare[1].indexOf(HULL);
+      check(sailStart === hullStart + 1, `width ${width} sail and hull starts drifted`);
+      check(sailStart + 1 === hullStart + 2, `width ${width} centers were not aligned`);
+      const before = bare[1].slice(Math.max(0, hullStart - 3), hullStart);
+      const after = bare[1].slice(hullStart + 5, hullStart + 8);
+      check(/^[▁]*$/.test(before) && /^[▁]*$/.test(after), `width ${width} hull left its trough`);
+    }
+    animation.tick();
+  }
+  for (const frame of frames) {
+    check(
+      frame.position >= 0 && frame.position <= span,
+      `width ${width} left the track at column ${frame.position}`,
+    );
+    if (width >= 3) check(frame.sail === SAIL, `width ${width} lost its fixed sail`);
+  }
+  if (span > 0) {
+    const positions = frames.map((frame) => frame.position);
+    check(Math.min(...positions) === 0, `width ${width} never reached the left edge`);
+    check(Math.max(...positions) === span, `width ${width} never reached the right edge`);
+    const directions = new Set(frames.map((frame) => frame.direction));
+    check(directions.has(1) && directions.has(-1), `width ${width} did not reverse both ways`);
+  }
+}
+
+// --- Shrink and grow resize clamping ----------------------------------------------
+{
+  const animation = createCalmWorkingShipAnimation();
+  animation.render(80);
+  while (animation.position() < 75) animation.tick();
+  check(animation.position() === 75, `boat did not reach the wide right edge: ${animation.position()}`);
+
+  const shrunk = animation.render(20);
+  check(animation.position() === 15, `shrink did not clamp the track immediately: ${animation.position()}`);
+  check(visibleWidth(shrunk[1]) === 20, `shrunk water row was ${visibleWidth(shrunk[1])} cells instead of 20`);
+  check(visibleWidth(shrunk[0]) <= 20, "shrunk sail row would wrap");
+  check(animation.direction() === -1, "the boat did not turn around after being clamped to the right edge");
+
+  for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE; step += 1) animation.tick();
+  const afterShrink = animation.render(20);
+  check(animation.position() < 15, "the boat stalled at the edge after a shrink");
+  check(visibleWidth(afterShrink[1]) === 20, "motion after a shrink broke the water row width");
+
+  const grown = animation.render(60);
+  check(visibleWidth(grown[1]) === 60, `grown water row was ${visibleWidth(grown[1])} cells`);
+  for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE; step += 1) animation.tick();
+  const afterGrow = animation.render(60);
+  check(
+    animation.position() >= 0 && animation.position() <= 55,
+    `motion left the grown track: ${animation.position()}`,
+  );
+  check(visibleWidth(afterGrow[1]) === 60, "motion after a grow broke the water row width");
+}
+
+// --- Deterministic narrow fallbacks ------------------------------------------------
+{
+  const animation = createCalmWorkingShipAnimation();
+  check(JSON.stringify(animation.render(0)) === "[]", "zero width rendered a line");
+  for (const width of [1, 2, 3, 4]) {
+    const fallback = createCalmWorkingShipAnimation();
+    for (let step = 0; step < 12; step += 1) {
+      const frame = fallback.render(width);
+      check(frame.length === 1, `width ${width} fallback was not a single row`);
+      check(visibleWidth(frame[0]) === width, `width ${width} fallback was not exactly ${width} cells`);
+      const bare = strip(frame[0]);
+      if (width < 3) {
+        check(new RegExp(`^[${WAVE_BARS}]+$`).test(bare), `width ${width} fallback was not low water: ${bare}`);
+      } else {
+        check(bare.includes(SAIL), `width ${width} fallback lost the sail: ${bare}`);
+      }
+      fallback.tick();
+    }
+  }
+}
+
+// --- Freeze/resume continuity on one shared animation instance ---------------------
+// Hiding the working presentation must freeze column and direction. The next widget
+// bound to the same animation resumes exactly there; hidden wall time must not jump.
+{
+  const animation = createCalmWorkingShipAnimation();
+  const tui = { requestRender() {} };
+  animation.render(40);
+  for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE * 7; step += 1) animation.tick();
+  animation.render(40);
+  const frozenColumn = animation.position();
+  const frozenDirection = animation.direction();
+  const frozenPhase = animation.waterPhase();
+  check(frozenColumn > 0, `continuity setup never left the left edge: ${frozenColumn}`);
+
+  const first = createCalmWorkingShipWidget(tui, animation);
+  check(first.render(40) && animation.position() === frozenColumn, "binding a widget moved the frozen boat");
+  first.dispose();
+  // Dispose freezes; further wall time without ticks must not change logical state.
+  check(animation.position() === frozenColumn, "dispose changed the frozen column");
+  check(animation.direction() === frozenDirection, "dispose changed the frozen direction");
+  check(animation.waterPhase() === frozenPhase, "dispose changed the frozen water phase");
+
+  const resumed = createCalmWorkingShipWidget(tui, animation);
+  const firstFrame = resumed.render(40);
+  check(
+    animation.position() === frozenColumn && animation.direction() === frozenDirection,
+    `resume first frame left frozen state: col=${animation.position()} dir=${animation.direction()}`,
+  );
+  check(sailOf(firstFrame) === SAIL, "resume first frame lost its centered sail");
+  check(animation.waterPhase() === frozenPhase, "resume advanced water phase without a tick");
+  // After resume, motion continues from the frozen state rather than restarting.
+  for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE; step += 1) animation.tick();
+  check(
+    animation.position() === frozenColumn + frozenDirection,
+    `post-resume motion did not continue from frozen column: ${animation.position()}`,
+  );
+  resumed.dispose();
+
+  // Hidden resize clamps without needing a live widget, and preserves a valid heading.
+  animation.render(80);
+  while (animation.position() < 75) animation.tick();
+  animation.render(80);
+  check(animation.position() === 75 && animation.direction() === -1, "endpoint setup failed before hidden resize");
+  const beforeHiddenResize = { column: animation.position(), direction: animation.direction(), phase: animation.waterPhase() };
+  animation.clampToWidth(20);
+  check(animation.position() === 15, `hidden shrink did not clamp: ${animation.position()}`);
+  check(animation.direction() === -1, "hidden shrink lost the leftward heading at the right edge");
+  check(animation.waterPhase() === beforeHiddenResize.phase, "hidden clamp advanced water phase");
+  // Growing while hidden must not invent motion either.
+  animation.clampToWidth(60);
+  check(animation.position() === 15, `hidden grow moved the boat: ${animation.position()}`);
+  check(animation.direction() === -1, "hidden grow changed direction without cause");
+
+  // Endpoint and bounce continuity: pause immediately before, at, and after each edge.
+  for (const scenario of [
+    { label: "before-right", setup(anim) {
+      anim.reset(); anim.render(12);
+      while (anim.position() < 6) anim.tick();
+      check(anim.position() === 6 && anim.direction() === 1, "before-right setup");
+    }},
+    { label: "at-right", setup(anim) {
+      anim.reset(); anim.render(12);
+      while (anim.position() < 7) anim.tick();
+      check(anim.position() === 7 && anim.direction() === -1, "at-right setup");
+    }},
+    { label: "after-right", setup(anim) {
+      anim.reset(); anim.render(12);
+      while (anim.position() < 7) anim.tick();
+      for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE; step += 1) anim.tick();
+      check(anim.position() === 6 && anim.direction() === -1, "after-right setup");
+    }},
+    { label: "before-left", setup(anim) {
+      anim.reset(); anim.render(12);
+      while (anim.position() < 7) anim.tick();
+      while (!(anim.position() === 1 && anim.direction() === -1)) anim.tick();
+    }},
+    { label: "at-left", setup(anim) {
+      anim.reset(); anim.render(12);
+      while (anim.position() < 7) anim.tick();
+      while (!(anim.position() === 0 && anim.direction() === 1)) anim.tick();
+    }},
+    { label: "after-left", setup(anim) {
+      anim.reset(); anim.render(12);
+      while (anim.position() < 7) anim.tick();
+      while (!(anim.position() === 0 && anim.direction() === 1)) anim.tick();
+      for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE; step += 1) anim.tick();
+      check(anim.position() === 1 && anim.direction() === 1, "after-left setup");
+    }},
+  ]) {
+    const edge = createCalmWorkingShipAnimation();
+    scenario.setup(edge);
+    edge.render(12);
+    const frozen = { column: edge.position(), direction: edge.direction(), phase: edge.waterPhase() };
+    const paused = createCalmWorkingShipWidget(tui, edge);
+    paused.dispose();
+    const again = createCalmWorkingShipWidget(tui, edge);
+    again.render(12);
+    check(
+      edge.position() === frozen.column && edge.direction() === frozen.direction && edge.waterPhase() === frozen.phase,
+      `${scenario.label} resume changed frozen edge state`,
+    );
+    for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE; step += 1) edge.tick();
+    const expectedColumn = Math.min(7, Math.max(0, frozen.column + frozen.direction));
+    let expectedDirection = frozen.direction;
+    if (expectedColumn >= 7) expectedDirection = -1;
+    else if (expectedColumn <= 0) expectedDirection = 1;
+    check(
+      edge.position() === expectedColumn && edge.direction() === expectedDirection,
+      `${scenario.label} post-resume bounce drifted: col=${edge.position()} dir=${edge.direction()}`,
+    );
+    again.dispose();
+  }
+
+  // reset() returns a genuine fresh-session initial state.
+  animation.reset();
+  check(
+    animation.position() === 0 && animation.direction() === 1 && animation.waterPhase() === 0,
+    "reset() did not restore the normal initial boat state",
+  );
+  animation.render(40);
+  check(sailOf(animation.render(40)) === SAIL, "reset() first frame lost the centered sail");
+
+  // Two controller instances never share motion state.
+  const left = createCalmWorkingShipAnimation();
+  const right = createCalmWorkingShipAnimation();
+  left.render(40);
+  right.render(40);
+  for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE * 3; step += 1) left.tick();
+  check(left.position() === 3 && right.position() === 0, "separate animations leaked motion state");
+}
+
+{
+  const realSetInterval = globalThis.setInterval;
+  const realClearInterval = globalThis.clearInterval;
+  const callbacks = [];
+  const handles = new Set();
+  globalThis.setInterval = (callback) => {
+    callbacks.push(callback);
+    const handle = { unref() {} };
+    handles.add(handle);
+    return handle;
+  };
+  globalThis.clearInterval = (handle) => {
+    handles.delete(handle);
+  };
+
+  try {
+    const tui = { renderRequests: 0, requestRender() { this.renderRequests += 1; } };
+    const animation = createCalmWorkingShipAnimation();
+    const first = createCalmWorkingShipWidget(tui, animation);
+    first.render(40);
+    callbacks[callbacks.length - 1]();
+    callbacks[callbacks.length - 1]();
+    check(tui.renderRequests === 2, "unpainted timer ticks did not request renders");
+    first.dispose();
+    check(handles.size === 0, "disposing the unpainted widget left its timer scheduled");
+    check(
+      animation.position() === 0 && animation.direction() === 1 && animation.waterPhase() === 0,
+      "dispose retained state from unpainted timer ticks",
+    );
+
+    const resumed = createCalmWorkingShipWidget(tui, animation);
+    resumed.render(40);
+    for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE; step += 1) {
+      callbacks[callbacks.length - 1]();
+    }
+    resumed.render(40);
+    check(animation.position() === 1, "unpainted ticks leaked into the resumed cadence");
+    check(animation.waterPhase() === 0, "resumed cadence did not restore the rendered water phase");
+    resumed.dispose();
+
+    const committed = createCalmWorkingShipAnimation();
+    const progressing = createCalmWorkingShipWidget(tui, committed);
+    progressing.render(40);
+    callbacks[callbacks.length - 1]();
+    progressing.render(40);
+    const renderedPhase = committed.waterPhase();
+    callbacks[callbacks.length - 1]();
+    progressing.dispose();
+    check(committed.position() === 0, "dispose changed the committed column after an unpainted tick");
+    check(committed.waterPhase() === renderedPhase, "dispose changed the committed phase after an unpainted tick");
+
+    const committedResume = createCalmWorkingShipWidget(tui, committed);
+    committedResume.render(40);
+    for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE - 2; step += 1) {
+      callbacks[callbacks.length - 1]();
+    }
+    check(committed.position() === 0, "serviced render did not preserve the committed cadence");
+    callbacks[callbacks.length - 1]();
+    committedResume.render(40);
+    check(committed.position() === 1, "serviced render did not commit progress for the next cadence");
+    committedResume.dispose();
+
+    const boundaryCases = [
+      [6, 1], [7, -1], [6, -1], [1, -1], [0, 1], [1, 1],
+    ];
+    for (const [targetPosition, targetDirection] of boundaryCases) {
+      const edge = createCalmWorkingShipAnimation();
+      edge.render(12);
+      let reached = false;
+      for (let step = 0; step < 160; step += 1) {
+        if (edge.position() === targetPosition && edge.direction() === targetDirection) {
+          edge.render(12);
+          reached = true;
+          break;
+        }
+        edge.tick();
+        edge.render(12);
+      }
+      check(reached, `could not prepare bounce state ${targetPosition}/${targetDirection}`);
+      const before = { position: edge.position(), direction: edge.direction(), phase: edge.waterPhase() };
+      const paused = createCalmWorkingShipWidget(tui, edge);
+      paused.render(12);
+      for (let step = 0; step < CALM_WORKING_SHIP_TICKS_PER_MOVE; step += 1) {
+        callbacks[callbacks.length - 1]();
+      }
+      paused.dispose();
+      check(
+        edge.position() === before.position &&
+          edge.direction() === before.direction &&
+          edge.waterPhase() === before.phase,
+        `unpainted bounce tick escaped ${targetPosition}/${targetDirection}`,
+      );
+      const resumedEdge = createCalmWorkingShipWidget(tui, edge);
+      resumedEdge.render(12);
+      check(
+        edge.position() === before.position && edge.direction() === before.direction,
+        `bounce state ${targetPosition}/${targetDirection} changed on resume`,
+      );
+      resumedEdge.dispose();
+    }
+  } finally {
+    globalThis.setInterval = realSetInterval;
+    globalThis.clearInterval = realClearInterval;
+  }
+}
+
+// --- Lifecycle through the Calm extension's registered handlers --------------------
+let liveTimers = 0;
+const realSetInterval = globalThis.setInterval;
+const realClearInterval = globalThis.clearInterval;
+globalThis.setInterval = (...args) => {
+  liveTimers += 1;
+  return realSetInterval(...args);
+};
+globalThis.clearInterval = (timer) => {
+  if (timer !== undefined) liveTimers -= 1;
+  return realClearInterval(timer);
+};
+
+const sessionWrites = [];
+const handlers = new Map();
+let calmCommand;
+const pi = {
+  events: { emit() {}, on() {} },
+  on(event, handler) {
+    const existing = handlers.get(event) ?? [];
+    existing.push(handler);
+    handlers.set(event, existing);
+  },
+  registerCommand(name, command) {
+    if (name === "calm") calmCommand = command;
+  },
+  registerEntryRenderer() {},
+  registerTool() {},
+  getAllTools() {
+    return [];
+  },
+  appendEntry: (...args) => sessionWrites.push(["appendEntry", ...args]),
+  sendMessage: (...args) => sessionWrites.push(["sendMessage", ...args]),
+  sendUserMessage: (...args) => sessionWrites.push(["sendUserMessage", ...args]),
+  setSessionName: (...args) => sessionWrites.push(["setSessionName", ...args]),
+};
+const extension = await import(`${pathToFileURL(process.env.EXT).href}?ship=${Date.now()}`);
+extension.default(pi);
+check(!!calmCommand, "Calm command was not registered");
+for (const event of ["session_start", "agent_start", "agent_settled", "session_shutdown"]) {
+  check(handlers.has(event), `Calm did not register a ${event} handler`);
+}
+
+let renderRequests = 0;
+const tui = { requestRender: () => { renderRequests += 1; } };
+const ui = {
+  workingVisible: [],
+  visibilityCalls: 0,
+  widgetOps: [],
+  widgets: new Map(),
+  setWorkingVisible(visible) {
+    this.visibilityCalls += 1;
+    this.workingVisible.push(visible);
+  },
+  // Mirrors Pi's documented widget contract: the previous component under a key is
+  // disposed before a replacement is installed, and clearing disposes it too.
+  setWidget(key, content, options) {
+    const existing = this.widgets.get(key);
+    if (existing?.dispose) existing.dispose();
+    this.widgets.delete(key);
+    this.widgetOps.push({
+      key,
+      action: content === undefined ? "clear" : "set",
+      placement: options?.placement,
+    });
+    if (content === undefined) return;
+    this.widgets.set(key, typeof content === "function" ? content(tui, theme) : content);
+  },
+  getEditorText: () => "",
+  getToolsExpanded: () => false,
+  onTerminalInput: () => () => {},
+  setHiddenThinkingLabel() {},
+  setStatus() {},
+  setToolsExpanded() {},
+  notify() {},
+  theme,
+};
+const ctx = { ui };
+const fire = async (event, payload = {}) => {
+  for (const handler of handlers.get(event) ?? []) await handler(payload, ctx);
+};
+const reset = () => {
+  ui.workingVisible.length = 0;
+  ui.widgetOps.length = 0;
+  ui.visibilityCalls = 0;
+};
+const shipWidget = () => ui.widgets.get(CALM_WORKING_SHIP_WIDGET_KEY);
+
+// --- Calm off leaves Pi's stock working behavior completely untouched -------------
+await fire("session_start", { reason: "startup" });
+reset();
+for (const event of ["agent_start", "agent_settled", "session_shutdown"]) {
+  await fire(event, { reason: "quit" });
+}
+check(
+  ui.visibilityCalls === 0,
+  `Calm off called setWorkingVisible ${ui.visibilityCalls} times from the run lifecycle`,
+);
+check(ui.widgetOps.length === 0, `Calm off registered a working widget: ${JSON.stringify(ui.widgetOps)}`);
+check(liveTimers === 0, `Calm off started ${liveTimers} animation timers`);
+
+// --- Turning Calm on while idle shows no boat until a run starts -------------------
+reset();
+await calmCommand.handler("", ctx);
+check(ui.widgetOps.length === 0, "toggling Calm on while idle installed a working widget");
+check(liveTimers === 0, "toggling Calm on while idle started an animation timer");
+
+// --- Calm on plus an active run shows the boat instead of the stock row -----------
+reset();
+await fire("agent_start");
+check(
+  ui.widgetOps.length === 1 &&
+    ui.widgetOps[0].key === CALM_WORKING_SHIP_WIDGET_KEY &&
+    ui.widgetOps[0].action === "set",
+  `Calm on did not install exactly one working widget: ${JSON.stringify(ui.widgetOps)}`,
+);
+check(ui.widgetOps[0].placement === undefined, "Calm working widget asked for a non-default placement");
+check(
+  ui.workingVisible[ui.workingVisible.length - 1] === false,
+  "Calm on did not hide Pi's stock working row",
+);
+check(liveTimers === 1, `Calm on kept ${liveTimers} animation timers instead of one`);
+
+const widget = shipWidget();
+check(!!widget, "Calm on did not install the working-ship widget");
+check(typeof widget.render === "function", "working widget has no render(width)");
+check(typeof widget.invalidate === "function", "working widget has no invalidate()");
+check(typeof widget.dispose === "function", "working widget has no dispose()");
+// A focusable widget could steal input or swallow Escape; this one takes no keys.
+check(widget.handleInput === undefined, "working widget accepts keyboard input");
+check(widget.wantsKeyRelease === undefined, "working widget asked for key release events");
+check(widget.render(60).length === 2, "installed working widget did not render the two-row sprite");
+check(
+  widget.render(60).every((line) => visibleWidth(line) <= 60),
+  "installed working widget rendered a line wider than its viewport",
+);
+
+// --- Repeated low-level starts inside one logical run never duplicate anything -----
+reset();
+for (let repeat = 0; repeat < 5; repeat += 1) await fire("agent_start");
+check(ui.widgetOps.length === 0, `repeated starts churned the working widget: ${JSON.stringify(ui.widgetOps)}`);
+check(liveTimers === 1, `repeated starts left ${liveTimers} animation timers`);
+check(ui.widgets.size === 1, `repeated starts left ${ui.widgets.size} widgets`);
+check(shipWidget() === widget, "repeated starts replaced the running widget");
+
+// --- The animation drives Pi's renderer -------------------------------------------
+{
+  const before = renderRequests;
+  await new Promise((resolve) => setTimeout(resolve, CALM_WORKING_SHIP_TICK_MS * 3));
+  check(renderRequests > before, "the working animation never requested a TUI render");
+}
+
+// --- Settling removes the boat, stops the animation, and restores the stock row ----
+// Drive the live widget far enough that a left-edge reset would be observable.
+{
+  const moving = shipWidget();
+  check(!!moving, "continuity setup lost the live working widget");
+  moving.render(40);
+  await new Promise((resolve) => setTimeout(resolve, CALM_WORKING_SHIP_TICK_MS * CALM_WORKING_SHIP_TICKS_PER_MOVE * 5 + 40));
+  moving.render(40);
+}
+const hullColumn = (widget) => strip(widget.render(40)[1]).indexOf(HULL);
+const freezeColumn = hullColumn(shipWidget());
+const freezeSail = sailOf(shipWidget().render(40));
+check(freezeColumn > 0, `lifecycle continuity setup never left the left edge: ${freezeColumn}`);
+
+reset();
+await fire("agent_settled");
+check(
+  ui.widgetOps.length === 1 &&
+    ui.widgetOps[0].key === CALM_WORKING_SHIP_WIDGET_KEY &&
+    ui.widgetOps[0].action === "clear",
+  `settling did not clear the working widget: ${JSON.stringify(ui.widgetOps)}`,
+);
+check(liveTimers === 0, `settling left ${liveTimers} animation timers`);
+check(ui.widgets.size === 0, "settling left a residual widget");
+check(
+  ui.workingVisible[ui.workingVisible.length - 1] === true,
+  "settling did not restore Pi's stock working row",
+);
+{
+  // No stale rows survive the removal: the widget renders nothing once disposed.
+  const renderRequestsAfterDispose = renderRequests;
+  await new Promise((resolve) => setTimeout(resolve, CALM_WORKING_SHIP_TICK_MS * CALM_WORKING_SHIP_TICKS_PER_MOVE * 3));
+  check(
+    renderRequests === renderRequestsAfterDispose,
+    "the animation kept running after the widget was removed",
+  );
+}
+
+// --- Later working period resumes the frozen column and direction -----------------
+reset();
+await fire("agent_start");
+check(liveTimers === 1, `resume start left ${liveTimers} animation timers instead of one`);
+check(ui.widgets.size === 1, "resume start did not install exactly one working widget");
+const resumedWidget = shipWidget();
+const resumeColumn = hullColumn(resumedWidget);
+const resumeSail = sailOf(resumedWidget.render(40));
+check(
+  resumeColumn === freezeColumn && resumeSail === freezeSail,
+  `resume reset the boat instead of continuing: froze ${freezeColumn}/${freezeSail}, resumed ${resumeColumn}/${resumeSail}`,
+);
+// Repeated start/settle cycles must not duplicate scheduler or widget ownership.
+for (let cycle = 0; cycle < 3; cycle += 1) {
+  await fire("agent_settled");
+  check(liveTimers === 0, `cycle ${cycle} settle left ${liveTimers} timers`);
+  check(ui.widgets.size === 0, `cycle ${cycle} settle left a residual widget`);
+  await fire("agent_start");
+  check(liveTimers === 1, `cycle ${cycle} start left ${liveTimers} timers`);
+  check(ui.widgets.size === 1, `cycle ${cycle} start left ${ui.widgets.size} widgets`);
+  check(
+    hullColumn(shipWidget()) >= freezeColumn,
+    `cycle ${cycle} lost continuity after repeated settle/start`,
+  );
+}
+await fire("agent_settled");
+check(liveTimers === 0 && ui.widgets.size === 0, "repeated continuity cycles did not finish clean");
+
+// A genuine fresh session resets to the normal initial position.
+reset();
+await fire("session_start", { reason: "new" });
+check(liveTimers === 0 && ui.widgets.size === 0, "fresh session left a stale boat");
+await fire("agent_start");
+check(hullColumn(shipWidget()) === 0, "fresh session did not restart at the left edge");
+check(sailOf(shipWidget().render(40)) === SAIL, "fresh session lost the centered sail");
+await fire("agent_settled");
+
+// --- Abort and failure share Pi's agent_settled path ------------------------------
+// Pi emits agent_settled from a finally block, so an aborted or failed run reaches
+// exactly this handler; the real-TUI regression covers the Escape abort path.
+for (const outcome of ["abort", "failure"]) {
+  reset();
+  await fire("agent_start");
+  check(liveTimers === 1, `${outcome} setup did not start the animation`);
+  await fire("agent_settled");
+  check(liveTimers === 0, `${outcome} left ${liveTimers} animation timers`);
+  check(ui.widgets.size === 0, `${outcome} left a residual widget`);
+  check(
+    ui.workingVisible[ui.workingVisible.length - 1] === true,
+    `${outcome} did not restore Pi's stock working row`,
+  );
+}
+
+// --- Shutdown, reload, and session replacement all clean up -----------------------
+for (const reason of ["quit", "reload", "new", "resume", "fork"]) {
+  reset();
+  await fire("agent_start");
+  check(liveTimers === 1, `${reason} setup did not start the animation`);
+  await fire("session_shutdown", { reason });
+  check(liveTimers === 0, `session_shutdown(${reason}) left ${liveTimers} animation timers`);
+  check(ui.widgets.size === 0, `session_shutdown(${reason}) left a residual widget`);
+  check(
+    ui.workingVisible[ui.workingVisible.length - 1] === true,
+    `session_shutdown(${reason}) did not restore Pi's stock working row`,
+  );
+  if (reason === "quit") continue;
+  reset();
+  await fire("session_start", { reason });
+  check(ui.widgets.size === 0, `session_start(${reason}) installed a stale widget`);
+  check(liveTimers === 0, `session_start(${reason}) left ${liveTimers} animation timers`);
+}
+
+// --- Toggling Calm off during an active run restores the stock row immediately -----
+await fire("session_start", { reason: "startup" });
+reset();
+await fire("agent_start");
+check(liveTimers === 1, "active-run setup did not start the animation");
+await calmCommand.handler("", ctx);
+check(liveTimers === 0, "toggling Calm off during a run left the animation running");
+check(ui.widgets.size === 0, "toggling Calm off during a run left the boat on screen");
+check(
+  ui.workingVisible[ui.workingVisible.length - 1] === true,
+  "toggling Calm off during a run did not restore Pi's stock working row",
+);
+
+// Toggling Calm back on during the same run returns the boat.
+reset();
+await calmCommand.handler("", ctx);
+check(liveTimers === 1, "toggling Calm on during a run did not return the boat");
+check(
+  ui.workingVisible[ui.workingVisible.length - 1] === false,
+  "toggling Calm on during a run did not hide Pi's stock working row",
+);
+await fire("agent_settled");
+check(liveTimers === 0, "the toggled-on run did not clean up");
+
+// A run started after toggling Calm on while idle uses the boat.
+reset();
+await calmCommand.handler("", ctx);
+await calmCommand.handler("", ctx);
+await fire("agent_start");
+check(liveTimers === 1, "a later run did not use the boat after an idle Calm toggle");
+await fire("agent_settled");
+check(liveTimers === 0, "the later run did not clean up");
+
+// --- The visual-only widget never touches session, transcript, or export data ------
+check(
+  sessionWrites.length === 0,
+  `the working presentation wrote session or transcript data: ${JSON.stringify(sessionWrites)}`,
+);
+
+globalThis.setInterval = realSetInterval;
+globalThis.clearInterval = realClearInterval;
+JS
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "Pi Calm working-ship checks failed: $out"
+  [ -z "$out" ] || fail "Pi Calm working-ship test printed output: $out"
+  pass "Pi Calm working ship keeps its centered two-row asymmetric Unicode boat inside a deterministic long-wave trough, paints all water standard blue and the whole boat standard yellow with balanced resets, keeps ANSI-stripped width exact, reverses cleanly at both edges and every width, clamps visible and hidden resizes, falls back deterministically when narrow, freezes and resumes across settle/start without hidden-time jumps or duplicate timers, resets only on a fresh session, and leaves Calm-off visibility untouched"
+}
+
+# The rendered-DOM assertions below depend on a real browser, so the render step
+# itself is the part that fails for reasons that have nothing to do with Calm.
+# This pins that guard with real processes and no browser: one clean render, one
+# that only succeeds after Chrome's start-up flake, and one that never renders
+# and must report enough to tell a Chrome failure apart from a Pi export change.
+test_export_dom_render_guard() {
+  local dir source_file out_file report
+
+  dir="$TMP_ROOT/render-guard"
+  mkdir -p "$dir"
+  source_file="$dir/export.html"
+  out_file="$dir/dom.html"
+  printf '<html><body>export</body></html>\n' >"$source_file"
+
+  cat >"$dir/chrome-ok" <<'SH'
+#!/bin/sh
+case "${1:-}" in --version) echo "FakeChrome 1.2.3"; exit 0 ;; esac
+echo attempt >>"$FM_FAKE_CHROME_ATTEMPTS"
+printf '<html><head></head><body>export</body></html>\n'
+SH
+  cat >"$dir/chrome-flaky" <<'SH'
+#!/bin/sh
+case "${1:-}" in --version) echo "FakeChrome 1.2.3"; exit 0 ;; esac
+echo attempt >>"$FM_FAKE_CHROME_ATTEMPTS"
+if [ "$(wc -l <"$FM_FAKE_CHROME_ATTEMPTS")" -lt 3 ]; then
+  echo "fake chrome start-up crashed" >&2
+  exit 1
+fi
+printf '<html><head></head><body>export</body></html>\n'
+SH
+  cat >"$dir/chrome-broken" <<'SH'
+#!/bin/sh
+case "${1:-}" in --version) echo "FakeChrome 1.2.3"; exit 0 ;; esac
+echo attempt >>"$FM_FAKE_CHROME_ATTEMPTS"
+echo "FAKE_CHROME_STARTUP_MARKER" >&2
+exit 9
+SH
+  cat >"$dir/chrome-hang" <<'SH'
+#!/bin/sh
+case "${1:-}" in --version) echo "FakeChrome 1.2.3"; exit 0 ;; esac
+echo attempt >>"$FM_FAKE_CHROME_ATTEMPTS"
+printf '<html><head></head><body>export'
+exec sleep 30
+SH
+  chmod +x "$dir/chrome-ok" "$dir/chrome-flaky" "$dir/chrome-broken" "$dir/chrome-hang"
+
+  : >"$dir/attempts-ok"
+  FM_FAKE_CHROME_ATTEMPTS="$dir/attempts-ok" \
+    render_export_dom "$dir/chrome-ok" "$source_file" "$out_file" 9.9.9 >"$dir/report-ok" \
+    || fail "render_export_dom rejected a Chrome that dumped a complete DOM"
+  grep -Fq '</html>' "$out_file" || fail "render_export_dom did not leave the rendered DOM behind"
+  [ "$(wc -l <"$dir/attempts-ok")" -eq 1 ] \
+    || fail "render_export_dom retried a Chrome that had already rendered the DOM"
+  [ ! -s "$dir/report-ok" ] || fail "render_export_dom reported a diagnostic for a successful render"
+
+  : >"$dir/attempts-flaky"
+  : >"$out_file"
+  FM_FAKE_CHROME_ATTEMPTS="$dir/attempts-flaky" \
+    render_export_dom "$dir/chrome-flaky" "$source_file" "$out_file" 9.9.9 >"$dir/report-flaky" \
+    || fail "render_export_dom gave up on a Chrome that renders after a start-up failure"
+  grep -Fq '</html>' "$out_file" || fail "a retried render left no DOM behind"
+  [ "$(wc -l <"$dir/attempts-flaky")" -eq 3 ] \
+    || fail "render_export_dom did not retry the failed Chrome start-ups exactly"
+
+  : >"$dir/attempts-broken"
+  : >"$out_file"
+  if FM_FAKE_CHROME_ATTEMPTS="$dir/attempts-broken" \
+    render_export_dom "$dir/chrome-broken" "$source_file" "$out_file" 9.9.9 >"$dir/report-broken"
+  then
+    fail "render_export_dom accepted a Chrome that never rendered the DOM"
+  fi
+  [ "$(wc -l <"$dir/attempts-broken")" -eq 3 ] \
+    || fail "render_export_dom did not exhaust its bounded retries before failing"
+  report=$(cat "$dir/report-broken")
+  assert_contains "$report" "$dir/chrome-broken" "the render failure did not name the Chrome binary it used"
+  assert_contains "$report" "FakeChrome 1.2.3" "the render failure did not name the Chrome version it used"
+  assert_contains "$report" "pi=9.9.9" "the render failure did not name the installed Pi version"
+  assert_contains "$report" "exit=9" "the render failure did not report Chrome's exit status"
+  assert_contains "$report" "timed_out=no" "the render failure did not report that Chrome exited on its own"
+  assert_contains "$report" "FAKE_CHROME_STARTUP_MARKER" "the render failure discarded Chrome's own diagnostic"
+
+  : >"$dir/attempts-hang"
+  : >"$out_file"
+  if FM_FAKE_CHROME_ATTEMPTS="$dir/attempts-hang" FM_CHROME_RENDER_WAIT_TICKS=3 \
+    render_export_dom "$dir/chrome-hang" "$source_file" "$out_file" 9.9.9 >"$dir/report-hang"
+  then
+    fail "render_export_dom accepted a Chrome that never finished the DOM"
+  fi
+  [ "$(wc -l <"$dir/attempts-hang")" -eq 3 ] \
+    || fail "render_export_dom did not exhaust its bounded retries on a Chrome that never finished"
+  report=$(cat "$dir/report-hang")
+  assert_contains "$report" "timed_out=yes" \
+    "the render failure reported its own kill signal without saying the attempt was timed out"
+
+  pass "the rendered-export-DOM guard renders in one pass, retries a bounded number of Chrome start-up failures, and reports the Chrome binary, Chrome version, Pi version, exit status, and Chrome diagnostic when every attempt fails"
+}
+
 test_interactive_terminal_e2e() {
-  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_pid chrome_wait active_wait active_screen_wait
+  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot export_settled_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_report active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi calm interactive E2E"
     return 0
@@ -1612,9 +3353,20 @@ test_interactive_terminal_e2e() {
   active_before_snapshot="$TMP_ROOT/active-before.txt"
   active_hidden_snapshot="$TMP_ROOT/active-hidden.txt"
   export_snapshot="$TMP_ROOT/export.txt"
+  export_settled_snapshot="$TMP_ROOT/export-settled.txt"
   restored_snapshot="$TMP_ROOT/restored.txt"
   working_snapshot="$TMP_ROOT/working.txt"
   working_response_snapshot="$TMP_ROOT/working-response.txt"
+  boat_frame_one="$TMP_ROOT/boat-frame-one.txt"
+  boat_frame_two="$TMP_ROOT/boat-frame-two.txt"
+  boat_resized_snapshot="$TMP_ROOT/boat-resized.txt"
+  boat_focus_snapshot="$TMP_ROOT/boat-focus.txt"
+  boat_cleared_snapshot="$TMP_ROOT/boat-cleared.txt"
+  boat_color_snapshot="$TMP_ROOT/boat-color.txt"
+  boat_water_snapshot="$TMP_ROOT/boat-water.txt"
+  boat_narrow_snapshot="$TMP_ROOT/boat-narrow.txt"
+  boat_freeze_snapshot="$TMP_ROOT/boat-freeze.txt"
+  boat_resume_snapshot="$TMP_ROOT/boat-resume.txt"
   restarted_snapshot="$TMP_ROOT/restarted.txt"
   resumed_restored_snapshot="$TMP_ROOT/resumed-restored.txt"
   mkdir -p "$project/.pi/extensions/lib" "$project/bin" "$project/state" "$config" "$home/config"
@@ -1624,15 +3376,31 @@ test_interactive_terminal_e2e() {
   cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
+  cp "$WORKING_SHIP_SPRITE" "$project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$project/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$project/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$project/.pi/extensions/lib/fm-native-contract.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$project/.pi/extensions/lib/fm-async-exec.ts"
   cp "$WATCH_EXT" "$project/.pi/extensions/fm-primary-pi-watch.ts"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$project/.pi/extensions/fm-primary-turnend-guard.ts"
   cp \
+    "$ROOT/bin/fm-sessionstart-run.sh" \
     "$ROOT/bin/fm-sessionstart-nudge.sh" \
     "$ROOT/bin/fm-primary-scope-lib.sh" \
     "$ROOT/bin/fm-gate-refuse-lib.sh" \
     "$ROOT/bin/fm-operational-input.sh" \
     "$project/bin/"
+  # The real digest is out of scope here: this lab is about how Calm RENDERS the
+  # session-open message and whether it keeps its operational provenance, not
+  # about what session start reports. A stub keeps the run tier's real routing
+  # and the extension's real encoding in the path without dragging a whole
+  # fleet home into a rendering test.
+  cat >"$project/bin/fm-session-start.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'CALM_E2E_SESSION_START_DIGEST\n'
+exit 0
+SH
   chmod +x "$project/bin/"*.sh
   cat >"$project/.pi/extensions/fm-calm-e2e-inject.ts" <<'TS'
 import {
@@ -1651,6 +3419,15 @@ export default function (pi: ExtensionAPI): void {
       {
         id: "delayed",
         name: "Delayed Calm working-row fixture",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 4096,
+        maxTokens: 128,
+      },
+      {
+        id: "delayed-boat",
+        name: "Long-delay Calm working-ship fixture",
         reasoning: false,
         input: ["text"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -1695,7 +3472,18 @@ export default function (pi: ExtensionAPI): void {
           stream.end();
           return;
         }
-        await new Promise((resolve) => setTimeout(resolve, 1500));
+        // Wake as soon as the run is aborted so Escape settles the turn promptly.
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, model.id === "delayed-boat" ? 90000 : 1500);
+          options?.signal?.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              resolve();
+            },
+            { once: true },
+          );
+        });
         if (options?.signal?.aborted) {
           output.stopReason = "aborted";
           stream.push({ type: "error", reason: "aborted", error: output });
@@ -1742,6 +3530,16 @@ export default function (pi: ExtensionAPI): void {
       await pi.sendUserMessage(encodeFirstmateOperationalInput(kind, body), {
         deliverAs: "followUp",
       });
+    },
+  });
+  pi.registerCommand("calm-boat-e2e", {
+    description: "Start the long-delay working-ship fixture.",
+    handler: async (_args, ctx) => {
+      const model = ctx.modelRegistry.find("calm-e2e", "delayed-boat");
+      if (!model || !(await pi.setModel(model))) {
+        throw new Error("could not select the long-delay Calm E2E model");
+      }
+      await pi.sendUserMessage("CALM_BOAT_E2E_PROMPT");
     },
   });
   pi.registerCommand("calm-working-e2e", {
@@ -1794,26 +3592,51 @@ JSON
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-o
   wait_for_text "$expanded_snapshot" "escape to interrupt" \
     || fail "Ctrl+O did not retain Pi's ordinary startup and tool expansion behavior"
+  # The expansion redraw lands a frame or two after the footer hint, so wait for the
+  # tool output this block actually asserts instead of assuming one implies the other.
+  wait_for_text "$expanded_snapshot" "CALM_E2E_OUTPUT" \
+    || fail "ordinary Ctrl+O expansion hid tool activity while calm mode was off"
   assert_contains "$(cat "$expanded_snapshot")" "CALM_E2E_OUTPUT" "ordinary Ctrl+O expansion hid tool activity while calm mode was off"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 120 ]; do
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$hidden_snapshot"
-    if ! grep -Fq "CALM_E2E_OUTPUT" "$hidden_snapshot" &&
-      ! grep -Fq "/calm" "$hidden_snapshot"; then
+    # Include scrollback: the built-in tool rows this documented bound keeps visible
+    # (see below) lengthen the transcript enough to push earlier genuine content, such
+    # as the original user prompt, above the plain viewport.
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$hidden_snapshot"
+    # Wait for the redraw this block actually asserts: the collapsed-thinking adapter
+    # (unconditional, unaffected by the built-in tool gate below) hides, and the
+    # retained genuine rows are back on screen. Built-in tool rows from before this
+    # first-ever activation are a separate, documented exception (see fm-calm.ts's
+    # file header and docs/calm.md): Pi gives no way to re-point an already-rendered
+    # tool row at a definition registered later, so CALM_E2E_OUTPUT and friends stay
+    # on screen through this whole redraw rather than disappearing with it.
+    if ! grep -Fq "Thinking..." "$hidden_snapshot" &&
+      ! grep -Fq "/calm" "$hidden_snapshot" &&
+      ! grep -Fq "I will run one command." "$hidden_snapshot" &&
+      grep -Fq "FIRSTMATE WATCHER WAKE: can you explain this phrase?" "$hidden_snapshot" &&
+      grep -Fq "The deterministic tool example is complete." "$hidden_snapshot"; then
       break
     fi
     sleep 0.05
     active_screen_wait=$((active_screen_wait + 1))
   done
-  assert_not_contains "$(cat "$hidden_snapshot")" "CALM_E2E_OUTPUT" "/calm left tool result output in the transcript"
+  # This session's built-in tool rows (bash/grep/find) were all rendered during the
+  # initial session restore, before Calm's first-ever activation in this session had
+  # claimed any built-in name; they keep their stock presentation for the rest of the
+  # session. This is the captain-accepted, documented bound on the collision fix (see
+  # fm-calm.ts's file header and docs/calm.md): the alternative was letting Calm
+  # silently disable a differently loaded extension's own bash/read/etc override. A
+  # fresh built-in tool call made after this same activation does hide correctly;
+  # that path is covered by this file's own test_calm_activation_collision_and
+  # _regression_bound against real Pi rendering components, not repeated here.
+  assert_contains "$(cat "$hidden_snapshot")" "CALM_E2E_OUTPUT" "a pre-activation built-in tool row unexpectedly hid; the documented bound regressed"
   assert_not_contains "$(cat "$hidden_snapshot")" "calm transcript" "/calm added a persistent Calm status row"
   [ "$(cat "$home/config/calm")" = on ] || fail "/calm did not persist its active choice"
-  assert_not_contains "$(cat "$hidden_snapshot")" "CALM_EXPORT_GREP" "/calm left the grep row in the transcript"
-  assert_not_contains "$(cat "$hidden_snapshot")" "CALM_EXPORT_FIND" "/calm left the find row in the transcript"
-  assert_not_contains "$(cat "$hidden_snapshot")" "\$ printf" "/calm left the tool-call row in the transcript"
+  assert_contains "$(cat "$hidden_snapshot")" "CALM_EXPORT_GREP" "a pre-activation grep row unexpectedly hid; the documented bound regressed"
+  assert_contains "$(cat "$hidden_snapshot")" "CALM_EXPORT_FIND" "a pre-activation find row unexpectedly hid; the documented bound regressed"
   assert_not_contains "$(cat "$hidden_snapshot")" "Thinking..." "/calm left collapsed thinking labels in the transcript"
   assert_not_contains "$(cat "$hidden_snapshot")" "fm_watch_arm_pi" "/calm left the Firstmate watcher tool call shell in the transcript"
   assert_not_contains "$(cat "$hidden_snapshot")" "watcher: started Pi extension arm child" "/calm left the Firstmate watcher tool result in the transcript"
@@ -1829,7 +3652,9 @@ JSON
   do
     assert_contains "$(cat "$hidden_snapshot")" "$near_miss" "/calm hid the genuine operational near miss $near_miss"
   done
-  assert_contains "$(cat "$hidden_snapshot")" "I will run one command." "/calm removed assistant conversation before a tool"
+  # Mid-turn narration emitted alongside the tool call is a working note, which Calm
+  # hides against the real Pi renderer; the genuine reply that ended the response stays.
+  assert_not_contains "$(cat "$hidden_snapshot")" "I will run one command." "/calm left a mid-turn assistant working note in the transcript"
   assert_contains "$(cat "$hidden_snapshot")" "The deterministic tool example is complete." "/calm removed assistant conversation after a tool"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-diagnostic-e2e"
@@ -1956,26 +3781,10 @@ if (!serialized.includes("firstmate-synthetic-input") || !serialized.includes("/
 const synthetic = entries.find((entry) => entry.type === "custom_message" && entry.customType === "firstmate-synthetic-input");
 if (!synthetic || synthetic.display) process.exit(1);
 JS
-  chrome=$(find_chrome) || fail "Chrome or Chromium is required for rendered export DOM assertions"
-  "$chrome" \
-    --headless=new \
-    --disable-gpu \
-    --no-sandbox \
-    --user-data-dir="$TMP_ROOT/chrome-profile" \
-    --virtual-time-budget=2000 \
-    --dump-dom \
-    "file://$export_file" >"$export_dom" 2>/dev/null &
-  chrome_pid=$!
-  chrome_wait=0
-  while kill -0 "$chrome_pid" 2>/dev/null && [ "$chrome_wait" -lt 100 ]; do
-    grep -Fq '</html>' "$export_dom" 2>/dev/null && break
-    sleep 0.1
-    chrome_wait=$((chrome_wait + 1))
-  done
-  kill "$chrome_pid" 2>/dev/null || true
-  wait "$chrome_pid" 2>/dev/null || true
-  grep -Fq '</html>' "$export_dom" 2>/dev/null \
-    || fail "could not render calm-mode HTML export DOM"
+  chrome=$(find_chrome) \
+    || fail "Chrome or Chromium is required for rendered export DOM assertions; set FM_CHROME_BIN to one"
+  chrome_report=$(render_export_dom "$chrome" "$export_file" "$export_dom" "$version") \
+    || fail "could not render calm-mode HTML export DOM: $chrome_report"
   node - "$export_dom" <<'JS' || fail "rendered export DOM violated the Calm conversation boundary"
 const dom = require("node:fs").readFileSync(process.argv[2], "utf8");
 const messages = dom.match(/<div id="messages">([\s\S]*?)<\/main>/)?.[1];
@@ -1990,6 +3799,38 @@ for (const current of ["CURRENT_WATCHER_E2E", "CURRENT_TURN_END_E2E", "CURRENT_A
 }
 if (!tree.includes("firstmate-synthetic-input") || !tree.includes("/tmp/probe.status")) process.exit(1);
 JS
+  # Calm returns the transcript to its own presentation once the export has been
+  # rendered. That repaint runs on the macrotask right after Pi prints the export
+  # confirmation, so it must not overwrite it: the captain has to keep seeing where
+  # their export landed. The export-data assertions above take seconds of real time,
+  # so this snapshot is taken well after that repaint has settled rather than racing it.
+  tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$export_settled_snapshot"
+  assert_contains "$(cat "$export_settled_snapshot")" "Session exported to: $export_file" \
+    "Calm's post-export repaint overwrote Pi's export confirmation"
+  assert_not_contains "$(cat "$export_settled_snapshot")" "fm_watch_arm_pi" \
+    "/export left the Firstmate watcher tool call shell in the Calm transcript"
+  assert_not_contains "$(cat "$export_settled_snapshot")" "watcher: started Pi extension arm child" \
+    "/export left the Firstmate watcher tool result in the Calm transcript"
+  assert_not_contains "$(cat "$export_settled_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" \
+    "/export left a synthetic Firstmate user-role presentation in the Calm transcript"
+  assert_not_contains "$(cat "$export_settled_snapshot")" "Thinking..." \
+    "/export left collapsed thinking labels in the Calm transcript"
+  assert_not_contains "$(cat "$export_settled_snapshot")" "I will run one command." \
+    "/export left a mid-turn assistant working note in the Calm transcript"
+  for hidden in \
+    CURRENT_WATCHER_E2E \
+    CURRENT_TURN_END_E2E \
+    CURRENT_AWAY_E2E \
+    CURRENT_FROM_FIRSTMATE_E2E \
+    CURRENT_LAUNCH_BRIEF_E2E
+  do
+    assert_not_contains "$(cat "$export_settled_snapshot")" "$hidden" \
+      "/export left operational input $hidden in the Calm transcript"
+  done
+  assert_contains "$(cat "$export_settled_snapshot")" "Show a deterministic tool example." \
+    "/export removed a genuine user prompt from the Calm transcript"
+  assert_contains "$(cat "$export_settled_snapshot")" "The deterministic tool example is complete." \
+    "/export removed genuine assistant conversation from the Calm transcript"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
@@ -2012,6 +3853,7 @@ JS
   assert_contains "$(cat "$restored_snapshot")" " Error:" "second /calm dropped the synthetic delivery diagnostic"
   assert_not_contains "$(cat "$restored_snapshot")" "Navigated to selected point" "second /calm added a navigation status row"
   assert_contains "$(cat "$restored_snapshot")" "Thinking..." "second /calm did not restore Pi's collapsed thinking labels"
+  assert_contains "$(cat "$restored_snapshot")" "I will run one command." "second /calm did not restore the mid-turn assistant working note"
   assert_contains "$(cat "$restored_snapshot")" "escape to interrupt" "/calm changed the active Ctrl+O expansion state"
 
   hash_after=$(shasum -a 256 "$session_file" | awk '{print $1}')
@@ -2020,10 +3862,13 @@ JS
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
   active_screen_wait=0
+  # CALM_E2E_OUTPUT is not a useful redraw signal here: it is the pre-activation
+  # bash row covered by the documented bound above, so it never leaves the screen
+  # again this session regardless of this toggle.
   while [ "$active_screen_wait" -lt 120 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$working_snapshot"
-    if ! grep -Fq "CALM_E2E_OUTPUT" "$working_snapshot" &&
-      ! grep -Fq "/calm" "$working_snapshot"; then
+    if ! grep -Fq "/calm" "$working_snapshot" &&
+      [ "$(cat "$home/config/calm")" = on ]; then
       break
     fi
     sleep 0.05
@@ -2031,22 +3876,313 @@ JS
   done
   [ "$(cat "$home/config/calm")" = on ] || fail "third /calm did not persist the active choice"
 
-  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-working-e2e"
+  # Calm on plus a genuinely active run replaces Pi's stock working row with the boat.
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-boat-e2e"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
   active_screen_wait=0
-  while [ "$active_screen_wait" -lt 120 ]; do
+  while [ "$active_screen_wait" -lt 200 ]; do
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$working_snapshot"
-    if grep -Fq "Working..." "$working_snapshot"; then
+    if grep -Fq '╲▁▁▁╱' "$working_snapshot"; then
       break
     fi
     sleep 0.025
     active_screen_wait=$((active_screen_wait + 1))
   done
-  assert_contains "$(cat "$working_snapshot")" "Working..." "Calm hid Pi's built-in Working row during a real provider wait"
-  assert_not_contains "$(cat "$working_snapshot")" "calm transcript" "the real provider wait showed a persistent Calm status row"
-  assert_not_contains "$(cat "$working_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "the real provider wait restored a hidden operational row"
+  cp "$working_snapshot" "$boat_frame_one"
+  assert_contains "$(cat "$boat_frame_one")" '╲▁▁▁╱' "Calm did not show the working ship during a real provider wait"
+  assert_contains "$(cat "$boat_frame_one")" '◿│◣' "the working ship lost its centered asymmetric sail"
+  assert_not_contains "$(cat "$boat_frame_one")" "Working" "Calm left Pi's stock working row visible while the ship was shown"
+  assert_not_contains "$(cat "$boat_frame_one")" "calm transcript" "the real provider wait showed a persistent Calm status row"
+  assert_not_contains "$(cat "$boat_frame_one")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "the real provider wait restored a hidden operational row"
+  boat_hull_line=$(grep -F '╲▁▁▁╱' "$boat_frame_one" | head -1)
+  boat_hull_column=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_frame_one")
+  boat_sail_column=$(awk 'index($0,"◿│◣"){print index($0,"◿│◣"); exit}' "$boat_frame_one")
+  [ "$boat_sail_column" -eq $((boat_hull_column + 1)) ] \
+    || fail "the working ship sail was not centered over its five-cell hull"
+  assert_not_contains "$boat_hull_line" "Working" "the ship row carried extra status copy"
+  printf '%s\n' "$boat_hull_line" | grep -Eq '[▁▂▃▄]' \
+    || fail "the working ship rendered no low waveform"
+  # Standard ANSI colors: all water blue at every height, the whole hull and sail
+  # yellow, no cyan crests or red sail half, and no RGB/256 escapes.
+  tmux -L "$TMUX_SOCKET" capture-pane -p -e -t "$TMUX_SESSION" >"$boat_color_snapshot"
+  boat_color_line=$(grep -F '╲' "$boat_color_snapshot" | head -1)
+  boat_sail_line=$(grep -F '◿' "$boat_color_snapshot" | head -1)
+  [ -n "$boat_color_line" ] || fail "could not capture a colored working-ship row"
+  [ -n "$boat_sail_line" ] || fail "could not capture a colored working-ship sail"
+  case "$boat_color_line" in
+    *'[34m'*) : ;;
+    *) fail "the trough was not rendered with standard ANSI blue" ;;
+  esac
+  case "$boat_color_line$boat_sail_line" in
+    *'[36m'*) fail "the wave crests were still rendered in a second water color (cyan)" ;;
+    *'[31m'*) fail "the right sail was still rendered in a second boat color (red)" ;;
+  esac
+  case "$boat_color_line" in
+    *'[33m'*) : ;;
+    *) fail "the hull was not rendered with standard ANSI yellow" ;;
+  esac
+  case "$boat_sail_line" in
+    *'[33m'*'◿│◣'*) : ;;
+    *) fail "the sail was not rendered as one standard ANSI yellow run" ;;
+  esac
+  case "$boat_color_line" in
+    *'[33m'*'╲▁▁▁╱'*) : ;;
+    *) fail "the hull was not rendered as one standard ANSI yellow run" ;;
+  esac
+  case "$boat_color_line$boat_sail_line" in
+    *'[38;2;'*|*'[38;5;'*|*'[9'[0-9]'m'*) fail "the working ship used a non-standard color escape" ;;
+    *) : ;;
+  esac
+
+  # The water animates on its own faster cadence while the boat holds its column.
+  boat_column_one=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_frame_one")
+  boat_water_changed=0
+  boat_water_first=$(grep -F '╲▁▁▁╱' "$boat_frame_one" | head -1)
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 60 ]; do
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_water_snapshot"
+    boat_water_line=$(grep -F '╲▁▁▁╱' "$boat_water_snapshot" | head -1)
+    boat_column_two=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_water_snapshot")
+    if [ -n "$boat_water_line" ] && [ "$boat_column_two" = "$boat_column_one" ] &&
+      [ "$boat_water_line" != "$boat_water_first" ]; then
+      boat_water_changed=1
+      break
+    fi
+    sleep 0.05
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  [ "$boat_water_changed" -eq 1 ] \
+    || fail "the water never animated while the working ship held its column"
+
+  # Two frames at different hull columns prove genuine horizontal motion.
+  boat_column_two=""
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 200 ]; do
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_frame_two"
+    boat_column_two=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_frame_two")
+    if [ -n "$boat_column_two" ] && [ "$boat_column_two" != "$boat_column_one" ]; then
+      break
+    fi
+    sleep 0.05
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  [ -n "$boat_column_two" ] || fail "the working ship disappeared between animation frames"
+  [ "$boat_column_two" != "$boat_column_one" ] \
+    || fail "the working ship never moved horizontally (stuck at column $boat_column_one)"
+
+  # The widget owns its own geometry, so resizing the same running TUI must reflow it.
+  tmux -L "$TMUX_SOCKET" set-option -t "$TMUX_SESSION" window-size manual
+  tmux -L "$TMUX_SOCKET" resize-window -t "$TMUX_SESSION" -x 100 -y 30
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 200 ]; do
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_resized_snapshot"
+    boat_hull_line=$(grep -F '╲▁▁▁╱' "$boat_resized_snapshot" | head -1)
+    if [ -n "$boat_hull_line" ] && [ "${#boat_hull_line}" -eq 100 ]; then
+      break
+    fi
+    sleep 0.05
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  assert_contains "$(cat "$boat_resized_snapshot")" '╲▁▁▁╱' "the working ship left the screen after a resize"
+  boat_hull_line=$(grep -F '╲▁▁▁╱' "$boat_resized_snapshot" | head -1)
+  [ "${#boat_hull_line}" -eq 100 ] \
+    || fail "after resizing to 100 columns the ship row was ${#boat_hull_line} cells instead of exactly 100"
+  # Exactly one wave row means the two-row sprite reflowed rather than wrapping.
+  [ "$(grep -c -F '╲▁▁▁╱' "$boat_resized_snapshot")" -eq 1 ] \
+    || fail "the working ship wrapped onto more than one water row after the resize"
+  while IFS= read -r boat_line; do
+    [ "${#boat_line}" -le 100 ] \
+      || fail "a rendered line was ${#boat_line} cells after resizing to 100 columns"
+  done <"$boat_resized_snapshot"
+  boat_column_one=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_resized_snapshot")
+  [ "$boat_column_one" -le 96 ] \
+    || fail "the working ship hull started at column $boat_column_one and cannot fit in 100 columns"
+
+  # Motion continues on-screen after the resize instead of jumping offscreen.
+  boat_column_two=""
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 200 ]; do
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_resized_snapshot"
+    boat_column_two=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_resized_snapshot")
+    if [ -n "$boat_column_two" ] && [ "$boat_column_two" != "$boat_column_one" ]; then
+      break
+    fi
+    sleep 0.05
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  [ -n "$boat_column_two" ] && [ "$boat_column_two" != "$boat_column_one" ] \
+    || fail "the working ship stopped moving after the resize"
+  [ "$boat_column_two" -le 96 ] \
+    || fail "the working ship moved offscreen after the resize"
+
+  # A narrow terminal shortens the track enough to observe both bounce directions.
+  tmux -L "$TMUX_SOCKET" resize-window -t "$TMUX_SESSION" -x 12 -y 20
+  boat_narrow_previous=""
+  boat_narrow_direction=0
+  boat_narrow_reversed=0
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 400 ]; do
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_narrow_snapshot"
+    boat_narrow_column=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_narrow_snapshot")
+    if [ -n "$boat_narrow_previous" ] && [ -n "$boat_narrow_column" ] &&
+      [ "$boat_narrow_column" -ne "$boat_narrow_previous" ]; then
+      boat_narrow_next_direction=1
+      [ "$boat_narrow_column" -lt "$boat_narrow_previous" ] && boat_narrow_next_direction=-1
+      if [ "$boat_narrow_direction" -ne 0 ] &&
+        [ "$boat_narrow_next_direction" -ne "$boat_narrow_direction" ]; then
+        boat_narrow_reversed=1
+        break
+      fi
+      boat_narrow_direction=$boat_narrow_next_direction
+    fi
+    [ -n "$boat_narrow_column" ] && boat_narrow_previous=$boat_narrow_column
+    sleep 0.1
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  [ "$boat_narrow_reversed" -eq 1 ] \
+    || fail "the working ship never reversed direction on a narrow track"
+  boat_hull_line=$(grep -F '╲▁▁▁╱' "$boat_narrow_snapshot" | head -1)
+  [ "${#boat_hull_line}" -eq 12 ] \
+    || fail "the narrow working-ship row was ${#boat_hull_line} cells instead of exactly 12"
+  tmux -L "$TMUX_SOCKET" resize-window -t "$TMUX_SESSION" -x 100 -y 30
+
+  # Typing still reaches the editor while the animation runs.
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "FOCUSPROBE"
+  wait_for_text "$boat_focus_snapshot" "FOCUSPROBE" \
+    || fail "keyboard input did not reach the editor while the working ship animated"
+  i=0
+  while [ "$i" -lt 10 ]; do
+    tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" BSpace
+    i=$((i + 1))
+  done
+
+  # Capture the last on-screen column and sail before settling so the next working
+  # period in this same Pi session can prove freeze/resume continuity.
+  tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_freeze_snapshot"
+  boat_freeze_column=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_freeze_snapshot")
+  boat_freeze_sail=$(grep -F '◿│◣' "$boat_freeze_snapshot" | tail -1 || true)
+  case "$boat_freeze_sail" in
+    *'◿│◣'*) boat_freeze_sail='◿│◣' ;;
+    *) fail "could not read the freeze-frame centered asymmetric sail" ;;
+  esac
+  [ -n "$boat_freeze_column" ] && [ "$boat_freeze_column" -gt 1 ] \
+    || fail "freeze frame never left the left edge (column '${boat_freeze_column:-empty}')"
+
+  # Escape aborts the run, and the abort path removes the ship with no residue.
+  # Escape can land while the just-started run is not yet abortable, so retry
+  # until pi records the abort instead of assuming one keypress sufficed.
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Escape
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 200 ]; do
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$boat_cleared_snapshot"
+    if ! grep -Fq '╲▁▁▁╱' "$boat_cleared_snapshot" &&
+      [ "$(grep -Fc 'Operation aborted' "$boat_cleared_snapshot" || true)" -ge 1 ]; then
+      break
+    fi
+    if [ "$((active_screen_wait % 20))" -eq 19 ]; then
+      tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Escape
+    fi
+    sleep 0.05
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  assert_not_contains "$(cat "$boat_cleared_snapshot")" '╲▁▁▁╱' "Escape did not remove the working ship"
+  assert_not_contains "$(cat "$boat_cleared_snapshot")" "CALM_WORKING_E2E_RESPONSE" "the long-delay fixture settled instead of aborting on Escape"
+  assert_not_contains "$(cat "$boat_cleared_snapshot")" "FOCUSPROBE" "the editor kept the focus probe text after Escape"
+
+  # A later working period in the same Pi process must resume the frozen column and
+  # sail rather than recreating the boat at the left edge. Capture the first resumed
+  # frames quickly so the slow boat cadence cannot advance before the assertion.
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-boat-e2e"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  boat_resume_column=""
+  boat_resume_sail=""
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 200 ]; do
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_resume_snapshot"
+    if grep -Fq '╲▁▁▁╱' "$boat_resume_snapshot"; then
+      boat_resume_column=$(awk 'index($0,"╲▁▁▁╱"){print index($0,"╲▁▁▁╱"); exit}' "$boat_resume_snapshot")
+      boat_resume_sail=$(grep -F '◿│◣' "$boat_resume_snapshot" | tail -1 || true)
+      case "$boat_resume_sail" in
+        *'◿│◣'*) boat_resume_sail='◿│◣' ;;
+      esac
+      break
+    fi
+    sleep 0.025
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  [ -n "$boat_resume_column" ] \
+    || fail "the second working period never showed the working ship"
+  [ "$boat_resume_column" -eq "$boat_freeze_column" ] \
+    || fail "the second working period reset the boat from column $boat_freeze_column to $boat_resume_column instead of resuming"
+  [ "$boat_resume_sail" = "$boat_freeze_sail" ] \
+    || fail "the second working period changed sail from $boat_freeze_sail to $boat_resume_sail"
+  assert_not_contains "$(cat "$boat_resume_snapshot")" "Working" \
+    "the second working period left Pi's stock working row visible"
+
+  # Clear the resumed run before the Calm-off stock-row probe, with the same
+  # abort-recorded retry as the first boat so a swallowed Escape cannot leave
+  # the long-delay run occupying the agent.
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Escape
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 200 ]; do
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$boat_cleared_snapshot"
+    if ! grep -Fq '╲▁▁▁╱' "$boat_cleared_snapshot" &&
+      [ "$(grep -Fc 'Operation aborted' "$boat_cleared_snapshot" || true)" -ge 2 ]; then
+      break
+    fi
+    if [ "$((active_screen_wait % 20))" -eq 19 ]; then
+      tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" Escape
+    fi
+    sleep 0.05
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  assert_not_contains "$(cat "$boat_cleared_snapshot")" '╲▁▁▁╱' "Escape did not remove the resumed working ship"
+
+  # Calm off restores Pi's stock working row and never shows the ship.
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 200 ]; do
+    if [ "$(cat "$home/config/calm")" = off ]; then
+      break
+    fi
+    sleep 0.05
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  [ "$(cat "$home/config/calm")" = off ] || fail "the Calm-off working-row probe did not turn Calm off"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-working-e2e"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 200 ]; do
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$working_snapshot"
+    if grep -Eq "Working(\\.\\.\\.)?([[:space:]]|─|$)" "$working_snapshot"; then
+      break
+    fi
+    sleep 0.025
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  assert_contains "$(cat "$working_snapshot")" "Working" "Calm off did not keep Pi's stock working row"
+  assert_not_contains "$(cat "$working_snapshot")" '╲▁▁▁╱' "Calm off showed the working ship"
   wait_for_text "$working_response_snapshot" "CALM_WORKING_E2E_RESPONSE" \
-    || fail "the deterministic provider did not settle after proving Pi's Working row"
+    || fail "the deterministic provider did not settle after proving Pi's stock working row"
+
+  # No blank-row residue: settling returns to the same layout Calm off started from.
+  tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$boat_cleared_snapshot"
+  assert_not_contains "$(cat "$boat_cleared_snapshot")" '╲▁▁▁╱' "a settled run left the working ship on screen"
+
+  # Restore Calm for the persistence restart below.
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  active_screen_wait=0
+  while [ "$active_screen_wait" -lt 200 ]; do
+    if [ "$(cat "$home/config/calm")" = on ]; then
+      break
+    fi
+    sleep 0.05
+    active_screen_wait=$((active_screen_wait + 1))
+  done
+  [ "$(cat "$home/config/calm")" = on ] || fail "Calm was not restored before the persistence restart"
+  tmux -L "$TMUX_SOCKET" resize-window -t "$TMUX_SESSION" -x 180 -y 44
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/quit"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
@@ -2082,14 +4218,19 @@ JS
   [ "$(cat "$home/config/calm")" = off ] || fail "/calm after restart did not persist the inactive choice"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/quit"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
-  pass "Pi calm native E2E keeps Working and captain turns visible, hides exact operational user rows without changing persistence, restores them Calm-off, survives restart, and preserves export plus Ctrl+O behavior"
+  pass "Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior"
 }
 
 test_home_resolution
 test_pi_compat_no_upper_bound
 test_pi_compat_degraded_adapter
 test_pi_compat_missing_adapter_exports
+test_builtin_gate_load_time
+test_calm_activation_collision_and_regression_bound
 test_rendering_and_session_lifecycle
+test_calm_mid_turn_working_notes
 test_operational_followup_turn_e2e
 test_hidden_block_geometry_e2e
+test_working_ship_geometry_and_lifecycle
+test_export_dom_render_guard
 test_interactive_terminal_e2e

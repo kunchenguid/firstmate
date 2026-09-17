@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 860" width="1200" height="860" role="img" aria-labelledby="poster-title poster-desc">
+  <title id="poster-title">Multi-brain agent architecture</title>
+  <desc id="poster-desc">One agent. Two branches of attention. Events are commits. A git-graph poster of one fix: routine notes merge with zero turns, and the requested outcome persists visibly before a sequence-keyed processing turn.</desc>
+  <defs>
+    <pattern id="poster-grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M 36 0 L 0 0 0 36" fill="none" stroke="#8CAAE6" stroke-opacity="0.06" stroke-width="1"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="860" fill="#0D1321"/>
+  <rect width="1200" height="860" fill="url(#poster-grid)"/>
+  <rect x="0.5" y="0.5" width="1199" height="859" fill="none" stroke="#94B4FF" stroke-opacity="0.20" stroke-width="1"/>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+    <text x="48" y="56" fill="#E6EDF3" font-size="36" font-weight="700">Multi-brain agent architecture</text>
+    <text x="48" y="86" fill="#8CA3C7" font-size="18">One agent. Two branches of attention. Events are commits.</text>
+    <text x="1152" y="56" text-anchor="end" fill="#8CA3C7" fill-opacity="0.7" font-size="14">fig. 1 - firstmate</text>
+  </g>
+  <g transform="translate(0 100)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+<title id="mb-title">Multi-brain agent architecture drawn as a git graph: one fix's lifecycle. The worker finishes and CI runs (routine note), the captain's merge-when-green instruction is cherry-picked down, a flaky test is rerun (routine note), and when CI goes green the supervision brain persists the exact requested outcome visibly before main processes it.</title>
+        <defs>
+          <marker id="ah-cyan" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#56C8FF"></path>
+          </marker>
+          <marker id="ah-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#FFB454"></path>
+          </marker>
+          <marker id="ah-time" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#8CA3C7"></path>
+          </marker>
+          <linearGradient id="merge-up" x1="0" y1="1" x2="1" y2="0">
+            <stop offset="0" stop-color="#56C8FF"></stop>
+            <stop offset="1" stop-color="#FFB454"></stop>
+          </linearGradient>
+        </defs>
+
+        <!-- ================= LANE LINES ================= -->
+        <line x1="280" y1="210" x2="1140" y2="210" stroke="#FFB454" stroke-width="3" stroke-linecap="round"></line>
+        <path d="M 310 221 C 310 380, 330 490, 420 490" fill="none" stroke="#56C8FF" stroke-width="3" stroke-linecap="round"></path>
+        <line x1="420" y1="490" x2="1140" y2="490" stroke="#56C8FF" stroke-width="3" stroke-linecap="round"></line>
+
+        <!-- ================= LANE LABELS ================= -->
+        <text x="64" y="200" fill="#FFB454" font-size="24" font-weight="700">MAIN SESSION</text>
+        <text x="64" y="230" fill="#E6EDF3" opacity="0.6" font-size="16">talks with the captain</text>
+        <text x="64" y="480" fill="#56C8FF" font-size="24" font-weight="700">SUPERVISION SESSION</text>
+        <text x="64" y="510" fill="#E6EDF3" opacity="0.6" font-size="16">handles the routine,</text>
+        <text x="64" y="534" fill="#E6EDF3" opacity="0.6" font-size="16">decides routine note or exact captain entry</text>
+
+        <!-- ================= CROSS-LANE ARCS (all arrowed, drawn under chips) ================= -->
+        <path id="arc-quiet-1" d="M 460 479 C 490 400, 520 300, 545 221" fill="none" stroke="#56C8FF" stroke-width="2.5" stroke-dasharray="1 7" stroke-linecap="round" opacity="0.6" marker-end="url(#ah-cyan)"></path>
+        <path id="arc-cherry" d="M 620 221 C 645 300, 675 400, 700 479" fill="none" stroke="#FFB454" stroke-width="2.5" stroke-dasharray="2 8" stroke-linecap="round" opacity="0.8" marker-end="url(#ah-amber)"></path>
+        <path id="arc-quiet-2" d="M 760 479 C 785 400, 810 300, 830 221" fill="none" stroke="#56C8FF" stroke-width="2.5" stroke-dasharray="1 7" stroke-linecap="round" opacity="0.6" marker-end="url(#ah-cyan)"></path>
+        <path id="arc-wake" d="M 940 479 C 975 410, 1015 300, 1038 226" fill="none" stroke="url(#merge-up)" stroke-width="4" stroke-linecap="round" marker-end="url(#ah-amber)"></path>
+
+        <!-- ================= EXAMPLE CHIPS ON THE ARCS ================= -->
+        <g id="chip-quiet-1">
+          <title>A silent note: nothing needs the captain yet</title>
+          <rect x="385" y="312" width="230" height="36" rx="6" fill="#0D1321" stroke="#56C8FF" stroke-width="1.5" opacity="0.95"></rect>
+          <text x="500" y="336" text-anchor="middle" fill="#B9E5FF" font-size="16">&#8220;PR opened, CI running&#8221;</text>
+        </g>
+        <g id="chip-cherry">
+          <title>The captain's own instruction, cherry-picked down as context</title>
+          <rect x="530" y="377" width="260" height="36" rx="6" fill="#0D1321" stroke="#FFB454" stroke-width="1.5" opacity="0.95"></rect>
+          <text x="660" y="401" text-anchor="middle" fill="#FFD9A0" font-size="16">you: &#8220;merge when CI green&#8221;</text>
+        </g>
+        <g id="chip-quiet-2">
+          <title>A silent note: the supervision brain already fixed it</title>
+          <rect x="665" y="272" width="270" height="36" rx="6" fill="#0D1321" stroke="#56C8FF" stroke-width="1.5" opacity="0.95"></rect>
+          <text x="800" y="296" text-anchor="middle" fill="#B9E5FF" font-size="16">&#8220;flaky test: reran, passed&#8221;</text>
+        </g>
+        <g id="chip-wake">
+          <title>The outcome the captain asked for: this exact entry persists visibly</title>
+          <rect x="865" y="342" width="250" height="38" rx="6" fill="#0D1321" stroke="#FFB454" stroke-width="2"></rect>
+          <text x="990" y="367" text-anchor="middle" fill="#FFB454" font-size="17" font-weight="600">&#8220;merged: your fix is in&#8221;</text>
+        </g>
+
+        <!-- ================= MAIN COMMITS ================= -->
+        <g id="main-commits">
+          <title>The captain's conversation, commit by commit</title>
+          <circle cx="310" cy="210" r="11" fill="#0D1321" stroke="#FFB454" stroke-width="3.5"></circle>
+          <circle cx="620" cy="210" r="11" fill="#0D1321" stroke="#FFB454" stroke-width="3.5"></circle>
+          <circle cx="1120" cy="210" r="11" fill="#0D1321" stroke="#FFB454" stroke-width="3.5"></circle>
+        </g>
+        <!-- silent-note landings -->
+        <g id="silent-landings">
+          <title>Notes merged silently into the conversation: no one is woken</title>
+          <circle cx="545" cy="210" r="7" fill="#0D1321" stroke="#56C8FF" stroke-width="3" opacity="0.85"></circle>
+          <circle cx="830" cy="210" r="7" fill="#0D1321" stroke="#56C8FF" stroke-width="3" opacity="0.85"></circle>
+        </g>
+        <text x="545" y="174" text-anchor="middle" fill="#56C8FF" opacity="0.8" font-size="13.5">silent merge. zero turns</text>
+        <text x="830" y="174" text-anchor="middle" fill="#56C8FF" opacity="0.8" font-size="13.5">silent merge. zero turns</text>
+        <!-- the merge commit that persists the exact captain outcome -->
+        <g id="merge-commit">
+          <title>Merged and surfaced: the exact captain outcome persists visibly once</title>
+          <circle cx="1040" cy="210" r="13" fill="#FFB454"></circle>
+          <circle cx="1040" cy="210" r="21" fill="none" stroke="#FFB454" stroke-width="1.5" opacity="0.5"></circle>
+          <path d="M 1019 189 A 30 30 0 0 1 1061 189" fill="none" stroke="#FFB454" stroke-width="2.5" stroke-linecap="round" opacity="0.8"></path>
+          <path d="M 1011 181 A 41 41 0 0 1 1069 181" fill="none" stroke="#FFB454" stroke-width="2.5" stroke-linecap="round" opacity="0.5"></path>
+        </g>
+        <text x="1040" y="148" text-anchor="middle" fill="#FFB454" font-size="18" font-weight="700">persists visibly</text>
+
+        <!-- ================= BRANCH COMMITS + EVENT EXAMPLES ================= -->
+        <g id="branch-commits">
+          <title>One fix's routine events, handled on the supervision brain</title>
+          <circle cx="460" cy="490" r="10" fill="#0D1321" stroke="#56C8FF" stroke-width="3.5"></circle>
+          <circle cx="760" cy="490" r="10" fill="#0D1321" stroke="#56C8FF" stroke-width="3.5"></circle>
+          <circle cx="940" cy="490" r="10" fill="#0D1321" stroke="#56C8FF" stroke-width="3.5"></circle>
+        </g>
+        <!-- cherry-pick landing -->
+        <circle cx="700" cy="490" r="8" fill="#0D1321" stroke="#FFB454" stroke-width="3"></circle>
+
+        <line x1="460" y1="503" x2="460" y2="530" stroke="#56C8FF" stroke-width="1.5" opacity="0.35"></line>
+        <text x="460" y="554" text-anchor="middle" fill="#E6EDF3" opacity="0.75" font-size="16">worker finishes the fix</text>
+        <line x1="760" y1="503" x2="760" y2="530" stroke="#56C8FF" stroke-width="1.5" opacity="0.35"></line>
+        <text x="760" y="554" text-anchor="middle" fill="#E6EDF3" opacity="0.75" font-size="16">a flaky test fails</text>
+        <line x1="940" y1="503" x2="940" y2="530" stroke="#56C8FF" stroke-width="1.5" opacity="0.35"></line>
+        <text x="940" y="554" text-anchor="middle" fill="#E6EDF3" opacity="0.75" font-size="16">CI goes green</text>
+
+        <!-- ================= TIME AXIS ================= -->
+        <line x1="1010" y1="660" x2="1110" y2="660" stroke="#8CA3C7" stroke-width="2" stroke-linecap="round" marker-end="url(#ah-time)"></line>
+        <text x="1128" y="665" fill="#8CA3C7" font-size="15">time</text>
+
+        <!-- ================= MORAL ================= -->
+        <text x="560" y="700" text-anchor="middle" fill="#E6EDF3" opacity="0.6" font-size="18">Routine outcomes stay quiet. What needs you persists visibly and exactly.</text>
+  </g>
+</svg>

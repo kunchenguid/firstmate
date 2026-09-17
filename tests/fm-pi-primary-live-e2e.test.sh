@@ -4,10 +4,10 @@
 # copying credentials and pins the captain-approved openai-codex model.
 set -u
 
-if [ "${FM_PI_LIVE_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_PI_LIVE_E2E=1 to run the isolated interactive Pi regression"
-  exit 0
-fi
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+fm_live_gate opt-in FM_PI_LIVE_E2E pi tmux
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 unset NO_MISTAKES_GATE
@@ -16,9 +16,6 @@ fail() {
   printf 'not ok - %s\n' "$1" >&2
   exit 1
 }
-
-command -v pi >/dev/null 2>&1 || fail "pi not found"
-command -v tmux >/dev/null 2>&1 || fail "tmux not found"
 
 TMUX=$(command -v tmux)
 SOCKET="fm-pi-live-e2e-$$"
@@ -254,6 +251,11 @@ cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$PROJECT/.pi/extensions/fm-pri
 cp "$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts" "$PROJECT/.pi/extensions/lib/fm-calm-assistant-layout.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts" "$PROJECT/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$PROJECT/.pi/extensions/lib/fm-calm-visibility.ts"
+cp "$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts" "$PROJECT/.pi/extensions/lib/fm-calm-working-ship.ts"
+cp "$ROOT/.pi/extensions/lib/fm-calm-working-ship-sprite.ts" "$PROJECT/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
+cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$PROJECT/.pi/extensions/lib/fm-branch-dispatch.ts"
+cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$PROJECT/.pi/extensions/lib/fm-native-contract.ts"
+cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$PROJECT/.pi/extensions/lib/fm-async-exec.ts"
 cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$PROJECT/.pi/extensions/lib/fm-operational-input.ts"
 cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$PROJECT/.pi/extensions/fm-primary-turnend-guard.ts"
 cp "$ROOT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-watch-arm.sh"
@@ -282,17 +284,21 @@ send_prompt "Reply exactly CALM_LIVE_WORKING_VISIBLE"
 i=0
 while [ "$i" -lt 240 ]; do
   pane=$(capture)
-  if printf '%s\n' "$pane" | grep -Fq "Working..."; then
+  if printf '%s\n' "$pane" | grep -Fq '╲▁▁▁╱'; then
     break
   fi
   sleep 0.05
   i=$((i + 1))
 done
+printf '%s\n' "$pane" | grep -Fq '╲▁▁▁╱' \
+  || fail "Calm did not show the working ship on the credentialed provider path"
 printf '%s\n' "$pane" | grep -Fq "Working..." \
-  || fail "Calm hid Pi's built-in Working row on the credentialed provider path"
+  && fail "Calm left Pi's stock working row visible on the credentialed provider path"
 wait_for_exact_line "CALM_LIVE_WORKING_VISIBLE" 120 \
-  || fail "Pi did not settle the Calm Working-row provider probe"
+  || fail "Pi did not settle the Calm working-ship provider probe"
 pane=$(capture)
+printf '%s\n' "$pane" | grep -Fq '╲▁▁▁╱' \
+  && fail "Calm left the working ship on screen after the run settled"
 printf '%s\n' "$pane" | grep -Fq "calm transcript" \
   && fail "Calm added a persistent Calm status row on the credentialed provider path"
 send_prompt "/calm"
@@ -336,4 +342,4 @@ wait_for_text "PI_EXIT=0" 60 || fail "Pi did not exit cleanly"
 wait_pid_dead "$watcher_pid" || fail "watcher child survived clean Pi exit"
 wait_pid_dead "$arm_pid" || fail "arm child survived clean Pi exit"
 
-printf 'ok - Pi %s live E2E covered native Calm Working visibility, Ahoy first/later messages, legacy transcripts, near misses, and watcher continuity\n' "$PI_VERSION"
+printf 'ok - Pi %s live E2E covered the Calm working ship, Ahoy first/later messages, legacy transcripts, near misses, and watcher continuity\n' "$PI_VERSION"

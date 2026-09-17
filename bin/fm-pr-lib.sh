@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Shared validation and atomic artifact helpers for merge polling on the
-# supported forges. Callers must validate task IDs and raw PR/MR URLs before
-# constructing task paths or performing any side effect.
+# Shared PR/MR record reads, validation, and atomic artifact helpers for merge
+# polling on the supported forges. Callers must validate task IDs and raw PR/MR
+# URLs before constructing task paths or performing any side effect.
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
 # "path" is the full project path, which is owner/repository on GitHub and an
@@ -74,6 +74,8 @@ FM_PR_POLL_SNAPSHOT_DATA_IDENTITY=
 FM_PR_POLL_SNAPSHOT_CHECK_IDENTITY=
 FM_PR_POLL_SNAPSHOT_REG_HASH=
 FM_PR_POLL_SNAPSHOT_REG_IDENTITY=
+FM_PR_POLL_REARM_DATA_IDENTITY=
+FM_PR_POLL_REARM_CHECK_IDENTITY=
 FM_PR_RETIRE_ID=
 FM_PR_RETIRE_PROVIDER=
 FM_PR_RETIRE_URL=
@@ -88,6 +90,8 @@ FM_PR_RETIRE_REG_HASH=
 FM_PR_RETIRE_REG_IDENTITY=
 FM_PR_RETIRE_RECEIPT_HASH=
 FM_PR_RETIRE_RECEIPT_IDENTITY=
+FM_PR_RECORD_STATE=
+FM_PR_RECORD_MERGED=
 FM_PR_POLL_RETIREMENT_REJECTED=
 
 fm_task_id_path_safe() {
@@ -163,8 +167,8 @@ fm_pr_gitlab_path_valid() {
 #
 # FM_PR_OWNER and FM_PR_REPO are additionally set for github because
 # bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab URL leaves
-# them empty; teaching the merge path about GitLab is a separate change, and
-# until then it refuses a GitLab URL rather than merging anything.
+# them empty, and that path addresses the project by FM_PR_HOST and FM_PR_PATH
+# instead, so a merge request on any instance resolves without a hardcoded host.
 fm_pr_url_parse() {
   local raw=${1-} pattern host path
   local LC_ALL=C
@@ -215,7 +219,7 @@ fm_pr_head_valid() {
 
 fm_pr_file_mode() {
   if [ "$(uname)" = Darwin ]; then
-    stat -f %Lp "$1" 2>/dev/null
+    /usr/bin/stat -f %Lp "$1" 2>/dev/null
   else
     stat -c %a "$1" 2>/dev/null
   fi
@@ -223,7 +227,7 @@ fm_pr_file_mode() {
 
 fm_pr_file_device() {
   if [ "$(uname)" = Darwin ]; then
-    stat -f %d "$1" 2>/dev/null
+    /usr/bin/stat -f %d "$1" 2>/dev/null
   else
     stat -c %d "$1" 2>/dev/null
   fi
@@ -231,7 +235,7 @@ fm_pr_file_device() {
 
 fm_pr_file_link_count() {
   if [ "$(uname)" = Darwin ]; then
-    stat -f %l "$1" 2>/dev/null
+    /usr/bin/stat -f %l "$1" 2>/dev/null
   else
     stat -c %h "$1" 2>/dev/null
   fi
@@ -239,12 +243,17 @@ fm_pr_file_link_count() {
 
 fm_pr_file_inode() {
   if [ "$(uname)" = Darwin ]; then
-    stat -f %i "$1" 2>/dev/null
+    /usr/bin/stat -f %i "$1" 2>/dev/null
   else
     stat -c %i "$1" 2>/dev/null
   fi
 }
 
+# device:inode names one file object, since an inode number is unique only
+# within its filesystem. The device part is not stable across a volume remount:
+# APFS can renumber st_dev on reboot while every inode and byte is unchanged, so
+# an identity persisted before the remount no longer matches the live file
+# (fm_pr_poll_registration_rerecord_device).
 fm_pr_file_identity() {
   local device inode
   device=$(fm_pr_file_device "$1") || return 1
@@ -263,6 +272,11 @@ fm_pr_sha256() {
   fi
 }
 
+# Callers pass the containing directory's device read in the same invocation,
+# never a persisted one, so this compares two live readings and survives a
+# remount that renumbers the volume. It refuses a file that is not on that
+# directory's own filesystem, such as one bind-mounted over the name, which is
+# also what keeps same-directory rename publication atomic.
 fm_pr_private_file_valid() {
   local path=$1 mode=$2 device=$3
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
@@ -365,9 +379,7 @@ fm_pr_poll_data_parse() {
 # Registration layout: version tag, task id, then the same provider-tagged
 # identity as the sidecar, then the two hashes and the two file identities.
 # The version tag moved to v2 with the provider tag, so a registration written
-# by the previous release is recognised as old and refused. The non-executing
-# migration in bin/fm-pr-check-migrate.sh then rebuilds that poll from the
-# task's recorded pull request URL.
+# by the previous release is recognised as old and refused.
 fm_pr_poll_registration_parse() {
   local file=$1 version id provider url host path number data_hash template_hash data_identity check_identity
   FM_PR_REG_ID=
@@ -521,6 +533,8 @@ fm_pr_poll_prepare() {
   fi
 }
 
+# The caller holds the task's poll publication lock while publishing this
+# prepared generation, so no registration can name another generation's files.
 fm_pr_poll_publish_prepared() {
   [ -n "$FM_PR_POLL_DATA_TMP" ] && [ -n "$FM_PR_POLL_CHECK_TMP" ] \
     && [ -n "$FM_PR_POLL_REG_TMP" ] || return 1
@@ -580,7 +594,24 @@ fm_pr_poll_publish_prepared() {
 }
 
 fm_pr_poll_artifacts_valid() {
-  local state=$1 id=$2 template=$3 state_device check data registration meta data_hash template_hash data_identity check_identity
+  local state=$1 id=$2 template=$3 data_identity check_identity
+  fm_pr_poll_artifacts_content_valid "$state" "$id" "$template" || return 1
+  data_identity=$(fm_pr_file_identity "$state/$id.pr-poll") || return 1
+  check_identity=$(fm_pr_file_identity "$state/$id.check.sh") || return 1
+  # The recorded identities bind the registration to the exact sidecar and
+  # check file objects published in its own transaction, so a byte-identical
+  # replacement or a torn re-arm pairing one generation's check with another's
+  # registration is refused.
+  [ "$FM_PR_REG_DATA_IDENTITY" = "$data_identity" ] || return 1
+  [ "$FM_PR_REG_CHECK_IDENTITY" = "$check_identity" ]
+}
+
+# Everything fm_pr_poll_artifacts_valid proves except that the registration's
+# recorded file identities name the live sidecar and check. Success alone is
+# never authentication. On success FM_PR_DATA_*, FM_PR_REG_*, and FM_PR_META_*
+# hold the parsed records.
+fm_pr_poll_artifacts_content_valid() {
+  local state=$1 id=$2 template=$3 state_device check data registration meta data_hash template_hash
   fm_pr_task_id_valid "$id" || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   state_device=$(fm_pr_file_device "$state") || return 1
@@ -597,8 +628,6 @@ fm_pr_poll_artifacts_valid() {
   fm_pr_poll_data_parse "$data" || return 1
   data_hash=$(fm_pr_sha256 "$data") || return 1
   template_hash=$(fm_pr_sha256 "$check") || return 1
-  data_identity=$(fm_pr_file_identity "$data") || return 1
-  check_identity=$(fm_pr_file_identity "$check") || return 1
   fm_pr_poll_registration_parse "$registration" || return 1
   [ "$FM_PR_REG_ID" = "$id" ] || return 1
   [ "$FM_PR_REG_PROVIDER" = "$FM_PR_DATA_PROVIDER" ] || return 1
@@ -608,14 +637,97 @@ fm_pr_poll_artifacts_valid() {
   [ "$FM_PR_REG_NUMBER" = "$FM_PR_DATA_NUMBER" ] || return 1
   [ "$FM_PR_REG_DATA_HASH" = "$data_hash" ] || return 1
   [ "$FM_PR_REG_TEMPLATE_HASH" = "$template_hash" ] || return 1
-  [ "$FM_PR_REG_DATA_IDENTITY" = "$data_identity" ] || return 1
-  [ "$FM_PR_REG_CHECK_IDENTITY" = "$check_identity" ] || return 1
   fm_pr_metadata_identity_parse "$meta" || return 1
   [ "$FM_PR_META_PROVIDER" = "$FM_PR_DATA_PROVIDER" ] || return 1
   [ "$FM_PR_META_URL" = "$FM_PR_DATA_URL" ] || return 1
   [ "$FM_PR_META_HOST" = "$FM_PR_DATA_HOST" ] || return 1
   [ "$FM_PR_META_PATH" = "$FM_PR_DATA_PATH" ] || return 1
   [ "$FM_PR_META_NUMBER" = "$FM_PR_DATA_NUMBER" ]
+}
+
+# A registration armed before a volume remount can name a device number the
+# kernel has since reassigned (fm_pr_file_identity). This proves that is the
+# only difference: every artifact passes fm_pr_poll_artifacts_content_valid, so
+# the check is byte-identical to the template, both hashes match, and the three
+# poll artifacts are private, single-link, and on the state directory's live
+# device; both recorded identities name one device; each recorded inode equals
+# its live inode; and that recorded device differs from the live one. A
+# replaced, altered, re-moded, relinked, or foreign-device artifact fails a proof
+# here and stays refused. A pending retirement receipt owns its artifacts, so
+# none is re-recorded while one exists. On success
+# FM_PR_POLL_REARM_DATA_IDENTITY and FM_PR_POLL_REARM_CHECK_IDENTITY hold the
+# live identities.
+fm_pr_poll_registration_device_shifted() {  # <state> <id> <template>
+  local state=$1 id=$2 template=$3 state_device recorded_device receipt data_identity check_identity
+  FM_PR_POLL_REARM_DATA_IDENTITY=
+  FM_PR_POLL_REARM_CHECK_IDENTITY=
+  fm_pr_task_id_valid "$id" || return 1
+  [ -f "$state/$id.pr-poll-registration" ] || return 1
+  receipt="$state/$id.pr-poll-retirement"
+  [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || return 1
+  fm_pr_poll_artifacts_content_valid "$state" "$id" "$template" || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  data_identity=$(fm_pr_file_identity "$state/$id.pr-poll") || return 1
+  check_identity=$(fm_pr_file_identity "$state/$id.check.sh") || return 1
+  recorded_device=${FM_PR_REG_DATA_IDENTITY%%:*}
+  [ "${FM_PR_REG_CHECK_IDENTITY%%:*}" = "$recorded_device" ] || return 1
+  [ "$recorded_device" != "$state_device" ] || return 1
+  [ "$data_identity" = "$state_device:${FM_PR_REG_DATA_IDENTITY#*:}" ] || return 1
+  [ "$check_identity" = "$state_device:${FM_PR_REG_CHECK_IDENTITY#*:}" ] || return 1
+  FM_PR_POLL_REARM_DATA_IDENTITY=$data_identity
+  FM_PR_POLL_REARM_CHECK_IDENTITY=$check_identity
+}
+
+# Rewrite a device-shifted registration (fm_pr_poll_registration_device_shifted)
+# so it names the live device, changing no other line. The caller holds the
+# task's control lock and poll publication lock, which serialize this with the
+# watcher's validated check and retirement, teardown, bin/fm-pr-merge.sh, and
+# direct bin/fm-pr-check.sh publication. The proof is repeated just before the
+# rename, which proceeds only while the registration is still the exact file
+# object and bytes first proven.
+# Success means the strict fm_pr_poll_artifacts_valid accepts the result.
+fm_pr_poll_registration_rerecord_device() {  # <state> <id> <template>
+  local state=$1 id=$2 template=$3 state_device registration tmp reg_hash reg_identity
+  local id_line provider url host path number data_hash template_hash data_identity check_identity
+  fm_pr_poll_registration_device_shifted "$state" "$id" "$template" || return 1
+  registration="$state/$id.pr-poll-registration"
+  id_line=$FM_PR_REG_ID
+  provider=$FM_PR_REG_PROVIDER
+  url=$FM_PR_REG_URL
+  host=$FM_PR_REG_HOST
+  path=$FM_PR_REG_PATH
+  number=$FM_PR_REG_NUMBER
+  data_hash=$FM_PR_REG_DATA_HASH
+  template_hash=$FM_PR_REG_TEMPLATE_HASH
+  data_identity=$FM_PR_POLL_REARM_DATA_IDENTITY
+  check_identity=$FM_PR_POLL_REARM_CHECK_IDENTITY
+  state_device=$(fm_pr_file_device "$state") || return 1
+  reg_hash=$(fm_pr_sha256 "$registration") || return 1
+  reg_identity=$(fm_pr_file_identity "$registration") || return 1
+  tmp=$(mktemp "$state/.fm-pr-poll-registration.XXXXXX") || return 1
+  if ! printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+      fm-pr-poll-registration-v2 "$id_line" "$provider" "$url" "$host" "$path" "$number" \
+      "$data_hash" "$template_hash" "$data_identity" "$check_identity" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! fm_pr_private_file_valid "$tmp" 600 "$state_device" \
+    || ! fm_pr_poll_registration_parse "$tmp" \
+    || [ "$FM_PR_REG_ID" != "$id" ] \
+    || [ "$FM_PR_REG_URL" != "$url" ] \
+    || [ "$FM_PR_REG_DATA_HASH" != "$data_hash" ] \
+    || [ "$FM_PR_REG_TEMPLATE_HASH" != "$template_hash" ] \
+    || [ "$FM_PR_REG_DATA_IDENTITY" != "$data_identity" ] \
+    || [ "$FM_PR_REG_CHECK_IDENTITY" != "$check_identity" ] \
+    || ! fm_pr_poll_registration_device_shifted "$state" "$id" "$template" \
+    || [ "$FM_PR_POLL_REARM_DATA_IDENTITY" != "$data_identity" ] \
+    || [ "$FM_PR_POLL_REARM_CHECK_IDENTITY" != "$check_identity" ] \
+    || [ "$(fm_pr_sha256 "$registration")" != "$reg_hash" ] \
+    || [ "$(fm_pr_file_identity "$registration")" != "$reg_identity" ] \
+    || ! fm_pr_regular_destination_on_device_or_absent "$registration" "$state_device" \
+    || ! mv -f -- "$tmp" "$registration"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  fm_pr_poll_artifacts_valid "$state" "$id" "$template"
 }
 
 fm_pr_poll_snapshot_capture() {
@@ -738,6 +850,142 @@ fm_pr_poll_retirement_receipt_valid() {
   [ "$FM_PR_META_NUMBER" = "$FM_PR_RETIRE_NUMBER" ] || return 1
   FM_PR_RETIRE_RECEIPT_HASH=$(fm_pr_sha256 "$receipt") || return 1
   FM_PR_RETIRE_RECEIPT_IDENTITY=$(fm_pr_file_identity "$receipt") || return 1
+}
+
+fm_pr_github_read_record_with_gh() {  # <owner> <repo> <number>
+  local owner=$1 repo=$2 number=$3 fields line total=0 named=0
+  local state='' merged=''
+  FM_PR_RECORD_STATE=
+  FM_PR_RECORD_MERGED=
+
+  # shellcheck disable=SC2016  # GraphQL variables are literal query syntax.
+  if ! fields=$(gh api graphql \
+    -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){state merged}}}' \
+    -F "owner=$owner" -F "repo=$repo" -F "number=$number" \
+    --jq '.data.repository.pullRequest | "state=" + (.state // ""), "merged=" + (.merged | tostring)' \
+    2>/dev/null) || [ -z "$fields" ]; then
+    return 1
+  fi
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      state=*) state=${line#state=} ;;
+      merged=*) merged=${line#merged=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  if [ "$named" -ne 2 ] || [ "$total" -ne 2 ] || [ -z "$state" ] \
+    || { [ "$merged" != true ] && [ "$merged" != false ]; }; then
+    return 1
+  fi
+
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_STATE=$state
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_MERGED=$merged
+}
+
+fm_pr_github_read_record_with_gh_axi() {  # <owner> <repo> <number>
+  local owner=$1 repo=$2 number=$3 output state
+  FM_PR_RECORD_STATE=
+  FM_PR_RECORD_MERGED=
+  if ! output=$(gh-axi pr view "$number" --repo "$owner/$repo" 2>/dev/null); then
+    return 1
+  fi
+  if ! state=$(printf '%s\n' "$output" | awk '
+    $1 == "state:" { count++; value=$2 }
+    END { if (count == 1 && value != "") print value; else exit 1 }
+  '); then
+    return 1
+  fi
+  case "$state" in
+    MERGED|merged)
+      # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+      # shellcheck disable=SC2034
+      FM_PR_RECORD_STATE=MERGED
+      # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+      # shellcheck disable=SC2034
+      FM_PR_RECORD_MERGED=true
+      ;;
+    OPEN|open)
+      # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+      # shellcheck disable=SC2034
+      FM_PR_RECORD_STATE=OPEN
+      # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+      # shellcheck disable=SC2034
+      FM_PR_RECORD_MERGED=false
+      ;;
+    CLOSED|closed)
+      # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+      # shellcheck disable=SC2034
+      FM_PR_RECORD_STATE=CLOSED
+      # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+      # shellcheck disable=SC2034
+      FM_PR_RECORD_MERGED=false
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+fm_pr_github_read_record() {  # <owner> <repo> <number>
+  if command -v gh >/dev/null 2>&1 && fm_pr_github_read_record_with_gh "$@"; then
+    return 0
+  fi
+  command -v gh-axi >/dev/null 2>&1 || return 1
+  fm_pr_github_read_record_with_gh_axi "$@"
+}
+
+fm_pr_gitlab_read_record() {  # <host> <path> <number>
+  local host=$1 path=$2 number=$3 project_url json fields line
+  local total=0 named=0 state='' merged=''
+  FM_PR_RECORD_STATE=
+  FM_PR_RECORD_MERGED=
+  command -v glab >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  project_url="https://$host/$path"
+
+  if ! json=$(GITLAB_HOST="$host" glab mr view "$number" -R "$project_url" -F json 2>/dev/null) \
+    || [ -z "$json" ]; then
+    return 1
+  fi
+  if ! fields=$(printf '%s' "$json" | jq -r '
+      if type == "object" and (.state | type == "string") and .state != "" then
+        "state=" + .state,
+        "merged=" + (if .state == "merged" then "true" else "false" end)
+      else
+        error("invalid merge request state")
+      end' 2>/dev/null); then
+    return 1
+  fi
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      state=*) state=${line#state=} ;;
+      merged=*) merged=${line#merged=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  if [ "$named" -ne 2 ] || [ "$total" -ne 2 ] || [ -z "$state" ] \
+    || { [ "$merged" != true ] && [ "$merged" != false ]; }; then
+    return 1
+  fi
+
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_STATE=$state
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_MERGED=$merged
 }
 
 fm_pr_poll_retirement_data_valid() {
@@ -939,4 +1187,80 @@ fm_pr_poll_retirement_recover_all() {
     fi
   done
   [ -z "$FM_PR_POLL_RETIREMENT_REJECTED" ]
+}
+
+# --- merge-notification canonical-identity marker ----------------------------
+# A merged-PR poll retires (fm_pr_poll_retirement_recover_one) in the same
+# watcher cycle that detects it, which is normally enough on its own to stop a
+# duplicate detection: the check.sh is gone, so nothing re-polls it. The
+# exception is the same poll re-registered after its merge was already
+# surfaced. Its retirement state is scoped to one registration, so this marker
+# carries the canonical PR identity across registrations for the task. Only a
+# matching identity is a no-op; a different PR for the same task reaches its
+# role-routed supervision destination and replaces the marker when its first
+# outcome is published.
+fm_pr_poll_merge_marker_matches() {  # <marker> <device> <provider> <host> <path> <number>
+  local marker=$1 device=$2 expected_provider=$3 expected_host=$4 expected_path=$5 expected_number=$6
+  local version provider host path number
+  fm_pr_private_file_valid "$marker" 600 "$device" || return 1
+  exec 8< "$marker" || return 1
+  IFS= read -r version <&8 || { exec 8<&-; return 1; }
+  IFS= read -r provider <&8 || { exec 8<&-; return 1; }
+  IFS= read -r host <&8 || { exec 8<&-; return 1; }
+  IFS= read -r path <&8 || { exec 8<&-; return 1; }
+  IFS= read -r number <&8 || { exec 8<&-; return 1; }
+  if IFS= read -r _extra <&8; then
+    exec 8<&-
+    return 1
+  fi
+  exec 8<&-
+  [ "$version" = fm-pr-poll-merge-notified-v1 ] \
+    && [ "$provider" = "$expected_provider" ] \
+    && [ "$host" = "$expected_host" ] \
+    && [ "$path" = "$expected_path" ] \
+    && [ "$number" = "$expected_number" ]
+}
+
+fm_pr_poll_merge_already_notified() {  # <state> <id> <provider> <host> <path> <number>
+  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 marker state_device
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  marker="$state/$id.pr-poll-merge-notified"
+  fm_pr_poll_merge_marker_matches "$marker" "$state_device" \
+    "$provider" "$host" "$path" "$number"
+}
+
+fm_pr_poll_merge_mark_notified() {  # <state> <id> <provider> <host> <path> <number>
+  local state=$1 id=$2 provider=$3 host=$4 path=$5 number=$6 marker tmp state_device
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  marker="$state/$id.pr-poll-merge-notified"
+  fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" || return 1
+  umask 077
+  tmp=$(mktemp "$state/.fm-pr-poll-merge-notified.XXXXXX") || return 1
+  if ! printf '%s\n%s\n%s\n%s\n%s\n' \
+      fm-pr-poll-merge-notified-v1 "$provider" "$host" "$path" "$number" > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! fm_pr_poll_merge_marker_matches "$tmp" "$state_device" \
+      "$provider" "$host" "$path" "$number" \
+    || ! fm_pr_regular_destination_on_device_or_absent "$marker" "$state_device" \
+    || ! mv -f -- "$tmp" "$marker" \
+    || ! fm_pr_poll_merge_marker_matches "$marker" "$state_device" \
+      "$provider" "$host" "$path" "$number"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+# Removed at teardown alongside the other per-task PR-poll artifacts
+# (bin/fm-teardown.sh) so a retired task id leaves no residue behind.
+fm_pr_poll_merge_notified_remove() {  # <state> <id>
+  local state=$1 id=$2 marker
+  fm_pr_task_id_valid "$id" || return 1
+  marker="$state/$id.pr-poll-merge-notified"
+  [ -e "$marker" ] || [ -L "$marker" ] || return 0
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  rm -f -- "$marker"
 }
