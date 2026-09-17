@@ -1040,6 +1040,63 @@ test_reassigned_slot_with_surviving_claimant_record_deadlocks_neither_task() {
   pass "fm-teardown: a reassigned slot with a surviving claimant record deadlocks neither teardown"
 }
 
+# The same deadlock torn down in the order the operator hit it: the claimant
+# first. Its claim proves the other record is the stale one, so the claimant
+# returns its slot; the stale record then finds no claim and no rival record.
+test_claimant_tears_down_first_past_a_stale_record() {
+  local dir stale=stale-task live=live-task
+
+  dir=$(make_case slot-deadlock-live-first)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$stale.meta" \
+    "window=firstmate:fm-$stale" "endpoint_task_id=$stale" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$live.meta" \
+    "window=firstmate:fm-$live" "endpoint_task_id=$live" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$live" "$dir/home"
+
+  run_case "$dir" "$live" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "claimant's teardown refused on the stale record: $(cat "$dir/stderr")"
+  grep -Fq "$stale's record is stale" "$dir/stderr" \
+    || fail "claimant's teardown did not name the stale record: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$live.meta" "claimant teardown left its task record"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "claimant teardown left its spent slot claim behind"
+  assert_present "$dir/home/state/$stale.meta" "claimant teardown removed the stale task's record"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "claimant teardown did not return its own pool slot: $(cat "$dir/runtime.log")"
+
+  pass "fm-teardown: the claimant tears down first past a stale record naming its slot"
+}
+
+# A secondmate home takes its slot through a Treehouse lease and writes no
+# claim, so a leftover claim naming a crewmate never overrides its record.
+test_leftover_claim_still_refuses_on_a_secondmate_home() {
+  local dir stale=stale-task sm=sm-home rc
+
+  dir=$(make_case slot-claim-secondmate)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$stale.meta" \
+    "window=firstmate:fm-$stale" "endpoint_task_id=$stale" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$sm.meta" \
+    "window=firstmate:fm-$sm" "endpoint_task_id=$sm" \
+    "worktree=$dir/worktree" "home=$dir/worktree" "project=$dir/project" "kind=secondmate"
+  claim_pool_slot "$dir" "$stale" "$dir/home"
+
+  set +e
+  run_case "$dir" "$stale" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a leftover claim let teardown return a secondmate's home slot"
+  grep -Fq "REFUSED: task $stale's recorded worktree" "$dir/stderr" \
+    || fail "secondmate-home refusal missing: $(cat "$dir/stderr")"
+  assert_present "$dir/home/state/$stale.meta" "refused teardown removed the task record"
+  assert_present "$dir/worktree/sentinel" "refused teardown reset the secondmate's slot"
+
+  pass "fm-teardown: a leftover claim still refuses on a secondmate home"
+}
+
 
 # The tmux shim used by the endpoint-close tests below: every subcommand
 # reaches the real isolated server, so presence is always read from real tmux.
@@ -1431,6 +1488,8 @@ test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_reassigned_slot_with_surviving_claimant_record_deadlocks_neither_task
+test_claimant_tears_down_first_past_a_stale_record
+test_leftover_claim_still_refuses_on_a_secondmate_home
 test_remote_seeded_home_returns_its_uncontested_slot
 test_remote_seeded_home_still_refuses_a_slot_its_child_holds
 test_remote_layout_homes_serialize_on_one_project_lock

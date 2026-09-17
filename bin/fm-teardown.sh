@@ -2205,9 +2205,16 @@ collect_local_firstmate_states() {
 
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
-  local slot state_dir other other_id field other_path other_slot
+  local slot state_dir other other_id field other_path other_slot claimed=0
   slot=$(canonical_existing_dir "$worktree") || return 0
   collect_local_firstmate_states "$record_state" || return 1
+  # A claim naming this task was written under the project lock when it took
+  # the slot, and every later crewmate spawn into the slot would have replaced
+  # it. So another crewmate record naming the slot predates this task's claim
+  # and is stale. Secondmate homes and Orca worktrees take no claim, so a
+  # record of either kind still refuses.
+  fm_treehouse_slot_owner_state "$slot" "$record_id"
+  [ "$FM_TREEHOUSE_SLOT_OWNER" != mine ] || claimed=1
   for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
     for other in "$state_dir"/*.meta; do
       [ -f "$other" ] && [ ! -L "$other" ] || continue
@@ -2218,6 +2225,12 @@ require_exclusive_worktree_slot_record() {
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
+        if [ "$claimed" = 1 ] && [ "$field" = worktree ] && [ "$other_id" != "$record_id" ] \
+           && [ "$(fm_meta_get "$other" kind)" != secondmate ] \
+           && [ "$(fm_meta_get "$other" backend)" != orca ]; then
+          echo "warning: task $other_id's record also names worktree $slot, but that pool slot's claim names $record_id, which took it after $other_id's record was written; $other_id's record is stale and does not block this teardown (bin/fm-crew-state.sh $other_id)." >&2
+          continue
+        fi
         echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
         echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
         echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
