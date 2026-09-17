@@ -86,7 +86,15 @@ chmod +x "$LAB/bin/agent-launcher"
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source tmux || fail "fm_backend_source tmux failed"
 
-"$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -n idle -c "$LAB/wt" \
+# The idle window names its shell explicitly rather than letting tmux fall back
+# to `default-shell`, which is whoever runs the suite. An operator's login shell
+# runs that operator's configuration, and a prompt or update hook that spawns a
+# helper puts a non-shell process in this pane's FOREGROUND process group - the
+# one surface the classifier reads - so the idle case below saw `ambiguous`
+# instead of `dead` on exactly the runs where such a helper overlapped it. A
+# bare `/bin/sh`, the same shell the background case already execs, is idle
+# because nothing configured it, which is what that case means to assert.
+"$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -n idle -c "$LAB/wt" -- /bin/sh \
   || fail "could not start the private tmux server"
 
 # Run the pane's process DIRECTLY as the window command rather than typing into
@@ -117,7 +125,7 @@ wait_for_state() {  # <target> <expected> [tries]
 title_classifies_agent() {  # <target>
   local name
   name=$(fm_backend_tmux_current_command "$1" 2>/dev/null)
-  [ "$(fm_backend_tmux_classify_process_name "$name")" = agent ]
+  [ "$(fm_agent_process_classify_name "$name")" = agent ]
 }
 
 # Does the foreground-process-group identity, including argv[0], name one?
@@ -125,13 +133,13 @@ comms_classify_agent() {  # <target>
   local name
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    [ "$(fm_backend_tmux_classify_process_name "$name")" = agent ] && return 0
+    [ "$(fm_agent_process_classify_name "$name")" = agent ] && return 0
   done <<EOF
 $(fm_backend_tmux_foreground_comms "$1")
 EOF
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    [ "$(fm_backend_tmux_classify_process_name '' "$name")" = agent ] && return 0
+    [ "$(fm_agent_process_classify_name '' "$name")" = agent ] && return 0
   done <<EOF
 $(fm_backend_tmux_foreground_argv0s "$1")
 EOF

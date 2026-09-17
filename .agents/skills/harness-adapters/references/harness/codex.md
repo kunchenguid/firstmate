@@ -12,8 +12,9 @@ Verified on 2026-06-11 with codex-cli 0.139.0 unless a fact gives a newer versio
 | Skill invocation | `$<skill>`, for example `$no-mistakes`; `/<skill>` is Claude-only and Codex rejects it as "Unrecognized command". |
 | Resume | `codex resume <session-id>`, using the id printed on quit. |
 | Model flag | `--model <model>`. |
-| Effort flag | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh>"'`, verified on codex-cli 0.142.1 whose installed schema contains `model_reasoning_effort`, active config uses it, and bundled catalog advertises only these four values while omitting `max`. |
+| Effort flag | `-c 'model_reasoning_effort="<low\|medium\|high\|xhigh\|max>"'`, verified on codex-cli 0.142.1 whose installed schema contains `model_reasoning_effort`, active config uses it, and bundled catalog advertised only the first four values while omitting `max`; current codex-cli 0.153.4 catalog data at `${CODEX_HOME:-~/.codex}/models_cache.json` advertises `max` for `gpt-5.6-luna`, which Firstmate passes for that model. |
 | Model discovery | Open the current interactive session's `/model` picker. |
+| Marker | None; identity comes from ancestry, and `../../../bin/fm-harness.sh` is what keeps a retained foreign `CLAUDECODE` from renaming it. Verified on 2026-09-01 with codex-cli 0.152.0: the pane process is the `node` npm shim and the native `codex` binary runs as its foreground child, so a tool subprocess reaches the native name directly while the shim itself is identified from its script path. |
 
 Because busy state is unknown, `../../../bin/fm-crew-state.sh` reports a Codex worker as `unknown` and names the adapter, for example `harness state unavailable (unknown codex-unverified)`.
 That is the recorded contract rather than a fault to investigate, and it is not evidence the worker is wedged.
@@ -41,6 +42,15 @@ Read the hooks before choosing rather than trusting blind.
 For a Firstmate-launched worker or secondmate these are Firstmate's own tracked hooks - session start, the Bash pre-tool checks, and the turn-end guard - each anchored to a Firstmate-shaped root and written to exit 0 when anything is missing.
 Codex's own option text declares that declining leaves hooks unrun, and the turn-end guard is one of the hooks that gate registers, so `3. Continue without trusting` launches a worker whose turn-end backstop is not installed.
 That consequence follows from the option's declared behavior and the registered hook set; it has not been separately exercised, and nothing in the pane announces it after the choice is made.
+
+## Hook trust
+
+A second dialog, "Hooks need review - N hooks are new or changed", appears whenever the machine's `~/.codex/hooks.json` or a project's own `.codex/hooks.json` carries a hook Codex has not persisted trust for.
+It is unanswerable rather than merely inconvenient: its selection starts on "Review hooks", which is neither trusting nor declining, and Firstmate's key plane carries Enter, Escape and Ctrl-C with no arrow navigation.
+Writing Codex's own trust store to pre-accept it would manufacture an operator consent that was never given.
+So crewmate and scout launches disable Codex's hook layer outright (`bin/fm-spawn.sh`'s launch template owns the flag), which is the opposite of `--dangerously-bypass-hook-trust` - that flag RUNS the untrusted hooks.
+A crewmate loses nothing: its turn-end signal is the `-c notify=` program on the same launch, and the Firstmate hooks in a project's `.codex/hooks.json` are primary-session infrastructure that stands down in a child worktree.
+A secondmate is a primary in its own home and keeps its hooks, so an unanswerable modal there is still possible and is the operator's own hook review to settle.
 
 ## Skill popup
 

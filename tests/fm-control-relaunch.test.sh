@@ -29,6 +29,7 @@ set -u
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
+BRIEF="$ROOT/bin/fm-brief.sh"
 X_LINK="$ROOT/bin/fm-x-link.sh"
 # fm_test_tmproot's own cleanup trap fires when its command substitution exits,
 # so recreate the root before resolving it and clean it up from this file's trap.
@@ -109,7 +110,14 @@ case "${1:-}" in
       esac
     done
     printf 'fakepane\n'; exit 0 ;;
-  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
+  capture-pane)
+    [ -z "${FM_FAKE_COMPOSER_READ_FAIL:-}" ] || exit 1
+    if [ -s "$D/composer" ]; then
+      printf '╭────╮\n│ %s  │\n╰────╯\n' "$(cat "$D/composer")"
+    else
+      printf '╭────╮\n│    │\n╰────╯\n'
+    fi
+    exit 0 ;;
   list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
 esac
 exit 0
@@ -324,6 +332,44 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
+test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
+  local dir out rc
+  dir=$(new_case pending-exit rl43)
+  add_ship_task "$dir" rl43 claude
+  printf 'i' > "$dir/fake/composer"
+
+  out=$(run_control "$dir" rl43 relaunch --note "preserve the pending draft"); rc=$?
+
+  expect_code 1 "$rc" "a relaunch must refuse before typing an exit command into pending composer text"
+  assert_contains "$out" "composer visibly holds pending text" \
+    "the refusal should name the pending composer text"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a pending composer refusal must leave the old agent running"
+  assert_no_grep "/exit" "$dir/fake/literal" \
+    "the exit command must not be concatenated onto pending composer text"
+  pass "fm-control relaunch: pending composer text refuses before the exit command is typed"
+}
+
+test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven() {
+  local dir out rc
+  dir=$(new_case unproven-exit rl44)
+  add_ship_task "$dir" rl44 claude
+
+  out=$(FM_FAKE_COMPOSER_READ_FAIL=1 \
+    run_control "$dir" rl44 relaunch --note "preserve on an unreadable composer"); rc=$?
+
+  expect_code 1 "$rc" "a relaunch must refuse before typing an exit command when the composer state cannot be proven empty"
+  assert_contains "$out" "not proven empty" \
+    "the refusal should name the unproven composer state, not claim pending text"
+  assert_not_contains "$out" "visibly holds pending text" \
+    "an unreadable composer is not the same claim as observed pending text"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "an unproven composer refusal must leave the old agent running"
+  assert_no_grep "/exit" "$dir/fake/literal" \
+    "the exit command must not be typed when the composer state is not proven empty"
+  pass "fm-control relaunch: an unreadable composer fails safe before the exit command is typed"
+}
+
 test_relaunch_from_linked_home_preserves_recorded_worktree() {
   local dir out rc head fetch_head
   dir=$(new_case linked-home rl42)
@@ -481,9 +527,10 @@ test_disabled_relaunch_clears_prior_trace_context() {
 }
 
 test_relaunch_appends_the_progress_note_to_the_instructions() {
-  local dir out rc brief
+  local dir out rc brief launch_brief first_line role_line task_line
   dir=$(new_case note rl2)
   add_ship_task "$dir" rl2 claude
+  cp "$ROOT/AGENTS.md" "$dir/wt/AGENTS.md"
   out=$(run_control "$dir" rl2 relaunch --note "reproduced the crash in parser.go"); rc=$?
   expect_code 0 "$rc" "relaunch should succeed"$'\n'"$out"
   brief="$dir/home/data/rl2/brief.md"
@@ -492,7 +539,18 @@ test_relaunch_appends_the_progress_note_to_the_instructions() {
   assert_grep "reproduced the crash in parser.go" "$brief" "the note text should reach the replacement"
   assert_grep "reproduced the crash in parser.go" "$dir/home/state/rl2.control-relaunch.note" \
     "the note should also be preserved beside the transaction record"
-  pass "fm-control relaunch: the progress note lands in the instructions the replacement reads"
+  launch_brief="$dir/home/data/rl2/launch-brief.md"
+  first_line=$(sed -n '1p' "$launch_brief")
+  [ "$first_line" = '# Current worker role contract' ] ||
+    fail "a Firstmate-worktree relaunch did not establish the crewmate identity first"
+  role_line=$(grep -n '^# Current worker role contract$' "$launch_brief" | cut -d: -f1)
+  task_line=$(grep -n '^# Task$' "$launch_brief" | head -1 | cut -d: -f1)
+  [ "$role_line" -lt "$task_line" ] || fail "the relaunched worker identity followed its task content"
+  assert_grep "$dir/home/state/rl2.inbox" "$launch_brief" \
+    "the Firstmate-worktree relaunch omitted the worker's exact steering inbox"
+  assert_grep 'do not reject it as another home' "$launch_brief" \
+    "the Firstmate-worktree relaunch did not distinguish its inbox from cross-home state"
+  pass "fm-control relaunch: progress and the Firstmate-worktree worker identity reach the replacement"
 }
 
 test_relaunch_requires_a_note_for_a_ship_task() {
@@ -910,6 +968,71 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
     || fail "fm-spawn --relaunch without --harness must reuse the recorded harness, got '$(meta_field "$dir" rl21 harness)'"
   assert_contains "$out" "spawned rl21 harness=claude" "the launch should report the recorded harness"
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
+}
+
+test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
+  local dir home id brief launch out mode rule
+  for mode in no-mistakes direct-PR local-only; do
+    id="rl-promoted-${mode}"
+    dir=$(new_case "promoted-scout-$mode" "$id")
+    home="$dir/home"
+    fm_git_worktree "$dir/proj" "$dir/wt" "task-$id"
+    FM_HOME="$home" "$BRIEF" "$id" firstmate --scout >/dev/null \
+      || fail "$mode: could not scaffold the scout brief"
+    brief="$home/data/$id/brief.md"
+    sed 's/{TASK}/Fix the promotion relaunch contract./; s/{FIRSTMATE_SPEC}/Preserve the current delivery mode./' \
+      "$brief" > "$brief.filled"
+    mv "$brief.filled" "$brief"
+    {
+      echo "window=fmses:fm-$id"
+      echo "endpoint_task_id=$id"
+      echo "worktree=$dir/wt"
+      echo "project=$dir/proj"
+      echo "harness=claude"
+      echo "kind=scout"
+      echo "tasktmp=/tmp/fm-$id"
+      echo "model=default"
+      echo "effort=default"
+    } > "$home/state/$id.meta"
+    printf '%s\n' "fm-$id" > "$dir/fake/windows"
+    printf '%s' "$dir/wt" > "$dir/fake/cwd"
+
+    out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1) \
+      || fail "$mode: scout promotion should succeed: $out"
+    assert_grep 'This is a SCOUT task' "$brief" \
+      "$mode: the reproduction fixture lost the original scout delivery text"
+    assert_grep 'Never push to any remote and never open a PR' "$brief" \
+      "$mode: the reproduction fixture lost the stale scout prohibition"
+
+    printf 'zsh' > "$dir/fake/command"
+    out=$(run_spawn "$dir" "$id" --relaunch) \
+      || fail "$mode: promoted scout relaunch should succeed: $out"
+    launch="$home/data/$id/launch-brief.md"
+    assert_grep "This task is now kind=ship with mode=$mode" "$launch" \
+      "$mode: the replacement launch did not receive the promoted task identity"
+    assert_grep 'Any earlier "Never push" or scout-only delivery language in this file is superseded' "$launch" \
+      "$mode: the replacement launch left the stale scout prohibition readable at face value"
+    case "$mode" in
+      direct-PR)
+        rule="1. Never push to the default branch (push only your \`fm/$id\` branch). Never merge a PR." ;;
+      local-only)
+        rule="1. Never push to any remote and never open a PR. Work only on your \`fm/$id\` branch; firstmate handles the merge into local \`main\`." ;;
+      *)
+        rule='1. Never push to the default branch. Never merge a PR.' ;;
+    esac
+    assert_grep "$rule" "$launch" \
+      "$mode: the replacement launch did not receive the current ship push and merge safety rule"
+    assert_grep "git checkout -b fm/$id" "$launch" \
+      "$mode: the replacement launch did not receive its promoted branch name"
+    assert_grep 'Inventory this worktree' "$launch" \
+      "$mode: the replacement launch did not receive the scratch-state inventory step"
+    assert_grep 'Carry over only the intended fix changes' "$launch" \
+      "$mode: the replacement launch did not receive the carry-over boundary"
+    assert_grep "Delivery contract: mode=$mode" "$launch" \
+      "$mode: the replacement launch did not receive the actual ship delivery mode"
+  done
+  pass "fm-promote/fm-spawn --relaunch: the current ship contract supersedes stale scout delivery text"
 }
 
 # fm-spawn arms per-task wiring on harness PREFIXES, because a task launched
@@ -1519,7 +1642,8 @@ test_spawn_relaunch_refuses_a_pane_outside_the_worktree() {
   out=$(run_spawn "$dir" rl18 --relaunch --harness claude); rc=$?
   expect_code 1 "$rc" "a pane outside the worktree should refuse"
   assert_contains "$out" "not its recorded worktree" "the refusal should name the wrong location"
-  pass "fm-spawn --relaunch: refuses to start a replacement outside the copy holding the work"
+  [ ! -s "$dir/fake/keys" ] || fail "a refused tmux relaunch must send nothing to the pane"
+  pass "fm-spawn --relaunch: refuses to start a replacement outside the copy holding its work"
 }
 
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it() {
@@ -1558,6 +1682,8 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
+test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
@@ -1581,6 +1707,7 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_promoted_scout_relaunch_receives_the_current_delivery_contract
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
