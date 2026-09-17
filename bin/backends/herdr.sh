@@ -3129,13 +3129,9 @@ fm_backend_herdr_layout_attempt_commit() { # <file>
     --arg label "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LABEL" \
     '.result.pane.workspace_id == $workspace and .result.pane.tab_id == $tab and .result.pane.pane_id == $pane and .result.pane.label == $label' \
     >/dev/null 2>&1 || return 1
+  rm -f -- "$file" || return 1
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" pane rename \
-    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" --clear >/dev/null 2>&1 || return 1
-  info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" pane get \
-    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" 2>/dev/null) || return 1
-  printf '%s' "$info" | jq -e --arg pane "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" \
-    '.result.pane.pane_id == $pane and ((.result.pane.label // "") == "")' >/dev/null 2>&1 || return 1
-  rm -f -- "$file"
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" --clear >/dev/null 2>&1 || true
 }
 
 # Reconcile only the random label published before the structural request.
@@ -3192,9 +3188,9 @@ fm_backend_herdr_layout_attempt_reconcile_remove() { # <file>
     [ "$candidate" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" ] \
       && [ "$new_tab" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB" ] || return 1
   fi
-  fm_backend_herdr_cli "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" pane close "$candidate" >/dev/null 2>&1 || return 1
-  if fm_backend_herdr_cli "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" pane get "$candidate" >/dev/null 2>&1; then
-    echo "error: exact Herdr structural replacement still exists after close; refusing duplicate launch" >&2
+  if ! fm_backend_herdr_explicit_close_pane_confirmed \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" "$candidate"; then
+    echo "error: exact Herdr structural replacement was not confirmed gone after close; refusing duplicate launch" >&2
     return 1
   fi
   fm_backend_herdr_layout_attempt_resolve "$file" removed "$new_tab" "$candidate"
@@ -3206,11 +3202,10 @@ fm_backend_herdr_layout_attempt_reconcile_remove() { # <file>
 fm_backend_herdr_layout_discard_response_pane() { # <session> <pane>
   local session=$1 pane=$2
   [ -n "$session" ] && [ -n "$pane" ] || return 1
-  if ! fm_backend_herdr_cli "$session" pane close "$pane" >/dev/null 2>&1; then
-    echo "warning: Herdr structural launch could not clean the unconfirmed response pane '$pane'" >&2
+  if ! fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane"; then
+    echo "warning: Herdr structural launch could not confirm the unconfirmed response pane '$pane' was removed" >&2
     return 1
   fi
-  ! fm_backend_herdr_cli "$session" pane get "$pane" >/dev/null 2>&1
 }
 
 # fm_backend_herdr_layout_apply: replace one exact fresh pane through the

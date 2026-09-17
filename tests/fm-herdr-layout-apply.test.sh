@@ -19,10 +19,12 @@ APPLIED="$TMP_ROOT/applied"
 REPORTED="$TMP_ROOT/reported"
 CLOSED="$TMP_ROOT/closed"
 LABEL_CLEARED="$TMP_ROOT/label-cleared"
+RENAME_BEFORE_RETIRE="$TMP_ROOT/rename-before-retire"
 ATTEMPT="$TMP_ROOT/task.herdr-launch"
 CALLS="$TMP_ROOT/calls.log"
 SERVER_PID=
 MODE=ok
+CLOSE_READBACK=dead
 
 layout_schema() {
   cat <<'JSON'
@@ -32,7 +34,7 @@ JSON
 
 start_server() { # <success|wrong-id|error|malformed|timeout>
   local response=$1
-  rm -f "$SOCK" "$REQUEST" "$APPLIED" "$CLOSED" "$LABEL_CLEARED"
+  rm -f "$SOCK" "$REQUEST" "$APPLIED" "$CLOSED" "$LABEL_CLEARED" "$RENAME_BEFORE_RETIRE"
   python3 - "$SOCK" "$REQUEST" "$APPLIED" "$response" <<'PY' &
 import json
 import socket
@@ -180,8 +182,14 @@ fm_backend_herdr_cli() { # <session> <args...>
       esac
       ;;
     "pane get w1:p3")
-      [ ! -e "$CLOSED" ] || return 1
-      if [ -e "$LABEL_CLEARED" ]; then
+      if [ -e "$CLOSED" ]; then
+        if [ "$CLOSE_READBACK" = dead ]; then
+          printf '%s\n' '{"error":{"code":"pane_not_found"}}'
+        else
+          printf '%s\n' 'unreadable response'
+          return 1
+        fi
+      elif [ -e "$LABEL_CLEARED" ]; then
         printf '%s\n' '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t3","pane_id":"w1:p3","label":null}}}'
       else
         label=$(jq -r '.params.root.label // "fm-launch-0123456789abcdef0123456789abcdef"' "$REQUEST" 2>/dev/null || printf 'fm-launch-0123456789abcdef0123456789abcdef')
@@ -189,6 +197,8 @@ fm_backend_herdr_cli() { # <session> <args...>
       fi
       ;;
     "pane rename w1:p3 --clear")
+      [ ! -e "$ATTEMPT" ] || : > "$RENAME_BEFORE_RETIRE"
+      [ "$MODE" != rename_failure ] || return 1
       : > "$LABEL_CLEARED"
       printf '%s\n' '{"result":{"type":"pane_rename","pane_id":"w1:p3"}}'
       ;;
@@ -252,8 +262,18 @@ fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
 [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 2 ] \
   || fail "successful layout attempt did not advance to exact replacement ids"
 fm_backend_herdr_layout_attempt_commit "$ATTEMPT" \
-  || fail "successful layout did not clear its temporary attempt label"
+  || fail "successful layout did not retire its exact attempt"
 [ ! -e "$ATTEMPT" ] || fail "successful layout retained its attempt after exact commit"
+[ ! -e "$RENAME_BEFORE_RETIRE" ] \
+  || fail "successful layout cleared its correlation label before retiring the attempt"
+rm -f "$LABEL_CLEARED"
+fm_backend_herdr_layout_attempt_write "$ATTEMPT" 2 0123456789abcdef0123456789abcdef \
+  lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef w1:t3 w1:p3
+MODE=rename_failure
+fm_backend_herdr_layout_attempt_commit "$ATTEMPT" \
+  || fail "label-clear failure stranded an otherwise committed layout attempt"
+[ ! -e "$ATTEMPT" ] || fail "label-clear failure retained a committed layout attempt"
+MODE=ok
 pass "layout.apply preserves exact cwd/environment/argv and binds only response ids re-read from the named session"
 
 for mode in protocol schema workspace tab pane layout foreground socket; do
@@ -291,6 +311,27 @@ fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
 rm -f "$ATTEMPT"
 pass "layout.apply cleans only the exact returned pane after a post-mutation identity refusal"
 MODE=ok
+
+CLOSE_READBACK=unreadable
+rm -f "$CLOSED"
+if fm_backend_herdr_layout_discard_response_pane lab-structural w1:p3 >/dev/null 2>&1; then
+  fail "response-pane cleanup accepted an unreadable post-close pane response"
+fi
+rm -f "$CLOSED"
+fm_backend_herdr_layout_attempt_write "$ATTEMPT" 1 0123456789abcdef0123456789abcdef \
+  lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef
+MODE=reconcile
+if fm_backend_herdr_layout_attempt_reconcile_remove "$ATTEMPT" >/dev/null 2>&1; then
+  fail "quarantine reconciliation accepted an unreadable post-close pane response"
+fi
+fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
+  || fail "unreadable post-close reconciliation lost its durable attempt"
+[ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 1 ] \
+  || fail "unreadable post-close reconciliation advanced its durable attempt"
+rm -f "$ATTEMPT" "$CLOSED"
+MODE=ok
+CLOSE_READBACK=dead
+pass "structural cleanup advances only after explicit pane absence"
 
 HELPER_PAYLOAD="$TMP_ROOT/helper-payload.json"
 printf '%s\n' '{"cwd":"/tmp/worktree","env":{"OPENAI_API_KEY":"credential-must-stay-off-argv"},"command":["pi"]}' > "$HELPER_PAYLOAD"

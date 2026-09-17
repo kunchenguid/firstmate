@@ -4608,7 +4608,7 @@ print(json.dumps(["/bin/sh", "-c", sys.stdin.read()], separators=(",", ":")))
     exit 1
   fi
   fm_backend_herdr_layout_attempt_commit "$HERDR_LAYOUT_ATTEMPT" || {
-    echo "error: structural Herdr launch could not retire its exact attempt label and record" >&2
+    echo "error: structural Herdr launch could not retire its exact attempt record" >&2
     exit 1
   }
 else
