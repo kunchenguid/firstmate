@@ -136,6 +136,11 @@ A bare `<project>` is still accepted when this machine happens to have `projects
 [`bin/fm-project-origin-lib.sh`](../bin/fm-project-origin-lib.sh) owns which URLs are accepted; it decides on structure and safety alone, so no forge, domain, or host is privileged and a self-hosted server works exactly as a hosted one does.
 The primary validates every resolved origin before transport, and the receiving host validates it again before cloning.
 The project's registered delivery mode still comes from this machine's `data/projects.md`, so an unregistered or `local-only` project is refused rather than provisioned.
+Root holds the secondmate registry lock while it snapshots project Firstmate repository identities and refuses a remote project whose canonical origin overlaps one of them.
+Remote provisioning verifies its cloned repository identities and records both the clone scope and the root authority snapshot in `.fm-secondmate-parent`.
+Remote project work fails closed if that snapshot is missing or invalid, if the task repository is outside the provisioned clone scope, or if it is owned by a project Firstmate.
+Re-provision a projectful remote ordinary home created by older tooling before spawning project work from it.
+Non-overlapping remote ordinary routes remain supported; this snapshot is a provisioning-time check, not distributed locking.
 
 Remote child routes beneath a project Firstmate are refused because the repository-wide admission lock is local to that project Firstmate's home.
 Use local child homes on the project Firstmate's host until distributed locking is available.

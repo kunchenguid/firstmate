@@ -117,6 +117,77 @@ ssh_identity=$(fm_repo_scope_canonical_origin_identity "$identity_repo") \
   || fail "SSH origin could not be normalized"
 [ "$https_identity" = "$ssh_identity" ] \
   || fail "equivalent HTTPS and SSH origins had different identities"
+alpha_identity=$(fm_repo_scope_canonical_origin_identity "$PFM/projects/alpha") \
+  || fail "project Firstmate repository identity could not be normalized"
+
+remote_home="$TMP_ROOT/attested-remote-home"
+mkdir -p "$remote_home/data" "$remote_home/state" "$remote_home/projects"
+printf 'remote-mate\n' > "$remote_home/.fm-secondmate-home"
+git clone --quiet "$ORIGIN_URL" "$remote_home/projects/alpha"
+printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-09-17)' > "$remote_home/data/projects.md"
+printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_role=root\nrepo_scope_snapshot=fm-remote-repo-scope.v1\nrepo_scope_count=1\nrepo_authority_count=1\nrepo_scope_identity=%s\nrepo_authority_identity=%s\n' \
+  "sha256:$alpha_identity" "sha256:$alpha_identity" > "$remote_home/.fm-secondmate-parent"
+if fm_repo_scope_root_route_guard "$remote_home" "$remote_home/projects/alpha"; then
+  fail "remote ordinary route bypassed a matching root project-authority identity"
+fi
+printf '%s\n' "$FM_REPO_SCOPE_LAST_ERROR" | grep -F 'owned by a root project Firstmate' >/dev/null \
+  || fail "remote overlap refusal did not explain the project Firstmate route"
+
+printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_role=root\n' > "$remote_home/.fm-secondmate-parent"
+if fm_repo_scope_root_route_guard "$remote_home" "$remote_home/projects/alpha"; then
+  fail "remote ordinary route without an authority snapshot was allowed to spawn project work"
+fi
+printf '%s\n' "$FM_REPO_SCOPE_LAST_ERROR" | grep -F 'no verified repository-scope snapshot' >/dev/null \
+  || fail "remote uncertainty refusal did not name the missing scope snapshot"
+
+other_origin="$TMP_ROOT/other-origin.git"
+fm_git_init_commit "$TMP_ROOT/other-source"
+fm_git_add_origin "$TMP_ROOT/other-source" "$other_origin"
+git clone --quiet "file://$(cd "$other_origin" && pwd -P)" "$remote_home/projects/other"
+other_identity=$(fm_repo_scope_canonical_origin_identity "$remote_home/projects/other") \
+  || fail "non-overlapping remote project identity could not be normalized"
+printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_role=root\nrepo_scope_snapshot=fm-remote-repo-scope.v1\nrepo_scope_count=1\nrepo_authority_count=1\nrepo_scope_identity=%s\nrepo_authority_identity=%s\n' \
+  "sha256:$other_identity" "sha256:$alpha_identity" > "$remote_home/.fm-secondmate-parent"
+if fm_repo_scope_root_route_guard "$remote_home" "$remote_home/projects/alpha"; then
+  fail "remote ordinary route allowed a target outside its attested clone scope"
+fi
+printf '%s\n' "$FM_REPO_SCOPE_LAST_ERROR" | grep -F 'outside the verified remote-home scope' >/dev/null \
+  || fail "remote out-of-scope refusal did not report the stale or uncertain binding"
+fm_repo_scope_root_route_guard "$remote_home" "$remote_home/projects/other" \
+  || fail "attested non-overlapping remote ordinary route was not preserved: $FM_REPO_SCOPE_LAST_ERROR"
+sed 's/^repo_scope_count=1$/repo_scope_count=2/' "$remote_home/.fm-secondmate-parent" \
+  > "$remote_home/.fm-secondmate-parent.tmp"
+mv "$remote_home/.fm-secondmate-parent.tmp" "$remote_home/.fm-secondmate-parent"
+if fm_repo_scope_root_route_guard "$remote_home" "$remote_home/projects/other"; then
+  fail "remote ordinary route accepted a malformed manually edited scope snapshot"
+fi
+printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_role=root\nrepo_scope_snapshot=fm-remote-repo-scope.v1\nrepo_scope_count=2\nrepo_authority_count=0\nrepo_scope_identity=sha256:%s\nrepo_scope_identity=sha256:%s\n' \
+  "$other_identity" "$other_identity" > "$remote_home/.fm-secondmate-parent"
+if fm_repo_scope_root_route_guard "$remote_home" "$remote_home/projects/other"; then
+  fail "remote ordinary route accepted duplicate repository identities in its attested snapshot"
+fi
+
+audit_root="$TMP_ROOT/remote-overlap-audit-root"
+mkdir -p "$audit_root/data" "$audit_root/projects"
+git clone --quiet "$ORIGIN_URL" "$audit_root/projects/alpha"
+printf -- '- alpha-pfm - project alpha (home: %s; scope: alpha; projects: alpha; added 2026-09-17)\n' "$PFM" \
+  > "$audit_root/data/secondmates.md"
+printf -- '- remote-alpha - remote alpha (host: build; root: /srv/fm; home: /srv/alpha; scope: alpha; projects: alpha; added 2026-09-17)\n' \
+  >> "$audit_root/data/secondmates.md"
+if fm_repo_scope_audit_remote_overlaps "$audit_root/data/secondmates.md" "$audit_root/projects"; then
+  fail "bootstrap overlap audit accepted a manually registered remote/PFM ownership collision"
+fi
+printf '%s\n' "$FM_REPO_SCOPE_LAST_ERROR" | grep -F 'overlaps project Firstmate repository alpha' >/dev/null \
+  || fail "bootstrap overlap audit did not identify the conflicting route"
+mkdir -p "$audit_root/config" "$TMP_ROOT/bootstrap-home"
+if audit_bootstrap=$(HOME="$TMP_ROOT/bootstrap-home" FM_HOME="$audit_root" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_BOOTSTRAP_NETWORK=skip FM_BOOTSTRAP_LOCKED=1 "$ROOT/bin/fm-bootstrap.sh" 2>&1); then
+  :
+else
+  fail "bootstrap did not complete its manual-overlap audit: $audit_bootstrap"
+fi
+printf '%s\n' "$audit_bootstrap" | grep -F 'REPO_CONCURRENCY: remote repository ownership needs review: remote ordinary route' >/dev/null \
+  || fail "bootstrap did not surface manually registered remote/PFM overlap"
 limit=$(fm_repo_scope_limit "$PFM") || fail "configured repository limit was rejected"
 [ "$limit" = 2 ] || fail "repository limit parser returned $limit instead of 2"
 printf '2\n\n' > "$PFM/config/repo-concurrency"

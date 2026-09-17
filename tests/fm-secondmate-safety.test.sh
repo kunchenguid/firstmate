@@ -140,7 +140,7 @@ EOF
 test_project_firstmate_seed_has_one_repository_authority() {
   local home first duplicate ordinary child err origin fakebin launch_log output spawn_rc remote_child
   local root_id before_backlog overlap overlap_id overlap_before convert convert_id before_convert
-  local root_brief_before root_data_before
+  local root_brief_before root_data_before remote_root remote_first remote_route remote_task remote_identity
   home="$TMP_ROOT/project-firstmate-seed-home"
   first="$TMP_ROOT/project-firstmate-seed-first"
   duplicate="$TMP_ROOT/project-firstmate-seed-duplicate"
@@ -162,6 +162,33 @@ test_project_firstmate_seed_has_one_repository_authority() {
   grep -F 'requires exactly one beta entry in' "$TMP_ROOT/project-firstmate-unregistered.err" >/dev/null \
     || fail "unregistered project Firstmate refusal did not name the registration requirement"
 
+  remote_root="$TMP_ROOT/project-firstmate-remote-overlap-root"
+  remote_first="$TMP_ROOT/project-firstmate-remote-overlap-first"
+  mkdir -p "$remote_root/projects" "$remote_root/data" "$remote_root/state"
+  fm_git_init_commit "$remote_root/projects/alpha"
+  fm_git_add_origin "$remote_root/projects/alpha" "$TMP_ROOT/remotes/remote-overlap-alpha.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$remote_root/data/projects.md"
+  printf -- '- remote-alpha - remote alpha (host: build; root: /srv/fm; home: /srv/alpha; scope: alpha tasks; projects: alpha; added 2026-09-17)\n' \
+    > "$remote_root/data/secondmates.md"
+  if FM_HOME="$remote_root" FM_SECONDMATE_CHARTER='overlapping remote authority' \
+    "$ROOT/bin/fm-home-seed.sh" remote-alpha-pfm "$remote_first" --project-firstmate alpha >/dev/null 2>"$err"; then
+    fail "project Firstmate creation overlapped an existing remote ordinary route"
+  fi
+  grep -F 'already in remote ordinary route' "$err" >/dev/null \
+    || fail "project Firstmate remote-overlap refusal did not name the conflicting route"
+  [ ! -e "$remote_first" ] || fail "remote-overlap refusal created a project Firstmate home"
+  fm_git_init_commit "$remote_root/projects/beta"
+  fm_git_add_origin "$remote_root/projects/beta" "$TMP_ROOT/remotes/remote-overlap-beta.git"
+  printf '%s\n' '- beta [direct-PR] - beta project (added 2026-06-22)' >> "$remote_root/data/projects.md"
+  printf -- '- remote-unknown - remote project (host: build; root: /srv/fm; home: /srv/unknown; scope: unknown tasks; projects: unknown; added 2026-09-17)\n' \
+    >> "$remote_root/data/secondmates.md"
+  if FM_HOME="$remote_root" FM_SECONDMATE_CHARTER='uncertain remote authority' \
+    "$ROOT/bin/fm-home-seed.sh" remote-unknown-pfm "$remote_first" --project-firstmate beta >/dev/null 2>"$err"; then
+    fail "project Firstmate creation ignored an unverifiable remote ordinary scope"
+  fi
+  grep -F 'cannot prove remote ordinary route' "$err" >/dev/null \
+    || fail "uncertain remote-scope refusal did not explain the missing local clone proof"
+
   FM_HOME="$home" FM_SECONDMATE_CHARTER='own the alpha repository' \
     FM_SECONDMATE_SCOPE='alpha repository work' \
     "$ROOT/bin/fm-home-seed.sh" alpha-pfm "$first" --project-firstmate alpha >/dev/null \
@@ -174,6 +201,46 @@ test_project_firstmate_seed_has_one_repository_authority() {
     || fail "project Firstmate charter did not explain its bounded repository role"
   [ "$(git -C "$first/projects/alpha" remote get-url origin)" = "$(git -C "$home/projects/alpha" remote get-url origin)" ] \
     || fail "project Firstmate clone did not preserve the repository identity"
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='overlapping remote ordinary route' \
+    "$ROOT/bin/fm-remote-home-seed.sh" remote-alpha remote-host /remote/root /remote/alpha \
+    "alpha=$origin" >"$TMP_ROOT/remote-pfm-overlap.out" 2>&1; then
+    fail "remote ordinary provisioning overlapped an existing project Firstmate"
+  fi
+  grep -F 'already owned by a project Firstmate' "$TMP_ROOT/remote-pfm-overlap.out" >/dev/null \
+    || fail "remote provisioning overlap refusal did not name the project Firstmate authority"
+  [ ! -e "$home/data/remote-alpha/brief.md" ] \
+    || fail "remote provisioning overlap refusal wrote a charter before admission"
+
+  remote_route="$TMP_ROOT/remote-pfm-overlap-runtime"
+  fm_test_spawn_home "$remote_route" codex
+  printf 'remote-alpha\n' > "$remote_route/.fm-secondmate-home"
+  git clone --quiet "$origin" "$remote_route/projects/alpha"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$remote_route/data/projects.md"
+  . "$ROOT/bin/fm-repo-concurrency-lib.sh"
+  remote_identity=$(fm_repo_scope_canonical_origin_identity "$remote_route/projects/alpha") \
+    || fail "remote ordinary test clone identity could not be normalized"
+  remote_identity="sha256:$remote_identity"
+  printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_role=root\nrepo_scope_snapshot=fm-remote-repo-scope.v1\nrepo_scope_count=1\nrepo_authority_count=1\nrepo_scope_identity=%s\nrepo_authority_identity=%s\n' \
+    "$remote_identity" "$remote_identity" > "$remote_route/.fm-secondmate-parent"
+  remote_task=remote-bypass-alpha
+  fm_test_spawn_brief "$remote_route" "$remote_task" "remote ordinary work must not bypass project authority"
+  printf 'manual\n' > "$remote_route/config/backlog-backend"
+  fakebin=$(fm_test_make_spawn_fakebin "$TMP_ROOT/project-firstmate-remote-overlap-runtime")
+  launch_log="$TMP_ROOT/project-firstmate-remote-overlap-runtime.launch"
+  : > "$launch_log"
+  if output=$(FM_FAKE_LAUNCH_LOG="$launch_log" \
+    fm_test_run_spawn "$remote_route" "$remote_route/projects/alpha" "$fakebin" \
+      "$remote_task" "$remote_route/projects/alpha" --scout 2>&1); then
+    fail "remote ordinary runtime bypassed an overlapping project Firstmate authority"
+  fi
+  printf '%s\n' "$output" | grep -F 'owned by a root project Firstmate' >/dev/null \
+    || fail "remote ordinary runtime refusal did not provide project-authority routing guidance"
+  [ ! -e "$remote_route/state/$remote_task.meta" ] \
+    || fail "remote authority-overlap refusal published worker metadata"
+  [ ! -e "$remote_route/data/$remote_task/launch-brief.md" ] \
+    || fail "remote authority-overlap refusal published a worker overlay"
+  [ ! -s "$launch_log" ] || fail "remote authority-overlap refusal created an endpoint"
 
   first_origin=$(git -C "$first/projects/alpha" remote get-url origin)
   root_origin=$(git -C "$home/projects/alpha" remote get-url origin)

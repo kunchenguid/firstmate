@@ -26,6 +26,8 @@ MAX_MANIFEST_BYTES=1048576
 
 # shellcheck source=bin/fm-project-origin-lib.sh
 . "$SCRIPT_DIR/fm-project-origin-lib.sh"
+# shellcheck source=bin/fm-repo-concurrency-lib.sh
+. "$SCRIPT_DIR/fm-repo-concurrency-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 
@@ -53,6 +55,10 @@ PROVISION_LOCK=
 PROVISION_LOCK_HELD=0
 CREATED_PROJECTS="$TMP/created-projects"
 : > "$CREATED_PROJECTS"
+REMOTE_SCOPE_IDENTITIES="$TMP/repo-scope-identities"
+REMOTE_AUTHORITY_IDENTITIES="$TMP/repo-authority-identities"
+: > "$REMOTE_SCOPE_IDENTITIES"
+: > "$REMOTE_AUTHORITY_IDENTITIES"
 release_provision_lock() {
   if [ "$PROVISION_LOCK_HELD" -eq 1 ]; then
     fm_lock_release "$PROVISION_LOCK"
@@ -103,6 +109,8 @@ CHARTER_B64=$(manifest_value "$TMP/manifest" charter_b64 || true)
 # host in that case rather than refusing the whole seed.
 PARENT_HOST_B64=$(manifest_value "$TMP/manifest" parent_host_b64 || true)
 COUNT=$(manifest_value "$TMP/manifest" project_count || true)
+REPO_SCOPE_SNAPSHOT=$(manifest_value "$TMP/manifest" repo_scope_snapshot || true)
+REPO_SCOPE_AUTHORITY_COUNT=$(manifest_value "$TMP/manifest" repo_authority_count || true)
 base64_decode_to "$ID_B64" "$TMP/id" || die "manifest id is not valid base64"
 base64_decode_to "$CHARTER_B64" "$TMP/charter" || die "manifest charter is not valid base64"
 PARENT_HOST=
@@ -117,6 +125,21 @@ case "$COUNT" in ''|*[!0-9]*) die "manifest project count is invalid" ;; esac
 [ -z "$(LC_ALL=C tr -cd '\000' < "$TMP/charter")" ] || die "manifest charter contains NUL bytes"
 RECORDS=$(grep -c '^project=' "$TMP/manifest" 2>/dev/null || true)
 [ "$RECORDS" -eq "$COUNT" ] || die "manifest project count does not match its records"
+if [ -n "$REPO_SCOPE_SNAPSHOT" ]; then
+  [ "$REPO_SCOPE_SNAPSHOT" = fm-remote-repo-scope.v1 ] || die "manifest repository-scope snapshot is unsupported"
+  case "$REPO_SCOPE_AUTHORITY_COUNT" in ''|*[!0-9]*) die "manifest project-authority count is invalid" ;; esac
+  AUTHORITY_RECORDS=$(grep -c '^repo_authority_identity=' "$TMP/manifest" 2>/dev/null || true)
+  [ "$AUTHORITY_RECORDS" -eq "$REPO_SCOPE_AUTHORITY_COUNT" ] || die "manifest project-authority count does not match its records"
+  while IFS= read -r identity; do
+    [ -n "$identity" ] || continue
+    [[ "$identity" =~ ^sha256:[[:xdigit:]]{64}$ ]] || die "manifest project-authority identity is invalid"
+    grep -Fqx -- "$identity" "$REMOTE_AUTHORITY_IDENTITIES" && die "manifest repeats a project-authority identity"
+    printf '%s\n' "$identity" >> "$REMOTE_AUTHORITY_IDENTITIES"
+  done < <(sed -n 's/^repo_authority_identity=//p' "$TMP/manifest")
+else
+  [ "$COUNT" -eq 0 ] || die "projectful remote provisioning requires a verified repository-scope snapshot"
+  [ -z "$REPO_SCOPE_AUTHORITY_COUNT" ] || die "manifest authority count requires a repository-scope snapshot"
+fi
 
 HOME_PARENT=$(dirname "$FM_HOME")
 HOME_PARENT_REAL=$(CDPATH='' cd -- "$HOME_PARENT" 2>/dev/null && pwd -P) \
@@ -200,11 +223,11 @@ while IFS= read -r record; do
   encoded=${record#project=}
   old_ifs=$IFS
   IFS='|'
-  read -r NAME_B64 ORIGIN_B64 REGISTRY_B64 MODE_B64 <<EOF
+  read -r NAME_B64 ORIGIN_B64 REGISTRY_B64 MODE_B64 IDENTITY_B64 <<EOF
 $encoded
 EOF
   IFS=$old_ifs
-  for field in NAME_B64 ORIGIN_B64 REGISTRY_B64 MODE_B64; do
+  for field in NAME_B64 ORIGIN_B64 REGISTRY_B64 MODE_B64 IDENTITY_B64; do
     eval "value=\${$field}"
     [ -n "$value" ] || die "project manifest record is incomplete"
   done
@@ -212,11 +235,14 @@ EOF
   base64_decode_to "$ORIGIN_B64" "$TMP/origin" || die "project origin is not valid base64"
   base64_decode_to "$REGISTRY_B64" "$TMP/registry" || die "project registry line is not valid base64"
   base64_decode_to "$MODE_B64" "$TMP/mode" || die "project mode is not valid base64"
+  base64_decode_to "$IDENTITY_B64" "$TMP/repo-identity" || die "project repository identity is not valid base64"
   NAME=$(cat "$TMP/name")
   ORIGIN=$(cat "$TMP/origin")
   REGISTRY_LINE=$(cat "$TMP/registry")
   MODE=$(cat "$TMP/mode")
+  EXPECTED_REPO_IDENTITY=$(cat "$TMP/repo-identity")
   safe_id "$NAME" || die "project name is unsafe: $NAME"
+  [[ "$EXPECTED_REPO_IDENTITY" =~ ^sha256:[[:xdigit:]]{64}$ ]] || die "project $NAME repository identity is invalid"
   [ -n "$ORIGIN" ] || die "project $NAME has no origin"
   fm_project_origin_safe "$ORIGIN" || die "project $NAME origin is not an accepted clone URL: $ORIGIN"
   case "$MODE" in direct-PR) ;; *) die "project $NAME has unsupported remote mode: $MODE" ;; esac
@@ -231,6 +257,15 @@ EOF
     printf '%s\n' "$NAME" >> "$CREATED_PROJECTS"
     git clone --quiet -- "$ORIGIN" "$DEST" || die "could not clone project $NAME on the remote host"
   fi
+  REPO_SCOPE_IDENTITY=$(fm_repo_scope_canonical_origin_identity "$DEST") \
+    || die "could not establish the canonical repository identity for remote project $NAME"
+  [ "sha256:$REPO_SCOPE_IDENTITY" = "$EXPECTED_REPO_IDENTITY" ] \
+    || die "remote project $NAME canonical origin differs from the root-verified identity"
+  grep -Fqx -- "$REPO_SCOPE_IDENTITY" "$REMOTE_SCOPE_IDENTITIES" \
+    && die "remote project manifest repeats a repository identity"
+  grep -Fqx -- "sha256:$REPO_SCOPE_IDENTITY" "$REMOTE_AUTHORITY_IDENTITIES" \
+    && die "remote ordinary project $NAME overlaps a root project Firstmate authority"
+  printf '%s\n' "$REPO_SCOPE_IDENTITY" >> "$REMOTE_SCOPE_IDENTITIES"
   printf '%s\n' "$REGISTRY_LINE" >> "$PROJECT_REG"
 done < <(grep '^project=' "$TMP/manifest")
 
@@ -242,6 +277,14 @@ mv -f -- "$FM_HOME/data/projects.md.tmp.$$" "$FM_HOME/data/projects.md"
 {
   printf 'schema=fm-secondmate-parent.v1\n'
   printf 'route=remote\n'
+  if [ -n "$REPO_SCOPE_SNAPSHOT" ]; then
+    printf 'parent_role=root\n'
+    printf 'repo_scope_snapshot=%s\n' "$REPO_SCOPE_SNAPSHOT"
+    printf 'repo_scope_count=%s\n' "$(wc -l < "$REMOTE_SCOPE_IDENTITIES" | tr -d ' ')"
+    printf 'repo_authority_count=%s\n' "$REPO_SCOPE_AUTHORITY_COUNT"
+    sed 's/^/repo_scope_identity=sha256:/' "$REMOTE_SCOPE_IDENTITIES"
+    sed 's/^/repo_authority_identity=/' "$REMOTE_AUTHORITY_IDENTITIES"
+  fi
   [ -z "$PARENT_HOST" ] || printf 'parent_host=%s\n' "$PARENT_HOST"
 } > "$FM_HOME/.fm-secondmate-parent.tmp.$$"
 mv -f -- "$FM_HOME/.fm-secondmate-parent.tmp.$$" "$FM_HOME/.fm-secondmate-parent"

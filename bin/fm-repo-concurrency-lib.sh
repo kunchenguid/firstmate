@@ -44,9 +44,8 @@ fm_repo_scope_clone_identity() {  # <git-repository>
   fm_repo_scope_hash "$origin"
 }
 
-fm_repo_scope_canonical_origin() {  # <git-repository>
-  local repo=$1 origin scheme rest host path prefix canonical_path source_path
-  origin=$(git -C "$repo" remote get-url origin 2>/dev/null) || return 1
+fm_repo_scope_canonical_origin_value() {  # <origin> [local-base]
+  local origin=$1 repo=${2:-/} scheme rest host path prefix canonical_path source_path
   [ -n "$origin" ] || return 1
   case "$origin" in
     file://*)
@@ -97,10 +96,149 @@ fm_repo_scope_canonical_origin() {  # <git-repository>
   esac
 }
 
+fm_repo_scope_canonical_origin() {  # <git-repository>
+  local repo=$1 origin
+  # Use the configured route intent, not `remote get-url`, which expands
+  # host-local insteadOf rewrites and can make the same declared origin look
+  # like a different repository on the receiving host.
+  origin=$(git -C "$repo" config --local --get remote.origin.url 2>/dev/null) || return 1
+  fm_repo_scope_canonical_origin_value "$origin" "$repo"
+}
+
 fm_repo_scope_canonical_origin_identity() {  # <git-repository>
   local canonical
   canonical=$(fm_repo_scope_canonical_origin "$1") || return 1
   fm_repo_scope_hash "$canonical"
+}
+
+fm_repo_scope_canonical_origin_value_identity() {  # <origin> [local-base]
+  local canonical
+  canonical=$(fm_repo_scope_canonical_origin_value "$1" "${2:-/}") || return 1
+  fm_repo_scope_hash "$canonical"
+}
+
+fm_repo_scope_registered_authority_identities() {  # <root-secondmates-registry>
+  local registry=$1 registry_dir line entry_id entry_home identity
+  registry_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  # shellcheck source=bin/fm-secondmate-registry-lib.sh
+  . "$registry_dir/fm-secondmate-registry-lib.sh"
+  [ -e "$registry" ] || [ -L "$registry" ] || return 0
+  [ -f "$registry" ] && [ ! -L "$registry" ] || {
+    FM_REPO_SCOPE_LAST_ERROR="secondmate registry is unsafe while enumerating project authorities"
+    return 1
+  }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in "- "*) ;; *) continue ;; esac
+    secondmate_registry_parse_line "$line" || {
+      FM_REPO_SCOPE_LAST_ERROR="secondmate registry has an invalid route while enumerating project authorities"
+      return 1
+    }
+    entry_id=$SECONDMATE_REGISTRY_ID
+    entry_home=$SECONDMATE_REGISTRY_HOME
+    if [ -e "$entry_home/.fm-project-firstmate" ] || [ -L "$entry_home/.fm-project-firstmate" ]; then
+      [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || {
+        FM_REPO_SCOPE_LAST_ERROR="project Firstmate $entry_id has a remote route that cannot be verified locally"
+        return 1
+      }
+      fm_repo_scope_marker_parse "$entry_home" || {
+        FM_REPO_SCOPE_LAST_ERROR="registered project Firstmate $entry_id has an invalid authority marker"
+        return 1
+      }
+      identity=$(fm_repo_scope_canonical_origin_identity "$entry_home/projects/$FM_REPO_SCOPE_PROJECT") || {
+        FM_REPO_SCOPE_LAST_ERROR="cannot verify the repository identity of project Firstmate $entry_id"
+        return 1
+      }
+      printf '%s\n' "$identity"
+    fi
+  done < "$registry"
+}
+
+fm_repo_scope_refuse_remote_ordinary_overlap() {  # <registry> <root-projects> <candidate-identity>
+  local registry=$1 projects_root=$2 candidate_identity=$3 line entry_home entry_projects name repo identity registry_dir
+  local -a names=()
+  registry_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  # shellcheck source=bin/fm-secondmate-registry-lib.sh
+  . "$registry_dir/fm-secondmate-registry-lib.sh"
+  [ -e "$registry" ] || [ -L "$registry" ] || return 0
+  [ -f "$registry" ] && [ ! -L "$registry" ] || {
+    FM_REPO_SCOPE_LAST_ERROR="secondmate registry is unsafe while checking remote repository overlap"
+    return 1
+  }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in "- "*) ;; *) continue ;; esac
+    secondmate_registry_parse_line "$line" || {
+      FM_REPO_SCOPE_LAST_ERROR="secondmate registry has an invalid route while checking remote repository overlap"
+      return 1
+    }
+    [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ] || continue
+    entry_home=$SECONDMATE_REGISTRY_HOME
+    entry_projects=$SECONDMATE_REGISTRY_PROJECTS
+    [ -n "$entry_projects" ] || continue
+    names=()
+    IFS=, read -r -a names <<< "$entry_projects"
+    for name in "${names[@]}"; do
+      name=${name#"${name%%[![:space:]]*}"}
+      name=${name%"${name##*[![:space:]]}"}
+      case "$name" in ''|*[!A-Za-z0-9._-]*)
+        FM_REPO_SCOPE_LAST_ERROR="remote route $entry_home has an invalid project scope"
+        return 1
+        ;;
+      esac
+      repo="$projects_root/$name"
+      identity=$(fm_repo_scope_canonical_origin_identity "$repo" 2>/dev/null) || {
+        FM_REPO_SCOPE_LAST_ERROR="cannot prove remote ordinary route $entry_home's ownership of $name; restore its local clone before creating project Firstmate authority"
+        return 1
+      }
+      if [ "$identity" = "$candidate_identity" ]; then
+        FM_REPO_SCOPE_LAST_ERROR="repository $name is already in remote ordinary route $entry_home; refusing overlapping project Firstmate authority"
+        return 1
+      fi
+    done
+  done < "$registry"
+}
+
+fm_repo_scope_audit_remote_overlaps() {  # <registry> <root-projects>
+  local registry=$1 projects_root=$2 line entry_home entry_projects name repo identity authority_ids authority_identity registry_dir
+  local -a names=()
+  registry_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  # shellcheck source=bin/fm-secondmate-registry-lib.sh
+  . "$registry_dir/fm-secondmate-registry-lib.sh"
+  authority_ids=$(fm_repo_scope_registered_authority_identities "$registry") || return 1
+  [ -e "$registry" ] || [ -L "$registry" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in "- "*) ;; *) continue ;; esac
+    secondmate_registry_parse_line "$line" || {
+      FM_REPO_SCOPE_LAST_ERROR="secondmate registry has an invalid route while auditing remote repository ownership"
+      return 1
+    }
+    [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ] || continue
+    entry_home=$SECONDMATE_REGISTRY_HOME
+    entry_projects=$SECONDMATE_REGISTRY_PROJECTS
+    [ -n "$entry_projects" ] || continue
+    names=()
+    IFS=, read -r -a names <<< "$entry_projects"
+    for name in "${names[@]}"; do
+      name=${name#"${name%%[![:space:]]*}"}
+      name=${name%"${name##*[![:space:]]}"}
+      case "$name" in ''|*[!A-Za-z0-9._-]*)
+        FM_REPO_SCOPE_LAST_ERROR="remote route $entry_home has an invalid project scope"
+        return 1
+        ;;
+      esac
+      repo="$projects_root/$name"
+      identity=$(fm_repo_scope_canonical_origin_identity "$repo" 2>/dev/null) || {
+        FM_REPO_SCOPE_LAST_ERROR="cannot prove repository scope for remote ordinary route $entry_home project $name"
+        return 1
+      }
+      while IFS= read -r authority_identity; do
+        [ -n "$authority_identity" ] || continue
+        [ "$identity" != "$authority_identity" ] || {
+          FM_REPO_SCOPE_LAST_ERROR="remote ordinary route $entry_home overlaps project Firstmate repository $name"
+          return 1
+        }
+      done <<< "$authority_ids"
+    done
+  done < "$registry"
 }
 
 fm_repo_scope_root_route_lock_release() {
@@ -123,10 +261,39 @@ fm_repo_scope_root_route_guard() {  # <task-home> <project-path>
     parent_file="$task_home/.fm-secondmate-parent"
     # shellcheck source=bin/fm-secondmate-parent-lib.sh
     . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-secondmate-parent-lib.sh"
-    fm_secondmate_parent_record_parse "$parent_file" || return 0
-    [ "$FM_SECONDMATE_PARENT_ROUTE" = local ] &&
-      { [ -z "$FM_SECONDMATE_PARENT_ROLE" ] || [ "$FM_SECONDMATE_PARENT_ROLE" = root ]; } || return 0
-    root_home=$(cd "$FM_SECONDMATE_PARENT_HOME" 2>/dev/null && pwd -P) || return 0
+    fm_secondmate_parent_record_parse "$parent_file" || {
+      FM_REPO_SCOPE_LAST_ERROR="secondmate parent binding is invalid; refusing repository work until the route can be verified"
+      return 1
+    }
+    if [ "$FM_SECONDMATE_PARENT_ROUTE" = remote ]; then
+      target_identity=$(fm_repo_scope_canonical_origin_identity "$project_path") || {
+        FM_REPO_SCOPE_LAST_ERROR="cannot establish the canonical origin identity for $project_path"
+        return 1
+      }
+      [ "$FM_SECONDMATE_PARENT_REPO_SCOPE_SNAPSHOT" = fm-remote-repo-scope.v1 ] || {
+        FM_REPO_SCOPE_LAST_ERROR="remote ordinary home has no verified repository-scope snapshot; re-provision it from root before spawning project work"
+        return 1
+      }
+      target_identity="sha256:$target_identity"
+      if ! printf '%s' "$FM_SECONDMATE_PARENT_REPO_SCOPE_IDENTITIES" | grep -Fqx -- "$target_identity"; then
+        FM_REPO_SCOPE_LAST_ERROR="repository $project_path is outside the verified remote-home scope; re-provision the route before spawning it"
+        return 1
+      fi
+      if printf '%s' "$FM_SECONDMATE_PARENT_REPO_AUTHORITY_IDENTITIES" | grep -Fqx -- "$target_identity"; then
+        FM_REPO_SCOPE_LAST_ERROR="repository $project_path is owned by a root project Firstmate; route this work through that authority instead of the remote ordinary home"
+        return 1
+      fi
+      return 0
+    fi
+    if [ "$FM_SECONDMATE_PARENT_ROUTE" != local ] ||
+      { [ -n "$FM_SECONDMATE_PARENT_ROLE" ] && [ "$FM_SECONDMATE_PARENT_ROLE" != root ]; }; then
+        FM_REPO_SCOPE_LAST_ERROR="secondmate parent route cannot be verified for repository work"
+        return 1
+    fi
+    root_home=$(cd "$FM_SECONDMATE_PARENT_HOME" 2>/dev/null && pwd -P) || {
+      FM_REPO_SCOPE_LAST_ERROR="local parent home cannot be verified for repository work"
+      return 1
+    }
   else
     root_home=$(cd "$task_home" 2>/dev/null && pwd -P) || return 0
   fi

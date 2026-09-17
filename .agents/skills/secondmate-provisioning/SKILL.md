@@ -28,6 +28,7 @@ Start the root Firstmate session in the Firstmate repository, then ask it in nat
 Root provisions the explicit authority with `bin/fm-home-seed.sh <id> <home|-> --project-firstmate buttertrip-mvp --repo-concurrency 2`, then launches it with `bin/fm-spawn.sh <id> --secondmate`.
 The route's scope should say that it owns all work for that repository, so subsequent root intake routes matching tasks there.
 Create exactly one project Firstmate for a repository; do not create multiple project Firstmates to increase capacity.
+Project Firstmate creation refuses overlap with a registered remote ordinary route, and fails closed when the root cannot prove that route's repository identity from a local clone.
 
 The project Firstmate's `config/repo-concurrency` controls all active ship and scout tasks in its own home and its registered local ordinary-secondmate homes.
 Persistent project Firstmates and ordinary secondmates do not consume worker slots.
@@ -42,6 +43,9 @@ When teardown releases a slot, the supervising home re-evaluates its queue and d
 Project Firstmates may seed only local child routes until distributed locking is available.
 Remote descendants beneath a project Firstmate fail closed because a remote home cannot safely claim against the local authority lock.
 The current seed workflow creates the project Firstmate locally; remote project-Firstmate provisioning is not yet supported.
+Root remote ordinary seeding snapshots the current project-authority identities and refuses canonical-origin overlap before contacting the host.
+The remote home records the checked root authorities and its own cloned repository scope in `.fm-secondmate-parent`, and project spawns fail closed when that snapshot is absent, malformed, out of scope, or overlapping.
+Re-provision older projectful remote homes before spawning project work; this attestation preserves non-overlapping remote routes but does not provide distributed locking.
 Child outcomes remain in their immediate parent's home, and the project Firstmate reports only its correlated decisions and concise milestones to root.
 Its `/stow` may cascade one hop to its registered ordinary-secondmate children, while an ordinary secondmate never cascades.
 

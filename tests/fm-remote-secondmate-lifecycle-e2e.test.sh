@@ -8,6 +8,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/remote-herdr-fixture.sh"
 # shellcheck source=tests/herdr-client-pair-fixture.sh
 . "$(dirname "${BASH_SOURCE[0]}")/herdr-client-pair-fixture.sh"
+# shellcheck source=bin/fm-repo-concurrency-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd)/fm-repo-concurrency-lib.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
@@ -541,13 +543,14 @@ pass "remote seeding provisions a supplied origin without touching the primary p
 
 # The receiving host validates the origin itself rather than trusting whatever
 # reached it, so a manifest naming an executable transport provisions nothing.
-printf 'schema=fm-remote-home-provision.v1\nid_b64=%s\ncharter_b64=%s\nproject_count=1\nproject=%s|%s|%s|%s\n' \
+printf 'schema=fm-remote-home-provision.v1\nid_b64=%s\ncharter_b64=%s\nrepo_scope_snapshot=fm-remote-repo-scope.v1\nrepo_authority_count=0\nproject_count=1\nproject=%s|%s|%s|%s|%s\n' \
   "$(printf unsafe-origin | base64 | tr -d '\n')" \
   "$(printf 'Unsafe origin manifest charter.\n' | base64 | tr -d '\n')" \
   "$(printf beta | base64 | tr -d '\n')" \
   "$(printf 'ext::git-upload-pack' | base64 | tr -d '\n')" \
   "$(printf -- '- beta [direct-PR] - beta project (added 2026-08-06)' | base64 | tr -d '\n')" \
   "$(printf direct-PR | base64 | tr -d '\n')" \
+  "$(printf 'sha256:%064d' 0 | base64 | tr -d '\n')" \
   > "$TMP_ROOT/unsafe-origin.manifest"
 if FM_HOME="$TMP_ROOT/unsafe-origin-home" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
   "$REMOTE_ROOT/bin/fm-remote-home-provision.sh" < "$TMP_ROOT/unsafe-origin.manifest" \
@@ -597,11 +600,24 @@ set -u
 if [ "\${1:-}" = clone ]; then
   printf '%s\n' "\$*" >> '$FORGE_CLONE_LOG'
   args=()
+  original_origin=
   for arg in "\$@"; do
     replacement=\$(awk -v k="\$arg" -F'\t' '\$1 == k { print \$2; exit }' '$FORGE_ORIGIN_MAP' 2>/dev/null)
-    if [ -n "\$replacement" ]; then args+=("\$replacement"); else args+=("\$arg"); fi
+    if [ -n "\$replacement" ]; then
+      original_origin=\$arg
+      args+=("\$replacement")
+    else
+      args+=("\$arg")
+    fi
   done
-  exec '$REAL_GIT' "\${args[@]}"
+  '$REAL_GIT' "\${args[@]}"
+  clone_status=\$?
+  [ "\$clone_status" -eq 0 ] || exit "\$clone_status"
+  if [ -n "\$original_origin" ]; then
+    destination=\${args[\${#args[@]}-1]}
+    '$REAL_GIT' -C "\$destination" remote set-url origin "\$original_origin" || exit 1
+  fi
+  exit 0
 fi
 exec '$REAL_GIT' "\$@"
 SH
