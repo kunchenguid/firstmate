@@ -821,7 +821,7 @@ refuse_projectful_projectless_charter() {
 }
 
 refuse_duplicate_project_authority() {
-  local candidate_repo_key=$1 candidate_home=$2 line existing_id existing_home existing_key
+  local candidate_repo_key=$1 candidate_home=$2 line existing_id existing_home existing_home_key existing_key
   [ -f "$REG" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in "- "*) ;; *) continue ;; esac
@@ -841,7 +841,11 @@ refuse_duplicate_project_authority() {
         echo "error: registered project Firstmate $existing_id has no verifiable repository origin" >&2
         return 1
       }
-      if [ "$existing_key" = "$candidate_repo_key" ] && [ "$existing_home" != "$candidate_home" ]; then
+      existing_home_key=$(secondmate_registry_path_key "$existing_home") || {
+        echo "error: registered project Firstmate $existing_id has an unresolvable home" >&2
+        return 1
+      }
+      if [ "$existing_key" = "$candidate_repo_key" ] && [ "$existing_home_key" != "$candidate_home" ]; then
         echo "error: repository already has project Firstmate authority $existing_id at $existing_home" >&2
         return 1
       fi
@@ -856,13 +860,15 @@ refuse_duplicate_project_authority() {
 seed_home() {
   local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope
   local requested_role=secondmate parent_role=root parent_project='' parent_repo_identity='' parent_authority_id=''
-  local arg no_projects=0 repo_concurrency='' want_value=''
+  local arg no_projects=0 repo_concurrency='' repo_concurrency_seen=0 want_value=''
+  local repo_hash repo_identity authority_hash authority_id
   local filtered=()
   shift 2
   for arg in "$@"; do
     if [ -n "$want_value" ]; then
       case "$arg" in -* ) echo "error: --repo-concurrency requires a value" >&2; return 1 ;; esac
       repo_concurrency=$arg
+      repo_concurrency_seen=1
       want_value=
       continue
     fi
@@ -870,7 +876,7 @@ seed_home() {
       --project-firstmate) requested_role='project-firstmate' ;;
       --no-projects) no_projects=1 ;;
       --repo-concurrency) want_value='repo-concurrency' ;;
-      --repo-concurrency=*) repo_concurrency=${arg#*=} ;;
+      --repo-concurrency=*) repo_concurrency=${arg#*=}; repo_concurrency_seen=1 ;;
       --*) echo "error: unsupported secondmate seed option: $arg" >&2; return 1 ;;
       *) filtered+=("$arg") ;;
     esac
@@ -887,7 +893,7 @@ seed_home() {
     echo "error: secondmate needs at least one project, or --no-projects for a project-less home" >&2
     return 1
   fi
-  if [ -n "$repo_concurrency" ]; then
+  if [ "$repo_concurrency_seen" -eq 1 ]; then
     case "$repo_concurrency" in ''|*[!0-9]*|0|0*) echo "error: repository concurrency limit must be a positive integer" >&2; return 1 ;; esac
     [ "$repo_concurrency" -le 256 ] || { echo "error: repository concurrency limit must not exceed 256" >&2; return 1; }
     [ "$requested_role" = project-firstmate ] || { echo "error: --repo-concurrency is only valid for a project Firstmate" >&2; return 1; }
@@ -1098,7 +1104,7 @@ seed_home() {
       return 1
     }
     repo_identity="sha256:$repo_hash"
-    authority_hash=$(fm_repo_scope_hash "$(resolved_path "$home")\n$project\n$repo_identity") || return 1
+    authority_hash=$(fm_repo_scope_hash "$(resolved_path "$home")"$'\n'"$project"$'\n'"$repo_identity") || return 1
     authority_id="sha256:$authority_hash"
     if [ "$SEED_PROJECT_FIRSTMATE_EXISTED" = 1 ]; then
       fm_repo_scope_marker_parse "$home" || {

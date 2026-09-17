@@ -15,6 +15,8 @@ FM_REPO_SCOPE_LEASE_AUTHORITY_ID=
 FM_REPO_SCOPE_LEASE_REPO_ID=
 FM_REPO_SCOPE_LEASE_TASK_HOME=
 FM_REPO_SCOPE_LEASE_TASK_ID=
+FM_REPO_SCOPE_LEASE_CLAIM_PID=
+FM_REPO_SCOPE_LEASE_CLAIM_IDENTITY=
 FM_REPO_SCOPE_ROOT_LOCK=
 FM_REPO_SCOPE_ROOT_LOCK_HELD=0
 FM_REPO_SCOPE_REMOTE_IDENTITY_RECORDS=
@@ -232,7 +234,7 @@ fm_repo_scope_remote_identity_records_parse() {  # <route-id> <projects-csv> <id
 }
 
 fm_repo_scope_refuse_remote_ordinary_overlap() {  # <registry> <candidate-identity>
-  local registry=$1 candidate_identity=$2 line entry_home entry_projects entry_id identity_record identity registry_dir
+  local registry=$1 candidate_identity=$2 line entry_home entry_projects entry_id identity_record identity registry_dir issue issues=''
   registry_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
   # shellcheck source=bin/fm-secondmate-registry-lib.sh
   . "$registry_dir/fm-secondmate-registry-lib.sh"
@@ -251,20 +253,28 @@ fm_repo_scope_refuse_remote_ordinary_overlap() {  # <registry> <candidate-identi
     entry_home=$SECONDMATE_REGISTRY_HOME
     entry_projects=$SECONDMATE_REGISTRY_PROJECTS
     entry_id=$SECONDMATE_REGISTRY_ID
-    fm_repo_scope_remote_identity_records_parse "$entry_id" "$entry_projects" "$SECONDMATE_REGISTRY_REPO_IDENTITIES" || return 1
+    if ! fm_repo_scope_remote_identity_records_parse "$entry_id" "$entry_projects" "$SECONDMATE_REGISTRY_REPO_IDENTITIES"; then
+      issue=$FM_REPO_SCOPE_LAST_ERROR
+      issues+="${issues:+; }$issue"
+      continue
+    fi
     while IFS= read -r identity_record; do
       [ -n "$identity_record" ] || continue
       identity=${identity_record#*=}
       if [ "${identity#sha256:}" = "$candidate_identity" ]; then
-        FM_REPO_SCOPE_LAST_ERROR="repository ${identity_record%%=*} is already in remote ordinary route $entry_home; refusing overlapping project Firstmate authority"
-        return 1
+        issue="repository ${identity_record%%=*} is already in remote ordinary route $entry_home; refusing overlapping project Firstmate authority"
+        issues+="${issues:+; }$issue"
       fi
     done <<< "$FM_REPO_SCOPE_REMOTE_IDENTITY_RECORDS"
   done < "$registry"
+  [ -z "$issues" ] || {
+    FM_REPO_SCOPE_LAST_ERROR=$issues
+    return 1
+  }
 }
 
 fm_repo_scope_audit_remote_overlaps() {  # <registry>
-  local registry=$1 line entry_home entry_projects entry_id identity_record identity authority_ids authority_identity registry_dir
+  local registry=$1 line entry_home entry_projects entry_id identity_record identity authority_ids authority_identity registry_dir issue issues=''
   registry_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
   # shellcheck source=bin/fm-secondmate-registry-lib.sh
   . "$registry_dir/fm-secondmate-registry-lib.sh"
@@ -280,19 +290,27 @@ fm_repo_scope_audit_remote_overlaps() {  # <registry>
     entry_home=$SECONDMATE_REGISTRY_HOME
     entry_projects=$SECONDMATE_REGISTRY_PROJECTS
     entry_id=$SECONDMATE_REGISTRY_ID
-    fm_repo_scope_remote_identity_records_parse "$entry_id" "$entry_projects" "$SECONDMATE_REGISTRY_REPO_IDENTITIES" || return 1
+    if ! fm_repo_scope_remote_identity_records_parse "$entry_id" "$entry_projects" "$SECONDMATE_REGISTRY_REPO_IDENTITIES"; then
+      issue=$FM_REPO_SCOPE_LAST_ERROR
+      issues+="${issues:+; }$issue"
+      continue
+    fi
     while IFS= read -r identity_record; do
       [ -n "$identity_record" ] || continue
       identity=${identity_record#*=}
       while IFS= read -r authority_identity; do
         [ -n "$authority_identity" ] || continue
-        [ "${identity#sha256:}" != "$authority_identity" ] || {
-          FM_REPO_SCOPE_LAST_ERROR="remote ordinary route $entry_home overlaps project Firstmate repository ${identity_record%%=*}"
-          return 1
-        }
+        if [ "${identity#sha256:}" = "$authority_identity" ]; then
+          issue="remote ordinary route $entry_home overlaps project Firstmate repository ${identity_record%%=*}"
+          issues+="${issues:+; }$issue"
+        fi
       done <<< "$authority_ids"
     done <<< "$FM_REPO_SCOPE_REMOTE_IDENTITY_RECORDS"
   done < "$registry"
+  [ -z "$issues" ] || {
+    FM_REPO_SCOPE_LAST_ERROR=$issues
+    return 1
+  }
 }
 
 fm_repo_scope_root_route_lock_release() {
@@ -464,7 +482,7 @@ fm_repo_scope_marker_parse() {  # <project-firstmate-home>
   repo_path_real=$(cd "$repo_path" && pwd -P) || return 1
   expected_repo_path=$(cd "$expected_repo_path" && pwd -P) || return 1
   [ "$repo_path_real" = "$expected_repo_path" ] || return 1
-  expected_authority="sha256:$(fm_repo_scope_hash "$home_real\n$project\n$repo_id")" || return 1
+  expected_authority="sha256:$(fm_repo_scope_hash "$home_real"$'\n'"$project"$'\n'"$repo_id")" || return 1
   [ "$authority_id" = "$expected_authority" ] || return 1
   FM_REPO_SCOPE_HOME=$home_real
   FM_REPO_SCOPE_PROJECT=$project
@@ -574,8 +592,25 @@ fm_repo_scope_validate_project() {  # <task-home> <project-path>
   return 0
 }
 
+# Resolve task metadata for the active home. The authority lock, leases, limit,
+# and child registry always use the authority home's ordinary paths so every
+# child process computes the same shared namespace without ambient overrides.
+fm_repo_scope_task_state_dir() {  # <task-home>
+  local home=$1 home_real active_real=''
+  home_real=$(cd "$home" && pwd -P) || return 1
+  if [ -n "${FM_HOME:-}" ]; then
+    active_real=$(cd "$FM_HOME" 2>/dev/null && pwd -P || true)
+  fi
+  if [ "$home_real" = "$active_real" ] && [ -n "${FM_STATE_OVERRIDE:-}" ]; then
+    printf '%s\n' "$FM_STATE_OVERRIDE"
+  else
+    printf '%s/state\n' "$home_real"
+  fi
+}
+
 fm_repo_scope_limit() {  # <authority-home>
-  local config_dir=$1/config file=$1/config/repo-concurrency value links
+  local config_dir=$1/config file value links
+  file="$config_dir/repo-concurrency"
   if [ -e "$config_dir" ] || [ -L "$config_dir" ]; then
     [ -d "$config_dir" ] && [ ! -L "$config_dir" ] || {
       FM_REPO_SCOPE_LAST_ERROR="repository concurrency config directory is unsafe: $config_dir"
@@ -618,8 +653,12 @@ fm_repo_scope_limit() {  # <authority-home>
 }
 
 fm_repo_scope_lock_acquire() {  # <authority-home>
-  local home=$1 requested timeout=${FM_REPO_SCOPE_LOCK_TIMEOUT:-5}
-  requested="$home/state/.repo-concurrency.lock"
+  local home=$1 requested state_dir="$1/state" timeout=${FM_REPO_SCOPE_LOCK_TIMEOUT:-5}
+  [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || {
+    FM_REPO_SCOPE_LAST_ERROR="repository concurrency authority state directory is missing or unsafe: $state_dir"
+    return 1
+  }
+  requested="$state_dir/.repo-concurrency.lock"
   if [ "$FM_REPO_SCOPE_LOCK_HELD" != 0 ]; then
     [ "$FM_REPO_SCOPE_LOCK" = "$requested" ] || {
       FM_REPO_SCOPE_LAST_ERROR="repository concurrency lock is already held for a different authority"
@@ -644,7 +683,7 @@ fm_repo_scope_lock_release() {
 }
 
 fm_repo_scope_lease_key() {  # <task-home> <task-id>
-  fm_repo_scope_hash "$(cd "$1" && pwd -P)\n$2"
+  fm_repo_scope_hash "$(cd "$1" && pwd -P)"$'\n'"$2"
 }
 
 fm_repo_scope_lease_path() {  # <authority-home> <task-home> <task-id>
@@ -654,8 +693,8 @@ fm_repo_scope_lease_path() {  # <authority-home> <task-home> <task-id>
 }
 
 fm_repo_scope_lease_record_parse() {  # <lease-file>
-  local file=$1 line schema='' authority='' repo='' task_home='' task_id=''
-  local schema_count=0 authority_count=0 repo_count=0 home_count=0 id_count=0
+  local file=$1 line schema='' authority='' repo='' task_home='' task_id='' claim_pid='' claim_identity=''
+  local schema_count=0 authority_count=0 repo_count=0 home_count=0 id_count=0 claim_pid_count=0 claim_identity_count=0
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   [ "$(wc -c < "$file")" -eq "$(LC_ALL=C tr -d '\0' < "$file" | wc -c)" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
@@ -665,6 +704,8 @@ fm_repo_scope_lease_record_parse() {  # <lease-file>
       repo_identity=*) repo_count=$((repo_count + 1)); repo=${line#repo_identity=} ;;
       task_home=*) home_count=$((home_count + 1)); task_home=${line#task_home=} ;;
       task_id=*) id_count=$((id_count + 1)); task_id=${line#task_id=} ;;
+      claim_pid=*) claim_pid_count=$((claim_pid_count + 1)); claim_pid=${line#claim_pid=} ;;
+      claim_identity=*) claim_identity_count=$((claim_identity_count + 1)); claim_identity=${line#claim_identity=} ;;
       *) return 1 ;;
     esac
   done < "$file"
@@ -676,10 +717,18 @@ fm_repo_scope_lease_record_parse() {  # <lease-file>
   case "$task_home" in /*) ;; *) return 1 ;; esac
   case "$task_home" in *$'\t'*|*$'\n'*|*$'\r'*) return 1 ;; esac
   case "$task_id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ "$claim_pid_count" -eq "$claim_identity_count" ] || return 1
+  [ "$claim_pid_count" -le 1 ] || return 1
+  if [ "$claim_pid_count" -eq 1 ]; then
+    case "$claim_pid" in ''|*[!0-9]*) return 1 ;; esac
+    [[ "$claim_identity" =~ ^sha256:[[:xdigit:]]{64}$ ]] || return 1
+  fi
   FM_REPO_SCOPE_LEASE_AUTHORITY_ID=$authority
   FM_REPO_SCOPE_LEASE_REPO_ID=$repo
   FM_REPO_SCOPE_LEASE_TASK_HOME=$task_home
   FM_REPO_SCOPE_LEASE_TASK_ID=$task_id
+  FM_REPO_SCOPE_LEASE_CLAIM_PID=$claim_pid
+  FM_REPO_SCOPE_LEASE_CLAIM_IDENTITY=$claim_identity
 }
 
 fm_repo_scope_lease_identity_matches() {  # <lease-file> <authority-id> <repo-id> <task-home> <task-id>
@@ -732,14 +781,16 @@ fm_repo_scope_meta_value() {  # <meta-file> <key>
 
 fm_repo_scope_reconcile_home_locked() {  # <project-firstmate-home> [report:0|1]
   (
-    local home=$1 report=${2:-0} script_dir registry tmp homes expected expected_paths task_home state_dir meta task_id kind project_path expected_project lease lease_dir limit count available line task_home_real task_project_real file
+    local home=$1 report=${2:-0} script_dir registry tmp homes expected expected_paths task_home state_dir authority_state authority_data meta task_id kind project_path expected_project lease lease_dir limit count available line task_home_real task_project_real file claim_current claim_hash abandoned
     set -u
     fm_repo_scope_marker_parse "$home" || {
       echo "error: cannot reconcile an invalid project Firstmate authority at $home" >&2
       exit 1
     }
-    [ -d "$home/state" ] && [ ! -L "$home/state" ] || {
-      echo "error: project Firstmate state directory is missing or unsafe: $home/state" >&2
+    authority_state="$home/state"
+    authority_data="$home/data"
+    [ -d "$authority_state" ] && [ ! -L "$authority_state" ] || {
+      echo "error: project Firstmate state directory is missing or unsafe: $authority_state" >&2
       exit 1
     }
     script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -758,7 +809,7 @@ fm_repo_scope_reconcile_home_locked() {  # <project-firstmate-home> [report:0|1]
     : > "$expected_paths"
     home=$(cd "$home" && pwd -P) || { rm -rf -- "$tmp"; exit 1; }
     printf '%s\n' "$home" > "$homes"
-    registry="$home/data/secondmates.md"
+    registry="$authority_data/secondmates.md"
     if [ -e "$registry" ] || [ -L "$registry" ]; then
       secondmate_registry_validate_bindings "$registry" secondmate_registry_path_key || {
         echo "error: cannot reconcile project Firstmate children: $SECONDMATE_REGISTRY_ERROR" >&2
@@ -809,7 +860,7 @@ fm_repo_scope_reconcile_home_locked() {  # <project-firstmate-home> [report:0|1]
       done < "$registry"
     fi
     while IFS= read -r task_home; do
-      state_dir="$task_home/state"
+      state_dir=$(fm_repo_scope_task_state_dir "$task_home") || { rm -rf -- "$tmp"; exit 1; }
       if [ ! -e "$state_dir" ] && [ ! -L "$state_dir" ]; then
         [ "$task_home" = "$home" ] || continue
         echo "error: project Firstmate state directory is missing: $state_dir" >&2
@@ -862,10 +913,10 @@ fm_repo_scope_reconcile_home_locked() {  # <project-firstmate-home> [report:0|1]
       done
     done < "$homes"
 
-    lease_dir="$home/state/.repo-concurrency/leases"
-    if [ -e "$home/state/.repo-concurrency" ] || [ -L "$home/state/.repo-concurrency" ]; then
-      [ -d "$home/state/.repo-concurrency" ] && [ ! -L "$home/state/.repo-concurrency" ] || {
-        echo "error: repository concurrency lease directory is unsafe: $home/state/.repo-concurrency" >&2
+    lease_dir="$authority_state/.repo-concurrency/leases"
+    if [ -e "$authority_state/.repo-concurrency" ] || [ -L "$authority_state/.repo-concurrency" ]; then
+      [ -d "$authority_state/.repo-concurrency" ] && [ ! -L "$authority_state/.repo-concurrency" ] || {
+        echo "error: repository concurrency lease directory is unsafe: $authority_state/.repo-concurrency" >&2
         rm -rf -- "$tmp"
         exit 1
       }
@@ -899,12 +950,29 @@ fm_repo_scope_reconcile_home_locked() {  # <project-firstmate-home> [report:0|1]
           exit 1
         }
         if ! grep -Fqx -- "$lease" "$expected_paths"; then
-          if grep -Fqx -- "$task_home_real" "$homes" || { [ ! -e "$task_home_real" ] && [ ! -L "$task_home_real" ]; }; then
-            rm -f -- "$lease" || { echo "error: cannot remove stale repository concurrency lease: $lease" >&2; rm -rf -- "$tmp"; exit 1; }
+          if grep -Fqx -- "$task_home_real" "$homes"; then
+            abandoned=0
+            if [ -n "$FM_REPO_SCOPE_LEASE_CLAIM_PID" ]; then
+              if claim_current=$(fm_pid_identity "$FM_REPO_SCOPE_LEASE_CLAIM_PID" 2>/dev/null); then
+                claim_hash=$(fm_repo_scope_hash "$claim_current") || { rm -rf -- "$tmp"; exit 1; }
+                [ "sha256:$claim_hash" = "$FM_REPO_SCOPE_LEASE_CLAIM_IDENTITY" ] || abandoned=1
+              elif ! fm_pid_alive "$FM_REPO_SCOPE_LEASE_CLAIM_PID"; then
+                abandoned=1
+              fi
+            fi
+            if [ "$abandoned" -eq 1 ]; then
+              rm -f -- "$lease" || { echo "error: cannot remove abandoned provisional repository concurrency lease: $lease" >&2; rm -rf -- "$tmp"; exit 1; }
+              if [ "$report" = 1 ]; then
+                printf 'REPO_CONCURRENCY: removed abandoned provisional lease for registered task home %s: %s\n' "$task_home_real" "$lease" >&2
+              fi
+            elif [ "$report" = 1 ]; then
+              printf 'REPO_CONCURRENCY: retained unmatched lease for registered task home %s without task metadata: %s\n' "$task_home_real" "$lease" >&2
+            fi
           else
-            echo "error: repository concurrency lease names an unregistered live task home: $task_home_real" >&2
-            rm -rf -- "$tmp"
-            exit 1
+            rm -f -- "$lease" || { echo "error: cannot remove stale repository concurrency lease: $lease" >&2; rm -rf -- "$tmp"; exit 1; }
+          fi
+          if [ "$report" = 1 ] && ! grep -Fqx -- "$task_home_real" "$homes" && { [ -e "$task_home_real" ] || [ -L "$task_home_real" ]; }; then
+            printf 'REPO_CONCURRENCY: removed stale lease for unregistered task home %s: %s\n' "$task_home_real" "$lease" >&2
           fi
         fi
       done
@@ -968,7 +1036,7 @@ fm_repo_scope_reconcile_task_home() {  # <project-firstmate-or-local-child-home>
 }
 
 fm_repo_scope_acquire_task_locked() {  # <authority-home> <task-home> <task-id> <relaunch:0|1>
-  local authority_home=$1 task_home=$2 task_id=$3 relaunch=$4 lease limit count task_home_real tmp
+  local authority_home=$1 task_home=$2 task_id=$3 relaunch=$4 lease limit count task_home_real tmp claim_current='' claim_hash=''
   fm_repo_scope_reconcile_home_locked "$authority_home" 0 || return 1
   limit=$(fm_repo_scope_limit "$authority_home") || { echo "error: $FM_REPO_SCOPE_LAST_ERROR" >&2; return 1; }
   task_home_real=$(cd "$task_home" && pwd -P) || return 1
@@ -990,12 +1058,19 @@ fm_repo_scope_acquire_task_locked() {  # <authority-home> <task-home> <task-id> 
   umask 077
   mkdir -p "$(dirname "$lease")" || return 1
   tmp="$lease.tmp.${BASHPID:-$$}"
+  claim_current=$(fm_pid_identity "${BASHPID:-$$}" 2>/dev/null) || {
+    FM_REPO_SCOPE_LAST_ERROR="cannot capture provisional repository claim process identity"
+    return 1
+  }
+  claim_hash=$(fm_repo_scope_hash "$claim_current") || return 1
   {
     printf 'schema=fm-repo-concurrency-lease.v1\n'
     printf 'authority_id=%s\n' "$FM_REPO_SCOPE_AUTHORITY_ID"
     printf 'repo_identity=%s\n' "$FM_REPO_SCOPE_REPO_ID"
     printf 'task_home=%s\n' "$task_home_real"
     printf 'task_id=%s\n' "$task_id"
+    printf 'claim_pid=%s\n' "${BASHPID:-$$}"
+    printf 'claim_identity=sha256:%s\n' "$claim_hash"
   } > "$tmp" || return 1
   mv -f -- "$tmp" "$lease" || return 1
   FM_REPO_SCOPE_LEASE_CREATED=1

@@ -167,6 +167,7 @@ fm_parent_channel_absorb_descendant_line() {  # <home> <line> [publisher-class]
 }
 
 # Publish one parent-facing line from <home> using a typed publisher class.
+# Return 3 means the parent binding or project-authority marker is missing or unreadable.
 _fm_parent_channel_report_typed() {  # <class> <home> <state> <line>
   local class=$1 home=$2 state=$3 line=$4 destination rc=0 absorb_rc=0
   fm_parent_channel_absorb_descendant_line "$home" "$line" "$class" || absorb_rc=$?

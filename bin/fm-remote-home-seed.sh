@@ -164,7 +164,7 @@ for project in "${PROJECT_NAMES[@]+"${PROJECT_NAMES[@]}"}"; do
   origin_explicit=${PROJECT_ORIGIN_EXPLICIT[$PROJECT_INDEX]}
   PROJECT_INDEX=$((PROJECT_INDEX + 1))
   if [ -z "$origin" ] && [ -d "$PROJECTS/$project/.git" ]; then
-    origin=$(git -C "$PROJECTS/$project" remote get-url origin 2>/dev/null || true)
+    origin=$(git -C "$PROJECTS/$project" config --local --get remote.origin.url 2>/dev/null || true)
   fi
   [ -n "$origin" ] || die "project $project has no origin; pass $project=<origin-url> so the remote host can clone it"
   identity=$(fm_repo_scope_canonical_origin_value_identity "$origin" "$PROJECTS") \
@@ -251,7 +251,7 @@ EOF
   # clone this home happens to have is only a convenience for the already-cloned
   # case; it is never a reason to create one.
   if [ -z "$ORIGIN" ] && [ -d "$PROJECTS/$project/.git" ]; then
-    ORIGIN=$(git -C "$PROJECTS/$project" remote get-url origin 2>/dev/null || true)
+    ORIGIN=$(git -C "$PROJECTS/$project" config --local --get remote.origin.url 2>/dev/null || true)
   fi
   [ -n "$ORIGIN" ] \
     || die "project $project has no origin; pass $project=<origin-url> so the remote host can clone it"

@@ -1793,7 +1793,7 @@ configure_secondmate_home() {  # <case-dir> <local|remote> [<parent-home>]
 # with the canonical URL on the parent channel from fm-pr-check itself, once;
 # a main home publishes nothing.
 test_secondmate_pr_registration_publishes_ready_line() {
-  local case_dir pr_head channel url
+  local case_dir pr_head channel url project_home repo_identity authority_id
   url=https://github.com/example/repo/pull/7
   case_dir=$(make_case mate-pr-ready)
   configure_secondmate_home "$case_dir" local "$case_dir/parent"
@@ -1817,6 +1817,36 @@ test_secondmate_pr_registration_publishes_ready_line() {
     || fail "mate-pr-ready: re-registration failed"
   [ "$(grep -c 'child-pr-task-x1' "$channel")" -eq 1 ] \
     || fail "mate-pr-ready: re-registration duplicated the ready line"
+
+  case_dir=$(make_case project-firstmate-pr-ready)
+  configure_secondmate_home "$case_dir" local "$case_dir/parent"
+  project_home=$(cd "$case_dir/home" && pwd -P)
+  mkdir -p "$case_dir/home/projects/alpha"
+  repo_identity="sha256:$(printf '%s' alpha | shasum -a 256 | awk '{print $1}')"
+  authority_id="sha256:$(printf '%s' "$project_home"$'\n''alpha'$'\n'"$repo_identity" | shasum -a 256 | awk '{print $1}')"
+  printf 'schema=fm-project-firstmate.v1\nproject=alpha\nrepo_identity=%s\nauthority_id=%s\nrepo_path=%s/projects/alpha\n' \
+    "$repo_identity" "$authority_id" "$project_home" > "$case_dir/home/.fm-project-firstmate"
+  cat > "$case_dir/home/.fm-secondmate-parent" <<EOF
+schema=fm-secondmate-parent.v1
+route=local
+parent_home=$case_dir/parent
+parent_role=project-firstmate
+repo_authority_home=$project_home
+repo_authority_id=$authority_id
+repo_identity=$repo_identity
+EOF
+  write_meta "$case_dir" direct-PR ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+  channel="$case_dir/parent/state/mate-x.status"
+  FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    PATH="$case_dir/fakebin:$PATH" "$PR_CHECK" task-x1 "$url" >/dev/null 2> "$case_dir/pr-check.err" \
+    || fail "project-firstmate-pr-ready: fm-pr-check failed: $(cat "$case_dir/pr-check.err")"
+  assert_grep 'child-pr-task-x1' "$case_dir/home/state/project-outcomes.log" \
+    "project-firstmate-pr-ready: raw ready outcome was not retained at the repository hop"
+  assert_grep 'child-pr-task-x1' "$channel" \
+    "project-firstmate-pr-ready: typed PR milestone did not reach root"
 
   case_dir=$(make_case main-pr-ready)
   write_meta "$case_dir" direct-PR ship
@@ -1940,7 +1970,7 @@ test_teardown_releases_project_firstmate_repository_lease() {
       _ "$ROOT" "$project"
   ) || fail "repo-lease-release: could not derive the canonical repository identity"
   repo_identity="sha256:$repo_hash"
-  authority_hash=$(printf '%s' "$home\\nalpha\\n$repo_identity" | shasum -a 256 | awk '{print $1}')
+  authority_hash=$(printf '%s' "$home"$'\n''alpha'$'\n'"$repo_identity" | shasum -a 256 | awk '{print $1}')
   authority_id="sha256:$authority_hash"
   printf 'schema=fm-project-firstmate.v1\nproject=alpha\nrepo_identity=%s\nauthority_id=%s\nrepo_path=%s\n' \
     "$repo_identity" "$authority_id" "$project" > "$home/.fm-project-firstmate"

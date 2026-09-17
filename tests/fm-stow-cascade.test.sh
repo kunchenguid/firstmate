@@ -363,8 +363,9 @@ test_no_cascade_without_secondmates_or_from_an_ordinary_secondmate() {
   project_firstmate=$(new_home alpha-project-firstmate)
   child=$(new_home alpha-worker-home)
   printf '%s\n' alpha-worker > "$child/.fm-secondmate-home"
+  mkdir -p "$project_firstmate/projects/alpha"
   repo_identity="sha256:$(printf alpha | shasum -a 256 | awk '{print $1}')"
-  authority_id="sha256:$(printf '%s' "$project_firstmate\\nalpha\\n$repo_identity" | shasum -a 256 | awk '{print $1}')"
+  authority_id="sha256:$(printf '%s' "$project_firstmate"$'\n''alpha'$'\n'"$repo_identity" | shasum -a 256 | awk '{print $1}')"
   repo_path="$project_firstmate/projects/alpha"
   printf 'schema=fm-project-firstmate.v1\nproject=alpha\nrepo_identity=%s\nauthority_id=%s\nrepo_path=%s\n' \
     "$repo_identity" "$authority_id" "$repo_path" > "$project_firstmate/.fm-project-firstmate"

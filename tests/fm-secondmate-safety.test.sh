@@ -141,6 +141,7 @@ test_project_firstmate_seed_has_one_repository_authority() {
   local home first duplicate ordinary child err origin fakebin launch_log output spawn_rc remote_child
   local root_id before_backlog overlap overlap_id overlap_before convert convert_id before_convert
   local root_brief_before root_data_before remote_root remote_first remote_route remote_task remote_identity remote_alpha_identity
+  local first_noncanonical registry_text
   home="$TMP_ROOT/project-firstmate-seed-home"
   first="$TMP_ROOT/project-firstmate-seed-first"
   duplicate="$TMP_ROOT/project-firstmate-seed-duplicate"
@@ -193,6 +194,16 @@ test_project_firstmate_seed_has_one_repository_authority() {
   grep -F 'cannot prove remote ordinary route' "$err" >/dev/null \
     || fail "uncertain remote-scope refusal did not explain the missing local clone proof"
 
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='invalid empty limit' \
+    "$ROOT/bin/fm-home-seed.sh" empty-limit-pfm "$TMP_ROOT/project-firstmate-empty-limit" \
+      --project-firstmate --repo-concurrency= alpha >/dev/null 2>"$TMP_ROOT/project-firstmate-empty-limit.err"; then
+    fail "project Firstmate seed silently replaced an explicit empty concurrency limit"
+  fi
+  grep -F 'repository concurrency limit must be a positive integer' "$TMP_ROOT/project-firstmate-empty-limit.err" >/dev/null \
+    || fail "empty repository concurrency limit did not report its validation error"
+  [ ! -e "$TMP_ROOT/project-firstmate-empty-limit" ] \
+    || fail "empty repository concurrency refusal created a project Firstmate home"
+
   FM_HOME="$home" FM_SECONDMATE_CHARTER='own the alpha repository' \
     FM_SECONDMATE_SCOPE='alpha repository work' \
     "$ROOT/bin/fm-home-seed.sh" alpha-pfm "$first" --project-firstmate alpha >/dev/null \
@@ -205,6 +216,16 @@ test_project_firstmate_seed_has_one_repository_authority() {
     || fail "project Firstmate charter did not explain its bounded repository role"
   [ "$(git -C "$first/projects/alpha" remote get-url origin)" = "$(git -C "$home/projects/alpha" remote get-url origin)" ] \
     || fail "project Firstmate clone did not preserve the repository identity"
+  first_noncanonical="$(dirname "$first")/./$(basename "$first")"
+  registry_text=$(<"$home/data/secondmates.md")
+  registry_text=${registry_text/"home: $first"/"home: $first_noncanonical"}
+  printf '%s\n' "$registry_text" > "$home/data/secondmates.md"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='own the alpha repository' \
+    FM_SECONDMATE_SCOPE='alpha repository work' \
+    "$ROOT/bin/fm-home-seed.sh" alpha-pfm "$first" --project-firstmate alpha >/dev/null \
+    || fail "project Firstmate reseed rejected its non-canonical registry spelling"
+  [ "$(grep -c '^- alpha-pfm ' "$home/data/secondmates.md")" -eq 1 ] \
+    || fail "project Firstmate reseed duplicated a non-canonically spelled home route"
 
   if FM_HOME="$home" FM_SECONDMATE_CHARTER='overlapping remote ordinary route' \
     "$ROOT/bin/fm-remote-home-seed.sh" remote-alpha remote-host /remote/root /remote/alpha \

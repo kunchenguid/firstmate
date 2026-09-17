@@ -1516,7 +1516,7 @@ while [ ! -e "${FM_FAKE_STATE_READ_RELEASE:?}" ] && [ "$ticks" -lt 300 ]; do
   ticks=$((ticks + 1))
 done
 : > "${FM_FAKE_STATE_READ_FINISHED:?}"
-printf '%s\n' 'state: working · source: pane · active worker'
+printf '%s\n' 'state: done · source: status-log · completed worker'
 SH
   chmod +x "$crew_state"
 

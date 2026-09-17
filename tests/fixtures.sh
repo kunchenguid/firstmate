@@ -73,7 +73,11 @@ case "${1:-}" in
     fi
     exit 0
     ;;
-  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
+  new-window)
+    [ "${FM_FAKE_TMUX_NEW_WINDOW_FAIL:-0}" != 1 ] || exit 73
+    exit 0
+    ;;
+  has-session|new-session|kill-window|set-window-option) exit 0 ;;
   send-keys)
     prev=
     prior=

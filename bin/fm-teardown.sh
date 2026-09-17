@@ -3407,6 +3407,10 @@ if [ "$KIND" = secondmate ]; then
       || echo "error: receiver wake restoration failed; recovery state remains at $HANDOFF_WAKE_RETIRE_STAGE" >&2
     exit "$rc"
   fi
+  # Retire the route immediately after the home disappears so concurrent
+  # repository reconciliation cannot keep treating that removed child as a
+  # live lease owner. The staged wake cleanup below is independently durable
+  # and startup-recoverable if a later step fails.
   remove_secondmate_registry_entry "$ID" \
     || { echo "error: secondmate home was removed but its registry route could not be retired; the next reconciliation will ignore the absent home until the route is repaired" >&2; exit 1; }
   handoff_wake_retire_stage_commit \

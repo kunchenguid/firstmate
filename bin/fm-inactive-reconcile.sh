@@ -332,12 +332,25 @@ home_secondmate_id() {
   fm_parent_channel_home_id "$FM_HOME"
 }
 
+# Raw worker outcomes are retained at a project Firstmate hop for local audit.
+# The trusted reconciliation publisher then promotes the same bounded terminal
+# fact through the project-summary class so the root home also receives it.
+report_worker_outcome() { # <line>
+  local line=$1 rc=0
+  fm_parent_channel_report "$FM_HOME" "$STATE" "$line" || rc=$?
+  if [ "$rc" -eq 5 ]; then
+    rc=0
+    fm_parent_channel_report_project_summary "$FM_HOME" "$STATE" "$line" || rc=$?
+  fi
+  return "$rc"
+}
+
 report_to_parent() { # <task> <state> <outcome-key> <fingerprint> <pr>
   local task=$1 state=$2 outcome_key=$3 fingerprint=$4 pr=$5 line rc=0
   line="$state [key=$outcome_key]: inactive terminal child=$task fingerprint=$fingerprint"
   [ -z "$pr" ] || line="$line pr=$pr"
-  fm_parent_channel_report "$FM_HOME" "$STATE" "$line" || rc=$?
-  case "$rc" in 0|5) return 0 ;; *) return "$rc" ;; esac
+  report_worker_outcome "$line" || rc=$?
+  return "$rc"
 }
 
 # Queue the once-per-record notice that a parent report could not be written.
@@ -434,8 +447,8 @@ report_child_ledger_locked() { # <id> <meta>
     line="$line report=data/$id/report.md"
   fi
   local report_rc=0
-  fm_parent_channel_report "$FM_HOME" "$STATE" "$line" || report_rc=$?
-  if [ "$report_rc" -eq 0 ] || [ "$report_rc" -eq 5 ]; then
+  report_worker_outcome "$line" || report_rc=$?
+  if [ "$report_rc" -eq 0 ]; then
     mark_reported "$RECORD_PENDING" || return 1
     return 0
   fi

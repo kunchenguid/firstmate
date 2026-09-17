@@ -206,6 +206,44 @@ remote_env() {
   "$@"
 }
 
+# A clone-local insteadOf rule changes `git remote get-url` output without
+# changing the configured origin. Remote seeding must use the same raw origin
+# value as repository-authority hashing, or it can record and clone a different
+# repository while overlap checks compare against the original one.
+git init -q --bare "$TMP_ROOT/rewrite-real.git"
+git init -q --bare "$TMP_ROOT/rewrite-decoy.git"
+git -C "$PARENT/projects" init -q -b main rewrite
+git -C "$PARENT/projects/rewrite" config user.email test@example.com
+git -C "$PARENT/projects/rewrite" config user.name Test
+printf 'rewrite\n' > "$PARENT/projects/rewrite/README.md"
+git -C "$PARENT/projects/rewrite" add README.md
+git -C "$PARENT/projects/rewrite" commit -qm init
+REWRITE_ORIGIN="file://$TMP_ROOT/rewrite-real.git"
+REWRITE_DECOY="file://$TMP_ROOT/rewrite-decoy.git"
+git -C "$PARENT/projects/rewrite" remote add origin "$REWRITE_ORIGIN"
+git -C "$PARENT/projects/rewrite" push -q -u origin main
+git --git-dir="$TMP_ROOT/rewrite-real.git" symbolic-ref HEAD refs/heads/main
+git -C "$PARENT/projects/rewrite" config --local "url.$REWRITE_DECOY.insteadOf" "$REWRITE_ORIGIN"
+[ "$(git -C "$PARENT/projects/rewrite" remote get-url origin)" = "$REWRITE_DECOY" ] \
+  || fail "insteadOf regression fixture did not rewrite the porcelain origin"
+[ "$(git -C "$PARENT/projects/rewrite" config --local --get remote.origin.url)" = "$REWRITE_ORIGIN" ] \
+  || fail "insteadOf regression fixture changed the stored origin"
+printf '%s\n' '- rewrite [direct-PR] - rewrite project (added 2026-09-17)' >> "$PARENT/data/projects.md"
+REWRITE_HOME="$TMP_ROOT/remote-rewrite-home"
+FM_SECONDMATE_CHARTER='Own rewrite-origin work on the build Mac.' \
+  FM_SECONDMATE_SCOPE='rewrite repository work' \
+  remote_env "$ROOT/bin/fm-remote-home-seed.sh" rewrite-route remote-mac "$REMOTE_ROOT" "$REWRITE_HOME" rewrite \
+  >/dev/null || fail "remote seeding failed through an insteadOf-configured source clone"
+REWRITE_EXPECTED_IDENTITY=$(fm_repo_scope_canonical_origin_identity "$PARENT/projects/rewrite") \
+  || fail "raw configured rewrite origin could not be normalized"
+REWRITE_REMOTE_IDENTITY=$(fm_repo_scope_canonical_origin_identity "$REWRITE_HOME/projects/rewrite") \
+  || fail "remotely provisioned rewrite origin could not be normalized"
+[ "$REWRITE_REMOTE_IDENTITY" = "$REWRITE_EXPECTED_IDENTITY" ] \
+  || fail "remote seeding followed insteadOf-expanded porcelain output instead of the configured origin"
+assert_grep "repo-identities: rewrite=sha256:$REWRITE_EXPECTED_IDENTITY" "$PARENT/data/secondmates.md" \
+  "remote route registry identity did not use the configured origin under insteadOf"
+pass "remote seeding and authority hashing share the raw configured origin under insteadOf"
+
 FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
   FM_SECONDMATE_SCOPE='iOS implementation and Xcode validation' \
   remote_env "$ROOT/bin/fm-remote-home-seed.sh" ios remote-mac "$REMOTE_ROOT" "$REMOTE_HOME" alpha \
@@ -225,7 +263,7 @@ assert_grep "repo-identities: alpha=sha256:$REMOTE_ALPHA_IDENTITY" "$PARENT/data
 
 # A legacy remote row without durable identities cannot be refreshed from the
 # same-named root clone alone, but an explicit origin can repair that route.
-sed -E 's/; repo-identities: [^;]+//' "$PARENT/data/secondmates.md" > "$TMP_ROOT/legacy-route.registry"
+sed -E '/^- ios / s/; repo-identities: [^;]+//' "$PARENT/data/secondmates.md" > "$TMP_ROOT/legacy-route.registry"
 mv "$TMP_ROOT/legacy-route.registry" "$PARENT/data/secondmates.md"
 legacy_refresh_out=
 if legacy_refresh_out=$(FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \

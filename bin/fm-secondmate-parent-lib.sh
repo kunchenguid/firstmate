@@ -149,7 +149,8 @@ fm_secondmate_parent_record_parse() {
         [ "$repo_scope_snapshot_count" -eq 1 ] && [ "$repo_scope_snapshot" = fm-remote-repo-scope.v1 ] || return 1
         [ "$parent_role" = root ] || return 1
         [ "$repo_scope_expected_count" -eq 1 ] && [ "$repo_authority_expected_count" -eq 1 ] || return 1
-        case "$repo_scope_expected:$repo_authority_expected" in *[!0-9:]*|:*) return 1 ;; esac
+        case "$repo_scope_expected" in ''|*[!0-9]*) return 1 ;; esac
+        case "$repo_authority_expected" in ''|*[!0-9]*) return 1 ;; esac
         [ "$repo_scope_expected" -eq "$repo_scope_count" ] && [ "$repo_authority_expected" -eq "$repo_authority_count" ] || return 1
         FM_SECONDMATE_PARENT_REPO_SCOPE_SNAPSHOT=$repo_scope_snapshot
       elif [ "$repo_scope_expected_count" -gt 0 ] || [ "$repo_authority_expected_count" -gt 0 ]; then

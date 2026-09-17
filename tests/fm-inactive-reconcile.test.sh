@@ -774,7 +774,7 @@ test_project_firstmate_absorbs_worker_outcomes_at_its_parent_hop() {
   make_world project-firstmate-hop; bind_secondmate local; write_mate_meta
   project_home=$(cd "$MATE" && pwd -P)
   repo_identity="sha256:$(printf '%s' alpha | shasum -a 256 | awk '{print $1}')"
-  authority_id="sha256:$(printf '%s' "$project_home\\nalpha\\n$repo_identity" | shasum -a 256 | awk '{print $1}')"
+  authority_id="sha256:$(printf '%s' "$project_home"$'\n''alpha'$'\n'"$repo_identity" | shasum -a 256 | awk '{print $1}')"
   mkdir -p "$MATE/projects/alpha"
   printf 'schema=fm-project-firstmate.v1\nproject=alpha\nrepo_identity=%s\nauthority_id=%s\nrepo_path=%s/projects/alpha\n' \
     "$repo_identity" "$authority_id" "$project_home" > "$MATE/.fm-project-firstmate"
@@ -831,6 +831,13 @@ EOF
     "project Firstmate PR-ready outcomes reached the root's persistent-supervisor status file"
   assert_no_grep 'merged-' "$parent_channel" \
     "project Firstmate merged-PR outcomes reached the root's persistent-supervisor status file"
+  write_child "$MATE" project-child 'done: repository task complete'
+  run_report "$MATE" project-child \
+    || fail "project Firstmate terminal outcome did not publish its typed root summary"
+  assert_grep 'child project-child done: repository task complete' "$MATE/state/project-outcomes.log" \
+    "project Firstmate terminal outcome was not retained at the repository hop"
+  assert_grep 'child project-child done: repository task complete' "$parent_channel" \
+    "project Firstmate terminal outcome summary did not reach root"
   fm_parent_channel_report_correlated "$MATE" "$MATE/state" \
     'done [corr=abcdef0123456789]: request-correlated project status summary' \
     || fail "project Firstmate correlated summary did not reach root"
@@ -858,7 +865,7 @@ EOF
     "project summary API was not forwarded"
   assert_no_grep 'forged' "$parent_channel" \
     "untrusted worker text forged a privileged project-hop event"
-  pass "project Firstmate outcomes stay hop-local except typed summary publishers"
+  pass "project Firstmate outcomes stay hop-local while trusted terminal summaries reach root"
 }
 
 # A stalled authoritative state read consumes only the aggregate scan budget.

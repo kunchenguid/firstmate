@@ -2965,6 +2965,9 @@ test_a_secondmate_home_keeps_its_own_books() {
   printf '%s\n' mate-h1 > "$home/.fm-secondmate-home"
   printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\nparent_role=root\n' \
     "$parent" > "$home/.fm-secondmate-parent"
+  printf -- '- mate-h1 - Atomicity fixture (home: %s; scope: synthetic; projects: ; added 2026-09-17)\n' \
+    "$home" > "$parent/data/secondmates.md"
+  fm_write_meta "$parent/state/mate-h1.meta" "kind=secondmate" "home=$home"
   add_item "$case_dir" "$id"
 
   out=$(run_ship_spawn "$case_dir" "$id") || fail "mate-home spawn failed: $out"

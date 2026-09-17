@@ -1197,7 +1197,6 @@ spawn_abort_cleanup() {
         status=1
       fi
     fi
-    fm_repo_scope_lock_release || true
     SPAWN_REPO_SCOPE_ACTIVE=0
     SPAWN_REPO_LEASE_CREATED=0
   fi
@@ -3306,10 +3305,7 @@ if [ "$KIND" != secondmate ]; then
   else
     REPO_SCOPE_STATUS=$?
   fi
-  [ "$FM_REPO_SCOPE_LOCK_HELD" = 1 ] && SPAWN_REPO_SCOPE_ACTIVE=1
   if [ "$REPO_SCOPE_STATUS" -eq 2 ]; then
-    fm_repo_scope_lock_release || true
-    SPAWN_REPO_SCOPE_ACTIVE=0
     exit 2
   fi
   if [ "$REPO_SCOPE_STATUS" -ne 0 ]; then
@@ -3317,9 +3313,8 @@ if [ "$KIND" != secondmate ]; then
     echo "error: $FM_REPO_SCOPE_LAST_ERROR" >&2
     exit 1
   fi
-  if [ "$SPAWN_REPO_SCOPE_ACTIVE" = 1 ]; then
-    SPAWN_REPO_LEASE_CREATED=$FM_REPO_SCOPE_LEASE_CREATED
-  fi
+  SPAWN_REPO_SCOPE_ACTIVE=1
+  SPAWN_REPO_LEASE_CREATED=$FM_REPO_SCOPE_LEASE_CREATED
 fi
 
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
@@ -4926,9 +4921,6 @@ fi
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
 if [ "$SPAWN_REPO_SCOPE_ACTIVE" = 1 ]; then
-  fm_repo_scope_lock_release || {
-    echo "warning: repository concurrency lease for $ID was committed but its authority lock could not be released cleanly" >&2
-  }
   SPAWN_REPO_SCOPE_ACTIVE=0
   SPAWN_REPO_LEASE_CREATED=0
 fi
