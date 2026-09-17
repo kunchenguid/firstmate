@@ -10,7 +10,7 @@ Exact task chronology, branch names, temporary homes, local paths, process ids, 
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.
 A marker alone is not proof of ownership, because it is ordinary environment state that a child inherits and a terminal multiplexer can replay into an unrelated session.
-Verified on 2026-09-02 on Linux 7.1.12 with the portable regression, which builds every case from real renamed processes and no installed harness:
+Verified on 2026-09-17 on Linux 7.1.8 with the portable regression, which builds every case from real renamed processes and no installed harness:
 
 ```sh
 bin/fm-test-run.sh tests/fm-harness-precedence.test.sh
@@ -32,7 +32,8 @@ ok - the descent probe reports no verdict from a sibling branch detection cannot
 ok - a foreign args-only verdict at the deepest vantage leaves the comm-strength identity intact
 ok - equal-depth descent ties prefer the comm-strength leaf regardless of spawn order
 ok - session start renders the Codex protocol for a Codex primary holding a retained CLAUDECODE
-FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=3666
+ok - the executable harness probe reaches Codex through the real SessionStart depth
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=1766
 ```
 
 Before that boundary existed, a Codex session started from an environment that had retained `CLAUDECODE=1` reported `claude`, and session start emitted Claude's Stop-owned supervision protocol to a Codex primary.
@@ -66,11 +67,13 @@ SUPERVISION OPERATING INSTRUCTIONS - primary harness: codex
 Mode: Codex foreground checkpoint.
 ```
 
-Two boundaries are load-bearing here, and the marker-versus-ancestry precedence above is only the first.
+Three boundaries are load-bearing here, and the marker-versus-ancestry precedence above is only the first.
 The walk also used to stop as soon as the next pid was 1, on the assumption that pid 1 is always init.
 That assumption inverts inside a PID namespace, where the harness is pid 1: the walk returned no ancestry at all, so the retained marker won by default even with precedence corrected.
 The walk now examines that top process before stopping, which costs one `ps` call and can introduce no false positive, because a host's real pid 1 (init, systemd, launchd) matches no harness name.
 The portable regression asserts both directions of that case: a host-shaped pid 1 still leaves the marker to answer, and a harness at pid 1 outranks it.
+The walk's depth bound is the third: a real Codex SessionStart hook chain wraps the probe in a bash hook shell, the run wrapper, and the bounded session-start timeout, putting the native `codex` process nine ancestors up, so the old eight-parent climb ended short, session start rendered `primary harness: unknown` and the wrong supervision block, while the same probe from a tool shell moments later still answered `codex`.
+The bound now climbs sixteen parents, the same bounded walk `bin/fm-session-lock-lib.sh` uses, and the portable regression builds that chain from renamed executables to pin `codex` both with no foreign marker and against a retained `CLAUDECODE`.
 
 Run on the host under Claude Code 2.1.252 with the same two markers set, the same probe reports `claude`, `comm claude`, and Claude's Stop-owned protocol, so the correction does not trade one misidentification for its inverse.
 
