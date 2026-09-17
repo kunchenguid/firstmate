@@ -169,6 +169,28 @@ fm_harness_pid_alive() {
   fm_harness_process_matches "$comm" "$args"
 }
 
+# True if pid $1 is alive and harness-shaped but reparented to init (ppid=1)
+# with no controlling tty: the shape a firstmate session's own launched
+# daemon/bg-pty-host child takes on once the parent session that spawned it
+# has already exited. fm_harness_pid_alive alone cannot tell that orphan apart
+# from a genuine attended or backgrounded session, which is why it is treated
+# as suspect rather than dead. This is not exhaustive: a stale holder can also
+# keep a real tty and a normal (non-1) ppid (confirmed 2026-09-16, a captain
+# session the operator no longer recognized as his own), so a false result
+# here is not proof the holder is healthy, only that this one mechanical tell
+# does not fire. `ps -o tty=` reports the no-tty case as `?` on Linux and `??`
+# on macOS.
+fm_harness_pid_orphaned() {  # <pid>
+  local pid=$1 ppid tty
+  ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+  [ "$ppid" = 1 ] || return 1
+  tty=$(ps -o tty= -p "$pid" 2>/dev/null | tr -d ' ')
+  case "$tty" in
+    ''|'?'|'??') return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # --- trusted same-session identity -------------------------------------------
 # Claude Code hands every hook and tool shell CLAUDE_CODE_SESSION_ID (the
 # session's conversation id) and CLAUDE_PID (the pid of the process running the
@@ -322,6 +344,13 @@ EOF
 #   FM_LOCK_INSPECT_STATE         free|held|stale|unreadable|unknown
 #   FM_LOCK_INSPECT_PID           recorded pid, or empty
 #   FM_LOCK_INSPECT_LIVE_HARNESS  true|false|unknown
+#   FM_LOCK_INSPECT_ORPHANED      true|false - only meaningful when STATE=held;
+#                                 true means fm_harness_pid_orphaned flagged
+#                                 the holder as suspect (ppid=1, no tty). A
+#                                 flag only: this function never reclaims a
+#                                 suspect lock, and false is not proof the
+#                                 holder is healthy, only that this one
+#                                 mechanical tell did not fire.
 #
 # held: the recorded pid is a live verified harness.
 # stale: the recorded pid is gone.
@@ -332,6 +361,7 @@ EOF
 FM_LOCK_INSPECT_STATE=unknown
 FM_LOCK_INSPECT_PID=
 FM_LOCK_INSPECT_LIVE_HARNESS=unknown
+FM_LOCK_INSPECT_ORPHANED=false
 fm_session_lock_inspect() {  # <state>
   local state=$1 lock pid
   # shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.
@@ -340,6 +370,8 @@ fm_session_lock_inspect() {  # <state>
   FM_LOCK_INSPECT_PID=
   # shellcheck disable=SC2034 # Output globals, read by lock status and inbox ready.
   FM_LOCK_INSPECT_LIVE_HARNESS=unknown
+  # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
+  FM_LOCK_INSPECT_ORPHANED=false
   lock="$state/.lock"
   if [ ! -e "$lock" ]; then
     FM_LOCK_INSPECT_STATE=free
@@ -367,6 +399,10 @@ fm_session_lock_inspect() {  # <state>
     if fm_harness_pid_alive "$pid"; then
       FM_LOCK_INSPECT_STATE=held
       FM_LOCK_INSPECT_LIVE_HARNESS=true
+      if fm_harness_pid_orphaned "$pid"; then
+        # shellcheck disable=SC2034 # Output global, read by lock status and inbox ready.
+        FM_LOCK_INSPECT_ORPHANED=true
+      fi
     else
       FM_LOCK_INSPECT_STATE=unknown
       FM_LOCK_INSPECT_LIVE_HARNESS=false
