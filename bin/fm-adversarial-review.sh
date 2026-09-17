@@ -823,7 +823,7 @@ CLASSIFY
     if [ "$ui" = 1 ]; then
       printf 'UI-impacting: the advisory Design/UX lens is required this round.\n\n'
     fi
-    [ "$tier" != T0 ] || printf 'Waiver class: %s. Reason: %s. Granted by captain call `%s`.\n\n' \
+    [ "$tier" != T0 ] || printf "Waiver class: %s. Reason: %s. Granted by captain call \`%s\`.\n\n" \
       "$waiver_class" "$waiver_reason" "$waiver_hold"
     [ "$tier" = T0 ] || printf 'Tier floor derived from the reviewed change: %s (base %s).\n\n' \
       "$required_tier" "$base_source"
