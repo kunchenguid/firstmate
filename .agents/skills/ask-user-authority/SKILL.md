@@ -34,11 +34,11 @@ It stops at the finding, routes the decision to firstmate, and applies only the 
 4. Fix only what makes the deliverable wrong.
    Approve past wording, restatement, simplification, and documentation-polish findings even when the reviewer is right, unless the text is actually false or the behavior it describes is actually wrong.
    Approving one of those records that the deliverable is already correct; it neither concedes nor disputes the reviewer's reading, and it leaves no defect unfixed.
-5. Cap the work at three fix rounds.
-   Once three rounds have run, approve every remaining finding that is not a correctness or contract defect and file it as its own issue rather than opening a fourth round.
+5. Cap the work at three fix rounds counted across the whole run, never three per gate or per step.
+   Once three rounds have run, approve every remaining finding that is not a correctness or contract defect and file it as its own backlog work item with `bin/fm-tasks-axi.sh add` rather than opening a fourth round.
+   Raising it in the project's own tracker instead is an outward-facing action that stays with the captain, so never take that path on your own.
    Review wall-clock is the dominant cost of a small change, so hours already spent are a reason to stop rather than evidence that another round is warranted.
    The cap bounds proportionality and never correctness: it is never authority to approve past a correctness or contract defect, which is still fixed at the fourth round and beyond, and the criteria in step 6 still escalate regardless of how many rounds have run.
-   Exceed the cap only for a reason you state in the gate response, such as a structural defect worth the extra round or a stale comment that would lead a future maintainer to remove a safeguard.
 6. Escalate only genuinely ambiguous findings:
    - a Fix that would materially expand the contract by adding a new guarantee, threat model, subsystem, abstraction, compatibility surface, state machine, continuous-monitoring requirement, generalized framework, or broader architecture not required by the accepted intent
    - a product or architecture call not settled by accepted intent
