@@ -15,21 +15,33 @@
 # present for UI-impacting T2/T3 work. Anything else is RED and writes no
 # marker.
 #
-# The tier is not the caller's to lower. dispatch derives the tier the reviewed
-# change itself requires from its staged file list and diff - security- or
-# architecture-sensitive paths and major waves need T3, everything else T2 -
-# and refuses a --tier below it. That derived floor is recorded in the loop-
-# green marker as required=, so the merge boundary enforces a minimum tier from
-# the evidence instead of re-deriving a classification of its own.
+# The tier is not the caller's to lower, and neither is the diff it is derived
+# from. dispatch reads the PR's own base from the forge and classifies the
+# reviewed change from the staged file list and diff over it - security- or
+# architecture-sensitive paths and major waves need T3, everything else T2. A
+# --base is accepted only when it IS the forge base or an ancestor of it, which
+# can only widen the review; a narrower base that would understate the tier is
+# refused, and a base nothing could verify pins the floor at T3 rather than
+# trusting the caller. A --tier below the derived floor is refused too. That
+# floor is recorded in the loop-green marker as required=, so the merge
+# boundary enforces a minimum tier from the evidence instead of re-deriving a
+# classification of its own.
 #
-# A T0 waiver is captain authority, never self-attestation: it needs
-# --waiver-hold naming a captain call this home's backlog records the captain
-# as having answered (bin/fm-captain-hold.sh answered), and writes no marker
-# without it.
+# A T0 waiver is captain authority, never self-attestation, and that authority
+# is bound to THIS lane and THIS PR: --waiver-hold must name the lane task's own
+# captain call, and that call's newest captain decision must contain both the
+# grant phrase and this PR's URL (bin/fm-captain-hold.sh answered --names). An
+# answered call about anything else clears nothing and writes no marker.
+#
+# Findings outlive the round that raised them. Reconciliation re-checks every
+# MAJOR/BLOCKER from every earlier round of the same PR, and a later round that
+# simply stops reporting one does not close it: only a fixed_verified or
+# rejected_with_counterevidence disposition does, recorded in any round.
 #
 # State layout under the task state dir:
 #   <id>.adversarial-review/round-<N>/  staged evidence, prompts, reports,
-#     resolutions, reconciliation, and posted comments for one round.
+#     seats recorded as each lens reports, resolutions, reconciliation, and
+#     posted comments for one round.
 #   <id>.adversarial-review-green  the loop-green marker: exactly a pr=, head=,
 #     tier=, and required= line. Written only on a GREEN reconciliation at that
 #     head, or on a captain-granted T0 waiver.
@@ -39,7 +51,7 @@
 #     [--base <sha>] [--head <sha>] [--round N] [--reclaim] [--ui-impacting]
 #     [--seat SLOT=MODEL ...]
 #     [--waiver-class C --waiver-reason R --waiver-hold <task-id>]
-#   record-lens <task-id> --round N --lens <slot> --report <file>
+#   record-lens <task-id> --round N --lens <slot> --report <file> [--seat MODEL]
 #   resolve <task-id> --round N --finding <lens>:<id> --disposition <d>
 #     [--note <text>]
 #   reconcile <task-id> --round N
@@ -52,10 +64,15 @@
 # The condition exits 0 when a PR-open status line still needs a loop and 1
 # otherwise. The action dispatches EVERY pending loop, not just the first, so
 # one fire covers every PR that opened while the watch was armed. A when-watch
-# fires at most once, so ensure-watch is the re-arming half: it is idempotent
-# and runs from the startup path (bin/fm-bootstrap.sh) and again from every
-# PR-open registration (bin/fm-pr-check.sh), which is what makes the loop
-# automatic rather than something a human remembers to arm.
+# fires at most once and the runner then drops its REGISTRATION while leaving
+# its private spec, trust record, and fired marker behind, so ensure-watch is
+# the re-arming half: it reads liveness from the registration, completes the
+# adapter's handle-then-retire cycle for the fired outcome, and arms again. It
+# runs from the startup path (bin/fm-bootstrap.sh) and again from every PR-open
+# registration (bin/fm-pr-check.sh), which is what makes the loop automatic
+# rather than something a human remembers to arm. An outcome that is not a
+# clean fire is left unacknowledged and reported, because re-arming over it
+# would discard the only evidence of what the last fire did.
 # Exact reads go through gh and every PR mutation through gh-axi, the same
 # split bin/fm-pr-check.sh uses, because gh-axi's curated surface has no
 # exact-body read while gh exposes selectable fields.
@@ -230,15 +247,22 @@ write_green_marker() {
   mv -f -- "$tmp" "$dest" || { rm -f -- "$tmp"; return 1; }
 }
 
-# A T0 waiver is only as strong as the captain's own recorded words. The named
-# captain call must carry a recorded captain answer in this home's backlog;
-# anything else - including a call still open, an ordinary task, or a backlog
-# that cannot be read - is refused.
+# The literal words a captain has to write to waive this gate. It is fixed and
+# specific so the pre-answer task body, which the decision region below still
+# includes, cannot supply it by accident.
+FM_ADV_WAIVER_PHRASE='adversarial-review waiver'
+
+# A T0 waiver is only as strong as the captain's own recorded words ABOUT THIS
+# PR. The lane task's own captain call must carry a recorded captain decision
+# naming both the grant phrase and this PR's URL; a call still open, a decision
+# about some other subject, an unrelated answered row, or a backlog that cannot
+# be read are all refused.
 captain_waiver_granted() {
-  local hold=$1 rc=0
+  local hold=$1 url=$2 rc=0
   [ -x "$SCRIPT_DIR/fm-captain-hold.sh" ] || return 1
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-captain-hold.sh" answered "$hold" >/dev/null 2>&1 || rc=$?
+    "$SCRIPT_DIR/fm-captain-hold.sh" answered "$hold" \
+    --names "$FM_ADV_WAIVER_PHRASE" --names "$url" >/dev/null 2>&1 || rc=$?
   [ "$rc" -eq 0 ]
 }
 
@@ -383,10 +407,12 @@ cmd_dispatch() {
     [ -n "$waiver_class" ] && [ -n "$waiver_reason" ] \
       || fail "T0 needs --waiver-class and --waiver-reason on explicit captain words" 2
     [ -n "$waiver_hold" ] \
-      || fail "T0 needs --waiver-hold naming the captain call that granted the waiver" 2
+      || fail "T0 needs --waiver-hold naming this lane task's own captain call" 2
     fm_pr_task_id_valid "$waiver_hold" || fail "invalid --waiver-hold task id" 2
-    captain_waiver_granted "$waiver_hold" \
-      || fail "T0 refused: captain call $waiver_hold carries no recorded captain answer" 1
+    [ "$waiver_hold" = "$id" ] \
+      || fail "T0 waiver must be this lane task's own captain call ($id), not $waiver_hold" 2
+    captain_waiver_granted "$id" "$url" \
+      || fail "T0 refused: captain call $id records no captain decision naming \"$FM_ADV_WAIVER_PHRASE\" and $url" 1
   fi
   cap=$(tier_cap "$tier")
   if [ "$round" -gt 1 ]; then
@@ -402,12 +428,28 @@ cmd_dispatch() {
     head=$(forge_head "$url") || fail "cannot resolve the PR head from the forge (pass --head)" 1
   fi
   fm_pr_head_valid "$head" || fail "invalid head SHA" 2
+  # The PR's own base is what decides how much of the change gets reviewed, and
+  # therefore what tier it is classified at, so the forge owns it. A --base is
+  # a widening escape hatch, never a narrowing one.
+  forge_base_sha=$(forge_base "$url" 2>/dev/null) || forge_base_sha=''
+  case "$forge_base_sha" in
+    *[!0-9a-f]*|"") forge_base_sha='' ;;
+  esac
   if [ -z "$base" ]; then
-    base=$(forge_base "$url") || fail "cannot resolve the PR base from the forge (pass --base)" 1
+    [ -n "$forge_base_sha" ] || fail "cannot resolve the PR base from the forge (pass --base)" 1
+    base=$forge_base_sha
   fi
   case "$base" in
     *[!0-9a-f]*|"") fail "invalid base SHA" 2 ;;
   esac
+  base_source=forge
+  if [ -z "$forge_base_sha" ]; then
+    base_source=unverified
+  elif [ "$base" != "$forge_base_sha" ]; then
+    git -C "$wt" merge-base --is-ancestor "$base" "$forge_base_sha" 2>/dev/null \
+      || fail "--base $base is neither the PR base $forge_base_sha nor an ancestor of it; a narrower base would understate the tier" 1
+    base_source=widened
+  fi
   dir=$(round_dir "$id" "$round")
   if [ -e "$dir" ] || [ -L "$dir" ]; then
     if [ "$reclaim" = 1 ] && [ "$(round_meta_get "$dir" status)" = failed ]; then
@@ -454,6 +496,13 @@ $(classify_required "$dir/files.txt" "$dir/diff.patch")
 CLASSIFY
   tier_rank "$required_tier" >/dev/null || fail "cannot classify the reviewed change" 1
   tier_rank "$default_tier" >/dev/null || fail "cannot classify the reviewed change" 1
+  # A base nothing could check against the forge makes the staged diff - and so
+  # the classification drawn from it - unverifiable, so the floor goes to the
+  # top rather than to whatever that diff happened to show.
+  if [ "$base_source" = unverified ]; then
+    required_tier=T3
+    default_tier=T3
+  fi
   if [ "$tier" != T0 ]; then
     if [ "$tier_explicit" = 0 ]; then
       tier=$default_tier
@@ -485,7 +534,8 @@ CLASSIFY
   fi
   {
     printf 'url=%s\ntier=%s\nrequired_tier=%s\nboundary=merge\n' "$url" "$tier" "$required_tier"
-    printf 'base=%s\nhead=%s\nwt=%s\ntree=%s\ntree_head=%s\n' "$base" "$head" "$wt" "$wt" "$tree_head"
+    printf 'base=%s\nbase_source=%s\nhead=%s\nwt=%s\ntree=%s\ntree_head=%s\n' \
+      "$base" "$base_source" "$head" "$wt" "$wt" "$tree_head"
     printf 'round=%s\ncap=%s\nui_impacting=%s\nprose_source=%s\n' "$round" "$cap" "$ui" "$prose_source"
     printf 'slots=%s\n' "$(printf '%s' "$slots" | paste -sd' ' -)"
     printf 'seats=%s\n' "$seats_args"
@@ -520,7 +570,8 @@ CLASSIFY
     fi
     [ "$tier" != T0 ] || printf 'Waiver class: %s. Reason: %s. Granted by captain call `%s`.\n\n' \
       "$waiver_class" "$waiver_reason" "$waiver_hold"
-    [ "$tier" = T0 ] || printf 'Tier floor derived from the reviewed change: %s.\n\n' "$required_tier"
+    [ "$tier" = T0 ] || printf 'Tier floor derived from the reviewed change: %s (base %s).\n\n' \
+      "$required_tier" "$base_source"
     printf "Evidence staged before dispatch: diff \`%s\`, prose \`%s\`, file list \`%s\`, tree \`%s\`.\n\n" \
       "$dir/diff.patch" "$dir/prose.md" "$dir/files.txt" "$wt"
     printf 'Diff scope: %s files, %s.\n\n' "$files_count" "$numstat"
@@ -575,18 +626,27 @@ lens_report_scan() {
 }
 
 cmd_record_lens() {
-  local id=$1 round='' lens='' report=''
+  local id=$1 round='' lens='' report='' seat=''
   shift 1 || true
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --round) round=${2-}; shift 2 ;;
       --lens) lens=${2-}; shift 2 ;;
       --report) report=${2-}; shift 2 ;;
+      --seat) seat=${2-}; shift 2 ;;
       *) fail "unknown record-lens flag: $1" 2 ;;
     esac
   done
   fm_pr_task_id_valid "$id" || fail "invalid task id" 2
   [ -n "$round" ] && [ -n "$lens" ] && [ -n "$report" ] || fail "record-lens needs --round, --lens, --report" 2
+  # The seat is only known once the lens actually runs, so a round dispatched
+  # without one is seated here rather than being unseatable forever.
+  if [ -n "$seat" ]; then
+    case "$seat" in
+      *[[:space:]]*) fail "seat cannot contain whitespace" 2 ;;
+      unassigned) fail "\"unassigned\" is the absence of a seat, not a seat" 2 ;;
+    esac
+  fi
   dir=$(round_dir "$id" "$round")
   [ -f "$dir/meta" ] || fail "round $round was never dispatched for $id" 1
   [ "$(round_meta_get "$dir" status)" != failed ] || fail "round $round failed to dispatch; reclaim it first" 1
@@ -607,7 +667,12 @@ cmd_record_lens() {
   esac
   cp -- "$report" "$dest" || fail "cannot store the lens report" 1
   chmod 0600 "$dest" || fail "cannot protect the lens report" 1
-  printf 'recorded: %s round-%s lens %s\n' "$id" "$round" "$lens"
+  if [ -n "$seat" ]; then
+    printf '%s %s\n' "$lens" "$seat" >> "$dir/seats.recorded" \
+      || fail "cannot record the lens seat" 1
+    chmod 0600 "$dir/seats.recorded" || fail "cannot protect the recorded seats" 1
+  fi
+  printf 'recorded: %s round-%s lens %s seat %s\n' "$id" "$round" "$lens" "${seat:-unassigned}"
 }
 
 cmd_resolve() {
@@ -678,6 +743,43 @@ slot_seat() {
   printf '%s' "$seat"
 }
 
+# The seat record-lens stored for one slot, matched as the whole first field.
+# The last one recorded wins, and it outranks the dispatch-time seats= list
+# because it names the seat that actually produced the report.
+recorded_slot_seat() {
+  local file=$1 slot=$2
+  [ -f "$file" ] || return 0
+  awk -v k="$slot" '$1 == k { s = $2 } END { if (s != "") print s }' "$file" 2>/dev/null || true
+}
+
+# Every resolutions file for this PR up to and including one round, oldest
+# first. A finding's disposition is the last one recorded for it in ANY of
+# them, so a fix verified in a later round closes the round that raised it.
+resolution_files_through() {
+  local id=$1 url=$2 upto=$3 k=1 d files=''
+  while [ "$k" -le "$upto" ]; do
+    d=$(round_dir "$id" "$k")
+    if [ -f "$d/meta" ] && [ "$(round_meta_get "$d" url)" = "$url" ] && [ -f "$d/resolutions" ]; then
+      files="$files$d/resolutions
+"
+    fi
+    k=$((k + 1))
+  done
+  printf '%s' "$files"
+}
+
+finding_disposition_across() {
+  local files=$1 key=$2 f d disp=''
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    d=$(finding_disposition "$f" "$key")
+    [ -z "$d" ] || disp=$d
+  done <<RESOLUTIONS
+$files
+RESOLUTIONS
+  printf '%s' "$disp"
+}
+
 # Report file for one lens slot. Colons are normalised away so advisory
 # slot names stay plain filenames.
 lens_file() {
@@ -735,10 +837,13 @@ cmd_reconcile() {
   fi
   lens_table=
   finding_rows=
+  seen_keys=' '
+  resolution_files=$(resolution_files_through "$id" "$url" "$round")
   # shellcheck disable=SC2086
   for slot in $slots; do
     class=$(slot_class "$slot")
-    seat=$(slot_seat "$seats" "$slot")
+    seat=$(recorded_slot_seat "$dir/seats.recorded" "$slot")
+    [ -n "$seat" ] || seat=$(slot_seat "$seats" "$slot")
     # A seat nobody filled is a lens nobody ran, and a lens run by the lane's
     # own model is the implementer reviewing their own work. The seat map makes
     # the standard slot the lane model by definition, so only that class is
@@ -771,7 +876,8 @@ cmd_reconcile() {
       case "$sev" in
         BLOCKER|MAJOR)
           reconcilable=$((reconcilable + 1))
-          disp=$(finding_disposition "$dir/resolutions" "$slot:$fid")
+          seen_keys="$seen_keys$slot:$fid "
+          disp=$(finding_disposition_across "$resolution_files" "$slot:$fid")
           case "$disp" in
             fixed_verified|rejected_with_counterevidence)
               finding_rows="$finding_rows- [$slot:$fid] $sev: $disp
@@ -790,7 +896,7 @@ cmd_reconcile() {
           esac
           ;;
         *)
-          disp=$(finding_disposition "$dir/resolutions" "$slot:$fid")
+          disp=$(finding_disposition_across "$resolution_files" "$slot:$fid")
           finding_rows="$finding_rows- [$slot:$fid] $sev: ${disp:-noted}
 "
           ;;
@@ -803,6 +909,44 @@ cmd_reconcile() {
     if [ "$verdict" = RED ] && [ "$reconcilable" -eq 0 ]; then
       note_red "lens $slot returned RED with no parsed MAJOR/BLOCKER finding; its report is degraded or unparseable"
     fi
+  done
+  # A fix round that simply stops reporting an earlier round's BLOCKER has not
+  # closed it. Every MAJOR/BLOCKER raised in an earlier round of this PR is
+  # re-checked here against the dispositions recorded in ANY round, so the only
+  # way out of the loop is through each finding rather than past it.
+  prev_round=1
+  while [ "$prev_round" -lt "$round" ]; do
+    prev_dir=$(round_dir "$id" "$prev_round")
+    if [ -f "$prev_dir/meta" ] && [ "$(round_meta_get "$prev_dir" url)" = "$url" ]; then
+      prev_slots=$(round_meta_get "$prev_dir" slots)
+      # shellcheck disable=SC2086
+      for prev_slot in $prev_slots; do
+        prev_report=$(lens_file "$prev_dir" "$prev_slot")
+        [ -f "$prev_report" ] || continue
+        prev_findings=$(lens_report_scan "$prev_report" | awk '$1=="FINDING"{print $2}') || prev_findings=
+        # shellcheck disable=SC2086
+        for prev_entry in $prev_findings; do
+          prev_fid=${prev_entry%%:*}
+          prev_sev=${prev_entry#*:}
+          case "$prev_sev" in BLOCKER|MAJOR) ;; *) continue ;; esac
+          case "$seen_keys" in *" $prev_slot:$prev_fid "*) continue ;; esac
+          seen_keys="$seen_keys$prev_slot:$prev_fid "
+          prev_disp=$(finding_disposition_across "$resolution_files" "$prev_slot:$prev_fid")
+          case "$prev_disp" in
+            fixed_verified|rejected_with_counterevidence)
+              finding_rows="$finding_rows- [round $prev_round][$prev_slot:$prev_fid] $prev_sev: $prev_disp (carried)
+"
+              ;;
+            *)
+              note_red "[round $prev_round][$prev_slot:$prev_fid] $prev_sev carried forward is ${prev_disp:-unresolved}"
+              finding_rows="$finding_rows- [round $prev_round][$prev_slot:$prev_fid] $prev_sev: ${prev_disp:-unresolved} (carried)
+"
+              ;;
+          esac
+        done
+      done
+    fi
+    prev_round=$((prev_round + 1))
   done
   if [ "$red" = 0 ]; then recommendation=GREEN; else recommendation=RED; fi
   {
@@ -989,29 +1133,75 @@ cmd_arm_watch() {
     --action "$SELF" action
 }
 
-# The re-arming half of the trigger. A when-watch fires at most once and is
-# then retired, so something has to put it back; this is idempotent so the
-# startup path and every PR-open registration can both call it unconditionally.
-# A watch already armed, or one whose fired outcome firstmate has not handled
-# yet, is left exactly as it is - re-arming over an unhandled outcome would
-# discard the evidence of what the last fire did.
+# The re-arming half of the trigger, idempotent so the startup path and every
+# PR-open registration can both call it unconditionally.
+#
+# Liveness is the REGISTRATION, not the watch's private records. A terminal
+# outcome makes bin/fm-procevent.sh drop only state/procevent/<sid>.source; the
+# spec, trust record, and fired marker under state/when/ survive until
+# fm-procevent-when.sh retire removes them. Reading those as "armed" is how a
+# watch that has already fired presents as live forever with no runner behind
+# it, so this reads the registration and completes the adapter's documented
+# handle-then-retire cycle before arming again.
+#
+# A captured outcome is acknowledged here only when it is a clean end to the
+# last arming - a fire that ran the action, or a deadline that expired with
+# nothing to do. Anything else (the action failed, the condition errored, the
+# fire is ambiguous, the spec was rejected) stays unacknowledged so it keeps
+# being re-announced to firstmate, and this reports that it cannot re-arm yet
+# rather than burying the evidence under a fresh watch.
 cmd_ensure_watch() {
-  local sid out rc=0
+  local sid registration inbox result seq class out rc=0 blocked=0
   sid=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent-when.sh" source-id "$(when_watch_name)" 2>/dev/null) \
-    || { echo "adversarial-review: watch source id unavailable; loop not armed" >&2; return 1; }
-  if [ -e "$STATE/when/$sid.spec" ]; then
-    printf 'adversarial-review: watch %s already armed\n' "$sid"
+    || { echo "error: adversarial-review watch source id unavailable; the PR-open loop is not armed" >&2; return 1; }
+  registration="$STATE/procevent/$sid.source"
+  if [ -e "$registration" ] || [ -L "$registration" ]; then
+    printf 'adversarial-review: watch %s is registered\n' "$sid"
     return 0
+  fi
+  inbox="$STATE/procevent-inbox"
+  shopt -s nullglob
+  for result in "$inbox/$sid".*.result; do
+    [ -f "$result" ] && [ ! -L "$result" ] || continue
+    [ -e "${result%.result}.handled" ] && continue
+    seq=${result%.result}
+    seq=${seq##*.}
+    case "$seq" in ''|*[!0-9]*) continue ;; esac
+    class=$("$SCRIPT_DIR/fm-procevent-when.sh" classify "$result" 2>/dev/null) || class=unknown
+    case "$class" in
+      fired|never-true)
+        printf 'adversarial-review: watch %s outcome %s was %s; acknowledging it to re-arm\n' \
+          "$sid" "$seq" "$class"
+        FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" handled "$sid" "$seq" >/dev/null || {
+          printf 'error: cannot acknowledge adversarial-review watch outcome %s; the PR-open loop stays unarmed\n' \
+            "$seq" >&2
+          blocked=1
+        }
+        ;;
+      *)
+        printf 'actionable: adversarial-review watch %s outcome %s is %s; handle it before the PR-open loop can re-arm\n' \
+          "$sid" "$seq" "$class" >&2
+        blocked=1
+        ;;
+    esac
+  done
+  shopt -u nullglob
+  [ "$blocked" -eq 0 ] || return 1
+  if ! FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent-when.sh" retire "$(when_watch_name)" >/dev/null; then
+    if [ -e "$registration" ] || [ -L "$registration" ]; then
+      printf 'adversarial-review: watch %s was armed concurrently\n' "$sid"
+      return 0
+    fi
+    echo "error: cannot clear the adversarial-review watch records before re-arming" >&2
+    return 1
   fi
   out=$(cmd_arm_watch "$@" 2>&1) || rc=$?
   if [ "$rc" -ne 0 ]; then
-    case "$out" in
-      *'unhandled captured result'*|*'already exists or left state behind'*)
-        printf 'adversarial-review: watch %s has an unhandled outcome; handle it to re-arm\n' "$sid" >&2
-        return 0
-        ;;
-    esac
-    printf '%s\n' "$out" >&2
+    if [ -e "$registration" ] || [ -L "$registration" ]; then
+      printf 'adversarial-review: watch %s was armed concurrently\n' "$sid"
+      return 0
+    fi
+    printf 'error: cannot arm the adversarial-review PR-open watch: %s\n' "$out" >&2
     return "$rc"
   fi
   printf '%s\n' "$out"

@@ -19,9 +19,14 @@
 #   (h) a RED lens verdict with no parsed MAJOR/BLOCKER reconciles RED
 #   (i) a resolution note naming another finding does not resolve it
 #   (j) an unseated lens, and a lens seated on the lane's own model, are RED
-#   (k) a T0 waiver without a recorded captain answer writes no marker
+#   (k) a T0 waiver without a recorded captain answer writes no marker, and it
+#     must name this lane task's own captain call
 #   (l) a tier below the one the change requires is refused, and a marker
 #     below its recorded floor fails check-green
+#   (m) ensure-watch re-arms after the watch has fired and been retired
+#   (n) record-lens --seat seats a round dispatched with no seats
+#   (o) a --base narrower than the PR's own base is refused
+#   (p) a MAJOR/BLOCKER from an earlier round stays RED until it is disposed of
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -84,6 +89,19 @@ run_adv() {
   shift 2
   FM_STATE_OVERRIDE="$state_dir" \
   FM_TEST_GH_AXI_LOG="$state_dir/gh-axi.log" \
+  PATH="$fakebin:$PATH" \
+    "$ADV" "$@"
+}
+
+# The watch commands address a whole home rather than a bare state dir, and the
+# process-event claim root is machine-wide, so the fixture takes its own to stay
+# clear of any watch really armed on this machine.
+run_watch_home() {
+  local home=$1 fakebin=$2
+  shift 2
+  FM_HOME="$home" \
+  FM_PROCEVENT_CLAIM_ROOT="$home/claims" \
+  FM_TEST_GH_AXI_LOG="$home/state/gh-axi.log" \
   PATH="$fakebin:$PATH" \
     "$ADV" "$@"
 }
@@ -437,19 +455,241 @@ test_t0_waiver_needs_a_captain_answer() {
     "t0-waiver: the refusal does not name the missing captain call"
   assert_absent "$case_dir/state/task-a.adversarial-review-green" \
     "t0-waiver: a self-attested waiver wrote a loop-green marker"
-  # A named call the backlog does not record as answered is refused too.
+  # Regression: the waiver used to accept ANY answered captain call in the
+  # backlog, so a captain's words about unrelated work cleared this gate. Only
+  # this lane task's own call may be named.
   if run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
     --tier T0 --wt "$wt" --base "$base" --head "$head" \
     --waiver-class trivial --waiver-reason 'captain said so' \
-    --waiver-hold task-nope \
+    --waiver-hold task-other \
     >"$case_dir/stdout" 2>"$case_dir/stderr"; then
-    fail "t0-waiver: a waiver naming an unanswered captain call was accepted"
+    fail "t0-waiver: a waiver naming another task's captain call was accepted"
   fi
-  assert_grep 'no recorded captain answer' "$case_dir/stderr" \
-    "t0-waiver: the refusal does not name the missing captain answer"
+  assert_grep "own captain call (task-a)" "$case_dir/stderr" \
+    "t0-waiver: the refusal does not name the lane's own captain call"
+  assert_absent "$case_dir/state/task-a.adversarial-review-green" \
+    "t0-waiver: another task's captain call wrote a loop-green marker"
+  # This lane's own id, with no backlog recording any decision for it.
+  if run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --tier T0 --wt "$wt" --base "$base" --head "$head" \
+    --waiver-class trivial --waiver-reason 'captain said so' \
+    --waiver-hold task-a \
+    >"$case_dir/stdout" 2>"$case_dir/stderr"; then
+    fail "t0-waiver: a waiver with no recorded captain decision was accepted"
+  fi
+  assert_grep 'records no captain decision' "$case_dir/stderr" \
+    "t0-waiver: the refusal does not name the missing captain decision"
   assert_absent "$case_dir/state/task-a.adversarial-review-green" \
     "t0-waiver: an unanswered captain call wrote a loop-green marker"
-  pass "a T0 waiver without a recorded captain answer writes no marker"
+  pass "a T0 waiver needs this lane's own captain call to have decided it"
+}
+
+# Regression: ensure-watch used to read liveness from the watch's private spec
+# file, which a fire never removes. Once the runner retired the REGISTRATION,
+# every later call reported "already armed" and no PR ever got a loop again.
+test_ensure_watch_rearms_after_a_fire() {
+  local home fakebin wt registration result
+  home="$TMP_ROOT/h-rearm"
+  fakebin="$home/fakebin"
+  mkdir -p "$home/state" "$fakebin"
+  read -r base head wt < <(make_repo "$home/wt")
+  add_fake_gh "$fakebin"
+  add_fake_gh_axi "$fakebin"
+  fm_write_meta "$home/state/task-a.meta" "window=fm-task-a" "worktree=$wt"
+  export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
+  export FAKE_GH_title='Add the feature' FAKE_GH_body='It works.'
+  export FM_TEST_GH_AXI_LOG="$home/state/gh-axi.log"
+  : > "$home/state/gh-axi.log"
+  registration="$home/state/procevent/when-adversarial-review-pr.source"
+
+  run_watch_home "$home" "$fakebin" ensure-watch --interval 0.1 --stable 1 >/dev/null \
+    || fail "rearm: the first ensure-watch did not arm"
+  assert_present "$registration" "rearm: the first ensure-watch registered no source"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$home/claims" \
+    "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null
+  printf 'done: PR %s\n' "$PR_URL" > "$home/state/task-a.status"
+  result=
+  for _ in $(seq 1 200); do
+    result=$(printf '%s\n' "$home"/state/procevent-inbox/when-adversarial-review-pr.*.result 2>/dev/null | head -1)
+    [ -n "$result" ] && [ -e "$result" ] && break
+    sleep 0.1
+  done
+  [ -n "${result:-}" ] && [ -e "$result" ] || fail "rearm: the armed watch never fired"
+  assert_grep 'status: fired' "$result" "rearm: the outcome is not a fired action"
+  # The runner drops the registration on a terminal outcome; the watch's own
+  # spec and fired marker survive, which is what used to look like "armed".
+  # Retirement happens just after the result is captured, so give it a moment.
+  for _ in $(seq 1 100); do
+    [ -e "$registration" ] || break
+    sleep 0.1
+  done
+  assert_absent "$registration" "rearm: the fired watch kept its registration"
+  assert_present "$home/state/when/when-adversarial-review-pr.spec" \
+    "rearm: the fired watch dropped the private spec a re-arm has to clear"
+
+  run_watch_home "$home" "$fakebin" ensure-watch --interval 0.1 --stable 1 >/dev/null \
+    || fail "rearm: ensure-watch did not re-arm after the fire"
+  assert_present "$registration" \
+    "rearm: ensure-watch reported success without registering a source"
+  assert_present "${result%.result}.handled" \
+    "rearm: the fired outcome was re-armed over without being acknowledged"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$home/claims" \
+    "$ROOT/bin/fm-procevent.sh" retire when-adversarial-review-pr >/dev/null 2>&1 || true
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_PROCEVENT_CLAIM_ROOT="$home/claims" \
+    "$ROOT/bin/fm-procevent.sh" sweep-home >/dev/null 2>&1 || true
+  pass "ensure-watch re-arms the PR-open watch after it has fired and retired"
+}
+
+# Regression: cmd_action dispatches with no --seat, and reconcile REDs an
+# unseated lens, so the automatic loop could never reach GREEN in the round it
+# created. The seat is only known when the lens runs, so record-lens carries it.
+test_record_lens_seats_a_round_dispatched_without_seats() {
+  local case_dir fakebin wt out
+  case_dir="$TMP_ROOT/record-seat"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$fakebin"
+  read -r base head wt < <(make_repo "$case_dir/wt")
+  add_fake_gh "$fakebin"
+  add_fake_gh_axi "$fakebin"
+  export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
+  export FAKE_GH_title='t' FAKE_GH_body='b'
+  : > "$case_dir/state/gh-axi.log"
+  # Exactly what the auto-dispatched action passes: no tier, no seats.
+  run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --wt "$wt" --base "$base" --head "$head" >/dev/null \
+    || fail "record-seat: dispatch failed"
+  write_lens_report "$case_dir/clean.md" GREEN ''
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens frontier --report "$case_dir/clean.md" --seat fable-5.1 >/dev/null \
+    || fail "record-seat: frontier record failed"
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens deep --report "$case_dir/clean.md" --seat opus-5 >/dev/null \
+    || fail "record-seat: deep record failed"
+  out=$(run_adv "$case_dir/state" "$fakebin" reconcile task-a --round 1) \
+    || fail "record-seat: reconcile failed to post"
+  assert_contains "$out" "round-1 GREEN" \
+    "record-seat: a round seated at record-lens time still reconciled RED"
+  assert_grep "head=$head" "$case_dir/state/task-a.adversarial-review-green" \
+    "record-seat: the GREEN round wrote no loop-green marker"
+  # An unseated lens is still RED, and "unassigned" is not a seat.
+  if run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens advisory:design-ux --report "$case_dir/clean.md" \
+    --seat unassigned >/dev/null 2>&1; then
+    fail "record-seat: the literal seat 'unassigned' was accepted"
+  fi
+  pass "record-lens seats a round the automatic dispatch left unseated"
+}
+
+# Regression: --base was taken on trust, so a caller could stage only the last
+# commit of a security-sensitive branch and have it classified as ordinary.
+test_narrower_base_than_the_pr_base_is_refused() {
+  local case_dir fakebin wt base mid head out
+  case_dir="$TMP_ROOT/base-bind"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$fakebin" "$case_dir/wt"
+  wt="$case_dir/wt"
+  git -C "$wt" init -q
+  git -C "$wt" commit -q --allow-empty -m init
+  mkdir -p "$wt/auth"
+  printf 'token\n' > "$wt/auth/session.go"
+  git -C "$wt" add -A
+  git -C "$wt" commit -q -m 'add session handling'
+  printf 'hello\n' > "$wt/app.txt"
+  git -C "$wt" add -A
+  git -C "$wt" commit -q -m 'trivial follow-up'
+  base=$(git -C "$wt" rev-parse 'HEAD~2')
+  mid=$(git -C "$wt" rev-parse 'HEAD~1')
+  head=$(git -C "$wt" rev-parse HEAD)
+  add_fake_gh "$fakebin"
+  add_fake_gh_axi "$fakebin"
+  export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
+  export FAKE_GH_title='t' FAKE_GH_body='b'
+  : > "$case_dir/state/gh-axi.log"
+
+  if run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --wt "$wt" --base "$mid" --head "$head" \
+    >"$case_dir/stdout" 2>"$case_dir/stderr"; then
+    fail "base-bind: a base narrower than the PR base was accepted"
+  fi
+  assert_grep 'nor an ancestor of it' "$case_dir/stderr" \
+    "base-bind: the refusal does not name the PR base"
+  assert_absent "$case_dir/state/task-a.adversarial-review/round-1/diff.patch" \
+    "base-bind: the refused dispatch still staged a narrowed diff"
+  # The PR's own base sees the security-sensitive commit and classifies T3.
+  out=$(run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --wt "$wt" --head "$head" --reclaim) \
+    || fail "base-bind: the forge-base dispatch failed"
+  assert_contains "$out" "tier=T3" \
+    "base-bind: the PR's own base did not classify the change at T3"
+  pass "a --base narrower than the PR's own base is refused"
+}
+
+# Regression: reconciliation read only its own round, so a round-2 pair of
+# clean lens reports at the same head closed a round-1 BLOCKER nobody fixed.
+test_open_findings_carry_into_later_rounds() {
+  local case_dir fakebin wt out
+  case_dir="$TMP_ROOT/carry-forward"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$fakebin"
+  read -r base head wt < <(make_repo "$case_dir/wt")
+  add_fake_gh "$fakebin"
+  add_fake_gh_axi "$fakebin"
+  export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
+  export FAKE_GH_title='t' FAKE_GH_body='b'
+  : > "$case_dir/state/gh-axi.log"
+  run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --tier T2 --wt "$wt" --base "$base" --head "$head" \
+    --seat frontier=fable-5.1 --seat deep=opus-5 >/dev/null \
+    || fail "carry: round 1 dispatch failed"
+  write_lens_report "$case_dir/clean.md" GREEN ''
+  write_lens_report "$case_dir/blocker.md" RED '  - id: f1
+    severity: BLOCKER
+    claim: unguarded
+    evidence: app.txt:1
+    problem: no guard
+    fix: guard it
+'
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens frontier --report "$case_dir/blocker.md" >/dev/null \
+    || fail "carry: round 1 frontier record failed"
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens deep --report "$case_dir/clean.md" >/dev/null \
+    || fail "carry: round 1 deep record failed"
+  out=$(run_adv "$case_dir/state" "$fakebin" reconcile task-a --round 1) \
+    || fail "carry: round 1 reconcile failed to post"
+  assert_contains "$out" "round-1 RED" "carry: an unresolved BLOCKER did not stay RED"
+
+  # Round 2 at the same head, with two clean lenses and nothing fixed.
+  run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --tier T2 --wt "$wt" --base "$base" --head "$head" --round 2 \
+    --seat frontier=fable-5.1 --seat deep=opus-5 >/dev/null \
+    || fail "carry: round 2 dispatch failed"
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 2 --lens frontier --report "$case_dir/clean.md" >/dev/null \
+    || fail "carry: round 2 frontier record failed"
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 2 --lens deep --report "$case_dir/clean.md" >/dev/null \
+    || fail "carry: round 2 deep record failed"
+  out=$(run_adv "$case_dir/state" "$fakebin" reconcile task-a --round 2) \
+    || fail "carry: round 2 reconcile failed to post"
+  assert_contains "$out" "round-2 RED" \
+    "carry: a clean round 2 closed an unresolved round-1 BLOCKER"
+  assert_grep 'frontier:f1' "$case_dir/state/task-a.adversarial-review/round-2/reconciliation.md" \
+    "carry: the round-1 BLOCKER is absent from the round-2 reconciliation"
+  assert_absent "$case_dir/state/task-a.adversarial-review-green" \
+    "carry: a carried-forward BLOCKER still wrote a loop-green marker"
+
+  # Disposing of it in round 2 is what closes it.
+  run_adv "$case_dir/state" "$fakebin" resolve task-a --round 2 \
+    --finding frontier:f1 --disposition fixed_verified >/dev/null \
+    || fail "carry: resolve failed"
+  out=$(run_adv "$case_dir/state" "$fakebin" reconcile task-a --round 2) \
+    || fail "carry: the second round 2 reconcile failed to post"
+  assert_contains "$out" "round-2 GREEN" \
+    "carry: disposing of the carried BLOCKER did not reach GREEN"
+  pass "an earlier round's MAJOR/BLOCKER stays RED until it is disposed of"
 }
 
 test_tier_floor_is_enforced_at_dispatch_and_at_check_green() {
@@ -510,3 +750,7 @@ test_resolution_note_cannot_resolve_another_finding
 test_unseated_and_self_seated_lenses_are_red
 test_t0_waiver_needs_a_captain_answer
 test_tier_floor_is_enforced_at_dispatch_and_at_check_green
+test_ensure_watch_rearms_after_a_fire
+test_record_lens_seats_a_round_dispatched_without_seats
+test_narrower_base_than_the_pr_base_is_refused
+test_open_findings_carry_into_later_rounds

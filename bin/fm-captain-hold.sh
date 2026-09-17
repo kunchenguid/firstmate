@@ -31,7 +31,7 @@
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
 #   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
-#   fm-captain-hold.sh answered <task-id>
+#   fm-captain-hold.sh answered <task-id> [--names <text>]...
 #   fm-captain-hold.sh diverged
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
@@ -185,6 +185,13 @@
 # on captain authority (the adversarial-review T0 waiver in
 # bin/fm-adversarial-review.sh) cannot settle for "not currently held", which
 # every ordinary task also satisfies. It prints nothing and mutates nothing.
+# Each `--names <text>` narrows it further: the newest record's captain decision
+# must contain that literal text, so a gate can require the captain to have
+# spoken about ITS subject rather than about some other call on the same row.
+# That decision region is bounded above by the record it belongs to but runs to
+# the end of the body below, which preserves the pre-answer text, so a caller
+# must ask for something specific enough that the prior body cannot supply it -
+# a fixed grant phrase AND the subject's own identifier, never one alone.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
@@ -1922,9 +1929,39 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
   exit 2
 }
 
-command_answered() {  # <task-id>
-  local id=${1-} show body mode
-  [ "$#" -le 1 ] || { usage >&2; exit 2; }
+# The newest resolution record's captain decision text. Records are prepended,
+# so the newest one runs from the first `Captain decision:` line to the next
+# resolution record. Bounded above by the record that follows it and below by
+# the end of the body, which is why a caller asking --names must ask for
+# something specific enough that the preserved prior body cannot supply it.
+newest_captain_decision() {  # <shown-body>
+  local body
+  body=$(decode_shown_value "$1") || return 1
+  printf '%s\n' "$body" | awk '
+    /^Resolution recorded by fm-(captain|decision)-hold\.$/ { if (capture) exit; next }
+    capture { print; next }
+    /^Captain decision:$/ { capture = 1 }
+  '
+}
+
+command_answered() {  # <task-id> [--names <text>]...
+  local id='' show body mode region want
+  local -a names=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --names)
+        [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+        names+=("$2")
+        shift 2
+        ;;
+      -*) usage >&2; exit 2 ;;
+      *)
+        [ -z "$id" ] || { usage >&2; exit 2; }
+        id=$1
+        shift
+        ;;
+    esac
+  done
   case "$id" in
     ''|*[!A-Za-z0-9._-]*)
       printf 'fm-captain-hold: task id must be a non-empty privacy-safe slug: %s\n' "$id" >&2
@@ -1941,9 +1978,18 @@ command_answered() {  # <task-id>
   esac
   mode=$(recorded_resolution_mode "$body") || mode=''
   case "$mode" in
-    ''|answered|released|repaired|routed) return 0 ;;
+    ''|answered|released|repaired|routed) ;;
     *) return 1 ;;
   esac
+  [ "${#names[@]}" -gt 0 ] || return 0
+  region=$(newest_captain_decision "$body") || return 1
+  for want in "${names[@]+"${names[@]}"}"; do
+    case "$region" in
+      *"$want"*) ;;
+      *) return 1 ;;
+    esac
+  done
+  return 0
 }
 
 case "${1:-}" in

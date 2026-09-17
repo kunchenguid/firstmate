@@ -3224,7 +3224,22 @@ test_answered_is_true_only_after_the_captain_spoke() {
     >/dev/null || fail "could not record the captain answer"
   run_captain "$home" answered "$id" >/dev/null 2>&1 \
     || fail "answered was false after the captain's words were recorded"
-  pass "answered is true only once a captain answer is recorded"
+
+  # --names is what binds a gate's authority to its own subject: the captain's
+  # recorded decision has to contain the text the caller asks about, so words
+  # about one thing cannot clear a gate about another.
+  rc=0
+  run_captain "$home" answered "$id" --names 'Waive the loop' >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || fail "answered rejected text the captain's decision does contain (rc=$rc)"
+  rc=0
+  run_captain "$home" answered "$id" --names 'https://github.com/example/repo/pull/9' \
+    >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || fail "answered accepted a subject the captain never named (rc=$rc)"
+  rc=0
+  run_captain "$home" answered "$id" --names 'Waive the loop' --names 'never written' \
+    >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || fail "answered accepted a decision missing one of its --names (rc=$rc)"
+  pass "answered is true only once a captain answer naming its subject is recorded"
 }
 
 test_pr_merge_entrypoint_refuses_a_captain_held_task() {
