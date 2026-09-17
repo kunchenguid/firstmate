@@ -10,7 +10,10 @@
 # stdout with no trailing blank line. The caller validates the mode; an unknown
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
-# line that bin/fm-spawn.sh checks a ship brief against.
+# line, so fm_brief_without_dod's stripping and any legacy or promoted brief's
+# embedded copy are recognized by the same pattern; bin/fm-brief.sh writes that
+# line separately at the top of a freshly scaffolded ship brief, which is what
+# bin/fm-spawn.sh checks against its own explicit --mode before launching.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
