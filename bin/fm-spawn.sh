@@ -3222,9 +3222,21 @@ spawn_reconcile_herdr_layout_attempt() {
   spawn_herdr_presentation_order_lock_acquire \
     "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" || return 1
   lock_for_restore=1
+  value="$(herdr_projection_meta_field_exact "$meta" herdr_tab_id 2>/dev/null || true):$(herdr_projection_meta_field_exact "$meta" herdr_pane_id 2>/dev/null || true)"
+  case "$value" in
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE"|\
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE"|\
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE") ;;
+    *)
+      spawn_herdr_presentation_order_lock_release
+      echo "error: task $ID's locked Herdr launch endpoint no longer matches its attempt; preserving quarantine" >&2
+      return 1
+      ;;
+  esac
   if [ "$expected_mode" = fresh ] \
     && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 5 ] \
-    && [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = acquired ]; then
+    && [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = acquired ] \
+    && [ "$value" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" ]; then
     if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
       gate_status=0
       row=

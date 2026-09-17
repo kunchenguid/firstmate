@@ -1361,6 +1361,48 @@ test_forced_secondmate_child_close_failure_still_refuses() {
   pass "fm-teardown: forced secondmate cleanup still refuses on a child endpoint close that failed"
 }
 
+test_forced_secondmate_child_lease_is_returned_exactly() {
+  local dir mate parent=lease-mate child=lease-child holder lease_id physical_wt
+  dir=$(make_case secondmate-child-lease)
+  mark_case_as_treehouse_pool "$dir"
+  install_lease_aware_treehouse "$dir"
+  mate="$dir/mate"
+  mkdir -p "$mate/state" "$mate/data" "$mate/config"
+  printf '%s' "$parent" > "$mate/.fm-secondmate-home"
+  holder=fm-$child-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  lease_id=88888888888888888888888888888888
+  physical_wt=$dir/pool/1/project
+  fm_write_meta "$dir/home/state/$parent.meta" \
+    "window=firstmate:fm-$parent" "endpoint_task_id=$parent" \
+    "worktree=$mate" "project=$mate" "home=$mate" \
+    "kind=secondmate" "mode=secondmate" "harness=echo" "yolo=off" "projects=alpha"
+  fm_write_meta "$mate/state/$child.meta" \
+    "window=lab:w1:p1" "endpoint_task_id=$child" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t1" "herdr_pane_id=w1:p1" \
+    "treehouse_lease_holder=$holder" "treehouse_lease_id=$lease_id" \
+    "treehouse_lease_worktree=$physical_wt"
+  fm_treehouse_lease_transaction_write "$mate/state/$child.herdr-lease" acquired \
+    "$child" "$holder" "$dir/project" "$dir/worktree" "$lease_id" \
+    || fail "could not stage a descendant's acquired Treehouse lease"
+  jq -cn --arg path "$physical_wt" --arg id "$lease_id" --arg holder "$holder" \
+    '{name:"1",path:$path,status:"leased",lease_id:$id,lease_holder:$holder}' \
+    > "$dir/treehouse-live.json"
+  claim_pool_slot "$dir" "$child" "$mate" "$holder"
+
+  run_case "$dir" "$parent" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "forced secondmate cleanup did not reconcile its child's exact lease: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$parent.meta" "forced secondmate cleanup left the parent record"
+  assert_absent "$mate" "forced secondmate cleanup left the retired child home"
+  assert_absent "$dir/treehouse-live.json" "forced secondmate cleanup left the child's lease live"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "forced secondmate cleanup left the child's spent slot claim"
+  grep -Fq "treehouse <return> <--force> <--if-lease-id> <$lease_id> <$physical_wt>" "$dir/runtime.log" \
+    || fail "forced secondmate cleanup did not return the child's immutable lease identity: $(cat "$dir/runtime.log")"
+
+  pass "fm-teardown: forced secondmate cleanup returns each child's exact durable lease"
+}
+
 test_orca_close_failure_refuses_even_under_force() {
   local dir orca_free id=orca-strand rc
   dir=$(make_case orca-close-failure)
@@ -1565,7 +1607,28 @@ test_structural_herdr_lease_teardown_is_transaction_driven() {
   ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
     || fail "pruned-symlink recovery returned an already-returned lease"
 
-  pass "fm-teardown: durable Herdr lease cleanup survives return, reassignment, and pruned symlink history"
+  dir=$(make_case herdr-lease-receipt-retired)
+  mark_case_as_treehouse_pool "$dir"
+  install_lease_aware_treehouse "$dir"
+  id=herdr-receipt-retired-z1
+  holder=fm-$id-22222222222222222222222222222222
+  lease_id=99999999999999999999999999999999
+  physical_wt=$dir/pool/1/project
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=lab:w1:p1" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t1" "herdr_pane_id=w1:p1" \
+    "treehouse_lease_holder=$holder" "treehouse_lease_id=$lease_id" \
+    "treehouse_lease_worktree=$physical_wt" "treehouse_lease_returned_id=$lease_id"
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "cleanup could not resume after its returned lease receipt was retired: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "receipt-retired recovery left task metadata"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "receipt-retired recovery tried to return an already-returned lease"
+
+  pass "fm-teardown: durable Herdr lease cleanup survives return, receipt retirement, reassignment, and pruned symlink history"
 }
 
 test_already_gone_endpoint_still_completes_without_a_refusal() {
@@ -1623,6 +1686,7 @@ test_failed_endpoint_close_refuses_before_removing_the_record
 test_forced_teardown_continues_past_a_close_it_could_not_make
 test_unreadable_close_read_refuses_while_a_definitive_absence_completes
 test_forced_secondmate_child_close_failure_still_refuses
+test_forced_secondmate_child_lease_is_returned_exactly
 test_orca_close_failure_refuses_even_under_force
 test_already_gone_endpoint_still_completes_without_a_refusal
 test_structural_herdr_lease_teardown_is_transaction_driven

@@ -1412,6 +1412,86 @@ fm_treehouse_slot_owner_release "$STRUCT_WT" success-z1 "$SUCCESS_HOLDER"
 rm -f "$SUCCESS_META" "$SUCCESS_TX"
 pass "successful structural launches retain their live lease after spawn exits"
 
+rm -f "$STRUCT_TASK_CREATED" "$STRUCT_TASK_LABEL" "$STRUCT_CLOSED" "$STRUCT_TREEHOUSE_STATE" "$APPLIED" "$REQUEST"
+: > "$STRUCT_CLOSE_LOG"
+: > "$STRUCT_TREEHOUSE_LOG"
+fm_test_spawn_brief "$STRUCT_HOME" unrebound-z1 "Recover an applied launch that crashed before endpoint rebinding."
+start_server success
+set +e
+unrebound_seed_out=$(HERDR_SESSION=lab-structural \
+  FM_FAKE_STRUCT_MODE=success FM_FAKE_STRUCT_SOCKET="$SOCK" \
+  FM_FAKE_STRUCT_APPLIED="$APPLIED" FM_FAKE_STRUCT_REQUEST="$REQUEST" \
+  FM_FAKE_STRUCT_TASK_CREATED="$STRUCT_TASK_CREATED" FM_FAKE_STRUCT_TASK_LABEL="$STRUCT_TASK_LABEL" \
+  FM_FAKE_STRUCT_CLOSED="$STRUCT_CLOSED" FM_FAKE_STRUCT_CLOSE_LOG="$STRUCT_CLOSE_LOG" \
+  FM_FAKE_STRUCT_TREEHOUSE_LOG="$STRUCT_TREEHOUSE_LOG" FM_FAKE_STRUCT_TREEHOUSE_STATE="$STRUCT_TREEHOUSE_STATE" \
+  FM_FAKE_STRUCT_LEASE_ID="$STRUCT_LEASE_ID" FM_FAKE_STRUCT_WT="$STRUCT_WT" \
+  FM_FAKE_STRUCT_WORKSPACE_LABEL="$STRUCT_WORKSPACE_LABEL" FM_FAKE_STRUCT_PARENT_PID="$$" \
+  fm_test_run_spawn "$STRUCT_HOME" "$STRUCT_WT" "$STRUCT_FAKEBIN" \
+    unrebound-z1 "$STRUCT_PROJECT" --scout --harness pi --backend herdr)
+unrebound_seed_status=$?
+set -e
+wait_server
+[ "$unrebound_seed_status" -eq 0 ] || fail "unrebound recovery fixture could not launch: $unrebound_seed_out"
+UNREBOUND_META="$STRUCT_HOME/state/unrebound-z1.meta"
+UNREBOUND_TX="$STRUCT_HOME/state/unrebound-z1.herdr-lease"
+UNREBOUND_HOLDER=$(sed -n 's/^treehouse_lease_holder=//p' "$UNREBOUND_META")
+UNREBOUND_LABEL=$(jq -r '.params.root.label' "$REQUEST")
+UNREBOUND_ATTEMPT_ID=${UNREBOUND_LABEL#fm-launch-}
+fm_backend_herdr_layout_attempt_write "$STRUCT_HOME/state/unrebound-z1.herdr-launch" 5 \
+  "$UNREBOUND_ATTEMPT_ID" fresh unrebound-z1 "$STRUCT_WT" "$UNREBOUND_HOLDER" \
+  lab-structural w1 w1:t2 w1:p2 "$UNREBOUND_LABEL" w1:t3 w1:p3 \
+  || fail "could not stage an applied pre-rebind launch receipt"
+awk '
+  /^window=/ { print "window=lab-structural:w1:p2"; next }
+  /^herdr_tab_id=/ { print "herdr_tab_id=w1:t2"; next }
+  /^herdr_pane_id=/ { print "herdr_pane_id=w1:p2"; next }
+  { print }
+' "$UNREBOUND_META" > "$UNREBOUND_META.tmp"
+mv "$UNREBOUND_META.tmp" "$UNREBOUND_META"
+set +e
+unrebound_recovery_out=$(HERDR_SESSION=lab-structural \
+  FM_FAKE_STRUCT_MODE=postapply FM_FAKE_STRUCT_SOCKET="$SOCK" \
+  FM_FAKE_STRUCT_APPLIED="$APPLIED" FM_FAKE_STRUCT_REQUEST="$REQUEST" \
+  FM_FAKE_STRUCT_TASK_CREATED="$STRUCT_TASK_CREATED" FM_FAKE_STRUCT_TASK_LABEL="$STRUCT_TASK_LABEL" \
+  FM_FAKE_STRUCT_CLOSED="$STRUCT_CLOSED" FM_FAKE_STRUCT_CLOSE_LOG="$STRUCT_CLOSE_LOG" \
+  FM_FAKE_STRUCT_TREEHOUSE_LOG="$STRUCT_TREEHOUSE_LOG" FM_FAKE_STRUCT_TREEHOUSE_STATE="$STRUCT_TREEHOUSE_STATE" \
+  FM_FAKE_STRUCT_LEASE_ID="$STRUCT_LEASE_ID" FM_FAKE_STRUCT_WT="$STRUCT_WT" \
+  FM_FAKE_STRUCT_WORKSPACE_LABEL="$STRUCT_WORKSPACE_LABEL" FM_FAKE_STRUCT_PARENT_PID="$$" \
+  fm_test_run_spawn "$STRUCT_HOME" "$STRUCT_WT" "$STRUCT_FAKEBIN" \
+    unrebound-z1 "$STRUCT_PROJECT" --scout --harness pi --backend herdr)
+unrebound_recovery_status=$?
+set -e
+[ "$unrebound_recovery_status" -ne 0 ] || fail "post-recovery validation mismatch unexpectedly launched"
+assert_not_contains "$unrebound_recovery_out" "committed structural worker could not be verified" \
+  "an applied pre-rebind receipt was misclassified as committed"
+if [ -e "$STRUCT_HOME/state/unrebound-z1.herdr-launch" ]; then
+  fm_backend_herdr_layout_attempt_snapshot "$STRUCT_HOME/state/unrebound-z1.herdr-launch" \
+    || fail "the retry left a malformed structural receipt"
+  [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_ID" != "$UNREBOUND_ATTEMPT_ID" ] \
+    || fail "applied pre-rebind recovery preserved the crashed receipt"
+fi
+if [ -e "$UNREBOUND_TX" ]; then
+  fm_treehouse_lease_transaction_snapshot "$UNREBOUND_TX" \
+    || fail "the retry left a malformed lease transaction"
+  [ "$FM_TREEHOUSE_LEASE_TX_HOLDER" != "$UNREBOUND_HOLDER" ] \
+    || fail "applied pre-rebind recovery preserved the crashed lease transaction"
+fi
+assert_grep 'w1:p3' "$STRUCT_CLOSE_LOG" \
+  "applied pre-rebind recovery did not close its exact replacement"
+if [ -e "$STRUCT_TREEHOUSE_STATE" ]; then
+  [ "$(jq -r '.lease_holder' "$STRUCT_TREEHOUSE_STATE")" != "$UNREBOUND_HOLDER" ] \
+    || fail "applied pre-rebind recovery left the crashed Treehouse lease live"
+fi
+if [ -e "$UNREBOUND_TX" ] && [ -e "$UNREBOUND_META" ]; then
+  RETRY_HOLDER=$(sed -n 's/^treehouse_lease_holder=//p' "$UNREBOUND_META")
+  PATH="$STRUCT_FAKEBIN:$PATH" fm_treehouse_lease_transaction_return \
+    "$UNREBOUND_TX" unrebound-z1 "$RETRY_HOLDER" "$STRUCT_PROJECT" >/dev/null \
+    || fail "could not clean the retry lease fixture"
+  fm_treehouse_slot_owner_release "$STRUCT_WT" unrebound-z1 "$RETRY_HOLDER"
+fi
+rm -f "$UNREBOUND_META" "$UNREBOUND_TX" "$STRUCT_HOME/state/unrebound-z1.herdr-launch" "$STRUCT_TREEHOUSE_STATE"
+pass "pre-rebind structural receipts recover instead of impersonating committed workers"
+
 rm -f "$STRUCT_TASK_CREATED" "$STRUCT_TASK_LABEL" "$STRUCT_CLOSED" "$APPLIED" "$REQUEST"
 : > "$STRUCT_CLOSE_LOG"
 fm_test_spawn_brief "$STRUCT_HOME" preapply-held-z1 "Keep durable ownership when focused cleanup refuses."

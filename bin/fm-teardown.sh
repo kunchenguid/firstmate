@@ -2303,42 +2303,97 @@ teardown_owns_worktree() {
     && [ "$TREEHOUSE_LEASE_ALREADY_RETURNED" != 1 ]
 }
 
-teardown_treehouse_lease_transaction_prepare() {
-  local canonical_worktree recorded_worktree
-  if [ ! -e "$TREEHOUSE_LEASE_TX" ] && [ ! -L "$TREEHOUSE_LEASE_TX" ]; then
+teardown_treehouse_lease_record_prepare() {  # <meta> <task-id> <backend> <project> <worktree> <transaction>
+  local meta=$1 task_id=$2 backend=$3 project=$4 worktree=$5 transaction=$6
+  local canonical_worktree recorded_worktree returned_id holder lease_id
+  FM_TEARDOWN_TREEHOUSE_LEASE_PRESENT=0
+  FM_TEARDOWN_TREEHOUSE_LEASE_ALREADY_RETURNED=0
+  FM_TEARDOWN_TREEHOUSE_LEASE_HOLDER=
+  FM_TEARDOWN_TREEHOUSE_LEASE_ID=
+  FM_TEARDOWN_TREEHOUSE_LEASE_WORKTREE=
+  FM_TEARDOWN_TREEHOUSE_LEASE_RESULT=
+  if [ ! -e "$transaction" ] && [ ! -L "$transaction" ]; then
+    returned_id=$(fm_meta_get "$meta" treehouse_lease_returned_id)
+    [ -n "$returned_id" ] || return 0
+    [ "$backend" = herdr ] || return 1
+    holder=$(fm_meta_get "$meta" treehouse_lease_holder)
+    lease_id=$(fm_meta_get "$meta" treehouse_lease_id)
+    recorded_worktree=$(fm_meta_get "$meta" treehouse_lease_worktree)
+    fm_treehouse_lease_holder_valid "$task_id" "$holder" \
+      && [ -n "$lease_id" ] \
+      && [ "$returned_id" = "$lease_id" ] \
+      && [ -n "$recorded_worktree" ] || return 1
+    case "$recorded_worktree" in /*) ;; *) return 1 ;; esac
+    FM_TEARDOWN_TREEHOUSE_LEASE_ALREADY_RETURNED=1
+    FM_TEARDOWN_TREEHOUSE_LEASE_HOLDER=$holder
+    FM_TEARDOWN_TREEHOUSE_LEASE_ID=$lease_id
+    FM_TEARDOWN_TREEHOUSE_LEASE_WORKTREE=$recorded_worktree
+    FM_TEARDOWN_TREEHOUSE_LEASE_RESULT=returned
     return 0
   fi
-  [ "$BACKEND" = herdr ] || return 1
-  fm_treehouse_lease_transaction_snapshot "$TREEHOUSE_LEASE_TX" || return 1
-  TREEHOUSE_LEASE_HOLDER=$(fm_meta_get "$META" treehouse_lease_holder)
-  TREEHOUSE_LEASE_ID=$(fm_meta_get "$META" treehouse_lease_id)
-  [ -n "$TREEHOUSE_LEASE_HOLDER" ] \
-    && [ "$TREEHOUSE_LEASE_HOLDER" = "$FM_TREEHOUSE_LEASE_TX_HOLDER" ] \
-    && [ -n "$TREEHOUSE_LEASE_ID" ] \
-    && [ "$TREEHOUSE_LEASE_ID" = "$FM_TREEHOUSE_LEASE_TX_ID" ] \
-    && [ "$FM_TREEHOUSE_LEASE_TX_TASK" = "$ID" ] || return 1
-  fm_treehouse_lease_transaction_reconcile "$TREEHOUSE_LEASE_TX" \
-    "$ID" "$TREEHOUSE_LEASE_HOLDER" "$PROJ" || return 1
-  recorded_worktree=$(fm_meta_get "$META" treehouse_lease_worktree)
+  [ "$backend" = herdr ] || return 1
+  fm_treehouse_lease_transaction_snapshot "$transaction" || return 1
+  holder=$(fm_meta_get "$meta" treehouse_lease_holder)
+  lease_id=$(fm_meta_get "$meta" treehouse_lease_id)
+  [ -n "$holder" ] \
+    && [ "$holder" = "$FM_TREEHOUSE_LEASE_TX_HOLDER" ] \
+    && [ -n "$lease_id" ] \
+    && [ "$lease_id" = "$FM_TREEHOUSE_LEASE_TX_ID" ] \
+    && [ "$FM_TREEHOUSE_LEASE_TX_TASK" = "$task_id" ] || return 1
+  fm_treehouse_lease_transaction_reconcile "$transaction" \
+    "$task_id" "$holder" "$project" || return 1
+  recorded_worktree=$(fm_meta_get "$meta" treehouse_lease_worktree)
   if [ -n "$recorded_worktree" ]; then
     canonical_worktree=$recorded_worktree
-  elif [ -e "$WT" ] || [ -L "$WT" ]; then
-    canonical_worktree=$(fm_treehouse_canonical_existing_path "$WT") || return 1
+  elif [ -e "$worktree" ] || [ -L "$worktree" ]; then
+    canonical_worktree=$(fm_treehouse_canonical_existing_path "$worktree") || return 1
   elif [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = returned ]; then
     canonical_worktree=$FM_TREEHOUSE_LEASE_TX_WORKTREE
   else
     return 1
   fi
   [ "$FM_TREEHOUSE_LEASE_TX_WORKTREE" = "$canonical_worktree" ] \
-    && [ "$FM_TREEHOUSE_LEASE_TX_ID" = "$TREEHOUSE_LEASE_ID" ] || return 1
-  TREEHOUSE_LEASE_WORKTREE=$FM_TREEHOUSE_LEASE_TX_WORKTREE
+    && [ "$FM_TREEHOUSE_LEASE_TX_ID" = "$lease_id" ] || return 1
   case "$FM_TREEHOUSE_LEASE_TX_RESULT" in
     acquired|cleanup) ;;
-    returned) TREEHOUSE_LEASE_ALREADY_RETURNED=1 ;;
+    returned) FM_TEARDOWN_TREEHOUSE_LEASE_ALREADY_RETURNED=1 ;;
     *) return 1 ;;
   esac
-  TREEHOUSE_LEASE_RESULT=$FM_TREEHOUSE_LEASE_TX_RESULT
-  TREEHOUSE_LEASE_TX_PRESENT=1
+  FM_TEARDOWN_TREEHOUSE_LEASE_PRESENT=1
+  FM_TEARDOWN_TREEHOUSE_LEASE_HOLDER=$holder
+  FM_TEARDOWN_TREEHOUSE_LEASE_ID=$lease_id
+  FM_TEARDOWN_TREEHOUSE_LEASE_WORKTREE=$FM_TREEHOUSE_LEASE_TX_WORKTREE
+  FM_TEARDOWN_TREEHOUSE_LEASE_RESULT=$FM_TREEHOUSE_LEASE_TX_RESULT
+}
+
+teardown_mark_treehouse_lease_returned() {  # <meta> <state> <task-id> <holder> <lease-id> <canonical-worktree>
+  local meta=$1 state=$2 task_id=$3 holder=$4 lease_id=$5 canonical_worktree=$6 tmp recorded
+  [ "$(fm_meta_get "$meta" endpoint_task_id)" = "$task_id" ] \
+    && [ "$(fm_meta_get "$meta" treehouse_lease_holder)" = "$holder" ] \
+    && [ "$(fm_meta_get "$meta" treehouse_lease_id)" = "$lease_id" ] || return 1
+  recorded=$(fm_meta_get "$meta" treehouse_lease_worktree)
+  [ -z "$recorded" ] || [ "$recorded" = "$canonical_worktree" ] || return 1
+  [ "$(fm_meta_get "$meta" treehouse_lease_returned_id)" != "$lease_id" ] || return 0
+  [ -z "$(fm_meta_get "$meta" treehouse_lease_returned_id)" ] || return 1
+  tmp=$(mktemp "$meta.returned.XXXXXX") || return 1
+  if ! awk '!/^treehouse_lease_worktree=/ && !/^treehouse_lease_returned_id=/' "$meta" > "$tmp" \
+    || ! printf 'treehouse_lease_worktree=%s\ntreehouse_lease_returned_id=%s\n' \
+      "$canonical_worktree" "$lease_id" >> "$tmp" \
+    || ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$state"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+teardown_treehouse_lease_transaction_prepare() {
+  teardown_treehouse_lease_record_prepare \
+    "$META" "$ID" "$BACKEND" "$PROJ" "$WT" "$TREEHOUSE_LEASE_TX" || return 1
+  TREEHOUSE_LEASE_TX_PRESENT=$FM_TEARDOWN_TREEHOUSE_LEASE_PRESENT
+  TREEHOUSE_LEASE_ALREADY_RETURNED=$FM_TEARDOWN_TREEHOUSE_LEASE_ALREADY_RETURNED
+  TREEHOUSE_LEASE_HOLDER=$FM_TEARDOWN_TREEHOUSE_LEASE_HOLDER
+  TREEHOUSE_LEASE_ID=$FM_TEARDOWN_TREEHOUSE_LEASE_ID
+  TREEHOUSE_LEASE_WORKTREE=$FM_TEARDOWN_TREEHOUSE_LEASE_WORKTREE
+  TREEHOUSE_LEASE_RESULT=$FM_TEARDOWN_TREEHOUSE_LEASE_RESULT
 }
 
 firstmate_home_has_treehouse_slot() {
@@ -2810,6 +2865,7 @@ preflight_descendant_task_locks() {
 
 preflight_descendant_treehouse_slots() {
   local i state task_id meta kind backend target worktree project lock_path held owner_rc
+  local transaction has_lease owner_worktree holder already_returned
   for ((i=0; i < ${#DESCENDANT_TASK_IDS[@]}; i++)); do
     state=${DESCENDANT_TASK_STATES[$i]}
     task_id=${DESCENDANT_TASK_IDS[$i]}
@@ -2822,7 +2878,13 @@ preflight_descendant_treehouse_slots() {
     if [ "$kind" = secondmate ] || [ "$backend" = orca ]; then
       continue
     fi
-    if ! fm_treehouse_pool_slot "$project" "$worktree"; then
+    transaction="$state/$task_id.herdr-lease"
+    has_lease=0
+    if [ -e "$transaction" ] || [ -L "$transaction" ] \
+      || [ -n "$(meta_value "$meta" treehouse_lease_returned_id)" ]; then
+      has_lease=1
+    fi
+    if [ "$has_lease" = 0 ] && ! fm_treehouse_pool_slot "$project" "$worktree"; then
       continue
     fi
     lock_path=$(fm_treehouse_project_lock_path "$project") || {
@@ -2855,15 +2917,40 @@ preflight_descendant_treehouse_slots() {
     if [ "$kind" = secondmate ] || [ "$backend" = orca ]; then
       continue
     fi
-    if ! fm_treehouse_pool_slot "$project" "$worktree"; then
+    transaction="$state/$task_id.herdr-lease"
+    has_lease=0
+    if [ -e "$transaction" ] || [ -L "$transaction" ] \
+      || [ -n "$(meta_value "$meta" treehouse_lease_returned_id)" ]; then
+      has_lease=1
+    fi
+    if [ "$has_lease" = 0 ] && ! fm_treehouse_pool_slot "$project" "$worktree"; then
       continue
     fi
     fm_backend_validate_task_endpoint "$meta" "$task_id" || return 1
-    require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
+    owner_worktree=$worktree
+    holder=
+    already_returned=0
+    if [ "$has_lease" = 1 ]; then
+      teardown_treehouse_lease_record_prepare \
+        "$meta" "$task_id" "$backend" "$project" "$worktree" "$transaction" || {
+        echo "REFUSED: child $task_id's structural Herdr Treehouse lease transaction is invalid; forced teardown changed nothing" >&2
+        return 1
+      }
+      holder=$FM_TEARDOWN_TREEHOUSE_LEASE_HOLDER
+      already_returned=$FM_TEARDOWN_TREEHOUSE_LEASE_ALREADY_RETURNED
+      owner_worktree=$FM_TEARDOWN_TREEHOUSE_LEASE_WORKTREE
+    fi
+    require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$owner_worktree" || return 1
     owner_rc=0
-    require_owned_worktree_slot_record "$task_id" "$worktree" || owner_rc=$?
+    require_owned_worktree_slot_record "$task_id" "$owner_worktree" "$holder" || owner_rc=$?
     case "$owner_rc" in
-      0|"$TEARDOWN_SLOT_REASSIGNED_RC") ;;
+      0) ;;
+      "$TEARDOWN_SLOT_REASSIGNED_RC")
+        [ "$has_lease" != 1 ] || [ "$already_returned" = 1 ] || {
+          echo "REFUSED: child $task_id's live structural Herdr lease contradicts its slot owner; forced teardown changed nothing" >&2
+          return 1
+        }
+        ;;
       *) return 1 ;;
     esac
   done
@@ -3082,6 +3169,7 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
 
 cleanup_firstmate_home_children() {
   local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc
+  local child_tx child_lease_known child_lease_returned child_lease_holder child_lease_id child_lease_worktree
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -3092,6 +3180,22 @@ cleanup_firstmate_home_children() {
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     child_backend=$(fm_backend_of_meta "$child_meta")
+    child_tx="$sub_state/$child_id.herdr-lease"
+    child_lease_known=0
+    child_lease_returned=0
+    child_lease_holder=
+    child_lease_id=
+    child_lease_worktree=
+    if [ -e "$child_tx" ] || [ -L "$child_tx" ] \
+      || [ -n "$(meta_value "$child_meta" treehouse_lease_returned_id)" ]; then
+      teardown_treehouse_lease_record_prepare \
+        "$child_meta" "$child_id" "$child_backend" "$child_proj" "$child_wt" "$child_tx" || return 1
+      child_lease_known=1
+      child_lease_returned=$FM_TEARDOWN_TREEHOUSE_LEASE_ALREADY_RETURNED
+      child_lease_holder=$FM_TEARDOWN_TREEHOUSE_LEASE_HOLDER
+      child_lease_id=$FM_TEARDOWN_TREEHOUSE_LEASE_ID
+      child_lease_worktree=$FM_TEARDOWN_TREEHOUSE_LEASE_WORKTREE
+    fi
     if [ "$child_backend" = orca ]; then
       child_t=$(meta_value "$child_meta" terminal)
     else
@@ -3139,11 +3243,26 @@ cleanup_firstmate_home_children() {
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
+    elif [ "$child_lease_known" = 1 ]; then
+      if [ "$child_lease_returned" != 1 ]; then
+        [ -n "$child_wt" ] && [ -d "$child_wt" ] || return 1
+        validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
+        rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
+          "$child_wt/.opencode/plugins/fm-busy-state.js" \
+          "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
+        fm_treehouse_lease_transaction_return "$child_tx" \
+          "$child_id" "$child_lease_holder" "$child_proj" >/dev/null || return 1
+        teardown_treehouse_lease_record_prepare \
+          "$child_meta" "$child_id" "$child_backend" "$child_proj" "$child_wt" "$child_tx" || return 1
+        child_lease_returned=$FM_TEARDOWN_TREEHOUSE_LEASE_ALREADY_RETURNED
+        child_lease_holder=$FM_TEARDOWN_TREEHOUSE_LEASE_HOLDER
+        child_lease_id=$FM_TEARDOWN_TREEHOUSE_LEASE_ID
+        child_lease_worktree=$FM_TEARDOWN_TREEHOUSE_LEASE_WORKTREE
+        [ "$child_lease_returned" = 1 ] || return 1
+      fi
+      fm_treehouse_slot_owner_release \
+        "$child_lease_worktree" "$child_id" "$child_lease_holder"
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
-      # The same ownership determination as the parent's own slot: a child
-      # slot reassigned to another task is not this child's to kill, reset,
-      # or return, so only its records are cleaned up. The preflight above
-      # already named the reassignment on stderr under the same lock.
       child_owner_rc=0
       if fm_treehouse_pool_slot "$child_proj" "$child_wt"; then
         require_owned_worktree_slot_record "$child_id" "$child_wt" 2>/dev/null || child_owner_rc=$?
@@ -3181,6 +3300,20 @@ cleanup_firstmate_home_children() {
     fi
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
     status_retire_presentation_task "$sub_state" "$child_id" || return 1
+    if [ "$child_lease_known" = 1 ]; then
+      [ "$child_lease_returned" = 1 ] || return 1
+      teardown_mark_treehouse_lease_returned \
+        "$child_meta" "$sub_state" "$child_id" "$child_lease_holder" \
+        "$child_lease_id" "$child_lease_worktree" || return 1
+      if [ -e "$child_tx" ] || [ -L "$child_tx" ]; then
+        fm_treehouse_lease_transaction_snapshot "$child_tx" \
+          && [ "$FM_TREEHOUSE_LEASE_TX_PHASE" = returned ] \
+          && [ "$FM_TREEHOUSE_LEASE_TX_TASK" = "$child_id" ] \
+          && [ "$FM_TREEHOUSE_LEASE_TX_HOLDER" = "$child_lease_holder" ] \
+          && [ "$FM_TREEHOUSE_LEASE_TX_ID" = "$child_lease_id" ] || return 1
+        rm -f -- "$child_tx" || return 1
+      fi
+    fi
     fm_backlog_atomic_transition remove "$sub_state/$child_id.meta" "task record" "$sub_state" || return 1
     rm -f "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.progress" \
       "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.omp-ext.ts" \
@@ -3634,6 +3767,23 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.
 rm -rf "$STATE/$ID.inbox"
+if [ "$TREEHOUSE_LEASE_ALREADY_RETURNED" = 1 ] \
+  && { [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; }; then
+  teardown_mark_treehouse_lease_returned \
+    "$STATE/$ID.meta" "$STATE" "$ID" "$TREEHOUSE_LEASE_HOLDER" \
+    "$TREEHOUSE_LEASE_ID" "$TREEHOUSE_LEASE_WORKTREE" || exit 1
+  if [ -e "$STATE/$ID.herdr-lease" ] || [ -L "$STATE/$ID.herdr-lease" ]; then
+    fm_treehouse_lease_transaction_snapshot "$STATE/$ID.herdr-lease" \
+      && [ "$FM_TREEHOUSE_LEASE_TX_PHASE" = returned ] \
+      && [ "$FM_TREEHOUSE_LEASE_TX_TASK" = "$ID" ] \
+      && [ "$FM_TREEHOUSE_LEASE_TX_HOLDER" = "$TREEHOUSE_LEASE_HOLDER" ] \
+      && [ "$FM_TREEHOUSE_LEASE_TX_ID" = "$TREEHOUSE_LEASE_ID" ] || {
+      echo "error: structural Herdr Treehouse cleanup is not durably confirmed returned; retaining its lease record" >&2
+      exit 1
+    }
+    rm -f -- "$STATE/$ID.herdr-lease" || exit 1
+  fi
+fi
 # The record is gone, so the backlog must not still show this task in flight
 # when teardown reports success. Still under this task's meta lock, so a steer
 # racing the same id stays serialized exactly as it was before. A captain-held
@@ -3664,19 +3814,6 @@ else
     echo "error: $ID's endpoint and local copy are cleaned up, but its task record could not be removed ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1
   fi
-fi
-if [ -e "$STATE/$ID.herdr-lease" ] || [ -L "$STATE/$ID.herdr-lease" ]; then
-  [ "$TREEHOUSE_LEASE_TX_PRESENT" = 1 ] \
-    && [ "$TREEHOUSE_LEASE_ALREADY_RETURNED" = 1 ] \
-    && fm_treehouse_lease_transaction_snapshot "$STATE/$ID.herdr-lease" \
-    && [ "$FM_TREEHOUSE_LEASE_TX_PHASE" = returned ] \
-    && [ "$FM_TREEHOUSE_LEASE_TX_TASK" = "$ID" ] \
-    && [ "$FM_TREEHOUSE_LEASE_TX_HOLDER" = "$TREEHOUSE_LEASE_HOLDER" ] \
-    && [ "$FM_TREEHOUSE_LEASE_TX_ID" = "$TREEHOUSE_LEASE_ID" ] || {
-    echo "error: structural Herdr Treehouse cleanup is not durably confirmed returned; retaining its lease record" >&2
-    exit 1
-  }
-  rm -f -- "$STATE/$ID.herdr-lease"
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
