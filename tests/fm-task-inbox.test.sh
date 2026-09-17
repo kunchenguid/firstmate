@@ -692,6 +692,34 @@ test_watcher_dead_pane_ignores_stale_busy_state() {
   pass "watcher: dead-pane recovery overrides stale busy state"
 }
 
+
+# A kind=executor task reads no steering inbox and its agent exiting is the
+# expected terminal shape (bin/fm-executor-lib.sh), so the dead-pane escalation
+# above must never fire for it: executor_kind_skips_pane_supervision in
+# fm-watch.sh keeps the executor out of the ladder entirely.
+test_watcher_executor_dead_pane_never_escalates() {
+  local dir state out log pid rec
+  dir=$(setup_watch_case executor-dead)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  fm_write_meta "$state/t1.meta" "window=sess:fm-t1" "kind=executor" "harness=opencode"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  age_path "$rec"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_FAKE_TMUX_AGENT=zsh FM_TASK_INBOX_RING_MAX=99
+  pid=$!
+  sleep 4
+  kill -0 "$pid" 2>/dev/null \
+    || fail "the watcher exited on a dead executor pane:"$'\n'"$(cat "$out")"
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  [ ! -s "$log" ] || fail "a dead executor pane was typed into:"$'\n'"$(cat "$log")"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "a dead executor pane queued a stale or dead-agent wake:"$'\n'"$(cat "$state/.wake-queue")"
+  [ ! -e "$state/t1.inbox/.escalated" ] || fail "an executor entered the inbox escalation ladder"
+  [ ! -e "$state/t1.inbox/.ring-state" ] || fail "an executor entered the re-ring ladder"
+  pass "watcher: a dead executor pane never enters the dead-agent or inbox-ladder paths"
+}
+
 test_write_is_durable_and_exact
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
@@ -712,3 +740,4 @@ test_watcher_surfaces_unwritable_ladder
 test_watcher_escalates_once_after_budget
 test_watcher_dead_pane_escalates_once_without_ringing
 test_watcher_dead_pane_ignores_stale_busy_state
+test_watcher_executor_dead_pane_never_escalates
