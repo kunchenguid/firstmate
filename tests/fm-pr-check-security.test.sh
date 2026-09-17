@@ -449,7 +449,7 @@ test_invalid_entrypoints_have_zero_side_effects() {
     rc=$?
     set -e
     [ "$rc" -ne 0 ] || fail "merge entrypoint accepted invalid URL"
-    [ "$(cat "$dir/stderr")" = 'error: invalid PR merge request' ] || fail "merge invalid URL diagnostic was not fixed"
+    grep -qF 'error (caller): malformed PR URL' "$dir/stderr" || fail "merge invalid URL diagnostic was not a self-describing caller error"
     after=$(state_snapshot "$dir/home/state")
     [ "$after" = "$before" ] || fail "merge invalid URL changed prior state"
   done
