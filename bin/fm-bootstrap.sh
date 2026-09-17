@@ -1378,13 +1378,29 @@ startup_memory_budget_setup() {
 }
 
 repo_concurrency_bootstrap() {
-  local out
-  [ -e "$FM_HOME/.fm-project-firstmate" ] || [ -L "$FM_HOME/.fm-project-firstmate" ] \
-    || [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ] || return 0
+  local out registry_lock
   # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   # shellcheck source=bin/fm-repo-concurrency-lib.sh disable=SC1091
   . "$SCRIPT_DIR/fm-repo-concurrency-lib.sh"
+  if [ ! -e "$FM_HOME/.fm-project-firstmate" ] && [ ! -L "$FM_HOME/.fm-project-firstmate" ] \
+    && [ ! -e "$FM_HOME/.fm-secondmate-home" ] && [ ! -L "$FM_HOME/.fm-secondmate-home" ]; then
+    # shellcheck source=bin/fm-secondmate-registry-lib.sh disable=SC1091
+    . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+    registry_lock=$(secondmate_registry_lock_path "$STATE")
+    if ! fm_lock_acquire_wait "$registry_lock"; then
+      printf 'REPO_CONCURRENCY: could not lock the secondmate registry while auditing remote repository overlap\n'
+      return 0
+    fi
+    if fm_repo_scope_audit_remote_overlaps "$DATA/secondmates.md" "$PROJECTS"; then
+      :
+    else
+      printf 'REPO_CONCURRENCY: remote repository ownership needs review: %s\n' \
+        "${FM_REPO_SCOPE_LAST_ERROR:-overlap audit failed}"
+    fi
+    fm_lock_release "$registry_lock"
+    return 0
+  fi
   if out=$(fm_repo_scope_reconcile_task_home "$FM_HOME" 2>&1); then
     [ -z "$out" ] || printf '%s\n' "$out"
   else

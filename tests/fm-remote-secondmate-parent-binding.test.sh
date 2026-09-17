@@ -31,6 +31,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/remote-herdr-fixture.sh
 . "$(dirname "${BASH_SOURCE[0]}")/remote-herdr-fixture.sh"
+# shellcheck source=bin/fm-repo-concurrency-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd)/fm-repo-concurrency-lib.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
@@ -212,8 +214,11 @@ FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
 # --- the durable record itself: the fundamental part of the fix -------------
 assert_present "$REMOTE_HOME/.fm-secondmate-parent" \
   "real remote provisioning must write a durable parent record"
+REMOTE_ALPHA_IDENTITY=$(fm_repo_scope_canonical_origin_identity "$REMOTE_HOME/projects/alpha") \
+  || fail "real remote project identity could not be normalized"
 cmp -s "$REMOTE_HOME/.fm-secondmate-parent" <(
-  printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_host=remote-mac\n'
+  printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_role=root\nrepo_scope_snapshot=fm-remote-repo-scope.v1\nrepo_scope_count=1\nrepo_authority_count=0\nrepo_scope_identity=sha256:%s\nparent_host=remote-mac\n' \
+    "$REMOTE_ALPHA_IDENTITY"
 ) || fail "real remote provisioning must write the exact durable remote parent record"
 
 remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null \

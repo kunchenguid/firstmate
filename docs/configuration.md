@@ -312,6 +312,7 @@ A project Firstmate is the sole persistent authority for exactly one registered 
 Root may seed project Firstmates or root-level ordinary secondmates, while only a project Firstmate may seed ordinary child secondmates for the same repository.
 Ordinary secondmates may remain project-less or domain-scoped as before, but cannot seed any child homes.
 Root routes all work for the project Firstmate's repository through that authority, even when ordinary secondmate clone lists overlap.
+Creating a project Firstmate refuses overlap with registered remote ordinary routes; if the root cannot verify a remote route's local clone origin, it refuses until scope can be proven.
 
 The operator workflow starts the root Firstmate session in the Firstmate repository and asks in natural language: "Create and launch one persistent project Firstmate for buttertrip-mvp with a repository concurrency limit of 2."
 Root seeds it with `bin/fm-home-seed.sh <id> <home|-> --project-firstmate buttertrip-mvp --repo-concurrency 2` and launches it with `bin/fm-spawn.sh <id> --secondmate`.
@@ -328,6 +329,8 @@ The setting is not inherited into child homes because the project home owns the 
 
 Remote child routes beneath a project Firstmate are refused until distributed repository locking exists.
 The current seed workflow creates project Firstmates locally, while a project Firstmate's local children may share its local authority safely.
+Root remote ordinary provisioning snapshots the registered project-authority identities and the receiver's actual cloned repository identities into `.fm-secondmate-parent`.
+Remote project work fails closed when that snapshot is absent, malformed, outside the route's cloned scope, or overlaps a root project Firstmate; re-provision old projectful remote homes to refresh it.
 Child supervision and detailed outcomes stay in the immediate parent home, and the project Firstmate sends root only correlated decisions and concise milestones.
 
 ## FM_HOME

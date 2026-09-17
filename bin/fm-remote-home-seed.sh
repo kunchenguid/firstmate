@@ -94,6 +94,7 @@ fi
 NO_PROJECTS=0
 PROJECT_NAMES=()
 PROJECT_ORIGINS=()
+PROJECT_IDENTITIES=()
 for arg in "$@"; do
   if [ "$arg" = --no-projects ]; then
     NO_PROJECTS=1
@@ -134,6 +135,26 @@ if [ -e "$REG" ] || [ -L "$REG" ]; then
   fi
 fi
 
+AUTHORITY_IDENTITIES=$(fm_repo_scope_registered_authority_identities "$REG") \
+  || die "${FM_REPO_SCOPE_LAST_ERROR:-cannot read project Firstmate authority identities}"
+PROJECT_INDEX=0
+for project in "${PROJECT_NAMES[@]+"${PROJECT_NAMES[@]}"}"; do
+  origin=${PROJECT_ORIGINS[$PROJECT_INDEX]}
+  PROJECT_INDEX=$((PROJECT_INDEX + 1))
+  if [ -z "$origin" ] && [ -d "$PROJECTS/$project/.git" ]; then
+    origin=$(git -C "$PROJECTS/$project" remote get-url origin 2>/dev/null || true)
+  fi
+  [ -n "$origin" ] || die "project $project has no origin; pass $project=<origin-url> so the remote host can clone it"
+  identity=$(fm_repo_scope_canonical_origin_value_identity "$origin" "$PROJECTS") \
+    || die "cannot establish canonical repository identity for remote project $project"
+  while IFS= read -r authority_identity; do
+    [ -n "$authority_identity" ] || continue
+    [ "$identity" != "$authority_identity" ] \
+      || die "project $project is already owned by a project Firstmate; remote ordinary homes cannot overlap that authority"
+  done <<< "$AUTHORITY_IDENTITIES"
+  PROJECT_IDENTITIES+=("$identity")
+done
+
 mkdir -p "$DATA"
 BRIEF="$DATA/$ID/brief.md"
 BRIEF_CREATED=0
@@ -171,6 +192,7 @@ PROJECTS_CSV=
 PROJECT_INDEX=0
 for project in "${PROJECT_NAMES[@]+"${PROJECT_NAMES[@]}"}"; do
   ORIGIN=${PROJECT_ORIGINS[$PROJECT_INDEX]}
+  REPO_IDENTITY=${PROJECT_IDENTITIES[$PROJECT_INDEX]}
   PROJECT_INDEX=$((PROJECT_INDEX + 1))
   MODE_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$project")
   read -r MODE _ <<EOF
@@ -197,7 +219,8 @@ EOF
   ORIGIN_B64=$(printf '%s' "$ORIGIN" | encode)
   PROJECT_REG_B64=$(printf '%s' "$REGISTRY_LINE" | encode)
   MODE_B64=$(printf '%s' "$MODE" | encode)
-  printf 'project=%s|%s|%s|%s\n' "$NAME_B64" "$ORIGIN_B64" "$PROJECT_REG_B64" "$MODE_B64" >> "$TMP/project.records"
+  IDENTITY_B64=$(printf 'sha256:%s' "$REPO_IDENTITY" | encode)
+  printf 'project=%s|%s|%s|%s|%s\n' "$NAME_B64" "$ORIGIN_B64" "$PROJECT_REG_B64" "$MODE_B64" "$IDENTITY_B64" >> "$TMP/project.records"
   PROJECTS_CSV="${PROJECTS_CSV}${PROJECTS_CSV:+, }$project"
 done
 
@@ -213,6 +236,12 @@ done
   # nothing on the remote filesystem.
   printf 'parent_host_b64=%s\n' "$(printf '%s' "$HOST" | encode)"
   printf 'project_count=%s\n' "${#PROJECT_NAMES[@]}"
+  printf 'repo_scope_snapshot=fm-remote-repo-scope.v1\n'
+  printf 'repo_authority_count=%s\n' "$(printf '%s\n' "$AUTHORITY_IDENTITIES" | awk 'NF { count++ } END { print count + 0 }')"
+  while IFS= read -r authority_identity; do
+    [ -n "$authority_identity" ] || continue
+    printf 'repo_authority_identity=sha256:%s\n' "$authority_identity"
+  done <<< "$AUTHORITY_IDENTITIES"
   cat "$TMP/project.records"
 } > "$TMP/manifest"
 MANIFEST_BYTES=$(LC_ALL=C wc -c < "$TMP/manifest" | tr -d ' ')
