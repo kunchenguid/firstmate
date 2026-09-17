@@ -32,6 +32,11 @@
 #   (r) a --seat carrying a line break cannot rewrite the round meta
 #   (s) --round is held to a number outside dispatch too
 #   (t) a lane with no resolvable worktree does not starve the other PRs
+#   (u) a dispatch that fails after claiming its round leaves that round named
+#     for its PR, so the lane is not re-selected and wedged forever
+#   (v) finding-shaped content the scanner cannot key refuses the report
+#   (w) a UI-impacting round dispatches the Design/UX lens it then requires,
+#     and reconciles that lens's own verdict and findings
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -931,6 +936,185 @@ test_an_unstageable_lane_does_not_starve_the_others() {
   pass "an undispatchable lane claims a failed round instead of starving the others"
 }
 
+# Regression: dispatch claimed its round directory and only wrote the meta at
+# the very end, so a failure in between (a forge outage staging the prose, an
+# empty diff) left a round naming no PR. pending_loops then did not see the
+# lane as claimed, re-selected it on every fire, and dispatch died on the
+# directory it had left behind - the lane, and the shared watch, wedged.
+test_a_failed_dispatch_still_names_its_pr() {
+  local case_dir fakebin wt out rc
+  case_dir="$TMP_ROOT/failed-claim"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$fakebin"
+  read -r base head wt < <(make_repo "$case_dir/wt")
+  add_fake_gh "$fakebin"
+  add_fake_gh_axi "$fakebin"
+  export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
+  export FAKE_GH_title='t' FAKE_GH_body='b'
+  : > "$case_dir/state/gh-axi.log"
+  fm_write_meta "$case_dir/state/task-a.meta" "window=fm-task-a" "worktree=$wt"
+  printf 'done: PR %s\n' "$PR_URL" > "$case_dir/state/task-a.status"
+  # A PR whose forge base IS its head: the empty-diff refusal lands AFTER the
+  # round directory is claimed, which is the window this covers.
+  export FAKE_GH_baseRefOid="$head"
+  set +e
+  run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --wt "$wt" --head "$head" \
+    >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+  export FAKE_GH_baseRefOid="$base"
+  [ "$rc" -ne 0 ] || fail "failed-claim: an empty diff was dispatched"
+  assert_grep 'empty diff' "$case_dir/stderr" \
+    "failed-claim: the dispatch failed before it claimed its round"
+  assert_grep "url=$PR_URL" "$case_dir/state/task-a.adversarial-review/round-1/meta" \
+    "failed-claim: the failed round names no PR"
+  assert_grep 'status=failed' "$case_dir/state/task-a.adversarial-review/round-1/meta" \
+    "failed-claim: the failed round is not marked failed"
+  # The lane is claimed, so it is no longer pending and no fire re-selects it.
+  out=$(run_adv "$case_dir/state" "$fakebin" condition 2>/dev/null; printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=1" \
+    "failed-claim: the lane is still pending after its round was claimed failed"
+  # --reclaim is what clears it once the cause is fixed.
+  run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --wt "$wt" --head "$head" --reclaim >/dev/null \
+    || fail "failed-claim: --reclaim could not re-dispatch the fixed lane"
+  assert_present "$case_dir/state/task-a.adversarial-review/round-1/diff.patch" \
+    "failed-claim: the reclaimed round staged no evidence"
+  pass "a dispatch that fails after claiming its round still names its PR"
+}
+
+# Regression: content the strict rules did not consume was dropped in silence,
+# so a BLOCKER written in an unkeyable shape never reached reconciliation while
+# a sibling well-formed finding kept the degradation guard from firing.
+test_unkeyable_finding_shapes_refuse_the_report() {
+  local case_dir fakebin wt shape
+  case_dir="$TMP_ROOT/unkeyable"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$fakebin"
+  read -r base head wt < <(make_repo "$case_dir/wt")
+  add_fake_gh "$fakebin"
+  add_fake_gh_axi "$fakebin"
+  export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
+  export FAKE_GH_title='t' FAKE_GH_body='b'
+  : > "$case_dir/state/gh-axi.log"
+  run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --tier T2 --wt "$wt" --base "$base" --head "$head" \
+    --seat frontier=fable-5.1 --seat deep=opus-5 >/dev/null \
+    || fail "unkeyable: dispatch failed"
+  # Each of these carries a real BLOCKER the reconciler could not key.
+  local n=0
+  for shape in \
+'  - id: a1
+    severity: MAJOR
+  - id:
+    severity: BLOCKER
+' \
+'  - id: a1
+    severity: MAJOR
+  - severity: BLOCKER
+    id: b2
+' \
+'  - id: a1
+    severity: MAJOR
+    id: b2
+    severity: BLOCKER
+' \
+'  - id: a1
+    severity: MAJOR
+  - id: b2
+    severity: SHOWSTOPPER
+'; do
+    n=$((n + 1))
+    write_lens_report "$case_dir/shape-$n.md" RED "$shape"
+    if run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+      --round 1 --lens frontier --report "$case_dir/shape-$n.md" \
+      >/dev/null 2>&1; then
+      fail "unkeyable: shape $n was recorded with a BLOCKER the reconciler cannot key"
+    fi
+    assert_absent "$case_dir/state/task-a.adversarial-review/round-1/lens-frontier.report" \
+      "unkeyable: shape $n stored a report the reconciler cannot fully read"
+  done
+  pass "finding-shaped content the scanner cannot key refuses the report"
+}
+
+# Regression: reconcile hard-RED'd a UI-impacting round for the absence of the
+# Design/UX lens, but dispatch never staged a prompt or a seat for it - the one
+# lens whose absence is red was the one lens the loop did not ask anybody to
+# run. Its own verdict and findings were never reconciled either.
+test_ui_round_dispatches_and_reconciles_the_design_lens() {
+  local case_dir fakebin wt out
+  case_dir="$TMP_ROOT/ui-lens"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$fakebin" "$case_dir/wt"
+  wt="$case_dir/wt"
+  git -C "$wt" init -q
+  git -C "$wt" commit -q --allow-empty -m init
+  printf '.a { color: red }\n' > "$wt/app.css"
+  git -C "$wt" add -A
+  git -C "$wt" commit -q -m 'restyle the panel'
+  base=$(git -C "$wt" rev-parse 'HEAD~1')
+  head=$(git -C "$wt" rev-parse HEAD)
+  add_fake_gh "$fakebin"
+  add_fake_gh_axi "$fakebin"
+  export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
+  export FAKE_GH_title='t' FAKE_GH_body='b'
+  : > "$case_dir/state/gh-axi.log"
+  # Exactly what the auto-dispatched action passes: no tier, no --ui-impacting.
+  run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --wt "$wt" --base "$base" --head "$head" \
+    --seat frontier=fable-5.1 --seat deep=opus-5 \
+    --seat advisory:design-ux=astra >/dev/null \
+    || fail "ui-lens: dispatch failed"
+  local dir="$case_dir/state/task-a.adversarial-review/round-1"
+  assert_present "$dir/prompt-advisory:design-ux.md" \
+    "ui-lens: the required Design/UX lens got no staged prompt"
+  assert_grep 'advisory:design-ux' "$dir/comment.md" \
+    "ui-lens: the round comment does not name the Design/UX lens"
+
+  write_lens_report "$case_dir/clean.md" GREEN ''
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens frontier --report "$case_dir/clean.md" >/dev/null \
+    || fail "ui-lens: frontier record failed"
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens deep --report "$case_dir/clean.md" >/dev/null \
+    || fail "ui-lens: deep record failed"
+  # Both required lenses are clean, but the Design/UX lens has not reported.
+  out=$(run_adv "$case_dir/state" "$fakebin" reconcile task-a --round 1) \
+    || fail "ui-lens: reconcile failed to post"
+  assert_contains "$out" "round-1 RED" \
+    "ui-lens: a UI round reconciled GREEN without its Design/UX lens"
+
+  # The advisory lens's own BLOCKER carries full reconciliation weight.
+  write_lens_report "$case_dir/design.md" RED '  - id: d1
+    severity: BLOCKER
+    claim: contrast
+    evidence: app.css:1
+    problem: unreadable
+    fix: darken it
+'
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens advisory:design-ux --report "$case_dir/design.md" >/dev/null \
+    || fail "ui-lens: design-ux record failed"
+  out=$(run_adv "$case_dir/state" "$fakebin" reconcile task-a --round 1) \
+    || fail "ui-lens: the second reconcile failed to post"
+  assert_contains "$out" "round-1 RED" \
+    "ui-lens: an unresolved Design/UX BLOCKER reconciled GREEN"
+  assert_grep 'advisory:design-ux:d1' "$dir/reconciliation.md" \
+    "ui-lens: the Design/UX lens's own finding was never reconciled"
+  assert_absent "$case_dir/state/task-a.adversarial-review-green" \
+    "ui-lens: an unresolved Design/UX BLOCKER wrote a loop-green marker"
+
+  run_adv "$case_dir/state" "$fakebin" resolve task-a --round 1 \
+    --finding advisory:design-ux:d1 --disposition fixed_verified >/dev/null \
+    || fail "ui-lens: resolving the Design/UX BLOCKER failed"
+  out=$(run_adv "$case_dir/state" "$fakebin" reconcile task-a --round 1) \
+    || fail "ui-lens: the third reconcile failed to post"
+  assert_contains "$out" "round-1 GREEN" \
+    "ui-lens: a fully reconciled UI round did not reach GREEN"
+  pass "a UI-impacting round dispatches and reconciles its Design/UX lens"
+}
+
 test_condition_needs_a_pr_open_line
 test_watch_fires_on_pr_open_line
 test_dispatch_stages_evidence_and_posts
@@ -950,3 +1134,6 @@ test_unreadable_finding_fields_are_refused
 test_seat_cannot_rewrite_the_round_meta
 test_round_is_validated_outside_dispatch
 test_an_unstageable_lane_does_not_starve_the_others
+test_a_failed_dispatch_still_names_its_pr
+test_unkeyable_finding_shapes_refuse_the_report
+test_ui_round_dispatches_and_reconciles_the_design_lens

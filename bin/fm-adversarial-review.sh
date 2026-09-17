@@ -15,6 +15,12 @@
 # present for UI-impacting T2/T3 work. Anything else is RED and writes no
 # marker.
 #
+# A UI-impacting round dispatches the Design/UX lens the same way it dispatches
+# the tier's own slots - its own prompt, its own seat - and reconciles it the
+# same way too, verdict and findings included. Advisory means it is not one of
+# the tier's slots and never stands in for one; it does not mean the loop can
+# demand a lens it never asked anybody to run.
+#
 # The tier is not the caller's to lower, and neither is the diff it is derived
 # from. dispatch reads the PR's own base from the forge and classifies the
 # reviewed change from the staged file list and diff over it - security- or
@@ -91,6 +97,8 @@ BODY_BEGIN='<!-- fm-adversarial-review:start -->'
 BODY_END='<!-- fm-adversarial-review:end -->'
 FM_ADV_NL='
 '
+FM_ADV_ROUND_SCAN_MAX=64
+FM_ADV_UI_LENS='advisory:design-ux'
 
 usage() {
   sed -n '2,/^set -eu/p' "$SELF" | sed 's/^# \{0,1\}//'
@@ -490,8 +498,11 @@ cmd_dispatch() {
   fi
   dir=$(round_dir "$id" "$round")
   if [ -e "$dir" ] || [ -L "$dir" ]; then
+    claimed_url=$(round_meta_get "$dir" url)
     if [ "$reclaim" = 1 ] && [ "$(round_meta_get "$dir" status)" = failed ]; then
       rm -rf -- "$dir" || fail "cannot reclaim round $round" 1
+    elif [ -n "$claimed_url" ] && [ "$claimed_url" != "$url" ]; then
+      fail "round $round of $id belongs to $claimed_url, not $url; name a free round for this PR" 1
     else
       fail "round $round already dispatched for $id" 1
     fi
@@ -500,6 +511,17 @@ cmd_dispatch() {
   # the same round fails here before staging or posting anything.
   mkdir -p "$(review_dir "$id")" || fail "cannot create review state" 1
   mkdir "$dir" || fail "round $round already dispatched for $id" 1
+  # Identify the round the instant it is claimed. Everything below can fail -
+  # a worktree that is not a checkout, an empty diff, a forge outage staging
+  # the prose - and the EXIT trap then records status=failed. Without the url=
+  # here that failed round names no PR, so pending_loops does not recognise the
+  # lane as claimed, re-selects it on every fire, and dispatch dies on the
+  # directory it left behind: a lane wedged forever and, with it, the shared
+  # watch. The full meta below rewrites this file, so this is a claim, not a
+  # duplicate.
+  printf 'url=%s\nround=%s\n' "$url" "$round" > "$dir/meta" \
+    || fail "cannot claim round $round" 1
+  chmod 0600 "$dir/meta" || fail "cannot protect the round claim" 1
   status='failed'
   round_cleanup() {
     if [ "$status" = 'failed' ]; then
@@ -570,12 +592,22 @@ CLASSIFY
   else
     fail "cannot stage PR prose (gh and gh-axi both failed)" 1
   fi
+  # The Design/UX lens is advisory: it never counts toward the tier's slot
+  # requirement, but the intent makes its absence red, so a UI-impacting round
+  # has to actually dispatch it. It is staged with its own prompt and seat
+  # alongside the required slots rather than being a lens the reconciler
+  # demands and the dispatcher never asked anybody to run.
+  advisory_slots=
+  if [ "$ui" = 1 ] && [ "$tier" != T0 ]; then
+    advisory_slots=$FM_ADV_UI_LENS
+  fi
   {
     printf 'url=%s\ntier=%s\nrequired_tier=%s\nboundary=merge\n' "$url" "$tier" "$required_tier"
     printf 'base=%s\nbase_source=%s\nhead=%s\nwt=%s\ntree=%s\ntree_head=%s\n' \
       "$base" "$base_source" "$head" "$wt" "$wt" "$tree_head"
     printf 'round=%s\ncap=%s\nui_impacting=%s\nprose_source=%s\n' "$round" "$cap" "$ui" "$prose_source"
     printf 'slots=%s\n' "$(printf '%s' "$slots" | paste -sd' ' -)"
+    printf 'advisory_slots=%s\n' "$advisory_slots"
     printf 'seats=%s\n' "$seats_args"
     [ "$tier" != T0 ] || printf 'waiver_class=%s\nwaiver_reason=%s\nwaiver_hold=%s\n' \
       "$waiver_class" "$waiver_reason" "$waiver_hold"
@@ -585,12 +617,17 @@ CLASSIFY
   files_count=$(grep -c . "$dir/files.txt" 2>/dev/null || true)
   slot_lines=
   # shellcheck disable=SC2086
-  for slot in $slots; do
+  for slot in $slots $advisory_slots; do
     class=$(slot_class "$slot")
     seat=$(slot_seat "$seats_args" "$slot")
     [ -n "$seat" ] || seat=unassigned
-    slot_lines="$slot_lines- $slot (class $class, seat $seat)
+    if [ "$class" = advisory ]; then
+      slot_lines="$slot_lines- $slot (class $class, seat $seat, advisory: does not count toward the tier)
 "
+    else
+      slot_lines="$slot_lines- $slot (class $class, seat $seat)
+"
+    fi
     write_prompt "$dir" "$slot" "$class" "$seat" "$tier" "$url" "$base" "$head" "$wt" "$tree_head" "$(cat "$dir/files.txt")"
   done
   if [ "$tier" = T0 ]; then
@@ -642,9 +679,17 @@ CLASSIFY
 # position, because the matching regexes tolerate spacing the field numbering
 # does not: `severity:BLOCKER` put the severity in $1, so a BLOCKER parsed to
 # an empty severity, passed record-lens, and then missed reconciliation's
-# BLOCKER|MAJOR branch entirely. An id is rejected outright when it is empty or
-# carries a colon, because the colon is what separates id from severity in the
-# line below and in the resolution keys built from it.
+# BLOCKER|MAJOR branch entirely. An id carrying a colon is rejected outright,
+# because the colon is what separates id from severity in the line below and in
+# the resolution keys built from it.
+#
+# Anything else that looks like a finding field and does NOT parse is refused
+# rather than skipped. `- id:` with nothing after it, `- severity: BLOCKER`
+# written before its id, a bare `id: f1` with no dash, a severity outside the
+# four levels: each used to be dropped in silence, and a BLOCKER dropped in
+# silence is a BLOCKER the reconciler never sees and never counts. A report the
+# scanner cannot fully key fails here, at record-lens, instead of reconciling
+# around the part of itself it could not read.
 lens_report_scan() {
   awk '
     /^[[:space:]]*verdict:[[:space:]]*(GREEN|RED)[[:space:]]*$/ {
@@ -663,8 +708,8 @@ lens_report_scan() {
       sub(/^[[:space:]]*-[[:space:]]*id:[[:space:]]*/, "", value)
       sub(/[[:space:]]+$/, "", value)
       gsub(/[[:space:]]+/, "-", value)
-      if (value == "" || index(value, ":") > 0) {
-        printf "MALFORMED unusable-id %s\n", (value == "" ? "(empty)" : value)
+      if (index(value, ":") > 0) {
+        printf "MALFORMED unusable-id %s\n", value
         bad = 1
         current = ""
         next
@@ -676,13 +721,13 @@ lens_report_scan() {
       value = $0
       sub(/^[[:space:]]*severity:[[:space:]]*/, "", value)
       sub(/[[:space:]]+$/, "", value)
-      if (value == "") {
-        printf "MALFORMED unusable-severity %s\n", (current == "" ? "(no-id)" : current)
-        bad = 1
-        current = ""
-        next
-      }
       if (current != "") { printf "FINDING %s:%s\n", current, value; current = "" }
+      next
+    }
+    /^[[:space:]]*-?[[:space:]]*(id|severity)[[:space:]]*:/ {
+      printf "MALFORMED unkeyable-field %s\n", NR
+      bad = 1
+      current = ""
       next
     }
     END {
@@ -721,13 +766,14 @@ cmd_record_lens() {
   [ -f "$dir/meta" ] || fail "round $round was never dispatched for $id" 1
   [ "$(round_meta_get "$dir" status)" != failed ] || fail "round $round failed to dispatch; reclaim it first" 1
   slots=$(round_meta_get "$dir" slots)
+  advisory_slots=$(round_meta_get "$dir" advisory_slots)
   slot_ok=0
   # shellcheck disable=SC2086
-  for slot in $slots; do
+  for slot in $slots $advisory_slots; do
     if [ "$slot" = "$lens" ]; then slot_ok=1; fi
   done
-  if [ "$lens" = advisory:design-ux ]; then slot_ok=1; fi
-  [ "$slot_ok" = 1 ] || fail "lens $lens is not a required slot this round" 2
+  if [ "$lens" = "$FM_ADV_UI_LENS" ]; then slot_ok=1; fi
+  [ "$slot_ok" = 1 ] || fail "lens $lens is not a slot this round" 2
   [ -f "$report" ] || fail "report file is missing" 2
   dest=$(lens_file "$dir" "$lens")
   [ ! -e "$dest" ] || fail "lens $lens is already recorded this round" 1
@@ -879,8 +925,12 @@ cmd_reconcile() {
   recorded_head=$(round_meta_get "$dir" head)
   ui=$(round_meta_get "$dir" ui_impacting)
   slots=$(round_meta_get "$dir" slots)
+  advisory_slots=$(round_meta_get "$dir" advisory_slots)
   seats=$(round_meta_get "$dir" seats)
   lane_model=$(meta_get "$id" model 2>/dev/null || true)
+  if [ -z "$advisory_slots" ] && [ "$ui" = 1 ]; then
+    advisory_slots=$FM_ADV_UI_LENS
+  fi
   fm_pr_url_parse "$url" || fail "round meta has an invalid PR URL" 1
   url=$FM_PR_URL
   owner=$FM_PR_OWNER
@@ -904,15 +954,21 @@ cmd_reconcile() {
   elif [ -n "$recorded_head" ] && [ "$live_head" != "$recorded_head" ]; then
     note_red "head changed: reviewed $recorded_head, PR is at $live_head"
   fi
-  if [ "$ui" = 1 ] && [ ! -f "$(lens_file "$dir" advisory:design-ux)" ]; then
-    note_red "UI-impacting round without the advisory Design/UX lens"
-  fi
   lens_table=
   finding_rows=
   seen_keys=' '
   resolution_files=$(resolution_files_through "$id" "$url" "$round")
+  # The advisory lens is reconciled exactly like a required one - its seat, its
+  # verdict, and every MAJOR/BLOCKER it raises all carry full weight, and its
+  # absence on a UI-impacting round is red per the intent. What "advisory"
+  # means here is only that it is not one of the tier's slots, so it never
+  # stands in for frontier, deep, or standard.
   # shellcheck disable=SC2086
-  for slot in $slots; do
+  for slot in $slots $advisory_slots; do
+    case " $advisory_slots " in
+      *" $slot "*) kind=advisory ;;
+      *) kind=REQUIRED ;;
+    esac
     class=$(slot_class "$slot")
     seat=$(recorded_slot_seat "$dir/seats.recorded" "$slot")
     [ -n "$seat" ] || seat=$(slot_seat "$seats" "$slot")
@@ -927,13 +983,17 @@ cmd_reconcile() {
     fi
     report=$(lens_file "$dir" "$slot")
     if [ ! -f "$report" ]; then
-      note_red "missing REQUIRED lens $slot"
-      lens_table="$lens_table- $slot: MISSING (REQUIRED, seat ${seat:-unassigned})
+      if [ "$kind" = advisory ]; then
+        note_red "missing advisory lens $slot on a UI-impacting round"
+      else
+        note_red "missing REQUIRED lens $slot"
+      fi
+      lens_table="$lens_table- $slot: MISSING ($kind, seat ${seat:-unassigned})
 "
       continue
     fi
     verdict=$(lens_report_scan "$report" | awk '$1=="VERDICT"{print $2}')
-    lens_table="$lens_table- $slot: $verdict (seat ${seat:-unassigned})
+    lens_table="$lens_table- $slot: $verdict ($kind, seat ${seat:-unassigned})
 "
     if [ "$verdict" != GREEN ] && [ "$verdict" != RED ]; then
       note_red "lens $slot has no readable verdict"
@@ -1106,24 +1166,37 @@ pending_loops() {
   shopt -u nullglob
 }
 
-# Claim round 1 as failed for a PR the action could not dispatch. Dispatch's own
-# failures all happen before it creates the round directory, so without this the
-# same unstageable entry is re-selected on every fire, fails again, and keeps
-# the watch from ever re-arming. A failed round is reclaimable with --reclaim
-# once the cause is fixed, and no marker is written, so the merge still refuses.
+# Claim a round as failed for a PR the action could not dispatch, so the entry
+# stops being pending and the shared watch is not starved by one lane nobody
+# can stage. Dispatch that got as far as creating its round directory has
+# already claimed it under this URL, and this is then a no-op. Dispatch that
+# failed earlier - or that collided with a round another PR of the same task
+# owns - gets the first free index instead, so a second PR on one task id is
+# recorded rather than retried forever. A failed round is reclaimable with
+# --reclaim once the cause is fixed, and no marker is written, so the merge
+# still refuses.
 mark_dispatch_failed() {
-  local id=$1 url=$2 reason=$3 dir
+  local id=$1 url=$2 reason=$3 dir n=1
   meta_value_safe "$url" && meta_value_safe "$reason" || return 1
-  dir=$(round_dir "$id" 1)
   mkdir -p "$(review_dir "$id")" 2>/dev/null || return 1
-  if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
-    mkdir "$dir" 2>/dev/null || return 1
-  fi
-  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
-  [ ! -f "$dir/meta" ] || return 0
-  printf 'url=%s\nboundary=merge\nround=1\ndispatch_error=%s\nstatus=failed\n' \
-    "$url" "$reason" > "$dir/meta" || return 1
-  chmod 0600 "$dir/meta" || return 1
+  while [ "$n" -le "$FM_ADV_ROUND_SCAN_MAX" ]; do
+    dir=$(round_dir "$id" "$n")
+    if [ -f "$dir/meta" ]; then
+      [ "$(round_meta_get "$dir" url)" != "$url" ] || return 0
+      n=$((n + 1))
+      continue
+    fi
+    if [ -e "$dir" ] || [ -L "$dir" ]; then
+      n=$((n + 1))
+      continue
+    fi
+    mkdir "$dir" 2>/dev/null || { n=$((n + 1)); continue; }
+    printf 'url=%s\nboundary=merge\nround=%s\ndispatch_error=%s\nstatus=failed\n' \
+      "$url" "$n" "$reason" > "$dir/meta" || return 1
+    chmod 0600 "$dir/meta" || return 1
+    return 0
+  done
+  return 1
 }
 
 cmd_condition() {
