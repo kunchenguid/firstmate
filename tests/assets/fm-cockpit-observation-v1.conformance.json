@@ -1,0 +1,420 @@
+{
+  "schema": "fm-cockpit-observation-conformance.v1",
+  "contract": "fm-cockpit-observation.v1",
+  "vectors": [
+    {
+      "id": "valid-complete",
+      "class": "valid",
+      "schema_valid": true,
+      "contract_valid": true,
+      "document": {
+        "schema": "fm-cockpit-observation.v1",
+        "data_class": "internal_non_sensitive",
+        "observed_at": "2026-09-04T20:00:00Z",
+        "observed_epoch": 1788552000,
+        "state": "active_child_work",
+        "valid": true,
+        "invalidity": null,
+        "counts": {
+          "active_children": 1,
+          "decisions_open": 1,
+          "holds": 1,
+          "queued": 1,
+          "landed": 1,
+          "endpoints": 1
+        }
+      }
+    },
+    {
+      "id": "valid-partial",
+      "class": "valid",
+      "schema_valid": true,
+      "contract_valid": true,
+      "document": {
+        "schema": "fm-cockpit-observation.v1",
+        "data_class": "internal_non_sensitive",
+        "observed_at": "2026-09-04T20:00:00Z",
+        "observed_epoch": 1788552000,
+        "state": "unknown",
+        "valid": false,
+        "invalidity": "child_current_unavailable",
+        "counts": {
+          "active_children": 0,
+          "decisions_open": 0,
+          "holds": 0,
+          "queued": 0,
+          "landed": 0,
+          "endpoints": 0
+        }
+      }
+    },
+    {
+      "id": "timestamp-epoch-mismatch",
+      "class": "timestamp_epoch_identity",
+      "schema_valid": true,
+      "contract_valid": false,
+      "document": {
+        "schema": "fm-cockpit-observation.v1",
+        "data_class": "internal_non_sensitive",
+        "observed_at": "2026-09-04T20:00:00Z",
+        "observed_epoch": 1788552001,
+        "state": "no_active_work",
+        "valid": true,
+        "invalidity": null,
+        "counts": {
+          "active_children": 0,
+          "decisions_open": 0,
+          "holds": 0,
+          "queued": 0,
+          "landed": 0,
+          "endpoints": 0
+        }
+      }
+    },
+    {
+      "id": "timestamp-impossible-calendar-date",
+      "class": "canonical_timestamp",
+      "schema_valid": true,
+      "contract_valid": false,
+      "document": {
+        "schema": "fm-cockpit-observation.v1",
+        "data_class": "internal_non_sensitive",
+        "observed_at": "2026-02-30T00:00:00Z",
+        "observed_epoch": 1772409600,
+        "state": "no_active_work",
+        "valid": true,
+        "invalidity": null,
+        "counts": {
+          "active_children": 0,
+          "decisions_open": 0,
+          "holds": 0,
+          "queued": 0,
+          "landed": 0,
+          "endpoints": 0
+        }
+      }
+    },
+    {
+      "id": "timestamp-offset-form",
+      "class": "canonical_timestamp",
+      "schema_valid": false,
+      "contract_valid": false,
+      "document": {
+        "schema": "fm-cockpit-observation.v1",
+        "data_class": "internal_non_sensitive",
+        "observed_at": "2026-09-04T22:00:00+02:00",
+        "observed_epoch": 1788552000,
+        "state": "no_active_work",
+        "valid": true,
+        "invalidity": null,
+        "counts": {
+          "active_children": 0,
+          "decisions_open": 0,
+          "holds": 0,
+          "queued": 0,
+          "landed": 0,
+          "endpoints": 0
+        }
+      }
+    },
+    {
+      "id": "timestamp-subsecond-form",
+      "class": "canonical_timestamp",
+      "schema_valid": false,
+      "contract_valid": false,
+      "document": {
+        "schema": "fm-cockpit-observation.v1",
+        "data_class": "internal_non_sensitive",
+        "observed_at": "2026-09-04T20:00:00.000Z",
+        "observed_epoch": 1788552000,
+        "state": "no_active_work",
+        "valid": true,
+        "invalidity": null,
+        "counts": {
+          "active_children": 0,
+          "decisions_open": 0,
+          "holds": 0,
+          "queued": 0,
+          "landed": 0,
+          "endpoints": 0
+        }
+      }
+    },
+    {
+      "id": "valid-true-with-invalidity",
+      "class": "validity_coupling",
+      "schema_valid": false,
+      "contract_valid": false,
+      "document": {
+        "schema": "fm-cockpit-observation.v1",
+        "data_class": "internal_non_sensitive",
+        "observed_at": "2026-09-04T20:00:00Z",
+        "observed_epoch": 1788552000,
+        "state": "unknown",
+        "valid": true,
+        "invalidity": "missing_backlog",
+        "counts": {
+          "active_children": 0,
+          "decisions_open": 0,
+          "holds": 0,
+          "queued": 0,
+          "landed": 0,
+          "endpoints": 0
+        }
+      }
+    },
+    {
+      "id": "valid-false-with-null-invalidity",
+      "class": "validity_coupling",
+      "schema_valid": false,
+      "contract_valid": false,
+      "document": {
+        "schema": "fm-cockpit-observation.v1",
+        "data_class": "internal_non_sensitive",
+        "observed_at": "2026-09-04T20:00:00Z",
+        "observed_epoch": 1788552000,
+        "state": "unknown",
+        "valid": false,
+        "invalidity": null,
+        "counts": {
+          "active_children": 0,
+          "decisions_open": 0,
+          "holds": 0,
+          "queued": 0,
+          "landed": 0,
+          "endpoints": 0
+        }
+      }
+    },
+    {
+      "id": "root-unknown-field",
+      "class": "exact_keys",
+      "schema_valid": false,
+      "contract_valid": false,
+      "document": {
+        "schema": "fm-cockpit-observation.v1",
+        "data_class": "internal_non_sensitive",
+        "observed_at": "2026-09-04T20:00:00Z",
+        "observed_epoch": 1788552000,
+        "state": "no_active_work",
+        "valid": true,
+        "invalidity": null,
+        "raw": "private detail",
+        "counts": {
+          "active_children": 0,
+          "decisions_open": 0,
+          "holds": 0,
+          "queued": 0,
+          "landed": 0,
+          "endpoints": 0
+        }
+      }
+    },
+    {
+      "id": "root-missing-field",
+      "class": "exact_keys",
+      "schema_valid": false,
+      "contract_valid": false,
+      "document": {
+        "schema": "fm-cockpit-observation.v1",
+        "data_class": "internal_non_sensitive",
+        "observed_at": "2026-09-04T20:00:00Z",
+        "observed_epoch": 1788552000,
+        "valid": true,
+        "invalidity": null,
+        "counts": {
+          "active_children": 0,
+          "decisions_open": 0,
+          "holds": 0,
+          "queued": 0,
+          "landed": 0,
+          "endpoints": 0
+        }
+      }
+    },
+    {
+      "id": "counts-unknown-field",
+      "class": "exact_keys",
+      "schema_valid": false,
+      "contract_valid": false,
+      "document": {
+        "schema": "fm-cockpit-observation.v1",
+        "data_class": "internal_non_sensitive",
+        "observed_at": "2026-09-04T20:00:00Z",
+        "observed_epoch": 1788552000,
+        "state": "no_active_work",
+        "valid": true,
+        "invalidity": null,
+        "counts": {
+          "active_children": 0,
+          "decisions_open": 0,
+          "holds": 0,
+          "queued": 0,
+          "landed": 0,
+          "endpoints": 0,
+          "private_count": 1
+        }
+      }
+    },
+    {
+      "id": "counts-missing-field",
+      "class": "exact_keys",
+      "schema_valid": false,
+      "contract_valid": false,
+      "document": {
+        "schema": "fm-cockpit-observation.v1",
+        "data_class": "internal_non_sensitive",
+        "observed_at": "2026-09-04T20:00:00Z",
+        "observed_epoch": 1788552000,
+        "state": "no_active_work",
+        "valid": true,
+        "invalidity": null,
+        "counts": {
+          "active_children": 0,
+          "decisions_open": 0,
+          "holds": 0,
+          "queued": 0,
+          "landed": 0
+        }
+      }
+    },
+    {
+      "id": "schema-wrong-constant",
+      "class": "enums",
+      "schema_valid": false,
+      "contract_valid": false,
+      "document": {
+        "schema": "fm-cockpit-observation.v2",
+        "data_class": "internal_non_sensitive",
+        "observed_at": "2026-09-04T20:00:00Z",
+        "observed_epoch": 1788552000,
+        "state": "no_active_work",
+        "valid": true,
+        "invalidity": null,
+        "counts": {
+          "active_children": 0,
+          "decisions_open": 0,
+          "holds": 0,
+          "queued": 0,
+          "landed": 0,
+          "endpoints": 0
+        }
+      }
+    },
+    {
+      "id": "data-class-wrong-constant",
+      "class": "enums",
+      "schema_valid": false,
+      "contract_valid": false,
+      "document": {
+        "schema": "fm-cockpit-observation.v1",
+        "data_class": "sensitive",
+        "observed_at": "2026-09-04T20:00:00Z",
+        "observed_epoch": 1788552000,
+        "state": "no_active_work",
+        "valid": true,
+        "invalidity": null,
+        "counts": {
+          "active_children": 0,
+          "decisions_open": 0,
+          "holds": 0,
+          "queued": 0,
+          "landed": 0,
+          "endpoints": 0
+        }
+      }
+    },
+    {
+      "id": "state-unknown-enum",
+      "class": "enums",
+      "schema_valid": false,
+      "contract_valid": false,
+      "document": {
+        "schema": "fm-cockpit-observation.v1",
+        "data_class": "internal_non_sensitive",
+        "observed_at": "2026-09-04T20:00:00Z",
+        "observed_epoch": 1788552000,
+        "state": "idle",
+        "valid": true,
+        "invalidity": null,
+        "counts": {
+          "active_children": 0,
+          "decisions_open": 0,
+          "holds": 0,
+          "queued": 0,
+          "landed": 0,
+          "endpoints": 0
+        }
+      }
+    },
+    {
+      "id": "invalidity-unknown-enum",
+      "class": "enums",
+      "schema_valid": false,
+      "contract_valid": false,
+      "document": {
+        "schema": "fm-cockpit-observation.v1",
+        "data_class": "internal_non_sensitive",
+        "observed_at": "2026-09-04T20:00:00Z",
+        "observed_epoch": 1788552000,
+        "state": "unknown",
+        "valid": false,
+        "invalidity": "offline",
+        "counts": {
+          "active_children": 0,
+          "decisions_open": 0,
+          "holds": 0,
+          "queued": 0,
+          "landed": 0,
+          "endpoints": 0
+        }
+      }
+    },
+    {
+      "id": "count-negative",
+      "class": "counts",
+      "schema_valid": false,
+      "contract_valid": false,
+      "document": {
+        "schema": "fm-cockpit-observation.v1",
+        "data_class": "internal_non_sensitive",
+        "observed_at": "2026-09-04T20:00:00Z",
+        "observed_epoch": 1788552000,
+        "state": "no_active_work",
+        "valid": true,
+        "invalidity": null,
+        "counts": {
+          "active_children": -1,
+          "decisions_open": 0,
+          "holds": 0,
+          "queued": 0,
+          "landed": 0,
+          "endpoints": 0
+        }
+      }
+    },
+    {
+      "id": "count-fractional",
+      "class": "counts",
+      "schema_valid": false,
+      "contract_valid": false,
+      "document": {
+        "schema": "fm-cockpit-observation.v1",
+        "data_class": "internal_non_sensitive",
+        "observed_at": "2026-09-04T20:00:00Z",
+        "observed_epoch": 1788552000,
+        "state": "no_active_work",
+        "valid": true,
+        "invalidity": null,
+        "counts": {
+          "active_children": 0.5,
+          "decisions_open": 0,
+          "holds": 0,
+          "queued": 0,
+          "landed": 0,
+          "endpoints": 0
+        }
+      }
+    }
+  ]
+}

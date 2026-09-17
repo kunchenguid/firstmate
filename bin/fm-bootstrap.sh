@@ -12,8 +12,9 @@
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
-#                 "HOME_SUMMARY: <ledger never published|not republished since
-#                 <stamp>>; <n> failed attempt(s) ... last: <recorded failure>",
+#                 "HOME_SUMMARY: <private summary or opted-in Cockpit
+#                 observation never published|not republished since <stamp>>;
+#                 <n> failed attempt(s) ... last: <recorded failure>",
 #                 "BACKLOG_RECONCILE: <id>: <what this home could not reconcile>",
 #                 "BACKLOG_RECONCILE: code-root <file> is not this home's <file>; ...",
 #                 "TANGLE: <remediation>",
@@ -1548,21 +1549,35 @@ detect_code_root_backlog_fork() {
 # This home's ledger publication is deliberately best-effort: every lifecycle
 # trigger calls it with --best-effort so a failure can never change the result
 # of a session start, a spawn, a teardown, or a watcher poll. That is correct,
-# and it also means a home that never manages to publish says nothing at all -
-# the failures land only in the bounded home-local record nobody reads.
+# and it also means a home that never completes its active publication target
+# says nothing at all - the failures land only in the bounded home-local record
+# nobody reads. The private summary is always that target; an opted-in Cockpit
+# observation becomes the coupled target because its publication follows the
+# private summary in the same refresh.
 #
 # So read that same record here, where a session start already looks, and say so
-# once when the evidence is a pattern rather than a blip: the ledger has not
-# been (re)published, and at least FM_HOME_SUMMARY_FAILURE_REPORT attempts have
-# failed since whenever it last was. No new record, no new state, no retry
+# once when the evidence is a pattern rather than a blip: the active target has
+# not been (re)published, and at least FM_HOME_SUMMARY_FAILURE_REPORT attempts
+# have failed since whenever it last was. No new record, no new state, no retry
 # policy - just the existing evidence, surfaced.
 detect_home_summary_publication() {
-  local log="$STATE/.home-summary-refresh.log" ledger="$STATE/home-summary.json"
+  local log="$STATE/.home-summary-refresh.log"
+  local ledger="$STATE/home-summary.json"
+  local observation="$STATE/cockpit-observation.json"
+  local observation_document target='state/home-summary.json'
   local since='' counted failures last threshold
   threshold=${FM_HOME_SUMMARY_FAILURE_REPORT:-2}
   case "$threshold" in ''|*[!0-9]*|0) threshold=2 ;; esac
   [ -f "$log" ] && [ -r "$log" ] && [ ! -L "$log" ] || return 0
-  if [ -f "$ledger" ] && [ -r "$ledger" ] && [ ! -L "$ledger" ]; then
+  if [ -e "$CONFIG/cockpit-observation" ]; then
+    target='state/cockpit-observation.json'
+    if [ -f "$observation" ] && [ -r "$observation" ] && [ ! -L "$observation" ]; then
+      if observation_document=$("$SCRIPT_DIR/fm-cockpit-observation.sh" --json 2>/dev/null); then
+        since=$(printf '%s\n' "$observation_document" \
+          | jq -e -r '.observed_at' 2>/dev/null) || since=
+      fi
+    fi
+  elif [ -f "$ledger" ] && [ -r "$ledger" ] && [ ! -L "$ledger" ]; then
     since=$(LC_ALL=C sed -n 's/.*"generated"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
       "$ledger" 2>/dev/null | head -1)
   fi
@@ -1589,9 +1604,9 @@ detect_home_summary_publication() {
   [ "$failures" -ge "$threshold" ] || return 0
   last=$(printf '%s' "$last" | cut -c1-200)
   if [ -z "$since" ]; then
-    echo "HOME_SUMMARY: this home has never published state/home-summary.json; $failures failed attempt(s) recorded in state/.home-summary-refresh.log, last: $last"
+    echo "HOME_SUMMARY: this home has never published $target; $failures failed attempt(s) recorded in state/.home-summary-refresh.log, last: $last"
   else
-    echo "HOME_SUMMARY: state/home-summary.json has not been republished since $since; $failures failed attempt(s) recorded in state/.home-summary-refresh.log, last: $last"
+    echo "HOME_SUMMARY: $target has not been republished since $since; $failures failed attempt(s) recorded in state/.home-summary-refresh.log, last: $last"
   fi
 }
 

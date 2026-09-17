@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://firstmate.local/contracts/fm-cockpit-observation-v1.schema.json",
+  "title": "FirstMate Cockpit Observation v1",
+  "description": "Exact whitelisted source document published for the read-only Cockpit boundary. Cross-field timestamp and epoch identity plus actual calendar validity are covered by the versioned semantic conformance corpus.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "data_class",
+    "observed_at",
+    "observed_epoch",
+    "state",
+    "valid",
+    "invalidity",
+    "counts"
+  ],
+  "properties": {
+    "schema": {
+      "const": "fm-cockpit-observation.v1"
+    },
+    "data_class": {
+      "const": "internal_non_sensitive"
+    },
+    "observed_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "observed_epoch": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "state": {
+      "enum": [
+        "unknown",
+        "captain_decision",
+        "active_child_work",
+        "externally_held",
+        "no_active_work"
+      ]
+    },
+    "valid": {
+      "type": "boolean"
+    },
+    "invalidity": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/invalidity"
+        }
+      ]
+    },
+    "counts": {
+      "$ref": "#/$defs/counts"
+    }
+  },
+  "oneOf": [
+    {
+      "required": [
+        "valid",
+        "invalidity"
+      ],
+      "properties": {
+        "valid": {
+          "const": true
+        },
+        "invalidity": {
+          "type": "null"
+        }
+      }
+    },
+    {
+      "required": [
+        "valid",
+        "invalidity"
+      ],
+      "properties": {
+        "valid": {
+          "const": false
+        },
+        "invalidity": {
+          "$ref": "#/$defs/invalidity"
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "invalidity": {
+      "enum": [
+        "missing_backlog",
+        "unstructured_current",
+        "orphan_in_flight",
+        "unowned_current",
+        "terminal_in_flight",
+        "child_current_unavailable"
+      ]
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "active_children",
+        "decisions_open",
+        "holds",
+        "queued",
+        "landed",
+        "endpoints"
+      ],
+      "properties": {
+        "active_children": {
+          "$ref": "#/$defs/count"
+        },
+        "decisions_open": {
+          "$ref": "#/$defs/count"
+        },
+        "holds": {
+          "$ref": "#/$defs/count"
+        },
+        "queued": {
+          "$ref": "#/$defs/count"
+        },
+        "landed": {
+          "$ref": "#/$defs/count"
+        },
+        "endpoints": {
+          "$ref": "#/$defs/count"
+        }
+      }
+    }
+  }
+}

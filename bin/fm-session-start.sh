@@ -655,7 +655,8 @@ if [ "$READ_ONLY" -eq 0 ]; then
     rm -f "$COMPLETION_FILE" 2>/dev/null || true
   fi
   fm_trace_context_session_start "$CONFIG" "$STATE/.trace-context-effective"
-  # A full locked start publishes this home's current structured summary.
+  # A full locked start publishes this home's current private summary and any
+  # opted-in redacted Cockpit observation.
   # Publication is side-band and best-effort, so it can never change the
   # session-start result. A context re-emit is not another session start.
   if [ "$REEMIT" -eq 0 ]; then

@@ -104,9 +104,10 @@ The existing Bearings Captain's Call consumes that coverage, and its skill owns 
 
 For whole-fleet review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the backlog, task metadata, local current crew state, supervision-owned endpoint evidence, PR/report pointers, scout reports, bounded current summaries from registered secondmate homes, and secondmate return-channel guidance.
 Each home atomically publishes that bounded home summary with freshness epoch metadata at `state/home-summary.json` after a locked session start, a watcher-observed status change, task spawn, task teardown, and on a recurring live-watcher cadence; `bin/fm-home-summary-refresh.sh` owns the publication mechanics.
+When a home opts in under the [Cockpit observation configuration contract](configuration.md#cockpit-observation-configcockpit-observation), the same refresh derives `state/cockpit-observation.json` from that already validated summary as a path-, text-, identity-, and lineage-free `internal_non_sensitive` projection; `contracts/fm-cockpit-observation-v1.schema.json` owns its exact machine grammar, while `bin/fm-cockpit-observation.sh` owns projection and read-only runtime validation.
 The fleet snapshot and Bearings paths use the concurrent remote-ledger collection, cache, unreadable-home disclosure, and remote-liveness boundary owned by `bin/fm-fleet-snapshot.sh`'s header.
 `bin/fm-fleet-view.sh` renders that snapshot as Markdown for humans, while `bin/fm-bearings-snapshot.sh` provides the bounded bearings projection, so both views consume one structured contract instead of reparsing raw fleet files.
-The script header owns the exact JSON schema.
+The `bin/fm-fleet-snapshot.sh` header owns the exact fleet-snapshot JSON schema.
 
 On a Pi primary, supervision is default-on: the watcher extension can hand eligible task-local rows from an ordinary actionable wake, plus selected fleet-wide heartbeat reviews, to a persistent in-process supervision conversation while main-only rows remain on the captain-facing path.
 The branch handles those rows, stores the outcome durably, and merges it back into main.
