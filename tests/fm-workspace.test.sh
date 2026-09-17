@@ -434,6 +434,51 @@ test_release_retry_never_touches_a_reassigned_slot() {
   pass "a release retry completes from its journal without touching a reassigned slot, and foreign or unreadable claims refuse"
 }
 
+test_every_released_path_reaps_tasktmp() {
+  local rec out tasktmp
+  add_tasktmp() {
+    tasktmp="$D/tmp/fm-task-x1"
+    mkdir -p "$tasktmp"
+    printf 'scratch\n' > "$tasktmp/scratch"
+    sed -i.bak "s|^pr=|tasktmp=$tasktmp\\
+pr=|" "$HOME_DIR/state/task-x1.meta"
+  }
+  journal_state() {  # <state>
+    sed -i.bak "s/^workspace_state=active$/workspace_state=$1/" "$HOME_DIR/state/task-x1.meta"
+    sed -i.bak "s|^pr=|workspace_head=$HEAD\\
+workspace_branch=fm/task-x1\\
+workspace_base=fm/lower-stack\\
+pr=|" "$HOME_DIR/state/task-x1.meta"
+  }
+
+  rec=$(make_case tasktmp-normal); read_case "$rec"; add_tasktmp
+  out=$(TMPDIR="$D/tmp" run_workspace release task-x1) || fail "normal release failed: $out"
+  [ ! -e "$tasktmp" ] || fail "normal release retained tasktmp"
+
+  rec=$(make_case tasktmp-reclaim); read_case "$rec"; add_tasktmp
+  out=$(TMPDIR="$D/tmp" FM_TEST_DESTROY_FAIL_ONCE="$D/destroy-failed-once" run_workspace release task-x1) \
+    && fail "fixture error: the first release should stop at reclaim-pending"
+  [ -d "$tasktmp" ] || fail "an unfinished release reaped tasktmp before publishing released"
+  out=$(TMPDIR="$D/tmp" run_workspace release task-x1) || fail "reclaim-pending retry failed: $out"
+  [ ! -e "$tasktmp" ] || fail "reclaim-pending completion retained tasktmp"
+
+  rec=$(make_case tasktmp-missing-worktree); read_case "$rec"; add_tasktmp; journal_state releasing
+  git -C "$PROJECT" worktree remove --force "$WT"
+  out=$(TMPDIR="$D/tmp" run_workspace release task-x1) || fail "missing-worktree recovery failed: $out"
+  assert_equals released "$(meta_value workspace_state)" "missing-worktree recovery did not publish released"
+  [ ! -e "$tasktmp" ] || fail "missing-worktree recovery retained tasktmp"
+
+  rec=$(make_case tasktmp-reassigned); read_case "$rec"; add_tasktmp; journal_state reclaim-pending
+  printf 'task=task-x2\nhome=%s\n' "$HOME_DIR" > "$(dirname "$WT")/.fm-slot-owner"
+  out=$(TMPDIR="$D/tmp" run_workspace release task-x1) || fail "reassigned-slot completion failed: $out"
+  assert_equals released "$(meta_value workspace_state)" "reassigned-slot completion did not publish released"
+  [ ! -e "$tasktmp" ] || fail "reassigned-slot completion retained tasktmp"
+  [ -d "$WT" ] || fail "reassigned-slot completion touched the other task's slot"
+
+  out=$(TMPDIR="$D/tmp" run_workspace release task-x1) || fail "repeating a finished release failed: $out"
+  pass "every path that publishes released reaps the task temp root, and only once the release is published"
+}
+
 test_ignored_secret_and_runtime_material_refuse() {
   local rec out name
   for name in .env server.pem dev.sqlite run/app.pid run/app.log; do
@@ -650,6 +695,7 @@ test_legacy_audit_and_reclaim_stay_conservative
 test_two_homes_share_one_project
 test_slot_claim_follows_release_and_restore
 test_release_retry_never_touches_a_reassigned_slot
+test_every_released_path_reaps_tasktmp
 test_ignored_secret_and_runtime_material_refuse
 test_generated_trees_do_not_refuse
 test_unavailable_or_changing_remote_proof_refuses

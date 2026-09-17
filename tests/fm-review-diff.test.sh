@@ -10,6 +10,9 @@
 #   (c) pr= absent -> unchanged worktree-branch diff
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
 #   (e) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
+#   (f) workspace_state=released (no worktree) -> no-checkout review in the project
+#       clone from the fetched PR head and the PR's actual (possibly stacked) base,
+#       refusing missing, mismatched, or unfetchable identity
 #       (this is the class that bit reviewers holding merges over "missing" fixes)
 set -u
 
@@ -169,8 +172,119 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+# make_released_case <name>: a stacked PR (#9, head fm/task-x1 on base
+# fm/lower) whose workspace is gone. Sets LOWER_SHA and PR_SHA.
+make_released_case() {
+  local case_dir
+  case_dir=$(make_case "$1")
+  git -C "$case_dir/wt" checkout -q -b fm/lower
+  printf 'lower-layer\n' > "$case_dir/wt/lower.txt"
+  git -C "$case_dir/wt" add lower.txt
+  git -C "$case_dir/wt" commit -qm "lower stack layer"
+  LOWER_SHA=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/wt" push -q origin fm/lower
+  git -C "$case_dir/wt" checkout -q fm/task-x1
+  git -C "$case_dir/wt" reset -q --hard fm/lower
+  printf 'upper-layer\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "upper stack layer"
+  PR_SHA=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/wt" push -q origin HEAD:refs/pull/9/head
+  git -C "$case_dir/project" worktree remove --force "$case_dir/wt"
+  git -C "$case_dir/project" branch -q -D fm/task-x1 fm/lower
+  printf '%s\n' "$case_dir"
+}
+
+write_released_meta() {  # <case-dir> [extra kv...]
+  local case_dir=$1
+  shift
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=" \
+    "project=$case_dir/project" \
+    "workspace_state=released" \
+    "$@"
+}
+
+test_released_task_reviews_stacked_pr_without_a_checkout() {
+  local case_dir out before_head before_worktrees
+  case_dir=$(make_released_case released-stacked)
+  PR_SHA=$(git -C "$case_dir/origin.git" rev-parse refs/pull/9/head)
+  write_released_meta "$case_dir" "workspace_base=fm/lower" \
+    "pr=https://github.com/example/repo/pull/9" "pr_head=$PR_SHA"
+  before_head=$(git -C "$case_dir/project" rev-parse HEAD)
+  before_worktrees=$(git -C "$case_dir/project" worktree list --porcelain)
+
+  out=$(run_review_diff "$case_dir" task-x1) || fail "released stacked review failed: $out"
+  assert_contains "$out" '+upper-layer' "released: the PR's own layer must be shown"
+  assert_not_contains "$out" 'lower-layer' "released: a stacked PR must diff against its actual base, not trunk"
+  assert_contains "$out" 'fm/lower' "released: the diff base line should name the actual PR base"
+  assert_equals "$before_head" "$(git -C "$case_dir/project" rev-parse HEAD)" "released: review moved the project clone's HEAD"
+  assert_equals "$before_worktrees" "$(git -C "$case_dir/project" worktree list --porcelain)" \
+    "released: review reconstructed a workspace merely to read"
+  [ -z "$(git -C "$case_dir/project" status --porcelain)" ] || fail "released: review dirtied the project clone"
+
+  out=$(run_review_diff "$case_dir" task-x1 --stat) || fail "released --stat review failed: $out"
+  assert_contains "$out" 'feature.txt' "released --stat: should summarize the changed file"
+  assert_not_contains "$out" '+upper-layer' "released --stat: must not print the full diff"
+  pass "fm-review-diff reviews a released stacked PR from fetched head and base refs with no checkout"
+}
+
+test_released_task_reviews_trunk_based_pr_with_workspace_head_proof() {
+  local case_dir out
+  case_dir=$(make_released_case released-trunk)
+  PR_SHA=$(git -C "$case_dir/origin.git" rev-parse refs/pull/9/head)
+  write_released_meta "$case_dir" "workspace_base=main" "workspace_head=$PR_SHA" \
+    "pr=https://github.com/example/repo/pull/9"
+  out=$(run_review_diff "$case_dir" task-x1) || fail "released trunk-based review failed: $out"
+  assert_contains "$out" '+upper-layer' "released trunk: the upper layer must be shown"
+  assert_contains "$out" '+lower-layer' "released trunk: a trunk-based PR shows everything above trunk"
+  pass "fm-review-diff reviews a released trunk-based PR verified by its journaled workspace head"
+}
+
+test_released_task_refuses_missing_or_mismatched_identity() {
+  local case_dir out rc
+  case_dir=$(make_released_case released-refusals)
+  PR_SHA=$(git -C "$case_dir/origin.git" rev-parse refs/pull/9/head)
+  LOWER_SHA=$(git -C "$case_dir/origin.git" rev-parse refs/heads/fm/lower)
+
+  write_released_meta "$case_dir" "workspace_base=fm/lower" "pr=https://github.com/example/repo/pull/9"
+  rc=0; out=$(run_review_diff "$case_dir" task-x1 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "released review without a recorded head must refuse"
+  assert_contains "$out" 'no pr_head= or workspace_head=' "missing head proof refusal was not explicit"
+  assert_not_contains "$out" 'upper-layer' "a refused review must print no diff"
+
+  write_released_meta "$case_dir" "pr=https://github.com/example/repo/pull/9" "pr_head=$PR_SHA"
+  rc=0; out=$(run_review_diff "$case_dir" task-x1 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "released review without a recorded base must refuse"
+  assert_contains "$out" 'no workspace_base=' "missing base refusal was not explicit"
+
+  write_released_meta "$case_dir" "workspace_base=fm/lower" "pr_head=$PR_SHA"
+  rc=0; out=$(run_review_diff "$case_dir" task-x1 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "released review without a PR must refuse"
+  assert_contains "$out" 'no pull-request number' "missing PR refusal was not explicit"
+
+  write_released_meta "$case_dir" "workspace_base=fm/lower" \
+    "pr=https://github.com/example/repo/pull/9" "pr_head=$LOWER_SHA"
+  rc=0; out=$(run_review_diff "$case_dir" task-x1 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "released review must refuse a fetched head that differs from the recorded head"
+  assert_contains "$out" "PR #9 head is $PR_SHA but task task-x1 recorded $LOWER_SHA" "mismatched head refusal was not explicit"
+  assert_not_contains "$out" 'upper-layer' "a mismatched head must print no diff"
+
+  write_released_meta "$case_dir" "workspace_base=fm/lower" \
+    "pr=https://github.com/example/repo/pull/9" "pr_head=$PR_SHA"
+  git -C "$case_dir/project" remote set-url origin "$case_dir/no-such-origin.git"
+  rc=0; out=$(run_review_diff "$case_dir" task-x1 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "released review must refuse when the remote proof is unavailable"
+  assert_contains "$out" 'remote proof is unavailable' "unavailable remote refusal was not explicit"
+  pass "fm-review-diff refuses a released task with missing, mismatched, or unfetchable identity"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_released_task_reviews_stacked_pr_without_a_checkout
+test_released_task_reviews_trunk_based_pr_with_workspace_head_proof
+test_released_task_refuses_missing_or_mismatched_identity

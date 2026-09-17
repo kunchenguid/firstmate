@@ -10,6 +10,16 @@
 # only a fallback when fetch fails (stale recorded SHAs must never win over a
 # reachable remote PR head). If neither PR head can be resolved, fall back to
 # the local branch with a warning. Without pr=, compare the local branch.
+#
+# A task whose workspace bin/fm-workspace.sh already released
+# (workspace_state=released, worktree= cleared) has no local copy and needs none
+# to be read: the review runs in the durable project clone without any checkout.
+# It fetches the exact refs/pull/<n>/head and the PR's actual recorded base
+# branch - a stacked PR's base is the branch below it, never assumed to be
+# trunk - into refs/fm-review/<task-id>/, requires the fetched head to equal the
+# recorded pr_head= (workspace_head= when no pr_head= was recorded), and diffs
+# those two refs. Missing or mismatched identity refuses; nothing falls back to
+# a local branch, because a released task has none that is authoritative.
 # Usage: fm-review-diff.sh <task-id> [--stat]
 #   --stat prints only the stat summary; default prints stat summary plus full diff.
 set -eu
@@ -44,6 +54,58 @@ META="$STATE/$ID.meta"
 
 WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
+WORKSPACE_STATE=$(grep '^workspace_state=' "$META" | tail -1 | cut -d= -f2- || true)
+
+print_diff() {  # <git-dir> <base-label> <base-ref> <compare-ref>
+  echo "diff base: $2"
+  if git -C "$1" diff --quiet "$3...$4" --; then
+    echo "no changes vs $2"
+    return 0
+  fi
+  git -C "$1" diff --stat "$3...$4" --
+  if ! "$STAT_ONLY"; then
+    echo
+    git -C "$1" diff "$3...$4" --
+  fi
+}
+
+review_released() {
+  local pr_url recorded base n head_ref base_ref fetched
+  [ -n "$PROJ" ] || { echo "error: meta for task $ID is missing project=" >&2; exit 1; }
+  [ -d "$PROJ" ] || { echo "error: project for task $ID is missing: $PROJ" >&2; exit 1; }
+  pr_url=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+  recorded=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+  [ -n "$recorded" ] || recorded=$(grep '^workspace_head=' "$META" | tail -1 | cut -d= -f2- || true)
+  base=$(grep '^workspace_base=' "$META" | tail -1 | cut -d= -f2- || true)
+  n=${pr_url##*/pull/}
+  [ "$n" != "$pr_url" ] || n=
+  n=${n%%[!0-9]*}
+  [ -n "$n" ] || { echo "error: released task $ID records no pull-request number in pr=; cannot review without its workspace" >&2; exit 1; }
+  [ -n "$recorded" ] || { echo "error: released task $ID records no pr_head= or workspace_head= to verify the fetched PR head against" >&2; exit 1; }
+  [ -n "$base" ] || { echo "error: released task $ID records no workspace_base=, so its actual PR base is unknown" >&2; exit 1; }
+  git -C "$PROJ" check-ref-format "refs/heads/$base" >/dev/null 2>&1 \
+    || { echo "error: released task $ID records an invalid PR base branch: $base" >&2; exit 1; }
+  git -C "$PROJ" remote get-url origin >/dev/null 2>&1 \
+    || { echo "error: project $PROJ has no origin to fetch released task $ID's PR from" >&2; exit 1; }
+  head_ref="refs/fm-review/$ID/head"
+  base_ref="refs/fm-review/$ID/base"
+  git -C "$PROJ" fetch --quiet origin "+refs/pull/$n/head:$head_ref" "+refs/heads/$base:$base_ref" >/dev/null 2>&1 \
+    || { echo "error: could not fetch PR #$n head and base branch $base for released task $ID; remote proof is unavailable" >&2; exit 1; }
+  fetched=$(git -C "$PROJ" rev-parse --verify "$head_ref^{commit}" 2>/dev/null) \
+    || { echo "error: fetched PR #$n head for released task $ID is not a commit" >&2; exit 1; }
+  git -C "$PROJ" rev-parse --verify --quiet "$base_ref^{commit}" >/dev/null \
+    || { echo "error: fetched base branch $base for released task $ID is not a commit" >&2; exit 1; }
+  [ "$fetched" = "$recorded" ] || {
+    echo "error: PR #$n head is $fetched but task $ID recorded $recorded; rerun bin/fm-pr-check.sh $ID $pr_url to record the current head before reviewing" >&2
+    exit 1
+  }
+  print_diff "$PROJ" "origin/$base (PR #$n base) at $fetched" "$base_ref" "$head_ref"
+}
+
+if [ "$WORKSPACE_STATE" = released ] && [ -z "$WT" ]; then
+  review_released
+  exit 0
+fi
 [ -n "$WT" ] || { echo "error: meta for task $ID is missing worktree=" >&2; exit 1; }
 [ -n "$PROJ" ] || { echo "error: meta for task $ID is missing project=" >&2; exit 1; }
 [ -d "$WT" ] || { echo "error: worktree for task $ID is missing: $WT" >&2; exit 1; }
@@ -145,14 +207,4 @@ fi
 git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
 git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" >/dev/null || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
 
-echo "diff base: $BASE"
-if git -C "$WT" diff --quiet "$BASE...$COMPARE_REF" --; then
-  echo "no changes vs $BASE"
-  exit 0
-fi
-
-git -C "$WT" diff --stat "$BASE...$COMPARE_REF" --
-if ! "$STAT_ONLY"; then
-  echo
-  git -C "$WT" diff "$BASE...$COMPARE_REF" --
-fi
+print_diff "$WT" "$BASE" "$BASE" "$COMPARE_REF"

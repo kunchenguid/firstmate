@@ -190,6 +190,15 @@ meta_rewrite() {  # state worktree [extra owned endpoint lines...]
   done
   chmod 0600 "$tmp" || { rm -f "$tmp"; fail "cannot protect task workspace metadata"; }
   mv -f -- "$tmp" "$META" || { rm -f "$tmp"; fail "cannot publish task workspace metadata"; }
+  [ "$state" != released ] || reap_tasktmp
+}
+
+# Every transition to released retains zero idle task material, so the per-task
+# temp root goes with the workspace whichever path published the release.
+reap_tasktmp() {
+  local tasktmp
+  tasktmp=$(meta_get tasktmp)
+  case "$tasktmp" in "/tmp/fm-$ID"|"${TMPDIR:-/tmp}/fm-$ID") rm -rf -- "$tasktmp" ;; esac
 }
 
 current_endpoint_lines() {
@@ -371,8 +380,6 @@ if [ "$ACTION" = release ]; then
     tmux|herdr|zellij|cmux) release_treehouse ;;
     *) fail "backend $BACKEND has no workspace release contract" ;;
   esac
-  TASKTMP=$(meta_get tasktmp)
-  case "$TASKTMP" in "/tmp/fm-$ID"|"${TMPDIR:-/tmp}/fm-$ID") rm -rf -- "$TASKTMP" ;; esac
   printf 'workspace %s released; remote head %s branch %s base %s\n' "$ID" "$REMOTE_HEAD" "$REMOTE_BRANCH" "$REMOTE_BASE"
   exit 0
 fi
