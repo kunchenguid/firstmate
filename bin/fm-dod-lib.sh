@@ -105,6 +105,12 @@
 # ordinary ship brief and the durable contract written during scout promotion.
 # It takes the same optional trailing forge argument, because the rule that keeps
 # a worker off a remote is exactly the rule that changes when the forge does.
+# fm_brief_executor_issue reads the fixed "Delivery contract: kind=executor
+# issue=<N>" line bin/fm-brief.sh --executor writes, so bin/fm-spawn.sh can
+# refuse a brief whose kind or issue disagrees with the spawn. An executor brief
+# has no Task subsections, no intent contract, and no worker role scope: its
+# issue is the specification and its state is derived structurally
+# (bin/fm-executor-lib.sh), so none of the helpers above apply to it.
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] || d=.; cd "${d:-/}" && pwd)/fm-pr-lib.sh"
@@ -213,6 +219,17 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<
       return 1
       ;;
   esac
+}
+
+# Print the issue number from an executor brief's delivery-contract line; fail
+# when the file is not an executor brief. The line is matched exactly so a
+# mention of the contract in prose can never stand in for it.
+fm_brief_executor_issue() {  # <file>
+  local file=$1 issue
+  [ -f "$file" ] || return 1
+  issue=$(sed -n 's/^Delivery contract: kind=executor issue=\([1-9][0-9]*\)$/\1/p' "$file" | head -n 1)
+  [ -n "$issue" ] || return 1
+  printf '%s\n' "$issue"
 }
 
 # Return 0 when a Task subsection still consists only of its scaffold
