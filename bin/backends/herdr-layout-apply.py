@@ -52,7 +52,7 @@ def main(argv):
         return fail("workspace, tab, pane, and label identities must be non-empty")
     if len(attempt_id) != 32 or any(character not in "0123456789abcdef" for character in attempt_id):
         return fail("attempt identity must be 128-bit lowercase hex")
-    if label != "fm-launch-" + attempt_id:
+    if label not in ("fm-launch-" + attempt_id, "fm-restore-" + attempt_id):
         return fail("label must carry the complete attempt identity")
     try:
         payload = json.load(sys.stdin)

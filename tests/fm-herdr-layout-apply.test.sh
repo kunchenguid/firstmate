@@ -57,9 +57,12 @@ with open(request_path, "w", encoding="utf-8") as stream:
 with open(applied_path, "w", encoding="utf-8"):
     pass
 if response_mode == "success":
+    restoring = request["params"]["root"]["label"].startswith("fm-restore-")
+    tab_id = "w1:t4" if restoring else "w1:t3"
+    pane_id = "w1:p4" if restoring else "w1:p3"
     response = {"id": request["id"], "result": {"type": "layout_apply", "layout": {
-        "workspace_id": "w1", "tab_id": "w1:t3", "focused_pane_id": "w1:p3",
-        "root": {"type": "pane", "pane_id": "w1:p3"}}}}
+        "workspace_id": "w1", "tab_id": tab_id, "focused_pane_id": pane_id,
+        "root": {"type": "pane", "pane_id": pane_id}}}}
 elif response_mode == "timeout":
     import time
     time.sleep(1)
@@ -105,11 +108,11 @@ fm_backend_herdr_cli() { # <session> <args...>
   [ "$session" = lab-structural ] || return 91
   case "$*" in
     "status --json")
-      if [ "$MODE" = protocol ]; then
-        printf '%s\n' '{"client":{"protocol":19},"server":{"protocol":20,"running":true}}'
-      else
-        printf '%s\n' '{"client":{"protocol":20},"server":{"protocol":20,"running":true}}'
-      fi
+      case "$MODE" in
+        protocol) printf '%s\n' '{"client":{"protocol":19},"server":{"protocol":20,"running":true}}' ;;
+        protocol22) printf '%s\n' '{"client":{"protocol":22},"server":{"protocol":22,"running":true}}' ;;
+        *) printf '%s\n' '{"client":{"protocol":20},"server":{"protocol":20,"running":true}}' ;;
+      esac
       ;;
     "api schema --json")
       if [ "$MODE" = schema ]; then printf '%s\n' '{"schemas":{"request":{}}}'; else layout_schema; fi
@@ -117,6 +120,8 @@ fm_backend_herdr_cli() { # <session> <args...>
     "workspace list")
       if [ "$MODE" = workspace ]; then
         printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w9"}]}}'
+      elif [ "$MODE" = reconcile_retain ]; then
+        printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"anchor","focused":true,"active_tab_id":"anchor:t1"},{"workspace_id":"w1","focused":false,"active_tab_id":"w1:t3"}]}}'
       else
         printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1"}]}}'
       fi
@@ -130,7 +135,7 @@ fm_backend_herdr_cli() { # <session> <args...>
       ;;
     "pane get w1:p2")
       case "$MODE" in
-        reconcile|reconcile_duplicate|reconcile_missing) return 1 ;;
+        reconcile|reconcile_duplicate|reconcile_missing|reconcile_retain) return 1 ;;
         pane) printf '%s\n' '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t9","pane_id":"w1:p2"}}}' ;;
         *) printf '%s\n' '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2"}}}' ;;
       esac
@@ -166,12 +171,21 @@ fm_backend_herdr_cli() { # <session> <args...>
         printf '%s\n' '{"result":{"tab":{"workspace_id":"w1","tab_id":"w1:t3"}}}'
       fi
       ;;
+    "tab list --workspace anchor")
+      printf '%s\n' '{"result":{"tabs":[{"workspace_id":"anchor","tab_id":"anchor:t1","focused":true}]}}'
+      ;;
+    "tab get w1:t4")
+      printf '%s\n' '{"result":{"tab":{"workspace_id":"w1","tab_id":"w1:t4"}}}'
+      ;;
     "pane list --workspace w1")
       case "$MODE" in
         reconcile_duplicate)
           printf '%s\n' '{"result":{"panes":[{"workspace_id":"w1","tab_id":"w1:t3","pane_id":"w1:p3","label":"fm-launch-0123456789abcdef0123456789abcdef"},{"workspace_id":"w1","tab_id":"w1:t4","pane_id":"w1:p4","label":"fm-launch-0123456789abcdef0123456789abcdef"}]}}'
           ;;
         reconcile_missing) printf '%s\n' '{"result":{"panes":[]}}' ;;
+        reconcile_retain)
+          printf '%s\n' '{"result":{"panes":[{"workspace_id":"w1","tab_id":"w1:t3","pane_id":"w1:p3","label":"fm-launch-0123456789abcdef0123456789abcdef"}]}}'
+          ;;
         *)
           if [ -e "$CLOSED" ]; then
             printf '%s\n' '{"result":{"panes":[]}}'
@@ -206,12 +220,24 @@ fm_backend_herdr_cli() { # <session> <args...>
       : > "$CLOSED"
       printf '%s\n' '{"result":{"type":"pane_close","pane_id":"w1:p3"}}'
       ;;
+    "pane get w1:p4")
+      printf '%s\n' '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t4","pane_id":"w1:p4","label":"fm-restore-0123456789abcdef0123456789abcdef"}}}'
+      ;;
     "pane process-info --pane w1:p3")
       if [ "$MODE" = wrong-agent ]; then
         printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p3","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"codex","argv0":"codex","argv":["codex"],"cmdline":"codex"}]}}}'
       else
         printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p3","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"node","argv0":"pi","argv":["pi","--model","fake"],"cmdline":"pi --model fake"}]}}}'
       fi
+      ;;
+    "pane process-info --pane w1:p4")
+      printf '%s\n' "{\"result\":{\"type\":\"pane_process_info\",\"process_info\":{\"pane_id\":\"w1:p4\",\"shell_pid\":$$,\"foreground_processes\":[{\"pid\":$$,\"name\":\"sh\",\"argv0\":\"/bin/sh\",\"argv\":[\"/bin/sh\"]}]}}}"
+      ;;
+    "agent get w1:p4")
+      printf '%s\n' '{"error":{"code":"agent_not_found"}}'
+      ;;
+    "pane rename w1:p4 --clear")
+      printf '%s\n' '{"result":{"type":"pane_rename","pane_id":"w1:p4"}}'
       ;;
     "pane report-agent w1:p3 --source firstmate-layout-apply --agent pi --state working")
       : > "$REPORTED"
@@ -277,7 +303,7 @@ fm_backend_herdr_layout_attempt_commit "$ATTEMPT" \
 MODE=ok
 pass "layout.apply preserves exact cwd/environment/argv and binds only response ids re-read from the named session"
 
-for mode in protocol schema workspace tab pane layout foreground socket; do
+for mode in protocol protocol22 schema workspace tab pane layout foreground socket; do
   MODE=$mode
   rm -f "$REQUEST" "$APPLIED"
   if run_layout >/dev/null 2>&1; then
@@ -324,7 +350,7 @@ fm_backend_herdr_layout_attempt_write "$ATTEMPT" 4 0123456789abcdef0123456789abc
   fresh task-z1 "$TMP_ROOT/worktree" fm-task-z1 \
   lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef
 MODE=reconcile
-if fm_backend_herdr_layout_attempt_reconcile_remove "$ATTEMPT" >/dev/null 2>&1; then
+if fm_backend_herdr_layout_attempt_reconcile "$ATTEMPT" >/dev/null 2>&1; then
   fail "quarantine reconciliation accepted an unreadable post-close pane response"
 fi
 fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
@@ -406,7 +432,7 @@ for response_mode in wrong-id error malformed timeout; do
   [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 4 ] \
     || fail "$response_mode response invented replacement ids"
   MODE=reconcile
-  fm_backend_herdr_layout_attempt_reconcile_remove "$ATTEMPT" \
+  fm_backend_herdr_layout_attempt_reconcile "$ATTEMPT" \
     || fail "$response_mode response could not remove its exact replacement"
   rm -f "$ATTEMPT" "$CLOSED"
   MODE=ok
@@ -440,7 +466,7 @@ wait_server
 fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" || fail "crashed helper lost its durable attempt"
 [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 4 ] || fail "crashed helper unexpectedly claimed replacement ids"
 MODE=reconcile
-fm_backend_herdr_layout_attempt_reconcile_remove "$ATTEMPT" \
+fm_backend_herdr_layout_attempt_reconcile "$ATTEMPT" \
   || fail "one exact crash replacement was not safely reconciled"
 fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" || fail "reconciliation erased ownership before lease cleanup"
 [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 6 ] \
@@ -451,7 +477,7 @@ fm_backend_herdr_layout_attempt_write "$ATTEMPT" 4 0123456789abcdef0123456789abc
   fresh task-z1 "$TMP_ROOT/worktree" fm-task-z1 \
   lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef
 MODE=reconcile_duplicate
-if fm_backend_herdr_layout_attempt_reconcile_remove "$ATTEMPT" >/dev/null 2>&1; then
+if fm_backend_herdr_layout_attempt_reconcile "$ATTEMPT" >/dev/null 2>&1; then
   fail "duplicate attempt labels were accepted for destructive reconciliation"
 fi
 [ ! -e "$CLOSED" ] || fail "duplicate reconciliation closed an ambiguous pane"
@@ -465,6 +491,34 @@ wait_server
 [ "$result" = $'w1:t3\tw1:p3' ] || fail "safe retry did not launch after exact reconciliation"
 rm -f "$ATTEMPT"
 pass "crash quarantine refuses duplicates, reconciles one exact replacement, and permits a safe retry"
+
+rm -f "$ATTEMPT"
+fm_backend_herdr_layout_attempt_write "$ATTEMPT" 5 0123456789abcdef0123456789abcdef \
+  relaunch task-z1 "$TMP_ROOT/worktree" - \
+  lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef w1:t3 w1:p3
+MODE=reconcile_retain
+start_server success
+fm_backend_herdr_layout_attempt_reconcile "$ATTEMPT" \
+  || fail "retained Pi replacement did not restore an inert shell"
+wait_server
+fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
+  || fail "retained restoration lost its durable transaction"
+[ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 7 ] \
+  && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = restored ] \
+  && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" = "w1:t3:w1:p3" ] \
+  && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE" = "w1:t4:w1:p4" ] \
+  || fail "retained restoration did not preserve source and restored identities"
+jq -e --arg cwd "$TMP_ROOT/worktree" '
+  .params.root.command == ["/bin/sh"]
+  and .params.root.cwd == $cwd
+  and .params.root.env == {}
+  and .params.root.label == "fm-restore-0123456789abcdef0123456789abcdef"
+' "$REQUEST" >/dev/null || fail "retained restoration launched an agent or transported environment values"
+fm_backend_herdr_layout_attempt_commit_restored "$ATTEMPT" \
+  || fail "verified inert-shell restoration did not retire its transaction"
+[ ! -e "$ATTEMPT" ] || fail "restored attempt remained quarantined after exact commit"
+MODE=ok
+pass "retained relaunch restoration preserves source identity and creates one credential-free inert shell"
 
 for ownership_mode in fresh relaunch secondmate; do
   lease_holder=-
@@ -484,13 +538,15 @@ for ownership_mode in fresh relaunch secondmate; do
     || fail "$ownership_mode ownership policy was refused"
   [ "$policy" = "$expected_policy" ] \
     || fail "$ownership_mode ownership policy returned $policy"
-  for resolution in removed not-applied; do
+  resolutions='restored not-applied'
+  [ "$ownership_mode" != fresh ] || resolutions='removed not-applied'
+  for resolution in $resolutions; do
     action=$(fm_backend_herdr_layout_attempt_recovery_action \
       "$ownership_mode" task-z1 "$TMP_ROOT/worktree" "$resolution") \
       || fail "$ownership_mode $resolution recovery action was refused"
     case "$ownership_mode:$resolution:$action" in
       fresh:removed:release-fresh|fresh:not-applied:release-fresh|\
-      relaunch:removed:retain-retry|secondmate:removed:retain-retry|\
+      relaunch:restored:retain-retry|secondmate:restored:retain-retry|\
       relaunch:not-applied:retain-continue|secondmate:not-applied:retain-continue) ;;
       *) fail "$ownership_mode $resolution recovery action was unsafe: $action" ;;
     esac
@@ -611,42 +667,39 @@ fm_backend_herdr_process_matches_expected pi codex codex '["codex"]' \
   && fail "an unrelated recognized agent was accepted as plain Pi"
 pass "exact harness confirmation distinguishes plain Pi from pi-signed and other agents"
 
-UNSUPPORTED="$TMP_ROOT/unsupported"
-UNSUPPORTED_HOME="$UNSUPPORTED/home"
-UNSUPPORTED_PROJECT="$UNSUPPORTED/project"
-UNSUPPORTED_WT="$UNSUPPORTED/worktree"
-UNSUPPORTED_LOG="$UNSUPPORTED/tool.log"
-UNSUPPORTED_FAKEBIN=$(fm_fakebin "$UNSUPPORTED/fake")
-fm_test_spawn_home "$UNSUPPORTED_HOME" pi-signed
-fm_test_spawn_brief "$UNSUPPORTED_HOME" unsupported-pi-signed-z1 "Refuse unproved Herdr harness normalization."
-fm_git_worktree "$UNSUPPORTED_PROJECT" "$UNSUPPORTED_WT" unsupported-worktree
-cat > "$UNSUPPORTED_FAKEBIN/herdr" <<'SH'
+NON_PI="$TMP_ROOT/non-pi"
+NON_PI_HOME="$NON_PI/home"
+NON_PI_PROJECT="$NON_PI/project"
+NON_PI_WT="$NON_PI/worktree"
+NON_PI_LOG="$NON_PI/herdr.log"
+NON_PI_STATE="$NON_PI/herdr-state.json"
+NON_PI_SEND_FAIL="$NON_PI/send-fail"
+NON_PI_FAKEBIN=$(fm_fakebin "$NON_PI/bin")
+fm_test_spawn_home "$NON_PI_HOME" pi-signed
+printf 'off\n' > "$NON_PI_HOME/config/herdr-presentation-spaces"
+fm_test_spawn_brief "$NON_PI_HOME" non-pi-z1 "Preserve the existing interactive Herdr launch path."
+fm_git_worktree "$NON_PI_PROJECT" "$NON_PI_WT" non-pi-worktree
+# shellcheck source=tests/remote-herdr-fixture.sh
+. "$ROOT/tests/remote-herdr-fixture.sh"
+install_remote_herdr_fixture "$NON_PI" "$NON_PI_STATE" "$NON_PI_LOG" "$NON_PI_SEND_FAIL" "$SOCK"
+ln -s ../herdr "$NON_PI_FAKEBIN/herdr"
+cat > "$NON_PI_FAKEBIN/treehouse" <<'SH'
 #!/usr/bin/env bash
-printf 'herdr %s\n' "$*" >> "${FM_UNSUPPORTED_LOG:?}"
-case "$*" in
-  *"status --json"*) printf '%s\n' '{"client":{"protocol":20},"server":{"protocol":20,"running":true}}' ;;
-esac
-SH
-cat > "$UNSUPPORTED_FAKEBIN/treehouse" <<'SH'
-#!/usr/bin/env bash
-printf 'treehouse %s\n' "$*" >> "${FM_UNSUPPORTED_LOG:?}"
 printf '%s\n' "${FM_FAKE_PANE_PATH:?}"
 SH
-fm_fake_exit0 "$UNSUPPORTED_FAKEBIN" pi-signed
-chmod +x "$UNSUPPORTED_FAKEBIN/herdr" "$UNSUPPORTED_FAKEBIN/treehouse"
-: > "$UNSUPPORTED_LOG"
+fm_fake_exit0 "$NON_PI_FAKEBIN" pi-signed
+chmod +x "$NON_PI_FAKEBIN/treehouse"
 set +e
-unsupported_out=$(FM_UNSUPPORTED_LOG="$UNSUPPORTED_LOG" HERDR_SESSION=lab-structural \
-  fm_test_run_spawn "$UNSUPPORTED_HOME" "$UNSUPPORTED_WT" "$UNSUPPORTED_FAKEBIN" \
-    unsupported-pi-signed-z1 "$UNSUPPORTED_PROJECT" --scout --harness pi-signed --backend herdr)
-unsupported_status=$?
+non_pi_out=$(HERDR_SESSION=lab-structural \
+  fm_test_run_spawn "$NON_PI_HOME" "$NON_PI_WT" "$NON_PI_FAKEBIN" \
+    non-pi-z1 "$NON_PI_PROJECT" --scout --harness pi-signed --backend herdr)
+non_pi_status=$?
 set -e
-[ "$unsupported_status" -ne 0 ] || fail "pi-signed launch unexpectedly used the plain-Pi structural path"
-assert_contains "$unsupported_out" "supports only the exact plain pi harness" \
-  "unsupported Herdr harness refusal did not name its exact boundary"
-assert_no_grep 'workspace create' "$UNSUPPORTED_LOG" "unsupported harness created a Herdr workspace"
-assert_no_grep 'tab create' "$UNSUPPORTED_LOG" "unsupported harness created a Herdr tab"
-assert_no_grep '^treehouse ' "$UNSUPPORTED_LOG" "unsupported harness acquired a local copy"
-pass "unsupported Herdr harnesses refuse before endpoint or local-copy mutation without normalizing pi-signed"
+[ "$non_pi_status" -eq 0 ] || fail "non-Pi Herdr launch no longer reaches its existing interactive path: $non_pi_out"
+assert_grep 'pane send-text' "$NON_PI_LOG" "non-Pi Herdr launch did not type its launch command"
+assert_grep 'pane send-keys' "$NON_PI_LOG" "non-Pi Herdr launch did not submit through the existing key path"
+assert_not_contains "$non_pi_out" "structural Herdr launch" \
+  "non-Pi Herdr launch was incorrectly routed through plain-Pi structural handling"
+pass "non-Pi Herdr harnesses retain interactive launch behavior without Pi normalization"
 
 printf '# all fm-herdr-layout-apply tests passed\n'

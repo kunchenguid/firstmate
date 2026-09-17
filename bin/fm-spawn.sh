@@ -1092,10 +1092,12 @@ spawn_abort_cleanup() {
   if [ -n "$HERDR_LAYOUT_ATTEMPT" ] \
     && { [ -e "$HERDR_LAYOUT_ATTEMPT" ] || [ -L "$HERDR_LAYOUT_ATTEMPT" ]; }; then
     if fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" \
+      && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" = fresh ] \
       && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" -ge 5 ] \
-      && fm_backend_herdr_layout_attempt_reconcile_remove "$HERDR_LAYOUT_ATTEMPT" \
+      && fm_backend_herdr_layout_attempt_reconcile "$HERDR_LAYOUT_ATTEMPT" \
       && fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" \
-      && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 6 ]; then
+      && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 6 ] \
+      && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = removed ]; then
       rm -f -- "$HERDR_LAYOUT_ATTEMPT" || HERDR_LAYOUT_QUARANTINED=1
     else
       HERDR_LAYOUT_QUARANTINED=1
@@ -1970,15 +1972,6 @@ fi
 # standing one up with no way to arm its watch cycle.
 if [ "$KIND" = secondmate ] && [ "$HARNESS" = rovo ]; then
   echo "error: rovo is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
-  exit 1
-fi
-
-# Protocol-20 structural replacement is deliberately proven only for plain Pi.
-# Refuse every other Herdr harness before creating an endpoint or local copy;
-# in particular, pi-signed is a distinct executable identity and is never
-# silently normalized to pi.
-if [ "$BACKEND" = herdr ] && [ "$HARNESS" != pi ]; then
-  echo "error: structural Herdr launch supports only the exact plain pi harness; '$HARNESS' is not safely mappable" >&2
   exit 1
 fi
 
@@ -2941,8 +2934,61 @@ herdr_projection_existing_meta_allows_flat() { # <meta>
   esac
 }
 
+spawn_rebind_restored_herdr_layout_attempt() {
+  local meta="$STATE/$ID.meta" journal current tmp
+  fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" || return 1
+  [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 7 ] \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = restored ] || return 1
+  current="$(herdr_projection_meta_field_exact "$meta" herdr_tab_id 2>/dev/null || true):$(herdr_projection_meta_field_exact "$meta" herdr_pane_id 2>/dev/null || true)"
+  case "$current" in
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE"|\
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE"|\
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE") ;;
+    *)
+      echo "error: task $ID's endpoint changed outside its structural restoration transaction; preserving quarantine" >&2
+      return 1
+      ;;
+  esac
+  journal=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+  if [ -e "$journal" ] || [ -L "$journal" ]; then
+    fm_backend_herdr_projection_journal_snapshot "$journal" "$ID" || return 1
+    case "$FM_BACKEND_HERDR_JOURNAL_VERSION" in
+      1) ;;
+      2)
+        [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" ] \
+          && [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" ] || return 1
+        current="$FM_BACKEND_HERDR_JOURNAL_TAB_ID:$FM_BACKEND_HERDR_JOURNAL_PANE_ID"
+        case "$current" in
+          "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE") ;;
+          "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE"|\
+          "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE")
+            fm_backend_herdr_projection_journal_replace_endpoint \
+              "$journal" "$ID" "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" \
+              "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_TAB" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE" || return 1
+            ;;
+          *) return 1 ;;
+        esac
+        ;;
+      *) return 1 ;;
+    esac
+  fi
+  current="$(herdr_projection_meta_field_exact "$meta" herdr_tab_id 2>/dev/null || true):$(herdr_projection_meta_field_exact "$meta" herdr_pane_id 2>/dev/null || true)"
+  if [ "$current" != "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE" ]; then
+    tmp=$(mktemp "$STATE/.${ID}.meta.restore.XXXXXX") || return 1
+    if ! fm_backend_herdr_layout_rebind_meta "$meta" "$tmp" \
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" \
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_TAB" \
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE" \
+      || ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$STATE"; then
+      rm -f "$tmp"
+      return 1
+    fi
+  fi
+  fm_backend_herdr_layout_attempt_commit_restored "$HERDR_LAYOUT_ATTEMPT"
+}
+
 spawn_reconcile_herdr_layout_attempt() {
-  local meta="$STATE/$ID.meta" value worktree holder busy_gen expected_mode ownership_policy recovery_action resolution
+  local meta="$STATE/$ID.meta" value worktree holder busy_gen expected_mode ownership_policy recovery_action resolution lock_for_restore=0
   [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ] || {
     echo "error: task $ID has a quarantined Herdr structural launch attempt; retry with backend=herdr and the exact plain pi harness" >&2
     return 1
@@ -2986,13 +3032,15 @@ spawn_reconcile_herdr_layout_attempt() {
     }
   done
   value="$(herdr_projection_meta_field_exact "$meta" herdr_tab_id 2>/dev/null || true):$(herdr_projection_meta_field_exact "$meta" herdr_pane_id 2>/dev/null || true)"
-  if [ "$value" != "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE" ]; then
-    [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" -ge 5 ] \
-      && [ "$value" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" ] || {
+  case "$value" in
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE"|\
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE"|\
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE") ;;
+    *)
       echo "error: task $ID's quarantined Herdr launch endpoint does not match its attempt; refusing duplicate launch" >&2
       return 1
-    }
-  fi
+      ;;
+  esac
   case "$expected_mode" in
     fresh)
       holder=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LEASE_HOLDER
@@ -3024,21 +3072,55 @@ spawn_reconcile_herdr_layout_attempt() {
       }
       ;;
   esac
-  fm_backend_herdr_layout_attempt_reconcile_remove "$HERDR_LAYOUT_ATTEMPT" || return 1
-  fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" || return 1
-  [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 6 ] || return 1
+  if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
+    SPAWN_META_LOCK=$(fm_meta_lock_path "$meta") || return 1
+    fm_lock_acquire_wait "$SPAWN_META_LOCK"
+    SPAWN_META_LOCK_HELD=1
+  fi
+  case "$expected_mode" in
+    relaunch|secondmate)
+      spawn_herdr_presentation_order_lock_acquire \
+        "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" || return 1
+      lock_for_restore=1
+      ;;
+  esac
+  if ! fm_backend_herdr_layout_attempt_reconcile "$HERDR_LAYOUT_ATTEMPT"; then
+    [ "$lock_for_restore" = 0 ] || spawn_herdr_presentation_order_lock_release
+    return 1
+  fi
+  fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" || {
+    [ "$lock_for_restore" = 0 ] || spawn_herdr_presentation_order_lock_release
+    return 1
+  }
+  case "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" in 6|7) ;; *)
+    [ "$lock_for_restore" = 0 ] || spawn_herdr_presentation_order_lock_release
+    return 1
+    ;;
+  esac
   resolution=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION
   recovery_action=$(fm_backend_herdr_layout_attempt_recovery_action \
-    "$expected_mode" "$ID" "$worktree" "$resolution") || return 1
+    "$expected_mode" "$ID" "$worktree" "$resolution") || {
+    [ "$lock_for_restore" = 0 ] || spawn_herdr_presentation_order_lock_release
+    return 1
+  }
   case "$recovery_action" in
     retain-continue)
-      rm -f -- "$HERDR_LAYOUT_ATTEMPT" || return 1
+      rm -f -- "$HERDR_LAYOUT_ATTEMPT" || {
+        [ "$lock_for_restore" = 0 ] || spawn_herdr_presentation_order_lock_release
+        return 1
+      }
+      [ "$lock_for_restore" = 0 ] || spawn_herdr_presentation_order_lock_release
       echo "notice: retired task $ID's non-mutating structural Herdr attempt; retained its record, lease, and local work" >&2
       return 0
       ;;
     retain-retry)
-      rm -f -- "$HERDR_LAYOUT_ATTEMPT" || return 1
-      echo "notice: removed task $ID's exact structural Herdr replacement; retained its record, lease, and local work for a safe retry" >&2
+      if ! spawn_rebind_restored_herdr_layout_attempt; then
+        [ "$lock_for_restore" = 0 ] || spawn_herdr_presentation_order_lock_release
+        echo "error: task $ID's inert Herdr endpoint could not be rebound transactionally; preserving quarantine" >&2
+        return 1
+      fi
+      [ "$lock_for_restore" = 0 ] || spawn_herdr_presentation_order_lock_release
+      echo "notice: restored task $ID's inert Herdr endpoint and retained its ownership and local work for a safe retry" >&2
       return 2
       ;;
     release-fresh) ;;
@@ -3065,7 +3147,7 @@ if [ -e "$HERDR_LAYOUT_ATTEMPT" ] || [ -L "$HERDR_LAYOUT_ATTEMPT" ]; then
   else
     reconcile_status=$?
     if [ "$reconcile_status" -eq 2 ]; then
-      echo "error: task $ID's exact replacement was removed; retry the relaunch now that its quarantine is retired" >&2
+      echo "error: task $ID's inert shell endpoint was restored; retry the relaunch now that its quarantine is retired" >&2
     fi
     exit 1
   fi
@@ -4494,11 +4576,11 @@ spawn_record_traceparent() {
   return "$status"
 }
 
-# Non-Herdr backends still drive their fresh interactive shell exactly as
-# before. Herdr never types setup text into that shell: layout.apply replaces
-# it structurally, inherits the destination daemon environment, and carries
-# only Firstmate's non-sensitive operational overrides explicitly.
-if [ "$BACKEND" != herdr ]; then
+# Every launch except structural plain Pi still drives its fresh interactive
+# shell exactly as before. Plain Pi on Herdr instead inherits the destination
+# daemon environment through layout.apply and carries only non-sensitive
+# operational overrides explicitly.
+if [ "$BACKEND" != herdr ] || [ "$HARNESS" != pi ]; then
   # Export GOTMPDIR into the worker shell so the agent and every child process
   # (go build, go test, ...) inherit it.
   spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
@@ -4603,11 +4685,7 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
-if [ "$BACKEND" = herdr ]; then
-  if [ "$HARNESS" != pi ]; then
-    echo "error: structural Herdr launch currently supports only the exact plain pi harness; '$HARNESS' is not safely mappable" >&2
-    exit 1
-  fi
+if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ]; then
   HERDR_LAYOUT_ENV=$(spawn_herdr_layout_environment) || exit 1
   HERDR_LAYOUT_COMMAND=$(printf '%s' "$LAUNCH" | python3 -c '
 import json

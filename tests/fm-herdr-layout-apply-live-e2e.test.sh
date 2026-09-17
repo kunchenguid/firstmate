@@ -149,6 +149,41 @@ printf '%s' "$AGENT" | jq -e --arg pane "$NEW_PANE" '
   .result.agent.pane_id == $pane and .result.agent.agent == "pi"
 ' >/dev/null || fail "Herdr inventory did not bind Pi to the returned replacement pane"
 
-lab pane close "$NEW_PANE" >/dev/null || fail "could not clean up the replacement pane"
-pass "live Herdr structural launch inherited destination environment, replaced stale input, and kept exact fake Pi manageable"
+ANCHOR=$(lab workspace create --cwd "$CWD" --label captain-anchor --no-focus) \
+  || fail "could not create the focus-preservation anchor"
+ANCHOR_TAB=$(printf '%s' "$ANCHOR" | jq -r '.result.tab.tab_id // empty')
+[ -n "$ANCHOR_TAB" ] || fail "focus-preservation anchor returned no tab identity"
+lab tab focus "$ANCHOR_TAB" >/dev/null || fail "could not focus the restoration anchor"
+FOCUS_BEFORE=$(lab workspace list | jq -r '[.result.workspaces[] | select(.focused == true) | .active_tab_id] | @tsv')
+RESTORE_PAYLOAD=$(python3 - "$CWD" <<'PY'
+import json
+import sys
+print(json.dumps({"cwd": sys.argv[1], "env": {}, "command": ["/bin/sh"]}, separators=(",", ":")))
+PY
+)
+RESTORED=$(printf '%s\n' "$RESTORE_PAYLOAD" | FM_LAYOUT_DESTINATION=must-not-be-forwarded \
+  python3 "$ROOT/bin/backends/herdr-layout-apply.py" \
+    "$SOCKET" "$WORKSPACE" "$NEW_TAB" "$NEW_PANE" \
+    33333333333333333333333333333333 fm-restore-33333333333333333333333333333333 --stdin-v1) \
+  || fail "the retained-Pi inert-shell restoration failed in the isolated lab"
+RESTORED_TAB=$(printf '%s' "$RESTORED" | jq -r '.layout.tab_id // empty')
+RESTORED_PANE=$(printf '%s' "$RESTORED" | jq -r '.layout.root | select(.type == "pane") | .pane_id // empty')
+[ -n "$RESTORED_TAB" ] && [ -n "$RESTORED_PANE" ] || fail "inert-shell restoration returned no exact endpoint"
+RESTORED_INFO=$(lab pane get "$RESTORED_PANE") || fail "restored shell pane did not re-read from the named session"
+printf '%s' "$RESTORED_INFO" | jq -e \
+  --arg workspace "$WORKSPACE" --arg tab "$RESTORED_TAB" --arg pane "$RESTORED_PANE" \
+  '.result.pane.workspace_id == $workspace and .result.pane.tab_id == $tab and .result.pane.pane_id == $pane' \
+  >/dev/null || fail "restored shell endpoint escaped its intended workspace or tab"
+RESTORED_PROCESS=$(lab pane process-info --pane "$RESTORED_PANE") || fail "could not inspect the restored shell"
+printf '%s' "$RESTORED_PROCESS" | jq -e '
+  (.result.process_info.foreground_processes | length) == 1
+  and (any(.result.process_info.foreground_processes[]?; .name == "sh" or .argv0 == "/bin/sh"))
+' >/dev/null || fail "retained-Pi restoration did not converge to one inert shell"
+if lab agent get "$RESTORED_PANE" >/dev/null 2>&1; then
+  fail "retained-Pi restoration registered an agent in the inert shell"
+fi
+FOCUS_AFTER=$(lab workspace list | jq -r '[.result.workspaces[] | select(.focused == true) | .active_tab_id] | @tsv')
+[ "$FOCUS_AFTER" = "$FOCUS_BEFORE" ] || fail "retained-Pi restoration changed the active workspace or tab"
+lab pane close "$RESTORED_PANE" >/dev/null || fail "could not clean up the restored shell pane"
+pass "live Herdr structural launch and inert-shell recovery preserve destination environment, identity, and focus"
 printf '# herdr=%s protocol=%s session=%s\n' "$HERDR_VERSION" "$PROTOCOL" "$HERDR_LAB_SESSION"

@@ -2987,16 +2987,16 @@ fm_backend_herdr_current_path() {  # <target>
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
 }
 
-fm_backend_herdr_layout_attempt_write() { # <file> <version> <attempt> <ownership-mode> <task> <worktree> <lease-holder|-> <session> <workspace> <old-tab> <old-pane> <label> [<new-tab> <new-pane> <resolution>]
+fm_backend_herdr_layout_attempt_write() { # <file> <version> <attempt> <ownership-mode> <task> <worktree> <lease-holder|-> <session> <workspace> <old-tab> <old-pane> <label> [<new-tab> <new-pane> <resolution> [<restore-tab> <restore-pane>]]
   local file=$1 version=$2 attempt=$3 ownership_mode=$4 task=$5 worktree=$6 lease_holder=$7
   local session=$8 workspace=$9 old_tab=${10} old_pane=${11} label=${12}
-  local new_tab=${13:-} new_pane=${14:-} resolution=${15:-} parent tmp value
+  local new_tab=${13:-} new_pane=${14:-} resolution=${15:-} restore_tab=${16:-} restore_pane=${17:-} parent tmp value
   parent=$(dirname "$file")
   [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
   if [ -e "$file" ] || [ -L "$file" ]; then
     [ -f "$file" ] && [ ! -L "$file" ] || return 1
   fi
-  case "$version" in 4|5|6) ;; *) return 1 ;; esac
+  case "$version" in 4|5|6|7) ;; *) return 1 ;; esac
   [ "${#attempt}" -eq 32 ] || return 1
   case "$attempt" in *[!0-9a-f]*) return 1 ;; esac
   for value in "$ownership_mode" "$task" "$worktree" "$lease_holder" "$session" "$workspace" "$old_tab" "$old_pane" "$label"; do
@@ -3019,11 +3019,17 @@ fm_backend_herdr_layout_attempt_write() { # <file> <version> <attempt> <ownershi
       case "$value" in *$'\n'*|*=*) return 1 ;; esac
     done
   fi
-  if [ "$version" = 6 ]; then
-    case "$resolution" in removed|not-applied) ;; *) return 1 ;; esac
-  elif [ -n "$resolution" ]; then
-    return 1
-  fi
+  case "$version" in
+    6) case "$resolution" in removed|not-applied) ;; *) return 1 ;; esac ;;
+    7)
+      [ "$resolution" = restored ] && [ "$ownership_mode" != fresh ] || return 1
+      for value in "$restore_tab" "$restore_pane"; do
+        [ -n "$value" ] || return 1
+        case "$value" in *$'\n'*|*=*) return 1 ;; esac
+      done
+      ;;
+    *) [ -z "$resolution$restore_tab$restore_pane" ] || return 1 ;;
+  esac
   tmp=$(umask 077; mktemp "$parent/.${file##*/}.tmp.XXXXXX") || return 1
   {
     printf 'version=%s\n' "$version"
@@ -3041,7 +3047,14 @@ fm_backend_herdr_layout_attempt_write() { # <file> <version> <attempt> <ownershi
       printf 'new_tab=%s\n' "$new_tab"
       printf 'new_pane=%s\n' "$new_pane"
     }
-    [ "$version" != 6 ] || printf 'resolution=%s\n' "$resolution"
+    case "$version" in
+      6) printf 'resolution=%s\n' "$resolution" ;;
+      7)
+        printf 'resolution=restored\n'
+        printf 'restore_tab=%s\n' "$restore_tab"
+        printf 'restore_pane=%s\n' "$restore_pane"
+        ;;
+    esac
   } >"$tmp" || { rm -f "$tmp"; return 1; }
   chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
   mv -f -- "$tmp" "$file" || { rm -f "$tmp"; return 1; }
@@ -3063,6 +3076,8 @@ fm_backend_herdr_layout_attempt_snapshot() { # <file>
   FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB=
   FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE=
   FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION=
+  FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_TAB=
+  FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE=
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   lines=$(wc -l <"$file" 2>/dev/null | tr -d ' ') || return 1
   for key in version attempt ownership_mode task worktree lease_holder session workspace old_tab old_pane label; do
@@ -3105,6 +3120,7 @@ fm_backend_herdr_layout_attempt_snapshot() { # <file>
     4) expected_lines=11 ;;
     5) expected_lines=13 ;;
     6) expected_lines=14 ;;
+    7) expected_lines=16 ;;
     *) return 1 ;;
   esac
   [ "$lines" = "$expected_lines" ] || return 1
@@ -3117,11 +3133,23 @@ fm_backend_herdr_layout_attempt_snapshot() { # <file>
       if [ "$key" = new_tab ]; then FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB=$value; else FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE=$value; fi
     done
   fi
-  if [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 6 ]; then
+  if [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" -ge 6 ]; then
     count=$(awk -F= '$1 == "resolution" { count++ } END { print count + 0 }' "$file") || return 1
     [ "$count" = 1 ] || return 1
     FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION=$(awk -F= '$1 == "resolution" { sub(/^[^=]*=/, ""); print }' "$file") || return 1
-    case "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" in removed|not-applied) ;; *) return 1 ;; esac
+    if [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 6 ]; then
+      case "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" in removed|not-applied) ;; *) return 1 ;; esac
+    else
+      [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = restored ] \
+        && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" != fresh ] || return 1
+      for key in restore_tab restore_pane; do
+        count=$(awk -F= -v key="$key" '$1 == key { count++ } END { print count + 0 }' "$file") || return 1
+        [ "$count" = 1 ] || return 1
+        value=$(awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print }' "$file") || return 1
+        [ -n "$value" ] || return 1
+        if [ "$key" = restore_tab ]; then FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_TAB=$value; else FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE=$value; fi
+      done
+    fi
   fi
 }
 
@@ -3143,13 +3171,13 @@ fm_backend_herdr_layout_attempt_ownership_policy() { # <expected-mode> <task> <w
   esac
 }
 
-fm_backend_herdr_layout_attempt_recovery_action() { # <expected-mode> <task> <worktree> <removed|not-applied>
+fm_backend_herdr_layout_attempt_recovery_action() { # <expected-mode> <task> <worktree> <removed|not-applied|restored>
   local expected_mode=$1 task=$2 worktree=$3 resolution=$4 policy
   policy=$(fm_backend_herdr_layout_attempt_ownership_policy \
     "$expected_mode" "$task" "$worktree") || return 1
   case "$policy:$resolution" in
     release-fresh:removed|release-fresh:not-applied) printf '%s\n' release-fresh ;;
-    retain:removed) printf '%s\n' retain-retry ;;
+    retain:restored) printf '%s\n' retain-retry ;;
     retain:not-applied) printf '%s\n' retain-continue ;;
     *) return 1 ;;
   esac
@@ -3168,23 +3196,36 @@ fm_backend_herdr_layout_attempt_bind() { # <file> <new-tab> <new-pane>
     "$new_tab" "$new_pane"
 }
 
-fm_backend_herdr_layout_attempt_resolve() { # <file> <removed|not-applied> [<new-tab> <new-pane>]
-  local file=$1 resolution=$2 new_tab=${3:-} new_pane=${4:-}
+fm_backend_herdr_layout_attempt_resolve() { # <file> <removed|not-applied|restored> [<source-tab> <source-pane> [<restore-tab> <restore-pane>]]
+  local file=$1 resolution=$2 source_tab=${3:-} source_pane=${4:-} restore_tab=${5:-} restore_pane=${6:-}
   fm_backend_herdr_layout_attempt_snapshot "$file" || return 1
-  [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" != 6 ] || return 0
-  if [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 5 ]; then
-    new_tab=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB
-    new_pane=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE
+  case "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" in 6|7) return 0 ;; esac
+  if [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 5 ] \
+    && { [ -z "$source_tab" ] || [ -z "$source_pane" ]; }; then
+    source_tab=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB
+    source_pane=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE
   fi
-  [ -n "$new_tab" ] || new_tab=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB
-  [ -n "$new_pane" ] || new_pane=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE
-  fm_backend_herdr_layout_attempt_write "$file" 6 \
-    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_ID" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" \
-    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_TASK" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKTREE" \
-    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LEASE_HOLDER" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" \
-    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB" \
-    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LABEL" \
-    "$new_tab" "$new_pane" "$resolution"
+  [ -n "$source_tab" ] || source_tab=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB
+  [ -n "$source_pane" ] || source_pane=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE
+  if [ "$resolution" = restored ]; then
+    [ -n "$restore_tab" ] || restore_tab=$source_tab
+    [ -n "$restore_pane" ] || restore_pane=$source_pane
+    fm_backend_herdr_layout_attempt_write "$file" 7 \
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_ID" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" \
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_TASK" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKTREE" \
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LEASE_HOLDER" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" \
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB" \
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LABEL" \
+      "$source_tab" "$source_pane" restored "$restore_tab" "$restore_pane"
+  else
+    fm_backend_herdr_layout_attempt_write "$file" 6 \
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_ID" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" \
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_TASK" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKTREE" \
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LEASE_HOLDER" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" \
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB" \
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LABEL" \
+      "$source_tab" "$source_pane" "$resolution"
+  fi
 }
 
 fm_backend_herdr_layout_attempt_commit() { # <file>
@@ -3205,22 +3246,113 @@ fm_backend_herdr_layout_attempt_commit() { # <file>
     "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" --clear >/dev/null 2>&1 || true
 }
 
-# Reconcile only the random label published before the structural request.
-# The durable record advances to version 6 before its owner may return the
-# Treehouse lease or clear the quarantine.
-fm_backend_herdr_layout_attempt_reconcile_remove() { # <file>
-  local file=$1 panes count candidate info old_present=0 new_tab
+fm_backend_herdr_layout_attempt_commit_restored() { # <file>
+  local file=$1 info label
+  fm_backend_herdr_layout_attempt_snapshot "$file" || return 1
+  [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 7 ] \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = restored ] \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" != fresh ] || return 1
+  label="fm-restore-$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_ID"
+  info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" pane get \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e \
+    --arg workspace "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" \
+    --arg tab "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_TAB" \
+    --arg pane "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE" \
+    --arg launch "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LABEL" --arg restore "$label" \
+    '.result.pane.workspace_id == $workspace and .result.pane.tab_id == $tab and .result.pane.pane_id == $pane and (.result.pane.label == $launch or .result.pane.label == $restore)' \
+    >/dev/null 2>&1 || return 1
+  [ "$(fm_backend_herdr_pane_process_state "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE")" = shell ] \
+    && [ "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" \
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE")" = no-agent ] || return 1
+  rm -f -- "$file" || return 1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" pane rename \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE" --clear >/dev/null 2>&1 || true
+}
+
+# Replace one independently confirmed retained Pi with an inert shell through
+# the same structural protocol. The restore label is derived from the durable
+# attempt, so an uncertain response can be reconciled without issuing a second
+# mutation. The request carries no inherited values or credentials.
+fm_backend_herdr_layout_attempt_restore_shell() { # <file> <tab> <pane>
+  local file=$1 tab=$2 pane=$3 session workspace attempt restore_label protocol schema socket helper
+  local payload out helper_status new_tab new_pane info focus_before
+  fm_backend_herdr_layout_attempt_snapshot "$file" || return 1
+  session=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION
+  workspace=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE
+  attempt=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_ID
+  restore_label="fm-restore-$attempt"
+  fm_backend_herdr_pane_matches_harness "$session" "$pane" pi || {
+    echo "error: quarantined Herdr replacement is not one independently confirmed plain Pi; refusing restoration" >&2
+    return 1
+  }
+  protocol=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null \
+    | jq -r '[.client.protocol, .server.protocol] | if length == 2 and all(.[]; type == "number") then map(tostring) | join("/") else empty end' 2>/dev/null)
+  [ "$protocol" = "$FM_BACKEND_HERDR_LAYOUT_APPLY_PROTOCOL/$FM_BACKEND_HERDR_LAYOUT_APPLY_PROTOCOL" ] || return 1
+  schema=$(fm_backend_herdr_cli "$session" api schema --json 2>/dev/null) || return 1
+  printf '%s' "$schema" | jq -e '
+    any(.schemas.request.oneOf[]?; .properties.method.const == "layout.apply")
+    and (.schemas.request["$defs"].LayoutNode.oneOf[]?
+      | select(.properties.type.const == "pane")
+      | .properties.command.type == ["array", "null"]
+      and .properties.cwd.type == ["string", "null"]
+      and .properties.env.type == "object"
+      and .properties.label.type == ["string", "null"]
+      and .properties.pane_id.type == ["string", "null"])
+  ' >/dev/null 2>&1 || return 1
+  socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || return 1
+  focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 1
+  payload=$(python3 -c '
+import json
+import sys
+print(json.dumps({"cwd": sys.argv[1], "env": {}, "command": ["/bin/sh"]}, separators=(",", ":")))
+' "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKTREE") || return 1
+  helper=${FM_BACKEND_HERDR_LAYOUT_APPLY_HELPER:-$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-layout-apply.py}
+  if out=$(printf '%s\n' "$payload" | python3 "$helper" \
+    "$socket" "$workspace" "$tab" "$pane" "$attempt" "$restore_label" --stdin-v1); then
+    helper_status=0
+  else
+    helper_status=$?
+  fi
+  fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "structural shell restoration" || return 2
+  [ "$helper_status" -eq 0 ] || return 2
+  new_tab=$(printf '%s' "$out" | jq -r '.layout.tab_id // empty' 2>/dev/null) || new_tab=
+  new_pane=$(printf '%s' "$out" | jq -r '.layout.root | select(.type == "pane") | .pane_id // empty' 2>/dev/null) || new_pane=
+  [ -n "$new_tab" ] && [ -n "$new_pane" ] || return 2
+  info=$(fm_backend_herdr_cli "$session" tab get "$new_tab" 2>/dev/null) || return 2
+  printf '%s' "$info" | jq -e --arg workspace "$workspace" --arg tab "$new_tab" \
+    '.result.tab.workspace_id == $workspace and .result.tab.tab_id == $tab' \
+    >/dev/null 2>&1 || return 2
+  info=$(fm_backend_herdr_cli "$session" pane get "$new_pane" 2>/dev/null) || return 2
+  printf '%s' "$info" | jq -e \
+    --arg workspace "$workspace" --arg tab "$new_tab" --arg pane "$new_pane" --arg label "$restore_label" \
+    '.result.pane.workspace_id == $workspace and .result.pane.tab_id == $tab and .result.pane.pane_id == $pane and .result.pane.label == $label' \
+    >/dev/null 2>&1 || return 2
+  [ "$(fm_backend_herdr_pane_process_state "$session" "$new_pane")" = shell ] \
+    && [ "$(fm_backend_herdr_pane_agent_state "$session" "$new_pane")" = no-agent ] || return 2
+  fm_backend_herdr_layout_attempt_resolve "$file" restored "$tab" "$pane" "$new_tab" "$new_pane"
+}
+
+# Reconcile only the launch and restoration labels derived from the durable
+# attempt. Fresh ownership removes an exact replacement. Retained ownership
+# structurally replaces one confirmed Pi with an inert shell, preserving the
+# workspace and tab while making the next relaunch retryable.
+fm_backend_herdr_layout_attempt_reconcile() { # <file>
+  local file=$1 panes count candidate info old_present=0 new_tab candidate_label restore_label state restore_status
   fm_backend_herdr_layout_attempt_snapshot "$file" || {
     echo "error: Herdr structural launch attempt record is malformed; refusing duplicate launch" >&2
     return 1
   }
-  [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" != 6 ] || return 0
+  case "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" in 6|7) return 0 ;; esac
   fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" || return 1
+  restore_label="fm-restore-$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_ID"
   panes=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" pane list \
     --workspace "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" 2>/dev/null) || return 1
   printf '%s' "$panes" | jq -e '(.result.panes | type) == "array"' >/dev/null 2>&1 || return 1
-  count=$(printf '%s' "$panes" | jq -r --arg label "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LABEL" \
-    '[.result.panes[]? | select(.label == $label)] | length' 2>/dev/null) || return 1
+  count=$(printf '%s' "$panes" | jq -r \
+    --arg launch "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LABEL" --arg restore "$restore_label" \
+    '[.result.panes[]? | select(.label == $launch or .label == $restore)] | length' 2>/dev/null) || return 1
   [ "$count" -le 1 ] || {
     echo "error: multiple panes match the quarantined Herdr structural launch attempt; refusing duplicate launch" >&2
     return 1
@@ -3246,25 +3378,63 @@ fm_backend_herdr_layout_attempt_reconcile_remove() { # <file>
     fm_backend_herdr_layout_attempt_resolve "$file" not-applied
     return
   fi
-  candidate=$(printf '%s' "$panes" | jq -r --arg label "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LABEL" \
-    '.result.panes[]? | select(.label == $label) | .pane_id' 2>/dev/null) || return 1
+  candidate=$(printf '%s' "$panes" | jq -r \
+    --arg launch "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LABEL" --arg restore "$restore_label" \
+    '.result.panes[]? | select(.label == $launch or .label == $restore) | .pane_id' 2>/dev/null) || return 1
+  candidate_label=$(printf '%s' "$panes" | jq -r \
+    --arg pane "$candidate" '.result.panes[]? | select(.pane_id == $pane) | .label // empty' 2>/dev/null) || return 1
   info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" pane get "$candidate" 2>/dev/null) || return 1
   new_tab=$(printf '%s' "$info" | jq -r \
     --arg workspace "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" --arg pane "$candidate" \
-    --arg label "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LABEL" \
+    --arg label "$candidate_label" \
     '.result.pane | select(.workspace_id == $workspace and .pane_id == $pane and .label == $label) | .tab_id // empty' \
     2>/dev/null) || return 1
   [ -n "$new_tab" ] || return 1
+  if [ "$candidate_label" = "$restore_label" ]; then
+    [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" != fresh ] || return 1
+    [ "$(fm_backend_herdr_pane_process_state "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" "$candidate")" = shell ] \
+      && [ "$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" "$candidate")" = no-agent ] || return 1
+    if [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 5 ]; then
+      fm_backend_herdr_layout_attempt_resolve "$file" restored \
+        "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" \
+        "$new_tab" "$candidate"
+    else
+      fm_backend_herdr_layout_attempt_resolve "$file" restored \
+        "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE" \
+        "$new_tab" "$candidate"
+    fi
+    return
+  fi
   if [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 5 ]; then
     [ "$candidate" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" ] \
       && [ "$new_tab" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB" ] || return 1
   fi
-  if ! fm_backend_herdr_explicit_close_pane_confirmed \
-    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" "$candidate"; then
-    echo "error: exact Herdr structural replacement was not confirmed gone after close; refusing duplicate launch" >&2
-    return 1
-  fi
-  fm_backend_herdr_layout_attempt_resolve "$file" removed "$new_tab" "$candidate"
+  case "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" in
+    fresh)
+      if ! fm_backend_herdr_explicit_close_pane_confirmed \
+        "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" "$candidate"; then
+        echo "error: exact Herdr structural replacement was not confirmed gone after close; refusing duplicate launch" >&2
+        return 1
+      fi
+      fm_backend_herdr_layout_attempt_resolve "$file" removed "$new_tab" "$candidate"
+      ;;
+    relaunch|secondmate)
+      state=$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" "$candidate")
+      if [ "$state" = no-agent ] \
+        && [ "$(fm_backend_herdr_pane_process_state "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" "$candidate")" = shell ]; then
+        fm_backend_herdr_layout_attempt_resolve "$file" restored \
+          "$new_tab" "$candidate" "$new_tab" "$candidate"
+      else
+        fm_backend_herdr_layout_attempt_restore_shell "$file" "$new_tab" "$candidate" || {
+          restore_status=$?
+          [ "$restore_status" -eq 2 ] \
+            && echo "error: inert-shell restoration has an uncertain result; preserving structural launch quarantine" >&2
+          return 1
+        }
+      fi
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 # fm_backend_herdr_layout_discard_response_pane: after layout.apply has
