@@ -24,6 +24,8 @@
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks it up.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
+# A kind=executor task is refused: an executor already ships its own pull request,
+# so re-scope its GitHub issue and relaunch it (bin/fm-control.sh <task-id> relaunch).
 # Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
 set -eu
 
