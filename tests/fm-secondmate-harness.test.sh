@@ -66,9 +66,8 @@ export FM_BACKEND=tmux
 
 # Every claude launch pre-registers workspace trust for the directory it starts
 # in, and for a secondmate that directory is the home (bin/fm-claude-trust.sh).
-# Several cases here resolve claude, so every spawn below pins a throwaway HOME
-# with an empty CLAUDE_CONFIG_DIR and puts node on the spawn's PATH; without the
-# first, this suite would write the developer's real ~/.claude.json.
+# Several cases here resolve claude, so every spawn below pins a throwaway HOME;
+# without that, this suite would write the developer's real ~/.claude.json.
 # Dropping the ambient markers is only half the isolation: a structural ancestor
 # outranks a marker, so a case that PINS detect_own with CLAUDECODE=1 also has to
 # blind the ancestry walk, or the harness this suite was launched from answers
@@ -459,17 +458,16 @@ make_seeded_home() {
   printf 'charter\n' > "$home/data/charter.md"
 }
 
-# fm-spawn refuses a claude or Pi launch without an account pin, and a
+# fm-spawn refuses a Pi launch without an account pin, and a
 # secondmate launches on the launching home's account, so each world gets
-# throwaway roots pinned in the primary home's config. An existing file is left
+# throwaway Pi roots pinned in the primary home's config. An existing file is left
 # alone, and FM_TEST_ACCOUNT_PINS=0 skips this for a case about a missing pin.
+# Claude is not pinned.
 seed_account_pins() {  # <world>
   local world=$1 file
   [ "${FM_TEST_ACCOUNT_PINS:-1}" = 1 ] || return 0
-  mkdir -p "$world/accounts/claude" "$world/accounts/pi" "$world/home/config"
+  mkdir -p "$world/accounts/pi" "$world/home/config"
   printf '{"defaultProvider":"fake"}\n' > "$world/accounts/pi/settings.json"
-  file="$world/home/config/claude-config-dir"
-  [ -e "$file" ] || printf '%s\n' "$world/accounts/claude" > "$file"
   file="$world/home/config/pi-agent-dir"
   [ -e "$file" ] || printf '%s\n' "$world/accounts/pi" > "$file"
 }
@@ -481,7 +479,7 @@ seed_account_pins() {  # <world>
 # non-worktree home). Inspect <world>/home/state/<id>.meta and <home>/config after.
 spawn_secondmate() {
   local world=$1 id=$2 home=$3 harness=${4:-} fakebin
-  mkdir -p "$world/home/state" "$world/home/data"
+  mkdir -p "$world/home/state" "$world/home/data" "$world/home/user-home"
   seed_account_pins "$world"
   fakebin=$(make_noop_tmux "$world/tmux-$id")
   # An empty harness must contribute zero args, not an empty positional; build the
@@ -490,7 +488,7 @@ spawn_secondmate() {
   [ -n "$harness" ] && spawn_args+=("$harness")
   spawn_args+=(--secondmate)
   PATH="$fakebin:$BLIND_BIN:$BASE_PATH" TMUX='' CLAUDECODE=1 \
-    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" HOME="$world/home/user-home" CLAUDE_CONFIG_DIR='' \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" HOME="$world/home/user-home" \
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
     FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
     FM_SPAWN_NO_GUARD=1 \
@@ -717,7 +715,7 @@ SH
 spawn_secondmate_capture() {
   local world=$1 id=$2 home=$3 launchlog=$4 fakebin
   shift 4
-  mkdir -p "$world/home/state" "$world/home/data"
+  mkdir -p "$world/home/state" "$world/home/data" "$world/home/user-home"
   seed_account_pins "$world"
   fakebin=$(make_launch_capturing_tmux "$world/tmux-$id")
   : > "$launchlog"
@@ -1054,7 +1052,7 @@ new_world() {
     printf 'projects/\nstate/\ndata/\n.no-mistakes/\n'
     [ "$dispatch_ignore" = no ] || printf 'config/crew-dispatch.json\n'
     printf 'config/crew-harness\nconfig/secondmate-harness\nconfig/backlog-backend\n'
-    printf 'config/backend\nconfig/claude-config-dir\nconfig/herdr-presentation-spaces\nconfig/startup-memory-budget\n'
+    printf 'config/backend\nconfig/herdr-presentation-spaces\nconfig/startup-memory-budget\n'
     printf 'config/claude-permission-mode\n'
   } > "$w/main/.gitignore"
   printf 'v1\n' > "$w/main/AGENTS.md"
@@ -2655,114 +2653,105 @@ SH
   pass "B25 spawn quarantines stale rereads without blocking relaunch"
 }
 
-test_spawn_claude_config_dir_precedence() {
-  local w sm launchlog launch configured env_root lane out status
+test_spawn_claude_uses_default_login() {
+  local w sm launchlog launch leftover env_root out status
 
-  # A secondmate is a supervisor: it launches on the launching home's Claude
-  # account, never on the worker pin its own home holds.
-  w="$TMP_ROOT/spawn-claude-config-file"
+  # A leftover pin file and an inherited CLAUDE_CONFIG_DIR must not reach the
+  # launch, and a missing pin file must not refuse.
+  w="$TMP_ROOT/spawn-claude-default"
   sm="$w/sm"
   launchlog="$w/launch.log"
-  configured="$w/configured root"
-  lane="$w/lane root"
-  mkdir -p "$w/home/config" "$configured" "$lane"
-  printf '%s\n' "$configured" > "$w/home/config/claude-config-dir"
-  make_seeded_home "$sm" sm
-  mkdir -p "$sm/config"
-  printf '%s\n' "$lane" > "$sm/config/claude-config-dir"
-  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness claude >/dev/null 2>&1
-  launch=$(cat "$launchlog")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$configured'" \
-    "a Claude secondmate without an environment override did not use the launching home's config/claude-config-dir"
-  assert_not_contains "$launch" "$lane" "a Claude secondmate launched on its own home's worker pin"
-  [ "$(cat "$sm/config/claude-config-dir")" = "$lane" ] \
-    || fail "a secondmate launch rewrote the secondmate home's worker pin"
-
-  w="$TMP_ROOT/spawn-claude-config-env"
-  sm="$w/sm"
-  launchlog="$w/launch.log"
-  configured="$w/configured"
-  env_root="$w/environment root"
-  lane="$w/lane"
-  mkdir -p "$w/home/config" "$configured" "$env_root" "$lane"
-  printf '%s\n' "$configured" > "$w/home/config/claude-config-dir"
-  make_seeded_home "$sm" sm
-  mkdir -p "$sm/config"
-  printf '%s\n' "$lane" > "$sm/config/claude-config-dir"
-  CLAUDE_CONFIG_DIR="$env_root" \
-    spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness claude >/dev/null 2>&1
-  launch=$(cat "$launchlog")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$env_root'" \
-    "the spawning environment did not override config/claude-config-dir"
-  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR='$configured'" \
-    "a Claude launch used the config file despite an explicit environment override"
-  assert_not_contains "$launch" "$lane" "a Claude secondmate launched on its own home's worker pin"
-
-  # A secondmate home's worker pin never stands in for a missing supervisor pin.
-  w="$TMP_ROOT/spawn-claude-config-unset"
-  sm="$w/sm"
-  launchlog="$w/launch.log"
-  mkdir -p "$w/home/config" "$w/lane"
+  leftover="$w/leftover root"
+  mkdir -p "$w/home/config" "$leftover"
+  printf '%s\n' "$leftover" > "$w/home/config/claude-config-dir"
   make_seeded_home "$sm" sm
   mkdir -p "$sm/config"
   printf '%s\n' "$w/lane" > "$sm/config/claude-config-dir"
+  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness claude >/dev/null 2>&1
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "env -u CLAUDE_CONFIG_DIR" \
+    "a Claude secondmate launch must unset CLAUDE_CONFIG_DIR"
+  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
+    "a Claude secondmate launch exported CLAUDE_CONFIG_DIR"
+  assert_not_contains "$launch" "$leftover" "a leftover config/claude-config-dir reached the launch"
+  [ "$(cat "$sm/config/claude-config-dir")" = "$w/lane" ] \
+    || fail "a secondmate launch rewrote a leftover config/claude-config-dir"
+
+  w="$TMP_ROOT/spawn-claude-env-ignored"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  env_root="$w/environment root"
+  mkdir -p "$w/home/config" "$env_root"
+  make_seeded_home "$sm" sm
+  CLAUDE_CONFIG_DIR="$env_root" \
+    spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness claude >/dev/null 2>&1
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "env -u CLAUDE_CONFIG_DIR" \
+    "a Claude secondmate launch under an inherited CLAUDE_CONFIG_DIR must unset it"
+  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
+    "an inherited CLAUDE_CONFIG_DIR was exported onto the launch"
+  assert_not_contains "$launch" "$env_root" "an inherited CLAUDE_CONFIG_DIR reached the launch"
+
+  w="$TMP_ROOT/spawn-claude-no-pin"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  make_seeded_home "$sm" sm
   out=$(FM_TEST_ACCOUNT_PINS=0 spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness claude 2>&1); status=$?
-  expect_code 1 "$status" "a Claude launch with neither pin source set must refuse: $out"
-  assert_contains "$out" "require an account pin: create $w/home/config/claude-config-dir" \
-    "a Claude launch with neither pin source set did not name the file to create"
-  [ ! -s "$launchlog" ] || fail "a Claude launch with neither pin source set was delivered"
+  expect_code 0 "$status" "a Claude launch with no config/claude-config-dir must succeed: $out"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "env -u CLAUDE_CONFIG_DIR" \
+    "a Claude launch with no pin file must still unset CLAUDE_CONFIG_DIR"
+  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
+    "a Claude launch with no pin file exported CLAUDE_CONFIG_DIR"
 
   w="$TMP_ROOT/spawn-non-claude-config"
   sm="$w/sm"
   launchlog="$w/launch.log"
   env_root="$w/environment"
   mkdir -p "$w/home/config" "$env_root"
-  printf '%s\n' "$env_root" > "$w/home/config/claude-config-dir"
   make_seeded_home "$sm" sm
   CLAUDE_CONFIG_DIR="$env_root" \
     spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness codex >/dev/null 2>&1
   assert_not_contains "$(cat "$launchlog")" "CLAUDE_CONFIG_DIR=" \
     "a non-Claude launch gained the Claude configuration prefix"
-  pass "spawn: a secondmate's Claude account resolves from the launching home's environment or file, never its own home's worker pin"
+  pass "spawn: a Claude secondmate uses the default login with CLAUDE_CONFIG_DIR unset"
 }
 
 test_spawn_secondmate_pins_ignore_config_override() {
-  local w sm launchlog fakebin harness pin out status launch
+  local w sm launchlog fakebin pin out status launch
   # The remote legs run fm-spawn with FM_HOME set to the host's launching
   # Firstmate copy and FM_CONFIG_OVERRIDE set to the second mate's own home;
-  # the supervisor pin still comes from FM_HOME's config.
-  for harness in claude pi; do
-    w="$TMP_ROOT/spawn-secondmate-pin-override-$harness"
-    sm="$w/sm"
-    launchlog="$w/launch.log"
-    pin="$w/accounts/$harness"
-    mkdir -p "$w/home/state" "$w/home/data" "$w/lane"
-    seed_account_pins "$w"
-    make_seeded_home "$sm" sm
-    mkdir -p "$sm/config"
-    printf '%s\n' "$w/lane" > "$sm/config/claude-config-dir"
-    printf '%s\n' "$w/lane" > "$sm/config/pi-agent-dir"
-    fakebin=$(make_launch_capturing_tmux "$w/tmux")
-    : > "$launchlog"
-    out=$(PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 CLAUDE_CONFIG_DIR='' \
-      FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
-      FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
-      FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$sm/config" \
-      FM_SKIP_SECONDMATE_INHERIT=1 FM_SKIP_SECONDMATE_SYNC=1 \
-      FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
-      "$ROOT/bin/fm-spawn.sh" sm "$sm" --harness "$harness" --model fake/model --secondmate 2>&1); status=$?
-    expect_code 0 "$status" "a $harness secondmate launch with its own home as FM_CONFIG_OVERRIDE failed: $out"
-    launch=$(cat "$launchlog")
-    assert_contains "$launch" "$pin" \
-      "a $harness secondmate did not launch on the launching home's pin when FM_CONFIG_OVERRIDE named its own home"
-    assert_not_contains "$launch" "$w/lane" \
-      "a $harness secondmate launched on its own home's worker pin through FM_CONFIG_OVERRIDE"
-  done
-  pass "spawn: a secondmate launched with its own home as FM_CONFIG_OVERRIDE, as the remote legs run it, still uses the launching home's pins"
+  # the supervisor Pi pin still comes from FM_HOME's config.
+  w="$TMP_ROOT/spawn-secondmate-pin-override-pi"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  pin="$w/accounts/pi"
+  mkdir -p "$w/home/state" "$w/home/data" "$w/home/user-home" "$w/lane"
+  seed_account_pins "$w"
+  make_seeded_home "$sm" sm
+  mkdir -p "$sm/config"
+  printf '%s\n' "$w/lane" > "$sm/config/pi-agent-dir"
+  fakebin=$(make_launch_capturing_tmux "$w/tmux")
+  : > "$launchlog"
+  out=$(PATH="$fakebin:$BASE_PATH" TMUX='' CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" HOME="$w/home/user-home" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+    FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$sm/config" \
+    FM_SKIP_SECONDMATE_INHERIT=1 FM_SKIP_SECONDMATE_SYNC=1 \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
+    "$ROOT/bin/fm-spawn.sh" sm "$sm" --harness pi --model fake/model --secondmate 2>&1); status=$?
+  expect_code 0 "$status" "a pi secondmate launch with its own home as FM_CONFIG_OVERRIDE failed: $out"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "$pin" \
+    "a pi secondmate did not launch on the launching home's pin when FM_CONFIG_OVERRIDE named its own home"
+  assert_not_contains "$launch" "$w/lane" \
+    "a pi secondmate launched on its own home's worker pin through FM_CONFIG_OVERRIDE"
+  pass "spawn: a secondmate launched with its own home as FM_CONFIG_OVERRIDE, as the remote legs run it, still uses the launching home's Pi pin"
 }
 
-test_spawn_refuses_invalid_claude_config_dir() {
-  local w sm launchlog out status
+test_spawn_ignores_invalid_leftover_claude_config_dir() {
+  local w sm launchlog out status launch
   w="$TMP_ROOT/spawn-claude-config-invalid"
   sm="$w/sm"
   launchlog="$w/launch.log"
@@ -2771,10 +2760,11 @@ test_spawn_refuses_invalid_claude_config_dir() {
   make_seeded_home "$sm" sm
 
   out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" --harness claude 2>&1); status=$?
-  expect_code 1 "$status" "a configured Claude root that is not a directory must refuse the spawn"
-  assert_contains "$out" "config/claude-config-dir" \
-    "the invalid Claude root refusal did not name config/claude-config-dir"
-  pass "spawn: an invalid configured Claude root refuses with the owning file named"
+  expect_code 0 "$status" "a leftover invalid config/claude-config-dir must not refuse a Claude spawn: $out"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "env -u CLAUDE_CONFIG_DIR" \
+    "a Claude launch with a leftover invalid pin must still unset CLAUDE_CONFIG_DIR"
+  pass "spawn: a leftover invalid config/claude-config-dir is ignored"
 }
 
 test_account_pins_are_home_local() {
@@ -2783,49 +2773,37 @@ test_account_pins_are_home_local() {
   head=$(git -C "$w/main" rev-parse HEAD)
   add_sm_worktree "$w" sm "$head"
   mkdir -p "$w/sm/config"
-  for file in claude-config-dir pi-agent-dir; do
-    printf '/synthetic/lane-account\n' > "$w/sm/config/$file"
-  done
+  printf '/synthetic/lane-account\n' > "$w/sm/config/pi-agent-dir"
   for phase in present changed absent; do
-    for file in claude-config-dir pi-agent-dir; do
-      case "$phase" in
-        present) printf '/synthetic/primary-account\n' > "$w/home/config/$file" ;;
-        changed) printf '/synthetic/another-account\n' > "$w/home/config/$file" ;;
-        absent) rm "$w/home/config/$file" ;;
-      esac
-    done
+    case "$phase" in
+      present) printf '/synthetic/primary-account\n' > "$w/home/config/pi-agent-dir" ;;
+      changed) printf '/synthetic/another-account\n' > "$w/home/config/pi-agent-dir" ;;
+      absent) rm "$w/home/config/pi-agent-dir" ;;
+    esac
     out=$(run_config_push "$w" 2>&1); status=$?
-    expect_code 0 "$status" "config push with $phase primary account pins failed: $out"
-    for file in claude-config-dir pi-agent-dir; do
-      [ "$(cat "$w/sm/config/$file")" = /synthetic/lane-account ] \
-        || fail "config push overwrote the home-local config/$file"
-    done
+    expect_code 0 "$status" "config push with $phase primary Pi pin failed: $out"
+    [ "$(cat "$w/sm/config/pi-agent-dir")" = /synthetic/lane-account ] \
+      || fail "config push overwrote the home-local config/pi-agent-dir"
     out=$(run_bootstrap "$w" 2>&1); status=$?
-    expect_code 0 "$status" "bootstrap with $phase primary account pins failed: $out"
-    for file in claude-config-dir pi-agent-dir; do
-      [ "$(cat "$w/sm/config/$file")" = /synthetic/lane-account ] \
-        || fail "bootstrap overwrote the home-local config/$file"
-    done
+    expect_code 0 "$status" "bootstrap with $phase primary Pi pin failed: $out"
+    [ "$(cat "$w/sm/config/pi-agent-dir")" = /synthetic/lane-account ] \
+      || fail "bootstrap overwrote the home-local config/pi-agent-dir"
   done
   # A home without a pin of its own never gains the primary's.
-  rm "$w/sm/config/claude-config-dir" "$w/sm/config/pi-agent-dir"
-  for file in claude-config-dir pi-agent-dir; do
-    printf '/synthetic/primary-account\n' > "$w/home/config/$file"
-  done
+  rm "$w/sm/config/pi-agent-dir"
+  printf '/synthetic/primary-account\n' > "$w/home/config/pi-agent-dir"
   out=$(run_config_push "$w" 2>&1); status=$?
-  expect_code 0 "$status" "config push onto a home without account pins failed: $out"
+  expect_code 0 "$status" "config push onto a home without a Pi pin failed: $out"
   out=$(run_bootstrap "$w" 2>&1); status=$?
-  expect_code 0 "$status" "bootstrap onto a home without account pins failed: $out"
-  for file in claude-config-dir pi-agent-dir; do
-    [ ! -e "$w/sm/config/$file" ] || fail "convergence propagated the primary's config/$file into a secondmate home"
-  done
-  pass "account pins survive primary changes and absence in config push and startup convergence, and never propagate"
+  expect_code 0 "$status" "bootstrap onto a home without a Pi pin failed: $out"
+  [ ! -e "$w/sm/config/pi-agent-dir" ] || fail "convergence propagated the primary's config/pi-agent-dir into a secondmate home"
+  pass "Pi account pins survive primary changes and absence in config push and startup convergence, and never propagate"
 }
 
 test_account_pins_are_home_local
-test_spawn_claude_config_dir_precedence
+test_spawn_claude_uses_default_login
 test_spawn_secondmate_pins_ignore_config_override
-test_spawn_refuses_invalid_claude_config_dir
+test_spawn_ignores_invalid_leftover_claude_config_dir
 test_harness_resolution
 test_cursor_marker_detection
 test_secondmate_model_effort_tokens

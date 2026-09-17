@@ -196,15 +196,16 @@ Re-run the two commands above and update this section and the pinned version tog
 ## Account-pin preflight
 
 Verified on 2026-09-10 with Pi 0.85.1 and quota-axi 0.1.30 on macOS, against throwaway roots holding no real credential.
-`bin/fm-account-pin-lib.sh` refuses a spawn unless the runner's own check says the pinned root can authenticate, and these are the answers it reads.
-The keyed Pi root holds `{"anthropic":{"type":"api_key","key":"<fake>"}}` in `auth.json`, and the filed Claude root holds a `.credentials.json` whose `claudeAiOauth.expiresAt` is one day ahead.
+`bin/fm-account-pin-lib.sh` refuses a spawn unless the runner's own check says the launch can authenticate, and these are the answers it reads.
+The keyed Pi root holds `{"anthropic":{"type":"api_key","key":"<fake>"}}` in `auth.json`.
+Claude is not pinned: the check runs with `CLAUDE_CONFIG_DIR` unset against a throwaway `HOME`, and a credentialed HOME holds `~/.claude/.credentials.json` whose `claudeAiOauth.expiresAt` is one day ahead.
 
 ```sh
 env -i HOME="$HOME" PATH="$PATH" PI_CODING_AGENT_DIR=<empty> pi auth check --provider anthropic --json --no-refresh
 env -i HOME="$HOME" PATH="$PATH" PI_CODING_AGENT_DIR=<keyed> pi auth check --provider anthropic --json --no-refresh
 env -i HOME="$HOME" PATH="$PATH" ANTHROPIC_API_KEY=<fake> PI_CODING_AGENT_DIR=<empty> pi auth check --provider anthropic --json --no-refresh
-env -i HOME="$HOME" PATH="$PATH" CLAUDE_CONFIG_DIR=<empty> quota-axi auth --json --provider claude | jq -c '[.auth[].sources[] | {source,status}]'
-env -i HOME="$HOME" PATH="$PATH" CLAUDE_CONFIG_DIR=<filed> quota-axi auth --json --provider claude | jq -c '[.auth[].sources[] | {source,status}]'
+env -i HOME=<empty> PATH="$PATH" quota-axi auth --json --provider claude | jq -c '[.auth[].sources[] | {source,status}]'
+env -i HOME=<filed> PATH="$PATH" quota-axi auth --json --provider claude | jq -c '[.auth[].sources[] | {source,status}]'
 ```
 
 ```text
@@ -227,11 +228,11 @@ Observed on 2026-09-11 with quota-axi 0.1.41 on macOS.
 The `keychain` answers recorded above were taken on 0.1.30 and no longer hold.
 A root with a real login still answers determinately: one account root reports `{"source":"keychain","status":"available"}` and another `{"source":"keychain","status":"expired"}`.
 Two other roots answer `{"source":"keychain","status":"skipped","error":"keychain_prompt_required","credentialPresent":true}` and `{"source":"keychain","status":"skipped","error":"keychain_presence_check_failed","credentialPresent":true}`.
-A throwaway root holding nothing at all gets that same `keychain_presence_check_failed` answer, so on this version `credentialPresent` is not evidence when the presence check did not complete, and trusting it would pass an empty Claude root.
+A throwaway HOME holding nothing at all gets that same `keychain_presence_check_failed` answer, so on this version `credentialPresent` is not evidence when the presence check did not complete, and trusting it would pass an empty Claude default login.
 The two cases are indistinguishable in that output, so the library does not take a skipped source's `credentialPresent` on its own.
-It passes that answer only when the root's own `.claude.json` has an `oauthAccount` entry, which `/login` writes whether the token lands in a file or the keychain.
-On 2026-09-14 the three logged-in account roots on this host had that entry and a throwaway root did not.
-`tests/fm-account-pin-claude-preflight.test.sh` replays the 0.1.41 answer against an empty root, a root without the entry, and a root with it.
+It passes that answer only when `$HOME/.claude.json` has an `oauthAccount` entry, which `/login` writes whether the token lands in a file or the keychain.
+On 2026-09-14 the three logged-in account roots on this host had that entry and a throwaway HOME did not.
+`tests/fm-account-pin-claude-preflight.test.sh` replays the 0.1.41 answer against an empty HOME, a HOME without the entry, and a HOME with it.
 
 ### Extension-registered Pi providers
 

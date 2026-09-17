@@ -310,30 +310,35 @@ The full cmux home label also includes a short hash of the resolved `FM_ROOT` pa
 ## Account pins
 
 An account pin is one file per operational home naming the account root that home's workers launch from, the way `AWS_PROFILE` names a profile.
-Claude, Pi, and Pi-signed launches require one, because each of those runners keeps its login in a root the launching process can select:
+Pi and Pi-signed launches require one, because that runner keeps its login in a root the launching process can select:
 
 | Runner | Pin file | Variable the launch receives |
 | --- | --- | --- |
-| `claude` | `config/claude-config-dir` | `CLAUDE_CONFIG_DIR` |
 | `pi`, `pi-signed` | `config/pi-agent-dir` | `PI_CODING_AGENT_DIR` |
 
+Claude is not pinned.
+Every Claude launch Firstmate makes - ship and scout workers, local second mates, and remote second mates - unsets `CLAUDE_CONFIG_DIR`, including a value inherited from the launching environment, so Claude always uses its default login.
+A leftover `config/claude-config-dir` is ignored.
+Workspace-trust pre-registration writes the default store `$HOME/.claude.json`, and a Claude quota snapshot unsets `CLAUDE_CONFIG_DIR` the same way.
+See [Claude default login](#claude-default-login).
+
 Pins are home-local and never inherited, and a home's pins name the accounts its own workers and scouts launch on.
-A worker or scout reads only its home's file, never the spawning `CLAUDE_CONFIG_DIR`, because inside a second mate that variable holds the supervisor's account.
-A second mate is a supervisor, so its own launch resolves against the launching home instead, never against the pins in the second mate's home; the sections below give each runner's order.
-A missing pin refuses the spawn with a message naming the runner, the home, and the file to create.
-Firstmate never falls back to `~/.claude` or `~/.pi/agent`, because a forgotten pin would otherwise spend whichever account the default root holds.
+A worker or scout reads only its home's file.
+A second mate is a supervisor, so its own launch resolves against the launching home instead, never against the pins in the second mate's home; the Pi section below gives that runner's order.
+A missing Pi pin refuses the spawn with a message naming the runner, the home, and the file to create.
+Firstmate never falls back to `~/.pi/agent`, because a forgotten pin would otherwise spend whichever account the default root holds.
 A pin is one literal absolute path followed by exactly one newline, naming an existing directory that is readable and searchable.
 Firstmate never creates the account directory or reads, copies, or changes its credentials.
 
 A Pi root can hold more than one account: an extension can register a second ChatGPT login under its own provider id, so the Pi pin selects the root and the model's provider selects the account inside it.
 `config/pi-account-side` is what keeps those accounts apart, and [Pi account side](#pi-account-side-configpi-account-side) owns it.
 
-Before any endpoint exists, the spawn asks the runner's own non-interactive check whether the pinned root can authenticate the launch.
-Claude is asked through `quota-axi auth --json --provider claude`.
-Pi is asked `pi auth check --provider <the launch model's provider> --json --no-refresh`, so a Pi launch must name its model as `<provider>/<id>`; a model that names no provider refuses, because one Pi root can hold several accounts and the root's `defaultProvider` must never pick which one a launch spends.
+Before any endpoint exists, the spawn asks the runner's own non-interactive check whether the launch can authenticate.
+Claude is asked through `quota-axi auth --json --provider claude` with `CLAUDE_CONFIG_DIR` unset, against the default login.
+Pi is asked `pi auth check --provider <the launch model's provider> --json --no-refresh` under the pin, so a Pi launch must name its model as `<provider>/<id>`; a model that names no provider refuses, because one Pi root can hold several accounts and the root's `defaultProvider` must never pick which one a launch spends.
 Anything but a ready answer refuses the spawn, and so does no answer within the bound.
 This matters most for Pi: an interactive Pi with no usable login does not exit but waits behind a `/login` hint, which looks like a live worker.
-The check runs with only `HOME`, `PATH`, `TMPDIR`, and the pin in its environment, because Pi also counts provider keys such as `ANTHROPIC_API_KEY`, so a key left in the caller would otherwise vouch for an empty root.
+The check runs with only `HOME`, `PATH`, and `TMPDIR` in its environment (plus the Pi pin for a Pi launch), because Pi also counts provider keys such as `ANTHROPIC_API_KEY`, so a key left in the caller would otherwise vouch for an empty root.
 `--no-refresh` keeps the check from rewriting a root's tokens while other workers use them, and Claude's check passes an expired OAuth token, which Claude renews on its next use.
 `pi auth check` loads no extensions, so a provider an extension registers is indistinguishable to it from a typo and comes back `not_ready`/`provider_not_found`.
 That one answer, and only that one, falls through to `pi --list-models <provider>`, which does load extensions; the launch passes only when a listed row's provider and model columns both match exactly.
@@ -342,14 +347,15 @@ A `codex-native/<id>` model is not checked: that provider comes from the `pi-cod
 [`bin/fm-account-pin-lib.sh`](../bin/fm-account-pin-lib.sh) owns resolution, validation, and the check, and [Dispatch authentication verification](verification/dispatch-auth.md#account-pin-preflight) records the vendor answers it relies on.
 
 A pin selects a root; it does not stop a credential ranked above that root from being used.
-Claude's documented authentication precedence ranks a cloud-provider selection, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `apiKeyHelper`, `CLAUDE_CODE_OAUTH_TOKEN`, and an Anthropic profile or federation rule above the `/login` stored in the root, so every Claude launch unsets those environment variables, including a long-lived OAuth token the destination shell exports.
-Credentials that live in files cannot be shed that way: an `apiKeyHelper` in project or managed settings, an active federation profile under `~/.config/anthropic`, and a gateway session all still outrank the pin.
+Claude's documented authentication precedence ranks a cloud-provider selection, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `apiKeyHelper`, `CLAUDE_CODE_OAUTH_TOKEN`, and an Anthropic profile or federation rule above the stored `/login`, so every Claude launch unsets those environment variables, including a long-lived OAuth token the destination shell exports, and also unsets `CLAUDE_CONFIG_DIR`.
+Credentials that live in files cannot be shed that way: an `apiKeyHelper` in project or managed settings, an active federation profile under `~/.config/anthropic`, and a gateway session all still outrank the stored login.
 Pi's `docs/providers.md` gives credentials in the root's `auth.json` priority over environment variables, and Pi keeps no second token cache beside that file, so a Pi launch keeps its environment.
 The check refuses a launch whose provider the root cannot authenticate, but a Pi worker that switches mid-session to a provider the root holds no credential for can still use a key from its environment; Firstmate does not shed Pi's provider keys, because Pi documents dozens of them and adds more per release.
 
 Each pin is a separate pool.
 Dispatch reads capacity once per distinct pin in a matched array through [`bin/fm-quota-snapshot.sh`](../bin/fm-quota-snapshot.sh), which runs `quota-axi` with that pin exported, and ranks candidates only against candidates on the same pin, so `spendPriority` cannot move work onto another pin's account; `quota-array-dispatch` owns that procedure.
-`quota-axi` reads a pin only where it documents one: `CLAUDE_CONFIG_DIR` for the `claude` row, and `PI_CODING_AGENT_DIR` only for Pi's own `pi:xai` and `pi:kimi-coding` sources.
+A Claude snapshot unsets `CLAUDE_CONFIG_DIR` so `quota-axi` reads the default login the spawn will use.
+`quota-axi` reads a pin only where it documents one: `CLAUDE_CONFIG_DIR` for the `claude` row (left unset), and `PI_CODING_AGENT_DIR` only for Pi's own `pi:xai` and `pi:kimi-coding` sources.
 A Pi candidate whose quota row comes from another store, such as `codex` for an `openai-codex` model, therefore has no evidence specific to its pin, and dispatch discloses its capacity as unknown.
 
 Other runners carry no pin, because the official controls cannot isolate them or Firstmate has not adopted one yet:
@@ -363,21 +369,21 @@ Those runners launch on their ambient account, and dispatch cannot tell whose ca
 
 ### Default-root tripwire
 
-The required pin and the check already refuse any launch through Firstmate that would reach a default root.
-Leaving the default roots (`~/.claude`, `~/.pi/agent`) without a usable login adds a line for what bypasses Firstmate, such as a bare `claude` or `pi` typed by hand, which then meets a login prompt instead of silently spending the account stored there.
-Emptying a default root is the operator's decision and act: move its credentials into a named root, pin homes to that root, and log out of the default one.
+The required Pi pin and the check already refuse any Pi launch through Firstmate that would reach `~/.pi/agent`.
+Leaving that default root without a usable login adds a line for what bypasses Firstmate, such as a bare `pi` typed by hand, which then meets a login prompt instead of silently spending the account stored there.
+Emptying a default Pi root is the operator's decision and act: move its credentials into a named root, pin homes to that root, and log out of the default one.
 Firstmate never empties or moves a credential root itself.
 On its own the tripwire does not refuse an interactive Pi, which waits at the `/login` hint, and a `/login` typed there authenticates the default root again, so the check above is what protects spawned workers.
+Claude launches always use the vendor default login, so emptying `~/.claude` is not a Firstmate isolation control.
 
-### Claude configuration root (config/claude-config-dir / CLAUDE_CONFIG_DIR)
+### Claude default login
 
-`config/claude-config-dir` is local, gitignored, and deliberately **not inherited**: it names the account this home's Claude workers and scouts launch on, so configure it in every home whose workers use Claude, including a secondmate home.
-A ship or scout Claude spawn reads only the active home's file and ignores a `CLAUDE_CONFIG_DIR` in the spawning environment, because inside a second mate that variable is the supervisor's account.
-A second mate's own Claude launch runs on the supervisor account instead: a non-empty `CLAUDE_CONFIG_DIR` in the launching environment wins and is validated the same way, then the launching home's file supplies the pin, and the second mate home's own file is never read for it.
-Relaunch and startup recovery launch from that same home, and config push and secondmate convergence leave this home-local file untouched.
-A remote second mate resolves the same way on its host, where the launching home is the Firstmate code root that launches it there, so its supervisor pin lives in that code root's `config/claude-config-dir` and never in the remote home's own file.
-The spawn pre-registers workspace trust in the resolved root, and ship and scout launches on other runners receive neither the pin nor the credential-shedding prefix.
-The file is materialized by hand in each home because bootstrap cannot choose an account: run `mkdir -p config && printf '%s\n' "$CLAUDE_CONFIG_DIR" > config/claude-config-dir` with `CLAUDE_CONFIG_DIR` naming the account root that home's workers should launch on.
+Every Claude launch Firstmate makes starts `claude` with `CLAUDE_CONFIG_DIR` unset, including shedding any value inherited from the launching environment or the destination shell, so Claude always uses its default login.
+Firstmate does not read, require, or validate `config/claude-config-dir`; a leftover file is ignored and is not inherited.
+The spawn pre-registers workspace trust in the default store `$HOME/.claude.json`.
+A Claude quota snapshot unsets `CLAUDE_CONFIG_DIR` the same way.
+Ship and scout launches on other runners receive neither the Claude credential-shedding prefix nor an unset of `CLAUDE_CONFIG_DIR`.
+Exporting `CLAUDE_CONFIG_DIR` to Claude's own default folder (`~/.claude`) is not equivalent to leaving the variable unset: Claude then looks in a different store and can report itself logged out of an account that is logged in with the variable unset.
 
 ### Pi configuration root (config/pi-agent-dir / PI_CODING_AGENT_DIR)
 

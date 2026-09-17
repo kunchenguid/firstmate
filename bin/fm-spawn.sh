@@ -180,7 +180,7 @@
 #   secondmate receives the primary's read-only shared captain-preference file
 #   (fm-config-inherit-lib.sh). A successful launch clears pending inherited
 #   config reread generations because the new agent reads the converged files.
-#   Claude, Pi, and Pi-signed launches require an account pin
+#   Pi and Pi-signed launches require an account pin
 #   (bin/fm-account-pin-lib.sh owns resolution, validation, and the preflight).
 #   A Pi root can hold several accounts, so a pi/pi-signed launch must also name
 #   its model as <provider>/<id> and match the side config/pi-account-side
@@ -188,26 +188,25 @@
 #   before any endpoint exists. config/pi-mcp-config, resolved from the same
 #   config directory, overlays those launches with --mcp-config and refuses when
 #   the file it names is missing rather than falling back to Pi's own discovery.
-#   Both pins are home-local, never inherited, and name the accounts that
+#   The Pi pin is home-local, never inherited, and names the account that
 #   home's workers use: a ship/scout reads only the active home's
-#   config/claude-config-dir or config/pi-agent-dir, never the spawning
-#   CLAUDE_CONFIG_DIR, which inside a secondmate is the supervisor's account. A
-#   secondmate is a supervisor and runs on the launching home's account, never
-#   its own home's worker pins: Claude from a non-empty spawning
-#   CLAUDE_CONFIG_DIR, else the launching home's config/claude-config-dir, and
-#   Pi from the launching home's config/pi-agent-dir. Relaunch and startup
-#   recovery launch from that same home, and a remote launch reads them from
-#   the host's Firstmate code root that launches it (FM_HOME), never from the
-#   remote home's own config. The Pi pin overrides both caller and
+#   config/pi-agent-dir. A secondmate is a supervisor and runs on the launching
+#   home's Pi pin, never its own home's worker pin. Claude is not pinned:
+#   every Claude launch unsets CLAUDE_CONFIG_DIR, including a value inherited
+#   from the launching environment, so Claude always uses its default login, and
+#   a leftover config/claude-config-dir is ignored. Relaunch and startup
+#   recovery launch from that same home, and a remote launch reads the Pi pin
+#   from the host's Firstmate code root that launches it (FM_HOME), never from
+#   the remote home's own config. The Pi pin overrides both caller and
 #   destination-shell PI_CODING_AGENT_DIR, including inside a filtered launch
-#   environment. A missing, invalid, or unreadable pin, or a pinned root the
+#   environment. A missing, invalid, or unreadable Pi pin, or a root the
 #   runner's own non-interactive auth check cannot confirm, refuses before
-#   endpoint creation; nothing falls back to ~/.claude or ~/.pi/agent. A pinned
-#   Claude launch also sheds the environment credentials Claude ranks above
-#   its stored login. The pin follows the resolved harness, so a raw launch
-#   command whose executable is claude, pi, or pi-signed receives it too;
-#   other harnesses are unaffected. No credential files are
-#   read or transferred.
+#   endpoint creation; nothing falls back to ~/.pi/agent. A Claude launch also
+#   sheds the environment credentials Claude ranks above its stored default
+#   login. The pin follows the resolved harness, so a raw launch command whose
+#   executable is pi or pi-signed receives it too; a raw claude command still
+#   unsets CLAUDE_CONFIG_DIR. Other harnesses are unaffected. No credential
+#   files are read or transferred.
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; the default is kind=ship.
@@ -2035,18 +2034,16 @@ case "$ARG3" in
   ;;
 esac
 
-# A home's pins are its workers' accounts. A secondmate is a supervisor, so it
-# launches on the launching home's account, never on its own home's worker
-# pins: that is $FM_HOME's own config even when FM_CONFIG_OVERRIDE points
-# $CONFIG at the second mate's home, as the remote legs do, where $FM_HOME is
-# the host's Firstmate copy that launches it. Resolve before the secondmate
-# home is touched or any endpoint or task record exists.
+# A home's Pi pin is its workers' account. A secondmate is a supervisor, so it
+# launches on the launching home's pin, never on its own home's worker pin:
+# that is $FM_HOME's own config even when FM_CONFIG_OVERRIDE points $CONFIG at
+# the second mate's home, as the remote legs do, where $FM_HOME is the host's
+# Firstmate copy that launches it. Resolve before the secondmate home is
+# touched or any endpoint or task record exists. Claude is not pinned.
 PIN_CONFIG=$CONFIG
 [ "$KIND" != secondmate ] || PIN_CONFIG="$FM_HOME/config"
-CLAUDE_CONFIG_ROOT=
 PI_AGENT_ROOT=
 case "$HARNESS" in
-  claude) CLAUDE_CONFIG_ROOT=$(fm_account_pin_resolve claude "$PIN_CONFIG" "$FM_HOME" "$KIND") || exit 1 ;;
   pi|pi-signed) PI_AGENT_ROOT=$(fm_account_pin_resolve "$HARNESS" "$PIN_CONFIG" "$FM_HOME") || exit 1 ;;
 esac
 
@@ -2680,8 +2677,10 @@ fi
 # fresh spawns, --relaunch, secondmates, and raw launch commands alike - so the
 # model it judges is the one the launch actually carries: a raw command ignores
 # --model, so its own embedded model is what counts.
+# Claude's check is the same gate for the default login, with CLAUDE_CONFIG_DIR
+# unset, so a logged-out default does not launch a pane that waits at /login.
 case "$HARNESS" in
-  claude) fm_account_pin_preflight claude "$CLAUDE_CONFIG_ROOT" claude "$MODEL" || exit 1 ;;
+  claude) fm_account_pin_preflight claude "" claude "$MODEL" || exit 1 ;;
   pi|pi-signed)
     PI_LAUNCH_MODEL=$MODEL
     [ "$RAW_LAUNCH" -ne 1 ] || PI_LAUNCH_MODEL=$(raw_launch_model "$LAUNCH")
@@ -3844,7 +3843,7 @@ claude*)
   else
     spawn_trust_args=("$WT" "$PROJ_ABS")
   fi
-  if ! CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_ROOT" "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
+  if ! env -u CLAUDE_CONFIG_DIR "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
     echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2
     exit 1
   fi
@@ -4513,16 +4512,12 @@ claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo 
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac
-# Crewmate panes are created by a long-lived tmux/herdr daemon that does not
-# inherit firstmate's current environment, so a bare `claude` in the pane falls
-# back to the default ~/.claude store even when firstmate itself runs under a
-# different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
-# Forward the root resolved above (the home's worker pin, or for a secondmate
-# the launching home's supervisor account) onto the claude launch so the agent
-# uses the captain-selected credential/config store, and shed the environment
-# credentials Claude would otherwise rank above that store's login.
+# Every Claude launch unsets CLAUDE_CONFIG_DIR, including a value the
+# destination shell exports, so the pane always uses Claude's default login,
+# and sheds the environment credentials Claude would otherwise rank above that
+# stored login.
 if [ "$HARNESS" = claude ]; then
-  LAUNCH="$(fm_account_pin_shed_prefix claude) CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_ROOT") $LAUNCH"
+  LAUNCH="$(fm_account_pin_shed_prefix claude) $LAUNCH"
 fi
 if [ -n "$PI_AGENT_ROOT" ]; then
   LAUNCH="PI_CODING_AGENT_DIR=$(shell_quote "$PI_AGENT_ROOT") $LAUNCH"

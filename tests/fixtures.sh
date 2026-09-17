@@ -245,20 +245,20 @@ fm_test_spawn_home() {
 }
 
 # fm_test_account_pins <home>
-# Pins Claude and Pi launches from <home> to throwaway account roots under it,
-# because bin/fm-spawn.sh refuses a claude, pi, or pi-signed launch without a
+# Pins Pi launches from <home> to a throwaway account root under it,
+# because bin/fm-spawn.sh refuses a pi or pi-signed launch without a
 # pin (bin/fm-account-pin-lib.sh). Pins are home-local: a worker reads its own
 # home's, and a secondmate launch reads the launching home's. The Pi root's
 # defaultProvider is deliberately never read by a launch: one root can hold
 # several accounts, so every Pi spawn must name --model as <provider>/<id>. A
 # test that exercises a missing or invalid pin removes or rewrites the file
 # afterwards, and one that exercises the work/personal side writes
-# config/pi-account-side itself.
+# config/pi-account-side itself. Claude is not pinned; a leftover
+# config/claude-config-dir is ignored.
 fm_test_account_pins() {
   local home=$1
-  mkdir -p "$home/config" "$home/accounts/claude" "$home/accounts/pi"
+  mkdir -p "$home/config" "$home/accounts/pi"
   printf '{"defaultProvider":"fake"}\n' > "$home/accounts/pi/settings.json"
-  printf '%s\n' "$home/accounts/claude" > "$home/config/claude-config-dir"
   printf '%s\n' "$home/accounts/pi" > "$home/config/pi-agent-dir"
 }
 
@@ -273,7 +273,7 @@ fm_test_fake_account_auth() {
   local fakebin=$1
   cat > "$fakebin/quota-axi" <<'SH'
 #!/bin/sh
-status=$(cat "${CLAUDE_CONFIG_DIR:-/nonexistent}/.fake-auth" 2>/dev/null) || status=available
+status=$(cat "${HOME:-/nonexistent}/.fake-auth" 2>/dev/null) || status=available
 printf '{"schemaVersion":1,"auth":[{"provider":"claude","sources":[{"source":"keychain","status":"%s"}]}]}\n' "$status"
 SH
   chmod +x "$fakebin/quota-axi"
@@ -371,22 +371,16 @@ make_spawn_fakebin() {
 
 # fm_test_run_spawn <home> <pane-path> <fakebin> [fm-spawn args...]
 # Common spawn env. Extra variables in the caller (GROK_HOME, FM_FAKE_LAUNCH_LOG,
-# CLAUDE_CONFIG_DIR, ...) are inherited. Does not add --mode/--yolo; ship tests
-# that need a delivery contract pass those flags themselves.
+# ...) are inherited. Does not add --mode/--yolo; ship tests that need a
+# delivery contract pass those flags themselves.
 fm_test_run_spawn() {
   local home=$1 pane=$2 fakebin=$3
   shift 3
-  # Every spawn here runs against a throwaway HOME, so nothing a spawn touches
-  # outside its pinned account root can reach the developer's real one.
-  # CLAUDE_CONFIG_DIR is pinned EMPTY: a secondmate launch ranks an ambient
-  # value above the launching home's config/claude-config-dir
-  # (fm_test_account_pins), so a value inherited from the developer's shell
-  # would point that launch at the developer's real Claude store. A test that
-  # needs the ambient case opts in through FM_TEST_CLAUDE_CONFIG_DIR.
+  # Every spawn here runs against a throwaway HOME, so Claude's default
+  # store ($HOME/.claude.json) cannot reach the developer's real one.
   local spawn_home=$home/user-home
   mkdir -p "$spawn_home"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$spawn_home" \
-    CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="${TMUX:-fake,1,0}" \

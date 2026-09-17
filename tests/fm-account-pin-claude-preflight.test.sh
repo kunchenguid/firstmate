@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Hermetic coverage for the Claude branch of the account-pin preflight
 # (bin/fm-account-pin-lib.sh) against quota-axi 0.1.41's recorded answer for a
-# root whose keychain presence check did not complete: skipped with
-# credentialPresent true, given to an empty root and a logged-in root alike.
-# That answer must refuse an empty root and pass a root whose .claude.json
+# default login whose keychain presence check did not complete: skipped with
+# credentialPresent true, given to an empty HOME and a logged-in HOME alike.
+# That answer must refuse an empty HOME and pass a HOME whose .claude.json
 # records a login. The live guard tests/fm-account-pin-preflight-live-e2e.test.sh
 # covers what the installed quota-axi actually emits.
 set -u
@@ -19,8 +19,8 @@ printf '{"auth":[{"provider":"claude","sources":[{"source":"oauth-file","status"
 SH
 chmod +x "$FAKEBIN/quota-axi"
 
-preflight() {  # <root> -> the lib's verdict and exit status
-  PATH="$FAKEBIN:$PATH" bash -c '. "$1/bin/fm-account-pin-lib.sh"; fm_account_pin_preflight claude "$2" claude' _ "$ROOT" "$1" 2>&1
+preflight() {  # <home> -> the lib's verdict and exit status
+  HOME="$1" PATH="$FAKEBIN:$PATH" bash -c '. "$1/bin/fm-account-pin-lib.sh"; fm_account_pin_preflight claude "" claude' _ "$ROOT" 2>&1
 }
 
 empty="$TMP_ROOT/empty"
@@ -31,12 +31,12 @@ printf '{"numStartups":1}\n' > "$unlogged/.claude.json"
 printf '{"oauthAccount":{"emailAddress":"fm@example.invalid"}}\n' > "$logged/.claude.json"
 
 out=$(preflight "$empty"); status=$?
-expect_code 1 "$status" "an empty Claude root passed on a skipped keychain answer: $out"
-assert_contains "$out" "keychain=skipped" "an empty Claude root refused for an unexpected reason"
+expect_code 1 "$status" "an empty Claude HOME passed on a skipped keychain answer: $out"
+assert_contains "$out" "keychain=skipped" "an empty Claude HOME refused for an unexpected reason"
 
 out=$(preflight "$unlogged"); status=$?
-expect_code 1 "$status" "a Claude root with no recorded login passed on a skipped keychain answer: $out"
+expect_code 1 "$status" "a Claude HOME with no recorded login passed on a skipped keychain answer: $out"
 
 out=$(preflight "$logged"); status=$?
-expect_code 0 "$status" "a Claude root with a recorded login refused on a skipped keychain answer: $out"
-pass "a skipped keychain answer passes only a Claude root whose .claude.json records a login"
+expect_code 0 "$status" "a Claude HOME with a recorded login refused on a skipped keychain answer: $out"
+pass "a skipped keychain answer passes only a Claude default login whose .claude.json records a login"

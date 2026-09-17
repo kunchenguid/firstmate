@@ -15,8 +15,9 @@
 #   - a provider only an extension registers passes when the root serves its
 #     models and refuses when it does not, which is the one case `pi auth check`
 #     cannot answer for at all;
-#   - an empty Claude root refuses;
-#   - a Claude root holding an unexpired OAuth credentials file passes.
+#   - an empty Claude HOME refuses;
+#   - a Claude HOME holding an unexpired OAuth credentials file in the default
+#     store passes.
 # Raw Pi is also asked under the caller's key, so the scrubbed case cannot pass
 # vacuously if a Pi release stops reading that variable, and raw Pi's own
 # provider_not_found answer is asserted so the extension case cannot pass
@@ -132,22 +133,22 @@ test_claude_roots() {
   local empty filed out status expires
   empty="$TMP_ROOT/claude-empty"
   filed="$TMP_ROOT/claude-filed"
-  mkdir -p "$empty" "$filed"
+  mkdir -p "$empty" "$filed/.claude"
   expires=$(( ($(date +%s) + 86400) * 1000 ))
   printf '{"claudeAiOauth":{"accessToken":"sk-ant-oat01-%s","refreshToken":"sk-ant-ort01-%s","expiresAt":%s,"scopes":["user:inference"]}}\n' \
-    "$FAKE_KEY" "$FAKE_KEY" "$expires" > "$filed/.credentials.json"
-  chmod 600 "$filed/.credentials.json"
+    "$FAKE_KEY" "$FAKE_KEY" "$expires" > "$filed/.claude/.credentials.json"
+  chmod 600 "$filed/.claude/.credentials.json"
 
-  out=$(preflight claude "$empty"); status=$?
-  expect_code 1 "$status" "$QUOTA_VERSION: an empty Claude root must refuse: $out
+  out=$(HOME="$empty" preflight claude "$empty"); status=$?
+  expect_code 1 "$status" "$QUOTA_VERSION: an empty Claude HOME must refuse: $out
     On 0.1.41 the keychain source answers skipped/keychain_presence_check_failed with
     credentialPresent true, which the library accepts only with oauthAccount in .claude.json. See the dated readings in
     docs/verification/dispatch-auth.md under \"quota-axi keychain reporting on 0.1.41\"."
-  assert_contains "$out" "oauth-file=missing" "$QUOTA_VERSION: an empty Claude root refused for an unexpected reason"
+  assert_contains "$out" "oauth-file=missing" "$QUOTA_VERSION: an empty Claude HOME refused for an unexpected reason"
 
-  out=$(preflight claude "$filed"); status=$?
-  expect_code 0 "$status" "$QUOTA_VERSION: a Claude root holding an unexpired credentials file must pass: $out"
-  pass "$QUOTA_VERSION: the Claude preflight refuses an empty root and passes a credentialed one"
+  out=$(HOME="$filed" preflight claude "$filed"); status=$?
+  expect_code 0 "$status" "$QUOTA_VERSION: a Claude HOME holding an unexpired credentials file must pass: $out"
+  pass "$QUOTA_VERSION: the Claude preflight refuses an empty default login and passes a credentialed one"
 }
 
 test_pi_roots

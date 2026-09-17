@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # fm-account-pin-lib.sh - the single owner of account-pin mechanics: which
 # runners require a pin, how a home's pin is resolved and validated, the
-# spawn-time authentication preflight under that pin, and the environment
-# credentials a pinned Claude launch sheds.
+# spawn-time authentication preflight, and the environment credentials a
+# Claude launch sheds so Claude's stored default login wins.
 #
 # docs/configuration.md "Account pins" owns the operator-facing contract and
 # the reasons the other runners carry no pin. Sourced by bin/fm-spawn.sh,
@@ -10,8 +10,14 @@
 #
 # Pinned runners, each a credential file inside a root its vendor lets a
 # process select:
-#   claude          CLAUDE_CONFIG_DIR     config/claude-config-dir
 #   pi, pi-signed   PI_CODING_AGENT_DIR   config/pi-agent-dir
+#
+# Claude is not pinned. Every Claude launch Firstmate makes unsets
+# CLAUDE_CONFIG_DIR, including a value inherited from the launching
+# environment, so Claude always uses its default login. A leftover
+# config/claude-config-dir is ignored. The spawn still asks whether that
+# default login can authenticate, and still sheds the environment credentials
+# Claude ranks above it.
 #
 # A Pi root can hold several ChatGPT logins at once, one per provider id, so
 # the Pi pin selects the root and the model's provider selects the account
@@ -21,25 +27,23 @@
 # read off the model at all, because the root's defaultProvider is a personal
 # account on the shared root and must never decide a work launch.
 #
-# Resolution: both pins are home-local, never inherited, and name the accounts
+# Resolution: the Pi pin is home-local, never inherited, and names the account
 # the home's workers use, so a worker or scout launch reads only the home's
-# file: inside a secondmate the ambient CLAUDE_CONFIG_DIR is the supervisor's
-# account. A secondmate is a supervisor and is resolved against the launching
-# home instead, where a non-empty ambient CLAUDE_CONFIG_DIR still wins for
-# Claude. The root must be an absolute, existing, readable, searchable
-# directory. A missing pin refuses; nothing falls back to ~/.claude or
-# ~/.pi/agent.
+# file. A secondmate is a supervisor and is resolved against the launching
+# home instead. The root must be an absolute, existing, readable, searchable
+# directory. A missing Pi pin refuses; nothing falls back to ~/.pi/agent.
 #
 # Preflight: the runner's own non-interactive check, run with only HOME, PATH,
-# TMPDIR, and the pin in its environment, so a provider key left in the caller
-# cannot answer for an empty root. Claude: `quota-axi auth --json --provider
-# claude`; a source that is available or expired (renewed on next use) passes.
-# A source skipped with credentialPresent passes only when the root's own
-# .claude.json records a login (oauthAccount): quota-axi 0.1.41 answers an
-# empty root skipped/keychain_presence_check_failed with credentialPresent
-# true, while a keychain-only /login still writes oauthAccount to that file.
-# Pi: `pi auth check --provider <the launch model's provider> --json
-# --no-refresh`, and only status "ready" passes. That command loads no
+# and TMPDIR in its environment, so a provider key left in the caller cannot
+# answer for an empty root. Claude: `quota-axi auth --json --provider claude`
+# with CLAUDE_CONFIG_DIR unset; a source that is available or expired (renewed
+# on next use) passes. A source skipped with credentialPresent passes only
+# when $HOME/.claude.json records a login (oauthAccount): quota-axi 0.1.41
+# answers an empty root skipped/keychain_presence_check_failed with
+# credentialPresent true, while a keychain-only /login still writes
+# oauthAccount to that file. Pi: the pin is added to that same scrubbed
+# environment, then `pi auth check --provider <the launch model's provider>
+# --json --no-refresh`, and only status "ready" passes. That command loads no
 # extensions, so an extension-registered provider comes back
 # not_ready/provider_not_found; only that one answer falls through to
 # `pi --list-models <provider>`, which does load them, and the launch passes
@@ -64,7 +68,6 @@ FM_ACCOUNT_PIN_CLAUDE_SHED="CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUD
 # Prints the pin's environment variable; returns 1 for a runner with no pin.
 fm_account_pin_var() {
   case "$1" in
-    claude) printf 'CLAUDE_CONFIG_DIR\n' ;;
     pi|pi-signed) printf 'PI_CODING_AGENT_DIR\n' ;;
     *) return 1 ;;
   esac
@@ -96,31 +99,17 @@ fm_account_pin_read_path() {
 
 # fm_account_pin_resolve <harness> <config-dir> <home> [<kind>]
 # Prints the validated root. On refusal prints one error naming the runner,
-# the home, and the file, and returns 1. For kind "secondmate" a non-empty
-# ambient CLAUDE_CONFIG_DIR wins over the file; any other launch reads only
-# the file.
+# the home, and the file, and returns 1. Kind is accepted for caller
+# compatibility and ignored: only Pi is pinned, and a secondmate Pi launch
+# is resolved against the launching home by the caller.
 fm_account_pin_resolve() {
-  local harness=$1 config=$2 home=$3 kind=${4:-} runner file fallback cfg root rc
+  local harness=$1 config=$2 home=$3 runner file fallback cfg root rc
   # shellcheck disable=SC2088  # The fallbacks are literal text for the refusal.
   case "$harness" in
-    claude) runner=Claude file=claude-config-dir fallback='~/.claude' ;;
     pi|pi-signed) runner=Pi file=pi-agent-dir fallback='~/.pi/agent' ;;
     *) return 1 ;;
   esac
   cfg="$config/$file"
-  if [ "$runner" = Claude ] && [ "$kind" = secondmate ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-    root=$CLAUDE_CONFIG_DIR
-    case "$root" in
-      /*) ;;
-      *) echo "error: CLAUDE_CONFIG_DIR must be an absolute path to this home's Claude account root: $root" >&2; return 1 ;;
-    esac
-    if [ ! -d "$root" ] || [ ! -r "$root" ] || [ ! -x "$root" ]; then
-      echo "error: CLAUDE_CONFIG_DIR must name a readable, searchable existing directory: $root" >&2
-      return 1
-    fi
-    printf '%s\n' "$root"
-    return 0
-  fi
   root=$(fm_account_pin_read_path "$cfg")
   rc=$?
   case "$rc" in
@@ -254,10 +243,10 @@ fm_account_pin_preflight() {
   [ -z "${TMPDIR:-}" ] || clean+=("TMPDIR=$TMPDIR")
   case "$harness" in
     claude)
-      out=$(fm_run_timed "$FM_ACCOUNT_PIN_PREFLIGHT_SECONDS" "${clean[@]}" "CLAUDE_CONFIG_DIR=$root" \
+      out=$(fm_run_timed "$FM_ACCOUNT_PIN_PREFLIGHT_SECONDS" "${clean[@]}" \
         quota-axi auth --json --provider claude 2>/dev/null </dev/null)
       local logged_in=false
-      [ "$(jq -r 'has("oauthAccount")' "$root/.claude.json" 2>/dev/null)" != true ] || logged_in=true
+      [ "$(jq -r 'has("oauthAccount")' "${HOME:-}/.claude.json" 2>/dev/null)" != true ] || logged_in=true
       verdict=$(printf '%s\n' "$out" | jq -r --argjson logged_in "$logged_in" '
         [.auth[]? | select(.provider == "claude") | .sources[]?] as $s |
         if any($s[]; .status == "available" or .status == "expired" or
@@ -266,7 +255,7 @@ fm_account_pin_preflight() {
         else ($s | map("\(.source)=\(.status)") | join(", "))
         end' 2>/dev/null)
       [ "$verdict" != ready ] || return 0
-      echo "error: the Claude account pin $root holds no usable login (quota-axi auth: ${verdict:-no answer}); log in under it with CLAUDE_CONFIG_DIR=$root claude, then /login, or pin another root" >&2
+      echo "error: Claude's default login is not usable (quota-axi auth: ${verdict:-no answer}); log in with claude, then /login, with CLAUDE_CONFIG_DIR unset" >&2
       return 1
       ;;
     pi|pi-signed)
@@ -300,12 +289,13 @@ fm_account_pin_preflight() {
 }
 
 # fm_account_pin_shed_prefix <harness>
-# Prints an `env -u ...` launch prefix removing the environment credentials
-# that would outrank the pin, or nothing for a runner without one.
+# Prints an `env -u ...` launch prefix removing CLAUDE_CONFIG_DIR and the
+# environment credentials that would outrank Claude's stored default login, or
+# nothing for a runner that does not need it.
 fm_account_pin_shed_prefix() {
   local var prefix=env
   [ "$1" = claude ] || return 0
-  for var in $FM_ACCOUNT_PIN_CLAUDE_SHED; do
+  for var in CLAUDE_CONFIG_DIR $FM_ACCOUNT_PIN_CLAUDE_SHED; do
     prefix="$prefix -u $var"
   done
   printf '%s\n' "$prefix"

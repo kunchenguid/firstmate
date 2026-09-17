@@ -146,14 +146,13 @@
 #
 # Only the launching user's own store is written. In worktree mode: the
 # projects entries for the worktree path and the resolved canonical project
-# path in ${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json, which must be a regular
-# file this uid owns; every unrelated key and project entry is preserved, and
-# both entries land in one atomic replacement. In secondmate-home mode: the
-# single projects entry for the registered home path, same store, same atomic
-# replacement. fm-spawn.sh passes the home's resolved Claude account pin as
-# CLAUDE_CONFIG_DIR both here and onto the claude launch, and the pane starts
-# in the registered directory, so only an absolute value names the same store
-# on both sides; a relative one is refused below rather than guessed at.
+# path in $HOME/.claude.json, which must be a regular file this uid owns;
+# every unrelated key and project entry is preserved, and both entries land
+# in one atomic replacement. In secondmate-home mode: the single projects
+# entry for the registered home path, same store, same atomic replacement.
+# Firstmate always uses Claude's default store: this script unsets
+# CLAUDE_CONFIG_DIR so an inherited value cannot redirect the write, and
+# fm-spawn.sh launches claude the same way.
 set -u
 # Path resolution here must answer from the filesystem, never from the caller's
 # environment, because the refusals below are the safety property. CDPATH would
@@ -166,6 +165,7 @@ set -u
 # than hostile. Clear the whole class once here so every subshell inherits it
 # and a later added git call cannot silently reintroduce the hole.
 unset CDPATH \
+  CLAUDE_CONFIG_DIR \
   GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_INDEX_FILE \
   GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CEILING_DIRECTORIES GIT_NAMESPACE \
   GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_CONFIG GIT_CONFIG_GLOBAL \
@@ -226,33 +226,19 @@ if [ "$MODE" = worktree ]; then
   [ -n "$PROJ_REAL" ] || refuse "project '$PROJ_ARG' is not an accessible directory"
 fi
 
-CONFIG_DIR=${CLAUDE_CONFIG_DIR:-${HOME:-}}
-[ -n "$CONFIG_DIR" ] || refuse "neither CLAUDE_CONFIG_DIR nor HOME is set, so the store cannot be located"
-# A relative value resolves against this process's cwd here but against the
-# worker's own cwd once it reaches the launch, so the two sides can name
-# different stores and the registration would report a success the worker never
-# sees. Refuse rather than guess at the worker's cwd.
-case ${CLAUDE_CONFIG_DIR:-} in
-  '' | /*) ;;
-  *) refuse "CLAUDE_CONFIG_DIR '$CLAUDE_CONFIG_DIR' is a relative path, so the store the worker reads cannot be guaranteed to be the one written here; set it to an absolute path" ;;
-esac
-# claude creates its own store directory on first use, so a direct caller may
-# name one that does not exist yet (fm-spawn.sh already requires its pin to
-# exist). Create it here for the same reason, and refuse only when it genuinely
-# cannot be written, since a store this cannot reach means the worker meets the
-# dialog after all.
+CONFIG_DIR=${HOME:-}
+[ -n "$CONFIG_DIR" ] || refuse "HOME is not set, so the default Claude store cannot be located"
+# claude creates ~/.claude on first use; the trust store itself is
+# $HOME/.claude.json, so HOME must already be an existing directory.
 CONFIG_DIR_REAL=$(real_dir "$CONFIG_DIR") || true
-if [ -z "$CONFIG_DIR_REAL" ]; then
-  mkdir -p "$CONFIG_DIR" 2>/dev/null || true
-  CONFIG_DIR_REAL=$(real_dir "$CONFIG_DIR") || true
-fi
-[ -n "$CONFIG_DIR_REAL" ] || refuse "Claude config directory '$CONFIG_DIR' does not exist and could not be created"
+[ -n "$CONFIG_DIR_REAL" ] || refuse "HOME '$CONFIG_DIR' is not an accessible directory"
 
-# The filesystem root, a home directory, and the config directory are never
-# something this registers, in either mode. Checked explicitly so the refusal
-# names the real reason instead of the scope verdict behind it.
+# The filesystem root and a home directory are never something this
+# registers, in either mode. Checked explicitly so the refusal names the
+# real reason instead of the scope verdict behind it. The default Claude
+# store is $HOME/.claude.json, so the home-directory refusal also covers
+# the store's directory.
 [ "$TARGET_REAL" != / ] || refuse "'/' is the filesystem root, not a $SCOPE_NOUN"
-[ "$TARGET_REAL" != "$CONFIG_DIR_REAL" ] || refuse "'$TARGET_REAL' is the Claude config directory, not a $SCOPE_NOUN"
 if [ -n "${HOME:-}" ]; then
   HOME_REAL=$(real_dir "$HOME") || true
   [ "$TARGET_REAL" != "${HOME_REAL:-}" ] || refuse "'$TARGET_REAL' is the home directory, not a $SCOPE_NOUN"

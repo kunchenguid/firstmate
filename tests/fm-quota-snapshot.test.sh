@@ -2,6 +2,8 @@
 # Behavior tests for bin/fm-quota-snapshot.sh: quota-axi read under one
 # candidate runner's account pin, so each pin's capacity is read from that
 # pin's own account and a missing pin refuses exactly as a spawn would.
+# Claude is not pinned: its snapshot unsets CLAUDE_CONFIG_DIR so quota-axi
+# reads the default login.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -28,14 +30,14 @@ run_snapshot() {
 test_pinned_runners_read_under_their_pin() {
   local out harness
   out=$(run_snapshot claude --json) || fail "claude snapshot failed: $out"
-  [ "$out" = "$HOME_DIR/accounts/claude|ambient-pi|--json" ] \
-    || fail "claude snapshot did not run under the Claude pin: $out"
+  [ "$out" = "unset|ambient-pi|--json" ] \
+    || fail "claude snapshot did not unset CLAUDE_CONFIG_DIR: $out"
   for harness in pi pi-signed; do
     out=$(run_snapshot "$harness" auth --json) || fail "$harness snapshot failed: $out"
     [ "$out" = "ambient-claude|$HOME_DIR/accounts/pi|auth --json" ] \
       || fail "$harness snapshot did not run under the Pi pin: $out"
   done
-  pass "claude, pi, and pi-signed snapshots run quota-axi under the home's pin, never an ambient root, arguments unchanged"
+  pass "claude snapshots unset CLAUDE_CONFIG_DIR; pi and pi-signed snapshots run quota-axi under the home's pin, arguments unchanged"
 }
 
 test_unpinned_runner_reads_ambient() {

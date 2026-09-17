@@ -37,7 +37,7 @@ EOF
 # run_trust <config> <worktree> <project> [home]: invoke with an isolated store.
 run_trust() {
   local config=$1 wt=$2 proj=$3 home=${4:-$1}
-  CLAUDE_CONFIG_DIR="$config" HOME="$home" "$TRUST" "$wt" "$proj" 2>&1
+  HOME="$home" "$TRUST" "$wt" "$proj" 2>&1
 }
 
 trusted_paths() {  # <store>
@@ -143,19 +143,18 @@ seed_secondmate_home() {
 # mode against an isolated store.
 run_home_trust() {
   local config=$1 home=$2 id=$3 user_home=${4:-$1}
-  CLAUDE_CONFIG_DIR="$config" HOME="$user_home" "$TRUST" --secondmate-home "$home" "$id" 2>&1
+  HOME="$user_home" "$TRUST" --secondmate-home "$home" "$id" 2>&1
 }
 
 # spawn_secondmate_claude <case-dir> <home> <id>: run a real --secondmate claude
-# spawn against the isolated store at <case-dir>/claude-config, logging the
-# launch to <case-dir>/launch.log. Echoes the spawn output.
+# spawn against the isolated default store at <primary>/user-home/.claude.json,
+# logging the launch to <case-dir>/launch.log. Echoes the spawn output.
 spawn_secondmate_claude() {
   local case_dir=$1 home=$2 id=$3 primary fakebin
   primary="$case_dir/primary"
-  mkdir -p "$case_dir/claude-config"
   fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
   fm_test_spawn_home "$primary" claude
-  FM_TEST_CLAUDE_CONFIG_DIR="$case_dir/claude-config" FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
+  FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
     fm_test_run_spawn "$primary" "$home" "$fakebin" "$id" "$home" claude --secondmate
 }
 
@@ -369,43 +368,38 @@ test_home_directory_is_refused_even_when_it_is_a_worktree() {
   out=$(run_trust "$CONFIG" "$home" "$PROJ" "$home")
   expect_code 1 $? "a home directory must be refused even as a valid worktree: $out"
   assert_contains "$out" "home directory" "the refusal did not name the home directory"
-  assert_not_trusted "$CONFIG/.claude.json" "$home" "the home directory was trusted"
+  assert_not_trusted "$home/.claude.json" "$home" "the home directory was trusted"
   # Prove the git checks really would have accepted it, so the guard above is
   # what refused rather than an unrelated failure.
+  mkdir -p "$CASE_DIR/elsewhere-home"
   out=$(run_trust "$CONFIG" "$home" "$PROJ" "$CASE_DIR/elsewhere-home")
   expect_code 0 $? "the same path must be acceptable once it is not HOME: $out"
   pass "fm-claude-trust.sh: refuses a home directory the git checks would accept"
 }
 
-# fm-spawn forwards CLAUDE_CONFIG_DIR onto the worker verbatim and the worker's
-# pane starts in the task worktree, so a relative value names one store here and
-# another there; registering into the first and reporting success would leave the
-# worker meeting the dialog this control exists to remove.
-test_relative_config_dir_is_refused() {
+# fm-claude-trust always writes $HOME/.claude.json and unsets CLAUDE_CONFIG_DIR,
+# so an inherited relative value cannot redirect the store.
+test_inherited_claude_config_dir_is_ignored() {
   local rec out
   rec=$(make_case relative-config)
   read_case "$rec"
   mkdir -p "$CASE_DIR/relhome"
-  out=$(cd "$CASE_DIR/relhome" && CLAUDE_CONFIG_DIR=.claude-work HOME="$CASE_DIR/relhome" "$TRUST" "$WT" "$PROJ" 2>&1)
-  expect_code 1 $? "a relative CLAUDE_CONFIG_DIR must be refused: $out"
-  assert_contains "$out" ".claude-work" "the refusal did not name the relative value"
-  assert_contains "$out" "relative" "the refusal did not say why the value is unusable"
+  out=$(cd "$CASE_DIR/relhome" && CLAUDE_CONFIG_DIR=.claude-work HOME="$CONFIG" "$TRUST" "$WT" "$PROJ" 2>&1)
+  expect_code 0 $? "an inherited CLAUDE_CONFIG_DIR must be ignored: $out"
+  assert_trusted "$CONFIG/.claude.json" "$WT" "trust did not land in the default HOME store"
   [ ! -e "$CASE_DIR/relhome/.claude-work/.claude.json" ] \
-    || fail "a store was written under this process's cwd for a relative CLAUDE_CONFIG_DIR"
-  case "$out" in
-    *"trusted:"*) fail "a registration was claimed for a store the worker may not read: $out" ;;
-  esac
-  pass "fm-claude-trust.sh: refuses a relative CLAUDE_CONFIG_DIR"
+    || fail "a store was written under this process's cwd for an inherited CLAUDE_CONFIG_DIR"
+  pass "fm-claude-trust.sh: ignores an inherited CLAUDE_CONFIG_DIR and writes the default HOME store"
 }
 
-test_config_directory_is_refused() {
+test_home_as_store_directory_is_refused() {
   local rec out
   rec=$(make_case config-dir)
   read_case "$rec"
   out=$(run_trust "$CONFIG" "$CONFIG" "$PROJ")
-  expect_code 1 $? "the Claude config directory must be refused: $out"
-  assert_contains "$out" "config directory" "the refusal did not name the config directory"
-  pass "fm-claude-trust.sh: refuses the Claude config directory"
+  expect_code 1 $? "the default Claude store directory (HOME) must be refused: $out"
+  assert_contains "$out" "home directory" "the refusal did not name the home directory"
+  pass "fm-claude-trust.sh: refuses the default Claude store directory"
 }
 
 test_non_git_directory_is_refused() {
@@ -590,12 +584,11 @@ test_corrupt_store_fails_closed() {
 # meta, which a refused spawn never publishes. The id carries this process's pid
 # so the temp-root assertion reads only this run's path.
 test_refused_spawn_leaves_no_task_state() {
-  local case_dir home proj wt config fakebin out id
+  local case_dir home proj wt fakebin out id
   case_dir="$TMP_ROOT/refused-spawn"
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  config="$case_dir/claude-config"
   id="refusedspawn$$"
   # Root owns /etc/passwd, so a store resolving to it is refused as another
   # user's file. Running as root would own it and make the refusal vacuous.
@@ -603,13 +596,12 @@ test_refused_spawn_leaves_no_task_state() {
     pass "fm-spawn.sh: a trust-refused claude spawn leaves no task state (skipped as root)"
     return 0
   fi
-  mkdir -p "$config"
-  ln -s /etc/passwd "$config/.claude.json"
   fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
   fm_test_spawn_home "$home" claude
+  mkdir -p "$home/user-home"
+  ln -s /etc/passwd "$home/user-home/.claude.json"
   fm_git_worktree "$proj" "$wt" wt-refused
   fm_test_spawn_brief "$home" "$id"
-  printf '%s\n' "$config" > "$home/config/claude-config-dir"
   out=$(fm_test_run_spawn "$home" "$wt" "$fakebin" "$id" "$proj" claude \
     --mode no-mistakes --yolo off)
   expect_code 1 $? "a spawn whose trust registration is refused must fail: $out"
@@ -627,34 +619,31 @@ test_refused_spawn_leaves_no_task_state() {
 # worktree AND deliver the launch command carrying the brief, with no dialog to
 # answer and no human in the loop.
 test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief() {
-  local case_dir home proj wt config fakebin launch_log out
+  local case_dir home proj wt fakebin launch_log out
   case_dir="$TMP_ROOT/spawn"
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  config="$case_dir/claude-config"
   launch_log="$case_dir/launch.log"
-  mkdir -p "$config"
   fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
   fm_test_spawn_home "$home" claude
   fm_git_worktree "$proj" "$wt" wt-spawn
   fm_test_spawn_brief "$home" trustspawn
-  printf '%s\n' "$config" > "$home/config/claude-config-dir"
   out=$(FM_FAKE_LAUNCH_LOG="$launch_log" \
     fm_test_run_spawn "$home" "$wt" "$fakebin" trustspawn "$proj" claude \
     --mode no-mistakes --yolo off)
   expect_code 0 $? "the claude spawn must succeed: $out"
-  assert_trusted "$config/.claude.json" "$wt" \
+  assert_trusted "$home/user-home/.claude.json" "$wt" \
     "the claude spawn did not pre-register trust for its worktree"
   assert_present "$launch_log" "the claude spawn sent no launch command"
   assert_grep 'claude --dangerously-skip-permissions' "$launch_log" \
     "the launch command was not the claude worker launch"
   assert_grep "$home/data/trustspawn/launch-brief.md" "$launch_log" \
     "the launch command did not carry the brief the worker must read"
-  # The worker must read the SAME store the registration wrote, or the trust
-  # would land somewhere the pane never looks.
-  assert_grep "CLAUDE_CONFIG_DIR='$config'" "$launch_log" \
-    "the launch command did not point the worker at the store that was trusted"
+  assert_grep 'env -u CLAUDE_CONFIG_DIR' "$launch_log" \
+    "the launch command did not unset CLAUDE_CONFIG_DIR"
+  assert_not_contains "$(cat "$launch_log")" "CLAUDE_CONFIG_DIR=" \
+    "the launch command exported CLAUDE_CONFIG_DIR"
   pass "fm-spawn.sh: a claude spawn pre-trusts its worktree and launches with the brief"
 }
 
@@ -670,17 +659,17 @@ test_secondmate_standalone_clone_home_is_trusted() {
   seed_secondmate_home "$home" nomistakes-n1 clone
   out=$(spawn_secondmate_claude "$case_dir" "$home" nomistakes-n1)
   expect_code 0 $? "a claude secondmate spawn into a standalone-clone home must succeed: $out"
-  assert_trusted "$case_dir/claude-config/.claude.json" "$home" \
+  assert_trusted "$case_dir/primary/user-home/.claude.json" "$home" \
     "the claude secondmate spawn did not pre-register trust for its standalone-clone home"
   assert_present "$case_dir/launch.log" "the claude secondmate spawn sent no launch command"
   assert_grep 'claude --dangerously-skip-permissions' "$case_dir/launch.log" \
     "the launch command was not the claude secondmate launch"
   assert_grep "$home/data/charter.md" "$case_dir/launch.log" \
     "the launch command did not carry the charter the secondmate must read"
-  # The pane must read the SAME store the registration wrote, or the trust would
-  # land somewhere it never looks and the dialog would appear anyway.
-  assert_grep "CLAUDE_CONFIG_DIR='$case_dir/claude-config'" "$case_dir/launch.log" \
-    "the launch command did not point the secondmate at the store that was trusted"
+  assert_grep 'env -u CLAUDE_CONFIG_DIR' "$case_dir/launch.log" \
+    "the launch command did not unset CLAUDE_CONFIG_DIR"
+  assert_not_contains "$(cat "$case_dir/launch.log")" "CLAUDE_CONFIG_DIR=" \
+    "the launch command exported CLAUDE_CONFIG_DIR"
   pass "fm-spawn.sh: a claude secondmate spawn pre-trusts a standalone-clone home"
 }
 
@@ -695,7 +684,7 @@ test_secondmate_leased_worktree_home_is_trusted() {
   seed_secondmate_home "$home" leased-n1 worktree
   out=$(spawn_secondmate_claude "$case_dir" "$home" leased-n1)
   expect_code 0 $? "a claude secondmate spawn into a leased worktree home must succeed: $out"
-  assert_trusted "$case_dir/claude-config/.claude.json" "$home" \
+  assert_trusted "$case_dir/primary/user-home/.claude.json" "$home" \
     "the claude secondmate spawn did not pre-register trust for its leased worktree home"
   pass "fm-spawn.sh: a claude secondmate spawn pre-trusts a leased worktree home"
 }
@@ -769,6 +758,7 @@ test_secondmate_home_trust_refuses_everything_unseeded() {
   assert_not_trusted "$config/.claude.json" "$target" "the user's home directory was trusted"
   # Prove the seed really would have been accepted, so the guard above is what
   # refused rather than an unrelated failure.
+  mkdir -p "$case_dir/elsewhere-home"
   out=$(run_home_trust "$config" "$target" userhome-n1 "$case_dir/elsewhere-home")
   expect_code 0 $? "the same seeded home must be accepted once it is not HOME: $out"
 
@@ -805,8 +795,8 @@ test_secondmate_spawn_fails_closed_when_home_trust_cannot_be_recorded() {
     return 0
   fi
   seed_secondmate_home "$home" failclosed-n1 clone
-  mkdir -p "$case_dir/claude-config"
-  ln -s /etc/passwd "$case_dir/claude-config/.claude.json"
+  mkdir -p "$case_dir/primary/user-home"
+  ln -s /etc/passwd "$case_dir/primary/user-home/.claude.json"
   out=$(spawn_secondmate_claude "$case_dir" "$home" failclosed-n1)
   expect_code 1 $? "a secondmate spawn whose trust registration is refused must fail: $out"
   assert_contains "$out" "workspace trust" "the spawn did not report the trust refusal"
@@ -825,8 +815,8 @@ test_primary_checkout_is_refused
 test_cdpath_cannot_defeat_the_primary_checkout_refusal
 test_git_env_overrides_cannot_defeat_the_primary_checkout_refusal
 test_home_directory_is_refused_even_when_it_is_a_worktree
-test_config_directory_is_refused
-test_relative_config_dir_is_refused
+test_home_as_store_directory_is_refused
+test_inherited_claude_config_dir_is_ignored
 test_non_git_directory_is_refused
 test_missing_directory_is_refused
 test_foreign_project_worktree_is_refused
