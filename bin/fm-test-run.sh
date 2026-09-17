@@ -721,6 +721,7 @@ tests/fm-herdr-submit-confirm-live-e2e.test.sh 23
 tests/fm-herdr-version-floor-live-e2e.test.sh 23
 tests/fm-home-summary-refresh.test.sh 34793
 tests/fm-inactive-reconcile.test.sh 74399
+tests/fm-jev-router.test.sh 8000
 tests/fm-kimi-harness.test.sh 18015
 tests/fm-lint-workflows.test.sh 855
 tests/fm-live-gate.test.sh 6000
