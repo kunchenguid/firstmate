@@ -32,8 +32,13 @@
 #   failed-no-commits                 exited, no pull request, branch at its base
 #   failed-no-pr                      exited, no pull request, commits on the branch
 # It returns 0 with one of those verdicts, 2 when gh could not answer (the
-# caller stays silent and non-zero rather than reading "no PR"), and 1 when the
-# task has nothing left to classify (worktree gone, unreadable git state).
+# caller stays silent and non-zero rather than reading "no PR"), 3 when the
+# backend could not read the endpoint's liveness at all (unknown, never a
+# guess either way), and 1 when the task has nothing left to classify
+# (worktree gone, unreadable git state, malformed record). A backend with no
+# recovery-grade classifier (zellij, cmux, orca) reports `unverified`, which
+# leaves the exit marker as the only exit evidence there: no marker reads as
+# running until the runtime bound, exactly as a shell-only pane does.
 #
 # FM_EXECUTOR_MAX_RUNTIME (seconds, default 7200) bounds a running executor;
 # docs/configuration.md "Environment variables" documents it. A value that is
@@ -277,7 +282,11 @@ fm_executor_classify() {  # <state> <id> <gen> <worktree> <backend> <target> <ba
     exited=1
   else
     agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null) || agent_state=unreadable
-    [ "$agent_state" != missing ] || exited=1
+    case "$agent_state" in
+      missing) exited=1 ;;
+      alive|dead|ambiguous|unverified) ;;
+      *) return 3 ;;
+    esac
   fi
   if [ "$exited" -eq 0 ]; then
     now=$(date +%s)

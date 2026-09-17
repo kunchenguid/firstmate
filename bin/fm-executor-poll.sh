@@ -44,4 +44,6 @@ case "$rc" in
   2) exit 1 ;;
   *) exit 0 ;;
 esac
+# rc 1 (nothing to classify) and rc 3 (liveness unreadable) are silence: neither
+# is evidence of an outcome, and the next poll reads again.
 exit 0

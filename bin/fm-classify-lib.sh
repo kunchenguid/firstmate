@@ -829,7 +829,7 @@ _fm_status_kind() {
     done < "$meta"
     kind=${kind:-ship}
   fi
-  case "$kind" in ship|scout|secondmate) printf '%s' "$kind" ;; *) printf unknown ;; esac
+  case "$kind" in ship|scout|secondmate|executor) printf '%s' "$kind" ;; *) printf unknown ;; esac
 }
 
 _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb> <kind>
@@ -855,7 +855,7 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   esac
   status_line_verb "$line" verb
   case "$unstamped" in
-    *:*) case "$verb:$kind" in done:ship|done:scout|failed:ship|failed:scout) return 0 ;; esac ;;
+    *:*) case "$verb:$kind" in done:ship|done:scout|done:executor|failed:ship|failed:scout|failed:executor) return 0 ;; esac ;;
   esac
   case "$verb" in
     needs-decision|blocked|"$resolve"|"$held") ;;
@@ -1036,7 +1036,7 @@ status_key_closing_verb() {  # <status-file> <key>
   while IFS= read -r line || [ -n "$line" ]; do
     status_line_verb "$line" event
     case "$event:$kind" in
-      done:ship|done:scout|failed:ship|failed:scout) ;;
+      done:ship|done:scout|done:executor|failed:ship|failed:scout|failed:executor) ;;
       *)
         case "$event" in
           needs-decision|blocked|"$resolve"|"$held") ;;
