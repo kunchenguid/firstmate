@@ -221,11 +221,11 @@ The test fixture enumerates every class below through the centralized policy, an
 | --- | --- | --- |
 | `genuine-user-prompt` | `UserMessageComponent` | Visible, including every tested operational near miss. |
 | `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible. |
-| `assistant-working-note` | Assistant text in an `AssistantMessageComponent` message that also carries a tool call | Visible through Pi's ordinary assistant component while streaming and after settlement, exactly once from the original message rather than a copied custom entry (verified on Pi 0.85.1). |
-| `assistant-thinking` | Thinking content in `AssistantMessageComponent` | While Calm is active, the display-only Markdown transformer suppresses raw thinking across live, restored, reflowed, and bundled CLI paths, while a shallow component projection removes residual spacing and the single assistant render boundary projects distinct streamed thinking lines as compact numbered `Step N:` rows on the active assistant response; the final step is followed by one blank row before ordinary response text, the active row reserves its right side for a clipped safe tool-activity ticker, and the display-only list resets at the next run or lifecycle boundary while message data and stock export rendering retain the original reasoning. |
-| `assistant-tool-call` | `ToolExecutionComponent` | Every built-in and custom model-tool call, its arguments, timing, and collapsed shell render at zero height through the component boundary. |
-| `tool-result` | `ToolExecutionComponent` | Every built-in and custom model-tool result renders at zero height through the same boundary. |
-| `tool-image` | Image children appended by `ToolExecutionComponent` | Hidden with the complete owning component. |
+| `assistant-working-note` | Assistant text in an `AssistantMessageComponent` message the model did not end its response with, identified by its own `stopReason` of `toolUse`, or of `length` with tool calls present | Each settled text block follows the cross-harness preservation contract in [`calm.md`](calm.md); hidden blocks are removed from the shallow presentation copy before layout, a `toolUse` message carrying only short narration occupies zero rows (verified on Pi 0.84.1), and a still-streaming `pending` message is never filtered. |
+| `assistant-thinking` | Thinking content in `AssistantMessageComponent` | Collapsed reasoning is removed from the shallow presentation copy before layout and occupies zero rows; explicit expansion renders the original reasoning. |
+| `assistant-tool-call` | `ToolExecutionComponent` | Seven built-ins, `fm_watch_arm_pi`, and `fm_branch_outcomes` hidden; other arbitrary custom tools remain an unsupported boundary. |
+| `tool-result` | `ToolExecutionComponent` | Text results for the controlled tools hidden; other arbitrary custom results remain an unsupported boundary. |
+| `tool-image` | Image children appended outside tool renderer slots | Unsupported boundary; remains visible. |
 | `user-bash` | `BashExecutionComponent` for `!` and `!!` | Unsupported boundary; remains visible. |
 | `skill-invocation` | `SkillInvocationMessageComponent` plus parsed user text | Unsupported boundary; remains visible. |
 | `custom-message` | `CustomMessageComponent` when `display` is true | The session-start nudge and legacy Calm context messages use `display: false`; arbitrary extension messages remain an unsupported boundary. |
@@ -708,7 +708,7 @@ $ bin/fm-test-run.sh tests/fm-calm-claude-mod.test.sh
 ok - the Calm mod is one hooks module, linked into the project's auto-load path, with no command, skill, agent, or classic hook path that bypasses its exact opt-in
 ok - the Pi working ship renders byte-for-byte the shared sprite core's frame painted in standard ANSI, at every width, cadence step, freeze, clamp, and reset
 ok - the Raster packing lays the shared frame out row-major with the sprite's palette, plain padding, default backgrounds, BMP glyphs, clipping, and a standard base64 encoding
-ok - the Calm policy resolves the shared preference exactly as Pi does, reads on, max, and off as Pi does, and classifies working notes by stop reason, tool use, and restored transcript shape
+ok - the Calm policy resolves the shared preference exactly as Pi does, reads on, max, and off as Pi does, and shares Pi's 240-character-or-newline preservation behavior while classifying working notes by stop reason, tool use, and restored transcript shape
 ok - the mod's operational-input classifier agrees with bin/fm-operational-input.sh on all 77 corpus cases: every current kind the owner encodes, every legacy shape, and every near miss
 
 $ bin/fm-test-run.sh tests/fm-calm-pi-extension.test.sh

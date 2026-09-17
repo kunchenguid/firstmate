@@ -1,37 +1,16 @@
-// Calm's assistant presentation has one display-only contract with two Pi rendering
-// seams. The supported Markdown transformer covers live streaming, restored history,
-// terminal reflow, and bundled-class identity changes. The component projection removes
-// the otherwise-empty thinking spacer on Pi versions that export the class used by the
-// interactive UI. Both consume the same visibility state and only render shallow
-// presentation copies; messages, model context, session storage, and exports are never
-// changed. Calm paints the visible assistant range with a temporary muted dark purple
-// background without changing its geometry.
-import type {
-  AssistantMessageComponent as PiAssistantMessageComponent,
-  ExtensionAPI,
-  MarkdownTransformContext,
-  MarkdownTransformer,
-  ToolExecutionComponent as PiToolExecutionComponent,
-} from "@earendil-works/pi-coding-agent";
+// Verified against Pi 0.81.1 and 0.82.0, which export AssistantMessageComponent with an
+// updateContent method. installCalmAssistantLayout() probes that exact method and throws
+// if it is missing; fm-calm.ts catches that and skips only this adapter with a diagnostic
+// instead of blocking Calm or Pi.
+// This layout removes collapsed thinking and short mid-turn assistant text blocks
+// classified as "assistant-working-note" from a shallow presentation copy. Substantive
+// mid-turn text is preserved. The message
+// itself, model context, session storage, and export rendering are never touched.
+// ./fm-calm-visibility.ts owns which classes Calm hides.
+import type { AssistantMessageComponent as PiAssistantMessageComponent } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
-import {
-  appendCalmStep,
-  appendCalmActivity,
-  calmActivityForTool,
-  calmPresentationHides,
-  calmStockExportRenderingIsActive,
-  calmTickerText,
-  currentCalmSteps,
-  setCalmRenderRequester,
-} from "./fm-calm-visibility.ts";
-
-const CALM_ASSISTANT_BACKGROUND = "\x1b[48;2;36;24;32m";
-const CALM_STEP_FOREGROUND = "\x1b[38;2;166;112;145m";
-const CALM_ACTIVITY_FOREGROUND = "\x1b[38;2;198;163;188m";
-const stripTerminalSequences = (text: string): string =>
-  text
-    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
-    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+import { calmTextIsSubstantive } from "./fm-calm-preservation.ts";
+import { calmPresentationHides } from "./fm-calm-visibility.ts";
 
 type AssistantMessage = Parameters<PiAssistantMessageComponent["updateContent"]>[0];
 
@@ -224,18 +203,35 @@ export function installCalmAssistantLayout(
     };
   }
 
-  const activeController = controller;
-  installAssistantRenderBoundary(AssistantMessageComponent, activeController);
-  // Controllers created by the prior source revision survive /reload and lack the two
-  // Markdown fields. Upgrade them in place before replacing either delegate.
-  activeController.ownedThinkingMessages ??= new WeakSet();
-  activeController.ownedThinkingMarkdown ??= new Set();
-  activeController.transform = (
-    markdown: string,
-    context: MarkdownTransformContext,
-  ): string => {
-    if (context.messageType !== "assistant-thinking") return markdown;
-    if (calmStockExportRenderingIsActive()) return markdown;
+  AssistantMessageComponent.prototype.updateContent = function (
+    message: AssistantMessage,
+  ): void {
+    const state = this as unknown as AssistantMessagePresentationState;
+    const hideThinking =
+      state.hiddenThinkingLabel === "" &&
+      state.hideThinkingBlock &&
+      patch.hidesThinking();
+    const hideWorkingNote =
+      patch.hidesWorkingNote() &&
+      isMidTurnAssistantMessage(message) &&
+      message.content.some(
+        (block) => block.type === "text" && !calmTextIsSubstantive(block.text),
+      );
+    const presentationMessage =
+      hideThinking || hideWorkingNote
+        ? {
+            ...message,
+            content: message.content.filter(
+              (block) =>
+                !(hideThinking && block.type === "thinking") &&
+                !(
+                  hideWorkingNote &&
+                  block.type === "text" &&
+                  !calmTextIsSubstantive(block.text)
+                ),
+            ),
+          }
+        : message;
 
     const hiddenNow = calmPresentationHides("assistant-thinking");
     if (hiddenNow) activeController.ownedThinkingMarkdown.add(markdown);
