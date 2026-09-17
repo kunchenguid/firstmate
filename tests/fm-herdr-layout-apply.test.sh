@@ -335,12 +335,17 @@ pass "layout.apply preserves exact cwd/environment/argv and binds only response 
 
 for mode in protocol protocol22 schema workspace tab pane layout foreground socket; do
   MODE=$mode
-  rm -f "$REQUEST" "$APPLIED"
+  rm -f "$REQUEST" "$APPLIED" "$ATTEMPT"
   if run_layout >/dev/null 2>&1; then
     fail "layout adapter accepted the $mode mismatch"
   fi
   [ ! -e "$APPLIED" ] || fail "layout adapter mutated Herdr before refusing the $mode mismatch"
+  fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
+    || fail "layout adapter did not preserve durable ownership across the $mode refusal"
+  [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 4 ] \
+    || fail "layout adapter advanced ownership despite the $mode pre-send refusal"
 done
+rm -f "$ATTEMPT"
 MODE=ok
 if fm_backend_herdr_layout_apply lab-structural:w1:p9 w1 w1:t2 w1:p2 \
   "$TMP_ROOT/worktree" '{}' '["pi"]' "$ATTEMPT" 0123456789abcdef0123456789abcdef \
@@ -348,6 +353,25 @@ if fm_backend_herdr_layout_apply lab-structural:w1:p9 w1 w1:t2 w1:p2 \
   fail "layout adapter accepted a target/pane identity mismatch"
 fi
 pass "layout.apply refuses every protocol, schema, socket, session, container, layout, and foreground identity mismatch before mutation"
+
+REJECT_HELPER="$TMP_ROOT/reject-helper.py"
+cat > "$REJECT_HELPER" <<'PY'
+import sys
+sys.exit(2)
+PY
+rm -f "$ATTEMPT"
+MODE=ok
+set +e
+FM_BACKEND_HERDR_LAYOUT_APPLY_HELPER="$REJECT_HELPER" run_layout >/dev/null 2>&1
+reject_status=$?
+set -e
+[ "$reject_status" -eq 2 ] || fail "pre-send helper refusal returned the wrong classification"
+fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
+  || fail "pre-send helper refusal discarded its durable recovery marker"
+[ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 4 ] \
+  || fail "pre-send helper refusal advanced ownership without sending"
+rm -f "$ATTEMPT"
+pass "known pre-send refusals retain their durable structural recovery marker"
 
 MODE=response_identity
 : > "$CALLS"
@@ -482,8 +506,16 @@ fm_backend_herdr_projection_journal_retire_removed_attempt \
   "$JOURNAL" task-z1 "$ATTEMPT" \
   || fail "fresh recovery did not retire its exact removed endpoint's presentation journal"
 [ ! -e "$JOURNAL" ] || fail "fresh recovery left its correlated presentation journal behind"
+printf 'version=1\ntask_id=task-z1\nprojection_id=%s\n' "$TOKEN" > "$JOURNAL"
+fm_backend_herdr_projection_journal_write_v2 \
+  "$JOURNAL" task-z1 "$TOKEN" "$TMP_ROOT" lab-structural w1 w1:t3 w1:p3 \
+  anchor firstmate "$WORKSPACE_LABEL" fm-task-z1
+fm_backend_herdr_projection_journal_retire_closed_endpoint \
+  "$JOURNAL" task-z1 lab-structural w1 w1:p3 \
+  || fail "confirmed post-commit endpoint cleanup did not retire its presentation journal"
+[ ! -e "$JOURNAL" ] || fail "post-commit cleanup left its exact presentation journal behind"
 rm -f "$ATTEMPT" "$CLOSED" "$OLD_CLOSED"
-pass "fresh recovery retires only the presentation journal bound to its removed endpoint"
+pass "confirmed endpoint cleanup retires only its exact presentation journal"
 
 HELPER_PAYLOAD="$TMP_ROOT/helper-payload.json"
 printf '%s\n' '{"cwd":"/tmp/worktree","env":{"OPENAI_API_KEY":"credential-must-stay-off-argv"},"command":["pi"]}' > "$HELPER_PAYLOAD"
@@ -1062,7 +1094,11 @@ case "$*" in
     printf '%s\n' '{"error":{"code":"agent_not_found"}}'
     ;;
   "terminal title clear")
-    printf '%s\n' '{"result":{"reason":"no_foreground_client"}}'
+    if [ "${FM_FAKE_STRUCT_MODE:?}" = preapply-focused ]; then
+      printf '%s\n' '{"result":{"reason":"cleared"}}'
+    else
+      printf '%s\n' '{"result":{"reason":"no_foreground_client"}}'
+    fi
     ;;
   "pane close w1:p2"|"pane close w1:p3")
     printf '%s\n' "$pane" >> "${FM_FAKE_STRUCT_CLOSE_LOG:?}"
@@ -1070,13 +1106,16 @@ case "$*" in
     printf '{"result":{"type":"pane_close","pane_id":"%s"}}\n' "$pane"
     ;;
   "api schema --json")
-    if [ "${FM_FAKE_STRUCT_MODE:?}" = preapply ]; then
+    case "${FM_FAKE_STRUCT_MODE:?}" in
+    preapply*)
       printf '%s\n' '{"schemas":{"request":{}}}'
-    else
+      ;;
+    *)
       cat <<'JSON'
 {"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"layout.apply"}}}],"$defs":{"LayoutApplyParams":{"required":["root"],"properties":{"workspace_id":{"type":["string","null"]},"tab_id":{"type":["string","null"]}}},"LayoutNode":{"oneOf":[{"properties":{"type":{"const":"pane"},"command":{"type":["array","null"]},"cwd":{"type":["string","null"]},"env":{"type":"object"},"label":{"type":["string","null"]},"pane_id":{"type":["string","null"]}}}]}}}}}
 JSON
-    fi
+      ;;
+    esac
     ;;
   *)
     printf 'unexpected structural fake Herdr call: %s\n' "$*" >&2
@@ -1143,6 +1182,37 @@ assert_contains "$struct_post_out" "did not produce the expected Pi process" \
 assert_grep 'return --force --if-lease-holder fm-postapply-z1' "$STRUCT_TREEHOUSE_LOG" \
   "post-apply reconciliation did not return its exact Treehouse lease"
 pass "post-apply abort reconciliation owns cleanup without a duplicate close"
+
+rm -f "$STRUCT_TASK_CREATED" "$STRUCT_TASK_LABEL" "$STRUCT_CLOSED" "$APPLIED" "$REQUEST"
+: > "$STRUCT_CLOSE_LOG"
+fm_test_spawn_brief "$STRUCT_HOME" preapply-held-z1 "Keep durable ownership when focused cleanup refuses."
+set +e
+struct_held_out=$(HERDR_SESSION=lab-structural \
+  FM_FAKE_STRUCT_MODE=preapply-focused FM_FAKE_STRUCT_SOCKET="$SOCK" \
+  FM_FAKE_STRUCT_APPLIED="$APPLIED" FM_FAKE_STRUCT_REQUEST="$REQUEST" \
+  FM_FAKE_STRUCT_TASK_CREATED="$STRUCT_TASK_CREATED" FM_FAKE_STRUCT_TASK_LABEL="$STRUCT_TASK_LABEL" \
+  FM_FAKE_STRUCT_CLOSED="$STRUCT_CLOSED" FM_FAKE_STRUCT_CLOSE_LOG="$STRUCT_CLOSE_LOG" \
+  FM_FAKE_STRUCT_TREEHOUSE_LOG="$STRUCT_TREEHOUSE_LOG" FM_FAKE_STRUCT_WT="$STRUCT_WT" \
+  FM_FAKE_STRUCT_WORKSPACE_LABEL="$STRUCT_WORKSPACE_LABEL" FM_FAKE_STRUCT_PARENT_PID="$$" \
+  fm_test_run_spawn "$STRUCT_HOME" "$STRUCT_WT" "$STRUCT_FAKEBIN" \
+    preapply-held-z1 "$STRUCT_PROJECT" --scout --harness pi --backend herdr)
+struct_held_status=$?
+set -e
+[ "$struct_held_status" -ne 0 ] || fail "focused pre-apply refusal unexpectedly launched a worker"
+assert_contains "$struct_held_out" "preserving task preapply-held-z1's record and Treehouse lease" \
+  "focused pre-apply refusal did not preserve ownership"
+[ ! -s "$STRUCT_CLOSE_LOG" ] || fail "focused pre-apply refusal closed the actively viewed pane"
+[ -e "$STRUCT_HOME/state/preapply-held-z1.meta" ] \
+  || fail "focused pre-apply refusal discarded its task record"
+HELD_ATTEMPT="$STRUCT_HOME/state/preapply-held-z1.herdr-launch"
+fm_backend_herdr_layout_attempt_snapshot "$HELD_ATTEMPT" \
+  || fail "focused pre-apply refusal lost its durable recovery marker"
+[ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 6 ] \
+  && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = not-applied ] \
+  || fail "focused pre-apply refusal did not preserve its non-mutating recovery state"
+assert_no_grep 'return --force --if-lease-holder fm-preapply-held-z1' "$STRUCT_TREEHOUSE_LOG" \
+  "focused pre-apply refusal returned the lease while preserving its task"
+pass "pre-apply focus refusals preserve durable ownership for exact recovery"
 
 NON_PI="$TMP_ROOT/non-pi"
 NON_PI_HOME="$NON_PI/home"

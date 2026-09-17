@@ -3187,6 +3187,25 @@ fm_backend_herdr_projection_journal_retire_removed_attempt() { # <journal> <task
   rm -f -- "$journal"
 }
 
+fm_backend_herdr_projection_journal_retire_closed_endpoint() { # <journal> <task-id> <session> <workspace> <pane> [projection-id]
+  local journal=$1 id=$2 session=$3 workspace=$4 pane=$5 projection_id=${6:-}
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
+  case "$FM_BACKEND_HERDR_JOURNAL_VERSION" in
+    1)
+      [ -n "$projection_id" ] \
+        && [ "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" = "$projection_id" ] || return 1
+      ;;
+    2)
+      [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$session" ] \
+        && [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" = "$workspace" ] \
+        && [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" = "$pane" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  [ "$(fm_backend_herdr_pane_presence_state "$session" "$pane")" = dead ] || return 1
+  rm -f -- "$journal"
+}
+
 fm_backend_herdr_layout_attempt_ownership_policy() { # <expected-mode> <task> <worktree>
   local expected_mode=$1 task=$2 worktree=$3
   [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" = "$expected_mode" ] \
@@ -3531,6 +3550,17 @@ fm_backend_herdr_layout_apply() { # <target> <workspace> <tab> <pane> <cwd> <env
   local protocol schema socket info layout out new_tab new_pane helper_status label payload helper
   fm_backend_herdr_parse_target "$target" || return 1
   [ "$FM_BACKEND_HERDR_PANE" = "$pane" ] || return 1
+  label="fm-launch-$attempt_id"
+  if [ -e "$attempt_file" ] || [ -L "$attempt_file" ]; then
+    echo "error: Herdr structural launch attempt already exists; refusing duplicate launch" >&2
+    return 1
+  fi
+  fm_backend_herdr_layout_attempt_write "$attempt_file" 4 "$attempt_id" \
+    "$ownership_mode" "$task" "$cwd" "$lease_holder" \
+    "$FM_BACKEND_HERDR_SESSION" "$workspace" "$tab" "$pane" "$label" || {
+    echo "error: Herdr structural launch could not publish its durable attempt identity" >&2
+    return 1
+  }
   command -v python3 >/dev/null 2>&1 || {
     echo "error: Herdr structural launch requires python3 for its protocol-20 layout.apply transport" >&2
     return 1
@@ -3592,17 +3622,6 @@ fm_backend_herdr_layout_apply() { # <target> <workspace> <tab> <pane> <cwd> <env
     echo "error: Herdr structural launch could not bind the selected session to one live socket" >&2
     return 1
   }
-  label="fm-launch-$attempt_id"
-  if [ -e "$attempt_file" ] || [ -L "$attempt_file" ]; then
-    echo "error: Herdr structural launch attempt already exists; refusing duplicate launch" >&2
-    return 1
-  fi
-  fm_backend_herdr_layout_attempt_write "$attempt_file" 4 "$attempt_id" \
-    "$ownership_mode" "$task" "$cwd" "$lease_holder" \
-    "$FM_BACKEND_HERDR_SESSION" "$workspace" "$tab" "$pane" "$label" || {
-    echo "error: Herdr structural launch could not publish its durable attempt identity" >&2
-    return 1
-  }
   payload=$(printf '%s\n%s\n' "$env_json" "$command_json" | python3 -c '
 import json
 import sys
@@ -3619,7 +3638,6 @@ print(json.dumps({"cwd": sys.argv[1], "env": env, "command": command}, separator
   fi
   if [ "$helper_status" -ne 0 ]; then
     if [ "$helper_status" -eq 2 ]; then
-      rm -f -- "$attempt_file"
       return 2
     fi
     echo "error: Herdr structural launch outcome is uncertain; its attempt remains quarantined" >&2

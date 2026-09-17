@@ -1090,30 +1090,40 @@ parse_orca_worktree_result() {
   fi
 }
 
+spawn_abort_reconcile_fresh_herdr_layout() {
+  local journal
+  fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" = fresh ] \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" -ge 4 ] \
+    && fm_backend_herdr_layout_attempt_reconcile "$HERDR_LAYOUT_ATTEMPT" \
+    && fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" || return 1
+  if [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 6 ] \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = not-applied ]; then
+    fm_backend_herdr_layout_attempt_remove_original "$HERDR_LAYOUT_ATTEMPT" \
+      && fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" || return 1
+  fi
+  [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 6 ] \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = removed ] || return 1
+  journal=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+  if [ -e "$journal" ] || [ -L "$journal" ]; then
+    fm_backend_herdr_projection_journal_retire_removed_attempt \
+      "$journal" "$ID" "$HERDR_LAYOUT_ATTEMPT" \
+      || fm_backend_herdr_projection_journal_retire_closed_endpoint \
+        "$journal" "$ID" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" \
+        "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" \
+        "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" \
+        "${HERDR_PROJECTION_ID:-}" \
+      || return 1
+  fi
+  rm -f -- "$HERDR_LAYOUT_ATTEMPT" || return 1
+  HERDR_PROJECTION_ABORT_CLEANUP=0
+}
+
 spawn_abort_cleanup() {
   local status=$? journal
   if [ -n "$HERDR_LAYOUT_ATTEMPT" ] \
     && { [ -e "$HERDR_LAYOUT_ATTEMPT" ] || [ -L "$HERDR_LAYOUT_ATTEMPT" ]; }; then
-    if fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" \
-      && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" = fresh ] \
-      && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" -ge 5 ] \
-      && fm_backend_herdr_layout_attempt_reconcile "$HERDR_LAYOUT_ATTEMPT" \
-      && fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" \
-      && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 6 ] \
-      && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = removed ]; then
-      journal=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
-      if { [ ! -e "$journal" ] && [ ! -L "$journal" ]; } \
-        || fm_backend_herdr_projection_journal_retire_removed_attempt \
-          "$journal" "$ID" "$HERDR_LAYOUT_ATTEMPT"; then
-        if rm -f -- "$HERDR_LAYOUT_ATTEMPT"; then
-          HERDR_PROJECTION_ABORT_CLEANUP=0
-        else
-          HERDR_LAYOUT_QUARANTINED=1
-        fi
-      else
-        HERDR_LAYOUT_QUARANTINED=1
-      fi
-    else
+    if ! spawn_abort_reconcile_fresh_herdr_layout; then
       HERDR_LAYOUT_QUARANTINED=1
       SPAWN_FRESH_COMMIT_PENDING=0
     fi
@@ -1159,7 +1169,19 @@ spawn_abort_cleanup() {
       "$HERDR_PROJECTION_ABORT_TASK_PANE" \
       "$HERDR_PROJECTION_ABORT_SEEDED_PANE" \
       "$HERDR_PROJECTION_ABORT_SEEDED_PRUNED"; then
-      HERDR_PROJECTION_ABORT_CLEANUP=0
+      journal=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+      if { [ ! -e "$journal" ] && [ ! -L "$journal" ]; } \
+        || fm_backend_herdr_projection_journal_retire_closed_endpoint \
+          "$journal" "$ID" "$HERDR_PROJECTION_ABORT_SESSION" \
+          "$HERDR_WORKSPACE_ID" "$HERDR_PROJECTION_ABORT_TASK_PANE" \
+          "${HERDR_PROJECTION_ID:-}"; then
+        HERDR_PROJECTION_ABORT_CLEANUP=0
+      else
+        echo "warning: exact Herdr endpoint was removed but its presentation record could not be retired; retaining the task record and Treehouse lease" >&2
+        HERDR_LAYOUT_QUARANTINED=1
+        SPAWN_FRESH_COMMIT_PENDING=0
+        status=1
+      fi
     else
       echo "warning: exact Herdr endpoint cleanup could not be confirmed; retaining the task record and Treehouse lease" >&2
       HERDR_LAYOUT_QUARANTINED=1
