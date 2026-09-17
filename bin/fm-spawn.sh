@@ -53,6 +53,11 @@
 #   from that harness's launch rather than guessed. Ultra is the explicit
 #   exception: bin/fm-harness.sh validate-native-effort owns its model scope;
 #   supported Pi launches receive --codex-effort ultra, never --thinking ultra.
+#   The resolved model is then checked against this home's forbidden-model policy
+#   (config/model-denylist, bin/fm-model-policy-lib.sh) before any worktree or
+#   endpoint is provisioned: a denied model, an unnamed one, or a raw launch
+#   command carrying a denied fragment or naming no model refuses the spawn
+#   instead of launching it. A home without that file is unaffected.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -500,6 +505,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-model-policy-lib.sh
+. "$SCRIPT_DIR/fm-model-policy-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -2027,6 +2034,34 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
       esac
     fi
   fi
+fi
+# Forbidden-model policy: refuse a denied or unnamed model here, on the fully
+# resolved profile and before worktree or endpoint provisioning, so a home that
+# forbids a model pays a refusal instead of a launch (bin/fm-model-policy-lib.sh
+# owns the file format and the decision). A raw launch command is operator-written
+# shell Firstmate cannot parse for the model it will run, so its whole text is
+# scanned for denied fragments AND it must carry an explicit --model; leaving it
+# exempt would make the policy's one bypass the easiest path to the account
+# default it exists to refuse.
+if [ "$RAW_LAUNCH" = 1 ]; then
+  fm_model_policy_check_command "$CONFIG" "$LAUNCH" "$MODEL" || {
+    echo "error: spawn refused: $FM_MODEL_POLICY_ERROR" >&2
+    exit 1
+  }
+else
+  # Name where the refused value came from: by this point a model is either the
+  # explicit flag or the secondmate harness file's token, and an operator who is
+  # only told the model still has to work out which file to correct.
+  MODEL_ORIGIN=
+  if [ "$MODEL_SET" -eq 1 ]; then
+    MODEL_ORIGIN='the --model flag'
+  elif [ -n "$MODEL" ]; then
+    MODEL_ORIGIN='config/secondmate-harness'
+  fi
+  fm_model_policy_check "$CONFIG" "$MODEL" "$MODEL_ORIGIN" || {
+    echo "error: spawn refused: $FM_MODEL_POLICY_ERROR" >&2
+    exit 1
+  }
 fi
 # Ultra is an explicit native capability, never a Pi thinking-level alias.
 # Validate the fully resolved profile before worktree or endpoint provisioning.

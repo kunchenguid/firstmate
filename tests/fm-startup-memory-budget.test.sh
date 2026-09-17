@@ -77,6 +77,10 @@ new_bootstrap_world() {
   root="$world/root"
   home="$world/home"
   mkdir -p "$home/config" "$home/data" "$home/state" "$root/bin"
+  # Fixture hygiene, like the backlog-backend pins elsewhere: this home
+  # declares its forbidden-model posture so bootstrap has nothing to say
+  # about it and the quiet assertions below stay about the budget.
+  printf '%s\n' '# no forbidden models in this fixture home' > "$home/config/model-denylist"
   git init -q -b main "$root"
   printf '%s\n' 'config/' > "$root/.gitignore"
   printf '%s\n' '# Firstmate test root' > "$root/AGENTS.md"

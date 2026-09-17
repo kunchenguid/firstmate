@@ -259,8 +259,9 @@ test_bootstrap_reporting() {
     n=$((n + 1))
     case_dir="$TMP_ROOT/case-$n"
     mkdir -p "$case_dir/home"
+    mkdir -p "$case_dir/home/config"
+    printf '%s\n' '# no forbidden models in this fixture home' > "$case_dir/home/config/model-denylist"
     if [ "$backend" != "-" ]; then
-      mkdir -p "$case_dir/home/config"
       printf '%s\n' "$backend" > "$case_dir/home/config/backlog-backend"
     fi
     fakebin=$(make_fake_toolchain "$case_dir")
@@ -329,6 +330,7 @@ test_no_mistakes_min_version() {
     mkdir -p "$case_dir/home"
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    printf '%s\n' '# no forbidden models in this fixture home' > "$case_dir/home/config/model-denylist"
     fakebin=$(make_fake_toolchain "$case_dir")
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_NO_MISTAKES_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
@@ -358,6 +360,7 @@ test_gh_axi_min_version() {
     case_dir="$TMP_ROOT/gh-axi-$n"
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    printf '%s\n' '# no forbidden models in this fixture home' > "$case_dir/home/config/model-denylist"
     fakebin=$(make_fake_toolchain "$case_dir")
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_GH_AXI_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
@@ -389,6 +392,7 @@ test_lavish_axi_min_version() {
     case_dir="$TMP_ROOT/lavish-axi-$n"
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    printf '%s\n' '# no forbidden models in this fixture home' > "$case_dir/home/config/model-denylist"
     fakebin=$(make_fake_toolchain "$case_dir")
     [ "$version" != absent ] || rm -f "$fakebin/lavish-axi"
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
@@ -424,6 +428,7 @@ test_tasks_axi_min_version() {
     case_dir="$TMP_ROOT/tasks-axi-$n"
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    printf '%s\n' '# no forbidden models in this fixture home' > "$case_dir/home/config/model-denylist"
     fakebin=$(make_fake_toolchain "$case_dir")
     archive_body=yes
     multi_id=yes
@@ -474,6 +479,7 @@ test_quota_axi_min_version() {
     case_dir="$TMP_ROOT/quota-axi-$n"
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    printf '%s\n' '# no forbidden models in this fixture home' > "$case_dir/home/config/model-denylist"
     fakebin=$(make_fake_toolchain "$case_dir")
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_QUOTA_AXI_VERSION="$version" "$ROOT/bin/fm-bootstrap.sh")
@@ -500,6 +506,7 @@ test_git_is_required_with_supported_install_instruction() {
   case_dir="$TMP_ROOT/git-required"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '# no forbidden models in this fixture home' > "$case_dir/home/config/model-denylist"
   fakebin=$(make_fake_toolchain "$case_dir")
   bash_env="$case_dir/no-git.bash"
   cat > "$bash_env" <<'SH'
@@ -528,6 +535,7 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   case_dir="$TMP_ROOT/orca-backend-selected"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '# no forbidden models in this fixture home' > "$case_dir/home/config/model-denylist"
   printf '%s\n' orca > "$case_dir/home/config/backend"
   fakebin=$(make_fake_toolchain "$case_dir")
   out=$(PATH="$fakebin:$(fm_test_base_path_sans "$BASE_PATH" orca)" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
@@ -537,6 +545,7 @@ test_orca_backend_gates_orca_tool_only_when_selected() {
   case_dir="$TMP_ROOT/orca-backend-not-selected"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '# no forbidden models in this fixture home' > "$case_dir/home/config/model-denylist"
   fakebin=$(make_fake_toolchain "$case_dir")
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
@@ -568,6 +577,7 @@ test_session_provider_backends_do_not_require_tmux() {
     case_dir="$TMP_ROOT/$backend-no-tmux"
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    printf '%s\n' '# no forbidden models in this fixture home' > "$case_dir/home/config/model-denylist"
     printf '%s\n' "$backend" > "$case_dir/home/config/backend"
     fakebin=$(make_fake_toolchain_no_tmux "$case_dir" "$cli")
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
@@ -590,6 +600,7 @@ test_session_provider_backends_gate_own_cli_not_tmux() {
     case_dir="$TMP_ROOT/$backend-missing-cli"
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    printf '%s\n' '# no forbidden models in this fixture home' > "$case_dir/home/config/model-denylist"
     printf '%s\n' "$backend" > "$case_dir/home/config/backend"
     # Toolchain has jq + treehouse but NOT the session CLI and NOT tmux.
     fakebin=$(make_fake_toolchain_no_tmux "$case_dir")
@@ -629,6 +640,7 @@ test_cmux_bundled_cli_satisfies_dependency() {
   case_dir="$TMP_ROOT/cmux-bundled-cli"
   mkdir -p "$case_dir/home/config" "$case_dir/bundle"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '# no forbidden models in this fixture home' > "$case_dir/home/config/model-denylist"
   printf '%s\n' cmux > "$case_dir/home/config/backend"
   fakebin=$(make_fake_toolchain_no_tmux "$case_dir")
   fm_fake_exit0 "$case_dir/bundle" cmux
@@ -644,6 +656,7 @@ test_unknown_backend_reports_invalid_configuration() {
   case_dir="$TMP_ROOT/unknown-backend"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '# no forbidden models in this fixture home' > "$case_dir/home/config/model-denylist"
   printf '%s\n' bogus > "$case_dir/home/config/backend"
   fakebin=$(make_fake_toolchain "$case_dir")
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
@@ -665,6 +678,7 @@ test_json_backends_require_jq_not_tmux() {
     case_dir="$TMP_ROOT/$backend-missing-jq"
     mkdir -p "$case_dir/home/config"
     printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    printf '%s\n' '# no forbidden models in this fixture home' > "$case_dir/home/config/model-denylist"
     printf '%s\n' "$backend" > "$case_dir/home/config/backend"
     # Session CLI present, tmux absent, jq deliberately NOT stubbed and masked below.
     fakebin=$(make_fake_toolchain "$case_dir")
@@ -702,6 +716,7 @@ test_treehouse_lease_check_follows_resolved_backend() {
   case_dir="$TMP_ROOT/orca-old-treehouse"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '# no forbidden models in this fixture home' > "$case_dir/home/config/model-denylist"
   printf '%s\n' orca > "$case_dir/home/config/backend"
   fakebin=$(make_fake_toolchain "$case_dir")
   rm -f "$fakebin/tmux"
@@ -716,6 +731,7 @@ test_treehouse_lease_check_follows_resolved_backend() {
   case_dir="$TMP_ROOT/herdr-old-treehouse"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '# no forbidden models in this fixture home' > "$case_dir/home/config/model-denylist"
   printf '%s\n' herdr > "$case_dir/home/config/backend"
   fakebin=$(make_fake_toolchain_no_tmux "$case_dir" herdr)
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
@@ -731,6 +747,7 @@ test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
   home="$case_dir/home"
   mkdir -p "$home/config"
   printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' '# no forbidden models in this fixture home' > "$home/config/model-denylist"
   add_origin_backed_projects "$home" 18
   add_no_origin_projects "$home" 3
   fakebin=$(make_fake_toolchain "$case_dir")
@@ -749,6 +766,7 @@ test_fleet_sync_timeout_floor_preserves_small_fleets() {
   home="$case_dir/home"
   mkdir -p "$home/config"
   printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' '# no forbidden models in this fixture home' > "$home/config/model-denylist"
   add_origin_backed_projects "$home" 2
   fakebin=$(make_fake_toolchain "$case_dir")
   fake_root=$(make_fake_fleet_sync_root "$case_dir")
@@ -765,6 +783,7 @@ test_fleet_sync_timeout_explicit_override_wins() {
   home="$case_dir/home"
   mkdir -p "$home/config"
   printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' '# no forbidden models in this fixture home' > "$home/config/model-denylist"
   add_origin_backed_projects "$home" 18
   fakebin=$(make_fake_toolchain "$case_dir")
   fake_root=$(make_fake_fleet_sync_root "$case_dir")
@@ -782,6 +801,7 @@ test_fleet_sync_timeout_empty_override_uses_default() {
   home="$case_dir/home"
   mkdir -p "$home/config"
   printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' '# no forbidden models in this fixture home' > "$home/config/model-denylist"
   add_origin_backed_projects "$home" 18
   fakebin=$(make_fake_toolchain "$case_dir")
   fake_root=$(make_fake_fleet_sync_root "$case_dir")
@@ -801,6 +821,7 @@ test_fleet_sync_timeout_is_computed_before_launch() {
   git_record="$case_dir/git-after-start"
   mkdir -p "$home/config"
   printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' '# no forbidden models in this fixture home' > "$home/config/model-denylist"
   add_origin_backed_projects "$home" 3
   fakebin=$(make_fake_toolchain "$case_dir")
   fake_root=$(make_fake_fleet_sync_root "$case_dir")
@@ -821,13 +842,18 @@ make_routine_bootstrap_fixture() {
   fm_git_identity
   mkdir -p "$home/config" "$home/state"
   printf '%s\n' codex > "$home/config/crew-harness"
-  printf '%s\n' '{"rules":[{"when":"normal work","use":{"harness":"codex"}}],"default":{"harness":"claude","effort":"low"}}' \
+  printf '%s\n' '{"rules":[{"when":"normal work","use":{"harness":"codex","model":"gpt-5.5"}}],"default":{"harness":"claude","model":"claude-opus-5","effort":"low"}}' \
     > "$home/config/crew-dispatch.json"
+  # A healthy home has decided its forbidden-model posture. This one forbids
+  # nothing, and its dispatch profiles name their models, which is what keeps
+  # the routine contract silent.
+  printf '%s\n' '# no forbidden models in this fixture home' > "$home/config/model-denylist"
   git init -q -b main "$root"
   {
     printf '%s\n' '.fm-secondmate-home'
     printf '%s\n' 'config/crew-harness'
     printf '%s\n' 'config/crew-dispatch.json'
+    printf '%s\n' 'config/model-denylist'
     printf '%s\n' 'config/startup-memory-budget'
   } > "$root/.gitignore"
   printf '%s\n' 'instructions' > "$root/AGENTS.md"
@@ -866,12 +892,13 @@ SH
 }
 
 run_routine_bootstrap_fixture() {
-  local shell=$1 case_dir=$2 fixture root home fakebin
+  local shell=$1 case_dir=$2 policy=${3:-declared} fixture root home fakebin
   fixture=$(make_routine_bootstrap_fixture "$case_dir")
   root=${fixture%%|*}
   fixture=${fixture#*|}
   home=${fixture%%|*}
   fakebin=${fixture#*|}
+  [ "$policy" != nopolicy ] || rm -f "$home/config/model-denylist"
   PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
     "$shell" "$ROOT/bin/fm-bootstrap.sh"
@@ -882,6 +909,17 @@ test_routine_bootstrap_confirmations_are_silent() {
   out=$(run_routine_bootstrap_fixture bash "$TMP_ROOT/routine-silent")
   [ -z "$out" ] || fail "routine bootstrap confirmations should be silent, got: $out"
   pass "bootstrap keeps routine tasks-axi, harness, dispatch, and already-live liveness confirmations silent"
+}
+
+test_routine_bootstrap_reports_a_home_with_no_policy() {
+  local out home
+  # The same otherwise-healthy fixture, minus the policy decision: bootstrap
+  # says so rather than staying silent, because a home that never declared one
+  # is exactly the home an operator would not notice is unguarded.
+  out=$(run_routine_bootstrap_fixture bash "$TMP_ROOT/routine-nopolicy" nopolicy)
+  [ "$out" = 'MODEL_POLICY: this home has no config/model-denylist, so no model is forbidden here; see docs/configuration.md "Forbidden models" to add one' ] \
+    || fail "an otherwise routine home with no policy file should report exactly that, got: $out"
+  pass "bootstrap reports an otherwise healthy home that has declared no forbidden-model policy"
 }
 
 test_routine_bootstrap_contract_runs_under_system_bash() {
@@ -902,6 +940,7 @@ test_network_phase_partitions_the_run() {
   case_dir="$TMP_ROOT/network-phase"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '# no forbidden models in this fixture home' > "$case_dir/home/config/model-denylist"
   fakebin=$(make_fake_toolchain "$case_dir")
   # Break the two diagnostics that stand for the two halves: a local tool floor
   # and the network GitHub-auth probe.
@@ -944,6 +983,7 @@ test_network_sweeps_recheck_lock_ownership() {
   case_dir="$TMP_ROOT/network-lock-handoff"
   mkdir -p "$case_dir/home/config" "$case_dir/home/projects" "$case_dir/home/state"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '# no forbidden models in this fixture home' > "$case_dir/home/config/model-denylist"
   printf '222222\n' > "$case_dir/home/state/.lock"
   fakebin=$(make_fake_toolchain "$case_dir")
   fake_root="$case_dir/root"
@@ -996,6 +1036,7 @@ test_network_phases_record_per_step_elapsed_times() {
   case_dir="$TMP_ROOT/network-timings"
   mkdir -p "$case_dir/home/config" "$case_dir/home/state" "$case_dir/home/data" "$case_dir/home/projects"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '# no forbidden models in this fixture home' > "$case_dir/home/config/model-denylist"
   printf '%s\n' $$ > "$case_dir/home/state/.lock"
   fakebin=$(make_fake_toolchain "$case_dir")
   # A real clone with a real origin, so fm-fleet-sync.sh genuinely iterates it.
@@ -1088,18 +1129,23 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   case_dir="$TMP_ROOT/dispatch-active"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  # Deliberately no policy file here: these rules include profiles that name no
+  # model, which is what pins the renderer's model-less output shape, and under
+  # an active policy each of those would be reported instead. The home's posture
+  # line is expected below as the one thing bootstrap has to say about it.
   printf '%s\n' '{"rules":[{"when":"fresh news","use":{"harness":"grok"},"why":"current context"},{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]},{"when":"legacy feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"quota-balanced"}],"default":[{"harness":"pi","model":"anthropic/claude-sonnet-5","effort":"high"},{"harness":"grok","model":"grok-4.5","effort":"high"}]}' > "$case_dir/home/config/crew-dispatch.json"
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_jq "$fakebin"
 
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ -z "$out" ] || fail "active dispatch profile should be silent by default, got: $out"
+  [ "$out" = 'MODEL_POLICY: this home has no config/model-denylist, so no model is forbidden here; see docs/configuration.md "Forbidden models" to add one' ] \
+    || fail "active dispatch profile should say only this home's policy posture, got: $out"
 
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_BOOTSTRAP_VERBOSE_FACTS=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
 
-  expect=$'BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json\nBOOTSTRAP_INFO: crew dispatch rule: fresh news -> grok\nBOOTSTRAP_INFO: crew dispatch rule: big feature -> quota-balanced[claude/claude-sonnet-5/high, codex/gpt-5.5/high]\nBOOTSTRAP_INFO: crew dispatch rule: legacy feature -> quota-balanced[claude, codex]\nBOOTSTRAP_INFO: crew dispatch default: quota-balanced[pi/anthropic/claude-sonnet-5/high, grok/grok-4.5/high]'
+  expect=$'BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json\nBOOTSTRAP_INFO: crew dispatch rule: fresh news -> grok\nBOOTSTRAP_INFO: crew dispatch rule: big feature -> quota-balanced[claude/claude-sonnet-5/high, codex/gpt-5.5/high]\nBOOTSTRAP_INFO: crew dispatch rule: legacy feature -> quota-balanced[claude, codex]\nBOOTSTRAP_INFO: crew dispatch default: quota-balanced[pi/anthropic/claude-sonnet-5/high, grok/grok-4.5/high]\nMODEL_POLICY: this home has no config/model-denylist, so no model is forbidden here; see docs/configuration.md "Forbidden models" to add one'
   [ "$out" = "$expect" ] || fail "active dispatch verbose info block mismatch"$'\n'"expected: $expect"$'\n'"actual:   $out"
   pass "bootstrap surfaces active crew-dispatch rules only as verbose BOOTSTRAP_INFO"
 }
@@ -1116,8 +1162,14 @@ test_crew_dispatch_validation() {
     printf '%s\n' "$body" > "$case_dir/home/config/crew-dispatch.json"
     fakebin=$(make_fake_toolchain "$case_dir")
     add_real_jq "$fakebin"
+    # These rows are dispatch-schema inputs, and most of their profiles name no
+    # model deliberately, so this home declares no forbidden-model policy and
+    # bootstrap states that posture once. That one line is not this table's
+    # subject - test_model_policy_validation and the routine-bootstrap cases pin
+    # it directly - so it is dropped before comparing.
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-      TYPESAFE_API_KEY=test-key FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+      TYPESAFE_API_KEY=test-key FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" \
+      | grep -v '^MODEL_POLICY: this home has no config/model-denylist,')
     case "$mode" in
       empty)
         [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
@@ -1185,53 +1237,109 @@ ROWS
   case_dir="$TMP_ROOT/dispatch-opt-in-gate"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  # Same scoping as the table above: these inputs are dispatch-schema cases, so
+  # this home declares no policy and its one posture line is dropped.
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_jq "$fakebin"
 
   printf '%s\n' '{"rules":[{"when":"legacy malformed model","use":{"harness":"codex","model":5}}]}' > "$case_dir/home/config/crew-dispatch.json"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" \
+    | grep -v '^MODEL_POLICY: this home has no config/model-denylist,')
   [ "$out" = 'CREW_DISPATCH: invalid config/crew-dispatch.json - use profile model and effort must be non-empty strings when present' ] \
     || fail "no-key use-profile diagnostic changed from main, got: $out"
 
   printf '%s\n' '{"default":{"harness":"codex","effort":3}}' > "$case_dir/home/config/crew-dispatch.json"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" \
+    | grep -v '^MODEL_POLICY: this home has no config/model-denylist,')
   [ "$out" = 'CREW_DISPATCH: invalid config/crew-dispatch.json - default profile model and effort must be non-empty strings when present' ] \
     || fail "no-key default-profile diagnostic changed from main, got: $out"
 
   printf '%s\n' '{"rules":[{"when":"legacy metadata","approval":"firstmate","floor":{"scope":"all_models","min_percent":200,"provider":"CLAUDE"},"use":{"harness":"claude","provider":"Anthropic","floor":{"scope":"all_models"}}}]}' > "$case_dir/home/config/crew-dispatch.json"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" \
+    | grep -v '^MODEL_POLICY: this home has no config/model-denylist,')
   [ -z "$out" ] || fail "resolver-only fields must be ignored without the typed key, got: $out"
   printf '%s\n' 'TYPESAFE_API_KEY=test-key' > "$case_dir/home/.env"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" \
+    | grep -v '^MODEL_POLICY: this home has no config/model-denylist,')
   [ "$out" = 'CREW_DISPATCH: invalid config/crew-dispatch.json - use profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' ] \
     || fail "typed .env key must activate resolver-field validation, got: $out"
 
   rm -f "$case_dir/home/.env"
   printf '%s\n' '{"rules":[{"when":"gemini work","use":{"harness":"gemini","model":"gemini-3.8-flash-high","provider":"google"}}]}' > "$case_dir/home/config/crew-dispatch.json"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" \
+    | grep -v '^MODEL_POLICY: this home has no config/model-denylist,')
   [ "$out" = 'CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: gemini' ] \
     || fail "no-key bootstrap must preserve its former verified-harness baseline, got: $out"
   printf '%s\n' 'TYPESAFE_API_KEY=test-key' > "$case_dir/home/.env"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" \
+    | grep -v '^MODEL_POLICY: this home has no config/model-denylist,')
   [ -z "$out" ] || fail "typed resolution should add verified Gemini crewmate routing, got: $out"
 
   rm -f "$case_dir/home/.env"
   : > "$case_dir/child-env.log"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     TYPESAFE_API_KEY=test-key FM_TEST_CHILD_ENV_LOG="$case_dir/child-env.log" \
-    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" \
+    | grep -v '^MODEL_POLICY: this home has no config/model-denylist,')
   [ -z "$out" ] || fail "environment-key validation should remain silent, got: $out"
   child_env=$(cat "$case_dir/child-env.log")
   [ -n "$child_env" ] || fail "bootstrap child environment probe did not run"
   assert_not_contains "$child_env" 'secret-present' "bootstrap children never inherit the typesafe key"
   pass "bootstrap gates resolver fields and additive harnesses on the typed key"
 }
+
+# Forbidden-model policy (config/model-denylist). Configuration validation is
+# the earliest place a model this home has ruled out can be caught, and each row
+# pins the exact diagnostic: a policy that reports the wrong thing is how an
+# operator learns to ignore it. Every deny row is paired with an allow row so no
+# case can pass because bootstrap happened to say nothing at all.
+test_model_policy_validation() {
+  local label denylist dispatch secondmate mode expect case_dir fakebin out n
+  n=0
+  while IFS='^' read -r label denylist dispatch secondmate mode expect; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/model-policy-$n"
+    mkdir -p "$case_dir/home/config"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    case "$denylist" in
+      none) : ;;
+      symlink) ln -s /nowhere/model-denylist "$case_dir/home/config/model-denylist" ;;
+      *) printf '%b\n' "$denylist" > "$case_dir/home/config/model-denylist" ;;
+    esac
+    [ "$dispatch" = none ] || printf '%s\n' "$dispatch" > "$case_dir/home/config/crew-dispatch.json"
+    [ "$secondmate" = none ] || printf '%s\n' "$secondmate" > "$case_dir/home/config/secondmate-harness"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    add_real_jq "$fakebin"
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    case "$mode" in
+      empty)
+        [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
+      exact)
+        [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out" ;;
+    esac
+  done <<'ROWS'
+a home with no policy file is reported as unguarded^none^{"default":{"harness":"claude","model":"claude-fable-5"}}^none^exact^MODEL_POLICY: this home has no config/model-denylist, so no model is forbidden here; see docs/configuration.md "Forbidden models" to add one
+a home with no policy file and no other configuration is reported too^none^none^none^exact^MODEL_POLICY: this home has no config/model-denylist, so no model is forbidden here; see docs/configuration.md "Forbidden models" to add one
+permitted dispatch models stay silent^fable^{"default":{"harness":"claude","model":"claude-opus-5"}}^none^empty^
+denied dispatch model is reported^fable^{"default":{"harness":"claude","model":"claude-fable-5"}}^none^exact^MODEL_POLICY: config/crew-dispatch.json profile harness=claude: model 'claude-fable-5' matches 'fable' in config/model-denylist
+denied dispatch model in a rule profile is reported^fable^{"rules":[{"when":"hard design","use":[{"harness":"claude","model":"claude-opus-5"},{"harness":"pi","model":"anthropic/claude-fable-5"}]}],"default":{"harness":"claude","model":"claude-opus-5"}}^none^exact^MODEL_POLICY: config/crew-dispatch.json profile harness=pi: model 'anthropic/claude-fable-5' matches 'fable' in config/model-denylist
+dispatch profile naming no model is reported^fable^{"default":{"harness":"claude"}}^none^exact^MODEL_POLICY: config/crew-dispatch.json profile harness=claude: no model is named, so the harness would pick one from its own account default; config/model-denylist requires an explicit model
+denied secondmate harness model token is reported^fable^none^codex claude-fable-5^exact^MODEL_POLICY: config/secondmate-harness: model 'claude-fable-5' matches 'fable' in config/model-denylist
+permitted secondmate harness model token stays silent^fable^none^codex claude-opus-5^empty^
+harness-only secondmate file is reported^fable^none^codex^exact^MODEL_POLICY: config/secondmate-harness: no model is named, so the harness would pick one from its own account default; config/model-denylist requires an explicit model
+unusable policy file is reported^symlink^{"default":{"harness":"claude","model":"claude-opus-5"}}^none^exact^MODEL_POLICY: config/model-denylist is symlinked; a forbidden-model policy must be a plain file in this home
+ROWS
+  pass "bootstrap reports every denied or unnamed model the home's configuration names"
+}
+
 
 test_bootstrap_reporting
 test_no_mistakes_min_version
@@ -1254,6 +1362,7 @@ test_fleet_sync_timeout_explicit_override_wins
 test_fleet_sync_timeout_empty_override_uses_default
 test_fleet_sync_timeout_is_computed_before_launch
 test_routine_bootstrap_confirmations_are_silent
+test_routine_bootstrap_reports_a_home_with_no_policy
 test_routine_bootstrap_contract_runs_under_system_bash
 test_network_phase_partitions_the_run
 test_network_sweeps_recheck_lock_ownership
@@ -1261,3 +1370,4 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_model_policy_validation

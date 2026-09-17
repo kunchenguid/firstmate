@@ -271,6 +271,7 @@ When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without 
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
 That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, muse, rovo, omp, and agy while preserving the requested profile for later audit.
+A home can also forbid models outright with `config/model-denylist`, which is enforced in code rather than by convention: bootstrap refuses the configuration that names one and `fm-spawn.sh` refuses the resolved profile, so no judgment layer can reintroduce a model the operator ruled out ([configuration.md](configuration.md#forbidden-models-configmodel-denylist)).
 
 ## Optional secondmates
 

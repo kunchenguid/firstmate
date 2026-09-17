@@ -473,6 +473,46 @@ Missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
+## Forbidden models (config/model-denylist)
+
+`config/model-denylist` is an optional local, gitignored file naming models this home must never run.
+It exists because a model pin written into a dispatch profile is a convention: nothing stops the next edit, the next profile, or a vendor's changing default from reintroducing a model whose cost the operator has ruled out.
+This section is the single owner of its operator contract; `bin/fm-model-policy-lib.sh` owns the file format and the refusal decision, and the two enforcing scripts own where each refusal lands.
+
+```text
+# config/model-denylist - one item per line, "#" starts a comment
+fable          # denies fable, claude-fable-5, anthropic/claude-fable-5, ...
+best           # an alias that resolves to a forbidden model today
+```
+
+An absent file means no policy, so a home that has not opted in behaves exactly as before.
+A present file that cannot be trusted - symlinked, not a regular file, or unreadable - is an error that refuses, never a policy that quietly evaporates.
+
+Each non-directive line is a denied fragment, matched case-insensitively against any part of the requested model.
+Fragments rather than exact ids, because one vendor model reaches Firstmate under several spellings, and one operator's forbidden model is another's default.
+
+A profile or spawn that names no model at all is refused too, with no opt-out: the model would otherwise come from the harness's own account-level default, which the vendor controls and can change to the very model the operator forbade.
+The literal model `default`, which is what Firstmate records for a spawn that named none, counts as naming no model.
+A home that forbids a model therefore names one everywhere, which is the discipline the policy exists to enforce rather than a hardship; an exemption from this rule would be the single thing that restores the hole it closes.
+
+A vendor alias such as `best` resolves to a concrete model inside the harness, and that mapping changes without notice, so Firstmate cannot resolve one without asking the vendor and spending on the answer.
+An alias is denied only when the operator lists it, which is exactly why an unnamed model is refused by default; list every alias that could reach a forbidden model.
+
+Two enforcement points:
+
+- `bin/fm-bootstrap.sh` checks the home's written configuration at session start and reports each finding as `MODEL_POLICY: <where>: <reason>`.
+  It covers every model named by a `config/crew-dispatch.json` profile or by `config/secondmate-harness`, and written configuration that names no model at all, because that configuration is itself the home's dispatch choice.
+  A home with no policy file is reported too, as a plain fact rather than a warning: enforcement that exists only where someone remembered to write the file is still a configuration dependency, `config/` is gitignored, and a new or re-created home would otherwise start unguarded with nothing saying so.
+- `bin/fm-spawn.sh` checks the fully resolved profile before provisioning a worktree or endpoint, so a denied model, an unnamed model from any path, or a raw launch command carrying a denied fragment refuses the spawn instead of launching it.
+  Its refusal names the model, the entry that matched it, and whether the value came from the `--model` flag or from `config/secondmate-harness`, so the file to correct is in the message rather than somewhere among the home's configuration.
+  A raw launch command is operator-written shell Firstmate cannot parse for the model it will run, so its whole text is scanned for denied fragments and it must also carry an explicit `--model`; recognizing a model inside arbitrary shell would be guesswork, and guessing wrong there launches the forbidden model, so an unrecognizable command refuses and says what to add.
+
+The policy binds crewmate, scout, and secondmate launches alike, including relaunches through `bin/fm-control.sh`, which refuses before it stops the running agent, so a task recorded without a model needs one named on its relaunch before it can restart.
+It does not reach Pi's `/supervision-model` pin, which selects the supervision branch's own model from Pi's catalog; that is a named residual hole in the guarantee, not a completed boundary, and it is tracked as backlog item `supervision-branch-model-policy`.
+The fix belongs at branch-build time rather than in the picker, because the read side also covers pins written before the policy existed.
+See [`docs/examples/model-denylist`](examples/model-denylist) for a starting point to copy into local `config/model-denylist`.
+Secondmate homes inherit this file from the primary, so a secondmate and its own crewmates are bound by the same policy.
+
 ## Typed dispatch resolution (.env TYPESAFE_API_KEY)
 
 `bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief with typesafe.ai's System One model (Jev), so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.

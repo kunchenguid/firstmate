@@ -1,0 +1,26 @@
+# config/model-denylist - models this home must never run (docs/configuration.md
+# "Forbidden models" owns the contract). Copy this into a local, gitignored
+# config/model-denylist and edit. One item per non-empty line; text from "#" to
+# end of line is a comment.
+#
+# Each item is a denied FRAGMENT, matched case-insensitively against any part of
+# the requested model. One vendor model reaches Firstmate under several
+# spellings, so a fragment covers them all: "fable" below denies "fable",
+# "claude-fable-5", and "anthropic/claude-fable-5" alike.
+#
+# List vendor ALIASES too. An alias resolves to a concrete model inside the
+# harness, and that mapping changes without notice, so Firstmate cannot resolve
+# one without asking the vendor and spending on the answer. An alias is denied
+# only when you list it.
+#
+# While this file exists, every profile and every spawn must NAME a model, and a
+# raw launch command must carry an explicit --model as well. There is no opt-out
+# from that rule: naming no model hands the choice to the vendor's account
+# default, which is the same hole a denied alias would leave open.
+
+# The model whose cost this home has ruled out, under every spelling.
+fable
+
+# Aliases that resolve to a model rather than naming one.
+best
+latest

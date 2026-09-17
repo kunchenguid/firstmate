@@ -572,7 +572,11 @@ test_bootstrap_nudge_retry_is_idempotent() {
 
   out2=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
-  [ -z "$out2" ] || fail "idempotent retry should converge to silence, got: $out2"
+  # This fixture home declares no forbidden-model policy, so bootstrap states
+  # that posture on every run; the convergence this case is about is that
+  # nothing else remains to say.
+  [ "$out2" = 'MODEL_POLICY: this home has no config/model-denylist, so no model is forbidden here; see docs/configuration.md "Forbidden models" to add one' ] \
+    || fail "idempotent retry should converge to no remaining nudge output, got: $out2"
   pass "T8d bootstrap nudge retry is idempotent after success"
 }
 

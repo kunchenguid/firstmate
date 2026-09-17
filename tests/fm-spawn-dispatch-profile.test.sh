@@ -1020,6 +1020,137 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+
+# --- forbidden-model policy (config/model-denylist) -------------------------
+# The gate exists so a model this home has ruled out cannot come back through an
+# edited profile, an omitted model, or a raw launch command. Each case asserts
+# the refusal happens before anything is provisioned, because a refusal after a
+# worker starts has already spent what the policy exists to prevent.
+
+deny_models() {
+  printf '%s\n' "$2" > "$1/config/model-denylist"
+}
+
+test_denied_model_refuses_before_endpoint_or_metadata() {
+  local rec id out status
+  id=denylist-model-z40
+  rec=$(make_spawn_case denylist-model claude "$id")
+  read_case_record "$rec"
+  deny_models "$HOME_DIR" fable
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness claude --model claude-fable-5)
+  status=$?
+  expect_code 1 "$status" "a model denied by config/model-denylist must refuse the spawn"
+  assert_contains "$out" "model 'claude-fable-5' matches 'fable' in config/model-denylist" \
+    "refusal must name the model and the matched entry"
+  assert_contains "$out" "(model came from the --model flag)" \
+    "refusal must name where the refused value came from"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a denied model must launch nothing (got: $(cat "$LAUNCH_LOG"))"
+  assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
+  pass "a denied model refuses before any endpoint or metadata"
+}
+
+test_unnamed_model_refuses_while_a_permitted_one_launches() {
+  local rec id out status launch
+  id=denylist-unnamed-z41
+  rec=$(make_spawn_case denylist-unnamed claude "$id")
+  read_case_record "$rec"
+  deny_models "$HOME_DIR" fable
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness claude)
+  status=$?
+  expect_code 1 "$status" "a spawn naming no model must refuse while the policy is active"
+  assert_contains "$out" "no model is named" "refusal must say the model is unnamed"
+  assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
+
+  # The same home launches normally once a permitted model is named, so the
+  # refusal above is the policy deciding and not the fixture failing to spawn.
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness claude --model claude-opus-5)
+  status=$?
+  expect_code 0 "$status" "a permitted model must still launch under an active policy"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude claude-opus-5 default
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--model 'claude-opus-5'" "the permitted model must reach the launch"
+  pass "an unnamed model refuses and a permitted one launches in the same home"
+}
+
+test_no_entry_exempts_a_spawn_from_naming_a_model() {
+  local rec id out status
+  id=denylist-noexempt-z42
+  rec=$(make_spawn_case denylist-noexempt claude "$id")
+  read_case_record "$rec"
+  # A line that reads like an opt-out is an ordinary denied fragment, not an
+  # exemption: the unnamed-model rule has none.
+  deny_models "$HOME_DIR" 'fable
+allow-unspecified-model'
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness claude)
+  status=$?
+  expect_code 1 "$status" "no entry may let a spawn omit the model"
+  assert_contains "$out" "no model is named" "refusal must say the model is unnamed"
+  [ ! -s "$LAUNCH_LOG" ] || fail "an unnamed model must launch nothing (got: $(cat "$LAUNCH_LOG"))"
+  assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
+  pass "no denylist entry exempts a spawn from naming its model"
+}
+
+test_raw_launch_command_must_name_its_model() {
+  local rec id out status
+  id=denylist-raw-z43
+  rec=$(make_spawn_case denylist-raw claude "$id")
+  read_case_record "$rec"
+  deny_models "$HOME_DIR" fable
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "custom-agent --model claude-fable-5")
+  status=$?
+  expect_code 1 "$status" "a raw launch command carrying a denied fragment must refuse"
+  assert_contains "$out" "launch command contains 'fable'" "refusal must name the matched entry"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a denied raw launch must launch nothing (got: $(cat "$LAUNCH_LOG"))"
+  assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
+
+  # A raw launch command is operator-written shell Firstmate cannot parse for the
+  # model it will run, so it must name one explicitly rather than being exempt.
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "custom-agent --flag")
+  status=$?
+  expect_code 1 "$status" "a raw launch command naming no model must refuse"
+  assert_contains "$out" "cannot be parsed for the model it will run" \
+    "refusal must say why the explicit flag is required"
+  [ ! -s "$LAUNCH_LOG" ] || fail "an unnamed raw launch must launch nothing (got: $(cat "$LAUNCH_LOG"))"
+
+  # Naming a permitted model launches the same command.
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    "custom-agent --flag" --model claude-opus-5)
+  status=$?
+  expect_code 0 "$status" "a raw launch command naming a permitted model must launch"
+  [ "$(cat "$LAUNCH_LOG")" = "custom-agent --flag" ] \
+    || fail "the raw launch command must reach the pane verbatim"
+  pass "a raw launch command must name its model and is scanned for denied fragments"
+}
+
+test_denied_secondmate_harness_model_token_refuses() {
+  local rec id sm out status
+  id=denylist-secondmate-z44
+  rec=$(make_spawn_case denylist-secondmate codex "$id")
+  read_case_record "$rec"
+  deny_models "$HOME_DIR" fable
+  printf '%s\n' 'codex claude-fable-5' > "$HOME_DIR/config/secondmate-harness"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 1 "$status" "a denied model pinned in config/secondmate-harness must refuse the launch"
+  assert_contains "$out" "model 'claude-fable-5' matches 'fable' in config/model-denylist" \
+    "refusal must name the model resolved from the secondmate harness file"
+  assert_contains "$out" "(model came from config/secondmate-harness)" \
+    "refusal must name the file the refused value came from, not only the model"
+  assert_absent "$HOME_DIR/state/$id.meta" "refusal must happen before meta is written"
+  pass "the policy covers the model token config/secondmate-harness resolves"
+}
+
 # Execute the actual emitted command in a synthetic pane environment: the
 # fake backend records delivery, while real shells exercise the env boundary.
 # No developer environment or credential values are inspected by these probes.
@@ -1461,5 +1592,10 @@ test_claude_secondmate_launch_omits_task_control_channel_authority
 test_claude_crewmate_launch_carries_the_attribution_policy
 test_claude_secondmate_launch_carries_the_attribution_policy
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_denied_model_refuses_before_endpoint_or_metadata
+test_unnamed_model_refuses_while_a_permitted_one_launches
+test_no_entry_exempts_a_spawn_from_naming_a_model
+test_raw_launch_command_must_name_its_model
+test_denied_secondmate_harness_model_token_refuses
 
 echo "# all fm-spawn-dispatch-profile tests passed"
