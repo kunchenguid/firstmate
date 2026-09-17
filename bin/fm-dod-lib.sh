@@ -288,9 +288,9 @@ Three firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
-- Fix rounds are capped at three per run, counted only as your own \`no-mistakes axi respond --action fix\` responses.
-  The chaining note above bounds how long one drive call can block and never adds to that count.
-  \`ask-user-authority\` owns the cap and every criterion for what is still fixed past it; you apply none of those criteria.
+- Fix rounds are capped at three per run, counted as your own \`no-mistakes axi respond --action fix\` responses and never rounds the pipeline chains inside one drive call; \`ask-user-authority\` step 5 owns that cap and every criterion for what is fixed past it.
+  Its proportionality half binds you on every gate you drive yourself: fix only what makes the deliverable wrong, and approve past wording, restatement, simplification, and documentation-polish findings even when the reviewer is right, unless the text is actually false.
+  The count is advisory rather than enforced: nothing records it durably, so it resets on a context reset or a worker recovery, and review-round-cap-enforcement tracks the durable version.
   Once you have sent three, escalate the next gate to firstmate using rule 6's escalation format and stop, instead of responding to that gate yourself.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.

@@ -28,12 +28,16 @@ test_primary_and_secondmate_instruction_generation() {
   assert_no_grep 'the captain, not you, owns the ask-user decisions' "$ship" \
     "generated implementation brief retained conflicting captain-only wording"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
-  assert_grep 'Fix rounds are capped at three per run, counted only as your own `no-mistakes axi respond --action fix` responses' "$ship" \
+  assert_grep 'Fix rounds are capped at three per run, counted as your own `no-mistakes axi respond --action fix` responses' "$ship" \
     "generated implementation brief leaves the cap without an observable counting unit"
+  assert_grep 'approve past wording, restatement, simplification, and documentation-polish findings even when the reviewer is right, unless the text is actually false' "$ship" \
+    "generated implementation brief withholds the proportionality criterion from the worker that drives auto-fix gates"
+  assert_grep 'The count is advisory rather than enforced' "$ship" \
+    "generated implementation brief presents the advisory count as an enforced limit"
   assert_grep 'Once you have sent three, escalate the next gate to firstmate' "$ship" \
     "generated implementation brief does not make the worker stop at the cap"
   assert_no_grep 'not a correctness or contract defect' "$ship" \
-    "generated implementation brief duplicated the cap criteria the skill owns"
+    "generated implementation brief restated the post-cap sorting criteria the skill owns"
 
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SECONDMATE_CHARTER='Handle sample work.' \
     "$BRIEF" authority-mate --secondmate --no-projects >/dev/null 2>&1
