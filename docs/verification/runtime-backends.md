@@ -626,7 +626,17 @@ ok - kimi (0.43.1) mid-turn steer: the queued doorbell was injected into the run
 ok - live steering-inbox doorbell guard: 2 harness(es) honored the doorbell contract
 ```
 
-No trust dialog appeared in this checkout; the idle check's composer did not classify empty within the readiness budget and its doorbell was honored after the guard's single watcher-role re-ring, while the mid-turn check's composer classified empty before the long tool call was started.
+Kimi self-updated to 2.0.0 on the same machine later on 2026-09-17, and the same command, with `~/.kimi-code/bin` prepended to PATH, was re-run against it; complete output:
+
+```text
+ok - kimi (2.0.0): the doorbell reached a real worker, which acted and acked with the mv
+ok - kimi (2.0.0) mid-turn steer: the queued doorbell was injected into the running turn, acted on, and acked without a re-ring
+ok - live steering-inbox doorbell guard: 2 harness(es) honored the doorbell contract
+```
+
+An earlier 2.0.0 attempt proved nothing mid-turn because Kimi sat in `Retrying (2/10) · APIConnectionError` and never started its tool call, which the guard reported as a failure rather than a pass.
+
+In the 0.43.1 run no trust dialog appeared in this checkout; the idle check's composer did not classify empty within the readiness budget and its doorbell was honored after the guard's single watcher-role re-ring, while the mid-turn check's composer classified empty before the long tool call was started.
 
 The queue block Kimi 0.43.1 draws directly above its composer, as `tmux capture-pane -p` reads it, and the same rows after `tmux send-keys C-s`:
 
