@@ -37,6 +37,11 @@
 #   (v) finding-shaped content the scanner cannot key refuses the report
 #   (w) a UI-impacting round dispatches the Design/UX lens it then requires,
 #     and reconciles that lens's own verdict and findings
+#   (x) an advisory Design/UX BLOCKER carries into later rounds like any other
+#   (y) a round re-reconciled RED revokes the marker an earlier GREEN wrote
+#   (z) one model seated on two lenses is RED, and placeholder seats are refused
+#   (aa) a transient forge failure leaves the PR pending for the next fire
+#   (ab) a lens the round does not own is refused rather than stored
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -794,20 +799,25 @@ test_unreadable_finding_fields_are_refused() {
   assert_absent "$case_dir/state/task-a.adversarial-review-green" \
     "lens-parse: an unreconciled BLOCKER wrote a loop-green marker"
 
+  # Round 1 is RED, so round 2 opens a fresh frontier slot for the id shapes.
+  run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --tier T2 --wt "$wt" --base "$base" --head "$head" --round 2 \
+    --seat frontier=fable-5.1 --seat deep=opus-5 >/dev/null \
+    || fail "lens-parse: round 2 dispatch failed"
   # An id carrying a colon would corrupt the id:severity key, and an id line
   # with nothing after the label carries no id at all: both are refused.
   write_lens_report "$case_dir/colon.md" RED '  - id: a:b
     severity: MAJOR
 '
   if run_adv "$case_dir/state" "$fakebin" record-lens task-a \
-    --round 1 --lens advisory:design-ux --report "$case_dir/colon.md" >/dev/null 2>&1; then
+    --round 2 --lens frontier --report "$case_dir/colon.md" >/dev/null 2>&1; then
     fail "lens-parse: an id containing a colon was recorded"
   fi
   write_lens_report "$case_dir/noid.md" RED '  -id: c3
     severity: MAJOR
 '
   run_adv "$case_dir/state" "$fakebin" record-lens task-a \
-    --round 1 --lens advisory:design-ux --report "$case_dir/noid.md" >/dev/null \
+    --round 2 --lens frontier --report "$case_dir/noid.md" >/dev/null \
     || fail "lens-parse: a dash-tight id line was refused instead of read"
   pass "a lens report whose id or severity cannot be read is refused"
 }
@@ -1115,6 +1125,277 @@ test_ui_round_dispatches_and_reconciles_the_design_lens() {
   pass "a UI-impacting round dispatches and reconciles its Design/UX lens"
 }
 
+# Build a UI-touching fixture lane repo and return base head wt.
+make_ui_repo() {
+  local wt=$1
+  mkdir -p "$wt"
+  git -C "$wt" init -q
+  git -C "$wt" commit -q --allow-empty -m init
+  printf '.a { color: red }\n' > "$wt/app.css"
+  git -C "$wt" add -A
+  git -C "$wt" commit -q -m 'restyle the panel'
+  printf '%s %s %s\n' "$(git -C "$wt" rev-parse 'HEAD~1')" "$(git -C "$wt" rev-parse HEAD)" "$wt"
+}
+
+# Regression: the cross-round carry-forward read only the previous round's
+# REQUIRED slots, so an advisory Design/UX BLOCKER was dropped by the next
+# round instead of reconciled, and the marker was written with it open.
+test_advisory_findings_carry_into_later_rounds() {
+  local case_dir fakebin wt out
+  case_dir="$TMP_ROOT/advisory-carry"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$fakebin"
+  read -r base head wt < <(make_ui_repo "$case_dir/wt")
+  add_fake_gh "$fakebin"
+  add_fake_gh_axi "$fakebin"
+  export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
+  export FAKE_GH_title='t' FAKE_GH_body='b'
+  : > "$case_dir/state/gh-axi.log"
+  local seats='--seat frontier=fable-5.1 --seat deep=opus-5 --seat advisory:design-ux=astra'
+  # shellcheck disable=SC2086
+  run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --wt "$wt" --base "$base" --head "$head" $seats >/dev/null \
+    || fail "advisory-carry: round 1 dispatch failed"
+  write_lens_report "$case_dir/clean.md" GREEN ''
+  write_lens_report "$case_dir/design.md" RED '  - id: d1
+    severity: BLOCKER
+    claim: contrast
+    evidence: app.css:1
+    problem: unreadable
+    fix: darken it
+'
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens frontier --report "$case_dir/clean.md" >/dev/null \
+    || fail "advisory-carry: round 1 frontier record failed"
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens deep --report "$case_dir/clean.md" >/dev/null \
+    || fail "advisory-carry: round 1 deep record failed"
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens advisory:design-ux --report "$case_dir/design.md" >/dev/null \
+    || fail "advisory-carry: round 1 design record failed"
+  out=$(run_adv "$case_dir/state" "$fakebin" reconcile task-a --round 1) \
+    || fail "advisory-carry: round 1 reconcile failed to post"
+  assert_contains "$out" "round-1 RED" \
+    "advisory-carry: an unresolved advisory BLOCKER did not keep round 1 RED"
+
+  # Round 2 at the same head: all three lenses clean, nothing fixed.
+  # shellcheck disable=SC2086
+  run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --wt "$wt" --base "$base" --head "$head" --round 2 $seats >/dev/null \
+    || fail "advisory-carry: round 2 dispatch failed"
+  local lens
+  for lens in frontier deep advisory:design-ux; do
+    run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+      --round 2 --lens "$lens" --report "$case_dir/clean.md" >/dev/null \
+      || fail "advisory-carry: round 2 $lens record failed"
+  done
+  out=$(run_adv "$case_dir/state" "$fakebin" reconcile task-a --round 2) \
+    || fail "advisory-carry: round 2 reconcile failed to post"
+  assert_contains "$out" "round-2 RED" \
+    "advisory-carry: a clean round 2 closed an unresolved advisory BLOCKER"
+  assert_grep 'advisory:design-ux:d1' \
+    "$case_dir/state/task-a.adversarial-review/round-2/reconciliation.md" \
+    "advisory-carry: the round-1 advisory BLOCKER is absent from round 2"
+  assert_absent "$case_dir/state/task-a.adversarial-review-green" \
+    "advisory-carry: a carried advisory BLOCKER still wrote a loop-green marker"
+
+  run_adv "$case_dir/state" "$fakebin" resolve task-a --round 2 \
+    --finding advisory:design-ux:d1 --disposition fixed_verified >/dev/null \
+    || fail "advisory-carry: resolve failed"
+  out=$(run_adv "$case_dir/state" "$fakebin" reconcile task-a --round 2) \
+    || fail "advisory-carry: the second round 2 reconcile failed to post"
+  assert_contains "$out" "round-2 GREEN" \
+    "advisory-carry: disposing of the carried advisory BLOCKER did not reach GREEN"
+  pass "an advisory BLOCKER carries into later rounds until it is disposed of"
+}
+
+# Regression: nothing ever removed the loop-green marker, so a round whose
+# reconciliation later came back RED left the merge boundary cleared by
+# evidence the PR itself had just contradicted.
+test_a_red_reconcile_revokes_the_green_marker() {
+  local case_dir fakebin wt out marker
+  case_dir="$TMP_ROOT/revoke-green"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$fakebin"
+  read -r base head wt < <(make_repo "$case_dir/wt")
+  add_fake_gh "$fakebin"
+  add_fake_gh_axi "$fakebin"
+  export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
+  export FAKE_GH_title='t' FAKE_GH_body='b'
+  : > "$case_dir/state/gh-axi.log"
+  run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --tier T2 --wt "$wt" --base "$base" --head "$head" \
+    --seat frontier=fable-5.1 --seat deep=opus-5 >/dev/null \
+    || fail "revoke-green: dispatch failed"
+  write_lens_report "$case_dir/clean.md" GREEN ''
+  write_lens_report "$case_dir/blocker.md" RED '  - id: f1
+    severity: BLOCKER
+    claim: unguarded
+    evidence: app.txt:1
+    problem: no guard
+    fix: guard it
+'
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens frontier --report "$case_dir/blocker.md" >/dev/null \
+    || fail "revoke-green: frontier record failed"
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens deep --report "$case_dir/clean.md" >/dev/null \
+    || fail "revoke-green: deep record failed"
+  run_adv "$case_dir/state" "$fakebin" resolve task-a --round 1 \
+    --finding frontier:f1 --disposition fixed_verified >/dev/null \
+    || fail "revoke-green: resolve failed"
+  out=$(run_adv "$case_dir/state" "$fakebin" reconcile task-a --round 1) \
+    || fail "revoke-green: the GREEN reconcile failed to post"
+  assert_contains "$out" "round-1 GREEN" "revoke-green: the fixed round did not go GREEN"
+  marker="$case_dir/state/task-a.adversarial-review-green"
+  assert_present "$marker" "revoke-green: the GREEN round wrote no marker"
+  run_adv "$case_dir/state" "$fakebin" check-green task-a "$PR_URL" >/dev/null \
+    || fail "revoke-green: check-green refused its own GREEN marker"
+
+  # The fix turns out to be wrong; the same round reconciles RED again.
+  run_adv "$case_dir/state" "$fakebin" resolve task-a --round 1 \
+    --finding frontier:f1 --disposition accepted_pending_fix >/dev/null \
+    || fail "revoke-green: the re-open resolve failed"
+  out=$(run_adv "$case_dir/state" "$fakebin" reconcile task-a --round 1) \
+    || fail "revoke-green: the RED reconcile failed to post"
+  assert_contains "$out" "round-1 RED" "revoke-green: the re-opened BLOCKER did not go RED"
+  assert_absent "$marker" \
+    "revoke-green: a RED reconciliation left the earlier GREEN marker on disk"
+  if run_adv "$case_dir/state" "$fakebin" check-green task-a "$PR_URL" \
+    >/dev/null 2>&1; then
+    fail "revoke-green: the merge boundary still cleared a PR whose newest round is RED"
+  fi
+  pass "a round re-reconciled RED revokes the marker an earlier GREEN wrote"
+}
+
+# Regression: the self-review refusal compared the seat against the task's
+# model= key, which bin/fm-spawn.sh records as the literal `default` for a lane
+# launched without --model, so firstmate could seat every lens on one model and
+# reconcile GREEN. Distinctness is what makes independence checkable.
+test_one_model_cannot_seat_two_lenses() {
+  local case_dir fakebin wt out
+  case_dir="$TMP_ROOT/seat-independence"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$fakebin"
+  read -r base head wt < <(make_repo "$case_dir/wt")
+  add_fake_gh "$fakebin"
+  add_fake_gh_axi "$fakebin"
+  export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
+  export FAKE_GH_title='t' FAKE_GH_body='b'
+  : > "$case_dir/state/gh-axi.log"
+  # The common lane: spawned with no --model, so model= is the placeholder.
+  fm_write_meta "$case_dir/state/task-a.meta" "window=fm-task-a" \
+    "worktree=$wt" "model=default"
+  run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --tier T2 --wt "$wt" --base "$base" --head "$head" \
+    --seat frontier=opus-5 --seat deep=opus-5 >/dev/null \
+    || fail "seat-independence: dispatch failed"
+  write_lens_report "$case_dir/clean.md" GREEN ''
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens frontier --report "$case_dir/clean.md" >/dev/null \
+    || fail "seat-independence: frontier record failed"
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens deep --report "$case_dir/clean.md" >/dev/null \
+    || fail "seat-independence: deep record failed"
+  out=$(run_adv "$case_dir/state" "$fakebin" reconcile task-a --round 1) \
+    || fail "seat-independence: reconcile failed to post"
+  assert_contains "$out" "round-1 RED" \
+    "seat-independence: one model seated on both lenses reconciled GREEN"
+  assert_grep 'repeats the seat opus-5' \
+    "$case_dir/state/task-a.adversarial-review/round-1/reconciliation.md" \
+    "seat-independence: the repeated seat is not disclosed"
+  assert_absent "$case_dir/state/task-a.adversarial-review-green" \
+    "seat-independence: a single-model round wrote a loop-green marker"
+
+  # `default` names no seat, at either entry point.
+  if run_adv "$case_dir/state" "$fakebin" dispatch task-b "$PR_URL" \
+    --tier T2 --wt "$wt" --base "$base" --head "$head" \
+    --seat frontier=default >/dev/null 2>&1; then
+    fail "seat-independence: dispatch accepted the placeholder seat 'default'"
+  fi
+  if run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens deep --report "$case_dir/clean.md" --seat default \
+    >/dev/null 2>&1; then
+    fail "seat-independence: record-lens accepted the placeholder seat 'default'"
+  fi
+  pass "one model cannot seat two lenses, and placeholder seats are refused"
+}
+
+# Regression: any dispatch failure claimed a round, and pending_loops then read
+# that PR as covered forever - so a single gh blip removed a PR from the
+# automatic loop until a human ran --reclaim by hand.
+test_a_transient_forge_failure_keeps_the_pr_pending() {
+  local case_dir fakebin wt out rc
+  case_dir="$TMP_ROOT/transient"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$fakebin"
+  read -r base head wt < <(make_repo "$case_dir/wt")
+  add_fake_gh "$fakebin"
+  add_fake_gh_axi "$fakebin"
+  export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
+  export FAKE_GH_title='t' FAKE_GH_body='b'
+  : > "$case_dir/state/gh-axi.log"
+  fm_write_meta "$case_dir/state/task-a.meta" "window=fm-task-a" "worktree=$wt"
+  printf 'done: PR %s\n' "$PR_URL" > "$case_dir/state/task-a.status"
+  # The forge cannot answer the head: gh is on PATH but reports nothing.
+  export FAKE_GH_headRefOid=''
+  set +e
+  run_adv "$case_dir/state" "$fakebin" action \
+    >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+  export FAKE_GH_headRefOid="$head"
+  [ "$rc" -ne 0 ] || fail "transient: the action reported success on a forge outage"
+  assert_grep 'stays pending for the next fire' "$case_dir/stderr" \
+    "transient: the failure was not reported as transient"
+  assert_absent "$case_dir/state/task-a.adversarial-review/round-1" \
+    "transient: a forge outage claimed a round the next fire cannot reuse"
+  # The forge recovers: the next fire dispatches the loop it owed.
+  run_adv "$case_dir/state" "$fakebin" condition \
+    || fail "transient: the PR stopped being pending after a forge outage"
+  out=$(run_adv "$case_dir/state" "$fakebin" action) \
+    || fail "transient: the retry after recovery failed"
+  assert_contains "$out" "dispatched: task-a" \
+    "transient: the recovered fire did not dispatch the loop"
+  pass "a transient forge failure leaves the PR pending for the next fire"
+}
+
+# Regression: record-lens took the Design/UX lens on ANY round, so a design
+# report on a non-UI round was stored and then ignored by reconcile - BLOCKERs
+# written into a dead letter that reads like evidence and blocks nothing.
+test_a_lens_the_round_does_not_own_is_refused() {
+  local case_dir fakebin wt
+  case_dir="$TMP_ROOT/foreign-lens"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$fakebin"
+  read -r base head wt < <(make_repo "$case_dir/wt")
+  add_fake_gh "$fakebin"
+  add_fake_gh_axi "$fakebin"
+  export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
+  export FAKE_GH_title='t' FAKE_GH_body='b'
+  : > "$case_dir/state/gh-axi.log"
+  # app.txt is not UI-touching, so this round owns no advisory slot.
+  run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --tier T2 --wt "$wt" --base "$base" --head "$head" \
+    --seat frontier=fable-5.1 --seat deep=opus-5 >/dev/null \
+    || fail "foreign-lens: dispatch failed"
+  write_lens_report "$case_dir/design.md" RED '  - id: d1
+    severity: BLOCKER
+    claim: contrast
+    evidence: app.txt:1
+    problem: unreadable
+    fix: darken it
+'
+  if run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens advisory:design-ux --report "$case_dir/design.md" \
+    --seat astra >/dev/null 2>&1; then
+    fail "foreign-lens: a lens this round does not own was recorded"
+  fi
+  assert_absent "$case_dir/state/task-a.adversarial-review/round-1/lens-advisory-design-ux.report" \
+    "foreign-lens: the refused report was stored anyway"
+  pass "a lens the round does not own is refused rather than stored"
+}
+
 test_condition_needs_a_pr_open_line
 test_watch_fires_on_pr_open_line
 test_dispatch_stages_evidence_and_posts
@@ -1137,3 +1418,8 @@ test_an_unstageable_lane_does_not_starve_the_others
 test_a_failed_dispatch_still_names_its_pr
 test_unkeyable_finding_shapes_refuse_the_report
 test_ui_round_dispatches_and_reconciles_the_design_lens
+test_advisory_findings_carry_into_later_rounds
+test_a_red_reconcile_revokes_the_green_marker
+test_one_model_cannot_seat_two_lenses
+test_a_transient_forge_failure_keeps_the_pr_pending
+test_a_lens_the_round_does_not_own_is_refused

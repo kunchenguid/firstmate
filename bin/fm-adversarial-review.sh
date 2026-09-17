@@ -40,9 +40,23 @@
 # answered call about anything else clears nothing and writes no marker.
 #
 # Findings outlive the round that raised them. Reconciliation re-checks every
-# MAJOR/BLOCKER from every earlier round of the same PR, and a later round that
-# simply stops reporting one does not close it: only a fixed_verified or
-# rejected_with_counterevidence disposition does, recorded in any round.
+# MAJOR/BLOCKER from every earlier round of the same PR - required lenses and
+# the advisory one alike - and a later round that simply stops reporting one
+# does not close it: only a fixed_verified or rejected_with_counterevidence
+# disposition does, recorded in any round.
+#
+# Seats are checked for independence, not against a model catalogue. Every
+# lens in a round must name a seat, no two lenses in a round may name the SAME
+# seat, and no non-standard lens may name the lane's own model when the lane
+# records a real one. That last read is why `default` and its kin are refused
+# as seat values: bin/fm-spawn.sh records model=default for a lane launched
+# without an explicit --model, and a rule that compares against a placeholder
+# is a rule that never fires. Which concrete models fill which class is the
+# skill's seat map, disclosed in the round comment rather than enumerated here.
+#
+# What the loop-green marker says is what the NEWEST reconciliation of that PR
+# said. A round re-reconciled RED revokes a marker an earlier GREEN wrote, so
+# the merge boundary can never be cleared by evidence the PR itself contradicts.
 #
 # State layout under the task state dir:
 #   <id>.adversarial-review/round-<N>/  staged evidence, prompts, reports,
@@ -107,6 +121,29 @@ usage() {
 fail() {
   echo "error: $1" >&2
   exit "${2:-1}"
+}
+
+# A failure whose cause is outside this run and may well be gone by the next
+# one: the forge unreachable, a comment that could not be posted. It exits with
+# its own status so the caller can leave the PR eligible and retry, and it
+# marks the round so the EXIT trap releases the claim rather than recording a
+# failed round nothing ever revisits. A permanent cause still uses fail().
+FM_ADV_TRANSIENT=0
+FM_ADV_TRANSIENT_RC=3
+fail_transient() {
+  FM_ADV_TRANSIENT=1
+  echo "error: $1" >&2
+  exit "$FM_ADV_TRANSIENT_RC"
+}
+
+# Seat values that name no seat. `default` is what bin/fm-spawn.sh records for
+# a lane launched without an explicit --model, so accepting it as a seat would
+# let an unnamed model pass for a named one.
+seat_is_placeholder() {
+  case "$1" in
+    ''|unassigned|default|none|unknown) return 0 ;;
+  esac
+  return 1
 }
 
 review_dir() {
@@ -198,6 +235,20 @@ slot_class() {
 round_meta_get() {
   local dir=$1 key=$2
   grep -E "^$key=" "$dir/meta" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+# The advisory slots one round carries. Every caller that iterates a round's
+# lenses resolves them through here, so record-lens, the current round's
+# reconciliation, and the carry-forward over earlier rounds can never disagree
+# about which lenses that round owes. A round dispatched before advisory_slots
+# was recorded still resolves through its ui_impacting flag.
+round_advisory_slots() {
+  local dir=$1 advisory
+  advisory=$(round_meta_get "$dir" advisory_slots)
+  if [ -z "$advisory" ] && [ "$(round_meta_get "$dir" ui_impacting)" = 1 ]; then
+    advisory=$FM_ADV_UI_LENS
+  fi
+  printf '%s' "$advisory"
 }
 
 # The round meta is a line-per-key record whose reader takes the LAST match, so
@@ -423,6 +474,9 @@ cmd_dispatch() {
         case "${2#*=}" in
           '') fail "--seat needs a model after the =: ${2-}" 2 ;;
         esac
+        if seat_is_placeholder "${2#*=}"; then
+          fail "--seat ${2#*=} names no seat; name the model that will run the lens" 2
+        fi
         seats_args="$seats_args ${2-}"
         shift 2
         ;;
@@ -471,7 +525,11 @@ cmd_dispatch() {
   wt=$(resolve_wt "$id" "$wt") || fail "no lane worktree (pass --wt or record worktree= in task meta)" 1
   meta_value_safe "$wt" || fail "the lane worktree path cannot contain a line break" 1
   if [ -z "$head" ]; then
-    head=$(forge_head "$url") || fail "cannot resolve the PR head from the forge (pass --head)" 1
+    head=$(forge_head "$url") || head=''
+    # gh can exit 0 and answer nothing; an unusable answer is still the forge
+    # failing to answer, not a caller naming a bad head.
+    fm_pr_head_valid "$head" \
+      || fail_transient "cannot resolve the PR head from the forge (pass --head)"
   fi
   fm_pr_head_valid "$head" || fail "invalid head SHA" 2
   # The PR's own base is what decides how much of the change gets reviewed, and
@@ -482,7 +540,7 @@ cmd_dispatch() {
     *[!0-9a-f]*|"") forge_base_sha='' ;;
   esac
   if [ -z "$base" ]; then
-    [ -n "$forge_base_sha" ] || fail "cannot resolve the PR base from the forge (pass --base)" 1
+    [ -n "$forge_base_sha" ] || fail_transient "cannot resolve the PR base from the forge (pass --base)"
     base=$forge_base_sha
   fi
   case "$base" in
@@ -525,6 +583,9 @@ cmd_dispatch() {
   status='failed'
   round_cleanup() {
     if [ "$status" = 'failed' ]; then
+      if [ "$FM_ADV_TRANSIENT" = 1 ] && rm -rf -- "$dir" 2>/dev/null; then
+        return 0
+      fi
       printf 'status=failed\n' >> "$dir/meta" 2>/dev/null || true
     fi
   }
@@ -590,7 +651,7 @@ CLASSIFY
     } >> "$dir/prose.md"
     prose_source=gh-axi
   else
-    fail "cannot stage PR prose (gh and gh-axi both failed)" 1
+    fail_transient "cannot stage PR prose (gh and gh-axi both failed)"
   fi
   # The Design/UX lens is advisory: it never counts toward the tier's slot
   # requirement, but the intent makes its absence red, so a UI-impacting round
@@ -654,9 +715,9 @@ CLASSIFY
   } > "$dir/comment.md"
   section=$(printf "Adversarial review (tier %s): round %s dispatched at \`%s\`; recommendation pending." "$tier" "$round" "$head")
   sync_body_section "$url" "$number" "$owner/$repo" "$section" \
-    || fail "cannot sync the PR body section" 1
+    || fail_transient "cannot sync the PR body section"
   pr_comment "$number" "$owner/$repo" "$dir/comment.md" \
-    || fail "cannot post the round comment" 1
+    || fail_transient "cannot post the round comment"
   if [ "$tier" = T0 ]; then
     write_green_marker "$id" "$url" "$head" T0 T0 || fail "cannot write the loop-green marker" 1
     sed -i.bak 's/^status=staging$/status=waived/' "$dir/meta" 2>/dev/null || true
@@ -759,20 +820,24 @@ cmd_record_lens() {
   if [ -n "$seat" ]; then
     case "$seat" in
       *[[:space:]]*) fail "seat cannot contain whitespace" 2 ;;
-      unassigned) fail "\"unassigned\" is the absence of a seat, not a seat" 2 ;;
     esac
+    if seat_is_placeholder "$seat"; then
+      fail "seat $seat names no seat; name the model that ran the lens" 2
+    fi
   fi
   dir=$(round_dir "$id" "$round")
   [ -f "$dir/meta" ] || fail "round $round was never dispatched for $id" 1
   [ "$(round_meta_get "$dir" status)" != failed ] || fail "round $round failed to dispatch; reclaim it first" 1
   slots=$(round_meta_get "$dir" slots)
-  advisory_slots=$(round_meta_get "$dir" advisory_slots)
+  advisory_slots=$(round_advisory_slots "$dir")
   slot_ok=0
   # shellcheck disable=SC2086
   for slot in $slots $advisory_slots; do
     if [ "$slot" = "$lens" ]; then slot_ok=1; fi
   done
-  if [ "$lens" = "$FM_ADV_UI_LENS" ]; then slot_ok=1; fi
+  # A lens this round does not own is refused rather than stored. Storing it
+  # would leave a report reconciliation never reads: BLOCKERs recorded into a
+  # dead letter, which reads like evidence and blocks nothing.
   [ "$slot_ok" = 1 ] || fail "lens $lens is not a slot this round" 2
   [ -f "$report" ] || fail "report file is missing" 2
   dest=$(lens_file "$dir" "$lens")
@@ -925,12 +990,15 @@ cmd_reconcile() {
   recorded_head=$(round_meta_get "$dir" head)
   ui=$(round_meta_get "$dir" ui_impacting)
   slots=$(round_meta_get "$dir" slots)
-  advisory_slots=$(round_meta_get "$dir" advisory_slots)
+  advisory_slots=$(round_advisory_slots "$dir")
   seats=$(round_meta_get "$dir" seats)
+  # bin/fm-spawn.sh records model=default for a lane launched without an
+  # explicit --model, so an unfiltered read makes the self-review refusal below
+  # compare against a word no seat is ever called and never fire. A lane whose
+  # model is only a placeholder has no identity to compare, and seat
+  # distinctness is what carries the independence rule for it.
   lane_model=$(meta_get "$id" model 2>/dev/null || true)
-  if [ -z "$advisory_slots" ] && [ "$ui" = 1 ]; then
-    advisory_slots=$FM_ADV_UI_LENS
-  fi
+  if seat_is_placeholder "$lane_model"; then lane_model=''; fi
   fm_pr_url_parse "$url" || fail "round meta has an invalid PR URL" 1
   url=$FM_PR_URL
   owner=$FM_PR_OWNER
@@ -957,6 +1025,7 @@ cmd_reconcile() {
   lens_table=
   finding_rows=
   seen_keys=' '
+  seen_seats=' '
   resolution_files=$(resolution_files_through "$id" "$url" "$round")
   # The advisory lens is reconciled exactly like a required one - its seat, its
   # verdict, and every MAJOR/BLOCKER it raises all carry full weight, and its
@@ -976,10 +1045,20 @@ cmd_reconcile() {
     # own model is the implementer reviewing their own work. The seat map makes
     # the standard slot the lane model by definition, so only that class is
     # exempt from the self-review refusal.
-    if [ -z "$seat" ] || [ "$seat" = unassigned ]; then
+    #
+    # Distinctness is what makes independence checkable when the lane's own
+    # model is not recorded as a real id: one model seated on two lenses is a
+    # single-lens round wearing two names, whoever that model is.
+    if seat_is_placeholder "$seat"; then
       note_red "lens $slot has no assigned seat"
-    elif [ "$class" != standard ] && [ -n "$lane_model" ] && [ "$seat" = "$lane_model" ]; then
-      note_red "lens $slot was seated on the lane's own model $lane_model"
+    else
+      if [ "$class" != standard ] && [ -n "$lane_model" ] && [ "$seat" = "$lane_model" ]; then
+        note_red "lens $slot was seated on the lane's own model $lane_model"
+      fi
+      case "$seen_seats" in
+        *" $seat "*) note_red "lens $slot repeats the seat $seat another lens in this round already used" ;;
+        *) seen_seats="$seen_seats$seat " ;;
+      esac
     fi
     report=$(lens_file "$dir" "$slot")
     if [ ! -f "$report" ]; then
@@ -1051,8 +1130,9 @@ cmd_reconcile() {
     prev_dir=$(round_dir "$id" "$prev_round")
     if [ -f "$prev_dir/meta" ] && [ "$(round_meta_get "$prev_dir" url)" = "$url" ]; then
       prev_slots=$(round_meta_get "$prev_dir" slots)
+      prev_advisory_slots=$(round_advisory_slots "$prev_dir")
       # shellcheck disable=SC2086
-      for prev_slot in $prev_slots; do
+      for prev_slot in $prev_slots $prev_advisory_slots; do
         prev_report=$(lens_file "$prev_dir" "$prev_slot")
         [ -f "$prev_report" ] || continue
         prev_findings=$(lens_report_scan "$prev_report" | awk '$1=="FINDING"{print $2}') || prev_findings=
@@ -1111,6 +1191,17 @@ cmd_reconcile() {
     sed -i.bak 's/^status=.*$/status=green/' "$dir/meta" 2>/dev/null || true
     rm -f -- "$dir/meta.bak"
   else
+    # The newest reconciliation of a PR is what the merge boundary must read.
+    # An earlier GREEN round left a marker on disk, and nothing else ever
+    # removes one, so a round re-reconciled RED - a fix that turned out wrong,
+    # a lens that reported late - would otherwise leave the merge cleared by
+    # evidence this very run has just contradicted in the PR itself.
+    marker=$(green_file "$id")
+    if fm_adv_green_parse "$marker" 2>/dev/null && [ "$FM_ADV_GREEN_PR" = "$url" ]; then
+      rm -f -- "$marker" \
+        || fail "reconciled RED but could not revoke the stale loop-green marker" 1
+      printf 'revoked: %s loop-green marker for %s\n' "$id" "$url"
+    fi
     sed -i.bak 's/^status=.*$/status=red/' "$dir/meta" 2>/dev/null || true
     rm -f -- "$dir/meta.bak"
   fi
@@ -1215,15 +1306,24 @@ cmd_condition() {
 # also claims its round as failed, so the next fire moves on to the other PRs
 # instead of hitting the same unstageable lane and failing again forever.
 cmd_action() {
-  local pending line id url rc=0 dispatched=0
+  local pending line id url rc=0 dispatched=0 one=0
   pending=$(pending_loops | sort -u)
   [ -n "$pending" ] || fail "no pending adversarial-review loop" 1
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     id=${line%%$'\t'*}
     url=${line#*$'\t'}
-    if ( cmd_dispatch "$id" "$url" ); then
+    one=0
+    ( cmd_dispatch "$id" "$url" ) || one=$?
+    if [ "$one" -eq 0 ]; then
       dispatched=$((dispatched + 1))
+    elif [ "$one" -eq "$FM_ADV_TRANSIENT_RC" ]; then
+      # The forge, not the lane. Claiming a round here would delist the PR from
+      # the automatic loop for a cause that is likely gone by the next fire, so
+      # it stays pending and the next fire retries it.
+      rc=1
+      printf 'actionable: adversarial-review dispatch for %s %s hit a transient failure; it stays pending for the next fire\n' \
+        "$id" "$url" >&2
     else
       rc=1
       printf 'actionable: adversarial-review dispatch failed for %s %s\n' "$id" "$url" >&2
