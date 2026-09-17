@@ -217,10 +217,13 @@ Workspace and tab ids support verification and cleanup but are not inferred from
 
 ## Current transport behavior
 
-The adapter starts and polls a named server before workspace, tab, pane, or agent calls.
-Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
+Explicit creation, send, close, and recovery mutations start and poll their named server before using it.
+Read-only endpoint existence, current-path, capture, composer, native-state, process-state, fleet-state, and discovery calls instead use bounded non-mutating probes.
+A stopped or unreadable named server is reported as unavailable, unknown, or missing according to the caller's existing contract and is never started by observation.
+The session-state probe and every session-scoped read command have a hard per-command deadline, so an offline or wedged Herdr client cannot hold fleet polling indefinitely.
+Every named-session operational invocation goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
 An environment variable alone is not reliable when another Herdr server is running.
-When the selected named server is not running, the adapter launches it without inherited Firstmate home and directory overrides, harness identity markers, or the supervision-model override.
+When an explicit mutation finds that the selected named server is not running, the adapter launches it without inherited Firstmate home and directory overrides, harness identity markers, or the supervision-model override.
 Herdr passes its server startup environment to every later pane, so retaining those values could misroute panes for another Firstmate home or harness.
 An already-running server is reused without restart or environment changes.
 Explicit named-session routing and unrelated launch environment remain intact.
@@ -356,6 +359,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 
 ```sh
 tests/fm-backend-herdr.test.sh
+tests/fm-backend-herdr-readonly-offline-e2e.test.sh
 tests/fm-composer-lib.test.sh
 tests/fm-herdr-submit-confirm-live-e2e.test.sh
 tests/fm-backend-herdr-smoke.test.sh
