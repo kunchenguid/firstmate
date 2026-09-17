@@ -143,7 +143,7 @@ if [ ! -f "$PY_BIN" ]; then
 fi
 
 STATE_DIR="$FM_HOME/state"
-mkdir -p "$STATE_DIR"
+(umask 077; mkdir -p "$STATE_DIR")
 CURSOR="$STATE_DIR/.mail-seen"
 # Durable emission journal: every successfully published poll wake records its
 # uid here under the queue lock, immediately after the wake row is appended and

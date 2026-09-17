@@ -466,7 +466,7 @@ ledger_pass() {
 # The `report <task-id>` entry point: the caller holds the child's meta lock.
 report_child() { # <id>
   local id=$1 meta rc=0
-  mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
+  (umask 077; mkdir -p "$STATE" "$OUTCOME_DIR") || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
   home_secondmate_id >/dev/null || { rc=$?; [ "$rc" -eq 1 ] && return 0; return 1; }
   meta="$STATE/$id.meta"
@@ -577,7 +577,7 @@ scan_pass() { # <cursor> <after|through> <deadline> <secondmate-id-or-empty>
 
 scan() {
   local startup=${1:-0} self='' cursor deadline rc=0 marker_rc=0
-  mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
+  (umask 077; mkdir -p "$STATE" "$OUTCOME_DIR") || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
   if self=$(home_secondmate_id); then
     # The ledger-first delivery is per poll, not per cadence.

@@ -823,7 +823,7 @@ seed_home() {
     [ $# -gt 0 ] || { echo "error: secondmate needs at least one project, or --no-projects for a project-less home" >&2; return 1; }
   fi
 
-  mkdir -p "$STATE" || return 1
+  (umask 077; mkdir -p "$STATE") || return 1
   SEED_REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
   fm_lock_acquire_wait "$SEED_REGISTRY_LOCK" || return 1
   SEED_REGISTRY_LOCK_HELD=1
@@ -881,7 +881,8 @@ seed_home() {
       refuse_projectful_projectless_charter "$id" "$SEED_PARENT_BRIEF" || return 1
     fi
   fi
-  mkdir -p "$DATA" "$home/data" "$home/state" "$home/config" "$home/projects"
+  (umask 077; mkdir -p "$home/state")
+  mkdir -p "$DATA" "$home/data" "$home/config" "$home/projects"
   if [ -f "$home/data/projects.md" ]; then
     SEED_SUB_REG_EXISTED=1
     cp "$home/data/projects.md" "$SEED_BACKUP_DIR/sub-projects.md"

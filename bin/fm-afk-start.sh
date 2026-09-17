@@ -113,7 +113,7 @@ daemon_lock_held_by_live_daemon() {
 fm_afk_flag_write() {  # <state-dir> [mode]
   local state=$1 requested_mode=${2:-} lock="$1/.cursor-park-owner.lock" \
     pending attempt=0 status=1 mode
-  mkdir -p "$state" || return 1
+  (umask 077; mkdir -p "$state") || return 1
   [ ! -d "$state/.afk" ] || return 1
   # An explicit mode is a caller's deliberate request (a fresh /afk or /quiet
   # entry). Omitted means "just refresh" (an already-running daemon, or
@@ -149,7 +149,7 @@ fm_afk_start_main() {
     * ) echo "usage: $(basename "${BASH_SOURCE[1]:-fm-afk-start.sh}")" >&2; return 2 ;;
   esac
 
-  mkdir -p "$FM_AFK_STATE"
+  (umask 077; mkdir -p "$FM_AFK_STATE")
   if [ "${FM_AFK_STATE_PREPARED:-0}" = 1 ]; then
     [ -f "$FM_AFK_STATE/.afk" ] || { echo "afk: launcher-prepared state is missing" >&2; return 1; }
   else

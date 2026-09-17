@@ -213,7 +213,7 @@ worker_covers_request() {  # <locked> <lock-pid>
 
 cmd_start() {  # <locked> <harvest-pid>
   local locked=$1 harvest_pid=$2 lock_pid generation worker_pid phases started
-  mkdir -p "$STATE" 2>/dev/null || return 1
+  (umask 077; mkdir -p "$STATE" 2>/dev/null) || return 1
   # Captured HERE, at the moment the caller still holds the lock, and carried to
   # the worker: re-reading the lock later would only prove that SOME session
   # holds it, which is exactly the case this guard exists to reject.
@@ -421,7 +421,7 @@ EOF
 
 cmd_run() {  # <locked> <lock-pid> <generation>
   local locked=$1 lock_pid=$2 generation=$3 phases started budget out rc sweep_locked=0 downgraded=0 internal=0 lease_held=0 timings stage_started
-  mkdir -p "$STATE" 2>/dev/null || return 1
+  (umask 077; mkdir -p "$STATE" 2>/dev/null) || return 1
   started=$(now)
   budget=$(stage_budget)
   phases=probe

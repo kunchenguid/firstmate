@@ -101,7 +101,7 @@ home_summary_fail() {
 
 home_summary_refresh_once() {
   local producer_rc producer_error
-  if ! mkdir -p "$STATE" 2>/dev/null; then
+  if ! (umask 077; mkdir -p "$STATE" 2>/dev/null); then
     home_summary_fail "state directory is unavailable: $STATE"
     return 1
   fi

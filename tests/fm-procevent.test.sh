@@ -3566,4 +3566,69 @@ kill -0 -"$CRASH_PID" 2>/dev/null \
 pass "a group whose leader died to something else is still refused, not signalled"
 kill -KILL -"$CRASH_PID" 2>/dev/null || true
 
+# --- a fresh home's state root is private under a permissive umask -----------
+#
+# Every tool that touches a home creates state/ defensively as its first act,
+# and this runner refuses a group- or world-writable state root, so a machine
+# with umask 002 used to break every process-to-event source - the Lavish
+# review channel included - just by starting a home. Both creation owners are
+# driven here through their own interface: the session lock, and this runner's
+# own shared wake library. Creation never rewrites an existing directory, so
+# the refusal stays the safety net for a home that was already made writable.
+
+state_root_mode() {  # <path>
+  PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
+    '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_mode "$2"' _ "$ROOT" "$1"
+}
+
+assert_state_root_private() {  # <home> <label>
+  local mode
+  mode=$(state_root_mode "$1/state")
+  case "$mode" in
+    ''|*[!0-7]*) fail "$2: state root mode is unreadable (got '$mode')" ;;
+  esac
+  [ $((8#$mode & 8#022)) -eq 0 ] \
+    || fail "$2: state root mode $mode is group- or world-writable"
+}
+
+SR_LOCK_HOME="$TMP_ROOT/state-root-lock"
+mkdir -p "$SR_LOCK_HOME"
+(umask 002; FM_HOME="$SR_LOCK_HOME" "$ROOT/bin/fm-lock.sh" status) >/dev/null \
+  || fail "the session lock could not start a fresh home"
+assert_state_root_private "$SR_LOCK_HOME" "a fresh home started by the session lock"
+pe "$SR_LOCK_HOME" list >/dev/null \
+  || fail "process-event list refused a home the session lock had just started"
+pass "the session lock starts a fresh home's state root private under umask 002"
+
+SR_PE_HOME="$TMP_ROOT/state-root-procevent"
+mkdir -p "$SR_PE_HOME"
+sr_out=$(umask 002; pe "$SR_PE_HOME" list 2>&1) \
+  || fail "process-event list refused a fresh home it had to create itself: $sr_out"
+assert_not_contains "$sr_out" "not a private directory" \
+  "a fresh home's state root is private before any other tool touches it"
+assert_state_root_private "$SR_PE_HOME" "a fresh home a process-event command started"
+pass "a process-event command starts a fresh home's state root private under umask 002"
+
+SR_EXISTING_HOME="$TMP_ROOT/state-root-existing"
+mkdir -p "$SR_EXISTING_HOME/state"
+chmod 700 "$SR_EXISTING_HOME/state"
+: > "$SR_EXISTING_HOME/state/keep"
+(umask 002; FM_HOME="$SR_EXISTING_HOME" "$ROOT/bin/fm-lock.sh" status) >/dev/null
+[ "$(state_root_mode "$SR_EXISTING_HOME/state")" = 700 ] \
+  || fail "an existing private state root was rewritten"
+assert_present "$SR_EXISTING_HOME/state/keep" "an existing private state root was replaced"
+pass "creation leaves an already-correct state root alone"
+
+SR_PERMISSIVE_HOME="$TMP_ROOT/state-root-permissive"
+mkdir -p "$SR_PERMISSIVE_HOME/state"
+chmod 775 "$SR_PERMISSIVE_HOME/state"
+(umask 002; FM_HOME="$SR_PERMISSIVE_HOME" "$ROOT/bin/fm-lock.sh" status) >/dev/null
+[ "$(state_root_mode "$SR_PERMISSIVE_HOME/state")" = 775 ] \
+  || fail "creation rewrote an existing state root's mode instead of leaving it to the operator"
+sr_refusal=$(pe "$SR_PERMISSIVE_HOME" list 2>&1) \
+  && fail "a group-writable state root was accepted"
+assert_contains "$sr_refusal" "process-event state root is not a private directory" \
+  "a pre-existing permissive state root is still refused, not silently repaired"
+pass "an already-permissive state root keeps its mode and stays refused"
+
 printf '\nall procevent tests passed\n'

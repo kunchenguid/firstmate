@@ -2660,7 +2660,7 @@ collect_descendant_task_locks() {
     echo "REFUSED: secondmate home $home has a non-directory state path at $sub_state; forced teardown changed nothing" >&2
     return 1
   fi
-  if ! mkdir -p -- "$sub_state"; then
+  if ! (umask 077; mkdir -p -- "$sub_state"); then
     echo "REFUSED: secondmate home $home state directory could not be established at $sub_state; forced teardown changed nothing" >&2
     return 1
   fi

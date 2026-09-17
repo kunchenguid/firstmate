@@ -843,7 +843,7 @@ action_arm() {
     printf 'fm-tool-update-check: %s (%s)\n' "$CONFIG_PROBLEM" "$CONFIG" >&2
     return 1
   fi
-  mkdir -p "$STATE" || return 1
+  (umask 077; mkdir -p "$STATE") || return 1
   case "$FM_HOME" in
     /*) home=$FM_HOME ;;
     *)
