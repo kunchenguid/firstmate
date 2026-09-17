@@ -42,6 +42,11 @@
 # because the brief on disk - not a harness-private session - is the durable
 # instruction.
 
+# The executor headless-adapter set consulted by fm_control_harness_supports_kind;
+# that library defines functions only and has no side effects on source.
+# shellcheck source=bin/fm-executor-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-executor-lib.sh"
+
 # The complete control-plane verb allowlist, one per line.
 fm_control_verbs() {
   cat <<'EOF'
@@ -113,6 +118,12 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   case "$harness" in
     muse|gemini|rovo|agy) [ "$kind" != secondmate ] || return 1 ;;
   esac
+  # An executor runs only on an adapter with a verified headless one-shot form;
+  # bin/fm-executor-lib.sh owns that set and bin/fm-spawn.sh's launch_template
+  # carries the forms (docs/verification/executor.md).
+  if [ "$kind" = executor ]; then
+    fm_executor_harness_headless "$harness" || return 1
+  fi
   return 0
 }
 

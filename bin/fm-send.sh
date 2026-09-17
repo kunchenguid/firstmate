@@ -531,6 +531,15 @@ fm_send_known_undelivered_cleanup() {
     fm_pending_reply_reset_known_undelivered "$STATE" "$PENDING_REPLY_CORR"
   fi
 }
+# A kind=executor task is a one-shot headless process with no steering inbox
+# and no composer to type into (bin/fm-executor-lib.sh): a steer would be
+# written to a record nothing reads and rung into a pane nothing answers. It is
+# refused so firstmate never believes an executor was steered; re-scoping the
+# GitHub issue and relaunching is the way to change what an executor does.
+if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = executor ]; then
+  echo "error: task $(fm_send_id_from_meta "$TARGET_META") is a one-shot executor that reads no steering inbox; re-scope its GitHub issue and relaunch it with bin/fm-control.sh <id> relaunch instead of steering it" >&2
+  exit 1
+fi
 if [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] && [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
   MARK_FROM_FIRSTMATE=1
   TARGET_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")

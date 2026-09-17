@@ -53,6 +53,27 @@
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
 #
+# A kind=executor task (bin/fm-executor-lib.sh) is a one-shot headless process
+# rather than an interactive agent, so two verbs change shape for it:
+#   interrupt  REFUSED: a one-shot has no turn to cancel while leaving it
+#              running; `exit` stops it and `relaunch` re-runs it.
+#   exit       Sends Ctrl-C to the endpoint and waits for the pane shell's exit
+#              marker (state/<id>.executor-exit) or the classifier's dead
+#              verdict; a process that survives it is sent SIGTERM through the
+#              foreground process group where the backend exposes it (tmux),
+#              never the pane shell itself, and an executor that still does not
+#              stop fails closed with exit=unconfirmed. Already exited is
+#              idempotent success.
+#   relaunch   Re-runs the one-shot command in the same worktree on the same
+#              fm/<id> branch, exactly as the previous executor left it, on the
+#              same or an explicitly chosen headless harness, model, and effort;
+#              this is how a failed attempt is escalated to a stronger profile
+#              without a second task. --note is optional (the issue is the
+#              specification); when given it is appended to the brief as a
+#              dated note from Firstmate. The replacement is confirmed started
+#              when its process is alive or ambiguous, or when it has already
+#              exited and written its marker.
+#
 # Teardown and discard are NOT verbs here and never will be. `exit` stops an
 # agent and preserves everything else; removing a worktree, killing an
 # endpoint, or discarding work stays with bin/fm-teardown.sh, which owns the
@@ -446,10 +467,106 @@ retire_busy_incarnation() {
   fi
 }
 
+# wait_executor_stopped <timeout>: poll until the executor's exit marker exists
+# or the classifier reads the endpoint agent-free. Prints the final observed
+# state (`exited` when the marker decided); returns 0 on a stop.
+wait_executor_stopped() {  # <timeout>
+  local timeout=$1 state marker elapsed=0
+  marker=$(fm_executor_exit_marker_path "$STATE" "$ID")
+  while :; do
+    if [ -f "$marker" ]; then
+      printf 'exited'
+      return 0
+    fi
+    state=$(agent_state)
+    if [ "$state" = dead ]; then
+      printf '%s' "$state"
+      return 0
+    fi
+    awk -v e="$elapsed" -v t="$timeout" 'BEGIN{exit !(e < t)}' || break
+    sleep "$POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+  printf '%s' "$state"
+  return 1
+}
+
+# wait_executor_started <timeout>: a relaunched executor is confirmed when its
+# process is alive or ambiguous (a raw command's process name is not a verified
+# adapter's), or when it already ran to completion and wrote its exit marker.
+wait_executor_started() {  # <timeout>
+  local timeout=$1 state marker elapsed=0
+  marker=$(fm_executor_exit_marker_path "$STATE" "$ID")
+  while :; do
+    state=$(agent_state)
+    case "$state" in
+      alive|ambiguous) printf '%s' "$state"; return 0 ;;
+    esac
+    if [ -f "$marker" ]; then
+      printf 'exited'
+      return 0
+    fi
+    awk -v e="$elapsed" -v t="$timeout" 'BEGIN{exit !(e < t)}' || break
+    sleep "$POLL"
+    elapsed=$(awk -v e="$elapsed" -v p="$POLL" 'BEGIN{printf "%.3f", e + p}')
+  done
+  printf '%s' "$state"
+  return 1
+}
+
+# do_exit_executor: stop a one-shot executor process. Ctrl-C first, then
+# SIGTERM to the foreground process group where the backend exposes it, never
+# the pane shell; the postcondition is the exit marker or a dead classifier
+# verdict. Prints `already-stopped` or `stopped`.
+do_exit_executor() {
+  local state marker pid comm
+  require_state_verified_backend exit
+  marker=$(fm_executor_exit_marker_path "$STATE" "$ID")
+  state=$(agent_state)
+  if [ -f "$marker" ] || [ "$state" = dead ]; then
+    printf 'already-stopped'
+    return 0
+  fi
+  case "$state" in
+    alive|ambiguous) ;;
+    missing) die "task $ID's recorded endpoint is gone, so there is no executor process to stop; reconcile the task before any further control action" ;;
+    *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to signal an unattributed endpoint" ;;
+  esac
+  fm_control_backend_supports_key "$BACKEND" C-c \
+    || die "the $BACKEND backend cannot deliver Ctrl-C, so executor $ID cannot be stopped from this plane"
+  fm_backend_send_key "$BACKEND" "$T" C-c "$LABEL" \
+    || die "Ctrl-C could not be delivered to task $ID on $BACKEND"
+  if wait_executor_stopped "$EXIT_WAIT" >/dev/null; then
+    printf 'stopped'
+    return 0
+  fi
+  if [ "$BACKEND" = tmux ]; then
+    fm_backend_source tmux || die "the tmux adapter could not be loaded to escalate the stop of task $ID"
+    while IFS= read -r pid; do
+      [ -n "$pid" ] || continue
+      comm=$(LC_ALL=C ps -o comm= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+      [ "$(fm_agent_process_classify_name "$comm")" != shell ] || continue
+      kill -TERM "$pid" 2>/dev/null || true
+    done <<EOF
+$(fm_backend_tmux_foreground_pids "$T")
+EOF
+    if wait_executor_stopped "$EXIT_WAIT" >/dev/null; then
+      printf 'stopped'
+      return 0
+    fi
+  fi
+  state=$(agent_state)
+  die "exit-delivered $ID interrupt=C-c agent-state=$state exit=unconfirmed; the executor process did not stop within ${EXIT_WAIT}s"
+}
+
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped` or `stopped`.
 do_exit() {
   local state cmd verdict composer_state cancel interrupt_result=not-needed
+  if [ "$KIND" = executor ]; then
+    do_exit_executor
+    return $?
+  fi
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
@@ -778,6 +895,20 @@ record_note() {
   stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   printf '%s\n' "$NOTE" > "$NOTE_FILE"
   case "$KIND" in
+    executor)
+      # The issue is the executor's specification, so the note is a short
+      # dated addendum rather than the interactive progress-note shape.
+      cp -p "$RELAUNCH_BRIEF" "$BRIEF_PRIOR" \
+        || die "could not preserve task $ID's instructions before recording the note"
+      {
+        echo
+        echo "# Note from Firstmate ($stamp)"
+        echo "This run is a relaunch of the same issue on the same branch; the worktree is exactly as the previous executor left it."
+        echo
+        printf '%s\n' "$NOTE"
+      } >> "$RELAUNCH_BRIEF" \
+        || die "could not append the note to task $ID's instructions"
+      ;;
     ship|scout)
       cp -p "$RELAUNCH_BRIEF" "$BRIEF_PRIOR" \
         || die "could not preserve task $ID's instructions before recording the progress note"
@@ -813,6 +944,11 @@ do_relaunch() {
         || die "task $ID has no instructions at $RELAUNCH_BRIEF; refusing to relaunch a worker with nothing to work from"
       [ "$NOTE_SET" = 1 ] && [ -n "$NOTE" ] \
         || die "relaunch of a $KIND task requires --note (or --note-file): the replacement worker inherits the local copy but none of the conversation, so it must be told what happened"
+      ;;
+    executor)
+      RELAUNCH_BRIEF="$DATA/$ID/brief.md"
+      [ -f "$RELAUNCH_BRIEF" ] \
+        || die "task $ID has no instructions at $RELAUNCH_BRIEF; refusing to relaunch an executor with nothing to work from"
       ;;
     secondmate)
       # The charter in the secondmate's own home is its instruction source and
@@ -857,9 +993,15 @@ do_relaunch() {
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
   fi
 
-  state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
-    die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
-  }
+  if [ "$KIND" = executor ]; then
+    state=$(wait_executor_started "$LAUNCH_WAIT") || {
+      die "the replacement executor for $ID did not start within ${LAUNCH_WAIT}s (endpoint reads '$state')"
+    }
+  else
+    state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
+      die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
+    }
+  fi
   RELAUNCH_AGENT_CONFIRMED=1
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
@@ -871,6 +1013,8 @@ do_relaunch() {
 
 case "$VERB" in
   interrupt)
+    [ "$KIND" != executor ] \
+      || die "task $ID is a one-shot executor with no turn to cancel; use 'bin/fm-control.sh $ID exit' to stop it or 'relaunch' to re-run it"
     state=$(agent_state)
     case "$state" in
       alive) ;;
