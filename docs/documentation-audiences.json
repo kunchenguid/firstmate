@@ -511,6 +511,10 @@
     {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
+    },
+    {
+      "path": "presenter/README.md",
+      "audience": "public-product"
     }
   ]
 }
