@@ -10,10 +10,10 @@
 #
 # A launcher that exports those directories covers only the panes it starts, so
 # a pane restored or started without it - a Herdr pane on a server started from
-# an unlaunched shell, a secondmate pane, a hand-opened terminal - sees an
-# ambient PATH without them. Bootstrap would then report an installed helper as
-# MISSING and lavish-axi as PRESENTATION_UNAVAILABLE, which is false noise for
-# that home. This file is the single owner of the directory list and its order.
+# an unlaunched shell, or a hand-opened terminal - sees an ambient PATH without
+# them. Bootstrap would then report an installed helper as MISSING and
+# lavish-axi as PRESENTATION_UNAVAILABLE, which is false noise for that home.
+# This file is the single owner of the directory list and its order.
 
 # fm_tools_path_prepend [<config-dir>]
 # Prepend each existing helper directory, in the fixed order
