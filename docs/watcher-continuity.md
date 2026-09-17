@@ -184,8 +184,8 @@ The bounded turn-end guard enforces recovery at Stop when no watcher is live and
 So a finished, hung, or identity-mismatched claim cannot suppress that recovery ([`turnend-guard.md`](turnend-guard.md#harness-integrations) owns that boundary).
 
 The recovery-episode contract below owns once-per-generation announcement.
-A handling successor does not re-announce.
-It enters its poll loop immediately and keeps scanning signals, stale panes, and checks.
+A handling successor does not re-announce the exact recovery generation open at its own handoff; it enters its poll loop immediately and keeps scanning signals, stale panes, and checks.
+That suppression is scoped to the one generation captured at handoff, never to the successor's whole lifetime: a later, distinct generation minted while it keeps running - most commonly by an unrelated task's `fm_wake_append` after the originating generation is acknowledged - flows through the same `resurface_after_downtime` recovery path as any other watcher.
 
 ### Manual recovery and other harnesses
 
@@ -447,6 +447,14 @@ They also prove that a legacy or handoff-phase watcher marker from an absent rep
 
 - The once-per-generation announcement bound with the real Pi extension against a refused handling handshake.
 - A handling successor that must surface a real crew event instead of going blind.
+
+`tests/fm-watch-recovery-generation-scope.test.sh` covers:
+
+- Generation-scoped suppression for the exact recovery generation open at a handling successor's handoff.
+- A later generation minted by an external `fm_wake_append` while that same successor keeps running.
+- Multiple independent later generations resurfacing across repeated handoffs.
+- A still-open generation never being fragmented by a second append.
+- Generation-bound acknowledgement retiring a later generation exactly as it retires the original.
 
 `tests/fm-watch-triage.test.sh` proves TERM stops a watcher blocked inside a poll's pane capture and still releases its lock and records an acknowledgeable stop.
 It also exercises a single TERM with a live foreign downtime-marker lock holder, retained stale singleton and subsequent arm-style recovery, including decimal `08` and zero `00` cleanup bounds.
