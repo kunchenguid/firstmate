@@ -290,7 +290,9 @@ if [ -f "$remote_home/state/slow-ledger-read" ]; then
     fi
     sleep 0.05
   done
-  sleep 30 &
+  slow_seconds=$(cat "$remote_home/state/slow-ledger-read" 2>/dev/null || true)
+  case "$slow_seconds" in ''|*[!0-9]*) slow_seconds=30 ;; esac
+  sleep "$slow_seconds" &
   sleeper=$!
   printf '%s %s\n' "$$" "$sleeper" >> "$FM_TEST_LEDGER_PID_LOG"
   wait "$sleeper"
@@ -638,6 +640,63 @@ test_bad_secondmate_homes_never_revive_parent_work() {
       and (.secondmate_reconcile[1].kind == "child_current_unavailable")
   ' >/dev/null || fail "bad home outcomes revived stale work or lacked provenance: $json"
   pass "missing, invalid, unreadable, malformed, and unavailable-child homes stay explicit unknowns"
+}
+
+test_bearings_publishes_the_bounded_projection_as_the_reconcile_request() {
+  local home orphan_home fakebin request
+  home=$(make_home reconcile-payload-shape)
+  : > "$home/data/secondmates.md"
+  orphan_home="$TMP_ROOT/reconcile-payload-shape-orphan-home"
+  make_valid_secondmate_home orphan "$orphan_home"
+  printf '## In flight\n- [ ] ghost - Ghost child (repo: sample) (kind: ship) (since 2026-07-13)\n\n## Queued\n\n## Done\n' \
+    > "$orphan_home/data/backlog.md"
+  append_secondmate_registry "$home" orphan "$orphan_home"
+  write_parent_secondmate_event "$home" orphan "$orphan_home" "old orphan work"
+  fakebin=$(make_fakebin "$home")
+  run "$home" "$fakebin" --json >/dev/null || fail "bearings failed"
+
+  request=$(find "$home/state/reconcile-notify" -maxdepth 1 -type f -name 'request-*.json' -print -quit)
+  [ -n "$request" ] || fail "no reconcile request was published"
+  jq -e '
+    .schema == "fm-bearings.v1"
+      and (.secondmate_reconcile | length) == 1
+      and .secondmate_reconcile[0].id == "orphan"
+      and .secondmate_reconcile[0].kind == "orphan_in_flight"
+      and .secondmate_reconcile[0].ids == ["ghost"]
+      and (has("tasks") | not)
+      and (has("secondmate_current") | not)
+  ' "$request" >/dev/null || fail "the published request is not the bearings projection: $(cat "$request")"
+  pass "the reconcile request carries the bounded fm-bearings.v1 projection"
+}
+
+test_failed_reconcile_request_warns_without_losing_bearings() {
+  local home mate fakebin out err status
+  home=$(make_home reconcile-publish-failure)
+  : > "$home/data/secondmates.md"
+  mate="$TMP_ROOT/reconcile-publish-failure-orphan-home"
+  make_valid_secondmate_home orphan "$mate"
+  printf '## In flight\n- [ ] ghost - Ghost child (repo: sample) (kind: ship) (since 2026-07-13)\n\n## Queued\n\n## Done\n' \
+    > "$mate/data/backlog.md"
+  append_secondmate_registry "$home" orphan "$mate"
+  write_parent_secondmate_event "$home" orphan "$mate" "old orphan work"
+  fakebin=$(make_fakebin "$home")
+  PATH="$fakebin:$PATH" refresh_local_secondmate_ledgers "$home"
+
+  err="$home/reconcile-warning.err"
+  status=0
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-11T18:00:00Z \
+    NET_LOG="$home/net.log" FM_RECONCILE_REQUEST_MAX_BYTES=1 \
+    "$BEARINGS" --json 2>"$err") || status=$?
+  [ "$status" = 0 ] || fail "a failed reconcile request aborted bearings (exit $status): $(cat "$err")"
+  printf '%s' "$out" | jq -e '
+    .schema == "fm-bearings.v1"
+      and (.secondmates | any(.[]; .id == "orphan"))
+  ' >/dev/null || fail "bearings dropped its projection when the reconcile request failed: $out"
+  grep -q 'could not durably queue secondmate inventory reconciliation' "$err" \
+    || fail "no durability warning was emitted on stderr: $(cat "$err")"
+  [ -z "$(ls -A "$home/state/reconcile-notify" 2>/dev/null || true)" ] \
+    || fail "a reconcile request was published despite the failure"
+  pass "a failed reconcile request warns on stderr and preserves the bearings projection"
 }
 
 test_oversized_secondmate_summary_stays_strict_unknown() {
@@ -3283,6 +3342,32 @@ EOF
   pass "remote ledgers collect concurrently under one budget, reuse aged cache, and cancel wedged collectors"
 }
 
+test_default_remote_ledger_budget_covers_measured_ssh_latency() {
+  local parent fakebin remote_home json
+  parent=$(make_home remote-ledger-measured-latency)
+  make_remote_ledger_fleet "$parent" 1
+  remote_home="$TMP_ROOT/remote-ledger-home-1"
+  printf '6\n' > "$remote_home/state/slow-ledger-read"
+  fakebin=$(make_remote_ledger_ssh "$parent/remote-ssh")
+  mkdir -p "$parent/ledger-active"
+  : > "$parent/ledger-calls.log"
+  : > "$parent/ledger-pids.log"
+  : > "$parent/ledger-active/overlap-proved"
+
+  json=$(FM_HOME="$parent" FM_ROOT_OVERRIDE="$ROOT" FM_SSH_BIN="$fakebin/fake-ssh" \
+    FM_TEST_LEDGER_CALL_LOG="$parent/ledger-calls.log" \
+    FM_TEST_LEDGER_PID_LOG="$parent/ledger-pids.log" \
+    FM_TEST_LEDGER_ACTIVE_DIR="$parent/ledger-active" \
+    FM_SNAPSHOT_CACHE_DIR="$parent/state/summary-cache" FM_SNAPSHOT_NOW_EPOCH=1100 \
+    FM_BEARINGS_NOW=2026-09-01T22:00:00Z "$BEARINGS" --json)
+  printf '%s' "$json" | jq -e '
+    .secondmates | length == 1
+      and .[0].id == "ledger-1"
+      and .[0].freshness == "fresh"
+  ' >/dev/null || fail "the default remote ledger budget rejected a six-second healthy read: $json"
+  pass "default remote ledger budget covers a measured six-second healthy read"
+}
+
 test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_compute() {
   local parent fakebin remote_home json
   parent=$(make_home remote-ledger-missing)
@@ -3310,9 +3395,12 @@ test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_co
 
 test_task_teardown_during_metadata_capture_does_not_abort_snapshot
 test_current_state_uses_captured_status_observation
+test_failed_reconcile_request_warns_without_losing_bearings
+test_bearings_publishes_the_bounded_projection_as_the_reconcile_request
 test_relaunched_task_does_not_inherit_reused_endpoint_state
 test_large_local_snapshot_overlaps_local_reads_without_projection_drift
 test_remote_ledgers_share_one_concurrent_budget_and_fall_back_to_cache
+test_default_remote_ledger_budget_covers_measured_ssh_latency
 test_a_remote_home_without_any_ledger_is_explicitly_unreadable_without_remote_compute
 test_domain_alpha_stale_parent_event_does_not_become_current_work
 test_gnu_stat_uses_file_formats_without_bsd_fallback_pollution
