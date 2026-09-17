@@ -26,8 +26,10 @@
 #       --org it must run inside a git repository and creates a per-project
 #       home at that repo's root, registering the repo itself. Both write
 #       config/projects-root=.., a .tasks.toml backlog config, and a
-#       whitelist-style .firstmate/.gitignore, and add the home to the
-#       enclosing repository's .git/info/exclude when one exists.
+#       whitelist-style .firstmate/.gitignore. The home is never added to the
+#       enclosing repository's .git/info/exclude: git would then never read
+#       the whitelist negations, and the .gitignore's `*` already keeps the
+#       rest of the home private.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -59,23 +61,6 @@ nearest_firstmate_home() {
 # repo_top <dir>: print the enclosing git worktree root, or nothing.
 repo_top() {
   git -C "$1" rev-parse --show-toplevel 2>/dev/null
-}
-
-# exclude_firstmate_dir <home-dir>: add the home to the enclosing repo's
-# .git/info/exclude (local-only, never committed) when one exists.
-exclude_firstmate_dir() {
-  local home=$1 top rel pattern exclude
-  top=$(repo_top "$home") || return 0
-  rel=${home#"$top"/}
-  case "$rel" in
-    "$home") return 0 ;; # home is not under the repo top
-  esac
-  pattern="/$rel/"
-  exclude="$top/.git/info/exclude"
-  [ -f "$exclude" ] || { mkdir -p "$(dirname "$exclude")" && : > "$exclude"; }
-  grep -qxF "$pattern" "$exclude" 2>/dev/null && return 0
-  printf '%s\n' "$pattern" >> "$exclude"
-  echo "firstmate: added $pattern to $exclude"
 }
 
 # scaffold_home <dir> [--register-self]: create the .firstmate/ layout.
@@ -136,7 +121,6 @@ cmd_init() {
   existing=$(nearest_firstmate_home "$(dirname "$target")" || true)
 
   scaffold_home "$home" "$([ "$org" -eq 0 ] && echo --register-self)"
-  exclude_firstmate_dir "$home"
 
   echo "firstmate: created $home"
   echo "firstmate: projects root is $target (config/projects-root=..)"

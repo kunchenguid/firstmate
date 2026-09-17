@@ -35,6 +35,9 @@
 # projects - data/projects.md and data/project-paths.json aliases - because
 # every sibling of the org root is a user working copy and discovery is not
 # authority. Every other home keeps the legacy direct-children glob.
+# That refresh is external-safe: fetch, then fast-forward only a clean default
+# branch; it never prunes branches, re-attaches a detached HEAD, or reports a
+# user's feature branch as STUCK.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,6 +48,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-projects-lib.sh
 . "$SCRIPT_DIR/fm-projects-lib.sh"
 PROJECTS=$(fm_projects_root "$FM_HOME" "$CONFIG") || exit 1
+ORG_HOME=0
+fm_projects_root_is_custom "$CONFIG" && ORG_HOME=1
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # Inert unless FM_TIMING_LOG names a file; only the deferred network stage sets it.
@@ -347,7 +352,9 @@ sync_project() {
     return 0
   fi
 
-  prune_gone_branches || true
+  if [ "$ORG_HOME" -eq 0 ]; then
+    prune_gone_branches || true
+  fi
 
   DEFAULT=$(default_branch) || {
     echo "$label: skipped: cannot determine default branch"
@@ -363,6 +370,11 @@ sync_project() {
   dirty=no
   [ -z "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
   recovered=no
+
+  if [ "$ORG_HOME" -eq 1 ] && { [ "$cur" != "$DEFAULT" ] || [ "$dirty" = yes ]; }; then
+    echo "$label: skipped: on $(stuck_state) (org homes refresh only a clean $DEFAULT)"
+    return 0
+  fi
 
   if [ "$cur" != "$DEFAULT" ]; then
     # Off the default branch. Auto-recover only the one unambiguously safe drift:
@@ -415,6 +427,10 @@ sync_project() {
     return 0
   fi
   if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BASE"; then
+    if [ "$ORG_HOME" -eq 1 ]; then
+      echo "$label: skipped: local $DEFAULT diverged from $BASE"
+      return 0
+    fi
     report_stuck "diverged $DEFAULT"
     return 0
   fi

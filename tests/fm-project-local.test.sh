@@ -133,7 +133,21 @@ test_init() {
   assert_present "$repo/.firstmate/config/projects-root" "per-project init wrote no projects-root"
   assert_absent "$repo/deep/dir/.firstmate" "per-project init did not land at the repo root"
   assert_grep "- standalone " "$repo/.firstmate/data/projects.md" "per-project init did not register the repo"
-  assert_grep "/.firstmate/" "$repo/.git/info/exclude" "init did not add .firstmate to .git/info/exclude"
+  if grep -qF "/.firstmate/" "$repo/.git/info/exclude" 2>/dev/null; then
+    fail "init excluded .firstmate/ wholesale, hiding whitelisted config"
+  fi
+  [ -z "$(git -C "$repo" status --porcelain -- .firstmate/data .firstmate/state)" ] \
+    || fail "init left private .firstmate state visible to git"
+  printf '!config/crew-harness\n' >> "$repo/.firstmate/.gitignore"
+  printf 'claude\n' > "$repo/.firstmate/config/crew-harness"
+  printf 'x\n' > "$repo/.firstmate/config/private-item"
+  git -C "$repo" check-ignore -q .firstmate/config/crew-harness \
+    && fail "whitelisted config item is still ignored"
+  git -C "$repo" check-ignore -q .firstmate/config/private-item \
+    || fail "non-whitelisted config item is not ignored"
+  # The self-registered alias resolves to the repo itself.
+  assert_equals "$(cd "$repo" && pwd -P)" "$(FM_HOME="$repo/.firstmate" "$ROOT/bin/fm-projects.sh" resolve standalone)" \
+    "per-project init alias did not resolve to the repo"
 
   # init outside a repo and without --org refuses.
   local nowhere="$base/nowhere"
@@ -242,12 +256,33 @@ test_discovery_authority() {
   commit_file "$w-unreg" f.txt v1 C1
   git -C "$w-unreg" push -q origin HEAD:main 2>/dev/null || git -C "$w-unreg" push -q origin HEAD:master
 
+  # A local branch whose upstream is gone must survive an org-home refresh.
+  git -C "$reg" fetch -q origin
+  git -C "$reg" branch -q keepme
+  git -C "$reg" config branch.keepme.remote origin
+  git -C "$reg" config branch.keepme.merge refs/heads/vanished
   reg_head=$(git -C "$reg" rev-parse HEAD)
   unreg_head=$(git -C "$unreg" rev-parse HEAD)
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-fleet-sync.sh" >/dev/null 2>&1 \
     || fail "fleet sync failed in org home"
   [ "$(git -C "$reg" rev-parse HEAD)" != "$reg_head" ] || fail "registered sibling was not fast-forwarded"
   [ "$(git -C "$unreg" rev-parse HEAD)" = "$unreg_head" ] || fail "unregistered sibling was fetched - discovery leaked into authority"
+  git -C "$reg" show-ref --verify --quiet refs/heads/keepme \
+    || fail "org-home refresh pruned a user branch"
+
+  # A user feature branch is skipped, never re-attached or reported STUCK.
+  git -C "$reg" checkout -q -b feature
+  local out
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-fleet-sync.sh" 2>/dev/null)
+  assert_contains "$out" "reg: skipped: on branch feature" "org-home refresh did not skip a feature branch"
+  case "$out" in *STUCK*) fail "org-home refresh reported a user branch as STUCK" ;; esac
+  [ "$(git -C "$reg" symbolic-ref --short HEAD)" = feature ] || fail "org-home refresh moved the user's branch"
+
+  # A registered alias that resolves nowhere is skipped, not treated as a cwd path.
+  printf -- '- docs [direct-PR] - missing (added 2026-09-17)\n' >> "$home/data/projects.md"
+  local cands
+  cands=$(cd "$ROOT" && FM_HOME="$home" bash -c '. bin/fm-projects-lib.sh; fm_project_sync_candidates "$FM_HOME" "$FM_HOME/config" "$FM_HOME/data"' 2>/dev/null)
+  case "$cands" in *docs*) fail "unresolved registered alias leaked into sync candidates" ;; esac
 
   pass "discovery=authority: discover lists siblings, refresh touches registered only, resolver precedence"
 }

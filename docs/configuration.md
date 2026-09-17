@@ -37,7 +37,7 @@ The caller's directory is exported as `FM_LAUNCH_DIR` and printed by the session
 The harness is `--harness <name>`, then the home's `config/primary-harness` (one token), then `claude`; remaining arguments pass through to the harness.
 
 `firstmate init --org` scaffolds `.firstmate/` at the current directory (an org root), and `firstmate init` inside a git repository scaffolds a per-project home at that repo's root and registers the repository itself.
-Both write `config/projects-root` (below), a `.tasks.toml` backlog config, and a whitelist-style `.firstmate/.gitignore`, and add the home to the enclosing repository's `.git/info/exclude` when one exists.
+Both write `config/projects-root` (below), a `.tasks.toml` backlog config, and a whitelist-style `.firstmate/.gitignore` that keeps the home private while letting a team commit selected `config/` items; the home is deliberately not added to `.git/info/exclude`, which would hide those whitelisted items from git.
 `.firstmate/` is private by default; to share a config item with a team, commit it by appending an exact-path negation such as `!config/crew-harness` to `.firstmate/.gitignore` and removing the parent-level ignore - `data/` and `state/` are never shared.
 
 `config/projects-root` holds one line naming the directory whose children are this home's projects: a relative path resolves against the home, and `firstmate init` writes `..` so an org home's projects are the org root's sibling repositories.
@@ -48,7 +48,7 @@ Discovery is not authority: sibling repositories under a `config/projects-root` 
 `data/project-paths.json` is a flat JSON object `{"<alias>": "<absolute-path>"}` registering a project that lives outside the projects root.
 The central resolver maps a project argument to a path in this order: a `projects/<name>` argument prefers the legacy `$FM_HOME/projects/<name>` clone then resolves `<name>` as an alias; a bare alias resolves through `data/project-paths.json`, then `<projects-root>/<alias>`, then `$FM_HOME/projects/<alias>`; any other path passes through unchanged.
 Task metadata records `project_name=` (the stable alias or basename) beside `project=` (the absolute path), and `bin/fm-captain-hold.sh` derives a held task's repo from it.
-A whole-fleet refresh touches only registered projects in a `config/projects-root` home and keeps the legacy direct-children glob everywhere else; the refresh itself is unchanged - fetch, fast-forward only when clean and on the default branch, and loud `STUCK:` reports otherwise.
+A whole-fleet refresh touches only registered projects in a `config/projects-root` home and keeps the legacy direct-children glob everywhere else; in a `config/projects-root` home the refresh is external-safe - fetch, then fast-forward only when clean and on the default branch; it never prunes local branches or re-attaches a detached HEAD, and any other state is skipped rather than touched. Other homes keep the full refresh, including gone-branch pruning and loud `STUCK:` reports.
 Homes without `config/projects-root` behave exactly as before, and `FM_HOME` semantics are unchanged.
 
 ## Calm preference (config/calm)

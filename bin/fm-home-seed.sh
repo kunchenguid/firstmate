@@ -27,10 +27,10 @@
 #       to override the registry routing scope. Otherwise the registry summary
 #       and scope are derived from the filled charter brief.
 #       --projects-root <dir> seeds an org-shaped home: the child's projects
-#       live as siblings under <dir> (recorded in the child's
-#       config/projects-root, absolute or relative to the child home), no
-#       projects/ directory is required or created, each named project must
-#       already exist as a sibling git repo and is REGISTERED into the child's
+#       live as siblings under <dir> (recorded as an absolute path in the
+#       child's config/projects-root), no
+#       projects/ directory is required or created, each named project must be
+#       registered in this home and already exist as a sibling git repo and is REGISTERED into the child's
 #       data/projects.md instead of cloned, and no-mistakes initialization is
 #       left to that project's own tasks. A preexisting child
 #       config/projects-root selects the same mode and must agree with the
@@ -486,11 +486,16 @@ seed_project_source() {
 }
 
 # register_org_project <project>: the org-mode counterpart of clone_project.
-# The sibling must already exist as the root of its own git work tree; nothing
+# The project must be registered in this (parent) home, and the sibling must
+# already exist as the root of its own git work tree; nothing
 # is cloned, created, or initialized - registration in the child's
 # data/projects.md (sync_project_registry) is the whole operation.
 register_org_project() {
   local project=$1 src top
+  fm_project_registered_aliases "$DATA" | grep -Fxq -- "$project" || {
+    echo "error: project $project is not registered in $DATA/projects.md or project-paths.json; register it before seeding" >&2
+    return 1
+  }
   src=$(seed_project_source "$project")
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   top=$(git -C "$src" rev-parse --show-toplevel 2>/dev/null) || {
@@ -894,8 +899,8 @@ seed_home() {
 
   # Resolve the org-mode projects root before project validation: the flag
   # wins, then a preexisting child config/projects-root. The flag's relative
-  # value resolves against the caller's cwd here and is recorded verbatim for
-  # the child (fm-projects-lib.sh resolves it against the child home).
+  # value resolves against the caller's cwd here, and the child's
+  # config/projects-root records the resulting absolute path.
   SEED_PROJECTS_ROOT=
   if [ -n "$projects_root_arg" ]; then
     case "$projects_root_arg" in

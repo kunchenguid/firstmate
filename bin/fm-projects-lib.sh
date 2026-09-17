@@ -31,8 +31,10 @@
 #   - projects/<name> prefers the legacy <home>/projects/<name> clone, then
 #     resolves <name> as an alias;
 #   - a bare alias resolves through data/project-paths.json (non-sibling
-#     registrations), then <projects-root>/<alias>, then the legacy
-#     <home>/projects/<alias>;
+#     registrations), then <projects-root>/<alias>, then - in a
+#     config/projects-root home - the projects root itself when it is a git
+#     work-tree root named <alias> (the repo a per-project `firstmate init`
+#     registers), then the legacy <home>/projects/<alias>;
 #   - an alias that resolves nowhere passes through unchanged so callers keep
 #     their existing not-a-directory handling.
 #
@@ -203,6 +205,12 @@ fm_project_resolve() {
     printf '%s\n' "$projects/$arg"
     return 0
   fi
+  if fm_projects_root_is_custom "$config" && [ -d "$projects" ] \
+      && [ "$(basename "$projects")" = "$arg" ] \
+      && [ "$(git -C "$projects" rev-parse --show-toplevel 2>/dev/null)" = "$(cd "$projects" && pwd -P)" ]; then
+    printf '%s\n' "$projects"
+    return 0
+  fi
   if [ -d "$home/projects/$arg" ]; then
     printf '%s\n' "$home/projects/$arg"
     return 0
@@ -212,7 +220,9 @@ fm_project_resolve() {
 
 # fm_project_sync_candidates <home> <config> <data>: print the project paths a
 # whole-fleet refresh may touch. A config/projects-root home enumerates only
-# REGISTERED aliases (discovery is not authority); every other home keeps the
+# REGISTERED aliases (discovery is not authority), skipping any alias that
+# resolves to no directory rather than emitting it as a cwd-relative name;
+# every other home keeps the
 # legacy direct-children glob, including unregistered clones.
 fm_project_sync_candidates() {
   local home=$1 config=$2 data=$3 projects alias resolved aliases proj
@@ -221,6 +231,10 @@ fm_project_sync_candidates() {
     while IFS= read -r alias; do
       [ -n "$alias" ] || continue
       resolved=$(fm_project_resolve "$home" "$config" "$data" "$alias") || return 1
+      if [ "$resolved" = "$alias" ]; then
+        echo "warning: registered project $alias resolves to no directory; skipped" >&2
+        continue
+      fi
       printf '%s\n' "$resolved"
     done <<< "$aliases"
     return 0

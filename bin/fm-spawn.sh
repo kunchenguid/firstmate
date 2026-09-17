@@ -2549,6 +2549,17 @@ else
     echo "error: could not resolve the project name for $PROJ" >&2
     exit 1
   }
+  if fm_projects_root_is_custom "$CONFIG"; then
+    PROJ_REGISTERED_ALIAS=$(fm_project_alias_for_path "$FM_HOME" "$CONFIG" "$DATA" "$PROJ_ABS") || {
+      echo "error: could not read this home's project registry" >&2
+      exit 1
+    }
+    [ -n "$PROJ_REGISTERED_ALIAS" ] || {
+      echo "error: $PROJ_ABS is not a registered project of this home; register it in $DATA/projects.md (or data/project-paths.json) before spawning" >&2
+      exit 1
+    }
+    PROJ_NAME=$PROJ_REGISTERED_ALIAS
+  fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
@@ -4108,6 +4119,7 @@ preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
       split("window endpoint_task_id worktree project project_name harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
   ' "$RELAUNCH_META"
