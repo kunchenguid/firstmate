@@ -279,9 +279,9 @@ Three dependencies surfaced, all now installed:
 
 ## Staying mergeable against upstream
 
-The adapter is shaped to stay mergeable rather than merely to work: 14 added files, which an upstream merge cannot conflict on, and 18 modified upstream files, which are the entire conflict surface.
+The adapter is shaped to stay mergeable rather than merely to work: 14 added files, which an upstream merge cannot conflict on, and 20 modified upstream files, which are the entire conflict surface.
 One added file is not merge-neutral against DSH itself: `.dsh/agent-presets/firstmate/agent.cordis.yml` is a copy of DSH's `standard` preset, so a DSH upgrade means re-copying it and re-applying its budget raise.
-Each modified file is modified additively — a case arm, a new mode, a new function or a call site, never a reorder or a rename — so an upstream change outside those 18 files cannot conflict, and one inside them conflicts at the added line rather than at a rewritten one.
+Each modified file is modified additively — a case arm, a new mode, a new function or a call site, never a reorder or a rename — so an upstream change outside those 20 files cannot conflict, and one inside them conflicts at the added line rather than at a rewritten one.
 
 **First sync, 2026-09-16.** Upstream `main` had advanced by one commit (`7111081c`), touching four files, none of them on the conflict surface; the rebase replayed every commit with zero conflicts.
 
@@ -343,7 +343,7 @@ Against dsh 0.1.5-rc.1 / dsh-base 0.1.5-rc.2 the live guard passed its five sess
 Its sixth contract, that the documented `web` launch renders `AGENTS.md` whole through the `firstmate` preset, was added after that run; it needs no credentials, and it was run on its own against the same dsh.
 The five-contract run predates the preflight's hook sandbox-mode check, so on its own it is not evidence that the first contract still passes.
 On 2026-09-16, after `.dsh/profile.patch.yml` pinned the `sandbox-policy` row, the guard was run again with `DSH_PERMISSION_MODE` unset and passed all six contracts: the first contract's preflight read the composed hook sandbox mode as `danger-full-access` from the pin alone, and the documented `web` launch rendered `AGENTS.md` whole through the `firstmate` preset at budget 262144.
-That is the evidence for the first contract after the sandbox check; the guard now also unsets the variable for that contract itself, so a pin removed from the tracked patch cannot pass on a value inherited from the caller's shell.
+That is the evidence for the first contract after the sandbox check; the guard no longer unsets the variable for that contract, because the preflight now refuses every `!!js` mode whatever the environment holds, so a pin removed from the tracked patch cannot pass on a value inherited from the caller's shell.
 Its seventh contract, that the launcher's own `web` exec composes the tracked patch and loads the plugin tree with it applied once, was added after both; its commands were run on their own against dsh 0.1.5-rc.1 in a disposable `DSH_HOME`, where they pass and the previous launcher failed them with the parent-option refusal and `duplicate loader entry id`, and the whole guard has not been rerun since.
 Its eighth contract, that the tracked patch keeps every permission preset `dsh-base` offers, was added with the restated preset table: a patch replaces a row's whole config, and the earlier `permission` row carrying only `defaultPreset` left DSH offering `workspace-write` and `danger-full-access` but no `read-only`.
 Its composition, through DSH's own layer composer and the permission plugin's own config schema over dsh-base 0.1.5-rc.2, was run on its own: without the table the tracked patch resolved to those two presets, and with it to all three, matching `dsh-base`.

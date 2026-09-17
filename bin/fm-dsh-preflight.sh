@@ -14,11 +14,12 @@
 #      the wrong build.
 #   2. INSTRUCTION BUDGET. `dsh-agent-instructions` budgets the whole rendered
 #      instruction chain at `maxBytes`, which dsh-base and DSH's shipped agent
-#      presets set to 65536. Over budget it omits the broadest file whole, and
-#      firstmate's AGENTS.md is larger than that, so the agent receives only the
-#      CLAUDE.md pointer and a budget marker the operator never sees. Under
-#      dsh-web-app the host row is disabled and the session's agent preset
-#      carries the budget, so a raise on the host row there is not a budget.
+#      presets that render instructions set to 65536. Over budget it omits the
+#      broadest file whole, and firstmate's AGENTS.md is larger than that, so
+#      the agent receives only the CLAUDE.md pointer and a budget marker the
+#      operator never sees. Under dsh-web-app the host row is disabled and the
+#      session's agent preset carries the budget, so a raise on the host row
+#      there is not a budget.
 #   3. SANDBOX. `ps` is denied under the `workspace-write` sandbox. Harness
 #      ancestry, the PID-strict watcher lock and away-mode daemon ownership
 #      then read "unknown" or "down" rather than reporting a misconfiguration,
