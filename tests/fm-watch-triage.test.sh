@@ -2292,6 +2292,106 @@ test_absorbed_replacement_wait_does_not_inherit_the_old_throttle() {
   pass "absorbed paused and captain-held replacements each start their own re-surface cadence"
 }
 
+# Run one watcher round against a dead-agent declared-wait fixture, armed as a
+# handled-wake successor so an absorbing round stays in the poll loop.
+# <mode> `exit` requires the watcher to surface and exit; `absorb` requires it to
+# survive whole poll cycles. Returns 1 when the watcher does the other thing.
+absorbed_wait_round() {  # <state> <fakebin> <out> <capture> <window> <exit|absorb>
+  local state=$1 fakebin=$2 out=$3 capture=$4 window=$5 mode=$6 pid cycles=0
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  if [ "$mode" = exit ]; then
+    wait_for_exit "$pid" 100 || { reap "$pid"; return 1; }
+    return 0
+  fi
+  while [ "$cycles" -lt 4 ]; do
+    wait_poll_cycle "$state" "$pid" 300 || { reap "$pid"; return 1; }
+    cycles=$((cycles + 1))
+  done
+  reap "$pid"
+  return 0
+}
+
+# A status write that does not change what is awaited must not restart the
+# declared wait's re-surface cadence or its age. The throttle and the age are both
+# bound to the declaration itself - its verb and reason - so a repeated identical
+# declaration or a continuation line appended under it is absorbed until the
+# cadence elapses, and the recheck then reports how long THAT wait has held rather
+# than how long ago the log was last written. A genuinely changed declaration
+# still surfaces on first inspection.
+test_absorbed_wait_cadence_survives_a_status_write_that_keeps_the_wait() {
+  local spec name initial changed label dir state fakebin out capture_file
+  local statusf window key sig wakes throttle waited write
+  for spec in \
+    'paused-unchanged-write|paused: waiting on validation run one|paused: waiting on validation run two|paused' \
+    'captain-held-unchanged-write|captain-held [key=route]: awaiting the routing call|captain-held [key=route]: awaiting the release call|captain-held'
+  do
+    name=${spec%%|*}; spec=${spec#*|}
+    initial=${spec%%|*}; spec=${spec#*|}
+    changed=${spec%%|*}; label=${spec#*|}
+    dir=$(make_case "$name"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+    window="test:fm-held"
+    printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+    printf '%s\n' "$initial" > "$statusf"
+    set_mtime "$(( $(date +%s) - 500 ))" "$statusf"
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    throttle="$state/.paused-resurfaced-$key"
+    printf 'idle after agent exit\n' > "$capture_file"
+    printf '%s' "$(hash_text 'idle after agent exit')" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+
+    absorbed_wait_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
+      || fail "[$name] initial declared wait did not re-surface"
+    ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the initial declared wait"
+
+    # Two writes that leave the wait exactly as declared, each in its own round.
+    for write in "$initial" 'continuation of the same wait, nothing changed'; do
+      printf '%s\n' "$write" >> "$statusf"
+      sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+      printf 'idle after write: %s\n' "$write" > "$capture_file"
+      absorbed_wait_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb \
+        || fail "[$name] a status write that kept the wait woke the supervisor before the cadence: $(cat "$state/.wake-queue" 2>/dev/null)"
+      wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+        "$state/.wake-queue" 2>/dev/null || echo 0)
+      [ "$wakes" -eq 0 ] || fail "[$name] a status write that kept the wait produced $wakes wakes before the cadence"
+    done
+
+    # The cadence elapses: one recheck, aged from the declaration, not the write.
+    set_mtime "$(( $(date +%s) - 2000 ))" "$throttle"
+    printf 'idle once the cadence elapsed\n' > "$capture_file"
+    absorbed_wait_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
+      || fail "[$name] the unchanged wait did not re-surface once its cadence elapsed"
+    wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+      "$state/.wake-queue" 2>/dev/null || echo 0)
+    [ "$wakes" -eq 1 ] || fail "[$name] the elapsed cadence produced $wakes wakes instead of one"
+    waited=$(sed -n "s/.*($label \([0-9][0-9]*\)s,.*/\1/p" "$state/.wake-queue" | head -1)
+    [ -n "$waited" ] && [ "$waited" -ge 500 ] \
+      || fail "[$name] a status write that kept the wait reset its age: $(cat "$state/.wake-queue")"
+    ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the elapsed recheck"
+
+    # A changed reason is a new declaration and surfaces on first inspection.
+    printf '%s\n' "$changed" >> "$statusf"
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+    printf 'idle after the changed declaration\n' > "$capture_file"
+    absorbed_wait_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
+      || fail "[$name] a changed declaration inherited the unchanged wait's throttle"
+    wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+      "$state/.wake-queue" 2>/dev/null || echo 0)
+    [ "$wakes" -eq 1 ] || fail "[$name] a changed declaration produced $wakes wakes instead of one"
+    waited=$(sed -n "s/.*($label \([0-9][0-9]*\)s,.*/\1/p" "$state/.wake-queue" | head -1)
+    [ -n "$waited" ] && [ "$waited" -lt 500 ] \
+      || fail "[$name] a changed declaration kept the previous wait's age: $(cat "$state/.wake-queue")"
+  done
+  pass "a status write that keeps a paused or captain-held wait keeps its cadence and age, while a changed declaration surfaces at once"
+}
+
 # Run one watcher round against a parked-worker fixture, so a round differs only
 # in the pane contents the case just wrote. Armed the way fm-watch-arm.sh arms a
 # successor after firstmate handled a wake, because that is what a supervision
@@ -5509,6 +5609,7 @@ test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
+test_absorbed_wait_cadence_survives_a_status_write_that_keeps_the_wait
 test_live_declared_wait_churn_honors_the_resurface_throttle
 test_live_paused_until_controls_recheck_time
 test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict
