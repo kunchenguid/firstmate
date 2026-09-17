@@ -191,11 +191,18 @@ An unreachable or unreadable remote read is unknown, not evidence that the endpo
 Marked requests keep the existing correlation contract.
 The remote charter appends replies to `state/parent-replies.status` in the remote home.
 The remote home's own outcome publishers append there too, through the channel contract in `bin/fm-parent-channel-lib.sh` ([secondmate-parent-channel.md](secondmate-parent-channel.md)).
-A process-event source performs a non-destructive, cursor-anchored delta read, fetches only referenced `data/*.md` documents through the confined reader, mirrors every content-bearing line at most once into the primary status channel, and does not carry blank separators.
+A process-event source performs a non-destructive, cursor-anchored delta read, fetches the documents a line explicitly offers through the confined reader, mirrors content-bearing lines into the primary status channel, and does not carry blank separators.
+Only a structured `report=data/....md` pointer offers a document; a bare path inside prose is a mention, so writing about a document - including one the mate has not created yet - never asks this channel to fetch it.
+Each normalized source line, before its delivered `report=` pointers are rewritten, is the replay identity.
+Once committed, that identity prevents an ingestion retry or whole-log recapture from appending a second spelling when document availability changes, and its record survives reply-adapter retirement alongside the parent status stream.
+For lines mirrored before this source-line record existed, exact mirrored bytes remain the compatibility fallback.
+The first whole-log recapture after upgrading can therefore append one duplicate in the original source spelling for a legacy line whose bare `data/*.md` mention was previously fetched and rewritten; if that line was a since-resolved decision, the duplicate can read as reopening it, but recording that source line prevents another duplicate on later recaptures.
 The channel carries the mate's status and decision model: an uncorrelated progress line and a newly raised `needs-decision` travel the same path as a correlated answer, and reach the parent's open-decision fold identically.
 Correlation is a per-line property that settles a pending request; it is never a gate on the stream, so no single line can stop or wedge the relay or hold the cursor back.
 Transport normalization rewrites NUL, every other C0 control except tab and newline, and DEL to `?`, while printable ASCII and all high bytes, including UTF-8, pass through unchanged.
-If the confined remote reader permanently refuses a referenced document, the mate's line is mirrored with its original pointer and the adapter appends one keyed escalation naming the gap instead of stalling the stream.
+If the confined remote reader cannot deliver an offered document, the channel fails open: the mate's line is mirrored with its original pointer, the cursor still advances, and the adapter appends one unkeyed note carrying the reader's own reason instead of stalling the stream.
+That note never enters the open-decision fold, because the reader cannot tell a report that is still being written from one that will never exist, and a decision raised on that ambiguity could stand open describing a transfer that later succeeded.
+A refused document is not re-attempted automatically; it stays on the remote, and a later structured offer of the same path fetches it.
 An SSH exit status of 255 while fetching a referenced document leaves the delta uncommitted for the process-event runner's normal retry because remote completion is unknown.
 The process-event runner applies each captured delta through this adapter as soon as it is captured, so a mirrored reply reaches the primary status channel without depending on the wake handler running the adapter itself.
 A mirrored line that carries a correlation token settles its pending-reply record and closes that request's own open escalation decision.
@@ -220,9 +227,8 @@ bin/fm-backlog-handoff.sh <id> <item-key>...
 
 For a remote route, `tasks-axi mv` first moves the dependency-closed set atomically from the primary backlog into `data/handoff/<id>.outbox.md`.
 The outbox is then copied to the remote handoff scratch directory and `fm-backlog-receive.sh` atomically ingests every destination-absent key under the remote backlog's own lock.
-After receipt, the helper sends a marked routed-work instruction through the recorded remote endpoint and removes the outbox only after that wake is confirmed.
-A failed wake leaves the remote backlog intact and the outbox available for `--resume-pending`; an unresolved send is reported without a blind resend.
-Bootstrap retries pending outboxes and emits `SECONDMATE_HANDOFF:` only when one remains.
+The [`bin/fm-backlog-handoff.sh`](../bin/fm-backlog-handoff.sh) header owns remote outbox release after receipt and stable wake-correlation retry behavior.
+Bootstrap retries pending outboxes and wakes, and emits `SECONDMATE_HANDOFF:` only when an outbox remains.
 There is no two-phase journal and no additional tasks-axi release requirement.
 
 ## Sync, update, and retirement

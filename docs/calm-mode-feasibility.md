@@ -5,9 +5,9 @@ This document owns the version-scoped feasibility evidence, Pi transcript taxono
 
 ## Required extension surface
 
-A qualifying implementation must auto-load from the trusted project, persist the toggle choice for the effective Firstmate home across Pi session starts and resumes, keep working activity visible, emit no Calm status row, redraw already-rendered controllable rows, remove supported hidden rows without gaps, restore ordinary rendering, and leave delivery, tool execution, model context, session storage, export and share operation, diagnostics, and expansion state unchanged.
+A qualifying implementation must auto-load from the trusted project, persist the toggle choice for the effective Firstmate home across session starts and resumes, keep working activity visible, emit no Calm status row, redraw already-rendered controllable rows, remove supported hidden rows without gaps, restore ordinary rendering, and leave delivery, tool execution, model context, session storage, export and share operation, diagnostics, and expansion state unchanged.
 The governing presentation policy allows genuine original user prompts, genuine user-facing assistant text, and working activity.
-Working activity may be presented through Pi's stock row or through a supported Calm-owned widget, but Calm must leave the stock row untouched whenever Calm is off.
+Working activity may be presented through the harness's stock row or through a supported Calm-owned drawing, but Calm must leave the stock row untouched whenever Calm is off.
 Changing persisted context to remove hidden content, filtering provider context, patching installed harness code, or claiming coverage outside a supported renderer does not satisfy that boundary.
 
 ## Compatibility evidence
@@ -154,23 +154,25 @@ Calm replaces Pi's stock working row with a small animated boat while Calm is on
 This path uses only public extension API and patches nothing: `ExtensionUIContext.setWorkingVisible(false)` hides the stock row, and `setWidget()` installs a temporary component factory above the editor.
 Pi's documented custom working-indicator frames are static and width-blind, so they cannot own responsive geometry; a widget component receives `render(width)` and can.
 
-`.pi/extensions/fm-calm.ts` remains the sole owner of the presentation choice and the only caller of `setWorkingVisible()`, while `.pi/extensions/lib/fm-calm-working-ship.ts` owns the sprite geometry, the bounce track, and the widget.
+`.pi/extensions/fm-calm.ts` remains the sole owner of the presentation choice and the only caller of `setWorkingVisible()`, while `.pi/extensions/lib/fm-calm-working-ship.ts` owns Pi's ANSI painting and the widget over the sprite geometry, bounce track, cadences, and freeze/resume state in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`, the harness-neutral core the Claude Code mod also draws from (reached from the Pi tree through a tracked symlink, because Claude Code refuses a hooks-module import from outside the plugin folder).
 Visibility follows `agent_start` through `agent_settled` rather than turns or tool calls.
 Pi emits `agent_settled` from a `finally` block once a run will not continue automatically, so retries, automatic continuations, queued follow-ups, and compaction inside one run never remove the boat, while settle, abort, and failure all reach the same cleanup.
 Repeated `agent_start` events inside one run are idempotent, and Pi disposes the previous component before installing a replacement under the same key and when it clears extension widgets, so the frame timer cannot duplicate or outlive the widget.
 Pi's above-editor widget container reserves one spacer row whether or not a widget is present, so removing the boat leaves no residual blank row.
 
-The sprite is two rows when the usable width admits the complete hull: a two-cell mainsail centered over a symmetric `\__/` hull that replaces water on its row rather than adding a third row.
-The sail is directional because a mainsail extends aft of the mast, so it renders `<|` while travelling right and `|>` while travelling left.
-Direction reverses the moment the boat lands on an endpoint, so the endpoint frame itself already shows the new heading and no frame at or after a bounce shows the previous sail.
+The sprite is two rows when the usable width admits the complete hull: an asymmetric three-cell `◿│◣` sail centered over a five-cell `╲▁▁▁╱` hull that sits inside the water row rather than adding a third row.
+The sail is the same in both travel directions, and its one-cell quarter triangle keeps the left sail visibly smaller than the full right sail.
+The hull's three inner cells are zero-height water glyphs, so the swell reads as continuous beneath the boat instead of being interrupted by it.
+Direction reverses the moment the boat lands on an endpoint, so the endpoint frame itself already carries the new heading and the trough follows the next boat movement without a discontinuity.
 The water row fills the complete supplied width, the track is recomputed and clamped from that width on every frame so a resize cannot wrap or strand the boat offscreen, and widths too narrow for the hull fall back to a deterministic single row.
 
-One scheduler drives two logically independent clocks.
-Every tick advances a bounded fixed-cell water phase, and only every fourth tick moves the boat, so at a 220ms tick the water ripples several times between boat steps and the boat travels one column every 880ms.
-Ticks rather than wall-clock timestamps drive every state change, so tests seek animation time exactly, and disposing the widget stops both clocks together.
-Water phases are single-column ASCII, so advancing them never changes visible width, adds a row, or moves the hull column.
+One scheduler drives two linked cadences.
+Every tick advances the wave by one quarter-cell, and only every fourth tick moves the boat one whole cell, so at a 220ms tick the swell advances one cell per 880ms boat step and the boat stays phase-locked inside the same trough.
+Ticks rather than wall-clock timestamps drive every state change, so tests seek animation time exactly, and disposing the widget stops both cadences together.
+The water is the lower half of the bottom-aligned one-cell bars that Pi Dictation uses for its level history, `▁▂▃▄`, so advancing the phase never changes visible width, adds a row, or moves the hull column.
+The swell is a deterministic field of smoothstep half-waves whose lengths vary between nine and thirteen cells from a fixed hash, surrounding a broad zero-height trough five cells either side of the hull center, so the boat never rides a crest and the surface still avoids a mechanical fixed period.
 
-Colors are standard ANSI foreground codes rather than theme lookups: blue for every water cell and yellow for the complete boat, with no bright variant, 256-color, or RGB escape.
+Colors are standard ANSI foreground codes rather than theme lookups: every water cell is blue whatever its height, so the swell reads through glyph height alone rather than a crest-versus-trough color split, and the whole boat, both sail halves, the mast, and the complete hull including its zero-height interior, is one yellow, with no bright variant, 256-color, or RGB escape.
 Each colored run is closed with a default-foreground reset so styling cannot bleed into the sail row's padding, neighbouring UI, or a later frame, and geometry is always computed from visible cells rather than escape bytes.
 
 The presentation is TUI-only and visual-only.
@@ -183,7 +185,7 @@ Compaction and retry loaders remain stock because Pi exposes no supported replac
 `bin/fm-operational-input.sh` owns current cross-language operational-input construction and parsing, while the thin Pi adapter lives at `.pi/extensions/lib/fm-operational-input.ts`.
 Only `genuine-user-prompt`, `genuine-agent-response`, and `working-status` are policy-visible.
 Every other audited class is policy-hidden when Pi exposes a supported presentation boundary, but semantic input is never transformed to enforce that preference.
-The home-local persistence schema is owned by [`docs/configuration.md`](configuration.md#pi-calm-preference-configcalm).
+The home-local persistence schema is owned by [`docs/configuration.md`](configuration.md#calm-preference-configcalm).
 
 Current session-start, watcher, turn-end guard, away supervisor, and launch-brief inputs retain their versioned U+2063 static envelopes.
 The established leading `[fm-from-firstmate]` plus U+2063 routing carrier remains current so running secondmate charters remain compatible.
@@ -265,17 +267,17 @@ grok 0.2.106 (bde89716f679)
 
 | Harness | Conclusion | Evidence |
 | --- | --- | --- |
-| Claude Code 2.1.218 | Not feasible through the inspected supported project surface. | Project hooks can observe lifecycle and tool events, while the plugin CLI packages supported components; neither inspected surface exposes a transcript-row renderer or transcript-wide redraw API. |
+| Claude Code 2.1.272 (superseding the 2.1.218 row, which found no transcript-row renderer in project hooks or the plugin CLI) | Feasible through the early-access Claude Code mods surface (function hooks), default-off behind `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`, and shipped as the `firstmate-calm` mod. | A `ui.render` hook draws per-component transcript rows and the working row, `$.ui.invalidate` redraws the transcript, and `$.ui.blit` animates a `Raster`; the [2026-09-15 record](#2026-09-15-claude-code-21272-mods-feasibility-and-the-shipped-mod) owns the spike-verified working animation, gapless hiding and retroactive redraw of tool, narration, and operational rows, the persisted per-home toggle, and the three bounded gaps: an early-access API that may change, main-screen scrollback keeping pre-toggle copies, and 256-color Raster paint. |
 | Codex CLI 0.144.6 | Not feasible through the inspected supported project surface. | The tracked hooks expose session, pre-tool, and stop handling, while the plugin and feature inventories expose no TUI tool-row renderer or transcript redraw control. |
 | OpenCode 1.17.18 | Not feasible without violating the preservation boundary. | Plugins expose events and tool execution hooks, not a built-in transcript-row renderer; same-name tool replacement changes execution rather than presentation alone. |
 | Pi (verified 0.81.1 through 0.82.0) | Partially feasible with two API-probed exported-class adapters. | Public APIs control working visibility, collapsed labels, known tool slots, custom entries, and expansion redraws; exported assistant and interactive-mode classes provide the collapsed-thinking and operational-user layout boundaries, gated on the exact method's presence rather than a version number, while generic user, tool, and status filtering remains unavailable. |
 | Grok CLI 0.2.106 | Not feasible through the inspected supported project surface. | Project hooks expose lifecycle and tool interception, while the plugin CLI exposes no row-renderer contract; `--minimal` changes the whole screen mode rather than selected transcript rows. |
 
 These conclusions are deliberately limited to the named versions and supported surfaces.
-They do not claim that a harness can never add the missing renderer API.
+They do not claim that a harness can never add the missing renderer API, and the Claude Code row is the first that changed for exactly that reason.
 For the duplicate-turn fix and the latest presentation change, the launch templates for Claude, Codex, OpenCode, Pi, and Grok and the watcher, turn-end, session-start, away-supervisor, and from-firstmate producers were re-inspected.
 The canonical encoder and every non-Pi delivery path remain unchanged, and the tmux, Herdr, Zellij, Orca, and cmux runtime surfaces continue to transport the same input selected by the harness adapter.
-Only Pi's Calm presentation implementation changed; every producer and non-Pi transport remains unchanged.
+Pi's Calm implementation changed only to consume the shared sprite core, while the new Claude Code mod changes drawings only; every producer and non-Pi transport remains unchanged.
 
 ## Regression coverage
 
@@ -288,6 +290,9 @@ It asserts one persisted and rendered captain answer, exact user-role operationa
 Quoted current markers, ASCII-only labels, ordinary text before a marker, unrelated U+2063 placement, and image-bearing input remain visible in component and native transcript checks.
 `tests/fm-pi-primary-live-e2e.test.sh` also proves the working ship replaces the built-in `Working...` row while Calm is active on the credentialed provider path, and that it clears when the run settles, before continuing its ordinary watcher lifecycle.
 `tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against whichever Pi declarations are installed, without pinning a version of its own.
+`tests/fm-calm-claude-mod.test.sh` needs no Claude Code binary: it proves the mod is one hooks module with no command, skill, agent, or classic hook path around its opt-in, that Pi's working ship renders byte-for-byte the shared sprite core painted in ANSI at every width and step, that the Raster packing lays that frame out exactly, that the mod resolves its home like Pi, that its live and restored working-note classifiers enforce the visibility boundaries [`calm.md`](calm.md#claude-code) owns, and that its operational-input classifier agrees with `bin/fm-operational-input.sh` on a corpus the shell owner itself encodes plus legacy shapes and near misses.
+`tests/fm-calm-claude-mod-plugin.test.sh` runs wherever `claude` is installed without spending a model turn: strict `claude plugin validate` on the folder and on the `.claude/skills` auto-load path, then the mod's own `claude plugin test` suites, which drive the hooks module in the engine's host against a mocked clock, environment, file system, and drawing surface.
+`tests/fm-calm-claude-mod-live-e2e.test.sh` is the opt-in credentialed guard in a real Claude Code TUI under tmux: flag off is a complete no-op with the preference already on, flag on shows the moving boat, hides tool and operational rows, toggles and persists through `/calm`, and `claude --continue` restores the hidden rows.
 
 The relevant commands are:
 
@@ -296,6 +301,9 @@ tests/fm-calm-pi-extension.test.sh
 tests/fm-pi-branch-extension.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 tests/fm-pi-primary-types.test.sh
+tests/fm-calm-claude-mod.test.sh
+tests/fm-calm-claude-mod-plugin.test.sh
+FM_CLAUDE_CALM_LIVE_E2E=1 tests/fm-calm-claude-mod-live-e2e.test.sh
 ```
 
 ## 2026-07-23 verification record
@@ -608,4 +616,131 @@ ok - Pi Calm native /skill:ahoy geometry keeps every collapsed thinking and tool
 ok - Pi Calm working ship moves on a slow independent cadence over faster fixed-cell blue water, paints the complete boat standard yellow with balanced resets, keeps ANSI-stripped width exact, flips the directional sail on the exact bounce at both edges and every width, clamps visible and hidden resizes, falls back deterministically when narrow, freezes and resumes column/direction across settle/start without hidden-time jumps or duplicate timers, resets only on a fresh session, and installs and removes one scheduler-owning widget across starts, settle, abort, failure, shutdown, reload, replacement, and Calm toggles while leaving Calm-off visibility untouched
 ok - the rendered-export-DOM guard renders in one pass, retries a bounded number of Chrome start-up failures, and reports the Chrome binary, Chrome version, Pi version, exit status, and Chrome diagnostic when every attempt fails
 ok - Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior
+```
+
+## 2026-09-15 Claude Code 2.1.272 mods feasibility and the shipped mod
+
+Claude Code 2.1.272 exposes exactly the capability the 2026-07-22 row found missing, through its early-access "Claude Mods" surface, whose engineering primitive is the function hook: a plugin whose behavior lives in one hooks module exporting `register(on, options)`, hooking dotted engine events as `($, e, next)` middleware, with `ui.render` drawing per-component transcript rows and the working row, `$.ui.invalidate("ui.render")` redrawing every hooked drawing, and `$.ui.blit` repainting a mounted `Raster` without a render pass.
+The surface is default-off: hooks modules load only when the `tengu_plugin_hooks_modules` rollout flag or the `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` environment variable turns them on, never under safe mode, `disableAllHooks`, or a managed-hooks-only policy, and only after workspace trust is accepted.
+The generated declarations (`/plugin-types`) carry the header "EARLY ACCESS: this surface may change between releases without notice", and the public proposal invites testing behind that variable while the feature is not yet in the public docs or CHANGELOG.
+The feasibility spike (scout `fm-claude-mods-calm-sailboat-s1`, whose private report holds the raw captures) and the shipped `firstmate-calm` mod both use only that documented-in-binary plugin API; the shipped mod also checks that `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` is exactly `1` before any preference read, transcript read, timer, command registration, or drawing change, so loading its module through the rollout flag alone remains a complete no-op. Nothing patches installed Claude Code code, and no prompt, tool, or session event is rewritten.
+
+```text
+$ claude --version
+2.1.272 (Claude Code)
+$ tmux -V
+tmux 3.6a
+```
+
+### What the API allows, per surface
+
+| Surface | Can it own the working indicator? | Can it hide or redraw transcript rows? | Evidence |
+| --- | --- | --- | --- |
+| Mods, `ui.render` | Yes: the `Spinner` component (`word`, `message`, `mode`, `requestId` the agent id, `e.viewport.columns`), replaced by a `Raster` repainted through `$.ui.blit` at the frame rate. | Yes: `UserMessage`, `AssistantMessage` (one text block), `ToolUse`, `ToolResult`, `ToolGroup`, `CommandOutput`, `TurnDuration`, and more, each rewrite changing the drawing and leaving the stored message alone; `$.ui.invalidate("ui.render")` redraws every instance the plugin may draw. | The declarations' `RenderComponent`, `RenderPropsOf`, `UiBlitArgs`, and `RasterProps`, the spike captures below, and the shipped mod's tests. |
+| `statusLine` command | No: it renders in the footer, its input has no turn-running field, and it refreshes at most once per second. | No. | Binary settings schema and the status-line docs; not spiked. |
+| Spinner settings (`spinnerVerbs`, `spinnerTipsEnabled`, `prefersReducedMotion`) | No: text and tips only, no frames or hiding. | No. | Binary settings schema. |
+| `/focus` view mode | No. | Coarse only: the stock "prompt, summary, and response" view, fullscreen only, not a per-row policy. | Binary command source. |
+| Classic settings hooks | No. | No: decision, context, system message, and terminal-sequence outputs only. | Unchanged from the 2026-07-22 record. |
+
+### Spike-verified behavior
+
+Every capture came from real Claude Code 2.1.272 TUIs under tmux at 160 by 44 cells, driven by Haiku, with an isolated `FM_HOME` and the inherited session markers stripped.
+
+- The stock `✽ Verb… (Ns · tokens)` row is absent while the boat draws in its place; over 23 working frames at 0.4s spacing the hull advanced one column every 0.8s to 0.9s (the 880ms cadence), the water row changed on every frame (the quarter-cell swell), the water width was exactly 158 (the 160-cell viewport minus the transcript's 2-cell margin), and the sail stayed one column right of the hull.
+- When the turn settled the boat was gone with no residual row, on both the fullscreen (`CLAUDE_CODE_NO_FLICKER=1`) and main-screen (`CLAUDE_CODE_NO_FLICKER=0`) layouts.
+- Resizing the running TUI 160 to 64 to 12 to 160 columns reflowed the boat to 62, 10, and 158 cells of water within one frame of each resize settling, with the track clamped and direction flipping at the narrow edges.
+- A narrated two-tool turn drawn with Calm off redrew after `/calm` with only the prompt and the final reply, at the same single-row spacing as a turn that never used tools; toggling off restored the narration, the `Bash(...)` row, and the `Read 1 file` group, and toggling on hid them again.
+- An exact watcher-shaped operational input typed at idle drew no user row while the genuine prompt that followed stayed visible, and session storage held it as one ordinary user entry with its exact U+2063 bytes, answered once.
+- The first Calm-on turn's storage held both tool uses, both results, its text, and its thinking blocks intact.
+- Launching with `config/calm` already `on` started Calm on, and after `/exit` and `claude --continue` the restored tool rows and operational row stayed hidden from the first frame; the first spike build failed that, because restored rows drew before its `session.start` loaded the preference, which is why every hook of the shipped mod awaits one cached load.
+- A trusted project folder holding only `.claude/skills/<mod>` (a symlink to the plugin) loaded the mod with no launch flag once the flag was on, logging `hooks module <name> loaded (worker, environment 1, tier user)`; without the flag the same folder logged `hooks modules not loaded: rollout flag (tengu_plugin_hooks_modules) is off`.
+- Each render dispatch settled well under 3ms in the debug log.
+
+An escape-preserving capture of the boat from the spike, taken before the palette was unified on 2026-09-15 and so still showing a cyan crest and a red sail half, shows the Raster's RGB quantized to 256-color escapes; the shipped mod paints Claude Code's own theme colors through the same quantization, the spinner blue of the active family for every water cell (`#93a5ff` dark, `#5769f7` light) and the Claude orange of the stock spinner (`#d77757`) for the whole boat, choosing the family from the `theme` setting's prefix at load and on every theme change, with the light set as the both-readable fallback for `auto`, custom, missing, or unreadable values, while the Pi extension keeps standard ANSI blue and yellow:
+
+```text
+\x1b[38;5;184m◿│\x1b[38;5;167m◣\x1b[39m
+\x1b[38;5;69m▁▁▁\x1b[38;5;184m╲\x1b[38;5;69m▁▁▁\x1b[38;5;184m╱\x1b[38;5;69m▁▁▁▁▁▂▂▂\x1b[38;5;38m▃▃▄▄▄▄▄▃▃▃\x1b[38;5;69m▂▂
+```
+
+### Parity against the required extension surface
+
+| Requirement | Result on Claude Code 2.1.272 |
+| --- | --- |
+| Auto-load from the trusted project | Met, behind the flag: the project's `.claude/skills/<mod>` entry, a symlink or directory, is adopted as a `<mod>@skills-dir` plugin after trust; dot-prefixed entries are skipped, and hooks-module imports must resolve physically inside the plugin folder. |
+| Persist the toggle for the effective home across starts and resumes | Met: the same `config/calm` file and values as Pi, resolved the same way; the plugin API's `$.fs.write` is a plain write rather than Pi's temp-plus-rename. |
+| Keep working activity visible | Met: the boat draws in place of `Spinner` on every working frame on both layouts. |
+| Emit no Calm status row | Met: `/calm` answers with a transient toast and no output row. |
+| Redraw already-rendered controllable rows | Met through `$.ui.invalidate("ui.render")`, with the main-screen scrollback caveat below. |
+| Remove supported hidden rows without gaps | Met: zero-height `display: "none"` boxes; spacing equals the no-tool baseline. |
+| Restore ordinary rendering when off | Met: hooks return `next(e)`; the stock rows and stock spinner return. |
+| Leave delivery, tool execution, model context, session storage, and export unchanged | Met for storage and context; only `ui.render` rewrites drawings and no other event is hooked for effect. |
+| Collapsed thinking | Not needed: no thinking row appears in the default view, and there is no thinking drawing to hook elsewhere. |
+| Arbitrary third-party rows | Better than Pi: `ToolUse`, `ToolResult`, and `ToolGroup` hooks see every tool, built-in, MCP, or plugin, with no same-name override collision. |
+
+### Bounded gaps
+
+1. The whole surface is early access and default-off, and its API may change between releases without notice; the real TUI behavior is verified on Claude Code 2.1.272, the plugin compatibility guard also passes on 2.1.273, the mod refuses nothing newer, and `tests/fm-calm-claude-mod-plugin.test.sh` is the check that says when a newer Claude Code stops accepting it.
+2. On the main-screen (non-fullscreen) layout a toggle redraws the live screen by clearing and reprinting the whole conversation, and the terminal's own scrollback keeps the previous rendering above it; the fullscreen layout has no such stale copy.
+3. The Raster paints RGB through a quantized palette, so the boat renders as 256-color escapes rather than Pi's standard 16-color ANSI codes.
+
+Three further observations, recorded so they are not read as failures: the `ctrl+o` detailed transcript view keeps its per-message timestamp and model headers where hidden assistant rows sat, because those headers are not a render component; the `/calm` toggle's answer is a transient toast under the prompt (`firstmate-calm: Calm on`) that expires within a few seconds and never becomes a transcript row; and the engine logs one benign debug-level warning at load, `options requested but its manifest declares no userConfig`, for every hooks module whose manifest declares no configuration fields, which an empty `userConfig` object does not silence.
+
+### The shipped mod
+
+`.claude/mods/firstmate-calm` holds the plugin: its manifest, `hooks/hooks.json` naming the one module, `hooks/register.ts` (the only file that touches `$`), and pure libraries the tests drive under Node: the sprite core both harnesses share, the Raster packing, the presentation policy, and a port of `bin/fm-operational-input.sh`'s `classify` guarded by a corpus parity test.
+`.agents/skills/firstmate-calm` is a symlink to it, so the project's `.claude/skills` scan adopts it, and it carries no `SKILL.md` so other harnesses' skill loaders see nothing.
+The mod declares no command file, skill, agent, or classic hook; its function-hooks handlers independently require the exact environment opt-in before `/calm` registration or any other side effect, including when Claude Code loads the module through its rollout flag.
+Working-note and preserved-reply keys are recorded from `turn.step` per text block and seeded from `$.session.messages()` for a restored transcript, with [`calm.md`](calm.md#claude-code) owning the exact Claude Code visibility contract.
+
+```text
+$ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin validate --strict .claude/mods/firstmate-calm
+  ❯ ./register.ts hooks: session.start, command.run{command=calm}, config.set{key=theme}, turn.step, ui.render{component=Spinner}, ui.render{component=ToolUse}, ui.render{component=ToolResult}, ui.render{component=ToolGroup}, ui.render{component=UserMessage}, ui.render{component=AssistantMessage}
+  ❯ ./register.ts calls: $.clock.every (via load), $.command.register, $.config.list (via readTheme), $.env.get (via isActivated, load), $.fs.read (via readPreference), $.fs.write, $.session.messages (via load), $.ui.blit (via repaintShip), $.ui.invalidate, $.ui.resolve, $.ui.toast
+  ❯ ./register.ts env writes: nothing
+  ❯ ./register.ts env reads: CLAUDE_CODE_ENABLE_FUNCTION_HOOKS, FM_CONFIG_OVERRIDE, FM_HOME, FM_ROOT_OVERRIDE
+✔ Validation passed
+
+$ CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test .claude/mods/firstmate-calm
+ 40 pass
+ 0 fail
+Ran 40 tests across 2 files.
+
+$ bin/fm-test-run.sh tests/fm-calm-claude-mod.test.sh
+ok - the Calm mod is one hooks module, linked into the project's auto-load path, with no command, skill, agent, or classic hook path that bypasses its exact opt-in
+ok - the Pi working ship renders byte-for-byte the shared sprite core's frame painted in standard ANSI, at every width, cadence step, freeze, clamp, and reset
+ok - the Raster packing lays the shared frame out row-major with the sprite's palette, plain padding, default backgrounds, BMP glyphs, clipping, and a standard base64 encoding
+ok - the Calm policy resolves the shared preference exactly as Pi does, reads on, max, and off as Pi does, and classifies working notes by stop reason, tool use, and restored transcript shape
+ok - the mod's operational-input classifier agrees with bin/fm-operational-input.sh on all 77 corpus cases: every current kind the owner encodes, every legacy shape, and every near miss
+
+$ bin/fm-test-run.sh tests/fm-calm-pi-extension.test.sh
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=68438
+```
+
+The Pi suite above ran against the extracted sprite core with every one of its thirteen cases green, including the working-ship geometry and the interactive TUI case, which is the evidence that the extraction left Pi's drawing unchanged.
+Later the same day the installed Claude Code auto-updated to 2.1.273, and `tests/fm-calm-claude-mod-plugin.test.sh` passed there as well: strict validation accepts the mod from both paths, including the theme hook and configuration read shown above, and the plugin-kit suites pass with the theme cases added.
+
+The opt-in live guard, run on this host against the installed Claude Code 2.1.272 with tmux 3.6a and Haiku, through the shipped `.claude/skills` auto-load path, an isolated project and `FM_HOME`, and the preference already `on` before the flag-off session:
+
+```text
+$ FM_CLAUDE_CALM_LIVE_E2E=1 tests/fm-calm-claude-mod-live-e2e.test.sh
+ok - Claude Code 2.1.272 (Claude Code) with the flag unset: no hooks module, no /calm, stock working row, stock tool rows, preference on ignored
+ok - Claude Code 2.1.272 (Claude Code) with the flag on: the mod auto-loads from .claude/skills, /calm exists, the sailboat replaces and moves in the working row, tool and operational rows draw at zero height, /calm restores and re-hides them while persisting the shared preference
+ok - Claude Code 2.1.272 (Claude Code) resumes the transcript with Calm's hidden rows still hidden and the preference intact
+
+$ bin/fm-test-run.sh tests/fm-calm-claude-mod-plugin.test.sh
+ok - Claude Code 2.1.272 (Claude Code) validates the Calm mod strictly at its folder and its auto-load path, hooking exactly the working row, tool, user, and assistant drawings and /calm
+ok - Claude Code 2.1.272 (Claude Code) runs the Calm mod's plugin test suites clean: persisted toggle, hidden rows, working notes, and the clock-driven working ship
+```
+
+The flag-off session's settled screen, with the preference `on` on disk, drew Claude Code's own rows exactly as a session without the mod does:
+
+```text
+❯ Run this exact bash command with the Bash tool: sleep 5; cat notes.txt   Then reply with one short sentence naming the three words.
+
+  Ran 1 shell command
+
+⏺ The three words are alpha, beta, and gamma.
+
+✻ Sautéed for 8s · done 11:07 AM
 ```

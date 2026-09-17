@@ -683,6 +683,41 @@ test_single_flight_admits_exactly_one_owner() {
   pass "auto-arm: concurrent firings admit one owner and one rewake translation"
 }
 
+# Claude terminates the complete async hook process tree when the declared hook
+# timeout expires. The hook owner must turn that TERM into the same durable,
+# rewake-triggering failure handoff as any other exhausted arm failure; leaving
+# the generation at `arming` cannot recover without a later manual turn.
+test_term_mid_arm_commits_failure_and_rewakes() {
+  local dir out hook_pid i status=0
+  dir=$(make_primary_dir "$TMP_ROOT/term-mid-arm")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" blocking-actionable
+  out="$dir/state/autoarm.out"
+  run_autoarm_bg "$dir" "$out"
+
+  hook_pid=
+  i=0
+  while [ "$i" -lt 100 ]; do
+    hook_pid=$(epoch_field "$dir" owner_pid)
+    [ -n "$hook_pid" ] && [ -e "$dir/state/arm-ran" ] && break
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -n "$hook_pid" ] || fail "auto-arm did not publish its generation owner before TERM"
+  [ -e "$dir/state/arm-ran" ] || fail "auto-arm did not enter the foreground arm before TERM"
+
+  kill -TERM "$hook_pid" 2>/dev/null || fail "could not TERM the foreground auto-arm owner"
+  wait "$RUN_AUTOARM_BG_PID" || status=$?
+
+  expect_code 2 "$status" "TERM mid-arm must preserve Claude's rewake-triggering hook exit"
+  assert_present "$dir/state/.claude-autoarm-failure-notified" "TERM mid-arm left no durable failure marker"
+  [ "$(epoch_outcome "$dir")" = failed ] \
+    || fail "TERM mid-arm left a nonterminal ledger outcome: $(sed -n '1p' "$dir/state/.claude-autoarm-epoch")"
+  assert_contains "$(cat "$out")" "firstmate watcher auto-arm INTERRUPTED" \
+    "TERM mid-arm omitted the rewake failure banner"
+  pass "auto-arm: TERM mid-arm commits a durable failure and exits 2 for rewake"
+}
+
 # --- abandoned single-flight claim recovery (legacy shim) ----------------------
 # The 2026-08-14 lapse: one cycle armed, beat its beacon, delivered a single
 # rewake, and exited, leaving its owner lock behind with a live pid. The single
@@ -1219,6 +1254,7 @@ test_owner_mutex_contention_preserves_failure_episode_reset
 test_arms_for_x_mode_poll_need_without_inflight
 test_arms_for_registered_custom_check_without_inflight
 test_single_flight_admits_exactly_one_owner
+test_term_mid_arm_commits_failure_and_rewakes
 test_abandoned_owner_claim_is_reclaimed_and_rearms
 test_arming_claim_with_fresh_beacon_is_never_reclaimed
 test_fresh_arming_claim_with_stale_beacon_is_never_reclaimed

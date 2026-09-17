@@ -72,31 +72,12 @@
 # the template may display the routing id. Anything else refuses before the
 # existing board is touched.
 #
-# Validation judges the SHAPE of a payload, never the quality of a question.
-# A question the composer wrote badly still reaches the captain: he cannot
-# answer what he is never shown, so no rule here may withhold, drop, defer or
-# hide a Captain's Call card on account of what it says. Two faults are handled
-# by marking the card instead:
-#
-#   - A card carrying more than one question, or offering options that describe
-#     how to work through the card rather than answering it, is dealt with a
-#     visible `bundle` flag telling the composer to split it. Splitting is the
-#     composer's job; the board only says it is owed.
-#   - A card the composer knows is thin carries an optional `missing` string -
-#     a short plain statement of what is not yet established, for example
-#     "the two figures are not named yet". It is rendered verbatim as a visible
-#     `incomplete` flag. It is never required and never checked: a card whose
-#     gaps are named still asks its question, and one whose gaps are not named
-#     still has to be asked.
-#
-# Both are informational. Neither can fail a build, and neither is a substitute
-# for the composer supplying the specifics in the first place.
-#
-# `allow_freeform` adds the write-your-own answer as the LAST OPTION ROW of the
-# card's radio group, not a box below it, so the captain can pick it like any
-# other answer. Its typed words are then the whole answer, unprefixed; words
-# typed beside a picked option stay an annotation of that option.
-# `freeform_hint` overrides that row's placeholder text.
+# Every Underway row likewise carries a non-empty `name`: the durable task name
+# when known, otherwise its durable identifier.
+# A Charted Next row MAY carry `filed`, the durable filed date (YYYY-MM-DD, or
+# that date with a UTC timestamp) the template orders the section by, newest
+# first; a row with no comparable date keeps its payload order after every dated
+# row. Anything else in that field refuses rather than sorting on garbage.
 #
 # The board path is stable - $FM_HOME/.lavish/bearings-board.html - so a
 # re-invocation rebuilds the same file in place, which keeps the same Lavish
@@ -135,6 +116,17 @@ validate_payload() {  # <data.json>
     def nonempty_string: type == "string" and length > 0;
     def slug($max): type == "string" and test("^[A-Za-z0-9._-]{1," + ($max | tostring) + "}$");
     def repo_marker: has("repo") and (.repo == null or (.repo | type == "string"));
+    def name_marker: has("name") and (.name | nonempty_string);
+    def valid_filed:
+      . as $filed
+      | type == "string"
+      and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?$")
+      and (if test("T")
+        then try ((fromdateiso8601 | strftime("%Y-%m-%dT%H:%M:%SZ")) == $filed) catch false
+        else try (((. + "T00:00:00Z") | fromdateiso8601 | strftime("%Y-%m-%d")) == $filed) catch false
+        end);
+    def optional_filed:
+      (has("filed") | not) or (.filed == null) or (.filed | valid_filed);
     def optional_string($name): (has($name) | not) or (.[$name] | type == "string");
     def optional_https_url($name):
       (has($name) | not)
@@ -179,7 +171,7 @@ validate_payload() {  # <data.json>
       and ([.options[].value] | index("reconcile") == null)
       and (if .type == "merge" then (.risk | nonempty_string) else true end);
     def underway_item:
-      type == "object" and repo_marker and (.id | nonempty_string)
+      type == "object" and repo_marker and name_marker and (.id | nonempty_string)
       and (.state | nonempty_string) and (.doing | nonempty_string) and (.kind | nonempty_string);
     def landed_item:
       type == "object" and repo_marker and (.id | nonempty_string)
@@ -192,6 +184,7 @@ validate_payload() {  # <data.json>
       and (.dispatchable | type == "boolean")
       and (optional_string("detail"))
       and ((has("kind") | not) or (.kind == "queued" or .kind == "warning"))
+      and optional_filed
       and (if .kind == "warning" then .dispatchable == false else true end);
     type == "object"
     and (.schema == $schema)

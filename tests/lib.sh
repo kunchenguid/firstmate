@@ -33,6 +33,11 @@ FM_TEST_LIB_SOURCED=1
 # suite's fixtures were written against.
 umask 022
 
+# Fixture Git isolation for every suite that reaches this library; the helper's
+# header owns the invariant and the layers it deliberately leaves in force.
+# shellcheck source=tests/git-config-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/git-config-helpers.sh"
+
 # Exempt firstmate's own test suite from the gate-lifecycle refusal
 # (bin/fm-gate-refuse-lib.sh). The no-mistakes gate runs this suite FROM a gate
 # worktree - the exact environment that guard refuses - so without this every
@@ -47,6 +52,16 @@ export FM_GATE_REFUSE_BYPASS=1
 # it runs a copied bin/fm-test-run.sh in, and that runner refuses the primary
 # under the marker. A case that verifies the refusal sets FM_TASK_ID itself.
 unset FM_TASK_ID
+
+# Clear the tasks-axi env overrides. An operator shell exports TASKS_AXI_FILE
+# (and may export TASKS_AXI_BACKEND) at its real home's backlog, and tasks-axi
+# resolves that env AHEAD of the .tasks.toml a fixture copies, so a suite that
+# seeds a temp home with bare `tasks-axi` would silently write the operator's
+# live backlog instead - tests/fm-public-followup.test.sh did exactly that. Every
+# fixture addresses its own data/backlog.md through its copied .tasks.toml, an
+# explicit --file, or bin/fm-tasks-axi.sh; a case that verifies the wrapper
+# against an ambient override sets TASKS_AXI_FILE itself.
+unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
@@ -379,6 +394,34 @@ echo "fm-crash-inject: pid $target still running 30s after SIGKILL" >&2
 exit 1
 SH
   chmod +x "$fakebin/fm-crash-inject"
+}
+
+# fm_fake_blind_ancestry <fakebin>
+# Blind the parent-chain walks: a query of the FIELD-FIRST per-pid form those walks
+# use - `ps -o comm=|args=|ppid= -p <pid>`, the shape in bin/fm-harness.sh,
+# bin/fm-session-lock-lib.sh, bin/fm-sessionstart-nudge.sh and bin/fm-backend.sh's
+# cmux ancestor detection - reports a bash ancestor terminating at pid 1, so ancestry
+# proves nothing and the marker a case sets is the only evidence left. A case that pins
+# its harness with a marker (CLAUDECODE=1 and friends) needs this, because a structural
+# ancestor of a DIFFERENT harness outranks a marker - without it, the harness the SUITE
+# was launched from decides the verdict.
+# Every other ps query reaches the real ps untouched, and the pid-first form is
+# deliberately among them: bin/fm-tmux-lib.sh and bin/backends/tmux.sh read pane and
+# cursor identity with `ps -p <pid> -o args=`, so intercepting that shape too would make
+# a pane assertion under a PATH-wide blind read `bash` and reject every cursor pane.
+fm_fake_blind_ancestry() {
+  local fakebin=$1 real_ps
+  real_ps=$(command -v ps) || return 1
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  '-o comm= -p '*) printf '%s\n' bash ;;
+  '-o args= -p '*) printf '%s\n' bash ;;
+  '-o ppid= -p '*) printf '%s\n' 1 ;;
+  *) exec "$real_ps" "\$@" ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
 }
 
 # fm_fake_version_tool <fakebin> <tool> <override-env-var> <default-version>

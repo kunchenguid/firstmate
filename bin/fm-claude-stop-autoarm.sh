@@ -35,6 +35,8 @@
 #   - Foreground arm: the owner runs bin/fm-watch-arm.sh in the FOREGROUND of
 #     this hook-owned process tree (never shell &); Claude owns the process
 #     group, so its timeout/session teardown kills arm and watcher together.
+#     HUP, TERM, and INT are translated through the ordinary durable failure
+#     handoff instead of leaving the generation frozen at arming.
 #   - Translation: while supervision is still needed and AFK remains inactive,
 #     an actionable arm close (signal:/stale:/check:/heartbeat) prints one
 #     rewake banner to stderr and exits 2, which wakes Claude even while idle
@@ -206,6 +208,37 @@ autoarm_commit() {  # <outcome> [marker-file]
 autoarm_record() {  # <outcome>
   fm_autoarm_write_owned "$STATE" "$MY_GEN" "$1" >/dev/null 2>&1 || true
 }
+
+# Claude terminates the complete async-hook process tree when the configured
+# hook timeout expires. The arm is intentionally allowed to follow a healthy
+# watcher until its next wake, so that wait cannot be shortened without adding
+# artificial turns. Translate a host interruption through the ordinary durable
+# failure protocol instead: the winning generation records a terminal outcome,
+# creates the episode marker, and exits 2 so Claude delivers a recovery turn.
+# A superseded generation remains silent, and an episode whose attended
+# fail-open was already consumed must not restart automatic continuation.
+# shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
+handle_autoarm_signal() {
+  local signal=$1
+  trap - HUP TERM INT
+  [ -z "${OUT:-}" ] || rm -f "$OUT" 2>/dev/null || true
+  if [ -e "$FAILURE_ALARM" ]; then
+    autoarm_record failed-suppressed
+    exit 0
+  fi
+  if [ ! -e "$FAILURE_NOTICE" ]; then
+    printf 'firstmate watcher auto-arm INTERRUPTED by %s - the Stop-owned automatic supervision mechanism did not reach a terminal watcher outcome.\n' "$signal" >&2
+    printf 'Do not launch a manual background arm from this notice; investigate the automatic Stop hook and watcher startup before ending blind.\n' >&2
+    autoarm_commit failed "$FAILURE_NOTICE" && exit 2
+    exit 0
+  fi
+  autoarm_commit failed-suppressed && exit 2
+  exit 0
+}
+
+trap 'handle_autoarm_signal HUP' HUP
+trap 'handle_autoarm_signal TERM' TERM
+trap 'handle_autoarm_signal INT' INT
 
 # X mode cadence: source the generated config so an X instance polls at its
 # 30s cadence (fm-bootstrap.sh x_mode_setup contract).
