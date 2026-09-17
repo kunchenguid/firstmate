@@ -33,19 +33,9 @@
 # can grant merge authority. Captain-actor prose requires an existing live hold;
 # an eligible merge remains a captain call, never an automatic forge action.
 #
-# retire ends one task's observation of a contribution whose forge object can
-# never be read again, such as a PR in a deleted repository. It records retired
-# with actor captain, a non-empty reason and the UTC time. It refuses any
-# other actor, a blank reason, and a task/url pair with no saved record or
-# with unacknowledged pending signals. A retired pair leaves known, rotation and coverage even while a
-# backlog link remains. Retiring a retired pair again is a no-op that keeps the
-# first provenance. Nothing un-retires a record, poll never retires one on its
-# own, and a later owner settled from a retired record is not retired. A
-# retirement always records the captain's word: the script cannot verify who
-# runs it, and the authority to retire is the captain's.
-#
-# poll consumes fm-fleet-snapshot.sh --contribution-input, a local-only read,
-# and spends at most FM_CONTRIBUTIONS_BUDGET seconds on forge reads (default 20,
+# poll consumes fm-fleet-snapshot.sh --contribution-input, a local-only read
+# whose failure fails the command rather than measuring empty coverage, and
+# spends at most FM_CONTRIBUTIONS_BUDGET seconds on forge reads (default 20,
 # 1..25). A configured value rides the generated check shim into watcher runs
 # and is cut down to the watcher's own per-check bound (FM_CHECK_TIMEOUT,
 # default 30, read from the poll's environment because the watcher runs it as
@@ -164,7 +154,8 @@ read_saved() {
 }
 
 get_input() {
-  "$SCRIPT_DIR/fm-fleet-snapshot.sh" --contribution-input > "$TMP/input.json"
+  "$SCRIPT_DIR/fm-fleet-snapshot.sh" --contribution-input > "$TMP/input.json" \
+    || fail 'canonical contribution input unavailable'
 }
 
 project() {
