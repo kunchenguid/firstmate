@@ -190,7 +190,7 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | `/bearings`        | Compatibility alias for `/report`, including the explicit `file`, `lavish`, and `include PRs` variants |
 | `/tasks`           | Toggle the live task table using the statuses and routes defined in the [captain-facing lifecycle](docs/task-lifecycle.md) |
 | `/t`               | Approved task router: bare `/t` toggles the task dashboard, while `/t <selector>` routes to `/task <selector>` |
-| `/next`            | Show the highest-value captain action that restarts work or advances review, acceptance, delivery, or monitoring before closure |
+| `/next`            | Recommend the highest-value concrete action for you to take now, with task-specific checks, outcomes, and ranking rationale |
 | `/task <selector>` | Show one current, recent, or closed task's purpose, lifecycle evidence, outcome, artifacts, attention, and next action |
 | `/close`           | Guardedly archive work only after its selected lifecycle route is complete, preserving acceptance and private task material |
 | `/history`         | Show or search closed work with its recorded acceptance and selected route |

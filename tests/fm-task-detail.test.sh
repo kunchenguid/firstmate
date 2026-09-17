@@ -74,6 +74,15 @@ Keep purpose concise.
 
 ## Firstmate spec
 This generated implementation section must not be copied into Purpose.
+
+## Captain review plan
+Review Action: Exercise the detailed task card
+Review Context: The detail view is implemented.
+Review Check: Open the task by its short reference.
+Review Check: Confirm the purpose excludes implementation-only instructions.
+Review Success: The task detail is useful and concise.
+Review Failure: The purpose leaks implementation-only instructions.
+Review Fix: Remove the leaked implementation text.
 EOF
 printf 'working: assembling the deterministic task card\n' > "$HOME_DIR/state/active-task.status"
 printf 'done: ready in branch fm/ready-task\n' > "$HOME_DIR/state/ready-task.status"
@@ -82,7 +91,7 @@ active=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" "$TA
   || fail "active task detail lookup failed"
 printf '%s\n' "$active" | jq -e '
   .schema == "fm-task-detail.v2"
-  and (keys | sort) == ["acceptance","artifacts","attention","closeReady","dates","delivery","details","followUps","id","kind","lifecycle","name","nextAction","outcome","project","purpose","ref","retainedKnowledge","route","schema","source","status"]
+  and (keys | sort) == ["acceptance","artifacts","attention","closeReady","completionEvidence","dates","delivery","details","followUps","id","kind","lifecycle","name","nextAction","outcome","project","purpose","ref","requirements","retainedKnowledge","reviewPlan","route","schema","source","status"]
   and .source == "current"
   and .ref == "t1"
   and .name == "understandable-task-details"
@@ -97,6 +106,16 @@ printf '%s\n' "$active" | jq -e '
   and (.purpose | contains("generated implementation") | not)
   and (.details | contains("useful durable context"))
   and .outcome == "assembling the deterministic task card"
+  and .requirements.captainIntent == "Show enough useful task detail to decide whether to close the work. Keep purpose concise."
+  and .requirements.firstmateSpec == "This generated implementation section must not be copied into Purpose."
+  and .reviewPlan.source == "data/active-task/brief.md"
+  and .reviewPlan.review.action == "Exercise the detailed task card"
+  and .reviewPlan.review.checks == ["Open the task by its short reference.","Confirm the purpose excludes implementation-only instructions."]
+  and .reviewPlan.review.success == "The task detail is useful and concise."
+  and .reviewPlan.review.failure == "The purpose leaks implementation-only instructions."
+  and .reviewPlan.review.fix == "Remove the leaked implementation text."
+  and .completionEvidence.summary == "assembling the deterministic task card"
+  and .completionEvidence.artifactType == "pull request"
   and (.artifacts | index("https://example.test/pull/44") != null)
   and .nextAction == "Continue the current work"
 ' >/dev/null || fail "active detail omitted composed current records: $active"

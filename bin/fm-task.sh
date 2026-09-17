@@ -10,11 +10,13 @@
 # references never resolve from history because they may be recycled.
 #
 # Current detail composes the captain-facing lifecycle projection owned by
-# bin/fm-task-lifecycle.sh with task instructions, metadata, and artifacts.
-# docs/task-lifecycle.md owns status and route semantics. This command does not
-# persist another task summary. Dates are emitted only from explicit backlog,
-# metadata, lifecycle, or closure fields; absent dates stay null/unknown and file
-# mtimes are never treated as lifecycle dates.
+# bin/fm-task-lifecycle.sh with task instructions, review guidance, metadata, and
+# completion evidence. docs/task-lifecycle.md owns status, route, and review-plan
+# semantics. The task brief remains the durable review-plan owner; this command
+# only projects its exact fields alongside existing outcome and artifact evidence.
+# Dates are emitted only from explicit backlog, metadata, lifecycle, or closure
+# fields; absent dates stay null/unknown and file mtimes are never treated as
+# lifecycle dates.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,14 +55,39 @@ meta_value() {  # <file> <key>
   awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$file"
 }
 
-captain_intent() {  # <brief-path>
-  local brief=$1
+# shellcheck source=bin/fm-dod-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-dod-lib.sh"
+
+brief_text() {  # <brief-path> <heading>
+  local brief=$1 heading=$2
   [ -f "$brief" ] && [ ! -L "$brief" ] || return 0
-  awk '
-    /^## Captain.s intent[[:space:]]*$/ {inside=1; next}
-    inside && /^##[[:space:]]+/ {exit}
-    inside {print}
-  ' "$brief" | jq -Rrs 'gsub("[[:space:]]+"; " ") | gsub("^ | $"; "")'
+  if fm_brief_task_heading_present "$brief" "$heading"; then
+    fm_brief_task_heading_body "$brief" "$heading"
+  else
+    fm_brief_heading_body "$brief" "$heading"
+  fi | jq -Rrs 'gsub("[[:space:]]+"; " ") | gsub("^ | $"; "")'
+}
+
+review_plan() {  # <brief-path> <durable-label>
+  local brief=$1 label=$2 body
+  [ -f "$brief" ] && [ ! -L "$brief" ] || { printf 'null\n'; return; }
+  body=$(fm_brief_task_heading_body "$brief" "## Captain review plan")
+  printf '%s\n' "$body" | jq -R -s --arg source "$label" '
+    def phase: {action:null,context:null,checks:[],success:null,failure:null,continue:null,fix:null};
+    reduce (split("\n")[]) as $line
+      ({source:$source,review:phase,delivery:phase,monitoring:phase,found:false};
+       . as $state
+       | ($line | ((try capture("^[[:space:]]*(?:-[[:space:]]*)?(?:(?<phase>Review|Delivery|Monitoring)[[:space:]]+)?(?<field>Action|Context|Check|Success|Failure|Continue|Fix):[[:space:]]*(?<value>.+)[[:space:]]*$"; "i") catch null) // null)) as $m
+       | $state
+       | if $m == null then . else
+           (($m.phase // "review") | ascii_downcase) as $phase
+           | ($m.field | ascii_downcase) as $field
+           | .found=true
+           | if $field == "check" then .[$phase].checks += [$m.value]
+             else .[$phase][$field]=$m.value end
+         end)
+    | if .found then del(.found) else null end
+  '
 }
 
 archive_task_field() {  # <task.txt> <field>
@@ -112,8 +139,8 @@ render_model() {  # <json>
 }
 
 current_model() {  # <compact-task-json>
-  local summary=$1 id snapshot row task ref name status outcome meta brief intent details lifecycle route next_action close_ready
-  local created started finished delivered
+  local summary=$1 id snapshot row task ref name status outcome meta brief intent spec plan details lifecycle route next_action close_ready
+  local created started finished delivered brief_label
   id=$(printf '%s\n' "$summary" | jq -r '.id')
   ref=$(printf '%s\n' "$summary" | jq -r '.ref')
   name=$(printf '%s\n' "$summary" | jq -r '.name')
@@ -139,7 +166,10 @@ current_model() {  # <compact-task-json>
   meta="$STATE/$id.meta"
   brief="$DATA/$id/brief.md"
   [ -f "$brief" ] && [ ! -L "$brief" ] || brief="$DATA/$id/launch-brief.md"
-  intent=$(captain_intent "$brief")
+  brief_label="data/$id/${brief##*/}"
+  intent=$(brief_text "$brief" "## Captain's intent")
+  spec=$(brief_text "$brief" "## Firstmate spec")
+  plan=$(review_plan "$brief" "$brief_label")
   details=$(printf '%s\n' "$row" | jq -r '.body_excerpt // empty')
   created=$(printf '%s\n' "$row" | jq -r '.since // empty')
   started=$(meta_value "$meta" started_at)
@@ -148,10 +178,10 @@ current_model() {  # <compact-task-json>
   [ -n "$delivered" ] || delivered=$(printf '%s\n' "$row" | jq -r '.merged // .reported // empty')
 
   jq -n \
-    --argjson row "$row" --argjson task "$task" --argjson lifecycle "$lifecycle" \
+    --argjson row "$row" --argjson task "$task" --argjson lifecycle "$lifecycle" --argjson reviewPlan "$plan" \
     --arg id "$id" --arg ref "$ref" --arg name "$name" \
     --arg status "$status" --arg outcome "$outcome" --arg route "$route" --arg nextAction "$next_action" --argjson closeReady "$close_ready" \
-    --arg intent "$intent" --arg details "$details" \
+    --arg intent "$intent" --arg spec "$spec" --arg details "$details" \
     --arg created "$created" --arg started "$started" \
     --arg finished "$finished" --arg delivered "$delivered" '
     def value($x): if $x == "" then null else $x end;
@@ -184,6 +214,12 @@ current_model() {  # <compact-task-json>
       elif ($task.mode // "") == "local-only" then "Candidate local branch"
       elif ($task.mode // "") != "" then $task.mode
       else "Not recorded" end;
+    def artifact_type($artifacts):
+      if ($task.pr.url // $row.pr_url // "") != "" then "pull request"
+      elif ($row.report_path // "") != "" or ($task.paths.report.present // false) then "report"
+      elif ($task.mode // "") == "local-only" then "local branch"
+      elif ($artifacts | length) > 0 then "artifact"
+      else "candidate result" end;
     (artifact_list) as $artifacts
     | {
         schema:"fm-task-detail.v2", source:"current",
@@ -193,6 +229,9 @@ current_model() {  # <compact-task-json>
         dates:{created:value($created), started:value($started), finished:value($finished), delivered:value($delivered), closed:null},
         purpose:(if $intent != "" then $intent elif ($row.title // "") != "" then $row.title elif $details != "" then $details else null end),
         details:value($details), outcome:current_outcome,
+        requirements:{captainIntent:value($intent),firstmateSpec:value($spec)},
+        reviewPlan:$reviewPlan,
+        completionEvidence:{summary:current_outcome,artifactType:artifact_type($artifacts),artifacts:$artifacts},
         route:value($route), acceptance:($lifecycle.acceptance // null), lifecycle:$lifecycle,
         closeReady:$closeReady,
         delivery:delivery($status), artifacts:$artifacts,
@@ -217,7 +256,7 @@ closed_model() {  # <selector>
   archive="$DATA/closed-tasks/$id"
   brief="$archive/brief.md"
   [ -f "$brief" ] && [ ! -L "$brief" ] || brief="$archive/launch-brief.md"
-  intent=$(captain_intent "$brief")
+  intent=$(brief_text "$brief" "## Captain's intent")
   task_file="$archive/task.txt"
   purpose=$(archive_task_field "$task_file" title)
   details=$(archive_task_field "$task_file" body)
