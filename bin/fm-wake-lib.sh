@@ -1249,15 +1249,6 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
   [ "$project_common" = "$slot_common" ]
 }
 
-fm_treehouse_lease_return_exact() {  # <project-dir> <worktree> <holder>
-  local project=$1 worktree=$2 holder=$3
-  [ -d "$project" ] && [ -n "$worktree" ] || return 1
-  case "$holder" in
-    ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
-  esac
-  (CDPATH='' cd -- "$project" && treehouse return --force --if-lease-holder "$holder" "$worktree")
-}
-
 fm_treehouse_lease_holder_valid() { # <task> <holder>
   local task=$1 holder=$2 prefix token
   case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac

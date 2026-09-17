@@ -1457,6 +1457,27 @@ test_orca_close_failure_refuses_even_under_force() {
 test_structural_herdr_lease_teardown_is_transaction_driven() {
   local dir id holder lease_id other_id other_holder physical_wt
 
+  dir=$(make_case herdr-holder-only)
+  mark_case_as_treehouse_pool "$dir"
+  install_lease_aware_treehouse "$dir"
+  id=herdr-holder-only-z1
+  holder=fm-$id-99999999999999999999999999999999
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=lab:w1:p1" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t1" "herdr_pane_id=w1:p1" \
+    "treehouse_lease_holder=$holder"
+  claim_pool_slot "$dir" "$id" "$dir/home" "$holder"
+
+  if run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"; then
+    fail "holder-only Herdr teardown bypassed immutable lease validation"
+  fi
+  assert_present "$dir/home/state/$id.meta" "holder-only refusal removed task metadata"
+  [ "$(cat "$dir/herdr-state")" = live ] || fail "holder-only refusal closed the worker endpoint"
+  assert_no_grep "treehouse <return>" "$dir/runtime.log" \
+    "holder-only refusal issued a Treehouse return"
+
   dir=$(make_case herdr-lease-owned)
   mark_case_as_treehouse_pool "$dir"
   install_lease_aware_treehouse "$dir"

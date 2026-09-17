@@ -965,26 +965,6 @@ fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
 rm -f "$ATTEMPT"
 pass "ownership records release only proven fresh leases and preserve valid paths"
 
-LEASE_LOG="$TMP_ROOT/lease-return.log"
-LEASE_BIN=$(fm_fakebin "$TMP_ROOT/lease-bin")
-cat > "$LEASE_BIN/treehouse" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "${FM_LEASE_LOG:?}"
-SH
-chmod +x "$LEASE_BIN/treehouse"
-: > "$LEASE_LOG"
-PATH="$LEASE_BIN:$PATH" FM_LEASE_LOG="$LEASE_LOG" \
-  fm_treehouse_lease_return_exact "$TMP_ROOT" "$TMP_ROOT/worktree" fm-task-z1 >/dev/null \
-  || fail "holder-bound Treehouse return failed"
-[ "$(cat "$LEASE_LOG")" = "return --force --if-lease-holder fm-task-z1 $TMP_ROOT/worktree" ] \
-  || fail "Treehouse return was not bound to the exact lease holder"
-if PATH="$LEASE_BIN:$PATH" FM_LEASE_LOG="$LEASE_LOG" \
-  fm_treehouse_lease_return_exact "$TMP_ROOT" "$TMP_ROOT/worktree" '../other' >/dev/null 2>&1; then
-  fail "invalid Treehouse lease holder reached the return command"
-fi
-[ "$(wc -l < "$LEASE_LOG" | tr -d ' ')" -eq 1 ] || fail "invalid holder issued a Treehouse return"
-pass "aborted structural leases return only through their exact holder"
-
 rm -f "$REPORTED"
 MODE=ok
 fm_backend_herdr_layout_report_pi lab-structural:w1:p3 \
@@ -1339,7 +1319,9 @@ assert_contains "$struct_pre_out" "failed before worker readiness" \
   || fail "pre-apply cleanup retained task metadata after confirming pane removal"
 assert_grep "return --force --if-lease-id $STRUCT_LEASE_ID $STRUCT_WT" "$STRUCT_TREEHOUSE_LOG" \
   "pre-apply cleanup did not return its exact Treehouse lease identity"
-pass "flat structural pre-apply refusals close their original pane and release ownership"
+assert_no_grep '--if-lease-holder' "$STRUCT_TREEHOUSE_LOG" \
+  "pre-apply cleanup exposed a holder-only Treehouse return"
+pass "flat structural pre-apply refusals return only immutable lease identities"
 
 rm -f "$STRUCT_TASK_CREATED" "$STRUCT_TASK_LABEL" "$STRUCT_CLOSED" "$APPLIED" "$REQUEST"
 : > "$STRUCT_CLOSE_LOG"
