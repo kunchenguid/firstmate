@@ -34,12 +34,13 @@
 # and spends at most FM_CONTRIBUTIONS_BUDGET seconds on forge reads (default 20,
 # 1..25). Each gh call is bounded by the remaining budget and five seconds.
 # Oldest observations go first, so a large corpus progresses across polls.
-# Each distinct URL is observed once per poll and applied to every owner. When
+# Each distinct URL is observed once per poll and applied to every owner. A
+# final observation applies to every owner without another forge read. When
 # the budget runs out mid-observation, the poll ends with that URL's records
 # untouched; only a genuine forge failure or head change records an error.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
-# A record whose last good observation is merged or closed is final: it is
+# A URL whose last good observation is merged or closed is final: it is
 # never re-read, stays fresh, and a stale error beside it is cleared once.
 # A genuine failure prints its unavailable line only when it starts an episode
 # (the prior record had no error); a successful read ends the episode.
@@ -267,19 +268,22 @@ publish_pending() { # task canonical-url record-file
   done < <(jq -r '. as $r | .pending[] | .token | select(. as $t | ($r.notified // [] | index($t)) == null)' "$record")
 }
 
-settle_final() { # canonical-url task... : clear a stale error beside a final observation
+settle_final() { # canonical-url task... : copy the URL's final observation to every owner
   local url=$1 task
   shift
+  jq -n --slurpfile saved "$TMP/saved.json" --arg url "$url" '
+    [$saved[0][] | .records[] | select(.url == $url
+      and (.observation.state | IN("merged","closed")))] as $final
+    | ([$final[] | select(.error == null)] | first) // ($final | first)' > "$TMP/final.json"
   for task in "$@"; do
     fm_pr_task_id_valid "$task" || { printf 'contributions: invalid durable task id\n'; continue; }
-    jq -n --slurpfile saved "$TMP/saved.json" --arg task "$task" --arg url "$url" '
-      [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first' > "$TMP/row.json"
-    if jq -e '.error != null' "$TMP/row.json" >/dev/null; then
-      jq '.error = null' "$TMP/row.json" > "$TMP/settled.json"
-      mv "$TMP/settled.json" "$TMP/row.json"
+    jq -n --slurpfile final "$TMP/final.json" '
+      $final[0] + {error:null,pending:[],notified:[]}' > "$TMP/row.json"
+    if ! jq -ne --slurpfile saved "$TMP/saved.json" --slurpfile row "$TMP/row.json" \
+      --arg task "$task" --arg url "$url" '
+        [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first == $row[0]' >/dev/null; then
       write_record "$task" "$TMP/row.json"
     fi
-    publish_pending "$task" "$url" "$TMP/row.json"
   done
 }
 
@@ -301,9 +305,9 @@ poll() {
     [ "${#row[@]}" -ge 2 ] || continue
     [ "$(date +%s)" -lt "$DEADLINE" ] || break
     url=${row[0]}
-    # A contribution whose every owner holds a final observation is not re-read.
+    # A contribution with a final observation is not re-read for any owner.
     if jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
-      'all($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
+      'any($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
         . != null and (.observation.state | IN("merged","closed")))' "${row[@]:1}" >/dev/null; then
       settle_final "$url" "${row[@]:1}"
       continue
