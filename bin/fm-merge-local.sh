@@ -25,11 +25,17 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-gate-refuse-lib.sh
+. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 if [ "$#" -ne 1 ] || ! fm_pr_task_id_valid "$1"; then
   echo "error: invalid local merge request" >&2
   exit 2
 fi
 ID=$1
+
+# Fail closed before any fleet mutation: a no-mistakes gate agent must never
+# land a local-only merge (see bin/fm-gate-refuse-lib.sh).
+fm_refuse_if_gate_agent
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: local merge refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1

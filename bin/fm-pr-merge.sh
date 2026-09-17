@@ -122,6 +122,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-merge-outcome-lib.sh"
 # shellcheck source=bin/fm-merge-authority-lib.sh
 . "$SCRIPT_DIR/fm-merge-authority-lib.sh"
+# shellcheck source=bin/fm-gate-refuse-lib.sh
+. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-afk-contract.sh
 . "$SCRIPT_DIR/fm-afk-contract.sh"
 
@@ -282,6 +284,10 @@ reject_protected_forge_args() {
 reject_repo_overrides "$@" || exit 1
 reject_head_overrides "$@" || exit 1
 reject_protected_forge_args "$@" || exit 1
+
+# Fail closed before any fleet mutation: a no-mistakes gate agent must never
+# merge a task's pull request (see bin/fm-gate-refuse-lib.sh).
+fm_refuse_if_gate_agent
 
 FM_PR_GITHUB_AUTO_REQUESTED=false
 if [ "$PROVIDER" = github ] && caller_requested_auto_merge "$@"; then
