@@ -2146,7 +2146,10 @@ test_latest_status_subshell_work_does_not_grow_with_history() {
   for ((i = 0; i < 500; i++)); do printf 'continuation prose %s\n' "$i" >> "$d/state/task.status"; done
   [ "$(last_status_line "$d/state/task.status")" = 'paused: awaiting a long quiet tail' ] \
     || fail "a declared pause buried under a long prose tail was hidden"
-  pass "latest status subprocess work stays bounded and still reads past a long prose tail"# --- a declared wait is STANDING, not the log's last event --------------------
+  pass "latest status subprocess work stays bounded and still reads past a long prose tail"
+}
+
+# --- a declared wait is STANDING, not the log's last event --------------------
 #
 # The masking defect: this helper derived current state from the log's newest
 # recognized line, so ANY later append by ANY producer - the crew's own armed
