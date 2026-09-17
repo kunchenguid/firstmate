@@ -155,6 +155,8 @@ Captured with `tmux capture-pane -p -e`:
 Prompt glyph `⟩` (U+27E9) at luminance ~149.9 against the 128 default ghost threshold; typed text at ~209.8.
 After a single Escape the interrupted prompt is restored into the composer at the same bright ~209.8, and `C-u` clears it.
 
+That glyph is this build's; Muse Code 1.3.0 draws a `❯` row inside a titled rule pair instead, captured and owned under [Composer classification matrix](runtime-backends.md#composer-classification-matrix).
+
 ## The credentialed multi-step smoke (verified 2026-08-06)
 
 This was the one item deferred until a `META_API_KEY` was available, because it is what decides whether a settled log may classify `idle`.
