@@ -189,7 +189,8 @@ test_retained_record_with_matching_reservation_passes() {
   home=$(make_home "$dir")
   project="$dir/project"
   write_meta "$home" task-reserved "worktree=$SLOT" "allocation_id=alloc-123"
-  printf 'task=task-reserved\nhome=%s\n' "$home" > "$CLAIM"
+  printf 'task=task-reserved\nhome=%s\nallocation_id=alloc-123\n' "$home" > "$CLAIM"
+  printf '{"worktrees":[{"name":"1","path":"%s","leased":true,"lease_holder":"alloc-123"}]}\n' "$SLOT" > "$POOL/treehouse-state.json"
 
   out=$(run_guard "$home" "$project")
   rc=${out%%|*}
@@ -245,7 +246,7 @@ test_unreadable_claim_refuses() {
   rc=${out%%|*}
   refusal=${out#*|}
   [ "$rc" -ne 0 ] || fail "a slot whose claim cannot be read was not refused"
-  assert_contains "$refusal" "cannot be read" \
+  assert_contains "$refusal" "unsafe inventory file" \
     "the refusal did not name the unreadable claim"
   pass "an unreadable slot claim refuses the allocation"
 }
@@ -303,3 +304,88 @@ test_missing_claim_refuses
 test_reassigned_claim_refuses
 test_unreadable_claim_refuses
 test_duplicate_records_name_one_slot_refuse
+
+fixture_digest() {
+  python3 - "$1" <<'PYTHON'
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+h = hashlib.sha256()
+for path in sorted(root.rglob('*')):
+    h.update(str(path.relative_to(root)).encode())
+    if path.is_symlink():
+        h.update(str(path.readlink()).encode())
+    elif path.is_file():
+        h.update(path.read_bytes())
+print(h.hexdigest())
+PYTHON
+}
+
+# Each refusal must preserve the complete private fixture, including ignored
+# payload, Git objects, allocator state and ownership claims.
+test_inventory_refuses_ambiguous_ownership() {
+  local mode dir home out before after
+  for mode in orphan dead-pid false-token stale-token wrong-home malformed missing-entry foreign unsafe-meta missing-state; do
+    dir="$TMP_ROOT/matrix-$mode"
+    make_pool_fixture "$dir"
+    home=$(make_home "$dir")
+    printf 'secret fixture bytes\n' > "$SLOT/ignored-payload"
+    printf 'ignored-payload\n' >> "$PROJECT/.git/info/exclude"
+    case "$mode" in
+      orphan) printf 'task=old\nhome=%s\n' "$home" > "$CLAIM" ;;
+      dead-pid) printf '{"worktrees":[{"name":"1","path":"%s","owner_pid":99999999}]}' "$SLOT" > "$POOL/treehouse-state.json" ;;
+      false-token|stale-token|wrong-home)
+        write_meta "$home" task "worktree=$SLOT" "allocation_id=alloc-1"
+        printf 'task=task\nhome=%s\nallocation_id=alloc-1\n' "$home" > "$CLAIM"
+        if [ "$mode" = stale-token ]; then
+          printf '{"worktrees":[{"name":"1","path":"%s","leased":true,"lease_holder":"alloc-2"}]}' "$SLOT" > "$POOL/treehouse-state.json"
+        elif [ "$mode" = wrong-home ]; then
+          printf 'task=task\nhome=/unrelated\nallocation_id=alloc-1\n' > "$CLAIM"
+        fi
+        ;;
+      malformed) printf '{' > "$POOL/treehouse-state.json" ;;
+      missing-entry) printf '{"worktrees":[]}' > "$POOL/treehouse-state.json" ;;
+      foreign)
+        git init --quiet -b main "$dir/foreign"
+        git -C "$dir/foreign" -c user.name=T -c user.email=t@example.invalid commit --allow-empty -qm init
+        git -C "$dir/foreign" worktree add --quiet --detach "$POOL/2/foreign" HEAD
+        printf '{"worktrees":[{"name":"1","path":"%s"},{"name":"2","path":"%s"}]}' "$SLOT" "$POOL/2/foreign" > "$POOL/treehouse-state.json"
+        ;;
+      unsafe-meta) ln -s "$dir/nonexistent" "$home/state/task.meta" ;;
+      missing-state)
+        # The configured prospective pool must be checked even without a
+        # state file or a usable Git worktree to discover it through.
+        rm "$POOL/treehouse-state.json"
+        printf 'root = "%s"\n' "$dir" > "$PROJECT/treehouse.toml"
+        python3 - "$PROJECT" "$dir" <<'PY'
+import hashlib, pathlib, sys
+project, root = sys.argv[1:]
+pool = pathlib.Path(root)/'.treehouse'/('project-'+hashlib.sha256(project.encode()).hexdigest()[:6])
+(pool/'1').mkdir(parents=True)
+(pool/'1'/'payload').write_text('must survive')
+PY
+        ;;
+    esac
+    before=$(fixture_digest "$dir")
+    out=$(run_guard "$home" "$PROJECT")
+    [ "${out%%|*}" != 0 ] || fail "$mode inventory was accepted"
+    after=$(fixture_digest "$dir")
+    [ "$before" = "$after" ] || fail "$mode refusal changed fixture bytes"
+    pass "$mode ownership refuses without changing any fixture bytes"
+  done
+}
+
+test_claim_never_replaces_prior_owner() {
+  local dir home out before
+  dir="$TMP_ROOT/claim-publication"
+  make_pool_fixture "$dir"
+  home=$(make_home "$dir")
+  printf 'task=old\nhome=%s\n' "$home" > "$CLAIM"
+  before=$(cat "$CLAIM")
+  out=$(FM_HOME="$home" bash -c '. "$1/bin/fm-wake-lib.sh"; fm_treehouse_slot_owner_claim "$2" new "$3"; printf "%s" "$?"' _ "$ROOT" "$SLOT" "$home")
+  [ "$out" != 0 ] || fail "claim replaced prior ownership"
+  [ "$(cat "$CLAIM")" = "$before" ] || fail "refused claim changed prior owner"
+  pass "claim publication never replaces prior ownership"
+}
+
+test_inventory_refuses_ambiguous_ownership
+test_claim_never_replaces_prior_owner

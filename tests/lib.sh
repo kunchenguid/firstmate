@@ -63,6 +63,13 @@ unset FM_TASK_ID
 # against an ambient override sets TASKS_AXI_FILE itself.
 unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
+# A supervisor's ambient home wins over fixture ROOT/STATE overrides in the
+# production routing code. In a secondmate this can publish a fake PR into the
+# real parent channel. Fixtures must set their own routing after loading this
+# library; never inherit the invoking fleet's destinations.
+unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE
+unset FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034

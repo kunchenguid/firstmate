@@ -720,7 +720,7 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   out=$(run_spawn "$id" --scout)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn launched a worker on a slot it could not claim"
-  assert_contains "$out" "could not claim Treehouse pool slot" \
+  assert_contains "$out" "orphan owner claim" \
     "spawn did not name the unclaimable slot as the reason"
   [ -d "$SLOT_CLAIM" ] || fail "spawn replaced the directory blocking its slot claim"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "spawn published a record for an unclaimable slot"
@@ -738,12 +738,41 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   assert_contains "$out" "could not fetch origin" \
     "the aborted spawn did not refuse on its unusable origin"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the aborted spawn published task metadata"
-  [ ! -e "$SLOT_CLAIM" ] && [ ! -L "$SLOT_CLAIM" ] \
-    || fail "the aborted spawn left a slot claim naming a task with no record: $(cat "$SLOT_CLAIM")"
-  pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
+  [ -f "$SLOT_CLAIM" ] || fail "the aborted spawn erased its ownership evidence"
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a retry reused the failed launch's retained slot"
+  assert_contains "$out" "orphan owner claim" "retry did not retain the failed launch for recovery"
+  pass "a Treehouse slot claim survives a failed launch and blocks unreviewed retry"
+}
+
+test_retained_slot_refuses_before_allocator_or_endpoint() {
+  local rec id out status before
+  id=retained-pre-acquire
+  rec=$(make_case retained-pre-acquire "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  printf 'worktree=%s\n' "$POOL_DIR" > "$HOME_DIR/state/parked.meta"
+  printf 'task=parked\nhome=%s\n' "$HOME_DIR" > "$SLOT_CLAIM"
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+  cat > "$FAKEBIN_DIR/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_ALLOCATOR_LOG"
+exit 99
+SH
+  out=$(FM_TEST_ALLOCATOR_LOG="$CASE_DIR/allocator.log" FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "retained slot spawn succeeded"
+  assert_contains "$out" "no durable allocation reservation" "spawn missed retained ownership"
+  assert_absent "$CASE_DIR/allocator.log" "refused spawn invoked the allocator"
+  assert_absent "$CASE_DIR/launch.log" "refused spawn launched a worker"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] || fail "refused spawn reset the slot"
+  assert_present "$HOME_DIR/state/parked.meta" "refused spawn removed the retained owner"
+  pass "full spawn refuses retained ownership before allocator effects"
 }
 
 test_remote_seeded_home_spawns_from_treehouse_pool
+test_retained_slot_refuses_before_allocator_or_endpoint
 test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching

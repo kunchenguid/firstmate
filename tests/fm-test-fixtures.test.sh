@@ -279,6 +279,30 @@ test_spawn_home_layout() {
   pass "spawn-home layout writes harness pin, beat, and brief"
 }
 
+test_parent_channel_isolation() {
+  local dir="$TMP_ROOT/parent-isolation" out rc
+  mkdir -p "$dir/mate/state" "$dir/parent/state"
+  printf 'mate\n' > "$dir/mate/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$dir/parent" > "$dir/mate/.fm-secondmate-parent"
+  printf 'original\n' > "$dir/parent/state/mate.status"
+  out=$(FM_HOME="$dir/mate" FM_STATE_OVERRIDE="$dir/mate/state" bash -c '
+    . "$1/tests/lib.sh"
+    "$1/bin/fm-secondmate-report.sh" done 0123456789abcdef fixture-result
+  ' _ "$ROOT" 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "fixture inherited a live parent route"
+  assert_contains "$out" "FM_HOME is required" "fixture did not clear the inherited reporting home"
+  [ "$(cat "$dir/parent/state/mate.status")" = original ] || fail "fixture published to its invoking parent"
+  # A deliberate fixture route set after library load must still work.
+  bash -c '
+    . "$1/tests/lib.sh"
+    FM_HOME="$2" "$1/bin/fm-secondmate-report.sh" done 0123456789abcdef explicit-fixture-result
+  ' _ "$ROOT" "$dir/mate" || fail "explicit fixture parent routing failed"
+  assert_grep explicit-fixture-result "$dir/parent/state/mate.status" "explicit fixture report was not delivered"
+  pass "fixtures cannot inherit a supervisor parent route; explicit private routing works"
+}
+
+test_parent_channel_isolation
 test_git_config_isolation || fail "Git fixture config isolation"
 test_touch_epoch_preserves_repeated_dst_hour
 test_no_mistakes_version_constant

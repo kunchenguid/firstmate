@@ -1307,25 +1307,23 @@ fm_treehouse_slot_owner_marker() {  # <worktree>
   printf '%s/.fm-slot-owner\n' "$(dirname "$slot")"
 }
 
-# Claim a pool slot for a task, replacing whatever the previous holder left.
-# The rename is atomic, so a reader either sees the old claim or the new one.
+# Claim an unclaimed pool slot. An existing claim is evidence, never permission
+# to overwrite ownership, even when it names the same task after a failed launch.
 fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
   local worktree=$1 id=$2 home=$3 marker tmp
   [ -n "$id" ] || return 1
   marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 1
-  # Only a plain claim file may be replaced: renaming onto a directory would
-  # move the new claim inside it and leave the slot reading as unclaimable.
-  if { [ -e "$marker" ] || [ -L "$marker" ]; } \
-     && { [ ! -f "$marker" ] || [ -L "$marker" ]; }; then
-    return 1
-  fi
+  [ ! -e "$marker" ] && [ ! -L "$marker" ] || return 1
   tmp="$marker.tmp.${BASHPID:-$$}"
   rm -f "$tmp" || return 1
   {
     printf 'task=%s\n' "$id"
     printf 'home=%s\n' "$home"
   } > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
-  mv -f "$tmp" "$marker" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  # Hard-link publication is atomic and cannot replace a concurrently published
+  # claim. Both files are in the same directory/filesystem.
+  ln "$tmp" "$marker" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  rm -f "$tmp"
 }
 
 # Read the claim on a pool slot and compare it with a task id.
@@ -1417,92 +1415,17 @@ fm_treehouse_local_state_dirs() {
   done
 }
 
-# The pre-acquire ownership guard: refuse a fresh Treehouse allocation for a
-# project when a retained local task record names a slot in that project's pool
-# and the slot lacks a durable allocation reservation, or when the pool's
-# ownership is ambiguous. It runs under the held project lock, before any
-# `treehouse get`, so an allocator reset can never destroy a retained copy.
-#
-# A durable reservation is recorded as allocation_id= in the task's metadata by
-# the durable-acquisition path. A retained record without one is a legacy or
-# parked copy whose slot Treehouse's allocator may reset; it stays unavailable
-# until an owning operator has preserved and reconciled it. Refusals print a
-# one-line reason to stderr and set FM_TREEHOUSE_PREACQUIRE_REFUSAL; they never
-# mutate the pool, a record, or a claim.
-fm_treehouse_preacquire_refuse() {  # <reason>
-  # shellcheck disable=SC2034 # Output global, read by the spawning caller.
-  FM_TREEHOUSE_PREACQUIRE_REFUSAL=$1
-}
-
+# Pre-acquire ownership admission runs under the canonical project lock. The
+# read-only inventory owner checks actual allocator reservations, retained task
+# records and orphan claims before any Treehouse command can reset a copy.
 fm_treehouse_preacquire_guard() {  # <project-dir>
-  local project=$1 state_dir meta line task_id worktree home_slot allocation_id
-  local slot value i j
-  local -a retained_slots=() retained_tasks=() retained_allocation_ids=()
-
+  FM_TREEHOUSE_PREACQUIRE_REFUSAL=
   if ! fm_treehouse_local_state_dirs; then
-    fm_treehouse_preacquire_refuse "cannot enumerate registered local Firstmate homes; refusing to allocate"
+    FM_TREEHOUSE_PREACQUIRE_REFUSAL="cannot enumerate registered local Firstmate homes; refusing to allocate"
     return 1
   fi
-
-  for state_dir in "${FM_TREEHOUSE_LOCAL_STATE_DIRS[@]}"; do
-    [ -d "$state_dir" ] || continue
-    for meta in "$state_dir"/*.meta; do
-      [ -f "$meta" ] && [ ! -L "$meta" ] || continue
-      task_id=$(basename "$meta" .meta)
-      worktree=
-      home_slot=
-      allocation_id=
-      while IFS= read -r line || [ -n "$line" ]; do
-        case "$line" in
-          worktree=*) worktree=${line#worktree=} ;;
-          home=*) home_slot=${line#home=} ;;
-          allocation_id=*) allocation_id=${line#allocation_id=} ;;
-        esac
-      done < "$meta"
-      for value in "$worktree" "$home_slot"; do
-        [ -n "$value" ] || continue
-        slot=$(CDPATH='' cd -- "$value" 2>/dev/null && pwd -P) || continue
-        fm_treehouse_pool_slot "$project" "$slot" || continue
-        retained_slots+=("$slot")
-        retained_tasks+=("$task_id")
-        retained_allocation_ids+=("$allocation_id")
-      done
-    done
-  done
-
-  # Nothing retained names this project's pool: nothing to protect.
-  [ "${#retained_slots[@]}" -gt 0 ] || return 0
-
-  for ((i = 0; i < ${#retained_slots[@]}; i++)); do
-    slot=${retained_slots[$i]}
-    task_id=${retained_tasks[$i]}
-    for ((j = i + 1; j < ${#retained_slots[@]}; j++)); do
-      if [ "${retained_slots[$j]}" = "$slot" ] && [ "${retained_tasks[$j]}" != "$task_id" ]; then
-        fm_treehouse_preacquire_refuse "multiple retained task records name pool slot $slot; refusing to allocate"
-        return 1
-      fi
-    done
-    fm_treehouse_slot_owner_state "$slot" "$task_id"
-    case "$FM_TREEHOUSE_SLOT_OWNER" in
-      absent)
-        fm_treehouse_preacquire_refuse "task $task_id's recorded pool slot $slot has no owner claim; a missing legacy marker does not grant permission to allocate over it"
-        return 1
-        ;;
-      unsafe)
-        fm_treehouse_preacquire_refuse "task $task_id's recorded pool slot $slot carries an owner claim that cannot be read; refusing to allocate"
-        return 1
-        ;;
-      other)
-        fm_treehouse_preacquire_refuse "task $task_id's recorded pool slot $slot is claimed by task $FM_TREEHOUSE_SLOT_OWNER_ID; refusing to allocate over an unreconciled reassignment"
-        return 1
-        ;;
-      mine) ;;
-    esac
-    if [ -z "${retained_allocation_ids[$i]}" ]; then
-      fm_treehouse_preacquire_refuse "task $task_id's recorded pool slot $slot has no durable allocation reservation; refusing to allocate over a retained copy"
-      return 1
-    fi
-  done
+  FM_TREEHOUSE_PREACQUIRE_REFUSAL=$(python3 "$FM_WAKE_LIB_DIR/fm-treehouse-inventory.py" \
+    "$1" "${FM_TREEHOUSE_LOCAL_STATE_DIRS[@]}" 2>&1) || return 1
 }
 
 

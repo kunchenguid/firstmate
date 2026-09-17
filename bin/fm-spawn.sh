@@ -1177,23 +1177,8 @@ spawn_abort_cleanup() {
     SPAWN_META_LOCK_HELD=0
     fm_lock_release "$SPAWN_META_LOCK" || true
   fi
-  # A spawn that aborts after claiming its slot but before its record survives
-  # must not leave a claim naming a task no record describes. The release is a
-  # read-then-remove, so it runs only while the project lock that wrote the
-  # claim is still held (aborts before metadata publication); a later abort has
-  # already released that lock and leaves the claim for the next spawn's
-  # atomic replacement rather than racing it. The release itself never removes
-  # another task's claim.
-  if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ -n "${WT:-}" ] &&
-    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] &&
-    fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
-    SPAWN_SLOT_CLAIMED=0
-    if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
-      fm_treehouse_slot_owner_release "$WT" "$ID" || true
-    else
-      echo "warning: leaving task $ID's slot claim on $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
-    fi
-  fi
+  # A failed launch may already have produced work. Retain its claim even
+  # without metadata; pre-acquire inventory refuses this orphan for recovery.
   if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
     SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
     fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK" || true
@@ -2528,6 +2513,12 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  SPAWN_REQUESTED_PROJECT_REAL=$(cd "$PROJ_ABS" && pwd -P) || exit 1
+  fm_treehouse_repo_identity "$PROJ_ABS" || {
+    echo "error: cannot resolve the primary Git checkout for Treehouse allocation: $PROJ_ABS" >&2
+    exit 1
+  }
+  PROJ_ABS=$FM_TREEHOUSE_REPO_IDENTITY
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
     echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
     exit 1
@@ -2537,6 +2528,10 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ];
     exit 1
   fi
   SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
+  if ! fm_treehouse_preacquire_guard "$PROJ_ABS"; then
+    echo "error: ${FM_TREEHOUSE_PREACQUIRE_REFUSAL:-refused to allocate a Treehouse slot for $PROJ_ABS}; nothing was changed" >&2
+    exit 1
+  fi
 fi
 [ -f "$BRIEF" ] || {
   echo "error: task $ID has no brief at inaccessible data path $BRIEF" >&2
@@ -2703,7 +2698,7 @@ spawn_worktree_isolated() { # <path>
     SPAWN_WT_REASON="it is a subdirectory of worktree root '$wt_top_real', not a worktree root"
     return 1
   fi
-  if [ "$wt_real" = "$PROJ_ABS_REAL" ]; then
+  if [ "$wt_real" = "$PROJ_ABS_REAL" ] || [ "$wt_real" = "${SPAWN_REQUESTED_PROJECT_REAL:-}" ]; then
     SPAWN_WT_REASON="it is the spawning project itself"
     return 1
   fi
@@ -3486,13 +3481,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  # Refuse a fresh allocation over a retained copy before any allocator side
-  # effect. The project lock is already held from slot-allocation scope, so
-  # this serializes with teardown's ownership proof and return.
-  if ! fm_treehouse_preacquire_guard "$PROJ_ABS"; then
-    echo "error: ${FM_TREEHOUSE_PREACQUIRE_REFUSAL:-refused to allocate a Treehouse slot for $PROJ_ABS}; nothing was changed" >&2
-    exit 1
-  fi
+  # Ownership admission ran before endpoint creation under the project lock,
+  # which remains held through claim and metadata publication.
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
