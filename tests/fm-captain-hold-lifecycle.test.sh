@@ -3195,6 +3195,38 @@ test_merge_approval_releases_before_zero_done_retention() {
   pass "merge approval releases before zero-retention cleanup records completion"
 }
 
+# `answered` is what a gate acting on captain authority asks. "Not currently
+# held" is the answer `open` gives, and every ordinary task satisfies it, so
+# this predicate must stay false until a captain answer is actually recorded.
+test_answered_is_true_only_after_the_captain_spoke() {
+  local home id rc
+  home=$(make_home captain-answered-predicate)
+  id=sample-answered-predicate
+  tasks_in "$home" add "$id" "An ordinary task nobody held" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the answered fixture"
+
+  rc=0
+  run_captain "$home" answered "$id" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || fail "answered was true for a task the captain never held (rc=$rc)"
+
+  rc=0
+  run_captain "$home" answered no-such-task >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "answered was true for a task that does not exist"
+
+  run_captain "$home" hold "$id" --reason "captain waiver pending" >/dev/null \
+    || fail "could not hold the answered fixture"
+  rc=0
+  run_captain "$home" answered "$id" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || fail "answered was true while the call was still open (rc=$rc)"
+
+  printf 'Waive the loop for this one.\n' > "$home/answered.txt"
+  run_captain "$home" answer "$id" --release --decision-file "$home/answered.txt" \
+    >/dev/null || fail "could not record the captain answer"
+  run_captain "$home" answered "$id" >/dev/null 2>&1 \
+    || fail "answered was false after the captain's words were recorded"
+  pass "answered is true only once a captain answer is recorded"
+}
+
 test_pr_merge_entrypoint_refuses_a_captain_held_task() {
   local home pr_id pr repo wt rc
   home=$(make_home held-merge-entrypoints)
@@ -3213,6 +3245,12 @@ test_pr_merge_entrypoint_refuses_a_captain_held_task() {
     "pr=$pr" "spawn_gen=fixture-$pr_id"
   run_captain "$home" hold "$pr_id" --reason "captain merge approval pending" >/dev/null \
     || fail "could not hold the PR entrypoint fixture"
+  # bin/fm-pr-merge.sh also refuses a GitHub pull request with no adversarial-
+  # review loop-green evidence. This case is about the captain hold, so the
+  # loop evidence is satisfied at the head configure_merged_github reports.
+  printf 'pr=%s\nhead=%s\ntier=T2\nrequired=T2\n' \
+    "$pr" 1111111111111111111111111111111111111111 \
+    > "$home/state/$pr_id.adversarial-review-green"
 
   # Without the entrypoint guard, this run reaches gh and returns success even
   # though the task is still held for the captain.
@@ -3277,6 +3315,11 @@ test_pr_merge_entrypoint_separates_an_unreadable_record_from_an_absent_one() {
   id=sample-missing-pr-authority
   pr=https://github.com/sample/sample/pull/43
   write_origin_meta "$home" "$id" ship
+  # Satisfy the adversarial-review loop-green gate at the head
+  # configure_merged_github reports; this case is about the authority record.
+  printf 'pr=%s\nhead=%s\ntier=T2\nrequired=T2\n' \
+    "$pr" 1111111111111111111111111111111111111111 \
+    > "$home/state/$id.adversarial-review-green"
 
   # A backlog that exists but cannot be read may hide a live captain hold, so
   # the merge must refuse without reaching the forge.
@@ -3429,6 +3472,11 @@ test_merge_entrypoints_refuse_a_reused_task_incarnation() {
     "project=$old_repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
     "spawn_gen=original-$id"
   printf 'done: merge ready\n' > "$home/state/$id.status"
+  # Satisfy the adversarial-review loop-green gate at the head
+  # configure_merged_github reports; this case is about the control lock.
+  printf 'pr=%s\nhead=%s\ntier=T2\nrequired=T2\n' \
+    "$pr" 1111111111111111111111111111111111111111 \
+    > "$home/state/$id.adversarial-review-green"
 
   teardown_ready="$home/reuse-teardown-ready"
   teardown_release="$home/reuse-teardown-release"
@@ -3630,6 +3678,11 @@ test_merge_entrypoints_serialize_forced_teardown_before_task_reads() {
   printf 'Merge the released pull request.\n' > "$home/race-answer.txt"
   run_captain "$home" answer "$id" --release --decision-file "$home/race-answer.txt" \
     >/dev/null || fail "could not release the PR teardown-race fixture"
+  # Satisfy the adversarial-review loop-green gate at the head
+  # configure_merged_github reports; this case is about the teardown race.
+  printf 'pr=%s\nhead=%s\ntier=T2\nrequired=T2\n' \
+    "$pr" 1111111111111111111111111111111111111111 \
+    > "$home/state/$id.adversarial-review-green"
 
   real_grep=$(command -v grep)
   ready="$home/pr-metadata-read-ready"
@@ -3801,6 +3854,11 @@ test_released_merge_passes_the_entrypoint_and_lands() {
   show=$(tasks_in "$home" show "$id" --full) || fail "the released merge task disappeared"
   assert_not_contains "$show" "hold_kind: captain" \
     "the approved merge remained captain-held after its release"
+  # Satisfy the adversarial-review loop-green gate at the head
+  # configure_merged_github reports; this case is about the released hold.
+  printf 'pr=%s\nhead=%s\ntier=T2\nrequired=T2\n' \
+    "$pr" 1111111111111111111111111111111111111111 \
+    > "$home/state/$id.adversarial-review-green"
   run_pr_merge "$home" "$id" "$pr" > "$home/merge.out" 2> "$home/merge.err" \
     || fail "the released merge was refused: $(cat "$home/merge.err")"
   PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
@@ -4026,6 +4084,7 @@ test_unusable_pending_close_record_names_its_reason
 test_relocated_report_does_not_wedge_an_answer_before_replay
 test_teardown_retains_captain_calls_in_a_relocated_backlog
 test_merge_approval_releases_before_zero_done_retention
+test_answered_is_true_only_after_the_captain_spoke
 test_pr_merge_entrypoint_refuses_a_captain_held_task
 test_local_merge_entrypoint_refuses_a_captain_held_task
 test_pr_merge_entrypoint_separates_an_unreadable_record_from_an_absent_one

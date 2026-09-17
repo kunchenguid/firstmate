@@ -1663,6 +1663,14 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
     "$SCRIPT_DIR/fm-contributions.sh" arm --if-owned >/dev/null \
       || echo "MISSING: contribution observation could not be armed; coverage is unconfirmed"
   fi
+  # Re-arm the adversarial-review PR-open watch. A when-watch fires at most
+  # once, so without this every session after the first fire would leave
+  # Firstmate-raised PRs with no loop dispatching itself. Idempotent, local,
+  # and no network call; detection-only startup publishes no registration.
+  if local_phase && [ -x "$SCRIPT_DIR/fm-adversarial-review.sh" ]; then
+    "$SCRIPT_DIR/fm-adversarial-review.sh" ensure-watch >/dev/null \
+      || echo "MISSING: the adversarial-review PR-open watch could not be armed; PR loops will not start themselves"
+  fi
   if [ -n "$fleet_sync_pid" ]; then
     wait "$fleet_sync_pid" || true
     cat "$fleet_sync_out"

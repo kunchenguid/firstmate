@@ -8,10 +8,19 @@
 #
 # A GitHub pull request is refused unless the adversarial-review loop is GREEN
 # for it at the head being merged: bin/fm-adversarial-review.sh owns the marker
-# and this script only enforces it, before arming any merge poll and again
-# against the freshly recorded head. The marker is GitHub-shaped evidence (it
-# parses to a GitHub pull request URL), so a GitLab merge request is outside
-# what the loop currently covers and carries no such requirement here.
+# and this script only enforces it, once before arming any merge poll and again
+# against FM_PR_MERGE_HEAD - the live head github_verify_mergeable read and
+# --match-head-commit pins - so the head the loop reviewed and the head that
+# merges are the same value. The marker also carries the tier the loop ran and
+# the tier the reviewed change required, so that second check is the minimum-
+# tier enforcement at this boundary as well.
+#
+# The marker is GitHub-shaped evidence (it parses to a GitHub pull request
+# URL), so a GitLab merge request is outside what the loop currently covers and
+# carries no such requirement here. That is a scope carve-out, not a waiver:
+# when the loop gains GitLab support the gate applies to GitLab lanes on the
+# same terms, and this branch becomes provider-agnostic rather than staying an
+# exception.
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
@@ -1143,16 +1152,6 @@ require_current_away_authority || away_status=$?
 [ "$away_status" -eq 0 ] || exit "$away_status"
 require_recorded_pr_identity || exit 1
 record_pr_metadata || exit 1
-# When the forge supplied a current head, the green marker must be for that
-# exact head. Without a recorded head there is nothing to compare, and the
-# reviewed head stays auditable in the PR's round comments. RECORDED_HEAD is
-# the GitLab pre-check read above and is deliberately left alone here.
-if [ "$PROVIDER" = github ]; then
-  REVIEWED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
-  if [ -n "$REVIEWED_HEAD" ]; then
-    "$SCRIPT_DIR/fm-adversarial-review.sh" check-green "$ID" "$URL" --head "$REVIEWED_HEAD" || exit 1
-  fi
-fi
 require_released_captain_hold || exit 1
 
 # Accepted confused-agent-grade limitation, as in bin/fm-lease-lib.sh, not an
@@ -1168,6 +1167,17 @@ case "$PROVIDER" in
     fi
     FM_PR_GITHUB_CALLER_METHOD=$(caller_merge_method "$@")
     github_verify_mergeable || exit 1
+    # Bind the loop-green evidence to the head this run actually merges.
+    # FM_PR_MERGE_HEAD is the live head github_verify_mergeable just read and
+    # the same value --match-head-commit pins below, so the reviewed head and
+    # the merged head are one value rather than two reads a push can slip
+    # between. No bindable head is a refusal, never a skipped check.
+    if ! fm_pr_head_valid "$FM_PR_MERGE_HEAD"; then
+      echo "error: refusing to merge $URL: no head could be bound for the adversarial-review check" >&2
+      exit 1
+    fi
+    "$SCRIPT_DIR/fm-adversarial-review.sh" check-green "$ID" "$URL" \
+      --head "$FM_PR_MERGE_HEAD" || exit 1
     # The away record is locked first, so this last presence and authority read
     # and the forge command below share one live-owner critical section.
     hold_away_record_for_merge || exit 1

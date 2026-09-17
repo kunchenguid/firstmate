@@ -211,8 +211,9 @@ SH
 # merging PR URL at the head fm-pr-check.sh will record. Args: case_dir url head
 # [task-id].
 write_green_marker() {
-  local case_dir=$1 url=$2 head=$3 id=${4:-task-x1}
-  printf 'pr=%s\nhead=%s\n' "$url" "$head" > "$case_dir/state/$id.adversarial-review-green"
+  local case_dir=$1 url=$2 head=$3 id=${4:-task-x1} tier=${5:-T2} required=${6:-T2}
+  printf 'pr=%s\nhead=%s\ntier=%s\nrequired=%s\n' "$url" "$head" "$tier" "$required" \
+    > "$case_dir/state/$id.adversarial-review-green"
 }
 
 # Stage a marker this case owns, so the shared fixture in run_pr_merge leaves it
@@ -2247,6 +2248,39 @@ test_stale_green_head_refuses() {
   pass "fm-pr-merge refuses when the loop-green head is stale against the recorded head"
 }
 
+# Regression: the loop-green head used to be compared against the pr_head
+# fm-pr-check.sh recorded, an EARLIER read than the head github_verify_mergeable
+# binds to --match-head-commit. A push landing between the two reads therefore
+# merged a head the loop never reviewed. Here the recorded head still matches
+# the marker while the live mergeable view - the head that would actually merge
+# - has moved on, so the merge must be refused.
+test_green_head_must_be_the_merged_head() {
+  local case_dir rc recorded=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  local pushed=ffffffffffffffffffffffffffffffffffffffff
+  case_dir=$(make_case green-head-vs-merge-head)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$recorded"
+  # The live pre-merge view has moved to a head nobody reviewed, while the
+  # headRefOid read fm-pr-check.sh makes still answers the reviewed one.
+  write_github_live_json "$case_dir" "$pushed"
+  printf '%s\n' "$recorded" > "$case_dir/github-head"
+  add_green_marker "$case_dir" https://github.com/example/repo/pull/34 "$recorded"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/34 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "green-head-vs-merge-head: fm-pr-merge should refuse a head the loop never reviewed"
+  assert_grep "GREEN at $recorded but the PR is at $pushed" "$case_dir/stderr" \
+    "green-head-vs-merge-head: refusal did not name the head that would have merged"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "green-head-vs-merge-head: gh pr merge ran on a head the loop never reviewed"
+  pass "fm-pr-merge binds loop-green to the head it merges, not to an earlier recorded head"
+}
+
 test_github_zero_exit_queue_required_refuses_with_exact_retry
 test_github_closed_unqueued_outcome_omits_retry_flags
 test_github_agreeing_queue_rules_keep_retry_guidance
@@ -3210,3 +3244,4 @@ test_allow_red_refused_on_gitlab
 test_missing_green_marker_refuses_before_poll
 test_wrong_pr_green_marker_refuses
 test_stale_green_head_refuses
+test_green_head_must_be_the_merged_head

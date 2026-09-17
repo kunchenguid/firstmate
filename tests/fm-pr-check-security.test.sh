@@ -250,6 +250,19 @@ run_check_entry() {
 run_merge_entry() {
   local dir=$1
   shift
+  # bin/fm-pr-merge.sh refuses a GitHub pull request without adversarial-review
+  # loop-green evidence at the head the gh mock reports. None of these cases is
+  # about that gate, so satisfy it for the task and URL this call names. The
+  # real parser decides what counts as a GitHub pull request URL, so the
+  # zero-side-effect cases that pass rejected bytes still touch nothing.
+  if [ "$#" -ge 2 ] && [ -d "$dir/home/state" ] \
+    && fm_pr_task_id_valid "$1" 2>/dev/null \
+    && fm_pr_url_parse "$2" 2>/dev/null \
+    && [ "$FM_PR_PROVIDER" = github ]; then
+    printf 'pr=%s\nhead=%s\ntier=T2\nrequired=T2\n' "$FM_PR_URL" \
+      "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" \
+      > "$dir/home/state/$1.adversarial-review-green"
+  fi
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
@@ -2385,6 +2398,11 @@ test_authority_retirement_preserves_replacement() {
   cat > "$dir/replace-authority.sh" <<SH
 #!/usr/bin/env bash
 "$PR_CHECK" task-a "$url_b" >/dev/null
+# This merge goes straight to \$PR_MERGE rather than through run_merge_entry,
+# so it satisfies the adversarial-review loop-green gate for url_b itself.
+printf 'pr=%s\nhead=%s\ntier=T2\nrequired=T2\n' "$url_b" \\
+  "\${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" \\
+  > "$state/task-a.adversarial-review-green"
 (
   FM_TEST_GH_GRAPHQL_STATE=OPEN FM_TEST_GH_GRAPHQL_MERGED=false \\
   FM_TEST_GH_GRAPHQL_QUEUED=true \\

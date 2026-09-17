@@ -157,6 +157,16 @@ if command -v jq >/dev/null 2>&1; then
 else
   printf 'contributions: jq unavailable; coverage is unconfirmed\n' >&2
 fi
+# Re-arm the adversarial-review PR-open watch here, at the one point every
+# Firstmate-raised PR passes through. A when-watch fires at most once, so the
+# PR registered by THIS run is what re-arms the watch for the next one; the
+# call is idempotent and leaves an already-armed watch, or one with an outcome
+# firstmate has not handled, exactly as it is. The poll above is armed either
+# way: a watch that cannot be armed is reported, never a refusal to register.
+if [ "$PROVIDER" = github ]; then
+  "$SCRIPT_DIR/fm-adversarial-review.sh" ensure-watch >/dev/null 2>&1 \
+    || printf 'adversarial-review: the PR-open watch is not armed; dispatch this PR loop by hand\n' >&2
+fi
 # In a secondmate home the registration itself is a captain-facing fact:
 # publish the child's PR-ready line with the canonical URL just recorded, so it
 # reaches the parent whether or not the mate model appends anything

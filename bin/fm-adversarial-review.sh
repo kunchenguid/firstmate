@@ -9,32 +9,53 @@
 # Reviewers stay read-only: this script stages file paths a reviewer can read
 # and records structured reports, while firstmate dispatches the tier lenses
 # and reconciles each MAJOR/BLOCKER. GREEN needs every required lens
-# returned, no MAJOR/BLOCKER unresolved or pending a fix, the reviewed head
-# still current, the round within cap, and the Design/UX lens present for
-# UI-impacting T2/T3 work. Anything else is RED and writes no marker.
+# returned under an assigned independent seat, no lens RED without a parsed
+# MAJOR/BLOCKER to reconcile, no MAJOR/BLOCKER unresolved or pending a fix, the
+# reviewed head still current, the round within cap, and the Design/UX lens
+# present for UI-impacting T2/T3 work. Anything else is RED and writes no
+# marker.
+#
+# The tier is not the caller's to lower. dispatch derives the tier the reviewed
+# change itself requires from its staged file list and diff - security- or
+# architecture-sensitive paths and major waves need T3, everything else T2 -
+# and refuses a --tier below it. That derived floor is recorded in the loop-
+# green marker as required=, so the merge boundary enforces a minimum tier from
+# the evidence instead of re-deriving a classification of its own.
+#
+# A T0 waiver is captain authority, never self-attestation: it needs
+# --waiver-hold naming a captain call this home's backlog records the captain
+# as having answered (bin/fm-captain-hold.sh answered), and writes no marker
+# without it.
 #
 # State layout under the task state dir:
 #   <id>.adversarial-review/round-<N>/  staged evidence, prompts, reports,
 #     resolutions, reconciliation, and posted comments for one round.
-#   <id>.adversarial-review-green  the loop-green marker: exactly a pr= line
-#     and a head= line. Written only on a GREEN reconciliation at that head.
+#   <id>.adversarial-review-green  the loop-green marker: exactly a pr=, head=,
+#     tier=, and required= line. Written only on a GREEN reconciliation at that
+#     head, or on a captain-granted T0 waiver.
 #
 # Usage: fm-adversarial-review.sh <command> [args]
 #   dispatch <task-id> <pr-url> [--tier T1|T2|T3|T0] [--wt <path>]
 #     [--base <sha>] [--head <sha>] [--round N] [--reclaim] [--ui-impacting]
-#     [--seat SLOT=MODEL ...] [--waiver-class C --waiver-reason R]
+#     [--seat SLOT=MODEL ...]
+#     [--waiver-class C --waiver-reason R --waiver-hold <task-id>]
 #   record-lens <task-id> --round N --lens <slot> --report <file>
 #   resolve <task-id> --round N --finding <lens>:<id> --disposition <d>
 #     [--note <text>]
 #   reconcile <task-id> --round N
 #   condition
 #   action
-#   check-green <task-id> <pr-url> [--head <sha>]
+#   check-green <task-id> <pr-url> [--head <sha>] [--min-tier T1|T2|T3]
 #   arm-watch [--interval <secs>] [--stable <n>] [--deadline <secs>]
+#   ensure-watch [--interval <secs>] [--stable <n>] [--deadline <secs>]
 #
 # The condition exits 0 when a PR-open status line still needs a loop and 1
-# otherwise. The action dispatches the first pending loop. The watch fires at
-# most once, so firstmate re-arms it after handling each fired outcome.
+# otherwise. The action dispatches EVERY pending loop, not just the first, so
+# one fire covers every PR that opened while the watch was armed. A when-watch
+# fires at most once, so ensure-watch is the re-arming half: it is idempotent
+# and runs from the startup path (bin/fm-bootstrap.sh) and again from every
+# PR-open registration (bin/fm-pr-check.sh), which is what makes the loop
+# automatic rather than something a human remembers to arm.
 # Exact reads go through gh and every PR mutation through gh-axi, the same
 # split bin/fm-pr-check.sh uses, because gh-axi's curated surface has no
 # exact-body read while gh exposes selectable fields.
@@ -93,6 +114,52 @@ tier_cap() {
   esac
 }
 
+# Comparable review strength. T0 is a captain waiver rather than a weaker
+# review, so it is ordered outside the T1..T3 ladder and compared explicitly
+# wherever a floor is enforced.
+tier_rank() {
+  case "$1" in
+    T1) printf '1\n' ;;
+    T2) printf '2\n' ;;
+    T3) printf '3\n' ;;
+    T0) printf '0\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+# Classify the reviewed change from its staged file list and diff. Prints
+# "<floor> <default> <ui-impacting>": the floor is the weakest tier this change
+# may be reviewed at, and the default is the tier a caller that named none
+# adopts. Security-sensitive, architecture-heavy, and major-wave changes pin
+# both to T3, so no caller can talk them down to a two-lens round. Everything
+# else defaults to T2 and floors at T1, which keeps T1 available for the
+# trivial mechanical changes it is for without making it the norm.
+classify_required() {
+  local files=$1 diff=$2 floor=T1 default=T2 ui=0 count lines
+  count=$(grep -c . "$files" 2>/dev/null || true)
+  lines=$(grep -c '^[+-]' "$diff" 2>/dev/null || true)
+  case "${count:-0}" in ''|*[!0-9]*) count=0 ;; esac
+  case "${lines:-0}" in ''|*[!0-9]*) lines=0 ;; esac
+  if grep -qEi '(^|/)[^/]*(auth|security|secret|crypto|credential|token|password|permission|policy|sandbox|trust|lease|lock)[^/]*(/|\.)' "$files" 2>/dev/null \
+    || grep -qEi '(^|/)(migration|migrations|schema|infra|terraform|k8s|helm|deploy|\.github)(/|\.)' "$files" 2>/dev/null \
+    || [ "$count" -ge 25 ] || [ "$lines" -ge 1500 ]; then
+    floor=T3
+    default=T3
+  fi
+  if grep -qEi '\.(tsx|jsx|vue|svelte|css|scss|sass|less|html)$' "$files" 2>/dev/null; then
+    ui=1
+  fi
+  printf '%s %s %s\n' "$floor" "$default" "$ui"
+}
+
+# One key from the lane task's own metadata, for the facts the round meta does
+# not carry (the lane model the seat check compares against).
+meta_get() {
+  local key=$2 meta="$STATE/$1.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  grep -E "^$key=" "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
 slot_class() {
   case "$1" in
     deep-1|deep-2) printf 'deep\n' ;;
@@ -106,12 +173,17 @@ round_meta_get() {
   grep -E "^$key=" "$dir/meta" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
-# Parse the loop-green marker strictly: exactly one pr= line and one head=
-# line in either order, nothing else. Sets FM_ADV_GREEN_PR/HEAD.
+# Parse the loop-green marker strictly: exactly one pr=, head=, tier=, and
+# required= line in any order, nothing else. Sets FM_ADV_GREEN_PR/HEAD/TIER/
+# REQUIRED. A marker missing the tier evidence is malformed rather than
+# tolerated, so an older two-line marker fails closed instead of merging with
+# an unknown review strength.
 fm_adv_green_parse() {
-  local file=$1 line pr_count=0 head_count=0
+  local file=$1 line pr_count=0 head_count=0 tier_count=0 required_count=0
   FM_ADV_GREEN_PR=
   FM_ADV_GREEN_HEAD=
+  FM_ADV_GREEN_TIER=
+  FM_ADV_GREEN_REQUIRED=
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
@@ -125,10 +197,23 @@ fm_adv_green_parse() {
         [ "$head_count" -eq 1 ] || return 1
         FM_ADV_GREEN_HEAD=${line#head=}
         ;;
+      tier=*)
+        tier_count=$((tier_count + 1))
+        [ "$tier_count" -eq 1 ] || return 1
+        FM_ADV_GREEN_TIER=${line#tier=}
+        ;;
+      required=*)
+        required_count=$((required_count + 1))
+        [ "$required_count" -eq 1 ] || return 1
+        FM_ADV_GREEN_REQUIRED=${line#required=}
+        ;;
       *) return 1 ;;
     esac
   done < "$file"
   [ "$pr_count" -eq 1 ] && [ "$head_count" -eq 1 ] || return 1
+  [ "$tier_count" -eq 1 ] && [ "$required_count" -eq 1 ] || return 1
+  tier_rank "$FM_ADV_GREEN_TIER" >/dev/null || return 1
+  tier_rank "$FM_ADV_GREEN_REQUIRED" >/dev/null || return 1
   fm_pr_url_parse "$FM_ADV_GREEN_PR" >/dev/null || return 1
   [ "$FM_PR_PROVIDER" = github ] || return 1
   FM_ADV_GREEN_PR=$FM_PR_URL
@@ -136,12 +221,25 @@ fm_adv_green_parse() {
 }
 
 write_green_marker() {
-  local id=$1 url=$2 head=$3 dest tmp
+  local id=$1 url=$2 head=$3 tier=$4 required=$5 dest tmp
   dest=$(green_file "$id")
   tmp=$(mktemp "$STATE/.fm-adv-green.XXXXXX") || return 1
-  printf 'pr=%s\nhead=%s\n' "$url" "$head" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  printf 'pr=%s\nhead=%s\ntier=%s\nrequired=%s\n' "$url" "$head" "$tier" "$required" > "$tmp" \
+    || { rm -f -- "$tmp"; return 1; }
   chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$dest" || { rm -f -- "$tmp"; return 1; }
+}
+
+# A T0 waiver is only as strong as the captain's own recorded words. The named
+# captain call must carry a recorded captain answer in this home's backlog;
+# anything else - including a call still open, an ordinary task, or a backlog
+# that cannot be read - is refused.
+captain_waiver_granted() {
+  local hold=$1 rc=0
+  [ -x "$SCRIPT_DIR/fm-captain-hold.sh" ] || return 1
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-captain-hold.sh" answered "$hold" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ]
 }
 
 forge_head() {
@@ -247,21 +345,22 @@ write_prompt() {
 }
 
 cmd_dispatch() {
-  local id=$1 url=$2 tier=T2 round=1 reclaim=0 ui=0
-  local wt='' base='' head='' waiver_class='' waiver_reason='' seats_args=''
+  local id=$1 url=$2 tier=T2 tier_explicit=0 round=1 reclaim=0 ui=0 ui_explicit=0
+  local wt='' base='' head='' waiver_class='' waiver_reason='' waiver_hold='' seats_args=''
   shift 2 || true
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --tier) tier=${2-}; shift 2 ;;
+      --tier) tier=${2-}; tier_explicit=1; shift 2 ;;
       --wt) wt=${2-}; shift 2 ;;
       --base) base=${2-}; shift 2 ;;
       --head) head=${2-}; shift 2 ;;
       --round) round=${2-}; shift 2 ;;
       --reclaim) reclaim=1; shift ;;
-      --ui-impacting) ui=1; shift ;;
+      --ui-impacting) ui=1; ui_explicit=1; shift ;;
       --seat) seats_args="$seats_args ${2-}"; shift 2 ;;
       --waiver-class) waiver_class=${2-}; shift 2 ;;
       --waiver-reason) waiver_reason=${2-}; shift 2 ;;
+      --waiver-hold) waiver_hold=${2-}; shift 2 ;;
       --help|-h) usage; return 0 ;;
       *) fail "unknown dispatch flag: $1" 2 ;;
     esac
@@ -283,6 +382,11 @@ cmd_dispatch() {
   if [ "$tier" = T0 ]; then
     [ -n "$waiver_class" ] && [ -n "$waiver_reason" ] \
       || fail "T0 needs --waiver-class and --waiver-reason on explicit captain words" 2
+    [ -n "$waiver_hold" ] \
+      || fail "T0 needs --waiver-hold naming the captain call that granted the waiver" 2
+    fm_pr_task_id_valid "$waiver_hold" || fail "invalid --waiver-hold task id" 2
+    captain_waiver_granted "$waiver_hold" \
+      || fail "T0 refused: captain call $waiver_hold carries no recorded captain answer" 1
   fi
   cap=$(tier_cap "$tier")
   if [ "$round" -gt 1 ]; then
@@ -340,6 +444,26 @@ cmd_dispatch() {
     ':!Gemfile.lock' ':!uv.lock' ':!poetry.lock' \
     ':!*symbols.json' ':!*codemap*' > "$dir/files.txt" \
     || fail "cannot list reviewed files" 1
+  # The change itself decides the floor. A caller that named no tier adopts the
+  # derived one (this is what makes the auto-dispatched loop tier-correct), and
+  # a caller that named a weaker tier is refused rather than quietly upgraded,
+  # so the mismatch is visible to whoever chose it. A captain-granted T0 waiver
+  # is the one tier outside this ladder and keeps its own authority check.
+  read -r required_tier default_tier derived_ui <<CLASSIFY
+$(classify_required "$dir/files.txt" "$dir/diff.patch")
+CLASSIFY
+  tier_rank "$required_tier" >/dev/null || fail "cannot classify the reviewed change" 1
+  tier_rank "$default_tier" >/dev/null || fail "cannot classify the reviewed change" 1
+  if [ "$tier" != T0 ]; then
+    if [ "$tier_explicit" = 0 ]; then
+      tier=$default_tier
+    elif [ "$(tier_rank "$tier")" -lt "$(tier_rank "$required_tier")" ]; then
+      fail "tier $tier is below the $required_tier this change requires (security/architecture-sensitive paths or major wave)" 1
+    fi
+    if [ "$ui_explicit" = 0 ] && [ "$derived_ui" = 1 ]; then ui=1; fi
+    slots=$(tier_slots "$tier")
+    cap=$(tier_cap "$tier")
+  fi
   prose_source=gh
   if command -v gh >/dev/null 2>&1 \
     && title=$(gh pr view "$url" --json title -q .title 2>/dev/null) \
@@ -360,12 +484,13 @@ cmd_dispatch() {
     fail "cannot stage PR prose (gh and gh-axi both failed)" 1
   fi
   {
-    printf 'url=%s\ntier=%s\nboundary=merge\n' "$url" "$tier"
+    printf 'url=%s\ntier=%s\nrequired_tier=%s\nboundary=merge\n' "$url" "$tier" "$required_tier"
     printf 'base=%s\nhead=%s\nwt=%s\ntree=%s\ntree_head=%s\n' "$base" "$head" "$wt" "$wt" "$tree_head"
     printf 'round=%s\ncap=%s\nui_impacting=%s\nprose_source=%s\n' "$round" "$cap" "$ui" "$prose_source"
     printf 'slots=%s\n' "$(printf '%s' "$slots" | paste -sd' ' -)"
     printf 'seats=%s\n' "$seats_args"
-    [ "$tier" != T0 ] || printf 'waiver_class=%s\nwaiver_reason=%s\n' "$waiver_class" "$waiver_reason"
+    [ "$tier" != T0 ] || printf 'waiver_class=%s\nwaiver_reason=%s\nwaiver_hold=%s\n' \
+      "$waiver_class" "$waiver_reason" "$waiver_hold"
     printf 'status=staging\n'
   } > "$dir/meta"
   numstat=$(git -C "$wt" diff --numstat "$base...$head" -- . 2>/dev/null | awk '{a+=$1; d+=$2} END {printf "%d additions, %d deletions", a+0, d+0}')
@@ -374,13 +499,7 @@ cmd_dispatch() {
   # shellcheck disable=SC2086
   for slot in $slots; do
     class=$(slot_class "$slot")
-    seat=unassigned
-    # shellcheck disable=SC2086
-    for pair in $seats_args; do
-      case "$pair" in
-        "$slot="*) seat=${pair#*=} ;;
-      esac
-    done
+    seat=$(slot_seat "$seats_args" "$slot")
     [ -n "$seat" ] || seat=unassigned
     slot_lines="$slot_lines- $slot (class $class, seat $seat)
 "
@@ -399,7 +518,9 @@ cmd_dispatch() {
     if [ "$ui" = 1 ]; then
       printf 'UI-impacting: the advisory Design/UX lens is required this round.\n\n'
     fi
-    [ "$tier" != T0 ] || printf 'Waiver class: %s. Reason: %s.\n\n' "$waiver_class" "$waiver_reason"
+    [ "$tier" != T0 ] || printf 'Waiver class: %s. Reason: %s. Granted by captain call `%s`.\n\n' \
+      "$waiver_class" "$waiver_reason" "$waiver_hold"
+    [ "$tier" = T0 ] || printf 'Tier floor derived from the reviewed change: %s.\n\n' "$required_tier"
     printf "Evidence staged before dispatch: diff \`%s\`, prose \`%s\`, file list \`%s\`, tree \`%s\`.\n\n" \
       "$dir/diff.patch" "$dir/prose.md" "$dir/files.txt" "$wt"
     printf 'Diff scope: %s files, %s.\n\n' "$files_count" "$numstat"
@@ -411,7 +532,7 @@ cmd_dispatch() {
   pr_comment "$number" "$owner/$repo" "$dir/comment.md" \
     || fail "cannot post the round comment" 1
   if [ "$tier" = T0 ]; then
-    write_green_marker "$id" "$url" "$head" || fail "cannot write the loop-green marker" 1
+    write_green_marker "$id" "$url" "$head" T0 T0 || fail "cannot write the loop-green marker" 1
     sed -i.bak 's/^status=staging$/status=waived/' "$dir/meta" 2>/dev/null || true
     rm -f -- "$dir/meta.bak"
   else
@@ -515,6 +636,19 @@ cmd_resolve() {
     *) fail "finding must look like <lens>:<id>" 2 ;;
   esac
   [ -n "$lens" ] && [ -n "$fid" ] || fail "finding must look like <lens>:<id>" 2
+  # The resolutions file is a whitespace-separated record read back by key, so
+  # a key or note carrying whitespace could forge or shadow another finding's
+  # disposition. Reject them at the door rather than sanitising on read.
+  case "$finding" in
+    *[[:space:]]*) fail "finding key cannot contain whitespace" 2 ;;
+  esac
+  case "$note" in
+    *[[:space:]]*)
+      case "$note" in
+        *$'\n'*|*$'\r'*) fail "note cannot contain a line break" 2 ;;
+      esac
+      ;;
+  esac
   dir=$(round_dir "$id" "$round")
   [ -f "$dir/meta" ] || fail "round $round was never dispatched for $id" 1
   printf '%s:%s %s %s\n' "$lens" "$fid" "$disposition" "$note" >> "$dir/resolutions"
@@ -522,10 +656,26 @@ cmd_resolve() {
   printf 'resolved: %s round-%s %s:%s %s\n' "$id" "$round" "$lens" "$fid" "$disposition"
 }
 
-# The last disposition recorded for one finding wins.
+# The last disposition recorded for one finding wins. The key is matched as the
+# whole first field, so a resolution whose free-text note happens to name
+# another finding cannot lend that finding its disposition.
 finding_disposition() {
   local file=$1 key=$2
-  grep -F -- "$key " "$file" 2>/dev/null | tail -1 | awk '{print $2}' || true
+  [ -f "$file" ] || return 0
+  awk -v k="$key" '$1 == k { d = $2 } END { if (d != "") print d }' "$file" 2>/dev/null || true
+}
+
+# The seat assigned to one slot, from the round's recorded seats= list.
+# Prints nothing when the slot was never seated.
+slot_seat() {
+  local seats=$1 slot=$2 pair seat=
+  # shellcheck disable=SC2086
+  for pair in $seats; do
+    case "$pair" in
+      "$slot="*) seat=${pair#*=} ;;
+    esac
+  done
+  printf '%s' "$seat"
 }
 
 # Report file for one lens slot. Colons are normalised away so advisory
@@ -551,9 +701,12 @@ cmd_reconcile() {
   [ -f "$dir/meta" ] || fail "round $round was never dispatched for $id" 1
   url=$(round_meta_get "$dir" url)
   tier=$(round_meta_get "$dir" tier)
+  required_tier=$(round_meta_get "$dir" required_tier)
   recorded_head=$(round_meta_get "$dir" head)
   ui=$(round_meta_get "$dir" ui_impacting)
   slots=$(round_meta_get "$dir" slots)
+  seats=$(round_meta_get "$dir" seats)
+  lane_model=$(meta_get "$id" model 2>/dev/null || true)
   fm_pr_url_parse "$url" || fail "round meta has an invalid PR URL" 1
   url=$FM_PR_URL
   owner=$FM_PR_OWNER
@@ -584,27 +737,40 @@ cmd_reconcile() {
   finding_rows=
   # shellcheck disable=SC2086
   for slot in $slots; do
+    class=$(slot_class "$slot")
+    seat=$(slot_seat "$seats" "$slot")
+    # A seat nobody filled is a lens nobody ran, and a lens run by the lane's
+    # own model is the implementer reviewing their own work. The seat map makes
+    # the standard slot the lane model by definition, so only that class is
+    # exempt from the self-review refusal.
+    if [ -z "$seat" ] || [ "$seat" = unassigned ]; then
+      note_red "lens $slot has no assigned seat"
+    elif [ "$class" != standard ] && [ -n "$lane_model" ] && [ "$seat" = "$lane_model" ]; then
+      note_red "lens $slot was seated on the lane's own model $lane_model"
+    fi
     report=$(lens_file "$dir" "$slot")
     if [ ! -f "$report" ]; then
       note_red "missing REQUIRED lens $slot"
-      lens_table="$lens_table- $slot: MISSING (REQUIRED)
+      lens_table="$lens_table- $slot: MISSING (REQUIRED, seat ${seat:-unassigned})
 "
       continue
     fi
     verdict=$(lens_report_scan "$report" | awk '$1=="VERDICT"{print $2}')
-    lens_table="$lens_table- $slot: $verdict
+    lens_table="$lens_table- $slot: $verdict (seat ${seat:-unassigned})
 "
     if [ "$verdict" != GREEN ] && [ "$verdict" != RED ]; then
       note_red "lens $slot has no readable verdict"
       continue
     fi
     findings=$(lens_report_scan "$report" | awk '$1=="FINDING"{print $2}')
+    reconcilable=0
     # shellcheck disable=SC2086
     for entry in $findings; do
       fid=${entry%%:*}
       sev=${entry#*:}
       case "$sev" in
         BLOCKER|MAJOR)
+          reconcilable=$((reconcilable + 1))
           disp=$(finding_disposition "$dir/resolutions" "$slot:$fid")
           case "$disp" in
             fixed_verified|rejected_with_counterevidence)
@@ -630,6 +796,13 @@ cmd_reconcile() {
           ;;
       esac
     done
+    # A lens that judged the change RED but contributed nothing reconcilable is
+    # a report this parser could not read, not a clean round: its blockers live
+    # somewhere the reconciler never saw. Disclose it red instead of greening
+    # on an empty finding list.
+    if [ "$verdict" = RED ] && [ "$reconcilable" -eq 0 ]; then
+      note_red "lens $slot returned RED with no parsed MAJOR/BLOCKER finding; its report is degraded or unparseable"
+    fi
   done
   if [ "$red" = 0 ]; then recommendation=GREEN; else recommendation=RED; fi
   {
@@ -655,7 +828,10 @@ cmd_reconcile() {
   pr_comment "$number" "$owner/$repo" "$dir/result-comment.md" \
     || fail "cannot post the results comment" 1
   if [ "$recommendation" = GREEN ]; then
-    write_green_marker "$id" "$url" "$recorded_head" || fail "cannot write the loop-green marker" 1
+    tier_rank "$tier" >/dev/null || fail "round meta has an invalid tier" 1
+    tier_rank "$required_tier" >/dev/null || fail "round meta has no derived tier floor" 1
+    write_green_marker "$id" "$url" "$recorded_head" "$tier" "$required_tier" \
+      || fail "cannot write the loop-green marker" 1
     sed -i.bak 's/^status=.*$/status=green/' "$dir/meta" 2>/dev/null || true
     rm -f -- "$dir/meta.bak"
   else
@@ -715,24 +891,44 @@ cmd_condition() {
   return 1
 }
 
+# Dispatch EVERY pending loop, not just the first: a when-watch fires once, so
+# firing on only one PR would leave every other PR that opened in the same
+# window with no loop until somebody noticed. No --tier is passed, so each
+# dispatch adopts the tier its own change requires. One failure is reported and
+# does not abandon the rest, and any failure exits nonzero so the fire is
+# captured as action-failed and firstmate is woken with the evidence.
 cmd_action() {
-  local first id url
-  first=$(pending_loops | sort -u | head -1)
-  [ -n "$first" ] || fail "no pending adversarial-review loop" 1
-  id=${first%%$'\t'*}
-  url=${first#*$'\t'}
-  cmd_dispatch "$id" "$url" --tier T2
+  local pending line id url rc=0 dispatched=0
+  pending=$(pending_loops | sort -u)
+  [ -n "$pending" ] || fail "no pending adversarial-review loop" 1
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    id=${line%%$'\t'*}
+    url=${line#*$'\t'}
+    if ( cmd_dispatch "$id" "$url" ); then
+      dispatched=$((dispatched + 1))
+    else
+      rc=1
+      printf 'actionable: adversarial-review dispatch failed for %s %s\n' "$id" "$url" >&2
+    fi
+  done <<PENDING
+$pending
+PENDING
+  printf 'dispatched %s pending adversarial-review loop(s)\n' "$dispatched"
+  return "$rc"
 }
 
 cmd_check_green() {
-  local id=$1 url=$2 want_head=
+  local id=$1 url=$2 want_head='' min_tier=''
   shift 2 || true
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --head) want_head=${2-}; shift 2 ;;
+      --min-tier) min_tier=${2-}; shift 2 ;;
       *) fail "unknown check-green flag: $1" 2 ;;
     esac
   done
+  [ -z "$min_tier" ] || tier_rank "$min_tier" >/dev/null || fail "unknown --min-tier: $min_tier" 2
   fm_pr_task_id_valid "$id" || fail "invalid task id" 2
   fm_pr_url_parse "$url" || fail "invalid PR URL" 2
   url=$FM_PR_URL
@@ -755,8 +951,27 @@ cmd_check_green() {
     echo "re-run the loop at the current head, then retry" >&2
     return 1
   fi
-  printf 'adversarial-review: green at %s\n' "$FM_ADV_GREEN_HEAD"
+  # The minimum tier at this boundary comes from the evidence itself: the
+  # marker carries the tier the loop actually ran and the tier the reviewed
+  # change required, so a weaker round can never clear a change that needed a
+  # stronger one. A T0 marker is a captain-granted waiver and is ordered
+  # outside that ladder, so it satisfies the floor by the captain's authority
+  # rather than by review strength.
+  if [ "$FM_ADV_GREEN_TIER" != T0 ]; then
+    if [ "$(tier_rank "$FM_ADV_GREEN_TIER")" -lt "$(tier_rank "$FM_ADV_GREEN_REQUIRED")" ]; then
+      echo "error: adversarial-review ran $FM_ADV_GREEN_TIER but this change requires $FM_ADV_GREEN_REQUIRED" >&2
+      return 1
+    fi
+    if [ -n "$min_tier" ] && [ "$(tier_rank "$FM_ADV_GREEN_TIER")" -lt "$(tier_rank "$min_tier")" ]; then
+      echo "error: adversarial-review ran $FM_ADV_GREEN_TIER but this boundary requires at least $min_tier" >&2
+      return 1
+    fi
+  fi
+  printf 'adversarial-review: green at %s (tier %s, required %s)\n' \
+    "$FM_ADV_GREEN_HEAD" "$FM_ADV_GREEN_TIER" "$FM_ADV_GREEN_REQUIRED"
 }
+
+when_watch_name() { printf 'adversarial-review-pr\n'; }
 
 cmd_arm_watch() {
   local interval=60 stable=2 deadline=604800
@@ -768,10 +983,38 @@ cmd_arm_watch() {
       *) fail "unknown arm-watch flag: $1" 2 ;;
     esac
   done
-  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent-when.sh" arm adversarial-review-pr \
+  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent-when.sh" arm "$(when_watch_name)" \
     --interval "$interval" --stable "$stable" --deadline "$deadline" \
     --condition "$SELF" condition \
     --action "$SELF" action
+}
+
+# The re-arming half of the trigger. A when-watch fires at most once and is
+# then retired, so something has to put it back; this is idempotent so the
+# startup path and every PR-open registration can both call it unconditionally.
+# A watch already armed, or one whose fired outcome firstmate has not handled
+# yet, is left exactly as it is - re-arming over an unhandled outcome would
+# discard the evidence of what the last fire did.
+cmd_ensure_watch() {
+  local sid out rc=0
+  sid=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent-when.sh" source-id "$(when_watch_name)" 2>/dev/null) \
+    || { echo "adversarial-review: watch source id unavailable; loop not armed" >&2; return 1; }
+  if [ -e "$STATE/when/$sid.spec" ]; then
+    printf 'adversarial-review: watch %s already armed\n' "$sid"
+    return 0
+  fi
+  out=$(cmd_arm_watch "$@" 2>&1) || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    case "$out" in
+      *'unhandled captured result'*|*'already exists or left state behind'*)
+        printf 'adversarial-review: watch %s has an unhandled outcome; handle it to re-arm\n' "$sid" >&2
+        return 0
+        ;;
+    esac
+    printf '%s\n' "$out" >&2
+    return "$rc"
+  fi
+  printf '%s\n' "$out"
 }
 
 cmd=${1-}
@@ -784,6 +1027,7 @@ case "$cmd" in
   action) shift; cmd_action "$@" ;;
   check-green) shift; [ "$#" -ge 2 ] || { usage >&2; exit 2; }; cmd_check_green "$@" ;;
   arm-watch) shift; cmd_arm_watch "$@" ;;
+  ensure-watch) shift; cmd_ensure_watch "$@" ;;
   --help|-h|help) usage ;;
   *) usage >&2; exit 2 ;;
 esac
