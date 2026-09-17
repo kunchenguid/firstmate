@@ -36,6 +36,7 @@ fm_root_is_secondmate_home() {
 # test, so neither inherits primary scope.
 # On failure FM_PRIMARY_SCOPE_REASON names the check that failed, and the
 # status is 2 when lock ownership is the only check that failed, 1 otherwise.
+# shellcheck disable=SC2034 # Output global, read by the sourcing caller.
 fm_primary_scope_matches() {
   local root=$1 state=$2 git_dir git_common_dir own_state resolved_state
   FM_PRIMARY_SCOPE_REASON=""

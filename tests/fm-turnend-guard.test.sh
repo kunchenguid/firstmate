@@ -286,6 +286,7 @@ run_hook() {
 run_hook_with_ancestry() {
   local dir=$1 stop_active=$2 lock=${3:-} home
   home=$(cd "$dir" && pwd)
+  # shellcheck disable=SC2016 # single quotes are deliberate: $$ and $FM_HOME expand inside the fake harness child
   printf '{"stop_hook_active":%s}' "$stop_active" \
     | CLAUDECODE=1 FM_HOME="$home" FM_TEST_LOCK_PID="$lock" "$FAKE_CLAUDE" -c '
         printf "%s\n" "${FM_TEST_LOCK_PID:-$$}" > "$FM_HOME/state/.lock"
