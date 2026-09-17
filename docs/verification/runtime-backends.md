@@ -331,6 +331,68 @@ Valid cleanup removed only the exact task-bound target and left the control wind
 The metadata-only validation covers tmux, Herdr, Zellij, Orca, and cmux before backend dispatch.
 Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that backend cleanup boundary; their harness-specific hook files, tokens, transcript bindings, and session-log sidecars are cleaned only after it, so no harness needs a separate endpoint parser.
 
+### Endpoint close
+
+A reported close failure costs teardown every durable record of the task, so what each backend's close actually returns was measured before that status was given any authority.
+Verified on 2026-09-14 with tmux 3.7c by driving `fm_backend_kill` against real tmux endpoints, and the Orca arm by driving `fm_backend_orca_kill` under a search path with no `orca` on it.
+Zellij and cmux were not driven with their CLIs absent; the table below states what those arms report today rather than claiming a measurement.
+
+```sh
+tests/fm-teardown-endpoint-safety.test.sh
+tests/fm-backend-orca.test.sh
+```
+
+```text
+ok - fm-teardown: a close that genuinely failed refuses and keeps the record naming the surviving endpoint, and the same teardown finishes once the close works
+ok - fm-teardown: --force continues past a close it could not make while still reporting it, and the same case refuses without --force
+ok - fm-teardown: a close re-read that could not run refuses, while a definitively absent session or server still completes silently
+ok - fm-teardown: forced secondmate cleanup still refuses on a child endpoint close that failed
+ok - fm-teardown: an Orca close its missing CLI never attempted refuses even under --force, keeping the record naming the terminal
+ok - fm-teardown: an already-exited endpoint, and a server that is already gone, still complete cleanup silently
+ok - fm_backend_orca_kill: a close its missing CLI never attempted reports the failure instead of a success
+```
+
+An endpoint that is already legitimately gone returns 0 silently on every arm, so ordinary cleanup of an already-exited session is unchanged: real tmux returns 0 for a live window, for a re-close of that same gone window, and for a close into a session whose whole server has exited.
+The refusal is reached only through a close that could not do its job, and each arm reports only what it can prove:
+
+| Backend | already gone | a close that failed |
+| --- | --- | --- |
+| tmux | 0, silent | 1, resolved by re-reading the window's exact recorded identity; a read that itself could not run refuses rather than passing for absence |
+| orca | 0, silent | 1 when a missing CLI means no close was attempted; 0 for a close command that failed after the CLI accepted it |
+| zellij | 0, silent | 0, not yet distinguishable |
+| cmux | 0, silent | 0, not yet distinguishable |
+| herdr | 0, silent | 0 from this arm; `bin/fm-teardown.sh` gates every Herdr record removal on `fm_backend_herdr_endpoint_confirmed_gone` instead |
+
+The three arms that still report 0 need a presence re-read taken after their own close, and the close-then-read timing that re-read depends on cannot be established without the real Zellij, Orca, and cmux binaries.
+Guessing it is what a refusal must never rest on: a gate that refused an already-exited session would break ordinary cleanup on every task, which is a worse failure than the stranded endpoint it would be trying to prevent.
+tmux's re-read is deliberately exact - `=session` plus a whole-line window-name match - because a prefix match would read a neighboring window as this window's survivor, which is the same exactness the cleanup identity boundary above already requires.
+It is also deliberately conservative about the read itself, sharing `fm_backend_tmux_window_inventory` with `fm_backend_tmux_agent_state` so both mean the same thing by an absent session: only a definitive missing-session, missing-server, or connect-error response proves the window gone.
+Any other read failure - a momentarily unresponsive server, or a teardown PATH without tmux on it - refuses, because a read that could not run is not evidence of absence.
+
+Two bounds of the refusal are known and deliberately not closed here.
+
+`--force` overrides it at exactly one site, the generic non-Herdr/non-Orca close.
+That is the only close where continuing is actually reachable: the worktree is already returned by then and nothing after it needs the backend that could not close, so `--force` - the operator's existing authority to discard a task's records - can mean something there.
+A forced run still prints the full diagnosis naming the backend, the target, and that the close failed, so what may survive is never silent.
+It states what `--force` authorizes rather than what will have happened, because a later refusal in the same run - the Herdr confirmed-gone gate, or the inactive-reconcile delivery gate - can still stop it with every record retained.
+
+The Orca close refuses under `--force` too.
+The step immediately after it removes the Orca worktree through the same CLI whose absence is the only thing that arm ever reports, so a forced continue would die there having removed nothing while claiming the records were already gone.
+The two child close sites inside forced secondmate cleanup also keep refusing: that path is only ever reached under `--force`, so honoring force there would delete the refusal rather than override it, and would contradict the adjacent Herdr child gate that stops forced cleanup for the same hazard.
+
+The retained record is this run's, not a durable guarantee.
+A task carrying a backlog transition writes its pending-close marker before the endpoint close, and the marker survives the refusal; the next `bin/fm-bootstrap.sh` replays it and removes the retained record.
+The pre-existing Herdr confirmed-gone gate has the identical property.
+The refusal message says so rather than promising a retention teardown does not own, so an operator reconciles the surviving endpoint instead of trusting the record to still be there later.
+
+Both directions are proven non-vacuous.
+Restoring the swallowed status makes the refusal case report `teardown <id> complete`, delete the endpoint record, and leave the window live.
+Keeping the refusal but dropping the exact re-read makes an already-exited endpoint refuse its own cleanup, and also fails the cleanup identity case above.
+Letting an unreadable inventory pass for absence makes the unreadable case complete and remove the record while the window is still there.
+Removing the `--force` arm makes the forced generic case refuse; honoring `--force` at the child sites makes forced secondmate cleanup continue past a child endpoint it could not close, and honoring it at the Orca site makes that forced cleanup abort on the missing CLI after announcing that it was continuing.
+Restoring `fm_backend_orca_kill`'s swallowed tool check makes the CLI-absent adapter case report success.
+Dropping the retention-is-not-durable line makes the refusal claim a retention teardown does not own.
+
 ## Claude workspace trust
 
 Verified 2026-09-03 on Claude Code 2.1.259.
@@ -446,6 +508,63 @@ The lab home was deleted and the test entry was removed from the store and verif
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
+## Codex hook trust
+
+Verified 2026-09-16 on codex-cli 0.151.0, macOS arm64, in a fresh linked worktree of this repository.
+
+Codex gates hooks it has no persisted trust for behind an interactive modal.
+A crewmate launch built by `bin/fm-spawn.sh` was driven under a real PTY and stopped there before the brief was ever submitted:
+
+```text
+Hooks need review
+12 hooks are new or changed.
+Hooks can run outside the sandbox after you trust them.
+> 1. Review hooks
+  2. Trust all and continue
+  3. Continue without trusting (hooks won't run)
+Press enter to confirm or esc to go back
+```
+
+The selection starts on "Review hooks", which is neither trusting nor declining, and Firstmate's key plane carries only Enter, Escape, and C-c with no arrow navigation, so the selection cannot be moved.
+That count covers every hook Codex had no persisted trust for, drawn from both the machine's own `~/.codex/hooks.json` and this repository's tracked `.codex/hooks.json`.
+Writing Codex's own trust store to pre-accept the modal would record an operator consent that was never given, so it is not an option either.
+
+`codex --help` documents `--dangerously-bypass-hook-trust` as "Run enabled hooks without requiring persisted hook trust for this invocation", which RUNS the untrusted hooks.
+That is the opposite of what an unattended worker needs, so the control used is the hook feature flag:
+
+```sh
+codex features list | grep '^hooks'
+codex --disable hooks features list | grep '^hooks'
+codex --disable no_such_feature features list
+```
+
+```text
+hooks                                    stable             true
+hooks                                    stable             false
+Error: Unknown feature flag: no_such_feature
+```
+
+The last arm is what makes the control safe to depend on: an unknown feature name is a hard error, so a release that renames or drops the flag fails the launch loudly instead of silently restoring the modal.
+
+The same launch with the hook layer disabled reached the composer with no modal, answered the prompt, and fired the turn-end program that rides the launch rather than any hook:
+
+```sh
+codex --dangerously-bypass-approvals-and-sandbox --disable hooks \
+  -c "notify=[\"bash\",\"-c\",\"touch $TURNEND\"]" "Say ACK and stop."
+```
+
+```text
+> Say ACK and stop.
+- ACK, captain.
+$ ls "$TURNEND"
+<turn-end file present>
+```
+
+`tests/fm-codex-hook-layer-live-e2e.test.sh` is the command that refreshes this record.
+It captures the launch `bin/fm-spawn.sh` actually builds, replays those exact flags against the installed Codex, and fails naming the harness and version if the hook layer comes back on.
+It spends no model tokens, so it runs by default wherever Codex is installed.
+The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the split the launch template makes: a crewmate launches hook-free while a secondmate, which runs a primary session on this repository's own project hooks, keeps them.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.
@@ -483,6 +602,43 @@ This closes only #3436's idle-composer-misclassification symptom (Grok/Herdr com
 Cursor is deliberately outside this cursor-anchored empty-composer matrix because its terminal cursor is parked outside the composer; tmux's Cursor-specific, process-identity-gated cursorless fallback is covered by the [Cursor Agent CLI](#cursor-agent-cli) section's separate live evidence and drift guard.
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
+
+### 2026-09-15 codex-cli 0.154.0 idle starfield and status footer through Herdr
+
+Verified on 2026-09-15 on macOS arm64 (Darwin 25.5.0) against codex-cli 0.154.0 (model gpt-6-astra, fast mode) running as a Codex second mate inside a Herdr pane, read through Herdr's ANSI capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`).
+Idle, codex 0.154 animates a braille starfield on the row above its bold `›` prompt row, on the `›` row behind the SGR-2 dim `Ask Codex to do anything` placeholder, and on the row below it, then draws a status footer reading `gpt-6-astra high fast · ~/Projects/purser · Launch Purser desk brief`.
+The starfield cells are truecolor greys whose luminance runs from roughly 66 to 165, so the cells above the 128 ghost ceiling survive ghost stripping, and the footer is bright, non-blank, and carries no structural edge.
+
+The capture is a read-only `herdr pane read <pane> --format ansi` of the live pane; its 20-row tail is fed to the shared classifier with the descriptor above:
+
+```sh
+herdr pane read w4Z:p2 --format ansi > codex-0.154-idle-herdr.ansi
+bash -c '. bin/fm-composer-lib.sh
+  caps=$(printf "styled=1\ncursor=0\nidentity=1\nrows=20")
+  fm_composer_classify_screen "$caps" "$(tail -n 20 codex-0.154-idle-herdr.ansi)"'
+```
+
+Observed output on the same capture before the fix (`bin/fm-composer-lib.sh` at b85e28b5) and then after it:
+
+```text
+pending
+empty
+```
+
+Before the fix the bare `›` shape extended its wrap region over the two rows beneath the glyph (`kind=bare first=17 last=19` within the 20-row tail), read the surviving starfield cells and the footer as wrapped typed input, and answered `pending`.
+The steering doorbell (`fm_task_inbox_ring` in `bin/fm-task-inbox-lib.sh`) defers on exactly that verdict, so every ring for the pane was recorded as skipped and the marked request was reported as a missed delivery.
+After the fix, braille-only rows bound the wrap region (the status footer sits beneath the starfield row, so the region never reaches it), starfield cells behind the placeholder are stripped from the glyph row, and the same capture reads `empty` under the Herdr and Zellij styled profiles and with a tmux cursor on the glyph row, while a plain (`styled=0`) capture still reads `unknown`, never `pending`.
+A second read-only capture of the same pane, taken during the fix with a bright starfield cell drawn between the `›` and the placeholder, read `pending` before and `empty` after as well.
+`test_matrix_codex_idle_starfield_furniture` in `tests/fm-composer-lib.test.sh` carries both samples byte-for-byte, the divergence (the same screen with letters in place of the starfield reads `pending`), and the over-stripping negatives (wrapped typed input, braille mixed with text, a typed row with a middle dot, and the footer or a starfield row alone).
+
+The live guard that refreshes this entry launches the installed codex idle in an isolated tmux server and asserts `empty` through both the cursor-anchored tmux read and the cursorless styled read Herdr and Zellij use, naming codex and `codex --version` on failure; it is default-on wherever codex and tmux are installed and spends no tokens:
+
+```sh
+tests/fm-composer-codex-idle-live-e2e.test.sh
+```
+
+The verification machine runs its fleet on Herdr and has no tmux installed, so on 2026-09-15 that guard reported `skip: live: tmux absent` there, and the Herdr capture above is this entry's live evidence.
+The guard also notes whether the starfield and the placeholder were actually drawn during its read, because codex need not animate them under every model or mode; a refresh on a tmux host should record that note beside the verdict rather than assume the starfield was exercised.
 
 ## Steering-inbox doorbell
 
@@ -1154,6 +1310,7 @@ Real captures verified these active distinctions:
 - Dim or faint suggestion text is ghost content, while normally styled text is pending input.
 - Grok dark truecolor placeholders are ghost content, while bright truecolor typed input remains pending.
 - A bare shell prompt has no safe agent-composer container and is unknown.
+- Codex 0.154's idle braille starfield rows are composer furniture, with the dated Herdr evidence and refresh command in [Composer classification matrix](#composer-classification-matrix).
 
 `tests/fm-composer-ghost.test.sh`, `tests/fm-composer-lib.test.sh`, and the Herdr composer cases pin the exact captured ANSI bytes.
 The U+2063 operational and routed-request separators were exercised through a real Pi-on-Herdr path; the byte-exact active regression is:

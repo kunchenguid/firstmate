@@ -24,7 +24,8 @@
 # candidate remains eligible under the captured quota evidence.
 #
 # Multi-provider limitation: this helper maps each harness to ONE primary
-# provider family (see provider_for_harness below) and checks quota for that
+# provider family (fm_quota_provider_for_harness in bin/fm-quota-axi-lib.sh)
+# and checks quota for that
 # family only. Some harnesses can run models from several providers - for
 # example, Pi and OpenCode may dispatch xAI, Anthropic, or other models - so a
 # candidate whose established provider differs from the harness's primary family
@@ -309,31 +310,11 @@ fi
 printf '%s\n' "$QUOTA_JSON" | fm_quota_json_valid || die "invalid quota-axi provider data"
 
 # provider_for_harness <harness> [<model>]
-# Map a firstmate harness name to its primary quota-axi provider family.
-# Multi-provider harnesses (Pi, OpenCode) map to their primary family only; see
-# the header limitation note. omp is keyed on the candidate model prefix instead
-# and has no family for any other prefix (see the header). Authoritative
-# multi-provider routing is owned by AGENTS.md section 4 and the
-# quota-array-dispatch skill, not this helper.
+# The harness -> primary provider family table is owned by
+# fm_quota_provider_for_harness in bin/fm-quota-axi-lib.sh; see the header
+# limitation note for why one family per harness is all this helper checks.
 provider_for_harness() {
-  case "$1" in
-    omp)
-      case "${2:-}" in
-        openai-codex/*)  printf 'codex\n' ;;
-        claude-bridge/*) printf 'claude\n' ;;
-        *)               return 1 ;;
-      esac
-      ;;
-    claude)       printf 'claude\n' ;;
-    codex)        printf 'codex\n' ;;
-    opencode)     printf 'codex\n' ;;
-    pi|pi-signed) printf 'pi\n' ;;
-    grok)         printf 'grok\n' ;;
-    kimi)         printf 'kimi\n' ;;
-    cursor)       printf 'cursor\n' ;;
-    muse)         printf 'meta\n' ;;
-    *)            return 1 ;;
-  esac
+  fm_quota_provider_for_harness "$@"
 }
 
 # effective_for_provider_model <provider> <model>

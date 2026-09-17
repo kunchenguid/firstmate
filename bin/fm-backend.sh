@@ -388,6 +388,25 @@ fm_backend_endpoint_atom_valid() {  # <value>
   esac
 }
 
+# An Orca worktree id is the composite `<orca id>::<absolute worktree path>`
+# that Orca itself returns, so the `:` and `/` characters every real value
+# carries make the simple-atom check reject it. Firstmate hands the id back to
+# Orca opaquely and resolves it through Orca before removing anything, so this
+# proves only the shape that can name one worktree: both halves of the first
+# `::` split present, and the path half absolute.
+fm_backend_orca_worktree_id_valid() {  # <value>
+  case "$1" in
+    *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;;
+    *::*) ;;
+    *) return 1 ;;
+  esac
+  [ -n "${1%%::*}" ] || return 1
+  case "${1#*::}" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface
@@ -508,7 +527,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       }
       if [ "$window" != "fm-$id" ] \
         || ! fm_backend_endpoint_atom_valid "$terminal" \
-        || ! fm_backend_endpoint_atom_valid "$worktree_id"; then
+        || ! fm_backend_orca_worktree_id_valid "$worktree_id"; then
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi
@@ -743,9 +762,18 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   esac
 }
 
-# fm_backend_kill: remove the task's session endpoint (best-effort; a
-# nonexistent/already-gone target is not an error - callers already swallow
-# failures here exactly as the inline `tmux kill-window ... || true` did).
+# fm_backend_kill: remove the task's session endpoint. An already-gone target
+# is NOT an error and returns 0 silently, so ordinary cleanup of an
+# already-exited session stays quiet. A nonzero return means the close could
+# not do its job and the endpoint may still be live: the caller owns that
+# refusal and must not delete the durable records that are the only thing
+# naming the endpoint (bin/fm-teardown.sh's retain-and-stop path).
+# How much each adapter can prove differs, and no arm ever guesses: tmux
+# resolves a failed close against the window's exact recorded identity, Orca
+# reports a close its missing CLI never attempted, and the remaining arms
+# still report 0 for a close command that failed after being accepted.
+# docs/verification/runtime-backends.md "Endpoint close" is the per-backend
+# record.
 fm_backend_kill() {  # <backend> <target>
   local backend=$1
   shift

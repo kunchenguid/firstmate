@@ -102,8 +102,11 @@
 #     unavailable child state or an untrustworthy backlog collapses to unknown.
 #     Which closed rows a home contributes is bin/fm-landed-lib.sh's rule, shared
 #     with the bearings projection so one Recently Landed section has one owner.
+#   contributions: cached owned-contribution coverage; fm-contributions.sh owns it.
 #   secondmate_guidance: return-channel action note for renderers and bearings.
 #
+# --contribution-input prints only the canonical backlog/tasks ownership pair,
+# without worker observations or cross-home collection, for the home-local poll.
 # Compatibility: JSON is the primary machine-readable surface.
 # Human views must render this output instead of parsing state files again.
 set -u
@@ -217,6 +220,8 @@ esac
 # shellcheck source=bin/fm-landed-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-landed-lib.sh"  # FM_LANDED_JQ_DEFS: the shared landed selector
+# shellcheck source=bin/fm-merge-authority-lib.sh
+. "$SCRIPT_DIR/fm-merge-authority-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -226,6 +231,9 @@ usage: fm-fleet-snapshot.sh --json
 Print a structured snapshot of the firstmate fleet.
 JSON is the stable machine-readable output contract. The default snapshot
 refreshes only its parent-side remote-summary cache as an observational side effect.
+
+--contribution-input emits the canonical local backlog/tasks ownership pair only,
+without worker observations or cross-home collection.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
@@ -275,6 +283,7 @@ OUTPUT_MODE=json
 case "${1:---json}" in
   --json) ;;
   --secondmate-home-summary) OUTPUT_MODE=secondmate-home-summary ;;
+  --contribution-input) OUTPUT_MODE=contribution-input ;;
   -h|--help) usage; exit 0 ;;
   *) usage >&2; exit 2 ;;
 esac
@@ -791,7 +800,7 @@ task_json_lines() {
     # never clear another concern's keyed decision. A parked/blocked state, or a
     # non-authoritative status-log/none read on a still-live task, keeps the fold's
     # open decision surfacing.
-    open_decisions_tsv=$(status_open_decisions "$status_log")
+    open_decisions_tsv=$(status_open_decisions "$status_log" "$kind")
     if [ "$kind" != secondmate ] && \
        { { { [ "$current_source" = run-step ] || [ "$current_source" = pane ]; } \
            && [ "$current_state" != parked ] && [ "$current_state" != blocked ]; } \
@@ -847,6 +856,7 @@ task_json_lines() {
       --arg remote_root "$remote_root" \
       --arg pr "$pr" \
       --arg pr_source "$pr_source" \
+      --arg pr_head "$(meta_value "$meta" pr_head)" \
       --arg agent_alive "$agent_alive" \
       --arg observed_at "$SNAPSHOT_NOW" \
       --arg last_event_raw "$last_event_raw" \
@@ -885,7 +895,7 @@ task_json_lines() {
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
                   else "unknown" end),
           observed_at:$observed_at,freshness:"fresh"},
-        pr:{url:($pr | if . == "" then null else . end),source:$pr_source},
+        pr:{url:($pr | if . == "" then null else . end),source:$pr_source,head:($pr_head | if . == "" then null else . end)},
         hints:{
           pending_decision:$pending_decision,
           blocked_event:$blocked_event,
@@ -951,7 +961,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
     --argjson decisions_n "$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
     --argjson landed_n "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
     --slurpfile backlog "$1" \
-    --slurpfile tasks "$2" "$FM_LANDED_JQ_DEFS"'
+    --slurpfile tasks "$2" --slurpfile contributions "$CONTRIBUTIONS_JSON_FILE" "$FM_LANDED_JQ_DEFS"'
     ($backlog[0]) as $backlog
     | ($tasks[0]) as $tasks
     | def trunc($n):
@@ -1075,6 +1085,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
     | {
         schema:"fm-secondmate-home-summary.v1",
         hold_classifier_schema:"fm-captain-hold-buckets.v1",
+        contributions:$contributions[0],
         generated:$generated,
         generated_epoch:$generated_epoch,
         home:$home,
@@ -1860,6 +1871,7 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
          freshness:{status:$summary_freshness,observed_at:$observed,age_seconds:$summary_age},
          active_children:$summary.active_children,
          decisions_open:$summary.decisions_open,holds:$summary.holds,queued:$summary.queued,
+         contributions:($summary.contributions // null),
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan,reconciliation:$reconciliation},
          terminal_evidence:$terminal,contradiction:$contradiction}' >> "$records_file" || return 1
@@ -1945,6 +1957,27 @@ scout_report_lines() {
 }
 
 BACKLOG_JSON=$(backlog_json) || { echo "fm-fleet-snapshot: backlog read failed" >&2; exit 1; }
+contribution_tasks_json() {
+  local meta id merge_authority
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    id=$(basename "$meta" .meta)
+    merge_authority=unknown
+    if fm_merge_authority_resolve "$FM_HOME" "$STATE" "$meta" "$id"; then
+      merge_authority=$FM_MERGE_AUTHORITY
+    fi
+    jq -n --arg id "$id" --arg kind "$(meta_value "$meta" kind)" \
+      --arg url "$(meta_value "$meta" pr)" --arg head "$(meta_value "$meta" pr_head)" \
+      --arg merge_authority "$merge_authority" '{id:$id,kind:$kind,pr:{url:$url,head:$head},merge_authority:$merge_authority}'
+  done | jq -s .
+}
+
+if [ "$OUTPUT_MODE" = contribution-input ]; then
+  # Reuse the canonical backlog parser, without observing workers or other homes.
+  contribution_tasks=$(contribution_tasks_json) || { echo "fm-fleet-snapshot: contribution task read failed" >&2; exit 1; }
+  jq -n --argjson backlog "$BACKLOG_JSON" --argjson tasks "$contribution_tasks" '{backlog:$backlog,tasks:$tasks}'
+  exit 0
+fi
 prefetch_task_current_states || { echo "fm-fleet-snapshot: task observation failed" >&2; exit 1; }
 TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
 
@@ -1960,6 +1993,17 @@ printf '%s\n' "$BACKLOG_JSON" > "$BACKLOG_JSON_FILE" \
   || { echo "fm-fleet-snapshot: temporary backlog file write failed" >&2; exit 1; }
 printf '%s\n' "$TASKS_JSON" > "$TASKS_JSON_FILE" \
   || { echo "fm-fleet-snapshot: temporary task file write failed" >&2; exit 1; }
+
+CONTRIBUTIONS_JSON_FILE="$JSON_TRANSPORT_DIR/contributions.json"
+CONTRIBUTION_TASKS_JSON=$(contribution_tasks_json) \
+  || { echo "fm-fleet-snapshot: contribution task read failed" >&2; exit 1; }
+printf '%s\n' "$CONTRIBUTION_TASKS_JSON" > "$JSON_TRANSPORT_DIR/contribution-tasks.json" \
+  || { echo "fm-fleet-snapshot: contribution task staging failed" >&2; exit 1; }
+jq -n --slurpfile backlog "$BACKLOG_JSON_FILE" --slurpfile tasks "$JSON_TRANSPORT_DIR/contribution-tasks.json" \
+  '{backlog:$backlog[0],tasks:$tasks[0]}' > "$JSON_TRANSPORT_DIR/contribution-input.json"
+FM_CONTRIBUTIONS_NOW="$SNAPSHOT_NOW" "$SCRIPT_DIR/fm-contributions.sh" snapshot \
+  "$JSON_TRANSPORT_DIR/contribution-input.json" > "$CONTRIBUTIONS_JSON_FILE" \
+  || { echo "fm-fleet-snapshot: contribution coverage unavailable" >&2; exit 1; }
 
 if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
   secondmate_home_summary_json "$BACKLOG_JSON_FILE" "$TASKS_JSON_FILE" \
@@ -1987,6 +2031,7 @@ jq -n \
   --slurpfile backlog "$BACKLOG_JSON_FILE" \
   --slurpfile tasks "$TASKS_JSON_FILE" \
   --slurpfile main_inventory "$MAIN_INVENTORY_JSON_FILE" \
+  --slurpfile contributions "$CONTRIBUTIONS_JSON_FILE" \
   --slurpfile scout_reports "$SCOUT_REPORTS_JSON_FILE" \
   --slurpfile secondmate_current "$SECONDMATE_CURRENT_JSON_FILE" \
   --slurpfile secondmate_landed "$SECONDMATE_LANDED_JSON_FILE" \
@@ -2007,6 +2052,7 @@ jq -n \
      backlog:$backlog,
      tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),
      main_inventory:$main_inventory,
+     contributions:$contributions[0],
      scout_reports:($scout_reports | map(. + {kind:report_kind(.id)})),
      secondmate_current:$secondmate_current,
      secondmate_landed:$secondmate_landed,

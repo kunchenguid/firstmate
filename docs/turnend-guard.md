@@ -108,6 +108,7 @@ Two bounded residuals are accepted intent, each costing at most one extra contin
 A legacy build's lock-holding claim (recognizable by its `autoarm` role file) still defers or reclaims under the legacy abandonment proof, with a live identity-verified stuck owner retired via TERM before its lock is removed and an unverified pid never signalled, so an upgrade mid-session can neither double-arm nor deadlock, and a failed reclaim re-blocks rather than allowing a blind stop.
 Fresh `failed` and `failed-suppressed` outcomes enter or advance the failure progression instead of acting as unconditional recovery proof.
 The auto-arm itself rechecks the healthy watcher predicate and retries a bounded number of times before reporting a genuine failure.
+The foreground arm legitimately follows a healthy watcher until its next wake, so the hook catches HUP, TERM, and INT from host timeout or teardown and commits the ordinary durable failed outcome and failure-notice marker before exiting 2 for a recovery turn.
 The first fresh exhausted-failure epoch preserves its handoff without consuming a blocked-stop count, while later fresh failed epochs advance the same monotonic progression instead of resetting it.
 When none of those proofs appears, it re-blocks up to `FM_CLAUDE_TURNEND_BLOCK_BUDGET` times (default 3, below Claude's 8-block override).
 In Claude mode, positive watcher recovery clears the block budget, failure notice, and attended alarm together under the existing budget lock before either hook reports ordinary recovery.

@@ -286,6 +286,7 @@ family_for_basename() {
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-rovo-harness.test.sh|fm-agy-harness.test.sh|fm-omp-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-lint-workflows.test.sh|\
     fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
+    fm-calm-claude-mod.test.sh|\
     fm-harness-adapter-references.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-subagent-pretool-check.test.sh|\
@@ -342,7 +343,9 @@ family_for_basename() {
     fm-claude-stop-autoarm-live-e2e.test.sh|\
     fm-cmux-claude-composer-live-e2e.test.sh|\
     fm-composer-matrix-live-e2e.test.sh|\
-    fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
+    fm-composer-codex-idle-live-e2e.test.sh|\
+    fm-codex-continuity-live-e2e.test.sh|fm-codex-hook-layer-live-e2e.test.sh|\
+    fm-grok-continuity-live-e2e.test.sh|\
     fm-cursor-primary-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-harness-adapter-instructions-live-e2e.test.sh|\
     fm-harness-liveness-drift-live-e2e.test.sh|\
@@ -352,9 +355,11 @@ family_for_basename() {
     fm-opencode-primary-live-e2e.test.sh|fm-pi-branch-live-e2e.test.sh|\
     fm-pi-branch-responsiveness-live-e2e.test.sh|\
     fm-pi-primary-live-e2e.test.sh|fm-pi-codex-native.test.sh|fm-omp-primary-live-e2e.test.sh|\
+    fm-pr-state-live-e2e.test.sh|\
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
     fm-send-inbox-doorbell-live-e2e.test.sh|\
+    fm-calm-claude-mod-plugin.test.sh|fm-calm-claude-mod-live-e2e.test.sh|\
     fm-herdr-submit-confirm-live-e2e.test.sh)
       printf '%s\n' live-harness-optin
       ;;
@@ -369,13 +374,14 @@ family_for_basename() {
       printf '%s\n' backend-dispatch
       ;;
     fm-check-unregister.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|\
+    fm-pr-reviewers.test.sh|fm-pr-state.test.sh|\
     fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
       ;;
     fm-afk-contract.test.sh|fm-afk-inject-e2e.test.sh|fm-afk-return.test.sh)
       printf '%s\n' afk
       ;;
-    fm-bearings-board-render.test.sh|fm-bearings-snapshot.test.sh|\
+    fm-bearings-board-render.test.sh|fm-bearings-snapshot.test.sh|fm-contributions.test.sh|\
     fm-fleet-snapshot-view.test.sh|fm-home-summary-refresh.test.sh)
       printf '%s\n' snapshot-bearings
       ;;
@@ -391,6 +397,7 @@ family_for_basename() {
     fm-branch-supervision.test.sh|fm-busy-adapter-wiring.test.sh|\
     fm-busy-state.test.sh|fm-classify-corr-token.test.sh|\
     fm-claude-stop-autoarm.test.sh|fm-cursor-harness.test.sh|\
+    fm-dispatch-resolve.test.sh|\
     fm-extension-binding.test.sh|fm-gitignore-config.test.sh|\
     fm-no-mistakes-required.test.sh|fm-peek-remote.test.sh|\
     fm-pending-reply.test.sh|fm-pi-branch-extension.test.sh|\
@@ -693,6 +700,7 @@ tests/fm-control.test.sh 54301
 tests/fm-cursor-harness.test.sh 30103
 tests/fm-cursor-primary-live-e2e.test.sh 21
 tests/fm-cursor-primary.test.sh 54947
+tests/fm-dispatch-resolve.test.sh 1800
 tests/fm-daemon.test.sh 26870
 tests/fm-documentation-audiences.test.sh 732
 tests/fm-extension-binding.test.sh 7398
@@ -1403,12 +1411,22 @@ families_for_changed_path() {
       printf '%s\n' session-bootstrap
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
+      printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       ;;
     bin/fm-procevent-quota.sh)
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
       ;;
     bin/fm-quota-choose.sh)
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
+      ;;
+    bin/fm-dispatch-resolve.sh)
+      printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
+      ;;
+    bin/fm-env-lib.sh)
+      # The one .env accessor, sourced by bin/fm-x-lib.sh (Relay token) and
+      # bin/fm-dispatch-resolve.sh (TYPESAFE_API_KEY).
+      printf '%s\n' pr-forge
+      printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       ;;
     .pi/extensions/fm-branch-supervision.ts|.pi/extensions/lib/fm-async-exec.ts|\
     .pi/extensions/lib/fm-branch-dispatch.ts|.pi/extensions/lib/fm-native-contract.ts)
@@ -1437,6 +1455,16 @@ families_for_changed_path() {
       printf '%s\n' __script__:fm-watch-recovery-loop.test.sh
       printf '%s\n' __script__:fm-turnend-guard.test.sh
       printf '%s\n' __script__:fm-sessionstart-nudge.test.sh
+      printf '%s\n' __script__:fm-pi-primary-types.test.sh
+      printf '%s\n' live-harness-optin
+      ;;
+    .claude/mods/firstmate-calm/*|.pi/extensions/lib/fm-calm-working-ship.ts|\
+    .pi/extensions/lib/fm-calm-working-ship-sprite.ts)
+      # The Claude Code Calm mod and the sprite core it shares with the Pi Calm
+      # extension: the portable Node checks, the Pi suites that draw the shared
+      # sprite, the Pi typecheck, and the Claude-dependent guards.
+      printf '%s\n' __script__:fm-calm-claude-mod.test.sh
+      printf '%s\n' __script__:fm-calm-pi-extension.test.sh
       printf '%s\n' __script__:fm-pi-primary-types.test.sh
       printf '%s\n' live-harness-optin
       ;;
@@ -1505,7 +1533,7 @@ families_for_changed_path() {
       printf '%s\n' watcher-wake-lock
       printf '%s\n' live-harness-optin
       ;;
-    bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh|\
+    bin/fm-bearings-snapshot.sh|bin/fm-fleet-snapshot.sh|bin/fm-fleet-view.sh|bin/fm-contributions.sh|bin/fm-contributions.jq|\
     bin/fm-home-summary-refresh.sh)
       printf '%s\n' snapshot-bearings
       ;;

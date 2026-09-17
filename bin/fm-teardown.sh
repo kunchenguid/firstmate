@@ -5,6 +5,13 @@
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
 # clone for PR-based ship tasks.
+# An endpoint whose close could not do its job REFUSES before any record naming
+# it is removed: those records are the only thing that names what survived, so
+# reporting such a close as a completed cleanup strands the endpoint instead of
+# merely leaving it behind. endpoint_close_refusal below owns that refusal and
+# the one site where --force overrides it, and bin/fm-backend.sh's
+# fm_backend_kill owns what each backend can prove about its own close - an
+# already-exited endpoint is not a failure and stays silent.
 # Removing state/<id>.meta and landing the backlog transition are one step, not
 # two: bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run
 # under the task's own meta lock before this script reports success. Because the
@@ -145,9 +152,13 @@
 # mutation. Local and remote retirement serialize their destructive phase with
 # that mate's backlog-handoff lock under the registry lock. Pending handoff wake
 # state is retired with the home, and local removal failure restores that state
-# before preserving the route for retry. Teardown then discards child work, kills
-# child runtime endpoints, and removes the retired home. Removing a leased home
-# releases its durable treehouse lease so the pool slot is freed,
+# before preserving the route for retry. After a successful local or remote
+# secondmate retirement, every parent pending-reply record for that id (resolved
+# leftovers included) and its delivery confirmation is removed so retired mates
+# cannot leave durable reply expectations behind. Non-forced retirement refuses
+# while any of those records is still unresolved. Teardown then discards child
+# work, kills child runtime endpoints, and removes the retired home. Removing a
+# leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record] [--expected-spawn-gen <generation>]
@@ -519,8 +530,8 @@ fi
 REMOTE_HANDOFF_DIR_PRESENT=0
 REMOTE_HANDOFF_DIR_REAL=
 REMOTE_OUTBOX_PRESENT=0
-REMOTE_PENDING_DIR_PRESENT=0
-REMOTE_PENDING_DIR_REAL=
+PENDING_REPLIES_DIR_PRESENT=0
+PENDING_REPLIES_DIR_REAL=
 REMOTE_HANDOFF_LOCK=
 REMOTE_REGISTRY_LOCK=
 REMOTE_REPLY_LIFECYCLE_LOCK=
@@ -742,11 +753,50 @@ remote_teardown_locks_release() {
   fi
 }
 
+# Validate $STATE/pending-replies for local and remote secondmate retirement:
+# refuse a symlinked directory, any non-regular entry, and any entry whose
+# basename is not a 16-hex correlation id or whose corr_id disagrees with that
+# basename; pin the realpath so later cleanup cannot follow a swapped link
+# target or a crafted confirmation path.
+pending_replies_recovery_validate() {
+  local mode=${1:-initial} pending_dir real rec base corr
+  pending_dir="$STATE/pending-replies"
+  if [ -e "$pending_dir" ] || [ -L "$pending_dir" ]; then
+    [ -d "$pending_dir" ] && [ ! -L "$pending_dir" ] \
+      || { echo "REFUSED: pending-replies recovery directory is unsafe" >&2; return 1; }
+    real=$(CDPATH='' cd -- "$pending_dir" 2>/dev/null && pwd -P) || return 1
+    if [ "$mode" = initial ]; then
+      PENDING_REPLIES_DIR_PRESENT=1
+      PENDING_REPLIES_DIR_REAL=$real
+    elif [ "$PENDING_REPLIES_DIR_PRESENT" -ne 1 ] || [ "$PENDING_REPLIES_DIR_REAL" != "$real" ]; then
+      echo "REFUSED: pending-replies recovery directory changed during retirement" >&2
+      return 1
+    fi
+    for rec in "$pending_dir"/*; do
+      [ -e "$rec" ] || [ -L "$rec" ] || continue
+      [ -f "$rec" ] && [ ! -L "$rec" ] \
+        || { echo "REFUSED: pending-replies contains an unsafe recovery entry" >&2; return 1; }
+      base=$(basename "$rec")
+      printf '%s' "$base" | grep -Eq '^[a-f0-9]{16}$' \
+        || { echo "REFUSED: pending-replies contains an unsafe recovery entry" >&2; return 1; }
+      corr=$(fm_meta_get "$rec" corr_id)
+      if [ -n "$corr" ]; then
+        printf '%s' "$corr" | grep -Eq '^[a-f0-9]{16}$' \
+          || { echo "REFUSED: pending-replies contains an unsafe recovery entry" >&2; return 1; }
+        [ "$corr" = "$base" ] \
+          || { echo "REFUSED: pending-replies contains an unsafe recovery entry" >&2; return 1; }
+      fi
+    done
+  elif [ "$mode" != initial ] && [ "$PENDING_REPLIES_DIR_PRESENT" -ne 0 ]; then
+    echo "REFUSED: pending-replies recovery directory changed during retirement" >&2
+    return 1
+  fi
+}
+
 remote_recovery_paths_validate() {
-  local mode=${1:-initial} handoff_dir outbox pending_dir real rec
+  local mode=${1:-initial} handoff_dir outbox real
   handoff_dir="$DATA/handoff"
   outbox="$handoff_dir/$ID.outbox.md"
-  pending_dir="$STATE/pending-replies"
   if [ -e "$handoff_dir" ] || [ -L "$handoff_dir" ]; then
     [ -d "$handoff_dir" ] && [ ! -L "$handoff_dir" ] \
       || { echo "REFUSED: remote handoff recovery directory is unsafe" >&2; return 1; }
@@ -775,40 +825,55 @@ remote_recovery_paths_validate() {
     echo "REFUSED: remote backlog outbox changed during retirement" >&2
     return 1
   fi
-  if [ -e "$pending_dir" ] || [ -L "$pending_dir" ]; then
-    [ -d "$pending_dir" ] && [ ! -L "$pending_dir" ] \
-      || { echo "REFUSED: pending-replies recovery directory is unsafe" >&2; return 1; }
-    real=$(CDPATH='' cd -- "$pending_dir" 2>/dev/null && pwd -P) || return 1
-    if [ "$mode" = initial ]; then
-      REMOTE_PENDING_DIR_PRESENT=1
-      REMOTE_PENDING_DIR_REAL=$real
-    elif [ "$REMOTE_PENDING_DIR_PRESENT" -ne 1 ] || [ "$REMOTE_PENDING_DIR_REAL" != "$real" ]; then
-      echo "REFUSED: pending-replies recovery directory changed during retirement" >&2
-      return 1
-    fi
-    for rec in "$pending_dir"/*; do
-      [ -e "$rec" ] || [ -L "$rec" ] || continue
-      [ -f "$rec" ] && [ ! -L "$rec" ] \
-        || { echo "REFUSED: pending-replies contains an unsafe recovery entry" >&2; return 1; }
-    done
-  elif [ "$mode" != initial ] && [ "$REMOTE_PENDING_DIR_PRESENT" -ne 0 ]; then
-    echo "REFUSED: pending-replies recovery directory changed during retirement" >&2
-    return 1
-  fi
+  pending_replies_recovery_validate "$mode" || return 1
 }
 
-remote_pending_replies_cleanup() {
-  local rec
-  [ "$REMOTE_PENDING_DIR_PRESENT" -eq 1 ] || return 0
+# Remove every parent pending-reply record for $ID, plus its delivery
+# confirmation when present. Shared by local and remote secondmate retirement
+# after the home/route is safely gone.
+pending_replies_cleanup_for_task() {
+  local pending_dir=$1 expected_real=${2-} rec base corr task_id
+  [ -d "$pending_dir" ] || return 0
   (
-    CDPATH='' cd -- "$STATE/pending-replies" 2>/dev/null || exit 1
-    [ "$(pwd -P)" = "$REMOTE_PENDING_DIR_REAL" ] || exit 1
+    CDPATH='' cd -- "$pending_dir" 2>/dev/null || exit 1
+    if [ -n "$expected_real" ]; then
+      [ "$(pwd -P)" = "$expected_real" ] || exit 1
+    fi
     for rec in ./*; do
       [ -e "$rec" ] || [ -L "$rec" ] || continue
       [ -f "$rec" ] && [ ! -L "$rec" ] || exit 1
-      [ "$(fm_meta_get "$rec" task_id)" = "$ID" ] && rm -f -- "$rec"
+      task_id=$(fm_meta_get "$rec" task_id)
+      [ "$task_id" = "$ID" ] || continue
+      base=${rec#./}
+      printf '%s' "$base" | grep -Eq '^[a-f0-9]{16}$' || exit 1
+      corr=$(fm_meta_get "$rec" corr_id)
+      [ -z "$corr" ] || [ "$corr" = "$base" ] || exit 1
+      rm -f -- "./.delivery-confirmed-$base" "$rec" || exit 1
     done
   )
+}
+
+remote_pending_replies_cleanup() {
+  [ "$PENDING_REPLIES_DIR_PRESENT" -eq 1 ] || return 0
+  pending_replies_cleanup_for_task "$STATE/pending-replies" "$PENDING_REPLIES_DIR_REAL"
+}
+
+# Refuse non-forced secondmate retirement while any parent pending-reply for
+# this id is still unresolved (local and remote share the gate).
+secondmate_unresolved_pending_replies_refuse() {
+  local rec task_id phase
+  [ -d "$STATE/pending-replies" ] || return 0
+  for rec in "$STATE/pending-replies"/*; do
+    [ -f "$rec" ] || continue
+    task_id=$(fm_meta_get "$rec" task_id)
+    [ "$task_id" = "$ID" ] || continue
+    phase=$(fm_meta_get "$rec" phase)
+    [ "$phase" = resolved ] || {
+      echo "REFUSED: secondmate $ID still has an unresolved routed reply" >&2
+      return 1
+    }
+  done
+  return 0
 }
 
 remote_outbox_cleanup() {
@@ -822,7 +887,7 @@ remote_outbox_cleanup() {
 }
 
 remote_secondmate_teardown() {
-  local remote_host remote_root remote_home kind route_host route_root route_home out rc tmp rec phase task_id
+  local remote_host remote_root remote_home kind route_host route_root route_home out rc tmp
   remote_host=$(fm_meta_get "$META" remote_host)
   [ -n "$remote_host" ] || return 3
   kind=$(fm_meta_get "$META" kind)
@@ -843,17 +908,8 @@ remote_secondmate_teardown() {
     echo "REFUSED: remote secondmate $ID still has a pending backlog outbox; deliver it or explicitly discard with --force" >&2
     return 1
   fi
-  if [ "$FORCE" != --force ] && [ -d "$STATE/pending-replies" ]; then
-    for rec in "$STATE/pending-replies"/*; do
-      [ -f "$rec" ] || continue
-      task_id=$(fm_meta_get "$rec" task_id)
-      [ "$task_id" = "$ID" ] || continue
-      phase=$(fm_meta_get "$rec" phase)
-      [ "$phase" = resolved ] || {
-        echo "REFUSED: remote secondmate $ID still has an unresolved routed reply" >&2
-        return 1
-      }
-    done
+  if [ "$FORCE" != --force ]; then
+    secondmate_unresolved_pending_replies_refuse || return 1
   fi
   "$SCRIPT_DIR/fm-procevent-remote-reply.sh" retire-quiesce-locked "$ID" "$FORCE" >/dev/null 2>&1 || {
     echo "REFUSED: remote secondmate $ID still has an unhandled captured reply" >&2
@@ -2955,6 +3011,50 @@ preflight_firstmate_home_herdr_children() {  # <home>
   done
 }
 
+# endpoint_close_refusal: the one report for an endpoint close that could not
+# do its job, wherever a close is attempted, and the one decision about what
+# that costs. Reporting such a close as a completed cleanup does not merely
+# leave a stray session behind, it STRANDS one: the durable metadata removed
+# below is the only record of which endpoint belongs to this task, so nothing
+# is left on disk naming what survived. The default is therefore to stop
+# without removing the task's records, exactly as the Herdr confirmed-gone
+# gates already do for the same hazard. What each backend can actually prove
+# about its own close is bin/fm-backend.sh's fm_backend_kill contract.
+#
+# Returns 0 when the caller must continue anyway and 1 when it must stop.
+# <honors-force> is 1 at exactly one site, the generic non-Herdr/non-Orca
+# close, where --force is the operator's existing authority to discard this
+# task's records deliberately AND continuing is actually reachable: the
+# worktree is already returned by then and nothing after it needs the backend
+# that could not close.
+# It is 0 everywhere else. The Orca site refuses under --force too, because
+# the step immediately after it removes the Orca worktree through the same CLI
+# whose absence is the only thing that arm ever reports, so a forced continue
+# would die there having removed nothing while this message claimed otherwise.
+# The two forced secondmate child sites refuse because that path is only ever
+# reached under --force, so honoring force would delete the refusal rather
+# than override it, and would contradict the adjacent Herdr child gate that
+# stops forced cleanup for this same hazard.
+#
+# What is retained is this run's records, not a durable guarantee: a task
+# carrying a backlog transition already wrote its pending-close marker, and the
+# next session start replays that marker and removes the retained record. The
+# message says so rather than promising a retention teardown does not own.
+endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
+  local subject=$1 backend=$2 target=$3 honors_force=$4
+  echo "error: the $backend endpoint $target for $subject could not be closed, so it may still be live." >&2
+  if [ "$honors_force" = 1 ] && [ "$FORCE" = "--force" ]; then
+    echo "error: --force authorizes continuing past a close that failed, so this cleanup proceeds toward removing the task's records; reconcile $target yourself, because nothing here can still be relied on to name it." >&2
+    return 0
+  fi
+  echo "error: stopping this cleanup without removing the task's records, so the record naming $target is still here to reconcile from." >&2
+  echo "error: that retention is not durable across a session start: if this task carries a backlog transition, the next session replays its pending close and removes the retained record, so reconcile the surviving endpoint yourself rather than trusting the retention." >&2
+  if [ "$honors_force" = 1 ]; then
+    echo "error: rerun teardown once the close can succeed, or rerun with --force to discard this task's records deliberately." >&2
+  fi
+  return 1
+}
+
 cleanup_firstmate_home_children() {
   local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc
   sub_state="$home/state"
@@ -2993,9 +3093,11 @@ cleanup_firstmate_home_children() {
       elif [ "$child_backend" = zellij ]; then
         # Zellij titles are scoped by the owning home tag, so forced secondmate
         # cleanup must verify child tabs as that child home, not the parent.
-        ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) 2>/dev/null || true
+        ( unset FM_ROOT_OVERRIDE; FM_HOME=$home FM_ROOT=$home fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" ) \
+          || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       else
-        fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" 2>/dev/null || true
+        fm_backend_kill "$child_backend" "$child_t" "$(meta_value "$child_meta" zellij_tab_id)" "fm-$child_id" \
+          || { endpoint_close_refusal "child $child_id" "$child_backend" "$child_t" 0; return 1; }
       fi
     fi
     if [ "$child_kind" = secondmate ]; then
@@ -3092,6 +3194,7 @@ if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   handoff_wake_retire_stage_recover "$HOME_PATH" || exit 1
   handoff_wake_retire_validate || exit 1
+  pending_replies_recovery_validate initial || exit 1
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
   if [ "$FORCE" = "--force" ]; then
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
@@ -3115,6 +3218,7 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
       exit 1
     done
   fi
+  secondmate_unresolved_pending_replies_refuse || exit 1
 fi
 
 if [ "$KIND" = secondmate ]; then
@@ -3331,7 +3435,10 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   fi
-  [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  if [ -n "$T_ORCA" ]; then
+    fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
+      || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
+  fi
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
@@ -3409,7 +3516,8 @@ elif [ "$BACKEND" = herdr ]; then
     echo "warning: herdr session presentation lock path is unavailable; skipping the pane close rather than closing unlocked" >&2
   fi
 elif [ "$BACKEND" != orca ]; then
-  fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
+    || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
   if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
@@ -3449,6 +3557,8 @@ if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   handoff_wake_retire_stage \
     || { echo "error: receiver wake cleanup could not be staged; preserving the secondmate home and route" >&2; exit 1; }
+  pending_replies_recovery_validate recheck \
+    || { echo "error: local pending-reply recovery paths changed; preserving the secondmate home and route" >&2; exit 1; }
   if remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"; then
     :
   else
@@ -3459,6 +3569,10 @@ if [ "$KIND" = secondmate ]; then
   fi
   handoff_wake_retire_stage_commit \
     || { echo "error: receiver wake cleanup failed; preserving the secondmate route for retry" >&2; exit 1; }
+  if [ "$PENDING_REPLIES_DIR_PRESENT" -eq 1 ]; then
+    pending_replies_cleanup_for_task "$STATE/pending-replies" "$PENDING_REPLIES_DIR_REAL" \
+      || { echo "error: local pending-reply cleanup failed; preserving the secondmate route for retry" >&2; exit 1; }
+  fi
   remove_secondmate_registry_entry "$ID"
 fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
