@@ -2449,10 +2449,15 @@ test_live_paused_until_controls_recheck_time() {
 # the real 240s default only changes how long that takes.
 # <mode> `exit` requires the watcher to surface and exit, `absorb` requires it to
 # survive whole poll cycles at the threshold. Returns 1 when it does the other.
+# The endpoint this lane's window resolves to is a live grok agent unless a case
+# drives it elsewhere with FM_TEST_PANE_COMMAND (the pane's foreground command)
+# and FM_TEST_TMUX_WINDOWS (the session inventory the recorded window must appear
+# in), which is how the dead-endpoint cases below reach `dead` and `missing`.
 wedge_threshold_round() {  # <state> <fakebin> <out> <capture> <window> <verdict> <exit|absorb>
   local state=$1 fakebin=$2 out=$3 capture=$4 window=$5 verdict=$6 mode=$7 pid cycles=0
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE="$verdict" \
+    FM_FAKE_TMUX_CURRENT_COMMAND="${FM_TEST_PANE_COMMAND-grok}" \
+    FM_FAKE_TMUX_WINDOWS="${FM_TEST_TMUX_WINDOWS-}" FM_FAKE_CREW_STATE="$verdict" \
     FM_WATCH_HANDLING_SUCCESSOR=1 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_PAUSE_RESURFACE_SECS="${FM_TEST_PAUSE_RESURFACE:-999}" FM_STALE_ESCALATE_SECS=1 \
@@ -2669,6 +2674,152 @@ test_wedge_threshold_recheck_names_the_captain_for_a_held_lane() {
     || fail "the recheck owed on return did not name the captain: $(cat "$out")"
   ack_stopped_cycle "$state" || fail "could not acknowledge the on-return captain-held recheck"
   pass "a captain-held lane is rechecked as a hold on the captain, never as an external wait, and never at all while the captain is away"
+}
+
+
+# --- a record whose agent is GONE reports once, instead of alarming forever ---
+# Observed on a live fleet: two finished lanes reached 226 and 203 CONSECUTIVE
+# wedge escalations, one alarm roughly every FM_STALE_ESCALATE_SECS, indefinitely -
+# from lanes with no agent running at all. `bin/fm-control.sh <id> exit` answered
+# `already-stopped` and `bin/fm-crew-state.sh` read `failed - run failed`. Closing
+# the pane did not stop it either: with the pane gone (`herdr pane read` ->
+# `pane_not_found`) the count still climbed, because the poll is driven by the
+# durable record's `window=` line, not by the pane. The escalate path clears its
+# own idle timer and re-arms with nothing bounding the count, and a dead agent's
+# pane never churns to reset it, so the ladder had no ceiling. The cost is not the
+# repetition: it is that ~400 notifications a day from two finished lanes drown
+# the alarms that matter, and the captain stopped reading them.
+#
+# fm_backend_agent_state already separated an agent that is THINKING from one that
+# is gone; the escalation path simply never asked it. Both directions are pinned
+# below, for the reason the declared-wait cases above give: a bound proved only in
+# the quiet direction is indistinguishable from deleting wedge detection.
+# Related, and deliberately NOT closed by this: upstream #4412, #4482, #4316.
+
+# The two endpoint verdicts that are PROOF an agent is gone, as the lane fixture
+# above reaches them: `dead` is the recorded window still present in the session
+# inventory with a bare shell in front of it (the husk a crashed agent leaves),
+# and `missing` is an inventory that no longer carries that window at all.
+gone_endpoint_env() {  # <dead|missing> -> assignments for the round below
+  case "$1" in
+    dead)    FM_TEST_PANE_COMMAND=bash FM_TEST_TMUX_WINDOWS=fm-wedge ;;
+    missing) FM_TEST_PANE_COMMAND=bash FM_TEST_TMUX_WINDOWS=fm-someone-else ;;
+  esac
+}
+
+test_gone_endpoint_reports_once_instead_of_escalating_forever() {
+  local dir state fakebin out capture window key verdict round
+  local failed='state: failed · source: run-step · run failed'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  for verdict in dead missing; do
+    dir=$(wedge_threshold_fixture "gone-endpoint-$verdict" 'working: still compiling' 0)
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    gone_endpoint_env "$verdict"
+    export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
+      || fail "a $verdict endpoint was never reported at the wedge threshold: $(cat "$out")"
+    grep -F "agent $verdict" "$out" >/dev/null \
+      || fail "the $verdict report did not name the endpoint verdict: $(cat "$out")"
+    grep -F 'possible wedge' "$out" >/dev/null \
+      && fail "a $verdict endpoint was still reported as a possible wedge: $(cat "$out")"
+    [ "$(wedge_stale_wakes "$state" "$window")" -eq 1 ] \
+      || fail "a $verdict endpoint queued $(wedge_stale_wakes "$state" "$window") wakes instead of one"
+    [ ! -e "$state/.wedge-escalations-$key" ] \
+      || fail "a $verdict endpoint advanced the wedge escalation count"
+    ack_stopped_cycle "$state" || fail "could not acknowledge the $verdict report"
+
+    # The defect itself: every later threshold repeated the alarm, 226 times over.
+    # Each of these rounds is several thresholds, and every one must stay quiet.
+    round=1
+    while [ "$round" -le 3 ]; do
+      : > "$out"
+      wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" absorb \
+        || fail "a $verdict endpoint re-alarmed on later threshold $round: $(cat "$out")"
+      [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+        || fail "a $verdict endpoint queued a repeat wake on round $round: $(cat "$state/.wake-queue")"
+      [ ! -e "$state/.wedge-escalations-$key" ] \
+        || fail "a $verdict endpoint advanced the escalation count on round $round"
+      round=$((round + 1))
+    done
+    unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  done
+  pass "a record whose endpoint is dead or missing reports itself once and is never re-escalated"
+}
+
+# The load-bearing direction. A genuinely wedged LIVE agent must escalate exactly
+# as it did before, and so must every verdict short of proof: an unattributable
+# foreground process (`ambiguous`) and an unreadable endpoint keep the identical
+# schedule, reason and count, because neither shows the agent is gone.
+test_live_and_unproven_endpoints_still_wedge_escalate() {
+  local dir state fakebin out capture window key spec verdict comm inventory
+  local working='state: working · source: run-step · ci running'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  for spec in 'alive|grok|fm-wedge' 'ambiguous|node|fm-wedge' 'unreadable||fm-wedge'; do
+    verdict=${spec%%|*}; comm=${spec#*|}; inventory=${comm#*|}; comm=${comm%%|*}
+    dir=$(wedge_threshold_fixture "wedge-live-$verdict" 'working: still compiling' 0)
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    FM_TEST_PANE_COMMAND=$comm FM_TEST_TMUX_WINDOWS=$inventory
+    export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+      || fail "an $verdict endpoint stopped escalating at the wedge threshold: $(cat "$out")"
+    grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
+      || fail "an $verdict endpoint lost its wedge reason: $(cat "$out")"
+    [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = 1 ] \
+      || fail "an $verdict endpoint did not advance the escalation count"
+    ack_stopped_cycle "$state" || fail "could not acknowledge the $verdict escalation"
+
+    # And it keeps escalating, with the count climbing exactly as it always did.
+    : > "$out"
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+      || fail "an $verdict endpoint escalated only once: $(cat "$out")"
+    grep -F 'possible wedge, escalation 2' "$out" >/dev/null \
+      || fail "an $verdict endpoint did not keep counting: $(cat "$out")"
+    ack_stopped_cycle "$state" || fail "could not acknowledge the second $verdict escalation"
+    unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  done
+  pass "a live wedged agent, an unattributable one, and an unreadable endpoint escalate unchanged"
+}
+
+# Reporting once must not mean reporting once forever: a replacement launched into
+# the same window has to get the full alarm back, and its own later death has to be
+# reported again rather than silenced by the record of the first one.
+test_gone_report_rearms_when_the_endpoint_comes_back() {
+  local dir state fakebin out capture window key
+  local failed='state: failed · source: run-step · run failed'
+  local working='state: working · source: run-step · ci running'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  dir=$(wedge_threshold_fixture gone-rearm 'working: still compiling' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+
+  gone_endpoint_env missing; export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
+    || fail "the gone endpoint was never reported: $(cat "$out")"
+  [ -s "$state/.dead-reported-$key" ] || fail "the once-only report left no record of itself"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first gone report"
+
+  # A replacement is launched into the same window and then wedges for real.
+  FM_TEST_PANE_COMMAND=grok FM_TEST_TMUX_WINDOWS=fm-wedge
+  : > "$out"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+    || fail "a replacement agent's wedge was swallowed by the earlier gone report: $(cat "$out")"
+  grep -F 'possible wedge, escalation' "$out" >/dev/null \
+    || fail "a replacement agent did not escalate as a wedge: $(cat "$out")"
+  [ ! -e "$state/.dead-reported-$key" ] \
+    || fail "the once-only record survived an endpoint that reads live again"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the replacement's wedge escalation"
+
+  # And when the replacement dies too, that death is reported in full.
+  gone_endpoint_env dead
+  : > "$out"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
+    || fail "a second death in the same window was never reported: $(cat "$out")"
+  grep -F 'agent dead' "$out" >/dev/null \
+    || fail "a second death was not reported as a gone endpoint: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the second gone report"
+  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  pass "the once-only gone report re-arms when the endpoint comes back, and reports a later death again"
 }
 
 
@@ -5150,6 +5301,9 @@ test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
+test_gone_endpoint_reports_once_instead_of_escalating_forever
+test_live_and_unproven_endpoints_still_wedge_escalate
+test_gone_report_rearms_when_the_endpoint_comes_back
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound

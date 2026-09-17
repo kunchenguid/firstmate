@@ -50,6 +50,11 @@
 #                          the run step cannot show; that deferral still
 #                          re-surfaces once per PAUSE_RESURFACE_SECS, and a pane
 #                          that writes nothing keeps the unchanged schedule.
+#                          A pane whose recorded endpoint holds no agent at all is
+#                          not a wedge and is reported ONCE instead of escalating
+#                          on that cadence forever (wedge_dead_record); only the
+#                          two recovery-grade verdicts license it, and every other
+#                          verdict escalates unchanged.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -1024,6 +1029,59 @@ clear_write_tracking() {  # <window-key>
   rm -f "$STATE/.writing-since-$key" "$STATE/.writing-resurfaced-$key"
 }
 
+# The question the wedge timer never asked before it alarmed: is there still an
+# agent here to BE wedged? A wedge is something stuck that might recover, so
+# re-alarming it earns its cost; an agent that is gone never moves again, its pane
+# never churns, the idle timer never resets, and the escalate path below clears its
+# own timer and re-arms with nothing bounding the count.
+# docs/architecture.md owns that contract and why only these two verdicts license
+# it; what the code needs stated here is the rest.
+#
+# fm_backend_agent_state (bin/fm-backend.sh) owns the vocabulary and the
+# process-level proof behind it. Every verdict short of proof - `alive`,
+# `ambiguous`, `unreadable`, `unverified`, or a read that failed outright - keeps
+# the unchanged escalation schedule, reason and count, so this narrows WHICH panes
+# escalate and never how loudly the ones that still do.
+#
+# Deliberately NOT a deferral like the two above it. They restart the idle timer
+# because the pane might still be working; this is terminal for as long as the
+# endpoint stays gone, because there is nothing left to re-probe on a cadence and a
+# repeat is exactly the noise it exists to stop. WHICH verdict fired is named for
+# the same reason wedge_wait_evidence names its verb: the two ask the supervisor
+# for different things.
+#
+# The marker is owned entirely by this function - written when the endpoint reads
+# gone, dropped by the same read the moment it stops reading gone - so a later
+# death is reported in full and no other reset site has to know this file exists.
+# Returns 0 when it has handled the window, 1 to escalate on the unchanged path.
+wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age>
+  local win=$1 since_file=$2 label=$3 age=$4 key marker agent_state detail reason
+  key=$(window_key "$win")
+  marker="$STATE/.dead-reported-$key"
+  agent_state=$(fm_backend_agent_state "$(window_backend "$win")" "$win" 2>/dev/null) || agent_state=unreadable
+  case "$agent_state" in
+    dead) detail='the endpoint is still there with no agent running in it' ;;
+    missing) detail='the recorded endpoint is gone' ;;
+    *) rm -f "$marker"; return 1 ;;
+  esac
+  # Re-arm the idle timer on BOTH paths below, so the backend probe above stays on
+  # its once-per-STALE_ESCALATE_SECS budget instead of running on every poll.
+  date +%s > "$since_file"
+  if [ "$(cat "$marker" 2>/dev/null || true)" = "$agent_state" ]; then
+    triage_log "absorbed $label (agent $agent_state, already reported once, idle ${age}s): $win"
+    return 0
+  fi
+  reason="stale: $win (idle ${age}s, agent $agent_state - $detail, so this is not a wedge; reported once and not re-escalated while it stays that way - reconcile this record, and check for unlanded work before any cleanup)"
+  # Append before the marker, for the reason stale_wait_record gives: a marker
+  # written ahead of a failed append outlives it, and the next sighting would then
+  # absorb the retry - the one way this bound could swallow the report outright
+  # rather than deliver it once.
+  fm_wake_append stale "$win" "$reason" || exit 1
+  printf '%s' "$agent_state" > "$marker"
+  clear_write_tracking "$key"
+  wake "$reason"
+}
+
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
@@ -1032,11 +1090,14 @@ clear_write_tracking() {  # <window-key>
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
-# The wait-evidence consult (wedge_wait_evidence, one status-line read) and the
-# worktree write probe run ONLY here, inside the at-threshold branch that is
-# about to escalate: at most one each per window per STALE_ESCALATE_SECS, never
-# per poll. The wait consult runs first, because a pane whose worker already said
-# why it is quiet has nothing to prove through its worktree.
+# The wait-evidence consult (wedge_wait_evidence, one status-line read), the
+# worktree write probe, and the dead-record probe (wedge_dead_record) run ONLY
+# here, inside the at-threshold branch that is about to escalate: at most one each
+# per window per STALE_ESCALATE_SECS, never per poll. The wait consult runs first,
+# because a pane whose worker already said why it is quiet has nothing to prove
+# through its worktree. The dead-record probe runs last of the three, so the two
+# cheaper deferrals keep the panes they already own on their existing bounded
+# cadences and only a pane that would otherwise alarm pays for a backend read.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason evidence
   since=$(cat "$since_file" 2>/dev/null || true)
@@ -1057,6 +1118,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         fi
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
+          return 0
+        fi
+        if wedge_dead_record "$win" "$since_file" "$label" "$age"; then
           return 0
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
