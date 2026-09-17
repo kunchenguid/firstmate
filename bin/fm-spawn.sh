@@ -3486,6 +3486,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  # Refuse a fresh allocation over a retained copy before any allocator side
+  # effect. The project lock is already held from slot-allocation scope, so
+  # this serializes with teardown's ownership proof and return.
+  if ! fm_treehouse_preacquire_guard "$PROJ_ABS"; then
+    echo "error: ${FM_TREEHOUSE_PREACQUIRE_REFUSAL:-refused to allocate a Treehouse slot for $PROJ_ABS}; nothing was changed" >&2
+    exit 1
+  fi
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.

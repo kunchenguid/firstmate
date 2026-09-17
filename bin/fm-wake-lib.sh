@@ -1202,6 +1202,36 @@ fm_firstmate_root_home() {
   printf '%s\n' "$home"
 }
 
+# The physical Git common directory names one repository: two paths that reach
+# one checkout - the primary clone, a linked worktree, or a symlinked prefix -
+# share a single common directory, while two same-basename directories do not.
+# The canonical lock identity is that common directory's owner (the primary
+# root), so a linked or symlinked source derives the same lock as its primary
+# and a local-path origin on a clone resolves to the same root it points at.
+#
+# Sets FM_TREEHOUSE_REPO_IDENTITY to the absolute primary root. Refuses a
+# layout whose common directory is not a `.git` directory beside a checkout,
+# because that shape's primary root cannot be derived without guessing; it
+# fails closed rather than guessing an identity.
+fm_treehouse_repo_identity() {  # <project-dir>
+  local project=$1 common
+  FM_TREEHOUSE_REPO_IDENTITY=
+  [ -d "$project" ] || return 1
+  common=$(git -C "$project" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  common=$(CDPATH='' cd -- "$common" 2>/dev/null && pwd -P) || return 1
+  [ "$(basename "$common")" = .git ] || return 1
+  FM_TREEHOUSE_REPO_IDENTITY=$(dirname "$common")
+  [ -d "$FM_TREEHOUSE_REPO_IDENTITY" ] || return 1
+}
+# The installed treehouse either supports atomic conditional return
+# (`return --if-lease-holder <holder>`) or it does not. A durable-lease release
+# must refuse without it: `return --force` resets before any holder check and
+# can destroy a slot reassigned outside Firstmate's cooperating lock domain.
+treehouse_supports_conditional_return() {
+  command -v treehouse >/dev/null 2>&1 || return 1
+  treehouse return --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--if-lease-holder([^[:alnum:]_-]|$)'
+}
+
 # The one lock serializing Treehouse slot allocation and return for a project.
 #
 # It is anchored in the local root home's state directory so that every home on
@@ -1209,9 +1239,10 @@ fm_firstmate_root_home() {
 # below it, including a remote-seeded home and its own local descendants -
 # derives the identical path. Its identity is the project's resolved origin, so
 # separate clones of one origin share a single lock; an origin-less local-only
-# project falls back to its own worktree top instead of failing to resolve.
+# project falls back to its physical Git common directory, so a linked or
+# symlinked root of that checkout derives the same lock as its primary.
 fm_treehouse_project_lock_path() {  # <project-dir>
-  local project=$1 root origin identity hash top
+  local project=$1 root origin identity hash
   [ -d "$project" ] || return 1
   root=$(fm_firstmate_root_home "$FM_HOME") || return 1
   origin=$(git -C "$project" remote get-url origin 2>/dev/null || true)
@@ -1223,9 +1254,8 @@ fm_treehouse_project_lock_path() {  # <project-dir>
     esac
     identity=$origin
   else
-    top=$(git -C "$project" rev-parse --show-toplevel 2>/dev/null) || return 1
-    top=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || return 1
-    identity=$top
+    fm_treehouse_repo_identity "$project" >/dev/null || return 1
+    identity=$FM_TREEHOUSE_REPO_IDENTITY
   fi
   hash=$(printf '%s' "$identity" | git hash-object --stdin 2>/dev/null) || return 1
   [ -d "$root/state" ] || return 1
@@ -1346,6 +1376,135 @@ fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
   marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 0
   rm -f "$marker" 2>/dev/null || true
 }
+
+# Enumerate the state directories of every locally registered Firstmate home on
+# this machine - the root home and each local secondmate below it - so an
+# ownership scan can see every retained task record that might name a pool slot.
+# bin/fm-teardown.sh's collect_local_firstmate_states keeps its record-scoped
+# variant of this same walk; this is the spawn-side read and owns the directory
+# set. Remote registry entries are skipped: their state is not on this machine.
+fm_treehouse_local_state_dirs() {
+  local root home reg line child i=0 known existing
+  local -a homes=()
+  FM_TREEHOUSE_LOCAL_STATE_DIRS=()
+  root=$(fm_firstmate_root_home "$FM_HOME") || return 1
+  homes=("$root")
+  while [ "$i" -lt "${#homes[@]}" ]; do
+    home=${homes[$i]}
+    i=$((i + 1))
+    FM_TREEHOUSE_LOCAL_STATE_DIRS+=("$home/state")
+    reg="$home/data/secondmates.md"
+    [ ! -e "$reg" ] && [ ! -L "$reg" ] && continue
+    [ -f "$reg" ] && [ ! -L "$reg" ] || return 1
+    if ! command -v secondmate_registry_parse_line >/dev/null 2>&1; then
+      # shellcheck source=bin/fm-secondmate-registry-lib.sh
+      . "$FM_WAKE_LIB_DIR/fm-secondmate-registry-lib.sh"
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        "- "*) ;;
+        *) continue ;;
+      esac
+      secondmate_registry_parse_line "$line" || return 1
+      [ "${SECONDMATE_REGISTRY_REMOTE:-0}" -eq 0 ] || continue
+      child=$(CDPATH='' cd -- "$SECONDMATE_REGISTRY_HOME" 2>/dev/null && pwd -P) || return 1
+      known=0
+      for existing in "${homes[@]}"; do
+        [ "$existing" != "$child" ] || known=1
+      done
+      [ "$known" = 1 ] || homes+=("$child")
+    done < "$reg"
+  done
+}
+
+# The pre-acquire ownership guard: refuse a fresh Treehouse allocation for a
+# project when a retained local task record names a slot in that project's pool
+# and the slot lacks a durable allocation reservation, or when the pool's
+# ownership is ambiguous. It runs under the held project lock, before any
+# `treehouse get`, so an allocator reset can never destroy a retained copy.
+#
+# A durable reservation is recorded as allocation_id= in the task's metadata by
+# the durable-acquisition path. A retained record without one is a legacy or
+# parked copy whose slot Treehouse's allocator may reset; it stays unavailable
+# until an owning operator has preserved and reconciled it. Refusals print a
+# one-line reason to stderr and set FM_TREEHOUSE_PREACQUIRE_REFUSAL; they never
+# mutate the pool, a record, or a claim.
+fm_treehouse_preacquire_refuse() {  # <reason>
+  # shellcheck disable=SC2034 # Output global, read by the spawning caller.
+  FM_TREEHOUSE_PREACQUIRE_REFUSAL=$1
+}
+
+fm_treehouse_preacquire_guard() {  # <project-dir>
+  local project=$1 state_dir meta line task_id worktree home_slot allocation_id
+  local slot value i j
+  local -a retained_slots=() retained_tasks=() retained_allocation_ids=()
+
+  if ! fm_treehouse_local_state_dirs; then
+    fm_treehouse_preacquire_refuse "cannot enumerate registered local Firstmate homes; refusing to allocate"
+    return 1
+  fi
+
+  for state_dir in "${FM_TREEHOUSE_LOCAL_STATE_DIRS[@]}"; do
+    [ -d "$state_dir" ] || continue
+    for meta in "$state_dir"/*.meta; do
+      [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+      task_id=$(basename "$meta" .meta)
+      worktree=
+      home_slot=
+      allocation_id=
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+          worktree=*) worktree=${line#worktree=} ;;
+          home=*) home_slot=${line#home=} ;;
+          allocation_id=*) allocation_id=${line#allocation_id=} ;;
+        esac
+      done < "$meta"
+      for value in "$worktree" "$home_slot"; do
+        [ -n "$value" ] || continue
+        slot=$(CDPATH='' cd -- "$value" 2>/dev/null && pwd -P) || continue
+        fm_treehouse_pool_slot "$project" "$slot" || continue
+        retained_slots+=("$slot")
+        retained_tasks+=("$task_id")
+        retained_allocation_ids+=("$allocation_id")
+      done
+    done
+  done
+
+  # Nothing retained names this project's pool: nothing to protect.
+  [ "${#retained_slots[@]}" -gt 0 ] || return 0
+
+  for ((i = 0; i < ${#retained_slots[@]}; i++)); do
+    slot=${retained_slots[$i]}
+    task_id=${retained_tasks[$i]}
+    for ((j = i + 1; j < ${#retained_slots[@]}; j++)); do
+      if [ "${retained_slots[$j]}" = "$slot" ] && [ "${retained_tasks[$j]}" != "$task_id" ]; then
+        fm_treehouse_preacquire_refuse "multiple retained task records name pool slot $slot; refusing to allocate"
+        return 1
+      fi
+    done
+    fm_treehouse_slot_owner_state "$slot" "$task_id"
+    case "$FM_TREEHOUSE_SLOT_OWNER" in
+      absent)
+        fm_treehouse_preacquire_refuse "task $task_id's recorded pool slot $slot has no owner claim; a missing legacy marker does not grant permission to allocate over it"
+        return 1
+        ;;
+      unsafe)
+        fm_treehouse_preacquire_refuse "task $task_id's recorded pool slot $slot carries an owner claim that cannot be read; refusing to allocate"
+        return 1
+        ;;
+      other)
+        fm_treehouse_preacquire_refuse "task $task_id's recorded pool slot $slot is claimed by task $FM_TREEHOUSE_SLOT_OWNER_ID; refusing to allocate over an unreconciled reassignment"
+        return 1
+        ;;
+      mine) ;;
+    esac
+    if [ -z "${retained_allocation_ids[$i]}" ]; then
+      fm_treehouse_preacquire_refuse "task $task_id's recorded pool slot $slot has no durable allocation reservation; refusing to allocate over a retained copy"
+      return 1
+    fi
+  done
+}
+
 
 fm_failure_episode_reset() {
   local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
