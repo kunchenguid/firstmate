@@ -234,6 +234,19 @@ EOF
 
 fm_dod_block() {  # <mode> <task-id>
   local mode=$1 id=$2
+  local post_commit
+  # Whether idle-compact is armed is decided at WAIT TIME by the worker
+  # itself (`bin/fm-idle-compact.sh enabled`), never baked into this brief at
+  # generation time: config/idle-compact can be added or removed at any point
+  # between when this brief is written and when the worker actually reaches
+  # this instruction, and a stale generation-time snapshot would either
+  # promise a ring that will never come or skip a ring that would have
+  # arrived. The bounded re-check below also covers a config change WHILE the
+  # worker is already waiting, so a paused worker can never wait forever.
+  # shellcheck disable=SC2016  # single quotes are deliberate: this is literal brief text whose backtick-wrapped commands must reach the reading agent verbatim, not expand here. $FM_ROOT is spliced in as an expanded segment between single-quoted runs (the '"$FM_ROOT"' idiom), the same technique the literal apostrophe below uses.
+  post_commit='Right after that implementation commit lands, check whether idle-compact is armed on this host right now: run `bash '"$FM_ROOT"'/bin/fm-idle-compact.sh enabled` (exit 0 = armed, exit 1 = not armed - absent, invalid, or zero `config/idle-compact`; an empty-but-present file is valid and uses the 15-minute default). Check live rather than trusting this brief: the config can change after this brief was written.
+If armed, append `paused: awaiting compaction before validation` to the status file and stop for this turn - do NOT run `no-mistakes axi run` yet. A worker cannot self-trigger compaction (`/compact` is a terminal built-in, not a tool you can invoke), so firstmate'"'"'s idle-compact watcher reads that line - the phrase must START the line, and any detail you want to note (your measured lane size, the commit) may follow it - compacts your context while it is still warm, then rings you with a durable inbox message telling you to start the validation run - resume from that ring instead of waiting on a reply. You never schedule your own wake for this - once you end this turn, nothing runs until something resumes you. Bounded fallback, applied only when you are ever resumed while still in this paused state (a firstmate check-in, a heartbeat, anything): compare now to the status file'"'"'s own mtime for the `paused: awaiting compaction before validation` line; if more than 60 minutes have passed with no ring, re-run `bash '"$FM_ROOT"'/bin/fm-idle-compact.sh enabled` - idle-compact may have been disarmed while you waited; if it now reports not armed, or more than 90 minutes have passed regardless of that check, stop waiting and start `no-mistakes axi run` yourself.
+If not armed, start `no-mistakes axi run` yourself and continue driving it below - do not wait for a ring that will never come.'
   case "$mode" in
     direct-PR)
       cat <<EOF
@@ -261,8 +274,7 @@ EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+$post_commit
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.

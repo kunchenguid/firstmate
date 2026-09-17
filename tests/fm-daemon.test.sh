@@ -895,6 +895,41 @@ test_handle_wake_terminal_signal_clears_pause_tracking() {
   pass "a terminal signal clears pause and stale tracking across both supervisors"
 }
 
+# The away-mode daemon is the second supervision path sharing
+# bin/fm-idle-compact.sh with bin/fm-watch.sh. Nothing else here proves this
+# path's housekeeping tick actually runs that shared sweep, so a deleted call
+# would leave the opt-in feature dead in away mode with the suite still green.
+# The sweep's own observable is its cadence stamp, written once per due sweep
+# and only while config/idle-compact exists. The subshell re-source is how the
+# config dir is repointed: the owner resolves CONFIG once, when sourced.
+run_housekeeping_with_config() {  # <state> <config-dir>
+  (
+    export FM_CONFIG_OVERRIDE="$2"
+    # shellcheck source=bin/fm-idle-compact.sh
+    . "$ROOT/bin/fm-idle-compact.sh"
+    FM_STATE_OVERRIDE="$1" housekeeping "$1"
+  )
+}
+
+test_housekeeping_sweeps_idle_compact_only_once_configured() {
+  local dir state cfg
+  dir=$(make_supercase idle-compact-housekeeping)
+  state="$dir/state"; cfg="$dir/config"
+  mkdir -p "$cfg"
+
+  run_housekeeping_with_config "$state" "$cfg" \
+    || fail "housekeeping failed with config/idle-compact absent"
+  [ ! -e "$state/.idle-compact-last-sweep" ] \
+    || fail "away-mode housekeeping swept with config/idle-compact absent - the feature must ship inert"
+
+  printf '30\n' > "$cfg/idle-compact"
+  run_housekeeping_with_config "$state" "$cfg" \
+    || fail "housekeeping failed with the idle-compact feature configured"
+  [ -e "$state/.idle-compact-last-sweep" ] \
+    || fail "away-mode housekeeping never ran the idle-compact sweep with the feature configured"
+  pass "away-mode housekeeping runs the shared idle-compact sweep only once the feature is configured"
+}
+
 test_housekeeping_migrates_watcher_pause_marker() {
   local dir state key win
   dir=$(make_supercase migrate-watcher-pause)
@@ -1761,6 +1796,9 @@ test_strip_injection_marker() {
   local encoded stripped
   fm_operational_input_encode away-supervisor "Supervisor escalate: done" encoded \
     || fail "could not encode current away fixture"
+  # shellcheck disable=SC2031 # false positive: an unrelated local "encoded" in
+  # bin/fm-classify-lib.sh's subshell gets conflated with this one by
+  # ShellCheck's cross-file --external-sources analysis.
   stripped=$(strip_injection_marker "$encoded")
   [ "$stripped" = "Supervisor escalate: done" ] \
     || fail "current typed operational envelope not stripped: '$stripped'"
@@ -2798,6 +2836,7 @@ test_stale_captain_held_classifies_pause
 test_handle_wake_paused_records_pause_marker
 test_handle_wake_paused_signal_records_pause_marker
 test_handle_wake_terminal_signal_clears_pause_tracking
+test_housekeeping_sweeps_idle_compact_only_once_configured
 test_housekeeping_migrates_watcher_pause_marker
 test_housekeeping_migrates_watcher_unpaused_marker_to_clear
 test_housekeeping_seeds_pause_marker_from_status
