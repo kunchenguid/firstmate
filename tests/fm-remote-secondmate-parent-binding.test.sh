@@ -220,6 +220,120 @@ cmp -s "$REMOTE_HOME/.fm-secondmate-parent" <(
   printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_role=root\nrepo_scope_snapshot=fm-remote-repo-scope.v1\nrepo_scope_count=1\nrepo_authority_count=0\nrepo_scope_identity=sha256:%s\nparent_host=remote-mac\n' \
     "$REMOTE_ALPHA_IDENTITY"
 ) || fail "real remote provisioning must write the exact durable remote parent record"
+assert_grep "repo-identities: alpha=sha256:$REMOTE_ALPHA_IDENTITY" "$PARENT/data/secondmates.md" \
+  "a same-named remote route must durably record the actual seeded repository identity"
+
+# A legacy remote row without durable identities cannot be refreshed from the
+# same-named root clone alone, but an explicit origin can repair that route.
+sed -E 's/; repo-identities: [^;]+//' "$PARENT/data/secondmates.md" > "$TMP_ROOT/legacy-route.registry"
+mv "$TMP_ROOT/legacy-route.registry" "$PARENT/data/secondmates.md"
+legacy_refresh_out=
+if legacy_refresh_out=$(FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
+  FM_SECONDMATE_SCOPE='iOS implementation and Xcode validation' \
+  remote_env "$ROOT/bin/fm-remote-home-seed.sh" ios remote-mac "$REMOTE_ROOT" "$REMOTE_HOME" alpha 2>&1); then
+  fail "legacy remote route refreshed from an unverified same-named root clone"
+fi
+assert_contains "$legacy_refresh_out" 'lacks durable repository identities' \
+  "legacy route refusal did not explain the explicit-origin repair path"
+FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
+  FM_SECONDMATE_SCOPE='iOS implementation and Xcode validation' \
+  remote_env "$ROOT/bin/fm-remote-home-seed.sh" ios remote-mac "$REMOTE_ROOT" "$REMOTE_HOME" \
+    "alpha=file://$TMP_ROOT/alpha.git" >/dev/null \
+  || fail "explicit-origin re-provision did not repair the legacy route"
+assert_grep "repo-identities: alpha=sha256:$REMOTE_ALPHA_IDENTITY" "$PARENT/data/secondmates.md" \
+  "explicit-origin re-provision did not restore the root-owned identity record"
+
+# A remote route may intentionally provision a same-named project from a
+# different origin than the root clone, so ownership checks must retain the
+# seeded identity instead of reconstructing it from the root project name.
+git init -q --bare "$TMP_ROOT/beta.git"
+git -C "$PARENT/projects" init -q -b main beta
+git -C "$PARENT/projects/beta" config user.email test@example.com
+git -C "$PARENT/projects/beta" config user.name Test
+printf 'beta\n' > "$PARENT/projects/beta/README.md"
+git -C "$PARENT/projects/beta" add README.md
+git -C "$PARENT/projects/beta" commit -qm init
+git -C "$PARENT/projects/beta" remote add origin "file://$TMP_ROOT/beta.git"
+git -C "$PARENT/projects/beta" push -q -u origin main
+git --git-dir="$TMP_ROOT/beta.git" symbolic-ref HEAD refs/heads/main
+printf '%s\n' '- beta [direct-PR] - beta project (added 2026-09-17)' >> "$PARENT/data/projects.md"
+MISMATCH_HOME="$TMP_ROOT/remote-mismatch-home"
+FM_SECONDMATE_CHARTER='Own beta-origin work under the alpha route.' \
+  FM_SECONDMATE_SCOPE='alpha-named remote clone from beta origin' \
+  remote_env "$ROOT/bin/fm-remote-home-seed.sh" ios-mismatch remote-mac "$REMOTE_ROOT" "$MISMATCH_HOME" \
+    "alpha=file://$TMP_ROOT/beta.git" >/dev/null \
+  || fail "explicit-origin remote route provisioning failed"
+MISMATCH_IDENTITY=$(fm_repo_scope_canonical_origin_identity "$MISMATCH_HOME/projects/alpha") \
+  || fail "mismatched-name remote clone identity could not be normalized"
+BETA_IDENTITY=$(fm_repo_scope_canonical_origin_identity "$PARENT/projects/beta") \
+  || fail "beta project identity could not be normalized"
+[ "$MISMATCH_IDENTITY" = "$BETA_IDENTITY" ] \
+  || fail "the alpha-named remote clone did not retain beta's repository identity"
+assert_grep "repo-identities: alpha=sha256:$BETA_IDENTITY" "$PARENT/data/secondmates.md" \
+  "an explicit-origin remote route did not record the actual canonical origin identity"
+
+git init -q --bare "$TMP_ROOT/gamma.git"
+git -C "$PARENT/projects" init -q -b main gamma
+git -C "$PARENT/projects/gamma" config user.email test@example.com
+git -C "$PARENT/projects/gamma" config user.name Test
+printf 'gamma\n' > "$PARENT/projects/gamma/README.md"
+git -C "$PARENT/projects/gamma" add README.md
+git -C "$PARENT/projects/gamma" commit -qm init
+git -C "$PARENT/projects/gamma" remote add origin "file://$TMP_ROOT/gamma.git"
+git -C "$PARENT/projects/gamma" push -q -u origin main
+git --git-dir="$TMP_ROOT/gamma.git" symbolic-ref HEAD refs/heads/main
+printf '%s\n' '- gamma [direct-PR] - gamma project (added 2026-09-17)' >> "$PARENT/data/projects.md"
+GAMMA_IDENTITY=$(fm_repo_scope_canonical_origin_identity "$PARENT/projects/gamma") \
+  || fail "gamma project identity could not be normalized"
+FM_HOME="$PARENT" FM_SECONDMATE_CHARTER='Own the gamma repository.' \
+  FM_SECONDMATE_SCOPE='all gamma repository work' \
+  "$ROOT/bin/fm-home-seed.sh" gamma-pfm "$TMP_ROOT/gamma-pfm" --project-firstmate gamma >/dev/null \
+  || fail "non-overlapping gamma project Firstmate seeding failed"
+FM_SECONDMATE_CHARTER='Own beta-origin work under the alpha route.' \
+  remote_env "$ROOT/bin/fm-remote-home-seed.sh" ios-mismatch remote-mac "$REMOTE_ROOT" "$MISMATCH_HOME" \
+    "alpha=file://$TMP_ROOT/beta.git" >/dev/null \
+  || fail "remote route refresh with a non-overlapping project authority failed"
+. "$ROOT/bin/fm-secondmate-parent-lib.sh"
+fm_secondmate_parent_record_parse "$MISMATCH_HOME/.fm-secondmate-parent" \
+  || fail "refreshed remote route parent attestation could not be parsed"
+printf '%s' "$FM_SECONDMATE_PARENT_REPO_AUTHORITY_IDENTITIES" | grep -Fqx "sha256:$GAMMA_IDENTITY" \
+  || fail "refreshed remote runtime attestation omitted the current gamma authority identity"
+fm_repo_scope_root_route_guard "$MISMATCH_HOME" "$MISMATCH_HOME/projects/alpha" \
+  || fail "refreshed non-overlapping remote route was not permitted: $FM_REPO_SCOPE_LAST_ERROR"
+
+beta_seed_out=
+if beta_seed_out=$(FM_HOME="$PARENT" FM_SECONDMATE_CHARTER='Own the beta repository.' \
+  FM_SECONDMATE_SCOPE='all beta repository work' \
+  "$ROOT/bin/fm-home-seed.sh" beta-pfm "$TMP_ROOT/beta-pfm" --project-firstmate beta 2>&1); then
+  fail "root admitted a project Firstmate for an explicit remote origin hidden behind a different project name"
+fi
+assert_contains "$beta_seed_out" 'already in remote ordinary route' \
+  "mismatched-name repository overlap refusal did not name the remote authority"
+
+# Recreate the impossible overlap as a manual registry edit to prove startup
+# audits the durable seeded identity rather than alpha's different root clone.
+grep -F -- '- ios-mismatch ' "$PARENT/data/secondmates.md" > "$TMP_ROOT/mismatch-route.line" \
+  || fail "mismatched remote route record was not available for the bootstrap counterexample"
+grep -vE '^- ios-mismatch( |$)' "$PARENT/data/secondmates.md" > "$TMP_ROOT/secondmates.without-mismatch"
+mv "$TMP_ROOT/secondmates.without-mismatch" "$PARENT/data/secondmates.md"
+FM_HOME="$PARENT" FM_SECONDMATE_CHARTER='Own the beta repository.' \
+  FM_SECONDMATE_SCOPE='all beta repository work' \
+  "$ROOT/bin/fm-home-seed.sh" beta-pfm "$TMP_ROOT/beta-pfm" --project-firstmate beta >/dev/null \
+  || fail "manual-overlap bootstrap fixture could not seed the conflicting beta authority"
+cat "$TMP_ROOT/mismatch-route.line" >> "$PARENT/data/secondmates.md"
+if fm_repo_scope_audit_remote_overlaps "$PARENT/data/secondmates.md"; then
+  fail "bootstrap overlap audit missed explicit beta origin behind remote project name alpha"
+fi
+assert_contains "$FM_REPO_SCOPE_LAST_ERROR" 'overlaps project Firstmate repository alpha' \
+  "bootstrap overlap report did not identify the mismatched-name remote repo"
+mkdir -p "$TMP_ROOT/bootstrap-home"
+BOOTSTRAP_OUT=$(HOME="$TMP_ROOT/bootstrap-home" FM_HOME="$PARENT" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_BOOTSTRAP_NETWORK=skip FM_BOOTSTRAP_LOCKED=1 "$ROOT/bin/fm-bootstrap.sh" 2>&1) \
+  || fail "bootstrap failed while surfacing the manually introduced mismatch: $BOOTSTRAP_OUT"
+assert_contains "$BOOTSTRAP_OUT" 'remote repository ownership needs review: remote ordinary route' \
+  "startup did not surface the explicit-origin remote ownership collision"
+pass "remote ordinary route identities, refreshed attestations, and bootstrap audits use seeded origins"
+pass "remote ordinary route identities, not same-named root clones, govern project authority"
 
 remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null \
   || fail "real remote secondmate launch failed"

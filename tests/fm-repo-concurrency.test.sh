@@ -172,9 +172,10 @@ mkdir -p "$audit_root/data" "$audit_root/projects"
 git clone --quiet "$ORIGIN_URL" "$audit_root/projects/alpha"
 printf -- '- alpha-pfm - project alpha (home: %s; scope: alpha; projects: alpha; added 2026-09-17)\n' "$PFM" \
   > "$audit_root/data/secondmates.md"
-printf -- '- remote-alpha - remote alpha (host: build; root: /srv/fm; home: /srv/alpha; scope: alpha; projects: alpha; added 2026-09-17)\n' \
+printf -- '- remote-alpha - remote alpha (host: build; root: /srv/fm; home: /srv/alpha; scope: alpha; projects: alpha; repo-identities: alpha=sha256:%s; added 2026-09-17)\n' \
+  "$alpha_identity" \
   >> "$audit_root/data/secondmates.md"
-if fm_repo_scope_audit_remote_overlaps "$audit_root/data/secondmates.md" "$audit_root/projects"; then
+if fm_repo_scope_audit_remote_overlaps "$audit_root/data/secondmates.md"; then
   fail "bootstrap overlap audit accepted a manually registered remote/PFM ownership collision"
 fi
 printf '%s\n' "$FM_REPO_SCOPE_LAST_ERROR" | grep -F 'overlaps project Firstmate repository alpha' >/dev/null \

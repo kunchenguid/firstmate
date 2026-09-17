@@ -19,6 +19,10 @@
 # data/projects.md still owns the project's registered delivery mode, so an
 # unregistered or local-only project is refused rather than provisioned.
 # Seeding writes nothing under projects/ and needs no fleet sync first.
+# The root registry stores canonical identities for the exact origins sent to
+# the remote host so later authority checks never infer identity from names.
+# Existing projectful routes without that durable map require explicit origins
+# before they can be safely refreshed.
 #
 # Known provisioning failure rolls the registry back. SSH status 255 preserves
 # the route and any newly scaffolded brief because completion is unknown and a same-route rerun converges.
@@ -94,6 +98,7 @@ fi
 NO_PROJECTS=0
 PROJECT_NAMES=()
 PROJECT_ORIGINS=()
+PROJECT_ORIGIN_EXPLICIT=()
 PROJECT_IDENTITIES=()
 for arg in "$@"; do
   if [ "$arg" = --no-projects ]; then
@@ -101,7 +106,7 @@ for arg in "$@"; do
   else
     name=${arg%%=*}
     origin=
-    case "$arg" in *=*) origin=${arg#*=} ;; esac
+    case "$arg" in *=*) origin=${arg#*=}; PROJECT_ORIGIN_EXPLICIT+=(1) ;; *) PROJECT_ORIGIN_EXPLICIT+=(0) ;; esac
     safe_id "$name" || die "invalid project name: $name"
     case "$arg" in
       *=*) fm_project_origin_safe "$origin" \
@@ -116,6 +121,11 @@ if [ "$NO_PROJECTS" -eq 1 ]; then
 else
   [ "${#PROJECT_NAMES[@]}" -gt 0 ] || die "at least one project or --no-projects is required"
 fi
+EXISTING_ROUTE=0
+EXISTING_ROUTE_PROJECTS=
+EXISTING_ROUTE_REPO_IDENTITIES=
+EXISTING_ROUTE_IDENTITIES_VALID=0
+EXISTING_ROUTE_IDENTITY_RECORDS=
 
 mkdir -p "$STATE" || die "cannot create parent state directory"
 REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
@@ -127,11 +137,18 @@ if [ -e "$REG" ] || [ -L "$REG" ]; then
   secondmate_registry_validate_bindings "$REG" secondmate_registry_path_key \
     || die "$SECONDMATE_REGISTRY_ERROR"
   if secondmate_registry_line_for_id "$REG" "$ID"; then
+    EXISTING_ROUTE=1
+    EXISTING_ROUTE_PROJECTS=$SECONDMATE_REGISTRY_PROJECTS
+    EXISTING_ROUTE_REPO_IDENTITIES=$SECONDMATE_REGISTRY_REPO_IDENTITIES
     [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ] \
       && [ "$SECONDMATE_REGISTRY_HOST" = "$HOST" ] \
       && [ "$SECONDMATE_REGISTRY_ROOT" = "$REMOTE_ROOT" ] \
       && [ "$SECONDMATE_REGISTRY_HOME" = "$REMOTE_HOME" ] \
       || die "secondmate $ID is already registered to a different local or remote home"
+    if fm_repo_scope_remote_identity_records_parse "$ID" "$EXISTING_ROUTE_PROJECTS" "$EXISTING_ROUTE_REPO_IDENTITIES"; then
+      EXISTING_ROUTE_IDENTITIES_VALID=1
+      EXISTING_ROUTE_IDENTITY_RECORDS=$FM_REPO_SCOPE_REMOTE_IDENTITY_RECORDS
+    fi
   fi
 fi
 
@@ -139,7 +156,12 @@ AUTHORITY_IDENTITIES=$(fm_repo_scope_registered_authority_identities "$REG") \
   || die "${FM_REPO_SCOPE_LAST_ERROR:-cannot read project Firstmate authority identities}"
 PROJECT_INDEX=0
 for project in "${PROJECT_NAMES[@]+"${PROJECT_NAMES[@]}"}"; do
+  if [ "$EXISTING_ROUTE" -eq 1 ] && [ "$EXISTING_ROUTE_IDENTITIES_VALID" -eq 0 ] \
+    && [ "${PROJECT_ORIGIN_EXPLICIT[$PROJECT_INDEX]}" -ne 1 ]; then
+    die "existing remote route $ID lacks durable repository identities; re-provision project $project with an explicit project=origin URL"
+  fi
   origin=${PROJECT_ORIGINS[$PROJECT_INDEX]}
+  origin_explicit=${PROJECT_ORIGIN_EXPLICIT[$PROJECT_INDEX]}
   PROJECT_INDEX=$((PROJECT_INDEX + 1))
   if [ -z "$origin" ] && [ -d "$PROJECTS/$project/.git" ]; then
     origin=$(git -C "$PROJECTS/$project" remote get-url origin 2>/dev/null || true)
@@ -147,12 +169,34 @@ for project in "${PROJECT_NAMES[@]+"${PROJECT_NAMES[@]}"}"; do
   [ -n "$origin" ] || die "project $project has no origin; pass $project=<origin-url> so the remote host can clone it"
   identity=$(fm_repo_scope_canonical_origin_value_identity "$origin" "$PROJECTS") \
     || die "cannot establish canonical repository identity for remote project $project"
+  if [ "$origin_explicit" -eq 0 ] && [ "$EXISTING_ROUTE_IDENTITIES_VALID" -eq 1 ]; then
+    while IFS= read -r prior_record; do
+      [ -n "$prior_record" ] || continue
+      [ "${prior_record%%=*}" = "$project" ] || continue
+      prior_identity=${prior_record#*=}
+      [ "${prior_identity#sha256:}" = "$identity" ] \
+        || die "root clone $project does not match the identity recorded for remote route $ID; pass the route's explicit project=origin URL to refresh it"
+    done <<< "$EXISTING_ROUTE_IDENTITY_RECORDS"
+  fi
   while IFS= read -r authority_identity; do
     [ -n "$authority_identity" ] || continue
     [ "$identity" != "$authority_identity" ] \
       || die "project $project is already owned by a project Firstmate; remote ordinary homes cannot overlap that authority"
   done <<< "$AUTHORITY_IDENTITIES"
   PROJECT_IDENTITIES+=("$identity")
+done
+REPO_IDENTITY_RECORDS=
+SEEN_REPO_IDENTITIES=' '
+PROJECT_INDEX=0
+for project in "${PROJECT_NAMES[@]+"${PROJECT_NAMES[@]}"}"; do
+  identity=${PROJECT_IDENTITIES[$PROJECT_INDEX]}
+  PROJECT_INDEX=$((PROJECT_INDEX + 1))
+  case "$SEEN_REPO_IDENTITIES" in *" $identity "*)
+    die "remote route $ID repeats repository identity for project $project"
+    ;;
+  esac
+  SEEN_REPO_IDENTITIES="$SEEN_REPO_IDENTITIES$identity "
+  REPO_IDENTITY_RECORDS="${REPO_IDENTITY_RECORDS}${REPO_IDENTITY_RECORDS:+, }$project=sha256:$identity"
 done
 
 mkdir -p "$DATA"
@@ -251,8 +295,9 @@ MANIFEST_BYTES=$(LC_ALL=C wc -c < "$TMP/manifest" | tr -d ' ')
 TODAY=$(date +%F)
 REG_TMP="$TMP/secondmates.next"
 if [ -f "$REG" ]; then grep -vE "^- $ID( |$)" "$REG" > "$REG_TMP" || true; else : > "$REG_TMP"; fi
-printf -- '- %s - %s (host: %s; root: %s; home: %s; scope: %s; projects: %s; added %s)\n' \
-  "$ID" "$SUMMARY" "$HOST" "$REMOTE_ROOT" "$REMOTE_HOME" "$SCOPE" "$PROJECTS_CSV" "$TODAY" >> "$REG_TMP"
+printf -- '- %s - %s (host: %s; root: %s; home: %s; scope: %s; projects: %s; repo-identities: %s; added %s)\n' \
+  "$ID" "$SUMMARY" "$HOST" "$REMOTE_ROOT" "$REMOTE_HOME" "$SCOPE" "$PROJECTS_CSV" \
+  "${REPO_IDENTITY_RECORDS:-none}" "$TODAY" >> "$REG_TMP"
 mv -f -- "$REG_TMP" "$REG"
 if ! secondmate_registry_validate_bindings "$REG" secondmate_registry_path_key "$ID" "$REMOTE_HOME"; then
   if [ "$REG_EXISTED" -eq 1 ]; then cp "$TMP/registry.before" "$REG"; else rm -f -- "$REG"; fi

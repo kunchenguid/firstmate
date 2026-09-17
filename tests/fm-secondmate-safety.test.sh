@@ -140,7 +140,7 @@ EOF
 test_project_firstmate_seed_has_one_repository_authority() {
   local home first duplicate ordinary child err origin fakebin launch_log output spawn_rc remote_child
   local root_id before_backlog overlap overlap_id overlap_before convert convert_id before_convert
-  local root_brief_before root_data_before remote_root remote_first remote_route remote_task remote_identity
+  local root_brief_before root_data_before remote_root remote_first remote_route remote_task remote_identity remote_alpha_identity
   home="$TMP_ROOT/project-firstmate-seed-home"
   first="$TMP_ROOT/project-firstmate-seed-first"
   duplicate="$TMP_ROOT/project-firstmate-seed-duplicate"
@@ -167,8 +167,12 @@ test_project_firstmate_seed_has_one_repository_authority() {
   mkdir -p "$remote_root/projects" "$remote_root/data" "$remote_root/state"
   fm_git_init_commit "$remote_root/projects/alpha"
   fm_git_add_origin "$remote_root/projects/alpha" "$TMP_ROOT/remotes/remote-overlap-alpha.git"
+  . "$ROOT/bin/fm-repo-concurrency-lib.sh"
+  remote_alpha_identity=$(fm_repo_scope_canonical_origin_identity "$remote_root/projects/alpha") \
+    || fail "remote overlap fixture identity could not be normalized"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$remote_root/data/projects.md"
-  printf -- '- remote-alpha - remote alpha (host: build; root: /srv/fm; home: /srv/alpha; scope: alpha tasks; projects: alpha; added 2026-09-17)\n' \
+  printf -- '- remote-alpha - remote alpha (host: build; root: /srv/fm; home: /srv/alpha; scope: alpha tasks; projects: alpha; repo-identities: alpha=sha256:%s; added 2026-09-17)\n' \
+    "$remote_alpha_identity" \
     > "$remote_root/data/secondmates.md"
   if FM_HOME="$remote_root" FM_SECONDMATE_CHARTER='overlapping remote authority' \
     "$ROOT/bin/fm-home-seed.sh" remote-alpha-pfm "$remote_first" --project-firstmate alpha >/dev/null 2>"$err"; then
@@ -217,7 +221,6 @@ test_project_firstmate_seed_has_one_repository_authority() {
   printf 'remote-alpha\n' > "$remote_route/.fm-secondmate-home"
   git clone --quiet "$origin" "$remote_route/projects/alpha"
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$remote_route/data/projects.md"
-  . "$ROOT/bin/fm-repo-concurrency-lib.sh"
   remote_identity=$(fm_repo_scope_canonical_origin_identity "$remote_route/projects/alpha") \
     || fail "remote ordinary test clone identity could not be normalized"
   remote_identity="sha256:$remote_identity"

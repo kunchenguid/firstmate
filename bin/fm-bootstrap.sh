@@ -1351,7 +1351,7 @@ repo_concurrency_bootstrap() {
       printf 'REPO_CONCURRENCY: could not lock the secondmate registry while auditing remote repository overlap\n'
       return 0
     fi
-    if fm_repo_scope_audit_remote_overlaps "$DATA/secondmates.md" "$PROJECTS"; then
+    if fm_repo_scope_audit_remote_overlaps "$DATA/secondmates.md"; then
       :
     else
       printf 'REPO_CONCURRENCY: remote repository ownership needs review: %s\n' \
