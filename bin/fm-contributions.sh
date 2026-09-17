@@ -41,7 +41,8 @@
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # A URL whose last good observation is merged or closed is final: it is
-# never re-read, stays fresh, and a stale error beside it is cleared once.
+# never re-read, stays fresh, and a stale error or divergent observation
+# beside it settles once.
 # A genuine failure prints its unavailable line only when it starts an episode
 # (no prior owner has an error); a successful read ends the episode.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
@@ -268,7 +269,7 @@ publish_pending() { # task canonical-url record-file
   done < <(jq -r '. as $r | .pending[] | .token | select(. as $t | ($r.notified // [] | index($t)) == null)' "$record")
 }
 
-settle_final() { # canonical-url task... : copy the URL's final observation to every owner
+settle_final() { # canonical-url task... : settle every owner onto the URL's final observation
   local url=$1 task
   shift
   jq -n --slurpfile saved "$TMP/saved.json" --arg url "$url" '
@@ -283,8 +284,13 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
       jq -n --slurpfile final "$TMP/final.json" '
         $final[0] + {error:null,pending:[],notified:[]}' > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
-    elif jq -e '.error != null' "$TMP/old.json" >/dev/null; then
-      jq '.error = null' "$TMP/old.json" > "$TMP/row.json"
+    elif jq -e --slurpfile final "$TMP/final.json" \
+      '.error != null or .observation != $final[0].observation' "$TMP/old.json" >/dev/null; then
+      # A record left behind by a crash mid-write keeps a divergent
+      # observation beside the settled one; converge it onto the final read.
+      jq --slurpfile final "$TMP/final.json" \
+        '. + {observation:$final[0].observation,checked_at:$final[0].checked_at,error:null}' \
+        "$TMP/old.json" > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
     fi
   done
