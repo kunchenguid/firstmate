@@ -18,9 +18,11 @@
 # classify   Print the lifecycle state a handler should act on: feedback, ended,
 #            waiting, missing, or unknown.
 # read       Print a structured presentation of one already-captured result so a
-#            handler consumes every queued item without grepping the raw file.
+#            handler consumes it without grepping the raw file. A bounded
+#            recovery chunk is presented with its exact byte range and final
+#            marker; successive result sequences carry the remaining ranges.
 #            It is read-only over the capture: it does not arm, poll, or change
-#            what Lavish delivered. The session-ending freeform message
+#            what Lavish delivered. For an ordinary result, the session-ending freeform message
 #            (tag=message) is its own labeled field, printed first and distinct
 #            from per-element annotations. Declared and presented item counts,
 #            plus a completeness verdict, follow before all annotations so a
@@ -109,7 +111,9 @@
 #
 # Before the published poll can destructively clear dock feedback, this adapter
 # snapshots the matching pending prompts. The runner removes that snapshot only
-# after it has durably captured a result. If the poll clears the store and then
+# after it has durably captured the whole snapshot. If the snapshot exceeds one
+# result's bound, successive invocations emit contiguous chunks and advance only
+# after each chunk is durably captured. If the poll clears the store and then
 # dies before returning output, the next invocation emits the snapshot through
 # the same process-event owner instead of polling again. Results that never
 # appeared in the session store retain the runner's ordinary output boundary.
