@@ -5,6 +5,9 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-platform-lib.sh"
+
 # bin/fm-harness.sh answers from environment markers and process ancestry. A
 # suite run from inside Cursor, Claude, Pi, or Grok inherits those markers and
 # its own real ancestry, either of which can decide a case the detection cases
@@ -132,7 +135,8 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse gh-axi gh
+  fm_fake_exit0 "$fakebin" gh-axi gh
+  fm_fake_treehouse_lease "$fakebin"
   fm_fake_exit0 "$fakebin" kimi
   ln -s "$JQ_BIN" "$fakebin/jq"
   printf '%s\n' "$fakebin"
@@ -191,7 +195,7 @@ EOF
 }
 
 test_kimi_launch_then_send_is_verified() {
-  local id rec out rc launch pointer brief_real meta task_tmp
+  local id rec out rc launch pointer brief_real meta task_tmp gotmp_export
   id="kimi-success-z1-$$"
   task_tmp="/tmp/fm-$id"
   KIMI_RUNTIME_TASK_TMP=$task_tmp
@@ -221,7 +225,10 @@ test_kimi_launch_then_send_is_verified() {
   assert_grep 'effort=high' "$meta" "kimi meta did not retain the unsupported effort axis"
   assert_grep "tasktmp=$task_tmp" "$meta" "kimi meta did not record its task temp root"
   assert_present "$task_tmp/gotmp" "kimi spawn did not create its Go temp directory"
-  assert_grep "export GOTMPDIR=$task_tmp/gotmp" "$CASE_DIR/tmux-calls.log" \
+  # fm-spawn hands GOTMPDIR to a native go, so on MSYS the exported value is
+  # the Windows form of this path (bin/fm-platform-lib.sh).
+  gotmp_export="export GOTMPDIR=$(fm_path_native "$task_tmp/gotmp")"
+  assert_grep "$gotmp_export" "$CASE_DIR/tmux-calls.log" \
     "kimi spawn did not export its Go temp directory into the pane"
   assert_grep "export FM_TASK_ID=$id" "$CASE_DIR/tmux-calls.log" \
     "kimi spawn did not mark the pane with its task id"

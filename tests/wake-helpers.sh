@@ -296,8 +296,23 @@ SH
   printf '%s\n' "$dir"
 }
 
+# Ticks-per-tick multiplier for every "wait up to N ticks for a process" bound
+# below. Raising a bound is free on a fast host, because each loop breaks the
+# moment the process is gone, so this only ever buys headroom on a slow one.
+#
+# Git Bash/MSYS needs that headroom: starting a shell costs roughly 40ms there
+# against about 2ms on Linux, so an arm that confirms a watcher and reaps its
+# child comfortably inside an 8-second budget on Linux can still be running
+# well past it on Windows. bin/fm-watch-arm.sh already carries the same
+# platform split for the same reason (ARM_CONFIRM_DEFAULT 30 vs 10).
+case "${OSTYPE:-}" in
+  msys*|mingw*|cygwin*) FM_TEST_PROC_WAIT_SCALE=${FM_TEST_PROC_WAIT_SCALE:-8} ;;
+  *) FM_TEST_PROC_WAIT_SCALE=${FM_TEST_PROC_WAIT_SCALE:-1} ;;
+esac
+
 wait_for_exit() {
   local pid=$1 limit=${2:-50} i=0
+  limit=$((limit * FM_TEST_PROC_WAIT_SCALE))
   while [ "$i" -lt "$limit" ]; do
     if ! is_live_non_zombie "$pid"; then
       wait "$pid"

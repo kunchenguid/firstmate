@@ -552,6 +552,36 @@ The locked bootstrap inheritance pass uses the same placement-specific behavior;
 That live discovery starts from `state/*.meta` records with `kind=secondmate`; `data/secondmates.md` only backfills `home=` for older or incomplete meta records.
 Skipped items, such as a destination checkout that does not yet gitignore the item, are visible warnings but not hard failures.
 
+## Native Windows support (FM_WINDOWS)
+
+Native Windows support is off until a home opts in with `FM_WINDOWS=1`, so the support is inert on every host that has not asked for it, including a Git Bash host.
+The opt-in is consent, and running under Git Bash is a necessary condition rather than a sufficient one.
+
+[`../bin/fm-platform-lib.sh`](../bin/fm-platform-lib.sh) owns the contract and splits it in two.
+`fm_platform_windows_opt_in` is consent alone, and `fm_platform_windows_enabled` is consent plus a real MSYS host.
+Behavioural Windows paths gate on the second, never on the raw platform fact.
+
+Three things change once it is set.
+
+- POSIX-to-Windows path conversion becomes live, so `fm_path_native` and `fm_path_posix` consult `cygpath` instead of returning their input unchanged.
+- The Windows process bridge in [`../bin/fm-winproc-lib.sh`](../bin/fm-winproc-lib.sh) becomes available, which is what lets the session lock reach its own harness through the severed MSYS process tree.
+- `fm_platform_fs_honors_modes` may report a filesystem as unable to store POSIX mode bits, which lets a caller keep its structural guards while dropping an exact-mode equality that cannot mean anything on a `noacl` NTFS mount.
+
+That third one is the reason consent is required rather than inferred.
+Without the opt-in the exact-mode contract stays strict everywhere, and the `FM_FS_MODES_HONORED` test seam cannot lift it, so landing this support cannot weaken a privacy guard for any home by default.
+`fm_platform_fs_honors_modes` reads consent alone and not the platform, because a filesystem that cannot store a mode is worth answering wherever that is true, and requiring MSYS as well would make the probe unreachable on every host CI runs.
+
+Set it wherever `MSYS` is set, described in the next section, so the two never drift apart.
+[`windows.md`](windows.md) owns the operator-facing setup.
+
+## Windows symlink mode (Git Bash / MSYS)
+
+On a native Windows Git Bash (MSYS) host, `MSYS=winsymlinks:sys` must be present in the environment of every firstmate process.
+Without it, `ln -s` silently creates a directory or file copy instead of a link, which permanently poisons the symlink-based session and watcher locks the moment one is taken.
+`winsymlinks:nativestrict` is not a safe alternative: without Windows Developer Mode it crashes bash outright (observed as STATUS_STACK_OVERFLOW), and `winsymlinks:native` silently falls back to copies in the same case.
+The tracked [`.claude/settings.json`](../.claude/settings.json) `env` block sets it for Claude Code primary sessions, including their hooks and the watcher processes those hooks launch; the variable is inert on non-MSYS hosts.
+Any other primary harness, any crew pane shell, and any manually opened shell must export it before running firstmate commands, for example from the shell profile.
+
 ## Watched tool updates (config/watched-tools.json)
 
 `config/watched-tools.json` is an optional local, gitignored list of the tools this home depends on.
@@ -1025,6 +1055,7 @@ FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh, mainly for tests
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
+FM_WINDOWS=             # 1 opts this home in to native Windows support; unset leaves every Windows path inert (see "Native Windows support")
 FM_TASK_ID=             # internal task-worker marker fm-spawn.sh exports into ship and scout panes, never set by hand; bin/fm-test-run.sh refuses to execute in the repository primary checkout while it is set
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_SUBMIT_POLLS=6  # herdr-only: agent-state samples spread across each Enter attempt's budget when confirming a submit (docs/herdr-backend.md "Current transport behavior")
@@ -1096,6 +1127,7 @@ FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)
 FMX_FOLLOWUP_MAX_COUNT=3   # local cap on Relay completion follow-ups per linked mention
 FM_PF_RETRY_BACKOFF_SECS=900   # seconds before the next attempt after a retryable promised-public-reply delivery error
+FM_FS_MODES_HONORED=    # override the mode-bit capability probe in bin/fm-platform-lib.sh, shared by the private-file contract in bin/fm-pr-lib.sh and the presentation lock namespace in bin/backends/herdr.sh (1 = exact strict mode contract, 0 = filesystem cannot store modes, keep only the structural guards); unset probes the filesystem per directory, mainly for tests
 FM_LOCK_STALE_AFTER=2   # grace seconds for missing or nonnumeric lock-owner PIDs (minimum 2s); dead numeric PIDs have no age grace
 FM_GUARD_GRACE=300      # beacon freshness threshold for guard verdicts, arm health checks, and the primary turn-end guard; see docs/turnend-guard.md for model-aware exceptions
 FM_CLAUDE_AUTOARM_ATTEMPTS=2   # bounded Stop-owned arm attempts per Claude auto-arm cycle; accepted values are 1, 2, or 3

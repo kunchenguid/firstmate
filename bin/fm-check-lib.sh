@@ -57,8 +57,13 @@ fm_custom_check_snapshot_prepare() {
   chmod 0600 "$FM_CUSTOM_CHECK_SNAPSHOT" || { fm_custom_check_snapshot_cleanup; return 1; }
   [ -f "$FM_CUSTOM_CHECK_SNAPSHOT" ] && [ ! -L "$FM_CUSTOM_CHECK_SNAPSHOT" ] \
     || { fm_custom_check_snapshot_cleanup; return 1; }
-  [ "$(fm_pr_file_mode "$FM_CUSTOM_CHECK_SNAPSHOT")" = 600 ] \
-    || { fm_custom_check_snapshot_cleanup; return 1; }
+  # The source check above is validated by fm_pr_private_file_valid, whose mode
+  # equality is already filesystem-gated; the copy must use the same gate or the
+  # snapshot is refused on a filesystem where the original was accepted.
+  if fm_platform_fs_honors_modes "$FM_CUSTOM_CHECK_SNAPSHOT"; then
+    [ "$(fm_pr_file_mode "$FM_CUSTOM_CHECK_SNAPSHOT")" = 600 ] \
+      || { fm_custom_check_snapshot_cleanup; return 1; }
+  fi
   [ "$(fm_pr_file_device "$FM_CUSTOM_CHECK_SNAPSHOT")" = "$state_device" ] \
     || { fm_custom_check_snapshot_cleanup; return 1; }
   [ "$(fm_pr_file_link_count "$FM_CUSTOM_CHECK_SNAPSHOT")" = 1 ] \

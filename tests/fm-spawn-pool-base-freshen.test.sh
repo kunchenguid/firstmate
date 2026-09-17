@@ -144,14 +144,20 @@ test_linked_spawning_home_rejects_primary_before_refresh() {
         || fail "spawn did not refresh the genuine scout copy"
     else
       [ "$status" -ne 0 ] || fail "linked spawning home accepted $returned as a disposable copy"
-      # None of these is an isolated copy, so the worktree poll never adopts one
-      # and the wait runs out instead: the spawning directory fails the poll's
-      # own project comparison, and the repository primary (named directly or
-      # through a symlink) fails the isolation screen the poll shares with the
-      # guard. The refusal names the last path the pane reported.
-      assert_contains "$out" "did not enter an isolated worktree" \
+      # None of these is an isolated copy, so the guard refuses the leased path
+      # before the pane is told anything: the spawning directory is the project
+      # itself, and the repository primary (named directly or through a symlink)
+      # shares the project repository's common git dir. The refusal names the
+      # path it resolved and the reason that path failed, which is what tells
+      # one cause from another in a log. Which reason applies depends on how the
+      # host resolves the alias, so the assertion is that a reason is named at
+      # all, not which one.
+      assert_contains "$out" "did not yield an isolated worktree" \
         "spawn did not explain its isolation refusal"
-      assert_contains "$out" "last seen" "refusal did not name the path the pane reported"
+      assert_contains "$out" "resolved '" "refusal did not name the path it rejected"
+      case "$out" in
+        *"reason unavailable"*) fail "refusal did not name why the path was rejected: $out" ;;
+      esac
       [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
       [ ! -e "$primary/.git/FETCH_HEAD" ] || fail "refused spawn fetched before proving isolation"
     fi
