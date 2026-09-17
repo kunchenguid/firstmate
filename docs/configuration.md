@@ -477,6 +477,7 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 
 `bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief with typesafe.ai's System One model (Jev), so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.
 It is off unless `TYPESAFE_API_KEY` is non-empty in the calling environment or the home's gitignored `.env` holds a `TYPESAFE_API_KEY=` line; the environment wins, matching the Relay and mail-plane contracts, and the Relay accessor in `bin/fm-env-lib.sh` reads the line.
+The key is provisioned from Infisical dev, and no tracked file ever carries its value.
 Off means one `dispatch-resolve: off` line on stderr, nothing on stdout, exit 0, and no network call, so firstmate dispatches exactly as it does without the tool.
 This section is the single owner of the tool's operator contract; the script header owns its exact flags and output lines, and "Crew dispatch profiles" above owns the declared rule and profile fields it applies.
 Rules come only from the effective home's `config/crew-dispatch.json`; `FM_CONFIG_OVERRIDE` selects the config directory for tests and specialized setup like the other scripts.
@@ -505,6 +506,23 @@ The resolver and bootstrap copy an environment-provided key into a non-exported 
 The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
 The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
+
+## Jev intake router (bin/fm-jev-router.sh)
+
+`bin/fm-jev-router.sh` routes one captain request through typesafe.ai's System One model (Jev) in a single typed call, then applies confidence-gated routing so a confident route proceeds and a low-confidence or safety-flagged request escalates instead of guessing.
+It sends the request text plus six typed routing questions (project, deliverable, effort class, worker, surface, safety) and turns the answers into an inspectable suggestion plus a machine-readable exit code: 0 for a route, 2 for an escalation, and 1 for an error.
+A high safety flag, an unknown project, or low confidence on the project or worker escalates; a missing key, missing input, transport error, or malformed response is an error, so the router never fabricates a route.
+The router is advisory only: it publishes a suggestion and never spawns, merges, or mutates anything.
+The script header owns its exact flags, output lines, and question wording; the six-question set is the shipped default, and the project and worker criteria are neutral placeholders because registry-driven criteria are a later phase.
+
+```sh
+bin/fm-jev-router.sh --state "add a pricing page to the marketing site"
+```
+
+It shares the `TYPESAFE_API_KEY` credential documented under "Typed dispatch resolution" above.
+Unlike typed dispatch resolution, which treats a missing key as off, the router fails closed: a missing key exits 1 with no network call, because the router must never fabricate a route.
+`JEV_HIGH` (default 0.7) and `JEV_LOW` (default 0.4) set the confidence bands: confidence at or above `JEV_HIGH` routes cleanly, confidence below `JEV_LOW` escalates, and confidence in between routes but flags the suggestion for review.
+`JEV_MODEL` (default `jev-latest`) selects the model.
 
 ## Toolchain
 
@@ -1090,7 +1108,10 @@ FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainl
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
 FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
-TYPESAFE_API_KEY=       # typed dispatch resolution opt-in, from the environment or .env; absent means bin/fm-dispatch-resolve.sh is off (docs/configuration.md "Typed dispatch resolution")
+TYPESAFE_API_KEY=       # typed routing opt-in (dispatch resolution and Jev intake router), from the environment or the home's gitignored .env; absent means both tools fail closed (docs/configuration.md "Typed dispatch resolution", "Jev intake router")
+JEV_MODEL=jev-latest   # Jev intake router model id (bin/fm-jev-router.sh)
+JEV_HIGH=0.7           # Jev intake router high-confidence threshold; confidence >= this routes cleanly
+JEV_LOW=0.4            # Jev intake router low-confidence threshold; confidence < this escalates
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)
