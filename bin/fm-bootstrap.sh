@@ -1253,19 +1253,28 @@ crew_dispatch_validate() {
 # diagnostic at session start rather than a launched worker.
 #
 # Scope split with the spawn boundary: here, every model the home's written
-# configuration actually names is checked, plus a dispatch profile that names no
-# model at all, because such a profile IS the home's dispatch choice and would
-# hand the pick to the vendor default. Everything else - an unnamed model from
-# any other path, an explicit --model, a raw launch command - is caught by
+# configuration actually names is checked, plus written configuration that names
+# no model at all, because that configuration IS the home's dispatch choice and
+# would hand the pick to the vendor default. Everything else - an unnamed model
+# from any other path, an explicit --model, a raw launch command - is caught by
 # bin/fm-spawn.sh on the fully resolved profile, which is where those choices
 # become concrete.
+#
+# A home with no policy file at all is reported too. Enforcement that exists only
+# where someone remembered to write the file is still a configuration dependency,
+# and config/ is gitignored, so a new or re-created home starts unguarded with
+# nothing saying so. The line is a fact, not a warning: most homes legitimately
+# forbid no model, and this one says which kind of home this is.
 model_policy_validate() {
   local dispatch harness model sm_model findings=''
   if ! fm_model_policy_load "$CONFIG"; then
     echo "MODEL_POLICY: $FM_MODEL_POLICY_ERROR"
     return 0
   fi
-  [ "$FM_MODEL_POLICY_ACTIVE" = 1 ] || return 0
+  if [ "$FM_MODEL_POLICY_ACTIVE" != 1 ]; then
+    echo "MODEL_POLICY: this home has no config/model-denylist, so no model is forbidden here; see docs/configuration.md \"Forbidden models\" to add one"
+    return 0
+  fi
 
   dispatch="$CONFIG/crew-dispatch.json"
   if [ -f "$dispatch" ] && command -v jq >/dev/null 2>&1 && jq -e . "$dispatch" >/dev/null 2>&1; then
@@ -1291,13 +1300,17 @@ EOF
   fi
 
   # config/secondmate-harness carries the primary's own secondmate model token
-  # (bin/fm-harness.sh owns that line format). Only a named token is checked:
-  # the file's harness-only form is its documented shape, and an unnamed model
-  # there is settled at the spawn like every other path.
-  sm_model=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model 2>/dev/null || true)
-  if [ -n "$sm_model" ] && ! fm_model_policy_check "$CONFIG" "$sm_model"; then
-    findings="${findings}MODEL_POLICY: config/secondmate-harness: $FM_MODEL_POLICY_ERROR
+  # (bin/fm-harness.sh owns that line format). Its harness-only form is checked
+  # like a model-less dispatch profile rather than left to the spawn: the file is
+  # the same class of written configuration, and the spawn that would refuse it
+  # is often the unattended liveness respawn, where the only other signal is a
+  # dead secondmate hours later.
+  if [ -f "$CONFIG/secondmate-harness" ]; then
+    sm_model=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model 2>/dev/null || true)
+    if ! fm_model_policy_check "$CONFIG" "$sm_model"; then
+      findings="${findings}MODEL_POLICY: config/secondmate-harness: $FM_MODEL_POLICY_ERROR
 "
+    fi
   fi
 
   [ -n "$findings" ] || return 0

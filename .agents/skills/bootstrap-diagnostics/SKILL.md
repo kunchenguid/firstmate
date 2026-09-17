@@ -41,6 +41,9 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `MODEL_POLICY: <where>: <reason>` - this home forbids models through `config/model-denylist` and its written configuration names one of them, names no model where the vendor default would decide, or the policy file itself cannot be trusted; [`docs/configuration.md`](../../../docs/configuration.md) ("Forbidden models") owns the contract.
   Correct the named configuration rather than dispatching around it: every spawn applies the same policy to the fully resolved profile, so the launch refuses anyway, and the captain set this file precisely so that model is never run.
   Never edit `config/model-denylist` to clear the diagnostic without the captain's word, and never work around it by passing the denied model on the spawn command.
+- `MODEL_POLICY: this home has no config/model-denylist ...` - a statement of this home's posture, not a problem: no model is forbidden here.
+  Take it as an answer when the captain expects a forbidden-model policy in this home, which a fresh or re-created home would otherwise lack silently; tell the captain the home is unguarded and ask which models to forbid rather than writing a policy they have not chosen.
+  A captain who wants no policy needs nothing, and the line simply says so.
 - `FLEET_SYNC: <repo>: skipped: <reason>` - a benign one-off skip (offline, no origin, local-only); bootstrap continued, investigate only if it blocks work.
   A skip can also report the bounded fleet-refresh timeout (`FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT`, or a fleet-size-aware default with a 20 second floor); a timeout never blocks startup.
 - `FLEET_SYNC: <repo>: recovered: <detail>` - the clone had drifted onto a clean detached HEAD holding no unique commits and the sync self-healed it (re-attached the default branch and fast-forwarded); no action needed, it is reported only so the self-heal is visible.

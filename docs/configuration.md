@@ -502,13 +502,15 @@ An alias is denied only when the operator lists it, which is exactly why an unna
 Two enforcement points:
 
 - `bin/fm-bootstrap.sh` checks the home's written configuration at session start and reports each finding as `MODEL_POLICY: <where>: <reason>`.
-  It covers every model named by a `config/crew-dispatch.json` profile or by `config/secondmate-harness`, plus a dispatch profile that names no model at all, because such a profile is itself the home's dispatch choice.
+  It covers every model named by a `config/crew-dispatch.json` profile or by `config/secondmate-harness`, and written configuration that names no model at all, because that configuration is itself the home's dispatch choice.
+  A home with no policy file is reported too, as a plain fact rather than a warning: enforcement that exists only where someone remembered to write the file is still a configuration dependency, `config/` is gitignored, and a new or re-created home would otherwise start unguarded with nothing saying so.
 - `bin/fm-spawn.sh` checks the fully resolved profile before provisioning a worktree or endpoint, so a denied model, an unnamed model from any path, or a raw launch command carrying a denied fragment refuses the spawn instead of launching it.
   Its refusal names the model, the entry that matched it, and whether the value came from the `--model` flag or from `config/secondmate-harness`, so the file to correct is in the message rather than somewhere among the home's configuration.
   A raw launch command is operator-written shell whose model flag cannot be parsed out, so its whole text is scanned for denied fragments and the unnamed-model rule cannot apply to it.
 
 The policy binds crewmate, scout, and secondmate launches alike, including relaunches through `bin/fm-control.sh`, so a task recorded without a model needs one named on its relaunch, or the directive present, before it can restart.
-It does not reach Pi's `/supervision-model` pin, which selects the supervision branch's own model from Pi's catalog; see [Pi supervision branch model and effort](#pi-supervision-branch-model-and-effort-configsupervision-branch-model-configsupervision-branch-effort).
+It does not reach Pi's `/supervision-model` pin, which selects the supervision branch's own model from Pi's catalog; that is a named residual hole in the guarantee, not a completed boundary, and it is tracked as backlog item `supervision-branch-model-policy`.
+The fix belongs at branch-build time rather than in the picker, because the read side also covers pins written before the policy existed.
 See [`docs/examples/model-denylist`](examples/model-denylist) for a starting point to copy into local `config/model-denylist`.
 Secondmate homes inherit this file from the primary, so a secondmate and its own crewmates are bound by the same policy.
 

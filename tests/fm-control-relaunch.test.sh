@@ -1120,6 +1120,52 @@ test_missing_instructions_refuse_before_stopping_anything() {
   pass "fm-control relaunch: a worker with nothing to work from is never launched"
 }
 
+test_forbidden_model_policy_refuses_before_stopping_the_agent() {
+  local dir out rc before
+  # The reported shape: a task recorded before the policy existed carries
+  # model=default, and fm-control omits --model for exactly that value, so the
+  # launch owner's own refusal would land only after the agent was killed.
+  dir=$(new_case denylist-unnamed rl40)
+  add_ship_task "$dir" rl40 claude
+  mkdir -p "$dir/home/config"
+  printf '%s\n' fable > "$dir/home/config/model-denylist"
+  before=$(cat "$dir/home/state/rl40.meta")
+  out=$(run_control "$dir" rl40 relaunch --note "x"); rc=$?
+  expect_code 1 "$rc" "an unnamed model under an active policy should refuse the relaunch"
+  assert_contains "$out" "before stopping the running agent" \
+    "the refusal must say it happened before the agent was stopped"
+  assert_contains "$out" "no model is named" "the refusal must name the policy reason"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a policy refusal must not stop the agent"
+  [ "$before" = "$(cat "$dir/home/state/rl40.meta")" ] \
+    || fail "a policy refusal must leave the durable record byte-identical"
+
+  # And a recorded model the policy denies outright, which also names where the
+  # value came from so the operator knows which record to correct.
+  dir=$(new_case denylist-denied rl41)
+  add_ship_task "$dir" rl41 claude
+  mkdir -p "$dir/home/config"
+  printf '%s\n' fable > "$dir/home/config/model-denylist"
+  sed 's/^model=default$/model=claude-fable-5/' "$dir/home/state/rl41.meta" > "$dir/meta.new"
+  mv "$dir/meta.new" "$dir/home/state/rl41.meta"
+  out=$(run_control "$dir" rl41 relaunch --note "x"); rc=$?
+  expect_code 1 "$rc" "a denied recorded model should refuse the relaunch"
+  assert_contains "$out" "matches 'fable' in config/model-denylist" \
+    "the refusal must name the model and the matched entry"
+  assert_contains "$out" "durable record" "the refusal must name where the value came from"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a denied model must not stop the agent"
+
+  # A permitted model still relaunches, so the cases above are the policy
+  # deciding rather than the fixture failing to relaunch at all.
+  dir=$(new_case denylist-permitted rl42)
+  add_ship_task "$dir" rl42 claude
+  mkdir -p "$dir/home/config"
+  printf '%s\n' fable > "$dir/home/config/model-denylist"
+  out=$(run_control "$dir" rl42 relaunch --note "x" --model claude-opus-5); rc=$?
+  expect_code 0 "$rc" "a permitted model must still relaunch under an active policy"$'\n'"$out"
+  assert_contains "$out" "relaunched rl42" "the permitted relaunch must report success"
+  pass "fm-control relaunch: the forbidden-model policy refuses before the agent is stopped"
+}
+
 test_checkpoint_refusal_leaves_the_record_byte_identical() {
   local dir before after
   dir=$(new_case bytes rl12)
@@ -1713,6 +1759,7 @@ test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
 test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
+test_forbidden_model_policy_refuses_before_stopping_the_agent
 test_checkpoint_refusal_leaves_the_record_byte_identical
 test_checkpoint_refuses_uninspectable_head_and_status
 test_launch_failure_keeps_the_prior_record_and_reports_it

@@ -123,6 +123,7 @@ fi
 }
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 [ -d "$STATE" ] || {
   echo "error: state dir '$STATE' is missing; fm-control cannot resolve tasks for FM_HOME '$FM_HOME'" >&2
   exit 1
@@ -138,6 +139,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-model-policy-lib.sh
+. "$SCRIPT_DIR/fm-model-policy-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -698,6 +701,20 @@ resolve_relaunch_profile() {
   if [ "$TARGET_EFFORT" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" || return 1
   fi
+  # The launch owner applies this home's forbidden-model policy too, but only
+  # after the old agent has been stopped. Asking the same decision here keeps
+  # that refusal on the pre-stop side of the transaction, where the running
+  # agent is still the task's live worker (bin/fm-model-policy-lib.sh owns the
+  # decision; docs/configuration.md "Forbidden models" owns the contract).
+  if [ "$MODEL_SET" = 1 ]; then
+    TARGET_MODEL_ORIGIN='the --model flag'
+  elif [ "$HARNESS_SET" = 0 ] && [ -n "$CONFIG_HARNESS" ]; then
+    TARGET_MODEL_ORIGIN='config/secondmate-harness'
+  else
+    TARGET_MODEL_ORIGIN="task $ID's durable record"
+  fi
+  fm_model_policy_check "$CONFIG" "$TARGET_MODEL" "$TARGET_MODEL_ORIGIN" \
+    || die "refusing to relaunch $ID before stopping the running agent: $FM_MODEL_POLICY_ERROR"
 }
 
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch
