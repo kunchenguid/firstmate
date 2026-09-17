@@ -35,6 +35,25 @@ mkdir -p "$TMP_ROOT/ambient-home"
 export FM_HOME="$TMP_ROOT/ambient-home"
 export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 
+make_agent_named_sleep() { # <path> <sleep-binary>
+  local path=$1 sleep_bin=$2
+  if [ "$(uname -s)" = Linux ]; then
+    cat > "$path" <<'PY'
+#!/usr/bin/env python3
+import ctypes
+import sys
+import time
+ctypes.CDLL(None).prctl(15, b"pi", 0, 0, 0)
+time.sleep(float(sys.argv[1]))
+PY
+    chmod +x "$path"
+  else
+    # Darwin's process identity follows the symlink basename and its signed
+    # system sleep remains executable through that link.
+    ln -sf "$sleep_bin" "$path"
+  fi
+}
+
 # make_herdr_fakebin: a `herdr` stub that logs every invocation (one line,
 # unit-separated args, to $FM_HERDR_LOG) and returns the canned response for
 # that call read from $FM_HERDR_RESPONSES/<n>.out, consumed IN ORDER (call 1
@@ -569,9 +588,10 @@ test_registered_agent_with_an_agent_descendant_outside_the_foreground_stays_aliv
   local lab sleep_bin shell_pid out shell_verdict
   sleep_bin=$(command -v sleep) || fail "sleep not found"
   lab="$TMP_ROOT/stale-reg-descendant-bin"; mkdir -p "$lab"
-  # A symlink to a real long-running binary so the kernel records `pi` as the
-  # executable identity (a copied platform binary fails code signing on macOS).
-  ln -sf "$sleep_bin" "$lab/pi"
+  # Use a process whose kernel identity is `pi`. Linux Nix coreutils is a
+  # multicall binary that rejects a `pi` symlink, while Darwin's signed system
+  # binary cannot be copied, so the fixture owns one portable constructor.
+  make_agent_named_sleep "$lab/pi" "$sleep_bin"
   # A real shell whose child is that agent-named process, while the canned
   # foreground view shows only the shell (a suspended or backgrounded agent).
   sh -c "'$lab/pi' 300; :" &
@@ -601,7 +621,7 @@ test_agent_descendant_under_a_spaced_install_path_stays_alive() {
   # `/Library/Application Support/...` shape), so a field-split read of the
   # process table sees only a fragment of the name.
   lab="$TMP_ROOT/stale-reg-spaced-bin/Application Support/Some Dir"; mkdir -p "$lab"
-  ln -sf "$sleep_bin" "$lab/pi"
+  make_agent_named_sleep "$lab/pi" "$sleep_bin"
   sh -c "'$lab/pi' 300; :" &
   shell_pid=$!
   sleep 0.3
@@ -1873,6 +1893,65 @@ test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
   pass "herdr presentation create: exact response IDs yield one normal task pane with no workspace-close authority"
 }
 
+test_projection_create_retains_seed_prune_proof_after_late_failure() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/projection-pruned-late-failure"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"workspace":{"workspace_id":"w9"},"tab":{"tab_id":"w9:t1"},"root_pane":{"pane_id":"w9:p1"}}}\n' > "$resp/1.out"
+  printf '{"result":{"tab":{"tab_id":"w9:t2"},"root_pane":{"pane_id":"w9:p2"}}}\n' > "$resp/2.out"
+  printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/3.out"
+  printf '{"result":{"panes":[{"pane_id":"w9:p1","tab_id":"w9:t1"},{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}\n' > "$resp/4.out"
+  printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/5.out"
+  printf '{"result":{"pane":{"pane_id":"w9:p1","tab_id":"w9:t1","workspace_id":"w9"}}}\n' > "$resp/6.out"
+  printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/7.out"
+  printf '{"error":{"code":"pane_not_found"}}\n' > "$resp/9.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_projection_focus_snapshot() { printf "captain-ws\tcaptain-tab"; }
+      fm_backend_herdr_projection_focus_restore() { return 0; }
+      fm_backend_herdr_projection_create_task /tmp/proj label fm-task-p2 >/dev/null 2>&1
+      status=$?
+      printf "%s %s %s\n" "$status" \
+        "$FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE" \
+        "$FM_BACKEND_HERDR_PROJECTION_SEEDED_PRUNED"
+    ' "$ROOT") || fail "late projection failure probe did not complete"
+  [ "$out" = "1 1 1" ] \
+    || fail "late projection failure lost confirmed seeded-pane absence: $out"
+  assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p1' \
+    "late projection failure never crossed the seeded-pane prune boundary"
+  pass "herdr presentation create: late failures preserve confirmed seeded-pane pruning"
+}
+
+test_seeded_prune_preserves_absence_proof_when_focus_restore_fails() {
+  local out
+  out=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_cli() {
+      shift
+      case "$*" in
+        "tab list --workspace w9")
+          printf "%s\n" "{\"result\":{\"tabs\":[{\"tab_id\":\"w9:t1\",\"label\":\"1\"},{\"tab_id\":\"w9:t2\",\"label\":\"task\"}]}}"
+          ;;
+        "agent get w9:p1") printf "%s\n" "{\"error\":{\"code\":\"agent_not_found\"}}" ;;
+        *) return 1 ;;
+      esac
+    }
+    fm_backend_herdr_pane_for_tab() { printf "%s\n" w9:p1; }
+    fm_backend_herdr_projection_close_pane_focus_preserving() {
+      FM_BACKEND_HERDR_PROJECTION_CLOSE_CONFIRMED=1
+      return 2
+    }
+    status=0
+    fm_backend_herdr_workspace_prune_seeded_default_tab fmtest w9 w9:t1 focus-preserving || status=$?
+    printf "%s %s\n" "$status" "$FM_BACKEND_HERDR_SEEDED_PRUNE_CONFIRMED"
+  ' "$ROOT") || fail "seeded prune focus-failure probe did not complete"
+  [ "$out" = "1 1" ] \
+    || fail "seeded prune lost confirmed absence after focus restoration failed: $out"
+  pass "herdr seeded prune: confirmed absence survives later focus restoration failure"
+}
+
 test_projection_create_never_closes_a_concurrent_same_label_tab() {
   local dir log resp fb out status
   dir="$TMP_ROOT/projection-concurrent-tab"; mkdir -p "$dir/responses"
@@ -2040,11 +2119,19 @@ test_projection_close_reports_focus_restore_failure() {
   cp "$resp/8.out" "$resp/12.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2' "$ROOT" 2>&1)
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      status=0
+      fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2 || status=$?
+      printf "close-confirmed=%s\n" "$FM_BACKEND_HERDR_PROJECTION_CLOSE_CONFIRMED"
+      exit "$status"
+    ' "$ROOT" 2>&1)
   status=$?
   [ "$status" -eq 2 ] || fail "cleanup did not distinguish post-close focus uncertainty: $status"
   assert_contains "$out" "did not restore the exact prior workspace and tab" \
     "focus restoration failure was not reported"
+  assert_contains "$out" "close-confirmed=1" \
+    "focus restoration failure lost the prior confirmed pane removal"
   assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p2' \
     "focus restoration failure fixture did not reach the close boundary"
   pass "herdr presentation focus: pane close fails when exact focus restoration fails"
@@ -5281,6 +5368,8 @@ test_presentation_preference_reports_three_distinct_states
 test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_journal_v2_binds_and_advances_exact_endpoint
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane
+test_projection_create_retains_seed_prune_proof_after_late_failure
+test_seeded_prune_preserves_absence_proof_when_focus_restore_fails
 test_projection_create_never_closes_a_concurrent_same_label_tab
 test_projection_focus_snapshot_requires_exact_workspace_and_tab
 test_projection_close_restores_exact_prior_focus

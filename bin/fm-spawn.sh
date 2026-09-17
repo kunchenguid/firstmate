@@ -43,8 +43,10 @@
 #   agent-free on a backend with a recovery-grade agent-state classifier (tmux
 #   or herdr), and clears the previous harness's per-task wiring before arming
 #   the new incarnation. The replacement still never starts outside the copy
-#   holding the work: a Herdr shell that has drifted out of the recorded
-#   worktree is told once to return, and only a shell that will not go refuses.
+#   holding the work: an interactive Herdr shell that has drifted out of the
+#   recorded worktree is told once to return, and only a shell that will not go
+#   refuses; exact plain Pi instead addresses that worktree directly through its
+#   structural layout request.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
@@ -94,8 +96,8 @@
 #   plus authoritative metadata may replace one exact agent-free husk in place.
 #   The journal, visible token, and labels alone are never endpoint or ownership
 #   authority, and every ambiguous recovery stays on the flat fallback after
-#   duplicate-agent risk is independently absent. Treehouse allocation and task
-#   metadata are unchanged.
+#   duplicate-agent risk is independently absent. Presentation selection itself
+#   does not alter Treehouse allocation or task metadata.
 #   A clean projected create or exact resume makes one bounded attempt to hold
 #   the one session-scoped presentation-order lock (keyed by named session plus
 #   canonical socket, outside any home's state/) through launch handoff. Lock
@@ -1029,6 +1031,7 @@ HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
+HERDR_PROJECTION_ABORT_SEEDED_PRUNED=0
 HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
@@ -1046,11 +1049,25 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+SPAWN_TREEHOUSE_LEASE_HELD=0
+SPAWN_TREEHOUSE_LEASE_ROLLBACK_ARMED=0
+SPAWN_TREEHOUSE_LEASE_HOLDER=
+SPAWN_TREEHOUSE_LEASE_ID=
+HERDR_TREEHOUSE_LEASE_TX=
+HERDR_LAYOUT_ATTEMPT=
+HERDR_LAYOUT_OWNERSHIP_MODE=
+HERDR_LAYOUT_LEASE_HOLDER=-
+HERDR_LAYOUT_QUARANTINED=0
+HERDR_LAYOUT_ABORT_RESOLVED=0
+HERDR_LAYOUT_ENDPOINT_COMMITTED=0
+HERDR_LAYOUT_ENDPOINT_READY=0
+HERDR_LAYOUT_ABORT_RECONCILE=1
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
 RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
+RELAUNCH_HERDR_ATTEMPT_PENDING=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -1081,8 +1098,45 @@ parse_orca_worktree_result() {
   fi
 }
 
+spawn_abort_reconcile_fresh_herdr_layout() {
+  local journal
+  fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" = fresh ] \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" -ge 4 ] \
+    && fm_backend_herdr_layout_attempt_reconcile "$HERDR_LAYOUT_ATTEMPT" \
+    && fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" || return 1
+  if [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 6 ] \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = not-applied ]; then
+    fm_backend_herdr_layout_attempt_remove_original "$HERDR_LAYOUT_ATTEMPT" \
+      && fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" || return 1
+  fi
+  [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 6 ] \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = removed ] || return 1
+  journal=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+  if [ -e "$journal" ] || [ -L "$journal" ]; then
+    fm_backend_herdr_projection_journal_retire_removed_attempt \
+      "$journal" "$ID" "$HERDR_LAYOUT_ATTEMPT" \
+      || fm_backend_herdr_projection_journal_retire_closed_endpoint \
+        "$journal" "$ID" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" \
+        "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" \
+        "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" \
+        "${HERDR_PROJECTION_ID:-}" \
+      || return 1
+  fi
+  HERDR_LAYOUT_ABORT_RESOLVED=1
+  HERDR_PROJECTION_ABORT_CLEANUP=0
+}
+
 spawn_abort_cleanup() {
-  local status=$?
+  local status=$? journal seeded_pruned
+  if [ "$HERDR_LAYOUT_ABORT_RECONCILE" = 1 ] \
+    && [ -n "$HERDR_LAYOUT_ATTEMPT" ] \
+    && { [ -e "$HERDR_LAYOUT_ATTEMPT" ] || [ -L "$HERDR_LAYOUT_ATTEMPT" ]; }; then
+    if ! spawn_abort_reconcile_fresh_herdr_layout; then
+      HERDR_LAYOUT_QUARANTINED=1
+      SPAWN_FRESH_COMMIT_PENDING=0
+    fi
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -1107,19 +1161,44 @@ spawn_abort_cleanup() {
       fi
     fi
   fi
-  if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] &&
-    [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
+  if [ "$HERDR_LAYOUT_QUARANTINED" != 1 ] \
+    && [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
+    && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
-      echo "warning: herdr presentation focus lock unavailable; retaining the projection journal and refusing concurrent abort cleanup" >&2
-      HERDR_PROJECTION_ABORT_CLEANUP=0
+      echo "warning: herdr presentation focus lock unavailable; retaining the exact endpoint, task record, and Treehouse lease" >&2
+      HERDR_LAYOUT_QUARANTINED=1
+      SPAWN_FRESH_COMMIT_PENDING=0
+      status=1
     fi
   fi
-  if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
-    HERDR_PROJECTION_ABORT_CLEANUP=0
-    fm_backend_herdr_projection_cleanup_exact \
+  if [ "$HERDR_LAYOUT_QUARANTINED" != 1 ] \
+    && [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
+    seeded_pruned=$HERDR_PROJECTION_ABORT_SEEDED_PRUNED
+    [ "${FM_BACKEND_HERDR_SEEDED_PRUNE_CONFIRMED:-0}" != 1 ] || seeded_pruned=1
+    if fm_backend_herdr_projection_cleanup_exact \
       "$HERDR_PROJECTION_ABORT_SESSION" \
       "$HERDR_PROJECTION_ABORT_TASK_PANE" \
-      "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
+      "$HERDR_PROJECTION_ABORT_SEEDED_PANE" \
+      "$seeded_pruned"; then
+      journal=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+      if { [ ! -e "$journal" ] && [ ! -L "$journal" ]; } \
+        || fm_backend_herdr_projection_journal_retire_closed_endpoint \
+          "$journal" "$ID" "$HERDR_PROJECTION_ABORT_SESSION" \
+          "$HERDR_WORKSPACE_ID" "$HERDR_PROJECTION_ABORT_TASK_PANE" \
+          "${HERDR_PROJECTION_ID:-}"; then
+        HERDR_PROJECTION_ABORT_CLEANUP=0
+      else
+        echo "warning: exact Herdr endpoint was removed but its presentation record could not be retired; retaining the task record and Treehouse lease" >&2
+        HERDR_LAYOUT_QUARANTINED=1
+        SPAWN_FRESH_COMMIT_PENDING=0
+        status=1
+      fi
+    else
+      echo "warning: exact Herdr endpoint cleanup could not be confirmed; retaining the task record and Treehouse lease" >&2
+      HERDR_LAYOUT_QUARANTINED=1
+      SPAWN_FRESH_COMMIT_PENDING=0
+      status=1
+    fi
   fi
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
@@ -1168,7 +1247,9 @@ spawn_abort_cleanup() {
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
   fi
-  if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
+  if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ] \
+    && [ "$HERDR_LAYOUT_QUARANTINED" != 1 ] \
+    && [ "$HERDR_LAYOUT_ABORT_RESOLVED" != 1 ]; then
     if ! spawn_fresh_commit_rollback; then
       status=1
     fi
@@ -1184,15 +1265,51 @@ spawn_abort_cleanup() {
   # already released that lock and leaves the claim for the next spawn's
   # atomic replacement rather than racing it. The release itself never removes
   # another task's claim.
-  if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ -n "${WT:-}" ] &&
-    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] &&
-    fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+  if [ "$HERDR_LAYOUT_QUARANTINED" != 1 ] \
+    && [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ -n "${WT:-}" ] \
+    && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] \
+    && fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
     SPAWN_SLOT_CLAIMED=0
     if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
-      fm_treehouse_slot_owner_release "$WT" "$ID" || true
+      fm_treehouse_slot_owner_release "$WT" "$ID" "${SPAWN_TREEHOUSE_LEASE_HOLDER:-}" || true
     else
       echo "warning: leaving task $ID's slot claim on $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
     fi
+  fi
+  if [ "$HERDR_LAYOUT_QUARANTINED" != 1 ] \
+    && [ "$SPAWN_TREEHOUSE_LEASE_ROLLBACK_ARMED" = 1 ] \
+    && [ -n "$HERDR_TREEHOUSE_LEASE_TX" ] \
+    && { [ -e "$HERDR_TREEHOUSE_LEASE_TX" ] || [ -L "$HERDR_TREEHOUSE_LEASE_TX" ]; }; then
+    if [ "$HERDR_LAYOUT_ABORT_RESOLVED" = 1 ]; then
+      if fm_treehouse_lease_transaction_return "$HERDR_TREEHOUSE_LEASE_TX" \
+        "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER" "$PROJ_ABS" >/dev/null \
+        && fm_treehouse_slot_owner_release \
+          "$WT" "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER" \
+        && fm_backend_herdr_layout_attempt_mark_released "$HERDR_LAYOUT_ATTEMPT" \
+        && spawn_finalize_released_fresh_herdr_layout; then
+        SPAWN_FRESH_COMMIT_PENDING=0
+        SPAWN_SLOT_CLAIMED=0
+        SPAWN_TREEHOUSE_LEASE_HELD=0
+        SPAWN_TREEHOUSE_LEASE_ROLLBACK_ARMED=0
+        HERDR_LAYOUT_ABORT_RESOLVED=0
+      else
+        HERDR_LAYOUT_QUARANTINED=1
+        SPAWN_FRESH_COMMIT_PENDING=0
+        echo "warning: could not finalize the exact Treehouse lease for aborted structural Herdr launch of $ID" >&2
+        status=1
+      fi
+    elif fm_treehouse_lease_transaction_return "$HERDR_TREEHOUSE_LEASE_TX" \
+      "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER" "$PROJ_ABS" >/dev/null \
+      && rm -f -- "$HERDR_TREEHOUSE_LEASE_TX"; then
+      SPAWN_TREEHOUSE_LEASE_HELD=0
+      SPAWN_TREEHOUSE_LEASE_ROLLBACK_ARMED=0
+    else
+      echo "warning: could not return the exact Treehouse lease for aborted structural Herdr launch of $ID" >&2
+      status=1
+    fi
+  fi
+  if [ "$HERDR_LAYOUT_QUARANTINED" = 1 ]; then
+    echo "warning: preserving task $ID's record and Treehouse lease until its exact Herdr endpoint ownership is reconciled" >&2
   fi
   if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
     SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
@@ -1324,6 +1441,8 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   exit "$rc"
 fi
 ID=${POS[0]}
+HERDR_LAYOUT_ATTEMPT="$STATE/$ID.herdr-launch"
+HERDR_TREEHOUSE_LEASE_TX="$STATE/$ID.herdr-lease"
 fm_task_id_creation_valid "$ID" || {
   echo "error: invalid task id" >&2
   exit 2
@@ -1450,6 +1569,17 @@ RAW_LAUNCH=0
 # validation teardown uses, so a malformed, ambiguous, or foreign record
 # refuses here exactly as it refuses there.
 RELAUNCH_PRIOR_HARNESS=
+spawn_require_relaunch_endpoint_dead() {
+  fm_control_backend_state_verified "$BACKEND" || {
+    echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
+    return 1
+  }
+  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  [ "$RELAUNCH_STATE" = dead ] || {
+    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
+    return 1
+  }
+}
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "${#POS[@]}" -eq 1 ] || {
     echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
@@ -1476,18 +1606,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
-  # A relaunch must PROVE the previous agent is gone before it launches another
-  # one into the same endpoint, and only tmux and herdr have a recovery-grade
-  # classifier that can (bin/fm-control-lib.sh owns that capability table).
-  fm_control_backend_state_verified "$BACKEND" || {
-    echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
-    exit 1
-  }
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  [ "$RELAUNCH_STATE" = dead ] || {
-    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
-    exit 1
-  }
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
@@ -1525,6 +1643,30 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID has no recorded harness; pass --harness to relaunch it" >&2
     exit 1
   }
+  if [ "$BACKEND" = herdr ] && [ "$ARG3" = pi ] \
+    && { [ -e "$HERDR_LAYOUT_ATTEMPT" ] || [ -L "$HERDR_LAYOUT_ATTEMPT" ]; } \
+    && fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT"; then
+    expected_attempt_mode=relaunch
+    [ "$KIND" != secondmate ] || expected_attempt_mode=secondmate
+    attempt_endpoint="$(fm_meta_get "$RELAUNCH_META" herdr_tab_id):$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)"
+    case "$attempt_endpoint" in
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE"|\
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE"|\
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE")
+        if [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" = "$expected_attempt_mode" ] \
+          && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_TASK" = "$ID" ] \
+          && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKTREE" = "$RELAUNCH_WT" ] \
+          && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LEASE_HOLDER" = - ] \
+          && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" = "$(fm_meta_get "$RELAUNCH_META" herdr_session)" ] \
+          && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" = "$(fm_meta_get "$RELAUNCH_META" herdr_workspace_id)" ]; then
+          RELAUNCH_HERDR_ATTEMPT_PENDING=1
+        fi
+        ;;
+    esac
+  fi
+  if [ "$RELAUNCH_HERDR_ATTEMPT_PENDING" != 1 ]; then
+    spawn_require_relaunch_endpoint_dead || exit 1
+  fi
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
   '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy)
@@ -2918,6 +3060,392 @@ herdr_projection_existing_meta_allows_flat() { # <meta>
   esac
 }
 
+spawn_rebind_restored_herdr_layout_attempt() {
+  local meta="$STATE/$ID.meta" journal current tmp
+  fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" || return 1
+  [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 7 ] \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = restored ] || return 1
+  current="$(herdr_projection_meta_field_exact "$meta" herdr_tab_id 2>/dev/null || true):$(herdr_projection_meta_field_exact "$meta" herdr_pane_id 2>/dev/null || true)"
+  case "$current" in
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE"|\
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE"|\
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE") ;;
+    *)
+      echo "error: task $ID's endpoint changed outside its structural restoration transaction; preserving quarantine" >&2
+      return 1
+      ;;
+  esac
+  journal=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+  if [ -e "$journal" ] || [ -L "$journal" ]; then
+    fm_backend_herdr_projection_journal_snapshot "$journal" "$ID" || return 1
+    case "$FM_BACKEND_HERDR_JOURNAL_VERSION" in
+      1) ;;
+      2)
+        [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" ] \
+          && [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" ] || return 1
+        current="$FM_BACKEND_HERDR_JOURNAL_TAB_ID:$FM_BACKEND_HERDR_JOURNAL_PANE_ID"
+        case "$current" in
+          "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE") ;;
+          "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE"|\
+          "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE")
+            fm_backend_herdr_projection_journal_replace_endpoint \
+              "$journal" "$ID" "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" \
+              "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_TAB" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE" || return 1
+            ;;
+          *) return 1 ;;
+        esac
+        ;;
+      *) return 1 ;;
+    esac
+  fi
+  current="$(herdr_projection_meta_field_exact "$meta" herdr_tab_id 2>/dev/null || true):$(herdr_projection_meta_field_exact "$meta" herdr_pane_id 2>/dev/null || true)"
+  if [ "$current" != "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE" ]; then
+    tmp=$(mktemp "$STATE/.${ID}.meta.restore.XXXXXX") || return 1
+    if ! fm_backend_herdr_layout_rebind_meta "$meta" "$tmp" \
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" \
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_TAB" \
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE" \
+      || ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$STATE"; then
+      rm -f "$tmp"
+      return 1
+    fi
+  fi
+  fm_backend_herdr_layout_attempt_commit_restored "$HERDR_LAYOUT_ATTEMPT"
+}
+
+spawn_finalize_released_fresh_herdr_layout() {
+  local meta="$STATE/$ID.meta" holder lease_id busy_gen recorded_worktree endpoint attempt_worktree
+  fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 8 ] \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = released ] \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" = fresh ] \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_TASK" = "$ID" ] || return 1
+  holder=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LEASE_HOLDER
+  attempt_worktree=$(real_path_or_raw "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKTREE")
+  if [ -e "$HERDR_TREEHOUSE_LEASE_TX" ] || [ -L "$HERDR_TREEHOUSE_LEASE_TX" ]; then
+    fm_treehouse_lease_transaction_reconcile "$HERDR_TREEHOUSE_LEASE_TX" \
+      "$ID" "$holder" "$PROJ_ABS" \
+      && [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = returned ] \
+      && [ "$FM_TREEHOUSE_LEASE_TX_WORKTREE" = "$attempt_worktree" ] || return 1
+    lease_id=$FM_TREEHOUSE_LEASE_TX_ID
+  elif [ -e "$meta" ] || [ -L "$meta" ]; then
+    return 1
+  fi
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    fm_backlog_record_present "$meta" "task record" "$STATE" || return 1
+    recorded_worktree=$(herdr_projection_meta_field_exact "$meta" treehouse_lease_worktree 2>/dev/null || true)
+    if [ -z "$recorded_worktree" ] && { [ -e "$(fm_meta_get "$meta" worktree)" ] || [ -L "$(fm_meta_get "$meta" worktree)" ]; }; then
+      recorded_worktree=$(fm_treehouse_canonical_existing_path "$(fm_meta_get "$meta" worktree)") || return 1
+    fi
+    endpoint="$(herdr_projection_meta_field_exact "$meta" herdr_tab_id 2>/dev/null || true):$(herdr_projection_meta_field_exact "$meta" herdr_pane_id 2>/dev/null || true)"
+    case "$endpoint" in
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE"|\
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE") ;;
+      *) return 1 ;;
+    esac
+    [ "$(herdr_projection_meta_field_exact "$meta" endpoint_task_id 2>/dev/null || true)" = "$ID" ] \
+      && [ "$(herdr_projection_meta_field_exact "$meta" treehouse_lease_holder 2>/dev/null || true)" = "$holder" ] \
+      && [ "$(herdr_projection_meta_field_exact "$meta" treehouse_lease_id 2>/dev/null || true)" = "$lease_id" ] \
+      && [ "$(herdr_projection_meta_field_exact "$meta" project 2>/dev/null || true)" = "$PROJ_ABS" ] \
+      && [ "$(herdr_projection_meta_field_exact "$meta" herdr_session 2>/dev/null || true)" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" ] \
+      && [ "$(herdr_projection_meta_field_exact "$meta" herdr_workspace_id 2>/dev/null || true)" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" ] \
+      && [ "$recorded_worktree" = "$attempt_worktree" ] || return 1
+    busy_gen=$(fm_meta_get "$meta" busy_gen)
+    [ -z "$busy_gen" ] || "$FM_ROOT/bin/fm-busy-event.sh" retire "$STATE" "$ID" --gen "$busy_gen" >/dev/null 2>&1 || return 1
+    fm_backlog_atomic_transition remove "$meta" "quarantined task record" "$STATE" || return 1
+  fi
+  if [ -e "$HERDR_TREEHOUSE_LEASE_TX" ] || [ -L "$HERDR_TREEHOUSE_LEASE_TX" ]; then
+    rm -f -- "$HERDR_TREEHOUSE_LEASE_TX" || return 1
+  fi
+  rm -f -- "$HERDR_LAYOUT_ATTEMPT" || return 1
+  echo "notice: finished task $ID's previously confirmed structural launch cleanup" >&2
+}
+
+spawn_reconcile_herdr_layout_attempt() {
+  local meta="$STATE/$ID.meta" value worktree holder lease_id busy_gen expected_mode ownership_policy recovery_action resolution journal
+  local lock_for_restore=0 gate_status row agent committed_receipt=0
+  [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ] || {
+    echo "error: task $ID has a quarantined Herdr structural launch attempt; retry with backend=herdr and the exact plain pi harness" >&2
+    return 1
+  }
+  fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" || {
+    echo "error: task $ID's Herdr structural launch attempt record is malformed, legacy, or unknown; refusing duplicate launch" >&2
+    return 1
+  }
+  if [ "$KIND" = secondmate ]; then
+    expected_mode=secondmate
+  elif [ "$RELAUNCH" -eq 1 ]; then
+    expected_mode=relaunch
+  else
+    expected_mode=fresh
+  fi
+  if [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 8 ]; then
+    if [ "$expected_mode" != fresh ] \
+      || ! spawn_finalize_released_fresh_herdr_layout; then
+      echo "error: task $ID's released structural launch receipt could not be finalized safely" >&2
+      return 1
+    fi
+    return 0
+  fi
+  fm_backlog_record_present "$meta" "task record" "$STATE" || {
+    echo "error: task $ID's quarantined Herdr structural launch has no trustworthy task record; refusing duplicate launch" >&2
+    return 1
+  }
+  worktree=$(herdr_projection_meta_field_exact "$meta" worktree) || {
+    echo "error: task $ID's quarantined Herdr launch has no one authoritative worktree; refusing mutation" >&2
+    return 1
+  }
+  ownership_policy=$(fm_backend_herdr_layout_attempt_ownership_policy \
+    "$expected_mode" "$ID" "$worktree") || {
+    echo "error: task $ID's quarantined Herdr launch ownership or worktree contradicts its task record; refusing mutation" >&2
+    return 1
+  }
+  case "$expected_mode:$ownership_policy" in
+    fresh:release-fresh|relaunch:retain|secondmate:retain) ;;
+    *) return 1 ;;
+  esac
+  for value in \
+    "backend:herdr" \
+    "project:$PROJ_ABS" \
+    "herdr_session:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" \
+    "herdr_workspace_id:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE"; do
+    [ "$(herdr_projection_meta_field_exact "$meta" "${value%%:*}" 2>/dev/null || true)" = "${value#*:}" ] || {
+      echo "error: task $ID's quarantined Herdr launch does not match its exact task record; refusing duplicate launch" >&2
+      return 1
+    }
+  done
+  value="$(herdr_projection_meta_field_exact "$meta" herdr_tab_id 2>/dev/null || true):$(herdr_projection_meta_field_exact "$meta" herdr_pane_id 2>/dev/null || true)"
+  case "$value" in
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE"|\
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE"|\
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE") ;;
+    *)
+      echo "error: task $ID's quarantined Herdr launch endpoint does not match its attempt; refusing duplicate launch" >&2
+      return 1
+      ;;
+  esac
+  case "$expected_mode" in
+    fresh)
+      holder=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LEASE_HOLDER
+      lease_id=$(herdr_projection_meta_field_exact "$meta" treehouse_lease_id 2>/dev/null || true)
+      fm_treehouse_lease_holder_valid "$ID" "$holder" \
+        && [ "$(herdr_projection_meta_field_exact "$meta" treehouse_lease_holder 2>/dev/null || true)" = "$holder" ] \
+        && fm_treehouse_lease_transaction_reconcile "$HERDR_TREEHOUSE_LEASE_TX" \
+          "$ID" "$holder" "$PROJ_ABS" \
+        && { [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = acquired ] \
+          || [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = cleanup ] \
+          || [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = returned ]; } \
+        && [ "$FM_TREEHOUSE_LEASE_TX_TASK" = "$ID" ] \
+        && [ "$FM_TREEHOUSE_LEASE_TX_HOLDER" = "$holder" ] \
+        && [ "$FM_TREEHOUSE_LEASE_TX_PROJECT" = "$PROJ_ABS_REAL" ] \
+        && [ "$FM_TREEHOUSE_LEASE_TX_WORKTREE" = "$(real_path_or_raw "$worktree")" ] \
+        && [ "$FM_TREEHOUSE_LEASE_TX_ID" = "$lease_id" ] || {
+        echo "error: task $ID's quarantined fresh launch lacks exact durable acquisition proof; refusing lease mutation" >&2
+        return 1
+      }
+      if [ "$FM_TREEHOUSE_LEASE_TX_RESULT" != returned ]; then
+        fm_treehouse_pool_slot "$PROJ_ABS" "$worktree" || {
+          echo "error: task $ID's quarantined fresh launch no longer names its exact Treehouse slot; refusing duplicate launch" >&2
+          return 1
+        }
+        fm_treehouse_slot_owner_state "$worktree" "$ID" "$holder"
+        [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || {
+          echo "error: task $ID no longer owns its quarantined Treehouse slot; refusing duplicate launch" >&2
+          return 1
+        }
+      fi
+      ;;
+    relaunch)
+      [ "$(herdr_projection_meta_field_exact "$meta" kind 2>/dev/null || true)" != secondmate ] || {
+        echo "error: ordinary relaunch quarantine names a persistent secondmate; refusing mutation" >&2
+        return 1
+      }
+      ;;
+    secondmate)
+      [ "$(herdr_projection_meta_field_exact "$meta" kind 2>/dev/null || true)" = secondmate ] || {
+        echo "error: secondmate quarantine does not name persistent secondmate ownership; refusing mutation" >&2
+        return 1
+      }
+      ;;
+  esac
+  if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
+    SPAWN_META_LOCK=$(fm_meta_lock_path "$meta") || return 1
+    fm_lock_acquire_wait "$SPAWN_META_LOCK"
+    SPAWN_META_LOCK_HELD=1
+  fi
+  spawn_herdr_presentation_order_lock_acquire \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" || return 1
+  lock_for_restore=1
+  value="$(herdr_projection_meta_field_exact "$meta" herdr_tab_id 2>/dev/null || true):$(herdr_projection_meta_field_exact "$meta" herdr_pane_id 2>/dev/null || true)"
+  case "$value" in
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE"|\
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE"|\
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE") ;;
+    *)
+      spawn_herdr_presentation_order_lock_release
+      echo "error: task $ID's locked Herdr launch endpoint no longer matches its attempt; preserving quarantine" >&2
+      return 1
+      ;;
+  esac
+  if [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 5 ] \
+    && [ "$value" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" ]; then
+    case "$expected_mode" in
+      relaunch|secondmate)
+        committed_receipt=1
+        ;;
+      fresh)
+        if [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = acquired ]; then
+          if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
+            gate_status=0
+            row=
+            if fm_backlog_row_probe "$DATA" "$ID"; then
+              row=$FM_BACKLOG_ROW_STATE
+            else
+              spawn_herdr_presentation_order_lock_release
+              echo "error: task $ID's backlog state could not be read while reconciling its committed structural worker; preserving quarantine" >&2
+              return 1
+            fi
+            [ "$row" = "in_flight no no" ] && committed_receipt=1
+          else
+            gate_status=$?
+            if [ "$gate_status" -eq 1 ]; then
+              committed_receipt=1
+            else
+              spawn_herdr_presentation_order_lock_release
+              echo "error: task $ID's backlog configuration could not be resolved while reconciling its structural worker; preserving quarantine" >&2
+              return 1
+            fi
+          fi
+        fi
+        ;;
+    esac
+  fi
+  if [ "$committed_receipt" = 1 ]; then
+    value="$(herdr_projection_meta_field_exact "$meta" herdr_tab_id 2>/dev/null || true):$(herdr_projection_meta_field_exact "$meta" herdr_pane_id 2>/dev/null || true)"
+    [ "$value" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" ] \
+      && fm_backend_herdr_layout_attempt_verify "$HERDR_LAYOUT_ATTEMPT" \
+      && [ "$(fm_backend_herdr_pane_agent_state \
+        "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" \
+        "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE")" = live ] \
+      && agent=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" agent get \
+        "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" 2>/dev/null \
+        | jq -r '.result.agent.agent // empty' 2>/dev/null) \
+      && [ "$agent" = pi ] || {
+      spawn_herdr_presentation_order_lock_release
+      echo "error: task $ID's committed structural worker could not be verified exactly; preserving quarantine" >&2
+      return 1
+    }
+    HERDR_LAYOUT_ABORT_RECONCILE=0
+    if ! fm_backend_herdr_layout_attempt_commit "$HERDR_LAYOUT_ATTEMPT"; then
+      spawn_herdr_presentation_order_lock_release
+      echo "error: task $ID's committed structural worker was verified, but its launch receipt could not be retired; preserving retry authority" >&2
+      return 1
+    fi
+    spawn_herdr_presentation_order_lock_release
+    HERDR_PROJECTION_ABORT_CLEANUP=0
+    HERDR_LAYOUT_ENDPOINT_COMMITTED=1
+    SPAWN_FRESH_COMMIT_PENDING=0
+    echo "notice: retired task $ID's committed structural launch receipt without launching another worker" >&2
+    return 3
+  fi
+  if ! fm_backend_herdr_layout_attempt_reconcile "$HERDR_LAYOUT_ATTEMPT"; then
+    [ "$lock_for_restore" = 0 ] || spawn_herdr_presentation_order_lock_release
+    return 1
+  fi
+  fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" || {
+    [ "$lock_for_restore" = 0 ] || spawn_herdr_presentation_order_lock_release
+    return 1
+  }
+  case "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" in 6|7) ;; *)
+    [ "$lock_for_restore" = 0 ] || spawn_herdr_presentation_order_lock_release
+    return 1
+    ;;
+  esac
+  resolution=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION
+  recovery_action=$(fm_backend_herdr_layout_attempt_recovery_action \
+    "$expected_mode" "$ID" "$worktree" "$resolution") || {
+    [ "$lock_for_restore" = 0 ] || spawn_herdr_presentation_order_lock_release
+    return 1
+  }
+  case "$recovery_action" in
+    retain-continue)
+      rm -f -- "$HERDR_LAYOUT_ATTEMPT" || {
+        [ "$lock_for_restore" = 0 ] || spawn_herdr_presentation_order_lock_release
+        return 1
+      }
+      [ "$lock_for_restore" = 0 ] || spawn_herdr_presentation_order_lock_release
+      echo "notice: retired task $ID's non-mutating structural Herdr attempt; retained its record, lease, and local work" >&2
+      return 0
+      ;;
+    retain-retry)
+      if ! spawn_rebind_restored_herdr_layout_attempt; then
+        [ "$lock_for_restore" = 0 ] || spawn_herdr_presentation_order_lock_release
+        echo "error: task $ID's inert Herdr endpoint could not be rebound transactionally; preserving quarantine" >&2
+        return 1
+      fi
+      [ "$lock_for_restore" = 0 ] || spawn_herdr_presentation_order_lock_release
+      echo "notice: restored task $ID's inert Herdr endpoint and retained its ownership and local work for a safe retry" >&2
+      return 2
+      ;;
+    release-fresh)
+      if [ "$resolution" = not-applied ] \
+        && ! fm_backend_herdr_layout_attempt_remove_original "$HERDR_LAYOUT_ATTEMPT"; then
+        spawn_herdr_presentation_order_lock_release
+        echo "error: task $ID's original Herdr shell could not be removed exactly; preserving structural launch quarantine" >&2
+        return 1
+      fi
+      journal=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+      if { [ -e "$journal" ] || [ -L "$journal" ]; } \
+        && ! fm_backend_herdr_projection_journal_retire_removed_attempt \
+          "$journal" "$ID" "$HERDR_LAYOUT_ATTEMPT"; then
+        spawn_herdr_presentation_order_lock_release
+        echo "error: task $ID's presentation record could not be bound to the removed Herdr endpoint; preserving structural launch quarantine" >&2
+        return 1
+      fi
+      spawn_herdr_presentation_order_lock_release
+      lock_for_restore=0
+      ;;
+    *)
+      [ "$lock_for_restore" = 0 ] || spawn_herdr_presentation_order_lock_release
+      return 1
+      ;;
+  esac
+  fm_treehouse_lease_transaction_return "$HERDR_TREEHOUSE_LEASE_TX" \
+    "$ID" "$holder" "$PROJ_ABS" >/dev/null || {
+    echo "error: exact Herdr replacement was reconciled, but task $ID's Treehouse lease return could not be confirmed; refusing duplicate launch" >&2
+    return 1
+  }
+  fm_treehouse_slot_owner_release "$worktree" "$ID" "$holder" || {
+    echo "error: task $ID's returned Treehouse slot claim could not be retired; refusing duplicate launch" >&2
+    return 1
+  }
+  fm_backend_herdr_layout_attempt_mark_released "$HERDR_LAYOUT_ATTEMPT" || return 1
+  busy_gen=$(fm_meta_get "$meta" busy_gen)
+  [ -z "$busy_gen" ] || "$FM_ROOT/bin/fm-busy-event.sh" retire "$STATE" "$ID" --gen "$busy_gen" >/dev/null 2>&1 || return 1
+  fm_backlog_atomic_transition remove "$meta" "quarantined task record" "$STATE" || return 1
+  rm -f -- "$HERDR_TREEHOUSE_LEASE_TX" || return 1
+  rm -f -- "$HERDR_LAYOUT_ATTEMPT" || return 1
+  echo "notice: reconciled task $ID's prior fresh structural Herdr launch and safely released its isolated copy" >&2
+}
+
+if [ -e "$HERDR_LAYOUT_ATTEMPT" ] || [ -L "$HERDR_LAYOUT_ATTEMPT" ]; then
+  if spawn_reconcile_herdr_layout_attempt; then
+    :
+  else
+    reconcile_status=$?
+    if [ "$reconcile_status" -eq 2 ]; then
+      echo "error: task $ID's inert shell endpoint was restored; retry the relaunch now that its quarantine is retired" >&2
+    elif [ "$reconcile_status" -eq 3 ]; then
+      echo "spawned $ID by recovering its already-committed structural Herdr worker"
+      exit 0
+    fi
+    exit 1
+  fi
+fi
+if [ "$RELAUNCH_HERDR_ATTEMPT_PENDING" = 1 ]; then
+  spawn_require_relaunch_endpoint_dead || exit 1
+fi
+
 # Backlog preflight (bin/fm-backlog-transition-lib.sh). This spawn is about to
 # become the sole owner of the row's In-flight transition, so prove the row is
 # transitionable BEFORE any endpoint, worktree, or record exists: a refusal here
@@ -3011,6 +3539,7 @@ else
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
+    HERDR_PRESENTATION_JOURNAL_OPTIONAL=0
     if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
@@ -3096,6 +3625,7 @@ else
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
                 HERDR_PROJECTION_ABORT_TASK_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
                 HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+                HERDR_PROJECTION_ABORT_SEEDED_PRUNED=${FM_BACKEND_HERDR_PROJECTION_SEEDED_PRUNED:-0}
               fi
               exit 1
             fi
@@ -3109,6 +3639,7 @@ else
             HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
             HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
             HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+            HERDR_PROJECTION_ABORT_SEEDED_PRUNED=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PRUNED
             fm_backend_herdr_projection_order_best_effort \
               "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID"
             HERDR_HOME_ID=$(fm_backend_herdr_projection_home_identity "$HERDR_LABEL_HOME" 2>/dev/null || true)
@@ -3123,6 +3654,7 @@ else
                 "$HERDR_PARENT_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PROJECTION_LABEL" "$W"; then
               :
             else
+              HERDR_PRESENTATION_JOURNAL_OPTIONAL=1
               echo "warning: herdr presentation could not publish an exact restart binding; this task will use flat fallback after a restart" >&2
             fi
           fi
@@ -3153,6 +3685,13 @@ EOF
       exit 1
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
+    if [ "$HARNESS" = pi ] && [ "$RELAUNCH" -eq 0 ] \
+      && [ "$HERDR_PROJECTED" -ne 1 ]; then
+      HERDR_PROJECTION_ABORT_CLEANUP=1
+      HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
+      HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
+      HERDR_PROJECTION_ABORT_SEEDED_PANE=
+    fi
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1
@@ -3453,40 +3992,111 @@ agy_spawn_fail() {  # <detail>
 }
 
 if [ "$RELAUNCH" -eq 1 ]; then
-  # No worktree is acquired: the recorded one is reused as-is. What must be
-  # proven instead is that the adopted endpoint's shell is actually sitting in
-  # that worktree, so the replacement agent starts where the work is rather
-  # than wherever the pane happened to drift.
-  relaunch_wt_real=$(real_path_or_raw "$WT")
-  relaunch_seen=
-  for _ in $(seq 1 10); do
-    relaunch_seen=$(spawn_current_path "$WT_TARGET" || true)
-    [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ] || break
-    sleep 0.5
-  done
-  if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then
-    if [ "$BACKEND" != herdr ]; then
-      echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}', not its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
-      exit 1
-    fi
-    relaunch_cd_path=${WT//\'/\'\\\'\'}
-    spawn_send_text_line "$WT_TARGET" "cd -- '$relaunch_cd_path'" || {
-      echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}' and could not be told to return to its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
-      exit 1
-    }
+  # No worktree is acquired: the recorded one is reused as-is. Structural Pi
+  # addresses that path in layout.apply; every interactive launch first proves
+  # that its shell is in the recorded worktree.
+  if [ "$BACKEND" != herdr ] || [ "$HARNESS" != pi ]; then
+    relaunch_wt_real=$(real_path_or_raw "$WT")
+    relaunch_seen=
     for _ in $(seq 1 10); do
       relaunch_seen=$(spawn_current_path "$WT_TARGET" || true)
       [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ] || break
       sleep 0.5
     done
     if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then
-      echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}' and did not return to its recorded worktree '$WT' when told to; refusing to relaunch an agent outside the copy holding its work" >&2
-      exit 1
+      if [ "$BACKEND" != herdr ]; then
+        echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}', not its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
+        exit 1
+      fi
+      relaunch_cd_path=${WT//\'/\'\\\'\'}
+      spawn_send_text_line "$WT_TARGET" "cd -- '$relaunch_cd_path'" || {
+        echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}' and could not be told to return to its recorded worktree '$WT'; refusing to relaunch an agent outside the copy holding its work" >&2
+        exit 1
+      }
+      for _ in $(seq 1 10); do
+        relaunch_seen=$(spawn_current_path "$WT_TARGET" || true)
+        [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ] || break
+        sleep 0.5
+      done
+      if [ -z "$relaunch_seen" ] || [ "$(real_path_or_raw "$relaunch_seen")" != "$relaunch_wt_real" ]; then
+        echo "error: task $ID's endpoint is in '${relaunch_seen:-unknown}' and did not return to its recorded worktree '$WT' when told to; refusing to relaunch an agent outside the copy holding its work" >&2
+        exit 1
+      fi
     fi
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ]; then
+    SPAWN_TREEHOUSE_LEASE_ROLLBACK_ARMED=1
+    if [ -e "$HERDR_TREEHOUSE_LEASE_TX" ] || [ -L "$HERDR_TREEHOUSE_LEASE_TX" ]; then
+      fm_treehouse_lease_transaction_snapshot "$HERDR_TREEHOUSE_LEASE_TX" || {
+        echo "error: task $ID's structural Herdr Treehouse lease transaction is malformed" >&2
+        exit 1
+      }
+      SPAWN_TREEHOUSE_LEASE_HOLDER=$FM_TREEHOUSE_LEASE_TX_HOLDER
+      fm_treehouse_lease_transaction_reconcile "$HERDR_TREEHOUSE_LEASE_TX" \
+        "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER" "$PROJ_ABS" || {
+        echo "error: task $ID's structural Herdr Treehouse lease transaction is malformed or contradicts live ownership" >&2
+        exit 1
+      }
+      case "$FM_TREEHOUSE_LEASE_TX_RESULT" in
+        acquired)
+          WT=$FM_TREEHOUSE_LEASE_TX_WORKTREE
+          SPAWN_TREEHOUSE_LEASE_ID=$FM_TREEHOUSE_LEASE_TX_ID
+          ;;
+        cleanup|returned)
+          if ! fm_treehouse_lease_transaction_return "$HERDR_TREEHOUSE_LEASE_TX" \
+            "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER" "$PROJ_ABS" >/dev/null \
+            || ! rm -f -- "$HERDR_TREEHOUSE_LEASE_TX"; then
+            echo "error: task $ID's prior structural Herdr Treehouse lease cleanup could not be confirmed" >&2
+            exit 1
+          fi
+          ;;
+        retry|absent) ;;
+        *) exit 1 ;;
+      esac
+    fi
+    if [ -z "$SPAWN_TREEHOUSE_LEASE_ID" ]; then
+      SPAWN_TREEHOUSE_LEASE_HOLDER="fm-$ID-$(python3 -c 'import os; print(os.urandom(16).hex())')" || exit 1
+      fm_treehouse_lease_transaction_write "$HERDR_TREEHOUSE_LEASE_TX" intent \
+        "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER" "$PROJ_ABS" - - || {
+        echo "error: could not publish structural Herdr Treehouse lease intent" >&2
+        exit 1
+      }
+      TREEHOUSE_LEASE_JSON=$(cd "$PROJ_ABS" && treehouse get --lease --json \
+        --lease-holder "$SPAWN_TREEHOUSE_LEASE_HOLDER") || {
+        echo "error: treehouse could not lease an isolated worktree for structural Herdr launch" >&2
+        exit 1
+      }
+      WT=$(printf '%s' "$TREEHOUSE_LEASE_JSON" | jq -r \
+        --arg holder "$SPAWN_TREEHOUSE_LEASE_HOLDER" \
+        'select(.lease_holder == $holder and (.path | type == "string") and (.lease_id | type == "string")) | .path' 2>/dev/null)
+      SPAWN_TREEHOUSE_LEASE_ID=$(printf '%s' "$TREEHOUSE_LEASE_JSON" | jq -r \
+        --arg holder "$SPAWN_TREEHOUSE_LEASE_HOLDER" \
+        'select(.lease_holder == $holder and (.path | type == "string") and (.lease_id | type == "string")) | .lease_id' 2>/dev/null)
+      if [ -z "$WT" ] || [ -z "$SPAWN_TREEHOUSE_LEASE_ID" ] \
+        || ! fm_treehouse_pool_slot "$PROJ_ABS" "$WT" \
+        || ! fm_treehouse_lease_transaction_write "$HERDR_TREEHOUSE_LEASE_TX" acquired \
+          "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER" "$PROJ_ABS" "$WT" "$SPAWN_TREEHOUSE_LEASE_ID"; then
+        echo "error: treehouse returned an invalid structural Herdr lease identity; preserving its acquisition intent for exact reconciliation" >&2
+        exit 1
+      fi
+      WT=$(fm_treehouse_canonical_existing_path "$WT") || {
+        echo "error: treehouse returned a structural Herdr worktree that could not be canonicalized" >&2
+        exit 1
+      }
+    fi
+    SPAWN_TREEHOUSE_LEASE_HELD=1
+    validate_spawn_worktree "treehouse lease" "$T"
+    if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+      if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME" "$SPAWN_TREEHOUSE_LEASE_HOLDER"; then
+        echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing structural Herdr launch" >&2
+        exit 1
+      fi
+      SPAWN_SLOT_CLAIMED=1
+    fi
+  else
+    spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -3548,9 +4158,9 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 
   # Claim the pool slot for this task. The interactive `treehouse get` sent to
-  # the pane above records only a process lease (Treehouse's durable
-  # `get --lease --lease-holder`, which bin/fm-home-seed.sh uses for secondmate
-  # homes, is not this path), so Treehouse cannot say which task a slot belongs
+  # the pane above records only a process lease. The structural Herdr path
+  # instead holds a durable holder-bound lease, but every other interactive
+  # backend still needs the same slot claim because Treehouse cannot say which task a slot belongs
   # to once that task's worker exits - and that is exactly when the slot is
   # handed on and this task's worktree= line goes stale. The claim is what lets
   # bin/fm-teardown.sh leave a slot that has since been reassigned untouched, so
@@ -3565,6 +4175,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       exit 1
     fi
     SPAWN_SLOT_CLAIMED=1
+  fi
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
@@ -4115,6 +4726,11 @@ preserve_relaunch_meta() {
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
     echo "herdr_tab_id=$HERDR_TAB_ID"
     echo "herdr_pane_id=$HERDR_PANE_ID"
+    if [ "$SPAWN_TREEHOUSE_LEASE_HELD" = 1 ]; then
+      echo "treehouse_lease_holder=$SPAWN_TREEHOUSE_LEASE_HOLDER"
+      echo "treehouse_lease_id=$SPAWN_TREEHOUSE_LEASE_ID"
+      echo "treehouse_lease_worktree=$(real_path_or_raw "$WT")"
+    fi
   fi
   if [ "$BACKEND" = zellij ]; then
     echo "zellij_session=$ZELLIJ_SES"
@@ -4334,35 +4950,95 @@ spawn_record_traceparent() {
   return "$status"
 }
 
-# Export GOTMPDIR into the crewmate's pane shell so the agent and every child
-# process (go build, go test, ...) inherit it. Sent before the launch command so
-# the env is set when the agent starts; the brief sleep lets the export land.
-spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
-# Mark the pane as a task worker so bin/fm-test-run.sh can refuse to run the
-# suite in the repository's primary checkout. Ship and scout workers are the
-# ones assigned an isolated worktree; a secondmate runs its own home instead.
-# The id reached a validated bare-slug charset above, so it carries no shell
-# syntax of its own.
-if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
-  spawn_send_text_line "$T" "export FM_TASK_ID=$ID"
-fi
-# Send through the exact channel that already ships GOTMPDIR, so every backend
-# and harness - ship, scout, and secondmate - gets it before launch. Skipped
-# entirely when trace context is off.
-if [ -n "$SPAWN_TRACEPARENT" ]; then
-  if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
-    if ! spawn_record_traceparent; then
+# Every launch except structural plain Pi still drives its fresh interactive
+# shell exactly as before. Plain Pi on Herdr instead inherits the destination
+# daemon environment through layout.apply and carries only non-sensitive
+# operational overrides explicitly.
+if [ "$BACKEND" != herdr ] || [ "$HARNESS" != pi ]; then
+  # Export GOTMPDIR into the worker shell so the agent and every child process
+  # (go build, go test, ...) inherit it.
+  spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+  # Ship and scout workers are assigned an isolated local copy. A secondmate
+  # runs its own home and therefore receives no FM_TASK_ID marker.
+  if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+    spawn_send_text_line "$T" "export FM_TASK_ID=$ID"
+  fi
+  if [ -n "$SPAWN_TRACEPARENT" ]; then
+    if spawn_send_text_line "$T" "export TRACEPARENT=$SPAWN_TRACEPARENT"; then
+      if ! spawn_record_traceparent; then
+        LAUNCH="unset TRACEPARENT; $LAUNCH"
+      fi
+    else
+      TRACE_SEND_STATUS=$?
+      if [ "$TRACE_SEND_STATUS" -eq 2 ]; then
+        echo "error: trace-context input could not be cleared for $W; refusing to append the launch command" >&2
+        exit 1
+      fi
       LAUNCH="unset TRACEPARENT; $LAUNCH"
     fi
-  else
-    TRACE_SEND_STATUS=$?
-    if [ "$TRACE_SEND_STATUS" -eq 2 ]; then
-      echo "error: trace-context input could not be cleared for $W; refusing to append the launch command" >&2
-      exit 1
-    fi
-    LAUNCH="unset TRACEPARENT; $LAUNCH"
   fi
+elif [ -n "$SPAWN_TRACEPARENT" ] && ! spawn_record_traceparent; then
+  LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
+
+spawn_herdr_layout_environment() {
+  local task_id=
+  if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+    task_id=$ID
+  fi
+  python3 - "$TASK_TMP/gotmp" "$task_id" "$SPAWN_TRACEPARENT" <<'PY'
+import json
+import sys
+
+gotmp, task_id, traceparent = sys.argv[1:4]
+env = {"GOTMPDIR": gotmp}
+if task_id:
+    env["FM_TASK_ID"] = task_id
+if traceparent:
+    env["TRACEPARENT"] = traceparent
+print(json.dumps(env, separators=(",", ":")))
+PY
+}
+
+spawn_rebind_herdr_layout_pane() { # <new-tab> <new-pane>
+  local new_tab=$1 new_pane=$2 tmp
+  tmp=$(mktemp "$STATE/.${ID}.meta.layout.XXXXXX") || return 1
+  if ! fm_backend_herdr_layout_rebind_meta \
+    "$STATE/$ID.meta" "$tmp" "$HERDR_SES" "$new_tab" "$new_pane"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! fm_backlog_atomic_transition publish "$tmp" "$STATE/$ID.meta" "task record" "$STATE"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+spawn_wait_herdr_layout_process() {
+  local i=0
+  while [ "$i" -lt 120 ]; do
+    fm_backend_herdr_pane_matches_harness "$HERDR_SES" "$HERDR_PANE_ID" pi && return 0
+    i=$((i + 1))
+    sleep 0.25
+  done
+  return 1
+}
+
+spawn_wait_herdr_layout_ready() {
+  local state agent i=0
+  while [ "$i" -lt 120 ]; do
+    state=$(fm_backend_herdr_pane_agent_state "$HERDR_SES" "$HERDR_PANE_ID")
+    if [ "$state" = live ]; then
+      agent=$(fm_backend_herdr_cli "$HERDR_SES" agent get "$HERDR_PANE_ID" 2>/dev/null \
+        | jq -r '.result.agent.agent // .result.agent.kind // empty' 2>/dev/null)
+      [ "$agent" = pi ] && return 0
+    fi
+    i=$((i + 1))
+    sleep 0.25
+  done
+  return 1
+}
+
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH_ENV_PREFIX='/usr/bin/env -i'
   for env_name in HOME PATH USER LOGNAME SHELL TERM COLORTERM LANG LC_ALL LC_CTYPE \
@@ -4383,14 +5059,114 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
-sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
-sleep 0.3
-if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ]; then
+  HERDR_LAYOUT_ENV=$(spawn_herdr_layout_environment) || exit 1
+  HERDR_LAYOUT_COMMAND=$(printf '%s' "$LAUNCH" | python3 -c '
+import json
+import sys
+print(json.dumps(["/bin/sh", "-c", sys.stdin.read()], separators=(",", ":")))
+') || exit 1
+  HERDR_LAYOUT_OLD_TAB_ID=$HERDR_TAB_ID
+  HERDR_LAYOUT_OLD_PANE_ID=$HERDR_PANE_ID
+  if [ "$KIND" = secondmate ]; then
+    HERDR_LAYOUT_OWNERSHIP_MODE=secondmate
+  elif [ "$RELAUNCH" -eq 1 ]; then
+    HERDR_LAYOUT_OWNERSHIP_MODE=relaunch
+  else
+    HERDR_LAYOUT_OWNERSHIP_MODE=fresh
+    if [ "$SPAWN_TREEHOUSE_LEASE_HELD" != 1 ] \
+      || ! fm_treehouse_lease_holder_valid \
+        "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER"; then
+      echo "error: fresh structural Herdr launch has no exact acquired Treehouse lease proof" >&2
+      exit 1
+    fi
+    HERDR_LAYOUT_LEASE_HOLDER=$SPAWN_TREEHOUSE_LEASE_HOLDER
+  fi
+  HERDR_LAYOUT_ATTEMPT_ID=$(python3 -c 'import os; print(os.urandom(16).hex())') || exit 1
+  if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
+    spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
+      echo "error: structural Herdr launch could not acquire its named-session mutation lock" >&2
+      exit 1
+    }
+  fi
+  if HERDR_LAYOUT_BINDING=$(fm_backend_herdr_layout_apply "$T" "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
+    "$WT" "$HERDR_LAYOUT_ENV" "$HERDR_LAYOUT_COMMAND" "$HERDR_LAYOUT_ATTEMPT" "$HERDR_LAYOUT_ATTEMPT_ID" \
+    "$HERDR_LAYOUT_OWNERSHIP_MODE" "$ID" "$HERDR_LAYOUT_LEASE_HOLDER"); then
+    :
+  else
+    HERDR_LAYOUT_STATUS=$?
+    if [ "$HERDR_LAYOUT_STATUS" -eq 3 ]; then
+      echo "error: structural Herdr launch has an uncertain result; preserving its task record and isolated copy for exact reconciliation" >&2
+    else
+      echo "error: structural Herdr launch failed before worker readiness; refusing to report a worker start" >&2
+    fi
+    exit 1
+  fi
+  HERDR_TAB_ID=${HERDR_LAYOUT_BINDING%%$'\t'*}
+  HERDR_PANE_ID=${HERDR_LAYOUT_BINDING#*$'\t'}
+  [ -n "$HERDR_TAB_ID" ] && [ -n "$HERDR_PANE_ID" ] && [ "$HERDR_TAB_ID" != "$HERDR_PANE_ID" ] || exit 1
+  T="$HERDR_SES:$HERDR_PANE_ID"
+  META_WINDOW=$T
+  # After layout.apply succeeds, every later refusal must target the returned
+  # replacement identity.
+  HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
+  if ! spawn_wait_herdr_layout_process; then
+    echo "error: structural Herdr launch did not produce the expected Pi process in its replacement pane" >&2
+    exit 1
+  fi
+  if ! fm_backend_herdr_layout_report_pi "$T"; then
+    echo "error: structural Herdr launch could not register its confirmed Pi in Herdr inventory" >&2
+    exit 1
+  fi
+  if ! spawn_wait_herdr_layout_ready; then
+    echo "error: structural Herdr launch did not produce a live registered plain Pi in its exact task pane" >&2
+    exit 1
+  fi
+  if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
+    if [ "${HERDR_PRESENTATION_JOURNAL_OPTIONAL:-0}" -eq 1 ]; then
+      # The one legitimate unbound state is the exact version-1 attempt journal
+      # left when restart binding was explicitly downgraded above. It contains
+      # no endpoint ids to rebind. Missing, linked, malformed, mismatched, or
+      # already-bound records still refuse instead of masking lost authority.
+      if ! fm_backend_herdr_projection_journal_snapshot "$HERDR_PRESENTATION_JOURNAL" "$ID" \
+        || [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" != 1 ] \
+        || [ "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" != "$HERDR_PROJECTION_ID" ]; then
+        echo "error: structural Herdr launch lost its exact unbound presentation attempt before endpoint rebinding" >&2
+        exit 1
+      fi
+    elif ! fm_backend_herdr_projection_journal_replace_endpoint \
+      "$HERDR_PRESENTATION_JOURNAL" "$ID" \
+      "$HERDR_LAYOUT_OLD_TAB_ID" "$HERDR_LAYOUT_OLD_PANE_ID" \
+      "$HERDR_TAB_ID" "$HERDR_PANE_ID"; then
+      echo "error: structural Herdr launch could not rebind its exact presentation record" >&2
+      exit 1
+    fi
+  fi
+  if ! spawn_rebind_herdr_layout_pane "$HERDR_TAB_ID" "$HERDR_PANE_ID"; then
+    echo "error: structural Herdr launch returned a replacement pane but its task record could not be rebound" >&2
+    exit 1
+  fi
+  fm_backend_herdr_layout_attempt_verify "$HERDR_LAYOUT_ATTEMPT" || {
+    echo "error: structural Herdr launch could not verify its exact attempt record" >&2
+    exit 1
+  }
+  HERDR_LAYOUT_ENDPOINT_READY=1
+  if [ "$HERDR_LAYOUT_OWNERSHIP_MODE" = fresh ]; then
+    HERDR_LAYOUT_ENDPOINT_COMMITTED=1
+  fi
+else
+  sleep 0.3
+  spawn_send_literal "$T" "$LAUNCH"
+  sleep 0.3
+  spawn_send_key "$T" Enter
+fi
+if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ] \
+  && [ "$HERDR_LAYOUT_ENDPOINT_COMMITTED" != 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
+fi
+if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
@@ -4486,22 +5262,37 @@ SPAWN_BACKLOG_COMMIT_STATUS=0
 FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-30}
 if spawn_commit_backlog_transition; then
   SPAWN_FRESH_COMMIT_PENDING=0
+  SPAWN_TREEHOUSE_LEASE_HELD=0
+  SPAWN_TREEHOUSE_LEASE_ROLLBACK_ARMED=0
 else
   SPAWN_BACKLOG_COMMIT_STATUS=$?
   if spawn_commit_backlog_transition; then
     SPAWN_BACKLOG_COMMIT_STATUS=0
     SPAWN_FRESH_COMMIT_PENDING=0
+    SPAWN_TREEHOUSE_LEASE_HELD=0
+    SPAWN_TREEHOUSE_LEASE_ROLLBACK_ARMED=0
   fi
 fi
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   if [ "$RELAUNCH" -eq 0 ]; then
-    if spawn_fresh_commit_rollback; then
+    if [ "$HERDR_LAYOUT_ENDPOINT_COMMITTED" = 1 ]; then
+      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); abort cleanup must close and confirm its exact Herdr endpoint before removing the provisional record and returning its isolated copy" >&2
+    elif spawn_fresh_commit_rollback; then
       echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed so no worker is left that the backlog does not own - close out endpoint $T and local copy $WT by hand, then re-run the spawn" >&2
     else
       echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR), and failed-dispatch cleanup is incomplete; the provisional record may remain at $STATE/$ID.meta - close out endpoint $T and local copy $WT by hand, then remove the record and busy state before retrying" >&2
     fi
   else
     echo "error: task $ID was republished but its backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); fix the backlog and re-run the relaunch" >&2
+  fi
+fi
+if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -eq 0 ] \
+  && [ "$HERDR_LAYOUT_ENDPOINT_READY" = 1 ]; then
+  HERDR_PROJECTION_ABORT_CLEANUP=0
+  HERDR_LAYOUT_ABORT_RECONCILE=0
+  if ! fm_backend_herdr_layout_attempt_commit "$HERDR_LAYOUT_ATTEMPT"; then
+    echo "error: task $ID is committed In flight with its exact worker and lease preserved, but its structural launch receipt could not be retired; retry the spawn to finish receipt cleanup without launching another worker" >&2
+    SPAWN_BACKLOG_COMMIT_STATUS=1
   fi
 fi
 trap - HUP INT TERM

@@ -1249,39 +1249,243 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
   [ "$project_common" = "$slot_common" ]
 }
 
+fm_treehouse_lease_holder_valid() { # <task> <holder>
+  local task=$1 holder=$2 prefix token
+  case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  prefix="fm-$task-"
+  case "$holder" in "$prefix"*) ;; *) return 1 ;; esac
+  token=${holder#"$prefix"}
+  [ "${#token}" = 32 ] || return 1
+  case "$token" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+fm_treehouse_canonical_existing_path() { # <path>
+  CDPATH='' cd -- "$1" 2>/dev/null && pwd -P
+}
+
+fm_treehouse_lease_transaction_validate() { # <phase> <task> <holder> <project> <worktree|-> <lease-id|->
+  local phase=$1 task=$2 holder=$3 project=$4 worktree=$5 lease_id=$6 canonical
+  fm_treehouse_lease_holder_valid "$task" "$holder" || return 1
+  canonical=$(fm_treehouse_canonical_existing_path "$project") || return 1
+  [ "$canonical" = "$project" ] || return 1
+  case "$project" in *$'\n'*) return 1 ;; esac
+  case "$phase" in
+    intent)
+      [ "$worktree" = - ] && [ "$lease_id" = - ]
+      ;;
+    acquired)
+      canonical=$(fm_treehouse_canonical_existing_path "$worktree") || return 1
+      [ "$canonical" = "$worktree" ] || return 1
+      case "$worktree" in *$'\n'*) return 1 ;; esac
+      [ "${#lease_id}" = 32 ] || return 1
+      case "$lease_id" in *[!0-9a-f]*) return 1 ;; esac
+      ;;
+    cleanup|returned)
+      case "$worktree" in /*) ;; *) return 1 ;; esac
+      case "$worktree" in *$'\n'*) return 1 ;; esac
+      if [ -e "$worktree" ] || [ -L "$worktree" ]; then
+        canonical=$(fm_treehouse_canonical_existing_path "$worktree") || return 1
+        [ "$canonical" = "$worktree" ] || return 1
+      fi
+      [ "${#lease_id}" = 32 ] || return 1
+      case "$lease_id" in *[!0-9a-f]*) return 1 ;; esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_treehouse_lease_transaction_write() { # <file> <phase> <task> <holder> <project> <worktree|-> <lease-id|->
+  local file=$1 phase=$2 task=$3 holder=$4 project=$5 worktree=$6 lease_id=$7 tmp
+  project=$(fm_treehouse_canonical_existing_path "$project") || return 1
+  case "$phase" in
+    acquired|cleanup)
+      worktree=$(fm_treehouse_canonical_existing_path "$worktree") || return 1
+      ;;
+    returned)
+      if [ -e "$worktree" ] || [ -L "$worktree" ]; then
+        worktree=$(fm_treehouse_canonical_existing_path "$worktree") || return 1
+      fi
+      ;;
+  esac
+  fm_treehouse_lease_transaction_validate "$phase" "$task" "$holder" "$project" "$worktree" "$lease_id" || return 1
+  if { [ -e "$file" ] || [ -L "$file" ]; } && { [ ! -f "$file" ] || [ -L "$file" ]; }; then
+    return 1
+  fi
+  tmp="$file.tmp.${BASHPID:-$$}.$RANDOM"
+  rm -f -- "$tmp" || return 1
+  {
+    printf 'version=1\n'
+    printf 'phase=%s\n' "$phase"
+    printf 'task=%s\n' "$task"
+    printf 'holder=%s\n' "$holder"
+    printf 'project=%s\n' "$project"
+    printf 'worktree=%s\n' "$worktree"
+    printf 'lease_id=%s\n' "$lease_id"
+  } >"$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$file" || { rm -f -- "$tmp"; return 1; }
+}
+
+fm_treehouse_lease_transaction_snapshot() { # <file>
+  local file=$1 key count line value
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  [ "$(wc -l < "$file" | tr -d '[:space:]')" = 7 ] \
+    && ! grep -Ev '^(version|phase|task|holder|project|worktree|lease_id)=' "$file" >/dev/null 2>&1 \
+    || return 1
+  for key in version phase task holder project worktree lease_id; do
+    count=$(grep -c "^${key}=" "$file" 2>/dev/null || true)
+    [ "$count" = 1 ] || return 1
+    line=$(grep "^${key}=" "$file") || return 1
+    value=${line#*=}
+    case "$key" in
+      version) FM_TREEHOUSE_LEASE_TX_VERSION=$value ;;
+      phase) FM_TREEHOUSE_LEASE_TX_PHASE=$value ;;
+      task) FM_TREEHOUSE_LEASE_TX_TASK=$value ;;
+      holder) FM_TREEHOUSE_LEASE_TX_HOLDER=$value ;;
+      project) FM_TREEHOUSE_LEASE_TX_PROJECT=$value ;;
+      worktree) FM_TREEHOUSE_LEASE_TX_WORKTREE=$value ;;
+      lease_id) FM_TREEHOUSE_LEASE_TX_ID=$value ;;
+    esac
+  done
+  [ "$FM_TREEHOUSE_LEASE_TX_VERSION" = 1 ] || return 1
+  fm_treehouse_lease_transaction_validate "$FM_TREEHOUSE_LEASE_TX_PHASE" \
+    "$FM_TREEHOUSE_LEASE_TX_TASK" "$FM_TREEHOUSE_LEASE_TX_HOLDER" \
+    "$FM_TREEHOUSE_LEASE_TX_PROJECT" "$FM_TREEHOUSE_LEASE_TX_WORKTREE" \
+    "$FM_TREEHOUSE_LEASE_TX_ID"
+}
+
+fm_treehouse_lease_status_json() { # <project>
+  (CDPATH='' cd -- "$1" && treehouse status --json)
+}
+
+fm_treehouse_lease_transaction_reconcile() { # <file> <task> <holder> <project>
+  local file=$1 task=$2 holder=$3 project=$4 status matches count path lease_id canonical live_holder
+  FM_TREEHOUSE_LEASE_TX_RESULT=
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    FM_TREEHOUSE_LEASE_TX_RESULT=absent
+    return 0
+  fi
+  project=$(fm_treehouse_canonical_existing_path "$project") || return 1
+  fm_treehouse_lease_transaction_snapshot "$file" || return 1
+  [ "$FM_TREEHOUSE_LEASE_TX_TASK" = "$task" ] \
+    && [ "$FM_TREEHOUSE_LEASE_TX_HOLDER" = "$holder" ] \
+    && [ "$FM_TREEHOUSE_LEASE_TX_PROJECT" = "$project" ] || return 1
+  status=$(fm_treehouse_lease_status_json "$project" 2>/dev/null) || return 1
+  printf '%s' "$status" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
+  case "$FM_TREEHOUSE_LEASE_TX_PHASE" in
+    intent)
+      matches=$(printf '%s' "$status" | jq -c --arg holder "$holder" \
+        '[.[] | select(.lease_holder == $holder and (.lease_id | type == "string") and (.path | type == "string"))]' 2>/dev/null) || return 1
+      count=$(printf '%s' "$matches" | jq -r 'length' 2>/dev/null) || return 1
+      if [ "$count" = 0 ]; then
+        rm -f -- "$file" || return 1
+        FM_TREEHOUSE_LEASE_TX_RESULT=retry
+        return 0
+      fi
+      [ "$count" = 1 ] || return 1
+      path=$(printf '%s' "$matches" | jq -r '.[0].path' 2>/dev/null) || return 1
+      lease_id=$(printf '%s' "$matches" | jq -r '.[0].lease_id' 2>/dev/null) || return 1
+      canonical=$(fm_treehouse_canonical_existing_path "$path") || return 1
+      fm_treehouse_pool_slot "$project" "$canonical" || return 1
+      fm_treehouse_lease_transaction_write "$file" acquired "$task" "$holder" "$project" "$canonical" "$lease_id" || return 1
+      fm_treehouse_lease_transaction_snapshot "$file" || return 1
+      FM_TREEHOUSE_LEASE_TX_RESULT=acquired
+      ;;
+    acquired|cleanup)
+      matches=$(printf '%s' "$status" | jq -c --arg id "$FM_TREEHOUSE_LEASE_TX_ID" \
+        '[.[] | select(.lease_id == $id)]' 2>/dev/null) || return 1
+      count=$(printf '%s' "$matches" | jq -r 'length' 2>/dev/null) || return 1
+      if [ "$count" = 0 ] && [ "$FM_TREEHOUSE_LEASE_TX_PHASE" = cleanup ]; then
+        fm_treehouse_lease_transaction_write "$file" returned "$task" "$holder" "$project" \
+          "$FM_TREEHOUSE_LEASE_TX_WORKTREE" "$FM_TREEHOUSE_LEASE_TX_ID" || return 1
+        fm_treehouse_lease_transaction_snapshot "$file" || return 1
+        FM_TREEHOUSE_LEASE_TX_RESULT=returned
+        return 0
+      fi
+      [ "$count" = 1 ] || return 1
+      path=$(printf '%s' "$matches" | jq -r '.[0].path // empty' 2>/dev/null) || return 1
+      live_holder=$(printf '%s' "$matches" | jq -r '.[0].lease_holder // empty' 2>/dev/null) || return 1
+      canonical=$(fm_treehouse_canonical_existing_path "$path") || return 1
+      [ "$live_holder" = "$holder" ] \
+        && [ "$canonical" = "$FM_TREEHOUSE_LEASE_TX_WORKTREE" ] \
+        && fm_treehouse_pool_slot "$project" "$canonical" || return 1
+      FM_TREEHOUSE_LEASE_TX_RESULT=$FM_TREEHOUSE_LEASE_TX_PHASE
+      ;;
+    returned)
+      count=$(printf '%s' "$status" | jq -r --arg id "$FM_TREEHOUSE_LEASE_TX_ID" \
+        '[.[] | select(.lease_id == $id)] | length' 2>/dev/null) || return 1
+      [ "$count" = 0 ] || return 1
+      FM_TREEHOUSE_LEASE_TX_RESULT=returned
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_treehouse_lease_transaction_return() { # <file> <task> <holder> <project>
+  local file=$1 task=$2 holder=$3 project=$4
+  project=$(fm_treehouse_canonical_existing_path "$project") || return 1
+  fm_treehouse_lease_transaction_reconcile "$file" "$task" "$holder" "$project" || return 1
+  case "$FM_TREEHOUSE_LEASE_TX_RESULT" in
+    absent|retry) return 0 ;;
+    acquired)
+      fm_treehouse_lease_transaction_write "$file" cleanup "$task" "$holder" "$project" \
+        "$FM_TREEHOUSE_LEASE_TX_WORKTREE" "$FM_TREEHOUSE_LEASE_TX_ID" || return 1
+      fm_treehouse_lease_transaction_snapshot "$file" || return 1
+      ;;
+    cleanup|returned) ;;
+    *) return 1 ;;
+  esac
+  if [ "$FM_TREEHOUSE_LEASE_TX_PHASE" = cleanup ]; then
+    (CDPATH='' cd -- "$project" && treehouse return --force \
+      --if-lease-id "$FM_TREEHOUSE_LEASE_TX_ID" "$FM_TREEHOUSE_LEASE_TX_WORKTREE") || return 1
+    fm_treehouse_lease_transaction_write "$file" returned "$task" "$holder" "$project" \
+      "$FM_TREEHOUSE_LEASE_TX_WORKTREE" "$FM_TREEHOUSE_LEASE_TX_ID" || return 1
+  fi
+  fm_treehouse_lease_transaction_reconcile "$file" "$task" "$holder" "$project" || return 1
+  [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = returned ]
+}
+
 # Slot-owner claim: which task a Treehouse pool slot currently belongs to.
 #
 # Treehouse can record ownership durably: `treehouse get --lease --lease-holder`
-# reserves a slot under a label until `treehouse return --if-lease-holder`
-# releases it, and Firstmate uses exactly that for secondmate homes
-# (bin/fm-home-seed.sh). Crewmate spawns do not take that path: they acquire
-# their slot through the interactive pane-driven `treehouse get`, whose state
-# entry is a live process lease (owner_pid plus owner_started_at, and `treehouse
-# status` reports in-use from the processes actually running under the path).
-# That answers "is anything running here", never "which task owns this", and it
-# is released by the very event that makes a task record stale - the worker
-# exiting - so a slot whose lease has lapsed reads identical whether it is still
-# this task's or has since been handed to another one. Firstmate therefore keeps
-# its own claim on top: one file naming the task that took the slot, written by
-# bin/fm-spawn.sh under the same project lock that allocates the slot and
-# released by bin/fm-teardown.sh when the slot goes back to the pool. Moving
-# crewmate spawns onto the durable lease is separate follow-up work.
+# reserves a slot under a label until a holder-bound return releases it.
+# Firstmate uses that path for secondmate homes and structural Herdr workers.
+# Other crewmate spawns acquire their slot through interactive pane-driven
+# `treehouse get`, whose state entry is a live process lease (owner_pid plus
+# owner_started_at, and `treehouse status` reports in-use from the processes
+# actually running under the path). That answers "is anything running here",
+# never "which task owns this", and it is released by the very event that makes
+# a task record stale - the worker exiting - so a slot whose lease has lapsed
+# reads identical whether it is still this task's or has since been handed to
+# another one. Firstmate therefore keeps its own claim on top: one file naming
+# the task that took the slot, written by bin/fm-spawn.sh under the same project
+# lock that allocates the slot and released by bin/fm-teardown.sh when the slot
+# goes back to the pool.
 #
 # The claim lives at <pool>/<slot>/.fm-slot-owner - a sibling of the repo
 # checkout rather than a file inside it - so claiming a slot can never dirty the
 # copy teardown's landed-work checks inspect, and a returned slot carries no
 # untracked leftover from it.
 fm_treehouse_slot_owner_marker() {  # <worktree>
-  local worktree=$1 slot
-  slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
+  local worktree=$1 slot parent base
+  if slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P); then
+    :
+  else
+    case "$worktree" in /*) ;; *) return 1 ;; esac
+    case "$worktree" in *$'\n'*) return 1 ;; esac
+    parent=$(CDPATH='' cd -- "$(dirname "$worktree")" 2>/dev/null && pwd -P) || return 1
+    base=$(basename "$worktree")
+    [ -n "$base" ] && [ "$base" != . ] && [ "$base" != .. ] || return 1
+    slot="$parent/$base"
+  fi
   printf '%s/.fm-slot-owner\n' "$(dirname "$slot")"
 }
 
 # Claim a pool slot for a task, replacing whatever the previous holder left.
 # The rename is atomic, so a reader either sees the old claim or the new one.
-fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
-  local worktree=$1 id=$2 home=$3 marker tmp
-  [ -n "$id" ] || return 1
+fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home> [<lease-holder>]
+  local worktree=$1 id=$2 home=$3 holder=${4:-} marker tmp
+  [ -n "$id" ] && [ -d "$worktree" ] || return 1
+  [ -z "$holder" ] || fm_treehouse_lease_holder_valid "$id" "$holder" || return 1
   marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 1
   # Only a plain claim file may be replaced: renaming onto a directory would
   # move the new claim inside it and leave the slot reading as unclaimable.
@@ -1294,6 +1498,7 @@ fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
   {
     printf 'task=%s\n' "$id"
     printf 'home=%s\n' "$home"
+    [ -z "$holder" ] || printf 'lease_holder=%s\n' "$holder"
   } > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$marker" 2>/dev/null || { rm -f "$tmp"; return 1; }
 }
@@ -1307,11 +1512,12 @@ fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
 # FM_TREEHOUSE_SLOT_OWNER_ID and FM_TREEHOUSE_SLOT_OWNER_HOME carry the recorded
 # claimant as evidence. The home is reported, never matched: a home that moved
 # must not turn a task's own slot into a refusal.
-fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
-  local worktree=$1 id=$2 marker line owner_id='' owner_home=''
+fm_treehouse_slot_owner_state() {  # <worktree> <task-id> [<lease-holder>]
+  local worktree=$1 id=$2 expected_holder=${3:-} marker line owner_id='' owner_home='' owner_holder=''
   FM_TREEHOUSE_SLOT_OWNER=unsafe
   FM_TREEHOUSE_SLOT_OWNER_ID=
   FM_TREEHOUSE_SLOT_OWNER_HOME=
+  FM_TREEHOUSE_SLOT_OWNER_HOLDER=
   marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 0
   if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
     FM_TREEHOUSE_SLOT_OWNER=absent
@@ -1322,6 +1528,7 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
     case "$line" in
       task=*) owner_id=${line#task=} ;;
       home=*) owner_home=${line#home=} ;;
+      lease_holder=*) owner_holder=${line#lease_holder=} ;;
     esac
   done < "$marker" || return 0
   [ -n "$owner_id" ] || return 0
@@ -1329,7 +1536,11 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
   FM_TREEHOUSE_SLOT_OWNER_ID=$owner_id
   # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
   FM_TREEHOUSE_SLOT_OWNER_HOME=$owner_home
-  if [ "$owner_id" = "$id" ]; then
+  # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
+  FM_TREEHOUSE_SLOT_OWNER_HOLDER=$owner_holder
+  if [ "$owner_id" = "$id" ] \
+    && { [ -z "$owner_holder$expected_holder" ] \
+      || { [ -n "$owner_holder" ] && [ "$owner_holder" = "$expected_holder" ]; }; }; then
     FM_TREEHOUSE_SLOT_OWNER=mine
   else
     FM_TREEHOUSE_SLOT_OWNER=other
@@ -1339,9 +1550,9 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
 # Drop a task's own claim once its slot is back in the pool. Never removes
 # another task's claim, so a misdirected release cannot strip the evidence that
 # protects the slot's real owner.
-fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
-  local worktree=$1 id=$2 marker
-  fm_treehouse_slot_owner_state "$worktree" "$id"
+fm_treehouse_slot_owner_release() {  # <worktree> <task-id> [<lease-holder>]
+  local worktree=$1 id=$2 holder=${3:-} marker
+  fm_treehouse_slot_owner_state "$worktree" "$id" "$holder"
   [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || return 0
   marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 0
   rm -f "$marker" 2>/dev/null || true

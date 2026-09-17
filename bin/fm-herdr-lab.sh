@@ -13,12 +13,13 @@
 #   fm-herdr-lab.sh teardown <session>
 #
 # Session names must begin with "fm-lab-" and can never be "default".
-# The name command sanitizes the label, caps it at 16 characters, and appends
+# The name command sanitizes the label, caps it at 8 characters, and appends
 # process/random suffixes to keep generated socket paths short.
-# Every Herdr call made here carries a trailing --session <session>.
-# The run command rejects caller-supplied --session flags, any leading option
-# before the subcommand, all session lifecycle operations, and every server
-# operation.
+# Every Herdr call made here carries --session <session> immediately before its
+# first `--` separator, or trailing when the command has no separator.
+# The run command rejects caller-supplied --session selectors, argument
+# separators, any leading option before the subcommand, all session lifecycle
+# operations, and every server operation.
 # Session stop is available only through guarded stop or teardown, and session
 # delete is available only through teardown.
 # Both paths perform a fresh refuse-default check immediately before each
@@ -59,9 +60,25 @@ fm_herdr_lab_tripwire_path() { # <session>
 }
 
 fm_herdr_lab_raw() { # <session> <herdr arguments...>
-  local name=$1
+  local name=$1 arg separator_seen=0
+  local -a before=() after=()
   shift
-  HERDR_SESSION="$name" herdr "$@" --session "$name"
+  for arg in "$@"; do
+    if [ "$separator_seen" -eq 0 ] && [ "$arg" = -- ]; then
+      separator_seen=1
+      continue
+    fi
+    if [ "$separator_seen" -eq 0 ]; then
+      before+=("$arg")
+    else
+      after+=("$arg")
+    fi
+  done
+  if [ "$separator_seen" -eq 1 ]; then
+    HERDR_SESSION="$name" herdr "${before[@]}" --session "$name" -- "${after[@]}"
+  else
+    HERDR_SESSION="$name" herdr "${before[@]}" --session "$name"
+  fi
 }
 
 fm_herdr_lab_session_list() { # <session>
@@ -143,8 +160,12 @@ fm_herdr_lab_cli() { # <session> <herdr arguments...>
   esac
   for arg in "$@"; do
     case "$arg" in
+      --)
+        fm_herdr_lab_error "run forbids an agent-argument separator"
+        return 1
+        ;;
       --session|--session=*)
-        fm_herdr_lab_error "run forbids caller-supplied --session; the helper appends the lab session"
+        fm_herdr_lab_error "run forbids caller-supplied --session; the helper selects the lab session"
         return 1
         ;;
     esac
@@ -527,7 +548,7 @@ fm_herdr_lab_name() { # <label>
   local label=${1:-lab}
   label=$(printf '%s' "$label" | tr -cd 'a-zA-Z0-9_-' | sed 's/^[^a-zA-Z0-9]*//; s/-*$//')
   [ -n "$label" ] || label=lab
-  label=${label:0:16}
+  label=${label:0:8}
   label=${label%-}
   [ -n "$label" ] || label=lab
   printf 'fm-lab-%s-%s-%s\n' "$label" "$$" "$RANDOM"

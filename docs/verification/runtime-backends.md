@@ -909,6 +909,38 @@ The CLI matrix was checked directly:
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
 
+### Protocol-20 structural plain-Pi launch
+
+Measured 2026-09-17 on Linux x86_64 with Herdr 0.8.2, protocol 20, in a generated non-default session provisioned and removed only by `bin/fm-herdr-lab.sh`.
+The worker boundary was a fake `pi` process that made no provider request and consumed no model tokens.
+The protocol client replaced the exact fresh single-pane tab root with an argv command, delivered the requested working directory and environment, returned replacement tab and pane ids, and left stale unsubmitted shell text unexecuted because the old shell was removed structurally.
+The returned pane exposed the fake Pi process through `pane process-info`; `pane report-agent` then made it visible as Pi through `agent get`, so the proof covers Herdr inventory and management rather than only an unclassified terminal process.
+The default-session fleet tripwire was byte-identical before and after the case.
+
+The reusable live refresh is:
+
+```sh
+FM_HERDR_LAYOUT_APPLY_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-herdr-layout-apply-live-e2e.test.sh
+```
+
+The portable contract is:
+
+```sh
+bin/fm-test-run.sh tests/fm-herdr-layout-apply.test.sh tests/fm-herdr-lab.test.sh
+```
+
+Its bounded output includes:
+
+```text
+ok - layout.apply preserves exact cwd/environment/argv and binds only response ids re-read from the named session
+ok - layout.apply refuses every protocol, schema, socket, session, container, layout, and foreground identity mismatch before mutation
+ok - layout.apply reconciles only the independently verified launch label after an identity refusal
+ok - retained relaunch restoration preserves source identity and creates one credential-free inert shell
+ok - agent inventory registration requires exact plain-Pi process identity and is re-read from Herdr
+ok - task metadata rebinding is exact, preserves trace metadata, and refuses ambiguous records
+ok - non-Pi Herdr harnesses retain interactive launch behavior without Pi normalization
+```
+
 ### fm-remote server birth and login-keychain access
 
 Measured 2026-09-09 on macOS 26 (Darwin 25.6.0) aarch64 with Claude Code 2.1.266 and Herdr 0.9.0, the guarantee behind `bin/fm-remote-herdr-guard.sh` and the doctor's `herdr-server` check: login-keychain access follows the audit session a process was born into, never the launch shape or the shell.

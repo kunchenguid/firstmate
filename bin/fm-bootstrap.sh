@@ -1348,20 +1348,24 @@ backlog_record_reconcile() {
     fi
     if [ "$(fm_meta_get "$meta" kind)" != secondmate ] \
        && [ "$(fm_meta_get "$meta" cleanup_recovery)" != orca ]; then
-      row=
-      if fm_backlog_row_probe "$DATA" "$id"; then
-        row=$FM_BACKLOG_ROW_STATE
-      elif [ "$FM_BACKLOG_ROW_RESULT" != not_found ]; then
-        echo "BACKLOG_RECONCILE: $id: worker record exists but its backlog item could not be read: $FM_BACKLOG_ROW_ERROR"
-      fi
-      # Heal only the unambiguous case: a queued row for a record this home
-      # already owns. A held row is the captain's to move, and a closed row is a
-      # contradiction this sweep must not resolve by resurrecting the item.
-      if [ "$row" = "queued no no" ]; then
-        if fm_backlog_start "$DATA" "$id"; then
-          echo "BOOTSTRAP_INFO: marked $id in flight to match the worker this home already owns"
-        else
-          echo "BACKLOG_RECONCILE: $id: worker record exists but its backlog item could not be moved to In flight: $FM_BACKLOG_TRANSITION_ERROR"
+      if [ -e "$STATE/$id.herdr-launch" ] || [ -L "$STATE/$id.herdr-launch" ]; then
+        echo "BACKLOG_RECONCILE: $id: structural Herdr launch remains unreconciled; leaving its backlog item unchanged"
+      else
+        row=
+        if fm_backlog_row_probe "$DATA" "$id"; then
+          row=$FM_BACKLOG_ROW_STATE
+        elif [ "$FM_BACKLOG_ROW_RESULT" != not_found ]; then
+          echo "BACKLOG_RECONCILE: $id: worker record exists but its backlog item could not be read: $FM_BACKLOG_ROW_ERROR"
+        fi
+        # Heal only the unambiguous case: a queued row for a record this home
+        # already owns. A held row is the captain's to move, and a closed row is a
+        # contradiction this sweep must not resolve by resurrecting the item.
+        if [ "$row" = "queued no no" ]; then
+          if fm_backlog_start "$DATA" "$id"; then
+            echo "BOOTSTRAP_INFO: marked $id in flight to match the worker this home already owns"
+          else
+            echo "BACKLOG_RECONCILE: $id: worker record exists but its backlog item could not be moved to In flight: $FM_BACKLOG_TRANSITION_ERROR"
+          fi
         fi
       fi
     fi

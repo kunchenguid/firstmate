@@ -4,6 +4,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$ROOT/bin/fm-wake-lib.sh"
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-endpoint-safety)
@@ -48,15 +50,83 @@ mark_case_as_treehouse_pool() {  # <case>
   : > "$dir/worktree/sentinel"
 }
 
-claim_pool_slot() {  # <case> <task-id> [home]
-  local dir=$1 id=$2 home=${3:-$1/home}
-  printf 'task=%s\nhome=%s\n' "$id" "$home" > "$dir/pool/1/.fm-slot-owner"
+claim_pool_slot() {  # <case> <task-id> [home] [lease-holder]
+  local dir=$1 id=$2 home=${3:-$1/home} holder=${4:-}
+  {
+    printf 'task=%s\nhome=%s\n' "$id" "$home"
+    [ -z "$holder" ] || printf 'lease_holder=%s\n' "$holder"
+  } > "$dir/pool/1/.fm-slot-owner"
+}
+
+install_lease_aware_treehouse() {  # <case>
+  local dir=$1
+  cat > "$dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf 'treehouse' >> "${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
+printf '\n' >> "${FM_RUNTIME_LOG:?}"
+case "${1:-}" in
+  status)
+    if [ -f "${FM_TREEHOUSE_LIVE_STATE:?}" ]; then jq -cs '.' "$FM_TREEHOUSE_LIVE_STATE"; else printf '%s\n' '[]'; fi
+    ;;
+  return)
+    previous=
+    lease_id=
+    for arg in "$@"; do
+      [ "$previous" != --if-lease-id ] || lease_id=$arg
+      previous=$arg
+    done
+    [ -f "${FM_TREEHOUSE_LIVE_STATE:?}" ]
+    [ "$lease_id" = "$(jq -r '.lease_id' "$FM_TREEHOUSE_LIVE_STATE")" ]
+    rm -f "$FM_TREEHOUSE_LIVE_STATE"
+    ;;
+esac
+SH
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -eu
+args=("$@")
+if [ "$#" -ge 2 ]; then
+  session_index=$(( $# - 2 ))
+  if [ "${args[$session_index]}" = --session ]; then
+    set -- "${args[@]:0:$session_index}"
+  fi
+fi
+case "$*" in
+  "session list --json")
+    printf '{"sessions":[{"name":"lab","running":true,"socket_path":"%s"}]}\n' "${FM_FAKE_HERDR_SOCKET:?}"
+    ;;
+  "pane get w1:p1")
+    if [ "$(cat "${FM_FAKE_HERDR_STATE:?}")" = live ]; then
+      printf '%s\n' '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t1","pane_id":"w1:p1"}}}'
+    else
+      printf '%s\n' '{"error":{"code":"pane_not_found"}}'
+    fi
+    ;;
+  "pane close w1:p1")
+    printf '%s\n' dead > "$FM_FAKE_HERDR_STATE"
+    printf '%s\n' '{"result":{"type":"pane_close","pane_id":"w1:p1"}}'
+    ;;
+  "workspace list"|"tab list --workspace w1")
+    exit 1
+    ;;
+  *)
+    printf 'unexpected fake Herdr call: %s\n' "$*" >&2
+    exit 92
+    ;;
+esac
+SH
+  chmod +x "$dir/fakebin/treehouse" "$dir/fakebin/herdr"
+  printf '%s\n' live > "$dir/herdr-state"
 }
 
 run_case() {  # <case> <id>
   local dir=$1 id=$2
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
-  FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+  FM_RUNTIME_LOG="$dir/runtime.log" FM_TREEHOUSE_LIVE_STATE="$dir/treehouse-live.json" \
+  FM_FAKE_HERDR_STATE="$dir/herdr-state" FM_FAKE_HERDR_SOCKET="$dir/herdr.sock" \
+  PATH="$dir/fakebin:$PATH" \
     "$TEARDOWN" "$id" --force
 }
 
@@ -70,6 +140,32 @@ assert_refused_without_mutation() {  # <case> <id> <description>
   assert_present "$dir/home/state/$id.meta" "$description: metadata changed before refusal"
   assert_present "$dir/worktree/sentinel" "$description: worktree changed before refusal"
   [ ! -s "$dir/runtime.log" ] || fail "$description: runtime command ran before refusal: $(cat "$dir/runtime.log")"
+}
+
+test_structural_launch_quarantine_refuses_before_mutation() {
+  local dir id=quarantined-task rc
+  dir=$(make_case structural-launch-quarantine)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  printf '%s\n' 'version=4' > "$dir/home/state/$id.herdr-launch"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown continued through a structural launch quarantine"
+  assert_contains "$(cat "$dir/stderr")" "unreconciled Herdr structural launch" \
+    "teardown did not identify the structural launch quarantine"
+  assert_present "$dir/home/state/$id.meta" \
+    "teardown removed task metadata while structural recovery remained open"
+  assert_present "$dir/home/state/$id.herdr-launch" \
+    "teardown removed structural recovery ownership"
+  assert_present "$dir/worktree/sentinel" \
+    "teardown changed the worktree while structural recovery remained open"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "teardown reached the runtime while structural recovery remained open: $(cat "$dir/runtime.log")"
+  pass "fm-teardown: structural launch quarantine refuses before cleanup mutation"
 }
 
 test_invalid_endpoint_records_refuse_before_mutation() {
@@ -941,6 +1037,26 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
 
+  dir=$(make_case slot-same-id-new-holder)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$id" "$dir/other-home" \
+    fm-stale-task-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "legacy teardown rejected a same-id slot reassigned under a unique holder: $(cat "$dir/stderr")"
+  assert_reassigned_slot_left_alone "$dir" "$id" "$id" \
+    "legacy holderless task versus same-id unique holder"
+  assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" \
+    "lease_holder=fm-stale-task-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+    "legacy teardown rewrote the same-id holder identity"
+
   # A claim that exists but cannot be read as a claim proves nothing either way,
   # so it refuses rather than guessing the slot is still this task's.
   dir=$(make_case slot-claim-unreadable)
@@ -1273,6 +1389,48 @@ test_forced_secondmate_child_close_failure_still_refuses() {
   pass "fm-teardown: forced secondmate cleanup still refuses on a child endpoint close that failed"
 }
 
+test_forced_secondmate_child_lease_is_returned_exactly() {
+  local dir mate parent=lease-mate child=lease-child holder lease_id physical_wt
+  dir=$(make_case secondmate-child-lease)
+  mark_case_as_treehouse_pool "$dir"
+  install_lease_aware_treehouse "$dir"
+  mate="$dir/mate"
+  mkdir -p "$mate/state" "$mate/data" "$mate/config"
+  printf '%s' "$parent" > "$mate/.fm-secondmate-home"
+  holder=fm-$child-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  lease_id=88888888888888888888888888888888
+  physical_wt=$dir/pool/1/project
+  fm_write_meta "$dir/home/state/$parent.meta" \
+    "window=firstmate:fm-$parent" "endpoint_task_id=$parent" \
+    "worktree=$mate" "project=$mate" "home=$mate" \
+    "kind=secondmate" "mode=secondmate" "harness=echo" "yolo=off" "projects=alpha"
+  fm_write_meta "$mate/state/$child.meta" \
+    "window=lab:w1:p1" "endpoint_task_id=$child" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t1" "herdr_pane_id=w1:p1" \
+    "treehouse_lease_holder=$holder" "treehouse_lease_id=$lease_id" \
+    "treehouse_lease_worktree=$physical_wt"
+  fm_treehouse_lease_transaction_write "$mate/state/$child.herdr-lease" acquired \
+    "$child" "$holder" "$dir/project" "$dir/worktree" "$lease_id" \
+    || fail "could not stage a descendant's acquired Treehouse lease"
+  jq -cn --arg path "$physical_wt" --arg id "$lease_id" --arg holder "$holder" \
+    '{name:"1",path:$path,status:"leased",lease_id:$id,lease_holder:$holder}' \
+    > "$dir/treehouse-live.json"
+  claim_pool_slot "$dir" "$child" "$mate" "$holder"
+
+  run_case "$dir" "$parent" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "forced secondmate cleanup did not reconcile its child's exact lease: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$parent.meta" "forced secondmate cleanup left the parent record"
+  assert_absent "$mate" "forced secondmate cleanup left the retired child home"
+  assert_absent "$dir/treehouse-live.json" "forced secondmate cleanup left the child's lease live"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "forced secondmate cleanup left the child's spent slot claim"
+  grep -Fq "treehouse <return> <--force> <--if-lease-id> <$lease_id> <$physical_wt>" "$dir/runtime.log" \
+    || fail "forced secondmate cleanup did not return the child's immutable lease identity: $(cat "$dir/runtime.log")"
+
+  pass "fm-teardown: forced secondmate cleanup returns each child's exact durable lease"
+}
+
 test_orca_close_failure_refuses_even_under_force() {
   local dir orca_free id=orca-strand rc
   dir=$(make_case orca-close-failure)
@@ -1324,6 +1482,204 @@ test_orca_close_failure_refuses_even_under_force() {
   pass "fm-teardown: an Orca close its missing CLI never attempted refuses even under --force, keeping the record naming the terminal"
 }
 
+test_structural_herdr_lease_teardown_is_transaction_driven() {
+  local dir id holder lease_id other_id other_holder physical_wt
+
+  dir=$(make_case herdr-holder-only)
+  mark_case_as_treehouse_pool "$dir"
+  install_lease_aware_treehouse "$dir"
+  id=herdr-holder-only-z1
+  holder=fm-$id-99999999999999999999999999999999
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=lab:w1:p1" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t1" "herdr_pane_id=w1:p1" \
+    "treehouse_lease_holder=$holder"
+  claim_pool_slot "$dir" "$id" "$dir/home" "$holder"
+
+  if run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"; then
+    fail "holder-only Herdr teardown bypassed immutable lease validation"
+  fi
+  assert_present "$dir/home/state/$id.meta" "holder-only refusal removed task metadata"
+  [ "$(cat "$dir/herdr-state")" = live ] || fail "holder-only refusal closed the worker endpoint"
+  assert_no_grep "treehouse <return>" "$dir/runtime.log" \
+    "holder-only refusal issued a Treehouse return"
+
+  dir=$(make_case herdr-lease-owned)
+  mark_case_as_treehouse_pool "$dir"
+  install_lease_aware_treehouse "$dir"
+  id=herdr-owned-z1
+  holder=fm-$id-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  lease_id=11111111111111111111111111111111
+  physical_wt=$dir/pool/1/project
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=lab:w1:p1" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t1" "herdr_pane_id=w1:p1" \
+    "treehouse_lease_holder=$holder" "treehouse_lease_id=$lease_id"
+  fm_treehouse_lease_transaction_write "$dir/home/state/$id.herdr-lease" acquired \
+    "$id" "$holder" "$dir/project" "$dir/worktree" "$lease_id" \
+    || fail "could not stage acquired structural Herdr lease"
+  jq -cn --arg path "$physical_wt" --arg id "$lease_id" --arg holder "$holder" \
+    '{name:"1",path:$path,status:"leased",lease_id:$id,lease_holder:$holder}' \
+    > "$dir/treehouse-live.json"
+  claim_pool_slot "$dir" "$id" "$dir/home" "$holder"
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "transaction-backed Herdr teardown failed: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "Herdr teardown left task metadata"
+  assert_absent "$dir/home/state/$id.herdr-lease" "Herdr teardown left its returned lease transaction"
+  [ "$(cat "$dir/herdr-state")" = dead ] || fail "Herdr teardown left its endpoint live"
+  grep -Fq "treehouse <return> <--force> <--if-lease-id> <$lease_id> <$physical_wt>" "$dir/runtime.log" \
+    || fail "Herdr teardown did not return the exact immutable lease identity: $(cat "$dir/runtime.log")"
+
+  dir=$(make_case herdr-lease-reassigned)
+  mark_case_as_treehouse_pool "$dir"
+  install_lease_aware_treehouse "$dir"
+  id=herdr-returned-z1
+  holder=fm-$id-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  lease_id=22222222222222222222222222222222
+  other_id=33333333333333333333333333333333
+  physical_wt=$dir/pool/1/project
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=lab:w1:p1" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t1" "herdr_pane_id=w1:p1" \
+    "treehouse_lease_holder=$holder" "treehouse_lease_id=$lease_id"
+  fm_treehouse_lease_transaction_write "$dir/home/state/$id.herdr-lease" cleanup \
+    "$id" "$holder" "$dir/project" "$dir/worktree" "$lease_id" \
+    || fail "could not stage interrupted structural Herdr lease cleanup"
+  jq -cn --arg path "$physical_wt" --arg id "$other_id" \
+    --arg holder fm-other-z1-cccccccccccccccccccccccccccccccc \
+    '{name:"1",path:$path,status:"leased",lease_id:$id,lease_holder:$holder}' \
+    > "$dir/treehouse-live.json"
+  claim_pool_slot "$dir" other-z1 "$dir/other-home"
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "post-return reassignment recovery failed: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "post-return recovery left task metadata"
+  assert_absent "$dir/home/state/$id.herdr-lease" "post-return recovery left its confirmed receipt"
+  assert_present "$dir/worktree/sentinel" "post-return recovery touched the reassigned worktree"
+  assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" "task=other-z1" \
+    "post-return recovery removed the reassigned slot claim"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "post-return recovery returned another task's lease: $(cat "$dir/runtime.log")"
+  [ "$(cat "$dir/herdr-state")" = dead ] || fail "post-return recovery left its endpoint live"
+
+  dir=$(make_case herdr-lease-returned-own-claim)
+  mark_case_as_treehouse_pool "$dir"
+  install_lease_aware_treehouse "$dir"
+  id=herdr-returned-own-z1
+  holder=fm-$id-dddddddddddddddddddddddddddddddd
+  lease_id=44444444444444444444444444444444
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=lab:w1:p1" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t1" "herdr_pane_id=w1:p1" \
+    "treehouse_lease_holder=$holder" "treehouse_lease_id=$lease_id"
+  fm_treehouse_lease_transaction_write "$dir/home/state/$id.herdr-lease" cleanup \
+    "$id" "$holder" "$dir/project" "$dir/worktree" "$lease_id" \
+    || fail "could not stage interrupted structural Herdr lease cleanup with an own claim"
+  claim_pool_slot "$dir" "$id" "$dir/home" "$holder"
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "post-return own-claim recovery failed: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "post-return own-claim recovery left task metadata"
+  assert_absent "$dir/home/state/$id.herdr-lease" "post-return own-claim recovery left its confirmed receipt"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "post-return own-claim recovery left its spent slot claim"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "post-return own-claim recovery returned an already-returned lease: $(cat "$dir/runtime.log")"
+  [ "$(cat "$dir/herdr-state")" = dead ] || fail "post-return own-claim recovery left its endpoint live"
+
+  dir=$(make_case herdr-lease-returned-same-id-reassigned)
+  mark_case_as_treehouse_pool "$dir"
+  install_lease_aware_treehouse "$dir"
+  id=herdr-same-id-z1
+  holder=fm-$id-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  other_holder=fm-$id-ffffffffffffffffffffffffffffffff
+  lease_id=55555555555555555555555555555555
+  other_id=66666666666666666666666666666666
+  physical_wt=$dir/pool/1/project
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=lab:w1:p1" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t1" "herdr_pane_id=w1:p1" \
+    "treehouse_lease_holder=$holder" "treehouse_lease_id=$lease_id"
+  fm_treehouse_lease_transaction_write "$dir/home/state/$id.herdr-lease" cleanup \
+    "$id" "$holder" "$dir/project" "$dir/worktree" "$lease_id" \
+    || fail "could not stage interrupted structural Herdr lease cleanup before same-id reassignment"
+  jq -cn --arg path "$physical_wt" --arg id "$other_id" --arg holder "$other_holder" \
+    '{name:"1",path:$path,status:"leased",lease_id:$id,lease_holder:$holder}' \
+    > "$dir/treehouse-live.json"
+  claim_pool_slot "$dir" "$id" "$dir/other-home" "$other_holder"
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "post-return same-id reassignment recovery failed: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "same-id reassignment recovery left old task metadata"
+  assert_absent "$dir/home/state/$id.herdr-lease" "same-id reassignment recovery left the old confirmed receipt"
+  assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" "lease_holder=$other_holder" \
+    "same-id reassignment recovery removed the new holder's slot claim"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "same-id reassignment recovery returned the new holder's lease: $(cat "$dir/runtime.log")"
+  [ "$(cat "$dir/herdr-state")" = dead ] || fail "same-id reassignment recovery left the old endpoint live"
+
+  dir=$(make_case herdr-lease-pruned-symlink)
+  mark_case_as_treehouse_pool "$dir"
+  install_lease_aware_treehouse "$dir"
+  id=herdr-pruned-z1
+  holder=fm-$id-11111111111111111111111111111111
+  lease_id=77777777777777777777777777777777
+  physical_wt=$dir/pool/1/project
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=lab:w1:p1" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t1" "herdr_pane_id=w1:p1" \
+    "treehouse_lease_holder=$holder" "treehouse_lease_id=$lease_id"
+  fm_treehouse_lease_transaction_write "$dir/home/state/$id.herdr-lease" cleanup \
+    "$id" "$holder" "$dir/project" "$dir/worktree" "$lease_id" \
+    || fail "could not stage interrupted cleanup through a symlinked slot path"
+  claim_pool_slot "$dir" "$id" "$dir/home" "$holder"
+  git -C "$dir/project" worktree remove --force "$physical_wt"
+  rm -f "$dir/worktree"
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "returned lease cleanup rejected its pruned symlink history: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "pruned-symlink recovery left task metadata"
+  assert_absent "$dir/home/state/$id.herdr-lease" "pruned-symlink recovery left its returned receipt"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "pruned-symlink recovery left its spent slot claim"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "pruned-symlink recovery returned an already-returned lease"
+
+  dir=$(make_case herdr-lease-receipt-retired)
+  mark_case_as_treehouse_pool "$dir"
+  install_lease_aware_treehouse "$dir"
+  id=herdr-receipt-retired-z1
+  holder=fm-$id-22222222222222222222222222222222
+  lease_id=99999999999999999999999999999999
+  physical_wt=$dir/pool/1/project
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=lab:w1:p1" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t1" "herdr_pane_id=w1:p1" \
+    "treehouse_lease_holder=$holder" "treehouse_lease_id=$lease_id" \
+    "treehouse_lease_worktree=$physical_wt" "treehouse_lease_returned_id=$lease_id"
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "cleanup could not resume after its returned lease receipt was retired: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "receipt-retired recovery left task metadata"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "receipt-retired recovery tried to return an already-returned lease"
+
+  pass "fm-teardown: durable Herdr lease cleanup survives return, receipt retirement, reassignment, and pruned symlink history"
+}
+
 test_already_gone_endpoint_still_completes_without_a_refusal() {
   local dir socket session='already gone' id=gone-task
   [ -n "$REAL_TMUX" ] || { echo "skip - tmux not installed"; return 0; }
@@ -1366,6 +1722,7 @@ test_already_gone_endpoint_still_completes_without_a_refusal() {
   pass "fm-teardown: an already-exited endpoint, and a server that is already gone, still complete cleanup silently"
 }
 
+test_structural_launch_quarantine_refuses_before_mutation
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock
@@ -1379,8 +1736,10 @@ test_failed_endpoint_close_refuses_before_removing_the_record
 test_forced_teardown_continues_past_a_close_it_could_not_make
 test_unreadable_close_read_refuses_while_a_definitive_absence_completes
 test_forced_secondmate_child_close_failure_still_refuses
+test_forced_secondmate_child_lease_is_returned_exactly
 test_orca_close_failure_refuses_even_under_force
 test_already_gone_endpoint_still_completes_without_a_refusal
+test_structural_herdr_lease_teardown_is_transaction_driven
 test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses

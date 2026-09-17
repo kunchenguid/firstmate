@@ -1963,6 +1963,27 @@ test_recovery_marks_an_owned_record_in_flight() {
   pass "session start marks an item In flight when this home already owns a worker for it"
 }
 
+test_recovery_does_not_start_an_unreconciled_structural_launch() {
+  local case_dir home id out
+  id=atomic-herdr-quarantine-b8
+  case_dir=$(make_home heal-herdr-quarantine)
+  home=$(home_of "$case_dir")
+  add_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship no-mistakes
+  printf 'version=6\n' > "$home/state/$id.herdr-launch"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = queued ] \
+    || fail "session start promoted an unreconciled structural launch: $out"
+  assert_present "$home/state/$id.meta" \
+    "session start removed the provisional worker record"
+  assert_present "$home/state/$id.herdr-launch" \
+    "session start removed the structural launch quarantine"
+  assert_contains "$out" "structural Herdr launch remains unreconciled" \
+    "session start did not report why the backlog item stayed queued"
+  pass "session start leaves unreconciled structural launches queued"
+}
+
 test_recovery_rejects_an_internal_worker_record_symlink() {
   local case_dir home id target_id out rc=0
   id=atomic-heal-internal-symlink-b8
@@ -3050,6 +3071,7 @@ test_recovery_retries_when_a_close_marker_cannot_be_removed
 test_recovery_reports_an_owned_row_read_failure
 test_orca_cleanup_recovery_never_transitions_the_backlog
 test_recovery_marks_an_owned_record_in_flight
+test_recovery_does_not_start_an_unreconciled_structural_launch
 test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
