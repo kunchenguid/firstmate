@@ -2,12 +2,14 @@
 // updateContent method. installCalmAssistantLayout() probes that exact method and throws
 // if it is missing; fm-calm.ts catches that and skips only this adapter with a diagnostic
 // instead of blocking Calm or Pi.
-// This layout removes collapsed thinking and the mid-turn assistant text blocks
-// classified as "assistant-working-note" from a shallow presentation copy. The message
+// This layout removes collapsed thinking and short mid-turn assistant text blocks
+// classified as "assistant-working-note" from a shallow presentation copy. Substantive
+// mid-turn text is preserved. The message
 // itself, model context, session storage, and export rendering are never touched.
 // ./fm-calm-visibility.ts owns which classes Calm hides.
 import type { AssistantMessageComponent as PiAssistantMessageComponent } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
+import { calmTextIsSubstantive } from "./fm-calm-preservation.ts";
 import { calmPresentationHides } from "./fm-calm-visibility.ts";
 
 type AssistantMessage = Parameters<PiAssistantMessageComponent["updateContent"]>[0];
@@ -34,6 +36,13 @@ function isMidTurnAssistantMessage(message: AssistantMessage): boolean {
   return (
     message.stopReason === "length" &&
     message.content.some((block) => block.type === "toolCall")
+  );
+}
+
+function assistantMessageText(message: AssistantMessage): string {
+  return message.content.reduce(
+    (text, block) => text + (block.type === "text" ? block.text : ""),
+    "",
   );
 }
 
@@ -75,7 +84,9 @@ export function installCalmAssistantLayout(): void {
       state.hideThinkingBlock &&
       patch.hidesThinking();
     const hideWorkingNote =
-      patch.hidesWorkingNote() && isMidTurnAssistantMessage(message);
+      patch.hidesWorkingNote() &&
+      isMidTurnAssistantMessage(message) &&
+      !calmTextIsSubstantive(assistantMessageText(message));
     const presentationMessage =
       hideThinking || hideWorkingNote
         ? {
