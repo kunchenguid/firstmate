@@ -520,6 +520,145 @@ fm_backend_herdr_layout_attempt_commit_restored "$ATTEMPT" \
 MODE=ok
 pass "retained relaunch restoration preserves source identity and creates one credential-free inert shell"
 
+RELAUNCH_HOME="$TMP_ROOT/relaunch-home"
+RELAUNCH_PROJECT="$TMP_ROOT/relaunch-project"
+RELAUNCH_WT="$TMP_ROOT/relaunch-worktree"
+RELAUNCH_ID=layout-relaunch
+RELAUNCH_ATTEMPT="$RELAUNCH_HOME/state/$RELAUNCH_ID.herdr-launch"
+RELAUNCH_FAKEBIN=$(fm_fakebin "$TMP_ROOT/relaunch-fake")
+fm_git_worktree "$RELAUNCH_PROJECT" "$RELAUNCH_WT" "task-$RELAUNCH_ID"
+mkdir -p "$RELAUNCH_HOME/state" "$RELAUNCH_HOME/data/$RELAUNCH_ID" "$RELAUNCH_HOME/config"
+cat > "$RELAUNCH_HOME/data/$RELAUNCH_ID/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Exercise retained Herdr relaunch recovery.
+
+## Firstmate spec
+Preserve the task endpoint while restoring a safe shell.
+EOF
+cat > "$RELAUNCH_HOME/state/$RELAUNCH_ID.meta" <<EOF
+window=lab-structural:w1:p3
+endpoint_task_id=$RELAUNCH_ID
+worktree=$RELAUNCH_WT
+project=$RELAUNCH_PROJECT
+harness=pi
+kind=ship
+mode=no-mistakes
+yolo=off
+tasktmp=/tmp/fm-$RELAUNCH_ID
+model=default
+effort=default
+backend=herdr
+herdr_root=$ROOT
+herdr_session=lab-structural
+herdr_workspace_id=w1
+herdr_tab_id=w1:t3
+herdr_pane_id=w1:p3
+EOF
+fm_backend_herdr_layout_attempt_write "$RELAUNCH_ATTEMPT" 5 0123456789abcdef0123456789abcdef \
+  relaunch "$RELAUNCH_ID" "$RELAUNCH_WT" - \
+  lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef w1:t3 w1:p3
+cat > "$RELAUNCH_FAKEBIN/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${*: -2:1}" = --session ]; then
+  set -- "${@:1:$#-2}"
+fi
+case "$*" in
+  "status --json")
+    printf '%s\n' '{"client":{"version":"test","protocol":20},"server":{"protocol":20,"running":true}}'
+    ;;
+  "api schema --json")
+    cat <<'JSON'
+{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"layout.apply"}}}],"$defs":{"LayoutNode":{"oneOf":[{"properties":{"type":{"const":"pane"},"command":{"type":["array","null"]},"cwd":{"type":["string","null"]},"env":{"type":"object"},"label":{"type":["string","null"]},"pane_id":{"type":["string","null"]}}}]}}}}}
+JSON
+    ;;
+  "session list --json")
+    printf '{"sessions":[{"name":"lab-structural","running":true,"socket_path":"%s"}]}\n' "$FM_FAKE_HERDR_SOCKET"
+    ;;
+  "workspace list")
+    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"anchor","focused":true,"active_tab_id":"anchor:t1"},{"workspace_id":"w1","focused":false,"active_tab_id":"w1:t3"}]}}'
+    ;;
+  "tab list --workspace anchor")
+    printf '%s\n' '{"result":{"tabs":[{"workspace_id":"anchor","tab_id":"anchor:t1","focused":true}]}}'
+    ;;
+  "tab get w1:t4")
+    printf '%s\n' '{"result":{"tab":{"workspace_id":"w1","tab_id":"w1:t4"}}}'
+    ;;
+  "pane list --workspace w1")
+    if [ -e "$FM_FAKE_HERDR_APPLIED" ]; then
+      printf '%s\n' '{"result":{"panes":[{"workspace_id":"w1","tab_id":"w1:t4","pane_id":"w1:p4","label":"fm-restore-0123456789abcdef0123456789abcdef"}]}}'
+    else
+      printf '%s\n' '{"result":{"panes":[{"workspace_id":"w1","tab_id":"w1:t3","pane_id":"w1:p3","label":"fm-launch-0123456789abcdef0123456789abcdef"}]}}'
+    fi
+    ;;
+  "pane get w1:p2")
+    printf '%s\n' '{"error":{"code":"pane_not_found"}}'
+    exit 1
+    ;;
+  "pane get w1:p3")
+    if [ -e "$FM_FAKE_HERDR_APPLIED" ]; then
+      printf '%s\n' '{"error":{"code":"pane_not_found"}}'
+      exit 1
+    else
+      printf '%s\n' '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t3","pane_id":"w1:p3","label":"fm-launch-0123456789abcdef0123456789abcdef"}}}'
+    fi
+    ;;
+  "pane get w1:p4")
+    printf '%s\n' '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t4","pane_id":"w1:p4","label":"fm-restore-0123456789abcdef0123456789abcdef"}}}'
+    ;;
+  "pane process-info --pane w1:p3")
+    printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p3","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"node","argv0":"pi","argv":["pi","--model","fake"]}]}}}'
+    ;;
+  "pane process-info --pane w1:p4")
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p4","shell_pid":%s,"foreground_processes":[{"pid":%s,"name":"bash","argv0":"bash","argv":["bash"]}]}}}\n' "$FM_FAKE_HERDR_PARENT_PID" "$FM_FAKE_HERDR_PARENT_PID"
+    ;;
+  "agent get w1:p3")
+    printf '%s\n' '{"result":{"agent":{"pane_id":"w1:p3","agent":"pi","agent_status":"working"}}}'
+    ;;
+  "agent get w1:p4")
+    printf '%s\n' '{"error":{"code":"agent_not_found"}}'
+    ;;
+  "pane rename w1:p4 --clear")
+    printf '%s\n' '{"result":{"type":"pane_rename","pane_id":"w1:p4"}}'
+    ;;
+  *)
+    printf 'unexpected fake Herdr call: %s\n' "$*" >&2
+    exit 92
+    ;;
+esac
+SH
+chmod +x "$RELAUNCH_FAKEBIN/herdr"
+start_server success
+set +e
+relaunch_out=$(FM_FAKE_HERDR_SOCKET="$SOCK" FM_FAKE_HERDR_APPLIED="$APPLIED" \
+  FM_FAKE_HERDR_PARENT_PID="$$" \
+  fm_test_run_spawn "$RELAUNCH_HOME" "$RELAUNCH_WT" "$RELAUNCH_FAKEBIN" \
+    "$RELAUNCH_ID" --relaunch --harness pi)
+relaunch_status=$?
+set -e
+if [ -e "$APPLIED" ]; then
+  wait_server
+else
+  kill "$SERVER_PID" 2>/dev/null || true
+  wait "$SERVER_PID" 2>/dev/null || true
+  SERVER_PID=
+  fail "retained recovery did not reach structural restoration: $relaunch_out"
+fi
+[ "$relaunch_status" -ne 0 ] || fail "retained recovery unexpectedly launched before its explicit retry"
+assert_contains "$relaunch_out" "inert shell endpoint was restored" \
+  "relaunch did not reconcile its live rebound structural replacement"
+assert_not_contains "$relaunch_out" "positively agent-free endpoint" \
+  "generic liveness rejected the live rebound endpoint before structural reconciliation"
+assert_grep 'window=lab-structural:w1:p4' "$RELAUNCH_HOME/state/$RELAUNCH_ID.meta" \
+  "relaunch did not publish the restored inert-shell endpoint"
+assert_grep 'herdr_tab_id=w1:t4' "$RELAUNCH_HOME/state/$RELAUNCH_ID.meta" \
+  "relaunch did not publish the restored tab identity"
+assert_grep 'herdr_pane_id=w1:p4' "$RELAUNCH_HOME/state/$RELAUNCH_ID.meta" \
+  "relaunch did not publish the restored pane identity"
+[ ! -e "$RELAUNCH_ATTEMPT" ] || fail "relaunch left a rebound structural attempt quarantined"
+pass "fm-spawn reconciles a live retained replacement before ordinary relaunch liveness"
+
 for ownership_mode in fresh relaunch secondmate; do
   lease_holder=-
   expected_policy=retain

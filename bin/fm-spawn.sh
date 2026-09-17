@@ -1057,6 +1057,7 @@ RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
 RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
+RELAUNCH_HERDR_ATTEMPT_PENDING=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -1488,6 +1489,17 @@ RAW_LAUNCH=0
 # validation teardown uses, so a malformed, ambiguous, or foreign record
 # refuses here exactly as it refuses there.
 RELAUNCH_PRIOR_HARNESS=
+spawn_require_relaunch_endpoint_dead() {
+  fm_control_backend_state_verified "$BACKEND" || {
+    echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
+    return 1
+  }
+  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+  [ "$RELAUNCH_STATE" = dead ] || {
+    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
+    return 1
+  }
+}
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "${#POS[@]}" -eq 1 ] || {
     echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
@@ -1514,18 +1526,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
-  # A relaunch must PROVE the previous agent is gone before it launches another
-  # one into the same endpoint, and only tmux and herdr have a recovery-grade
-  # classifier that can (bin/fm-control-lib.sh owns that capability table).
-  fm_control_backend_state_verified "$BACKEND" || {
-    echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
-    exit 1
-  }
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  [ "$RELAUNCH_STATE" = dead ] || {
-    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
-    exit 1
-  }
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
@@ -1563,6 +1563,30 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID has no recorded harness; pass --harness to relaunch it" >&2
     exit 1
   }
+  if [ "$BACKEND" = herdr ] && [ "$ARG3" = pi ] \
+    && { [ -e "$HERDR_LAYOUT_ATTEMPT" ] || [ -L "$HERDR_LAYOUT_ATTEMPT" ]; } \
+    && fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT"; then
+    expected_attempt_mode=relaunch
+    [ "$KIND" != secondmate ] || expected_attempt_mode=secondmate
+    attempt_endpoint="$(fm_meta_get "$RELAUNCH_META" herdr_tab_id):$(fm_meta_get "$RELAUNCH_META" herdr_pane_id)"
+    case "$attempt_endpoint" in
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE"|\
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE"|\
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE")
+        if [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" = "$expected_attempt_mode" ] \
+          && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_TASK" = "$ID" ] \
+          && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKTREE" = "$RELAUNCH_WT" ] \
+          && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LEASE_HOLDER" = - ] \
+          && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" = "$(fm_meta_get "$RELAUNCH_META" herdr_session)" ] \
+          && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" = "$(fm_meta_get "$RELAUNCH_META" herdr_workspace_id)" ]; then
+          RELAUNCH_HERDR_ATTEMPT_PENDING=1
+        fi
+        ;;
+    esac
+  fi
+  if [ "$RELAUNCH_HERDR_ATTEMPT_PENDING" != 1 ]; then
+    spawn_require_relaunch_endpoint_dead || exit 1
+  fi
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
   '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy)
@@ -3151,6 +3175,9 @@ if [ -e "$HERDR_LAYOUT_ATTEMPT" ] || [ -L "$HERDR_LAYOUT_ATTEMPT" ]; then
     fi
     exit 1
   fi
+fi
+if [ "$RELAUNCH_HERDR_ATTEMPT_PENDING" = 1 ]; then
+  spawn_require_relaunch_endpoint_dead || exit 1
 fi
 
 # Backlog preflight (bin/fm-backlog-transition-lib.sh). This spawn is about to
