@@ -3090,18 +3090,19 @@ spawn_rebind_restored_herdr_layout_attempt() {
 }
 
 spawn_finalize_released_fresh_herdr_layout() {
-  local meta="$STATE/$ID.meta" holder lease_id busy_gen recorded_worktree endpoint
+  local meta="$STATE/$ID.meta" holder lease_id busy_gen recorded_worktree endpoint attempt_worktree
   fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" \
     && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 8 ] \
     && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = released ] \
     && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" = fresh ] \
     && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_TASK" = "$ID" ] || return 1
   holder=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LEASE_HOLDER
+  attempt_worktree=$(real_path_or_raw "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKTREE")
   if [ -e "$HERDR_TREEHOUSE_LEASE_TX" ] || [ -L "$HERDR_TREEHOUSE_LEASE_TX" ]; then
     fm_treehouse_lease_transaction_reconcile "$HERDR_TREEHOUSE_LEASE_TX" \
       "$ID" "$holder" "$PROJ_ABS" \
       && [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = returned ] \
-      && [ "$FM_TREEHOUSE_LEASE_TX_WORKTREE" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKTREE" ] || return 1
+      && [ "$FM_TREEHOUSE_LEASE_TX_WORKTREE" = "$attempt_worktree" ] || return 1
     lease_id=$FM_TREEHOUSE_LEASE_TX_ID
   elif [ -e "$meta" ] || [ -L "$meta" ]; then
     return 1
@@ -3124,7 +3125,7 @@ spawn_finalize_released_fresh_herdr_layout() {
       && [ "$(herdr_projection_meta_field_exact "$meta" project 2>/dev/null || true)" = "$PROJ_ABS" ] \
       && [ "$(herdr_projection_meta_field_exact "$meta" herdr_session 2>/dev/null || true)" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" ] \
       && [ "$(herdr_projection_meta_field_exact "$meta" herdr_workspace_id 2>/dev/null || true)" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" ] \
-      && [ "$recorded_worktree" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKTREE" ] || return 1
+      && [ "$recorded_worktree" = "$attempt_worktree" ] || return 1
     busy_gen=$(fm_meta_get "$meta" busy_gen)
     [ -z "$busy_gen" ] || "$FM_ROOT/bin/fm-busy-event.sh" retire "$STATE" "$ID" --gen "$busy_gen" >/dev/null 2>&1 || return 1
     fm_backlog_atomic_transition remove "$meta" "quarantined task record" "$STATE" || return 1
@@ -3262,31 +3263,38 @@ spawn_reconcile_herdr_layout_attempt() {
       return 1
       ;;
   esac
-  if [ "$expected_mode" = fresh ] \
-    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 5 ] \
-    && [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = acquired ] \
+  if [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 5 ] \
     && [ "$value" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" ]; then
-    if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
-      gate_status=0
-      row=
-      if fm_backlog_row_probe "$DATA" "$ID"; then
-        row=$FM_BACKLOG_ROW_STATE
-      else
-        spawn_herdr_presentation_order_lock_release
-        echo "error: task $ID's backlog state could not be read while reconciling its committed structural worker; preserving quarantine" >&2
-        return 1
-      fi
-      [ "$row" = "in_flight no no" ] && committed_receipt=1
-    else
-      gate_status=$?
-      if [ "$gate_status" -eq 1 ]; then
+    case "$expected_mode" in
+      relaunch|secondmate)
         committed_receipt=1
-      else
-        spawn_herdr_presentation_order_lock_release
-        echo "error: task $ID's backlog configuration could not be resolved while reconciling its structural worker; preserving quarantine" >&2
-        return 1
-      fi
-    fi
+        ;;
+      fresh)
+        if [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = acquired ]; then
+          if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
+            gate_status=0
+            row=
+            if fm_backlog_row_probe "$DATA" "$ID"; then
+              row=$FM_BACKLOG_ROW_STATE
+            else
+              spawn_herdr_presentation_order_lock_release
+              echo "error: task $ID's backlog state could not be read while reconciling its committed structural worker; preserving quarantine" >&2
+              return 1
+            fi
+            [ "$row" = "in_flight no no" ] && committed_receipt=1
+          else
+            gate_status=$?
+            if [ "$gate_status" -eq 1 ]; then
+              committed_receipt=1
+            else
+              spawn_herdr_presentation_order_lock_release
+              echo "error: task $ID's backlog configuration could not be resolved while reconciling its structural worker; preserving quarantine" >&2
+              return 1
+            fi
+          fi
+        fi
+        ;;
+    esac
   fi
   if [ "$committed_receipt" = 1 ]; then
     value="$(herdr_projection_meta_field_exact "$meta" herdr_tab_id 2>/dev/null || true):$(herdr_projection_meta_field_exact "$meta" herdr_pane_id 2>/dev/null || true)"
@@ -3298,12 +3306,17 @@ spawn_reconcile_herdr_layout_attempt() {
       && agent=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" agent get \
         "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" 2>/dev/null \
         | jq -r '.result.agent.agent // empty' 2>/dev/null) \
-      && [ "$agent" = pi ] \
-      && fm_backend_herdr_layout_attempt_commit "$HERDR_LAYOUT_ATTEMPT" || {
+      && [ "$agent" = pi ] || {
       spawn_herdr_presentation_order_lock_release
       echo "error: task $ID's committed structural worker could not be verified exactly; preserving quarantine" >&2
       return 1
     }
+    HERDR_LAYOUT_ABORT_RECONCILE=0
+    if ! fm_backend_herdr_layout_attempt_commit "$HERDR_LAYOUT_ATTEMPT"; then
+      spawn_herdr_presentation_order_lock_release
+      echo "error: task $ID's committed structural worker was verified, but its launch receipt could not be retired; preserving retry authority" >&2
+      return 1
+    fi
     spawn_herdr_presentation_order_lock_release
     HERDR_PROJECTION_ABORT_CLEANUP=0
     HERDR_LAYOUT_ENDPOINT_COMMITTED=1
@@ -4042,6 +4055,10 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
         && fm_treehouse_lease_transaction_write "$HERDR_TREEHOUSE_LEASE_TX" acquired \
           "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER" "$PROJ_ABS" "$WT" "$SPAWN_TREEHOUSE_LEASE_ID" || {
         echo "error: treehouse returned an invalid structural Herdr lease identity; preserving its acquisition intent for exact reconciliation" >&2
+        exit 1
+      }
+      WT=$(fm_treehouse_canonical_existing_path "$WT") || {
+        echo "error: treehouse returned a structural Herdr worktree that could not be canonicalized" >&2
         exit 1
       }
     fi

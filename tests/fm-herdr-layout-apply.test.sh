@@ -131,7 +131,9 @@ fm_backend_herdr_cli() { # <session> <args...>
       elif [ "$MODE" = focused_cleanup ]; then
         printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","focused":true,"active_tab_id":"w1:t3"}]}}'
       elif [ "$MODE" = token_workspace ]; then
-        printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"└ task-z1 · p:abcdefghijklmnopqrstuv","focused":true,"active_tab_id":"w1:t3"}]}}'
+        printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w9","label":"└ task-z1 · p:abcdefghijklmnopqrstuv","focused":true,"active_tab_id":"w9:t3"}]}}'
+      elif [ "$MODE" = renamed_workspace ]; then
+        printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"renamed-by-user","focused":true,"active_tab_id":"w1:t9","pane_count":2}]}}'
       else
         printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","focused":true,"active_tab_id":"w1:t2"}]}}'
       fi
@@ -537,11 +539,18 @@ if fm_backend_herdr_projection_journal_retire_removed_attempt \
   fail "fresh recovery retired an unbound presentation journal while its token workspace remained"
 fi
 [ -e "$JOURNAL" ] || fail "live token workspace lost its unbound presentation journal"
-MODE=ok
+MODE=renamed_workspace
+if fm_backend_herdr_projection_journal_retire_removed_attempt \
+  "$JOURNAL" task-z1 "$ATTEMPT" >/dev/null 2>&1; then
+  fail "fresh recovery retired an unbound journal while its renamed exact workspace remained"
+fi
+[ -e "$JOURNAL" ] || fail "renamed exact workspace with concurrent panes lost its unbound journal"
+MODE=workspace
 fm_backend_herdr_projection_journal_retire_removed_attempt \
   "$JOURNAL" task-z1 "$ATTEMPT" \
   || fail "fresh recovery did not retire its absent token workspace's unbound presentation journal"
 [ ! -e "$JOURNAL" ] || fail "absent token workspace left its unbound presentation journal behind"
+MODE=ok
 printf 'version=1\ntask_id=task-z1\nprojection_id=%s\n' "$TOKEN" > "$JOURNAL"
 fm_backend_herdr_projection_journal_write_v2 \
   "$JOURNAL" task-z1 "$TOKEN" "$TMP_ROOT" lab-structural w1 w1:t3 w1:p3 \
@@ -844,7 +853,7 @@ JSON
 esac
 SH
 chmod +x "$RELAUNCH_FAKEBIN/herdr"
-start_server success
+rm -f "$APPLIED" "$REQUEST"
 set +e
 relaunch_out=$(FM_FAKE_HERDR_SOCKET="$SOCK" FM_FAKE_HERDR_APPLIED="$APPLIED" \
   FM_FAKE_HERDR_PARENT_PID="$$" \
@@ -852,27 +861,18 @@ relaunch_out=$(FM_FAKE_HERDR_SOCKET="$SOCK" FM_FAKE_HERDR_APPLIED="$APPLIED" \
     "$RELAUNCH_ID" --relaunch --harness pi)
 relaunch_status=$?
 set -e
-if [ -e "$APPLIED" ]; then
-  wait_server
-else
-  kill "$SERVER_PID" 2>/dev/null || true
-  wait "$SERVER_PID" 2>/dev/null || true
-  SERVER_PID=
-  fail "retained recovery did not reach structural restoration: $relaunch_out"
-fi
-[ "$relaunch_status" -ne 0 ] || fail "retained recovery unexpectedly launched before its explicit retry"
-assert_contains "$relaunch_out" "inert shell endpoint was restored" \
-  "relaunch did not reconcile its live rebound structural replacement"
-assert_not_contains "$relaunch_out" "positively agent-free endpoint" \
-  "generic liveness rejected the live rebound endpoint before structural reconciliation"
-assert_grep 'window=lab-structural:w1:p4' "$RELAUNCH_HOME/state/$RELAUNCH_ID.meta" \
-  "relaunch did not publish the restored inert-shell endpoint"
-assert_grep 'herdr_tab_id=w1:t4' "$RELAUNCH_HOME/state/$RELAUNCH_ID.meta" \
-  "relaunch did not publish the restored tab identity"
-assert_grep 'herdr_pane_id=w1:p4' "$RELAUNCH_HOME/state/$RELAUNCH_ID.meta" \
-  "relaunch did not publish the restored pane identity"
-[ ! -e "$RELAUNCH_ATTEMPT" ] || fail "relaunch left a rebound structural attempt quarantined"
-pass "fm-spawn reconciles a live retained replacement before ordinary relaunch liveness"
+[ "$relaunch_status" -eq 0 ] || fail "retained committed receipt recovery failed: $relaunch_out"
+[ ! -e "$APPLIED" ] || fail "retained committed receipt recovery launched a replacement shell"
+assert_contains "$relaunch_out" "already-committed structural Herdr worker" \
+  "relaunch did not recognize its exact rebound live Pi as committed"
+assert_grep 'window=lab-structural:w1:p3' "$RELAUNCH_HOME/state/$RELAUNCH_ID.meta" \
+  "relaunch changed its committed rebound endpoint"
+assert_grep 'herdr_tab_id=w1:t3' "$RELAUNCH_HOME/state/$RELAUNCH_ID.meta" \
+  "relaunch changed its committed tab identity"
+assert_grep 'herdr_pane_id=w1:p3' "$RELAUNCH_HOME/state/$RELAUNCH_ID.meta" \
+  "relaunch changed its committed pane identity"
+[ ! -e "$RELAUNCH_ATTEMPT" ] || fail "relaunch left its committed receipt quarantined"
+pass "fm-spawn preserves exact live retained workers during receipt recovery"
 
 for ownership_mode in fresh relaunch secondmate; do
   lease_holder=-
@@ -1352,7 +1352,7 @@ struct_post_out=$(HERDR_SESSION=lab-structural \
   FM_FAKE_STRUCT_TASK_CREATED="$STRUCT_TASK_CREATED" FM_FAKE_STRUCT_TASK_LABEL="$STRUCT_TASK_LABEL" \
   FM_FAKE_STRUCT_CLOSED="$STRUCT_CLOSED" FM_FAKE_STRUCT_CLOSE_LOG="$STRUCT_CLOSE_LOG" \
   FM_FAKE_STRUCT_TREEHOUSE_LOG="$STRUCT_TREEHOUSE_LOG" FM_FAKE_STRUCT_TREEHOUSE_STATE="$STRUCT_TREEHOUSE_STATE" \
-  FM_FAKE_STRUCT_LEASE_ID="$STRUCT_LEASE_ID" FM_FAKE_STRUCT_WT="$STRUCT_WT" \
+  FM_FAKE_STRUCT_LEASE_ID="$STRUCT_LEASE_ID" FM_FAKE_STRUCT_WT="$STRUCT_WT_LINK" \
   FM_FAKE_STRUCT_WORKSPACE_LABEL="$STRUCT_WORKSPACE_LABEL" FM_FAKE_STRUCT_PARENT_PID="$$" \
   fm_test_run_spawn "$STRUCT_HOME" "$STRUCT_WT" "$STRUCT_FAKEBIN" \
     postapply-z1 "$STRUCT_PROJECT" --scout --harness pi --backend herdr)
@@ -1370,7 +1370,9 @@ assert_contains "$struct_post_out" "did not produce the expected Pi process" \
   || fail "post-apply reconciliation retained its resolved attempt"
 assert_grep "return --force --if-lease-id $STRUCT_LEASE_ID $STRUCT_WT" "$STRUCT_TREEHOUSE_LOG" \
   "post-apply reconciliation did not return its exact Treehouse lease identity"
-pass "post-apply abort reconciliation owns cleanup without a duplicate close"
+[ "$(jq -r '.params.root.cwd' "$REQUEST")" = "$STRUCT_WT" ] \
+  || fail "post-apply structural launch did not canonicalize its symlinked leased worktree"
+pass "post-apply abort reconciliation canonicalizes symlinked ownership and completes cleanup"
 
 rm -f "$STRUCT_TASK_CREATED" "$STRUCT_TASK_LABEL" "$STRUCT_CLOSED" "$STRUCT_TREEHOUSE_STATE" "$APPLIED" "$REQUEST"
 : > "$STRUCT_CLOSE_LOG"
@@ -1611,6 +1613,7 @@ retained_success_out=$(HERDR_SESSION=lab-structural \
   FM_FAKE_STRUCT_TREEHOUSE_LOG="$STRUCT_TREEHOUSE_LOG" FM_FAKE_STRUCT_TREEHOUSE_STATE="$STRUCT_TREEHOUSE_STATE" \
   FM_FAKE_STRUCT_LEASE_ID="$STRUCT_LEASE_ID" FM_FAKE_STRUCT_WT="$STRUCT_WT" \
   FM_FAKE_STRUCT_WORKSPACE_LABEL="$STRUCT_WORKSPACE_LABEL" FM_FAKE_STRUCT_PARENT_PID="$$" \
+  FM_FAKE_STRUCT_FAIL_LAUNCH_RECEIPT_RM=1 \
   fm_test_run_spawn "$STRUCT_HOME" "$STRUCT_WT" "$STRUCT_FAKEBIN" \
     "$RETAINED_ID" --relaunch --harness pi)
 retained_success_status=$?
@@ -1622,13 +1625,37 @@ else
   wait "$SERVER_PID" 2>/dev/null || true
   SERVER_PID=
 fi
-[ "$retained_success_status" -eq 0 ] || fail "successful retained structural launch failed: $retained_success_out"
-[ ! -e "$STRUCT_HOME/state/$RETAINED_ID.herdr-launch" ] \
-  || fail "successful retained structural launch left its receipt behind"
+[ "$retained_success_status" -ne 0 ] \
+  || fail "retained receipt retirement failure unexpectedly reported success"
+RETAINED_ATTEMPT="$STRUCT_HOME/state/$RETAINED_ID.herdr-launch"
+[ -f "$RETAINED_ATTEMPT" ] \
+  || fail "retained receipt retirement failure discarded retry authority"
 assert_grep 'herdr_pane_id=w1:p3' "$STRUCT_HOME/state/$RETAINED_ID.meta" \
-  "successful retained structural launch did not publish its replacement endpoint"
+  "retained receipt retirement failure lost its replacement endpoint"
+assert_no_grep 'w1:p3' "$STRUCT_CLOSE_LOG" \
+  "retained receipt retirement failure closed its committed worker"
+set +e
+retained_retry_out=$(HERDR_SESSION=lab-structural \
+  FM_FAKE_STRUCT_MODE=success FM_FAKE_STRUCT_SOCKET="$SOCK" \
+  FM_FAKE_STRUCT_APPLIED="$APPLIED" FM_FAKE_STRUCT_REQUEST="$REQUEST" \
+  FM_FAKE_STRUCT_TASK_CREATED="$STRUCT_TASK_CREATED" FM_FAKE_STRUCT_TASK_LABEL="$STRUCT_TASK_LABEL" \
+  FM_FAKE_STRUCT_CLOSED="$STRUCT_CLOSED" FM_FAKE_STRUCT_CLOSE_LOG="$STRUCT_CLOSE_LOG" \
+  FM_FAKE_STRUCT_TREEHOUSE_LOG="$STRUCT_TREEHOUSE_LOG" FM_FAKE_STRUCT_TREEHOUSE_STATE="$STRUCT_TREEHOUSE_STATE" \
+  FM_FAKE_STRUCT_LEASE_ID="$STRUCT_LEASE_ID" FM_FAKE_STRUCT_WT="$STRUCT_WT" \
+  FM_FAKE_STRUCT_WORKSPACE_LABEL="$STRUCT_WORKSPACE_LABEL" FM_FAKE_STRUCT_PARENT_PID="$$" \
+  fm_test_run_spawn "$STRUCT_HOME" "$STRUCT_WT" "$STRUCT_FAKEBIN" \
+    "$RETAINED_ID" --relaunch --harness pi)
+retained_retry_status=$?
+set -e
+[ "$retained_retry_status" -eq 0 ] || fail "retained receipt retry failed: $retained_retry_out"
+[ ! -e "$RETAINED_ATTEMPT" ] \
+  || fail "retained receipt retry left its verified receipt behind"
+assert_grep 'herdr_pane_id=w1:p3' "$STRUCT_HOME/state/$RETAINED_ID.meta" \
+  "retained receipt retry replaced its committed endpoint"
+assert_no_grep 'w1:p3' "$STRUCT_CLOSE_LOG" \
+  "retained receipt retry closed its committed worker"
 rm -f "$STRUCT_HOME/state/$RETAINED_ID.meta"
-pass "successful retained structural launches retire their verified receipts"
+pass "retained receipt retries preserve committed workers and retire receipts"
 
 rm -f "$STRUCT_TASK_CREATED" "$STRUCT_TASK_LABEL" "$STRUCT_CLOSED" "$STRUCT_TREEHOUSE_STATE" "$APPLIED" "$REQUEST"
 : > "$STRUCT_CLOSE_LOG"

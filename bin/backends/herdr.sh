@@ -3207,8 +3207,10 @@ fm_backend_herdr_projection_journal_retire_removed_attempt() { # <journal> <task
     1)
       list=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" workspace list 2>/dev/null) || return 1
       printf '%s' "$list" | jq -e '(.result.workspaces | type) == "array"' >/dev/null 2>&1 || return 1
-      matches=$(printf '%s' "$list" | jq -r --arg suffix " · p:$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" \
-        '[.result.workspaces[]? | select((.label | type) == "string" and (.label | endswith($suffix)))] | length' 2>/dev/null) || return 1
+      matches=$(printf '%s' "$list" | jq -r \
+        --arg workspace "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" \
+        --arg suffix " · p:$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" \
+        '[.result.workspaces[]? | select(.workspace_id == $workspace or ((.label | type) == "string" and (.label | endswith($suffix))))] | length' 2>/dev/null) || return 1
       [ "$matches" = 0 ] || return 1
       ;;
     2)
