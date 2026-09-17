@@ -168,9 +168,11 @@ else
   MUSE_TARGET="$SESSION:$MUSE_PANE"
   # The launch shape here is the launch bin/fm-spawn.sh actually composes for
   # muse minus its positional brief, since this guard needs an idle composer to
-  # steer: the shared outer marker scrub (bin/fm-spawn.sh:4271) wrapping the
-  # verified muse template (bin/fm-spawn.sh:1857), the same absolute resolved
-  # binary, and MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on as the
+  # steer: the shared outer marker scrub bin/fm-spawn.sh prefixes onto every
+  # marker-bearing harness (the `env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u
+  # GEMINI_CLI` wrap in its `case "$HARNESS" in` LAUNCH prefix) around the
+  # verified `muse)` arm of that file's launch-template case, the same absolute
+  # resolved binary, and MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on as the
   # privacy control, which is the control used because the interactive TUI
   # rejects exec mode's --no-foreign-personal-context flag.
   # Two deviations are deliberate: the XDG homes point at this guard's isolated
@@ -205,16 +207,20 @@ else
   # process info carries it: muse's launcher execs a version-suffixed
   # muse-bin-<version>, which docs/verification/muse.md treats as muse's
   # authoritative version surface.
-  # The argv exec path is preferred over the kernel process name, the same
-  # ordering bin/backends/herdr.sh already applies, because that name is
-  # truncated (15 bytes on Linux, 16 on macOS) and a real muse identity
-  # truncates mid-version to a build that never existed.
+  # Only the argv surfaces are read, never the kernel process name: that name is
+  # truncated (15 bytes on Linux, 16 on macOS), and a real muse identity
+  # truncates mid-version to a build that never existed while still carrying the
+  # muse-bin- prefix, so admitting it would put a fabricated version into the
+  # pass line and into the verification record. An unreadable argv leaves the
+  # honest version-unknown placeholder instead.
+  # The suffix is shape-checked for the same reason: only a non-empty version
+  # after the prefix may name a build.
   muse_proc_json=$(lab pane process-info --pane "$MUSE_PANE" 2>/dev/null || true)
   muse_exec_name=$(printf '%s' "$muse_proc_json" | jq -r '
     [.result.process_info.foreground_processes[]?
-     | ((.argv // [])[0] // empty), (.argv0 // empty), (.name // empty)]
+     | ((.argv // [])[0] // empty), (.argv0 // empty)]
     | map(split("/") | last)
-    | map(select(startswith("muse-bin-")))
+    | map(select(test("^muse-bin-.+$")))
     | first // empty' 2>/dev/null || true)
   [ -z "$muse_exec_name" ] || MUSE_VERSION=${muse_exec_name#muse-bin-}
 
