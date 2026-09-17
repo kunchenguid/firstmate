@@ -190,7 +190,7 @@ mkfifo "$RPC_IN" || fail "could not create the rpc fifo"
   cd "$PROJECT" &&
     env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
       -u FM_HOME -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE \
-      FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 \
+      CLAUDECODE=1 FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 \
       FM_GUARD_GRACE="$GUARD_GRACE" \
       omp --mode rpc --no-session --cwd "$PROJECT" --config "$PROJECT/.omp/fm-worker-overlay.yml" --auto-approve \
         --model "$MODEL" --thinking low < "$RPC_IN" > "$RPC_LOG" 2> "$RPC_ERR"
@@ -204,19 +204,21 @@ wait_for_file "$PROJECT/state/.omp-watch-extension-loaded" 60 || fail "omp $OMP_
 pass "omp $OMP_VERSION: both tracked .omp/extensions loaded by auto-discovery with no -e and no trust dialog"
 
 # --- 1. session-start digest and lock identity ---------------------------------
-rpc_send '{"id":"p1","type":"prompt","message":"From the Firstmate session-start digest already in your context, reply with the single line that begins with SESSION START - and nothing else. Do not run any tool."}'
+rpc_send '{"id":"p1","type":"prompt","message":"From the Firstmate session-start digest already in your context, reply with the line that begins with SESSION START - and the SUPERVISION OPERATING INSTRUCTIONS line naming the primary harness. Do not run any tool."}'
 wait_for_agent_ends 1 360 || fail "omp did not finish the first turn: $(tail -3 "$RPC_ERR")"
 first=$(assistant_text_since 1)
 case "$first" in
   *"SESSION START - $PROJECT"*) ;;
   *) fail "the session-start digest did not reach model context before the first turn; reply was: $first" ;;
 esac
+assert_contains "$first" 'primary harness: omp' \
+  "omp $OMP_VERSION startup selected the wrong supervision protocol under inherited CLAUDECODE"
 lock_pid=$(sed -n '1p' "$PROJECT/state/.lock" 2>/dev/null || true)
 omp_real_pid=$(pgrep -P "$OMP_PID" -x omp 2>/dev/null | head -1 || true)
 [ -n "$omp_real_pid" ] || omp_real_pid=$OMP_PID
 [ "$lock_pid" = "$omp_real_pid" ] || fail "the session lock names pid '$lock_pid', not the omp process $omp_real_pid; ancestry detection failed"
 [ -f "$PROJECT/state/.session-start-complete" ] || fail "session start did not record completion"
-pass "omp $OMP_VERSION: before_agent_start delivered the digest into model context and the lock names the omp process"
+pass "omp $OMP_VERSION: before_agent_start delivered the omp digest despite inherited CLAUDECODE and the lock names the omp process"
 
 # --- 2. watcher arm, successor, and wake delivery ------------------------------
 : > "$PROJECT/state/omp-e2e.meta"

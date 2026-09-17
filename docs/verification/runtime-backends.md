@@ -38,6 +38,21 @@ FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=3666
 Before that boundary existed, a Codex session started from an environment that had retained `CLAUDECODE=1` reported `claude`, and session start emitted Claude's Stop-owned supervision protocol to a Codex primary.
 The same live shape, reproduced with a real process named `codex` and no installed harness, now reports `codex` with the marker present and `claude` with the marker present and ancestry blinded, which is what proves the case is not vacuous.
 
+### omp startup subprocess depth
+
+Verified on 2026-09-17 with omp 18.2.2 on Darwin 25.6.0 arm64.
+The real `before_agent_start` handler ran the tracked startup supervisor and timed digest path in an isolated probe that exited immediately after harness detection, before any fleet operations or model request.
+With `CLAUDECODE=1` and `FM_OMP_HARNESS=omp`, the command-substitution call returned `claude` while a direct call in the same digest returned `omp`.
+Extending the two upward ancestry walks from eight to sixteen inspected processes made both calls return `omp`.
+With neither marker, the equivalent nested subprocess probe changed from `unknown` to `omp`.
+The process-name classifier and nearest-process precedence are unchanged.
+The descendant-search bound is also unchanged.
+
+`tests/fm-omp-harness.test.sh` pins the deep-wrapper cases with real named shell processes, including an inherited Claude marker with and without the omp launch marker.
+`tests/fm-harness-precedence.test.sh` covers the unchanged other-harness precedence rules.
+Refresh the full native startup and supervision proof with `FM_OMP_LIVE_E2E=1 FM_OMP_LIVE_MODEL=<provider/model> bin/fm-test-run.sh tests/fm-omp-primary-live-e2e.test.sh`; its first turn now checks the selected supervision protocol while retaining `CLAUDECODE=1`.
+The isolated probe above verified startup detection only, not the full credentialed supervision guard or other installed harnesses.
+
 ### A real Codex session holding a retained Claude marker
 
 The portable regression builds its process tree from renamed executables, so the same guarantee is proven again against the real installed Codex.
