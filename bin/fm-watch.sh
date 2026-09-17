@@ -1050,12 +1050,16 @@ clear_write_tracking() {  # <window-key>
 # the same reason wedge_wait_evidence names its verb: the two ask the supervisor
 # for different things.
 #
-# The marker is owned entirely by this function - written when the endpoint reads
-# gone, dropped by the same read the moment it stops reading gone - so a later
-# death is reported in full and no other reset site has to know this file exists.
+# The marker is owned entirely by this function and records the verdict together
+# with the pane hash it was reported for: a repeat is absorbed only while BOTH
+# still match, a read that stops being gone still drops it, and no other reset
+# site has to know this file exists. The hash half re-arms a relaunch - a
+# replacement churns the pane, resetting the timer bookkeeping without any
+# threshold probe ever reading it alive - so its own later death is reported in
+# full, while a dead pane's static display still absorbs on every threshold.
 # Returns 0 when it has handled the window, 1 to escalate on the unchanged path.
-wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age>
-  local win=$1 since_file=$2 label=$3 age=$4 key marker agent_state detail reason
+wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-hash>
+  local win=$1 since_file=$2 label=$3 age=$4 hash=$5 key marker agent_state detail reason
   key=$(window_key "$win")
   marker="$STATE/.dead-reported-$key"
   agent_state=$(fm_backend_agent_state "$(window_backend "$win")" "$win" 2>/dev/null) || agent_state=unreadable
@@ -1067,7 +1071,7 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age>
   # Re-arm the idle timer on BOTH paths below, so the backend probe above stays on
   # its once-per-STALE_ESCALATE_SECS budget instead of running on every poll.
   date +%s > "$since_file"
-  if [ "$(cat "$marker" 2>/dev/null || true)" = "$agent_state" ]; then
+  if [ "$(cat "$marker" 2>/dev/null || true)" = "$agent_state $hash" ]; then
     triage_log "absorbed $label (agent $agent_state, already reported once, idle ${age}s): $win"
     return 0
   fi
@@ -1077,7 +1081,7 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age>
   # absorb the retry - the one way this bound could swallow the report outright
   # rather than deliver it once.
   fm_wake_append stale "$win" "$reason" || exit 1
-  printf '%s' "$agent_state" > "$marker"
+  printf '%s %s' "$agent_state" "$hash" > "$marker"
   clear_write_tracking "$key"
   wake "$reason"
 }
@@ -1098,8 +1102,8 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age>
 # through its worktree. The dead-record probe runs last of the three, so the two
 # cheaper deferrals keep the panes they already own on their existing bounded
 # cadences and only a pane that would otherwise alarm pays for a backend read.
-wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason evidence
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash>
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason evidence
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -1120,7 +1124,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
           return 0
         fi
-        if wedge_dead_record "$win" "$since_file" "$label" "$age"; then
+        if wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash"; then
           return 0
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
@@ -1271,7 +1275,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
     handle_paused_stale "$win" "$task" "$h"
     return 0
   fi
-  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task"
+  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task" "$h"
   return 1
 }
 
@@ -2573,7 +2577,7 @@ EOF
             # wedge timer is running for it) - keep treating it that way
             # without re-reading the crew state every poll, and without
             # letting the still-captain-relevant log line re-surface it.
-            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task"
+            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task" "$h"
           fi
           # else: already surfaced as genuinely terminal on a prior poll of
           # this same hash - nothing left to do (matches the original,
@@ -2616,12 +2620,12 @@ EOF
                 paused)  handle_paused_stale "$w" "$task" "$h" ;;
                 working) clear_pause_state "$key"
                          printf '%s' "$h" > "$sf"
-                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task"
+                         wedge_timer_check "$w" "$ssf" "non-terminal stale (provably working after a declared pause)" "$ewf" "$task" "$h"
                          triage_log "absorbed non-terminal stale (provably working): $w" ;;
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else
-              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$task"
+              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$task" "$h"
             fi
           fi
         fi

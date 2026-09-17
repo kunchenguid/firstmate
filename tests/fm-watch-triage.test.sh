@@ -2460,7 +2460,7 @@ wedge_threshold_round() {  # <state> <fakebin> <out> <capture> <window> <verdict
     FM_FAKE_TMUX_WINDOWS="${FM_TEST_TMUX_WINDOWS-}" FM_FAKE_CREW_STATE="$verdict" \
     FM_WATCH_HANDLING_SUCCESSOR=1 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_PAUSE_RESURFACE_SECS="${FM_TEST_PAUSE_RESURFACE:-999}" FM_STALE_ESCALATE_SECS=1 \
+    FM_PAUSE_RESURFACE_SECS="${FM_TEST_PAUSE_RESURFACE:-999}" FM_STALE_ESCALATE_SECS="${FM_TEST_STALE_ESCALATE:-1}" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
@@ -2820,6 +2820,77 @@ test_gone_report_rearms_when_the_endpoint_comes_back() {
   ack_stopped_cycle "$state" || fail "could not acknowledge the second gone report"
   unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
   pass "the once-only gone report re-arms when the endpoint comes back, and reports a later death again"
+}
+
+# The swallow the once-marker must be bound against: death #1 is reported, then a
+# replacement launches into the same window - churning the pane hash, which
+# resets the stale suppressor, wedge timer and escalation count while NO reset
+# site touches the once-marker - and then the replacement itself dies and the
+# pane settles static at ITS hash. The relaunch round ends before any threshold,
+# so no backend probe ever read the replacement alive; only the marker's pane
+# half can tell this death apart from the one already reported, so the second
+# death must report in full, while later thresholds on the SAME dead pane stay
+# silent and never advance the escalation count.
+test_second_death_after_a_same_window_relaunch_reports_in_full() {
+  local dir state fakebin out capture window key
+  local failed='state: failed · source: run-step · run failed'
+  local working='state: working · source: run-step · ci running'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  dir=$(wedge_threshold_fixture gone-relaunch-swallow 'working: still compiling' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+
+  # Death #1: the endpoint is gone and reported once, in full.
+  gone_endpoint_env missing; export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
+    || fail "the first death was never reported: $(cat "$out")"
+  grep -F 'agent missing' "$out" >/dev/null \
+    || fail "the first death report did not name the endpoint verdict: $(cat "$out")"
+  [ -s "$state/.dead-reported-$key" ] || fail "the first death left no once-record"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first death report"
+
+  # A replacement launches: the pane churns and the bookkeeping resets, but the
+  # round ends before the fresh timer could reach a threshold, so no probe runs
+  # and the once-record survives the churn untouched.
+  FM_TEST_PANE_COMMAND=grok FM_TEST_TMUX_WINDOWS=fm-wedge
+  printf '%s\n' 'waiting on the build queue' > "$capture"
+  : > "$out"
+  FM_TEST_STALE_ESCALATE=999 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" absorb \
+    || fail "a replacement launch churned the pane without absorbing: $(cat "$out")"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "the relaunch round escalated before its fresh window elapsed: $(cat "$out")"
+  [ -s "$state/.dead-reported-$key" ] \
+    || fail "the relaunch churn dropped the first death's once-record"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "the relaunch churn left a wedge escalation count behind"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "the relaunch churn queued a wake: $(cat "$state/.wake-queue")"
+
+  # The replacement dies too, without any intervening probe reading it alive:
+  # the second death must still produce its own detailed report naming the
+  # verdict, and must not be absorbed by the first death's record.
+  gone_endpoint_env missing
+  : > "$out"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
+    || fail "a second death after a same-window relaunch was never reported: $(cat "$out")"
+  grep -F 'agent missing' "$out" >/dev/null \
+    || fail "the second death was not reported as a gone endpoint: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 1 ] \
+    || fail "the second death queued $(wedge_stale_wakes "$state" "$window") wakes instead of one"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "the second death advanced the wedge escalation count"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the second death report"
+
+  # And later thresholds on the same unchanged dead pane stay silent: the
+  # bound still holds once the replacement's own death is the reported one.
+  : > "$out"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" absorb \
+    || fail "an unchanged dead pane re-alarmed after the second report: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "an unchanged dead pane queued a repeat wake: $(cat "$state/.wake-queue")"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "an unchanged dead pane advanced the escalation count"
+  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  pass "a second death after a same-window relaunch reports in full without a live probe, and an unchanged dead pane stays silent"
 }
 
 
@@ -5304,6 +5375,7 @@ test_wedge_escalation_resets_when_pane_becomes_active
 test_gone_endpoint_reports_once_instead_of_escalating_forever
 test_live_and_unproven_endpoints_still_wedge_escalate
 test_gone_report_rearms_when_the_endpoint_comes_back
+test_second_death_after_a_same_window_relaunch_reports_in_full
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
