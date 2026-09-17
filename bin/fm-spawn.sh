@@ -263,9 +263,13 @@
 #   worktree, or record exists and names the accepted values. The file is read
 #   on every spawn and relaunch, so a change reaches the next launch without a
 #   restart, and it is inherited into secondmate homes (bin/fm-config-inherit-lib.sh).
+#   The resolved posture is also written into .claude/settings.local.json so a
+#   session restore (`claude --resume`) inherits the configured mode instead of
+#   silently reverting to the permission-prompting default.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
+#     __CLAUDEPERMSETTING__ the matching Claude Code settings defaultMode value (bypassPermissions or auto)
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -465,8 +469,10 @@ if [ "$CLAUDE_PERM_PRESENT" = 1 ]; then
   esac
 fi
 case "$CLAUDE_PERMISSION_MODE" in
-  auto) CLAUDE_PERM_FLAG='--permission-mode auto' ;;
-  *) CLAUDE_PERM_FLAG='--dangerously-skip-permissions' ;;
+  auto) CLAUDE_PERM_FLAG='--permission-mode auto'
+        CLAUDE_PERM_SETTINGS_VALUE='auto' ;;
+  *) CLAUDE_PERM_FLAG='--dangerously-skip-permissions'
+     CLAUDE_PERM_SETTINGS_VALUE='bypassPermissions' ;;
 esac
 SUB_HOME_MARKER=".fm-secondmate-home"
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
@@ -1622,7 +1628,14 @@ launch_template() {
     # __CLAUDEPERMFLAG__ is the permission flag config/claude-permission-mode
     # selects (header above): --dangerously-skip-permissions by default, or
     # --permission-mode auto for a captain who refuses bypass mode.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __CLAUDEPERMFLAG__ --settings '\''{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false}}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # __CLAUDEPERMSETTING__ is the matching Claude Code settings defaultMode
+    # value (bypassPermissions or auto), carried both in the inline --settings
+    # JSON and in .claude/settings.local.json (below) so the posture persists
+    # across a session restore: `claude --resume` does not re-apply CLI flags,
+    # but it does read the project's settings files, so the restored session
+    # inherits the configured posture instead of silently downgrading to the
+    # permission-prompting default.
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude __CLAUDEPERMFLAG__ --settings '\''{"permissions":{"defaultMode":"__CLAUDEPERMSETTING__"},"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false}}'\'\ '__MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
@@ -3828,8 +3841,17 @@ if [ "$KIND" != secondmate ]; then
       j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
       j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
       j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
+      # Permission posture persistence: `claude --resume` does not re-apply
+      # CLI flags like --dangerously-skip-permissions, so a Herdr session
+      # restore (or any other mechanism that resumes a Claude session) would
+      # silently downgrade the worker to the permission-prompting default.
+      # Carrying the resolved posture in this project-level settings file
+      # makes the restored session inherit the configured mode, because Claude
+      # Code reads .claude/settings.local.json on every session start including
+      # resume. The CLI flag on the launch command is kept as well: both must
+      # agree, and the CLI flag is what the fresh launch actually executes.
       cat > "$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
+{"permissions":{"defaultMode":"$CLAUDE_PERM_SETTINGS_VALUE"},"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
       exclude_path '.claude/settings.local.json'
       ;;
@@ -4592,6 +4614,7 @@ EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
+LAUNCH=${LAUNCH//__CLAUDEPERMSETTING__/$CLAUDE_PERM_SETTINGS_VALUE}
 if [ "$HARNESS" = rovo ]; then
   ROVOCONFIGOVERRIDE=$(rovo_config_override_flag "$EFFORT" "$DATA" "$STATE" "$ID") || {
     echo "error: could not resolve this task's home paths for rovo's allowedExternalPaths grant" >&2
