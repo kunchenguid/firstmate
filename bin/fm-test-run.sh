@@ -303,6 +303,7 @@ family_for_basename() {
     fm-wake-drain-unread-status.test.sh|\
     fm-tool-update-check.test.sh|\
     fm-mail.test.sh|fm-mail-check.test.sh|\
+    fm-turnend-foreign-owner-arm-fix.test.sh|\
     fm-wake-queue.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-recovery-loop.test.sh|\
     fm-watch-triage.test.sh|fm-task-inbox.test.sh|\
     fm-watcher-lock.test.sh|fm-inactive-reconcile.test.sh)
@@ -800,6 +801,7 @@ tests/fm-test-fixture-cleanup.test.sh 915
 tests/fm-test-fixtures.test.sh 151
 tests/fm-test-isolation-proof.test.sh 2567
 tests/fm-tmux-agent-liveness.test.sh 1516
+tests/fm-turnend-foreign-owner-arm-fix.test.sh 2530
 tests/fm-tool-update-check.test.sh 14176
 tests/fm-trace-context-lib.test.sh 209
 tests/fm-trace-context-spawn.test.sh 44702
