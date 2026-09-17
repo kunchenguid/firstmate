@@ -395,11 +395,14 @@ test_ask_user_escalation_format() {
     "ship rule 6 must require the same shape for a single finding"
   assert_grep "write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority)" "$brief" \
     "ship rule 6 must limit the verbatim axi slice to ask-user findings"
-  assert_grep "At a fix-round cap stop the same event and snapshot shape carries every finding still holding that gate instead, whatever action class it was assigned." "$brief" \
+  assert_grep "At a fix-round cap stop the same event and snapshot shape carries every finding still holding that gate instead, whatever action class it was assigned" "$brief" \
     "ship rule 6 must widen the snapshot slice at a fix-round cap stop"
   # shellcheck disable=SC2016  # single quotes are deliberate: backticks and the key/findings/file tokens must stay literal
-  assert_grep 'needs-decision [key=nm-<run>-<step>]: findings=<id1>,<id2>,... file='"$home/data/$id/nm-<run>-findings.txt" "$brief" \
-    "ship rule 6 must render the exact needs-decision status line"
+  assert_grep 'needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file='"$home/data/$id/nm-<run>-findings.txt" "$brief" \
+    "ship rule 6 must render the exact needs-decision ask-user status line"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the cap-stop marker must stay literal
+  assert_grep 'reported with `fix-round-cap findings=` in place of `ask-user findings=`' "$brief" \
+    "ship rule 6 must let firstmate tell a cap stop from an ask-user escalation by the event alone"
   assert_grep "$home/data/$id/nm-<run>-findings.txt" "$brief" \
     "ship rule 6 must point the snapshot file under this task's own data directory"
   assert_grep "The status line only points at the file; it never restates or summarizes a finding's content." "$brief" \

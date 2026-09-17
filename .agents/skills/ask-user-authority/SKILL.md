@@ -34,7 +34,8 @@ It stops at the finding, routes the decision to firstmate, and applies only the 
 4. Fix only what makes the deliverable wrong.
    Approve past wording, restatement, simplification, and documentation-polish findings even when the reviewer is right, unless the text is actually false.
    Approving one of those records that the deliverable is already correct; it neither concedes nor disputes the reviewer's reading, and it leaves no defect unfixed.
-5. Cap the work at three fix rounds per run, counting one round per gate response that opens a fix round: the worker's own `no-mistakes axi respond --action fix` calls, never rounds the pipeline chains inside one of them and never a fresh three per gate or per step.
+5. Cap the work at three fix rounds per run, counting one round per gate response that opens a fix round: a `no-mistakes axi respond --action fix` the worker sends on its own judgment, never rounds the pipeline chains inside one of them and never a fresh three per gate or per step.
+   A fix response that carries a decision firstmate returned, or that retries an unfinished step such as a protected-path refusal, opens no round and does not count against the cap.
    The cap is a proportionality rule with an advisory count, not an enforced limit: nothing records the count durably, so it resets on a context reset or a worker recovery.
    It also bounds only what the worker initiates, not what the pipeline does inside one of those responses, so three of them can still chain into more fix rounds and more wall clock than the number suggests.
    Step 4 is the binding half and holds at every round, while three is guidance for when to stop.

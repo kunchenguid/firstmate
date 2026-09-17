@@ -227,9 +227,9 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
   local data=$1 id=$2
   cat <<EOF
    For a no-mistakes ask-user gate specifically, escalate all ask-user findings as one event plus one snapshot file, using that same shape even when the gate holds only a single ask-user finding: write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority), to \`$data/$id/nm-<run>-findings.txt\`, then report the gate with
-   \`needs-decision [key=nm-<run>-<step>]: findings=<id1>,<id2>,... file=$data/$id/nm-<run>-findings.txt\`
+   \`needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file=$data/$id/nm-<run>-findings.txt\`
    naming every ask-user finding id from that gate. The status line only points at the file; it never restates or summarizes a finding's content.
-   At a fix-round cap stop the same event and snapshot shape carries every finding still holding that gate instead, whatever action class it was assigned.
+   At a fix-round cap stop the same event and snapshot shape carries every finding still holding that gate instead, whatever action class it was assigned, reported with \`fix-round-cap findings=\` in place of \`ask-user findings=\` so firstmate can tell the two apart from the event alone.
 EOF
 }
 
@@ -289,11 +289,12 @@ Three firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
-- Fix rounds are capped at three per run, counted as your own \`no-mistakes axi respond --action fix\` responses and never rounds the pipeline chains inside one drive call; \`ask-user-authority\` step 5 owns that cap and every criterion for what is fixed past it.
+- Fix rounds are capped at three per run, counted as a \`no-mistakes axi respond --action fix\` you send on your own judgment and never rounds the pipeline chains inside one drive call; \`ask-user-authority\` step 5 owns that cap and every criterion for what is fixed past it.
+  A fix response that carries a decision firstmate returned, or that retries an unfinished step such as a protected-path refusal, is not a round you opened and does not count against the cap.
   Its proportionality half binds you on every gate you drive yourself: fix only what makes the deliverable wrong, and approve past wording, restatement, simplification, and documentation-polish findings even when the reviewer is right, unless the text is actually false.
   The count is advisory rather than enforced: nothing records it durably, so it resets on a context reset or a worker recovery.
   It also bounds only what you initiate, not what the pipeline does inside one of those responses, so three of them can still chain into more fix rounds and more wall clock than the number suggests.
-  Once you have sent three, do not send a fourth \`--action fix\`: escalate a gate that still holds actionable findings to firstmate using rule 6's escalation format and stop, and keep answering gates that hold nothing actionable.
+  Once you have opened three, do not open a fourth on your own judgment: escalate a gate that still holds actionable findings you would otherwise open a round for to firstmate using rule 6's escalation format and stop, and keep answering gates that hold nothing actionable.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF

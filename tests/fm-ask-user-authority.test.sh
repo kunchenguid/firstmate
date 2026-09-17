@@ -28,8 +28,10 @@ test_primary_and_secondmate_instruction_generation() {
   assert_no_grep 'the captain, not you, owns the ask-user decisions' "$ship" \
     "generated implementation brief retained conflicting captain-only wording"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
-  assert_grep 'Fix rounds are capped at three per run, counted as your own `no-mistakes axi respond --action fix` responses' "$ship" \
+  assert_grep 'Fix rounds are capped at three per run, counted as a `no-mistakes axi respond --action fix` you send on your own judgment' "$ship" \
     "generated implementation brief leaves the cap without an observable counting unit"
+  assert_grep 'A fix response that carries a decision firstmate returned, or that retries an unfinished step such as a protected-path refusal, is not a round you opened' "$ship" \
+    "generated implementation brief counts returned decisions and step retries against the cap"
   assert_grep 'approve past wording, restatement, simplification, and documentation-polish findings even when the reviewer is right, unless the text is actually false' "$ship" \
     "generated implementation brief withholds the proportionality criterion from the worker that drives auto-fix gates"
   assert_grep 'The count is advisory rather than enforced' "$ship" \
@@ -37,7 +39,7 @@ test_primary_and_secondmate_instruction_generation() {
   assert_grep 'It also bounds only what you initiate, not what the pipeline does inside one of those responses' "$ship" \
     "generated implementation brief hides that three responses can chain into more fix rounds"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
-  assert_grep 'Once you have sent three, do not send a fourth `--action fix`' "$ship" \
+  assert_grep 'Once you have opened three, do not open a fourth on your own judgment' "$ship" \
     "generated implementation brief does not stop the worker opening a fourth fix round"
   assert_grep 'keep answering gates that hold nothing actionable' "$ship" \
     "generated implementation brief strands a capped run on an unsatisfiable escalation"
