@@ -893,7 +893,7 @@ test_open_decision_clears_on_keyed_resolution() {
 # must not linger as pending. Decisions come purely from the keyed fold reconciled
 # against the crew lifecycle; report prose never opens or reopens a decision.
 test_completed_scout_report_is_pointer_not_pending() {
-  local home fakebin out
+  local home fakebin out kind terminal id phase single mate single_state mate_state
   home=$(make_home completed-scout)
   mkdir -p "$home/projects/scout-wt" "$home/data/lavish-103"
   fm_write_meta "$home/state/lavish-103.meta" \
@@ -918,11 +918,9 @@ test_completed_scout_report_is_pointer_not_pending() {
       and (.hints.open_decisions | length) == 0
       and .hints.scout_report_present == true
   ' >/dev/null || fail "a completed scout report must be a pointer, not a pending decision: $out"
-  pass "a completed scout's stale decision surfaces as a report pointer, not pending"
-}
 
-test_terminal_cleanup_decisions_agree_across_snapshot_modes() {
-  local home fakebin kind terminal id phase single mate single_state mate_state out
+  # Same terminal-supersession contract across ship/scout/secondmate, both snapshot
+  # modes, and reopen/resolve after cleanup.
   home=$(make_home terminal-cleanup)
   mkdir -p "$home/projects/task"
   fakebin=$(make_fakebin "$home")
@@ -969,7 +967,7 @@ test_terminal_cleanup_decisions_agree_across_snapshot_modes() {
           + [ ("secondmate-done","secondmate-failed") as $id | $mate[] | {id:$id,key:.} ]) | sort_by(.id,.key))
     ' >/dev/null || fail "$phase home summary revived a completed decision or lost a current one: $out"
   done
-  pass "snapshots and home summaries share terminal supersession, reopening, and secondmate preservation"
+  pass "a completed scout's stale decision surfaces as a report pointer, not pending"
 }
 
 # The complementary safety property: a scout still PARKED at a decision (its last
@@ -1109,7 +1107,6 @@ test_secondmate_open_decision_survives_live_endpoint
 test_open_decision_transfers_to_captain_hold
 test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
-test_terminal_cleanup_decisions_agree_across_snapshot_modes
 test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
