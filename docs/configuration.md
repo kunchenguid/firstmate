@@ -101,7 +101,7 @@ Untracked files and directories whose names begin with `scratchpad` are also git
 ### Format and lifecycle references
 
 - `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
-- An executor task (`kind=executor`) additionally records `issue=`, `issue_url=` when the project's origin is github.com, `executor_base=`, and `executor_launched=`, and keeps two private runtime records beside its check: `state/<id>.executor-exit`, the exit status the pane shell writes when the one-shot command returns, and `state/<id>.executor-notified`, the last outcome the watcher delivered for that incarnation; `bin/fm-executor-lib.sh` owns both.
+- An executor task (`kind=executor`) additionally records `issue=`, `executor_base=`, and `executor_launched=`, and keeps two private runtime records beside its check: `state/<id>.executor-exit`, the exit status the pane shell writes when the one-shot command returns, and `state/<id>.executor-notified`, the last outcome the watcher delivered for that incarnation; `bin/fm-executor-lib.sh` owns both.
 
 - `bin/fm-contributions.sh` owns durable published-contribution records under each task, observation bounds, equivalent triage-label configuration, and the authenticated contribution check.
 

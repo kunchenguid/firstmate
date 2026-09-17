@@ -18,7 +18,9 @@
 #   (e) a raw launch command receives the encoded brief as its final argument
 #   (f) the registry-deviation notice on a no-mistakes project, and silence on
 #       a direct-PR one
-#   (g) fm_executor_origin_issue_url resolves github.com origins only
+#   (g) a fresh spawn resets a stale fm/<id> left by an earlier partial
+#       failure onto the freshened base, and refuses with git's own words
+#       when another worktree holds that branch
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -93,7 +95,6 @@ test_executor_spawn_records_meta_branch_and_poll() {
   assert_grep 'mode=direct-PR' "$meta" "meta records the implied direct-PR mode"
   assert_grep 'yolo=off' "$meta" "meta yolo"
   assert_grep 'issue=7' "$meta" "meta issue"
-  assert_no_grep 'issue_url=' "$meta" "a file:// origin resolves no GitHub issue URL"
   assert_no_grep 'busy_gen=' "$meta" "an executor arms no busy-state contract"
   grep -q '^executor_launched=[0-9][0-9]*$' "$meta" || fail "meta must record the launch epoch"
   [ "$(git -C "$WT_DIR" branch --show-current)" = "fm/$id" ] || fail "fm/$id must be checked out before launch"
@@ -257,20 +258,35 @@ test_registry_deviation_notice() {
   pass "an executor on a no-mistakes project prints the deviation notice and continues"
 }
 
-test_origin_issue_url_resolution() {
-  local repo url
-  repo="$TMP_ROOT/origin-url"
-  fm_git_init_commit "$repo"
-  git -C "$repo" remote add origin git@github.com:Acme-Org/widget.git
-  url=$(fm_executor_origin_issue_url "$repo" 12) || fail "an ssh github origin must resolve"
-  [ "$url" = 'https://github.com/Acme-Org/widget/issues/12' ] || fail "unexpected issue URL: $url"
-  git -C "$repo" remote set-url origin https://github.com/Acme-Org/widget
-  url=$(fm_executor_origin_issue_url "$repo" 12) || fail "an https github origin must resolve"
-  [ "$url" = 'https://github.com/Acme-Org/widget/issues/12' ] || fail "unexpected https issue URL: $url"
-  git -C "$repo" remote set-url origin https://gitlab.example.com/group/widget.git
-  ! fm_executor_origin_issue_url "$repo" 12 >/dev/null || fail "a non-GitHub origin must resolve no URL"
-  ! fm_executor_origin_issue_url "$repo" 0 >/dev/null || fail "an invalid issue must resolve no URL"
-  pass "issue URLs come only from a github.com origin"
+test_stale_branch_retry_and_held_branch_refusal() {
+  local rec id out rc stale base meta holder
+  id=exec-stale-g1
+  rec=$(make_case stale); read_case "$rec"
+  executor_brief "$HOME_DIR" "$id" 5
+  stale=$(git -C "$PROJ_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit-tree -p HEAD -m 'stale earlier spawn' "$(git -C "$PROJ_DIR" rev-parse 'HEAD^{tree}')") \
+    || fail "could not mint the stale commit"
+  git -C "$PROJ_DIR" branch "fm/$id" "$stale" || fail "could not pre-create the stale fm/$id"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --executor --issue 5 --yolo off --harness opencode); rc=$?
+  expect_code 0 "$rc" "a fresh spawn must reset a stale fm/<id> instead of failing: $out"
+  [ "$(git -C "$WT_DIR" branch --show-current)" = "fm/$id" ] || fail "fm/$id must be checked out after the retry"
+  base=$(git -C "$PROJ_DIR" rev-parse origin/HEAD 2>/dev/null || git -C "$PROJ_DIR" rev-parse HEAD)
+  [ "$(git -C "$WT_DIR" rev-parse HEAD)" = "$base" ] || fail "the reset branch must sit on the freshened base, not the stale commit"
+  [ "$(git -C "$WT_DIR" rev-parse HEAD)" != "$stale" ] || fail "the stale commit must not survive the retry"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep "executor_base=$base" "$meta" "meta records the freshened base as the branch base"
+
+  id=exec-held-g2
+  rec=$(make_case held); read_case "$rec"
+  executor_brief "$HOME_DIR" "$id" 6
+  holder="$TMP_ROOT/held/holder"
+  git -C "$PROJ_DIR" worktree add --quiet -b "fm/$id" "$holder"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --executor --issue 6 --yolo off --harness opencode 2>&1); rc=$?
+  expect_code 1 "$rc" "a branch another worktree holds must refuse the spawn: $out"
+  assert_contains "$out" "could not create the executor branch fm/$id" "the refusal names the branch"
+  assert_contains "$out" "$holder" "the refusal carries git's own reason naming the holding worktree"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused spawn must publish no meta"
+  pass "a stale fm/<id> is reset onto the freshened base on retry; a held branch refuses with git's reason"
 }
 
 test_executor_spawn_records_meta_branch_and_poll
@@ -279,4 +295,4 @@ test_executor_refusals
 test_brief_and_spawn_kind_agreement
 test_raw_command_receives_brief_as_final_argument
 test_registry_deviation_notice
-test_origin_issue_url_resolution
+test_stale_branch_retry_and_held_branch_refusal

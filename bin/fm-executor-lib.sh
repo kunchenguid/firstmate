@@ -130,29 +130,6 @@ fm_executor_notified_path() {  # <state> <id>
   printf '%s/%s.executor-notified' "$1" "$2"
 }
 
-# The canonical issue URL derived from the project's origin remote, printed
-# only when that remote is github.com; any other host or shape prints nothing
-# and returns 1, so the caller records no issue_url= rather than a guess.
-fm_executor_origin_issue_url() {  # <project-dir> <issue>
-  local project=$1 issue=$2 remote owner repo
-  local LC_ALL=C
-  fm_executor_issue_valid "$issue" || return 1
-  remote=$(git -C "$project" remote get-url origin 2>/dev/null) || return 1
-  case "$remote" in
-    https://github.com/*/*) remote=${remote#https://github.com/} ;;
-    ssh://git@github.com/*/*) remote=${remote#ssh://git@github.com/} ;;
-    git@github.com:*/*) remote=${remote#git@github.com:} ;;
-    *) return 1 ;;
-  esac
-  remote=${remote%/}
-  remote=${remote%.git}
-  owner=${remote%%/*}
-  repo=${remote#*/}
-  case "$repo" in */*) return 1 ;; esac
-  fm_pr_url_parse "https://github.com/$owner/$repo/pull/1" || return 1
-  printf 'https://github.com/%s/%s/issues/%s' "$owner" "$repo" "$issue"
-}
-
 # Publish the byte-static poll as this task's slow check. A previous
 # incarnation's merge poll for a bounced pull request may still own the check
 # name and its private sidecar and registration; the relaunched executor's poll
