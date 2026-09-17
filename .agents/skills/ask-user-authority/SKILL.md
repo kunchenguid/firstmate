@@ -2,7 +2,7 @@
 name: ask-user-authority
 description: >-
   Agent-only decision procedure for ask-user findings.
-  Use before deciding any ask-user finding.
+  Use before deciding any ask-user finding and before deciding whether another fix round should happen at all.
   This skill is the single owner of finding-decision policy: firstmate always applies judgment, decides findings that are unambiguous toward accepted intent, and escalates only genuinely ambiguous, expanding, or destructive ones.
   Finding authority is this skill's criteria, not the project's yolo posture.
   It also owns the stopping rule: three fix rounds is the cap, and the cap never authorizes approving past a correctness or contract defect.
@@ -32,7 +32,7 @@ It stops at the finding, routes the decision to firstmate, and applies only the 
    Correcting stale final-diff PR or delivery evidence is likewise an autonomous downstream correction within already accepted behavior.
 3. Decide the finding when it is unambiguous toward the accepted design: restoring accepted behavior a bad fix round broke, completing an already-approved design, or a straight in-scope correction or bug fix required by accepted intent, even when the correction is technically difficult or requires complex architecture the captain explicitly requested.
 4. Fix only what makes the deliverable wrong.
-   Approve past wording, restatement, simplification, and documentation-polish findings even when the reviewer is right, unless the text is actually false or the behavior it describes is actually wrong.
+   Approve past wording, restatement, simplification, and documentation-polish findings even when the reviewer is right, unless the text is actually false.
    Approving one of those records that the deliverable is already correct; it neither concedes nor disputes the reviewer's reading, and it leaves no defect unfixed.
 5. Cap the work at three fix rounds counted across the whole run, never three per gate or per step.
    Once three rounds have run, approve every remaining finding that is not a correctness or contract defect and file it as its own backlog work item with `bin/fm-tasks-axi.sh add` rather than opening a fourth round.

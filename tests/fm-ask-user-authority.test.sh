@@ -27,9 +27,10 @@ test_primary_and_secondmate_instruction_generation() {
     "generated implementation brief does not explain the ask-user authority bypass"
   assert_no_grep 'the captain, not you, owns the ask-user decisions' "$ship" \
     "generated implementation brief retained conflicting captain-only wording"
-  assert_grep 'Fix rounds are capped at three across the whole run' "$ship" \
-    "generated implementation brief leaves pipeline-applied fix rounds uncapped"
-  assert_grep 'When a gate would open a fourth round, stop and escalate to firstmate' "$ship" \
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'Fix rounds are capped at three per run, counted only as your own `no-mistakes axi respond --action fix` responses' "$ship" \
+    "generated implementation brief leaves the cap without an observable counting unit"
+  assert_grep 'Once you have sent three, escalate the next gate to firstmate' "$ship" \
     "generated implementation brief does not make the worker stop at the cap"
   assert_no_grep 'not a correctness or contract defect' "$ship" \
     "generated implementation brief duplicated the cap criteria the skill owns"
