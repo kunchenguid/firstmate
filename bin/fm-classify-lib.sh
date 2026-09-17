@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Shared wake classifier: the common source of truth for captain-relevant status
-# tests, declared-external-wait vocabulary, and the working/paused absorb
+# tests, declared-external-wait vocabulary, and the provably-working absorb
 # classification that makes no-verb signal and stale-pane wakes safe to absorb.
 # Sourced by BOTH the always-on watcher
 # (bin/fm-watch.sh) and the away-mode daemon (bin/fm-supervise-daemon.sh) so the
@@ -28,10 +28,10 @@
 # from byte 0, preferring a bounded duplicate over a lost event.
 #
 # There are three documented exceptions. The absorb classification
-# (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
+# (crew_absorb_class and its crew_is_provably_working wrapper) is NOT a pure status-file
 # read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
-# to decide whether a crew that just stopped its turn or went stale is working,
-# deliberately paused, or neither. Callers run it ONLY on no-verb signal handling
+# to decide whether a crew that just stopped its turn or went stale is provably
+# working or not. Callers run it ONLY on no-verb signal handling
 # and first sighting of a stale hash, never on every wake, so the per-wake triage
 # stays cheap. status_open_decisions_incremental (see "incremental (cursor-backed)
 # open-decisions fold" below) also writes: it persists a per-status-file byte
@@ -516,6 +516,86 @@ status_open_decisions() {  # <status-file>
     open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
   done < "$f"
   printf '%s' "$open"
+}
+
+# The log line that represents the crew's genuine CURRENT declared state, for
+# callers that must not read the append-only stream last-line-wins.
+#
+# State-declaring and decision-closing are different planes, and a line can sit
+# on one, the other, or both. A resolved: line only CLOSES a keyed decision, and
+# a note: line only adds information; neither declares a state, so neither may
+# become the current state or blank out the one standing beneath it. The current
+# state is therefore the most recent line in the log whose verb is a real state -
+# working, done, failed, the configured pause verb, the captain-held transfer
+# verb, or a still-open needs-decision/blocked - with every other verb skipped.
+# Position decides: a terminal line appended after an unresolved decision
+# supersedes it, and a decision is current only when nothing state-bearing
+# follows it.
+#
+# captain-held sits on BOTH planes and is read on both here: it still closes its
+# keyed decision in status_open_decisions (that fold is untouched), and it also
+# declares a state, because this repo already treats a verified hold as a
+# declared wait carrying the same bounded cadence as paused: (see
+# status_is_paused_or_captain_held). Skipping it as a pure decision-closer would
+# resurrect whatever working: or paused: it was written to supersede, reporting
+# active execution - or an external wait on the wrong human - for a crew that
+# has handed the work to the captain.
+#
+# The walk runs from the END of the log backward and stops at the first
+# state-bearing line, so the cost is the distance back to the current state
+# rather than the length of the whole history. Backward order is also what
+# settles open-versus-closed without a second pass over the file: a decision is
+# closed only by a resolved:/captain-held: line positioned AFTER it, which the
+# backward walk has therefore already seen, so the same key parse and
+# reserved-key transition gate the fold applies (_fm_decision_key,
+# _fm_decision_key_transition_allowed) decide it inline as the walk passes. A
+# needs-decision/blocked line those cannot track by key (a malformed slug, or a
+# reserved key whose note does not speak that namespace) still declares its
+# state, so it is carried positionally instead of vanishing.
+#
+# Prints the crew's own line, untouched, so callers keep using
+# status_line_verb/status_line_note/map_log_state unchanged. Prints nothing
+# (and fails) when the log declares no state at all - e.g. every decision it
+# opened has since been resolved and no plain state was ever declared - so
+# callers fall back to their own unknown/none default exactly as before.
+status_current_state_line() {  # <status-file>
+  local f=$1 line verb key note paused held resolve closed='' plain=''
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+  paused=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  while IFS= read -r line; do
+    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+    verb=$(status_line_verb "$line")
+    if [ "$verb" = "$paused" ] || [ "$verb" = "$held" ]; then
+      plain=$line
+      break
+    fi
+    case "$verb" in
+      working|done|failed)
+        plain=$line
+        break
+        ;;
+      needs-decision|blocked)
+        note=$(status_line_note "$line")
+        if key=$(_fm_decision_key "$line") \
+          && _fm_decision_key_transition_allowed "$key" "$note"; then
+          case "$closed" in *"|$key|"*) continue ;; esac
+        fi
+        plain=$line
+        break
+        ;;
+      "$resolve")
+        note=$(status_line_note "$line")
+        if key=$(_fm_decision_key "$line") \
+          && _fm_decision_key_transition_allowed "$key" "$note"; then
+          closed="$closed|$key|"
+        fi
+        ;;
+    esac
+  done < <(awk '{ a[NR] = $0 } END { for (i = NR; i > 0; i--) print a[i] }' "$f" 2>/dev/null)
+  [ -n "$plain" ] || return 1
+  printf '%s' "$plain"
 }
 
 # 0 when <key> has a record in a folded "<key>\t<verb>\t<note>" open set.
@@ -1789,13 +1869,22 @@ status_span_has_actionable() {  # <status-file> <start-offset>
 #   working - an actively-running no-mistakes step (running/fixing/ci) or a busy
 #             pane; the crew is legitimately mid-work on a static-looking pane
 #             (e.g. waiting on CI);
-#   paused  - the crew's authoritative current state is a declared external-wait
-#             pause (paused:), which is EXPECTED to idle;
-#   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
-#             torn-down/unknown crew, or an unreadable verdict).
-# One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
-# authoritatively (not the status log) is what keeps run-step precedence: a crew
-# that appended paused: but then STARTED a run reports working, never paused.
+#   none    - not that, so the wake must surface (a stopped/finished/parked/
+#             paused/failed/torn-down/unknown crew, or an unreadable verdict).
+# Only run-step and pane evidence can absorb here: the STATUS LOG never can. A
+# declared wait is not read from this verdict at all, because the caller that
+# needs one already reads the status log itself (fm-watch.sh's
+# status_is_paused_or_captain_held gates every declared-wait path before this is
+# consulted, and recovers `paused` from a `none` answer where a declaration it
+# saw could not be named). Answering `paused` from the log here would put a
+# SECOND, differently-derived reading of the same log behind that gate: the log's
+# current declared state (status_current_state_line) legitimately outlives the
+# log's last line, so the two disagree for any wait carrying a trailing
+# resolved:/note:, and the caller then clears and re-creates its pause bookkeeping
+# on every poll - re-surfacing a crew that is waiting exactly as it declared.
+# Reading the state authoritatively (not the status log) is also what keeps
+# run-step precedence: a crew that appended paused: but then STARTED a run
+# reports working.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
@@ -1805,7 +1894,6 @@ crew_absorb_class() {  # <id>
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
-  if [ "$state" = paused ]; then printf 'paused'; return; fi
   if [ "$state" = working ]; then
     src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane) printf 'working'; return ;; esac
@@ -1822,16 +1910,9 @@ crew_absorb_class() {  # <id>
 # because the crew may be done, waiting on a decision, or wedged. For stale panes
 # it is checked before trusting the status log so a pre-validation captain-relevant
 # line does not override an active run. See crew_absorb_class for the exact
-# working/paused/none decision.
+# working/none decision.
 crew_is_provably_working() {  # <id>
   [ "$(crew_absorb_class "$1")" = working ]
-}
-
-# 0 if crew <id>'s authoritative current state is a declared external-wait pause.
-# The stale path absorbs such a crew (on a long re-surface cadence) instead of
-# escalating a possible wedge.
-crew_is_paused() {  # <id>
-  [ "$(crew_absorb_class "$1")" = paused ]
 }
 
 # Directories excluded from the worktree write probe below, and the depth it walks.

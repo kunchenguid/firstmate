@@ -284,6 +284,7 @@ Report only true captain-relevant outcomes or a declared external wait by append
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
 States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
 Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own, naming when it clears with \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) when you know; use \`blocked:\` when you are stuck and need firstmate to act.
+While on a declared \`$PAUSED_VERB:\` wait, surface a worthwhile finding with \`note: {finding}\`, never \`working:\`: unlike \`working:\`, a \`note:\` never changes your declared state, so the wait continues uninterrupted on its long recheck cadence instead of reading as fresh, unpaused activity.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, work ready for review, or work you landed.
 Work you landed includes a merge you performed yourself under standing merge authority and one the captain merged on the forge: under that authority nothing is ever \"ready for review\", so a landed merge that goes unreported reaches the captain as silence.
 This is also how you return the answer to a marked from-firstmate request above.
@@ -393,6 +394,9 @@ The report is the only thing that survives, so anything worth keeping must be in
    treating it as a possible wedge. When you know when the wait clears, say so in the line with
    \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) and firstmate rechecks at that time instead.
    Use \`blocked:\` when you are stuck and need help.
+   While on a declared \`$PAUSED_VERB:\` wait, surface a worthwhile finding with \`note: {finding}\`,
+   never \`working:\`: unlike \`working:\`, a \`note:\` never changes your declared state, so the wait
+   continues uninterrupted on its long recheck cadence instead of reading as fresh, unpaused activity.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
@@ -483,6 +487,9 @@ $RULE1
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
    a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
    cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+   While on a declared \`$PAUSED_VERB:\` wait, surface a worthwhile finding with \`note: {finding}\`,
+   never \`working:\`: unlike \`working:\`, a \`note:\` never changes your declared state, so the wait
+   continues uninterrupted on its long recheck cadence instead of reading as fresh, unpaused activity.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.

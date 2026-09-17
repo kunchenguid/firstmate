@@ -1759,6 +1759,183 @@ test_no_run_idle_secondmate_resolved_event_not_state() {
   pass "a trailing resolved: event does not corrupt state render (idle stays idle)"
 }
 
+# General form of the resolved: fix (2026-09-11 jr-voice incident): ANY
+# trailing non-state verb - not only resolved:, and regardless of whether it
+# closes a keyed decision at all - must report the state-bearing line beneath
+# it, never `unknown`. A bare (unkeyed) resolved: here closes nothing (there is
+# no open needs-decision/blocked to close), so the declared paused: beneath it
+# is untouched and must still read as the crew's current state.
+test_no_run_idle_pane_paused_survives_trailing_resolved() {
+  reset_fakes
+  local d; d=$(new_case paused-then-resolved)
+  make_repo_on_branch "$d/wt" fm/feat-pause-resolved
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pause-resolved.meta" "window=fm:fm-feat-pause-resolved" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: holding for the upstream tool release\nresolved: unrelated earlier note closed\n' > "$d/state/feat-pause-resolved.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-pause-resolved
+  local out; out=$(run_crew_state "$d" feat-pause-resolved)
+  assert_contains "$out" "state: paused" "a trailing resolved: does not blank a declared pause"
+  assert_contains "$out" "source: status-log" "the declared pause is still read from the status log"
+  assert_contains "$out" "holding for the upstream tool release" "the pause reason is still carried in the detail"
+  assert_not_contains "$out" "state: unknown" "a live pause must never render as the recovery-grade unknown state"
+  pass "a trailing resolved: never blanks a still-standing paused: into unknown"
+}
+
+# The general form's second half: a worker on a declared wait must be able to
+# report a finding without losing that wait. An informational note: (unlike
+# working:, which is a real state transition) is not itself a state, so it
+# must never cancel or supersede a declared paused: beneath it.
+test_no_run_idle_pane_paused_survives_trailing_note() {
+  reset_fakes
+  local d; d=$(new_case paused-then-note)
+  make_repo_on_branch "$d/wt" fm/feat-pause-note
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-pause-note.meta" "window=fm:fm-feat-pause-note" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: holding for the vendor rate limit to reset\nnote: found a related edge case worth flagging\n' > "$d/state/feat-pause-note.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-pause-note
+  local out; out=$(run_crew_state "$d" feat-pause-note)
+  assert_contains "$out" "state: paused" "an informational note: does not cancel a declared pause"
+  assert_contains "$out" "source: status-log" "the declared pause is still read from the status log"
+  assert_contains "$out" "holding for the vendor rate limit to reset" "the pause reason is still carried in the detail"
+  assert_not_contains "$out" "found a related edge case" "the note's own text is not the pause detail"
+  pass "a worker can report a finding via note: without losing its declared pause"
+}
+
+# Position decides between a decision and a later state. A decision stays open
+# across unrelated appends (that is the fold's whole point), but "still open"
+# is a captain-inbox fact, not a claim about what the crew is doing now: a
+# terminal line appended AFTER the question supersedes it as current state.
+# A scout that asked a question and then finished must read as done, or the
+# fleet snapshot resurfaces the completed report as a pending captain decision.
+test_no_run_idle_pane_terminal_after_open_decision_reads_terminal() {
+  reset_fakes
+  local d; d=$(new_case decision-then-done)
+  make_repo_on_branch "$d/wt" fm/feat-decision-done
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-decision-done.meta" "window=fm:fm-feat-decision-done" "worktree=$d/wt" "kind=scout" "harness=claude"
+  printf 'needs-decision: adopt approach A or B for issue 103\ndone: report ready at data/issue-103/report.md\n' > "$d/state/feat-decision-done.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-decision-done
+  local out; out=$(run_crew_state "$d" feat-decision-done)
+  assert_contains "$out" "state: done" "a terminal line after an unresolved question is the current state"
+  assert_contains "$out" "report ready at data/issue-103/report.md" "the terminal line carries the detail"
+  assert_not_contains "$out" "state: parked" "a still-open decision must not outrank a later terminal line"
+  assert_not_contains "$out" "adopt approach A or B" "the superseded question is not the current detail"
+  pass "a terminal line appended after an open decision reads as the current state"
+}
+
+# The same ordering rule protects a declared wait from a machine-written
+# escalation beneath it: a reserved pending-reply key opens a real decision,
+# but a paused: the worker declared afterwards is what it is doing now.
+test_no_run_idle_pane_pause_outranks_earlier_escalation() {
+  reset_fakes
+  local d; d=$(new_case escalation-then-pause)
+  make_repo_on_branch "$d/wt" fm/feat-escalation-pause
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-escalation-pause.meta" "window=fm:fm-feat-escalation-pause" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'blocked [key=pending-reply-abc]: pending-reply-missed: no reply seen\npaused: waiting on the vendor rate limit to reset\n' > "$d/state/feat-escalation-pause.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-escalation-pause
+  local out; out=$(run_crew_state "$d" feat-escalation-pause)
+  assert_contains "$out" "state: paused" "a declared wait appended after an escalation is the current state"
+  assert_contains "$out" "waiting on the vendor rate limit to reset" "the pause reason is carried in the detail"
+  assert_not_contains "$out" "state: blocked" "an earlier escalation must not mask a later declared wait"
+  pass "a later declared pause outranks an earlier machine-written escalation"
+}
+
+# A needs-decision the keyed fold cannot track - here an invalid slug, which
+# the fold rejects outright rather than rewriting to the shared "default"
+# bucket - still DECLARES a state. It must reach current state positionally
+# instead of vanishing into the recovery-grade `unknown` signature.
+test_no_run_idle_pane_untrackable_decision_key_still_parks() {
+  reset_fakes
+  local d; d=$(new_case decision-bad-key)
+  make_repo_on_branch "$d/wt" fm/feat-decision-bad-key
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-decision-bad-key.meta" "window=fm:fm-feat-decision-bad-key" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision [key=api shape]: pick REST or gRPC for the new edge\n' > "$d/state/feat-decision-bad-key.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-decision-bad-key
+  local out; out=$(run_crew_state "$d" feat-decision-bad-key)
+  assert_contains "$out" "state: parked" "a decision the fold cannot key still declares parked"
+  assert_contains "$out" "pick REST or gRPC for the new edge" "the question is still carried in the detail"
+  assert_not_contains "$out" "state: unknown" "a stated decision must never fall through to the recovery-grade unknown"
+  pass "a decision key the fold rejects still reaches current state as parked"
+}
+
+# The open-decision arm the ordering rule must NOT break: when nothing
+# state-bearing follows it, a still-open question is what the crew is doing.
+test_no_run_idle_pane_trailing_open_decision_parks() {
+  reset_fakes
+  local d; d=$(new_case decision-trailing)
+  make_repo_on_branch "$d/wt" fm/feat-decision-trailing
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-decision-trailing.meta" "window=fm:fm-feat-decision-trailing" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: drafting the migration\nneeds-decision [key=cutover]: cut over now or after the freeze\nnote: the staging run finished clean\n' > "$d/state/feat-decision-trailing.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-decision-trailing
+  local out; out=$(run_crew_state "$d" feat-decision-trailing)
+  assert_contains "$out" "state: parked" "a trailing open decision is the current state"
+  assert_contains "$out" "cut over now or after the freeze" "the open question is carried in the detail"
+  assert_not_contains "$out" "state: working" "an earlier working: must not outrank the open decision that followed it"
+  pass "a still-open decision with nothing state-bearing after it reads as parked"
+}
+
+# captain-held is a declared wait this repo already gives the same bounded
+# cadence as paused: (fm-classify-lib.sh's status_is_paused_or_captain_held), so
+# it declares a state as well as closing its key. Without that, the hold reads
+# as a pure decision-closer, its key drops out of the open set, and the
+# positional scan falls back to the working: the crew wrote BEFORE handing the
+# work over - reporting active execution, with stale prose as `doing`, for a
+# crew whose newest declaration is "the captain has this".
+test_no_run_idle_pane_captain_held_supersedes_earlier_working() {
+  reset_fakes
+  local d; d=$(new_case held-after-working)
+  make_repo_on_branch "$d/wt" fm/feat-held-working
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-held-working.meta" "window=fm:fm-feat-held-working" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing the migration\nneeds-decision [key=d1]: ship now or wait\ncaptain-held [key=d1]: tracked by inventory-2026-09\n' > "$d/state/feat-held-working.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-held-working
+  local out; out=$(run_crew_state "$d" feat-held-working)
+  assert_contains "$out" "state: paused" "a verified captain-held transfer is a declared wait, not active work"
+  assert_contains "$out" "source: status-log" "the hold is still read from the status log"
+  assert_contains "$out" "tracked by inventory-2026-09" "the hold's own line carries the detail"
+  assert_not_contains "$out" "state: working" "a superseded working: must not be resurrected by a hold that closed the decision"
+  assert_not_contains "$out" "implementing the migration" "the superseded working prose must not be the current detail"
+  assert_not_contains "$out" "state: unknown" "a declared hold must never fall through to the recovery-grade unknown"
+  pass "a captain-held transfer reads as a declared wait carrying its own reason"
+}
+
+# The hold's second confusable neighbour: appended beneath a live pause, it
+# blocks on the CAPTAIN, so the reason a reader sees must be the hold's, never
+# the pause's external dependency.
+test_no_run_idle_pane_captain_held_supersedes_earlier_pause() {
+  reset_fakes
+  local d; d=$(new_case held-after-pause)
+  make_repo_on_branch "$d/wt" fm/feat-held-pause
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-held-pause.meta" "window=fm:fm-feat-held-pause" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'paused: waiting on the vendor rate limit to reset\ncaptain-held [key=d1]: handing the cutover call to the captain\n' > "$d/state/feat-held-pause.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-held-pause
+  local out; out=$(run_crew_state "$d" feat-held-pause)
+  assert_contains "$out" "state: paused" "a hold appended beneath a pause is still a declared wait"
+  assert_contains "$out" "handing the cutover call to the captain" "the hold's reason is what a reader sees"
+  assert_not_contains "$out" "vendor rate limit" "a superseded external-wait reason must not outlive the hold that replaced it"
+  pass "a captain-held transfer beneath a pause reports the hold's own reason"
+}
+
 test_dead_window_ignores_stale_status_log() {
   reset_fakes
   local d; d=$(new_case dead-window)
@@ -2538,6 +2715,14 @@ test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
+test_no_run_idle_pane_paused_survives_trailing_resolved
+test_no_run_idle_pane_paused_survives_trailing_note
+test_no_run_idle_pane_terminal_after_open_decision_reads_terminal
+test_no_run_idle_pane_pause_outranks_earlier_escalation
+test_no_run_idle_pane_untrackable_decision_key_still_parks
+test_no_run_idle_pane_trailing_open_decision_parks
+test_no_run_idle_pane_captain_held_supersedes_earlier_working
+test_no_run_idle_pane_captain_held_supersedes_earlier_pause
 test_dead_window_ignores_stale_status_log
 test_no_run_tmux_unreadable_reads_unreachable_not_gone
 test_dead_window_still_reports_terminal_run_step

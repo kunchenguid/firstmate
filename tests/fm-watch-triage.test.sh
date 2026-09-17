@@ -443,10 +443,12 @@ test_status_is_paused_classifier() {
   pass "status_is_paused: only the leading paused verb matches, paused is not captain-relevant, and the two declared-wait verbs stay separable"
 }
 
-# crew_absorb_class: the single fm-crew-state.sh read that returns BOTH absorb
-# reasons - working (active run/busy pane), paused (declared external wait), or none
-# (surface it) - so the watcher's stale path gets both for one bounded call.
-# crew_is_paused delegates to it exactly as crew_is_provably_working does.
+# crew_absorb_class: the single fm-crew-state.sh read behind the watcher's
+# absorb-only-on-positive-evidence rule - working (active run step or busy pane)
+# or none (surface it). Only run-step and pane evidence absorbs; every
+# status-log verdict, including a declared pause, answers none, because the
+# caller reads the status log itself and would otherwise act on two
+# differently-derived readings of the same log at once.
 test_crew_absorb_class_classifier() {
   local dir fakebin
   dir=$(make_case absorb-class); fakebin="$dir/fakebin"
@@ -457,17 +459,15 @@ test_crew_absorb_class_classifier() {
   FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
   [ "$(crew_absorb_class a)" = working ] || fail "busy pane not classed working"
   FM_FAKE_CREW_STATE='state: paused · source: status-log · awaiting upstream'
-  [ "$(crew_absorb_class a)" = paused ] || fail "declared pause not classed paused"
-  crew_is_paused a || fail "crew_is_paused did not recognize a paused verdict"
+  [ "$(crew_absorb_class a)" = none ] || fail "a status-log pause was forwarded as an absorb reason"
   ! crew_is_provably_working a || fail "a paused crew was treated as provably working"
   FM_FAKE_CREW_STATE='state: working · source: status-log · working: compiling'
   [ "$(crew_absorb_class a)" = none ] || fail "stale working: status-log classed absorbable"
   FM_FAKE_CREW_STATE='state: unknown · source: none · worktree gone'
   [ "$(crew_absorb_class a)" = none ] || fail "unknown crew classed absorbable"
-  ! crew_is_paused a || fail "unknown crew classed paused"
   [ "$(crew_absorb_class "")" = none ] || fail "empty id not classed none"
   unset FM_FAKE_CREW_STATE
-  pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
+  pass "crew_absorb_class: only run-step/pane evidence absorbs; every status-log verdict answers none"
 }
 
 # The wedge detector's third liveness input: writes inside the crew's own recorded
@@ -2037,6 +2037,68 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the paused re-surface failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "paused re-surface was not queued"
   pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
+}
+
+# Regression (2026-09-11 jr-voice incident, fix round): a crew on a declared
+# wait that appends an informational `note:` must not put the watcher into a
+# per-poll wake loop. fm-crew-state.sh reads the log's CURRENT declared state,
+# so it keeps reporting `paused` underneath the trailing note:, while every
+# declared-wait gate in this watcher still reads the bare last line and sees no
+# wait. While the absorb classifier forwarded that status-log pause the two
+# disagreed on every single poll: the loop top cleared the pause bookkeeping
+# (taking the re-surface throttle AND the stale suppressor with it), the missing
+# suppressor made the very next poll a first sighting again, and the paused
+# absorber re-created both and re-surfaced - once per FM_POLL, forever, for any
+# wait older than the re-surface cadence. With the absorb classifier answering
+# from run-step/pane evidence only, the window surfaces once and then ages on
+# the ordinary bounded ladder, exactly as it did before crew state learned to
+# read past the last line.
+test_declared_pause_under_trailing_note_does_not_wake_every_poll() {
+  local dir state fakebin out capture_file statusf window key pane_hash sig pid back round wakes
+  dir=$(make_case pause-trailing-note); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
+  window="test:fm-held"
+  printf 'idle, holding for upstream\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/held.meta"
+  printf 'paused: holding for the upstream tool release\nnote: found a related edge case worth flagging\n' > "$statusf"
+  # Older than the re-surface cadence below, so the pre-fix loop is free to fire
+  # its bounded recheck on every poll rather than being hidden by the window.
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, holding for upstream")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+
+  # Each round is one poll of an UNCHANGED window. A wake exits the watcher, so
+  # the round is acknowledged before the next launch: without that the pending
+  # recovery episode suppresses every later wake and the loop this test exists to
+  # catch would be invisible. Wakes are therefore counted from what the watcher
+  # actually reported, not from the queue the acknowledgement consumes.
+  round=1
+  while [ "$round" -le 5 ]; do
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+      FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream tool release' \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+    pid=$!
+    if wait_poll_cycle "$state" "$pid"; then
+      reap "$pid"
+    elif kill -0 "$pid" 2>/dev/null; then
+      reap "$pid"
+      fail "trailing-note watcher round $round timed out before completing a poll cycle"
+    else
+      wait "$pid" || fail "trailing-note watcher round $round failed: $(cat "$out")"
+    fi
+    ack_stopped_cycle "$state" >/dev/null 2>&1 || true
+    round=$((round + 1))
+  done
+  wakes=$(grep -cF "stale: $window" "$out" 2>/dev/null || echo 0)
+  [ "$wakes" -le 1 ] || fail "a declared wait under a trailing note: woke $wakes times across five unchanged polls"
+  pass "a declared wait under a trailing note: surfaces once instead of waking on every poll"
 }
 
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
@@ -4800,6 +4862,7 @@ test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
+test_declared_pause_under_trailing_note_does_not_wake_every_poll
 test_crew_worktree_written_since_classifier
 test_empty_write_prune_widens_the_probe
 test_empty_write_prune_from_the_environment_widens_the_probe

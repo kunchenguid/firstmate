@@ -76,9 +76,13 @@
 #      call is not daemon death, so that claim is answered by steering the crew
 #      to reattach, not by escalating.
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
-#      recorded backend's pane busy state, then the status log's last line only
-#      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      recorded backend's pane busy state, then the status log's own current
+#      declared state (fm-classify-lib.sh's status_current_state_line): the
+#      newest line whose verb is a real state (working/done/failed/paused/
+#      captain-held, or a still-open needs-decision/blocked). A trailing
+#      resolved:/note:/other non-state line - or a needs-decision/blocked entry
+#      one of them already closed - is skipped rather than read as, or allowed
+#      to blank out, the crew's current state.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux and herdr, which own a
@@ -168,9 +172,14 @@ log_last_line() {
 # the deliberate-external-wait verb (fm-classify-lib.sh's FM_CLASSIFY_PAUSED_VERB):
 # a crew with no active run and an idle pane that declared a known external wait
 # reports `paused` distinctly, so a supervisor reading this sees a declared pause
-# and its reason rather than a wedge-suspect idle.
+# and its reason rather than a wedge-suspect idle. A verified captain-held
+# transfer is the other declared wait - fm-classify-lib.sh's shared
+# status_is_paused_or_captain_held already gives the two one cadence - so it maps
+# to the same `paused` state rather than a seventh one no consumer parses; the
+# detail carried alongside is the hold's own line, so the reason a reader sees
+# names the hold instead of an external dependency.
 map_log_state() {  # <line>
-  if status_is_paused "$1"; then
+  if status_is_paused_or_captain_held "$1"; then
     echo paused
     return
   fi
@@ -186,6 +195,16 @@ map_log_state() {  # <line>
 
 LOG_LINE=$(log_last_line || true)
 LOG_VERB=$(status_line_verb "$LOG_LINE")
+# The log's genuine current declared state (fm-classify-lib.sh's
+# status_current_state_line): the newest line whose verb is a real state,
+# skipping any resolved:/note:/other non-state line, and a still-open
+# needs-decision/blocked when nothing state-bearing follows it.
+# The fallback source below and the remote secondmate branch both read THIS,
+# never the bare last line, so a decision- or note-closing append can never
+# blank out or masquerade as current state. It scans the whole log, so each
+# branch reads it only once it is actually about to report from the log -
+# every earlier emit (run-step, busy pane, dead endpoint) exits without
+# paying for the scan.
 
 # --- remote secondmate: the true source is the remote endpoint ---------------
 # A remote mate's recorded worktree and backend target live on its own host, so
@@ -206,11 +225,9 @@ if [ -n "$REMOTE_HOST" ]; then
   REMOTE_STATE=$(printf '%s\n' "$REMOTE_STATE" | tail -1)
   case "$REMOTE_STATE" in
     alive)
-      if [ -n "$LOG_VERB" ]; then
-        LOG_STATE=$(map_log_state "$LOG_LINE")
-        if [ "$LOG_STATE" != unknown ]; then
-          emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")${SEP}remote endpoint alive on $REMOTE_HOST"
-        fi
+      STATE_LINE=$(status_current_state_line "$LOG" || true)
+      if [ -n "$STATE_LINE" ]; then
+        emit "$(map_log_state "$STATE_LINE")" status-log "$(status_line_note "$STATE_LINE")${SEP}remote endpoint alive on $REMOTE_HOST"
       fi
       emit unknown remote-endpoint "alive on $REMOTE_HOST (an idle secondmate is healthy)"
       ;;
@@ -841,21 +858,23 @@ if [ "$KIND" != secondmate ]; then
   esac
 fi
 
-# Fall back to the status log's last line, but ONLY when its verb maps to a real
-# run-state. A decision-closing event - resolved: (fm-classify-lib.sh's
-# FM_CLASSIFY_RESOLVE_VERB), and any future decision-only sibling - is NOT a state:
-# it exists solely to CLOSE a keyed decision in the durable fold, so a trailing
-# resolved: must never become the current state or leak its resolution prose as the
-# detail. Skipping it lets a just-resolved idle crew (typically a secondmate, which
-# has no busy check above) fall through to the idle default instead of rendering
-# `unknown` with the resolution note as `doing`. map_log_state is the single owner of
-# the verb->state mapping (including the configurable paused verb), so reusing its
-# `unknown` verdict as the "not a state" test needs no second verb list here.
-if [ -n "$LOG_VERB" ]; then
-  LOG_STATE=$(map_log_state "$LOG_LINE")
-  if [ "$LOG_STATE" != unknown ]; then
-    emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
-  fi
+# Fall back to the status log's genuine CURRENT declared state, never its bare
+# last line. bin/fm-classify-lib.sh's status_current_state_line is the single
+# owner of that read: the newest line whose verb is a real state
+# (working/done/failed/paused/captain-held, or a needs-decision/blocked still
+# open in the SAME fold status_open_decisions uses). A trailing resolved: (or
+# any future decision-only sibling), an informational note:, or any other
+# unrecognized verb is skipped - never read as, and never allowed to blank out,
+# the current state - and so is a needs-decision/blocked entry one of those
+# verbs already closed. That lets a just-resolved idle crew (typically a
+# secondmate, which has no busy check above) fall through to the idle default
+# instead of rendering `unknown` with stale resolution prose as `doing`, and
+# lets a still-declared paused: survive a later informational note: instead of
+# reading as a fresh wedge. map_log_state is still the single owner of the
+# verb->state mapping (including the configurable paused verb).
+STATE_LINE=$(status_current_state_line "$LOG" || true)
+if [ -n "$STATE_LINE" ]; then
+  emit "$(map_log_state "$STATE_LINE")" status-log "$(status_line_note "$STATE_LINE")"
 fi
 
 emit unknown none "no current-state source available"
