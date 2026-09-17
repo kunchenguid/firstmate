@@ -1097,6 +1097,57 @@ test_leftover_claim_still_refuses_on_a_secondmate_home() {
   pass "fm-teardown: a leftover claim still refuses on a secondmate home"
 }
 
+# Forced secondmate teardown walks its children in id order. When the claimant
+# sorts first it returns the slot and drops its claim, so the stale child must
+# keep the preflight's reassignment rather than re-read a claim that is gone.
+test_forced_secondmate_keeps_a_stale_child_off_its_claimants_returned_slot() {
+  local dir mate parent=mate-task live=a-claimant stale=b-stale rc returns
+
+  dir=$(make_case secondmate-shared-child-slot)
+  mark_case_as_treehouse_pool "$dir"
+  cat > "$dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf 'treehouse' >> "${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
+printf '\n' >> "${FM_RUNTIME_LOG:?}"
+if [ "${1:-}" = return ]; then
+  returned="$(dirname "${FM_RUNTIME_LOG:?}")/returned-once"
+  [ ! -e "$returned" ] || exit 1
+  : > "$returned"
+fi
+exit 0
+SH
+  chmod +x "$dir/fakebin/treehouse"
+  mate="$dir/mate"
+  mkdir -p "$mate/state" "$mate/data" "$mate/config"
+  printf '%s' "$parent" > "$mate/.fm-secondmate-home"
+  fm_write_meta "$dir/home/state/$parent.meta" \
+    "window=firstmate:fm-$parent" "endpoint_task_id=$parent" \
+    "worktree=$mate" "project=$mate" "home=$mate" \
+    "kind=secondmate" "mode=secondmate" "harness=echo" "yolo=off" "projects=alpha"
+  fm_write_meta "$mate/state/$live.meta" \
+    "window=firstmate:fm-$live" "endpoint_task_id=$live" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$mate/state/$stale.meta" \
+    "window=firstmate:fm-$stale" "endpoint_task_id=$stale" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$live" "$mate"
+
+  set +e
+  run_case "$dir" "$parent" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "forced secondmate teardown refused its children's shared slot: $(cat "$dir/stderr")"
+  returns=$(grep -Fc "treehouse <return>" "$dir/runtime.log" || true)
+  [ "$returns" -eq 1 ] \
+    || fail "the shared child slot was returned $returns times: $(cat "$dir/runtime.log")"
+  assert_present "$dir/pool/1/project/.git" "the stale child removed its claimant's returned slot"
+  assert_absent "$mate/state/$live.meta" "forced teardown left the claimant child's record"
+  assert_absent "$mate/state/$stale.meta" "forced teardown left the stale child's record"
+
+  pass "fm-teardown: forced secondmate teardown keeps a stale child off its claimant's returned slot"
+}
+
 
 # The tmux shim used by the endpoint-close tests below: every subcommand
 # reaches the real isolated server, so presence is always read from real tmux.
@@ -1490,6 +1541,7 @@ test_project_lock_anchors_at_the_local_root_across_home_layouts
 test_reassigned_slot_with_surviving_claimant_record_deadlocks_neither_task
 test_claimant_tears_down_first_past_a_stale_record
 test_leftover_claim_still_refuses_on_a_secondmate_home
+test_forced_secondmate_keeps_a_stale_child_off_its_claimants_returned_slot
 test_remote_seeded_home_returns_its_uncontested_slot
 test_remote_seeded_home_still_refuses_a_slot_its_child_holds
 test_remote_layout_homes_serialize_on_one_project_lock

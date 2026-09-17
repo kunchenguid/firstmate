@@ -373,6 +373,7 @@ DESCENDANT_TASK_IDS=()
 DESCENDANT_TASK_KINDS=()
 DESCENDANT_TASK_HOMES=()
 DESCENDANT_TREEHOUSE_LOCK_PATHS=()
+DESCENDANT_REASSIGNED_SLOT_METAS=()
 teardown_release_locks() {
   local status=$? i
   if declare -F teardown_release_herdr_locks >/dev/null 2>&1; then
@@ -2780,6 +2781,7 @@ preflight_descendant_task_locks() {
 
 preflight_descendant_treehouse_slots() {
   local i state task_id meta kind backend target worktree project lock_path held owner_rc
+  DESCENDANT_REASSIGNED_SLOT_METAS=()
   for ((i=0; i < ${#DESCENDANT_TASK_IDS[@]}; i++)); do
     state=${DESCENDANT_TASK_STATES[$i]}
     task_id=${DESCENDANT_TASK_IDS[$i]}
@@ -2837,10 +2839,18 @@ preflight_descendant_treehouse_slots() {
     require_owned_worktree_slot_record "$task_id" "$worktree" || owner_rc=$?
     case "$owner_rc" in
       0) require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1 ;;
-      "$TEARDOWN_SLOT_REASSIGNED_RC") ;;
+      "$TEARDOWN_SLOT_REASSIGNED_RC") DESCENDANT_REASSIGNED_SLOT_METAS+=("$meta") ;;
       *) return 1 ;;
     esac
   done
+}
+
+descendant_slot_reassigned() {  # <child-meta>
+  local recorded
+  for recorded in "${DESCENDANT_REASSIGNED_SLOT_METAS[@]+"${DESCENDANT_REASSIGNED_SLOT_METAS[@]}"}"; do
+    [ "$recorded" != "$1" ] || return 0
+  done
+  return 1
 }
 
 validate_firstmate_home_children_removal() {
@@ -3119,7 +3129,9 @@ cleanup_firstmate_home_children() {
       # or return, so only its records are cleaned up. The preflight above
       # already named the reassignment on stderr under the same lock.
       child_owner_rc=0
-      if fm_treehouse_pool_slot "$child_proj" "$child_wt"; then
+      if descendant_slot_reassigned "$child_meta"; then
+        child_owner_rc=$TEARDOWN_SLOT_REASSIGNED_RC
+      elif fm_treehouse_pool_slot "$child_proj" "$child_wt"; then
         require_owned_worktree_slot_record "$child_id" "$child_wt" 2>/dev/null || child_owner_rc=$?
       fi
       if [ "$child_owner_rc" -eq "$TEARDOWN_SLOT_REASSIGNED_RC" ]; then
