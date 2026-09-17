@@ -240,15 +240,17 @@ test_matrix_muse_bordered_composer_closes_its_rule_pair() {
   # cannot be read as a blanket relaxation of the separated shape.
   assert_screen "muse bordered typed on herdr" pending "$CAPS_STYLED" "$typed" '' $'muse\tidle'
   assert_screen "muse bordered typed on tmux" pending "$CAPS_TMUX" "$typed" 2 $'muse\tidle'
-  # The same composer in a NARROW pane. Muse's title spends 32 columns, so the
-  # opening rule's filler shrinks with the pane and the row carries no eight-
-  # column run of its own: a floor held against one contiguous run would stop
-  # closing the pair here and bring the false negative straight back on a split
-  # tab, so the idle read must stay empty and typed text must stay pending at
-  # this width too.
+  # The same composer in a NARROW pane, at the narrowest width that still
+  # renders filler at all: Muse's title spends 32 of the 33 columns, leaving a
+  # 2-column opening run and a 1-column closing one. Any width floor asked of
+  # the titled rule - one contiguous run, the two runs summed, or the row's own
+  # character count - fails somewhere on the way down from a full-width pane to
+  # this one, and failing it brings the false negative straight back on a split
+  # tab, so the idle read must stay empty and typed text must stay pending here
+  # exactly as they do at full width.
   local narrow_idle narrow_typed
-  narrow_idle=$'  Muse Code 1.3.0\n── Voice input (⌥ + v to start) ──────\n❯ \n──────────────────────────────────────\n  echo · /tmp/muse-workspace · YOLO'
-  narrow_typed=$'  Muse Code 1.3.0\n── Voice input (⌥ + v to start) ──────\n❯ reply with the token\n──────────────────────────────────────\n  echo · /tmp/muse-workspace · YOLO'
+  narrow_idle=$'  Muse Code 1.3.0\n── Voice input (⌥ + v to start) ─\n❯ \n─────────────────────────────────\n  echo · /tmp/muse-workspace · YOLO'
+  narrow_typed=$'  Muse Code 1.3.0\n── Voice input (⌥ + v to start) ─\n❯ reply with the token\n─────────────────────────────────\n  echo · /tmp/muse-workspace · YOLO'
   assert_screen "muse narrow bordered idle on herdr" empty "$CAPS_STYLED" "$narrow_idle" '' $'muse\tidle'
   assert_screen "muse narrow bordered idle on cmux/orca" empty "$CAPS_PLAIN" "$narrow_idle"
   assert_screen "muse narrow bordered typed on herdr" pending "$CAPS_STYLED" "$narrow_typed" '' $'muse\tidle'

@@ -339,12 +339,14 @@ else
     # and this leg cannot borrow it: on --provider echo no model reads the
     # prompt. The FIRST occurrence is the transcript's own rendering of the
     # submitted message, which is what separates a delivered steer from a
-    # composer that merely cleared, so it is required. A SECOND occurrence
-    # could only be the echo provider reproducing the prompt text - a vendor
-    # behavior no record in this repository has captured - so it is reported
-    # when it appears and never demanded: the leg declines to attribute what it
-    # did not measure everywhere else, and an unproven vendor assumption must
-    # not be the one place it turns an unchanged repository red.
+    # composer that merely cleared, so it is required. A SECOND occurrence is
+    # only ever reported, never demanded, and never attributed: `pane read
+    # --source recent` is a scrollback-bounded capture rather than a
+    # de-duplicated transcript, so a count of two separates a provider reply
+    # from a repaint of the one submitted message no better than it proves a
+    # vendor echo this repository has never captured. The leg declines to
+    # attribute what it did not measure everywhere else, and an unproven vendor
+    # assumption must not be the one place it turns a repository red.
     muse_landed=0
     muse_echoed=0
     muse_echo_waited=0
@@ -368,9 +370,9 @@ else
     [ "$muse_landed" = 1 ] \
       || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER: submit reported '$muse_verdict' but the submitted message never reached the transcript"
     if [ "$muse_echoed" = 1 ]; then
-      pass "live Herdr submit confirm: Muse Code ($MUSE_VERSION) on $HERDR_VER: the shared classifier read its idle composer as empty before the steer, the steer confirmed empty, the submitted message reached the transcript, and the echo provider reproduced it in isolated session $SESSION"
+      pass "live Herdr submit confirm: Muse Code ($MUSE_VERSION) on $HERDR_VER: the shared classifier read its idle composer as empty before the steer, the steer confirmed empty, and the submitted message reached the transcript, where the token rendered on a second line as well (source unattributed) in isolated session $SESSION"
     else
-      printf '# the echo provider rendered no second occurrence of the token within 15s of the submitted message appearing; whether this Muse build echoes prompt text back is not verified here, and the delivery assertion above does not rest on it\n'
+      printf '# the token rendered on one line only within 15s of the submitted message appearing; whether this Muse build echoes prompt text back is not verified here, and the delivery assertion above does not rest on it\n'
       pass "live Herdr submit confirm: Muse Code ($MUSE_VERSION) on $HERDR_VER: the shared classifier read its idle composer as empty before the steer, the steer confirmed empty, and the submitted message reached the transcript in isolated session $SESSION"
     fi
   fi

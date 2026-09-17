@@ -1024,7 +1024,8 @@ The Muse version in its reported line is that same gate-read identity, so a repo
 The truncated kernel `.name` is deliberately not a version surface: a 15/16-byte cut of a real `muse-bin-<version>` still carries the prefix, so accepting it would name a build that never existed.
 `version-unknown` in a passing line therefore means the host published no argv to read the build from, not that the version was lost.
 The echo provider makes the delivery assertion an assertion about the Muse runtime rather than about a model answer, which is the delivery mechanic this entry is about; exercising the credentialed provider belongs to real Muse work routing and is recorded in [muse.md](muse.md), not here.
-The leg does not require a reply from that provider: no record here captures whether `--provider echo` reproduces prompt text, so a second occurrence of the token is reported when it appears and reported as unverified when it does not, rather than failing the run on an unmeasured vendor behavior.
+The leg does not require a reply from that provider: no record here captures whether `--provider echo` reproduces prompt text, so a second rendered occurrence of the token is reported when it appears and reported as unverified when it does not, rather than failing the run on an unmeasured vendor behavior.
+That second occurrence is never attributed to the provider either, because `pane read --source recent` is a scrollback-bounded capture rather than a de-duplicated transcript, so a repaint of the one submitted message counts the same as a reply.
 A Herdr-lab-guarded run of that guard is what will replace this entry with an observed line carrying its Muse version and date.
 
 ### Prune and respawn
