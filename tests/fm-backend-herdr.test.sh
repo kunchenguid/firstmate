@@ -110,6 +110,46 @@ SH
   printf '%s\n' "$fb"
 }
 
+# make_herdr_detaching_server_fakebin: a stateful server stub whose `server`
+# launch behaves like the real `herdr server`: it never exits (it records its
+# own pid, the target of its fd 0, and the running marker, then sleeps until
+# killed). `status --json` reports running only once that marker exists. Paths
+# arrive via FM_HERDR_SERVER_MARKER, FM_HERDR_SERVER_PIDFILE, and
+# FM_HERDR_SERVER_STDIO. The caller kills the recorded pid when done.
+make_herdr_detaching_server_fakebin() {  # <dir> -> echoes fakebin dir
+  local dir=$1 fb="$1/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  status)
+    if [ -e "${FM_HERDR_SERVER_MARKER:?}" ]; then
+      printf '{"server":{"running":true}}\n'
+    else
+      printf '{"server":{"running":false}}\n'
+    fi
+    ;;
+  server)
+    printf '%s\n' "$$" > "${FM_HERDR_SERVER_PIDFILE:?}"
+    {
+      if [ -e /proc/self/fd/0 ]; then
+        readlink /proc/self/fd/0 || printf 'unreadable-fd0\n'
+      elif command -v lsof >/dev/null 2>&1; then
+        lsof -p "$$" -a -d 0 -F n 2>/dev/null | sed -n 's/^n//p' || printf 'unreadable-fd0\n'
+      else
+        printf 'no-fd-inspector\n'
+      fi
+    } > "${FM_HERDR_SERVER_STDIO:?}"
+    : > "${FM_HERDR_SERVER_MARKER:?}"
+    exec sleep 300
+    ;;
+esac
+SH
+  chmod +x "$fb/herdr"
+  printf '%s\n' "$fb"
+}
+
 # make_herdr_statefake: a STATEFUL `herdr` stub that models the parts of herdr's
 # real container behavior the workspace-leak fix (and the default-tab-prune
 # safety fix) depend on, so a full spawn->teardown cycle can be replayed
@@ -784,7 +824,11 @@ SH
      touch "$FM_HERDR_PAIR_DIR/switched"
      fm_backend_herdr_cli modern pane get w1:p1 > "$FM_HERDR_PAIR_DIR/legacy.out" || exit 1
      printf "%s|%s|%s|%s|%s" "$(cat "$FM_HERDR_PAIR_DIR/modern.out")" "$(jq -r .server.running "$FM_HERDR_PAIR_DIR/fresh-status.out")" "$(cat "$FM_HERDR_PAIR_DIR/server.out")" "$(cat "$FM_HERDR_PAIR_DIR/legacy.out")" "${FM_BACKEND_HERDR_BIN:-PATH-default}"')
-  [ "$out" = 'modern|false|path-default-server|legacy|PATH-default' ] \
+  # The server launch prints nothing to the caller: a detached long-lived
+  # server keeps none of the caller's stdio (server_ensure already sent its
+  # stdout to /dev/null before the detach). Which client served the start is
+  # proven by the per-client logs asserted below, not by captured output.
+  [ "$out" = 'modern|false||legacy|PATH-default' ] \
     || fail "a selected client should stay scoped to its session while forced reselection still returns to the PATH default, got: $out"
   assert_contains "$(cat "$dir/stale.log")" 'server --session fresh' "a stopped second session should start with the PATH-default client"
   assert_not_contains "$(cat "$dir/current.log")" 'server --session fresh' "another session's selected client must not start the stopped session"
@@ -1102,6 +1146,66 @@ test_server_ensure_scrubs_home_and_harness_identity() {
   assert_contains "$output" "HERDR_SESSION=fmtest" "server_ensure lost explicit Herdr session routing"
   assert_contains "$output" "args=server --session fmtest" "server_ensure lost the trailing Herdr session flag"
   pass "fm_backend_herdr_server_ensure: scrubs home and harness identity without disturbing unrelated environment or session routing"
+}
+
+# What makes this test fail: the spawn path (status reports not running) with
+# a never-exiting server binary. Before the detach fix the started server
+# stayed in the caller's process group holding the caller's fd 0, so the
+# process-group and stdio assertions below fail; asserting only the return
+# code would pass, because the function already returned 0 while its caller
+# hung waiting on the leftover child.
+test_server_ensure_detaches_the_server_it_starts() {
+  local dir fb marker pidfile stdio stdin_feed caller_out caller_jobs
+  local rc caller_pid caller_pgid server_pid server_pgid server_stdio caller_jobs_out
+  dir="$TMP_ROOT/server-detach"; mkdir -p "$dir"
+  marker="$dir/running"; pidfile="$dir/server.pid"; stdio="$dir/server-stdio"
+  stdin_feed="$dir/stdin-feed"; caller_out="$dir/caller"; caller_jobs="$dir/caller-jobs"
+  rm -f "$marker" "$pidfile" "$stdio" "$caller_out" "$caller_jobs"
+  printf 'caller-stdin\n' > "$stdin_feed"
+  fb=$(make_herdr_detaching_server_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_SERVER_MARKER="$marker" FM_HERDR_SERVER_PIDFILE="$pidfile" \
+    FM_HERDR_SERVER_STDIO="$stdio" FM_HERDR_CALLER_OUT="$caller_out" FM_HERDR_CALLER_JOBS="$caller_jobs" \
+    bash -c '. "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_server_ensure fmtest
+      rc=$?
+      printf "%s %s %s\n" "$rc" "$$" "$(ps -o pgid= -p $$ 2>/dev/null | tr -d "[:space:]")" > "$FM_HERDR_CALLER_OUT"
+      jobs -p > "$FM_HERDR_CALLER_JOBS"' "$ROOT" < "$stdin_feed"
+  [ -f "$caller_out" ] || fail "the server_ensure caller did not report back"
+  read -r rc caller_pid caller_pgid < "$caller_out"
+  expect_code 0 "$rc" "server_ensure should succeed once its server reports running"
+  caller_jobs_out=$(cat "$caller_jobs")
+  [ -z "$caller_jobs_out" ] || fail "the caller still holds background jobs after server_ensure returned: $caller_jobs_out"
+  [ -f "$pidfile" ] || fail "server_ensure did not start a server when none was running"
+  server_pid=$(cat "$pidfile")
+  kill -0 "$server_pid" 2>/dev/null || fail "the started server is not running after server_ensure returned"
+  server_pgid=$(ps -o pgid= -p "$server_pid" 2>/dev/null | tr -d '[:space:]')
+  [ -n "$server_pgid" ] || fail "could not read the started server's process group"
+  if [ "$server_pgid" = "$caller_pgid" ]; then
+    kill "$server_pid" 2>/dev/null || true
+    fail "the started server stayed in the caller's process group $caller_pgid, so an ancestor can wait on it"
+  fi
+  server_stdio=$(cat "$stdio")
+  if [ "$server_stdio" != /dev/null ]; then
+    kill "$server_pid" 2>/dev/null || true
+    fail "the started server kept fd 0 on '$server_stdio' instead of /dev/null, so it holds a caller pipe open"
+  fi
+  kill "$server_pid" 2>/dev/null || true
+  wait "$server_pid" 2>/dev/null || true
+  pass "fm_backend_herdr_server_ensure: the started server leaves the caller's process group and stdio while staying alive"
+}
+
+test_server_ensure_short_circuits_when_already_running() {
+  local dir log resp fb out rc calls
+  dir="$TMP_ROOT/server-short-circuit"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT" 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "server_ensure should return 0 immediately when the server already reports running"
+  assert_not_contains "$(cat "$log")" $'\x1fserver\x1f' "server_ensure spawned a second server while one was already running"
+  calls=$(wc -l < "$log" | tr -d '[:space:]')
+  [ "$calls" = 1 ] || fail "server_ensure made $calls herdr call(s) instead of one status check before returning: $out"
+  pass "fm_backend_herdr_server_ensure: returns 0 on one status check without spawning a second server"
 }
 
 test_container_ensure_reuses_existing_workspace() {
@@ -5213,6 +5317,8 @@ test_workspace_ensure_other_home_ignores_the_launcher_identity
 test_container_ensure_refuses_an_ambiguous_home_label
 test_container_ensure_starts_server_and_workspace
 test_server_ensure_scrubs_home_and_harness_identity
+test_server_ensure_detaches_the_server_it_starts
+test_server_ensure_short_circuits_when_already_running
 test_container_ensure_reuses_existing_workspace
 test_container_ensure_creates_with_no_focus_flag
 test_container_ensure_uses_secondmate_home_label

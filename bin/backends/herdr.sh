@@ -393,10 +393,30 @@ fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
   # stderr is buffered (stdout streams untouched) so a protocol_mismatch
   # refusal can be recognized and retried once on a compatible client; see
   # "client selection" below. A failed command's stderr is replayed verbatim.
-  # The long-lived `server` launch is exec'd straight through: buffering its
-  # stderr would hold this call open for the server's whole lifetime.
+  # The long-lived `server` launch below detaches fully instead: buffering
+  # its stderr, or leaving it the caller's child, would hold the caller open
+  # for the server's whole lifetime.
   if [ "${1:-}" = server ]; then
-    HERDR_SESSION="$session" "$client_bin" "$@" --session "$session"
+    # The server outlives its launcher (it is only ever started from
+    # fm_backend_herdr_server_ensure, whose poll proves it came up), so it
+    # must never stay the caller's child in the caller's process group with
+    # the caller's stdio: the first remote provision hung with the doctor
+    # waiting on exactly such a server. Double-fork under a new process
+    # group with every standard stream on /dev/null, so no ancestor ever
+    # waits on the server and it holds no caller pipe open. Without perl
+    # there is no portable setpgrp, so fall back to a plain background
+    # launch with closed stdio rather than refusing to start the server.
+    if command -v perl >/dev/null 2>&1; then
+      HERDR_SESSION="$session" perl -e '
+        my $pid = fork;
+        exit 0 if $pid;
+        die "fork: $!" unless defined $pid;
+        setpgrp(0, 0) or die "setpgrp: $!";
+        exec @ARGV or die "exec: $!";
+      ' -- "$client_bin" "$@" --session "$session" </dev/null >/dev/null 2>&1
+      return $?
+    fi
+    HERDR_SESSION="$session" "$client_bin" "$@" --session "$session" </dev/null >/dev/null 2>&1 &
     return $?
   fi
   failed_bin=$client_bin
