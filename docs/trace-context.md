@@ -110,7 +110,8 @@ This is a deliberate, source-owned choice:
 
 Firstmate learns nothing about OpenTelemetry, any exporter, collector, storage, or UI.
 It emits a standard W3C carrier and records the same identity; a downstream observer owns everything else and discovers active propagation from the home session's frozen decision or the `traceparent=` field.
-Native lifecycle-event emission, extra stable IDs, intake metadata, and any embedded OTLP are deliberately deferred until a running observer demonstrates a concrete fidelity gap that the derived artifacts cannot cover.
+Local watcher lifecycle telemetry is documented in [watcher continuity](watcher-continuity.md#local-cycle-telemetry).
+Extra stable IDs, intake metadata, and any embedded OTLP remain deliberately deferred until a running observer demonstrates a concrete fidelity gap that the derived artifacts cannot cover.
 
 ## Verification
 
