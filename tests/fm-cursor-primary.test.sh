@@ -138,8 +138,18 @@ SH
 # run the adapter as its child, so the real Cursor ancestry path decides lock
 # ownership on every platform. Keep the fake harness process alive: Linux
 # changes the process identity when an exec reaches the adapter's shebang.
+# FM_TEST_LOCK_PID, when exported by a test, records that pid instead, for a
+# lock this session does not own.
 PARK_CHILD='
-  printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+  printf "%s\n" "${FM_TEST_LOCK_PID:-$$}" > "$FM_HOME/state/.lock"
+  "$FM_HOME/bin/fm-turnend-guard-cursor.sh"
+'
+
+# The same body with state/.lock naming the fake harness itself, the forked
+# shell's parent. An unmarked linked-worktree home is in scope only when the
+# shared lock rule already credits that lock, before any stale-lock reclaim.
+PARK_CHILD_HARNESS_LOCK='
+  printf "%s\n" "$PPID" > "$FM_HOME/state/.lock"
   "$FM_HOME/bin/fm-turnend-guard-cursor.sh"
 '
 
@@ -578,6 +588,8 @@ test_park_stands_down_after_session_takeover() {
   pass "cursor park: session takeover stops polling without output or state mutation"
 }
 
+# A child task worktree never owns a session lock: nothing in it runs session
+# start. The recorded pid here belongs to no live process.
 test_park_inert_in_child_worktree() {
   local base child out
   base=$(make_primary_dir "$TMP_ROOT/park-base")
@@ -588,9 +600,28 @@ test_park_inert_in_child_worktree() {
   install_scripts "$child"
   : > "$child/state/task1.meta"
   write_arm_fixture "$child" actionable
-  out=$(run_park "$child")
+  out=$(FM_TEST_LOCK_PID=9999999 run_park "$child")
   [ -z "$out" ] || fail "a crewmate worktree must stay outside primary scope: $out"
+  [ ! -e "$child/state/arm-ran" ] || fail "the park armed inside a child crewmate worktree"
   pass "cursor park: inert inside a child crewmate worktree"
+}
+
+# The same linked worktree is a primary home once this session owns its own
+# state/.lock (upstream #1809): the park delivers the wake as in a plain checkout.
+test_park_active_in_linked_worktree_primary_owning_lock() {
+  local base home out
+  base=$(make_primary_dir "$TMP_ROOT/park-linked-base")
+  home="$TMP_ROOT/park-linked-home"
+  fm_git_worktree "$base" "$home" fm/cursor-park-linked-primary
+  mkdir -p "$home/state"
+  : > "$home/AGENTS.md"
+  install_scripts "$home"
+  : > "$home/state/task1.meta"
+  write_arm_fixture "$home" actionable
+  out=$(PARK_CHILD=$PARK_CHILD_HARNESS_LOCK run_park "$home")
+  [ "$(kind_of_followup "$out")" = watcher ] || fail "a linked-worktree primary owning its lock must deliver the wake, got: $out"
+  [ -e "$home/state/arm-ran" ] || fail "the park did not arm in a linked-worktree primary home"
+  pass "cursor park: active in an unmarked linked-worktree primary home on lock evidence"
 }
 
 test_park_ignores_malformed_payload() {
@@ -701,6 +732,7 @@ test_park_stands_down_when_away_mode_activates_before_commit
 test_park_inert_without_session_lock
 test_park_stands_down_after_session_takeover
 test_park_inert_in_child_worktree
+test_park_active_in_linked_worktree_primary_owning_lock
 test_park_ignores_malformed_payload
 test_sessionstart_emits_additional_context
 test_sessionstart_silent_in_child_worktree

@@ -23,6 +23,7 @@ let restorationInFlight = null;
 let armClose = new WeakMap();
 let armReadiness = new WeakMap();
 let armRecovery = new WeakMap();
+const notPrimaryReported = new Set();
 
 function positiveInteger(name, fallback) {
   const value = Number(process.env[name]);
@@ -90,15 +91,56 @@ function effectivePaths(root) {
   return { root: fmRoot, home: fmHome, state, config };
 }
 
-async function isPrimaryRoot(root, home) {
-  if (!root) return false;
-  if (!existsSync(`${root}/AGENTS.md`) || !existsSync(`${root}/bin`)) return false;
-  if (existsSync(`${root}/.fm-secondmate-home`)) return false;
-  if (home && home !== root && existsSync(`${home}/.fm-secondmate-home`)) return false;
-  const gitDir = await runProcess("git", ["-C", root, "rev-parse", "--git-dir"]);
-  const commonDir = await runProcess("git", ["-C", root, "rev-parse", "--git-common-dir"]);
-  if (gitDir.code !== 0 || commonDir.code !== 0) return false;
-  return gitDir.stdout.trim() === commonDir.stdout.trim();
+// bin/fm-primary-scope-lib.sh owns the primary-home rule for every tracked
+// hook; asking it through bash keeps this plugin on that one rule. Its
+// FM_PRIMARY_SCOPE_REASON names the failed check for the diagnostic below, and
+// its status 2 means lock ownership was the only check that failed.
+async function primaryScope(paths) {
+  if (!paths.root) return { primary: false, lockOnly: false, reason: "no root resolved" };
+  const lib = `${paths.root}/bin/fm-primary-scope-lib.sh`;
+  if (!existsSync(lib)) return { primary: false, lockOnly: false, reason: `${lib} is missing` };
+  const result = await runProcess("bash", [
+    "-c",
+    '. "$1" || exit 1; fm_primary_scope_matches "$2" "$3"; rc=$?; [ "$rc" -eq 0 ] && exit 0; printf "%s\n" "$FM_PRIMARY_SCOPE_REASON"; exit "$rc"',
+    "fm-primary-scope",
+    lib,
+    paths.root,
+    paths.state,
+  ]);
+  if (result.code === 0) return { primary: true, lockOnly: false, reason: "" };
+  const reason = result.stdout.trim() || result.stderr.trim() || `fm_primary_scope_matches exited ${result.code}`;
+  return { primary: false, lockOnly: result.code === 2, reason };
+}
+
+function lockHeldByOtherLiveSession(paths) {
+  const lockPid = readLockPid(paths);
+  if (!lockPid || Number(lockPid) === process.pid) return false;
+  try {
+    process.kill(Number(lockPid), 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function looksLikeFirstmateHome(paths) {
+  return existsSync(`${paths.root}/AGENTS.md`) && existsSync(`${paths.root}/bin`) && existsSync(`${paths.root}/state`);
+}
+
+// Once per session: a firstmate-shaped root that is refused says why, so a
+// primary home in a linked worktree never idles unsupervised in silence. A
+// child task worktree has no state dir of its own and stays silent, even when
+// its FM_HOME names its parent home.
+function reportNotPrimary(paths, client, sessionID, reason) {
+  if (notPrimaryReported.has(sessionID)) return;
+  if (!looksLikeFirstmateHome(paths)) return;
+  notPrimaryReported.add(sessionID);
+  surfaceFailure(
+    paths,
+    client,
+    sessionID,
+    `watcher: FAILED - OpenCode did not arm primary supervision because ${paths.root} is not a primary home: ${reason}`,
+  );
 }
 
 function shouldArm(paths) {
@@ -111,21 +153,25 @@ function shouldArm(paths) {
   }
 }
 
-async function sessionOwnsLock(paths) {
-  let lockPid = "";
+function readLockPid(paths) {
   try {
-    lockPid = readFileSync(`${paths.state}/.lock`, "utf8").trim();
+    const lockPid = readFileSync(`${paths.state}/.lock`, "utf8").trim();
+    return /^[0-9]+$/.test(lockPid) ? lockPid : "";
   } catch {
-    return false;
+    return "";
   }
-  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return false;
+}
+
+async function sessionOwnsLock(paths) {
+  const lockPid = readLockPid(paths);
+  if (!lockPid) return false;
   let pid = String(process.pid);
-  for (let i = 0; i < 8; i += 1) {
+  for (let i = 0; i < 16; i += 1) {
     if (pid === lockPid) return true;
     const result = await runProcess("ps", ["-o", "ppid=", "-p", pid]);
     if (result.code !== 0) return false;
     pid = result.stdout.trim();
-    if (!pid || pid === "1") return false;
+    if (!/^[0-9]+$/.test(pid) || Number(pid) < 1) return false;
   }
   return false;
 }
@@ -445,7 +491,12 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
 
 async function beginArm(paths, sessionID, client, predecessorArmPid) {
   if (!sessionID) return { status: "skipped", armChild: null };
-  if (!(await isPrimaryRoot(paths.root, paths.home))) return { status: "not-primary", armChild: null };
+  const scope = await primaryScope(paths);
+  if (!scope.primary) {
+    if (scope.lockOnly && lockHeldByOtherLiveSession(paths)) return { status: "read-only", armChild: null };
+    reportNotPrimary(paths, client, sessionID, scope.reason);
+    return { status: "not-primary", armChild: null };
+  }
   if (!(await sessionOwnsLock(paths))) return { status: "read-only", armChild: null };
   if (child) return { status: "existing", armChild: child };
   if (retryTimer) return { status: "retrying", armChild: null };

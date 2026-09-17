@@ -3388,6 +3388,8 @@ test_interactive_terminal_e2e() {
     "$ROOT/bin/fm-sessionstart-run.sh" \
     "$ROOT/bin/fm-sessionstart-nudge.sh" \
     "$ROOT/bin/fm-primary-scope-lib.sh" \
+    "$ROOT/bin/fm-session-lock-lib.sh" \
+    "$ROOT/bin/fm-cursor-lib.sh" \
     "$ROOT/bin/fm-gate-refuse-lib.sh" \
     "$ROOT/bin/fm-operational-input.sh" \
     "$project/bin/"
