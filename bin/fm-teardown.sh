@@ -292,6 +292,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 }
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-repo-concurrency-lib.sh
+. "$SCRIPT_DIR/fm-repo-concurrency-lib.sh"
 # Supervision lease guard: post-landing cleanup is overlap territory between
 # the two Pi supervision actors; refuse while the OTHER actor holds this
 # task's live lease (contract: bin/fm-lease-lib.sh; no-op in homes without
@@ -2992,6 +2994,10 @@ cleanup_firstmate_home_children() {
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
     status_retire_presentation_task "$sub_state" "$child_id" || return 1
     fm_backlog_atomic_transition remove "$sub_state/$child_id.meta" "task record" "$sub_state" || return 1
+    if ! fm_repo_scope_release_task_if_bound "$home" "$child_id"; then
+      echo "error: child task $child_id was removed but its repository concurrency claim could not be released: $FM_REPO_SCOPE_LAST_ERROR" >&2
+      return 1
+    fi
     rm -f "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.progress" \
       "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.omp-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
@@ -3460,6 +3466,10 @@ else
     echo "error: $ID's endpoint and local copy are cleaned up, but its task record could not be removed ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1
   fi
+fi
+if ! fm_repo_scope_release_task_if_bound "$FM_HOME" "$ID"; then
+  echo "error: task $ID was cleaned up but its repository concurrency claim could not be released: $FM_REPO_SCOPE_LAST_ERROR" >&2
+  exit 1
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0

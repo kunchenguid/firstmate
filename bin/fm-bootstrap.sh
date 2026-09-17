@@ -1377,6 +1377,21 @@ startup_memory_budget_setup() {
   fi
 }
 
+repo_concurrency_bootstrap() {
+  local out
+  [ -e "$FM_HOME/.fm-project-firstmate" ] || [ -L "$FM_HOME/.fm-project-firstmate" ] \
+    || [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ] || return 0
+  # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  # shellcheck source=bin/fm-repo-concurrency-lib.sh disable=SC1091
+  . "$SCRIPT_DIR/fm-repo-concurrency-lib.sh"
+  if out=$(fm_repo_scope_reconcile_task_home "$FM_HOME" 2>&1); then
+    [ -z "$out" ] || printf '%s\n' "$out"
+  else
+    printf 'REPO_CONCURRENCY: lease repair failed; repository task spawning will refuse until resolved: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+  fi
+}
+
 if [ "${1:-}" = "lavish-compatible" ]; then
   tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"
   exit
@@ -1450,6 +1465,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
       exit 1
     fi
   fi
+  repo_concurrency_bootstrap
 fi
 
 # Local detection: presence, version floors, and configuration. Nothing here

@@ -301,10 +301,34 @@ After creating a secondmate, move existing main-backlog queued items that you ha
 Set `FM_SECONDMATE_CHARTER` to seed from inline charter text when no filled charter brief exists; set `FM_SECONDMATE_SCOPE` when the routing scope should differ from the charter text.
 The seeded home's `data/charter.md` owns the standard secondmate lifecycle and escalation contract; the route file points to it through the existing `home:` field instead of adding another pointer.
 Each seed writes an `.fm-secondmate-home` identity marker at the home root, alongside a durable `.fm-secondmate-parent` record of the home's route to its parent (see "Provision a route" in [`docs/remote-secondmates.md`](remote-secondmates.md)).
-The tracked root `.gitignore` ignores both markers, so validation can read them without making a freshly seeded home appear dirty to porcelain-based safety checks.
+The tracked root `.gitignore` ignores all three markers, so validation can read them without making a freshly seeded home appear dirty to porcelain-based safety checks.
 This does not relax protection for any other untracked file.
 An existing linked-worktree home that predates this rule advances through its marker-only state during its next bootstrap or spawn local sync, after which Git ignores the marker normally.
 A local standalone-clone home cannot receive a primary-local commit through that no-fetch sync, so it receives the rule through `/updatefirstmate`'s origin refresh instead.
+
+## Project Firstmates and repository capacity
+
+A project Firstmate is the sole persistent authority for exactly one registered repository.
+Root may seed project Firstmates or root-level ordinary secondmates, while only a project Firstmate may seed ordinary child secondmates for the same repository.
+Ordinary secondmates may remain project-less or domain-scoped as before, but cannot seed any child homes.
+Root routes all work for the project Firstmate's repository through that authority, even when ordinary secondmate clone lists overlap.
+
+The operator workflow starts the root Firstmate session in the Firstmate repository and asks in natural language: "Create and launch one persistent project Firstmate for buttertrip-mvp with a repository concurrency limit of 2."
+Root seeds it with `bin/fm-home-seed.sh <id> <home|-> --project-firstmate buttertrip-mvp --repo-concurrency 2` and launches it with `bin/fm-spawn.sh <id> --secondmate`.
+Create exactly one project Firstmate for the repository, then route future matching requests through it; two project Firstmates do not mean two worker slots.
+
+The project Firstmate's local `config/repo-concurrency` limits active ship and scout tasks across its own home and its registered local ordinary-secondmate homes.
+Persistent supervisor tasks consume no slots, and a relaunched task reuses its durable claim.
+With a limit of 2, four tasks result in two active tasks and two queued tasks, not two project Firstmates.
+Admission takes the project home's shared authority lock before endpoint, worktree, or backlog mutation, so sibling homes cannot exceed the limit concurrently.
+Teardown releases the claim, and project-home bootstrap repairs and reports active, limit, and available capacity.
+The supervising home re-evaluates its backlog on the next normal intake pass after a slot opens; teardown does not start queued work itself.
+The config must contain one positive integer from 1 through 256 followed by one newline, defaults to 2 when a project Firstmate is seeded, and may be removed to select unlimited capacity.
+The setting is not inherited into child homes because the project home owns the single subtree limit.
+
+Remote child routes beneath a project Firstmate are refused until distributed repository locking exists.
+The current seed workflow creates project Firstmates locally, while a project Firstmate's local children may share its local authority safely.
+Child supervision and detailed outcomes stay in the immediate parent home, and the project Firstmate sends root only correlated decisions and concise milestones.
 
 ## FM_HOME
 

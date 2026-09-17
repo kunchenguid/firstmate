@@ -14,6 +14,36 @@ metadata:
 Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
 
 Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate, and secondmates are idle by default.
+The only nested supervisor role is a project Firstmate, which owns exactly one registered repository and may seed only local ordinary secondmates for that same repository.
+Ordinary secondmates cannot seed children, and a repository can have only one registered project Firstmate authority.
+
+## Project Firstmates and repository capacity
+
+Use a project Firstmate when one repository needs a persistent supervisor and an isolated repository-wide worker limit.
+The root Firstmate remains the captain's only contact and creates and launches the project Firstmate as one of its direct reports.
+Load `project-management` as well when this workflow establishes project ownership for a registered repository.
+Future root requests for that repository route through its project Firstmate, even when ordinary secondmate clone lists overlap.
+
+Start the root Firstmate session in the Firstmate repository, then ask it in natural language: "Create and launch one persistent project Firstmate for buttertrip-mvp with a repository concurrency limit of 2."
+Root provisions the explicit authority with `bin/fm-home-seed.sh <id> <home|-> --project-firstmate buttertrip-mvp --repo-concurrency 2`, then launches it with `bin/fm-spawn.sh <id> --secondmate`.
+The route's scope should say that it owns all work for that repository, so subsequent root intake routes matching tasks there.
+Create exactly one project Firstmate for a repository; do not create multiple project Firstmates to increase capacity.
+
+The project Firstmate's `config/repo-concurrency` controls all active ship and scout tasks in its own home and its registered local ordinary-secondmate homes.
+Persistent project Firstmates and ordinary secondmates do not consume worker slots.
+With a limit of 2, four tasks produce two admitted workers and two queued backlog items, not two project Firstmates.
+Admission claims are serialized by the project-home authority lock and use durable leases tied to each stable task-home path and task id.
+An admitted task keeps its slot through relaunch, and teardown releases it; bootstrap repairs missing and stale leases before reporting active, limit, and available capacity.
+The configured limit is a positive integer from 1 through 256, defaults to 2 for a newly seeded project Firstmate, and becomes unlimited if the config file is removed.
+The limit is project-home-local and is not inherited into child homes.
+Spawn refuses a task over capacity before creating its endpoint, worktree, or backlog transition, so excess work remains queued.
+When teardown releases a slot, the supervising home re-evaluates its queue and dispatches eligible work on its next normal intake pass; teardown never launches replacement work itself.
+
+Project Firstmates may seed only local child routes until distributed locking is available.
+Remote descendants beneath a project Firstmate fail closed because a remote home cannot safely claim against the local authority lock.
+The current seed workflow creates the project Firstmate locally; remote project-Firstmate provisioning is not yet supported.
+Child outcomes remain in their immediate parent's home, and the project Firstmate reports only its correlated decisions and concise milestones to root.
+Its `/stow` may cascade one hop to its registered ordinary-secondmate children, while an ordinary secondmate never cascades.
 
 ## Routing table
 

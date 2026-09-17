@@ -489,6 +489,10 @@ fi
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-repo-concurrency-lib.sh
+. "$SCRIPT_DIR/fm-repo-concurrency-lib.sh"
+# shellcheck source=bin/fm-secondmate-parent-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -1052,6 +1056,11 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+SPAWN_REPO_SCOPE_ACTIVE=0
+SPAWN_REPO_LEASE_CREATED=0
+SPAWN_REPO_AUTHORITY_HOME=
+SPAWN_REPO_AUTHORITY_ID=
+SPAWN_REPO_PROJECT=
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1178,6 +1187,18 @@ spawn_abort_cleanup() {
     if ! spawn_fresh_commit_rollback; then
       status=1
     fi
+  fi
+  if [ "$SPAWN_REPO_SCOPE_ACTIVE" = 1 ]; then
+    if [ "$SPAWN_REPO_LEASE_CREATED" = 1 ] &&
+      [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+      if ! fm_repo_scope_release_task "$FM_HOME" "$ID"; then
+        echo "warning: could not release provisional repository concurrency claim for $ID: $FM_REPO_SCOPE_LAST_ERROR" >&2
+        status=1
+      fi
+    fi
+    fm_repo_scope_lock_release || true
+    SPAWN_REPO_SCOPE_ACTIVE=0
+    SPAWN_REPO_LEASE_CREATED=0
   fi
   if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
     SPAWN_META_LOCK_HELD=0
@@ -1404,7 +1425,41 @@ if [ "$RELAUNCH" -eq 0 ]; then
   fi
   SPAWN_TASK_SET_LOCK_HELD=1
 fi
+
+validate_secondmate_spawn_parent_authority() {  # <secondmate-id>
+  local id=$1 remote_route
+  SPAWN_REPO_AUTHORITY_HOME=
+  SPAWN_REPO_AUTHORITY_ID=
+  SPAWN_REPO_PROJECT=
+  if [ -e "$FM_HOME/.fm-project-firstmate" ] || [ -L "$FM_HOME/.fm-project-firstmate" ]; then
+    fm_repo_scope_marker_parse "$FM_HOME" || {
+      echo "error: active project Firstmate authority marker is invalid" >&2
+      return 1
+    }
+    [ -f "$FM_HOME/.fm-secondmate-home" ] && [ ! -L "$FM_HOME/.fm-secondmate-home" ] || {
+      echo "error: project Firstmate is missing its seeded secondmate identity marker" >&2
+      return 1
+    }
+    SPAWN_REPO_AUTHORITY_HOME=$FM_REPO_SCOPE_HOME
+    SPAWN_REPO_AUTHORITY_ID=$FM_REPO_SCOPE_AUTHORITY_ID
+    SPAWN_REPO_PROJECT=$FM_REPO_SCOPE_PROJECT
+    remote_route=$(secondmate_registry_field "$DATA/secondmates.md" "$id" remote 2>/dev/null || true)
+    [ "$remote_route" != 1 ] || {
+      echo "error: remote descendants beneath a project Firstmate are unsupported until distributed repository locking exists" >&2
+      return 1
+    }
+  elif [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ]; then
+    if [ -f "$FM_HOME/.fm-secondmate-home" ] && [ ! -L "$FM_HOME/.fm-secondmate-home" ] \
+      && [ "$(<"$FM_HOME/.fm-secondmate-home")" = "$id" ]; then
+      return 0
+    fi
+    echo "error: ordinary secondmates cannot spawn nested secondmates; route work through their parent Firstmate" >&2
+    return 1
+  fi
+}
+
 if [ "$KIND" = secondmate ]; then
+  validate_secondmate_spawn_parent_authority "$ID" || exit 1
   if spawn_remote_secondmate "$ID"; then
     exit 0
   else
@@ -2730,12 +2785,52 @@ if [ "$KIND" = secondmate ]; then
     exit 1
   }
   PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
-  if [ -e "$DATA/secondmates.md" ] || [ -L "$DATA/secondmates.md" ]; then
+  if [ -n "$SPAWN_REPO_AUTHORITY_HOME" ]; then
+    if [ ! -f "$DATA/secondmates.md" ] || [ -L "$DATA/secondmates.md" ] \
+      || ! secondmate_registry_validate_bindings "$DATA/secondmates.md" resolve_path "$ID" "$FIRSTMATE_HOME"; then
+      echo "error: project Firstmate child $ID is not registered in its direct-report table${SECONDMATE_REGISTRY_ERROR:+: $SECONDMATE_REGISTRY_ERROR}" >&2
+      exit 1
+    fi
+    [ "$SECONDMATE_REGISTRY_MATCH_REMOTE" -eq 0 ] || {
+      echo "error: remote descendants beneath a project Firstmate are unsupported until distributed repository locking exists" >&2
+      exit 1
+    }
+    [ "$SECONDMATE_REGISTRY_MATCH_PROJECTS" = "$SPAWN_REPO_PROJECT" ] || {
+      echo "error: project Firstmate child $ID must clone only its owned repository $SPAWN_REPO_PROJECT" >&2
+      exit 1
+    }
+    SECONDMATE_PROJECTS=$SECONDMATE_REGISTRY_MATCH_PROJECTS
+    if ! fm_repo_scope_authority_for_home "$PROJ_ABS"; then
+      echo "error: project Firstmate child $ID has no valid local parent authority binding: $FM_REPO_SCOPE_LAST_ERROR" >&2
+      exit 1
+    fi
+    [ "$FM_REPO_SCOPE_HOME" = "$SPAWN_REPO_AUTHORITY_HOME" ] \
+      && [ "$FM_REPO_SCOPE_AUTHORITY_ID" = "$SPAWN_REPO_AUTHORITY_ID" ] \
+      && [ "$FM_REPO_SCOPE_PROJECT" = "$SPAWN_REPO_PROJECT" ] || {
+      echo "error: project Firstmate child $ID is bound to a different repository authority" >&2
+      exit 1
+    }
+  elif [ -e "$DATA/secondmates.md" ] || [ -L "$DATA/secondmates.md" ]; then
     if ! secondmate_registry_validate_bindings "$DATA/secondmates.md" resolve_path "$ID" "$FIRSTMATE_HOME"; then
       echo "error: $SECONDMATE_REGISTRY_ERROR" >&2
       exit 1
     fi
     SECONDMATE_PROJECTS=$SECONDMATE_REGISTRY_MATCH_PROJECTS
+    if [ -e "$PROJ_ABS/.fm-secondmate-parent" ] || [ -L "$PROJ_ABS/.fm-secondmate-parent" ]; then
+      fm_secondmate_parent_record_parse "$PROJ_ABS/.fm-secondmate-parent" || {
+        echo "error: secondmate $ID has an invalid parent binding" >&2
+        exit 1
+      }
+      if [ "$FM_SECONDMATE_PARENT_ROUTE" = local ]; then
+        current_home_real=$(cd "$FM_HOME" && pwd -P) || exit 1
+        target_parent_real=$(cd "$FM_SECONDMATE_PARENT_HOME" && pwd -P) || exit 1
+        if [ "$target_parent_real" != "$current_home_real" ] || \
+          { [ -n "$FM_SECONDMATE_PARENT_ROLE" ] && [ "$FM_SECONDMATE_PARENT_ROLE" != root ]; }; then
+          echo "error: root Firstmate cannot spawn a secondmate whose durable parent binding names another home" >&2
+          exit 1
+        fi
+      fi
+    fi
   fi
   WT="$PROJ_ABS"
   # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the
@@ -3210,6 +3305,28 @@ fi
 if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
   echo "error: task $ID has a pending authoritative backlog close at $STATE/$ID.backlog-close; finish or repair that close before dispatching a new worker" >&2
   exit 1
+fi
+
+if [ "$KIND" != secondmate ]; then
+  if fm_repo_scope_acquire_task "$FM_HOME" "$ID" "$PROJ_ABS" "$RELAUNCH"; then
+    REPO_SCOPE_STATUS=0
+  else
+    REPO_SCOPE_STATUS=$?
+  fi
+  [ "$FM_REPO_SCOPE_LOCK_HELD" = 1 ] && SPAWN_REPO_SCOPE_ACTIVE=1
+  if [ "$REPO_SCOPE_STATUS" -eq 2 ]; then
+    fm_repo_scope_lock_release || true
+    SPAWN_REPO_SCOPE_ACTIVE=0
+    exit 2
+  fi
+  if [ "$REPO_SCOPE_STATUS" -ne 0 ]; then
+    [ -n "$FM_REPO_SCOPE_LAST_ERROR" ] || FM_REPO_SCOPE_LAST_ERROR="repository subtree admission failed"
+    echo "error: $FM_REPO_SCOPE_LAST_ERROR" >&2
+    exit 1
+  fi
+  if [ "$SPAWN_REPO_SCOPE_ACTIVE" = 1 ]; then
+    SPAWN_REPO_LEASE_CREATED=$FM_REPO_SCOPE_LEASE_CREATED
+  fi
 fi
 
 W="fm-$ID"
@@ -4792,6 +4909,13 @@ if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
 fi
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
+if [ "$SPAWN_REPO_SCOPE_ACTIVE" = 1 ]; then
+  fm_repo_scope_lock_release || {
+    echo "warning: repository concurrency lease for $ID was committed but its authority lock could not be released cleanly" >&2
+  }
+  SPAWN_REPO_SCOPE_ACTIVE=0
+  SPAWN_REPO_LEASE_CREATED=0
+fi
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"

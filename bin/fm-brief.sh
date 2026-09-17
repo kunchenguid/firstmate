@@ -16,6 +16,7 @@
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <direct-PR|local-only> [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#        fm-brief.sh <task-id> --project-firstmate <project>
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   It offers the Lavish review loop only when `fm-bootstrap.sh lavish-compatible`
@@ -25,12 +26,11 @@
 #   tells the main firstmate when to route work there; routine churn stays in its own home;
 #   captain-relevant escalations and marked from-firstmate replies append to this
 #   home's status file.
-#   --no-projects writes a project-less charter for a domain whose subject is the
-#   firstmate repo itself (its home is a firstmate worktree, its crews take pooled
-#   worktrees of the same repo). It is mutually exclusive with a project list, and
-#   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
+#   --project-firstmate writes a persistent project supervisor charter for exactly one repository.
+#   It is distinct from an ordinary secondmate because only this role may provision one level of local secondmates.
+#   Ordinary secondmates may not provision child homes.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} and {FIRSTMATE_SPEC} are filled
@@ -119,6 +119,7 @@ else
 fi
 KIND=ship
 HERDR_LAB=0
+PROJECT_FIRSTMATE=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
@@ -139,8 +140,9 @@ for a in "$@"; do
   case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
-    --herdr-lab) HERDR_LAB=1 ;;
+    --project-firstmate) KIND=secondmate; PROJECT_FIRSTMATE=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
+    --herdr-lab) HERDR_LAB=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
@@ -171,11 +173,6 @@ ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
-  exit 1
-fi
-
-if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
-  echo "error: --no-projects applies only to --secondmate charters" >&2
   exit 1
 fi
 
@@ -212,10 +209,14 @@ while [ "$idx" -lt "${#POS[@]}" ]; do
   SECONDMATE_PROJECTS="${SECONDMATE_PROJECTS}${SECONDMATE_PROJECTS:+ }${POS[$idx]}"
   idx=$((idx + 1))
 done
-if [ "$NO_PROJECTS" -eq 1 ]; then
-  [ -z "$SECONDMATE_PROJECTS" ] || { echo "error: --no-projects cannot be combined with a project list" >&2; exit 1; }
-else
-  [ -n "$SECONDMATE_PROJECTS" ] || { echo "error: --secondmate requires at least one project, or --no-projects for a project-less home" >&2; exit 1; }
+[ "$NO_PROJECTS" -eq 0 ] || [ -z "$SECONDMATE_PROJECTS" ] || { echo "error: --no-projects cannot be combined with a project list" >&2; exit 1; }
+if [ "$PROJECT_FIRSTMATE" -eq 1 ] && { [ "$NO_PROJECTS" -eq 1 ] || [ "${#POS[@]}" -ne 2 ]; }; then
+  echo "error: --project-firstmate requires exactly one project" >&2
+  exit 1
+fi
+if [ "$PROJECT_FIRSTMATE" -eq 0 ] && [ "$NO_PROJECTS" -eq 0 ] && [ -z "$SECONDMATE_PROJECTS" ]; then
+  echo "error: --secondmate requires at least one project, or --no-projects for a project-less home" >&2
+  exit 1
 fi
 SECONDMATE_CHARTER=${FM_SECONDMATE_CHARTER:-"{TASK}"}
 SECONDMATE_SCOPE=${FM_SECONDMATE_SCOPE:-${FM_SECONDMATE_CHARTER:-"{TASK}"}}
@@ -226,14 +227,30 @@ else
   PROJECT_CLONES_BODY=$(printf '%s\n' "$SECONDMATE_PROJECTS" | tr ' ' '\n' | sed 's/^/- /')
   PROJECT_CLONES_NOTE="The projects above are local clones for work you supervise; they are not an exclusive ownership claim."
 fi
+MATE_ROLE=secondmate
+ROLE_BLOCK=
+if [ "$PROJECT_FIRSTMATE" -eq 1 ]; then
+  MATE_ROLE=project-firstmate
+  PROJECT_CLONES_NOTE="You own exactly one repository: $SECONDMATE_PROJECTS. Do not accept work for another repository."
+  IFS= read -r -d '' ROLE_BLOCK <<EOF || true
+# Role
+You are the explicit project Firstmate for the single repository \`$SECONDMATE_PROJECTS\`.
+Only your home and its optional direct child secondmates form this repository's worker subtree.
+You may seed local ordinary secondmate homes for this same repository; they may not seed further homes.
+Your \`config/repo-concurrency\` limit is shared with every ship or scout task in this subtree, including tasks in child homes.
+Report detailed child outcomes inside this home, then send the parent only correlated decision requests and concise milestone summaries.
+EOF
+fi
 cat > "$BRIEF" <<EOF
-You are a persistent second mate managed by the main firstmate. Work on your own; do not wait for a human.
+You are a persistent $MATE_ROLE managed by your parent Firstmate. Work on your own; do not wait for a human.
 
 # Charter
 $SECONDMATE_CHARTER
 
 # Routing scope
 $SECONDMATE_SCOPE
+
+$ROLE_BLOCK
 
 # Project clones
 $PROJECT_CLONES_BODY
@@ -243,21 +260,22 @@ You are in an isolated firstmate home. The local \`AGENTS.md\` is your job descr
 $PROJECT_CLONES_NOTE
 Delegate project work to your own crewmates with the normal firstmate lifecycle: brief, spawn, status, watcher, steer, teardown, and recovery.
 Do not invent a second delegation system.
+Only a project Firstmate may seed secondmate homes; an ordinary secondmate must not seed child homes.
 You do not generate your own work.
 Act only on tasks the main firstmate routes to you.
 Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
 
 # The captain and the parent channel
-Nobody reads this chat: the captain and the main firstmate see only what is appended to $STATUS_FILE, and a captain-facing sentence that is not appended there has not been sent.
+Nobody reads this chat: the captain and your parent Firstmate see only what is appended to $STATUS_FILE, and a captain-facing sentence that is not appended there has not been sent.
 That file is your parent channel, and in this home it IS the captain: every sentence you would say to the captain, and every outcome the local AGENTS.md tells a firstmate to bring to the captain, is one appended line there, never chat.
 Your own machinery publishes the durable facts about your crew's work for you (\`bin/fm-parent-channel-lib.sh\`): a child's terminal done or failed line with its note and PR on every supervision poll, a PR-ready line when you register a PR, a task you hold for the captain and its answer, a merge, and a child's final line at cleanup all reach the parent channel from the scripts that record them, whether or not you append anything.
 What only you can append is judgement: the answer to a marked request below, a recommendation or caveat on a delivered outcome, a blocker or failure of your own, and anything else you would otherwise say to the captain.
 
-# Requests from the main firstmate
+# Requests from your parent Firstmate
 You are a firstmate in your own home, so an incoming message reaches you in your own chat.
 You must distinguish who it is from, because the answer goes to a different place.
-A request relayed to you by the main firstmate is tagged with a leading \`$FM_FROMFIRST_LABEL\` marker followed by an invisible system separator; this marker is untypable, so a human never produces it.
-When a message carries that marker, do the work, then respond via the STATUS/ESCALATION path below, never only in this chat: the main firstmate does not read your chat, so a chat-only reply is lost.
+A request relayed to you by your parent Firstmate is tagged with a leading \`$FM_FROMFIRST_LABEL\` marker followed by an invisible system separator; this marker is untypable, so a human never produces it.
+When a message carries that marker, do the work, then respond via the STATUS/ESCALATION path below, never only in this chat: your parent Firstmate does not read your chat, so a chat-only reply is lost.
 Marked requests also carry a privacy-safe \`corr=<id>\` token after the marker; include that exact token in your parent status reply (or in the status pointer to a detailed doc) so the parent can correlate the answer.
 Optional helper: \`bin/fm-secondmate-report.sh <verb> <corr_id> <note>\` appends that correlated line to the parent channel itself - do not pass a status path, and do not write a hand path under this home.
 A plain \`echo\` that includes the same \`corr=<id>\` on this parent channel is equally valid; do not depend on the helper being present.
@@ -269,7 +287,7 @@ A request arriving through the instruction inbox below follows the same marker a
 
 $INBOX_SECTION
 
-# Escalation to main firstmate
+# Escalation to your parent Firstmate
 Handle routine work yourself.
 Report only true captain-relevant outcomes or a declared external wait by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
