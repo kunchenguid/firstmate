@@ -17,9 +17,9 @@
 # process/random suffixes to keep generated socket paths short.
 # Every Herdr call made here carries --session <session> immediately before its
 # first `--` separator, or trailing when the command has no separator.
-# The run command rejects caller-supplied --session selectors, any leading option
-# before the subcommand, all session lifecycle operations, and every server
-# operation.
+# The run command rejects caller-supplied --session selectors, argument
+# separators, any leading option before the subcommand, all session lifecycle
+# operations, and every server operation.
 # Session stop is available only through guarded stop or teardown, and session
 # delete is available only through teardown.
 # Both paths perform a fresh refuse-default check immediately before each
@@ -159,10 +159,13 @@ fm_herdr_lab_cli() { # <session> <herdr arguments...>
       ;;
   esac
   for arg in "$@"; do
-    [ "$arg" = -- ] && break
     case "$arg" in
+      --)
+        fm_herdr_lab_error "run forbids an agent-argument separator"
+        return 1
+        ;;
       --session|--session=*)
-        fm_herdr_lab_error "run forbids caller-supplied --session before the agent-argument separator; the helper selects the lab session"
+        fm_herdr_lab_error "run forbids caller-supplied --session; the helper selects the lab session"
         return 1
         ;;
     esac

@@ -83,7 +83,8 @@ Closing its last tab can remove the workspace, and the next spawn recreates it.
 
 A plain `pi` worker on Herdr protocol 20 starts by replacing the fresh task tab's single shell pane through the bundled `layout.apply` schema instead of typing a command into that shell.
 This avoids treating terminal input acceptance as worker-process readiness and prevents pending shell-editor text from joining or delaying the launch command.
-Firstmate acquires the isolated Treehouse copy under the task's durable lease, validates the exact named session, protocol, live schema, workspace, single-pane tab, pane, foreground shell, and Unix socket, then sends one argv array with the exact working directory through `bin/backends/herdr-layout-apply.py`.
+Before acquisition, Firstmate publishes `state/<id>.herdr-lease` with the task's unique holder intent. It then binds Treehouse's returned lease id and authoritative worktree, records cleanup intent before return, and retains confirmed-return state until task cleanup completes. Retries reconcile each phase against `treehouse status --json`, and returns use the immutable lease id rather than holder text alone.
+Firstmate validates the exact named session, protocol, live schema, workspace, single-pane tab, pane, foreground shell, and Unix socket, then sends one argv array with the exact working directory through `bin/backends/herdr-layout-apply.py`.
 The replacement inherits the environment of the Herdr daemon that created the destination pane, matching destination-pane semantics, while Firstmate sends only its non-sensitive task, temporary-directory, and trace overrides.
 The request payload travels over the helper's stdin, so allowlisted credentials and launch values never enter helper process arguments, logs, or durable attempt state.
 The local client exposes no general Herdr control surface and accepts only that one request shape.
@@ -91,7 +92,7 @@ It binds a random request id, rejects protocol errors and mismatched responses, 
 
 Immediately before the request, Firstmate publishes `state/<id>.herdr-launch` with a random non-sensitive attempt identity, the exact old session, workspace, tab, and pane, and one validated ownership mode: fresh allocation, ordinary relaunch, or persistent secondmate.
 A fresh record binds the exact acquired `fm-<id>` lease; relaunch and secondmate records carry no lease-return authority.
-A confirmed response advances that record to the returned replacement ids.
+A response advances that record to replacement ids only after the named session independently confirms their workspace, tab, pane, and random launch label. A mismatched response is never used as a close target; cleanup reconciles only the random launch label.
 A timeout, malformed response, wrong response id, helper crash, or other uncertain post-send result preserves the task record, lease, local work, and attempt record, and every retry refuses until the exact named session proves either that the old pane remains or that one random-label-correlated replacement was safely reconciled.
 Only fresh allocation recovery can return its proven lease and remove its provisional task record.
 Relaunch and secondmate recovery structurally replaces one independently confirmed exact Pi with an inert shell in the same named session, workspace, and tab, then transactionally rebinds task and presentation records before allowing a retry.
@@ -103,7 +104,7 @@ The worker counts as launched only after the replacement pane reports the exact 
 Only then do the task record and any presentation journal advance from the old tab and pane ids to the returned replacement ids.
 A failure after replacement targets the returned pane for exact cleanup and never reports spawn success.
 If backlog ownership cannot commit after launch, abort cleanup closes and confirms that exact live endpoint before removing its task record or returning its holder-bound Treehouse lease; an unconfirmed close preserves all three for reconciliation.
-Normal teardown and pre-launch aborts return the durable Treehouse lease only when its exact `fm-<id>` holder still owns it.
+Normal teardown and pre-launch aborts return the durable Treehouse lease only when its exact immutable lease id, `fm-<id>` holder, project, and worktree all match the durable transaction.
 Generic Enter behavior for post-launch interaction is unchanged.
 
 This structural path applies only to the exact `pi` harness.

@@ -1049,6 +1049,8 @@ SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
 SPAWN_TREEHOUSE_LEASE_HELD=0
 SPAWN_TREEHOUSE_LEASE_HOLDER=
+SPAWN_TREEHOUSE_LEASE_ID=
+HERDR_TREEHOUSE_LEASE_TX=
 HERDR_LAYOUT_ATTEMPT=
 HERDR_LAYOUT_OWNERSHIP_MODE=
 HERDR_LAYOUT_LEASE_HOLDER=-
@@ -1265,11 +1267,14 @@ spawn_abort_cleanup() {
     fi
   fi
   if [ "$HERDR_LAYOUT_QUARANTINED" != 1 ] \
-    && [ "$SPAWN_TREEHOUSE_LEASE_HELD" = 1 ]; then
-    if fm_treehouse_lease_return_exact "$PROJ_ABS" "$WT" "$SPAWN_TREEHOUSE_LEASE_HOLDER" >/dev/null; then
+    && [ -n "$HERDR_TREEHOUSE_LEASE_TX" ] \
+    && { [ -e "$HERDR_TREEHOUSE_LEASE_TX" ] || [ -L "$HERDR_TREEHOUSE_LEASE_TX" ]; }; then
+    if fm_treehouse_lease_transaction_return "$HERDR_TREEHOUSE_LEASE_TX" \
+      "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER" "$PROJ_ABS" >/dev/null \
+      && rm -f -- "$HERDR_TREEHOUSE_LEASE_TX"; then
       SPAWN_TREEHOUSE_LEASE_HELD=0
     else
-      echo "warning: could not return Treehouse lease for aborted structural Herdr launch of $ID" >&2
+      echo "warning: could not return the exact Treehouse lease for aborted structural Herdr launch of $ID" >&2
       status=1
     fi
   fi
@@ -1407,6 +1412,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 HERDR_LAYOUT_ATTEMPT="$STATE/$ID.herdr-launch"
+HERDR_TREEHOUSE_LEASE_TX="$STATE/$ID.herdr-lease"
 fm_task_id_creation_valid "$ID" || {
   echo "error: invalid task id" >&2
   exit 2
@@ -3056,7 +3062,7 @@ spawn_rebind_restored_herdr_layout_attempt() {
 }
 
 spawn_reconcile_herdr_layout_attempt() {
-  local meta="$STATE/$ID.meta" value worktree holder busy_gen expected_mode ownership_policy recovery_action resolution journal lock_for_restore=0
+  local meta="$STATE/$ID.meta" value worktree holder lease_id busy_gen expected_mode ownership_policy recovery_action resolution journal lock_for_restore=0
   [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ] || {
     echo "error: task $ID has a quarantined Herdr structural launch attempt; retry with backend=herdr and the exact plain pi harness" >&2
     return 1
@@ -3112,9 +3118,19 @@ spawn_reconcile_herdr_layout_attempt() {
   case "$expected_mode" in
     fresh)
       holder=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LEASE_HOLDER
+      lease_id=$(herdr_projection_meta_field_exact "$meta" treehouse_lease_id 2>/dev/null || true)
       [ "$holder" = "fm-$ID" ] \
-        && [ "$(herdr_projection_meta_field_exact "$meta" treehouse_lease_holder 2>/dev/null || true)" = "$holder" ] || {
-        echo "error: task $ID's quarantined fresh launch lacks exact acquisition proof; refusing lease mutation" >&2
+        && [ "$(herdr_projection_meta_field_exact "$meta" treehouse_lease_holder 2>/dev/null || true)" = "$holder" ] \
+        && fm_treehouse_lease_transaction_snapshot "$HERDR_TREEHOUSE_LEASE_TX" \
+        && { [ "$FM_TREEHOUSE_LEASE_TX_PHASE" = acquired ] \
+          || [ "$FM_TREEHOUSE_LEASE_TX_PHASE" = cleanup ] \
+          || [ "$FM_TREEHOUSE_LEASE_TX_PHASE" = returned ]; } \
+        && [ "$FM_TREEHOUSE_LEASE_TX_TASK" = "$ID" ] \
+        && [ "$FM_TREEHOUSE_LEASE_TX_HOLDER" = "$holder" ] \
+        && [ "$FM_TREEHOUSE_LEASE_TX_PROJECT" = "$PROJ_ABS" ] \
+        && [ "$FM_TREEHOUSE_LEASE_TX_WORKTREE" = "$worktree" ] \
+        && [ "$FM_TREEHOUSE_LEASE_TX_ID" = "$lease_id" ] || {
+        echo "error: task $ID's quarantined fresh launch lacks exact durable acquisition proof; refusing lease mutation" >&2
         return 1
       }
       fm_treehouse_pool_slot "$PROJ_ABS" "$worktree" || {
@@ -3122,10 +3138,12 @@ spawn_reconcile_herdr_layout_attempt() {
         return 1
       }
       fm_treehouse_slot_owner_state "$worktree" "$ID"
-      [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || {
+      if [ "$FM_TREEHOUSE_LEASE_TX_PHASE" = returned ]; then
+        case "$FM_TREEHOUSE_SLOT_OWNER" in mine|other|absent) ;; *) return 1 ;; esac
+      elif [ "$FM_TREEHOUSE_SLOT_OWNER" != mine ]; then
         echo "error: task $ID no longer owns its quarantined Treehouse slot; refusing duplicate launch" >&2
         return 1
-      }
+      fi
       ;;
     relaunch)
       [ "$(herdr_projection_meta_field_exact "$meta" kind 2>/dev/null || true)" != secondmate ] || {
@@ -3210,8 +3228,9 @@ spawn_reconcile_herdr_layout_attempt() {
       return 1
       ;;
   esac
-  fm_treehouse_lease_return_exact "$PROJ_ABS" "$worktree" "$holder" >/dev/null || {
-    echo "error: exact Herdr replacement was reconciled, but task $ID's Treehouse lease could not be returned; refusing duplicate launch" >&2
+  fm_treehouse_lease_transaction_return "$HERDR_TREEHOUSE_LEASE_TX" \
+    "$ID" "$holder" "$PROJ_ABS" >/dev/null || {
+    echo "error: exact Herdr replacement was reconciled, but task $ID's Treehouse lease return could not be confirmed; refusing duplicate launch" >&2
     return 1
   }
   fm_treehouse_slot_owner_release "$worktree" "$ID" || {
@@ -3222,6 +3241,7 @@ spawn_reconcile_herdr_layout_attempt() {
   [ -z "$busy_gen" ] || "$FM_ROOT/bin/fm-busy-event.sh" retire "$STATE" "$ID" --gen "$busy_gen" >/dev/null 2>&1 || return 1
   fm_backlog_atomic_transition remove "$meta" "quarantined task record" "$STATE" || return 1
   rm -f -- "$HERDR_LAYOUT_ATTEMPT" || return 1
+  rm -f -- "$HERDR_TREEHOUSE_LEASE_TX" || return 1
   echo "notice: reconciled task $ID's prior fresh structural Herdr launch and safely released its isolated copy" >&2
 }
 
@@ -3821,10 +3841,54 @@ if [ "$RELAUNCH" -eq 1 ]; then
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ]; then
     SPAWN_TREEHOUSE_LEASE_HOLDER="fm-$ID"
-    WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$SPAWN_TREEHOUSE_LEASE_HOLDER") || {
-      echo "error: treehouse could not lease an isolated worktree for structural Herdr launch" >&2
-      exit 1
-    }
+    if [ -e "$HERDR_TREEHOUSE_LEASE_TX" ] || [ -L "$HERDR_TREEHOUSE_LEASE_TX" ]; then
+      fm_treehouse_lease_transaction_reconcile "$HERDR_TREEHOUSE_LEASE_TX" \
+        "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER" "$PROJ_ABS" || {
+        echo "error: task $ID's structural Herdr Treehouse lease transaction is malformed or contradicts live ownership" >&2
+        exit 1
+      }
+      case "$FM_TREEHOUSE_LEASE_TX_RESULT" in
+        acquired)
+          WT=$FM_TREEHOUSE_LEASE_TX_WORKTREE
+          SPAWN_TREEHOUSE_LEASE_ID=$FM_TREEHOUSE_LEASE_TX_ID
+          ;;
+        cleanup|returned)
+          fm_treehouse_lease_transaction_return "$HERDR_TREEHOUSE_LEASE_TX" \
+            "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER" "$PROJ_ABS" >/dev/null \
+            && rm -f -- "$HERDR_TREEHOUSE_LEASE_TX" || {
+            echo "error: task $ID's prior structural Herdr Treehouse lease cleanup could not be confirmed" >&2
+            exit 1
+          }
+          ;;
+        retry|absent) ;;
+        *) exit 1 ;;
+      esac
+    fi
+    if [ -z "$SPAWN_TREEHOUSE_LEASE_ID" ]; then
+      fm_treehouse_lease_transaction_write "$HERDR_TREEHOUSE_LEASE_TX" intent \
+        "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER" "$PROJ_ABS" - - || {
+        echo "error: could not publish structural Herdr Treehouse lease intent" >&2
+        exit 1
+      }
+      TREEHOUSE_LEASE_JSON=$(cd "$PROJ_ABS" && treehouse get --lease --json \
+        --lease-holder "$SPAWN_TREEHOUSE_LEASE_HOLDER") || {
+        echo "error: treehouse could not lease an isolated worktree for structural Herdr launch" >&2
+        exit 1
+      }
+      WT=$(printf '%s' "$TREEHOUSE_LEASE_JSON" | jq -r \
+        --arg holder "$SPAWN_TREEHOUSE_LEASE_HOLDER" \
+        'select(.lease_holder == $holder and (.path | type == "string") and (.lease_id | type == "string")) | .path' 2>/dev/null)
+      SPAWN_TREEHOUSE_LEASE_ID=$(printf '%s' "$TREEHOUSE_LEASE_JSON" | jq -r \
+        --arg holder "$SPAWN_TREEHOUSE_LEASE_HOLDER" \
+        'select(.lease_holder == $holder and (.path | type == "string") and (.lease_id | type == "string")) | .lease_id' 2>/dev/null)
+      [ -n "$WT" ] && [ -n "$SPAWN_TREEHOUSE_LEASE_ID" ] \
+        && fm_treehouse_pool_slot "$PROJ_ABS" "$WT" \
+        && fm_treehouse_lease_transaction_write "$HERDR_TREEHOUSE_LEASE_TX" acquired \
+          "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER" "$PROJ_ABS" "$WT" "$SPAWN_TREEHOUSE_LEASE_ID" || {
+        echo "error: treehouse returned an invalid structural Herdr lease identity; preserving its acquisition intent for exact reconciliation" >&2
+        exit 1
+      }
+    fi
     SPAWN_TREEHOUSE_LEASE_HELD=1
     validate_spawn_worktree "treehouse lease" "$T"
     if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
@@ -4467,6 +4531,7 @@ preserve_relaunch_meta() {
     echo "herdr_pane_id=$HERDR_PANE_ID"
     if [ "$SPAWN_TREEHOUSE_LEASE_HELD" = 1 ]; then
       echo "treehouse_lease_holder=$SPAWN_TREEHOUSE_LEASE_HOLDER"
+      echo "treehouse_lease_id=$SPAWN_TREEHOUSE_LEASE_ID"
     fi
   fi
   if [ "$BACKEND" = zellij ]; then

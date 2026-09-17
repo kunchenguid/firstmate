@@ -3530,18 +3530,6 @@ fm_backend_herdr_layout_attempt_reconcile() { # <file>
   esac
 }
 
-# fm_backend_herdr_layout_discard_response_pane: after layout.apply has
-# replaced the old shell, discard only the pane id returned by that response
-# when a later identity check fails. Never target the stale pre-apply pane.
-fm_backend_herdr_layout_discard_response_pane() { # <session> <pane>
-  local session=$1 pane=$2
-  [ -n "$session" ] && [ -n "$pane" ] || return 1
-  if ! fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane"; then
-    echo "warning: Herdr structural launch could not safely confirm the unconfirmed response pane '$pane' was removed" >&2
-    return 1
-  fi
-}
-
 # fm_backend_herdr_layout_apply: replace one exact fresh pane through the
 # schema-pinned protocol-20 layout.apply operation, never through shell input.
 fm_backend_herdr_layout_apply() { # <target> <workspace> <tab> <pane> <cwd> <env-json> <command-json> <attempt-file> <attempt-id> <ownership-mode> <task> <lease-holder|->
@@ -3652,23 +3640,19 @@ print(json.dumps({"cwd": sys.argv[1], "env": env, "command": command}, separator
     echo "error: Herdr structural launch response did not return one bound replacement tab and pane id" >&2
     return 3
   fi
-  fm_backend_herdr_layout_attempt_bind "$attempt_file" "$new_tab" "$new_pane" || return 3
   if ! info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" tab get "$new_tab" 2>/dev/null) \
     || ! printf '%s' "$info" | jq -e --arg workspace "$workspace" --arg tab "$new_tab" \
       '.result.tab.workspace_id == $workspace and .result.tab.tab_id == $tab' >/dev/null 2>&1; then
-    if fm_backend_herdr_layout_discard_response_pane "$FM_BACKEND_HERDR_SESSION" "$new_pane"; then
-      fm_backend_herdr_layout_attempt_resolve "$attempt_file" removed || return 3
-    fi
+    fm_backend_herdr_layout_attempt_reconcile "$attempt_file" || true
     return 3
   fi
   if ! info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$new_pane" 2>/dev/null) \
     || ! printf '%s' "$info" | jq -e --arg workspace "$workspace" --arg tab "$new_tab" --arg pane "$new_pane" --arg label "$label" \
       '.result.pane.workspace_id == $workspace and .result.pane.tab_id == $tab and .result.pane.pane_id == $pane and .result.pane.label == $label' >/dev/null 2>&1; then
-    if fm_backend_herdr_layout_discard_response_pane "$FM_BACKEND_HERDR_SESSION" "$new_pane"; then
-      fm_backend_herdr_layout_attempt_resolve "$attempt_file" removed || return 3
-    fi
+    fm_backend_herdr_layout_attempt_reconcile "$attempt_file" || true
     return 3
   fi
+  fm_backend_herdr_layout_attempt_bind "$attempt_file" "$new_tab" "$new_pane" || return 3
   printf '%s\t%s' "$new_tab" "$new_pane"
 }
 

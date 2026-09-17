@@ -1618,9 +1618,11 @@ cleanup_stale_lock_for_safety_check() {
   return "$TEARDOWN_TREEHOUSE_LOCK_REFUSED"
 }
 
-teardown_treehouse_return_once() { # <worktree> <project> [<lease-holder>]
-  local dir=$1 cd_dir=$2 lease_holder=${3:-}
-  if [ -n "$lease_holder" ]; then
+teardown_treehouse_return_once() { # <worktree> <project> [<lease-holder>] [<lease-id>]
+  local dir=$1 cd_dir=$2 lease_holder=${3:-} lease_id=${4:-}
+  if [ -n "$lease_id" ]; then
+    (CDPATH='' cd -- "$cd_dir" && treehouse return --force --if-lease-id "$lease_id" "$dir")
+  elif [ -n "$lease_holder" ]; then
     fm_treehouse_lease_return_exact "$cd_dir" "$dir" "$lease_holder"
   else
     (CDPATH='' cd -- "$cd_dir" && treehouse return --force "$dir")
@@ -1630,12 +1632,12 @@ teardown_treehouse_return_once() { # <worktree> <project> [<lease-holder>]
 # Return a worktree/home via `treehouse return --force`, tolerating a transient or
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
-  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-} lease_holder=${5:-}
+  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-} lease_holder=${5:-} lease_id=${6:-}
   local out lock attempt=0 max_retries lock_desc
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  if out=$(teardown_treehouse_return_once "$dir" "$cd_dir" "$lease_holder" 2>&1); then
+  if out=$(teardown_treehouse_return_once "$dir" "$cd_dir" "$lease_holder" "$lease_id" 2>&1); then
     [ -n "$out" ] && printf '%s\n' "$out"
     return 0
   fi
@@ -1660,7 +1662,7 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if out=$(teardown_treehouse_return_once "$dir" "$cd_dir" "$lease_holder" 2>&1); then
+    if out=$(teardown_treehouse_return_once "$dir" "$cd_dir" "$lease_holder" "$lease_id" 2>&1); then
       [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
@@ -1687,7 +1689,7 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      if out=$(teardown_treehouse_return_once "$dir" "$cd_dir" "$lease_holder" 2>&1); then
+      if out=$(teardown_treehouse_return_once "$dir" "$cd_dir" "$lease_holder" "$lease_id" 2>&1); then
         [ -n "$out" ] && printf '%s\n' "$out"
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
@@ -3436,10 +3438,53 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
   TREEHOUSE_LEASE_HOLDER=$(fm_meta_get "$META" treehouse_lease_holder)
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" "$TREEHOUSE_LEASE_HOLDER" || {
-    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-    exit 1
-  }
+  TREEHOUSE_LEASE_ID=$(fm_meta_get "$META" treehouse_lease_id)
+  TREEHOUSE_LEASE_TX="$STATE/$ID.herdr-lease"
+  TREEHOUSE_RETURN_NEEDED=1
+  if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ] && [ -n "$TREEHOUSE_LEASE_HOLDER" ]; then
+    [ -n "$TREEHOUSE_LEASE_ID" ] \
+      && fm_treehouse_lease_transaction_reconcile "$TREEHOUSE_LEASE_TX" \
+        "$ID" "$TREEHOUSE_LEASE_HOLDER" "$PROJ" \
+      && [ "$FM_TREEHOUSE_LEASE_TX_WORKTREE" = "$WT" ] \
+      && [ "$FM_TREEHOUSE_LEASE_TX_ID" = "$TREEHOUSE_LEASE_ID" ] || {
+      echo "error: structural Herdr Treehouse lease identity does not match its durable cleanup transaction; teardown aborted" >&2
+      exit 1
+    }
+    case "$FM_TREEHOUSE_LEASE_TX_RESULT" in
+      acquired)
+        fm_treehouse_lease_transaction_write "$TREEHOUSE_LEASE_TX" cleanup \
+          "$ID" "$TREEHOUSE_LEASE_HOLDER" "$PROJ" "$WT" "$TREEHOUSE_LEASE_ID" || exit 1
+        ;;
+      cleanup) ;;
+      returned) TREEHOUSE_RETURN_NEEDED=0 ;;
+      *)
+        echo "error: structural Herdr Treehouse lease cleanup has no exact acquired identity; teardown aborted" >&2
+        exit 1
+        ;;
+    esac
+  fi
+  if [ "$TREEHOUSE_RETURN_NEEDED" = 1 ]; then
+    teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" \
+      "$TREEHOUSE_LEASE_HOLDER" "$TREEHOUSE_LEASE_ID" || {
+      echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+      exit 1
+    }
+  fi
+  if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ] && [ -n "$TREEHOUSE_LEASE_HOLDER" ]; then
+    if [ "$TREEHOUSE_RETURN_NEEDED" = 1 ]; then
+      fm_treehouse_lease_transaction_write "$TREEHOUSE_LEASE_TX" returned \
+        "$ID" "$TREEHOUSE_LEASE_HOLDER" "$PROJ" "$WT" "$TREEHOUSE_LEASE_ID" || {
+        echo "error: Treehouse returned the isolated copy but its confirmed-return state could not be persisted" >&2
+        exit 1
+      }
+    fi
+    fm_treehouse_lease_transaction_reconcile "$TREEHOUSE_LEASE_TX" \
+      "$ID" "$TREEHOUSE_LEASE_HOLDER" "$PROJ" \
+      && [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = returned ] || {
+      echo "error: Treehouse lease return could not be confirmed against its exact identity" >&2
+      exit 1
+    }
+  fi
   # The slot is back in the pool, so this task's claim on it is spent. Dropping
   # it here - and only after a return that succeeded - keeps a returned slot
   # unclaimed until its next holder claims it, and leaves the claim in place
@@ -3575,6 +3620,18 @@ else
     echo "error: $ID's endpoint and local copy are cleaned up, but its task record could not be removed ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1
   fi
+fi
+if [ -e "$STATE/$ID.herdr-lease" ] || [ -L "$STATE/$ID.herdr-lease" ]; then
+  fm_treehouse_lease_transaction_snapshot "$STATE/$ID.herdr-lease" \
+    && [ "$FM_TREEHOUSE_LEASE_TX_PHASE" = returned ] \
+    && [ "$FM_TREEHOUSE_LEASE_TX_TASK" = "$ID" ] \
+    && fm_treehouse_lease_transaction_reconcile "$STATE/$ID.herdr-lease" \
+      "$ID" "$FM_TREEHOUSE_LEASE_TX_HOLDER" "$FM_TREEHOUSE_LEASE_TX_PROJECT" \
+    && [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = returned ] || {
+    echo "error: structural Herdr Treehouse cleanup is not durably confirmed returned; retaining its lease record" >&2
+    exit 1
+  }
+  rm -f -- "$STATE/$ID.herdr-lease"
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0

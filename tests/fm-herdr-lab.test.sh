@@ -129,11 +129,14 @@ test_provision_run_and_guarded_teardown() {
   assert_present "$TRIPWIRES/$name.fleet-state.json" "provision did not record the fleet-state tripwire"
 
   run_with_fake fm_herdr_lab_cli "$name" workspace list >/dev/null || fail "safe run command failed"
-  FM_EXPECT_HERDR_SESSION="$name" run_with_fake fm_herdr_lab_cli "$name" \
-    agent start proof-pi --kind pi --pane w1:p2 -- --model test --session agent-argument >/dev/null \
-    || fail "agent start with arguments after -- failed"
-  grep -Fx "agent start proof-pi --kind pi --pane w1:p2 --session $name -- --model test --session agent-argument" "$FAKE_LOG" >/dev/null \
-    || fail "agent start did not place the lab selector before -- and preserve every agent argument"
+  FM_EXPECT_HERDR_SESSION="$name" run_with_fake fm_herdr_lab_raw "$name" \
+    agent start proof-pi --kind pi --pane w1:p2 -- --model test >/dev/null \
+    || fail "internal separator-safe call failed"
+  grep -Fx "agent start proof-pi --kind pi --pane w1:p2 --session $name -- --model test" "$FAKE_LOG" >/dev/null \
+    || fail "internal call did not place the lab selector immediately before the separator"
+  status=0
+  run_with_fake fm_herdr_lab_cli "$name" agent start proof-pi --kind pi --pane w1:p2 -- --model test >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "run must not expose the agent-argument separator surface"
   status=0
   run_with_fake fm_herdr_lab_cli "$name" agent start proof-pi --kind pi --pane w1:p2 --session default >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "caller-supplied agent-start selector must be refused"

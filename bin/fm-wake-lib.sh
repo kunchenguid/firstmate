@@ -1258,6 +1258,158 @@ fm_treehouse_lease_return_exact() {  # <project-dir> <worktree> <holder>
   (CDPATH='' cd -- "$project" && treehouse return --force --if-lease-holder "$holder" "$worktree")
 }
 
+fm_treehouse_lease_transaction_validate() { # <phase> <task> <holder> <project> <worktree|-> <lease-id|->
+  local phase=$1 task=$2 holder=$3 project=$4 worktree=$5 lease_id=$6 canonical_project canonical_worktree
+  case "$task:$holder" in *[!A-Za-z0-9._:-]*) return 1 ;; esac
+  case "$task" in '') return 1 ;; esac
+  case "$holder" in ''|.*) return 1 ;; esac
+  canonical_project=$(CDPATH='' cd -- "$project" 2>/dev/null && pwd -P) || return 1
+  [ "$canonical_project" = "$project" ] || return 1
+  case "$phase" in
+    intent)
+      [ "$worktree" = - ] && [ "$lease_id" = - ]
+      ;;
+    acquired|cleanup|returned)
+      canonical_worktree=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
+      [ "$canonical_worktree" = "$worktree" ] || return 1
+      [ "${#lease_id}" = 32 ] && case "$lease_id" in *[!0-9a-f]*) return 1 ;; *) return 0 ;; esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_treehouse_lease_transaction_write() { # <file> <phase> <task> <holder> <project> <worktree|-> <lease-id|->
+  local file=$1 phase=$2 task=$3 holder=$4 project=$5 worktree=$6 lease_id=$7 tmp
+  fm_treehouse_lease_transaction_validate "$phase" "$task" "$holder" "$project" "$worktree" "$lease_id" || return 1
+  if { [ -e "$file" ] || [ -L "$file" ]; } && { [ ! -f "$file" ] || [ -L "$file" ]; }; then
+    return 1
+  fi
+  tmp="$file.tmp.${BASHPID:-$$}.$RANDOM"
+  rm -f -- "$tmp" || return 1
+  {
+    printf 'version=1\n'
+    printf 'phase=%s\n' "$phase"
+    printf 'task=%s\n' "$task"
+    printf 'holder=%s\n' "$holder"
+    printf 'project=%s\n' "$project"
+    printf 'worktree=%s\n' "$worktree"
+    printf 'lease_id=%s\n' "$lease_id"
+  } >"$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$file" || { rm -f -- "$tmp"; return 1; }
+}
+
+fm_treehouse_lease_transaction_snapshot() { # <file>
+  local file=$1 key count line value
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  [ "$(wc -l < "$file" | tr -d '[:space:]')" = 7 ] \
+    && ! grep -Ev '^(version|phase|task|holder|project|worktree|lease_id)=' "$file" >/dev/null 2>&1 \
+    || return 1
+  for key in version phase task holder project worktree lease_id; do
+    count=$(grep -c "^${key}=" "$file" 2>/dev/null || true)
+    [ "$count" = 1 ] || return 1
+    line=$(grep "^${key}=" "$file") || return 1
+    value=${line#*=}
+    case "$key" in
+      version) FM_TREEHOUSE_LEASE_TX_VERSION=$value ;;
+      phase) FM_TREEHOUSE_LEASE_TX_PHASE=$value ;;
+      task) FM_TREEHOUSE_LEASE_TX_TASK=$value ;;
+      holder) FM_TREEHOUSE_LEASE_TX_HOLDER=$value ;;
+      project) FM_TREEHOUSE_LEASE_TX_PROJECT=$value ;;
+      worktree) FM_TREEHOUSE_LEASE_TX_WORKTREE=$value ;;
+      lease_id) FM_TREEHOUSE_LEASE_TX_ID=$value ;;
+    esac
+  done
+  [ "$FM_TREEHOUSE_LEASE_TX_VERSION" = 1 ] || return 1
+  fm_treehouse_lease_transaction_validate "$FM_TREEHOUSE_LEASE_TX_PHASE" \
+    "$FM_TREEHOUSE_LEASE_TX_TASK" "$FM_TREEHOUSE_LEASE_TX_HOLDER" \
+    "$FM_TREEHOUSE_LEASE_TX_PROJECT" "$FM_TREEHOUSE_LEASE_TX_WORKTREE" \
+    "$FM_TREEHOUSE_LEASE_TX_ID"
+}
+
+fm_treehouse_lease_status_json() { # <project>
+  (CDPATH='' cd -- "$1" && treehouse status --json)
+}
+
+fm_treehouse_lease_transaction_reconcile() { # <file> <task> <holder> <project>
+  local file=$1 task=$2 holder=$3 project=$4 status matches count path lease_id canonical
+  FM_TREEHOUSE_LEASE_TX_RESULT=
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    FM_TREEHOUSE_LEASE_TX_RESULT=absent
+    return 0
+  fi
+  fm_treehouse_lease_transaction_snapshot "$file" || return 1
+  [ "$FM_TREEHOUSE_LEASE_TX_TASK" = "$task" ] \
+    && [ "$FM_TREEHOUSE_LEASE_TX_HOLDER" = "$holder" ] \
+    && [ "$FM_TREEHOUSE_LEASE_TX_PROJECT" = "$project" ] || return 1
+  status=$(fm_treehouse_lease_status_json "$project" 2>/dev/null) || return 1
+  printf '%s' "$status" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
+  case "$FM_TREEHOUSE_LEASE_TX_PHASE" in
+    intent)
+      matches=$(printf '%s' "$status" | jq -c --arg holder "$holder" \
+        '[.[] | select(.lease_holder == $holder and (.lease_id | type == "string") and (.path | type == "string"))]' 2>/dev/null) || return 1
+      count=$(printf '%s' "$matches" | jq -r 'length' 2>/dev/null) || return 1
+      if [ "$count" = 0 ]; then
+        rm -f -- "$file" || return 1
+        FM_TREEHOUSE_LEASE_TX_RESULT=retry
+        return 0
+      fi
+      [ "$count" = 1 ] || return 1
+      path=$(printf '%s' "$matches" | jq -r '.[0].path' 2>/dev/null) || return 1
+      lease_id=$(printf '%s' "$matches" | jq -r '.[0].lease_id' 2>/dev/null) || return 1
+      canonical=$(CDPATH='' cd -- "$path" 2>/dev/null && pwd -P) || return 1
+      [ "$canonical" = "$path" ] && fm_treehouse_pool_slot "$project" "$path" || return 1
+      fm_treehouse_lease_transaction_write "$file" acquired "$task" "$holder" "$project" "$path" "$lease_id" || return 1
+      fm_treehouse_lease_transaction_snapshot "$file" || return 1
+      FM_TREEHOUSE_LEASE_TX_RESULT=acquired
+      ;;
+    acquired|cleanup)
+      fm_treehouse_pool_slot "$project" "$FM_TREEHOUSE_LEASE_TX_WORKTREE" || return 1
+      count=$(printf '%s' "$status" | jq -r --arg id "$FM_TREEHOUSE_LEASE_TX_ID" --arg holder "$holder" --arg path "$FM_TREEHOUSE_LEASE_TX_WORKTREE" \
+        '[.[] | select(.lease_id == $id and .lease_holder == $holder and .path == $path)] | length' 2>/dev/null) || return 1
+      if [ "$count" = 1 ]; then
+        FM_TREEHOUSE_LEASE_TX_RESULT=$FM_TREEHOUSE_LEASE_TX_PHASE
+      elif [ "$count" = 0 ] && [ "$FM_TREEHOUSE_LEASE_TX_PHASE" = cleanup ]; then
+        fm_treehouse_lease_transaction_write "$file" returned "$task" "$holder" "$project" \
+          "$FM_TREEHOUSE_LEASE_TX_WORKTREE" "$FM_TREEHOUSE_LEASE_TX_ID" || return 1
+        fm_treehouse_lease_transaction_snapshot "$file" || return 1
+        FM_TREEHOUSE_LEASE_TX_RESULT=returned
+      else
+        return 1
+      fi
+      ;;
+    returned)
+      count=$(printf '%s' "$status" | jq -r --arg id "$FM_TREEHOUSE_LEASE_TX_ID" \
+        '[.[] | select(.lease_id == $id)] | length' 2>/dev/null) || return 1
+      [ "$count" = 0 ] || return 1
+      FM_TREEHOUSE_LEASE_TX_RESULT=returned
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_treehouse_lease_transaction_return() { # <file> <task> <holder> <project>
+  local file=$1 task=$2 holder=$3 project=$4
+  fm_treehouse_lease_transaction_reconcile "$file" "$task" "$holder" "$project" || return 1
+  case "$FM_TREEHOUSE_LEASE_TX_RESULT" in
+    absent|retry) return 0 ;;
+    acquired)
+      fm_treehouse_lease_transaction_write "$file" cleanup "$task" "$holder" "$project" \
+        "$FM_TREEHOUSE_LEASE_TX_WORKTREE" "$FM_TREEHOUSE_LEASE_TX_ID" || return 1
+      fm_treehouse_lease_transaction_snapshot "$file" || return 1
+      ;;
+    cleanup|returned) ;;
+    *) return 1 ;;
+  esac
+  if [ "$FM_TREEHOUSE_LEASE_TX_PHASE" = cleanup ]; then
+    (CDPATH='' cd -- "$project" && treehouse return --force \
+      --if-lease-id "$FM_TREEHOUSE_LEASE_TX_ID" "$FM_TREEHOUSE_LEASE_TX_WORKTREE") || return 1
+    fm_treehouse_lease_transaction_write "$file" returned "$task" "$holder" "$project" \
+      "$FM_TREEHOUSE_LEASE_TX_WORKTREE" "$FM_TREEHOUSE_LEASE_TX_ID" || return 1
+  fi
+  fm_treehouse_lease_transaction_reconcile "$file" "$task" "$holder" "$project" || return 1
+  [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = returned ]
+}
+
 # Slot-owner claim: which task a Treehouse pool slot currently belongs to.
 #
 # Treehouse can record ownership durably: `treehouse get --lease --lease-holder`

@@ -64,6 +64,10 @@ if response_mode == "success":
     response = {"id": request["id"], "result": {"type": "layout_apply", "layout": {
         "workspace_id": "w1", "tab_id": tab_id, "focused_pane_id": pane_id,
         "root": {"type": "pane", "pane_id": pane_id}}}}
+elif response_mode == "misdirected":
+    response = {"id": request["id"], "result": {"type": "layout_apply", "layout": {
+        "workspace_id": "w1", "tab_id": "w1:t8", "focused_pane_id": "w1:p8",
+        "root": {"type": "pane", "pane_id": "w1:p8"}}}}
 elif response_mode == "timeout":
     import time
     time.sleep(1)
@@ -198,6 +202,9 @@ fm_backend_herdr_cli() { # <session> <args...>
     "tab get w1:t4")
       printf '%s\n' '{"result":{"tab":{"workspace_id":"w1","tab_id":"w1:t4"}}}'
       ;;
+    "tab get w1:t8")
+      printf '%s\n' '{"result":{"tab":{"workspace_id":"w1","tab_id":"w1:t8"}}}'
+      ;;
     "pane list --workspace w1")
       case "$MODE" in
         remove_original)
@@ -250,6 +257,12 @@ fm_backend_herdr_cli() { # <session> <args...>
       ;;
     "pane get w1:p4")
       printf '%s\n' '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t4","pane_id":"w1:p4","label":"fm-restore-0123456789abcdef0123456789abcdef"}}}'
+      ;;
+    "pane get w1:p8")
+      printf '%s\n' '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t8","pane_id":"w1:p8","label":"captain-pane"}}}'
+      ;;
+    "pane close w1:p8")
+      fail "adapter attempted to close an unverified response-named pane"
       ;;
     "pane process-info --pane w1:p3")
       if [ "$MODE" = wrong-agent ]; then
@@ -391,15 +404,21 @@ fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
   && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = removed ] \
   || fail "confirmed cleanup did not resolve the structural attempt"
 rm -f "$ATTEMPT"
-pass "layout.apply cleans only the exact returned pane after a post-mutation identity refusal"
-MODE=ok
-
-MODE=focused_cleanup
-rm -f "$CLOSED"
-if fm_backend_herdr_layout_discard_response_pane lab-structural w1:p3 >/dev/null 2>&1; then
-  fail "post-response cleanup closed the active tab viewed by a foreground client"
+pass "layout.apply reconciles only the independently verified launch label after an identity refusal"
+MODE=misdirected
+rm -f "$ATTEMPT" "$CLOSED"
+: > "$CALLS"
+start_server misdirected
+if run_layout >/dev/null 2>&1; then
+  fail "layout adapter accepted a response naming an unrelated pane"
 fi
-[ ! -e "$CLOSED" ] || fail "post-response focus refusal still closed its target pane"
+wait_server
+assert_no_grep 'pane close w1:p8' "$CALLS" \
+  "post-mutation refusal closed the unverified response-named pane"
+[ "$(grep -c '^lab-structural|pane close w1:p3$' "$CALLS")" -eq 1 ] \
+  || fail "post-mutation refusal did not reconcile the independently labeled replacement"
+rm -f "$ATTEMPT" "$CLOSED"
+MODE=focused_cleanup
 fm_backend_herdr_layout_attempt_write "$ATTEMPT" 4 0123456789abcdef0123456789abcdef \
   fresh task-z1 "$TMP_ROOT/worktree" fm-task-z1 \
   lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef
@@ -430,10 +449,6 @@ rm -f "$CLOSED" "$OLD_CLOSED"
 CLOSE_READBACK=unreadable
 if fm_backend_herdr_projection_cleanup_exact lab-structural w1:p3 '' >/dev/null 2>&1; then
   fail "spawn abort cleanup accepted an unreadable post-close task pane response"
-fi
-rm -f "$CLOSED"
-if fm_backend_herdr_layout_discard_response_pane lab-structural w1:p3 >/dev/null 2>&1; then
-  fail "response-pane cleanup accepted an unreadable post-close pane response"
 fi
 rm -f "$CLOSED"
 fm_backend_herdr_layout_attempt_write "$ATTEMPT" 4 0123456789abcdef0123456789abcdef \
@@ -995,6 +1010,8 @@ STRUCT_TASK_LABEL="$TMP_ROOT/structural-task-label"
 STRUCT_CLOSED="$TMP_ROOT/structural-closed"
 STRUCT_CLOSE_LOG="$TMP_ROOT/structural-close.log"
 STRUCT_TREEHOUSE_LOG="$TMP_ROOT/structural-treehouse.log"
+STRUCT_TREEHOUSE_STATE="$TMP_ROOT/structural-treehouse-state"
+STRUCT_LEASE_ID=11111111111111111111111111111111
 fm_test_spawn_home "$STRUCT_HOME" pi
 printf 'off\n' > "$STRUCT_HOME/config/herdr-presentation-spaces"
 fm_git_worktree "$STRUCT_PROJECT" "$STRUCT_WT" structural-worktree
@@ -1002,10 +1019,39 @@ printf '{}\n' > "$STRUCT_POOL/treehouse-state.json"
 STRUCT_WORKSPACE_LABEL=$(FM_HOME="$STRUCT_HOME" fm_backend_herdr_workspace_label)
 cat > "$STRUCT_FAKEBIN/treehouse" <<'SH'
 #!/usr/bin/env bash
+set -eu
 printf '%s\n' "$*" >> "${FM_FAKE_STRUCT_TREEHOUSE_LOG:?}"
+state=${FM_FAKE_STRUCT_TREEHOUSE_STATE:?}
 case "${1:-}" in
-  get) printf '%s\n' "${FM_FAKE_STRUCT_WT:?}" ;;
-  return) ;;
+  get)
+    holder=
+    previous=
+    for arg in "$@"; do
+      [ "$previous" != --lease-holder ] || holder=$arg
+      previous=$arg
+    done
+    printf '%s\n' "$holder" > "$state"
+    jq -cn --arg path "${FM_FAKE_STRUCT_WT:?}" --arg id "${FM_FAKE_STRUCT_LEASE_ID:?}" --arg holder "$holder" \
+      '{path:$path,lease_id:$id,lease_holder:$holder,leased_at:"2026-01-01T00:00:00Z",base_branch:"main"}'
+    ;;
+  status)
+    if [ -f "$state" ]; then
+      jq -cn --arg path "${FM_FAKE_STRUCT_WT:?}" --arg id "${FM_FAKE_STRUCT_LEASE_ID:?}" --arg holder "$(cat "$state")" \
+        '[{name:"slot",path:$path,status:"leased",lease_id:$id,lease_holder:$holder}]'
+    else
+      printf '%s\n' '[]'
+    fi
+    ;;
+  return)
+    previous=
+    lease_id=
+    for arg in "$@"; do
+      [ "$previous" != --if-lease-id ] || lease_id=$arg
+      previous=$arg
+    done
+    [ "$lease_id" = "${FM_FAKE_STRUCT_LEASE_ID:?}" ]
+    rm -f "$state"
+    ;;
 esac
 SH
 cat > "$STRUCT_FAKEBIN/herdr" <<'SH'
@@ -1126,9 +1172,49 @@ SH
 fm_fake_exit0 "$STRUCT_FAKEBIN" pi
 fm_test_fake_sleep_noop "$STRUCT_FAKEBIN"
 chmod +x "$STRUCT_FAKEBIN/treehouse" "$STRUCT_FAKEBIN/herdr"
+export FM_FAKE_STRUCT_TREEHOUSE_LOG="$STRUCT_TREEHOUSE_LOG"
+export FM_FAKE_STRUCT_TREEHOUSE_STATE="$STRUCT_TREEHOUSE_STATE"
+export FM_FAKE_STRUCT_LEASE_ID="$STRUCT_LEASE_ID"
+export FM_FAKE_STRUCT_WT="$STRUCT_WT"
+LEASE_TX="$TMP_ROOT/lease-transaction"
 : > "$STRUCT_TREEHOUSE_LOG"
+rm -f "$STRUCT_TREEHOUSE_STATE" "$LEASE_TX"
+fm_treehouse_lease_transaction_write "$LEASE_TX" intent lease-z1 fm-lease-z1 \
+  "$STRUCT_PROJECT" - - || fail "lease transaction did not publish holder intent"
+fm_treehouse_lease_transaction_snapshot "$LEASE_TX" \
+  && [ "$FM_TREEHOUSE_LEASE_TX_PHASE" = intent ] \
+  || fail "lease transaction intent was not durable"
+PATH="$STRUCT_FAKEBIN:$PATH" fm_treehouse_lease_transaction_reconcile \
+  "$LEASE_TX" lease-z1 fm-lease-z1 "$STRUCT_PROJECT" \
+  && [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = retry ] \
+  && [ ! -e "$LEASE_TX" ] \
+  || fail "pre-acquisition crash recovery did not retire an unspent intent"
+fm_treehouse_lease_transaction_write "$LEASE_TX" intent lease-z1 fm-lease-z1 \
+  "$STRUCT_PROJECT" - - || fail "lease transaction could not republish holder intent"
+printf '%s\n' fm-lease-z1 > "$STRUCT_TREEHOUSE_STATE"
+PATH="$STRUCT_FAKEBIN:$PATH" fm_treehouse_lease_transaction_reconcile \
+  "$LEASE_TX" lease-z1 fm-lease-z1 "$STRUCT_PROJECT" \
+  && [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = acquired ] \
+  && [ "$FM_TREEHOUSE_LEASE_TX_WORKTREE" = "$STRUCT_WT" ] \
+  && [ "$FM_TREEHOUSE_LEASE_TX_ID" = "$STRUCT_LEASE_ID" ] \
+  || fail "post-acquisition crash recovery did not bind the authoritative lease identity"
+fm_treehouse_lease_transaction_write "$LEASE_TX" cleanup lease-z1 fm-lease-z1 \
+  "$STRUCT_PROJECT" "$STRUCT_WT" "$STRUCT_LEASE_ID" \
+  || fail "lease transaction did not persist cleanup intent"
+rm -f "$STRUCT_TREEHOUSE_STATE"
+PATH="$STRUCT_FAKEBIN:$PATH" fm_treehouse_lease_transaction_reconcile \
+  "$LEASE_TX" lease-z1 fm-lease-z1 "$STRUCT_PROJECT" \
+  && [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = returned ] \
+  && [ "$FM_TREEHOUSE_LEASE_TX_PHASE" = returned ] \
+  || fail "post-return crash recovery did not persist confirmed return"
+PATH="$STRUCT_FAKEBIN:$PATH" fm_treehouse_lease_transaction_reconcile \
+  "$LEASE_TX" lease-z1 fm-lease-z1 "$STRUCT_PROJECT" \
+  && [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = returned ] \
+  || fail "confirmed lease return was not idempotent"
+rm -f "$LEASE_TX"
+pass "Treehouse lease transactions recover every acquisition and return transition"
 : > "$STRUCT_CLOSE_LOG"
-rm -f "$STRUCT_TASK_CREATED" "$STRUCT_TASK_LABEL" "$STRUCT_CLOSED" "$APPLIED" "$REQUEST"
+rm -f "$STRUCT_TASK_CREATED" "$STRUCT_TASK_LABEL" "$STRUCT_CLOSED" "$STRUCT_TREEHOUSE_STATE" "$APPLIED" "$REQUEST"
 fm_test_spawn_brief "$STRUCT_HOME" preapply-z1 "Clean a flat structural pane after pre-apply refusal."
 set +e
 struct_pre_out=$(HERDR_SESSION=lab-structural \
@@ -1136,7 +1222,8 @@ struct_pre_out=$(HERDR_SESSION=lab-structural \
   FM_FAKE_STRUCT_APPLIED="$APPLIED" FM_FAKE_STRUCT_REQUEST="$REQUEST" \
   FM_FAKE_STRUCT_TASK_CREATED="$STRUCT_TASK_CREATED" FM_FAKE_STRUCT_TASK_LABEL="$STRUCT_TASK_LABEL" \
   FM_FAKE_STRUCT_CLOSED="$STRUCT_CLOSED" FM_FAKE_STRUCT_CLOSE_LOG="$STRUCT_CLOSE_LOG" \
-  FM_FAKE_STRUCT_TREEHOUSE_LOG="$STRUCT_TREEHOUSE_LOG" FM_FAKE_STRUCT_WT="$STRUCT_WT" \
+  FM_FAKE_STRUCT_TREEHOUSE_LOG="$STRUCT_TREEHOUSE_LOG" FM_FAKE_STRUCT_TREEHOUSE_STATE="$STRUCT_TREEHOUSE_STATE" \
+  FM_FAKE_STRUCT_LEASE_ID="$STRUCT_LEASE_ID" FM_FAKE_STRUCT_WT="$STRUCT_WT" \
   FM_FAKE_STRUCT_WORKSPACE_LABEL="$STRUCT_WORKSPACE_LABEL" FM_FAKE_STRUCT_PARENT_PID="$$" \
   fm_test_run_spawn "$STRUCT_HOME" "$STRUCT_WT" "$STRUCT_FAKEBIN" \
     preapply-z1 "$STRUCT_PROJECT" --scout --harness pi --backend herdr)
@@ -1149,8 +1236,8 @@ assert_contains "$struct_pre_out" "failed before worker readiness" \
   || fail "pre-apply refusal did not close exactly its original flat pane"
 [ ! -e "$STRUCT_HOME/state/preapply-z1.meta" ] \
   || fail "pre-apply cleanup retained task metadata after confirming pane removal"
-assert_grep 'return --force --if-lease-holder fm-preapply-z1' "$STRUCT_TREEHOUSE_LOG" \
-  "pre-apply cleanup did not return its exact Treehouse lease"
+assert_grep "return --force --if-lease-id $STRUCT_LEASE_ID $STRUCT_WT" "$STRUCT_TREEHOUSE_LOG" \
+  "pre-apply cleanup did not return its exact Treehouse lease identity"
 pass "flat structural pre-apply refusals close their original pane and release ownership"
 
 rm -f "$STRUCT_TASK_CREATED" "$STRUCT_TASK_LABEL" "$STRUCT_CLOSED" "$APPLIED" "$REQUEST"
@@ -1163,7 +1250,8 @@ struct_post_out=$(HERDR_SESSION=lab-structural \
   FM_FAKE_STRUCT_APPLIED="$APPLIED" FM_FAKE_STRUCT_REQUEST="$REQUEST" \
   FM_FAKE_STRUCT_TASK_CREATED="$STRUCT_TASK_CREATED" FM_FAKE_STRUCT_TASK_LABEL="$STRUCT_TASK_LABEL" \
   FM_FAKE_STRUCT_CLOSED="$STRUCT_CLOSED" FM_FAKE_STRUCT_CLOSE_LOG="$STRUCT_CLOSE_LOG" \
-  FM_FAKE_STRUCT_TREEHOUSE_LOG="$STRUCT_TREEHOUSE_LOG" FM_FAKE_STRUCT_WT="$STRUCT_WT" \
+  FM_FAKE_STRUCT_TREEHOUSE_LOG="$STRUCT_TREEHOUSE_LOG" FM_FAKE_STRUCT_TREEHOUSE_STATE="$STRUCT_TREEHOUSE_STATE" \
+  FM_FAKE_STRUCT_LEASE_ID="$STRUCT_LEASE_ID" FM_FAKE_STRUCT_WT="$STRUCT_WT" \
   FM_FAKE_STRUCT_WORKSPACE_LABEL="$STRUCT_WORKSPACE_LABEL" FM_FAKE_STRUCT_PARENT_PID="$$" \
   fm_test_run_spawn "$STRUCT_HOME" "$STRUCT_WT" "$STRUCT_FAKEBIN" \
     postapply-z1 "$STRUCT_PROJECT" --scout --harness pi --backend herdr)
@@ -1179,8 +1267,8 @@ assert_contains "$struct_post_out" "did not produce the expected Pi process" \
   || fail "post-apply reconciliation retained metadata after confirmed cleanup"
 [ ! -e "$STRUCT_HOME/state/postapply-z1.herdr-launch" ] \
   || fail "post-apply reconciliation retained its resolved attempt"
-assert_grep 'return --force --if-lease-holder fm-postapply-z1' "$STRUCT_TREEHOUSE_LOG" \
-  "post-apply reconciliation did not return its exact Treehouse lease"
+assert_grep "return --force --if-lease-id $STRUCT_LEASE_ID $STRUCT_WT" "$STRUCT_TREEHOUSE_LOG" \
+  "post-apply reconciliation did not return its exact Treehouse lease identity"
 pass "post-apply abort reconciliation owns cleanup without a duplicate close"
 
 rm -f "$STRUCT_TASK_CREATED" "$STRUCT_TASK_LABEL" "$STRUCT_CLOSED" "$APPLIED" "$REQUEST"
@@ -1192,7 +1280,8 @@ struct_held_out=$(HERDR_SESSION=lab-structural \
   FM_FAKE_STRUCT_APPLIED="$APPLIED" FM_FAKE_STRUCT_REQUEST="$REQUEST" \
   FM_FAKE_STRUCT_TASK_CREATED="$STRUCT_TASK_CREATED" FM_FAKE_STRUCT_TASK_LABEL="$STRUCT_TASK_LABEL" \
   FM_FAKE_STRUCT_CLOSED="$STRUCT_CLOSED" FM_FAKE_STRUCT_CLOSE_LOG="$STRUCT_CLOSE_LOG" \
-  FM_FAKE_STRUCT_TREEHOUSE_LOG="$STRUCT_TREEHOUSE_LOG" FM_FAKE_STRUCT_WT="$STRUCT_WT" \
+  FM_FAKE_STRUCT_TREEHOUSE_LOG="$STRUCT_TREEHOUSE_LOG" FM_FAKE_STRUCT_TREEHOUSE_STATE="$STRUCT_TREEHOUSE_STATE" \
+  FM_FAKE_STRUCT_LEASE_ID="$STRUCT_LEASE_ID" FM_FAKE_STRUCT_WT="$STRUCT_WT" \
   FM_FAKE_STRUCT_WORKSPACE_LABEL="$STRUCT_WORKSPACE_LABEL" FM_FAKE_STRUCT_PARENT_PID="$$" \
   fm_test_run_spawn "$STRUCT_HOME" "$STRUCT_WT" "$STRUCT_FAKEBIN" \
     preapply-held-z1 "$STRUCT_PROJECT" --scout --harness pi --backend herdr)
@@ -1210,8 +1299,13 @@ fm_backend_herdr_layout_attempt_snapshot "$HELD_ATTEMPT" \
 [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 6 ] \
   && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = not-applied ] \
   || fail "focused pre-apply refusal did not preserve its non-mutating recovery state"
-assert_no_grep 'return --force --if-lease-holder fm-preapply-held-z1' "$STRUCT_TREEHOUSE_LOG" \
-  "focused pre-apply refusal returned the lease while preserving its task"
+[ -f "$STRUCT_TREEHOUSE_STATE" ] \
+  && [ "$(cat "$STRUCT_TREEHOUSE_STATE")" = fm-preapply-held-z1 ] \
+  || fail "focused pre-apply refusal lost its exact live Treehouse lease"
+fm_treehouse_lease_transaction_snapshot "$STRUCT_HOME/state/preapply-held-z1.herdr-lease" \
+  && [ "$FM_TREEHOUSE_LEASE_TX_PHASE" = acquired ] \
+  && [ "$FM_TREEHOUSE_LEASE_TX_ID" = "$STRUCT_LEASE_ID" ] \
+  || fail "focused pre-apply refusal lost its durable acquired lease state"
 pass "pre-apply focus refusals preserve durable ownership for exact recovery"
 
 NON_PI="$TMP_ROOT/non-pi"
