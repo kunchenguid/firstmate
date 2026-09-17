@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Focused safety tests for bin/fm-herdr-session-cleanup.sh.
-# Covers one exact cleanup, every title/journal/topology/agent/process refusal,
-# locked revalidation races, focus refusal, read errors, and repeat idempotence.
+# Covers terminal done/failed cleanup alongside one exact stale cleanup, every
+# title/journal/topology/agent/process refusal, locked revalidation races, focus
+# refusal, read errors, and repeat idempotence.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -188,7 +189,7 @@ fm_backend_herdr_cli() {
 
 fm_backend_herdr_projection_close_pane_focus_preserving() {
   [ ! -e "$FIXTURE_DIR/focus-refuse" ] || return 1
-  [ "${3:-}" = no-agent ] || return 1
+  case "${3:-}" in no-agent|terminal) ;; *) return 1 ;; esac
   printf '%s\n' "$*" >> "$CLOSE_LOG"
   : > "$FIXTURE_DIR/closed"
 }
@@ -219,6 +220,24 @@ write_cross_home_v2() {
   write_v2 "$TMP_ROOT/other-home" "$WS" "$TAB" "$PANE"
 }
 
+write_terminal_meta() {
+  local kind=${1:-ship}
+  {
+    printf 'window=test:%s\n' "$PANE"
+    printf 'endpoint_task_id=%s\n' "$ID"
+    printf 'worktree=%s/worktree\n' "$TMP_ROOT"
+    printf 'project=%s/project\n' "$TMP_ROOT"
+    printf 'backend=herdr\nkind=%s\n' "$kind"
+    printf 'herdr_session=test\nherdr_workspace_id=%s\nherdr_tab_id=%s\nherdr_pane_id=%s\n' \
+      "$WS" "$TAB" "$PANE"
+    printf 'pr=https://example.test/pull/17\n'
+  } > "$FM_STATE_OVERRIDE/$ID.meta"
+}
+
+write_terminal_status() {
+  printf '%s\n' "$1" > "$FM_STATE_OVERRIDE/$ID.status"
+}
+
 reset_fixture() {
   rm -rf "$FIXTURE_DIR" "$TMP_ROOT"/*.lock "${FM_STATE_OVERRIDE:?}/"*
   mkdir -p "$FIXTURE_DIR"
@@ -240,6 +259,14 @@ assert_preserved() { # <case>
   fi
   [ ! -s "$CLOSE_LOG" ] || fail "$name closed the pane"
   pass "$name preserves the candidate"
+}
+
+assert_terminal_preserved() { # <case>
+  local name=$1
+  fm_herdr_terminal_cleanup "$ID" >/dev/null 2>&1
+  [ -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "$name retired the journal"
+  [ ! -s "$CLOSE_LOG" ] || fail "$name closed the pane"
+  pass "$name preserves the terminal candidate"
 }
 
 reset_fixture
@@ -269,6 +296,79 @@ fm_herdr_session_cleanup >/dev/null 2>&1
 [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "matching v2 cleanup kept the journal"
 [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "matching v2 cleanup did not close exactly once"
 pass "v2 cleanup requires and accepts the exact journal endpoint binding"
+
+reset_fixture
+write_terminal_meta ship
+write_terminal_status 'done: worker finished with its PR ready'
+write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"
+fm_herdr_terminal_cleanup "$ID"
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "terminal cleanup kept the matching journal"
+[ -f "$FM_STATE_OVERRIDE/$ID.meta" ] || fail "terminal cleanup removed the durable task record"
+[ -f "$FM_STATE_OVERRIDE/$ID.status" ] || fail "terminal cleanup removed the terminal status record"
+grep -F 'pr=https://example.test/pull/17' "$FM_STATE_OVERRIDE/$ID.meta" >/dev/null \
+  || fail "terminal cleanup removed PR metadata"
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "terminal cleanup did not close exactly once"
+grep -F "test $PANE terminal" "$CLOSE_LOG" >/dev/null \
+  || fail "terminal cleanup did not use the terminal close guard"
+pass "terminal done cleanup closes one exact Herdr pane while retaining task and PR records"
+fm_herdr_terminal_cleanup "$ID"
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "repeated terminal cleanup closed a second pane"
+pass "repeated terminal cleanup is harmless after the exact pane is gone"
+reset_fixture
+write_terminal_meta ship
+write_terminal_status 'done: pane was already gone before notification'
+write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"
+: > "$FIXTURE_DIR/closed"
+fm_herdr_terminal_cleanup "$ID"
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] \
+  || fail "already-gone terminal cleanup kept an exact v2 journal"
+[ ! -s "$CLOSE_LOG" ] || fail "already-gone terminal cleanup attempted a second close"
+pass "already-gone terminal cleanup retires only the exact journal without a second close"
+
+reset_fixture
+write_terminal_meta ship
+write_terminal_status 'failed: worker stopped before validation'
+write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"
+fm_herdr_terminal_cleanup "$ID"
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "failed terminal outcome did not close the exact pane"
+pass "terminal failed cleanup uses the same exact endpoint path"
+
+reset_fixture
+write_terminal_meta ship
+write_terminal_status 'done: stale notification must not close a live agent'
+write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"
+printf 'live\n' > "$FIXTURE_DIR/agent"
+assert_terminal_preserved "live terminal target"
+reset_fixture
+write_terminal_meta ship
+write_terminal_status 'done: ambiguous notification must preserve the pane'
+write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"
+printf 'unknown\n' > "$FIXTURE_DIR/agent"
+assert_terminal_preserved "ambiguous terminal target"
+reset_fixture
+write_terminal_meta secondmate
+write_terminal_status 'done: secondmate tab is not a crewmate target'
+write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"
+assert_terminal_preserved "secondmate terminal target"
+reset_fixture
+write_terminal_meta ship
+write_terminal_status 'blocked: a non-terminal decision remains open'
+write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"
+assert_terminal_preserved "non-terminal status"
+reset_fixture
+write_terminal_meta ship
+write_terminal_status 'done: focus-safe refusal preserves the active tab'
+write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"
+: > "$FIXTURE_DIR/focus-refuse"
+assert_terminal_preserved "focus-unsafe terminal target"
+reset_fixture
+write_terminal_meta ship
+write_terminal_status 'done: flat Herdr worker has no projection journal'
+rm -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+fm_herdr_terminal_cleanup "$ID"
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "flat Herdr terminal cleanup did not close its exact pane"
+pass "flat Herdr terminal cleanup works without a presentation journal"
+
 reset_fixture; : > "$FM_STATE_OVERRIDE/$ID.meta"; assert_preserved "current task metadata"
 reset_fixture; printf 'live\n' > "$FIXTURE_DIR/agent"; assert_preserved "registered agent"
 reset_fixture; printf 'unknown\n' > "$FIXTURE_DIR/agent"; assert_preserved "unknown agent"

@@ -990,9 +990,40 @@ fm_backend_herdr_projection_target_tab_mutation_allowed() {  # <session> <tab-id
   return 1
 }
 
+# fm_backend_herdr_terminal_pane_binding_matches: prove that one response is
+# still the exact task pane, tab, and workspace selected by terminal cleanup.
+fm_backend_herdr_terminal_pane_binding_matches() {  # <session> <pane-id> <tab-id> <workspace-id>
+  local session=$1 pane_id=$2 expected_tab=$3 expected_workspace=$4 info
+  info=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e \
+    --arg pane "$pane_id" --arg tab "$expected_tab" --arg workspace "$expected_workspace" '
+    .result.pane.pane_id == $pane
+    and .result.pane.tab_id == $tab
+    and .result.pane.workspace_id == $workspace
+  ' >/dev/null 2>&1
+}
+
+# fm_backend_herdr_terminal_pane_close_allowed: prove a terminal task pane is
+# agent-free and contains only its exact idle shell. A stale Herdr registration
+# is allowed only when the process proof says the registered agent has exited.
+fm_backend_herdr_terminal_pane_close_allowed() {  # <session> <pane-id>
+  local session=$1 pane_id=$2 state
+  state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
+  case "$state" in
+    no-agent|stale-agent) ;;
+    *) return 1 ;;
+  esac
+  fm_backend_herdr_pane_idle_shell_pid "$session" "$pane_id" >/dev/null
+}
+
 # fm_backend_herdr_projection_close_pane_focus_preserving: close one exact
 # response-derived projection pane without leaving the captain focused
 # anywhere else.
+# The optional expected tab and workspace arguments are used by terminal
+# cleanup to bind the mutation to the complete recorded endpoint.
+# The optional required-agent-state `terminal` additionally requires an
+# agent-free, childless idle shell both before planning and at the mutation
+# boundary; the ordinary `no-agent` requirement remains unchanged.
 # If the target belongs to the active tab AND a live foreground client is
 # attached, exact tab preservation is impossible, so cleanup refuses instead
 # of changing focus. When no live client is attached, the persisted .focused
@@ -1006,9 +1037,11 @@ fm_backend_herdr_projection_target_tab_mutation_allowed() {  # <session> <tab-id
 # pane-death path. The exact-tab restore below remains the backstop, and any
 # ambiguity falls back to the plain explicit close, which the backstop masks
 # exactly as before this hardening.
-fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state]
+fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-id> [required-agent-state] [expected-tab] [expected-workspace]
   local session=$1 pane_id=$2 required_agent_state=${3:-}
+  local expected_tab=${4:-} expected_workspace=${5:-}
   local before active_tab info target_pane target_tab target_ws close_status state plan plan_shell_pid plan_move_record workspace_presence
+  local terminal_ready=1
   local skip_restore=0
   FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=""
   [ -n "$pane_id" ] || return 0
@@ -1024,11 +1057,17 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
   target_pane=$(printf '%s' "$info" | jq -r '.result.pane.pane_id // empty' 2>/dev/null)
   target_tab=$(printf '%s' "$info" | jq -r '.result.pane.tab_id // empty' 2>/dev/null)
   target_ws=$(printf '%s' "$info" | jq -r '.result.pane.workspace_id // empty' 2>/dev/null)
-  if [ "$target_pane" != "$pane_id" ] || [ -z "$target_tab" ]; then
+  if [ "$target_pane" != "$pane_id" ] || [ -z "$target_tab" ] \
+    || { [ -n "$expected_tab" ] && [ "$target_tab" != "$expected_tab" ]; } \
+    || { [ -n "$expected_workspace" ] && [ "$target_ws" != "$expected_workspace" ]; }; then
     echo "warning: herdr presentation cleanup received an ambiguous exact-pane response; refusing focus-unsafe pane close" >&2
     return 1
   fi
-  if [ -n "$required_agent_state" ]; then
+  if [ "$required_agent_state" = terminal ]; then
+    state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
+    FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=$state
+    fm_backend_herdr_terminal_pane_close_allowed "$session" "$pane_id" || return 1
+  elif [ -n "$required_agent_state" ]; then
     state=$(fm_backend_herdr_pane_agent_state "$session" "$pane_id")
     FM_BACKEND_HERDR_PROJECTION_CLOSE_AGENT_STATE=$state
     [ "$state" = "$required_agent_state" ] || return 1
@@ -1061,14 +1100,25 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
   # Herdr has no atomic target-focus-aware mutation, so these immediate
   # checkpoints bound but cannot eliminate the checkpoint-to-mutation race;
   # a durable atomic close remains deferred until Herdr exposes one.
+  if [ "$required_agent_state" = terminal ]; then
+    if [ -n "$expected_tab" ] && [ -n "$expected_workspace" ] \
+      && ! fm_backend_herdr_terminal_pane_binding_matches \
+        "$session" "$pane_id" "$expected_tab" "$expected_workspace"; then
+      terminal_ready=0
+    elif ! fm_backend_herdr_terminal_pane_close_allowed "$session" "$pane_id"; then
+      terminal_ready=0
+    fi
+  fi
   if [ "$plan" = death ]; then
-    if fm_backend_herdr_death_close_pane "$session" "$pane_id" "$plan_shell_pid" "$target_tab"; then
+    if [ "$terminal_ready" -eq 1 ] \
+      && fm_backend_herdr_death_close_pane "$session" "$pane_id" "$plan_shell_pid" "$target_tab"; then
       if [ -n "${FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS:-}" ]; then
         before=$FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS
         skip_restore=0
       fi
       close_status=0
-    elif fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$target_tab"; then
+    elif [ "$terminal_ready" -eq 1 ] \
+      && fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$target_tab"; then
       if [ -n "${FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS:-}" ]; then
         before=$FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS
         skip_restore=0
@@ -1081,7 +1131,8 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
     else
       close_status=1
     fi
-  elif fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$target_tab"; then
+  elif [ "$terminal_ready" -eq 1 ] \
+    && fm_backend_herdr_projection_target_tab_mutation_allowed "$session" "$target_tab"; then
     if [ -n "${FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS:-}" ]; then
       before=$FM_BACKEND_HERDR_PROJECTION_MUTATION_FOCUS
       skip_restore=0

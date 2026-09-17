@@ -2078,6 +2078,73 @@ test_projection_close_rechecks_required_agent_state_at_boundary() {
   pass "herdr presentation reclaim: live agent state at the close boundary refuses mutation"
 }
 
+test_projection_close_terminal_guard_refuses_live_or_ambiguous_panes() {
+  local dir events out status
+  dir="$TMP_ROOT/projection-close-terminal-guard"; mkdir -p "$dir"
+  events="$dir/events"; : > "$events"
+  out=$(ROOT="$ROOT" EVENTS="$events" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }
+    fm_backend_herdr_pane_agent_state() { printf "%s" "$FM_TEST_TERMINAL_STATE"; }
+    fm_backend_herdr_pane_idle_shell_pid() { printf "67"; }
+    fm_backend_herdr_emptying_close_plan() { printf "plain\n"; }
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "pane get") printf "{\"result\":{\"pane\":{\"pane_id\":\"w9:p2\",\"tab_id\":\"w9:t2\",\"workspace_id\":\"w9\"}}}\n" ;;
+        "pane close") printf "close\n" >> "$EVENTS" ;;
+      esac
+    }
+    FM_TEST_TERMINAL_STATE=live fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2 terminal >/dev/null 2>&1
+  ' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "terminal close guard accepted a live pane"
+  [ ! -s "$events" ] || fail "terminal close guard mutated a live pane"
+  out=$(ROOT="$ROOT" EVENTS="$events" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }
+    fm_backend_herdr_pane_agent_state() { printf "%s" "$FM_TEST_TERMINAL_STATE"; }
+    fm_backend_herdr_pane_idle_shell_pid() { printf "67"; }
+    fm_backend_herdr_emptying_close_plan() { printf "plain\n"; }
+    fm_backend_herdr_projection_target_tab_mutation_allowed() { return 0; }
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "pane get") printf "{\"result\":{\"pane\":{\"pane_id\":\"w9:p2\",\"tab_id\":\"w9:t2\",\"workspace_id\":\"w9\"}}}\n" ;;
+      esac
+    }
+    fm_backend_herdr_explicit_close_pane_confirmed() { printf "close\n" >> "$EVENTS"; }
+    FM_TEST_TERMINAL_STATE=unknown fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2 terminal >/dev/null 2>&1
+  ' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "terminal close guard accepted an ambiguous pane"
+  [ ! -s "$events" ] || fail "terminal close guard mutated an ambiguous pane"
+  pass "herdr terminal close guard refuses live and ambiguous panes"
+}
+
+test_projection_close_terminal_guard_allows_only_idle_agent_free_shell() {
+  local dir events out status
+  dir="$TMP_ROOT/projection-close-terminal-allowed"; mkdir -p "$dir"
+  events="$dir/events"; : > "$events"
+  out=$(ROOT="$ROOT" EVENTS="$events" bash -c '
+    . "$ROOT/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_focus_snapshot() { printf "w1\tw1:t1"; }
+    fm_backend_herdr_pane_agent_state() { printf stale-agent; }
+    fm_backend_herdr_pane_idle_shell_pid() { printf 67; }
+    fm_backend_herdr_emptying_close_plan() { printf "plain\n"; }
+    fm_backend_herdr_projection_target_tab_mutation_allowed() { return 0; }
+    fm_backend_herdr_cli() {
+      case "$2 $3" in
+        "pane get") printf "{\"result\":{\"pane\":{\"pane_id\":\"w9:p2\",\"tab_id\":\"w9:t2\",\"workspace_id\":\"w9\"}}}\n" ;;
+      esac
+    }
+    fm_backend_herdr_explicit_close_pane_confirmed() { printf "close\n" >> "$EVENTS"; }
+    fm_backend_herdr_projection_close_pane_focus_preserving fmtest w9:p2 terminal
+  ' 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "terminal close guard rejected an idle agent-free shell: $out"
+  [ "$(cat "$events")" = close ] || fail "terminal close guard did not close the exact idle pane"
+  pass "herdr terminal close guard allows only the exact idle agent-free shell"
+}
+
 test_projection_close_rechecks_foreground_client_after_agent_validation() {
   local dir events attached out status
   dir="$TMP_ROOT/projection-close-foreground-boundary"; mkdir -p "$dir"
@@ -5289,6 +5356,8 @@ test_projection_close_refuses_unknown_foreground_reason
 test_projection_close_allows_stale_active_tab_without_foreground_client
 test_projection_close_reports_focus_restore_failure
 test_projection_close_rechecks_required_agent_state_at_boundary
+test_projection_close_terminal_guard_refuses_live_or_ambiguous_panes
+test_projection_close_terminal_guard_allows_only_idle_agent_free_shell
 test_projection_close_rechecks_foreground_client_after_agent_validation
 test_projection_close_rechecks_target_focus_after_planning
 test_projection_close_preserves_live_focus_that_switched_away_from_target

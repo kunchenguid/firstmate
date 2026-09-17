@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Retire stale restored-shell Herdr presentation children at locked session start.
 #
-# Usage: fm-herdr-session-cleanup.sh
+# Usage: fm-herdr-session-cleanup.sh [terminal <task-id>]
 #
-# The caller must already own this Firstmate home's session lock. This script is
+# The caller must already own this Firstmate home's session lock for the default
+# session-start cleanup. Terminal cleanup is independently serialized by the
+# task and named-session presentation locks. This script is
 # home-local and considers only the current named Herdr session and ordinary
 # state/*.herdr-presentation journals in the effective FM_HOME. Each candidate
 # is additionally serialized by the existing state/.spawn-<task>.lock and the
@@ -30,6 +32,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 fm_backend_source herdr
@@ -292,6 +296,130 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
   return 0
 }
 
+fm_herdr_terminal_journal_matches_binding() { # <journal> <task-id> <session> <workspace> <tab> <pane> [live]
+  local journal=$1 id=$2 session=$3 workspace=$4 tab=$5 pane=$6 live=${7:-0} home_real
+  [ -f "$journal" ] && [ ! -L "$journal" ] || return 1
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
+  case "$FM_BACKEND_HERDR_JOURNAL_VERSION" in
+    1)
+      [ -n "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" ] || return 1
+      if [ "$live" = 1 ]; then
+        fm_backend_herdr_projection_endpoint_matches_journal \
+          "$session" "$workspace" "$journal" "$id" || return 1
+      fi
+      ;;
+    2)
+      home_real=$(fm_herdr_cleanup_home_identity) || return 1
+      [ "$FM_BACKEND_HERDR_JOURNAL_HOME" = "$home_real" ] \
+        && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$session" ] \
+        && [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" = "$workspace" ] \
+        && [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" = "$tab" ] \
+        && [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" = "$pane" ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_herdr_terminal_cleanup() { # <task-id>
+  local id=${1:-} meta status_file last kind backend journal task_lock presentation_lock
+  local session workspace tab pane state close_status=0
+  [ "$#" -eq 1 ] && fm_task_id_path_safe "$id" || return 0
+  status_file="$STATE/$id.status"
+  [ -f "$status_file" ] && [ ! -L "$status_file" ] || return 0
+  last=$(last_status_line "$status_file")
+  case "$(status_line_verb "$last")" in done|failed) ;; *) return 0 ;; esac
+  meta="$STATE/$id.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  kind=$(fm_meta_get "$meta" kind)
+  case "${kind:-ship}" in ship|scout) ;; *) return 0 ;; esac
+  backend=$(fm_backend_of_meta "$meta")
+  [ "$backend" = herdr ] || return 0
+  fm_backend_validate_task_endpoint "$meta" "$id" >/dev/null 2>&1 || return 0
+  [ "$FM_BACKEND_VALIDATED_BACKEND" = herdr ] || return 0
+  session=$(fm_meta_get "$meta" herdr_session)
+  workspace=$(fm_meta_get "$meta" herdr_workspace_id)
+  tab=$(fm_meta_get "$meta" herdr_tab_id)
+  pane=$(fm_meta_get "$meta" herdr_pane_id)
+  [ -n "$session" ] && [ -n "$workspace" ] && [ -n "$tab" ] && [ -n "$pane" ] || return 0
+  [ "$(fm_meta_get "$meta" window)" = "$session:$pane" ] || return 0
+
+  task_lock="$STATE/.spawn-$id.lock"
+  fm_lock_try_acquire "$task_lock" || return 0
+  presentation_lock=$(fm_backend_herdr_presentation_session_lock_path "$session" 2>/dev/null) || {
+    fm_lock_release "$task_lock" || true
+    return 0
+  }
+  if ! fm_lock_try_acquire "$presentation_lock"; then
+    fm_lock_release "$task_lock" || true
+    return 0
+  fi
+
+  # Re-read every durable identity after both locks so a relaunch or later
+  # status line cannot turn this into a close of a newer or still-live pane.
+  last=$(last_status_line "$status_file")
+  if [ "$(status_line_verb "$last")" != "done" ] \
+    && [ "$(status_line_verb "$last")" != "failed" ]; then
+    fm_lock_release "$presentation_lock" || true
+    fm_lock_release "$task_lock" || true
+    return 0
+  fi
+  fm_backend_validate_task_endpoint "$meta" "$id" >/dev/null 2>&1 || {
+    fm_lock_release "$presentation_lock" || true
+    fm_lock_release "$task_lock" || true
+    return 0
+  }
+  [ "$FM_BACKEND_VALIDATED_BACKEND" = herdr ] \
+    && [ "$(fm_meta_get "$meta" herdr_session)" = "$session" ] \
+    && [ "$(fm_meta_get "$meta" herdr_workspace_id)" = "$workspace" ] \
+    && [ "$(fm_meta_get "$meta" herdr_tab_id)" = "$tab" ] \
+    && [ "$(fm_meta_get "$meta" herdr_pane_id)" = "$pane" ] || {
+      fm_lock_release "$presentation_lock" || true
+      fm_lock_release "$task_lock" || true
+      return 0
+    }
+  journal="$STATE/$id.herdr-presentation"
+  if [ -e "$journal" ] || [ -L "$journal" ]; then
+    if ! fm_herdr_terminal_journal_matches_binding \
+      "$journal" "$id" "$session" "$workspace" "$tab" "$pane" 1; then
+      fm_lock_release "$presentation_lock" || true
+      fm_lock_release "$task_lock" || true
+      return 0
+    fi
+  fi
+  state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+  case "$state" in
+    dead)
+      if [ -f "$journal" ] && [ ! -L "$journal" ] \
+        && fm_herdr_terminal_journal_matches_binding \
+          "$journal" "$id" "$session" "$workspace" "$tab" "$pane" 1; then
+        rm -f -- "$journal" || true
+      fi
+      fm_lock_release "$presentation_lock" || true
+      fm_lock_release "$task_lock" || true
+      return 0
+      ;;
+    no-agent|stale-agent) ;;
+    *)
+      fm_lock_release "$presentation_lock" || true
+      fm_lock_release "$task_lock" || true
+      return 0
+      ;;
+  esac
+  fm_backend_herdr_projection_close_pane_focus_preserving \
+    "$session" "$pane" terminal "$tab" "$workspace" || close_status=$?
+  state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+  if [ "$state" = dead ] && [ -f "$journal" ] && [ ! -L "$journal" ] \
+    && fm_herdr_terminal_journal_matches_binding \
+      "$journal" "$id" "$session" "$workspace" "$tab" "$pane" 0; then
+    rm -f -- "$journal" || true
+  elif [ "$close_status" -ne 0 ]; then
+    fm_herdr_cleanup_warn "$id preserved because exact terminal pane closure was refused or unconfirmed"
+  fi
+  fm_lock_release "$presentation_lock" || true
+  fm_lock_release "$task_lock" || true
+  return 0
+}
+
 fm_herdr_session_cleanup() {
   local session home_real list candidates workspace title journal found=0
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 0
@@ -332,6 +460,17 @@ fm_herdr_session_cleanup() {
 }
 
 if [ "${FM_HERDR_SESSION_CLEANUP_SOURCE_ONLY:-0}" != 1 ]; then
-  fm_herdr_session_cleanup
+  case "${1:-}" in
+    '')
+      fm_herdr_session_cleanup
+      ;;
+    terminal)
+      [ "$#" -eq 2 ] || exit 2
+      fm_herdr_terminal_cleanup "$2"
+      ;;
+    *)
+      exit 2
+      ;;
+  esac
   exit 0
 fi
