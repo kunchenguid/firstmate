@@ -724,6 +724,7 @@ tests/fm-inactive-reconcile.test.sh 74399
 tests/fm-kimi-harness.test.sh 18015
 tests/fm-lint-workflows.test.sh 855
 tests/fm-live-gate.test.sh 6000
+tests/fm-model-policy.test.sh 1500
 tests/fm-muse-harness.test.sh 55572
 tests/fm-muse-signals-live-e2e.test.sh 23
 tests/fm-no-mistakes-required.test.sh 370
@@ -1421,6 +1422,12 @@ families_for_changed_path() {
       ;;
     bin/fm-dispatch-resolve.sh)
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
+      ;;
+    bin/fm-model-policy-lib.sh)
+      # The forbidden-model decision, and the two scripts that refuse with it.
+      printf '%s\n' "__script__:fm-model-policy.test.sh"
+      printf '%s\n' "__script__:fm-spawn-dispatch-profile.test.sh"
+      printf '%s\n' "__script__:fm-bootstrap.test.sh"
       ;;
     bin/fm-env-lib.sh)
       # The one .env accessor, sourced by bin/fm-x-lib.sh (Relay token) and

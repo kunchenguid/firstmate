@@ -1233,6 +1233,53 @@ ROWS
   pass "bootstrap gates resolver fields and additive harnesses on the typed key"
 }
 
+# Forbidden-model policy (config/model-denylist). Configuration validation is
+# the earliest place a model this home has ruled out can be caught, and each row
+# pins the exact diagnostic: a policy that reports the wrong thing is how an
+# operator learns to ignore it. Every deny row is paired with an allow row so no
+# case can pass because bootstrap happened to say nothing at all.
+test_model_policy_validation() {
+  local label denylist dispatch secondmate mode expect case_dir fakebin out n
+  n=0
+  while IFS='^' read -r label denylist dispatch secondmate mode expect; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/model-policy-$n"
+    mkdir -p "$case_dir/home/config"
+    printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+    case "$denylist" in
+      none) : ;;
+      symlink) ln -s /nowhere/model-denylist "$case_dir/home/config/model-denylist" ;;
+      *) printf '%b\n' "$denylist" > "$case_dir/home/config/model-denylist" ;;
+    esac
+    [ "$dispatch" = none ] || printf '%s\n' "$dispatch" > "$case_dir/home/config/crew-dispatch.json"
+    [ "$secondmate" = none ] || printf '%s\n' "$secondmate" > "$case_dir/home/config/secondmate-harness"
+    fakebin=$(make_fake_toolchain "$case_dir")
+    add_real_jq "$fakebin"
+    out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    case "$mode" in
+      empty)
+        [ -z "$out" ] || fail "$label: expected silence, got: $out" ;;
+      exact)
+        [ "$out" = "$expect" ] || fail "$label: expected '$expect', got: $out" ;;
+    esac
+  done <<'ROWS'
+no policy file leaves a forbidden model unreported^none^{"default":{"harness":"claude","model":"claude-fable-5"}}^none^empty^
+permitted dispatch models stay silent^fable^{"default":{"harness":"claude","model":"claude-opus-5"}}^none^empty^
+denied dispatch model is reported^fable^{"default":{"harness":"claude","model":"claude-fable-5"}}^none^exact^MODEL_POLICY: config/crew-dispatch.json profile harness=claude: model 'claude-fable-5' matches 'fable' in config/model-denylist
+denied dispatch model in a rule profile is reported^fable^{"rules":[{"when":"hard design","use":[{"harness":"claude","model":"claude-opus-5"},{"harness":"pi","model":"anthropic/claude-fable-5"}]}],"default":{"harness":"claude","model":"claude-opus-5"}}^none^exact^MODEL_POLICY: config/crew-dispatch.json profile harness=pi: model 'anthropic/claude-fable-5' matches 'fable' in config/model-denylist
+dispatch profile naming no model is reported^fable^{"default":{"harness":"claude"}}^none^exact^MODEL_POLICY: config/crew-dispatch.json profile harness=claude: no model is named, so the harness would pick one from its own account default; config/model-denylist requires an explicit model (add the line 'allow-unspecified-model' to that file to accept harness defaults)
+allow-unspecified-model accepts a profile with no model^fable\nallow-unspecified-model^{"default":{"harness":"claude"}}^none^empty^
+denied secondmate harness model token is reported^fable^none^codex claude-fable-5^exact^MODEL_POLICY: config/secondmate-harness: model 'claude-fable-5' matches 'fable' in config/model-denylist
+permitted secondmate harness model token stays silent^fable^none^codex claude-opus-5^empty^
+harness-only secondmate file stays silent^fable^none^codex^empty^
+unusable policy file is reported^symlink^{"default":{"harness":"claude","model":"claude-opus-5"}}^none^exact^MODEL_POLICY: config/model-denylist is symlinked; a forbidden-model policy must be a plain file in this home
+ROWS
+  pass "bootstrap reports every denied or unnamed model the home's configuration names"
+}
+
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
@@ -1261,3 +1308,4 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_model_policy_validation
