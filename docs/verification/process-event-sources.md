@@ -37,6 +37,38 @@ Note that `lavish-axi <anything> --help` exits 0 for any argument, including a n
 
 The adapter depends on none of this: it uses only the published poll shape above.
 
+## The two queued-content shapes the published poll emits
+
+Verified on 2026-09-17 on macOS (Darwin 25.5.0) with `lavish-axi` 0.1.69 installed.
+Both shapes come from the one encoder that build publishes through - `axi-sdk-js`'s `renderOutput` calling `@toon-format/toon` 2.3.1 - so they are two encodings of one format rather than two tool versions.
+TOON renders an array of objects as the tabular `prompts[N]{field,...}:` header with one CSV row per item only when every row is a uniform object whose values are all primitives.
+A row carrying a nested object such as an annotation's element `target`, a nested array such as an attachment list, or a different field set moves the whole array to the list `prompts[N]:` header with indented `- field: value` items, which is why a board whose annotations carry element targets arrives in the list form.
+
+```sh
+lavish_root=$(cd "$(dirname "$(command -v lavish-axi)")/.." && pwd)
+node --input-type=module -e "
+  import { encode } from '$lavish_root/lib/node_modules/lavish-axi/node_modules/@toon-format/toon/dist/index.mjs';
+  console.log(encode({ prompts: [{ uid: '1', text: 't' }, { uid: '2', text: 'u' }] }));
+  console.log(encode({ prompts: [{ uid: '1', text: 't' }, { uid: '2', text: 'u', target: { type: 'card' } }] }));
+"
+prompts[2]{uid,text}:
+  "1",t
+  "2",u
+prompts[2]:
+  - uid: "1"
+    text: t
+  - uid: "2"
+    text: u
+    target:
+      type: card
+```
+
+One parser in `bin/fm-procevent-lavish.sh` recognizes both, and `read`, `answers`, and `reconciles` all consume its records, so the encoding cannot change which items are presented or which answers are extracted.
+Recognizing only the tabular shape reported a real five-annotation review - two of whose annotations carried element targets and therefore forced the list form - as `declared_items 0` with no annotations, while the same blindness extracted no keyed answers at all from a board whose choice cards carried targets.
+`tests/fm-procevent.test.sh` pins both shapes against the same logical payload, including the invariant that both present identical annotations, and `tests/fm-captain-hold-lifecycle.test.sh` closes a captain-held task from a list-form capture.
+A payload the adapter cannot read at all is never reported as an empty review: content under a key it does not present, a `prompts` header in no known shape, and a declared payload that yields no readable item each name the block and exit nonzero.
+An explicitly empty payload encodes as `prompts: []`, which is read positively as no content rather than as an unknown block.
+
 ## Why an ended Lavish review is terminal
 
 Re-verified on 2026-08-01 against the same installed build.
