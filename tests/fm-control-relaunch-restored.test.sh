@@ -426,6 +426,26 @@ check_unrestored_relaunch_is_refused() {  # <backend> <id> [workspace_state]
 # others' results; the file fails if any check failed.
 
 FAILED=0
+check_unreconstructed_relaunch_names_restore() {  # <backend> <id> <workspace_state>
+  local backend=$1 id=$2 ws=$3 dir out rc before
+  dir=$(new_case "unreconstructed-$ws" "$backend" "$id")
+  printf 'workspace_state=%s\n' "$ws" >> "$dir/home/state/$id.meta"
+  before=$(cat "$dir/home/state/$id.meta")
+  out=$(run_control "$dir" "$id" relaunch --note "should not launch"); rc=$?
+  expect_code 1 "$rc" "$backend/$ws: relaunch must refuse until the workspace is restored"$'\n'"$out"
+  assert_contains "$out" "bin/fm-workspace.sh restore $id" "$backend/$ws: the refusal should name the restore command"
+  assert_nothing_typed "$dir" "$backend/$ws: a refused relaunch must send nothing anywhere"
+  assert_equals "$before" "$(cat "$dir/home/state/$id.meta")" "$backend/$ws: a refused relaunch must leave the record untouched"
+  assert_absent "$dir/home/state/$id.control-relaunch" "$backend/$ws: a refusal before the checkpoint must not open a transaction"
+
+  out=$(run_spawn "$dir" "$id" --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "$backend/$ws: fm-spawn --relaunch must refuse until the workspace is restored"$'\n'"$out"
+  assert_contains "$out" "bin/fm-workspace.sh restore $id" "$backend/$ws: fm-spawn's refusal should name the restore command"
+  assert_nothing_typed "$dir" "$backend/$ws: a refused fm-spawn --relaunch must send nothing anywhere"
+  assert_equals "$before" "$(cat "$dir/home/state/$id.meta")" "$backend/$ws: a refused fm-spawn --relaunch must leave the record untouched"
+  pass "relaunch ($backend, workspace_state=$ws): refused with the exact restore instruction"
+}
+
 run_check() {
   ( "$@" ) || FAILED=1
 }
@@ -442,6 +462,8 @@ done
 # workspace record is an ordinary relaunch.
 run_check check_restored_orca_relaunch_refuses_a_rebound_worktree rrb1
 run_check check_unrestored_relaunch_is_refused zellij rrp4 active
-run_check check_unrestored_relaunch_is_refused zellij rrp5 released
+for ws in released releasing reclaim-pending; do
+  run_check check_unreconstructed_relaunch_names_restore zellij "rru-$ws" "$ws"
+done
 
 exit "$FAILED"

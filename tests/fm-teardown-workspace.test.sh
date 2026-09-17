@@ -384,8 +384,29 @@ test_released_then_live_teardown_in_sequence() {
   pass "fm-teardown: released teardown then live teardown both complete, return and destroy run once for the live task only"
 }
 
+test_released_record_with_cleared_worktree_tears_down() {
+  local dir rc wt head
+  dir=$(make_case cleared fm/x)
+  wt="$dir/wsroot/pool/1/repo"
+  head=$(git -C "$wt" rev-parse HEAD)
+  write_task_meta "$dir" z released "pr=https://github.com/example/repo/pull/7"
+  sed -i.bak 's|^worktree=.*$|worktree=|' "$dir/home/state/z.meta"
+  rm -f "$dir/home/state/z.meta.bak"
+  write_task_meta "$dir" x active
+  claim_slot "$dir" x
+  rc=$(run_teardown "$dir" z)
+  assert_equals 0 "$rc" "a released record with no local path refused or failed: $(case_output "$dir")"
+  assert_slot_untouched "$dir" fm/x "$head" "released teardown (cleared worktree)"
+  assert_absent "$dir/home/state/z.meta" "the released task's record was not cleaned up"
+  assert_present "$dir/home/state/x.meta" "the live task's record was removed"
+  assert_contains "$(cat "$dir/stdout")" "workspace already released, no local worktree to remove)" \
+    "completion did not say the workspace was already released"
+  pass "fm-teardown: a released record that names no local path completes its own cleanup"
+}
+
 test_scoped_return_then_destroy_with_lease_holder
 test_scoped_return_then_destroy_without_lease_holder
+test_released_record_with_cleared_worktree_tears_down
 test_destroy_failure_aborts_with_record_intact_then_retry_succeeds
 test_released_record_leaves_reused_claimed_slot_untouched
 test_released_record_leaves_reused_unclaimed_slot_untouched

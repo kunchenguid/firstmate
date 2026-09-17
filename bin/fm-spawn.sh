@@ -1495,6 +1495,12 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # a backend with a classifier (tmux, Herdr) still proves its restored endpoint
   # dead, since a reused endpoint may have had something launched in it since.
   RELAUNCH_WORKSPACE_STATE=$(fm_meta_get "$RELAUNCH_META" workspace_state)
+  case "$RELAUNCH_WORKSPACE_STATE" in
+    released|releasing|reclaim-pending)
+      echo "error: task $ID's local workspace is $RELAUNCH_WORKSPACE_STATE, so there is no copy to relaunch into; run bin/fm-workspace.sh restore $ID first" >&2
+      exit 1
+      ;;
+  esac
   if [ "$RELAUNCH_WORKSPACE_STATE" = restored ] \
      && ! fm_control_backend_state_verified "$BACKEND"; then
     fm_backend_target_exists "$BACKEND" "$RELAUNCH_TARGET" "fm-$ID" || {

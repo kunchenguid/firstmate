@@ -233,6 +233,7 @@ test_release_and_exact_stacked_restore() {
   assert_grep 'workspace_base=fm/lower-stack' "$HOME_DIR/state/task-x1.meta" "stacked PR base was not preserved"
   assert_grep "workspace_head=$HEAD" "$HOME_DIR/state/task-x1.meta" "exact remote head was not preserved"
   pr_identity_readable || fail "release left a record the PR merge monitor can no longer validate"
+  assert_equals '' "$(meta_value worktree)" "a released record still names a local path another task may now hold"
 
   out=$(run_workspace restore task-x1) || fail "exact reconstruction failed: $out"
   restored=$(sed -n 's/^worktree=//p' "$HOME_DIR/state/task-x1.meta")
@@ -385,13 +386,52 @@ test_slot_claim_follows_release_and_restore() {
   restored=$(meta_value worktree)
   assert_grep 'task=task-x1' "$(dirname "$restored")/.fm-slot-owner" "restore did not claim its newly allocated slot"
 
-  rec=$(make_case slot-claim-other)
+  pass "release drops its own slot claim and restore claims the reconstructed slot"
+}
+
+test_release_retry_never_touches_a_reassigned_slot() {
+  local rec out state marker x_head
+  for state in releasing reclaim-pending; do
+    rec=$(make_case "reassigned-$state")
+    read_case "$rec"
+    # The interrupted release already returned this slot; task-x2 has since
+    # taken and claimed the same path and is working on its own branch.
+    sed -i.bak "s/^workspace_state=active$/workspace_state=$state/" "$HOME_DIR/state/task-x1.meta"
+    printf 'workspace_head=%s\nworkspace_branch=fm/task-x1\nworkspace_base=fm/lower-stack\n' "$HEAD" \
+      >> "$HOME_DIR/state/task-x1.meta"
+    marker="$(dirname "$WT")/.fm-slot-owner"
+    printf 'task=task-x2\nhome=%s\n' "$HOME_DIR" > "$marker"
+    git -C "$WT" checkout -q -b fm/task-x2 main
+    x_head=$(git -C "$WT" rev-parse HEAD)
+    : > "$D/treehouse.log"
+    out=$(run_workspace release task-x1) || fail "$state retry did not converge on a reassigned slot: $out"
+    [ ! -s "$D/treehouse.log" ] || fail "$state retry ran Treehouse against another task's slot: $(cat "$D/treehouse.log")"
+    [ "$(git -C "$WT" symbolic-ref --short HEAD)" = fm/task-x2 ] || fail "$state retry moved the other task's checkout"
+    [ "$(git -C "$WT" rev-parse HEAD)" = "$x_head" ] || fail "$state retry moved the other task's head"
+    assert_grep 'task=task-x2' "$marker" "$state retry changed the other task's claim"
+    assert_equals released "$(meta_value workspace_state)" "$state retry did not complete from its journal"
+    assert_equals '' "$(meta_value worktree)" "$state retry left the reassigned path on the released record"
+    assert_equals "$HEAD" "$(meta_value workspace_head)" "$state retry lost the journaled reconstruction head"
+  done
+
+  rec=$(make_case reassigned-active)
   read_case "$rec"
   marker="$(dirname "$WT")/.fm-slot-owner"
-  printf 'task=someone-else\nhome=/elsewhere\n' > "$marker"
-  out=$(run_workspace release task-x1) || fail "release with a foreign claim failed: $out"
-  assert_grep 'task=someone-else' "$marker" "release removed another task's slot claim"
-  pass "release drops only its own slot claim and restore claims the reconstructed slot"
+  printf 'task=task-x2\nhome=%s\n' "$HOME_DIR" > "$marker"
+  : > "$D/treehouse.log"
+  out=$(run_workspace release task-x1) && fail "an active record released a slot claimed by another task"
+  assert_contains "$out" "claimed by task task-x2" "foreign-claim refusal did not name the claimant"
+  [ ! -s "$D/treehouse.log" ] || fail "a foreign-claimed slot was handed to Treehouse"
+  [ -d "$WT" ] || fail "a foreign-claimed slot was removed"
+  assert_equals active "$(meta_value workspace_state)" "foreign-claim refusal rewrote lifecycle state"
+
+  rec=$(make_case unreadable-claim)
+  read_case "$rec"
+  mkdir "$(dirname "$WT")/.fm-slot-owner"
+  out=$(run_workspace release task-x1) && fail "a slot with an unreadable claim was released"
+  assert_contains "$out" "unreadable slot-owner claim" "unreadable-claim refusal was not explicit"
+  [ -d "$WT" ] || fail "a slot with an unreadable claim was removed"
+  pass "a release retry completes from its journal without touching a reassigned slot, and foreign or unreadable claims refuse"
 }
 
 test_ignored_secret_and_runtime_material_refuse() {
@@ -609,6 +649,7 @@ test_backend_metadata_survives_release
 test_legacy_audit_and_reclaim_stay_conservative
 test_two_homes_share_one_project
 test_slot_claim_follows_release_and_restore
+test_release_retry_never_touches_a_reassigned_slot
 test_ignored_secret_and_runtime_material_refuse
 test_generated_trees_do_not_refuse
 test_unavailable_or_changing_remote_proof_refuses

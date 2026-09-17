@@ -161,6 +161,9 @@ fetch_remote_head() {  # <worktree>
 meta_rewrite() {  # state worktree [extra owned endpoint lines...]
   local state=$1 worktree=$2 tmp line part
   shift 2
+  # A released task owns no local path: Treehouse may hand the old slot to
+  # another task, so no reader may find it under this record's worktree=.
+  [ "$state" != released ] || worktree=
   tmp=$(mktemp "$STATE/.fm-workspace-meta.XXXXXX") || fail "cannot stage task metadata"
   # bin/fm-pr-lib.sh's identity parser accepts only PR-owned lines from pr=
   # onward, so the record's pr= tail stays last and the owned lines go before it.
@@ -272,7 +275,39 @@ interrupted_return_completed() {
   ! likely_ignored_secret_present "$WT"
 }
 
+# Identity proof before any recorded path is inspected or touched.  A returned
+# slot goes back to the pool, so by the time an interrupted release is retried
+# another task may hold and have claimed the same path.  That path is no longer
+# this task's: the journaled proof completes the release without touching it.
+require_release_slot_identity() {
+  [ "$BACKEND" != orca ] && [ -d "$WT" ] || return 0
+  fm_treehouse_slot_owner_state "$WT" "$ID"
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    mine|absent) return 0 ;;
+    other)
+      case "$WORKSPACE_STATE" in
+        releasing|reclaim-pending)
+          REMOTE_HEAD=$(meta_get workspace_head)
+          REMOTE_BRANCH=$(meta_get workspace_branch)
+          REMOTE_BASE=$(meta_get workspace_base)
+          [ -n "$REMOTE_HEAD" ] && [ -n "$REMOTE_BRANCH" ] \
+            || fail "slot $WT now belongs to task $FM_TREEHOUSE_SLOT_OWNER_ID and this record kept no reconstruction identity"
+          WORKSPACE_ROOT=$(meta_get workspace_root)
+          LEASE_HOLDER=$(meta_get workspace_lease_holder)
+          current_endpoint_lines
+          meta_rewrite released "" "${CURRENT_ENDPOINT_LINES[@]}"
+          printf 'workspace %s released; its returned slot now belongs to task %s and was left untouched\n' "$ID" "$FM_TREEHOUSE_SLOT_OWNER_ID"
+          exit 0
+          ;;
+      esac
+      fail "recorded workspace $WT is claimed by task $FM_TREEHOUSE_SLOT_OWNER_ID, not $ID; nothing was touched"
+      ;;
+  esac
+  fail "recorded workspace $WT carries an unreadable slot-owner claim, so it cannot be proved to be $ID's; nothing was touched"
+}
+
 if [ "$ACTION" = release ]; then
+  [ "$WORKSPACE_STATE" = released ] || require_release_slot_identity
   if [ "$WORKSPACE_STATE" = releasing ] && interrupted_return_completed; then
     WORKSPACE_STATE=reclaim-pending
   fi

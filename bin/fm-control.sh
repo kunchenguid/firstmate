@@ -804,6 +804,12 @@ do_relaunch() {
   local exit_result state note_line restored_unverified=0
   local -a spawn_args
 
+  case "$WORKSPACE_STATE" in
+    released|releasing|reclaim-pending)
+      die "task $ID's local workspace is $WORKSPACE_STATE, so there is no copy to relaunch into; run bin/fm-workspace.sh restore $ID first"
+      ;;
+  esac
+
   # A workspace reconstructed by bin/fm-workspace.sh is the one relaunch an
   # unverified backend may run: that transaction durably recorded the exact
   # agent-free endpoint. A verified backend still proves the agent is dead.

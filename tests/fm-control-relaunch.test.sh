@@ -1748,6 +1748,33 @@ test_restored_tmux_relaunch_into_a_dead_endpoint_succeeds() {
   pass "fm-control relaunch: a restored tmux task with a dead endpoint relaunches normally"
 }
 
+test_unreconstructed_tmux_workspace_refuses_relaunch_until_restore() {
+  local dir out rc ws id n=0 before
+  for ws in released releasing reclaim-pending; do
+    n=$((n + 1)); id="rl5$n"
+    dir=$(new_case "unreconstructed-$ws" "$id")
+    add_ship_task "$dir" "$id" claude
+    # The recorded path still exists, as it does once Treehouse hands the old
+    # slot to another task, and the endpoint is a provably agent-free shell.
+    printf 'workspace_state=%s\n' "$ws" >> "$dir/home/state/$id.meta"
+    printf 'zsh' > "$dir/fake/command"
+    before=$(cat "$dir/home/state/$id.meta")
+    out=$(run_control "$dir" "$id" relaunch --note "must restore first"); rc=$?
+    expect_code 1 "$rc" "a $ws workspace must not relaunch"$'\n'"$out"
+    assert_contains "$out" "bin/fm-workspace.sh restore $id" "the $ws refusal should name the restore command"
+    [ ! -s "$dir/fake/literal" ] || fail "a refused $ws relaunch typed into the endpoint: $(cat "$dir/fake/literal")"
+    assert_equals zsh "$(cat "$dir/fake/command")" "a refused $ws relaunch must launch nothing"
+    assert_equals "$before" "$(cat "$dir/home/state/$id.meta")" "a refused $ws relaunch must leave the record untouched"
+
+    out=$(run_spawn "$dir" "$id" --relaunch --harness claude); rc=$?
+    expect_code 1 "$rc" "fm-spawn --relaunch must refuse a $ws workspace"$'\n'"$out"
+    assert_contains "$out" "bin/fm-workspace.sh restore $id" "fm-spawn's $ws refusal should name the restore command"
+    [ ! -s "$dir/fake/literal" ] || fail "a refused $ws fm-spawn --relaunch typed into the endpoint"
+    assert_equals zsh "$(cat "$dir/fake/command")" "a refused $ws fm-spawn --relaunch must launch nothing"
+  done
+  pass "relaunch: a released, releasing, or reclaim-pending workspace refuses with the restore instruction even when its old path exists"
+}
+
 test_spawn_relaunch_refuses_a_live_agent_in_a_restored_tmux_workspace() {
   local dir out rc
   dir=$(new_case restoredspawnlive rl43)
@@ -1835,5 +1862,6 @@ test_relaunch_moves_a_drifted_item_back_in_flight
 test_restored_tmux_relaunch_still_stops_a_live_agent_first
 test_restored_tmux_relaunch_refuses_when_the_live_agent_will_not_stop
 test_restored_tmux_relaunch_into_a_dead_endpoint_succeeds
+test_unreconstructed_tmux_workspace_refuses_relaunch_until_restore
 test_spawn_relaunch_refuses_a_live_agent_in_a_restored_tmux_workspace
 test_spawn_relaunch_into_a_dead_restored_tmux_endpoint_launches
