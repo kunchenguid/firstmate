@@ -1818,6 +1818,8 @@ test_secondmate_merge_reports_upward_once() {
   add_gh_mocks "$case_dir" 5555555555555555555555555555555555555555
   : >"$case_dir/gh-axi.log"
   replies="$case_dir/state/parent-replies.status"
+  # Seed prior escalation so the escalation gate passes for task-x1.
+  printf 'needs-decision [key=captain-hold-task-x1-fixture]: fixture escalation for task-x1\n' >> "$replies"
 
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
     >"$case_dir/stdout" 2>"$case_dir/stderr" || fail "secondmate-merge-reports: merge failed"
@@ -1850,6 +1852,8 @@ test_secondmate_merge_reports_on_the_local_route() {
   add_gh_mocks "$case_dir" 6666666666666666666666666666666666666666
   : >"$case_dir/gh-axi.log"
   parent_status="$TMP_ROOT/secondmate-merge-local/parent/state/mate-x.status"
+  # Seed prior escalation so the escalation gate passes for task-x1.
+  printf 'needs-decision [key=captain-hold-task-x1-fixture]: fixture escalation for task-x1\n' >> "$parent_status"
 
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
     >"$case_dir/stdout" 2>"$case_dir/stderr" || fail "secondmate-merge-local: merge failed"
@@ -1909,6 +1913,8 @@ test_gitlab_merge_reports_upward() {
   printf '%s\n' mate-x >"$case_dir/home/.fm-secondmate-home"
   printf 'schema=fm-secondmate-parent.v1\nroute=remote\n' >"$case_dir/home/.fm-secondmate-parent"
   url=$MR_URL
+  # Seed prior escalation so the escalation gate passes for task-x1.
+  printf 'needs-decision [key=captain-hold-task-x1-fixture]: fixture escalation for task-x1\n' >> "$case_dir/state/parent-replies.status"
 
   FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
     >"$case_dir/stdout" 2>"$case_dir/stderr" || fail "gitlab-merge-reports: merge failed"

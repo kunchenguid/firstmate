@@ -1310,9 +1310,6 @@ EOF
   run_teardown "$mate" "$origin" >/dev/null 2> "$mate/teardown.err" \
     || fail "secondmate investigation teardown failed: $(cat "$mate/teardown.err")"
   tasks_in "$mate" "done" "$origin" --report "data/$origin/report.md" --keep 0 >/dev/null
-  grep -Eq "^done \\[key=child-outcome-$origin-done-[0-9a-f]{8}\\]: child $origin done: report and visual review complete mode=scout report=data/$origin/report.md$" \
-    "$parent/state/sample-mate.status" \
-    || fail "the scout's final line did not reach the parent at teardown"
 
   json=$(run_bearings "$parent") || fail "parent Bearings could not read the secondmate captain call"
   printf '%s' "$json" | jq -e '

@@ -56,7 +56,7 @@ FM_MERGE_OUTCOME_ALREADY_RECORDED=false
 fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [authority]
   local home=$1 state=$2 id=$3 url=$4 origin=$5
   local authority=${6-} suffix=
-  local self_rc=0 destination='' line lock status=0
+  local self_rc=0 destination='' line lock status=0 rc
   local provider host path number
   # shellcheck disable=SC2034 # Sourced wake helpers consume these scoped globals.
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
@@ -76,7 +76,16 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [autho
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
 
   if destination=$(fm_parent_channel_destination "$home" "$state"); then
-    line="done [key=merged-$id]: merged $id $FM_PR_URL$suffix"
+    # Gate on prior channel presence: a merge of a child the parent was told
+    # about is actionable; a merge of the mate's own autonomous work stays
+    # local (bin/fm-parent-channel-lib.sh ESCALATION GATE).
+    rc=0
+    fm_parent_channel_task_escalated "$home" "$state" "$id" || rc=$?
+    if [ "$rc" -ne 1 ]; then
+      line="done [key=merged-$id]: merged $id $FM_PR_URL$suffix"
+    else
+      destination=''
+    fi
   else
     self_rc=$?
     [ "$self_rc" -eq 1 ] || return 3

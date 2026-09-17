@@ -134,22 +134,28 @@ fm_pr_poll_publish_prepared || {
   echo "error: could not publish PR poll" >&2
   exit 1
 }
-# In a secondmate home the registration itself is a captain-facing fact:
-# publish the child's PR-ready line with the canonical URL just recorded, so it
-# reaches the parent whether or not the mate model appends anything
-# (bin/fm-parent-channel-lib.sh). A main home has no channel and this is a
-# silent no-op there. The poll is armed either way; a channel that cannot be
-# written is reported as actionable, and bin/fm-inactive-reconcile.sh still
-# delivers the child's own ready line on the next supervision poll.
+# In a secondmate home the registration itself is a captain-facing fact when the
+# parent was previously told about this child (escalated, held, dispatched).
+# A child the parent never heard of is the mate's own business and its PR-ready
+# line stays in the local backlog (bin/fm-parent-channel-lib.sh ESCALATION GATE).
+# A main home has no channel and this is a silent no-op there. The poll is armed
+# either way; a channel that cannot be written is reported as actionable, and
+# bin/fm-inactive-reconcile.sh still delivers the child's own ready line on the
+# next supervision poll.
 READY_LINE="done [key=child-pr-$ID]: child $ID PR ready: $URL"
 PR_MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_YOLO=$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)
 [ -z "$PR_MODE" ] || READY_LINE="$READY_LINE mode=$(fm_parent_channel_clean_note "$PR_MODE")"
 [ -z "$PR_YOLO" ] || READY_LINE="$READY_LINE yolo=$(fm_parent_channel_clean_note "$PR_YOLO")"
 READY_RC=0
-fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" || READY_RC=$?
-case "$READY_RC" in
-  0|1) ;;
-  *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
-esac
+ESC_RC=0
+fm_parent_channel_task_escalated "$FM_HOME" "$STATE" "$ID" || ESC_RC=$?
+if [ "$ESC_RC" -ne 1 ]; then
+  fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" || READY_RC=$?
+  case "$READY_RC" in
+    0|1) ;;
+    *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
+  esac
+fi
 printf 'armed: state/%s.check.sh\n' "$ID"
+

@@ -88,7 +88,46 @@ write_child() { # <home> <id> <status> [spawn-gen]
   printf '%s\n' "$status" > "$home/state/$id.status"
   : > "$home/state/$id.turn-ended"
   age "$home/state/$id.meta" "$home/state/$id.status" "$home/state/$id.turn-ended"
+  # Pre-seed escalation on the parent channel so the escalation gate
+  # (fm_parent_channel_task_escalated) passes for this child. Without this,
+  # the child's terminal outcome would be suppressed as routine autonomous
+  # work. Tests that verify the gate itself use write_child_unescalated.
+  escalate_child "$home" "$id"
 }
+
+# Write a child WITHOUT seeding escalation on the parent channel, so the
+# escalation gate treats it as the mate's own autonomous work.
+write_child_unescalated() { # <home> <id> <status> [spawn-gen]
+  local home=$1 id=$2 status=$3 spawn_gen=${4:-s${BASHPID:-$$}.$RANDOM}
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$home/projects/$id" "project=alpha" \
+    'harness=codex' 'kind=ship' 'mode=no-mistakes' 'yolo=off' \
+    "spawn_gen=$spawn_gen" 'pr=https://example.test/owner/repo/pull/1'
+  printf '%s\n' "$status" > "$home/state/$id.status"
+  : > "$home/state/$id.turn-ended"
+  age "$home/state/$id.meta" "$home/state/$id.status" "$home/state/$id.turn-ended"
+}
+
+# Pre-seed a prior escalation line on the parent channel for a child in a
+# secondmate home. The fm_parent_channel_task_escalated gate checks for the
+# task id on the channel; this simulates the parent having been told about
+# the child (e.g. the child was dispatched by the parent or was escalated).
+# A no-op for main homes (no .fm-secondmate-home marker).
+escalate_child() { # <home> <id>
+  local home=$1 id=$2 marker parent_home destination
+  marker="$home/.fm-secondmate-home"
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
+  # Resolve destination from the parent binding.
+  if grep -q 'route=local' "$home/.fm-secondmate-parent" 2>/dev/null; then
+    parent_home=$(sed -n 's/^parent_home=//p' "$home/.fm-secondmate-parent")
+    destination="$parent_home/state/$(cat "$marker").status"
+  else
+    destination="$home/state/parent-replies.status"
+  fi
+  mkdir -p "$(dirname "$destination")"
+  printf 'needs-decision [key=captain-hold-%s-fixture]: fixture escalation for %s\n' "$id" "$id" >> "$destination"
+}
+
 
 write_mate_meta() {
   fm_write_secondmate_meta "$MAIN/state/mate.meta" "$MATE"
@@ -324,14 +363,14 @@ test_terminal_line_after_inactive_delivery_is_not_reported_twice() {
 
   printf 'done: completion landed after reconciliation\n' >> "$MATE/state/child.status"
   FM_FAKE_CREW_STATE='done' run_reconcile "$MATE"
-  [ "$(wc -l < "$MAIN/state/mate.status" | tr -d ' ')" = 1 ] \
+  [ "$(wc -l < "$MAIN/state/mate.status" | tr -d ' ')" = 2 ] \
     || fail "one completion was published by both inactive and ledger paths: $(cat "$MAIN/state/mate.status")"
   [ "$(outcome_count "$MATE" reported)" = 2 ] \
     || fail "the raced ledger event was not durably reconciled with the fallback receipt"
 
   printf 'working: retrying after completion\ndone: completed again\n' >> "$MATE/state/child.status"
   FM_FAKE_CREW_STATE='done' run_reconcile "$MATE"
-  [ "$(wc -l < "$MAIN/state/mate.status" | tr -d ' ')" = 2 ] \
+  [ "$(wc -l < "$MAIN/state/mate.status" | tr -d ' ')" = 3 ] \
     || fail "the inactive claim suppressed a later same-state terminal event: $(cat "$MAIN/state/mate.status")"
   grep -Fq 'child child done: completed again' "$MAIN/state/mate.status" \
     || fail "the later same-state terminal event was not delivered"
@@ -346,7 +385,7 @@ test_progress_after_inactive_delivery_starts_a_new_event() {
   FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
   printf 'working: retry started\ndone: retry completed\n' >> "$MATE/state/child.status"
   FM_FAKE_CREW_STATE='done' run_reconcile "$MATE"
-  [ "$(wc -l < "$MAIN/state/mate.status" | tr -d ' ')" = 2 ] \
+  [ "$(wc -l < "$MAIN/state/mate.status" | tr -d ' ')" = 3 ] \
     || fail "an intervening progress event did not separate two completions: $(cat "$MAIN/state/mate.status")"
   grep -Fq 'child child done: retry completed' "$MAIN/state/mate.status" \
     || fail "the completion after recovery was not delivered"

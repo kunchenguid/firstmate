@@ -1582,6 +1582,8 @@ test_merged_poll_retries_a_failed_upward_report() {
 
   printf 'schema=fm-secondmate-parent.v1\nroute=remote\n' \
     > "$dir/home/.fm-secondmate-parent"
+  # Seed task-a as escalated so the gate allows the outcome to be published
+  printf 'needs-decision [key=task-a-hold]: task-a is held\n' > "$replies"
   rm -f "$state/.last-check"
   set +e
   FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
@@ -1589,7 +1591,7 @@ test_merged_poll_retries_a_failed_upward_report() {
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "merged-poll-upward-retry: retry failed: $(cat "$dir/watch-2.err")"
-  if [ ! -e "$replies" ]; then
+  if ! grep -q "merged-task-a" "$replies" 2>/dev/null; then
     ack_watcher_cycle "$state" \
       || fail "merged-poll-upward-retry: recovery acknowledgement failed"
     rm -f "$state/.last-check"
@@ -1616,6 +1618,8 @@ test_self_merge_and_poll_publish_one_outcome() {
   state="$dir/home/state"
   replies="$state/parent-replies.status"
   seed_secondmate_home "$dir"
+  # Seed task-a as escalated
+  printf 'needs-decision [key=task-a-hold]: task-a is held\n' > "$replies"
   write_task_meta "$dir" task-a
   run_check_entry "$dir" task-a "$url" >/dev/null 2>"$dir/seed.err" \
     || fail "merge-outcome-committed: could not arm merge poll"
@@ -1629,7 +1633,8 @@ test_self_merge_and_poll_publish_one_outcome() {
   set -e
   [ "$rc" -eq 0 ] \
     || fail "merge-outcome-committed: watcher failed: $(cat "$dir/watch.err")"
-  [ "$(grep -c -F "done [key=merged-task-a]: merged task-a $url" "$replies")" -eq 1 ] \
+  count=$(grep -c -F "done [key=merged-task-a]: merged task-a $url" "$replies" 2>/dev/null || true)
+  [ "${count:-0}" -eq 1 ] \
     || fail "merge-outcome-committed: self and poll reports produced duplicate merge outcomes"
   assert_no_grep "check: $state/task-a.check.sh: merged" "$state/.wake-queue" \
     "merge-outcome-committed: absorbed poll published a second outcome"
@@ -1694,6 +1699,8 @@ test_merged_poll_reports_upward_from_a_secondmate_home_once() {
   state="$dir/home/state"
   replies="$state/parent-replies.status"
   seed_secondmate_home "$dir"
+  # Seed task-a as escalated so the gate allows the outcome to be published
+  printf 'needs-decision [key=task-a-hold]: task-a is held\n' > "$replies"
   write_poll_meta "$state" task-a "$url"
   seed_canonical_poll "$dir" task-a "$url"
   add_stop_custom_check "$dir"

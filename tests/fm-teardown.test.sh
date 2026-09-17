@@ -1843,6 +1843,8 @@ test_secondmate_pr_registration_publishes_ready_line() {
   configure_secondmate_home "$case_dir" local "$case_dir/parent"
   mkdir -p "$case_dir/parent/state"
   channel="$case_dir/parent/state/mate-x.status"
+  # Seed prior escalation so the escalation gate passes for task-x1.
+  printf 'needs-decision [key=captain-hold-task-x1-fixture]: fixture escalation for task-x1\n' >> "$channel"
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
   pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
@@ -1886,6 +1888,8 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
   configure_secondmate_home "$case_dir" local "$case_dir/parent"
   mkdir -p "$case_dir/parent/state"
   channel="$case_dir/parent/state/mate-x.status"
+  # Seed prior escalation so the escalation gate passes for task-x1.
+  printf 'needs-decision [key=captain-hold-task-x1-fixture]: fixture escalation for task-x1\n' >> "$channel"
   write_meta "$case_dir" local-only ship
   wt_commit "$case_dir" "merged work"
   wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
@@ -1929,6 +1933,8 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
     && [ -d "$case_dir/tasktmp" ] \
     || fail "mate-teardown-refuses: refusal removed endpoint records before parent delivery"
   rmdir "$channel"
+  # Seed prior escalation so the escalation gate passes for task-x1.
+  printf 'needs-decision [key=captain-hold-task-x1-fixture]: fixture escalation for task-x1\n' >> "$channel"
   err=$(FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
     "$ROOT/bin/fm-wake-drain.sh" 2>&1 >/dev/null)
   seq=$(printf '%s\n' "$err" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p')

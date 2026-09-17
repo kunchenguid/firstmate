@@ -28,6 +28,18 @@
 # The mate's own appends are reserved for judgement (bin/fm-brief.sh charter).
 # docs/secondmate-parent-channel.md records the design and its coverage.
 #
+# ESCALATION GATE. The first three publishers above report routine child
+# lifecycle events that the parent cannot act on when the child is the mate's
+# own autonomous work: a PR ready, a merge, a done or failed outcome for a task
+# the parent never heard of is noise, not signal, and each one wakes the parent
+# for a full handling turn. Those publishers gate on
+# fm_parent_channel_task_escalated: a child whose task id already appears on the
+# channel was previously communicated to the parent (escalated, held, dispatched)
+# and its lifecycle events are actionable; a child with no prior channel presence
+# is the mate's own business and its events stay in the local backlog.
+# The remaining publishers (captain hold, correlated replies, teardown guard)
+# are unconditional because they are the escalation or response itself.
+#
 # THE CHANNEL. It is resolved from the home's own durable identity and parent
 # binding, never from a caller's choice:
 #   - the .fm-secondmate-home marker names the mate's id in its parent home;
@@ -148,4 +160,32 @@ fm_parent_channel_report() {  # <home> <state> <line>
   destination=$(fm_parent_channel_destination "$home" "$state") || rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
   fm_parent_channel_append_once "$destination" "$line" || return 4
+}
+
+# Test whether a child task has prior presence on the parent channel.
+# A task has prior presence when the parent was told about it: the parent
+# dispatched it, the mate escalated it (needs-decision, blocked), or a
+# captain hold was published for it.  A task with no prior channel
+# presence is the mate's own autonomous work and its routine lifecycle
+# events (PR ready, merged, done, failed) are its own business.
+#
+# Returns 0 when the destination resolves and either (a) the channel file
+# contains a line mentioning <task-id>, or (b) the destination path exists
+# but is not a regular file (conservative: assume escalated so the caller
+# attempts delivery and existing error handling for broken channels fires).
+# Returns 1 when the destination resolves and the task has no prior
+# presence (file absent or present with no mention of the task).
+# Returns 2+ for destination resolution errors (same codes as
+# fm_parent_channel_destination).
+fm_parent_channel_task_escalated() {  # <home> <state> <task-id>
+  local home=$1 state=$2 id=$3 destination rc=0
+  destination=$(fm_parent_channel_destination "$home" "$state") || rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  # Channel file does not exist yet: the task has never been communicated.
+  [ -e "$destination" ] || return 1
+  # Destination exists but is not a regular file (e.g. a directory occupying
+  # the path): conservatively assume escalated so the caller attempts delivery
+  # and existing error handling fires.
+  [ -f "$destination" ] || return 0
+  grep -Fq -- "$id" "$destination" 2>/dev/null
 }

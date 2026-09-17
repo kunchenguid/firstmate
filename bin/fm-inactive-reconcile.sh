@@ -333,7 +333,13 @@ home_secondmate_id() {
 }
 
 report_to_parent() { # <task> <state> <outcome-key> <fingerprint> <pr>
-  local task=$1 state=$2 outcome_key=$3 fingerprint=$4 pr=$5 line
+  local task=$1 state=$2 outcome_key=$3 fingerprint=$4 pr=$5 line rc
+  # Gate on prior channel presence: an inactive terminal outcome of a child the
+  # parent never heard of is the mate's own business
+  # (bin/fm-parent-channel-lib.sh ESCALATION GATE).
+  rc=0
+  fm_parent_channel_task_escalated "$FM_HOME" "$STATE" "$task" || rc=$?
+  [ "$rc" -ne 1 ] || return 0
   line="$state [key=$outcome_key]: inactive terminal child=$task fingerprint=$fingerprint"
   [ -z "$pr" ] || line="$line pr=$pr"
   fm_parent_channel_report "$FM_HOME" "$STATE" "$line"
@@ -421,6 +427,16 @@ report_child_ledger_locked() { # <id> <meta>
   outcome_key="child-outcome-$id-$state-${fingerprint:0:8}"
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct upstream "$pr" || return 1
   [ -n "$RECORD_PENDING" ] || return 0
+  # Gate on prior channel presence: a child the parent never heard of is the
+  # mate's own business and its terminal outcome stays local
+  # (bin/fm-parent-channel-lib.sh ESCALATION GATE). The receipt is still marked
+  # so the outcome is not retried on every poll.
+  rc=0
+  fm_parent_channel_task_escalated "$FM_HOME" "$STATE" "$id" || rc=$?
+  if [ "$rc" -eq 1 ]; then
+    mark_reported "$RECORD_PENDING" || return 1
+    return 0
+  fi
   if claim_inactive_report_for_ledger "$id" "$incarnation" "$state" "$fingerprint" "$predecessor_head"; then
     # The fallback line is already on the parent channel. This reported ledger
     # receipt records that its richer rendering owes no second publication.
