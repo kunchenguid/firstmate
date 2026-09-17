@@ -3101,13 +3101,9 @@ spawn_reconcile_herdr_layout_attempt() {
     fm_lock_acquire_wait "$SPAWN_META_LOCK"
     SPAWN_META_LOCK_HELD=1
   fi
-  case "$expected_mode" in
-    relaunch|secondmate)
-      spawn_herdr_presentation_order_lock_acquire \
-        "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" || return 1
-      lock_for_restore=1
-      ;;
-  esac
+  spawn_herdr_presentation_order_lock_acquire \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" || return 1
+  lock_for_restore=1
   if ! fm_backend_herdr_layout_attempt_reconcile "$HERDR_LAYOUT_ATTEMPT"; then
     [ "$lock_for_restore" = 0 ] || spawn_herdr_presentation_order_lock_release
     return 1
@@ -3147,8 +3143,20 @@ spawn_reconcile_herdr_layout_attempt() {
       echo "notice: restored task $ID's inert Herdr endpoint and retained its ownership and local work for a safe retry" >&2
       return 2
       ;;
-    release-fresh) ;;
-    *) return 1 ;;
+    release-fresh)
+      if [ "$resolution" = not-applied ] \
+        && ! fm_backend_herdr_layout_attempt_remove_original "$HERDR_LAYOUT_ATTEMPT"; then
+        spawn_herdr_presentation_order_lock_release
+        echo "error: task $ID's original Herdr shell could not be removed exactly; preserving structural launch quarantine" >&2
+        return 1
+      fi
+      spawn_herdr_presentation_order_lock_release
+      lock_for_restore=0
+      ;;
+    *)
+      [ "$lock_for_restore" = 0 ] || spawn_herdr_presentation_order_lock_release
+      return 1
+      ;;
   esac
   fm_treehouse_lease_return_exact "$PROJ_ABS" "$worktree" "$holder" >/dev/null || {
     echo "error: exact Herdr replacement was reconciled, but task $ID's Treehouse lease could not be returned; refusing duplicate launch" >&2

@@ -3271,6 +3271,43 @@ fm_backend_herdr_layout_attempt_commit_restored() { # <file>
     "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE" --clear >/dev/null 2>&1 || true
 }
 
+fm_backend_herdr_layout_attempt_remove_original() { # <file>
+  local file=$1 session workspace tab pane presence info state
+  fm_backend_herdr_layout_attempt_snapshot "$file" || return 1
+  [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 6 ] \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = not-applied ] \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" = fresh ] || return 1
+  session=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION
+  workspace=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE
+  tab=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB
+  pane=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE
+  fm_backend_herdr_server_ensure "$session" || return 1
+  presence=$(fm_backend_herdr_pane_presence_state "$session" "$pane")
+  case "$presence" in
+    dead) ;;
+    present)
+      info=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
+      printf '%s' "$info" | jq -e \
+        --arg workspace "$workspace" --arg tab "$tab" --arg pane "$pane" \
+        '.result.pane.workspace_id == $workspace and .result.pane.tab_id == $tab and .result.pane.pane_id == $pane' \
+        >/dev/null 2>&1 || return 1
+      state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+      [ "$state" = no-agent ] \
+        && [ "$(fm_backend_herdr_pane_process_state "$session" "$pane")" = shell ] || return 1
+      fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane" no-agent || return 1
+      [ "$(fm_backend_herdr_pane_presence_state "$session" "$pane")" = dead ] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  fm_backend_herdr_layout_attempt_write "$file" 6 \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_ID" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_TASK" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKTREE" \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LEASE_HOLDER" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB" \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LABEL" \
+    "$tab" "$pane" removed
+}
+
 # Replace one independently confirmed retained Pi with an inert shell through
 # the same structural protocol. The restore label is derived from the durable
 # attempt, so an uncertain response can be reconciled without issuing a second

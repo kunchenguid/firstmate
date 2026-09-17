@@ -72,6 +72,32 @@ assert_refused_without_mutation() {  # <case> <id> <description>
   [ ! -s "$dir/runtime.log" ] || fail "$description: runtime command ran before refusal: $(cat "$dir/runtime.log")"
 }
 
+test_structural_launch_quarantine_refuses_before_mutation() {
+  local dir id=quarantined-task rc
+  dir=$(make_case structural-launch-quarantine)
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=isolated:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  printf '%s\n' 'version=4' > "$dir/home/state/$id.herdr-launch"
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown continued through a structural launch quarantine"
+  assert_contains "$(cat "$dir/stderr")" "unreconciled Herdr structural launch" \
+    "teardown did not identify the structural launch quarantine"
+  assert_present "$dir/home/state/$id.meta" \
+    "teardown removed task metadata while structural recovery remained open"
+  assert_present "$dir/home/state/$id.herdr-launch" \
+    "teardown removed structural recovery ownership"
+  assert_present "$dir/worktree/sentinel" \
+    "teardown changed the worktree while structural recovery remained open"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "teardown reached the runtime while structural recovery remained open: $(cat "$dir/runtime.log")"
+  pass "fm-teardown: structural launch quarantine refuses before cleanup mutation"
+}
+
 test_invalid_endpoint_records_refuse_before_mutation() {
   local dir id=endpoint-a
 
@@ -1338,6 +1364,7 @@ test_already_gone_endpoint_still_completes_without_a_refusal() {
   pass "fm-teardown: an already-exited endpoint, and a server that is already gone, still complete cleanup silently"
 }
 
+test_structural_launch_quarantine_refuses_before_mutation
 test_invalid_endpoint_records_refuse_before_mutation
 test_control_lock_contention_refuses_before_mutation
 test_non_pool_teardown_ignores_task_set_lock

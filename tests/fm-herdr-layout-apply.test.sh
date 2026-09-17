@@ -18,6 +18,7 @@ REQUEST="$TMP_ROOT/request.json"
 APPLIED="$TMP_ROOT/applied"
 REPORTED="$TMP_ROOT/reported"
 CLOSED="$TMP_ROOT/closed"
+OLD_CLOSED="$TMP_ROOT/old-closed"
 LABEL_CLEARED="$TMP_ROOT/label-cleared"
 RENAME_BEFORE_RETIRE="$TMP_ROOT/rename-before-retire"
 ATTEMPT="$TMP_ROOT/task.herdr-launch"
@@ -120,7 +121,7 @@ fm_backend_herdr_cli() { # <session> <args...>
     "workspace list")
       if [ "$MODE" = workspace ]; then
         printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w9"}]}}'
-      elif [ "$MODE" = reconcile_retain ]; then
+      elif [ "$MODE" = reconcile_retain ] || [ "$MODE" = remove_original ]; then
         printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"anchor","focused":true,"active_tab_id":"anchor:t1"},{"workspace_id":"w1","focused":false,"active_tab_id":"w1:t3"}]}}'
       else
         printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1"}]}}'
@@ -134,6 +135,10 @@ fm_backend_herdr_cli() { # <session> <args...>
       fi
       ;;
     "pane get w1:p2")
+      if [ -e "$OLD_CLOSED" ]; then
+        printf '%s\n' '{"error":{"code":"pane_not_found"}}'
+        return 0
+      fi
       case "$MODE" in
         reconcile|reconcile_duplicate|reconcile_missing|reconcile_retain) return 1 ;;
         pane) printf '%s\n' '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t9","pane_id":"w1:p2"}}}' ;;
@@ -174,11 +179,20 @@ fm_backend_herdr_cli() { # <session> <args...>
     "tab list --workspace anchor")
       printf '%s\n' '{"result":{"tabs":[{"workspace_id":"anchor","tab_id":"anchor:t1","focused":true}]}}'
       ;;
+    "tab list --workspace w1")
+      printf '%s\n' '{"result":{"tabs":[{"workspace_id":"w1","tab_id":"w1:t2","focused":false},{"workspace_id":"w1","tab_id":"w1:t3","focused":true}]}}'
+      ;;
+    "terminal title clear")
+      printf '%s\n' '{"result":{"reason":"no_foreground_client"}}'
+      ;;
     "tab get w1:t4")
       printf '%s\n' '{"result":{"tab":{"workspace_id":"w1","tab_id":"w1:t4"}}}'
       ;;
     "pane list --workspace w1")
       case "$MODE" in
+        remove_original)
+          printf '%s\n' '{"result":{"panes":[{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2","label":null},{"workspace_id":"w1","tab_id":"w1:t3","pane_id":"w1:p9","label":null}]}}'
+          ;;
         reconcile_duplicate)
           printf '%s\n' '{"result":{"panes":[{"workspace_id":"w1","tab_id":"w1:t3","pane_id":"w1:p3","label":"fm-launch-0123456789abcdef0123456789abcdef"},{"workspace_id":"w1","tab_id":"w1:t4","pane_id":"w1:p4","label":"fm-launch-0123456789abcdef0123456789abcdef"}]}}'
           ;;
@@ -215,6 +229,10 @@ fm_backend_herdr_cli() { # <session> <args...>
       [ "$MODE" != rename_failure ] || return 1
       : > "$LABEL_CLEARED"
       printf '%s\n' '{"result":{"type":"pane_rename","pane_id":"w1:p3"}}'
+      ;;
+    "pane close w1:p2")
+      : > "$OLD_CLOSED"
+      printf '%s\n' '{"result":{"type":"pane_close","pane_id":"w1:p2"}}'
       ;;
     "pane close w1:p3")
       : > "$CLOSED"
@@ -361,6 +379,35 @@ rm -f "$ATTEMPT" "$CLOSED"
 MODE=ok
 CLOSE_READBACK=dead
 pass "structural cleanup advances only after explicit pane absence"
+
+rm -f "$ATTEMPT" "$OLD_CLOSED"
+fm_backend_herdr_layout_attempt_write "$ATTEMPT" 6 0123456789abcdef0123456789abcdef \
+  fresh task-z1 "$TMP_ROOT/worktree" fm-task-z1 \
+  lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef \
+  w1:t2 w1:p2 not-applied
+MODE=remove_original
+: > "$CALLS"
+fm_backend_herdr_layout_attempt_remove_original "$ATTEMPT" \
+  || fail "fresh not-applied recovery did not close its original shell"
+[ -e "$OLD_CLOSED" ] || fail "fresh not-applied recovery left its original shell open"
+fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
+  || fail "fresh original-shell removal lost its durable attempt"
+[ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 6 ] \
+  && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = removed ] \
+  || fail "fresh original-shell removal did not publish its durable result"
+[ "$(grep -c '^lab-structural|pane close w1:p2$' "$CALLS")" -eq 1 ] \
+  || fail "fresh not-applied recovery did not close exactly one original pane"
+fm_backend_herdr_layout_attempt_write "$ATTEMPT" 6 0123456789abcdef0123456789abcdef \
+  fresh task-z1 "$TMP_ROOT/worktree" fm-task-z1 \
+  lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef \
+  w1:t2 w1:p2 not-applied
+fm_backend_herdr_layout_attempt_remove_original "$ATTEMPT" \
+  || fail "fresh original-shell recovery could not resume after a confirmed close"
+[ "$(grep -c '^lab-structural|pane close w1:p2$' "$CALLS")" -eq 1 ] \
+  || fail "fresh original-shell recovery repeated an already confirmed close"
+rm -f "$ATTEMPT" "$OLD_CLOSED"
+MODE=ok
+pass "fresh not-applied recovery closes and durably retires its exact original shell"
 
 HELPER_PAYLOAD="$TMP_ROOT/helper-payload.json"
 printf '%s\n' '{"cwd":"/tmp/worktree","env":{"OPENAI_API_KEY":"credential-must-stay-off-argv"},"command":["pi"]}' > "$HELPER_PAYLOAD"

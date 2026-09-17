@@ -334,6 +334,13 @@ fi
 fm_lease_guard "$ID" "teardown (fm-teardown)"
 
 META="$STATE/$ID.meta"
+teardown_refuse_structural_launch_attempt() { # <state> <task-id> <scope>
+  local state=$1 task_id=$2 scope=$3 attempt="$1/$2.herdr-launch"
+  if [ -e "$attempt" ] || [ -L "$attempt" ]; then
+    echo "REFUSED: $scope $task_id has an unreconciled Herdr structural launch; reconcile it before teardown. Nothing was changed." >&2
+    return 1
+  fi
+}
 TREEHOUSE_PROJECT_LOCK=
 TREEHOUSE_PROJECT_LOCK_HELD=0
 TREEHOUSE_SLOT_LOCK_REQUIRED=0
@@ -427,6 +434,7 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused after locking: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
 }
+teardown_refuse_structural_launch_attempt "$STATE" "$ID" task || exit 1
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
 TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
@@ -2733,6 +2741,7 @@ preflight_descendant_task_locks() {
       echo "REFUSED: descendant task $task_id changed while forced teardown acquired its locks; forced teardown changed nothing" >&2
       return 1
     }
+    teardown_refuse_structural_launch_attempt "$state" "$task_id" "descendant task" || return 1
     kind=$(meta_value "$meta" kind)
     [ -n "$kind" ] || kind=ship
     [ "$kind" = "${DESCENDANT_TASK_KINDS[$i]}" ] || {
