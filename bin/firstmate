@@ -78,9 +78,10 @@ scaffold_home() {
 # To share a config item with the team, append a negation for its exact path
 # below the config/* line, e.g.:
 #   !config/crew-harness
+# This file ignores itself so an uncommitted home leaves the repository clean;
+# a team that shares config commits it once with `git add -f`.
 # Keep data/, state/, and every non-whitelisted config item private.
 *
-!.gitignore
 !config/
 config/*
 # Whitelist shared config items below this line, one exact path per line.

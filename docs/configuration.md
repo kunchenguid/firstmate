@@ -38,7 +38,7 @@ The harness is `--harness <name>`, then the home's `config/primary-harness` (one
 
 `firstmate init --org` scaffolds `.firstmate/` at the current directory (an org root), and `firstmate init` inside a git repository scaffolds a per-project home at that repo's root and registers the repository itself.
 Both write `config/projects-root` (below), a `.tasks.toml` backlog config, and a whitelist-style `.firstmate/.gitignore` that keeps the home private while letting a team commit selected `config/` items; the home is deliberately not added to `.git/info/exclude`, which would hide those whitelisted items from git.
-`.firstmate/` is private by default; to share a config item with a team, commit it by appending an exact-path negation such as `!config/crew-harness` to `.firstmate/.gitignore` and removing the parent-level ignore - `data/` and `state/` are never shared.
+`.firstmate/` is private by default; to share a config item with a team, commit it by appending an exact-path negation such as `!config/crew-harness` to `.firstmate/.gitignore` and committing that `.gitignore` once with `git add -f` (it ignores itself, so an unshared home leaves the repository clean) - `data/` and `state/` are never shared.
 
 `config/projects-root` holds one line naming the directory whose children are this home's projects: a relative path resolves against the home, and `firstmate init` writes `..` so an org home's projects are the org root's sibling repositories.
 Resolution order for the effective projects root is `FM_PROJECTS_OVERRIDE`, then `config/projects-root`, then `$FM_HOME/projects`; `bin/fm-projects-lib.sh` owns the contract and every script that computes a projects root consumes it.

@@ -136,8 +136,8 @@ test_init() {
   if grep -qF "/.firstmate/" "$repo/.git/info/exclude" 2>/dev/null; then
     fail "init excluded .firstmate/ wholesale, hiding whitelisted config"
   fi
-  [ -z "$(git -C "$repo" status --porcelain -- .firstmate/data .firstmate/state)" ] \
-    || fail "init left private .firstmate state visible to git"
+  [ -z "$(git -C "$repo" status --porcelain)" ] \
+    || fail "init left the repository dirty"
   printf '!config/crew-harness\n' >> "$repo/.firstmate/.gitignore"
   printf 'claude\n' > "$repo/.firstmate/config/crew-harness"
   printf 'x\n' > "$repo/.firstmate/config/private-item"
