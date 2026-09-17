@@ -2,7 +2,7 @@
 # fm-lint-workflows.sh - owner of firstmate's GitHub workflow lint.
 #
 # Runs pinned actionlint on every .github/workflows/*.{yml,yaml} so a malformed
-# workflow, including a self-broken ci.yml, fails in the local and no-mistakes
+# workflow, including a self-broken ci.yml, fails in the local and CI
 # lint lane before merge. A broken ci.yml cannot report its own breakage, so
 # this check must not live only as a step inside that workflow. bin/fm-lint.sh
 # invokes this owner on its default (no explicit-path) path, which CI and

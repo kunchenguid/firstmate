@@ -557,7 +557,7 @@ test_main_owned_actions_refuse_the_branch_actor() {
   [ "$status" -eq 6 ] || fail "branch fm-merge-local exited $status, not 6: $out"
 
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
-    "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
+    "$ROOT/bin/fm-spawn.sh" task-new --mode direct-PR --yolo off 2>&1)
   status=$?
   [ "$status" -eq 6 ] || fail "branch fm-spawn exited $status, not 6: $out"
   assert_contains "$out" "new-task spawn (fm-spawn) refused" "spawn refusal lost its action label"

@@ -431,7 +431,7 @@ SH
   fm_write_meta "$dir/home/state/$target_id.meta" \
     "window=$session:$target" "endpoint_task_id=$target_id" \
     "worktree=$dir/nonexistent-worktree" "project=$dir/nonexistent-project" \
-    "kind=scout" "mode=no-mistakes"
+    "kind=scout" "mode=direct-PR"
   env -u TMUX -u TMUX_PANE FM_TEST_TMUX_SOCKET="$socket_id" \
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
     PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$target_id" --force \
@@ -1043,7 +1043,7 @@ write_endpoint_close_meta() {  # <case-dir> <id> <window>
   fm_write_meta "$1/home/state/$2.meta" \
     "window=$3" "endpoint_task_id=$2" \
     "worktree=$1/nonexistent-worktree" "project=$1/nonexistent-project" \
-    "kind=ship" "mode=no-mistakes"
+    "kind=ship" "mode=direct-PR"
 }
 
 test_failed_endpoint_close_refuses_before_removing_the_record() {
@@ -1286,7 +1286,7 @@ test_orca_close_failure_refuses_even_under_force() {
   fm_write_meta "$dir/home/state/$id.meta" \
     "window=fm-$id" "endpoint_task_id=$id" "terminal=term-7" \
     "worktree=$dir/nonexistent-worktree" "project=$dir/nonexistent-project" \
-    "backend=orca" "orca_worktree_id=worktree-9::/orca/worktree-9" "kind=ship" "mode=no-mistakes"
+    "backend=orca" "orca_worktree_id=worktree-9::/orca/worktree-9" "kind=ship" "mode=direct-PR"
 
   set +e
   env -u TMUX -u TMUX_PANE \

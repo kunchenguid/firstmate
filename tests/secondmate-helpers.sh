@@ -3,7 +3,7 @@
 # suites (fm-secondmate-lifecycle-e2e and fm-secondmate-safety).
 #
 # These mocks encode secondmate-lifecycle behavior (fake tmux that logs window
-# ops, fake treehouse that leases/returns homes, fake no-mistakes that records
+# ops, and fake treehouse that leases/returns homes.
 # init/doctor), so they live here rather than in the generic tests/lib.sh. The
 # generic git/identity/meta primitives come from lib.sh, which this file pulls in.
 
@@ -115,45 +115,6 @@ SH
   chmod +x "$fakebin/tmux"
   chmod +x "$fakebin/treehouse"
   : > "$dir/tmux.log"
-  printf '%s\n' "$fakebin"
-}
-
-# A fake no-mistakes that touches .no-mistakes-init / .no-mistakes-doctor markers.
-make_fake_no_mistakes() {
-  local dir=$1 fakebin
-  fakebin=$(fm_fakebin "$dir")
-  cat > "$fakebin/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-set -eu
-case "${1:-}" in
-  init) touch .no-mistakes-init ;;
-  doctor) touch .no-mistakes-doctor ;;
-  *) exit 2 ;;
-esac
-SH
-  chmod +x "$fakebin/no-mistakes"
-  printf '%s\n' "$fakebin"
-}
-
-# A fake no-mistakes that records each "<pwd>\t<verb>" call to
-# FM_FAKE_NO_MISTAKES_LOG and fails for the project named FM_FAKE_NO_MISTAKES_FAIL_PROJECT.
-make_recording_no_mistakes() {
-  local dir=$1 fakebin
-  fakebin=$(fm_fakebin "$dir")
-  cat > "$fakebin/no-mistakes" <<'SH'
-#!/usr/bin/env bash
-set -eu
-printf '%s\t%s\n' "$PWD" "${1:-}" >> "$FM_FAKE_NO_MISTAKES_LOG"
-if [ "$(basename "$PWD")" = "${FM_FAKE_NO_MISTAKES_FAIL_PROJECT:-}" ]; then
-  exit 1
-fi
-case "${1:-}" in
-  init) touch .no-mistakes-init ;;
-  doctor) touch .no-mistakes-doctor ;;
-  *) exit 2 ;;
-esac
-SH
-  chmod +x "$fakebin/no-mistakes"
   printf '%s\n' "$fakebin"
 }
 

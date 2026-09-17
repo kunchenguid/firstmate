@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
 # Parity guard for firstmate's shell-lint definition.
 #
-# bin/fm-lint.sh must be the single owner that BOTH CI
-# (.github/workflows/ci.yml) and the pre-push gate (.no-mistakes.yaml
-# commands.lint) invoke, so the local lint can never diverge from CI again.
-# Regression origin: with no commands.lint configured, the local no-mistakes
-# lint step never ran the deterministic
+# bin/fm-lint.sh must be the single owner invoked by CI and local contributors,
+# so the local lint can never diverge from CI again.
+# Regression origin: the local lint path once skipped the deterministic
 # `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh`, so PRs passed local
 # validation yet failed that exact check in CI on info/warning findings such as
 # SC2015, SC1007, and SC2034. A second axis was tool-version skew: CI's

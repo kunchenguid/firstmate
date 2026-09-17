@@ -222,7 +222,7 @@ write_task_meta() {
     "worktree=$dir/wt" \
     "project=$dir/project" \
     "kind=ship" \
-    "mode=no-mistakes"
+    "mode=direct-PR"
 }
 
 # Extra "field=value" arguments are written before pr=, because

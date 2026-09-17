@@ -165,7 +165,7 @@ EOF
     echo "project=$proj"
     echo "harness=$harness"
     echo "kind=ship"
-    echo "mode=no-mistakes"
+    echo "mode=direct-PR"
     echo "yolo=off"
     echo "tasktmp=/tmp/fm-$id"
     echo "model=default"
@@ -972,7 +972,7 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
 
 test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
   local dir home id brief launch out mode rule
-  for mode in no-mistakes direct-PR local-only; do
+  for mode in direct-PR local-only; do
     id="rl-promoted-${mode}"
     dir=$(new_case "promoted-scout-$mode" "$id")
     home="$dir/home"
