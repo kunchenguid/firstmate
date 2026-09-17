@@ -104,7 +104,7 @@ refresh_released_proof() {  # <pr-url> <head> <base>
       *) printf '%s\n' "$line" ;;
     esac
   done < "$META" > "$META_TMP" || { echo "error: cannot stage metadata for task $ID" >&2; exit 1; }
-  chmod 0600 "$META_TMP" && mv -f -- "$META_TMP" "$META" \
+  { chmod 0600 "$META_TMP" && mv -f -- "$META_TMP" "$META"; } \
     || { echo "error: cannot publish refreshed PR proof for task $ID" >&2; exit 1; }
   META_TMP=
   fm_lock_release "$META_LOCK" || true
@@ -145,7 +145,7 @@ review_released() {
     || { echo "error: the forge returned incomplete PR data for released task $ID" >&2; exit 1; }
   [ "$forge_url" = "$pr_url" ] \
     || { echo "error: the forge answered for $forge_url, not task $ID's recorded $pr_url; refusing to review another PR's identity" >&2; exit 1; }
-  fm_pr_head_valid "$forge_head" && fm_pr_head_valid "$forge_base_oid" \
+  { fm_pr_head_valid "$forge_head" && fm_pr_head_valid "$forge_base_oid"; } \
     || { echo "error: the forge returned an invalid head or base commit for PR #$n" >&2; exit 1; }
   case "$forge_base" in ''|*[$'\n\r\t']*) echo "error: the forge returned no usable base branch for PR #$n" >&2; exit 1 ;; esac
   git -C "$PROJ" check-ref-format "refs/heads/$forge_base" >/dev/null 2>&1 \
@@ -164,8 +164,8 @@ review_released() {
   # The base branch may have advanced past the commit the PR is measured
   # against; pin the ref to that exact forge-reported commit once it is proven
   # to be part of the fetched base branch.
-  git -C "$PROJ" cat-file -e "$forge_base_oid^{commit}" 2>/dev/null \
-    && git -C "$PROJ" merge-base --is-ancestor "$forge_base_oid" "$base_ref" 2>/dev/null \
+  { git -C "$PROJ" cat-file -e "$forge_base_oid^{commit}" 2>/dev/null \
+    && git -C "$PROJ" merge-base --is-ancestor "$forge_base_oid" "$base_ref" 2>/dev/null; } \
     || { echo "error: the forge's base commit $forge_base_oid for PR #$n is not on the fetched base branch $forge_base; refusing an unverifiable base" >&2; exit 1; }
   git -C "$PROJ" update-ref "$base_ref" "$forge_base_oid" \
     || { echo "error: could not pin the verified base commit for released task $ID" >&2; exit 1; }
