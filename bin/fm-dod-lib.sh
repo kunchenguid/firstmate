@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Single owner of a ship task's mode-specific "Definition of done" block.
-# Sourced by bin/fm-brief.sh, which renders it into a generated ship brief, and by
-# bin/fm-promote.sh, which renders it into the ship instructions a promoted scout
-# receives. Both paths must hand the worker the same contract: a promoted
-# no-mistakes worker that never received the ask-user escalation rule or the
-# `--yes` ban is the exact delivery hole this single owner exists to close.
+# bin/fm-spawn.sh renders it into every ship launch brief after removing any
+# authored or legacy copy, while bin/fm-promote.sh renders it into the immediate
+# ship instructions a promoted scout receives. Both paths must hand the worker
+# the same contract: a promoted no-mistakes worker that never received the
+# ask-user escalation rule or the `--yes` ban is the exact delivery hole this
+# single owner exists to close.
 # fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> prints the block on
 # stdout with no trailing blank line. The caller validates the mode; an unknown
 # mode is refused rather than silently rendered as the pipeline contract.
@@ -157,6 +158,54 @@ fm_brief_heading_body() {  # <file> <heading>
 
 fm_brief_heading_present() {  # <file> <heading>
   fm_brief_heading_parse "$1" "$2" present >/dev/null
+}
+
+# Print a brief without any exact, unfenced top-level Definition-of-done
+# section or machine-readable ship-mode marker. Launch rendering validates the
+# source marker separately, then uses this output before appending the current
+# generated contract, so legacy and promoted briefs cannot deliver stale or
+# duplicate completion rules. A later top-level section is preserved.
+fm_brief_without_dod() {  # <file>
+  awk '
+    {
+      line = $0
+      scan = line
+      spaces = 0
+      while (spaces < 3 && substr(scan, 1, 1) == " ") {
+        scan = substr(scan, 2)
+        spaces++
+      }
+      marker = substr(scan, 1, 1)
+      marker_len = 0
+      if (marker == "`" || marker == "~") {
+        while (substr(scan, marker_len + 1, 1) == marker) marker_len++
+      }
+      is_fence = marker_len >= 3
+      was_fenced = fenced
+      if (is_fence) {
+        rest = substr(scan, marker_len + 1)
+        if (!fenced) {
+          fenced = 1
+          fence_marker = marker
+          fence_len = marker_len
+        } else if (marker == fence_marker && marker_len >= fence_len && rest ~ /^[[:space:]]*$/) {
+          fenced = 0
+        }
+      }
+
+      if (!was_fenced && !is_fence && line ~ /^Delivery contract: mode=(no-mistakes|direct-PR|local-only)$/) {
+        next
+      }
+      if (!was_fenced && !is_fence && line == "# Definition of done") {
+        skipping = 1
+        next
+      }
+      if (skipping && !was_fenced && !is_fence && scan ~ /^#[[:space:]]/) {
+        skipping = 0
+      }
+      if (!skipping) print line
+    }
+  ' "$1"
 }
 
 fm_brief_task_heading_body() {  # <file> <heading>
