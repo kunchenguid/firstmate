@@ -146,6 +146,10 @@ const branchCacheKey = `fm-branch-${createHash("sha256").update(fmHome).digest("
 
 const MIRROR_MESSAGE_CAP = 4000;
 const MERGE_NOTE_BOAT = "⛵";
+const BRANCH_HEALTH_MESSAGE_TYPE = "fm-branch-health";
+const BRANCH_PAUSED_NOTE = "Supervision branch paused after repeated provider errors; main will handle wakes while it cools down.";
+const BRANCH_RECOVERED_NOTE = "Supervision branch recovered after a successful cooldown probe.";
+const BRANCH_HEALTH_NOTES = new Set([BRANCH_PAUSED_NOTE, BRANCH_RECOVERED_NOTE]);
 const VISIBLE_OUTCOME_ANCHOR = "⚓";
 const VISIBLE_OUTCOME_ENTRY_TYPE = "fm-branch-visible-outcome";
 // The processing half of the captain-outcome contract. The visible entry
@@ -673,7 +677,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function deliverBranchHealthNote(text: string): void {
-    const message = { customType: "fm-branch-merge", content: `${MERGE_NOTE_BOAT} ${text}`, display: true };
+    const message = { customType: BRANCH_HEALTH_MESSAGE_TYPE, content: `${MERGE_NOTE_BOAT} ${text}`, display: true };
     if (mainStreaming) pi.sendMessage(message, { deliverAs: "nextTurn" });
     else pi.sendMessage(message, {});
   }
@@ -693,7 +697,7 @@ export default function (pi: ExtensionAPI) {
       probeInFlight: false,
     };
     if (firstLatch) {
-      deliverBranchHealthNote("Supervision branch paused after repeated provider errors; main will handle wakes while it cools down.");
+      deliverBranchHealthNote(BRANCH_PAUSED_NOTE);
     }
   }
 
@@ -703,7 +707,7 @@ export default function (pi: ExtensionAPI) {
     if (!providerRecovery) return;
     branchBroken = "";
     providerRecovery = null;
-    deliverBranchHealthNote("Supervision branch recovered after a successful cooldown probe.");
+    deliverBranchHealthNote(BRANCH_RECOVERED_NOTE);
   }
 
   function finishProviderProbe(probeGeneration: number, probeSelectionRevision: number): void {
@@ -1980,6 +1984,13 @@ ${context.command}
     !calmPresentation.stockExportRendering &&
     !calmTranscriptClassIsVisible(itemClass);
 
+  class CalmAwareRoutineNote extends Text {
+    override render(width: number): string[] {
+      if (calmHides("custom-message")) return [];
+      return super.render(width);
+    }
+  }
+
   const outcomesToolAnsiPattern = new RegExp(
     "(?:\\u001B\\][\\s\\S]*?(?:\\u0007|\\u001B\\u005C|\\u009C))|[\\u001B\\u009B][[\\]\\()#;?]*(?:\\d{1,4}(?:[;:]\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]",
     "g",
@@ -2225,9 +2236,20 @@ ${context.command}
     const hasGlyph = note.startsWith(MERGE_NOTE_BOAT);
     const rest = hasGlyph ? note.slice(MERGE_NOTE_BOAT.length) : note;
     const outputPad = 1;
-    return new Text(
+    const Note = !hasGlyph || BRANCH_HEALTH_NOTES.has(rest.trim()) ? Text : CalmAwareRoutineNote;
+    return new Note(
       `${hasGlyph ? theme.fg("customMessageText", MERGE_NOTE_BOAT) : ""}${theme.fg("dim", rest)}`,
       outputPad,
+      0,
+    );
+  });
+  pi.registerMessageRenderer?.(BRANCH_HEALTH_MESSAGE_TYPE, (message, _options, theme) => {
+    const note = textOfContent(message.content);
+    const hasGlyph = note.startsWith(MERGE_NOTE_BOAT);
+    const rest = hasGlyph ? note.slice(MERGE_NOTE_BOAT.length) : note;
+    return new Text(
+      `${hasGlyph ? theme.fg("customMessageText", MERGE_NOTE_BOAT) : ""}${theme.fg("dim", rest)}`,
+      1,
       0,
     );
   });
