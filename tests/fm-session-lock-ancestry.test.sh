@@ -133,6 +133,44 @@ SH
   pass "session-lock: a harness that is pid 1 of its own namespace is examined, not skipped"
 }
 
+test_uppercase_omp_session_is_identified() {
+  local dir fakebin got
+  dir="$TMP_ROOT/omp-title"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  700:comm=) printf '%s\n' OMP ;;
+  700:args=) printf '%s\n' OMP ;;
+  700:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-lock.sh' ;;
+  *:ppid=) printf '%s\n' 700 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '700\n' > "$dir/state/.lock"
+
+  got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "an omp 18.1.18 session titling itself OMP was not found in the ancestry at all"
+  [ "$got" = 700 ] || fail "ancestry resolved '$got', expected the OMP-titled session pid 700"
+  lib_eval "$fakebin" 'fm_harness_pid_alive 700' \
+    || fail "a live OMP-titled session was not recognized as a harness"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "the OMP-titled session holding the lock did not recognize itself as the owner"
+  pass "session-lock: an omp 18.1.18 session whose macOS process title is OMP keeps its identity"
+}
+
 test_ordinary_paths_are_never_harness_processes() {
   local dir fakebin shape
   dir="$TMP_ROOT/ordinary-paths"
@@ -406,6 +444,7 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
 
 test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
+test_uppercase_omp_session_is_identified
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live

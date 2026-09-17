@@ -145,14 +145,16 @@ harness_marker() {
   return 0
 }
 
-# True when an exact `omp` process sits within eight parents of this one. The
-# same anchored match as the ancestry walk below, kept separate so the marker
-# precedence above can demand real process evidence before trusting FM_OMP_HARNESS.
+# True when an exact `omp` process sits within eight parents of this one,
+# accepting both the lowercase kernel name and the `OMP` title omp 18.1.18
+# rewrites on macOS. The same anchored match as the ancestry walk below, kept
+# separate so the marker precedence above can demand real process evidence
+# before trusting FM_OMP_HARNESS.
 ancestry_names_omp() {
   local pid=$$ comm
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    [ "$(basename -- "$comm")" = omp ] && return 0
+    case "$(basename -- "$comm")" in omp|OMP) return 0 ;; esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
@@ -212,13 +214,16 @@ harness_process_verdict() {  # <pid>
     pi) echo "comm pi"; return ;;
     # omp is a Bun-compiled single binary whose process name is exactly `omp`
     # (verified, omp 18.1.11: `ps -o comm=` reports omp from both its `!`
-    # bash path and the model's bash tool). Anchored, never *omp*, so ompd,
-    # comp, and similar unrelated commands are not misread as this harness.
+    # bash path and the model's bash tool). omp 18.1.18 rewrites that title,
+    # and macOS `ps -o comm=` then reports the argv[0] spelling `OMP` while
+    # the kernel name stays `omp` (verified live, 2026-09-12), so both
+    # spellings are accepted. Anchored, never *omp*, so ompd, comp, and
+    # similar unrelated commands are not misread as this harness.
     # It sits above the node*|python* interpreter fallback deliberately: the
     # optional claude-bridge extension runs a nested executable literally
     # named `claude` with its own node child, and that fallback's *claude*
     # args glob would otherwise claim it if that subtree were ever walked.
-    omp) echo "comm omp"; return ;;
+    omp|OMP) echo "comm omp"; return ;;
     # agy (Antigravity CLI) is a Go-compiled single binary whose process name
     # is exactly `agy` (verified, agy 1.2.0: `ps -o comm=` reports agy and
     # Herdr's process-info reports name agy with argv[0] agy). Anchored, never
