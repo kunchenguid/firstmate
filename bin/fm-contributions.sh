@@ -17,8 +17,8 @@
 # GitHub PRs and issues are supported; other forges remain visibly unmeasured.
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
-# task and records[]. Each record contains url, kind, checked_at, error,
-# observation, verdict, seen event tokens, pending events, and notified tokens.
+# task and records[]. Each record contains url, kind, checked_at, attempted_at,
+# error, observation, verdict, seen event tokens, pending events, and notified tokens.
 # observation is one coherent forge read (a PR head is rechecked after fetching
 # checks/reviews). Checks are normalized by name, id, started_at, status and
 # conclusion; projection picks the newest attempt per distinct name. The last
@@ -33,9 +33,17 @@
 # poll consumes fm-fleet-snapshot.sh --contribution-input, a local-only read,
 # and spends at most FM_CONTRIBUTIONS_BUDGET seconds on forge reads (default 20,
 # 1..25). Each gh call is bounded by the remaining budget and five seconds.
-# Oldest observations go first, so a large corpus progresses across polls.
-# API failure leaves error evidence; an expired or absent observation is not
-# silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
+# Oldest attempts go first, so deferred URLs do not starve other contributions.
+# Budget exhaustion preserves the last coherent observation without a failure wake.
+# A changed API failure emits a diagnostic; recovery clears its stored error.
+# Merged PRs with no pending feedback or observation error stop polling, even
+# while retained backlog links still own them. Closed, unmerged work stays live.
+# A live captain hold or an unacknowledged maintainer signal outranks that
+# terminal state, so retirement never hides work someone still owes.
+# A retired row stays counted as checked and is left out of the projection's
+# validity floor, so a home whose owned work is all merged does not expire back
+# into fleet work.
+# FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds live observation freshness.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
 # FM_CONTRIBUTIONS_READY_LABEL selects the equivalent triage label, default
 # ready-for-pr. Labels are matched case-insensitively and exactly.
@@ -126,7 +134,7 @@ project() {
     --arg all "${2:-}" '
     projected($input[0];$saved[0];$now;$max_age) as $rows
     | summary($rows;($errors + (if $input[0].backlog.present == true then 0 else 1 end)))
-    | .valid_until += $max_age
+    | .valid_until = ((if all($rows[]; .settled) then $now else .valid_until end) + $max_age)
     | .captain_omitted = ([0, (.captain | length) - 20] | max)
     | .captain |= .[:20]
     | . + (if $all == "--all" then {rows:$rows} else {} end)'
@@ -167,12 +175,16 @@ write_record() { # task record-json-file
 }
 
 forge() {
-  local remaining
+  local remaining status limit
   remaining=$((DEADLINE - $(date +%s)))
-  [ "$remaining" -gt 0 ] || return 1
-  [ "$remaining" -le 5 ] || remaining=5
-  fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
-    gh "$@" 2> "$TMP/forge.err"
+  if [ "$remaining" -le 0 ]; then FORGE_EXHAUSTED=1; return 1; fi
+  limit=$remaining
+  [ "$limit" -le 5 ] || limit=5
+  status=0
+  fm_run_timed "$limit" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+    gh "$@" 2> "$TMP/forge.err" || status=$?
+  if [ "$status" -eq 124 ] && [ "$remaining" -le 5 ]; then FORGE_EXHAUSTED=1; fi
+  return "$status"
 }
 
 observe() { # canonical GitHub URL -> normalized JSON
@@ -262,7 +274,10 @@ poll() {
   read_saved
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
   jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
-    known($input[0];$saved[0]) | map(. as $k | . + {at:([$saved[0][] | select(.task == $k.task) | .records[] | select(.url == $k.url) | .checked_at] | first // "")})
+    known($input[0];$saved[0]) | map(. as $k
+      | ([$saved[0][] | select(.task == $k.task) | .records[] | select(.url == $k.url)] | first) as $r
+      | select($r | settled | not)
+      | . + {at:($r.attempted_at // "")})
     | sort_by(.at,.task,.url)[] | [.task,.url] | @tsv' > "$TMP/known.tsv"
   DEADLINE=$(( $(date +%s) + BUDGET ))
   while IFS=$'\t' read -r task url; do
@@ -274,6 +289,7 @@ poll() {
     jq -n --slurpfile saved "$TMP/saved.json" --arg task "$task" --arg url "$url" --arg kind "$kind" '
       ([$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first)
       // {url:$url,kind:$kind,checked_at:null,observation:null,verdict:null,seen:[],pending:[],notified:[]}' > "$old"
+    FORGE_EXHAUSTED=0
     if observe "$url"; then
       jq -n --arg now "$NOW" --slurpfile old "$old" --slurpfile observation "$TMP/observation.json" '
         $old[0] as $old | $observation[0] as $o
@@ -284,11 +300,17 @@ poll() {
           observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
           seen:($events | map(.token)),
           pending:(($old.pending // []) + [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] | unique_by(.token))}' > "$TMP/row.json"
+    elif [ "${FORGE_EXHAUSTED:-0}" -eq 1 ]; then
+      cp "$old" "$TMP/row.json"
     else
       error='forge observation unavailable or changed during read'
       jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .error=$error' "$old" > "$TMP/row.json"
-      printf 'contributions: observation unavailable for %s\n' "$url"
+      if ! jq -e --arg error "$error" '.error == $error' "$old" >/dev/null; then
+        printf 'contributions: observation unavailable for %s\n' "$url"
+      fi
     fi
+    jq --arg now "$NOW" '.attempted_at=$now' "$TMP/row.json" > "$TMP/attempt.json"
+    mv "$TMP/attempt.json" "$TMP/row.json"
     write_record "$task" "$TMP/row.json"
     publish_pending "$task" "$url" "$TMP/row.json"
   done < "$TMP/known.tsv"

@@ -118,6 +118,12 @@ forge_home() {
   cat > "$home/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 set -eu
+printf '%s\n' "$*" >> "$FORGE/calls"
+if [ -f "$FORGE/exhaust" ] && [[ "$*" == 'api repos/o/r/issues/8/comments?'* ]]; then
+  touch "$FORGE/expired"
+fi
+if [ -f "$FORGE/fail" ]; then exit 1; fi
+if [ -f "$FORGE/slow" ]; then sleep 10; fi
 case "$*" in
   'pr view '*headRefOid,reviewDecision*)
     jq -n --arg head "$(cat "$FORGE/head")" '{headRefOid:$head,reviewDecision:"APPROVED"}' ;;
@@ -545,7 +551,112 @@ test_unreadable_pending_is_not_empty() {
   pass 'unreadable pending signals refuse an empty-inbox claim'
 }
 
+test_budget_preserves_observation_and_progresses() {
+  local home out
+  home=$(new_home budget)
+  forge_home "$home"
+  mutate_record "$home" delivery '.records[0].pending = [{token:"prior-feedback",type:"review"}] | .records[0].seen = ["prior-feedback"] | .records[0].notified = ["prior-feedback"]'
+  mkdir -p "$home/data/filed"
+  jq '.task = "filed"' "$home/data/delivery/contributions.json" > "$home/data/filed/contributions.json"
+  mutate_record "$home" delivery '.records[0].checked_at = "2026-09-16T07:00:00Z"'
+  mutate_record "$home" filed '.records[0].url = "https://github.com/o/r/issues/9" | .records[0].kind = "issue" | .records[0].observation = null'
+  printf -- '- [] filed - Filed https://github.com/o/r/issues/9 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
+  cat > "$home/fakebin/date" <<'SH'
+#!/usr/bin/env bash
+if [ "$*" = +%s ]; then
+  if [ -f "$FORGE/expired" ]; then printf '1020\n'; else printf '1000\n'; fi
+else
+  /bin/date "$@"
+fi
+SH
+  chmod +x "$home/fakebin/date"
+  touch "$home/forge/exhaust"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'budget poll failed'
+  [ -z "$out" ] || fail "local budget emitted a forge diagnostic: $out"
+  jq -e '.records[0] | .error == null and .checked_at == "2026-09-16T07:00:00Z" and .observation.state == "open" and .pending[0].token == "prior-feedback"' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'budget exhaustion replaced coherent evidence'
+  rm "$home/forge/expired" "$home/forge/exhaust"
+  : > "$home/forge/calls"
+  NOW=2026-09-16T08:01:00Z
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'next poll failed'
+  [ "$(sed -n '1p' "$home/forge/calls")" = 'api repos/o/r/issues/9' ] || fail 'deferred URL starved the next URL'
+  jq -e '.records[0].observation.state == "open" and .records[0].checked_at == "2026-09-16T08:01:00Z"' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'deferred observation never recovered'
+  pass 'local budget preserves evidence and rotates to the next URL'
+}
+
+test_forge_failure_notifies_once_and_recovers() {
+  local home out
+  home=$(new_home forge-failure)
+  forge_home "$home"
+  touch "$home/forge/fail"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll)
+  [ -n "$out" ] || fail 'actual forge failure was hidden'
+  jq -e '.records[0].error != null' "$home/data/delivery/contributions.json" >/dev/null || fail 'forge failure not retained'
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll)
+  [ -z "$out" ] || fail 'unchanged forge failure repeated its notification'
+  rm "$home/forge/fail"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null
+  jq -e '.records[0].error == null' "$home/data/delivery/contributions.json" >/dev/null || fail 'forge recovery not observed'
+  pass 'forge failures remain visible without repeated notifications'
+}
+
+test_budget_timeout_differs_from_forge_timeout() {
+  local home out
+  home=$(new_home timeout-budget)
+  forge_home "$home"
+  touch "$home/forge/slow"
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=1 "$ROOT/bin/fm-contributions.sh" poll) || fail 'bounded poll failed'
+  [ -z "$out" ] || fail 'budget-limited timeout claimed a forge failure'
+  jq -e '.records[0].error == null' "$home/data/delivery/contributions.json" >/dev/null || fail 'budget timeout damaged observation'
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 "$ROOT/bin/fm-contributions.sh" poll) || fail 'forge-timeout poll failed'
+  [ -n "$out" ] || fail 'five-second forge timeout was hidden despite remaining budget'
+  jq -e '.records[0].error != null' "$home/data/delivery/contributions.json" >/dev/null || fail 'forge timeout not retained'
+  pass 'poll budget timeout is distinct from the forge call limit'
+}
+
+test_merged_retirement_preserves_feedback() {
+  local home out token=review:terminal
+  home=$(new_home merged-retirement)
+  forge_home "$home"
+  mutate_record "$home" delivery '.records[0].observation.state = "merged" | .records[0].checked_at = "2026-09-01T00:00:00Z"'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null
+  [ ! -s "$home/forge/calls" ] || fail 'merged contribution was reobserved from retained backlog'
+  bearings "$home" | jq -e '.contributions.counts.nobody == 1 and .contributions.counts.fleet == 0' >/dev/null \
+    || fail 'retired merged evidence expired into fleet work'
+  mutate_record "$home" delivery ".records[0].pending = [{token:\"$token\",type:\"review\"}]"
+  bearings "$home" | jq -e '.contributions.counts.fleet == 1' >/dev/null || fail 'merged state hid unresolved feedback'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -e '.[0].token == "review:terminal"' >/dev/null || fail 'merged feedback was lost'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" || fail 'merged feedback could not be acknowledged'
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll)
+  [ -z "$out" ] && [ ! -s "$home/forge/calls" ] || fail 'acknowledgement did not retire merged polling'
+  pass 'merged backlog ownership retires only after feedback acknowledgement'
+}
+
+test_merged_precedence_respects_live_hold() {
+  local home out
+  home=$(new_home merged-hold)
+  record "$home" held 12 merged mergeable '(hold: choose scope) (hold-kind: captain)'
+  record "$home" clear 13 merged mergeable
+  mutate_record "$home" held '.records[0].checked_at = "2026-09-01T00:00:00Z"'
+  mutate_record "$home" clear '.records[0].checked_at = "2026-09-01T00:00:00Z"'
+  out=$(bearings "$home") || fail 'Bearings could not read merged hold fixture'
+  printf '%s' "$out" | jq -e '
+    .contributions.known == 2 and .contributions.checked == 2
+    and .contributions.counts == {captain:1,fleet:0,maintainer:0,nobody:1}
+    and (.contributions.captain | length) == 1
+    and .contributions.captain[0].url == "https://github.com/o/r/pull/12"
+    and .contributions.captain[0].reason == "choose scope"
+    and .contributions.proven_clear == false' >/dev/null \
+    || fail "merged delivery must keep a live captain hold and otherwise need nobody: $out"
+  pass 'merged contribution yields to a live captain hold and is otherwise retired'
+}
+
 failures=0
+( test_budget_timeout_differs_from_forge_timeout ) || failures=$((failures + 1))
+for test_name in test_budget_preserves_observation_and_progresses test_forge_failure_notifies_once_and_recovers test_merged_retirement_preserves_feedback test_merged_precedence_respects_live_hold; do
+  ( "$test_name" ) || failures=$((failures + 1))
+done
 for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
