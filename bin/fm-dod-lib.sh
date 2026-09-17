@@ -10,6 +10,10 @@
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
+# The no-mistakes block states the worker's pipeline authority where the worker
+# reads it - beside the status-line instruction it acts on when the code is
+# committed - because that is the point at which seven workers in one session
+# stopped early and reported done on work the forge never received.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
@@ -260,9 +264,11 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+\`mode=no-mistakes\` IS your authorization to run the pipeline, and you already have it: firstmate granted it when it dispatched you.
+Driving that pipeline to a PR is your own job and needs no further word from firstmate, so do not stop to ask for permission and do not wait to be told to start.
+Committing the implementation is the MIDDLE of this task, not the end of it.
+When the implementation is committed, append \`working: implemented, starting no-mistakes\` to the status file and start the pipeline in the same turn by running \`no-mistakes axi run --intent "..."\`; invoking the no-mistakes skill through this harness is equivalent convenience.
+This task has exactly one \`done:\` gate and it is the last line of this section; any \`done:\` you append before the forge holds your PR is a false claim, whatever the code is worth.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.
@@ -289,7 +295,13 @@ Two firstmate-specific rules layer on top of that guidance:
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 
-After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), the PR URL is the deliverable and it is sufficient.
+Before appending the terminal line, confirm that you genuinely pushed the branch and opened the PR, copying the full https:// URL from what the PR step actually produced rather than composing one.
+You never attest to what the forge holds: firstmate reads the PR head from the forge itself.
+Firstmate verifies a terminal claim against the forge, so a claim that names no PR cannot be checked at all, and a commit that exists only on the local branch is not a delivery.
+If the forge has no such PR for this run's validated branch, or its head is not this run's authoritative pipeline final head, which may include pipeline-authored fix commits stacked on the implementation commit, append \`blocked: {what the forge actually shows}\` when firstmate action is needed to get the work to the forge, or append \`failed: {what the forge actually shows}\` when delivery genuinely failed, then stop.
+After that confirmation, append \`done: PR {url} checks green\` and stop. You are finished.
+Keep the status line itself in exactly the \`done: PR {url} checks green\` shape above, because firstmate reads the PR out of it.
 EOF
       ;;
     *)
