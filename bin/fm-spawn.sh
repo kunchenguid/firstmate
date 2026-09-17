@@ -1052,6 +1052,7 @@ HERDR_LAYOUT_ATTEMPT=
 HERDR_LAYOUT_OWNERSHIP_MODE=
 HERDR_LAYOUT_LEASE_HOLDER=-
 HERDR_LAYOUT_QUARANTINED=0
+HERDR_LAYOUT_ENDPOINT_COMMITTED=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1133,17 +1134,25 @@ spawn_abort_cleanup() {
     && [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
     && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
-      echo "warning: herdr presentation focus lock unavailable; retaining the projection journal and refusing concurrent abort cleanup" >&2
-      HERDR_PROJECTION_ABORT_CLEANUP=0
+      echo "warning: herdr presentation focus lock unavailable; retaining the exact endpoint, task record, and Treehouse lease" >&2
+      HERDR_LAYOUT_QUARANTINED=1
+      SPAWN_FRESH_COMMIT_PENDING=0
+      status=1
     fi
   fi
   if [ "$HERDR_LAYOUT_QUARANTINED" != 1 ] \
     && [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
-    HERDR_PROJECTION_ABORT_CLEANUP=0
-    fm_backend_herdr_projection_cleanup_exact \
+    if fm_backend_herdr_projection_cleanup_exact \
       "$HERDR_PROJECTION_ABORT_SESSION" \
       "$HERDR_PROJECTION_ABORT_TASK_PANE" \
-      "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
+      "$HERDR_PROJECTION_ABORT_SEEDED_PANE"; then
+      HERDR_PROJECTION_ABORT_CLEANUP=0
+    else
+      echo "warning: exact Herdr endpoint cleanup could not be confirmed; retaining the task record and Treehouse lease" >&2
+      HERDR_LAYOUT_QUARANTINED=1
+      SPAWN_FRESH_COMMIT_PENDING=0
+      status=1
+    fi
   fi
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
@@ -1230,7 +1239,7 @@ spawn_abort_cleanup() {
     fi
   fi
   if [ "$HERDR_LAYOUT_QUARANTINED" = 1 ]; then
-    echo "warning: preserving task $ID's record and Treehouse lease until its exact Herdr structural launch attempt is reconciled" >&2
+    echo "warning: preserving task $ID's record and Treehouse lease until its exact Herdr endpoint ownership is reconciled" >&2
   fi
   if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
     SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
@@ -4813,13 +4822,16 @@ print(json.dumps(["/bin/sh", "-c", sys.stdin.read()], separators=(",", ":")))
     echo "error: structural Herdr launch could not retire its exact attempt record" >&2
     exit 1
   }
+  if [ "$HERDR_LAYOUT_OWNERSHIP_MODE" = fresh ]; then
+    HERDR_LAYOUT_ENDPOINT_COMMITTED=1
+  fi
 else
   sleep 0.3
   spawn_send_literal "$T" "$LAUNCH"
   sleep 0.3
   spawn_send_key "$T" Enter
 fi
-if [ "$BACKEND" = herdr ]; then
+if [ "$BACKEND" = herdr ] && [ "$HERDR_LAYOUT_ENDPOINT_COMMITTED" != 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
 fi
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
@@ -4931,7 +4943,9 @@ else
 fi
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   if [ "$RELAUNCH" -eq 0 ]; then
-    if spawn_fresh_commit_rollback; then
+    if [ "$HERDR_LAYOUT_ENDPOINT_COMMITTED" = 1 ]; then
+      echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); abort cleanup must close and confirm its exact Herdr endpoint before removing the provisional record and returning its isolated copy" >&2
+    elif spawn_fresh_commit_rollback; then
       echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); its record was removed so no worker is left that the backlog does not own - close out endpoint $T and local copy $WT by hand, then re-run the spawn" >&2
     else
       echo "error: task $ID's backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR), and failed-dispatch cleanup is incomplete; the provisional record may remain at $STATE/$ID.meta - close out endpoint $T and local copy $WT by hand, then remove the record and busy state before retrying" >&2
@@ -4943,6 +4957,9 @@ fi
 trap - HUP INT TERM
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   exit "$SPAWN_BACKLOG_COMMIT_STATUS"
+fi
+if [ "$HERDR_LAYOUT_ENDPOINT_COMMITTED" = 1 ]; then
+  HERDR_PROJECTION_ABORT_CLEANUP=0
 fi
 if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   case "$SPAWN_DEFERRED_SIGNAL" in

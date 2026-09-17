@@ -360,6 +360,10 @@ MODE=ok
 
 CLOSE_READBACK=unreadable
 rm -f "$CLOSED"
+if fm_backend_herdr_projection_cleanup_exact lab-structural w1:p3 '' >/dev/null 2>&1; then
+  fail "spawn abort cleanup accepted an unreadable post-close pane response"
+fi
+rm -f "$CLOSED"
 if fm_backend_herdr_layout_discard_response_pane lab-structural w1:p3 >/dev/null 2>&1; then
   fail "response-pane cleanup accepted an unreadable post-close pane response"
 fi
@@ -555,8 +559,8 @@ fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
   && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" = "w1:t3:w1:p3" ] \
   && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE" = "w1:t4:w1:p4" ] \
   || fail "retained restoration did not preserve source and restored identities"
-jq -e --arg cwd "$TMP_ROOT/worktree" '
-  .params.root.command == ["/bin/sh"]
+jq -e --arg cwd "$TMP_ROOT/worktree" --arg env_bin "$(command -v env)" '
+  .params.root.command == [$env_bin, "-i", "/bin/sh"]
   and .params.root.cwd == $cwd
   and .params.root.env == {}
   and .params.root.label == "fm-restore-0123456789abcdef0123456789abcdef"

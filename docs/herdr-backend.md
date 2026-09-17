@@ -95,13 +95,14 @@ A confirmed response advances that record to the returned replacement ids.
 A timeout, malformed response, wrong response id, helper crash, or other uncertain post-send result preserves the task record, lease, local work, and attempt record, and every retry refuses until the exact named session proves either that the old pane remains or that one random-label-correlated replacement was safely reconciled.
 Only fresh allocation recovery can return its proven lease and remove its provisional task record.
 Relaunch and secondmate recovery structurally replaces one independently confirmed exact Pi with an inert shell in the same named session, workspace, and tab, then transactionally rebinds task and presentation records before allowing a retry.
-The restoration carries no inherited environment values, preserves focus, and remains quarantined if its response or any identity cannot be proved.
+The restoration starts the shell through an explicit empty-environment argv, preserves focus, and remains quarantined if its response or any identity cannot be proved.
 Legacy, unknown, malformed, contradictory, stale-worktree, ambiguous, duplicate, renamed, or unverifiable records stay quarantined without mutation.
 The attempt record is cleared only after mode-safe retry cleanup or after the replacement's presentation and task metadata have both been rebound.
 
 The worker counts as launched only after the replacement pane reports the exact plain-Pi process, Herdr's public `pane report-agent` operation registers it as Pi, and a fresh inventory read confirms that registration is live.
 Only then do the task record and any presentation journal advance from the old tab and pane ids to the returned replacement ids.
 A failure after replacement targets the returned pane for exact cleanup and never reports spawn success.
+If backlog ownership cannot commit after launch, abort cleanup closes and confirms that exact live endpoint before removing its task record or returning its holder-bound Treehouse lease; an unconfirmed close preserves all three for reconciliation.
 Normal teardown and pre-launch aborts return the durable Treehouse lease only when its exact `fm-<id>` holder still owns it.
 Generic Enter behavior for post-launch interaction is unchanged.
 
@@ -110,7 +111,7 @@ This structural path applies only to the exact `pi` harness.
 For plain Pi, protocol versions other than 20, a missing method or schema field, an ambiguous identity, a non-shell foreground, an unrecognized replacement process, or an inventory mismatch refuse.
 
 `tests/fm-herdr-layout-apply.test.sh` pins the portable protocol, identity, metadata, inventory, quarantine, lease, and refusal contract.
-`tests/fm-herdr-layout-apply-live-e2e.test.sh` proves destination-daemon environment inheritance, exact argv and cwd, replacement identity, stale-input removal, inert-shell restoration, and focus preservation against an isolated real Herdr session.
+`tests/fm-herdr-layout-apply-live-e2e.test.sh` proves destination-daemon environment inheritance, exact argv and cwd, replacement identity, stale-input removal, restored-shell removal of daemon-provided environment sentinels, and focus preservation against an isolated real Herdr session.
 `tests/fm-herdr-lab.test.sh` pins the named-lab selector placement used for guarded real validation.
 
 ## Presentation spaces

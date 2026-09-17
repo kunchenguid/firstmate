@@ -11,7 +11,7 @@ HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 [ -x "$HERDR_LAB_HELPER" ] || fail "Herdr lab helper is not executable: $HERDR_LAB_HELPER"
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name herdr-blesh-launch)
 trap '"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"' EXIT
-FM_LAYOUT_DESTINATION=from-herdr-daemon \
+FM_LAYOUT_DESTINATION=from-herdr-daemon FM_RESTORE_CREDENTIAL=must-not-survive \
   "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" >/dev/null \
   || fail "could not provision the isolated Herdr structural-launch lab"
 
@@ -155,10 +155,11 @@ ANCHOR_TAB=$(printf '%s' "$ANCHOR" | jq -r '.result.tab.tab_id // empty')
 [ -n "$ANCHOR_TAB" ] || fail "focus-preservation anchor returned no tab identity"
 lab tab focus "$ANCHOR_TAB" >/dev/null || fail "could not focus the restoration anchor"
 FOCUS_BEFORE=$(lab workspace list | jq -r '[.result.workspaces[] | select(.focused == true) | .active_tab_id] | @tsv')
-RESTORE_PAYLOAD=$(python3 - "$CWD" <<'PY'
+ENV_BIN=$(command -v env)
+RESTORE_PAYLOAD=$(python3 - "$CWD" "$ENV_BIN" <<'PY'
 import json
 import sys
-print(json.dumps({"cwd": sys.argv[1], "env": {}, "command": ["/bin/sh"]}, separators=(",", ":")))
+print(json.dumps({"cwd": sys.argv[1], "env": {}, "command": [sys.argv[2], "-i", "/bin/sh"]}, separators=(",", ":")))
 PY
 )
 RESTORED=$(printf '%s\n' "$RESTORE_PAYLOAD" | FM_LAYOUT_DESTINATION=must-not-be-forwarded \
@@ -179,6 +180,15 @@ printf '%s' "$RESTORED_PROCESS" | jq -e '
   (.result.process_info.foreground_processes | length) == 1
   and (any(.result.process_info.foreground_processes[]?; .name == "sh" or .argv0 == "/bin/sh"))
 ' >/dev/null || fail "retained-Pi restoration did not converge to one inert shell"
+RESTORED_ENV_PROOF="$SCRATCH/restored-shell-environment-cleared"
+lab pane run "$RESTORED_PANE" \
+  "if [ -z \"\${FM_LAYOUT_DESTINATION+x}\${FM_RESTORE_CREDENTIAL+x}\" ]; then : > '$RESTORED_ENV_PROOF'; fi" \
+  >/dev/null || fail "could not inspect the restored shell environment"
+for _ in $(seq 1 100); do
+  [ -e "$RESTORED_ENV_PROOF" ] && break
+  sleep 0.1
+done
+[ -e "$RESTORED_ENV_PROOF" ] || fail "restored inert shell retained daemon environment values"
 if lab agent get "$RESTORED_PANE" >/dev/null 2>&1; then
   fail "retained-Pi restoration registered an agent in the inert shell"
 fi

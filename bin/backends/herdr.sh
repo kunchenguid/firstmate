@@ -2633,11 +2633,15 @@ fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-lab
 # projection whose create calls returned complete exact IDs.
 # It performs no lookup and never calls workspace close.
 fm_backend_herdr_projection_cleanup_exact() {  # <session> <task-pane> <seeded-pane>
-  local session=$1 task_pane=$2 seeded_pane=$3
-  [ -z "$task_pane" ] || fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$task_pane" || true
+  local session=$1 task_pane=$2 seeded_pane=$3 status=0
+  [ -z "$task_pane" ] \
+    || fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$task_pane" \
+    || status=1
   if [ -n "$seeded_pane" ] && [ "$seeded_pane" != "$task_pane" ]; then
-    fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$seeded_pane" || true
+    fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$seeded_pane" \
+      || status=1
   fi
+  return "$status"
 }
 
 # fm_backend_herdr_projection_parent_workspace_exact: resolve one exact parent
@@ -3314,7 +3318,7 @@ fm_backend_herdr_layout_attempt_remove_original() { # <file>
 # mutation. The request carries no inherited values or credentials.
 fm_backend_herdr_layout_attempt_restore_shell() { # <file> <tab> <pane>
   local file=$1 tab=$2 pane=$3 session workspace attempt restore_label protocol schema socket helper
-  local payload out helper_status new_tab new_pane info focus_before
+  local payload out helper_status new_tab new_pane info focus_before env_bin
   fm_backend_herdr_layout_attempt_snapshot "$file" || return 1
   session=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION
   workspace=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE
@@ -3340,11 +3344,16 @@ fm_backend_herdr_layout_attempt_restore_shell() { # <file> <tab> <pane>
   ' >/dev/null 2>&1 || return 1
   socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || return 1
   focus_before=$(fm_backend_herdr_projection_focus_snapshot "$session") || return 1
+  env_bin=$(command -v env) || return 1
+  case "$env_bin" in
+    /*) [ -x "$env_bin" ] || return 1 ;;
+    *) return 1 ;;
+  esac
   payload=$(python3 -c '
 import json
 import sys
-print(json.dumps({"cwd": sys.argv[1], "env": {}, "command": ["/bin/sh"]}, separators=(",", ":")))
-' "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKTREE") || return 1
+print(json.dumps({"cwd": sys.argv[1], "env": {}, "command": [sys.argv[2], "-i", "/bin/sh"]}, separators=(",", ":")))
+' "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKTREE" "$env_bin") || return 1
   helper=${FM_BACKEND_HERDR_LAYOUT_APPLY_HELPER:-$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-layout-apply.py}
   if out=$(printf '%s\n' "$payload" | python3 "$helper" \
     "$socket" "$workspace" "$tab" "$pane" "$attempt" "$restore_label" --stdin-v1); then
