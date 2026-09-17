@@ -42,7 +42,7 @@
 # resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
-#   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
+#   direct-PR    implement -> ordinary git push + provider PR/MR tool from the resolved forge route (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                the configured merge authority approves, firstmate merges to local main
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
@@ -217,6 +217,14 @@ The move IS the acknowledgement: without it firstmate rings again and eventually
 EOF
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
 
+IFS= read -r -d '' FORGE_DISCOVERY_SECTION <<'EOF' || true
+# Forge operations
+At launch, Firstmate resolves the forge from the project's git origin and appends a `# Resolved forge operations` section to the worker's launch instructions.
+Never infer a forge from a repository name or disable TLS certificate verification.
+If the resolved section reports that the forge is ambiguous or unavailable, stop and report that concrete ambiguity instead of guessing a CLI or opening a PR/MR.
+EOF
+FORGE_DISCOVERY_SECTION=${FORGE_DISCOVERY_SECTION%$'\n'}
+
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
 idx=1
@@ -371,6 +379,8 @@ $TASK_SECTION
 
 $HERDR_SECTION
 
+$FORGE_DISCOVERY_SECTION
+
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
@@ -380,7 +390,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 # Rules
 1. Never push to any remote and never open a PR.
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Follow the `# Resolved forge operations` section for forge operations and use chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
@@ -455,6 +465,8 @@ $TASK_SECTION
 
 $HERDR_SECTION
 
+$FORGE_DISCOVERY_SECTION
+
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 
@@ -467,7 +479,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 # Rules
 $RULE1
 2. Stay inside this worktree; modify nothing outside it.
-3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
+3. Follow the `# Resolved forge operations` section for forge operations and use chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.

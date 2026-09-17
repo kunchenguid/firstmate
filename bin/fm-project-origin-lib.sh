@@ -178,3 +178,249 @@ fm_project_origin_safe() { # <url>; 0 when the URL is an accepted clone URL
   esac
   return 0
 }
+
+# Forge routing is deliberately separate from clone-URL validation above.
+# A clone URL is not enough to prove which forge owns an arbitrary host, so
+# GitHub is recognized only by github.com and a self-hosted GitLab host is
+# recognized only when glab has configured or authenticated that exact host.
+# Callers use the result only to render worker instructions; no TLS setting is
+# changed and no forge is guessed from a repository name.
+FM_PROJECT_FORGE=
+FM_PROJECT_FORGE_HOST=
+FM_PROJECT_FORGE_ERROR=
+
+fm_project_origin_host() { # <origin>; prints host, or local for local origins
+  local url=${1-} rest authority hostpart host
+  fm_project_origin_safe "$url" || return 1
+  case "$url" in
+    /?*|file:///?*)
+      printf '%s\n' local
+      return 0
+      ;;
+    https://?*|http://?*|ssh://?*|git://?*)
+      rest=${url#*://}
+      authority=${rest%%/*}
+      hostpart=${authority##*@}
+      case "$hostpart" in
+        '['*']'*)
+          host=${hostpart%%']'*}']'
+          host=${host#'['}
+          host=${host%']'}
+          ;;
+        *)
+          host=${hostpart%%:*}
+          ;;
+      esac
+      ;;
+    *)
+      rest=${url%%:*}
+      case "$rest" in
+        *@*) rest=${rest##*@} ;;
+      esac
+      host=$rest
+      ;;
+  esac
+  [ -n "${host:-}" ] || return 1
+  printf '%s\n' "$host" | tr '[:upper:]' '[:lower:]'
+}
+
+fm_project_gh_config_has_host() { # <host>; local evidence only
+  local host=$1 home=${HOME:-} xdg=${XDG_CONFIG_HOME:-} file
+  local -a files
+  files=()
+  [ -n "${GH_CONFIG_DIR:-}" ] && files+=("$GH_CONFIG_DIR/hosts.yml")
+  [ -n "$xdg" ] && files+=("$xdg/gh/hosts.yml")
+  [ -n "$home" ] && files+=("$home/.config/gh/hosts.yml")
+  [ -n "$home" ] && files+=("$home/Library/Application Support/gh/hosts.yml")
+  for file in "${files[@]}"; do
+    [ -f "$file" ] && [ -r "$file" ] || continue
+    awk -v target="$host" '
+      /^[^[:space:]#][^:]*:[[:space:]]*$/ {
+        key=$0
+        sub(/:.*/, "", key)
+        gsub(/[[:space:]]/, "", key)
+        if (key == target) found=1
+      }
+      END { exit !found }
+    ' "$file" && return 0
+  done
+  return 1
+}
+
+fm_project_glab_config_has_host() { # <host>; local evidence only
+  local host=$1 home=${HOME:-} xdg=${XDG_CONFIG_HOME:-} file
+  local -a files
+  files=()
+  [ -n "${GLAB_CONFIG_DIR:-}" ] && files+=("$GLAB_CONFIG_DIR/config.yml")
+  [ -n "$xdg" ] && files+=("$xdg/glab-cli/config.yml")
+  [ -n "$home" ] && files+=("$home/.config/glab-cli/config.yml")
+  [ -n "$home" ] && files+=("$home/Library/Application Support/glab-cli/config.yml")
+  [ -n "$home" ] && files+=("$home/Library/Preferences/glab-cli/config.yml")
+  for file in "${files[@]}"; do
+    [ -f "$file" ] && [ -r "$file" ] || continue
+    awk -v target="$host" '
+      /^hosts:[[:space:]]*$/ { in_hosts=1; next }
+      in_hosts && /^[^[:space:]#]/ { in_hosts=0 }
+      in_hosts && substr($0, 1, 4) == "    " {
+        key=substr($0, 5)
+        sub(/:.*/, "", key)
+        gsub(/[[:space:]]/, "", key)
+        if (key == target) found=1
+      }
+      END { exit !found }
+    ' "$file" && return 0
+  done
+  return 1
+}
+
+fm_project_forge_from_origin() { # <origin>; sets FM_PROJECT_FORGE[_HOST]
+  local origin=${1-} host gitlab_host
+  FM_PROJECT_FORGE=
+  FM_PROJECT_FORGE_HOST=
+  FM_PROJECT_FORGE_ERROR=
+  host=$(fm_project_origin_host "$origin" 2>/dev/null) || {
+    FM_PROJECT_FORGE_ERROR="origin is not an accepted clone URL: ${origin:-<empty>}"
+    return 1
+  }
+  FM_PROJECT_FORGE_HOST=$host
+  case "$host" in
+    local)
+      FM_PROJECT_FORGE=local
+      return 0
+      ;;
+    github.com)
+      FM_PROJECT_FORGE=github
+      return 0
+      ;;
+    gitlab.com)
+      FM_PROJECT_FORGE=gitlab
+      return 0
+      ;;
+  esac
+  local gh_evidence=0 glab_evidence=0
+  if fm_project_gh_config_has_host "$host" ||
+    { command -v gh >/dev/null 2>&1 && gh auth status --hostname "$host" >/dev/null 2>&1; }; then
+    gh_evidence=1
+  fi
+  gitlab_host=${GITLAB_HOST:-}
+  gitlab_host=$(printf '%s' "$gitlab_host" | tr '[:upper:]' '[:lower:]')
+  if fm_project_glab_config_has_host "$host" ||
+    { [ -n "$gitlab_host" ] && [ "$gitlab_host" = "$host" ]; } ||
+    { command -v glab >/dev/null 2>&1 && glab auth status --hostname "$host" >/dev/null 2>&1; }; then
+    glab_evidence=1
+  fi
+  if [ "$gh_evidence" -eq 1 ] && [ "$glab_evidence" -eq 1 ]; then
+    FM_PROJECT_FORGE_ERROR="origin host '$host' is configured as both GitHub and GitLab; the forge is ambiguous"
+    return 1
+  fi
+  if [ "$gh_evidence" -eq 1 ]; then
+    FM_PROJECT_FORGE=github
+    return 0
+  fi
+  if [ "$glab_evidence" -eq 1 ]; then
+    FM_PROJECT_FORGE=gitlab
+    return 0
+  fi
+  FM_PROJECT_FORGE_ERROR="origin host '$host' is not recognized as GitHub or an authenticated GitLab instance"
+  return 1
+}
+
+fm_project_forge_from_repo() { # <repo>; sets FM_PROJECT_FORGE[_HOST]
+  local repo=$1 url pushurl identity first_identity first_origin found=0
+  FM_PROJECT_FORGE=
+  FM_PROJECT_FORGE_HOST=
+  FM_PROJECT_FORGE_ERROR=
+  [ -d "$repo" ] || {
+    FM_PROJECT_FORGE_ERROR="project directory is missing or unreadable: $repo"
+    return 1
+  }
+  first_origin=$(git -C "$repo" remote get-url origin 2>/dev/null || true)
+  [ -n "$first_origin" ] || {
+    FM_PROJECT_FORGE_ERROR="project has no origin remote, so its forge cannot be established"
+    return 1
+  }
+  while IFS= read -r url; do
+    [ -n "$url" ] || continue
+    fm_project_forge_from_origin "$url" || return 1
+    identity="$FM_PROJECT_FORGE:$FM_PROJECT_FORGE_HOST"
+    if [ "$found" -eq 0 ]; then
+      first_identity=$identity
+      first_origin=$url
+      found=1
+    elif [ "$identity" != "$first_identity" ]; then
+      FM_PROJECT_FORGE=
+      FM_PROJECT_FORGE_HOST=
+      FM_PROJECT_FORGE_ERROR="origin has conflicting forge routes; '$first_origin' and '$url' do not identify one forge"
+      return 1
+    fi
+  done <<EOF
+$(git -C "$repo" remote get-url --all origin 2>/dev/null || true)
+EOF
+  while IFS= read -r pushurl; do
+    [ -n "$pushurl" ] || continue
+    fm_project_forge_from_origin "$pushurl" || return 1
+    identity="$FM_PROJECT_FORGE:$FM_PROJECT_FORGE_HOST"
+    if [ "$identity" != "$first_identity" ]; then
+      FM_PROJECT_FORGE=
+      FM_PROJECT_FORGE_HOST=
+      FM_PROJECT_FORGE_ERROR="origin and pushurl identify different forge routes; '$first_origin' and '$pushurl' are ambiguous"
+      return 1
+    fi
+  done <<EOF
+$(git -C "$repo" config --get-all remote.origin.pushurl 2>/dev/null || true)
+EOF
+  [ "$found" -eq 1 ] || {
+    FM_PROJECT_FORGE_ERROR="project has no usable origin URL, so its forge cannot be established"
+    return 1
+  }
+  # Re-assert the selected result because the pushurl loop's final successful
+  # classification is otherwise allowed to overwrite only equivalent values.
+  FM_PROJECT_FORGE=${first_identity%%:*}
+  FM_PROJECT_FORGE_HOST=${first_identity#*:}
+}
+
+fm_project_forge_instructions() { # <resolved|ambiguous>; prints launch text
+  local mode=${1:-resolved} error=${FM_PROJECT_FORGE_ERROR:-forge identity is unavailable} github_host_line=
+  if [ "$mode" != resolved ] || [ -z "${FM_PROJECT_FORGE:-}" ]; then
+    cat <<EOF
+# Resolved forge operations
+Forge identity is ambiguous or unavailable: $error.
+Do not guess a forge CLI, disable TLS verification, publish a branch, or open a PR/MR from this route; stop and report this concrete ambiguity to firstmate.
+EOF
+    return 0
+  fi
+  case "$FM_PROJECT_FORGE" in
+    github)
+      if [ "$FM_PROJECT_FORGE_HOST" != github.com ]; then
+        github_host_line="For GitHub Enterprise, pass \`--hostname $FM_PROJECT_FORGE_HOST\` to gh-axi commands; do not assume github.com."
+      fi
+      cat <<EOF
+# Resolved forge operations
+The project's origin identifies GitHub at $FM_PROJECT_FORGE_HOST.
+Use \`gh-axi\` for GitHub operations and ordinary \`git push\` for branch publication.
+$github_host_line
+Do not use \`glab\` for this project.
+EOF
+      ;;
+    gitlab)
+      cat <<EOF
+# Resolved forge operations
+The project's origin identifies GitLab at $FM_PROJECT_FORGE_HOST.
+Use authenticated \`glab\` for GitLab operations against $FM_PROJECT_FORGE_HOST and ordinary \`git push\` for branch publication; do not substitute gitlab.com.
+Do not use \`gh-axi\` for this project, and never disable TLS certificate verification.
+If glab authentication or the server certificate is not usable, stop and report that concrete blocker to firstmate.
+EOF
+      ;;
+    local)
+      cat <<EOF
+# Resolved forge operations
+The project's origin is a local repository at $FM_PROJECT_FORGE_HOST.
+No forge CLI is available for this route; use ordinary \`git\` only when the delivery contract permits a local remote, and do not guess GitHub or GitLab.
+EOF
+      ;;
+    *)
+      FM_PROJECT_FORGE_ERROR="unsupported forge classification '$FM_PROJECT_FORGE'"
+      fm_project_forge_instructions ambiguous
+      ;;
+  esac
+}

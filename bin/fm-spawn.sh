@@ -492,6 +492,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-project-origin-lib.sh
+. "$SCRIPT_DIR/fm-project-origin-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 # shellcheck source=bin/fm-trace-context-lib.sh
@@ -3569,6 +3571,36 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
+fi
+
+# The source brief remains a historical task record, including any explicit
+# provider wording its author supplied. The launch copy gets one fresh route
+# section from the actual isolated worktree instead of rewriting that record.
+# Direct-PR cannot proceed without a proven forge, while scouts and pipeline or
+# local-only ships receive a concrete ambiguity and are told not to guess.
+publish_forge_route() {
+  local route route_tmp="$DATA/$ID/.launch-brief.forge.$$"
+  if fm_project_forge_from_repo "$WT"; then
+    route=$(fm_project_forge_instructions resolved)
+  else
+    route=$(fm_project_forge_instructions ambiguous)
+    if [ "$KIND" = ship ] && [ "${MODE:-}" = direct-PR ]; then
+      echo "error: direct-PR forge routing is unresolved for '$WT': $FM_PROJECT_FORGE_ERROR; refusing to launch without a concrete GitHub or authenticated GitLab route" >&2
+      return 1
+    fi
+  fi
+  {
+    cat "$BRIEF"
+    printf '\n%s\n' "$route"
+  } > "$route_tmp" || {
+    rm -f -- "$route_tmp"
+    echo "error: could not render forge route into $BRIEF" >&2
+    return 1
+  }
+  mv "$route_tmp" "$BRIEF"
+}
+if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+  publish_forge_route || exit 1
 fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,

@@ -62,6 +62,92 @@ assert_present "$TMP_ROOT/via-file-url/README.md" "the file:// clone produced no
 assert_present "$TMP_ROOT/via-path/README.md" "the absolute-path clone produced no worktree"
 pass "ordinary clone URLs are accepted and clone with the command the remote host runs"
 
+# Forge routing uses origin identity rather than the project name. GitHub is
+# recognized by its canonical host, while a self-hosted GitLab host needs glab's
+# own exact-host authentication evidence. An unrelated host and a fetch/push
+# split are concrete ambiguities, never silent guesses.
+ROUTING_HOME="$TMP_ROOT/routing-home"
+ROUTING_XDG="$TMP_ROOT/routing-xdg"
+mkdir -p "$ROUTING_HOME" "$ROUTING_XDG"
+cat > "$FAKEBIN/glab" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' sa.git-labs.com '*) exit 0 ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$FAKEBIN/glab"
+cat > "$FAKEBIN/gh" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *' github.enterprise.example '*) exit 0 ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$FAKEBIN/gh"
+make_routing_repo() {
+  local name=$1 origin=$2 repo="$TMP_ROOT/routing-$1"
+  git init -q "$repo"
+  git -C "$repo" remote add origin "$origin"
+  printf '%s\n' "$repo"
+}
+export HOME="$ROUTING_HOME" XDG_CONFIG_HOME="$ROUTING_XDG"
+GITHUB_ROUTE_REPO=$(make_routing_repo github 'git@github.com:echo/firstmate.git')
+fm_project_forge_from_repo "$GITHUB_ROUTE_REPO" || fail "GitHub origin was not classified"
+[ "$FM_PROJECT_FORGE" = github ] || fail "GitHub origin classified as '$FM_PROJECT_FORGE'"
+github_route=$(fm_project_forge_instructions)
+assert_contains "$github_route" 'gh-axi' "GitHub route omitted gh-axi"
+# shellcheck disable=SC2016 # Backticks are literal route text.
+assert_contains "$github_route" 'ordinary `git push`' "GitHub route omitted ordinary git push"
+
+GITHUB_ENTERPRISE_REPO=$(make_routing_repo github-enterprise 'ssh://git@github.enterprise.example/echo/firstmate.git')
+PATH="$FAKEBIN:$PATH" fm_project_forge_from_repo "$GITHUB_ENTERPRISE_REPO" \
+  || fail "authenticated GitHub Enterprise origin was not classified"
+[ "$FM_PROJECT_FORGE" = github ] || fail "GitHub Enterprise origin classified as '$FM_PROJECT_FORGE'"
+
+GITLAB_ROUTE_REPO=$(make_routing_repo gitlab 'git@sa.git-labs.com:echo/ai_operation-master.git')
+PATH="$FAKEBIN:$PATH" fm_project_forge_from_repo "$GITLAB_ROUTE_REPO" \
+  || fail "self-hosted GitLab origin was not classified through glab"
+[ "$FM_PROJECT_FORGE" = gitlab ] || fail "self-hosted GitLab origin classified as '$FM_PROJECT_FORGE'"
+gitlab_route=$(PATH="$FAKEBIN:$PATH" fm_project_forge_instructions)
+# shellcheck disable=SC2016 # Backticks are literal route text.
+assert_contains "$gitlab_route" 'authenticated `glab`' "GitLab route omitted authenticated glab"
+# shellcheck disable=SC2016 # Backticks are literal route text.
+assert_contains "$gitlab_route" 'ordinary `git push`' "GitLab route omitted ordinary git push"
+assert_contains "$gitlab_route" 'never disable TLS certificate verification' "GitLab route weakened TLS guidance"
+assert_not_contains "$gitlab_route" 'gh-axi for this project' "GitLab route still directs gh-axi"
+
+# Exercise the same decision through the executable public entry point used by
+# operators, not only through the sourced helper used by fm-spawn.
+public_github_route=$(HOME="$ROUTING_HOME" XDG_CONFIG_HOME="$ROUTING_XDG" \
+  "$ROOT/bin/fm-project-forge.sh" "$GITHUB_ROUTE_REPO")
+assert_contains "$public_github_route" 'gh-axi' "public forge script omitted GitHub routing"
+public_gitlab_route=$(HOME="$ROUTING_HOME" XDG_CONFIG_HOME="$ROUTING_XDG" \
+  PATH="$FAKEBIN:$PATH" "$ROOT/bin/fm-project-forge.sh" "$GITLAB_ROUTE_REPO")
+# shellcheck disable=SC2016 # Backticks are literal route text.
+assert_contains "$public_gitlab_route" 'authenticated `glab`' "public forge script omitted GitLab routing"
+
+UNKNOWN_ROUTE_REPO=$(make_routing_repo unknown 'ssh://git@codeberg.example/team/app.git')
+if PATH="$FAKEBIN:$PATH" fm_project_forge_from_repo "$UNKNOWN_ROUTE_REPO"; then
+  fail "unknown origin was silently classified as a forge"
+fi
+assert_contains "$FM_PROJECT_FORGE_ERROR" 'not recognized' "unknown origin did not report a concrete ambiguity"
+unknown_route=$(fm_project_forge_instructions ambiguous)
+assert_contains "$unknown_route" 'Do not guess a forge CLI' "unknown route did not stop guessing"
+unknown_public_output=$(HOME="$ROUTING_HOME" XDG_CONFIG_HOME="$ROUTING_XDG" \
+  PATH="$FAKEBIN:$PATH" "$ROOT/bin/fm-project-forge.sh" "$UNKNOWN_ROUTE_REPO" 2>&1)
+unknown_public_status=$?
+[ "$unknown_public_status" -ne 0 ] || fail "public forge script silently accepted an unknown origin"
+assert_contains "$unknown_public_output" 'origin host' "public forge script did not report the unknown origin"
+
+AMBIGUOUS_ROUTE_REPO=$(make_routing_repo ambiguous 'git@github.com:echo/firstmate.git')
+git -C "$AMBIGUOUS_ROUTE_REPO" remote set-url --add --push origin 'git@sa.git-labs.com:echo/firstmate.git'
+if PATH="$FAKEBIN:$PATH" fm_project_forge_from_repo "$AMBIGUOUS_ROUTE_REPO"; then
+  fail "conflicting fetch/push origins were silently accepted"
+fi
+assert_contains "$FM_PROJECT_FORGE_ERROR" 'different forge routes' "conflicting origins did not name the ambiguity"
+pass "origin-based forge routing selects GitHub and self-hosted GitLab and refuses unknown or conflicting origins"
+
 # A remote-helper transport is a command git runs whenever the cloning host's own
 # configuration permits that protocol, and the parent cannot see that host's
 # configuration. Prove the hazard is real before pinning the refusal that closes
