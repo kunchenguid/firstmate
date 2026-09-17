@@ -193,6 +193,68 @@ These discriminator strings are un-owned vendor UI text.
 `bin/fm-vendor-auth-probe.sh` pins the verified version, reports `versionVerified=no` when the running CLI differs, and classifies any unrecognized first line as `indeterminate` rather than authenticated.
 Re-run the two commands above and update this section and the pinned version together when the vendor CLI changes.
 
+## Firstmate no-mistakes automatic-agent inventory
+
+Verified 2026-09-14 against no-mistakes 1.72.0, Claude Code 2.1.269, OpenCode 1.18.30, Pi 0.85.1, and quota-axi 0.1.41.
+This is active evidence for Firstmate's tracked `agent: auto` repository setting, not a claim that no-mistakes performs quota-aware routing.
+No-mistakes resolves `auto` from runnable agent tools in its own fixed availability order, while model and effort profiles remain machine-global.
+Firstmate's tracked `disable_project_settings: true` boundary currently verifies suppression only for Claude, Codex, and Pi, so installed OpenCode is visible to automatic discovery but is not an eligible fallback for this repository if no-mistakes reaches it.
+
+The discovery commands were:
+
+```sh
+no-mistakes --version
+no-mistakes doctor
+claude --version
+claude --help
+opencode --version
+opencode models
+pi --version
+pi --list-models 'gpt-5.6'
+quota-axi --no-credential-refresh
+quota-axi auth --json --no-credential-refresh
+```
+
+The relevant no-mistakes discovery result was:
+
+```text
+✓ claude    <home>/.npm-global/bin/claude
+- codex     not found
+- grok      not found
+✓ opencode  <home>/.opencode/bin/opencode
+✓ pi        /usr/local/bin/pi
+```
+
+The one quota TOON snapshot reported:
+
+```text
+quota[2]{provider,scope,effectivePercentRemaining,spendPriority,runway,confidence,limitedBy,resetsAt}:
+  claude,all_models,98,0.6464,through_reset,early,seven_day,"2026-09-20T20:00:00.059017+00:00"
+  codex,all_models,66,-1.7884,projected_exhaustion,established,weekly,"2026-09-20T06:01:38.000Z"
+exhaustion[1]{provider,scope,usableRunwaySeconds,projectedExhaustedAt,limitingWindowId}:
+  codex,all_models,156540,"2026-09-15T23:54:39.600Z",weekly
+```
+
+Its candidate-relevant attention row was:
+
+```text
+opencode-go,all,unresolved_windows,rolling + weekly + monthly,none
+```
+
+The default TOON also contained unrelated unavailable-provider attention rows; they are omitted because they cannot describe any runnable no-mistakes agent found above.
+The authentication read reported Claude `oauth-file`, Codex `pi:openai-codex`, and OpenCode `opencode:auth.json` as available, while Codex `auth-json` and `cli-rpc` were missing.
+The available Pi credential is the relevant surface for its `openai-codex` model, so the two unused Codex source failures do not make that candidate ineligible.
+
+| Harness | Effective model and catalog evidence | Provider family | Authentication and quota evidence | Reasoning fit | `spendPriority` and runway uncertainty |
+|---|---|---|---|---|---|
+| Claude | No machine-global Claude model was pinned; `claude --help` accepts current aliases including `fable`, `opus`, and `sonnet`, but does not identify which model an unpinned run will choose. | Anthropic's Claude family through the native Claude tool. | Claude OAuth is available, and the `all_models` row applies 98 percent remaining. | The exact model and effort are unresolved, so its reasoning class cannot be proven from the catalog. | `0.6464`; `through_reset` passes the generic runway floor, with `early` confidence still disclosed. |
+| OpenCode | No model was pinned; `opencode models` reached the account and listed the current `opencode/...` catalog, but an automatic run does not reveal its default model before launch. | OpenCode's current multi-model service; the exact default model family is unresolved. | OpenCode auth is available, but its only quota evidence is `unresolved_windows`. | The exact model and reasoning variant are unresolved, and the repository's project-setting suppression boundary makes this installed tool ineligible if selected. | `unknown`; both spend priority and usable runway are unmeasurable. |
+| Pi | The current machine-global Pi profile selects `openai-codex/gpt-5.6-sol` at `medium`; `pi --list-models 'gpt-5.6'` lists Luna, Sol, and Terra under both `openai-codex` and `opencode`. | The selected catalog row establishes `openai-codex`. | Pi's `openai-codex` credential is available, and the Codex `all_models` row applies 66 percent remaining. | Sol supports thinking, but its name and the configured `medium` effort do not prove reasoning equivalence with Claude's unresolved default. | `-1.7884`; projected exhaustion has 156,540 usable seconds with `established` confidence, but the full pipeline completion horizon is task-dependent. |
+
+Claude has the stronger known quota scalar and generic runway result, but Claude and Pi cannot be conclusively ranked for reasoning fit while Claude's effective model remains unresolved.
+OpenCode cannot be ranked at all and is ineligible under Firstmate's project-setting suppression boundary.
+The tracked `agent: auto` setting therefore delegates an availability decision to no-mistakes and must not be described as a quota-informed model choice.
+
 ## Regression coverage
 
 `tests/fm-vendor-auth-probe.test.sh` drives the real script against a fake vendor CLI that records every invocation's argv and anything readable on stdin.
