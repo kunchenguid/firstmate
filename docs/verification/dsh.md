@@ -146,11 +146,13 @@ Both halves were measured on 2026-09-17 with the tracked hooks mounted, a throwa
 - **Acquisition.** A headless session wrote `state/.lock` with the harness pid and wrote the once-per-session gate afterwards, so the digest owned the fleet lock rather than falling into its read-only path.
 - **Refusal.** With `state/.lock` already holding a live node process whose argv carries a dsh launcher shape — which is what `fm_harness_pid_alive` demands of a lock holder — a second headless session delivered `READ-ONLY SESSION - FLEET LOCK OWNERSHIP WAS NOT VERIFIED` and left the lock untouched, so it did not take over the home.
 
-`tests/fm-dsh-live-e2e.test.sh` asserts both halves, in one lock home, as its ninth contract.
-First a control: with the lock free, a session must leave `state/.lock` holding a numeric pid other than the holder's.
-Then the refusal: with the lock holding a live dsh-shaped process and the once-per-session gate cleared, a session must leave the lock unchanged and still deliver a digest.
+`tests/fm-dsh-live-e2e.test.sh` asserts both halves as its ninth contract, each in its own home.
+First a control: with the lock free, a session must leave `state/.lock` holding a numeric pid that is gone once the session has exited.
+The ancestry walk climbs past a host it does not recognize to any harness above it, so a guard run from inside another harness would otherwise record that outer harness's live pid; a recorded pid that no longer exists is one the session resolved inside itself.
+Then the refusal, in a home no other session has touched: with the lock holding a live dsh-shaped process, a session must leave the lock unchanged and still deliver a digest.
+A separate home keeps the control session's detached startup sweep, which holds its home's claim lock for up to `FM_STARTUP_NETWORK_TIMEOUT`, from refusing the second session for a reason other than the holder.
 The control is what makes the refusal mean something, because `bin/fm-lock.sh` exits before touching the lock when a session cannot resolve its own harness ancestry, and the digest still carries the read-only banner, so a session that cannot identify itself would otherwise pass the refusal half too.
-What the contract proves is that a real DSH session resolves its own identity from its ancestry and then refuses a live harness-shaped holder; the holder is a synthetic process with a fixed argv, not a second real session.
+What the contract proves is that a real DSH session resolves an identity inside itself from its ancestry and that a session refuses a live harness-shaped holder; the holder is a synthetic process with a fixed argv, not a second real session.
 
 Forking a session while one is live therefore produces a read-only session, not a second captain.
 

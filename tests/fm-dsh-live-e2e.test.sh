@@ -306,19 +306,22 @@ esac
 # --- 9. a second concurrent session is refused into read-only ----------------
 # The fleet lock matches its holder by launcher path in argv, and DSH gives hook
 # and tool subprocesses no session identity of their own, so the question is
-# whether a live DSH session is recognizable as the lock owner at all. Both
-# halves run in one lock home. bin/fm-lock.sh exits before touching the lock
-# when a session cannot resolve its own harness ancestry, so the refusal half
-# alone would pass for a session that cannot identify itself; the control first
-# requires a session to take a free lock as its own pid. The holder is a live
-# node whose argv carries a dsh launcher shape, which is what
+# whether a live DSH session is recognizable as the lock owner at all.
+# bin/fm-lock.sh exits before touching the lock when a session cannot resolve
+# its own harness ancestry, so the refusal half alone would pass for a session
+# that cannot identify itself; a control first requires a session to take a free
+# lock as its own pid. The two halves run in separate homes: a session that takes
+# a lock leaves a detached startup sweep holding that home's claim lock, which
+# would refuse the next session there whatever the holder is. The holder is a
+# live node whose argv carries a dsh launcher shape, which is what
 # bin/fm-session-lock-lib.sh's fm_harness_pid_alive demands of a lock holder, so
 # it stands in for another live session without needing two real ones.
+CONTROL_HOME="$TMP_ROOT/lock-control-home"
 LOCK_HOME="$TMP_ROOT/lock-home"
 LOCK_WORK="$TMP_ROOT/lock-work"
 LOCK_PROFILE="${PROFILE}lock"
 LOCK_PROFILE_DIR="${DSH_HOME:-$HOME/.dsh}/profiles/$LOCK_PROFILE"
-mkdir -p "$LOCK_HOME/state" "$LOCK_WORK/holder/node_modules/.bin"
+mkdir -p "$CONTROL_HOME/state" "$LOCK_HOME/state" "$LOCK_WORK/holder/node_modules/.bin"
 
 # A dsh-shaped process that outlives the sessions below. comm is node and argv
 # carries `/.bin/dsh`, the shape fm_dsh_args_evidence accepts.
@@ -340,29 +343,35 @@ dsh plugin --profile "$LOCK_PROFILE" add "@deepseek-ai/dsh-hooks-claude-code@$BA
   || fail "could not install @deepseek-ai/dsh-hooks-claude-code@$BASE_VERSION into '$LOCK_PROFILE'"
 printf -- '- id: permission\n  config:\n    defaultPreset: danger-full-access\n' > "$LOCK_PROFILE_DIR/cordis.patch.yml"
 
-lock_session() {
-  ( cd "$LOCK_WORK" && FM_DSH_HARNESS=dsh FM_ROOT="$ROOT" FM_HOME="$LOCK_HOME" \
-      FM_STATE_OVERRIDE="$LOCK_HOME/state" \
+lock_session() {  # <home>
+  ( cd "$LOCK_WORK" && FM_DSH_HARNESS=dsh FM_ROOT="$ROOT" FM_HOME="$1" \
+      FM_STATE_OVERRIDE="$1/state" \
       dsh --profile "$LOCK_PROFILE" --patch "$ROOT/.dsh/profile.patch.yml" \
       "Without using any tools, reply with ONLY the word PING." >"$LOCK_WORK/out" 2>&1 ) || true
 }
 
-# Control: with the lock free, the session must write its own harness pid.
-rm -f "$LOCK_HOME/state/.lock"
-lock_session
-held=$(cat "$LOCK_HOME/state/.lock" 2>/dev/null || true)
+# Control: with the lock free, the session must write a pid from inside itself.
+# The ancestry walk climbs past a host it does not recognize to ANY harness above
+# it, so under a guard run from another harness a session that cannot identify
+# itself still writes a numeric pid: the outer harness's. The session's DSH host
+# has exited once lock_session returns, so a recorded pid that is still alive
+# names a process outside the session. That aliveness test is the whole
+# discriminating power of the control; the pid's argv cannot be inspected,
+# because by then the host is gone.
+lock_session "$CONTROL_HOME"
+held=$(cat "$CONTROL_HOME/state/.lock" 2>/dev/null || true)
 case "$held" in
   '' | *[!0-9]*) fail "live dsh $BASE_VERSION: a session left a free lock as '${held:-<no lock>}' rather than its own harness pid, so it cannot resolve its own ancestry and the refusal below would prove nothing" ;;
 esac
-[ "$held" != "$LOCK_HOLDER_PID" ] \
-  || fail "live dsh $BASE_VERSION: a session took a free lock as the holder's pid $LOCK_HOLDER_PID, not its own"
+if [ "$held" = "$LOCK_HOLDER_PID" ] || kill -0 "$held" 2>/dev/null; then
+  fail "live dsh $BASE_VERSION: a session took a free lock as pid $held, which outlived the session, so it named a process outside itself (the holder or a harness running this guard) rather than its own host"
+fi
 
-# The lock the next session must find and refuse. Only a session's acquisition
-# writes it, so an unchanged value after the run is proof the session did not
-# take it. The marker is cleared so the digest check below is this run's own.
-rm -f "$LOCK_HOME/state/.dsh-sessionstart-delivered"
+# The lock the next session must find and refuse, in a home no session has
+# touched. Only a session's acquisition writes it, so an unchanged value after
+# the run is proof the session did not take it.
 printf '%s\n' "$LOCK_HOLDER_PID" > "$LOCK_HOME/state/.lock"
-lock_session
+lock_session "$LOCK_HOME"
 
 held=$(cat "$LOCK_HOME/state/.lock" 2>/dev/null || true)
 [ "$held" = "$LOCK_HOLDER_PID" ] \
