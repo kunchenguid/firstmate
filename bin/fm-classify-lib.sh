@@ -2106,3 +2106,106 @@ stale_is_terminal() {  # <window> <state>
   last=$(last_status_line "$state/$(window_to_task "$win" "$state").status")
   [ -n "$last" ] && status_is_captain_relevant "$last"
 }
+
+# Bounded per-task branch-outcome index reader shared by drain recovery and
+# watcher absorb proofs. Sets BRANCH_OUTCOME_INDEX_STATE to ok or invalid,
+# BRANCH_OUTCOME_INDEX_SEQ/ENDPOINT/IDENT on a valid present index, and leaves
+# the three fields empty when the index is simply absent (ok + empty = no
+# coverage proof, never an error). Callers that need coverage treat empty as
+# uncovered and surface; only invalid is a distinct fault for drain backstop.
+BRANCH_OUTCOME_INDEX_VERSION=fm-branch-outcome-index-v1
+BRANCH_OUTCOME_INDEX_MAX_BYTES=512
+BRANCH_OUTCOME_INDEX_STATE=ok
+BRANCH_OUTCOME_INDEX_SEQ=
+BRANCH_OUTCOME_INDEX_ENDPOINT=
+BRANCH_OUTCOME_INDEX_IDENT=
+outcome_index_ready_ok() { # <ready-path>
+  local seq
+  [ -f "$1" ] && [ -r "$1" ] && [ ! -L "$1" ] || return 1
+  seq=$(LC_ALL=C command cat "$1" 2>/dev/null) || return 1
+  case "$seq" in ''|*[!0-9]*) return 1 ;; esac
+  return 0
+}
+
+load_branch_outcome_index() { # <task>
+  local task=$1 path data version seq endpoint ident extra size
+  BRANCH_OUTCOME_INDEX_STATE=ok
+  BRANCH_OUTCOME_INDEX_SEQ=
+  BRANCH_OUTCOME_INDEX_ENDPOINT=
+  BRANCH_OUTCOME_INDEX_IDENT=
+  case "$task" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
+  path="$STATE/.$task.branch-outcome-index"
+  [ -e "$path" ] || [ -L "$path" ] || return 0
+  if [ ! -f "$path" ] || [ ! -r "$path" ] || [ -L "$path" ]; then
+    BRANCH_OUTCOME_INDEX_STATE=invalid
+    return 0
+  fi
+  size=$(_fm_status_file_size "$path") || { BRANCH_OUTCOME_INDEX_STATE=invalid; return 0; }
+  size=${size//[[:space:]]/}
+  case "$size" in ''|*[!0-9]*) BRANCH_OUTCOME_INDEX_STATE=invalid; return 0 ;; esac
+  if [ "$size" -gt "$BRANCH_OUTCOME_INDEX_MAX_BYTES" ]; then
+    BRANCH_OUTCOME_INDEX_STATE=invalid
+    return 0
+  fi
+  data=$(LC_ALL=C command cat "$path" 2>/dev/null) \
+    || { BRANCH_OUTCOME_INDEX_STATE=invalid; return 0; }
+  case "$data" in *$'\n'*) BRANCH_OUTCOME_INDEX_STATE=invalid; return 0 ;; esac
+  IFS=$(printf '\t') read -r version seq endpoint ident extra <<EOF
+$data
+EOF
+  if [ "$version" != "$BRANCH_OUTCOME_INDEX_VERSION" ] || [ -n "$extra" ]; then
+    BRANCH_OUTCOME_INDEX_STATE=invalid
+    return 0
+  fi
+  case "$seq:$endpoint" in *[!0-9:]*) BRANCH_OUTCOME_INDEX_STATE=invalid; return 0 ;; esac
+  [ -n "$seq" ] && [ -n "$endpoint" ] && [ -n "$ident" ] \
+    && [ "${#seq}" -le 16 ] && [ "${#endpoint}" -le 16 ] \
+    && [ "$seq" -le 9007199254740991 ] && [ "$endpoint" -le 9007199254740991 ] \
+    || { BRANCH_OUTCOME_INDEX_STATE=invalid; return 0; }
+  BRANCH_OUTCOME_INDEX_SEQ=$seq
+  BRANCH_OUTCOME_INDEX_ENDPOINT=$endpoint
+  BRANCH_OUTCOME_INDEX_IDENT=$ident
+}
+
+# 0 when the task's bounded outcome index covers every byte of its current
+# status log under a matching identity and no steering-inbox RECORD is newer
+# than the status bytes that outcome covers. A steer is work the status log has
+# not reported yet, whoever sent it and whenever the outcome landed relative to
+# it, so coverage stays broken until the worker appends status again: ordering
+# between the steer, the worker's acknowledgement, and the branch's own report
+# is a race no writer serializes. Compare against <task>.inbox/*.msg and
+# <task>.inbox/handled/*.msg only: those keep the steer's send time across `mv`,
+# while directory mtime bumps from handled/ moves and ring-ladder cleanup must
+# not count as new work. Absent or empty index is uncovered (return 1); an
+# invalid index is also uncovered. Used by watcher absorb proofs that must fail
+# open to surfacing.
+branch_outcome_index_covers_status() { # <task>
+  local task=$1 f size ident inbox_dir msg
+  load_branch_outcome_index "$task"
+  [ "$BRANCH_OUTCOME_INDEX_STATE" = ok ] || return 1
+  [ -n "$BRANCH_OUTCOME_INDEX_SEQ" ] \
+    && [ -n "$BRANCH_OUTCOME_INDEX_ENDPOINT" ] \
+    && [ -n "$BRANCH_OUTCOME_INDEX_IDENT" ] || return 1
+  f="$STATE/$task.status"
+  inbox_dir="$STATE/$task.inbox"
+  if [ -d "$inbox_dir" ]; then
+    for msg in "$inbox_dir"/*.msg "$inbox_dir"/handled/*.msg; do
+      [ -f "$msg" ] || continue
+      if [ ! "$f" -nt "$msg" ]; then
+        return 1
+      fi
+    done
+  fi
+  if [ ! -e "$f" ] && [ ! -L "$f" ]; then
+    [ "$BRANCH_OUTCOME_INDEX_ENDPOINT" -ge 0 ] || return 1
+    [ "$BRANCH_OUTCOME_INDEX_IDENT" = "-" ] || return 1
+    return 0
+  fi
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 1
+  size=$(_fm_status_file_size "$f") || return 1
+  size=${size//[[:space:]]/}
+  case "$size" in ''|*[!0-9]*) return 1 ;; esac
+  ident=$(_fm_open_decisions_file_ident "$f") || return 1
+  [ "$BRANCH_OUTCOME_INDEX_IDENT" = "$ident" ] || return 1
+  [ "$BRANCH_OUTCOME_INDEX_ENDPOINT" -ge "$size" ]
+}

@@ -10,10 +10,11 @@
 // actionable wake here (lib/fm-branch-dispatch.ts); the branch handles it with
 // real tools and reports through the fm_branch_report custom tool, which
 // writes the durable outcome store FIRST (bin/fm-branch-outcome.sh), then
-// persists a sequence-keyed visible record in main's transcript, and for a
-// captain-facing outcome opens one sequence-keyed processing turn on main
-// that stays open until main acknowledges that sequence (see
-// presentUnprocessedOutcomes).
+// persists a sequence-keyed visible record in main's transcript. For a
+// captain-facing outcome, action main opens one sequence-keyed processing
+// turn on main that stays open until main acknowledges that sequence, while
+// action none is display-only and advances the processed marker without a
+// main turn (see presentUnprocessedOutcomes).
 // Main's captain/assistant dialog is mirrored into the branch as read-only
 // fm-main-mirror context from Pi's
 // before_agent_start prompt and at main's turn_end. Pi-only by construction: this
@@ -179,6 +180,7 @@ const PROCESSING_INSTRUCTION =
 type MirrorItem = { tag: "captain" | "main"; text: string };
 type MirrorCursor = { file: string; index: number };
 type Verdict = "routine" | "captain";
+type OutcomeAction = "main" | "none";
 type LockOwnership = "owned" | "other" | "missing";
 type OutcomeRow = {
   seq: number;
@@ -186,6 +188,7 @@ type OutcomeRow = {
   verdict: Verdict;
   summary: string;
   silent: boolean;
+  action: OutcomeAction;
 };
 type VisibleOutcomeRecord = OutcomeRow & { version: 1 };
 type ProviderRecovery = {
@@ -467,7 +470,13 @@ function parseOutcomeRow(value: unknown): OutcomeRow | null {
   if (row.silent !== undefined && typeof row.silent !== "boolean") return null;
   const silent = row.silent === true;
   if (silent && (row.task !== "fleet" || row.verdict !== "routine")) return null;
-  return { seq: row.seq, task: row.task, verdict: row.verdict, summary: row.summary, silent };
+  let action: OutcomeAction = "main";
+  if (row.action !== undefined) {
+    if (row.action !== "main" && row.action !== "none") return null;
+    action = row.action;
+  }
+  if (action === "none" && row.verdict !== "captain") return null;
+  return { seq: row.seq, task: row.task, verdict: row.verdict, summary: row.summary, silent, action };
 }
 
 function parseVisibleOutcomeRecord(value: unknown): VisibleOutcomeRecord | null {
@@ -481,7 +490,8 @@ function sameOutcome(left: OutcomeRow, right: OutcomeRow): boolean {
     left.task === right.task &&
     left.verdict === right.verdict &&
     left.summary === right.summary &&
-    left.silent === right.silent;
+    left.silent === right.silent &&
+    left.action === right.action;
 }
 
 // Volatile mirror-collection state. Instance-scoped and cleared at the
@@ -1013,12 +1023,15 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // Present every unprocessed captain outcome to main as ONE sequence-keyed
-  // processing request. The first PROCESSING_TRIGGERED_ATTEMPTS presentations
-  // of a given sequence set open a turn of their own (queued as a follow-up
-  // while main is busy); after that the request rides the captain's next
-  // prompt instead, once per run, and a session replacement starts the
-  // triggered budget over. Nothing here advances the processed marker: only
+  // Present every unprocessed captain outcome that still needs main action as
+  // ONE sequence-keyed processing request. Display-only (action:none) rows are
+  // closed here through the store-validated --display-only path after their
+  // anchor entry already exists, so they open no main turn. The first
+  // PROCESSING_TRIGGERED_ATTEMPTS presentations of a given action:main sequence
+  // set open a turn of their own (queued as a follow-up while main is busy);
+  // after that the request rides the captain's next prompt instead, once per
+  // run, and a session replacement starts the triggered budget over. Nothing
+  // here advances the processed marker for action:main rows: only
   // fm_branch_processed does, keyed to the sequence main acknowledges.
   async function presentUnprocessedOutcomes(expectedGeneration: number): Promise<boolean> {
     const rows = await readUnprocessedOutcomes(expectedGeneration);
@@ -1027,15 +1040,33 @@ export default function (pi: ExtensionAPI) {
       processing = null;
       return true;
     }
-    const through = rows[rows.length - 1].seq;
-    const sequences = rows.map((row) => row.seq).join(",");
+    const toPresent: OutcomeRow[] = [];
+    for (const row of rows) {
+      if (row.action === "none") {
+        if (toPresent.length > 0) continue;
+        if (!(await runOutcomeScript([
+          "mark-processed",
+          "--through",
+          String(row.seq),
+          "--display-only",
+        ])).ok) return false;
+        continue;
+      }
+      toPresent.push(row);
+    }
+    if (toPresent.length === 0) {
+      processing = null;
+      return true;
+    }
+    const through = toPresent[toPresent.length - 1].seq;
+    const sequences = toPresent.map((row) => row.seq).join(",");
     if (processing?.pending) return true;
     // Encoding the request body shells out, so it is done before the volatile
     // processing state is touched: the queue keeps another delivery out, but
     // main's own agent_start still runs during that await and clears
     // nextTurnQueued, and a decision recorded before the await could be acted
     // on after it.
-    const content = await processingRequestInput(rows);
+    const content = await processingRequestInput(toPresent);
     if (!(await generationOwnsLock(expectedGeneration))) return false;
     if (processing?.pending) return true;
     if (!processing || processing.sequences !== sequences) {
@@ -1130,7 +1161,7 @@ export default function (pi: ExtensionAPI) {
       name: "fm_branch_report",
       label: "Report supervision outcome",
       description:
-        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge it into the captain-facing main conversation. verdict captain persists an exact visible entry and opens one sequence-keyed processing turn on main that stays open until main acknowledges it; routine notes render unless silent marks a no-change heartbeat.",
+        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge it into the captain-facing main conversation. verdict captain persists an exact visible entry; action main opens one sequence-keyed processing turn on main that stays open until main acknowledges it, while action none is display-only and advances the processed marker without a main turn; routine notes render unless silent marks a no-change heartbeat.",
       parameters: Type.Object({
         task: Type.String({ description: "The task id the event belongs to (or 'fleet' for fleet-wide events)" }),
         verdict: Type.Union([Type.Literal("routine"), Type.Literal("captain")], {
@@ -1145,6 +1176,10 @@ export default function (pi: ExtensionAPI) {
         silent: Type.Optional(Type.Boolean({
           description: "True only when a fleet-wide heartbeat review found literally nothing worth reporting; omit or use false whenever any action was taken or any routine result is worth a note",
         })),
+        action: Type.Optional(Type.Union([Type.Literal("main"), Type.Literal("none")], {
+          description:
+            "Captain-row processing intent. none is only for display-only finished results whose delivery is already complete (anchor entry, PR URL, PR poll already armed); main is required for decisions, blockers, failures, ask-user findings, credentials, destructive or security-sensitive work, and anything main must still do. Omit or use main when in doubt. Ignored on routine rows.",
+        })),
       }),
       execute: async (_toolCallId, params) => {
         const task = String((params as { task: unknown }).task || "").trim();
@@ -1152,6 +1187,8 @@ export default function (pi: ExtensionAPI) {
         const summary = String((params as { summary: unknown }).summary || "").trim();
         const wake = String((params as { wake?: unknown }).wake ?? "").trim();
         const silent = (params as { silent?: unknown }).silent === true;
+        const actionRaw = (params as { action?: unknown }).action;
+        const action: OutcomeAction = actionRaw === "none" ? "none" : "main";
         if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain") || (silent && (task !== "fleet" || verdictRaw !== "routine"))) {
           return {
             content: [{ type: "text", text: "invalid report: task, verdict (routine|captain), and summary are required" }],
@@ -1164,7 +1201,19 @@ export default function (pi: ExtensionAPI) {
         if (scopeRefusal) {
           return { content: [{ type: "text", text: scopeRefusal }], details: undefined, isError: true };
         }
-        const appendArgs = ["append", "--task", task, "--verdict", verdict, "--summary", summary, "--silent", String(silent)];
+        const appendArgs = [
+          "append",
+          "--task",
+          task,
+          "--verdict",
+          verdict,
+          "--summary",
+          summary,
+          "--silent",
+          String(silent),
+          "--action",
+          verdict === "captain" ? action : "main",
+        ];
         if (wake) appendArgs.push("--wake", wake);
         // Ownership, the durable append, and the delivery it authorizes are
         // ONE unit of the delivery queue: store-before-visible-delivery and
@@ -2189,7 +2238,8 @@ ${context.command}
             isError: true,
           };
         }
-        const remaining = await readUnprocessedOutcomes(acknowledgedGeneration);
+        const unprocessed = await readUnprocessedOutcomes(acknowledgedGeneration);
+        const remaining = unprocessed === null ? null : unprocessed.filter((row) => row.action === "main");
         if (remaining !== null && remaining.length === 0) processing = null;
         const open = remaining === null
           ? "the remaining outcomes could not be read"
