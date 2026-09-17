@@ -450,6 +450,34 @@ test_verified_merge_records_pr_and_head() {
 # The forge call is the point of no return: once gh-axi has merged, nothing this
 # script does afterwards can un-merge it. Proving pr= is already in the task's
 # meta at that moment is what makes a later failure unable to lose the merge.
+test_refused_workspace_release_does_not_block_merge() {
+  local case_dir rc
+  case_dir=$(make_case release-refused-merge)
+  mkdir -p "$case_dir/project"
+  git init -q "$case_dir/wt"
+  printf 'secret=keep\n' > "$case_dir/wt/.env"
+  printf 'workspace_state=active\n' >> "$case_dir/state/task-x1.meta"
+  add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "release-refused-merge: a refused optional workspace release blocked the merge: $(cat "$case_dir/stderr")"
+  assert_grep 'pr=https://github.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "release-refused-merge: pr= was not recorded"
+  assert_grep 'workspace retained' "$case_dir/stderr" \
+    "release-refused-merge: the retained workspace was not surfaced"
+  assert_grep 'workspace_state=active' "$case_dir/state/task-x1.meta" \
+    "release-refused-merge: the refused release rewrote lifecycle state"
+  assert_present "$case_dir/wt/.env" "release-refused-merge: the refused release removed untracked material"
+  assert_logged_gh_merge "$case_dir" 9 example/repo --squash
+  pass "fm-pr-merge merges a verified PR even when the optional workspace release refuses and retains the workspace"
+}
+
 test_pr_metadata_is_recorded_before_the_forge_call() {
   local case_dir rc
   case_dir=$(make_case records-ahead-of-forge-call)
@@ -2152,6 +2180,7 @@ test_github_closed_unqueued_outcome_omits_retry_flags
 test_github_agreeing_queue_rules_keep_retry_guidance
 test_github_conflicting_queue_rules_report_ambiguity
 test_verified_merge_records_pr_and_head
+test_refused_workspace_release_does_not_block_merge
 test_pr_metadata_is_recorded_before_the_forge_call
 test_merge_failure_propagates_after_recording
 test_github_open_unqueued_outcome_refuses

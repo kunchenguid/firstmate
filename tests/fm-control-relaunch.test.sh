@@ -73,7 +73,9 @@ case "${1:-}" in
       printf '%s\n' "$payload" >> "$D/literal"
       case "$payload" in
         /exit|/quit)
-          printf 'zsh' > "$D/command"
+          # FM_FAKE_EXIT_IGNORED models an agent that receives its exit command
+          # and keeps running, so the endpoint never reads dead.
+          [ -n "${FM_FAKE_EXIT_IGNORED:-}" ] || printf 'zsh' > "$D/command"
           [ -z "${FM_FAKE_EXIT_TRANSPORT_FAIL_AFTER_STOP:-}" ] || exit 1
           ;;
         *'encode launch-brief'*)
@@ -1681,6 +1683,126 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+# --- reconstructed workspace (workspace_state=restored) on a verified backend --
+#
+# bin/fm-workspace.sh restore records workspace_state=restored. That record
+# relaxes the dead proof ONLY on a backend with no agent-state classifier; tmux
+# can prove the endpoint dead, so a restored tmux task is relaunched exactly like
+# any other. The unverified-backend half lives in
+# tests/fm-control-relaunch-restored.test.sh.
+
+test_restored_tmux_relaunch_still_stops_a_live_agent_first() {
+  local dir out rc exit_line launch_line
+  dir=$(new_case restoredlive rl40)
+  add_ship_task "$dir" rl40 claude
+  printf 'workspace_state=restored\n' >> "$dir/home/state/rl40.meta"
+  out=$(run_control "$dir" rl40 relaunch --note "restored, agent still up"); rc=$?
+  expect_code 0 "$rc" "a restored tmux relaunch should succeed once the live agent is stopped"$'\n'"$out"
+  exit_line=$(grep -n -x -- '/exit' "$dir/fake/literal" | head -1 | cut -d: -f1)
+  launch_line=$(grep -n -- 'encode launch-brief' "$dir/fake/literal" | head -1 | cut -d: -f1)
+  [ -n "$exit_line" ] || fail "a restored tmux task's live agent must be sent its exit command"
+  [ -n "$launch_line" ] || fail "the replacement should have been launched into the endpoint"
+  [ "$exit_line" -lt "$launch_line" ] \
+    || fail "the live agent must be stopped before the replacement launches (exit line $exit_line, launch line $launch_line)"
+  [ "$(grep -c -- 'encode launch-brief' "$dir/fake/literal")" = 1 ] \
+    || fail "exactly one replacement should be launched"
+  assert_equals stopped "$(journal_field "$dir" rl40 exit_result)" \
+    "a verified backend must record the proven stop, never the restored-workspace shortcut"
+  assert_equals complete "$(journal_field "$dir" rl40 phase)" "the transaction should complete"
+  pass "fm-control relaunch: a restored tmux task with a live agent is still stopped and proved dead first"
+}
+
+test_restored_tmux_relaunch_refuses_when_the_live_agent_will_not_stop() {
+  local dir out rc
+  dir=$(new_case restoredstuck rl41)
+  add_ship_task "$dir" rl41 claude
+  printf 'workspace_state=restored\n' >> "$dir/home/state/rl41.meta"
+  out=$(FM_FAKE_EXIT_IGNORED=1 run_control "$dir" rl41 relaunch --note "restored, agent will not stop"); rc=$?
+  expect_code 1 "$rc" "a restored tmux relaunch must refuse while the previous agent is still alive"$'\n'"$out"
+  assert_contains "$out" "did not stop" "the refusal should report the unconfirmed stop"
+  assert_grep "/exit" "$dir/fake/literal" "the exit command should have been attempted"
+  assert_no_grep "encode launch-brief" "$dir/fake/literal" \
+    "no second agent may be launched into an endpoint whose agent is still alive"
+  assert_equals claude "$(cat "$dir/fake/command")" "the fixture's original agent should still be the only one running"
+  assert_not_equals workspace-restored-agent-absent "$(journal_field "$dir" rl41 exit_result)" \
+    "a verified backend must never record the restored-workspace shortcut"
+  pass "fm-control relaunch: a restored tmux task whose agent will not stop is refused, never double-launched"
+}
+
+test_restored_tmux_relaunch_into_a_dead_endpoint_succeeds() {
+  local dir out rc
+  dir=$(new_case restoreddead rl42)
+  add_ship_task "$dir" rl42 claude
+  printf 'workspace_state=restored\n' >> "$dir/home/state/rl42.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_control "$dir" rl42 relaunch --note "restored into an agent-free shell"); rc=$?
+  expect_code 0 "$rc" "a restored tmux relaunch into a dead endpoint should succeed"$'\n'"$out"
+  assert_contains "$out" "relaunched rl42 harness=claude from=claude" "the outcome should name the transition"
+  assert_contains "$out" "endpoint=fmses:fm-rl42" "the recorded endpoint should be reused"
+  assert_no_grep "/exit" "$dir/fake/literal" "an already-dead endpoint needs no exit command"
+  assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should be launched into the endpoint"
+  assert_equals claude "$(cat "$dir/fake/command")" "the replacement agent should be running"
+  assert_equals already-stopped "$(journal_field "$dir" rl42 exit_result)" \
+    "the dead endpoint should be recorded as proven already stopped"
+  assert_equals complete "$(journal_field "$dir" rl42 phase)" "the transaction should complete"
+  pass "fm-control relaunch: a restored tmux task with a dead endpoint relaunches normally"
+}
+
+test_unreconstructed_tmux_workspace_refuses_relaunch_until_restore() {
+  local dir out rc ws id n=0 before
+  for ws in released releasing reclaim-pending; do
+    n=$((n + 1)); id="rl5$n"
+    dir=$(new_case "unreconstructed-$ws" "$id")
+    add_ship_task "$dir" "$id" claude
+    # The recorded path still exists, as it does once Treehouse hands the old
+    # slot to another task, and the endpoint is a provably agent-free shell.
+    printf 'workspace_state=%s\n' "$ws" >> "$dir/home/state/$id.meta"
+    printf 'zsh' > "$dir/fake/command"
+    before=$(cat "$dir/home/state/$id.meta")
+    out=$(run_control "$dir" "$id" relaunch --note "must restore first"); rc=$?
+    expect_code 1 "$rc" "a $ws workspace must not relaunch"$'\n'"$out"
+    assert_contains "$out" "bin/fm-workspace.sh restore $id" "the $ws refusal should name the restore command"
+    [ ! -s "$dir/fake/literal" ] || fail "a refused $ws relaunch typed into the endpoint: $(cat "$dir/fake/literal")"
+    assert_equals zsh "$(cat "$dir/fake/command")" "a refused $ws relaunch must launch nothing"
+    assert_equals "$before" "$(cat "$dir/home/state/$id.meta")" "a refused $ws relaunch must leave the record untouched"
+
+    out=$(run_spawn "$dir" "$id" --relaunch --harness claude); rc=$?
+    expect_code 1 "$rc" "fm-spawn --relaunch must refuse a $ws workspace"$'\n'"$out"
+    assert_contains "$out" "bin/fm-workspace.sh restore $id" "fm-spawn's $ws refusal should name the restore command"
+    [ ! -s "$dir/fake/literal" ] || fail "a refused $ws fm-spawn --relaunch typed into the endpoint"
+    assert_equals zsh "$(cat "$dir/fake/command")" "a refused $ws fm-spawn --relaunch must launch nothing"
+  done
+  pass "relaunch: a released, releasing, or reclaim-pending workspace refuses with the restore instruction even when its old path exists"
+}
+
+test_spawn_relaunch_refuses_a_live_agent_in_a_restored_tmux_workspace() {
+  local dir out rc
+  dir=$(new_case restoredspawnlive rl43)
+  add_ship_task "$dir" rl43 claude
+  printf 'workspace_state=restored\n' >> "$dir/home/state/rl43.meta"
+  out=$(run_spawn "$dir" rl43 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "a restored tmux endpoint with a live agent should refuse"$'\n'"$out"
+  assert_contains "$out" "endpoint reads 'alive'" "the refusal should name the live reading"
+  assert_contains "$out" "positively agent-free endpoint" "the refusal should demand an agent-free endpoint"
+  [ ! -s "$dir/fake/keys" ] || fail "a refused relaunch must send no keys to the pane"
+  [ ! -s "$dir/fake/literal" ] || fail "a refused relaunch must type nothing into the pane"
+  assert_equals claude "$(meta_field "$dir" rl43 harness)" "the record should be untouched"
+  pass "fm-spawn --relaunch: workspace_state=restored does not waive the dead proof on tmux"
+}
+
+test_spawn_relaunch_into_a_dead_restored_tmux_endpoint_launches() {
+  local dir out rc
+  dir=$(new_case restoredspawndead rl44)
+  add_ship_task "$dir" rl44 claude
+  printf 'workspace_state=restored\n' >> "$dir/home/state/rl44.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl44 --relaunch --harness claude); rc=$?
+  expect_code 0 "$rc" "a restored tmux endpoint proven dead should relaunch"$'\n'"$out"
+  assert_contains "$out" "spawned rl44 harness=claude" "the launch should be reported"
+  assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should be launched into the endpoint"
+  pass "fm-spawn --relaunch: a restored tmux endpoint proven dead is relaunched"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
@@ -1737,3 +1859,9 @@ test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_restored_tmux_relaunch_still_stops_a_live_agent_first
+test_restored_tmux_relaunch_refuses_when_the_live_agent_will_not_stop
+test_restored_tmux_relaunch_into_a_dead_endpoint_succeeds
+test_unreconstructed_tmux_workspace_refuses_relaunch_until_restore
+test_spawn_relaunch_refuses_a_live_agent_in_a_restored_tmux_workspace
+test_spawn_relaunch_into_a_dead_restored_tmux_endpoint_launches

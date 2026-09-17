@@ -5,6 +5,9 @@
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
 # including a merge request on a self-hosted GitLab instance.
+# After registration it asks bin/fm-workspace.sh to release a GitHub task's
+# local workspace; that cleanup is optional and never changes the exit status
+# (see the release block below).
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -71,7 +74,12 @@ fi
 # bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
 # bin/fm-pr-merge.sh reads a GitLab head live at merge time for the same reason,
 # and treats a recorded value that disagrees as stale rather than authoritative.
+# A released record has no worktree; its head is read from the project clone so
+# a rerun keeps pr_head= current instead of dropping it.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ -z "$WT" ] || [ ! -d "$WT" ]; then
+  WT=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
+fi
 PR_HEAD=
 if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
@@ -176,3 +184,26 @@ case "$READY_RC" in
   *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
 esac
 printf 'armed: state/%s.check.sh\n' "$ID"
+# New task records mark a managed workspace active. Once this exact PR identity
+# and poll are durable, release that local workspace at the earliest safe point:
+# bin/fm-workspace.sh independently proves a clean local HEAD is contained in the
+# fetched remote PR head before returning/removing anything. An interrupted
+# release (releasing, reclaim-pending) and a restored workspace are retried here
+# idempotently. The release is optional cleanup: a refusal keeps the workspace
+# and its retryable state, warns, and never fails the registration above, so
+# bin/fm-pr-merge.sh stays eligible and final teardown keeps its own checks.
+# Only GitHub has an implemented exact head/base reconstruction proof; any other
+# forge keeps its workspace until landing.
+# Legacy records omit workspace_state and retain their historical until-merge
+# behavior.
+WORKSPACE_STATE=$(grep '^workspace_state=' "$META" | tail -1 | cut -d= -f2- || true)
+case "$WORKSPACE_STATE" in
+  active|restored|releasing|reclaim-pending)
+    if [ "$PROVIDER" != github ]; then
+      printf 'workspace: retained; early release has no exact reconstruction proof for %s, so the local workspace stays until landing\n' "$PROVIDER" >&2
+    elif ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+        "$SCRIPT_DIR/fm-workspace.sh" release "$ID"; then
+      printf 'warning: workspace retained; PR %s is registered and armed, but its local workspace could not be safely released; fix the reported preservation refusal and rerun fm-pr-check.sh to retry the cleanup\n' "$URL" >&2
+    fi
+    ;;
+esac

@@ -425,8 +425,16 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
     return 1
   }
   worktree=$(fm_backend_meta_exact_value "$meta" worktree) || {
-    echo "REFUSED: task $id has a missing, empty, or ambiguous worktree identity; preserving task state." >&2
-    return 1
+    # bin/fm-workspace.sh clears worktree= when it releases a PR workspace, so
+    # exactly one empty line on an exactly released record is a valid identity.
+    if [ "$(grep -c '^worktree=' "$meta" 2>/dev/null || true)" = 1 ] \
+       && [ "$(grep -c '^worktree=$' "$meta" 2>/dev/null || true)" = 1 ] \
+       && [ "$(fm_backend_meta_exact_value "$meta" workspace_state 2>/dev/null || true)" = released ]; then
+      worktree=
+    else
+      echo "REFUSED: task $id has a missing, empty, or ambiguous worktree identity; preserving task state." >&2
+      return 1
+    fi
   }
   project=$(fm_backend_meta_exact_value "$meta" project) || {
     echo "REFUSED: task $id has a missing, empty, or ambiguous project identity; preserving task state." >&2
@@ -619,6 +627,7 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
 fm_backend_source() {  # <name>
   local name=$1
   fm_backend_validate "$name" || return 1
+  [ -r "$FM_BACKEND_LIB_DIR/backends/$name.sh" ] || return 1
   case "$name" in
     tmux)
       if [ -z "${_FM_BACKEND_TMUX_SOURCED:-}" ]; then
