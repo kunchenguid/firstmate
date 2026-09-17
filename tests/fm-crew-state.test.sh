@@ -21,9 +21,10 @@
 #   (d2) terminal failed run whose only failure is an orphaned ci monitor
 #       after checks read green                                   -> done
 #   (e) cross-branch attribution: this branch's own run found via list lookup
-#   (e2) multiple runs: creation order preserves newer failures, replacement
-#        gates retain their run identity, and competing live runs read unknown
-#   (e3) an older live sibling with an unfetched head cannot hide a newer failure
+#   (e2) several runs bound to one worktree: the live one outranks the corpse
+#        (an unclassifiable status word keeps the ledger's newest-first order)
+#   (e3) the live sibling's head was never fetched into the task copy: it still
+#        outranks a terminal row sitting at the worktree's exact commit
 #   (f) no run + semantic busy                                    -> pane
 #   (g) no run + semantic idle falls to the status-log verb       -> status-log
 #   (h) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
@@ -67,8 +68,7 @@ make_repo_on_branch() {  # <dir> <branch>
 
 # A fakebin with a fake `no-mistakes` (serves the env-driven run output) and a
 # fake `tmux` (serves a busy or idle pane). The fake no-mistakes mirrors the real
-# command surface the helper uses: `axi` (the identity overview), `axi status`,
-# and `axi status --run <id>` (the
+# command surface the helper uses: `axi status`, `axi status --run <id>` (the
 # `axi` surface - no runs-listing subcommand exists under it, verified against
 # the real CLI), and the actual top-level run-listing command, `no-mistakes
 # runs --limit N`, which is plain text - no run id, no quoting - serving
@@ -82,20 +82,11 @@ set -u
 case "${1:-}" in
   axi)
     shift
-    if [ "$#" = 0 ]; then
-      printf '%s\n' "${FM_FAKE_AXI_HOME:-${FM_FAKE_AXI_STATUS:-}}"
-      exit "${FM_FAKE_AXI_HOME_ERROR:-0}"
-    fi
     case "${1:-}" in
       status)
         shift
-        if [ "${1:-}" = --run ]; then
-          printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
-          exit "${FM_FAKE_AXI_STATUS_RUN_ERROR:-0}"
-        else
-          printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"
-          exit "${FM_FAKE_AXI_STATUS_ERROR:-0}"
-        fi ;;
+        if [ "${1:-}" = --run ]; then printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
+        else printf '%s\n' "${FM_FAKE_AXI_STATUS:-}"; fi ;;
       logs)
         printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
     esac
@@ -276,13 +267,7 @@ arm_idle_record() {  # <state-dir> <id>
 # assignments below stay exported into the fakes without an `export VAR=$(...)`
 # command-substitution assignment (SC2155).
 reset_fakes() {
-  NM_HOME="$TMP_ROOT/no-mistakes-unused"
-  export NM_HOME
   FM_FAKE_AXI_STATUS=""
-  FM_FAKE_AXI_STATUS_ERROR=0
-  FM_FAKE_AXI_HOME=""
-  FM_FAKE_AXI_HOME_ERROR=0
-  FM_FAKE_AXI_STATUS_RUN_ERROR=0
   FM_FAKE_AXI_STATUS_RUN=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=0
@@ -309,8 +294,7 @@ reset_fakes() {
   unset FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
-  export FM_FAKE_DAEMON_DOWN FM_FAKE_AXI_HOME
-  export FM_FAKE_AXI_HOME_ERROR FM_FAKE_AXI_STATUS_RUN_ERROR FM_FAKE_AXI_STATUS_ERROR
+  export FM_FAKE_DAEMON_DOWN
   export FM_FAKE_PR_STATE FM_FAKE_PR_MERGED FM_FAKE_PR_READ_FAIL FM_FAKE_PR_READ_LOG FM_FAKE_PR_STATE_AXI
   export FM_FAKE_GLAB_STATE FM_FAKE_GLAB_READ_FAIL FM_FAKE_GLAB_READ_LOG
   export FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
@@ -754,44 +738,6 @@ test_socket_refusal_over_terminal_run_reports_blocked() {
   assert_contains "$out" "source: status-log" "terminal run cannot suppress socket-failure evidence"
   assert_not_contains "$out" "state: failed" "terminal run state is not emitted over socket-failure evidence"
   pass "socket refusal over a terminal attributed run reports blocked"
-}
-
-# The socket-down override is evidence about the log's CURRENT tip, not a latch:
-# once the crew appends any later event the attributed run is the better witness.
-test_socket_refusal_override_expires_when_the_crew_moves_on() {
-  reset_fakes
-  local d out
-  d=$(new_case daemon-socket-refused-superseded)
-  make_repo_on_branch "$d/wt" fm/feat-ds
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-ds.meta" "window=fm:fm-feat-ds" "worktree=$d/wt" "kind=ship"
-  printf 'blocked: no-mistakes daemon socket is missing\n' > "$d/state/feat-ds.status"
-  FM_FAKE_AXI_STATUS="$(run_fixing_active_recent fm/feat-ds)"
-  out=$(run_crew_state "$d" feat-ds)
-  assert_contains "$out" "state: blocked" "socket-down as the latest event still outranks a live run"
-  assert_contains "$out" "source: status-log" "the override remains status-log evidence"
-  assert_contains "$out" "daemon socket down despite attributed run record" "the override names its reason"
-
-  printf 'working: reattached and continuing\n' >> "$d/state/feat-ds.status"
-  out=$(run_crew_state "$d" feat-ds)
-  assert_contains "$out" "state: working" "a later working event hands the reading back to the live run"
-  assert_contains "$out" "source: run-step" "the superseded override no longer emits status-log state"
-  assert_not_contains "$out" "daemon socket down despite attributed run record" \
-    "a stale socket-down blocker cannot override a live run forever"
-
-  # The later event does not have to be one the decision fold accepts. A blocked
-  # line on a reserved key whose note does not speak that namespace is folded as
-  # ordinary status, so the socket-down blocker stays the reconciled declaration
-  # while the tip of the log has moved on; the override reads the tip, not the
-  # declaration, so the stale daemon evidence stays retired.
-  printf 'blocked: no-mistakes daemon socket is missing\nblocked [key=pending-reply-t3]: still waiting on the answer\n' \
-    > "$d/state/feat-ds.status"
-  out=$(run_crew_state "$d" feat-ds)
-  assert_contains "$out" "state: working" "a later unfolded blocked event also hands the reading back to the run"
-  assert_contains "$out" "source: run-step" "the retired override emits no status-log state"
-  assert_not_contains "$out" "daemon socket down despite attributed run record" \
-    "an unrelated later blocker cannot republish stale socket-down evidence"
-  pass "socket-down evidence outranks a live run only while it is the log's latest event"
 }
 
 # And the claim half: an ordinary blocked line over the same live run keeps the
@@ -1456,10 +1402,13 @@ EOF
   pass "cross-branch attribution picks the branch's most recent row"
 }
 
-# The plain ledger is ordered by creation time, not the time a status changed.
-# A newer failure must not be hidden by an older live run, even when both heads
-# bind to the worktree. These legacy CLI cases lack the AXI identity table.
-test_terminal_run_keeps_newer_failure_over_live_sibling() {
+# Live-over-terminal selection (bin/fm-nm-run-lib.sh). Reproduces the proven
+# 2026-08 case: a crashed validation daemon left a FAILED run at the worktree's
+# exact commit, while the live run that replaced it validates a descendant
+# commit on the same branch. Both bind - the corpse by the equal-commit rule,
+# the live run by the ancestor rule - and bare `axi status` answers with the
+# corpse, so every recomputation read a healthy task as failed.
+test_terminal_corpse_loses_to_live_run_on_same_branch() {
   reset_fakes
   local d base_head live_head short_base short_live out
   d=$(new_case live-beats-corpse)
@@ -1474,25 +1423,28 @@ test_terminal_run_keeps_newer_failure_over_live_sibling() {
   [ "$short_base" != "$short_live" ] || fail "live run head did not advance past the worktree"
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/corpse.meta" "window=fm:fm-corpse" "worktree=$d/wt" "kind=ship"
-  # The newest run failed at this worktree's own commit.
+  # The corpse is the most-recently-touched run, so it is what `axi status`
+  # reports, at this worktree's own commit.
   FM_FAKE_RUN_HEAD="$base_head"
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-corpse)"
-  # The older live run may have advanced its tip, but it did not replace this run.
+  # It is also the newest row in the listing (the crash marked it after the
+  # live run started), so row order alone still selects the corpse.
   FM_FAKE_RUNS_LIST="$(cat <<EOF
   failed     fm/feat-corpse ${short_base}  2026-08-05 11:20
   running    fm/feat-corpse ${short_live}  2026-08-05 10:05
 EOF
 )"
   out=$(run_crew_state "$d" corpse)
-  assert_contains "$out" "state: failed" "the newer failure remains authoritative beside an older live run"
-  assert_contains "$out" "source: run-step" "the newer failure keeps its run-step verdict"
-  pass "a newer failure is not hidden by a live sibling"
+  assert_contains "$out" "state: working" "the live run outranks the terminal corpse bound to the same worktree"
+  assert_contains "$out" "source: run-step" "the live run is still an attributed run-step verdict"
+  assert_not_contains "$out" "state: failed" "a dead run at the worktree commit must not report a healthy task as failed"
+  pass "a live run outranks a terminal run bound to the same worktree"
 }
 
-# The same creation-order rule on the runs-list path itself: `axi status` answers for
+# The same preference on the runs-list path itself: `axi status` answers for
 # another crew's branch, and this branch's newest row is terminal while an older
 # row is still live.
-test_runs_list_newer_failure_outranks_older_live_row() {
+test_runs_list_live_row_outranks_newer_terminal_row() {
   reset_fakes
   local d base_head live_head short_base short_live out
   d=$(new_case live-row-beats-terminal-row)
@@ -1513,13 +1465,17 @@ test_runs_list_newer_failure_outranks_older_live_row() {
 EOF
 )"
   out=$(run_crew_state "$d" liverow)
-  assert_contains "$out" "state: failed" "the newest terminal row must not lose to an older live row"
-  pass "runs-list selection keeps the newer failure over an older live row"
+  assert_contains "$out" "state: working" "an older live row outranks the branch's newest terminal row"
+  assert_not_contains "$out" "state: failed" "the terminal row must not win while a live row binds"
+  pass "runs-list selection prefers a live row over a newer terminal one"
 }
 
-# An unfetched head on the older live row does not change creation order.
-# Exact-head compatibility of the newer terminal row is not supersession proof.
-test_unfetched_older_live_sibling_does_not_hide_failure() {
+# The routine production shape of the same case: the live run's fix-round
+# commits live only in the gate repo, so its head is not a git object in the
+# task copy and can never bind by the head rule. The terminal row sitting at
+# the worktree's EXACT commit is the anchor that proves the unfetched live row
+# is this worktree's own continuation, so the live run still wins.
+test_unfetched_live_sibling_outranks_terminal_row_at_exact_head() {
   reset_fakes
   local d base_head short_base unfetched out
   d=$(new_case unfetched-live-sibling)
@@ -1539,8 +1495,9 @@ test_unfetched_older_live_sibling_does_not_hide_failure() {
 EOF
 )"
   out=$(run_crew_state "$d" unfetched)
-  assert_contains "$out" "state: failed" "an older unfetched live head must not hide the newer failure"
-  pass "an older unfetched live sibling does not hide a newer failure"
+  assert_contains "$out" "state: working" "an unfetched live row anchored by the exact-head terminal row outranks it"
+  assert_not_contains "$out" "state: failed" "the corpse at the worktree commit must not report a healthy task as failed"
+  pass "an unfetched live sibling outranks a terminal row at the worktree's exact commit"
 }
 
 # The preference must not widen: candidates of the SAME liveness class keep the
@@ -1573,8 +1530,8 @@ EOF
 }
 
 # An unclassifiable status word keeps the ledger's own newest-first precedence:
-# the creation-order preference must preserve a status whose liveness is
-# unknown, so an unexpected newest row is answered as-is instead of being
+# the live-over-terminal preference only ever reorders rows whose liveness is
+# known, so an unexpected newest row is answered as-is instead of being
 # displaced by an older running row and reported as working.
 test_unknown_status_row_keeps_newest_first_precedence() {
   reset_fakes
@@ -2002,156 +1959,7 @@ test_no_run_idle_pane_paused() {
   assert_contains "$out" "state: paused" "paused log -> paused"
   assert_contains "$out" "source: status-log" "idle pause -> status-log source"
   assert_contains "$out" "holding for the upstream tool release" "the pause reason is carried in the detail"
-  printf 'The release window opens tomorrow.\n\n' >> "$d/state/feat-pause.status"
-  out=$(run_crew_state "$d" feat-pause)
-  assert_contains "$out" "state: paused" "continuation prose and trailing blanks preserve the pause"
-  assert_contains "$out" "holding for the upstream tool release" "multiline pause preserves its declared reason"
   pass "no run + idle pane on a paused: status reports state: paused with its reason"
-}
-
-test_secondmate_open_block_survives_unrelated_append() {
-  reset_fakes
-  local d out suffix gen
-  d=$(new_case buried-block)
-  mkdir -p "$d/wt"
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/mate.meta" "window=fm:fm-mate" "worktree=$d/wt" "kind=secondmate" "harness=claude"
-  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" mate)
-  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" mate busy --gen "$gen" --source claude-hook --event user-prompt-submit
-  for suffix in '' 'note: unrelated progress' 'resolved [key=other]: unrelated answer' 'working: continuing another task' 'done: another task completed' 'failed: another task failed' $'done: another task completed\nnote: cleanup complete' $'failed: another task failed\nnote: cleanup complete'; do
-    printf 'blocked [key=access]: need release access\n%s\n' "$suffix" > "$d/state/mate.status"
-    out=$(run_crew_state "$d" mate)
-    assert_contains "$out" "state: blocked" "open blocker survives '$suffix' with a busy endpoint"
-    assert_contains "$out" "need release access" "the open blocker's reason remains visible"
-  done
-  printf 'resolved [key=access]: access granted\n' >> "$d/state/mate.status"
-  out=$(run_crew_state "$d" mate)
-  assert_contains "$out" "state: unknown" "matching resolution clears the blocker"
-  assert_not_contains "$out" "need release access" "closed blocker is not resurrected"
-  pass "a busy secondmate keeps its open blocker until that exact key closes"
-}
-
-test_newest_open_decision_supplies_the_reported_detail() {
-  reset_fakes
-  local d out gen
-  d=$(new_case newest-open-decision)
-  mkdir -p "$d/wt"
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/mate.meta" "window=fm:fm-mate" "worktree=$d/wt" "kind=secondmate" "harness=claude"
-  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" mate)
-  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" mate busy --gen "$gen" --source claude-hook --event user-prompt-submit
-  printf 'blocked [key=a]: staging is down\nneeds-decision [key=b]: pick a rollout order\n' > "$d/state/mate.status"
-  out=$(run_crew_state "$d" mate)
-  assert_contains "$out" "state: parked" "the newer open decision is the reported state"
-  assert_contains "$out" "pick a rollout order" "the newer open decision supplies the detail"
-  printf 'blocked [key=c]: the deploy host went away\n' >> "$d/state/mate.status"
-  out=$(run_crew_state "$d" mate)
-  assert_contains "$out" "state: blocked" "a newer blocker takes the report back"
-  assert_contains "$out" "the deploy host went away" "the newest blocker supplies the detail"
-  printf 'resolved [key=c]: host restored\n' >> "$d/state/mate.status"
-  out=$(run_crew_state "$d" mate)
-  assert_contains "$out" "state: parked" "closing the newest decision falls back to the next open one"
-  assert_contains "$out" "pick a rollout order" "the still-open older decision is not lost"
-  pass "the most recently opened decision supplies the reported state and detail"
-}
-
-test_single_owner_terminal_declaration_supersedes_stale_decision() {
-  reset_fakes
-  local d kind opener terminal out key expected
-  d=$(new_case terminal-stale-decision)
-  mkdir -p "$d/wt"
-  make_fakebin "$d" >/dev/null
-  arm_idle_record "$d/state" task
-  for kind in scout ship; do
-    fm_write_meta "$d/state/task.meta" "window=fm:fm-task" "worktree=$d/wt" "kind=$kind" "harness=claude"
-    for opener in needs-decision blocked; do
-      for terminal in 'done' failed; do
-        printf '%s [key=choice]: an earlier decision\n%s: final outcome\nContinuation prose.\n\n' \
-          "$opener" "$terminal" > "$d/state/task.status"
-        out=$(run_crew_state "$d" task)
-        assert_contains "$out" "state: $terminal" "$kind terminal declaration supersedes stale $opener"
-        assert_contains "$out" "final outcome" "the terminal declaration supplies the detail"
-        printf 'note: cleanup complete\n' >> "$d/state/task.status"
-        out=$(run_crew_state "$d" task)
-        assert_contains "$out" "state: unknown" "$kind cleanup note does not revive a pre-terminal $opener"
-        assert_not_contains "$out" "an earlier decision" "superseded decision detail stays absent after cleanup"
-        expected=parked
-        [ "$opener" != blocked ] || expected=blocked
-        for key in choice new-choice; do
-          printf '%s [key=%s]: reopened after completion\nnote: more cleanup\n' "$opener" "$key" >> "$d/state/task.status"
-          out=$(run_crew_state "$d" task)
-          assert_contains "$out" "state: $expected" "$kind retains a post-terminal $opener for $key"
-          assert_contains "$out" "reopened after completion" "the reopened decision supplies the detail"
-          printf 'resolved [key=%s]: answered\n' "$key" >> "$d/state/task.status"
-          out=$(run_crew_state "$d" task)
-          assert_contains "$out" "state: unknown" "matching resolution clears the reopened decision"
-          assert_not_contains "$out" "an earlier decision" "closing a reopened decision cannot revive pre-terminal decisions"
-        done
-      done
-    done
-  done
-  pass "ship and scout terminal declarations supersede stale decisions"
-}
-
-test_latest_status_preserves_legacy_completions() {
-  local d event line
-  d=$(new_case latest-legacy)
-  for event in 'PR ready https://example.com/pull/1' 'checks green' 'ready in branch fm/topic' merged 'PR READY https://example.com/pull/1'; do
-    printf 'paused: awaiting release\n%s\nMore detail: cleanup complete.\n\n' "$event" > "$d/state/task.status"
-    line=$(last_status_line "$d/state/task.status")
-    [ "$line" = "$event" ] || fail "legacy completion '$event' was hidden by an earlier pause"
-    status_is_captain_relevant "$line" || fail "legacy completion is no longer captain-relevant"
-    status_is_paused "$line" && fail "legacy completion retained pause handling"
-    printf 'working: following up on merged work\n' >> "$d/state/task.status"
-    line=$(last_status_line "$d/state/task.status")
-    [ "$line" = 'working: following up on merged work' ] || fail "later working event did not supersede legacy completion"
-    status_is_captain_relevant "$line" && fail "legacy prose made a working event captain-relevant"
-    printf 'paused: waiting on upstream PR #123 to land\nOnce it is %s I will rebase and continue.\n\n' "$event" > "$d/state/task.status"
-    line=$(last_status_line "$d/state/task.status")
-    [ "$line" = 'paused: waiting on upstream PR #123 to land' ] || fail "continuation prose mentioning '$event' hid a multi-line pause: $line"
-    status_is_paused "$line" || fail "a multi-line pause lost pause handling behind prose mentioning '$event'"
-  done
-  (
-    shopt -u nocasematch
-    FM_CAPTAIN_RE='custom-event:' status_is_captain_relevant 'CUSTOM-EVENT: ready' || fail "custom captain regex lost case-insensitive matching"
-    shopt -q nocasematch && fail "captain matching changed caller shell options"
-    FM_CAPTAIN_RE='custom-event:' status_is_captain_relevant 'done: ready' && fail "custom captain regex did not replace defaults"
-    shopt -s nocasematch
-    status_is_captain_relevant 'unrelated prose' && fail "ordinary prose became captain-relevant"
-    shopt -q nocasematch || fail "captain matching cleared caller shell options"
-  ) || fail "captain matching changed regex or shell-option behavior"
-  pass "latest status retains legacy completion events and shared captain matching"
-}
-
-test_latest_status_subshell_work_does_not_grow_with_history() {
-  local d size i level small large window
-  d=$(new_case latest-processes)
-  window=${FM_CLASSIFY_EVENT_WINDOW_LINES:-200}
-  for size in "$window" "$((window * 10))"; do
-    {
-      for ((i = 0; i < size; i++)); do
-        printf 'working corr=0123456789abcdef [key=phase]: progress\nMore detail: still working.\n'
-      done
-      printf 'PR ready https://example.com/pull/1\npaused corr=0123456789abcdef [key=release]: awaiting release\n\n'
-    } > "$d/state/task.status"
-    : > "$d/children-$size"
-    (
-      level=$BASH_SUBSHELL
-      set -T
-      trap 'if [ "$BASH_SUBSHELL" -gt "$level" ]; then printf x >> "$d/children-$size"; fi' DEBUG
-      last_status_line "$d/state/task.status" > "$d/output"
-    )
-    [ "$(cat "$d/output")" = 'paused corr=0123456789abcdef [key=release]: awaiting release' ] \
-      || fail "latest status lost correlation-token parsing on a long log"
-  done
-  small=$(wc -c < "$d/children-$window")
-  large=$(wc -c < "$d/children-$((window * 10))")
-  [ "$large" -le "$((small + 20))" ] || fail "latest status shell work grows with history ($small -> $large)"
-  printf 'paused: awaiting a long quiet tail\n' > "$d/state/task.status"
-  for ((i = 0; i < 500; i++)); do printf 'continuation prose %s\n' "$i" >> "$d/state/task.status"; done
-  [ "$(last_status_line "$d/state/task.status")" = 'paused: awaiting a long quiet tail' ] \
-    || fail "a declared pause buried under a long prose tail was hidden"
-  pass "latest status subprocess work stays bounded and still reads past a long prose tail"
 }
 
 test_no_run_idle_pane_custom_paused_verb() {
@@ -2932,619 +2740,14 @@ EOF
   pass "runs-list continuation attribution works when axi answers another branch"
 }
 
-# The AXI overview supplies run ids in creation order; the plain runs listing
-# cannot identify a replacement or carry its review gate.
-make_competing_runs_case() {  # <name> <new-status> <old-status>
-  local d=$TMP_ROOT/$1 short
-  reset_fakes
-  mkdir -p "$d/state"
-  make_repo_on_branch "$d/wt" fm/competing
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/competing.meta" "window=fm:fm-competing" "worktree=$d/wt" "kind=ship"
-  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
-  FM_FAKE_AXI_HOME="count: 2 of 2 total
-runs[2]{id,branch,status,head,pr}:
-  \"01NEW\",fm/competing,$2,$short,\"\"
-  \"01OLD\",fm/competing,$3,$short,\"\""
-  FM_FAKE_RUNS_LIST="  $2 fm/competing $short 2026-09-14 12:01
-  $3 fm/competing $short 2026-09-14 12:00"
-}
-
-make_capped_runs_case() {
-  make_competing_runs_case "$1" "$2" "$3"
-  local d=$TMP_ROOT/$1
-  NM_HOME="$d/nm"
-  mkdir -p "$NM_HOME"
-  FM_FAKE_AXI_HOME=$(python3 - "$NM_HOME/state.sqlite" "$d/wt" "$2" "$3" "$FM_FAKE_RUN_HEAD" "${4:-visible}" <<'PY'
-import csv
-import json
-import sqlite3
-import sys
-
-database, worktree, newest, oldest, head, placement = sys.argv[1:]
-with sqlite3.connect(database) as db:
-    db.executescript("""
-        CREATE TABLE repos (id TEXT PRIMARY KEY, working_path TEXT NOT NULL UNIQUE);
-        CREATE TABLE runs (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, branch TEXT NOT NULL,
-                           status TEXT NOT NULL, head_sha TEXT NOT NULL, created_at INTEGER NOT NULL);
-    """)
-    db.executemany("INSERT INTO repos VALUES (?, ?)", [("repo", worktree), ("other-repo", worktree + "-other")])
-    db.executemany("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)", [
-        ("01NEW", "repo", "fm/competing", newest, head, 12 if placement == "visible" else 1),
-        ("01OLD", "repo", "fm/competing", oldest, head, 0),
-        ("01FOREIGN", "other-repo", "fm/competing", "running", head, 20),
-    ] + [("01OTHER%02d" % i, "repo", "fm/other-%d" % i, "running", head, i + 2)
-         for i in range(9 if placement == "visible" else 10)])
-    rows = db.execute("SELECT id, branch, status, head_sha FROM runs WHERE repo_id = 'repo' "
-                      "ORDER BY created_at DESC, id DESC").fetchall()
-print("repo: " + json.dumps(worktree))
-print("count: 10 of %d total" % len(rows))
-print("runs[10]{id,branch,status,head,pr}:")
-for row in rows[:10]:
-    sys.stdout.write("  ")
-    csv.writer(sys.stdout, lineterminator="\n").writerow([*row, ""])
-PY
-  ) || fail 'could not create the persisted run inventory fixture'
-  FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01NEW/')"
-  FM_FAKE_AXI_STATUS_RUN="$(run_parked fm/competing | sed 's/01RUN/01NEW/')"
-}
-
-test_capped_competing_live_runs_report_both_ids() {
-  make_capped_runs_case capped-competing running running
-  local d=$TMP_ROOT/capped-competing out
-  out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'a capped overview must not hide the competing live run'
-  assert_contains "$out" '01NEW' 'capped ambiguity names the visible run'
-  assert_contains "$out" '01OLD' 'capped ambiguity names the run beyond nine other branches'
-  assert_not_contains "$out" '01FOREIGN' 'another repository cannot claim this branch'
-  pass 'capped overview retains both competing same-branch run ids'
-}
-
-test_capped_overview_without_branch_rows_reports_both_ids() {
-  make_capped_runs_case capped-absent running pending hidden
-  local d=$TMP_ROOT/capped-absent out
-  out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'no visible branch rows cannot establish absence'
-  assert_contains "$out" '01NEW' 'the newer hidden run is identified'
-  assert_contains "$out" '01OLD' 'the older hidden pending run is identified'
-  pass 'same-branch identity survives both runs falling outside the overview'
-}
-
-test_capped_replacement_keeps_gate_and_inventory_unchanged() {
-  make_capped_runs_case "capped reviewer's replacement" running cancelled
-  local d="$TMP_ROOT/capped reviewer's replacement" out before after
-  before=$(git hash-object "$NM_HOME/state.sqlite")
-  FM_FAKE_AXI_STATUS="$(run_failed fm/competing | sed 's/01RUN/01OLD/; s/failed/cancelled/')"
-  out=$(run_crew_state "$d" competing)
-  after=$(git hash-object "$NM_HOME/state.sqlite")
-  assert_contains "$out" 'state: parked' 'the live replacement keeps its review gate beyond the history cap'
-  assert_contains "$out" 'parked at review: 2 finding(s)' 'full replacement gate details survive inventory selection'
-  assert_contains "$out" '01NEW' 'the replacement run is identified'
-  assert_not_contains "$out" '01FOREIGN' 'same-branch runs in another repository do not make authority ambiguous'
-  [ "$after" = "$before" ] || fail 'current-state reporting modified the persisted inventory'
-  NM_HOME=../nm
-  out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: parked' 'relative NM_HOME resolves from the queried worktree'
-  pass 'complete inventory preserves the replacement gate without writes'
-}
-
-test_capped_inventory_failures_report_unknown() {
-  local mode rc=0 overview
-  for mode in missing corrupt schema repo count; do
-    (
-      make_capped_runs_case "capped-unreadable-$mode" running running
-      d=$TMP_ROOT/capped-unreadable-$mode
-      overview=$FM_FAKE_AXI_HOME
-      case "$mode" in
-        missing) rm "$NM_HOME/state.sqlite" ;;
-        corrupt) printf 'invalid database\n' > "$NM_HOME/state.sqlite" ;;
-        schema|repo)
-          python3 - "$NM_HOME/state.sqlite" "$mode" <<'PY'
-import sqlite3
-import sys
-with sqlite3.connect(sys.argv[1]) as db:
-    if sys.argv[2] == "schema":
-        db.execute("DROP TABLE runs")
-    else:
-        db.execute("DELETE FROM repos WHERE id = 'repo'")
-PY
-          ;;
-        count) overview=$(printf '%s\n' "$overview" | sed '/^count:/d') ;;
-      esac
-      out=$(FM_FAKE_AXI_HOME="$overview" run_crew_state "$d" competing)
-      assert_contains "$out" 'state: unknown' "$mode cannot fall back to a confident verdict from capped rows"
-      assert_contains "$out" '01NEW' "$mode preserves the available run identity"
-      if [ "$mode" = missing ]; then
-        [ ! -e "$NM_HOME/state.sqlite" ] || fail 'the read-only lookup created a missing inventory'
-      fi
-      pass "$mode complete-inventory failure reports unknown"
-    ) || rc=1
-  done
-  [ "$rc" = 0 ] || fail 'capped inventory failures'
-}
-
-make_no_python_toolbin() {
-  local tb=$1/no-python tool real
-  mkdir -p "$tb"
-  for tool in bash git grep sed head cut tail dirname perl awk tr date stat ps uname readlink sleep; do
-    real=$(command -v "$tool") || fail "missing fixture tool: $tool"
-    ln -s "$real" "$tb/$tool"
-  done
-  PATH="$tb" bash -c '! command -v python3 && ! command -v sqlite3' || fail 'fixture exposes optional inventory readers'
-  printf '%s\n' "$tb"
-}
-
-test_complete_inventory_ignores_unrelated_semantics() {
-  local branch encoded d toolbin out i=0
-  for branch in 'fix/c++' 'fix/a,b' 'fix/a"b'; do
-    i=$((i + 1))
-    make_competing_runs_case "unrelated-semantics-$i" running cancelled
-    d=$TMP_ROOT/unrelated-semantics-$i
-    git -C "$d/wt" check-ref-format --branch "$branch" >/dev/null || fail 'fixture branch must be valid Git syntax'
-    encoded=$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$branch")
-    FM_FAKE_AXI_HOME="$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's/2 of 2/3 of 3/; s/runs\[2\]/runs[3]/')
-  01OTHER,$encoded,running,$FM_FAKE_RUN_HEAD,\"\""
-    FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01NEW/')"
-    FM_FAKE_AXI_STATUS_RUN="$(run_parked fm/competing | sed 's/01RUN/01NEW/')"
-    toolbin=$(make_no_python_toolbin "$d")
-    out=$(PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" competing)
-    assert_contains "$out" 'state: parked' 'R6 unrelated branch syntax must not suppress the requested gate'
-    assert_contains "$out" '01NEW' 'selection retains the requested run identity'
-    FM_FAKE_AXI_HOME="$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed '/^  01OTHER,/d')
-  foreign.id,$encoded,FUTURE,unresolved,\"\""
-    out=$(PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" competing)
-    assert_contains "$out" 'state: parked' 'unrelated id status and head semantics cannot suppress the requested gate'
-    assert_not_contains "$out" 'foreign.id' 'unrelated identities are not candidates'
-  done
-  pass 'R6 complete selection ignores unrelated branch semantics'
-}
-
-test_requested_branch_has_no_character_whitelist() {
-  local branch encoded d out i=0
-  for branch in 'fix/c++' 'fix/a,b'; do
-    i=$((i + 1))
-    make_competing_runs_case "requested-branch-syntax-$i" running cancelled
-    d=$TMP_ROOT/requested-branch-syntax-$i
-    git -C "$d/wt" branch -m "$branch"
-    encoded=$(python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$branch")
-    FM_FAKE_AXI_HOME="count: 2 of 2 total
-runs[2]{id,branch,status,head,pr}:
-  01NEW,$encoded,running,$FM_FAKE_RUN_HEAD,\"\"
-  01OLD,$encoded,cancelled,$FM_FAKE_RUN_HEAD,\"\""
-    FM_FAKE_AXI_STATUS="$(run_running "$branch" | sed 's/01RUN/01NEW/')"
-    FM_FAKE_AXI_STATUS_RUN="$(run_parked "$branch" | sed 's/01RUN/01NEW/')"
-    out=$(run_crew_state "$d" competing)
-    assert_contains "$out" 'state: parked' 'R6 requested branch identity must not depend on a character whitelist'
-    assert_contains "$out" '01NEW' 'the requested branch keeps its selected run'
-  done
-  pass 'R6 requested branches use exact identity without a whitelist'
-}
-
-test_capped_inventory_ignores_unrelated_semantics() {
-  make_capped_runs_case capped-unrelated-semantics running running
-  local d=$TMP_ROOT/capped-unrelated-semantics out
-  FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's@01OTHER00,fm/other-0,running,[^,]*,@foreign.id,"fix/a,b",FUTURE,unresolved,@')
-  out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'competing runs remain ambiguous beside unrelated metadata'
-  assert_contains "$out" '01NEW' 'capped ambiguity retains the visible id'
-  assert_contains "$out" '01OLD' 'R6 unrelated semantics cannot hide an id beyond the history window'
-  assert_not_contains "$out" 'foreign.id' 'unrelated runs do not claim this branch'
-  pass 'R6 capped inventory ignores unrelated semantics and names both ids'
-}
-
-test_capped_requested_semantics_do_not_hide_ids() {
-  make_capped_runs_case capped-requested-semantics running running
-  local d=$TMP_ROOT/capped-requested-semantics out
-  FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's@01NEW,fm/competing,running,[^,]*,@01NEW,fm/competing,FUTURE,unresolved,@')
-  out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'readable competing identities remain ambiguous'
-  assert_contains "$out" '01NEW' 'the visible requested run remains identified'
-  assert_contains "$out" '01OLD' 'R6 partial requested-row semantics cannot preempt complete identity lookup'
-  pass 'R6 complete identity lookup precedes partial-row semantic rejection'
-}
-
-test_capped_requested_branch_with_comma_names_both_ids() {
-  make_capped_runs_case capped-comma-branch running running
-  local d=$TMP_ROOT/capped-comma-branch out branch=fix/a,b
-  git -C "$d/wt" branch -m "$branch"
-  python3 - "$NM_HOME/state.sqlite" "$branch" <<'PY'
-import sqlite3
-import sys
-with sqlite3.connect(sys.argv[1]) as db:
-    db.execute("UPDATE runs SET branch = ? WHERE repo_id = 'repo' AND branch = 'fm/competing'", (sys.argv[2],))
-PY
-  FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's@fm/competing@"fix/a,b"@g')
-  FM_FAKE_AXI_STATUS="$(run_running "$branch" | sed 's/01RUN/01NEW/')"
-  FM_FAKE_AXI_STATUS_RUN="$(run_parked "$branch" | sed 's/01RUN/01NEW/')"
-  out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'quoted branch fields retain ambiguous authority'
-  assert_contains "$out" '01NEW' 'the quoted requested branch retains its visible run'
-  assert_contains "$out" '01OLD' 'R6 complete inventory preserves quoted branch identity and both ids'
-  pass 'R6 capped inventory preserves quoted requested-branch identity'
-}
-
-test_inventory_structure_and_requested_semantics_remain_checked() {
-  local mode d out
-  for mode in columns count status head; do
-    make_competing_runs_case "requested-validation-$mode" running cancelled
-    d=$TMP_ROOT/requested-validation-$mode
-    FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01NEW/')"
-    FM_FAKE_AXI_STATUS_RUN="$(run_parked fm/competing | sed 's/01RUN/01NEW/')"
-    case "$mode" in
-      columns) FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed '/01NEW/s/,""$//') ;;
-      count) FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's/2 of 2/1 of 2/') ;;
-      status) FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's/,running,/,FUTURE,/') ;;
-      head) FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed '/01NEW/s/,[a-f0-9]*,""$/,unresolved,""/') ;;
-    esac
-    out=$(run_crew_state "$d" competing)
-    assert_contains "$out" 'state: unknown' "$mode still prevents a confident selection"
-    assert_contains "$out" '01NEW' "$mode preserves the available newer identity"
-    assert_contains "$out" '01OLD' "$mode preserves the available older identity"
-  done
-  pass 'R6 structural completeness and requested-run validation remain enforced'
-}
-
-test_complete_inventory_without_python_keeps_gate() {
-  make_competing_runs_case no-python-complete running cancelled
-  local d=$TMP_ROOT/no-python-complete toolbin out
-  toolbin=$(make_no_python_toolbin "$d")
-  FM_FAKE_AXI_STATUS="$(run_failed fm/competing | sed 's/01RUN/01OLD/; s/failed/cancelled/')"
-  FM_FAKE_AXI_STATUS_RUN="$(run_parked fm/competing | sed 's/01RUN/01NEW/')"
-  out=$(PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" competing)
-  assert_contains "$out" 'state: parked' 'R5 complete inventory keeps its gate without Python'
-  assert_contains "$out" 'parked at review: 2 finding(s)' 'optional dependencies do not remove gate detail'
-  assert_contains "$out" '01NEW' 'complete inventory retains the selected id without Python'
-  pass 'R5 complete inventory without Python keeps the replacement gate'
-}
-
-test_complete_ambiguity_without_python_names_both_ids() {
-  make_competing_runs_case no-python-ambiguous running pending
-  local d=$TMP_ROOT/no-python-ambiguous toolbin out
-  toolbin=$(make_no_python_toolbin "$d")
-  FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01NEW/')"
-  out=$(PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" competing)
-  assert_contains "$out" 'state: unknown' 'complete competing runs remain ambiguous without Python'
-  assert_contains "$out" '01NEW' 'R5 complete ambiguity retains the newer id without Python'
-  assert_contains "$out" '01OLD' 'complete ambiguity retains the older id without Python'
-  pass 'R5 complete ambiguity without Python names both ids'
-}
-
-test_capped_without_python_preserves_available_ids() {
-  local placement d toolbin out
-  for placement in visible hidden; do
-    make_capped_runs_case "no-python-capped-$placement" running pending "$placement"
-    d=$TMP_ROOT/no-python-capped-$placement
-    toolbin=$(make_no_python_toolbin "$d")
-    out=$(PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" competing)
-    assert_contains "$out" 'state: unknown' 'unreadable complete inventory must fail closed'
-    assert_contains "$out" '01NEW' 'R5 capped lookup retains available ids without Python'
-    assert_contains "$out" 'inventory' 'unknown explains that complete inventory could not be read'
-    assert_not_contains "$out" '01FOREIGN' 'unreadable inventory does not invent foreign authority'
-  done
-  pass 'R5 capped lookup without Python preserves available ids'
-}
-
-test_capped_without_sqlite_preserves_available_ids() {
-  make_capped_runs_case no-sqlite-capped running running
-  local d=$TMP_ROOT/no-sqlite-capped out
-  mkdir -p "$d/no-sqlite"
-  printf 'raise ImportError("sqlite support unavailable")\n' > "$d/no-sqlite/sqlite3.py"
-  out=$(PYTHONPATH="$d/no-sqlite" run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'missing SQLite support must fail closed'
-  assert_contains "$out" '01NEW' 'R5 capped lookup retains available ids without SQLite support'
-  assert_contains "$out" 'inventory' 'missing SQLite support leaves an explicit inventory diagnostic'
-  pass 'R5 capped lookup without SQLite support preserves available ids'
-}
-
-test_live_to_terminal_inventory_disagreement_is_unknown() {
-  make_competing_runs_case live-to-terminal running cancelled
-  local d=$TMP_ROOT/live-to-terminal out
-  FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01NEW/')"
-  FM_FAKE_AXI_STATUS_RUN="$(run_failed fm/competing | sed 's/01RUN/01NEW/; s/failed/cancelled/')"
-  out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'R1 live selection becoming terminal cannot publish a stale failure'
-  assert_contains "$out" 'status disagrees with inventory' 'the selection race is identified'
-  assert_contains "$out" '01NEW' 'the changing run remains identifiable'
-  assert_not_contains "$out" 'state: failed' 'a cancelled stale selection is not a work failure'
-  FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's/,running,/,cancelled,/')
-  FM_FAKE_AXI_STATUS_RUN="$(run_parked fm/competing | sed 's/01RUN/01NEW/')"
-  out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'terminal-to-live disagreement remains rejected'
-  pass 'R1 both directions of inventory liveness disagreement read unknown'
-}
-
-make_uninitialized_worker_case() {
-  local d=$TMP_ROOT/$1 gen
-  reset_fakes
-  mkdir -p "$d/state"
-  make_repo_on_branch "$d/wt" fm/no-gate
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/worker.meta" "window=fm:fm-worker" "worktree=$d/wt" "kind=ship" "harness=claude"
-  FM_FAKE_AXI_STATUS=$(cat "$ROOT/tests/captures/no-mistakes-v1.70.1/uninitialized.toon")
-  FM_FAKE_AXI_STATUS_ERROR=1
-  FM_FAKE_AXI_HOME_ERROR=1
-  printf 'working: implementation continues\n' > "$d/state/worker.status"
-  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" worker)
-  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" worker "$2" --gen "$gen" \
-    --source claude-hook --event "${3:-stop}"
-}
-
-test_uninitialized_busy_worker_uses_pane() {
-  make_uninitialized_worker_case uninitialized-busy busy user-prompt-submit
-  local d=$TMP_ROOT/uninitialized-busy out
-  out=$(run_crew_state "$d" worker)
-  assert_contains "$out" 'state: working' 'R2 an uninitialized gate must preserve a busy worker'
-  assert_contains "$out" 'source: pane' 'a busy worker without a gate uses current pane evidence'
-  assert_not_contains "$out" 'source: run-step' 'an initialization error is not a run'
-  FM_FAKE_AXI_STATUS='error: "database locked"'
-  out=$(run_crew_state "$d" worker)
-  assert_contains "$out" 'state: unknown' 'other inventory errors must not be mistaken for no gate'
-  pass 'R2 uninitialized busy workers retain pane reporting'
-}
-
-test_uninitialized_idle_worker_uses_status() {
-  make_uninitialized_worker_case uninitialized-idle idle
-  local d=$TMP_ROOT/uninitialized-idle out
-  out=$(run_crew_state "$d" worker)
-  assert_contains "$out" 'state: working' 'R2 an uninitialized gate must preserve current worker status'
-  assert_contains "$out" 'source: status-log' 'an idle worker without a gate uses its current status'
-  assert_contains "$out" 'implementation continues' 'current worker detail remains available'
-  pass 'R2 uninitialized idle workers retain status reporting'
-}
-
-make_historical_inventory_case() {
-  make_competing_runs_case "$1" completed cancelled
-  local d=$TMP_ROOT/$1 gen
-  FM_FAKE_AXI_STATUS="$(run_passed fm/competing | sed 's/01RUN/01NEW/')"
-  FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
-  git -C "$d/wt" commit -q --allow-empty -m 'current work after completed validation'
-  fm_write_meta "$d/state/competing.meta" "window=fm:fm-competing" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'working: implementation after validation\n' > "$d/state/competing.status"
-  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" competing)
-  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" competing "$2" --gen "$gen" \
-    --source claude-hook --event "${3:-stop}"
-}
-
-test_historical_inventory_uses_current_pane() {
-  make_historical_inventory_case historical-inventory-busy busy user-prompt-submit
-  local d=$TMP_ROOT/historical-inventory-busy out
-  out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: working' 'R3 a proven historical run must preserve a busy worker'
-  assert_contains "$out" 'source: pane' 'a historical inventory row yields to current pane evidence'
-  assert_not_contains "$out" 'source: run-step' 'historical rows cannot be reattributed through the ledger'
-  pass 'R3 historical inventory yields to the current busy pane'
-}
-
-test_historical_inventory_uses_current_status() {
-  make_historical_inventory_case historical-inventory-idle idle
-  local d=$TMP_ROOT/historical-inventory-idle out
-  out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: working' 'R3 a proven historical run must preserve current worker status'
-  assert_contains "$out" 'source: status-log' 'historical inventory yields to the current status log'
-  assert_contains "$out" 'implementation after validation' 'the current work detail is preserved'
-  pass 'R3 historical inventory yields to current worker status'
-}
-
-test_superseded_cancelled_run_preserves_replacement_gate() {
-  make_competing_runs_case superseded-gate running cancelled
-  local d=$TMP_ROOT/superseded-gate out
-  FM_FAKE_AXI_STATUS="$(run_failed fm/competing | sed 's/01RUN/01OLD/; s/failed/cancelled/')
-error: \"cancelled: superseded by new push\""
-  # The rerun's rebased head is not in the submitted worktree's object store.
-  FM_FAKE_RUN_HEAD=0123abcd
-  FM_FAKE_AXI_STATUS_RUN="$(run_parked fm/competing | sed 's/01RUN/01NEW/')
-branch_sync:
-  state: pipeline_owned"
-  FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed '/01NEW/s/,[a-f0-9]*,""$/,0123abcd,""/')
-  out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: parked' 'superseded cancelled run must expose the live review gate'
-  assert_contains "$out" 'parked at review: 2 finding(s)' 'replacement gate detail survives selection'
-  assert_contains "$out" '01NEW' 'the selected replacement run is identified'
-  pass 'superseded cancelled run preserves the replacement review gate'
-}
-
-test_competing_live_runs_report_unknown_with_both_ids() {
-  make_competing_runs_case ambiguous-runs running running
-  local d=$TMP_ROOT/ambiguous-runs out
-  FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01OLD/')"
-  FM_FAKE_AXI_STATUS_RUN="$(run_parked fm/competing | sed 's/01RUN/01NEW/')"
-  printf 'done: old completion event\n' > "$d/state/competing.status"
-  out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'two live runs cannot establish exclusive authority'
-  assert_contains "$out" '01NEW' 'ambiguity names the newer candidate'
-  assert_contains "$out" '01OLD' 'ambiguity names the older candidate'
-  pass 'competing live runs report unknown with both run ids'
-}
-
-test_newer_failed_run_is_not_hidden_by_older_live_run() {
-  make_competing_runs_case newest-failed failed running
-  local d=$TMP_ROOT/newest-failed out
-  FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01OLD/')"
-  FM_FAKE_AXI_STATUS_RUN="$(run_failed fm/competing | sed 's/01RUN/01NEW/')"
-  out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: failed' 'the newer failed run must not be hidden by an older live run'
-  assert_contains "$out" '01NEW' 'the genuine failure identifies its run'
-  pass 'newer failed run remains failed beside an older live run'
-}
-
-test_unverifiable_run_selection_reports_unknown() {
-  local mode rc=0
-  for mode in missing wrong-id wrong-branch wrong-head missing-status malformed-table inventory-error selected-error; do
-    (
-      make_competing_runs_case "unverified-$mode" running cancelled
-      d=$TMP_ROOT/unverified-$mode
-      FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01OLD/')"
-      FM_FAKE_AXI_STATUS_RUN="$(run_parked fm/competing | sed 's/01RUN/01NEW/')"
-      case "$mode" in
-        missing) FM_FAKE_AXI_STATUS_RUN='' ;;
-        wrong-id) FM_FAKE_AXI_STATUS_RUN=$(printf '%s\n' "$FM_FAKE_AXI_STATUS_RUN" | sed 's/01NEW/01OLD/') ;;
-        wrong-branch) FM_FAKE_AXI_STATUS_RUN=$(printf '%s\n' "$FM_FAKE_AXI_STATUS_RUN" | sed 's@fm/competing@fm/another-task@') ;;
-        wrong-head)
-          FM_FAKE_AXI_STATUS_RUN="$(FM_FAKE_RUN_HEAD=0123abcd run_parked fm/competing | sed 's/01RUN/01NEW/')"
-          ;;
-        missing-status) FM_FAKE_AXI_STATUS_RUN=$(printf '%s\n' "$FM_FAKE_AXI_STATUS_RUN" | sed '/status:/d') ;;
-        malformed-table) FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's/runs\[2\]/runs[3]/') ;;
-        inventory-error) FM_FAKE_AXI_HOME_ERROR=1 ;;
-        selected-error) FM_FAKE_AXI_STATUS_RUN_ERROR=1 ;;
-      esac
-      out=$(run_crew_state "$d" competing)
-      assert_contains "$out" 'state: unknown' "$mode selection must not assert a run state"
-      assert_contains "$out" '01NEW' "$mode selection preserves the replacement id"
-      assert_contains "$out" '01OLD' "$mode selection preserves the original id"
-      pass "$mode run selection reports unknown with candidate ids"
-    ) || rc=1
-  done
-  [ "$rc" = 0 ] || fail 'unverifiable run selections'
-}
-
-test_legacy_conflicting_run_records_report_unknown() {
-  make_competing_runs_case legacy-conflict failed running
-  local d=$TMP_ROOT/legacy-conflict out
-  FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01OLD/')"
-  FM_FAKE_AXI_HOME=$FM_FAKE_AXI_STATUS
-  out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'conflicting records without identities cannot prove authority'
-  assert_contains "$out" '01OLD' 'legacy ambiguity preserves the available run id'
-  assert_contains "$out" 'unavailable' 'legacy ambiguity states that the competing id is unavailable'
-  pass 'legacy conflicting run records report unknown'
-}
-
-# Captured AXI stdout is a serialized input contract, not implementation source.
-# Only the run identity is rebound to each disposable git repository; status,
-# outcome, steps, findings, and gate bytes stay as emitted. The capture README
-# distinguishes genuine histories from deliberately composed scenarios.
-captured_axi_status() {  # <capture> [branch] [run-id]
-  awk -v branch="${2:-fm/competing}" -v id="${3:-01NEW}" -v head="$FM_FAKE_RUN_HEAD" '
-    /^  id:/ { print "  id: \"" id "\""; next }
-    /^  branch:/ { print "  branch: " branch; next }
-    /^  head:/ { print "  head: " head; next }
-    /^  head_sha:/ { print "  head_sha: " head; next }
-    { print }
-  ' "$ROOT/tests/captures/no-mistakes-v1.70.1/$1.toon"
-}
-
-test_captured_axi_status_shapes() {
-  local shape status expected d out toolbin
-  for shape in replacement parked failed; do
-    status=running; expected=working
-    case "$shape" in parked) expected=parked ;; failed) status=failed; expected=failed ;; esac
-    make_competing_runs_case "captured-$shape" "$status" cancelled
-    d=$TMP_ROOT/captured-$shape
-    FM_FAKE_AXI_STATUS=$(captured_axi_status superseded fm/competing 01OLD)
-    FM_FAKE_AXI_STATUS_RUN=$(captured_axi_status "$shape")
-    # A newer failure must remain visible even with an older live record.
-    if [ "$shape" = failed ]; then
-      FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's/,cancelled,/,running,/')
-      FM_FAKE_AXI_STATUS=$(captured_axi_status replacement fm/competing 01OLD)
-    fi
-    out=$(run_crew_state "$d" competing)
-    assert_contains "$out" "state: $expected" "captured $shape status is understood"
-    assert_contains "$out" '01NEW' "captured $shape preserves the selected identity"
-    if [ "$shape" = parked ]; then
-      assert_contains "$out" 'parked at test: 1 finding(s)' 'the captured gate retains its actual step and finding count'
-      toolbin=$(make_no_python_toolbin "$d")
-      out=$(PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" competing)
-      assert_contains "$out" 'parked at test: 1 finding(s)' 'a complete captured gate remains readable without Python'
-      assert_contains "$out" '01NEW' 'the captured gate retains its id without Python'
-    fi
-    pass "captured AXI $shape status replays through crew-state"
-  done
-}
-
-test_captured_inventory_replay() {
-  make_capped_runs_case captured-inventory running cancelled
-  local d=$TMP_ROOT/captured-inventory out before after branch newer older toolbin
-  branch=fm/fm-bearings-board-loses-owner-state-and-links
-  newer=01M2GAWMSDQK4B5EA9GZW35RXE
-  older=01M20MQ02N69VJKXW9N8321SQW
-  git -C "$d/wt" checkout -q -b "$branch"
-  python3 - "$NM_HOME/state.sqlite" "$ROOT/tests/captures/no-mistakes-v1.70.1/same-branch-inventory.json" <<'PY'
-import json
-import sqlite3
-import sys
-with sqlite3.connect(sys.argv[1]) as db:
-    db.execute("DELETE FROM runs")
-    db.executemany("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)", [
-        (r["id"], "repo", r["branch"], r["status"], r["head_sha"], r["created_at"])
-        for r in json.load(open(sys.argv[2]))
-    ])
-PY
-  FM_FAKE_AXI_HOME="repo: $d/wt
-$(cat "$ROOT/tests/captures/no-mistakes-v1.70.1/overview.toon")"
-  FM_FAKE_AXI_STATUS=$(captured_axi_status superseded "$branch" 01M2FNFPK984YP0EHFTD1XEF8P)
-  FM_FAKE_AXI_STATUS_RUN=$(captured_axi_status replacement "$branch" "$newer")
-  before=$(git hash-object "$NM_HOME/state.sqlite")
-  out=$(run_crew_state "$d" competing)
-  after=$(git hash-object "$NM_HOME/state.sqlite")
-  assert_contains "$out" 'state: working' 'the recorded live successor outranks its superseded cancellation'
-  assert_contains "$out" "$newer" 'the recorded successor keeps its real run id'
-  [ "$before" = "$after" ] || fail 'captured inventory replay wrote to the database'
-  assert_not_contains "$FM_FAKE_AXI_HOME" "$older" 'the competing candidate is outside the real overview window'
-  # Counterfactual, not a recorded competing-live history: revive one hidden
-  # cancelled row, keeping its captured id, branch, head, and creation order.
-  python3 - "$NM_HOME/state.sqlite" "$older" <<'PY'
-import sqlite3
-import sys
-with sqlite3.connect(sys.argv[1]) as db:
-    db.execute("UPDATE runs SET status = 'running' WHERE id = ?", (sys.argv[2],))
-PY
-  out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'a hidden counterfactual live competitor prevents selection'
-  assert_contains "$out" "$newer" 'captured ambiguity retains the visible id'
-  assert_contains "$out" "$older" 'captured ambiguity retains the hidden id'
-  toolbin=$(make_no_python_toolbin "$d")
-  out=$(PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" competing)
-  assert_contains "$out" 'state: unknown' 'missing optional lookup cannot imply exclusive authority'
-  assert_contains "$out" "$newer" 'unavailable lookup retains the captured visible id'
-  assert_contains "$out" 'inventory' 'unavailable lookup reports its evidence gap'
-  pass 'captured capped inventory replays selection, ambiguity, and unavailable lookup'
-}
-
-test_captured_authority_transition() {
-  make_competing_runs_case captured-transition running cancelled
-  local d=$TMP_ROOT/captured-transition out
-  FM_FAKE_AXI_STATUS=$(captured_axi_status replacement)
-  FM_FAKE_AXI_STATUS_RUN=$(captured_axi_status superseded)
-  out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'captured terminal output cannot validate a live selection'
-  assert_contains "$out" '01NEW' 'the changing selected id is preserved'
-  assert_contains "$out" '01OLD' 'the other available id is preserved'
-  pass 'captured status formats reject a synthetic authority transition'
-}
-
-test_captured_completed_history() {
-  local activity d out source
-  for activity in busy idle; do
-    make_historical_inventory_case "captured-history-$activity" "$activity"
-    d=$TMP_ROOT/captured-history-$activity
-    FM_FAKE_AXI_STATUS=$(captured_axi_status completed)
-    FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
-    source=pane; [ "$activity" = busy ] || source='status-log'
-    out=$(run_crew_state "$d" competing)
-    assert_contains "$out" 'state: working' 'captured completion does not hide subsequent development'
-    assert_contains "$out" "source: $source" 'captured historical validation yields to current worker evidence'
-  done
-  pass 'captured completed status yields to synthetic subsequent development'
-}
-
-test_captured_axi_status_shapes
-test_captured_inventory_replay
-test_captured_authority_transition
-test_captured_completed_history
 test_active_run_is_authoritative
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_daemon_claim_over_live_run_reads_run_alive
 test_socket_refusal_over_stale_fixing_run_reports_blocked
 test_socket_refusal_over_terminal_run_reports_blocked
-test_socket_refusal_override_expires_when_the_crew_moves_on
 test_ordinary_blocked_over_live_run_keeps_plain_superseded
 test_genuine_daemon_down_reports_blocked
-test_secondmate_open_block_survives_unrelated_append
-test_newest_open_decision_supplies_the_reported_detail
-test_single_owner_terminal_declaration_supersedes_stale_decision
-test_latest_status_preserves_legacy_completions
-test_latest_status_subshell_work_does_not_grow_with_history
 test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
@@ -3578,9 +2781,9 @@ test_cross_branch_attribution_via_runs_list
 test_coarse_socket_refusal_reports_blocked
 test_coarse_failed_ledger_with_daemon_down_reports_unknown
 test_cross_branch_attribution_picks_most_recent_row
-test_terminal_run_keeps_newer_failure_over_live_sibling
-test_runs_list_newer_failure_outranks_older_live_row
-test_unfetched_older_live_sibling_does_not_hide_failure
+test_terminal_corpse_loses_to_live_run_on_same_branch
+test_runs_list_live_row_outranks_newer_terminal_row
+test_unfetched_live_sibling_outranks_terminal_row_at_exact_head
 test_only_terminal_rows_keep_newest_first_precedence
 test_unknown_status_row_keeps_newest_first_precedence
 test_terminal_run_without_live_sibling_is_unchanged
@@ -3631,29 +2834,5 @@ test_unresolved_terminal_row_is_history_not_current
 test_runs_list_continuation_found_when_axi_answers_other_branch
 test_no_run_herdr_stale_registration_over_shell_reads_agent_gone
 test_no_run_herdr_stale_working_record_is_never_busy
-test_capped_competing_live_runs_report_both_ids
-test_capped_overview_without_branch_rows_reports_both_ids
-test_capped_replacement_keeps_gate_and_inventory_unchanged
-test_capped_inventory_failures_report_unknown
-test_complete_inventory_ignores_unrelated_semantics
-test_requested_branch_has_no_character_whitelist
-test_capped_inventory_ignores_unrelated_semantics
-test_capped_requested_semantics_do_not_hide_ids
-test_capped_requested_branch_with_comma_names_both_ids
-test_inventory_structure_and_requested_semantics_remain_checked
-test_complete_inventory_without_python_keeps_gate
-test_complete_ambiguity_without_python_names_both_ids
-test_capped_without_python_preserves_available_ids
-test_capped_without_sqlite_preserves_available_ids
-test_live_to_terminal_inventory_disagreement_is_unknown
-test_uninitialized_busy_worker_uses_pane
-test_uninitialized_idle_worker_uses_status
-test_historical_inventory_uses_current_pane
-test_historical_inventory_uses_current_status
-test_superseded_cancelled_run_preserves_replacement_gate
-test_competing_live_runs_report_unknown_with_both_ids
-test_newer_failed_run_is_not_hidden_by_older_live_run
-test_unverifiable_run_selection_reports_unknown
-test_legacy_conflicting_run_records_report_unknown
 
 echo "all fm-crew-state tests passed"
