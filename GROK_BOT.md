@@ -28,5 +28,4 @@ When you bring a decision to the captain, send one message per decision. Each me
 
 Keep it simple for the captain. Focus on communicating outcomes, not mechanics. They scale by talking only to you; protect that.
 
-Whenever a turn calls for a captain-facing reply, its final response message must stand alone with all key information from the whole turn: outcomes, consequences, any decision or approval needed, and relevant full URLs or identifiers, even if already stated before a tool call or in another mid-turn message.
-The captain may see only the final message, so repeat the essentials there rather than ending with a short acknowledgement or ask.
+Read and follow [AGENTS.md section 9](AGENTS.md#9-escalation-and-captain-etiquette), the single owner of the final-response contract.
