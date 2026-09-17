@@ -13,7 +13,8 @@
 #      and a record bound to another task are all refused.
 #   4. Verb allowlist: no arbitrary text, no raw keys, no resume.
 #   5. Lifecycle states: busy interrupts first, idle does not, already-stopped
-#      is idempotent success, and an agent that does not stop fails closed.
+#      is idempotent success that still retires stale busy wiring, and an
+#      agent that does not stop fails closed.
 #   6. Marker non-regression: a control command to a kind=secondmate task
 #      carries NO from-firstmate marker and opens no pending-reply expectation,
 #      while fm-send's marking of the same task is untouched.
@@ -634,6 +635,32 @@ test_already_stopped_exit_is_idempotent() {
   pass "fm-control exit: an already-stopped agent is idempotent success with no bytes sent"
 }
 
+test_already_stopped_exit_retires_stale_busy_wiring() {
+  local dir out rc gen crew
+  dir=$(new_case dead-busy)
+  add_task "$dir" t1 claude
+  # The agent crashed with no Stop or SessionEnd hook, so its last busy record
+  # survives the process that wrote it while the endpoint shell is back at zsh.
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1 --source claude-hook --event UserPromptSubmit)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  alive_as "$dir" zsh
+  crew=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    "$ROOT/bin/fm-crew-state.sh" t1 2>&1)
+  assert_contains "$crew" "harness busy" \
+    "the stale busy record should read as a busy harness before exit"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exiting a dead agent with stale busy wiring should succeed"$'\n'"$out"
+  assert_contains "$out" "already-stopped t1" "the verdict should still say it was already stopped"
+  [ -z "$(literals "$dir")" ] || fail "an already-stopped agent must not be sent an exit command"
+  [ ! -e "$dir/home/state/t1.busy-gen" ] && [ ! -e "$dir/home/state/t1.busy-state" ] \
+    || fail "exit should retire the dead incarnation's busy wiring"
+  crew=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    "$ROOT/bin/fm-crew-state.sh" t1 2>&1)
+  assert_not_contains "$crew" "harness busy" \
+    "crew state should no longer read busy after exit retired the incarnation"
+  pass "fm-control exit: an already-stopped agent's stale busy wiring is retired"
+}
+
 test_missing_endpoint_refuses() {
   local dir out rc
   dir=$(new_case gone)
@@ -900,6 +927,7 @@ test_verb_allowlist_is_closed
 test_resume_is_refused_with_its_reason
 test_relaunch_only_flags_are_rejected_on_other_verbs
 test_already_stopped_exit_is_idempotent
+test_already_stopped_exit_retires_stale_busy_wiring
 test_missing_endpoint_refuses
 test_interrupt_refuses_when_no_agent_runs
 test_ambiguous_endpoint_refuses

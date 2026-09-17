@@ -454,6 +454,9 @@ do_exit() {
   state=$(agent_state)
   case "$state" in
     dead)
+      # An agent that died on its own may leave hook-written busy wiring
+      # behind; the incarnation is over either way, so retire it here too.
+      retire_busy_incarnation
       printf 'already-stopped'
       return 0
       ;;
