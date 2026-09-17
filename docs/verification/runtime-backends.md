@@ -336,7 +336,7 @@ Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, and Muse share that 
 [`bin/fm-teardown.sh`](../../bin/fm-teardown.sh)'s header owns the adapter-prerequisite refusal that precedes endpoint cleanup.
 `test_teardown_adapter_prerequisites` in [`tests/fm-teardown.test.sh`](../../tests/fm-teardown.test.sh) exercises fixture-local missing, unreadable, and valid adapters with ordinary-task, forced-task, parent, child, and grandchild controls.
 
-A reported close failure costs teardown every durable record of the task, so what each backend's close actually returns was measured before that status was given any authority.
+The close-status evidence below supports the endpoint-close refusal without treating an already-exited endpoint as a failure.
 Verified on 2026-09-14 with tmux 3.7c by driving `fm_backend_kill` against real tmux endpoints, and the Orca arm by driving `fm_backend_orca_kill` under a search path with no `orca` on it.
 Zellij and cmux were not driven with their CLIs absent; the table below states what those arms report today rather than claiming a measurement.
 

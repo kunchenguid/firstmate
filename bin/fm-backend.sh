@@ -775,12 +775,12 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
   esac
 }
 
-# fm_backend_kill: remove the task's session endpoint. An already-gone target
-# is NOT an error and returns 0 silently, so ordinary cleanup of an
-# already-exited session stays quiet. A nonzero return means the close could
-# not do its job and the endpoint may still be live: the caller owns that
-# refusal and must not delete the durable records that are the only thing
-# naming the endpoint (bin/fm-teardown.sh's retain-and-stop path).
+# fm_backend_kill: remove the task's session endpoint after loading its adapter.
+# With the adapter available, an already-gone target is NOT an error and returns
+# 0 silently, so ordinary cleanup of an already-exited session stays quiet.
+# A nonzero return is not proof that the endpoint is gone.
+# bin/fm-teardown.sh's header and endpoint_close_refusal own prerequisite
+# refusal, record retention, and the limited --force override.
 # How much each adapter can prove differs, and no arm ever guesses: tmux
 # resolves a failed close against the window's exact recorded identity, Orca
 # reports a close its missing CLI never attempted, and the remaining arms
