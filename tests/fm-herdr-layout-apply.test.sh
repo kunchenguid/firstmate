@@ -933,7 +933,17 @@ if fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" >/dev/null 2>&1; then
   fail "contradictory attempt record was accepted"
 fi
 rm -f "$ATTEMPT"
-pass "ownership records release only proven fresh leases and retain relaunch and secondmate work"
+EQUALS_WORKTREE="$TMP_ROOT/team=alpha/worktree"
+mkdir -p "$EQUALS_WORKTREE"
+fm_backend_herdr_layout_attempt_write "$ATTEMPT" 4 0123456789abcdef0123456789abcdef \
+  fresh task-z1 "$EQUALS_WORKTREE" "$TEST_LEASE_HOLDER" \
+  lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef \
+  || fail "fresh ownership record rejected an absolute worktree path containing equals"
+fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
+  && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKTREE" = "$EQUALS_WORKTREE" ] \
+  || fail "fresh ownership record did not preserve a worktree path containing equals"
+rm -f "$ATTEMPT"
+pass "ownership records release only proven fresh leases and preserve valid paths"
 
 LEASE_LOG="$TMP_ROOT/lease-return.log"
 LEASE_BIN=$(fm_fakebin "$TMP_ROOT/lease-bin")
@@ -1136,10 +1146,24 @@ case "$*" in
       "${FM_FAKE_STRUCT_PARENT_PID:?}" "${FM_FAKE_STRUCT_PARENT_PID:?}"
     ;;
   "pane process-info --pane w1:p3")
-    printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p3","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"codex","argv0":"codex","argv":["codex"]}]}}}'
+    if [ "${FM_FAKE_STRUCT_MODE:?}" = success ]; then
+      printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p3","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"node","argv0":"pi","argv":["pi"]}]}}}'
+    else
+      printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p3","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"codex","argv0":"codex","argv":["codex"]}]}}}'
+    fi
     ;;
-  "agent get w1:p2"|"agent get w1:p3")
+  "agent get w1:p2")
     printf '%s\n' '{"error":{"code":"agent_not_found"}}'
+    ;;
+  "agent get w1:p3")
+    if [ "${FM_FAKE_STRUCT_MODE:?}" = success ]; then
+      printf '%s\n' '{"result":{"agent":{"pane_id":"w1:p3","agent":"pi","agent_status":"working"}}}'
+    else
+      printf '%s\n' '{"error":{"code":"agent_not_found"}}'
+    fi
+    ;;
+  "pane report-agent w1:p3 --source firstmate-layout-apply --agent pi --state working")
+    printf '%s\n' '{"result":{"type":"pane_report_agent","pane_id":"w1:p3"}}'
     ;;
   "terminal title clear")
     if [ "${FM_FAKE_STRUCT_MODE:?}" = preapply-focused ]; then
@@ -1160,7 +1184,7 @@ case "$*" in
       ;;
     *)
       cat <<'JSON'
-{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"layout.apply"}}}],"$defs":{"LayoutApplyParams":{"required":["root"],"properties":{"workspace_id":{"type":["string","null"]},"tab_id":{"type":["string","null"]}}},"LayoutNode":{"oneOf":[{"properties":{"type":{"const":"pane"},"command":{"type":["array","null"]},"cwd":{"type":["string","null"]},"env":{"type":"object"},"label":{"type":["string","null"]},"pane_id":{"type":["string","null"]}}}]}}}}}
+{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"layout.apply"}}},{"properties":{"method":{"const":"pane.report_agent"}}}],"$defs":{"LayoutApplyParams":{"required":["root"],"properties":{"workspace_id":{"type":["string","null"]},"tab_id":{"type":["string","null"]}}},"LayoutNode":{"oneOf":[{"properties":{"type":{"const":"pane"},"command":{"type":["array","null"]},"cwd":{"type":["string","null"]},"env":{"type":"object"},"label":{"type":["string","null"]},"pane_id":{"type":["string","null"]}}}]},"PaneReportAgentParams":{"required":["pane_id","source","agent","state"],"properties":{"agent":{"type":"string"},"state":{"$ref":"#/schemas/request/$defs/PaneAgentState"}}}}}}}
 JSON
       ;;
     esac
@@ -1313,6 +1337,46 @@ assert_contains "$struct_post_out" "did not produce the expected Pi process" \
 assert_grep "return --force --if-lease-id $STRUCT_LEASE_ID $STRUCT_WT" "$STRUCT_TREEHOUSE_LOG" \
   "post-apply reconciliation did not return its exact Treehouse lease identity"
 pass "post-apply abort reconciliation owns cleanup without a duplicate close"
+
+rm -f "$STRUCT_TASK_CREATED" "$STRUCT_TASK_LABEL" "$STRUCT_CLOSED" "$STRUCT_TREEHOUSE_STATE" "$APPLIED" "$REQUEST"
+: > "$STRUCT_CLOSE_LOG"
+: > "$STRUCT_TREEHOUSE_LOG"
+fm_test_spawn_brief "$STRUCT_HOME" success-z1 "Keep the committed structural worker's lease active."
+start_server success
+set +e
+struct_success_out=$(HERDR_SESSION=lab-structural \
+  FM_FAKE_STRUCT_MODE=success FM_FAKE_STRUCT_SOCKET="$SOCK" \
+  FM_FAKE_STRUCT_APPLIED="$APPLIED" FM_FAKE_STRUCT_REQUEST="$REQUEST" \
+  FM_FAKE_STRUCT_TASK_CREATED="$STRUCT_TASK_CREATED" FM_FAKE_STRUCT_TASK_LABEL="$STRUCT_TASK_LABEL" \
+  FM_FAKE_STRUCT_CLOSED="$STRUCT_CLOSED" FM_FAKE_STRUCT_CLOSE_LOG="$STRUCT_CLOSE_LOG" \
+  FM_FAKE_STRUCT_TREEHOUSE_LOG="$STRUCT_TREEHOUSE_LOG" FM_FAKE_STRUCT_TREEHOUSE_STATE="$STRUCT_TREEHOUSE_STATE" \
+  FM_FAKE_STRUCT_LEASE_ID="$STRUCT_LEASE_ID" FM_FAKE_STRUCT_WT="$STRUCT_WT" \
+  FM_FAKE_STRUCT_WORKSPACE_LABEL="$STRUCT_WORKSPACE_LABEL" FM_FAKE_STRUCT_PARENT_PID="$$" \
+  fm_test_run_spawn "$STRUCT_HOME" "$STRUCT_WT" "$STRUCT_FAKEBIN" \
+    success-z1 "$STRUCT_PROJECT" --scout --harness pi --backend herdr)
+struct_success_status=$?
+set -e
+wait_server
+[ "$struct_success_status" -eq 0 ] || fail "successful structural launch failed: $struct_success_out"
+SUCCESS_META="$STRUCT_HOME/state/success-z1.meta"
+SUCCESS_TX="$STRUCT_HOME/state/success-z1.herdr-lease"
+SUCCESS_HOLDER=$(sed -n 's/^treehouse_lease_holder=//p' "$SUCCESS_META")
+[ -f "$STRUCT_TREEHOUSE_STATE" ] \
+  && [ "$(jq -r '.lease_holder' "$STRUCT_TREEHOUSE_STATE")" = "$SUCCESS_HOLDER" ] \
+  || fail "successful structural launch returned its live Treehouse lease on exit"
+fm_treehouse_lease_transaction_snapshot "$SUCCESS_TX" \
+  && [ "$FM_TREEHOUSE_LEASE_TX_PHASE" = acquired ] \
+  || fail "successful structural launch retired its active lease transaction"
+assert_no_grep 'return --force' "$STRUCT_TREEHOUSE_LOG" \
+  "successful structural launch invoked Treehouse return during normal exit"
+assert_grep "lease_holder=$SUCCESS_HOLDER" "$STRUCT_POOL/slot/.fm-slot-owner" \
+  "successful structural launch did not bind its slot claim to the unique lease holder"
+PATH="$STRUCT_FAKEBIN:$PATH" fm_treehouse_lease_transaction_return \
+  "$SUCCESS_TX" success-z1 "$SUCCESS_HOLDER" "$STRUCT_PROJECT" >/dev/null \
+  || fail "successful structural launch fixture cleanup could not return its lease"
+fm_treehouse_slot_owner_release "$STRUCT_WT" success-z1 "$SUCCESS_HOLDER"
+rm -f "$SUCCESS_META" "$SUCCESS_TX"
+pass "successful structural launches retain their live lease after spawn exits"
 
 rm -f "$STRUCT_TASK_CREATED" "$STRUCT_TASK_LABEL" "$STRUCT_CLOSED" "$APPLIED" "$REQUEST"
 : > "$STRUCT_CLOSE_LOG"

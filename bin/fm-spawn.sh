@@ -1048,6 +1048,7 @@ SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
 SPAWN_TREEHOUSE_LEASE_HELD=0
+SPAWN_TREEHOUSE_LEASE_ROLLBACK_ARMED=0
 SPAWN_TREEHOUSE_LEASE_HOLDER=
 SPAWN_TREEHOUSE_LEASE_ID=
 HERDR_TREEHOUSE_LEASE_TX=
@@ -1261,18 +1262,20 @@ spawn_abort_cleanup() {
     && fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
     SPAWN_SLOT_CLAIMED=0
     if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
-      fm_treehouse_slot_owner_release "$WT" "$ID" || true
+      fm_treehouse_slot_owner_release "$WT" "$ID" "${SPAWN_TREEHOUSE_LEASE_HOLDER:-}" || true
     else
       echo "warning: leaving task $ID's slot claim on $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
     fi
   fi
   if [ "$HERDR_LAYOUT_QUARANTINED" != 1 ] \
+    && [ "$SPAWN_TREEHOUSE_LEASE_ROLLBACK_ARMED" = 1 ] \
     && [ -n "$HERDR_TREEHOUSE_LEASE_TX" ] \
     && { [ -e "$HERDR_TREEHOUSE_LEASE_TX" ] || [ -L "$HERDR_TREEHOUSE_LEASE_TX" ]; }; then
     if fm_treehouse_lease_transaction_return "$HERDR_TREEHOUSE_LEASE_TX" \
       "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER" "$PROJ_ABS" >/dev/null \
       && rm -f -- "$HERDR_TREEHOUSE_LEASE_TX"; then
       SPAWN_TREEHOUSE_LEASE_HELD=0
+      SPAWN_TREEHOUSE_LEASE_ROLLBACK_ARMED=0
     else
       echo "warning: could not return the exact Treehouse lease for aborted structural Herdr launch of $ID" >&2
       status=1
@@ -3140,7 +3143,9 @@ spawn_reconcile_herdr_layout_attempt() {
           return 1
         }
         fm_treehouse_slot_owner_state "$worktree" "$ID"
-        [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || {
+        [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] \
+          && { [ -z "$FM_TREEHOUSE_SLOT_OWNER_HOLDER" ] \
+            || [ "$FM_TREEHOUSE_SLOT_OWNER_HOLDER" = "$holder" ]; } || {
           echo "error: task $ID no longer owns its quarantined Treehouse slot; refusing duplicate launch" >&2
           return 1
         }
@@ -3234,7 +3239,7 @@ spawn_reconcile_herdr_layout_attempt() {
     echo "error: exact Herdr replacement was reconciled, but task $ID's Treehouse lease return could not be confirmed; refusing duplicate launch" >&2
     return 1
   }
-  fm_treehouse_slot_owner_release "$worktree" "$ID" || {
+  fm_treehouse_slot_owner_release "$worktree" "$ID" "$holder" || {
     echo "error: task $ID's returned Treehouse slot claim could not be retired; refusing duplicate launch" >&2
     return 1
   }
@@ -3841,6 +3846,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ]; then
+    SPAWN_TREEHOUSE_LEASE_ROLLBACK_ARMED=1
     if [ -e "$HERDR_TREEHOUSE_LEASE_TX" ] || [ -L "$HERDR_TREEHOUSE_LEASE_TX" ]; then
       fm_treehouse_lease_transaction_snapshot "$HERDR_TREEHOUSE_LEASE_TX" || {
         echo "error: task $ID's structural Herdr Treehouse lease transaction is malformed" >&2
@@ -3898,7 +3904,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     SPAWN_TREEHOUSE_LEASE_HELD=1
     validate_spawn_worktree "treehouse lease" "$T"
     if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
-      if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
+      if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME" "$SPAWN_TREEHOUSE_LEASE_HOLDER"; then
         echo "error: could not claim Treehouse pool slot $WT for task $ID; refusing structural Herdr launch" >&2
         exit 1
       fi
@@ -5069,12 +5075,14 @@ FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-30}
 if spawn_commit_backlog_transition; then
   SPAWN_FRESH_COMMIT_PENDING=0
   SPAWN_TREEHOUSE_LEASE_HELD=0
+  SPAWN_TREEHOUSE_LEASE_ROLLBACK_ARMED=0
 else
   SPAWN_BACKLOG_COMMIT_STATUS=$?
   if spawn_commit_backlog_transition; then
     SPAWN_BACKLOG_COMMIT_STATUS=0
     SPAWN_FRESH_COMMIT_PENDING=0
     SPAWN_TREEHOUSE_LEASE_HELD=0
+    SPAWN_TREEHOUSE_LEASE_ROLLBACK_ARMED=0
   fi
 fi
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then

@@ -50,9 +50,12 @@ mark_case_as_treehouse_pool() {  # <case>
   : > "$dir/worktree/sentinel"
 }
 
-claim_pool_slot() {  # <case> <task-id> [home]
-  local dir=$1 id=$2 home=${3:-$1/home}
-  printf 'task=%s\nhome=%s\n' "$id" "$home" > "$dir/pool/1/.fm-slot-owner"
+claim_pool_slot() {  # <case> <task-id> [home] [lease-holder]
+  local dir=$1 id=$2 home=${3:-$1/home} holder=${4:-}
+  {
+    printf 'task=%s\nhome=%s\n' "$id" "$home"
+    [ -z "$holder" ] || printf 'lease_holder=%s\n' "$holder"
+  } > "$dir/pool/1/.fm-slot-owner"
 }
 
 install_lease_aware_treehouse() {  # <case>
@@ -1390,7 +1393,7 @@ test_orca_close_failure_refuses_even_under_force() {
 }
 
 test_structural_herdr_lease_teardown_is_transaction_driven() {
-  local dir id holder lease_id other_id physical_wt
+  local dir id holder lease_id other_id other_holder physical_wt
 
   dir=$(make_case herdr-lease-owned)
   mark_case_as_treehouse_pool "$dir"
@@ -1411,7 +1414,7 @@ test_structural_herdr_lease_teardown_is_transaction_driven() {
   jq -cn --arg path "$physical_wt" --arg id "$lease_id" --arg holder "$holder" \
     '{name:"1",path:$path,status:"leased",lease_id:$id,lease_holder:$holder}' \
     > "$dir/treehouse-live.json"
-  claim_pool_slot "$dir" "$id"
+  claim_pool_slot "$dir" "$id" "$dir/home" "$holder"
 
   run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
     || fail "transaction-backed Herdr teardown failed: $(cat "$dir/stderr")"
@@ -1470,7 +1473,7 @@ test_structural_herdr_lease_teardown_is_transaction_driven() {
   fm_treehouse_lease_transaction_write "$dir/home/state/$id.herdr-lease" cleanup \
     "$id" "$holder" "$dir/project" "$dir/worktree" "$lease_id" \
     || fail "could not stage interrupted structural Herdr lease cleanup with an own claim"
-  claim_pool_slot "$dir" "$id"
+  claim_pool_slot "$dir" "$id" "$dir/home" "$holder"
 
   run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
     || fail "post-return own-claim recovery failed: $(cat "$dir/stderr")"
@@ -1480,6 +1483,39 @@ test_structural_herdr_lease_teardown_is_transaction_driven() {
   ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
     || fail "post-return own-claim recovery returned an already-returned lease: $(cat "$dir/runtime.log")"
   [ "$(cat "$dir/herdr-state")" = dead ] || fail "post-return own-claim recovery left its endpoint live"
+
+  dir=$(make_case herdr-lease-returned-same-id-reassigned)
+  mark_case_as_treehouse_pool "$dir"
+  install_lease_aware_treehouse "$dir"
+  id=herdr-same-id-z1
+  holder=fm-$id-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  other_holder=fm-$id-ffffffffffffffffffffffffffffffff
+  lease_id=55555555555555555555555555555555
+  other_id=66666666666666666666666666666666
+  physical_wt=$dir/pool/1/project
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=lab:w1:p1" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t1" "herdr_pane_id=w1:p1" \
+    "treehouse_lease_holder=$holder" "treehouse_lease_id=$lease_id"
+  fm_treehouse_lease_transaction_write "$dir/home/state/$id.herdr-lease" cleanup \
+    "$id" "$holder" "$dir/project" "$dir/worktree" "$lease_id" \
+    || fail "could not stage interrupted structural Herdr lease cleanup before same-id reassignment"
+  jq -cn --arg path "$physical_wt" --arg id "$other_id" --arg holder "$other_holder" \
+    '{name:"1",path:$path,status:"leased",lease_id:$id,lease_holder:$holder}' \
+    > "$dir/treehouse-live.json"
+  claim_pool_slot "$dir" "$id" "$dir/other-home" "$other_holder"
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "post-return same-id reassignment recovery failed: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "same-id reassignment recovery left old task metadata"
+  assert_absent "$dir/home/state/$id.herdr-lease" "same-id reassignment recovery left the old confirmed receipt"
+  assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" "lease_holder=$other_holder" \
+    "same-id reassignment recovery removed the new holder's slot claim"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "same-id reassignment recovery returned the new holder's lease: $(cat "$dir/runtime.log")"
+  [ "$(cat "$dir/herdr-state")" = dead ] || fail "same-id reassignment recovery left the old endpoint live"
 
   pass "fm-teardown: durable Herdr lease cleanup survives return and reassignment"
 }

@@ -3208,7 +3208,7 @@ teardown_treehouse_lease_transaction_prepare || {
 require_owned_task_worktree_slot || exit 1
 if [ "$TREEHOUSE_LEASE_TX_PRESENT" = 1 ] \
   && [ "$TREEHOUSE_LEASE_ALREADY_RETURNED" = 1 ]; then
-  fm_treehouse_slot_owner_release "$TREEHOUSE_LEASE_WORKTREE" "$ID"
+  fm_treehouse_slot_owner_release "$TREEHOUSE_LEASE_WORKTREE" "$ID" "$TREEHOUSE_LEASE_HOLDER"
 fi
 if [ "$TREEHOUSE_LEASE_TX_PRESENT" = 1 ] \
   && [ "$TREEHOUSE_LEASE_ALREADY_RETURNED" != 1 ] \
@@ -3527,7 +3527,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # it here - and only after a return that succeeded - keeps a returned slot
   # unclaimed until its next holder claims it, and leaves the claim in place
   # whenever the return did not actually happen.
-  fm_treehouse_slot_owner_release "$WT" "$ID"
+  fm_treehouse_slot_owner_release "$WT" "$ID" "${TREEHOUSE_LEASE_HOLDER:-}"
 fi
 
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then

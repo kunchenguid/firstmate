@@ -1482,9 +1482,10 @@ fm_treehouse_slot_owner_marker() {  # <worktree>
 
 # Claim a pool slot for a task, replacing whatever the previous holder left.
 # The rename is atomic, so a reader either sees the old claim or the new one.
-fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
-  local worktree=$1 id=$2 home=$3 marker tmp
+fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home> [<lease-holder>]
+  local worktree=$1 id=$2 home=$3 holder=${4:-} marker tmp
   [ -n "$id" ] || return 1
+  [ -z "$holder" ] || fm_treehouse_lease_holder_valid "$id" "$holder" || return 1
   marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 1
   # Only a plain claim file may be replaced: renaming onto a directory would
   # move the new claim inside it and leave the slot reading as unclaimable.
@@ -1497,6 +1498,7 @@ fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
   {
     printf 'task=%s\n' "$id"
     printf 'home=%s\n' "$home"
+    [ -z "$holder" ] || printf 'lease_holder=%s\n' "$holder"
   } > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$marker" 2>/dev/null || { rm -f "$tmp"; return 1; }
 }
@@ -1511,10 +1513,11 @@ fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home>
 # claimant as evidence. The home is reported, never matched: a home that moved
 # must not turn a task's own slot into a refusal.
 fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
-  local worktree=$1 id=$2 marker line owner_id='' owner_home=''
+  local worktree=$1 id=$2 marker line owner_id='' owner_home='' owner_holder=''
   FM_TREEHOUSE_SLOT_OWNER=unsafe
   FM_TREEHOUSE_SLOT_OWNER_ID=
   FM_TREEHOUSE_SLOT_OWNER_HOME=
+  FM_TREEHOUSE_SLOT_OWNER_HOLDER=
   marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 0
   if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
     FM_TREEHOUSE_SLOT_OWNER=absent
@@ -1525,6 +1528,7 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
     case "$line" in
       task=*) owner_id=${line#task=} ;;
       home=*) owner_home=${line#home=} ;;
+      lease_holder=*) owner_holder=${line#lease_holder=} ;;
     esac
   done < "$marker" || return 0
   [ -n "$owner_id" ] || return 0
@@ -1532,6 +1536,8 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
   FM_TREEHOUSE_SLOT_OWNER_ID=$owner_id
   # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
   FM_TREEHOUSE_SLOT_OWNER_HOME=$owner_home
+  # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
+  FM_TREEHOUSE_SLOT_OWNER_HOLDER=$owner_holder
   if [ "$owner_id" = "$id" ]; then
     FM_TREEHOUSE_SLOT_OWNER=mine
   else
@@ -1542,10 +1548,11 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
 # Drop a task's own claim once its slot is back in the pool. Never removes
 # another task's claim, so a misdirected release cannot strip the evidence that
 # protects the slot's real owner.
-fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
-  local worktree=$1 id=$2 marker
+fm_treehouse_slot_owner_release() {  # <worktree> <task-id> [<lease-holder>]
+  local worktree=$1 id=$2 holder=${3:-} marker
   fm_treehouse_slot_owner_state "$worktree" "$id"
   [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || return 0
+  [ -z "$holder" ] || [ "$FM_TREEHOUSE_SLOT_OWNER_HOLDER" = "$holder" ] || return 0
   marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 0
   rm -f "$marker" 2>/dev/null || true
 }

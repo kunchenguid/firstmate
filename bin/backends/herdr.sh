@@ -3018,10 +3018,12 @@ fm_backend_herdr_layout_attempt_write() { # <file> <version> <attempt> <ownershi
   case "$version" in 4|5|6|7) ;; *) return 1 ;; esac
   [ "${#attempt}" -eq 32 ] || return 1
   case "$attempt" in *[!0-9a-f]*) return 1 ;; esac
-  for value in "$ownership_mode" "$task" "$worktree" "$lease_holder" "$session" "$workspace" "$old_tab" "$old_pane" "$label"; do
+  for value in "$ownership_mode" "$task" "$lease_holder" "$session" "$workspace" "$old_tab" "$old_pane" "$label"; do
     [ -n "$value" ] || return 1
     case "$value" in *$'\n'*|*=*) return 1 ;; esac
   done
+  [ -n "$worktree" ] || return 1
+  case "$worktree" in *$'\n'*) return 1 ;; esac
   case "$ownership_mode" in
     fresh)
       fm_backend_herdr_layout_lease_holder_valid "$task" "$lease_holder" || return 1
