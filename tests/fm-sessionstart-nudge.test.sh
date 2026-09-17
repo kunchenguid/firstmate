@@ -12,11 +12,16 @@ set -u
 # lifecycle in which startup and later clear/compact hooks share one harness
 # ancestor. This also prevents a developer's ambient harness from making the
 # portable regression pass locally while failing on a harness-free CI runner.
+# The ancestor is named `pi` because these run-tier fixtures simulate a Pi
+# session: the harness probe now walks sixteen parents (the real Codex
+# SessionStart depth), so a foreign-named ancestor at this depth would
+# outrank the FM_PI_HARNESS=pi marker and rename the very sessions the
+# fixtures claim to own.
 if [ "${FM_SESSIONSTART_TEST_HARNESS:-0}" != 1 ]; then
   HARNESS_FIXTURE=$(mktemp -d "${TMPDIR:-/tmp}/fm-sessionstart-harness.XXXXXX") || exit 1
-  ln -s /bin/bash "$HARNESS_FIXTURE/codex" || exit 1
+  ln -s /bin/bash "$HARNESS_FIXTURE/pi" || exit 1
   # shellcheck disable=SC2016 # Expand in the fixture shell, not this parent.
-  FM_SESSIONSTART_TEST_HARNESS=1 "$HARNESS_FIXTURE/codex" \
+  FM_SESSIONSTART_TEST_HARNESS=1 "$HARNESS_FIXTURE/pi" \
     -c '"$@"; rc=$?; :; exit "$rc"' _ "$0" "$@"
   HARNESS_STATUS=$?
   rm -rf "$HARNESS_FIXTURE"
