@@ -122,9 +122,10 @@
 #   owns the claim and bin/fm-teardown.sh owns what it protects. A slot that
 #   cannot be claimed refuses the spawn rather than launching a worker whose slot
 #   could later be released out from under its successor. A spawn that aborts
-#   while it still holds the allocation lock drops its own claim; an abort after
-#   metadata publication has released that lock leaves the claim in place, and
-#   the next spawn's claim replaces it.
+#   retains its own claim regardless of whether the allocation lock is still
+#   held or already released, so no later spawn's claim can replace it;
+#   fm_treehouse_preacquire_guard refuses a fresh allocation until that
+#   retained claim resolves through durable recovery.
 #   The local root is whatever bin/fm-wake-lib.sh's
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
