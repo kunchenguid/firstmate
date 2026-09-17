@@ -682,17 +682,23 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # exact positive proof they require (`empty`), so unrecognized future verdicts
 # fail safe by default.
 
-# _fm_composer_pi_separator_row: a pi separator - a `─` rule at least 8
-# columns wide, either solid or carrying a label written INTO the rule. The
-# width floor is a literal substring test so it is byte-exact in every locale.
+# _fm_composer_pi_separator_row: a pi separator - a `─` rule that spends at
+# least 8 columns on rule, either solid or carrying a label written INTO the
+# rule. A solid rule spends its whole width on `─`, so the floor is a literal
+# substring test there, byte-exact in every locale. A titled rule spends most
+# of its width on the label, so its floor is the SUM of the runs that open and
+# close the row (_fm_composer_titled_separator_row): demanding one contiguous
+# run would put the floor out of reach on a narrow pane, where the same rule
+# pair must still close.
 _fm_composer_pi_separator_row() {  # <trimmed-row>
   local row=$1
   [ -n "$row" ] || return 1
-  case "$row" in
-    *────────*) ;;
-    *) return 1 ;;
-  esac
-  [ -n "${row//─/}" ] || return 0
+  if [ -z "${row//─/}" ]; then
+    case "$row" in
+      *────────*) return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
   _fm_composer_titled_separator_row "$row"
 }
 
@@ -705,18 +711,25 @@ _fm_composer_pi_separator_row() {  # <trimmed-row>
 # below the prompt row, which invalidates the candidate and turns an idle Muse
 # composer into `unknown` - the Muse-on-Herdr send false negative (a landed
 # steer reported delivery unconfirmed).
-# The rule must still open the row and close it at the width floor, and the
-# label between the two runs must be spaced away from both and carry no
-# further structure, so prose that merely contains dashes can never pass.
+# The rule must still open the row and close it, those two runs must together
+# spend the width floor, and the label between them must be spaced away from
+# both and carry no further structure, so prose that merely contains dashes can
+# never pass. The floor is held against their sum rather than against either
+# run alone because a titled rule fills only what the label leaves: Muse's
+# 32-column title leaves a 2-column opening run and a closing run that shrinks
+# with the pane, so a per-run floor would make the pair close on a wide pane
+# and stop closing on a narrow one - the same false negative, reached by
+# splitting the window instead.
 _fm_composer_titled_separator_row() {  # <trimmed-row>
-  local row=$1 rest title
+  local row=$1 rest title lead=0 trail=0
   case "$row" in
-    ─*────────) ;;
+    ─*─) ;;
     *) return 1 ;;
   esac
   rest=$row
-  while :; do case "$rest" in ─*) rest=${rest#─} ;; *) break ;; esac; done
-  while :; do case "$rest" in *─) rest=${rest%─} ;; *) break ;; esac; done
+  while :; do case "$rest" in ─*) rest=${rest#─}; lead=$((lead + 1)) ;; *) break ;; esac; done
+  while :; do case "$rest" in *─) rest=${rest%─}; trail=$((trail + 1)) ;; *) break ;; esac; done
+  [ "$((lead + trail))" -ge 8 ] || return 1
   case "$rest" in
     ' '*' ') ;;
     *) return 1 ;;

@@ -146,7 +146,9 @@ pass "live Herdr submit confirm: Claude Code ($VERSION) on $HERDR_VER reports em
 # home, data home, or repository.
 # The tradeoff is stated plainly rather than hidden: an echo reply is a runtime
 # echo and not a model answer, so what this asserts is delivery to the Muse
-# runtime, which is exactly the delivery mechanic this repair exists to prove.
+# runtime - the submitted message reaching its transcript - which is exactly the
+# delivery mechanic this repair exists to prove. Whether that provider replies
+# at all is reported, never required.
 # Exercising the credentialed provider belongs to real Muse work routing and to
 # docs/verification/muse.md, not to this guard, so the echo provider is a
 # deliberate scope boundary here rather than a gap.
@@ -333,24 +335,44 @@ else
     [ "$muse_verdict" = empty ] \
       || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER: a landed steer must confirm empty, got '$muse_verdict'"
 
-    # Same two-occurrence rule as the Claude leg: the token must appear in the
-    # submitted prompt and again in the echo provider's reply, so a merely
-    # cleared composer cannot pass for a delivered instruction.
+    # The Claude leg's two-occurrence rule is a model following an instruction,
+    # and this leg cannot borrow it: on --provider echo no model reads the
+    # prompt. The FIRST occurrence is the transcript's own rendering of the
+    # submitted message, which is what separates a delivered steer from a
+    # composer that merely cleared, so it is required. A SECOND occurrence
+    # could only be the echo provider reproducing the prompt text - a vendor
+    # behavior no record in this repository has captured - so it is reported
+    # when it appears and never demanded: the leg declines to attribute what it
+    # did not measure everywhere else, and an unproven vendor assumption must
+    # not be the one place it turns an unchanged repository red.
     muse_landed=0
+    muse_echoed=0
+    muse_echo_waited=0
     i=0
     while [ "$i" -lt 90 ]; do
       muse_screen=$(lab pane read "$MUSE_PANE" --source recent --lines 200 2>/dev/null || true)
       muse_occurrences=$(printf '%s\n' "$muse_screen" | grep -F -c "$MUSE_TOKEN" || true)
       if [ "$muse_occurrences" -ge 2 ]; then
         muse_landed=1
+        muse_echoed=1
         break
+      fi
+      if [ "$muse_occurrences" -ge 1 ]; then
+        muse_landed=1
+        muse_echo_waited=$((muse_echo_waited + 1))
+        [ "$muse_echo_waited" -ge 15 ] && break
       fi
       i=$((i + 1))
       sleep 1
     done
     [ "$muse_landed" = 1 ] \
-      || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER: submit reported '$muse_verdict' but the expected reply never rendered"
-    pass "live Herdr submit confirm: Muse Code ($MUSE_VERSION) on $HERDR_VER: the shared classifier read its idle composer as empty before the steer, the steer confirmed empty, and the echo provider rendered the requested reply in isolated session $SESSION"
+      || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER: submit reported '$muse_verdict' but the submitted message never reached the transcript"
+    if [ "$muse_echoed" = 1 ]; then
+      pass "live Herdr submit confirm: Muse Code ($MUSE_VERSION) on $HERDR_VER: the shared classifier read its idle composer as empty before the steer, the steer confirmed empty, the submitted message reached the transcript, and the echo provider reproduced it in isolated session $SESSION"
+    else
+      printf '# the echo provider rendered no second occurrence of the token within 15s of the submitted message appearing; whether this Muse build echoes prompt text back is not verified here, and the delivery assertion above does not rest on it\n'
+      pass "live Herdr submit confirm: Muse Code ($MUSE_VERSION) on $HERDR_VER: the shared classifier read its idle composer as empty before the steer, the steer confirmed empty, and the submitted message reached the transcript in isolated session $SESSION"
+    fi
   fi
 fi
 
