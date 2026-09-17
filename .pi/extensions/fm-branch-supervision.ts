@@ -555,6 +555,7 @@ function collectMainDialog(sessionManager: ReadonlyEntries, collection: MirrorCo
 }
 
 export default function (pi: ExtensionAPI) {
+  if (process.env.FM_TASK_ID) return;
   type BranchSession = {
     session: AgentSession;
     sessionManager: SessionManager;
