@@ -30,7 +30,13 @@ jobs:
     # September 12 starvation report, so this leaves deliberate margin.
     timeout-minutes: 25
     steps:
+      # Full history: fm-lint.sh's voice refusal bounds itself to the commits
+      # that are not yet on the default branch, so it needs origin/main to
+      # resolve. A shallow checkout would leave it unable to tell published
+      # history from new work, and it refuses rather than guessing.
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - name: Install pinned ShellCheck
         run: |
           set -eu
