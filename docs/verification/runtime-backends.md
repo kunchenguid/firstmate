@@ -508,6 +508,48 @@ The lab home was deleted and the test entry was removed from the store and verif
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
+### Worker settings placement
+
+Verified 2026-09-15 on Claude Code 2.1.272.
+A task worker's busy-state and turn-end hooks live in `state/<id>.claude-settings.json`, which `bin/fm-spawn.sh` passes as the launch's only `--settings` value, because a project may commit the worktree's `.claude/settings.local.json`.
+Three vendor behaviors carry that design, and each was observed in an interactive tmux pane.
+
+Repeated `--settings` flags do not merge: only the last value loads.
+A scratch repo committed `.claude/settings.local.json` with `"env": {"FM_PROBE_PROJECT": "project-local-loaded"}`, and the launch passed an inline JSON setting `FM_PROBE_INLINE` followed by a hooks file.
+
+```sh
+claude --dangerously-skip-permissions --model haiku \
+  --settings '{"feedbackDrafts":"off","env":{"FM_PROBE_INLINE":"inline-loaded"}}' \
+  --settings '<scratch>/hooks.json' \
+  'Run this exact bash command and report its output verbatim: echo "P=$FM_PROBE_PROJECT I=$FM_PROBE_INLINE"'
+```
+
+```
+● P=project-local-loaded I=
+```
+
+The hooks file's `UserPromptSubmit` and `Stop` markers were written while the inline value was dropped, so the per-task file also carries the launch policy that a secondmate launch keeps inline.
+The same output shows the project's own `settings.local.json` still loads beside `--settings`.
+
+The treatment arm then ran the fixed spawn's real artifacts.
+`bin/fm-spawn.sh` ran against a fake pane into a fresh linked worktree of a project committing a `settings.local.json` with that `env` block and `"permissions": {"allow": ["Bash(echo:*)"]}`, the worktree was trusted with `bin/fm-claude-trust.sh <wt> <project>`, and the captured launch command ran with `--model haiku` added.
+
+```
+claude --dangerously-skip-permissions --model haiku --settings '<home>/state/live-settings.claude-settings.json'
+```
+
+```
+● P=project-local-loaded
+```
+
+No trust or permission dialog rendered, the worker ran its brief with zero keypresses, and the busy record then read `seq=3 state=idle source=claude-hook event=stop`, with `state/live-settings.turn-ended` touched.
+After `/exit` it read `seq=4 state=idle source=claude-hook event=session-end`.
+`cmp` against the committed copy passed and `git status --porcelain` was empty both before and after exit, so Claude Code does not rewrite a committed `settings.local.json` at launch or shutdown.
+The scratch repo was deleted and its store entries were removed and verified absent, with the same point-in-time caveat as the arms above.
+
+`tests/fm-busy-adapter-wiring.test.sh` pins the spawn side against a fake claude: the committed file stays byte-identical, the worktree stays clean, and the launch names the per-task settings file.
+The live arms above are what establish that Claude loads that file's hooks alongside the project's own settings.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.
@@ -777,7 +819,7 @@ The credential must also be present before the session-provider daemon starts, s
 
 ### Settings placement
 
-Firstmate's hooks are NOT written into the worktree's `.gemini/settings.json`, because unlike Claude's `settings.local.json` that path is the project's own committed settings file.
+Firstmate's hooks are NOT written into the worktree's `.gemini/settings.json`, because that path can be the project's own committed settings file.
 They go to a firstmate-owned `state/<id>.gemini-settings.json` reached through `GEMINI_CLI_SYSTEM_SETTINGS_PATH`.
 Two measurements support that choice.
 Hooks from the system layer fired under `--skip-trust` in an untrusted folder, so the busy contract does not depend on the trust decision:

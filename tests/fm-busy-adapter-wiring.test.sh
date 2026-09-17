@@ -241,12 +241,18 @@ test_claude_hooks_semantic_lifecycle() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   expect_code 0 $? "claude spawn should succeed: $out"
   state="$HOME_DIR/state"
-  settings="$WT_DIR/.claude/settings.local.json"
+  settings="$state/$id.claude-settings.json"
   assert_present "$settings" "claude spawn did not write hook settings"
   jq -e . "$settings" >/dev/null || fail "claude hook settings are not valid JSON"
   for ev in UserPromptSubmit Stop StopFailure SessionEnd; do
     jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "claude hook settings lack $ev"
   done
+  # Claude keeps only the last --settings flag, so the one file must also
+  # carry the launch policy the inline JSON carries for a secondmate.
+  jq -e '.feedbackDrafts == "off" and .attribution == {"commit":"","pr":"","sessionUrl":false}' \
+    "$settings" >/dev/null || fail "claude hook settings dropped the launch policy"
+  assert_absent "$WT_DIR/.claude/settings.local.json" \
+    "claude spawn must not write the worktree's .claude/settings.local.json"
 
   out=$(classify claude "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
@@ -279,13 +285,66 @@ test_claude_hooks_stale_incarnation_harmless() {
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   expect_code 0 $? "claude spawn should succeed: $out"
   state="$HOME_DIR/state"
-  settings="$WT_DIR/.claude/settings.local.json"
+  settings="$state/$id.claude-settings.json"
   "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
   run_claude_hook "$settings" UserPromptSubmit \
     || fail "a stale-gen hook must still exit 0 so Claude's lifecycle is never broken"
   out=$(classify claude "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "a stale-gen hook event must not change state, got '$out'"
   pass "claude hook events from a superseded incarnation are rejected without breaking the hook"
+}
+
+# A project may commit .claude/settings.local.json (a permissions allow-list,
+# env, plugins). Spawning a claude worker into it must leave that file
+# byte-identical and the worktree clean, while the launch still reaches the
+# hooks through --settings.
+test_claude_spawn_leaves_a_tracked_project_settings_file_untouched() {
+  local case_dir home proj wt fakebin id=busy-cl-tracked out tracked launch_log
+  case_dir="$TMP_ROOT/claude-tracked-settings"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
+  fm_test_spawn_home "$home" claude
+  fm_git_init_commit "$proj"
+  mkdir -p "$proj/.claude"
+  printf '{\n  "permissions": {\n    "allow": [\n      "Bash(npm test:*)",\n      "Bash(git push:*)"\n    ]\n  }\n}\n' \
+    > "$proj/.claude/settings.local.json"
+  git -C "$proj" add -f .claude/settings.local.json
+  git -C "$proj" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm settings
+  fm_git_add_origin "$proj" "$proj.origin.git"
+  git -C "$proj" worktree add --quiet -b wt-claude-tracked "$wt"
+  fm_test_spawn_brief "$home" "$id"
+  tracked="$case_dir/settings.committed"
+  cp "$wt/.claude/settings.local.json" "$tracked"
+  launch_log="$case_dir/launch.log"
+
+  out=$(FM_FAKE_LAUNCH_LOG="$launch_log" run_spawn "$home" "$wt" "$fakebin" "$id" "$proj")
+  expect_code 0 $? "claude spawn should succeed: $out"
+  cmp -s "$tracked" "$wt/.claude/settings.local.json" \
+    || fail "claude spawn rewrote the project's committed .claude/settings.local.json: $(git -C "$wt" diff --stat)"
+  out=$(git -C "$wt" status --porcelain)
+  [ -z "$out" ] || fail "claude spawn left the worktree dirty: $out"
+  assert_grep "--settings '$(cd "$home/state" && pwd -P)/$id.claude-settings.json'" "$launch_log" \
+    "claude launch does not load the per-task hook settings"
+  pass "claude spawn leaves a project's committed .claude/settings.local.json untouched and the worktree clean"
+}
+
+test_raw_claude_launch_has_no_semantic_wiring() {
+  local rec id=busy-cl-raw out state
+  rec=$(make_spawn_case claude-raw claude "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR" 'claude --debug')
+  expect_code 0 $? "raw claude spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  assert_absent "$state/$id.busy-gen" "raw claude launch must not arm a busy generation"
+  assert_absent "$state/$id.claude-settings.json" "raw claude launch must not write hook settings"
+  assert_absent "$WT_DIR/.claude/settings.local.json" "raw claude launch must not write worktree settings"
+  assert_contains "$out" "raw claude launch cannot carry firstmate's per-task hook settings" \
+    "raw claude launch should say it runs unwired"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "unknown missing" ] || fail "raw claude launch must classify unknown, got '$out'"
+  pass "raw claude launch remains unwired, says so, and classifies unknown"
 }
 
 test_codex_unverified_until_a_semantic_source_exists() {
@@ -429,6 +488,8 @@ test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
+test_claude_spawn_leaves_a_tracked_project_settings_file_untouched
+test_raw_claude_launch_has_no_semantic_wiring
 test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless
 test_raw_gemini_launch_has_no_semantic_wiring
