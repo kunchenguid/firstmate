@@ -68,7 +68,12 @@
 #   auto-detected herdr or cmux spawn prints a loud stderr notice;
 #   auto-detected tmux stays silent; zellij and orca are never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
-#   blocked backend contract. Default tmux spawns do not write backend= to meta;
+#   blocked backend contract. Every Treehouse-backed task passes the deterministic
+#   owning-home root from bin/fm-workspace-lib.sh explicitly, so it never enters
+#   Treehouse's unbounded user-global default; the task record carries that root
+#   for exact release, cleanup, and reconstruction. docs/configuration.md "Task
+#   workspace scope, retention, and reconstruction" owns the lifecycle contract.
+#   Default tmux spawns do not write backend= to meta;
 #   absent backend= means tmux. cmux does not support --secondmate spawns yet.
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
@@ -474,6 +479,8 @@ fi
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-workspace-lib.sh
+. "$SCRIPT_DIR/fm-workspace-lib.sh"
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -1045,6 +1052,8 @@ SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
+SPAWN_WORKSPACE_ROOT=
+SPAWN_WORKSPACE_LEASE_HOLDER=
 SPAWN_SLOT_CLAIMED=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
@@ -1476,24 +1485,38 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
-  # A relaunch must PROVE the previous agent is gone before it launches another
-  # one into the same endpoint, and only tmux and herdr have a recovery-grade
-  # classifier that can (bin/fm-control-lib.sh owns that capability table).
-  fm_control_backend_state_verified "$BACKEND" || {
-    echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
-    exit 1
-  }
-  RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  [ "$RELAUNCH_STATE" = dead ] || {
-    echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
-    exit 1
-  }
+  # Ordinary relaunch must prove the previous agent is gone through a
+  # recovery-grade classifier. A workspace reconstructed by fm-workspace.sh is
+  # the bounded exception: that transaction created or reused an agent-free
+  # shell after the old workspace return synchronously terminated its worker,
+  # and records workspace_state=restored only after the exact endpoint is in the
+  # reconstructed path. This durable proof makes review-fix continuation
+  # available on zellij, Orca, and cmux without weakening ordinary relaunches.
+  RELAUNCH_WORKSPACE_STATE=$(fm_meta_get "$RELAUNCH_META" workspace_state)
+  if [ "$RELAUNCH_WORKSPACE_STATE" = restored ]; then
+    fm_backend_target_exists "$BACKEND" "$RELAUNCH_TARGET" "fm-$ID" || {
+      echo "error: task $ID's reconstructed endpoint is missing; run bin/fm-workspace.sh restore $ID again" >&2
+      exit 1
+    }
+  else
+    fm_control_backend_state_verified "$BACKEND" || {
+      echo "error: backend '$BACKEND' has no recovery-grade agent-state classifier, so a relaunch cannot prove the previous agent exited; refusing rather than risking two agents in one endpoint" >&2
+      exit 1
+    }
+    RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
+    [ "$RELAUNCH_STATE" = dead ] || {
+      echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
+      exit 1
+    }
+  fi
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
+  SPAWN_WORKSPACE_ROOT=$(fm_meta_get "$RELAUNCH_META" workspace_root)
+  SPAWN_WORKSPACE_LEASE_HOLDER=$(fm_meta_get "$RELAUNCH_META" workspace_lease_holder)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
     exit 1
@@ -2528,6 +2551,14 @@ else
   BRIEF="$DATA/$ID/brief.md"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  SPAWN_WORKSPACE_ROOT=$(fm_workspace_root_for_home "$FM_HOME") || {
+    echo "error: could not resolve this Firstmate home's scoped task-workspace root" >&2
+    exit 1
+  }
+  fm_workspace_prepare_root "$SPAWN_WORKSPACE_ROOT" || {
+    echo "error: could not prepare scoped task-workspace root $SPAWN_WORKSPACE_ROOT" >&2
+    exit 1
+  }
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
     echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
     exit 1
@@ -3486,7 +3517,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  SPAWN_WORKSPACE_ROOT_Q=$(shell_quote "$SPAWN_WORKSPACE_ROOT")
+  spawn_send_text_line "$WT_TARGET" "treehouse --root $SPAWN_WORKSPACE_ROOT_Q get"
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -4085,7 +4117,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx workspace_state workspace_root workspace_lease_holder workspace_head workspace_branch workspace_base workspace_released_at", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4105,6 +4137,11 @@ preserve_relaunch_meta() {
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  if [ "$KIND" != secondmate ]; then
+    echo "workspace_state=active"
+    [ -z "$SPAWN_WORKSPACE_ROOT" ] || echo "workspace_root=$SPAWN_WORKSPACE_ROOT"
+    [ -z "$SPAWN_WORKSPACE_LEASE_HOLDER" ] || echo "workspace_lease_holder=$SPAWN_WORKSPACE_LEASE_HOLDER"
+  fi
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;

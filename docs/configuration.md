@@ -26,6 +26,31 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Task workspace scope, retention, and reconstruction
+
+`bin/fm-workspace.sh` is the lifecycle owner for disposable task workspaces, while `bin/fm-workspace-lib.sh` owns their deterministic scope.
+Treehouse-backed tasks on tmux, Herdr, zellij, and cmux use one pool root per canonical `FM_HOME` under `${XDG_STATE_HOME:-$HOME/.local/state}/firstmate/task-workspaces/home-<hash>` rather than Treehouse's user-global `~/.treehouse` root.
+`FM_WORKSPACE_ROOT_BASE` may replace that base with an absolute directory for a specialized installation or test, but the home hash remains, so two homes using the same project never share slots.
+Orca remains its own worktree provider and participates in the same release/reconstruction state machine through its recorded worktree and terminal identities.
+
+Idle-task retention is zero.
+Normal completion returns a Treehouse workspace and then destroys that exact clean idle slot; it never uses a pool-wide destructive flag.
+After `fm-pr-check.sh` has durably recorded an open or merged GitHub PR and armed its merge monitor, it automatically asks `fm-workspace.sh release <task-id>` to remove the local workspace before merge.
+Release fetches `refs/pull/<number>/head`, requires the local workspace to be clean, requires local `HEAD` to be contained in that exact forge head, and records the PR head branch and base branch before cleanup.
+That preserves GitHub's stacked-PR contract: the bottom PR can target trunk, each higher PR can target the branch below it, and every layer remains reconstructable and independently reviewable.
+Dirty or untracked files, ignored secret-like files, a commit absent from the remote PR head, an unavailable or changing forge head, an unsafe record, or an incomplete cleanup proof is an explicit refusal and leaves the local copy available.
+Scout workspaces retain the report and captain-call completion gate, and local-only workspaces retain their landing gate; neither enters early remote-preservation cleanup.
+
+A later CI or review-fix continuation runs `bin/fm-workspace.sh restore <task-id>` before the ordinary control-plane relaunch.
+Restore fetches the latest exact PR head, recreates its recorded head branch rather than starting from trunk, recreates or reuses an agent-free endpoint for the recorded backend, and publishes `workspace_state=restored` only after the branch and endpoint are ready.
+`bin/fm-control.sh <task-id> relaunch --note '<progress>'` then consumes that one durable handoff across tmux, Herdr, zellij, Orca, and cmux.
+The task record, PR monitor, backlog item, instructions, and branch/head/base reconstruction identity remain after local release, so cleanup never depends on conversation memory.
+
+For pools created before scoped roots existed, `bin/fm-workspace.sh audit-legacy [<root>]` runs Treehouse's global conservative prune classifier as a dry run.
+`bin/fm-workspace.sh reclaim-legacy [<root>]` executes only those verified clean, merged, idle candidates.
+It deliberately never opts into orphan, unlanded, in-use, or leased deletion, so missing backing repositories and any unique or unverified work remain for manual reconciliation.
+The default Treehouse root is `${TREEHOUSE_ROOT:-$HOME}`, which audits its managed legacy pools under `.treehouse/`; an explicit argument uses the same Treehouse root semantics.
+
 ## Calm preference (config/calm)
 
 The Pi Calm extension and the Claude Code Calm mod share the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, so one `/calm` choice applies on either harness.

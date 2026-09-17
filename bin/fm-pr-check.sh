@@ -148,6 +148,20 @@ else
   echo "error: could not publish PR poll" >&2
   exit 1
 fi
+# New task records mark a managed workspace active. Once this exact PR identity
+# and poll are durable, release that local workspace at the earliest safe point:
+# bin/fm-workspace.sh independently proves a clean local HEAD is contained in the
+# fetched remote PR head before returning/removing anything. Legacy records omit
+# workspace_state and retain their historical until-merge behavior.
+WORKSPACE_STATE=$(grep '^workspace_state=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ "$WORKSPACE_STATE" = active ]; then
+  if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-workspace.sh" release "$ID"; then
+    echo "error: PR $URL is registered, but its local workspace could not be safely released; fix the reported preservation refusal and rerun fm-pr-check.sh" >&2
+    exit 1
+  fi
+fi
+
 # The contribution observer uses the same authenticated check mechanism and
 # owns verdict freshness, required actors and external feedback separately from
 # the exact merged-state poll. Registration is local and performs no forge read.

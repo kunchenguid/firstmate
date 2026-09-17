@@ -306,6 +306,7 @@ LABEL="fm-$ID"
 RECORDED_HARNESS=$(fm_meta_get "$META" harness)
 KIND=$(fm_meta_get "$META" kind)
 WT=$(fm_meta_get "$META" worktree)
+WORKSPACE_STATE=$(fm_meta_get "$META" workspace_state)
 [ -n "$KIND" ] || KIND=ship
 
 HARNESS=$(fm_control_harness_family "$RECORDED_HARNESS") \
@@ -803,7 +804,11 @@ do_relaunch() {
   local exit_result state note_line
   local -a spawn_args
 
-  require_state_verified_backend relaunch
+  if [ "$WORKSPACE_STATE" != restored ]; then
+    require_state_verified_backend relaunch
+  elif ! fm_backend_target_exists "$BACKEND" "$T" "$LABEL"; then
+    die "task $ID's reconstructed workspace has no recorded endpoint; run bin/fm-workspace.sh restore $ID again before relaunch"
+  fi
   resolve_relaunch_profile
 
   case "$KIND" in
@@ -838,7 +843,11 @@ do_relaunch() {
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
 
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
-  exit_result=$(do_exit)
+  if [ "$WORKSPACE_STATE" = restored ]; then
+    exit_result='workspace-restored-agent-absent'
+  else
+    exit_result=$(do_exit)
+  fi
   journal_write exited "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"
 
   # The launch owner (fm-spawn --relaunch) clears the previous incarnation's
@@ -857,9 +866,17 @@ do_relaunch() {
     die "the replacement agent for $ID could not be launched on $TARGET_HARNESS"
   fi
 
-  state=$(wait_agent_state "$LAUNCH_WAIT" alive) || {
+  if [ "$WORKSPACE_STATE" = restored ] \
+     && ! fm_control_backend_state_verified "$BACKEND"; then
+    sleep "$POLL"
+    fm_backend_target_exists "$BACKEND" "$T" "$LABEL" \
+      || die "the replacement endpoint for $ID disappeared after launch on unverified backend $BACKEND"
+    state='endpoint-present-backend-unverified'
+  elif state=$(wait_agent_state "$LAUNCH_WAIT" alive); then
+    :
+  else
     die "the replacement agent for $ID did not come up within ${LAUNCH_WAIT}s (endpoint reads '$state')"
-  }
+  fi
   RELAUNCH_AGENT_CONFIRMED=1
 
   journal_write complete "${CHECKPOINT_LINES[@]}" "$note_line" "exit_result=$exit_result"

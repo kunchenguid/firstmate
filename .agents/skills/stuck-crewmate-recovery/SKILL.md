@@ -32,13 +32,15 @@ Read the targeted current state with `bin/fm-crew-state.sh <id>` before deciding
 A no-mistakes run matched to the crew's branch and current code remains authoritative when the endpoint is dead: handle a terminal or parked run through the normal lifecycle, and keep supervising an active run instead of creating a duplicate worker.
 
 When no authoritative run accounts for the task, inspect only its recorded backend and worktree inventory.
-Use `treehouse status` for treehouse-backed tmux, herdr, zellij, or cmux tasks, and use the recorded `orca_worktree_id=` and `terminal=` for Orca tasks.
+Use `treehouse --root <recorded-workspace-root> status` for Treehouse-backed tmux, Herdr, zellij, or cmux tasks, never the user-global default, and use the recorded `orca_worktree_id=` and `terminal=` for Orca tasks.
 Do not sweep another home's endpoints or infer ownership from a matching window label.
 
-Before relaunch, prove that no live agent still owns the recorded task and that the existing worktree remains available.
-Preserve its uncommitted changes and commits, keep the same task identity, and resume or relaunch the recorded harness in that existing worktree with the same brief plus a concise progress note.
-Do not use a fresh generic spawn while the recorded worktree is unaccounted for, because allocating another worktree can split one task across two copies.
-If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
+Before relaunch, prove that no live agent still owns the recorded task and reconcile its workspace lifecycle.
+An active workspace must remain available with all uncommitted changes and commits intact.
+A PR task whose durable record says `workspace_state=released` instead runs `bin/fm-workspace.sh restore <id>` to reconstruct the exact remote PR head and branch before the ordinary control-plane relaunch; never reconstruct it from trunk or from conversation memory.
+Preserve the same task identity and relaunch the recorded harness with the same brief plus a concise progress note.
+Do not use a fresh generic spawn while an active workspace is unaccounted for, because allocating another worktree can split one task across two copies.
+If workspace or endpoint ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
 
 ## A live crewmate claiming the pipeline is dead
 
@@ -70,5 +72,5 @@ Escalate in order:
    Pass `--harness`, `--model`, or `--effort` on that same command when the worker should come back on a different runtime.
    Genuine wedging means looping, unresponsive, repeating the same obstacle, or truly dead.
    A low context reading is not wedging; modern harnesses auto-compact and keep going.
-   The worktree and commits persist, so relaunch is cheap.
+   An active workspace and its commits persist; a remotely preserved PR workspace is reconstructed first through the owner command above.
 5. If a second relaunch fails too, write `failed` to the backlog and tell the captain the plain failure, preserved work, and consequence using `AGENTS.md` section 9; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.
