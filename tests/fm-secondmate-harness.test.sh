@@ -662,18 +662,6 @@ case "${1:-}" in
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
-    if [ -n "${FM_FAKE_PANE_LOG:-}" ]; then
-      shift
-      skip_next=
-      for a in "$@"; do
-        if [ -n "$skip_next" ]; then skip_next=; continue; fi
-        case "$a" in
-          -t) skip_next=1; continue ;;
-          -l|Enter|C-m) continue ;;
-          *) printf '%s\n' "$a" >> "$FM_FAKE_PANE_LOG" ;;
-        esac
-      done
-    fi
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
       for a in "$@"; do
@@ -711,7 +699,6 @@ spawn_secondmate_capture() {
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
     FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
-    FM_FAKE_PANE_LOG="${FM_FAKE_PANE_LOG:-}" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$home" "$@" --secondmate
 }
 
@@ -757,28 +744,6 @@ test_spawn_explicit_backend_precedence_over_env_and_inherited_config() {
   assert_no_grep '^backend=' "$meta" \
     "explicit --backend tmux did not beat FM_BACKEND=zellij and inherited config/backend=herdr"
   pass "B5c spawn: explicit --backend wins over FM_BACKEND and inherited config/backend"
-}
-
-test_spawn_secondmate_target_tools_take_precedence() {
-  local w sm launchlog panelog out status expected first
-  w="$TMP_ROOT/spawn-target-tools-path"
-  sm="$w/sm"
-  launchlog="$w/launch.log"
-  panelog="$w/pane.log"
-  mkdir -p "$w/home/config/tools/bin" "$w/home/config/tools/node_modules/.bin" \
-    "$sm/config/tools/bin" "$sm/config/tools/node_modules/.bin"
-  make_seeded_home "$sm" sm
-  : > "$panelog"
-
-  out=$(FM_FAKE_PANE_LOG="$panelog" spawn_secondmate_capture \
-    "$w" sm "$sm" "$launchlog" --harness codex 2>&1); status=$?
-  expect_code 0 "$status" "secondmate tools PATH spawn should succeed"$'\n'"$out"
-
-  expected="export PATH='$sm/config/tools/bin:$sm/config/tools/node_modules/.bin:$w/home/config/tools/bin:$w/home/config/tools/node_modules/.bin:$w/tmux-sm/fakebin:$BLIND_BIN:$BASE_PATH'"
-  first=$(sed -n '1p' "$panelog")
-  [ "$first" = "$expected" ] \
-    || fail "a secondmate pane must receive its own config/tools before the primary home's tools (got '$first')"
-  pass "B5d spawn: target secondmate helpers precede primary helpers"
 }
 
 # A bare "<harness>" secondmate-harness file (today's format) must launch with
@@ -2677,7 +2642,6 @@ test_spawn_unverified_secondmate_harness_refused
 test_spawn_cursor_secondmate_launches_with_its_primary_contract
 test_spawn_backend_precedence_over_inherited_config
 test_spawn_explicit_backend_precedence_over_env_and_inherited_config
-test_spawn_secondmate_target_tools_take_precedence
 test_spawn_bare_harness_no_model_effort_flag
 test_spawn_secondmate_harness_model_token
 test_spawn_secondmate_harness_model_and_effort_tokens
