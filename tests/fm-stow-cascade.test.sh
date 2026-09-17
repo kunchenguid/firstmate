@@ -339,8 +339,8 @@ test_a_slow_remote_is_bounded_and_the_rest_still_report() {
   pass "one slow or unreachable home is bounded and every other home still reports"
 }
 
-test_no_cascade_without_secondmates_or_from_a_secondmate_home() {
-  local primary secondmate out rc
+test_no_cascade_without_secondmates_or_from_an_ordinary_secondmate() {
+  local primary secondmate out rc project_firstmate child repo_identity authority_id repo_path
   primary=$(new_primary quiet)
   set +e
   out=$(run_cascade "$primary")
@@ -359,7 +359,34 @@ test_no_cascade_without_secondmates_or_from_a_secondmate_home() {
   expect_code 0 "$rc" "a secondmate home should not fail its own stow"
   assert_contains "$out" 'role=secondmate' "a secondmate home was not recognized"
   assert_contains "$out" 'secondmates=0' "a secondmate home cascaded to its own registry"
-  pass "the cascade stays silent with no secondmates and never runs from a secondmate home"
+
+  project_firstmate=$(new_home alpha-project-firstmate)
+  child=$(new_home alpha-worker-home)
+  printf '%s\n' alpha-worker > "$child/.fm-secondmate-home"
+  repo_identity="sha256:$(printf alpha | shasum -a 256 | awk '{print $1}')"
+  authority_id="sha256:$(printf '%s' "$project_firstmate\\nalpha\\n$repo_identity" | shasum -a 256 | awk '{print $1}')"
+  repo_path="$project_firstmate/projects/alpha"
+  printf 'schema=fm-project-firstmate.v1\nproject=alpha\nrepo_identity=%s\nauthority_id=%s\nrepo_path=%s\n' \
+    "$repo_identity" "$authority_id" "$repo_path" > "$project_firstmate/.fm-project-firstmate"
+  local_record alpha-worker "$child" > "$project_firstmate/data/secondmates.md"
+  set +e
+  out=$(run_cascade "$project_firstmate")
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "a project Firstmate should be able to cascade to its direct children"
+  assert_contains "$out" 'role=project-firstmate' "a project Firstmate role was not recognized"
+  assert_contains "$out" 'secondmate=alpha-worker' "a project Firstmate did not enumerate its direct child"
+
+  printf '%s\n' '- remote-worker - remote domain (host: example; root: /remote/firstmate; home: /remote/worker; scope: alpha work; projects: alpha; added 2026-08-07)' \
+    > "$project_firstmate/data/secondmates.md"
+  set +e
+  out=$(run_cascade "$project_firstmate" 2>"$TMP_ROOT/project-firstmate-remote-cascade.err")
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a project Firstmate cascade accepted a remote descendant route"
+  assert_contains "$(<"$TMP_ROOT/project-firstmate-remote-cascade.err")" 'remote descendants beneath a project Firstmate are unsupported' \
+    "a project Firstmate did not explain why remote descendants are refused"
+  pass "ordinary secondmates do not cascade and project Firstmates reach only their direct children"
 }
 
 test_budget_is_enforced_per_home_and_never_summed
@@ -367,4 +394,4 @@ test_every_registered_home_is_enumerated_exactly_once
 test_transport_routes_by_placement_and_liveness
 test_receipt_facts_are_complete_and_show_before_and_after
 test_a_slow_remote_is_bounded_and_the_rest_still_report
-test_no_cascade_without_secondmates_or_from_a_secondmate_home
+test_no_cascade_without_secondmates_or_from_an_ordinary_secondmate

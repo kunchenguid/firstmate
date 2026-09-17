@@ -9,6 +9,8 @@ set -u
 
 # shellcheck source=tests/secondmate-helpers.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
+# shellcheck source=tests/fixtures.sh disable=SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-safety)
 export FM_BACKEND=tmux
@@ -133,6 +135,110 @@ EOF
     fail "owner subcommand still succeeded after routing moved to scopes"
   fi
   pass "seed allows overlapping project clone lists and drops the owns/owner routing"
+}
+
+test_project_firstmate_seed_has_one_repository_authority() {
+  local home first duplicate ordinary child err origin fakebin launch_log output spawn_rc remote_child
+  home="$TMP_ROOT/project-firstmate-seed-home"
+  first="$TMP_ROOT/project-firstmate-seed-first"
+  duplicate="$TMP_ROOT/project-firstmate-seed-duplicate"
+  ordinary="$TMP_ROOT/project-firstmate-seed-ordinary"
+  child="$TMP_ROOT/project-firstmate-seed-child"
+  err="$TMP_ROOT/project-firstmate-seed.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  origin="$TMP_ROOT/remotes/project-firstmate-alpha.git"
+  fm_git_add_origin "$home/projects/alpha" "$origin"
+  fm_git_init_commit "$home/projects/beta"
+  fm_git_add_origin "$home/projects/beta" "$TMP_ROOT/remotes/project-firstmate-beta.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='unregistered project authority' \
+    "$ROOT/bin/fm-home-seed.sh" unregistered-pfm "$TMP_ROOT/project-firstmate-unregistered" --project-firstmate beta >/dev/null 2>"$TMP_ROOT/project-firstmate-unregistered.err"; then
+    fail "project Firstmate authority was allowed for an unregistered repository"
+  fi
+  grep -F 'requires exactly one beta entry in' "$TMP_ROOT/project-firstmate-unregistered.err" >/dev/null \
+    || fail "unregistered project Firstmate refusal did not name the registration requirement"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='own the alpha repository' \
+    FM_SECONDMATE_SCOPE='alpha repository work' \
+    "$ROOT/bin/fm-home-seed.sh" alpha-pfm "$first" --project-firstmate alpha >/dev/null \
+    || fail "project Firstmate seed failed"
+  [ "$(cat "$first/.fm-project-firstmate" | sed -n 's/^project=//p')" = alpha ] \
+    || fail "project Firstmate marker did not bind the selected repository"
+  [ "$(cat "$first/config/repo-concurrency")" = 2 ] \
+    || fail "new project Firstmate did not receive the default subtree limit of 2"
+  grep -F 'You are the explicit project Firstmate for the single repository' "$first/data/charter.md" >/dev/null \
+    || fail "project Firstmate charter did not explain its bounded repository role"
+  [ "$(git -C "$first/projects/alpha" remote get-url origin)" = "$(git -C "$home/projects/alpha" remote get-url origin)" ] \
+    || fail "project Firstmate clone did not preserve the repository identity"
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='duplicate alpha authority' \
+    "$ROOT/bin/fm-home-seed.sh" alpha-pfm-duplicate "$duplicate" --project-firstmate alpha >/dev/null 2>"$err"; then
+    fail "a second project Firstmate authority was allowed for the same repository"
+  fi
+  grep -F 'repository already has project Firstmate authority alpha-pfm' "$err" >/dev/null \
+    || fail "duplicate project Firstmate refusal did not identify the existing authority"
+  [ ! -e "$duplicate" ] || fail "duplicate project Firstmate refusal left a new home behind"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='root level ordinary alpha domain' \
+    "$ROOT/bin/fm-home-seed.sh" alpha-ordinary "$ordinary" alpha >/dev/null \
+    || fail "root-level ordinary secondmate route was not preserved"
+  [ ! -e "$ordinary/.fm-project-firstmate" ] \
+    || fail "ordinary secondmate was accidentally marked as a project Firstmate"
+  if FM_HOME="$first" FM_SECONDMATE_CHARTER='bad child authority' \
+    "$ROOT/bin/fm-home-seed.sh" nested-pfm "$TMP_ROOT/project-firstmate-seed-nested" --project-firstmate alpha >/dev/null 2>"$err"; then
+    fail "project Firstmate was allowed to recursively create another project Firstmate"
+  fi
+  grep -F 'cannot recursively seed project Firstmates' "$err" >/dev/null \
+    || fail "nested project Firstmate refusal did not explain the bounded topology"
+  FM_HOME="$first" FM_SECONDMATE_CHARTER='local alpha workers' \
+    "$ROOT/bin/fm-home-seed.sh" alpha-child "$child" alpha >/dev/null \
+    || fail "project Firstmate could not seed a local child for its owned repository"
+  grep -F 'parent_role=project-firstmate' "$child/.fm-secondmate-parent" >/dev/null \
+    || fail "local child secondmate did not record its project Firstmate parent role"
+
+  fakebin=$(fm_test_make_spawn_fakebin "$TMP_ROOT/project-firstmate-child-spawn")
+  launch_log="$TMP_ROOT/project-firstmate-child-spawn.launch"
+  FM_BACKEND=tmux FM_SKIP_SECONDMATE_SYNC=1 FM_SKIP_SECONDMATE_INHERIT=1 \
+    FM_FAKE_LAUNCH_LOG="$launch_log" \
+    fm_test_run_spawn "$first" "$first/projects/alpha" "$fakebin" alpha-child "$child" --secondmate >/dev/null \
+    || fail "project Firstmate could not spawn its registered local child secondmate"
+  [ -f "$first/state/alpha-child.meta" ] || fail "project Firstmate child spawn did not publish its direct-report record"
+
+  fm_test_spawn_home "$ordinary" codex
+  remote_child=remote-child
+  printf -- '- %s - remote alpha workers (host: example; root: /remote/firstmate; home: /remote/child; scope: alpha worker tasks; projects: alpha; added 2026-09-17)\n' \
+    "$remote_child" > "$first/data/secondmates.md"
+  if output=$(FM_BACKEND=tmux fm_test_run_spawn "$first" "$first/projects/alpha" "$fakebin" "$remote_child" --secondmate 2>&1); then
+    fail "project Firstmate spawn was allowed to use a remote descendant route"
+  else
+    spawn_rc=$?
+  fi
+  [ "$spawn_rc" -ne 0 ] || fail "remote descendant spawn refusal returned success"
+  printf '%s\n' "$output" | grep -F 'remote descendants beneath a project Firstmate are unsupported' >/dev/null \
+    || fail "remote descendant spawn refusal did not explain the missing distributed lock"
+
+  launch_log="$TMP_ROOT/ordinary-nested-spawn.launch"
+  : > "$launch_log"
+  if output=$(FM_FAKE_LAUNCH_LOG="$launch_log" \
+    fm_test_run_spawn "$ordinary" "$ordinary/projects/alpha" "$fakebin" ordinary-child --secondmate 2>&1); then
+    fail "ordinary secondmate was allowed to spawn a nested secondmate"
+  else
+    spawn_rc=$?
+  fi
+  [ "$spawn_rc" -ne 0 ] || fail "ordinary secondmate nested-spawn refusal returned success"
+  printf '%s\n' "$output" | grep -F 'ordinary secondmates cannot spawn nested secondmates' >/dev/null \
+    || fail "ordinary secondmate nested-spawn refusal did not explain the hierarchy limit"
+  [ ! -s "$launch_log" ] || fail "ordinary secondmate nested-spawn refusal created an endpoint"
+
+  if FM_HOME="$ordinary" FM_SECONDMATE_CHARTER='bad recursive child' \
+    "$ROOT/bin/fm-home-seed.sh" ordinary-child "$TMP_ROOT/project-firstmate-seed-ordinary-child" alpha >/dev/null 2>"$err"; then
+    fail "ordinary secondmate was allowed to seed a child supervisor"
+  fi
+  grep -F 'ordinary secondmates cannot seed further supervisor homes' "$err" >/dev/null \
+    || fail "ordinary secondmate recursion refusal did not explain the bounded topology"
+  pass "project Firstmate seeding enforces one authority per repository and preserves ordinary root routes"
 }
 
 test_home_seed_validate_rejects_unparseable_registry_entry() {
@@ -2893,6 +2999,7 @@ EOF
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
+test_project_firstmate_seed_has_one_repository_authority
 test_home_seed_validate_rejects_unparseable_registry_entry
 test_home_seed_refuses_broken_registry_symlink
 test_home_seed_refuses_unreadable_registry

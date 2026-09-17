@@ -264,6 +264,10 @@ Remote placement pins the remote second-mate agent to Herdr while leaving the re
 `fm-home-seed.sh` provisions a local isolated home, clones the listed PR-based projects into it, copies the charter to `data/charter.md`, and `fm-spawn.sh --secondmate` launches it through the same session-provider and status-file path as any direct report.
 For a domain whose subject is the firstmate repo itself, a deliberate `--no-projects` seed creates a project-less home whose crews take pooled worktrees of that repo instead of separate clones.
 The signal cannot be mixed with project names or omitted accidentally, and a populated home cannot be converted in place; the full seed contract is in [configuration.md](configuration.md#secondmate-routes-datasecondmatesmd).
+The bounded nested-supervisor form is a project Firstmate that owns one registered repository and may seed only local ordinary secondmates for that same repository.
+Root routes all work for that repository to its one project Firstmate, while ordinary secondmates may still have non-exclusive clone lists and cannot seed child homes.
+The project's local `config/repo-concurrency` lease authority counts ship and scout tasks across the project Firstmate and its registered local child homes, excluding persistent supervisors.
+Its shared lock serializes admission across sibling homes, bootstrap repairs durable task claims, and teardown releases them; the [secondmate-provisioning skill](../.agents/skills/secondmate-provisioning/SKILL.md#project-firstmates-and-repository-capacity) owns the operator workflow.
 Herdr secondmate and child placement follows the launcher-binding contract in [Watching and task containers](herdr-backend.md#watching-and-task-containers).
 When seeded with `-`, the home is a durable treehouse lease under the secondmate id, so it survives with no live process and is not recycled by later `treehouse get` or pruning.
 Retirement or seed rollback returns the leased home; normal restart/recovery keeps it leased.

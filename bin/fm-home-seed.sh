@@ -2,6 +2,7 @@
 # Provision and route persistent secondmate homes.
 #
 # Usage:
+#   fm-home-seed.sh <id> <home|-> --project-firstmate <project>
 #   fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}
 #       Provision <home> as an isolated firstmate home. If <home> is "-", acquire
 #       a fresh firstmate worktree via "treehouse get --lease", which durably
@@ -9,12 +10,10 @@
 #       no live process and is never recycled until the lease is released with
 #       "treehouse return". Projects are cloned
 #       from the active home into the secondmate home's projects/ directory.
-#       That project list is non-exclusive provisioning data. Pass --no-projects
-#       instead of a project list to seed a project-less home for a domain whose
-#       subject is the firstmate repo itself; it is mutually exclusive with a
-#       project list, and omitting both still fails loudly. A project-less seed
-#       refuses a home with project clones or project-registry entries, so it
-#       never converts populated homes in place. The charter brief
+#       A root home may seed project Firstmates or ordinary secondmates. A
+#       project Firstmate may seed local secondmates for that same repository,
+#       but ordinary secondmates cannot seed further homes.
+#       The charter brief
 #       is copied to data/charter.md, an ignored .fm-secondmate-parent binding is published before
 #       the .fm-secondmate-home identity marker, and data/secondmates.md is updated.
 #       Seeding is transactional: on validation, clone, or registry failure,
@@ -40,6 +39,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
+PROJECT_FIRSTMATE_MARKER=".fm-project-firstmate"
+PROJECT_CONCURRENCY_CONFIG="repo-concurrency"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
@@ -48,9 +49,13 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-repo-concurrency-lib.sh
+. "$SCRIPT_DIR/fm-repo-concurrency-lib.sh"
 
 usage() {
-  echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
+  echo "usage: fm-home-seed.sh <id> <home|-> --project-firstmate <project>" >&2
+  echo "       fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
+  echo "       --repo-concurrency <limit> sets a project Firstmate's local subtree limit (default: 2)" >&2
   echo "       fm-home-seed.sh validate" >&2
 }
 
@@ -286,7 +291,7 @@ validate_operational_dirs() {
 validate_seed_leaf_files() {
   local home=$1 label path abs_home abs_path
   abs_home=$(resolved_path "$home")
-  for label in "data/projects.md" "data/charter.md" "$SUB_HOME_MARKER" "$SUB_HOME_PARENT_MARKER"; do
+  for label in "data/projects.md" "data/charter.md" "config/$PROJECT_CONCURRENCY_CONFIG" "$SUB_HOME_MARKER" "$SUB_HOME_PARENT_MARKER" "$PROJECT_FIRSTMATE_MARKER"; do
     path="$home/$label"
     if [ -L "$path" ]; then
       echo "error: secondmate leaf file must not be a symlink: $path" >&2
@@ -499,6 +504,19 @@ EOF
   [ -n "$url" ] || { echo "error: project $project is $mode but has no origin remote" >&2; return 1; }
 }
 
+validate_registered_project_authority() {  # <project-name>
+  local project=$1 count
+  [ -f "$DATA/projects.md" ] && [ ! -L "$DATA/projects.md" ] || {
+    echo "error: project Firstmate authority requires a registered repository in $DATA/projects.md" >&2
+    return 1
+  }
+  count=$(awk -v project="$project" '$1 == "-" && $2 == project { count++ } END { print count + 0 }' "$DATA/projects.md") || return 1
+  [ "$count" -eq 1 ] || {
+    echo "error: project Firstmate authority requires exactly one $project entry in $DATA/projects.md (found $count)" >&2
+    return 1
+  }
+}
+
 SEED_ROLLBACK_ACTIVE=0
 SEED_COMMITTED=0
 SEED_REGISTRY_LOCK=
@@ -649,6 +667,8 @@ seed_rollback() {
       if [ -n "${SEED_BACKUP_DIR:-}" ] && [ "${SEED_HOME_BACKED_UP:-0}" = 1 ]; then
         restore_seed_file "$SEED_MARKER_EXISTED" "$SEED_BACKUP_DIR/marker" "$SEED_HOME/$SUB_HOME_MARKER"
         restore_seed_file "$SEED_PARENT_MARKER_EXISTED" "$SEED_BACKUP_DIR/parent-marker" "$SEED_HOME/$SUB_HOME_PARENT_MARKER"
+        restore_seed_file "$SEED_PROJECT_FIRSTMATE_EXISTED" "$SEED_BACKUP_DIR/project-firstmate-marker" "$SEED_HOME/$PROJECT_FIRSTMATE_MARKER"
+        restore_seed_file "$SEED_CONCURRENCY_CONFIG_EXISTED" "$SEED_BACKUP_DIR/repo-concurrency" "$SEED_HOME/config/$PROJECT_CONCURRENCY_CONFIG"
         restore_seed_file "$SEED_CHARTER_EXISTED" "$SEED_BACKUP_DIR/charter.md" "$SEED_HOME/data/charter.md"
         restore_seed_file "$SEED_SUB_REG_EXISTED" "$SEED_BACKUP_DIR/sub-projects.md" "$SEED_HOME/data/projects.md"
       fi
@@ -715,8 +735,7 @@ write_registry() {
 
 refuse_populated_projectless_home() {
   local home=$1 project_path project registry_entries
-  local clones=()
-  local registry_projects=()
+  local clones=() registry_projects=()
   if [ -L "$home/projects" ]; then
     echo "error: cannot inspect existing projects directory at $home/projects because it is a symlink; resolve the symlink or retire or clean this home before seeding with --no-projects" >&2
     return 1
@@ -743,14 +762,9 @@ refuse_populated_projectless_home() {
     done <<< "$registry_entries"
   fi
   [ "${#clones[@]}" -eq 0 ] && [ "${#registry_projects[@]}" -eq 0 ] && return 0
-
   echo "error: cannot seed project-less secondmate home $home because it contains project data" >&2
-  if [ "${#clones[@]}" -gt 0 ]; then
-    printf 'error: projects/ entries: %s\n' "$(join_projects "${clones[@]}")" >&2
-  fi
-  if [ "${#registry_projects[@]}" -gt 0 ]; then
-    printf 'error: data/projects.md entries: %s\n' "$(join_projects "${registry_projects[@]}")" >&2
-  fi
+  [ "${#clones[@]}" -eq 0 ] || printf 'error: projects/ entries: %s\n' "$(join_projects "${clones[@]}")" >&2
+  [ "${#registry_projects[@]}" -eq 0 ] || printf 'error: data/projects.md entries: %s\n' "$(join_projects "${registry_projects[@]}")" >&2
   echo "error: retire or clean this home first before seeding with --no-projects" >&2
   return 1
 }
@@ -767,20 +781,52 @@ refuse_projectful_projectless_charter() {
   return 1
 }
 
+refuse_duplicate_project_authority() {
+  local candidate_repo_id=$1 candidate_home=$2 line existing_id existing_home
+  [ -f "$REG" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in "- "*) ;; *) continue ;; esac
+    secondmate_registry_parse_line "$line" || return 1
+    existing_id=$SECONDMATE_REGISTRY_ID
+    existing_home=$SECONDMATE_REGISTRY_HOME
+    [ "$existing_home" = "$candidate_home" ] && continue
+    [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
+    if [ -f "$existing_home/$PROJECT_FIRSTMATE_MARKER" ] || [ -L "$existing_home/$PROJECT_FIRSTMATE_MARKER" ]; then
+      fm_repo_scope_marker_parse "$existing_home" || {
+        echo "error: registered project Firstmate $existing_id has an invalid authority marker; cannot prove repository uniqueness" >&2
+        return 1
+      }
+      if [ "$FM_REPO_SCOPE_REPO_ID" = "$candidate_repo_id" ]; then
+        echo "error: repository already has project Firstmate authority $existing_id at $existing_home" >&2
+        return 1
+      fi
+    fi
+  done < "$REG"
+}
+
 seed_home() {
   local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope
-  local no_projects=0 arg
+  local requested_role=secondmate parent_role=root parent_project='' parent_repo_identity='' parent_authority_id=''
+  local arg no_projects=0 repo_concurrency='' want_value=''
   local filtered=()
   shift 2
-  # A deliberate --no-projects signal (anywhere in the project position) seeds a
-  # project-less home; an accidental omission with no signal still fails loudly.
   for arg in "$@"; do
-    if [ "$arg" = "--no-projects" ]; then
-      no_projects=1
-    else
-      filtered+=("$arg")
+    if [ -n "$want_value" ]; then
+      case "$arg" in -* ) echo "error: --repo-concurrency requires a value" >&2; return 1 ;; esac
+      repo_concurrency=$arg
+      want_value=
+      continue
     fi
+    case "$arg" in
+      --project-firstmate) requested_role='project-firstmate' ;;
+      --no-projects) no_projects=1 ;;
+      --repo-concurrency) want_value='repo-concurrency' ;;
+      --repo-concurrency=*) repo_concurrency=${arg#*=} ;;
+      --*) echo "error: unsupported secondmate seed option: $arg" >&2; return 1 ;;
+      *) filtered+=("$arg") ;;
+    esac
   done
+  [ -z "$want_value" ] || { echo "error: --repo-concurrency requires a value" >&2; return 1; }
   if [ "${#filtered[@]}" -gt 0 ]; then
     set -- "${filtered[@]}"
   else
@@ -788,9 +834,54 @@ seed_home() {
   fi
   if [ "$no_projects" -eq 1 ]; then
     [ $# -eq 0 ] || { echo "error: --no-projects cannot be combined with a project list" >&2; return 1; }
-  else
-    [ $# -gt 0 ] || { echo "error: secondmate needs at least one project, or --no-projects for a project-less home" >&2; return 1; }
+  elif [ $# -eq 0 ]; then
+    echo "error: secondmate needs at least one project, or --no-projects for a project-less home" >&2
+    return 1
   fi
+  if [ -n "$repo_concurrency" ]; then
+    case "$repo_concurrency" in ''|*[!0-9]*|0|0*) echo "error: repository concurrency limit must be a positive integer" >&2; return 1 ;; esac
+    [ "$repo_concurrency" -le 256 ] || { echo "error: repository concurrency limit must not exceed 256" >&2; return 1; }
+    [ "$requested_role" = project-firstmate ] || { echo "error: --repo-concurrency is only valid for a project Firstmate" >&2; return 1; }
+  fi
+  [ "$requested_role" != project-firstmate ] || [ "$no_projects" -eq 0 ] || {
+    echo "error: a project Firstmate must own exactly one repository" >&2
+    return 1
+  }
+  if [ -e "$FM_HOME/$PROJECT_FIRSTMATE_MARKER" ] || [ -L "$FM_HOME/$PROJECT_FIRSTMATE_MARKER" ]; then
+    parent_role='project-firstmate'
+    fm_repo_scope_marker_parse "$FM_HOME" || {
+      echo "error: active project Firstmate identity is invalid" >&2
+      return 1
+    }
+    parent_project=$FM_REPO_SCOPE_PROJECT
+    parent_repo_identity=$FM_REPO_SCOPE_REPO_ID
+    parent_authority_id=$FM_REPO_SCOPE_AUTHORITY_ID
+  elif [ -e "$FM_HOME/$SUB_HOME_MARKER" ] || [ -L "$FM_HOME/$SUB_HOME_MARKER" ]; then
+    [ -f "$FM_HOME/$SUB_HOME_MARKER" ] && [ ! -L "$FM_HOME/$SUB_HOME_MARKER" ] || {
+      echo "error: active secondmate identity marker is invalid" >&2
+      return 1
+    }
+    parent_role=secondmate
+  fi
+  case "$parent_role:$requested_role" in
+    root:project-firstmate) [ "$#" -eq 1 ] || { echo "error: a project Firstmate must own exactly one repository" >&2; return 1; } ;;
+    project-firstmate:secondmate)
+      [ "$no_projects" -eq 0 ] && [ "$#" -eq 1 ] && [ "$1" = "$parent_project" ] || {
+        echo "error: a project Firstmate may seed only one local secondmate clone of its owned repository ($parent_project)" >&2
+        return 1
+      }
+      ;;
+    root:secondmate) ;;
+    project-firstmate:project-firstmate)
+      echo "error: project Firstmate homes cannot recursively seed project Firstmates" >&2
+      return 1
+      ;;
+    secondmate:*)
+      echo "error: ordinary secondmates cannot seed further supervisor homes" >&2
+      return 1
+      ;;
+    *) echo "error: unsupported supervisor hierarchy transition" >&2; return 1 ;;
+  esac
 
   mkdir -p "$STATE" || return 1
   SEED_REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
@@ -802,6 +893,9 @@ seed_home() {
   for project in "$@"; do
     validate_seed_project "$project"
   done
+  if [ "$requested_role" = project-firstmate ]; then
+    validate_registered_project_authority "$1"
+  fi
 
   SEED_ROLLBACK_ACTIVE=1
   SEED_COMMITTED=0
@@ -815,11 +909,16 @@ seed_home() {
   : > "$SEED_CREATED_PROJECTS_FILE"
   SEED_PARENT_REG_EXISTED=0
   SEED_PARENT_BRIEF="$DATA/$id/brief.md"
+  if [ "$no_projects" -eq 1 ] && [ -f "$SEED_PARENT_BRIEF" ]; then
+    refuse_projectful_projectless_charter "$id" "$SEED_PARENT_BRIEF" || return 1
+  fi
   SEED_PARENT_BRIEF_CREATED=0
   SEED_PARENT_BRIEF_DIR_CREATED=0
   SEED_SUB_REG_EXISTED=0
   SEED_CHARTER_EXISTED=0
   SEED_MARKER_EXISTED=0
+  SEED_PROJECT_FIRSTMATE_EXISTED=0
+  SEED_CONCURRENCY_CONFIG_EXISTED=0
   if [ -f "$REG" ]; then
     SEED_PARENT_REG_EXISTED=1
     cp "$REG" "$SEED_BACKUP_DIR/parent-secondmates.md"
@@ -843,12 +942,15 @@ seed_home() {
   validate_home_assignment "$id" "$home"
   validate_operational_dirs "$home" || return 1
   validate_seed_leaf_files "$home" || return 1
+  if [ -e "$home/config/$PROJECT_CONCURRENCY_CONFIG" ] || [ -L "$home/config/$PROJECT_CONCURRENCY_CONFIG" ]; then
+    fm_repo_scope_limit "$home" >/dev/null || {
+      echo "error: existing project repository concurrency config is invalid: $FM_REPO_SCOPE_LAST_ERROR" >&2
+      return 1
+    }
+  fi
   validate_existing_parent_binding "$home" || return 1
   if [ "$no_projects" -eq 1 ]; then
     refuse_populated_projectless_home "$home" || return 1
-    if [ -f "$SEED_PARENT_BRIEF" ]; then
-      refuse_projectful_projectless_charter "$id" "$SEED_PARENT_BRIEF" || return 1
-    fi
   fi
   mkdir -p "$DATA" "$home/data" "$home/state" "$home/config" "$home/projects"
   if [ -f "$home/data/projects.md" ]; then
@@ -867,7 +969,27 @@ seed_home() {
     SEED_PARENT_MARKER_EXISTED=1
     cp "$home/$SUB_HOME_PARENT_MARKER" "$SEED_BACKUP_DIR/parent-marker"
   fi
+  if [ -f "$home/$PROJECT_FIRSTMATE_MARKER" ]; then
+    SEED_PROJECT_FIRSTMATE_EXISTED=1
+    cp "$home/$PROJECT_FIRSTMATE_MARKER" "$SEED_BACKUP_DIR/project-firstmate-marker"
+  fi
+  if [ -f "$home/config/$PROJECT_CONCURRENCY_CONFIG" ]; then
+    SEED_CONCURRENCY_CONFIG_EXISTED=1
+    cp "$home/config/$PROJECT_CONCURRENCY_CONFIG" "$SEED_BACKUP_DIR/repo-concurrency"
+  fi
+  if [ "$requested_role" = secondmate ] && [ "$SEED_PROJECT_FIRSTMATE_EXISTED" = 1 ]; then
+    echo "error: an existing project Firstmate home cannot be converted into an ordinary secondmate" >&2
+    return 1
+  fi
   SEED_HOME_BACKED_UP=1
+
+  if [ "$requested_role" = project-firstmate ]; then
+    repo_identity_candidate="sha256:$(fm_repo_scope_clone_identity "$PROJECTS/$1")" || {
+      echo "error: cannot establish stable repository identity for $1 at $PROJECTS/$1" >&2
+      return 1
+    }
+    refuse_duplicate_project_authority "$repo_identity_candidate" "$(resolved_path "$home")" || return 1
+  fi
 
   if [ ! -f "$SEED_PARENT_BRIEF" ]; then
     [ -n "${FM_SECONDMATE_CHARTER:-}" ] || {
@@ -875,7 +997,9 @@ seed_home() {
       return 1
     }
     [ -d "$DATA/$id" ] || SEED_PARENT_BRIEF_DIR_CREATED=1
-    if [ "$no_projects" -eq 1 ]; then
+    if [ "$requested_role" = project-firstmate ]; then
+      "$FM_ROOT/bin/fm-brief.sh" "$id" --project-firstmate "$@"
+    elif [ "$no_projects" -eq 1 ]; then
       "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects
     else
       "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate "$@"
@@ -884,6 +1008,13 @@ seed_home() {
   fi
   if grep -F '{TASK}' "$SEED_PARENT_BRIEF" >/dev/null 2>&1; then
     echo "error: secondmate charter brief at $SEED_PARENT_BRIEF still contains {TASK}; fill it before seeding" >&2
+    return 1
+  fi
+  if [ "$no_projects" -eq 1 ]; then
+    refuse_projectful_projectless_charter "$id" "$SEED_PARENT_BRIEF" || return 1
+  fi
+  if [ "$requested_role" = project-firstmate ] && ! grep -F "You are the explicit project Firstmate" "$SEED_PARENT_BRIEF" >/dev/null 2>&1; then
+    echo "error: project Firstmate charter at $SEED_PARENT_BRIEF is missing its single-repository role contract; scaffold it with fm-brief.sh --project-firstmate" >&2
     return 1
   fi
   charter_summary=$(registry_summary_for_brief "$SEED_PARENT_BRIEF")
@@ -904,8 +1035,51 @@ seed_home() {
   done
   sync_project_registry "$home" "$@"
   for project in "$@"; do
-    project_dst=$(validate_project_destination "$home" "$project") || return 1
+    validate_project_destination "$home" "$project" >/dev/null || return 1
   done
+
+  if [ "$requested_role" = project-firstmate ]; then
+    project=${1:?}
+    project_dst=$(validate_project_destination "$home" "$project") || return 1
+    repo_hash=$(fm_repo_scope_clone_identity "$project_dst") || {
+      echo "error: cannot establish stable repository identity for $project at $project_dst" >&2
+      return 1
+    }
+    repo_identity="sha256:$repo_hash"
+    authority_hash=$(fm_repo_scope_hash "$(resolved_path "$home")\n$project\n$repo_identity") || return 1
+    authority_id="sha256:$authority_hash"
+    if [ "$SEED_PROJECT_FIRSTMATE_EXISTED" = 1 ]; then
+      fm_repo_scope_marker_parse "$home" || {
+        echo "error: existing project Firstmate authority marker is invalid in $home" >&2
+        return 1
+      }
+      [ "$FM_REPO_SCOPE_PROJECT" = "$project" ] &&
+        [ "$FM_REPO_SCOPE_REPO_ID" = "$repo_identity" ] &&
+        [ "$FM_REPO_SCOPE_AUTHORITY_ID" = "$authority_id" ] || {
+        echo "error: existing project Firstmate home is bound to a different repository identity" >&2
+        return 1
+      }
+    else
+      {
+        printf 'schema=fm-project-firstmate.v1\n'
+        printf 'project=%s\n' "$project"
+        printf 'repo_identity=%s\n' "$repo_identity"
+        printf 'authority_id=%s\n' "$authority_id"
+        printf 'repo_path=%s\n' "$(resolved_path "$project_dst")"
+      } > "$home/$PROJECT_FIRSTMATE_MARKER.tmp.$$"
+      mv -f -- "$home/$PROJECT_FIRSTMATE_MARKER.tmp.$$" "$home/$PROJECT_FIRSTMATE_MARKER"
+    fi
+    if [ -n "$repo_concurrency" ]; then
+      printf '%s\n' "$repo_concurrency" > "$home/config/$PROJECT_CONCURRENCY_CONFIG"
+    elif [ "$SEED_CONCURRENCY_CONFIG_EXISTED" = 0 ]; then
+      printf '2\n' > "$home/config/$PROJECT_CONCURRENCY_CONFIG"
+    else
+      fm_repo_scope_limit "$home" >/dev/null || {
+        echo "error: $FM_REPO_SCOPE_LAST_ERROR" >&2
+        return 1
+      }
+    fi
+  fi
 
   cp "$SEED_PARENT_BRIEF" "$home/data/charter.md"
 
@@ -919,6 +1093,12 @@ seed_home() {
     printf 'schema=fm-secondmate-parent.v1\n'
     printf 'route=local\n'
     printf 'parent_home=%s\n' "$(resolved_path "$FM_HOME")"
+    printf 'parent_role=%s\n' "$parent_role"
+    if [ "$parent_role" = project-firstmate ]; then
+      printf 'repo_authority_home=%s\n' "$(resolved_path "$FM_HOME")"
+      printf 'repo_authority_id=%s\n' "$parent_authority_id"
+      printf 'repo_identity=%s\n' "$parent_repo_identity"
+    fi
   } > "$home/$SUB_HOME_PARENT_MARKER.tmp.$$"
   mv -f -- "$home/$SUB_HOME_PARENT_MARKER.tmp.$$" "$home/$SUB_HOME_PARENT_MARKER"
   printf '%s\n' "$id" > "$home/$SUB_HOME_MARKER.tmp.$$"

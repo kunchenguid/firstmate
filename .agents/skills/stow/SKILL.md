@@ -273,12 +273,13 @@ In a primary home the receipt is written after the cascade below, not instead of
 
 ## Automatic cascade to secondmates
 
-In a primary home, every `/stow` cascades to every registered secondmate after this home's own required pass and knowledge sweep are complete.
-In a secondmate home, `/stow` curates that home only and never cascades further.
+In a primary home, every `/stow` cascades to every registered direct report after this home's own required pass and knowledge sweep are complete.
+A project Firstmate also cascades to its registered ordinary-secondmate children after its own pass, then reports the bounded result to root.
+An ordinary secondmate curates only its own home and never cascades.
 The cascade changes nothing until `/stow` is invoked: it adds no notification, no digest section, and no background work.
 
-Run `bin/fm-stow-cascade.sh` once the primary's own pass is done.
-It enumerates each registered secondmate exactly once, reports that home's own budget accounting, and resolves how the sweep reaches it; its header owns the stanza fields, the bound, and the exit codes.
+Run `bin/fm-stow-cascade.sh` once this home's own pass is done when this home is primary or a project Firstmate.
+It enumerates each registered direct report exactly once, reports that home's own budget accounting, and resolves how the sweep reaches it; its header owns the stanza fields, the bound, and the exit codes.
 Every home is judged against its own `config/startup-memory-budget` allowance, so never add homes together or treat one home's excess as another's.
 
 Act on each home by its reported `transport`:

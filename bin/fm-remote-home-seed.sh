@@ -43,6 +43,8 @@ MAX_MANIFEST_BYTES=1048576
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-project-origin-lib.sh
 . "$SCRIPT_DIR/fm-project-origin-lib.sh"
+# shellcheck source=bin/fm-repo-concurrency-lib.sh
+. "$SCRIPT_DIR/fm-repo-concurrency-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -78,6 +80,16 @@ done
 [ "$REMOTE_ROOT" != "$REMOTE_HOME" ] || die "remote root and home must be separate"
 case "$REMOTE_HOME/" in "$REMOTE_ROOT/"*) die "remote home must not be inside the remote code root" ;; esac
 case "$REMOTE_ROOT/" in "$REMOTE_HOME/"*) die "remote code root must not be inside the remote home" ;; esac
+
+if [ -e "$FM_HOME/.fm-project-firstmate" ] || [ -L "$FM_HOME/.fm-project-firstmate" ]; then
+  fm_repo_scope_marker_parse "$FM_HOME" || die "active project Firstmate authority marker is invalid"
+  die "remote descendant routes beneath a project Firstmate are unsupported until distributed repository locking exists; seed only local child homes"
+fi
+if [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ]; then
+  [ -f "$FM_HOME/.fm-secondmate-home" ] && [ ! -L "$FM_HOME/.fm-secondmate-home" ] \
+    || die "active secondmate identity marker is invalid"
+  die "ordinary secondmates cannot seed further supervisor homes"
+fi
 
 NO_PROJECTS=0
 PROJECT_NAMES=()
