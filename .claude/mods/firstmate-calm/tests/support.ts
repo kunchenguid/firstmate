@@ -9,6 +9,7 @@ import { mock, type MockClock } from "claude-code/testing";
 
 export const HOME = "/fm/home";
 export const PREFERENCE = `${HOME}/config/calm`;
+export const WORKING_BOAT = `${HOME}/config/calm-working-boat.json`;
 
 export type Journal = {
   /** Every `$.command.register` name, in order. */
@@ -42,6 +43,8 @@ export type World = {
 export type WorldOptions = {
   /** The stored preference text; absent means no file. */
   preference?: string;
+  /** The stored local boat definition; absent means no file. */
+  workingBoat?: string;
   /** Extra environment beside FM_HOME; pass `{}` with `home: undefined` to unset FM_HOME. */
   env?: Record<string, string>;
   /** Function-hooks opt-in value; omitted options default to the active value `1`. */
@@ -68,6 +71,7 @@ export function world(on: On, options: WorldOptions = {}): World {
   const clock = mock.clock(on);
   const files = new Map<string, string>();
   if (options.preference !== undefined) files.set(PREFERENCE, options.preference);
+  if (options.workingBoat !== undefined) files.set(WORKING_BOAT, options.workingBoat);
   const journal: Journal = {
     commands: [],
     toasts: [],

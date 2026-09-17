@@ -54,6 +54,7 @@ import {
   createCalmWorkingShipAnimation,
   createCalmWorkingShipWidget,
 } from "./lib/fm-calm-working-ship.ts";
+import { parseCalmWorkingShipOverride } from "./lib/fm-calm-working-ship-sprite.ts";
 import {
   calmPresentationHides,
   calmPresentationIsActive,
@@ -133,7 +134,7 @@ export default function (pi: ExtensionAPI) {
   // One animation instance per extension lifetime. Hiding the working widget freezes
   // this state; the next working period resumes it. session_start resets it so a fresh
   // Pi session starts at the normal initial position. Never module-global.
-  const workingShipAnimation = createCalmWorkingShipAnimation();
+  let workingShipAnimation: ReturnType<typeof createCalmWorkingShipAnimation>;
 
   // Single owner of Calm's working-row presentation choice. The widget is only created
   // or removed on a real transition, so repeated starts cannot duplicate its timer.
@@ -159,6 +160,7 @@ export default function (pi: ExtensionAPI) {
   const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
   const configDirectory = process.env.FM_CONFIG_OVERRIDE || resolve(fmHome, "config");
   const calmPreferencePath = resolve(configDirectory, "calm");
+  const calmWorkingBoatPath = resolve(configDirectory, "calm-working-boat.json");
   // "max" is the legacy value written by the removed third presentation level, whose
   // behavior is now ordinary Calm; a home upgraded from it restores as on rather than
   // dropping to off. docs/configuration.md owns the persisted value schema.
@@ -185,6 +187,20 @@ export default function (pi: ExtensionAPI) {
       rmSync(temporaryPath, { force: true });
     }
   };
+  const loadCalmWorkingBoat = () => {
+    let stored: string | undefined;
+    try {
+      stored = readFileSync(calmWorkingBoatPath, "utf8");
+    } catch {
+      // A missing or unreadable local file is never fatal to Pi startup.
+    }
+    const parsed = parseCalmWorkingShipOverride(stored);
+    if (parsed.diagnostic !== undefined) {
+      console.error(`Firstmate Calm: local working-boat override at ${calmWorkingBoatPath} is unavailable (${parsed.diagnostic}); using the stock boat.`);
+    }
+    return parsed.override;
+  };
+  workingShipAnimation = createCalmWorkingShipAnimation(loadCalmWorkingBoat());
 
   const publishPresentationState = (): void => {
     pi.events.emit(FIRSTMATE_CALM_PRESENTATION_EVENT, {

@@ -65,6 +65,87 @@ export const CALM_WORKING_SHIP_TICK_MS = 220;
 /** Boat moves one column every Nth tick, so it travels at 220 * 4 = 880ms per column. */
 export const CALM_WORKING_SHIP_TICKS_PER_MOVE = 4;
 
+/** A home-local stationary working-boat definition, parsed from config JSON. */
+export type CalmWorkingShipOverride = {
+  readonly tickMs: number;
+  readonly hull: string;
+  readonly sails: readonly string[];
+  readonly sailOffset: number;
+  readonly wave: readonly string[];
+};
+
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
+const ZERO_WIDTH_CHARACTER = /[\p{Mark}\p{Format}]/u;
+
+function isWideCodePoint(codePoint: number): boolean {
+  return (
+    (codePoint >= 0x1100 && codePoint <= 0x115f) ||
+    codePoint === 0x2329 ||
+    codePoint === 0x232a ||
+    (codePoint >= 0x2e80 && codePoint <= 0x303e) ||
+    (codePoint >= 0x3040 && codePoint <= 0xa4cf) ||
+    (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+    (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+    (codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
+    (codePoint >= 0xff00 && codePoint <= 0xff60) ||
+    (codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
+    (codePoint >= 0x1f300 && codePoint <= 0x1f64f) ||
+    (codePoint >= 0x1f900 && codePoint <= 0x1f9ff) ||
+    (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+  );
+}
+
+function isSingleCellCharacter(value: string): boolean {
+  const codePoint = value.codePointAt(0) ?? 0;
+  return codePoint <= 0xffff && !CONTROL_CHARACTER.test(value) && !ZERO_WIDTH_CHARACTER.test(value) && !isWideCodePoint(codePoint);
+}
+
+function oneCellGlyph(value: unknown): value is string {
+  return typeof value === "string" && Array.from(value).length === 1 && isSingleCellCharacter(value);
+}
+
+function spriteText(value: unknown, minimumCells: number, maximumCells = 32): value is string {
+  const cells = typeof value === "string" ? Array.from(value) : [];
+  return typeof value === "string" && cells.length >= minimumCells && cells.length <= maximumCells && cells.every(isSingleCellCharacter);
+}
+
+/** Parse one local override without loading executable code from `config/`. */
+export function parseCalmWorkingShipOverride(stored: string | undefined): {
+  override?: CalmWorkingShipOverride;
+  diagnostic?: string;
+} {
+  if (stored === undefined) return { diagnostic: "file is absent" };
+  let value: unknown;
+  try {
+    value = JSON.parse(stored);
+  } catch {
+    return { diagnostic: "file is not valid JSON" };
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return { diagnostic: "top-level value must be an object" };
+  const record = value as Record<string, unknown>;
+  const allowed = new Set(["version", "mode", "tickMs", "hull", "sails", "sailOffset", "wave"]);
+  if (Object.keys(record).some((key) => !allowed.has(key))) return { diagnostic: "contains an unknown field" };
+  if (record.version !== 1 || record.mode !== "stationary") return { diagnostic: "requires version 1 with mode \\\"stationary\\\"" };
+  if (!Number.isInteger(record.tickMs) || (record.tickMs as number) < 10 || (record.tickMs as number) > 60_000) return { diagnostic: "tickMs must be an integer from 10 through 60000" };
+  if (!spriteText(record.hull, 1) || !Number.isInteger(record.sailOffset) || (record.sailOffset as number) < 0 || (record.sailOffset as number) > 31) return { diagnostic: "hull and sailOffset are invalid" };
+  if (!Array.isArray(record.sails) || record.sails.length === 0 || record.sails.length > 16 || !record.sails.every((sail) => spriteText(sail, 1))) return { diagnostic: "sails must be a non-empty array of safe text rows" };
+  const sailWidth = Array.from(record.sails[0] as string).length;
+  if (!record.sails.every((sail) => Array.from(sail as string).length === sailWidth)) return { diagnostic: "every sail must have the same width" };
+  const hullWidth = Array.from(record.hull as string).length;
+  if (record.sailOffset as number + sailWidth > Math.max(hullWidth, sailWidth)) return { diagnostic: "sailOffset and sail width cannot fit the hull" };
+  if (!Array.isArray(record.wave) || record.wave.length === 0 || record.wave.length > 16 || !record.wave.every(oneCellGlyph)) return { diagnostic: "wave must be a non-empty array of one-cell safe glyphs" };
+  return {
+    override: {
+      tickMs: record.tickMs as number,
+      hull: record.hull,
+      sails: record.sails as string[],
+      sailOffset: record.sailOffset as number,
+      wave: record.wave as string[],
+    },
+  };
+}
+
 /**
  * The color classes a frame uses. `plain` is uncolored padding; `water` is every water
  * cell whatever its height, so the swell reads through glyph height alone; `boat` is
@@ -84,6 +165,8 @@ export type CalmWorkingShipRun = {
 export type CalmWorkingShipFrame = readonly (readonly CalmWorkingShipRun[])[];
 
 export type CalmWorkingShipSprite = {
+  /** Scheduler period for this sprite's selected presentation. */
+  readonly tickMs: number;
   /** Paint one frame that exactly fits `width`, clamping the track to it first. */
   frame(width: number): CalmWorkingShipFrame;
   /** Advance one scheduler tick: water every tick, boat on its slower cadence. */
@@ -168,7 +251,61 @@ function waveLevel(
   );
 }
 
-export function createCalmWorkingShipSprite(): CalmWorkingShipSprite {
+function createStationaryCalmWorkingShipSprite(override: CalmWorkingShipOverride): CalmWorkingShipSprite {
+  const hullWidth = cellCount(override.hull);
+  const sailWidth = cellCount(override.sails[0] ?? "");
+  let position = 0;
+  let phase = 0;
+  let renderedPosition = position;
+  let renderedPhase = phase;
+  const spanFor = (width: number): number => width >= hullWidth ? width - hullWidth : width >= sailWidth ? width - sailWidth : 0;
+  const applyWidth = (width: number): void => {
+    position = width <= 0 ? 0 : Math.floor(spanFor(width) / 2);
+  };
+  const water = (from: number, count: number): CalmWorkingShipRun[] => {
+    const runs: CalmWorkingShipRun[] = [];
+    for (let column = from; column < from + count; column += 1) runs.push({ text: override.wave[(column + phase) % override.wave.length] ?? " ", color: "water" });
+    return runs;
+  };
+  return {
+    tickMs: override.tickMs,
+    position: () => position,
+    direction: () => 1,
+    waterPhase: () => phase,
+    restoreLastRendered: () => {
+      position = renderedPosition;
+      phase = renderedPhase;
+    },
+    reset: () => {
+      position = 0;
+      phase = 0;
+      renderedPosition = position;
+      renderedPhase = phase;
+    },
+    clampToWidth: applyWidth,
+    tick: () => {
+      phase = (phase + 1) % override.wave.length;
+    },
+    frame: (width: number): CalmWorkingShipFrame => {
+      if (width <= 0) return [];
+      applyWidth(width);
+      const sail = override.sails[phase % override.sails.length] ?? "";
+      let frame: CalmWorkingShipFrame;
+      if (width < sailWidth) frame = [water(0, width)];
+      else if (width < hullWidth) frame = [[...water(0, position), { text: sail, color: "boat" }, ...water(position + sailWidth, width - position - sailWidth)]];
+      else frame = [
+        [{ text: " ".repeat(position + override.sailOffset), color: "plain" }, { text: sail, color: "boat" }, { text: " ".repeat(width - position - override.sailOffset - sailWidth), color: "plain" }],
+        [...water(0, position), { text: override.hull, color: "boat" }, ...water(position + hullWidth, width - position - hullWidth)],
+      ];
+      renderedPosition = position;
+      renderedPhase = phase;
+      return frame;
+    },
+  };
+}
+
+export function createCalmWorkingShipSprite(override?: CalmWorkingShipOverride): CalmWorkingShipSprite {
+  if (override !== undefined) return createStationaryCalmWorkingShipSprite(override);
   let position = 0;
   let direction = 1;
   let span = 0;
@@ -237,6 +374,7 @@ export function createCalmWorkingShipSprite(): CalmWorkingShipSprite {
   const hull = (): CalmWorkingShipRun[] => [{ text: CALM_WORKING_SHIP_HULL, color: "boat" }];
 
   return {
+    tickMs: CALM_WORKING_SHIP_TICK_MS,
     position: () => position,
     direction: () => direction,
     waterPhase: () => phase,

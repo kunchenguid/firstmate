@@ -153,6 +153,7 @@ The current exact marker and the narrow bare-U+2063 `Supervisor escalate (` comp
 Calm replaces Pi's stock working row with a small animated boat while Calm is on and one logical agent run is active.
 This path uses only public extension API and patches nothing: `ExtensionUIContext.setWorkingVisible(false)` hides the stock row, and `setWidget()` installs a temporary component factory above the editor.
 Pi's documented custom working-indicator frames are static and width-blind, so they cannot own responsive geometry; a widget component receives `render(width)` and can.
+The stock geometry and cadences described below apply when no valid home-local override is present; the exact override schema, fallback, and resolution rules are owned by [`configuration.md`](configuration.md#calm-working-boat-override-configcalm-working-boatjson).
 
 `.pi/extensions/fm-calm.ts` remains the sole owner of the presentation choice and the only caller of `setWorkingVisible()`, while `.pi/extensions/lib/fm-calm-working-ship.ts` owns Pi's ANSI painting and the widget over the sprite geometry, bounce track, cadences, and freeze/resume state in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`, the harness-neutral core the Claude Code mod also draws from (reached from the Pi tree through a tracked symlink, because Claude Code refuses a hooks-module import from outside the plugin folder).
 Visibility follows `agent_start` through `agent_settled` rather than turns or tool calls.

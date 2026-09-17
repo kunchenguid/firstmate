@@ -37,6 +37,26 @@ The Pi extension reloads this preference on every Pi `session_start`, including 
 The Claude Code mod likewise reloads it on every `session.start`, including same-process session replacement, and also loads it lazily before any row that can draw ahead of that event, including during `claude --continue` restoration.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+## Calm working-boat override (config/calm-working-boat.json)
+
+`config/calm-working-boat.json` is an optional gitignored, home-local data file that replaces Calm's stock working boat on both Pi and Claude Code without loading code from `config/`.
+It resolves under the effective Firstmate home exactly as `config/calm` does, including `FM_CONFIG_OVERRIDE`, and is not inherited by secondmate homes.
+An absent, unreadable, or invalid file leaves the stock boat in place and emits one startup diagnostic without blocking either harness.
+Version 1 accepts only a stationary boat with a positive integer `tickMs`, safe text `hull`, equal-width `sails`, nonnegative `sailOffset`, and one-cell `wave` glyphs.
+To install a stationary boat, create the file with this exact content:
+
+```json
+{
+  "version": 1,
+  "mode": "stationary",
+  "tickMs": 440,
+  "hull": "\\__/",
+  "sails": ["◁|", "◀|", "◂|"],
+  "sailOffset": 1,
+  "wave": ["~", "~", "-", "~"]
+}
+```
+
 ## Pi supervision branch
 
 On a Pi primary, an in-process supervision branch handles eligible task-local wake rows and selected heartbeat reviews while keeping main-only rows on the captain-facing path; [docs/pi-supervision-branch.md](pi-supervision-branch.md) owns its conversation lifecycle, row eligibility, mixed-queue dispatch, heartbeat routing, and pre-drain recheck.

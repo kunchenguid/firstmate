@@ -51,6 +51,10 @@ wait_for_text() {
   return 1
 }
 
+without_calm_working_boat_diagnostics() {
+  sed '/^Firstmate Calm: local working-boat override at .* is unavailable (file is absent); using the stock boat\.$/d'
+}
+
 find_chrome() {
   local candidate
   if [ -n "${FM_CHROME_BIN:-}" ] && [ -x "$FM_CHROME_BIN" ]; then
@@ -259,8 +263,9 @@ JS
 )
   status=$?
   [ "$status" -eq 0 ] || fail "Pi calm home resolution failed: $out"
-  [ -z "$out" ] || fail "Pi calm home-resolution test printed output: $out"
-  pass "Pi calm resolves its persistent home independently of Pi's launch directory"
+  assert_contains "$out" "local working-boat override at $fixture/override/config/calm-working-boat.json is unavailable (file is absent); using the stock boat." "Pi Calm did not diagnose the absent override under FM_ROOT_OVERRIDE"
+  assert_contains "$out" "local working-boat override at $fixture/project/config/calm-working-boat.json is unavailable (file is absent); using the stock boat." "Pi Calm did not diagnose the absent override under its code-root fallback"
+  pass "Pi calm resolves its persistent home independently of Pi's launch directory and reports an absent local boat override without blocking startup"
 }
 
 test_pi_compat_no_upper_bound() {
@@ -376,7 +381,7 @@ JS
 )
   status=$?
   [ "$status" -eq 0 ] || fail "Pi calm degraded-adapter path failed: $out"
-  [ -z "$out" ] || fail "Pi calm degraded-adapter test printed output: $out"
+  [ -z "$(printf '%s\n' "$out" | without_calm_working_boat_diagnostics)" ] || fail "Pi calm degraded-adapter test printed output: $out"
   pass "a missing collapsed-thinking presentation API degrades only that Calm adapter with a clear skip reason, while the rest of Calm still registers"
 }
 
@@ -430,7 +435,7 @@ JS
 )
   status=$?
   [ "$status" -eq 0 ] || fail "Pi calm missing-adapter-export path failed: $out"
-  [ -z "$out" ] || fail "Pi calm missing-adapter-export test printed output: $out"
+  [ -z "$(printf '%s\n' "$out" | without_calm_working_boat_diagnostics)" ] || fail "Pi calm missing-adapter-export test printed output: $out"
   pass "missing Pi presentation class exports reach the independent adapter degradation path"
 }
 
@@ -518,7 +523,7 @@ JS
   status=$?
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm gate-at-load-time path failed: $out"
-  [ -z "$out" ] || fail "Pi calm gate-at-load-time test printed output: $out"
+  [ -z "$(printf '%s\n' "$out" | without_calm_working_boat_diagnostics)" ] || fail "Pi calm gate-at-load-time test printed output: $out"
   pass "Calm registers none of its 7 built-in tool wrappers at load while config/calm is off, and all 7 synchronously at load while config/calm is on"
 }
 
@@ -734,7 +739,7 @@ JS
   status=$?
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm activation/collision/regression-bound path failed: $out"
-  [ -z "$out" ] || fail "Pi calm activation/collision/regression-bound test printed output: $out"
+  [ -z "$(printf '%s\n' "$out" | without_calm_working_boat_diagnostics)" ] || fail "Pi calm activation/collision/regression-bound test printed output: $out"
   pass "Calm's first same-session /calm activation claims every uncontested built-in, leaves a foreign bash tool fully intact and callable, warns prominently and logs the contested name, and only rows constructed before that activation - the documented bound - fail to retroactively collapse"
 }
 
@@ -1452,7 +1457,7 @@ JS
   status=$?
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm renderer and lifecycle contract failed: $out"
-  [ -z "$out" ] || fail "Pi calm renderer test printed output: $out"
+  [ -z "$(printf '%s\n' "$out" | without_calm_working_boat_diagnostics)" ] || fail "Pi calm renderer test printed output: $out"
   pass "Pi calm centralizes transcript visibility, preserves execution/export data, keeps Pi's stock working row visible while no run is active, and persists its choice across session starts"
 }
 
@@ -1713,7 +1718,7 @@ JS
   status=$?
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm mid-turn contract failed: $out"
-  [ -z "$out" ] || fail "Pi calm mid-turn test printed output: $out"
+  [ -z "$(printf '%s\n' "$out" | without_calm_working_boat_diagnostics)" ] || fail "Pi calm mid-turn test printed output: $out"
   pass "Pi calm on collapses mid-turn assistant working notes to zero height while Calm off keeps them, leaves streaming, truncated-final, and genuine final replies untouched, never mutates the messages, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on"
 }
 
@@ -3231,7 +3236,7 @@ JS
 )
   status=$?
   [ "$status" -eq 0 ] || fail "Pi Calm working-ship checks failed: $out"
-  [ -z "$out" ] || fail "Pi Calm working-ship test printed output: $out"
+  [ -z "$(printf '%s\n' "$out" | without_calm_working_boat_diagnostics)" ] || fail "Pi Calm working-ship test printed output: $out"
   pass "Pi Calm working ship keeps its centered two-row asymmetric Unicode boat inside a deterministic long-wave trough, paints all water standard blue and the whole boat standard yellow with balanced resets, keeps ANSI-stripped width exact, reverses cleanly at both edges and every width, clamps visible and hidden resizes, falls back deterministically when narrow, freezes and resumes across settle/start without hidden-time jumps or duplicate timers, resets only on a fresh session, and leaves Calm-off visibility untouched"
 }
 

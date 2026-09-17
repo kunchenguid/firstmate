@@ -39,11 +39,20 @@ export function calmCodeRootFromPluginRoot(pluginRoot: string): string {
  * `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root, with
  * `FM_CONFIG_OVERRIDE` naming the config directory outright when present.
  */
-export function calmPreferencePath(env: CalmHomeEnvironment, pluginRoot: string): string {
+export function calmConfigPath(
+  env: CalmHomeEnvironment,
+  pluginRoot: string,
+  file: string,
+): string {
   const configDirectory =
     env.FM_CONFIG_OVERRIDE ||
     `${env.FM_HOME || env.FM_ROOT_OVERRIDE || calmCodeRootFromPluginRoot(pluginRoot)}/config`;
-  return `${configDirectory}/calm`;
+  return `${configDirectory}/${file}`;
+}
+
+/** The per-home `config/calm` path. */
+export function calmPreferencePath(env: CalmHomeEnvironment, pluginRoot: string): string {
+  return calmConfigPath(env, pluginRoot, "calm");
 }
 
 /**

@@ -333,7 +333,7 @@ describe("mid-turn working notes", () => {
       result: { answer: "Done.", toolUses: [{ name: "Bash", input: {} }], stopReason: "tool_use" },
     });
     await runStep($);
-    expect(journal.fsReads).toHaveLength(2);
+    expect(journal.fsReads).toHaveLength(4);
     expect(journal.sessionMessageReads).toBe(2);
     expect(isHidden(await $.ui.render(assistantMessage("Done.", "session-two-note")))).toBe(true);
   });

@@ -28,6 +28,7 @@ import {
   CALM_WORKING_SHIP_TICKS_PER_MOVE,
   createCalmWorkingShipSprite,
   type CalmWorkingShipColor,
+  type CalmWorkingShipOverride,
   type CalmWorkingShipRun,
   type CalmWorkingShipSprite,
 } from "./fm-calm-working-ship-sprite.ts";
@@ -57,8 +58,10 @@ function paintRun(run: CalmWorkingShipRun): string {
   return `${ANSI_FOREGROUND[run.color]}${run.text}${RESET}`;
 }
 
-export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
-  const sprite = createCalmWorkingShipSprite();
+export function createCalmWorkingShipAnimation(
+  override?: CalmWorkingShipOverride,
+): CalmWorkingShipAnimation {
+  const sprite = createCalmWorkingShipSprite(override);
   return {
     position: sprite.position,
     direction: sprite.direction,
@@ -90,7 +93,7 @@ export function createCalmWorkingShipWidget(
     if (disposed) return;
     animation.tick();
     tui.requestRender();
-  }, CALM_WORKING_SHIP_TICK_MS);
+  }, animation.tickMs);
   // The animation must never keep Pi's process alive on its own.
   timer.unref?.();
 

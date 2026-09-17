@@ -2,7 +2,8 @@
 // working row while Calm is on, its cadence on the mocked clock, its size against the
 // viewport, and how it lets go of a site the surface no longer draws.
 import { describe, expect, test } from "claude-code/testing";
-import { calmCommand, decodeCells, isStock, rasterOf, spinner, themeChange, unmeasuredSpinner, world } from "./support.ts";
+import { parseCalmWorkingShipOverride } from "../lib/fm-calm-working-ship-sprite.ts";
+import { calmCommand, decodeCells, isStock, rasterOf, spinner, themeChange, unmeasuredSpinner, WORKING_BOAT, world } from "./support.ts";
 
 const SAIL = "◿│◣";
 const HULL = "╲▁▁▁╱";
@@ -14,8 +15,50 @@ const LIGHT_WATER = 0x5769f7;
 const BOAT = 0xd77757;
 const TICK = 220;
 const TICKS_PER_MOVE = 4;
+const CAPTAIN_BOAT = JSON.stringify({
+  version: 1,
+  mode: "stationary",
+  tickMs: 440,
+  hull: "\\__/",
+  sails: ["◁|", "◀|", "◂|"],
+  sailOffset: 1,
+  wave: ["~", "~", "-", "~"],
+});
 
 describe("the working ship", () => {
+  test("uses a valid home-local stationary boat definition", async ($, on) => {
+    const { clock, journal } = world(on, { preference: "on\n", workingBoat: CAPTAIN_BOAT });
+    const raster = rasterOf(await $.ui.render(spinner("agent-main", { columns: 40, rows: 24 })))!;
+    const { glyphs } = decodeCells(raster.cells, 38, 2);
+    expect(glyphs[0]).toHaveLength(38);
+    expect(glyphs[0]!.indexOf("◁|")).toBe(18);
+    expect(glyphs[1]!.indexOf("\\__/")).toBe(17);
+    await clock.advance(439);
+    expect(journal.blits).toHaveLength(0);
+    await clock.advance(1);
+    expect(decodeCells(journal.blits.at(-1)!.cells, 38, 2).glyphs[0]).toContain("◀|");
+  });
+
+  test("falls back to stock when the local boat file is absent", async ($, on) => {
+    const absent = world(on, { preference: "on\n" });
+    const absentRaster = rasterOf(await $.ui.render(spinner("agent-absent", { columns: 40, rows: 24 })))!;
+    expect(absent.journal.fsReads).toContain(WORKING_BOAT);
+    expect(decodeCells(absentRaster.cells, 38, 2).glyphs[1]).toContain(HULL);
+  });
+
+  test("falls back to stock when the local boat file is malformed", async ($, on) => {
+    const malformed = world(on, { preference: "on\n", workingBoat: "{" });
+    const malformedRaster = rasterOf(await $.ui.render(spinner("agent-malformed", { columns: 40, rows: 24 })))!;
+    expect(malformed.journal.fsReads).toContain(WORKING_BOAT);
+    expect(decodeCells(malformedRaster.cells, 38, 2).glyphs[1]).toContain(HULL);
+  });
+
+  test("rejects override text that is not one terminal cell per code point", () => {
+    const base = { version: 1, mode: "stationary", tickMs: 440, hull: "____", sails: ["a"], sailOffset: 1, wave: ["~"] };
+    expect(parseCalmWorkingShipOverride(JSON.stringify({ ...base, hull: "界" })).override).toBeUndefined();
+    expect(parseCalmWorkingShipOverride(JSON.stringify({ ...base, sails: ["a\u0301"] })).override).toBeUndefined();
+  });
+
   test("replaces the spinner with a two-row raster sized to the row inside the transcript margin", async ($, on) => {
     world(on, { preference: "on\n" });
     const raster = rasterOf(await $.ui.render(spinner("agent-main", { columns: 40, rows: 24 })));

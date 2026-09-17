@@ -31,8 +31,8 @@
 // Each `session.start` clears presentation classifications and reloads the new session.
 import type { EngineInterface, Register, RenderElement, RenderInput } from "claude-code";
 import {
-  CALM_WORKING_SHIP_TICK_MS,
   createCalmWorkingShipSprite,
+  parseCalmWorkingShipOverride,
 } from "../lib/fm-calm-working-ship-sprite.ts";
 import {
   CALM_SHIP_RASTER_KEY,
@@ -44,6 +44,7 @@ import {
 } from "../lib/fm-calm-ship-raster.ts";
 import {
   calmPreferencePath,
+  calmConfigPath,
   parseCalmPreference,
   classifyRestoredTranscript,
   serializeCalmPreference,
@@ -62,9 +63,10 @@ let preferencePath: string | undefined;
 let activation: Promise<boolean> | undefined;
 let loading: Promise<void> | undefined;
 let ticker: { cancel(): void } | undefined;
+let lastBoatOverrideDiagnostic: string | undefined;
 const workingNotes = new Set<string>();
 const finalReplies = new Set<string>();
-const sprite = createCalmWorkingShipSprite();
+let sprite = createCalmWorkingShipSprite();
 let palette: CalmShipRasterPalette = CALM_SHIP_RASTER_PALETTES.light;
 // Every Spinner site currently drawing the boat, by its requestId, with the mounted
 // Raster size a blit must repeat exactly.
@@ -98,15 +100,23 @@ async function readTheme($: EngineInterface): Promise<unknown> {
 }
 
 async function load($: EngineInterface): Promise<void> {
-  preferencePath = calmPreferencePath(
-    {
-      FM_HOME: await $.env.get("FM_HOME"),
-      FM_ROOT_OVERRIDE: await $.env.get("FM_ROOT_OVERRIDE"),
-      FM_CONFIG_OVERRIDE: await $.env.get("FM_CONFIG_OVERRIDE"),
-    },
-    $.plugin.root,
-  );
+  const environment = {
+    FM_HOME: await $.env.get("FM_HOME"),
+    FM_ROOT_OVERRIDE: await $.env.get("FM_ROOT_OVERRIDE"),
+    FM_CONFIG_OVERRIDE: await $.env.get("FM_CONFIG_OVERRIDE"),
+  };
+  preferencePath = calmPreferencePath(environment, $.plugin.root);
   calm = parseCalmPreference(await readPreference($, preferencePath));
+  const boatPath = calmConfigPath(environment, $.plugin.root, "calm-working-boat.json");
+  const parsedBoat = parseCalmWorkingShipOverride(await readPreference($, boatPath));
+  const boatDiagnostic = parsedBoat.diagnostic === undefined
+    ? undefined
+    : `Firstmate Calm: local working-boat override at ${boatPath} is unavailable (${parsedBoat.diagnostic}); using the stock boat.`;
+  if (boatDiagnostic !== undefined && boatDiagnostic !== lastBoatOverrideDiagnostic) {
+    console.error(boatDiagnostic);
+  }
+  lastBoatOverrideDiagnostic = boatDiagnostic;
+  sprite = createCalmWorkingShipSprite(parsedBoat.override);
   palette = CALM_SHIP_RASTER_PALETTES[calmShipPaletteFamily(await readTheme($))];
   try {
     const restored = classifyRestoredTranscript(await $.session.messages());
@@ -115,11 +125,10 @@ async function load($: EngineInterface): Promise<void> {
   } catch {
     // A transcript that cannot be read leaves restored narration visible; nothing else changes.
   }
-  if (ticker === undefined) {
-    ticker = $.clock.every(CALM_WORKING_SHIP_TICK_MS, () => {
-      void repaintShip($);
-    });
-  }
+  ticker?.cancel();
+  ticker = $.clock.every(sprite.tickMs, () => {
+    void repaintShip($);
+  });
   $.ui.invalidate("ui.render");
 }
 
