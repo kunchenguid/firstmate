@@ -65,12 +65,15 @@
 # queues the doorbell instead of reading it, so a ring that leaves Kimi's queue
 # block on screen is followed by exactly one Ctrl-S, which Kimi binds to "steer
 # immediately" and which injects the queued doorbell into the running turn.
-# The ring reports that outcome distinctly (4, steered). It is not delivery
-# proof - the acknowledgement move stays the only delivery signal, so a
-# swallowed key still leaves the ladder to re-ring - but the queue block is
-# proof the pane was mid-turn, which the busy read cannot tell for standalone
-# Kimi (bin/fm-busy-lib.sh keeps it unknown), so the ladder treats a steered
-# ring as the wait a busy pane gets rather than as an idle-pane attempt.
+# The key goes out only when the doorbell's own submit read the composer
+# empty, so a composer still holding the doorbell (a swallowed Enter under a
+# transcript that merely quotes the queue block) never receives it. The ring
+# reports that outcome distinctly (4, steered). It is not delivery proof - the
+# acknowledgement move stays the only delivery signal, so a swallowed key still
+# leaves the ladder to re-ring - but the queue block is proof the pane was
+# mid-turn, which the busy read cannot tell for standalone Kimi
+# (bin/fm-busy-lib.sh keeps it unknown), so the ladder treats a steered ring
+# as the wait a busy pane gets rather than as an idle-pane attempt.
 #
 # Inbox paths containing bytes outside printable ASCII are unsupported. The
 # doorbell refuses them rather than sending terminal control bytes to a pane.
@@ -317,10 +320,13 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [har
   if ! verdict=$(fm_backend_send_text_submit "$backend" "$target" "$line" 1 0.4 0.3 "$label" 2>/dev/null); then
     return 2
   fi
-  # The verdict is read only to report a failed keystroke; every other value
-  # (empty, pending, unknown, ...) is deliberately ignored, never proof.
+  # The verdict is read to report a failed keystroke and to admit the Kimi
+  # steer only behind a composer that PROVENLY cleared; every other value
+  # (pending, unknown, ...) is deliberately ignored, never proof, and `empty`
+  # is not delivery proof either - it only keeps Ctrl-S off a composer that
+  # still holds the doorbell.
   [ "$verdict" != send-failed ] || return 2
-  if fm_task_inbox_kimi_steer "$backend" "$target" "$label" "$harness"; then
+  if [ "$verdict" = empty ] && fm_task_inbox_kimi_steer "$backend" "$target" "$label" "$harness"; then
     return 4
   fi
   return 0
@@ -334,7 +340,10 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label] [har
 # treats 1 and 2 as a plain ring.
 # The key is sent ONLY on a positive match read after the ring, so an idle
 # Kimi, which reads the doorbell at once and never draws the block, receives
-# nothing. It is scoped to a recorded harness of exactly `kimi` - Kimi behind
+# nothing; fm_task_inbox_ring additionally calls this only when the doorbell's
+# submit read the composer empty, because an idle Kimi whose last message
+# quotes the block would otherwise match with the doorbell still in its
+# composer. It is scoped to a recorded harness of exactly `kimi` - Kimi behind
 # Pi records `pi` - and to tmux, the one backend whose key path carries C-s
 # verified; every other harness and backend returns 1 untouched. A stray Ctrl-S
 # was verified a no-op on Kimi both idle and busy with nothing queued. The

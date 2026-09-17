@@ -411,9 +411,13 @@ fm_busy_lines_match() {  # [harness]
 # answers a positive verdict with a keystroke (fm_task_inbox_kimi_steer in
 # bin/fm-task-inbox-lib.sh): the hint must be the nearest nonblank row above the
 # LAST composer border and a `❯ ` row must sit directly above the hint, so
-# worker output or a diff that merely quotes the hint text, and Kimi's own
-# `❯`-cursored dialogs, never match. A miss is harmless there - the ordinary
-# re-ring ladder still applies - so unobserved spellings are not matched.
+# worker output or a diff that merely quotes the hint text mid-turn (Kimi's
+# spinner row then sits between transcript and composer), and Kimi's own
+# `❯`-cursored dialogs, never match. An IDLE Kimi whose last message ends in
+# those two rows directly above the composer does match, which is why the
+# consumer sends its key only behind a submit that read the composer empty.
+# A miss is harmless there - the ordinary re-ring ladder still applies - so
+# unobserved spellings are not matched.
 # Like the busy footers above, this is a DELIVERY guard and never a worker-state
 # source. Bytes are compared under LC_ALL=C so the verdict does not depend on
 # the caller's locale.

@@ -59,7 +59,8 @@ inbox_lib() {  # <state> <function> [args...]
 }
 
 # A fake tmux for the watcher cases: capture-pane replays FM_FAKE_TMUX_CAPTURE,
-# display-message yields a numeric cursor row, and every literal send-keys is
+# display-message yields the cursor row as tmux reports it - the capture's last
+# composer content row (`│ ...`), else row 1 - and every literal send-keys is
 # logged to FM_SEND_LOG so a doorbell ring is observable, and every named key
 # to FM_KEY_LOG. With
 # FM_FAKE_TMUX_AGENT set, the inventory lists window fm-t1 and its
@@ -94,7 +95,13 @@ case "${1:-}" in
   display-message)
     for a in "$@"; do
       case "$a" in
-        *cursor_y*) printf '1\n'; exit 0 ;;
+        *cursor_y*)
+          if [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ] && [ -f "$FM_FAKE_TMUX_CAPTURE" ]; then
+            awk 'BEGIN { row = 1 } /^[[:space:]]*│/ { row = NR - 1 } END { print row }' "$FM_FAKE_TMUX_CAPTURE"
+          else
+            printf '1\n'
+          fi
+          exit 0 ;;
         *pane_current_command*) [ -z "${FM_FAKE_TMUX_AGENT:-}" ] || { printf '%s\n' "$FM_FAKE_TMUX_AGENT"; exit 0; } ;;
         *pane_tty*) [ -z "${FM_FAKE_TMUX_AGENT:-}" ] || { printf '\n'; exit 0; } ;;
       esac
