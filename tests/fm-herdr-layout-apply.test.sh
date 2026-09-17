@@ -6,6 +6,8 @@ set -eu
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=bin/backends/herdr.sh
 . "$ROOT/bin/backends/herdr.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$ROOT/bin/fm-wake-lib.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found"; exit 0; }
@@ -15,19 +17,22 @@ SOCK="$TMP_ROOT/herdr.sock"
 REQUEST="$TMP_ROOT/request.json"
 APPLIED="$TMP_ROOT/applied"
 REPORTED="$TMP_ROOT/reported"
+CLOSED="$TMP_ROOT/closed"
+LABEL_CLEARED="$TMP_ROOT/label-cleared"
+ATTEMPT="$TMP_ROOT/task.herdr-launch"
 CALLS="$TMP_ROOT/calls.log"
 SERVER_PID=
 MODE=ok
 
 layout_schema() {
   cat <<'JSON'
-{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"layout.apply"}}},{"properties":{"method":{"const":"pane.report_agent"}}}],"$defs":{"LayoutApplyParams":{"required":["root"],"properties":{"workspace_id":{"type":["string","null"]},"tab_id":{"type":["string","null"]}}},"LayoutNode":{"oneOf":[{"properties":{"type":{"const":"pane"},"command":{"type":["array","null"]},"cwd":{"type":["string","null"]},"env":{"type":"object"},"pane_id":{"type":["string","null"]}}}]},"PaneReportAgentParams":{"required":["pane_id","source","agent","state"],"properties":{"agent":{"type":"string"},"state":{"$ref":"#/schemas/request/$defs/PaneAgentState"}}}}}}}
+{"schemas":{"request":{"oneOf":[{"properties":{"method":{"const":"layout.apply"}}},{"properties":{"method":{"const":"pane.report_agent"}}}],"$defs":{"LayoutApplyParams":{"required":["root"],"properties":{"workspace_id":{"type":["string","null"]},"tab_id":{"type":["string","null"]}}},"LayoutNode":{"oneOf":[{"properties":{"type":{"const":"pane"},"command":{"type":["array","null"]},"cwd":{"type":["string","null"]},"env":{"type":"object"},"label":{"type":["string","null"]},"pane_id":{"type":["string","null"]}}}]},"PaneReportAgentParams":{"required":["pane_id","source","agent","state"],"properties":{"agent":{"type":"string"},"state":{"$ref":"#/schemas/request/$defs/PaneAgentState"}}}}}}}
 JSON
 }
 
-start_server() { # <success|wrong-id|error|malformed>
+start_server() { # <success|wrong-id|error|malformed|timeout>
   local response=$1
-  rm -f "$SOCK" "$REQUEST" "$APPLIED"
+  rm -f "$SOCK" "$REQUEST" "$APPLIED" "$CLOSED" "$LABEL_CLEARED"
   python3 - "$SOCK" "$REQUEST" "$APPLIED" "$response" <<'PY' &
 import json
 import socket
@@ -53,6 +58,12 @@ if response_mode == "success":
     response = {"id": request["id"], "result": {"type": "layout_apply", "layout": {
         "workspace_id": "w1", "tab_id": "w1:t3", "focused_pane_id": "w1:p3",
         "root": {"type": "pane", "pane_id": "w1:p3"}}}}
+elif response_mode == "timeout":
+    import time
+    time.sleep(1)
+    client.close()
+    server.close()
+    raise SystemExit(0)
 elif response_mode == "wrong-id":
     response = {"id": "another-request", "result": {}}
 elif response_mode == "error":
@@ -62,7 +73,10 @@ else:
     client.close()
     server.close()
     raise SystemExit(0)
-client.sendall((json.dumps(response, separators=(",", ":")) + "\n").encode("utf-8"))
+try:
+    client.sendall((json.dumps(response, separators=(",", ":")) + "\n").encode("utf-8"))
+except BrokenPipeError:
+    pass
 client.close()
 server.close()
 PY
@@ -83,7 +97,7 @@ wait_server() {
 # report-agent call. Every response carries exact workspace/tab/pane identity,
 # so each refusal mode changes one independent proof.
 fm_backend_herdr_cli() { # <session> <args...>
-  local session=$1 pane
+  local session=$1 pane label
   shift
   printf '%s|%s\n' "$session" "$*" >> "$CALLS"
   [ "$session" = lab-structural ] || return 91
@@ -113,11 +127,11 @@ fm_backend_herdr_cli() { # <session> <args...>
       fi
       ;;
     "pane get w1:p2")
-      if [ "$MODE" = pane ]; then
-        printf '%s\n' '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t9","pane_id":"w1:p2"}}}'
-      else
-        printf '%s\n' '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2"}}}'
-      fi
+      case "$MODE" in
+        reconcile|reconcile_duplicate|reconcile_missing) return 1 ;;
+        pane) printf '%s\n' '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t9","pane_id":"w1:p2"}}}' ;;
+        *) printf '%s\n' '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2"}}}' ;;
+      esac
       ;;
     "pane layout --pane w1:p2")
       if [ "$MODE" = layout ]; then
@@ -150,10 +164,36 @@ fm_backend_herdr_cli() { # <session> <args...>
         printf '%s\n' '{"result":{"tab":{"workspace_id":"w1","tab_id":"w1:t3"}}}'
       fi
       ;;
+    "pane list --workspace w1")
+      case "$MODE" in
+        reconcile_duplicate)
+          printf '%s\n' '{"result":{"panes":[{"workspace_id":"w1","tab_id":"w1:t3","pane_id":"w1:p3","label":"fm-launch-0123456789abcdef0123456789abcdef"},{"workspace_id":"w1","tab_id":"w1:t4","pane_id":"w1:p4","label":"fm-launch-0123456789abcdef0123456789abcdef"}]}}'
+          ;;
+        reconcile_missing) printf '%s\n' '{"result":{"panes":[]}}' ;;
+        *)
+          if [ -e "$CLOSED" ]; then
+            printf '%s\n' '{"result":{"panes":[]}}'
+          else
+            printf '%s\n' '{"result":{"panes":[{"workspace_id":"w1","tab_id":"w1:t3","pane_id":"w1:p3","label":"fm-launch-0123456789abcdef0123456789abcdef"}]}}'
+          fi
+          ;;
+      esac
+      ;;
     "pane get w1:p3")
-      printf '%s\n' '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t3","pane_id":"w1:p3"}}}'
+      [ ! -e "$CLOSED" ] || return 1
+      if [ -e "$LABEL_CLEARED" ]; then
+        printf '%s\n' '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t3","pane_id":"w1:p3","label":null}}}'
+      else
+        label=$(jq -r '.params.root.label // "fm-launch-0123456789abcdef0123456789abcdef"' "$REQUEST" 2>/dev/null || printf 'fm-launch-0123456789abcdef0123456789abcdef')
+        printf '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t3","pane_id":"w1:p3","label":"%s"}}}\n' "$label"
+      fi
+      ;;
+    "pane rename w1:p3 --clear")
+      : > "$LABEL_CLEARED"
+      printf '%s\n' '{"result":{"type":"pane_rename","pane_id":"w1:p3"}}'
       ;;
     "pane close w1:p3")
+      : > "$CLOSED"
       printf '%s\n' '{"result":{"type":"pane_close","pane_id":"w1:p3"}}'
       ;;
     "pane process-info --pane w1:p3")
@@ -185,7 +225,8 @@ run_layout() {
   fm_backend_herdr_layout_apply \
     lab-structural:w1:p2 w1 w1:t2 w1:p2 "$TMP_ROOT/worktree" \
     '{"EXACT_ENV":"yes","STALE_TEXT":"must-not-run"}' \
-    '["/bin/sh","-c","exec pi --model fake --flag literal"]'
+    '["/bin/sh","-c","exec pi --model fake --flag literal"]' \
+    "$ATTEMPT" 0123456789abcdef0123456789abcdef
 }
 
 mkdir -p "$TMP_ROOT/worktree"
@@ -200,11 +241,19 @@ jq -e --arg cwd "$TMP_ROOT/worktree" '
   and .params.tab_id == "w1:t2"
   and .params.root == {
     type:"pane", pane_id:"w1:p2",
+    label:"fm-launch-0123456789abcdef0123456789abcdef",
     command:["/bin/sh","-c","exec pi --model fake --flag literal"],
     cwd:$cwd, env:{EXACT_ENV:"yes",STALE_TEXT:"must-not-run"}}
 ' "$REQUEST" >/dev/null || fail "layout request changed cwd, environment, argv, or exact replacement identity"
 [ "$(grep -c '^lab-structural|' "$CALLS")" -eq "$(wc -l < "$CALLS" | tr -d ' ')" ] \
   || fail "a structural-launch read escaped its exact named session"
+fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
+  || fail "successful layout did not leave one durable bound attempt"
+[ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 2 ] \
+  || fail "successful layout attempt did not advance to exact replacement ids"
+fm_backend_herdr_layout_attempt_commit "$ATTEMPT" \
+  || fail "successful layout did not clear its temporary attempt label"
+[ ! -e "$ATTEMPT" ] || fail "successful layout retained its attempt after exact commit"
 pass "layout.apply preserves exact cwd/environment/argv and binds only response ids re-read from the named session"
 
 for mode in protocol schema workspace tab pane layout foreground socket; do
@@ -217,7 +266,7 @@ for mode in protocol schema workspace tab pane layout foreground socket; do
 done
 MODE=ok
 if fm_backend_herdr_layout_apply lab-structural:w1:p9 w1 w1:t2 w1:p2 \
-  "$TMP_ROOT/worktree" '{}' '["pi"]' >/dev/null 2>&1; then
+  "$TMP_ROOT/worktree" '{}' '["pi"]' "$ATTEMPT" 0123456789abcdef0123456789abcdef >/dev/null 2>&1; then
   fail "layout adapter accepted a target/pane identity mismatch"
 fi
 pass "layout.apply refuses every protocol, schema, socket, session, container, layout, and foreground identity mismatch before mutation"
@@ -234,30 +283,163 @@ wait_server
   || fail "post-mutation refusal did not close the exact returned pane once"
 assert_no_grep 'pane close w1:p2' "$CALLS" \
   "post-mutation refusal targeted the stale pre-apply pane"
+fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
+  || fail "post-response refusal lost its durable attempt"
+[ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 3 ] \
+  && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = removed ] \
+  || fail "confirmed cleanup did not resolve the structural attempt"
+rm -f "$ATTEMPT"
 pass "layout.apply cleans only the exact returned pane after a post-mutation identity refusal"
 MODE=ok
 
+HELPER_PAYLOAD="$TMP_ROOT/helper-payload.json"
+printf '%s\n' '{"cwd":"/tmp/worktree","env":{"OPENAI_API_KEY":"credential-must-stay-off-argv"},"command":["pi"]}' > "$HELPER_PAYLOAD"
 for response_mode in wrong-id error malformed; do
   start_server "$response_mode"
-  if python3 "$ROOT/bin/backends/herdr-layout-apply.py" \
-    "$SOCK" w1 w1:t2 w1:p2 "$TMP_ROOT/worktree" '{}' '["pi"]' >/dev/null 2>&1; then
-    fail "protocol client accepted a $response_mode response"
-  fi
+  set +e
+  python3 "$ROOT/bin/backends/herdr-layout-apply.py" \
+    "$SOCK" w1 w1:t2 w1:p2 11111111111111111111111111111111 fm-launch-11111111111111111111111111111111 --stdin-v1 \
+    < "$HELPER_PAYLOAD" >/dev/null 2>&1
+  helper_status=$?
+  set -e
+  [ "$helper_status" -eq 3 ] || fail "protocol client did not classify $response_mode as an uncertain post-send result"
   wait_server
 done
-python3 "$ROOT/bin/backends/herdr-layout-apply.py" \
-  relative.sock w1 w1:t2 w1:p2 "$TMP_ROOT/worktree" '{}' '["pi"]' >/dev/null 2>&1 \
-  && fail "protocol client accepted a relative socket"
-python3 "$ROOT/bin/backends/herdr-layout-apply.py" \
-  "$SOCK" w1 w1:t2 w1:p2 relative '{}' '["pi"]' >/dev/null 2>&1 \
-  && fail "protocol client accepted a relative cwd"
-python3 "$ROOT/bin/backends/herdr-layout-apply.py" \
-  "$SOCK" w1 w1:t2 w1:p2 "$TMP_ROOT/worktree" '[]' '["pi"]' >/dev/null 2>&1 \
-  && fail "protocol client accepted a non-map environment"
-python3 "$ROOT/bin/backends/herdr-layout-apply.py" \
-  "$SOCK" w1 w1:t2 w1:p2 "$TMP_ROOT/worktree" '{}' '[]' >/dev/null 2>&1 \
-  && fail "protocol client accepted an empty command argv"
-pass "protocol client binds random response ids and refuses malformed endpoints, payloads, errors, and responses"
+set +e
+printf '%s\n' '{"cwd":"relative","env":{},"command":["pi"]}' | python3 "$ROOT/bin/backends/herdr-layout-apply.py" \
+  "$SOCK" w1 w1:t2 w1:p2 11111111111111111111111111111111 fm-launch-11111111111111111111111111111111 --stdin-v1 >/dev/null 2>&1
+helper_status=$?
+set -e
+[ "$helper_status" -eq 2 ] || fail "protocol client did not reject a relative cwd before send"
+set +e
+printf '%s\n' '{"cwd":"/tmp/worktree","env":[],"command":["pi"]}' | python3 "$ROOT/bin/backends/herdr-layout-apply.py" \
+  "$SOCK" w1 w1:t2 w1:p2 11111111111111111111111111111111 fm-launch-11111111111111111111111111111111 --stdin-v1 >/dev/null 2>&1
+helper_status=$?
+set -e
+[ "$helper_status" -eq 2 ] || fail "protocol client accepted a non-map environment"
+set +e
+printf '%s\n' '{"cwd":"/tmp/worktree","env":{},"command":[]}' | python3 "$ROOT/bin/backends/herdr-layout-apply.py" \
+  "$SOCK" w1 w1:t2 w1:p2 11111111111111111111111111111111 fm-launch-11111111111111111111111111111111 --stdin-v1 >/dev/null 2>&1
+helper_status=$?
+set -e
+[ "$helper_status" -eq 2 ] || fail "protocol client accepted an empty command argv"
+start_server timeout
+FM_HERDR_LAYOUT_APPLY_TIMEOUT_SECS=0.5 python3 "$ROOT/bin/backends/herdr-layout-apply.py" \
+  "$SOCK" w1 w1:t2 w1:p2 11111111111111111111111111111111 fm-launch-11111111111111111111111111111111 --stdin-v1 \
+  < "$HELPER_PAYLOAD" >/dev/null 2>&1 &
+HELPER_PID=$!
+for _ in $(seq 1 100); do
+  [ -e "$APPLIED" ] && break
+  sleep 0.005
+done
+[ -e "$APPLIED" ] || fail "credential argv probe never crossed the request-send boundary"
+helper_args=$(ps -p "$HELPER_PID" -o args= 2>/dev/null || true)
+assert_not_contains "$helper_args" 'credential-must-stay-off-argv' \
+  "protocol helper exposed a credential through its process arguments"
+set +e
+wait "$HELPER_PID"
+helper_status=$?
+set -e
+[ "$helper_status" -eq 3 ] || fail "protocol client did not quarantine a timed-out post-send request"
+wait_server
+pass "protocol client keeps payload values off argv and quarantines malformed, wrong-id, error, and timeout responses"
+
+for response_mode in wrong-id error malformed timeout; do
+  rm -f "$ATTEMPT" "$CLOSED"
+  start_server "$response_mode"
+  set +e
+  if [ "$response_mode" = timeout ]; then
+    FM_HERDR_LAYOUT_APPLY_TIMEOUT_SECS=0.05 run_layout >/dev/null 2>&1
+  else
+    run_layout >/dev/null 2>&1
+  fi
+  adapter_status=$?
+  set -e
+  [ "$adapter_status" -eq 3 ] || fail "adapter did not quarantine its $response_mode response"
+  wait_server
+  fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
+    || fail "$response_mode response lost its durable attempt"
+  [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 1 ] \
+    || fail "$response_mode response invented replacement ids"
+  MODE=reconcile
+  fm_backend_herdr_layout_attempt_reconcile_remove "$ATTEMPT" \
+    || fail "$response_mode response could not remove its exact replacement"
+  rm -f "$ATTEMPT" "$CLOSED"
+  MODE=ok
+done
+pass "uncertain responses preserve durable ownership until exact replacement cleanup"
+
+CRASH_HELPER="$TMP_ROOT/crash-helper.py"
+cat > "$CRASH_HELPER" <<'PY'
+import json
+import os
+import socket
+import sys
+_, socket_path, workspace, tab, pane, attempt, label, contract = sys.argv
+payload = json.load(sys.stdin)
+request = {"id": "fm-layout-apply-" + attempt, "method": "layout.apply", "params": {
+    "tab_id": tab, "root": {"type": "pane", "pane_id": pane, "label": label,
+    "command": payload["command"], "cwd": payload["cwd"], "env": payload["env"]}}}
+client = socket.socket(socket.AF_UNIX)
+client.connect(socket_path)
+client.sendall((json.dumps(request, separators=(",", ":")) + "\n").encode())
+os._exit(99)
+PY
+rm -f "$ATTEMPT" "$CLOSED"
+start_server success
+set +e
+FM_BACKEND_HERDR_LAYOUT_APPLY_HELPER="$CRASH_HELPER" run_layout >/dev/null 2>&1
+crash_status=$?
+set -e
+wait_server
+[ "$crash_status" -eq 3 ] || fail "crashed helper did not produce an uncertain adapter result"
+fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" || fail "crashed helper lost its durable attempt"
+[ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 1 ] || fail "crashed helper unexpectedly claimed replacement ids"
+MODE=reconcile
+fm_backend_herdr_layout_attempt_reconcile_remove "$ATTEMPT" \
+  || fail "one exact crash replacement was not safely reconciled"
+fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" || fail "reconciliation erased ownership before lease cleanup"
+[ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 3 ] \
+  && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = removed ] \
+  || fail "successful reconciliation did not publish its safe terminal result"
+rm -f "$ATTEMPT" "$CLOSED"
+fm_backend_herdr_layout_attempt_write "$ATTEMPT" 1 0123456789abcdef0123456789abcdef \
+  lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef
+MODE=reconcile_duplicate
+if fm_backend_herdr_layout_attempt_reconcile_remove "$ATTEMPT" >/dev/null 2>&1; then
+  fail "duplicate attempt labels were accepted for destructive reconciliation"
+fi
+[ ! -e "$CLOSED" ] || fail "duplicate reconciliation closed an ambiguous pane"
+fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
+  || fail "duplicate refusal did not preserve quarantine"
+rm -f "$ATTEMPT"
+MODE=ok
+start_server success
+result=$(run_layout)
+wait_server
+[ "$result" = $'w1:t3\tw1:p3' ] || fail "safe retry did not launch after exact reconciliation"
+rm -f "$ATTEMPT"
+pass "crash quarantine refuses duplicates, reconciles one exact replacement, and permits a safe retry"
+
+LEASE_LOG="$TMP_ROOT/lease-return.log"
+LEASE_BIN=$(fm_fakebin "$TMP_ROOT/lease-bin")
+cat > "$LEASE_BIN/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_LEASE_LOG:?}"
+SH
+chmod +x "$LEASE_BIN/treehouse"
+: > "$LEASE_LOG"
+PATH="$LEASE_BIN:$PATH" FM_LEASE_LOG="$LEASE_LOG" \
+  fm_treehouse_lease_return_exact "$TMP_ROOT" "$TMP_ROOT/worktree" fm-task-z1 >/dev/null \
+  || fail "holder-bound Treehouse return failed"
+[ "$(cat "$LEASE_LOG")" = "return --force --if-lease-holder fm-task-z1 $TMP_ROOT/worktree" ] \
+  || fail "Treehouse return was not bound to the exact lease holder"
+if PATH="$LEASE_BIN:$PATH" FM_LEASE_LOG="$LEASE_LOG" \
+  fm_treehouse_lease_return_exact "$TMP_ROOT" "$TMP_ROOT/worktree" '../other' >/dev/null 2>&1; then
+  fail "invalid Treehouse lease holder reached the return command"
+fi
+[ "$(wc -l < "$LEASE_LOG" | tr -d ' ')" -eq 1 ] || fail "invalid holder issued a Treehouse return"
+pass "aborted structural leases return only through their exact holder"
 
 rm -f "$REPORTED"
 MODE=ok

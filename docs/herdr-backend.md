@@ -83,20 +83,30 @@ Closing its last tab can remove the workspace, and the next spawn recreates it.
 
 A plain `pi` worker on Herdr protocol 20 starts by replacing the fresh task tab's single shell pane through the bundled `layout.apply` schema instead of typing a command into that shell.
 This avoids treating terminal input acceptance as worker-process readiness and prevents pending shell-editor text from joining or delaying the launch command.
-Firstmate acquires the isolated Treehouse copy directly, validates the exact named session, protocol, live schema, workspace, single-pane tab, pane, foreground shell, and Unix socket, then sends one argv array with the exact working directory and launch environment through `bin/backends/herdr-layout-apply.py`.
+Firstmate acquires the isolated Treehouse copy under the task's durable lease, validates the exact named session, protocol, live schema, workspace, single-pane tab, pane, foreground shell, and Unix socket, then sends one argv array with the exact working directory through `bin/backends/herdr-layout-apply.py`.
+The replacement inherits the environment of the Herdr daemon that created the destination pane, matching destination-pane semantics, while Firstmate sends only its non-sensitive task, temporary-directory, and trace overrides.
+The request payload travels over the helper's stdin, so allowlisted credentials and launch values never enter helper process arguments, logs, or durable attempt state.
 The local client exposes no general Herdr control surface and accepts only that one request shape.
 It binds a random request id, rejects protocol errors and mismatched responses, and returns only replacement ids that Firstmate re-reads from the same named session.
+
+Immediately before the request, Firstmate publishes `state/<id>.herdr-launch` with a random non-sensitive attempt identity and the exact old session, workspace, tab, and pane.
+A confirmed response advances that record to the returned replacement ids.
+A timeout, malformed response, wrong response id, helper crash, or other uncertain post-send result preserves the task record, holder-bound Treehouse lease, and attempt record, and every retry refuses until the exact named session proves either that the old pane remains or that one random-label-correlated replacement was removed.
+Ambiguous, duplicate, renamed, or unverifiable replacements stay quarantined.
+The attempt record is cleared only after safe retry cleanup or after the replacement's presentation and task metadata have both been rebound.
 
 The worker counts as launched only after the replacement pane reports the exact plain-Pi process, Herdr's public `pane report-agent` operation registers it as Pi, and a fresh inventory read confirms that registration is live.
 Only then do the task record and any presentation journal advance from the old tab and pane ids to the returned replacement ids.
 A failure after replacement targets the returned pane for exact cleanup and never reports spawn success.
+Normal teardown and pre-launch aborts return the durable Treehouse lease only when its exact `fm-<id>` holder still owns it.
 Generic Enter behavior for post-launch interaction is unchanged.
 
 This structural path currently supports only the exact `pi` harness.
 `pi-signed` and every other harness refuse before endpoint or worktree creation rather than being normalized to Pi or falling back to interactive-shell submission.
 Protocol versions other than 20, a missing method or schema field, an ambiguous identity, a non-shell foreground, an unrecognized replacement process, or an inventory mismatch also refuse.
 
-`tests/fm-herdr-layout-apply.test.sh` pins the portable protocol, identity, metadata, inventory, and refusal contract.
+`tests/fm-herdr-layout-apply.test.sh` pins the portable protocol, identity, metadata, inventory, quarantine, lease, and refusal contract.
+`tests/fm-herdr-layout-apply-live-e2e.test.sh` proves destination-daemon environment inheritance, exact argv and cwd, replacement identity, and stale-input removal against an isolated real Herdr session.
 `tests/fm-herdr-lab.test.sh` pins the named-lab selector placement used for guarded real validation.
 
 ## Presentation spaces

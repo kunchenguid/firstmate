@@ -11,7 +11,8 @@ HERDR_LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 [ -x "$HERDR_LAB_HELPER" ] || fail "Herdr lab helper is not executable: $HERDR_LAB_HELPER"
 HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name herdr-blesh-launch)
 trap '"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"' EXIT
-"$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" >/dev/null \
+FM_LAYOUT_DESTINATION=from-herdr-daemon \
+  "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" >/dev/null \
   || fail "could not provision the isolated Herdr structural-launch lab"
 
 lab() {
@@ -33,7 +34,8 @@ printf '%s' "$SCHEMA" | jq -e '
     | select(.properties.type.const == "pane")
     | .properties.command.type == ["array", "null"]
     and .properties.cwd.type == ["string", "null"]
-    and .properties.env.type == "object")
+    and .properties.env.type == "object"
+    and .properties.label.type == ["string", "null"])
 ' >/dev/null || fail "protocol 20 does not expose the pinned layout.apply pane schema"
 
 SCRATCH=$(fm_test_tmproot fm-herdr-layout-live)
@@ -52,6 +54,7 @@ with open(os.environ["FM_FAKE_PI_RECORD"], "w", encoding="utf-8") as stream:
         "argv": sys.argv[1:],
         "cwd": os.getcwd(),
         "probe_env": os.environ.get("FM_LAYOUT_PROBE"),
+        "destination_env": os.environ.get("FM_LAYOUT_DESTINATION"),
         "herdr_session": os.environ.get("HERDR_SESSION"),
         "herdr_pane": os.environ.get("HERDR_PANE_ID"),
     }, stream, separators=(",", ":"))
@@ -94,8 +97,17 @@ import sys
 print(json.dumps([sys.argv[1], "alpha", "two words"], separators=(",", ":")))
 PY
 )
-RESULT=$(python3 "$ROOT/bin/backends/herdr-layout-apply.py" \
-  "$SOCKET" "$WORKSPACE" "$OLD_TAB" "$OLD_PANE" "$CWD" "$ENV_JSON" "$COMMAND_JSON") \
+PAYLOAD=$(printf '%s\n%s\n' "$ENV_JSON" "$COMMAND_JSON" | python3 -c '
+import json
+import sys
+env = json.loads(sys.stdin.readline())
+command = json.loads(sys.stdin.readline())
+print(json.dumps({"cwd": sys.argv[1], "env": env, "command": command}, separators=(",", ":")))
+' "$CWD") || fail "could not encode structural launch payload"
+RESULT=$(printf '%s\n' "$PAYLOAD" | FM_LAYOUT_DESTINATION=from-invoker \
+  python3 "$ROOT/bin/backends/herdr-layout-apply.py" \
+    "$SOCKET" "$WORKSPACE" "$OLD_TAB" "$OLD_PANE" \
+    22222222222222222222222222222222 fm-launch-22222222222222222222222222222222 --stdin-v1) \
   || fail "the structural layout request failed in the isolated lab"
 NEW_TAB=$(printf '%s' "$RESULT" | jq -r '.layout.tab_id // empty')
 NEW_PANE=$(printf '%s' "$RESULT" | jq -r '.layout.root | select(.type == "pane") | .pane_id // empty')
@@ -119,6 +131,7 @@ jq -e --arg cwd "$CWD" --arg session "$HERDR_LAB_SESSION" --arg pane "$NEW_PANE"
   .argv == ["alpha", "two words"]
   and .cwd == $cwd
   and .probe_env == "exact-value"
+  and .destination_env == "from-herdr-daemon"
   and .herdr_session == $session
   and .herdr_pane == $pane
 ' "$RECORD" >/dev/null || fail "fake Pi did not receive exact argv, cwd, environment, and returned pane identity"
@@ -137,5 +150,5 @@ printf '%s' "$AGENT" | jq -e --arg pane "$NEW_PANE" '
 ' >/dev/null || fail "Herdr inventory did not bind Pi to the returned replacement pane"
 
 lab pane close "$NEW_PANE" >/dev/null || fail "could not clean up the replacement pane"
-pass "live Herdr protocol-20 layout.apply replaced stale shell input and kept exact fake Pi visible and manageable"
+pass "live Herdr structural launch inherited destination environment, replaced stale input, and kept exact fake Pi manageable"
 printf '# herdr=%s protocol=%s session=%s\n' "$HERDR_VERSION" "$PROTOCOL" "$HERDR_LAB_SESSION"

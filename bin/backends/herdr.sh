@@ -2987,6 +2987,219 @@ fm_backend_herdr_current_path() {  # <target>
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
 }
 
+fm_backend_herdr_layout_attempt_write() { # <file> <version> <attempt> <session> <workspace> <old-tab> <old-pane> <label> [<new-tab> <new-pane> <resolution>]
+  local file=$1 version=$2 attempt=$3 session=$4 workspace=$5 old_tab=$6 old_pane=$7 label=$8
+  local new_tab=${9:-} new_pane=${10:-} resolution=${11:-} parent tmp value
+  parent=$(dirname "$file")
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  fi
+  case "$version" in 1|2|3) ;; *) return 1 ;; esac
+  [ "${#attempt}" -eq 32 ] || return 1
+  case "$attempt" in *[!0-9a-f]*) return 1 ;; esac
+  for value in "$session" "$workspace" "$old_tab" "$old_pane" "$label"; do
+    [ -n "$value" ] || return 1
+    case "$value" in *$'\n'*|*=*) return 1 ;; esac
+  done
+  if [ "$version" -ge 2 ]; then
+    for value in "$new_tab" "$new_pane"; do
+      [ -n "$value" ] || return 1
+      case "$value" in *$'\n'*|*=*) return 1 ;; esac
+    done
+  fi
+  if [ "$version" = 3 ]; then
+    case "$resolution" in removed|not-applied) ;; *) return 1 ;; esac
+  elif [ -n "$resolution" ]; then
+    return 1
+  fi
+  tmp=$(umask 077; mktemp "$parent/.${file##*/}.tmp.XXXXXX") || return 1
+  {
+    printf 'version=%s\n' "$version"
+    printf 'attempt=%s\n' "$attempt"
+    printf 'session=%s\n' "$session"
+    printf 'workspace=%s\n' "$workspace"
+    printf 'old_tab=%s\n' "$old_tab"
+    printf 'old_pane=%s\n' "$old_pane"
+    printf 'label=%s\n' "$label"
+    [ "$version" -lt 2 ] || {
+      printf 'new_tab=%s\n' "$new_tab"
+      printf 'new_pane=%s\n' "$new_pane"
+    }
+    [ "$version" != 3 ] || printf 'resolution=%s\n' "$resolution"
+  } >"$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f -- "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+}
+
+fm_backend_herdr_layout_attempt_snapshot() { # <file>
+  local file=$1 lines key count value
+  FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION=
+  FM_BACKEND_HERDR_LAYOUT_ATTEMPT_ID=
+  FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION=
+  FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE=
+  FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB=
+  FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE=
+  FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LABEL=
+  FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB=
+  FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE=
+  FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION=
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  lines=$(wc -l <"$file" 2>/dev/null | tr -d ' ') || return 1
+  for key in version attempt session workspace old_tab old_pane label; do
+    count=$(awk -F= -v key="$key" '$1 == key { count++ } END { print count + 0 }' "$file") || return 1
+    [ "$count" = 1 ] || return 1
+    value=$(awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print }' "$file") || return 1
+    case "$key" in
+      version) FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION=$value ;;
+      attempt) FM_BACKEND_HERDR_LAYOUT_ATTEMPT_ID=$value ;;
+      session) FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION=$value ;;
+      workspace) FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE=$value ;;
+      old_tab) FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB=$value ;;
+      old_pane) FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE=$value ;;
+      label) FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LABEL=$value ;;
+    esac
+  done
+  [ "${#FM_BACKEND_HERDR_LAYOUT_ATTEMPT_ID}" -eq 32 ] || return 1
+  case "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_ID" in *[!0-9a-f]*) return 1 ;; esac
+  for value in "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE" \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LABEL"; do
+    [ -n "$value" ] || return 1
+  done
+  case "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION:$lines" in
+    1:7) ;;
+    2:9|3:10)
+      for key in new_tab new_pane; do
+        count=$(awk -F= -v key="$key" '$1 == key { count++ } END { print count + 0 }' "$file") || return 1
+        [ "$count" = 1 ] || return 1
+        value=$(awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print }' "$file") || return 1
+        [ -n "$value" ] || return 1
+        if [ "$key" = new_tab ]; then FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB=$value; else FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE=$value; fi
+      done
+      if [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 3 ]; then
+        count=$(awk -F= '$1 == "resolution" { count++ } END { print count + 0 }' "$file") || return 1
+        [ "$count" = 1 ] || return 1
+        FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION=$(awk -F= '$1 == "resolution" { sub(/^[^=]*=/, ""); print }' "$file") || return 1
+        case "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" in removed|not-applied) ;; *) return 1 ;; esac
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_backend_herdr_layout_attempt_bind() { # <file> <new-tab> <new-pane>
+  local file=$1 new_tab=$2 new_pane=$3
+  fm_backend_herdr_layout_attempt_snapshot "$file" || return 1
+  [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 1 ] || return 1
+  fm_backend_herdr_layout_attempt_write "$file" 2 \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_ID" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB" \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LABEL" \
+    "$new_tab" "$new_pane"
+}
+
+fm_backend_herdr_layout_attempt_resolve() { # <file> <removed|not-applied> [<new-tab> <new-pane>]
+  local file=$1 resolution=$2 new_tab=${3:-} new_pane=${4:-}
+  fm_backend_herdr_layout_attempt_snapshot "$file" || return 1
+  [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" != 3 ] || return 0
+  if [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 2 ]; then
+    new_tab=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB
+    new_pane=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE
+  fi
+  [ -n "$new_tab" ] || new_tab=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB
+  [ -n "$new_pane" ] || new_pane=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE
+  fm_backend_herdr_layout_attempt_write "$file" 3 \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_ID" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB" \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LABEL" \
+    "$new_tab" "$new_pane" "$resolution"
+}
+
+fm_backend_herdr_layout_attempt_commit() { # <file>
+  local file=$1 info
+  fm_backend_herdr_layout_attempt_snapshot "$file" || return 1
+  [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 2 ] || return 1
+  info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" pane get \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e \
+    --arg workspace "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" \
+    --arg tab "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB" \
+    --arg pane "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" \
+    --arg label "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LABEL" \
+    '.result.pane.workspace_id == $workspace and .result.pane.tab_id == $tab and .result.pane.pane_id == $pane and .result.pane.label == $label' \
+    >/dev/null 2>&1 || return 1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" pane rename \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" --clear >/dev/null 2>&1 || return 1
+  info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" pane get \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg pane "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" \
+    '.result.pane.pane_id == $pane and ((.result.pane.label // "") == "")' >/dev/null 2>&1 || return 1
+  rm -f -- "$file"
+}
+
+# Reconcile only the random label published before the structural request.
+# The durable record advances to version 3 before its owner may return the
+# Treehouse lease or clear the quarantine.
+fm_backend_herdr_layout_attempt_reconcile_remove() { # <file>
+  local file=$1 panes count candidate info old_present=0 new_tab
+  fm_backend_herdr_layout_attempt_snapshot "$file" || {
+    echo "error: Herdr structural launch attempt record is malformed; refusing duplicate launch" >&2
+    return 1
+  }
+  [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" != 3 ] || return 0
+  fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" || return 1
+  panes=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" pane list \
+    --workspace "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" 2>/dev/null) || return 1
+  printf '%s' "$panes" | jq -e '(.result.panes | type) == "array"' >/dev/null 2>&1 || return 1
+  count=$(printf '%s' "$panes" | jq -r --arg label "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LABEL" \
+    '[.result.panes[]? | select(.label == $label)] | length' 2>/dev/null) || return 1
+  [ "$count" -le 1 ] || {
+    echo "error: multiple panes match the quarantined Herdr structural launch attempt; refusing duplicate launch" >&2
+    return 1
+  }
+  if info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" pane get \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE" 2>/dev/null); then
+    if printf '%s' "$info" | jq -e \
+      --arg workspace "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" \
+      --arg tab "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB" \
+      --arg pane "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE" \
+      '.result.pane.workspace_id == $workspace and .result.pane.tab_id == $tab and .result.pane.pane_id == $pane' \
+      >/dev/null 2>&1; then
+      old_present=1
+    else
+      return 1
+    fi
+  fi
+  if [ "$count" = 0 ]; then
+    [ "$old_present" = 1 ] || {
+      echo "error: quarantined Herdr structural launch has neither its original pane nor one exact replacement; refusing duplicate launch" >&2
+      return 1
+    }
+    fm_backend_herdr_layout_attempt_resolve "$file" not-applied
+    return
+  fi
+  candidate=$(printf '%s' "$panes" | jq -r --arg label "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LABEL" \
+    '.result.panes[]? | select(.label == $label) | .pane_id' 2>/dev/null) || return 1
+  info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" pane get "$candidate" 2>/dev/null) || return 1
+  new_tab=$(printf '%s' "$info" | jq -r \
+    --arg workspace "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" --arg pane "$candidate" \
+    --arg label "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LABEL" \
+    '.result.pane | select(.workspace_id == $workspace and .pane_id == $pane and .label == $label) | .tab_id // empty' \
+    2>/dev/null) || return 1
+  [ -n "$new_tab" ] || return 1
+  if [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 2 ]; then
+    [ "$candidate" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" ] \
+      && [ "$new_tab" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB" ] || return 1
+  fi
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" pane close "$candidate" >/dev/null 2>&1 || return 1
+  if fm_backend_herdr_cli "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" pane get "$candidate" >/dev/null 2>&1; then
+    echo "error: exact Herdr structural replacement still exists after close; refusing duplicate launch" >&2
+    return 1
+  fi
+  fm_backend_herdr_layout_attempt_resolve "$file" removed "$new_tab" "$candidate"
+}
+
 # fm_backend_herdr_layout_discard_response_pane: after layout.apply has
 # replaced the old shell, discard only the pane id returned by that response
 # when a later identity check fails. Never target the stale pre-apply pane.
@@ -2997,13 +3210,14 @@ fm_backend_herdr_layout_discard_response_pane() { # <session> <pane>
     echo "warning: Herdr structural launch could not clean the unconfirmed response pane '$pane'" >&2
     return 1
   fi
+  ! fm_backend_herdr_cli "$session" pane get "$pane" >/dev/null 2>&1
 }
 
 # fm_backend_herdr_layout_apply: replace one exact fresh pane through the
 # schema-pinned protocol-20 layout.apply operation, never through shell input.
-fm_backend_herdr_layout_apply() { # <target> <workspace> <tab> <pane> <cwd> <env-json> <command-json>
-  local target=$1 workspace=$2 tab=$3 pane=$4 cwd=$5 env_json=$6 command_json=$7
-  local protocol schema socket info layout out new_tab new_pane
+fm_backend_herdr_layout_apply() { # <target> <workspace> <tab> <pane> <cwd> <env-json> <command-json> <attempt-file> <attempt-id>
+  local target=$1 workspace=$2 tab=$3 pane=$4 cwd=$5 env_json=$6 command_json=$7 attempt_file=$8 attempt_id=$9
+  local protocol schema socket info layout out new_tab new_pane helper_status label payload helper
   fm_backend_herdr_parse_target "$target" || return 1
   [ "$FM_BACKEND_HERDR_PANE" = "$pane" ] || return 1
   command -v python3 >/dev/null 2>&1 || {
@@ -3030,6 +3244,7 @@ fm_backend_herdr_layout_apply() { # <target> <workspace> <tab> <pane> <cwd> <env
       | .properties.command.type == ["array", "null"]
       and .properties.cwd.type == ["string", "null"]
       and .properties.env.type == "object"
+      and .properties.label.type == ["string", "null"]
       and .properties.pane_id.type == ["string", "null"])
   ' >/dev/null 2>&1 || {
     echo "error: Herdr structural launch refused because the live protocol schema does not match the pinned layout.apply pane contract" >&2
@@ -3066,29 +3281,63 @@ fm_backend_herdr_layout_apply() { # <target> <workspace> <tab> <pane> <cwd> <env
     echo "error: Herdr structural launch could not bind the selected session to one live socket" >&2
     return 1
   }
-  out=$(python3 "$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-layout-apply.py" \
-    "$socket" "$workspace" "$tab" "$pane" "$cwd" "$env_json" "$command_json") || return 1
-  [ -n "$out" ] || return 1
+  label="fm-launch-$attempt_id"
+  if [ -e "$attempt_file" ] || [ -L "$attempt_file" ]; then
+    echo "error: Herdr structural launch attempt already exists; refusing duplicate launch" >&2
+    return 1
+  fi
+  fm_backend_herdr_layout_attempt_write "$attempt_file" 1 "$attempt_id" \
+    "$FM_BACKEND_HERDR_SESSION" "$workspace" "$tab" "$pane" "$label" || {
+    echo "error: Herdr structural launch could not publish its durable attempt identity" >&2
+    return 1
+  }
+  payload=$(printf '%s\n%s\n' "$env_json" "$command_json" | python3 -c '
+import json
+import sys
+env = json.loads(sys.stdin.readline())
+command = json.loads(sys.stdin.readline())
+print(json.dumps({"cwd": sys.argv[1], "env": env, "command": command}, separators=(",", ":")))
+' "$cwd") || return 1
+  helper=${FM_BACKEND_HERDR_LAYOUT_APPLY_HELPER:-$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-layout-apply.py}
+  if out=$(printf '%s\n' "$payload" | python3 "$helper" \
+    "$socket" "$workspace" "$tab" "$pane" "$attempt_id" "$label" --stdin-v1); then
+    helper_status=0
+  else
+    helper_status=$?
+  fi
+  if [ "$helper_status" -ne 0 ]; then
+    if [ "$helper_status" -eq 2 ]; then
+      rm -f -- "$attempt_file"
+      return 2
+    fi
+    echo "error: Herdr structural launch outcome is uncertain; its attempt remains quarantined" >&2
+    return 3
+  fi
+  [ -n "$out" ] || return 3
   new_tab=$(printf '%s' "$out" | jq -r '.layout.tab_id // empty' 2>/dev/null) || new_tab=
   new_pane=$(printf '%s' "$out" | jq -r '.layout.root | select(.type == "pane") | .pane_id // empty' 2>/dev/null) || new_pane=
   if ! printf '%s' "$out" | jq -e --arg workspace "$workspace" '
     .type == "layout_apply" and .layout.workspace_id == $workspace
   ' >/dev/null 2>&1 || [ -z "$new_tab" ] || [ -z "$new_pane" ]; then
-    fm_backend_herdr_layout_discard_response_pane "$FM_BACKEND_HERDR_SESSION" "$new_pane" || true
     echo "error: Herdr structural launch response did not return one bound replacement tab and pane id" >&2
-    return 1
+    return 3
   fi
+  fm_backend_herdr_layout_attempt_bind "$attempt_file" "$new_tab" "$new_pane" || return 3
   if ! info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" tab get "$new_tab" 2>/dev/null) \
     || ! printf '%s' "$info" | jq -e --arg workspace "$workspace" --arg tab "$new_tab" \
       '.result.tab.workspace_id == $workspace and .result.tab.tab_id == $tab' >/dev/null 2>&1; then
-    fm_backend_herdr_layout_discard_response_pane "$FM_BACKEND_HERDR_SESSION" "$new_pane" || true
-    return 1
+    if fm_backend_herdr_layout_discard_response_pane "$FM_BACKEND_HERDR_SESSION" "$new_pane"; then
+      fm_backend_herdr_layout_attempt_resolve "$attempt_file" removed || return 3
+    fi
+    return 3
   fi
   if ! info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$new_pane" 2>/dev/null) \
-    || ! printf '%s' "$info" | jq -e --arg workspace "$workspace" --arg tab "$new_tab" --arg pane "$new_pane" \
-      '.result.pane.workspace_id == $workspace and .result.pane.tab_id == $tab and .result.pane.pane_id == $pane' >/dev/null 2>&1; then
-    fm_backend_herdr_layout_discard_response_pane "$FM_BACKEND_HERDR_SESSION" "$new_pane" || true
-    return 1
+    || ! printf '%s' "$info" | jq -e --arg workspace "$workspace" --arg tab "$new_tab" --arg pane "$new_pane" --arg label "$label" \
+      '.result.pane.workspace_id == $workspace and .result.pane.tab_id == $tab and .result.pane.pane_id == $pane and .result.pane.label == $label' >/dev/null 2>&1; then
+    if fm_backend_herdr_layout_discard_response_pane "$FM_BACKEND_HERDR_SESSION" "$new_pane"; then
+      fm_backend_herdr_layout_attempt_resolve "$attempt_file" removed || return 3
+    fi
+    return 3
   fi
   printf '%s\t%s' "$new_tab" "$new_pane"
 }
