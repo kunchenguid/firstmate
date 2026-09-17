@@ -798,6 +798,15 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
       "$kind brief did not require durable resolution when a blocker clears"
     assert_grep 'even when the answer is what started that work' "$brief" \
       "$kind brief did not warn that an answer-started done/working never closes a decision"
+    assert_grep 'A Lavish review loop is exactly such a deliberate external wait' "$brief" \
+      "$kind brief did not classify a Lavish review loop as a deliberate external wait"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_grep '`awaiting: hosting lavish review loop - waiting on captain annotations, re-running poll after each shell timeout`' "$brief" \
+      "$kind brief did not render the Lavish-loop paused line with the configured pause verb"
+    assert_grep 'lavish-axi poll' "$brief" \
+      "$kind brief did not name the foreground lavish poll command"
+    assert_grep 'Never shorten the loop to bounded polls' "$brief" \
+      "$kind brief did not forbid shortening the loop or passing --timeout-ms"
   done
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
