@@ -384,6 +384,37 @@ test_released_then_live_teardown_in_sequence() {
   pass "fm-teardown: released teardown then live teardown both complete, return and destroy run once for the live task only"
 }
 
+test_teardown_retires_task_namespaced_refs() {
+  local dir rc wt head refs
+  dir=$(make_case refs fm/x)
+  wt="$dir/wsroot/pool/1/repo"
+  head=$(git -C "$wt" rev-parse HEAD)
+  write_task_meta "$dir" z released "pr=https://github.com/example/repo/pull/7"
+  sed -i.bak 's|^worktree=.*$|worktree=|' "$dir/home/state/z.meta"
+  rm -f "$dir/home/state/z.meta.bak"
+  write_task_meta "$dir" x active
+  claim_slot "$dir" x
+  git -C "$dir/project" update-ref refs/fm-review/z/head "$head"
+  git -C "$dir/project" update-ref refs/fm-review/z/base "$head"
+  git -C "$dir/project" update-ref refs/fm-workspace/z/head "$head"
+  git -C "$dir/project" update-ref refs/fm-review/x/head "$head"
+  git -C "$dir/project" update-ref refs/fm-workspace/zz/head "$head"
+
+  rc=$(run_teardown "$dir" z)
+  assert_equals 0 "$rc" "released teardown failed: $(case_output "$dir")"
+  refs=$(git -C "$dir/project" for-each-ref --format='%(refname)' refs/fm-review refs/fm-workspace)
+  assert_not_contains "$refs" "refs/fm-review/z/" "teardown left the task's review refs behind"
+  assert_not_contains "$refs" "refs/fm-workspace/z/" "teardown left the task's workspace proof ref behind"
+  assert_contains "$refs" "refs/fm-review/x/head" "teardown retired another task's review ref"
+  assert_contains "$refs" "refs/fm-workspace/zz/head" "teardown retired a ref of a task whose id merely shares a prefix"
+
+  rc=$(run_teardown "$dir" x)
+  assert_equals 0 "$rc" "live task teardown failed: $(case_output "$dir")"
+  refs=$(git -C "$dir/project" for-each-ref --format='%(refname)' refs/fm-review refs/fm-workspace)
+  assert_not_contains "$refs" "refs/fm-review/x/" "an ordinary teardown left its review refs behind"
+  pass "fm-teardown: final teardown retires exactly the task's own fm-review and fm-workspace refs"
+}
+
 test_released_record_with_cleared_worktree_tears_down() {
   local dir rc wt head
   dir=$(make_case cleared fm/x)
@@ -407,6 +438,7 @@ test_released_record_with_cleared_worktree_tears_down() {
 test_scoped_return_then_destroy_with_lease_holder
 test_scoped_return_then_destroy_without_lease_holder
 test_released_record_with_cleared_worktree_tears_down
+test_teardown_retires_task_namespaced_refs
 test_destroy_failure_aborts_with_record_intact_then_retry_succeeds
 test_released_record_leaves_reused_claimed_slot_untouched
 test_released_record_leaves_reused_unclaimed_slot_untouched

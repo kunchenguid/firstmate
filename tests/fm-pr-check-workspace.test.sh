@@ -52,7 +52,7 @@ case " \$* " in
   *" state,headRefOid,headRefName,baseRefName,url "*)
     printf '%s\t%s\t%s\t%s\t%s\n' OPEN '$head' 'fm/$ID' 'main' '$URL'
     ;;
-  *" headRefOid "*) printf '%s\n' '$head' ;;
+  *" headRefOid "*) cat "$fake/current-head" 2>/dev/null || printf '%s\n' '$head' ;;
 esac
 SH
   cat > "$fake/treehouse" <<'SH'
@@ -158,6 +158,29 @@ test_clean_preserved_workspace_is_released() {
   pass "a clean remotely preserved workspace is released as soon as its PR is registered"
 }
 
+test_rerun_on_a_released_record_keeps_pr_head_current() {
+  local rec moved=0123456789abcdef0123456789abcdef01234567
+  rec=$(make_case released-rerun)
+  read_case "$rec"
+  run_pr_check
+  [ "$RC" -eq 0 ] || fail "the releasing registration failed ($RC): $OUT"
+  assert_grep 'workspace_state=released' "$META" "fixture error: the first run should release"
+  [ -z "$(sed -n 's/^worktree=//p' "$META")" ] || fail "fixture error: a released record names no worktree"
+  assert_grep "pr_head=$HEAD" "$META" "the first run did not record the forge head"
+
+  run_pr_check
+  [ "$RC" -eq 0 ] || fail "rerunning on a released record failed ($RC): $OUT"
+  assert_grep "pr_head=$HEAD" "$META" "a rerun on a released record dropped pr_head"
+
+  printf '%s\n' "$moved" > "$FAKEBIN/current-head"
+  run_pr_check
+  [ "$RC" -eq 0 ] || fail "rerunning after the PR head moved failed ($RC): $OUT"
+  assert_grep "pr_head=$moved" "$META" "a rerun on a released record did not record the forge's current head"
+  assert_no_grep "pr_head=$HEAD" "$META" "a stale pr_head survived the rerun"
+  assert_grep 'workspace_state=released' "$META" "a rerun disturbed the released lifecycle state"
+  pass "rerunning fm-pr-check on a released record records the forge's current head instead of dropping it"
+}
+
 test_interrupted_release_is_retried_by_rerunning() {
   local rec
   rec=$(make_case retry)
@@ -198,6 +221,7 @@ test_legacy_record_keeps_its_workspace() {
 
 test_refused_release_keeps_the_registration
 test_clean_preserved_workspace_is_released
+test_rerun_on_a_released_record_keeps_pr_head_current
 test_interrupted_release_is_retried_by_rerunning
 test_legacy_record_keeps_its_workspace
 printf '# all fm-pr-check-workspace tests passed\n'

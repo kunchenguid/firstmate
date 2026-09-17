@@ -3484,6 +3484,19 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   fi
 fi
 
+# Landing is proven and the local copy is gone, so the task-namespaced refs that
+# bin/fm-workspace.sh and bin/fm-review-diff.sh fetched into the shared project
+# clone have no reader left. Retiring them here keeps that clone's ref store
+# bounded; an already retired or never created ref is a quiet no-op.
+if [ "$KIND" != secondmate ] && [ -d "$PROJ" ]; then
+  while IFS= read -r task_ref; do
+    [ -n "$task_ref" ] || continue
+    git -C "$PROJ" update-ref -d "$task_ref" >/dev/null 2>&1 \
+      || echo "warning: could not retire task ref $task_ref in $PROJ" >&2
+  done < <(git -C "$PROJ" for-each-ref --format='%(refname)' \
+    "refs/fm-review/$ID/" "refs/fm-workspace/$ID/" 2>/dev/null || true)
+fi
+
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
 HERDR_PRESENTATION_SESSION=

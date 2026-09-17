@@ -150,9 +150,9 @@ fetch_remote_head() {  # <worktree>
   git -C "$wt" remote get-url origin >/dev/null 2>&1 \
     || fail "workspace has no origin from which refs/pull/$n/head can be fetched"
   git -C "$wt" fetch --quiet origin \
-    "+refs/pull/$n/head:refs/fm-workspace/pull/$n/head" \
+    "+refs/pull/$n/head:refs/fm-workspace/$ID/head" \
     || fail "could not fetch the exact remote head for $PR"
-  fetched=$(git -C "$wt" rev-parse --verify "refs/fm-workspace/pull/$n/head^{commit}" 2>/dev/null) \
+  fetched=$(git -C "$wt" rev-parse --verify "refs/fm-workspace/$ID/head^{commit}" 2>/dev/null) \
     || fail "fetched PR head is not a commit"
   [ "$fetched" = "$REMOTE_HEAD" ] \
     || fail "PR head changed while it was being preserved (forge $REMOTE_HEAD, fetched $fetched); retry"

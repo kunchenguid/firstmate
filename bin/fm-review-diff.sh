@@ -14,12 +14,16 @@
 # A task whose workspace bin/fm-workspace.sh already released
 # (workspace_state=released, worktree= cleared) has no local copy and needs none
 # to be read: the review runs in the durable project clone without any checkout.
-# It fetches the exact refs/pull/<n>/head and the PR's actual recorded base
-# branch - a stacked PR's base is the branch below it, never assumed to be
-# trunk - into refs/fm-review/<task-id>/, requires the fetched head to equal the
-# recorded pr_head= (workspace_head= when no pr_head= was recorded), and diffs
-# those two refs. Missing or mismatched identity refuses; nothing falls back to
-# a local branch, because a released task has none that is authoritative.
+# The forge's current canonical PR identity is authoritative, because the head
+# may have advanced and GitHub retargets an upper stacked PR once the branch
+# below it merges. The helper reads the PR's current head commit, base branch,
+# and base commit from the forge, requires the answer to be for the recorded
+# pr= URL, fetches refs/pull/<n>/head and that base branch into
+# refs/fm-review/<task-id>/, requires the fetched head to equal the forge head
+# and the forge base commit to lie on the fetched base branch, then atomically
+# refreshes the record's pr_head= and workspace_base= and reports any change.
+# Unavailable identity, forge access, fetch, or hash proof refuses; nothing
+# falls back to a local branch, because a released task has none.
 # Usage: fm-review-diff.sh <task-id> [--stat]
 #   --stat prints only the stat summary; default prints stat summary plus full diff.
 set -eu
@@ -69,40 +73,119 @@ print_diff() {  # <git-dir> <base-label> <base-ref> <compare-ref>
   fi
 }
 
+META_LOCK=
+META_LOCK_HELD=0
+META_TMP=
+released_cleanup() {
+  [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
+  [ "$META_LOCK_HELD" != 1 ] || fm_lock_release "$META_LOCK" || true
+}
+
+# Publish the forge's current head and base as the record's durable proof. The
+# pr= tail stays last (bin/fm-pr-lib.sh's identity parser accepts only PR-owned
+# lines from pr= onward), so workspace_base goes before it and pr_head after it.
+refresh_released_proof() {  # <pr-url> <head> <base>
+  local pr_url=$1 head=$2 base=$3 line wrote_base=0
+  META_LOCK=$(fm_meta_lock_path "$META") || { echo "error: cannot resolve the metadata lock for task $ID" >&2; exit 1; }
+  fm_lock_acquire_wait "$META_LOCK" || { echo "error: cannot lock metadata for task $ID" >&2; exit 1; }
+  META_LOCK_HELD=1
+  [ "$(grep '^workspace_state=' "$META" | tail -1 | cut -d= -f2-)" = released ] \
+    && [ "$(grep '^pr=' "$META" | tail -1 | cut -d= -f2-)" = "$pr_url" ] \
+    || { echo "error: task $ID's record changed while its PR was being verified; rerun the review" >&2; exit 1; }
+  META_TMP=$(mktemp "$STATE/.fm-review-meta.XXXXXX") || { echo "error: cannot stage metadata for task $ID" >&2; exit 1; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      workspace_base=*|pr_head=*) ;;
+      pr=*)
+        [ "$wrote_base" = 1 ] || printf 'workspace_base=%s\n' "$base"
+        wrote_base=1
+        printf '%s\npr_head=%s\n' "$line" "$head"
+        ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done < "$META" > "$META_TMP" || { echo "error: cannot stage metadata for task $ID" >&2; exit 1; }
+  chmod 0600 "$META_TMP" && mv -f -- "$META_TMP" "$META" \
+    || { echo "error: cannot publish refreshed PR proof for task $ID" >&2; exit 1; }
+  META_TMP=
+  fm_lock_release "$META_LOCK" || true
+  META_LOCK_HELD=0
+}
+
 review_released() {
-  local pr_url recorded base n head_ref base_ref fetched
+  local pr_url recorded recorded_base row rest forge_state forge_head forge_base forge_base_oid forge_url
+  local n head_ref base_ref fetched
   [ -n "$PROJ" ] || { echo "error: meta for task $ID is missing project=" >&2; exit 1; }
   [ -d "$PROJ" ] || { echo "error: project for task $ID is missing: $PROJ" >&2; exit 1; }
   pr_url=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
   recorded=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
   [ -n "$recorded" ] || recorded=$(grep '^workspace_head=' "$META" | tail -1 | cut -d= -f2- || true)
-  base=$(grep '^workspace_base=' "$META" | tail -1 | cut -d= -f2- || true)
-  n=${pr_url##*/pull/}
-  [ "$n" != "$pr_url" ] || n=
-  n=${n%%[!0-9]*}
-  [ -n "$n" ] || { echo "error: released task $ID records no pull-request number in pr=; cannot review without its workspace" >&2; exit 1; }
-  [ -n "$recorded" ] || { echo "error: released task $ID records no pr_head= or workspace_head= to verify the fetched PR head against" >&2; exit 1; }
-  [ -n "$base" ] || { echo "error: released task $ID records no workspace_base=, so its actual PR base is unknown" >&2; exit 1; }
-  git -C "$PROJ" check-ref-format "refs/heads/$base" >/dev/null 2>&1 \
-    || { echo "error: released task $ID records an invalid PR base branch: $base" >&2; exit 1; }
+  recorded_base=$(grep '^workspace_base=' "$META" | tail -1 | cut -d= -f2- || true)
+  fm_pr_url_parse "$pr_url" && [ "$FM_PR_PROVIDER" = github ] \
+    || { echo "error: released task $ID records no canonical GitHub pull-request URL in pr=; cannot review without its workspace" >&2; exit 1; }
+  pr_url=$FM_PR_URL
+  n=$FM_PR_NUMBER
   git -C "$PROJ" remote get-url origin >/dev/null 2>&1 \
     || { echo "error: project $PROJ has no origin to fetch released task $ID's PR from" >&2; exit 1; }
+  command -v gh >/dev/null 2>&1 \
+    || { echo "error: gh is required to read released task $ID's current PR head and base; remote proof is unavailable" >&2; exit 1; }
+
+  # The forge's current canonical identity is authoritative: a head may have
+  # advanced, and GitHub retargets an upper stacked PR once the branch below it
+  # merges, so neither the recorded head nor the recorded base is trusted.
+  row=$(CDPATH='' cd -- "$PROJ" && gh pr view "$pr_url" \
+    --json state,headRefOid,baseRefName,baseRefOid,url \
+    -q '[.state,.headRefOid,.baseRefName,.baseRefOid,.url] | @tsv' 2>/dev/null) \
+    || { echo "error: could not read PR #$n from the forge for released task $ID; remote proof is unavailable" >&2; exit 1; }
+  forge_state=${row%%$'\t'*}; rest=${row#*$'\t'}
+  forge_head=${rest%%$'\t'*}; rest=${rest#*$'\t'}
+  forge_base=${rest%%$'\t'*}; rest=${rest#*$'\t'}
+  forge_base_oid=${rest%%$'\t'*}
+  forge_url=${rest#*$'\t'}
+  [ "$forge_state" != "$row" ] && [ "$forge_url" != "$rest" ] \
+    || { echo "error: the forge returned incomplete PR data for released task $ID" >&2; exit 1; }
+  [ "$forge_url" = "$pr_url" ] \
+    || { echo "error: the forge answered for $forge_url, not task $ID's recorded $pr_url; refusing to review another PR's identity" >&2; exit 1; }
+  fm_pr_head_valid "$forge_head" && fm_pr_head_valid "$forge_base_oid" \
+    || { echo "error: the forge returned an invalid head or base commit for PR #$n" >&2; exit 1; }
+  case "$forge_base" in ''|*[$'\n\r\t']*) echo "error: the forge returned no usable base branch for PR #$n" >&2; exit 1 ;; esac
+  git -C "$PROJ" check-ref-format "refs/heads/$forge_base" >/dev/null 2>&1 \
+    || { echo "error: the forge returned an invalid base branch for PR #$n: $forge_base" >&2; exit 1; }
+
   head_ref="refs/fm-review/$ID/head"
   base_ref="refs/fm-review/$ID/base"
-  git -C "$PROJ" fetch --quiet origin "+refs/pull/$n/head:$head_ref" "+refs/heads/$base:$base_ref" >/dev/null 2>&1 \
-    || { echo "error: could not fetch PR #$n head and base branch $base for released task $ID; remote proof is unavailable" >&2; exit 1; }
+  git -C "$PROJ" fetch --quiet origin "+refs/pull/$n/head:$head_ref" "+refs/heads/$forge_base:$base_ref" >/dev/null 2>&1 \
+    || { echo "error: could not fetch PR #$n head and base branch $forge_base for released task $ID; remote proof is unavailable" >&2; exit 1; }
   fetched=$(git -C "$PROJ" rev-parse --verify "$head_ref^{commit}" 2>/dev/null) \
     || { echo "error: fetched PR #$n head for released task $ID is not a commit" >&2; exit 1; }
-  git -C "$PROJ" rev-parse --verify --quiet "$base_ref^{commit}" >/dev/null \
-    || { echo "error: fetched base branch $base for released task $ID is not a commit" >&2; exit 1; }
-  [ "$fetched" = "$recorded" ] || {
-    echo "error: PR #$n head is $fetched but task $ID recorded $recorded; rerun bin/fm-pr-check.sh $ID $pr_url to record the current head before reviewing" >&2
+  [ "$fetched" = "$forge_head" ] || {
+    echo "error: fetched PR #$n head $fetched does not match the forge's head $forge_head; the PR moved mid-read, rerun the review" >&2
     exit 1
   }
-  print_diff "$PROJ" "origin/$base (PR #$n base) at $fetched" "$base_ref" "$head_ref"
+  # The base branch may have advanced past the commit the PR is measured
+  # against; pin the ref to that exact forge-reported commit once it is proven
+  # to be part of the fetched base branch.
+  git -C "$PROJ" cat-file -e "$forge_base_oid^{commit}" 2>/dev/null \
+    && git -C "$PROJ" merge-base --is-ancestor "$forge_base_oid" "$base_ref" 2>/dev/null \
+    || { echo "error: the forge's base commit $forge_base_oid for PR #$n is not on the fetched base branch $forge_base; refusing an unverifiable base" >&2; exit 1; }
+  git -C "$PROJ" update-ref "$base_ref" "$forge_base_oid" \
+    || { echo "error: could not pin the verified base commit for released task $ID" >&2; exit 1; }
+
+  if [ -n "$recorded" ] && [ "$recorded" != "$forge_head" ]; then
+    echo "changed: PR #$n head advanced from $recorded to $forge_head since it was recorded"
+  fi
+  if [ -n "$recorded_base" ] && [ "$recorded_base" != "$forge_base" ]; then
+    echo "changed: PR #$n base was retargeted from $recorded_base to $forge_base"
+  fi
+  refresh_released_proof "$pr_url" "$forge_head" "$forge_base"
+  print_diff "$PROJ" "origin/$forge_base (PR #$n base $forge_base_oid) at $forge_head" "$base_ref" "$head_ref"
 }
 
 if [ "$WORKSPACE_STATE" = released ] && [ -z "$WT" ]; then
+  # shellcheck source=bin/fm-pr-lib.sh
+  . "$SCRIPT_DIR/fm-pr-lib.sh"
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  trap released_cleanup EXIT
   review_released
   exit 0
 fi
