@@ -101,6 +101,7 @@ Untracked files and directories whose names begin with `scratchpad` are also git
 ### Format and lifecycle references
 
 - `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
+- An executor task (`kind=executor`) additionally records `issue=`, `issue_url=` when the project's origin is github.com, `executor_base=`, and `executor_launched=`, and keeps two private runtime records beside its check: `state/<id>.executor-exit`, the exit status the pane shell writes when the one-shot command returns, and `state/<id>.executor-notified`, the last outcome the watcher delivered for that incarnation; `bin/fm-executor-lib.sh` owns both.
 
 - `bin/fm-contributions.sh` owns durable published-contribution records under each task, observation bounds, equivalent triage-label configuration, and the authenticated contribution check.
 
@@ -835,6 +836,13 @@ For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected exec
 Pi-family secondmates can start unattended in Firstmate-seeded homes without accepting project trust manually; [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the capability requirement, session-only approval scope, and older-version fallback, with [regression evidence](verification/runtime-backends.md#pi-seeded-secondmate-project-trust).
 
 For omp secondmate launches, `fm-spawn.sh` passes no `-e` at all: omp auto-discovers the home's tracked `.omp/extensions/` with no trust gate, and naming a discovered file with `-e` as well loads it twice; every omp launch instead carries the tracked `.omp/fm-worker-overlay.yml` posture overlay through `--config`, which [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns.
+
+### Executor launch
+
+`bin/fm-spawn.sh --executor` launches the one-shot executor kind on an adapter's verified non-interactive form only: `claude -p`, `codex exec`, and `opencode run`, each threading `--model` and `--effort` under the same record-and-omit contract as its interactive launch and carrying its autonomy flag the same way.
+Every other adapter is refused for `--executor` by name rather than launched interactively, because a TUI parked on a brief nobody answers would look like a working executor to nothing but the runtime bound.
+The escape hatch is unchanged: a whitespace-containing raw launch command is launched as given, and for an executor it receives the rendered brief as its final argument through the operational-input encode path unless it places `__BRIEF__` itself, so a vendor CLI the tracked code has never seen can still run one; `fm-spawn.sh --help` owns the exact contract.
+The flags themselves are vendor-emitted facts, so [`verification/executor.md`](verification/executor.md) records the dated per-adapter evidence and names the live guard that refreshes it.
 
 ## Claude permission mode (config/claude-permission-mode)
 
@@ -2385,6 +2393,7 @@ FM_CHECK_INTERVAL=300   # seconds between slow checks (authenticated merge polls
 FM_TASK_INBOX_GRACE_SECS=90   # seconds an unhandled steering-inbox message may sit before the watcher attempts doorbell delivery on an idle pane; also the minimum spacing between attempts
 FM_TASK_INBOX_RING_MAX=3      # watcher delivery attempts without an acknowledgement before the task surfaces as a stale wake for recovery
 FM_TASK_INBOX_BUSY_MAX=2      # consecutive busy-deferred due polls before a stuck-busy stale wake; 1..999999999, at most 9 decimal digits, otherwise 2; policy: bin/fm-task-inbox-lib.sh
+FM_EXECUTOR_MAX_RUNTIME=7200  # seconds a kind=executor process may run before its poll reports executor-stale once for that incarnation; a value that is not a positive integer uses 7200 (bin/fm-executor-lib.sh)
 FM_CHECK_TIMEOUT=30     # seconds allowed per slow check script
 FM_MAIL_CHECK_BUDGET=15   # seconds allowed for one standing mail poll; valid 5..25, cut to fit FM_CHECK_TIMEOUT
 FM_MAIL_POLL_MAX_WAKES=20   # per-poll wake cap for a mail poll; valid 1..200, keeps a flood from flooding firstmate
