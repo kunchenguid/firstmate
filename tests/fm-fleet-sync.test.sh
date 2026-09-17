@@ -87,6 +87,22 @@ advance_origin() {
   git -C "$work" push -q origin main
 }
 
+# declare_develop <home> <name>: give <name>'s origin a develop branch carrying
+# .firstmate-base and two commits main never sees - the shape of a project that
+# develops off its repository default. The clone is untouched, so it still sits
+# on main with no knowledge of develop until the sync fetches.
+declare_develop() {
+  local home=$1 name=$2 work
+  work="$home/work-$name"
+  git -C "$work" checkout -q -b develop
+  printf 'develop\n' > "$work/.firstmate-base"
+  git -C "$work" add .firstmate-base
+  git -C "$work" commit -qm "declare develop"
+  commit_file "$work" file.txt d1 D1
+  git -C "$work" push -q -u origin develop
+  git -C "$work" checkout -q main
+}
+
 head_sha() { git -C "$1" rev-parse HEAD; }
 
 # run_sync <home> [args...]: run fleet-sync against an isolated home, stdout only.
@@ -235,6 +251,53 @@ run_sync_guarded() {
 }
 
 # --- tests ------------------------------------------------------------------
+
+test_declared_development_branch_is_what_the_clone_tracks() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" devdecl)
+  declare_develop "$home" devdecl
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "moved onto develop" "the clone is reported as moved onto the declared branch"
+  assert_not_contains "$out" "STUCK" "a clean clone on the repo default is moved, not left stuck"
+  [ "$(git -C "$clone" symbolic-ref --short HEAD)" = develop ] \
+    || fail "clone was not moved onto the declared development branch"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/develop)" ] \
+    || fail "clone was not brought current against origin/develop"
+  pass "a project that declares develop is kept current against origin/develop, not origin/main"
+}
+
+test_undeclared_project_still_tracks_the_repo_default() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair "$home" nodecl)
+  advance_origin "$home" nodecl C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "nodecl: synced" "a project with no declaration syncs exactly as before"
+  [ "$(git -C "$clone" symbolic-ref --short HEAD)" = main ] || fail "undeclared project left its default branch"
+  pass "a project with no declared development branch is unaffected"
+}
+
+test_parked_feature_branch_is_still_stuck_untouched() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair "$home" parked)
+  declare_develop "$home" parked
+  git -C "$clone" checkout -q -b parked-work
+  before=$(head_sha "$clone")
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "STUCK" "a deliberately parked branch is reported, not moved"
+  assert_contains "$out" "origin/develop" "the stuck report counts against the declared branch"
+  [ "$(git -C "$clone" symbolic-ref --short HEAD)" = parked-work ] || fail "parked branch was checked out from under the captain"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "parked clone was modified"
+  pass "only the repo default is moved onto the declared branch; another parked branch is left alone"
+}
 
 test_detached_clean_ancestor_recovers() {
   local home clone out before after
@@ -719,3 +782,6 @@ test_non_signature_fetch_failure_is_not_retried
 test_non_clone_dir_never_syncs_the_enclosing_repo
 test_non_clone_dir_named_directly_never_syncs_the_enclosing_repo
 test_symlinked_clone_still_syncs
+test_declared_development_branch_is_what_the_clone_tracks
+test_undeclared_project_still_tracks_the_repo_default
+test_parked_feature_branch_is_still_stuck_untouched

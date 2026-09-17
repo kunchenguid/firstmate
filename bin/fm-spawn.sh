@@ -2461,9 +2461,9 @@ freshen_spawn_worktree_base() {  # <worktree>
   # A freshly allocated pool slot lands on the repo's DEFAULT branch, which is
   # silently the wrong base for a project that develops elsewhere: a task once
   # audited a tree 1036 commits behind origin/develop and correctly reported
-  # that nothing in its brief existed. The project's base= record in
-  # data/projects.md names the right branch; absent one, the default stands.
-  default=$("$FM_ROOT/bin/fm-project-mode.sh" --base "$PROJ_NAME" 2>/dev/null || true)
+  # that nothing in its brief existed. bin/fm-project-base.sh owns which branch
+  # the project declares; absent a declaration, the default stands.
+  default=$("$FM_ROOT/bin/fm-project-base.sh" "$worktree" "$PROJ_NAME" 2>/dev/null || true)
   base_source=recorded
   if [ -z "$default" ]; then
     base_source=default

@@ -115,7 +115,8 @@ resolve_project_arg() {
   printf '%s\n' "$arg"
 }
 
-default_branch() {
+# The repository's own default branch, with no project declaration considered.
+repo_default_branch() {
   local ref branch
   ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
   if [ -n "$ref" ]; then
@@ -129,6 +130,24 @@ default_branch() {
     fi
   done
   return 1
+}
+
+# The branch this clone must be kept current against. A project that develops off
+# its repository default - most of the captain's do - would otherwise be compared
+# against origin/main and report itself current while rotting: one clone sat 91
+# commits behind origin/develop under a "0 commits behind origin/main" verdict.
+# bin/fm-project-base.sh owns the declaration; an undeclared or unfetchable
+# branch falls back to the repository default, so nothing changes for a project
+# that develops on it.
+default_branch() {
+  local declared
+  declared=$("$FM_ROOT/bin/fm-project-base.sh" "$PROJ" "$label" 2>/dev/null || true)
+  if [ -n "$declared" ] \
+      && git -C "$PROJ" rev-parse --verify --quiet "refs/remotes/origin/$declared^{commit}" >/dev/null 2>&1; then
+    echo "$declared"
+    return 0
+  fi
+  repo_default_branch
 }
 
 first_line() {
@@ -360,17 +379,35 @@ sync_project() {
   dirty=no
   [ -z "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
   recovered=no
+  recovery_verb="re-attached"
 
   if [ "$cur" != "$DEFAULT" ]; then
-    # Off the default branch. Auto-recover only the one unambiguously safe drift:
+    # Off the development branch. Auto-recover only unambiguously safe drift. The first:
     # a clean, detached HEAD that holds no unique commits (it is an ancestor of
     # origin/<default>) and whose <default> branch is free to check out here.
     # Re-attaching to an already-published commit strands nothing, and the
     # fast-forward path below then catches the clone up. Anything else - a
-    # non-default named branch, a detached HEAD with unique commits, a dirty tree,
-    # or <default> already checked out elsewhere - may hold real work, so it is
+    # detached HEAD with unique commits, a dirty tree, another named branch, or
+    # <default> already checked out elsewhere - may hold real work, so it is
     # reported loudly and left untouched.
-    if [ -z "$cur" ] && [ "$dirty" = no ] \
+    # The second safe drift is the repository's OWN default branch when the
+    # project declares a different development branch: every clone lands there,
+    # and it would otherwise be STUCK forever, loud but never self-healing.
+    # Moving it strands nothing while the tree is clean and the branch it leaves
+    # holds no commit that is not already published. Only that branch: any other
+    # named branch may be where the captain deliberately parked this clone.
+    if [ "$dirty" = no ] && [ -n "$cur" ] && [ "$cur" = "$(repo_default_branch || true)" ] \
+        && [ -z "$(git -C "$PROJ" rev-list --max-count=1 HEAD --not --remotes 2>/dev/null)" ] \
+        && ! default_checked_out_elsewhere \
+        && local_default_safe_for_recovery; then
+      if ! git -C "$PROJ" checkout --quiet "$DEFAULT" 2>/dev/null; then
+        report_stuck "$(stuck_state)"
+        return 0
+      fi
+      recovered=yes
+      recovery_verb="moved onto"
+      cur=$DEFAULT
+    elif [ -z "$cur" ] && [ "$dirty" = no ] \
         && git -C "$PROJ" merge-base --is-ancestor HEAD "$BASE" 2>/dev/null \
         && ! default_checked_out_elsewhere \
         && local_default_safe_for_recovery; then
@@ -405,7 +442,7 @@ sync_project() {
   }
   if [ "$local_rev" = "$remote_rev" ]; then
     if [ "$recovered" = yes ]; then
-      echo "$label: recovered: re-attached $DEFAULT (already current)"
+      echo "$label: recovered: $recovery_verb $DEFAULT (already current)"
     else
       echo "$label: already current"
     fi
@@ -433,7 +470,7 @@ sync_project() {
     return 0
   }
   if [ "$recovered" = yes ]; then
-    echo "$label: recovered: re-attached $DEFAULT, synced $before..$after"
+    echo "$label: recovered: $recovery_verb $DEFAULT, synced $before..$after"
   else
     echo "$label: synced $before..$after"
   fi
