@@ -34,8 +34,13 @@ test_primary_and_secondmate_instruction_generation() {
     "generated implementation brief withholds the proportionality criterion from the worker that drives auto-fix gates"
   assert_grep 'The count is advisory rather than enforced' "$ship" \
     "generated implementation brief presents the advisory count as an enforced limit"
-  assert_grep 'Once you have sent three, escalate the next gate to firstmate' "$ship" \
-    "generated implementation brief does not make the worker stop at the cap"
+  assert_grep 'It also bounds only what you initiate, not what the pipeline does inside one of those responses' "$ship" \
+    "generated implementation brief hides that three responses can chain into more fix rounds"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'Once you have sent three, do not send a fourth `--action fix`' "$ship" \
+    "generated implementation brief does not stop the worker opening a fourth fix round"
+  assert_grep 'keep answering gates that hold nothing actionable' "$ship" \
+    "generated implementation brief strands a capped run on an unsatisfiable escalation"
   assert_no_grep 'not a correctness or contract defect' "$ship" \
     "generated implementation brief restated the post-cap sorting criteria the skill owns"
 

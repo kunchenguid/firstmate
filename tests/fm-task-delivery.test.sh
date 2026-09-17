@@ -372,8 +372,10 @@ STUB
   payload="$TMP_ROOT/promote-dod/payload-promote-dod-no-mistakes"
   assert_grep "ask-user findings are never yours to answer: escalate to firstmate" "$payload" \
     "promoted no-mistakes worker did not receive the ask-user escalation rule"
-  assert_grep "verbatim and unparaphrased (id, severity, file, line, description, authority), whatever action class the gate assigned them" "$payload" \
-    "promoted no-mistakes worker did not receive the class-agnostic snapshot contract"
+  assert_grep "write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority)" "$payload" \
+    "promoted no-mistakes worker did not receive the ask-user-only snapshot contract"
+  assert_grep "At a fix-round cap stop the same event and snapshot shape carries every finding still holding that gate instead" "$payload" \
+    "promoted no-mistakes worker did not receive the cap-stop snapshot clause"
   assert_grep 'needs-decision [key=nm-<run>-<step>]: findings=<id1>,<id2>,... file='"$home/data/promote-dod-no-mistakes/nm-<run>-findings.txt" "$payload" \
     "promoted no-mistakes worker did not receive the structured escalation event"
   assert_grep "NEVER pass \`--yes\` (or \`-y\`)" "$payload" \

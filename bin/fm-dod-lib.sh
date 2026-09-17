@@ -226,9 +226,10 @@ fm_brief_intent_address_line() {  # <file>
 fm_ask_user_escalation_block() {  # <data-dir> <task-id>
   local data=$1 id=$2
   cat <<EOF
-   For a no-mistakes gate you escalate instead of answering - an ask-user gate, or the gate you stop at once the fix-round cap is reached - escalate every finding holding that gate as one event plus one snapshot file, using that same shape even when the gate holds only a single finding: write those findings, verbatim and unparaphrased (id, severity, file, line, description, authority), whatever action class the gate assigned them, to \`$data/$id/nm-<run>-findings.txt\`, then report the gate with
+   For a no-mistakes ask-user gate specifically, escalate all ask-user findings as one event plus one snapshot file, using that same shape even when the gate holds only a single ask-user finding: write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority), to \`$data/$id/nm-<run>-findings.txt\`, then report the gate with
    \`needs-decision [key=nm-<run>-<step>]: findings=<id1>,<id2>,... file=$data/$id/nm-<run>-findings.txt\`
-   naming every one of those finding ids. The status line only points at the file; it never restates or summarizes a finding's content.
+   naming every ask-user finding id from that gate. The status line only points at the file; it never restates or summarizes a finding's content.
+   At a fix-round cap stop the same event and snapshot shape carries every finding still holding that gate instead, whatever action class it was assigned.
 EOF
 }
 
@@ -290,8 +291,9 @@ Three firstmate-specific rules layer on top of that guidance:
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
 - Fix rounds are capped at three per run, counted as your own \`no-mistakes axi respond --action fix\` responses and never rounds the pipeline chains inside one drive call; \`ask-user-authority\` step 5 owns that cap and every criterion for what is fixed past it.
   Its proportionality half binds you on every gate you drive yourself: fix only what makes the deliverable wrong, and approve past wording, restatement, simplification, and documentation-polish findings even when the reviewer is right, unless the text is actually false.
-  The count is advisory rather than enforced: nothing records it durably, so it resets on a context reset or a worker recovery, and review-round-cap-enforcement tracks the durable version.
-  Once you have sent three, escalate the next gate to firstmate using rule 6's escalation format and stop, instead of responding to that gate yourself.
+  The count is advisory rather than enforced: nothing records it durably, so it resets on a context reset or a worker recovery.
+  It also bounds only what you initiate, not what the pipeline does inside one of those responses, so three of them can still chain into more fix rounds and more wall clock than the number suggests.
+  Once you have sent three, do not send a fourth \`--action fix\`: escalate a gate that still holds actionable findings to firstmate using rule 6's escalation format and stop, and keep answering gates that hold nothing actionable.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF

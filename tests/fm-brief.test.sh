@@ -385,17 +385,18 @@ test_ask_user_escalation_format() {
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
 
-  # An escalated no-mistakes gate must escalate every finding holding it as one
-  # status event plus one verbatim findings snapshot file, using that same shape
-  # even for a single finding, never paraphrased into the status line.
-  assert_grep "escalate every finding holding that gate as one event plus one snapshot file" "$brief" \
-    "ship rule 6 lost the one-event-plus-snapshot-file escalation contract"
-  assert_grep "an ask-user gate, or the gate you stop at once the fix-round cap is reached" "$brief" \
-    "ship rule 6 must cover the fix-round cap stop as well as an ask-user gate"
-  assert_grep "using that same shape even when the gate holds only a single finding" "$brief" \
+  # A no-mistakes ask-user gate must escalate its ask-user findings as one status
+  # event plus one verbatim findings snapshot file, using that same shape even
+  # for a single finding, never paraphrased into the status line. A fix-round cap
+  # stop reuses that shape but widens the slice to every finding holding the gate.
+  assert_grep "escalate all ask-user findings as one event plus one snapshot file" "$brief" \
+    "ship rule 6 lost the one-event-plus-snapshot-file ask-user contract"
+  assert_grep "using that same shape even when the gate holds only a single ask-user finding" "$brief" \
     "ship rule 6 must require the same shape for a single finding"
-  assert_grep "verbatim and unparaphrased (id, severity, file, line, description, authority), whatever action class the gate assigned them" "$brief" \
-    "ship rule 6 must snapshot the blocking findings regardless of action class"
+  assert_grep "write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority)" "$brief" \
+    "ship rule 6 must limit the verbatim axi slice to ask-user findings"
+  assert_grep "At a fix-round cap stop the same event and snapshot shape carries every finding still holding that gate instead, whatever action class it was assigned." "$brief" \
+    "ship rule 6 must widen the snapshot slice at a fix-round cap stop"
   # shellcheck disable=SC2016  # single quotes are deliberate: backticks and the key/findings/file tokens must stay literal
   assert_grep 'needs-decision [key=nm-<run>-<step>]: findings=<id1>,<id2>,... file='"$home/data/$id/nm-<run>-findings.txt" "$brief" \
     "ship rule 6 must render the exact needs-decision status line"
