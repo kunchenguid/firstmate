@@ -2074,12 +2074,12 @@ if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
 fi
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ]; then
   if ! fm_recovery_marker_reopen_announced "$WATCHER_DOWNTIME_MARKER"; then
-    echo "watcher: recovery state could not be reopened safely; retaining stale lock evidence" >&2
+    echo "watcher: recovery state could not be reopened safely; releasing the watcher lock" >&2
     exit 1
   fi
 fi
 if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
-  echo "watcher: recovery state could not be consumed safely; retaining stale lock evidence" >&2
+  echo "watcher: recovery state could not be consumed safely; releasing the watcher lock" >&2
   exit 1
 fi
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then

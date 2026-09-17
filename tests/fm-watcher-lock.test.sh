@@ -1200,11 +1200,14 @@ plant_partial_watch_lock() {  # <state> <pid>
 }
 
 watch_lock_files_complete() {  # <lockdir>
-  local lockdir=$1
+  local lockdir=$1 identity
   [ -s "$lockdir/pid" ] || return 1
   [ -s "$lockdir/fm-home" ] || return 1
   [ -s "$lockdir/watcher-path" ] || return 1
-  [ -s "$lockdir/pid-identity" ] || return 1
+  # Every field is written with a trailing newline, so -s alone is true for an
+  # empty identity. The invariant is a usable identity, not a present file.
+  identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  [ -n "${identity//[[:space:]]/}" ]
 }
 
 test_watch_lock_publish_is_complete() {
@@ -1216,7 +1219,9 @@ test_watch_lock_publish_is_complete() {
     . "$1"
     fm_lock_try_acquire "$2" || exit 7
     complete=no
-    [ -s "$2/pid" ] && [ -s "$2/fm-home" ] && [ -s "$2/watcher-path" ] && [ -s "$2/pid-identity" ] && complete=yes
+    ident=$(cat "$2/pid-identity" 2>/dev/null || true)
+    [ -s "$2/pid" ] && [ -s "$2/fm-home" ] && [ -s "$2/watcher-path" ] \
+      && [ -n "${ident//[[:space:]]/}" ] && complete=yes
     printf "complete=%s home=%s path=%s\n" "$complete" "$(cat "$2/fm-home")" "$(cat "$2/watcher-path")"
     fm_lock_release "$2"
   ' _ "$LIB" "$lockdir") || fail "watch lock acquire failed: $out"
@@ -1250,7 +1255,9 @@ test_watch_lock_crash_before_publish_leaves_no_lock() {
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     fm_lock_try_acquire "$2" || exit 7
-    [ -s "$2/pid" ] && [ -s "$2/fm-home" ] && [ -s "$2/watcher-path" ] && [ -s "$2/pid-identity" ] || exit 8
+    ident=$(cat "$2/pid-identity" 2>/dev/null || true)
+    [ -s "$2/pid" ] && [ -s "$2/fm-home" ] && [ -s "$2/watcher-path" ] \
+      && [ -n "${ident//[[:space:]]/}" ] || exit 8
     fm_lock_release "$2"
   ' _ "$LIB" "$lockdir" || fail "acquire after crash-before-publish left a wedged lock"
   [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] \
@@ -1339,6 +1346,12 @@ test_arm_reclaims_half_written_dead_watch_lock() {
     sleep 0.1
     i=$((i + 1))
   done
+  # An arm that is still polling would never return from wait (its own confirm
+  # budget outlasts this window), so tear it and its child watcher down first
+  # and fail with the diagnostic instead of hanging the suite.
+  kill "$armpid" 2>/dev/null || true
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  [ -z "$lock_pid" ] || kill "$lock_pid" 2>/dev/null || true
   wait "$armpid" 2>/dev/null || true
   fail "arm did not reclaim pid-only dead watch lock: $(cat "$armout")"
 }
@@ -1378,32 +1391,41 @@ test_half_written_live_watch_lock_is_refused() {
   pass "live pid-only watch lock is not reclaimed"
 }
 
-test_foreign_home_watch_lock_is_not_reclaimed() {
-  local dir state lockdir dead owner out lockpid
+plant_foreign_home_watch_lock() {  # <state> <pid>
+  local state=$1 pid=$2 owner
+  owner=$(mktemp -d "$state/.watch.lock.owner.XXXXXX") || return 1
+  printf '%s\n' "$pid" > "$owner/pid" || return 1
+  printf '%s\n' "/not/this/home" > "$owner/fm-home" || return 1
+  printf '%s\n' "$WATCH" > "$owner/watcher-path" || return 1
+  printf '%s\n' "foreign watcher identity" > "$owner/pid-identity" || return 1
+  ln -s "$owner" "$state/.watch.lock"
+}
+
+test_foreign_home_watch_lock_with_fresh_beacon_is_not_reclaimed() {
+  local dir state lockdir dead out lockpid
   dir=$(make_case foreign-home-lock)
   state="$dir/state"
   lockdir="$state/.watch.lock"
   dead=$(dead_pid)
-  owner=$(mktemp -d "$state/.watch.lock.owner.XXXXXX") || fail "could not create foreign owner dir"
-  printf '%s\n' "$dead" > "$owner/pid"
-  printf '%s\n' "/not/this/home" > "$owner/fm-home"
-  printf '%s\n' "$WATCH" > "$owner/watcher-path"
-  printf '%s\n' "foreign watcher identity" > "$owner/pid-identity"
-  ln -s "$owner" "$lockdir"
+  plant_foreign_home_watch_lock "$state" "$dead" || fail "could not plant foreign-home lock"
+  # A fresh beacon is the one reason to believe an unseen peer is really there.
+  touch "$state/.last-watcher-beat"
   out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     abandoned=no
     foreign=no
+    stale=no
     fm_watch_lock_abandoned_own_home "$STATE" "$2" "$FM_HOME" && abandoned=yes
     fm_watch_lock_foreign_home "$3" && foreign=yes
+    fm_watch_lock_beacon_stale "$STATE" && stale=yes
     if fm_lock_try_acquire "$3"; then
-      printf "acquired abandoned=%s foreign=%s newpid=%s\n" \
-        "$abandoned" "$foreign" "$(cat "$3/pid")"
+      printf "acquired abandoned=%s foreign=%s stale=%s newpid=%s\n" \
+        "$abandoned" "$foreign" "$stale" "$(cat "$3/pid")"
       fm_lock_release "$3"
       exit 7
     fi
-    printf "refused abandoned=%s foreign=%s held=%s\n" \
-      "$abandoned" "$foreign" "${FM_LOCK_HELD_PID:-}"
+    printf "refused abandoned=%s foreign=%s stale=%s held=%s\n" \
+      "$abandoned" "$foreign" "$stale" "${FM_LOCK_HELD_PID:-}"
   ' _ "$LIB" "$WATCH" "$lockdir") || fail "foreign-home lock acquire crashed: $out"
   case "$out" in
     *"abandoned=no"*) ;;
@@ -1414,14 +1436,103 @@ test_foreign_home_watch_lock_is_not_reclaimed() {
     *) fail "other-home lock was not classified foreign: $out" ;;
   esac
   case "$out" in
+    *"stale=no"*) ;;
+    *) fail "fresh beacon was classified stale: $out" ;;
+  esac
+  case "$out" in
     *"refused"*) ;;
-    *) fail "other-home watch lock was reclaimed: $out" ;;
+    *) fail "other-home watch lock with a fresh beacon was reclaimed: $out" ;;
   esac
   lockpid=$(cat "$lockdir/pid" 2>/dev/null || true)
   [ "$lockpid" = "$dead" ] || fail "other-home lock pid was clobbered (got '$lockpid')"
   [ "$(cat "$lockdir/fm-home")" = "/not/this/home" ] \
     || fail "other-home lock fm-home was rewritten"
-  pass "watch lock naming another home is not reclaimed"
+  pass "watch lock naming another home is not reclaimed while the beacon is fresh"
+}
+
+test_foreign_home_dead_watch_lock_with_stale_beacon_is_reclaimed() {
+  local dir state lockdir dead out newpid
+  dir=$(make_case foreign-home-stale-beacon)
+  state="$dir/state"
+  lockdir="$state/.watch.lock"
+  dead=$(dead_pid)
+  plant_foreign_home_watch_lock "$state" "$dead" || fail "could not plant foreign-home lock"
+  # No beacon at all is the strongest form of stale: nothing has run here.
+  rm -f "$state/.last-watcher-beat"
+  out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    foreign=no
+    stale=no
+    fm_watch_lock_foreign_home "$3" && foreign=yes
+    fm_watch_lock_beacon_stale "$STATE" && stale=yes
+    if fm_lock_try_acquire "$3"; then
+      printf "acquired foreign=%s stale=%s recovered=%s newpid=%s home=%s\n" \
+        "$foreign" "$stale" "${FM_LOCK_RECOVERED_PID:-}" "$(cat "$3/pid")" \
+        "$(cat "$3/fm-home")"
+      fm_lock_release "$3"
+    else
+      printf "refused foreign=%s stale=%s held=%s\n" "$foreign" "$stale" "${FM_LOCK_HELD_PID:-}"
+      exit 7
+    fi
+  ' _ "$LIB" "$WATCH" "$lockdir") \
+    || fail "dead foreign-home lock with a stale beacon stayed unreclaimable: $out"
+  case "$out" in
+    *"foreign=yes"*) ;;
+    *) fail "planted lock was not classified foreign: $out" ;;
+  esac
+  case "$out" in
+    *"stale=yes"*) ;;
+    *) fail "missing beacon was not classified stale: $out" ;;
+  esac
+  case "$out" in
+    *"recovered=$dead"*) ;;
+    *) fail "reclaim did not report the dead foreign pid as recovered: $out" ;;
+  esac
+  newpid=${out#*newpid=}
+  newpid=${newpid%% *}
+  [ -n "$newpid" ] && [ "$newpid" != "$dead" ] || fail "dead foreign pid was not replaced: $out"
+  case "$out" in
+    *"home=$dir"*) ;;
+    *) fail "reclaimed lock did not republish this home: $out" ;;
+  esac
+  [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] || fail "reclaimed lock was not released"
+  pass "dead watch lock naming another home is reclaimed once the beacon is stale"
+}
+
+test_pid_identity_is_non_empty_on_this_host() {
+  local live identity
+  sleep 300 &
+  live=$!
+  identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$live") \
+    || { kill "$live" 2>/dev/null || true; fail "fm_pid_identity failed for a live process on $(uname)"; }
+  kill "$live" 2>/dev/null || true
+  wait "$live" 2>/dev/null || true
+  [ -n "${identity//[[:space:]]/}" ] \
+    || fail "fm_pid_identity returned an empty identity on $(uname) ('$identity')"
+  pass "process identity is non-empty for a live process on this host"
+}
+
+test_watch_lock_is_not_published_without_an_identity() {
+  local dir state lockdir fakebin rc
+  dir=$(make_case watch-lock-no-identity)
+  state="$dir/state"
+  lockdir="$state/.watch.lock"
+  fakebin="$dir/nops"
+  mkdir -p "$fakebin"
+  # Deny every identity source: no readable /proc tree, and a ps that fails.
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/ps"
+  chmod +x "$fakebin/ps"
+  rc=0
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" \
+    FM_PROC_ROOT_OVERRIDE="$dir/no-such-proc" bash -c '
+      . "$1"
+      fm_lock_try_acquire "$2" || exit 3
+      fm_lock_release "$2"
+    ' _ "$LIB" "$lockdir" || rc=$?
+  [ "$rc" -eq 3 ] || fail "watch lock acquire did not fail loudly without an identity (rc=$rc)"
+  [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] \
+    || fail "an unconfirmable watch lock was published without a pid-identity"
+  pass "watch lock creation fails loudly instead of publishing an empty identity"
 }
 
 test_wait_deadline_reaps_a_stopped_child
@@ -1459,4 +1570,7 @@ test_watch_lock_crash_before_publish_leaves_no_lock
 test_half_written_dead_watch_lock_is_reclaimed
 test_arm_reclaims_half_written_dead_watch_lock
 test_half_written_live_watch_lock_is_refused
-test_foreign_home_watch_lock_is_not_reclaimed
+test_foreign_home_watch_lock_with_fresh_beacon_is_not_reclaimed
+test_foreign_home_dead_watch_lock_with_stale_beacon_is_reclaimed
+test_pid_identity_is_non_empty_on_this_host
+test_watch_lock_is_not_published_without_an_identity

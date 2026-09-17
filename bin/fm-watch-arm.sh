@@ -223,8 +223,15 @@ cycle_mark_predecessor_successor() {
   fm_lock_release "$CYCLE_LOG_LOCK"
 }
 
+# clear_stale_recorded_watcher_lock [allow-live-pid]
+# The recorded-ownership branch has no liveness check of its own, so only the
+# --restart caller that already proved the live holder is a reused pid may pass
+# allow-live-pid. Every other caller reaches that branch after the recorded pid
+# was seen dead, and the predicate can flip between the two reads - without this
+# gate the fall-through would delete a live watcher's lock and break the
+# singleton.
 clear_stale_recorded_watcher_lock() {
-  local lock_home lock_path lock_identity
+  local allow_live=${1:-} lock_home lock_path lock_identity lock_pid
   if fm_watch_lock_abandoned_own_home "$STATE" "$WATCH" "$FM_HOME"; then
     fm_recovery_transition "$STATE/.watcher-down" clear-stale-lock "$WATCH_LOCK" downtime
     return
@@ -235,6 +242,10 @@ clear_stale_recorded_watcher_lock() {
   [ "$lock_home" = "$FM_HOME" ] || return 0
   [ "$lock_path" = "$WATCH" ] || return 0
   [ -n "$lock_identity" ] || return 0
+  if [ "$allow_live" != allow-live-pid ]; then
+    lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+    ! fm_pid_alive "$lock_pid" || return 0
+  fi
   fm_recovery_transition "$STATE/.watcher-down" clear-stale-lock "$WATCH_LOCK" downtime
 }
 
@@ -427,7 +438,7 @@ if [ "$mode" = restart ]; then
         i=$((i + 1))
       done
     else
-      if ! clear_stale_recorded_watcher_lock; then
+      if ! clear_stale_recorded_watcher_lock allow-live-pid; then
         echo "watcher: FAILED - stale watcher recovery state could not be persisted" >&2
         exit 1
       fi
