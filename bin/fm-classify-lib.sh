@@ -209,7 +209,7 @@ status_is_terminal_verb() {
 # the first colon, so existing FM_CAPTAIN_RE overrides keep matching; other
 # metadata and note text remain intact, as do the stored and surfaced event bytes.
 status_is_captain_relevant() {
-  local line=$1 verb
+  local line=$1 verb untimed
   [ -n "$line" ] || return 1
   status_line_verb "$line" verb
   case "$verb" in
@@ -222,8 +222,8 @@ status_is_captain_relevant() {
       done|needs-decision|blocked|failed) return 0 ;;
     esac
   fi
-  _fm_classify_matches "$(printf '%s' "$line" | awk "$_FM_STATUS_UNTIMED_AWK"' { print untimed($0) }')" \
-    "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
+  _fm_status_untimed "$line" untimed
+  _fm_classify_matches "$untimed" "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
 }
 
 # 0 if a status line's leading verb is the pause verb (paused: <reason>). A pure
@@ -321,26 +321,42 @@ status_stamp_line() {  # <new-status-line> -> line (without newline)
 # Strip only a well-formed optional numeric time tag before the first colon.
 # A malformed value is ordinary line bytes, never a time tag, so relevance,
 # retry dedup, key, and note all read the same line. Relevance and retry
-# matching share this normalization.
-_FM_STATUS_UNTIMED_AWK='
-  function untimed(s, colon, head) {
-    colon = index(s, ":")
-    if (!colon) return s
-    head = substr(s, 1, colon - 1)
-    gsub(/ \[at=[0-9]+\]/, "", head)
-    return head substr(s, colon)
-  }
-'
+# matching share this normalization: one in-shell definition for every reader,
+# so the rule cannot drift against a second spelling of itself, and a sweep that
+# normalizes a line at a time never pays a fork for the match it prepares.
+_fm_status_untimed() {  # <status-line> [<out-var>] -> line without a time tag
+  local head rest keep='' prefix tail digits
+  case "$1" in
+    *:*) head=${1%%:*}; rest=:${1#*:} ;;
+    # No colon means no header, so the line carries no time tag to strip.
+    *) head=''; rest=$1 ;;
+  esac
+  while :; do
+    case "$head" in *" [at="*\]*) ;; *) break ;; esac
+    prefix=${head%%" [at="*}
+    tail=${head#*" [at="}
+    digits=${tail%%\]*}
+    case "$digits" in
+      ''|*[!0-9]*) keep=$keep$prefix' [at='; head=$tail ;;
+      *) keep=$keep$prefix; head=${tail#*\]} ;;
+    esac
+  done
+  if [ "$#" -gt 1 ]; then printf -v "$2" '%s' "$keep$head$rest"; else printf '%s' "$keep$head$rest"; fi
+}
 
 # Retry deduplication ignores only a well-formed optional numeric time tag;
 # all other bytes, including correlation metadata, still identify the event.
+# Both sides normalize through the one helper above, so a stamped retry of an
+# already-recorded event can never read as a new one.
 status_event_recorded() {  # <status-file> <new-status-line>
+  local wanted line untimed
   [ -f "$1" ] || return 1
-  FM_STATUS_COMPARE=$2 awk "$_FM_STATUS_UNTIMED_AWK"'
-    BEGIN { wanted = untimed(ENVIRON["FM_STATUS_COMPARE"]) }
-    untimed($0) == wanted { found = 1; exit }
-    END { exit !found }
-  ' "$1"
+  _fm_status_untimed "$2" wanted
+  while IFS= read -r line || [ -n "$line" ]; do
+    _fm_status_untimed "$line" untimed
+    [ "$untimed" != "$wanted" ] || return 0
+  done < "$1"
+  return 1
 }
 
 # --- durable keyed decisions ------------------------------------------------
