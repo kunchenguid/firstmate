@@ -495,6 +495,9 @@ fm_watch_lock_abandoned_own_home() {
 
 # Write the watcher ownership files into an unpublished owner directory.
 # Called before the symlink is published so the visible lock is never pid-only.
+# Returns 2 - and only 2 - when this host yields no verifiable process identity,
+# so callers can tell that unretryable refusal from an owner-record write
+# failure, which returns 1 like every other error here.
 fm_lock_write_watch_ownership() {
   local ownerdir=$1 pid identity
   pid=$(cat "$ownerdir/pid" 2>/dev/null || true)
@@ -504,7 +507,7 @@ fm_lock_write_watch_ownership() {
   printf '%s\n' "$FM_HOME" > "$ownerdir/fm-home" || return 1
   printf '%s\n' "${FM_WATCH_PATH:-$FM_WAKE_LIB_DIR/fm-watch.sh}" > "$ownerdir/watcher-path" || return 1
   identity=$(fm_pid_identity "$pid" 2>/dev/null || true)
-  [ -n "$identity" ] || return 1
+  [ -n "$identity" ] || return 2
   printf '%s\n' "$identity" > "$ownerdir/pid-identity" || return 1
 }
 
@@ -628,12 +631,14 @@ fm_lock_claim() {
 
 # FM_LOCK_IDENTITY_REFUSED distinguishes the one creation failure that no retry
 # can resolve - no verifiable process identity for the watcher - from losing a
-# creation or steal race, which resolves itself into a single healthy watcher.
-# Only a watch-lock creation attempt writes it, so the recursive steal-lock
-# acquire inside fm_lock_try_acquire cannot clobber it.
+# creation or steal race, which resolves itself into a single healthy watcher,
+# and from an owner-record write failure, which is a different cause and must
+# not be reported as an identity problem. Only a watch-lock creation attempt
+# writes it, so the recursive steal-lock acquire inside fm_lock_try_acquire
+# cannot clobber it.
 FM_LOCK_IDENTITY_REFUSED=
 fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir ownership_rc
   FM_LOCK_OWNER_DIR=
   [ "$lockdir" != "$STATE/.watch.lock" ] || FM_LOCK_IDENTITY_REFUSED=
   ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
@@ -645,11 +650,14 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if [ "$lockdir" = "$STATE/.watch.lock" ] \
-    && ! fm_lock_write_watch_ownership "$ownerdir"; then
-    FM_LOCK_IDENTITY_REFUSED=1
-    fm_lock_discard_owner "$ownerdir"
-    return 1
+  if [ "$lockdir" = "$STATE/.watch.lock" ]; then
+    ownership_rc=0
+    fm_lock_write_watch_ownership "$ownerdir" || ownership_rc=$?
+    if [ "$ownership_rc" -ne 0 ]; then
+      [ "$ownership_rc" -ne 2 ] || FM_LOCK_IDENTITY_REFUSED=1
+      fm_lock_discard_owner "$ownerdir"
+      return 1
+    fi
   fi
   if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then

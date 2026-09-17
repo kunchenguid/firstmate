@@ -1615,6 +1615,47 @@ test_contended_steal_is_not_reported_as_an_identity_failure() {
   pass "a contended steal stands down instead of reporting an identity failure"
 }
 
+test_owner_record_write_failure_is_not_blamed_on_identity() {
+  local dir state lockdir fakebin out identity rc
+  dir=$(make_case watch-owner-record-write-failure)
+  state="$dir/state"
+  lockdir="$state/.watch.lock"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$$") \
+    || fail "this host yields no process identity, so the write-failure case cannot be isolated"
+  [ -n "$identity" ] || fail "fm_pid_identity returned empty for a live pid"
+  # Stand in for the state filesystem filling between the owner dir's creation
+  # (which needs no data blocks) and the first ownership write: every watch-lock
+  # owner dir comes back with fm-home already occupied by a directory, so
+  # printf into it fails while process identity stays perfectly obtainable.
+  cat > "$fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+set -u
+real=
+for cand in /bin/mktemp /usr/bin/mktemp; do
+  [ -x "$cand" ] && { real=$cand; break; }
+done
+[ -n "$real" ] || exit 1
+made=$("$real" "$@") || exit $?
+printf '%s\n' "$made"
+case "$made" in
+  */.watch.lock.owner.*) mkdir -p "$made/fm-home" 2>/dev/null || true ;;
+esac
+SH
+  chmod +x "$fakebin/mktemp"
+  rc=0
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 || rc=$?
+  grep -q 'verifiable process identity' "$out" \
+    && fail "an owner-record write failure was blamed on process identity: $(cat "$out")"
+  [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ] \
+    || fail "a watch lock was published without a complete owner record"
+  [ ! -e "$state/.watcher-down" ] \
+    || fail "a watcher that never armed published a downtime marker: $(cat "$state/.watcher-down")"
+  pass "an owner-record write failure is not reported as an identity refusal (rc=$rc)"
+}
+
 test_wait_deadline_reaps_a_stopped_child
 test_singleton_start
 test_pid_identity_is_locale_invariant
@@ -1656,3 +1697,4 @@ test_pid_identity_is_non_empty_on_this_host
 test_watch_lock_is_not_published_without_an_identity
 test_watcher_fails_loud_when_the_lock_cannot_be_created
 test_contended_steal_is_not_reported_as_an_identity_failure
+test_owner_record_write_failure_is_not_blamed_on_identity
