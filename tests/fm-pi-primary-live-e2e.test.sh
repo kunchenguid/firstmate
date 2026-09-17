@@ -241,8 +241,63 @@ run_native_ahoy_regressions() {
     || fail "Pi native later-message Ahoy reran session start"
 }
 
+# Project trust is a harness-dependent check: the verdict comes from Pi's own
+# startup behavior, so a portable assertion on the launch command alone cannot
+# prove --approve actually loads project resources. This drives the real Pi in
+# a genuinely fresh directory whose ancestors carry no saved trust decision, and
+# asserts the flag is what gates project-extension loading.
+run_project_trust_approve_regressions() {
+  local probe_dir marker_with marker_without default_trust status=0 probe_model=openai-codex/gpt-5.6-sol
+  probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/fm-pi-trust-live.XXXXXX")" \
+    || fail "could not allocate a fresh Pi trust probe directory"
+  mkdir -p "$probe_dir/.pi/extensions"
+  # A project extension loads only after Pi resolves project trust, so its
+  # marker file is the observable of the same decision the interactive dialog
+  # gates.
+  cat > "$probe_dir/.pi/extensions/fm-trust-probe.ts" <<'TS'
+import { writeFileSync } from "node:fs";
+export default function (pi) {
+  const target = process.env.FM_TRUST_PROBE_MARKER;
+  if (target) writeFileSync(target, "project-extension-loaded\n");
+}
+TS
+  printf '# Pi trust probe project\n' > "$probe_dir/AGENTS.md"
+
+  marker_with="$probe_dir/with.marker"
+  (
+    cd "$probe_dir" &&
+      FM_TRUST_PROBE_MARKER="$marker_with" pi --print --approve --no-session --no-context-files \
+        --model "$probe_model" --thinking low "Reply with exactly OK"
+  ) > "$probe_dir/with.out" 2>&1 || status=$?
+  [ "$status" -eq 0 ] || fail "Pi $PI_VERSION --approve print run failed: $(cat "$probe_dir/with.out")"
+  [ -e "$marker_with" ] \
+    || fail "Pi $PI_VERSION --approve did not load a project extension in a fresh untrusted directory"
+
+  default_trust=ask
+  if [ -f "$HOME/.pi/agent/settings.json" ]; then
+    default_trust=$(sed -n 's/.*"defaultProjectTrust"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' \
+      "$HOME/.pi/agent/settings.json" | head -n 1)
+    [ -n "$default_trust" ] || default_trust=ask
+  fi
+  # With defaultProjectTrust=always a no-flag run would legitimately load the
+  # extension too, so only the ask/never defaults prove --approve is the gate.
+  if [ "$default_trust" != always ]; then
+    marker_without="$probe_dir/without.marker"
+    (
+      cd "$probe_dir" &&
+        FM_TRUST_PROBE_MARKER="$marker_without" pi --print --no-session --no-context-files \
+          --model "$probe_model" --thinking low "Reply with exactly OK"
+    ) > "$probe_dir/without.out" 2>&1 || true
+    [ ! -e "$marker_without" ] \
+      || fail "Pi $PI_VERSION loaded a project extension without --approve under defaultProjectTrust=$default_trust"
+  fi
+  rm -rf "$probe_dir"
+  printf 'ok - Pi %s project trust: --approve loads project resources in a fresh directory and the default with ask/never does not\n' "$PI_VERSION"
+}
+
 mkdir -p "$LAB"
 git clone -q "$ROOT" "$PROJECT"
+run_project_trust_approve_regressions
 run_ahoy_transcript_regressions
 run_native_ahoy_regressions
 mkdir -p "$PROJECT/.pi/extensions/lib"

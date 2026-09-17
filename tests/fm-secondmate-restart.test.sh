@@ -557,8 +557,7 @@ test_native_ultra_restart_keeps_local_and_remote_profiles() {
   arm_answer "$dir" sm1
   printf 'pi codex-native/gpt-6-astra ultra\n' > "$dir/home/config/secondmate-harness"
   printf 'pi' > "$dir/fake/becomes"
-  printf '#!/usr/bin/env bash\nprintf "Options: --tui-mode\\n"\n' > "$dir/fakebin/pi"
-  chmod +x "$dir/fakebin/pi"
+  fm_fake_pi "$dir/fakebin" pi
   out=$(run_restart "$dir" sm1); rc=$?
   expect_code 0 "$rc" "native local restart failed: $out"
   assert_contains "$out" "restarted: sm1 (pi)" "native local restart did not complete"

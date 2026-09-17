@@ -966,6 +966,19 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
+  // A routine outcome identical to the same task's most recent routine outcome
+  // is a no-change repeat: merging it into main would only spend the lead
+  // model's context on text that says nothing new. The store owns the
+  // comparison (bin/fm-branch-outcome.sh `repeated`), and a store it cannot
+  // read answers "not a repeat" so an uncertain read delivers rather than
+  // swallowing a note. Captain outcomes never reach this path, so a decision,
+  // failure, or safety escalation is never suppressed.
+  async function routineOutcomeIsRepeat(seq: number): Promise<boolean> {
+    const checked = await runOutcomeScript(["repeated", "--seq", String(seq)]);
+    if (!checked.ok) return false;
+    return checked.stdout.trim() === "yes";
+  }
+
   function deliverRoutineOutcome(row: OutcomeRow): void {
     const message = {
       customType: "fm-branch-merge",
@@ -1108,7 +1121,7 @@ export default function (pi: ExtensionAPI) {
         // here.
         if (row.verdict === "captain") {
           if (!ensureVisibleCaptainOutcome(row)) return false;
-        } else {
+        } else if (!(await routineOutcomeIsRepeat(row.seq))) {
           deliverRoutineOutcome(row);
         }
         if (!(await runOutcomeScript(["mark-read", "--through", String(row.seq)])).ok) return false;
@@ -1195,8 +1208,16 @@ export default function (pi: ExtensionAPI) {
               isError: true,
             };
           }
+          const suppressed = verdict === "routine" && (await routineOutcomeIsRepeat(seq));
           return {
-            content: [{ type: "text", text: `recorded seq ${appended.stdout} and delivered [${verdict}] into main` }],
+            content: [
+              {
+                type: "text",
+                text: suppressed
+                  ? `recorded seq ${appended.stdout}; an unchanged [routine] repeat was not re-delivered into main`
+                  : `recorded seq ${appended.stdout} and delivered [${verdict}] into main`,
+              },
+            ],
             details: undefined,
           };
         });
