@@ -763,6 +763,23 @@ assert_no_grep '^bootout\|^bootstrap\|^kickstart' "$CASE_LAUNCHCTL_LOG" \
   "repeated repair reloaded an already healthy login-shell agent"
 pass "repeated repair reuses one resolved login shell and remains a no-op"
 
+# --- omp alone satisfies the at-least-one-harness requirement ----------------
+
+new_case Linux with-herdr no-gui
+rm -f "$CASE_BIN/claude"
+cat > "$CASE_BIN/omp" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+chmod +x "$CASE_BIN/omp"
+doctor --fix
+expect_code 0 "$DOCTOR_RC" "a host whose only installed harness tool is omp was not ready after --fix"
+assert_contains "$DOCTOR_OUT" 'required harness=omp:' \
+  "omp did not satisfy the at-least-one-harness requirement"
+assert_not_contains "$DOCTOR_OUT" 'required harness=MISSING' \
+  "a host with only omp installed still reported the harness requirement missing"
+pass "omp alone satisfies the remote harness requirement"
+
 # --- linux has no launch agent, and --fix starts the server directly ---------
 
 new_case Linux with-herdr no-gui
