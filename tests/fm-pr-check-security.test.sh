@@ -150,6 +150,11 @@ case "${1:-} ${2:-}" in
         printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}"
         exit 0
         ;;
+      # The fork movement poll reads state,isDraft,headRefOid,reviewDecision as
+      # a formatted scalar line, not this JSON stub. Leave that query to the
+      # fixture below so a merge cannot be swallowed as incomplete JSON.
+      *state,isDraft,headRefOid,reviewDecision*)
+        ;;
       *headRefOid,reviewDecision*)
         printf '%s\n' "{\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"reviewDecision\":\"APPROVED\"}"
         exit 0
