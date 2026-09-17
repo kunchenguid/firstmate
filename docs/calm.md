@@ -2,7 +2,8 @@
 
 Calm is Firstmate's conversation-only transcript presentation toggle.
 It is fully supported on Pi, and available on Claude Code behind that harness's default-off early-access function-hooks flag, as the [Claude Code](#claude-code) section below describes.
-It is off by default, and the last `/calm` choice persists for the effective Firstmate home across session starts and resumes on either harness, through the one shared preference file [`configuration.md`](configuration.md#calm-preference-configcalm) owns.
+It is also available as a best-effort first pass on OpenCode's TUI, as the [OpenCode](#opencode) section below describes.
+It is off by default, and the last `/calm` choice persists for the effective Firstmate home across session starts and resumes on every supporting harness, through the one shared preference file [`configuration.md`](configuration.md#calm-preference-configcalm) owns.
 
 ## Pi
 
@@ -51,7 +52,7 @@ If the other extension wins, a session-start console diagnostic names the tool a
 
 [`calm-mode-feasibility.md`](calm-mode-feasibility.md) owns the version-scoped renderer taxonomy, built-in override constraints, and empirical evidence.
 [`configuration.md`](configuration.md#calm-preference-configcalm) owns the persisted preference file and resolution rules.
-`.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, and `.pi/extensions/lib/fm-calm-working-ship.ts` owns Pi's animated working presentation over the sprite geometry both harnesses share in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`.
+`.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, and `.pi/extensions/lib/fm-calm-working-ship.ts` owns Pi's animated working presentation over the sprite geometry the supporting harnesses share in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`.
 
 Regression entry points:
 
@@ -95,4 +96,24 @@ Regression entry points:
 tests/fm-calm-claude-mod.test.sh
 tests/fm-calm-claude-mod-plugin.test.sh
 FM_CLAUDE_CALM_LIVE_E2E=1 tests/fm-calm-claude-mod-live-e2e.test.sh
+```
+
+## OpenCode
+
+Calm on OpenCode is the TUI plugin `.opencode/plugins/fm-calm.js`, listed in `.opencode/tui.json` so the OpenCode TUI loads it with this repo.
+`/calm` toggles the same per-home preference Pi and Claude Code use, persists the new choice before changing live presentation, and answers with a transient "Calm on" or "Calm off" notice; a preference that cannot be written leaves the current choice unchanged and says so in that notice.
+While Calm is on and the open session is busy or retrying, the plugin draws the same two-row sailboat Pi and Claude Code use, from the same shared sprite geometry, in the prompt's right-hand slot: it moves one column every 880ms, advances the wave one quarter-cell every 220ms, reflows on resize, and disappears when the session goes idle.
+On OpenCode the boat uses the same per-family colors as Claude Code rather than Pi's standard ANSI codes: every water cell takes the spinner blue of the active theme family (`#93a5ff` on a dark theme, `#5769f7` on a light one) and the whole boat takes the Claude orange of the stock spinner (`#d77757`).
+The family follows OpenCode's theme mode, is re-read as frames paint, and uses the dark set when the mode is missing or unreadable.
+Within one OpenCode TUI plugin lifetime, the next working period in the same session resumes the boat from its last rendered column and travel direction; a different session or a new plugin lifetime starts at the normal initial position.
+Hidden elapsed time does not advance the animation.
+
+This first pass is presentation-only and reversible, and it does not hide OpenCode's stock spinner and verb, tool rows, or other transcript rows, because the supported TUI slot surface can append beside the working strip and cannot collapse those drawings.
+Toggling Calm off removes the boat and leaves OpenCode's stock working strip exactly as OpenCode renders it.
+Nothing is rewritten: model context, session storage, and exports stay unchanged, and the plugin never touches tool execution or prompts.
+
+Regression entry points:
+
+```sh
+tests/fm-calm-opencode-tui.test.sh
 ```
