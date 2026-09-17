@@ -42,6 +42,11 @@
 #   (z) one model seated on two lenses is RED, and placeholder seats are refused
 #   (aa) a transient forge failure leaves the PR pending for the next fire
 #   (ab) a lens the round does not own is refused rather than stored
+#   (ac) a RED reconcile revokes the marker even when the forge post fails
+#   (ad) reconciling an earlier round still sees a later round's open findings
+#   (ae) a lane whose model= is the default placeholder still refuses a lens
+#     seated on it, and a lane nothing identifies refuses the seating
+#   (af) the report shape the staged prompt teaches is one record-lens accepts
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -81,7 +86,10 @@ case "$field" in
   headRefOid) printf '%s\n' "${FAKE_GH_headRefOid:-}" ;;
   baseRefOid) printf '%s\n' "${FAKE_GH_baseRefOid:-}" ;;
   title) printf '%s\n' "${FAKE_GH_title:-untitled}" ;;
-  body) printf '%s\n' "${FAKE_GH_body:-nobody}" ;;
+  body)
+    [ -z "${FAKE_GH_BODY_FAIL:-}" ] || exit 1
+    printf '%s\n' "${FAKE_GH_body:-nobody}"
+    ;;
   *) exit 1 ;;
 esac
 SH
@@ -119,6 +127,15 @@ run_watch_home() {
   FM_TEST_GH_AXI_LOG="$home/state/gh-axi.log" \
   PATH="$fakebin:$PATH" \
     "$ADV" "$@"
+}
+
+# A lane meta with the shape bin/fm-spawn.sh actually writes: a harness always,
+# and model=default whenever the lane was launched without an explicit --model.
+# Reconciliation refuses a round whose lane nothing identifies, so a fixture
+# that stands in for a real lane carries a real lane's identity.
+seed_lane_meta() {  # <state-dir> <task-id> <worktree> [harness]
+  fm_write_meta "$1/$2.meta" "window=fm-$2" "worktree=$3" \
+    "harness=${4:-claude}" "model=default"
 }
 
 write_lens_report() {
@@ -226,6 +243,7 @@ test_reconcile_red_then_green() {
   export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
   export FAKE_GH_title='Add the feature' FAKE_GH_body='It works.'
   : > "$case_dir/state/gh-axi.log"
+  seed_lane_meta "$case_dir/state" task-a "$wt"
   run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
     --tier T2 --wt "$wt" --base "$base" --head "$head" \
     --seat frontier=fable-5.1 --seat deep=opus-5 >/dev/null \
@@ -336,6 +354,7 @@ setup_round() {
   export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
   export FAKE_GH_title='t' FAKE_GH_body='b'
   : > "$CASE_DIR/state/gh-axi.log"
+  seed_lane_meta "$CASE_DIR/state" task-a "$wt"
   run_adv "$CASE_DIR/state" "$FAKEBIN" dispatch task-a "$PR_URL" \
     --tier T2 --wt "$wt" --base "$base" --head "$head" \
     --seat frontier=fable-5.1 --seat deep=opus-5 "$@" >/dev/null \
@@ -442,7 +461,7 @@ test_unseated_and_self_seated_lenses_are_red() {
     "seats: two clean lenses reconciled GREEN with an unseated and a self-seated lens"
   assert_grep 'no assigned seat' "$case_dir/state/task-a.adversarial-review/round-1/reconciliation.md" \
     "seats: the unassigned seat is not disclosed"
-  assert_grep "lane's own model opus-5" "$case_dir/state/task-a.adversarial-review/round-1/reconciliation.md" \
+  assert_grep "seated on opus-5, which is the lane" "$case_dir/state/task-a.adversarial-review/round-1/reconciliation.md" \
     "seats: the lane-self-authored lens is not disclosed"
   assert_absent "$case_dir/state/task-a.adversarial-review-green" \
     "seats: an unseated round wrote a loop-green marker"
@@ -571,6 +590,7 @@ test_record_lens_seats_a_round_dispatched_without_seats() {
   export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
   export FAKE_GH_title='t' FAKE_GH_body='b'
   : > "$case_dir/state/gh-axi.log"
+  seed_lane_meta "$case_dir/state" task-a "$wt"
   # Exactly what the auto-dispatched action passes: no tier, no seats.
   run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
     --wt "$wt" --base "$base" --head "$head" >/dev/null \
@@ -654,6 +674,7 @@ test_open_findings_carry_into_later_rounds() {
   export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
   export FAKE_GH_title='t' FAKE_GH_body='b'
   : > "$case_dir/state/gh-axi.log"
+  seed_lane_meta "$case_dir/state" task-a "$wt"
   run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
     --tier T2 --wt "$wt" --base "$base" --head "$head" \
     --seat frontier=fable-5.1 --seat deep=opus-5 >/dev/null \
@@ -769,6 +790,7 @@ test_unreadable_finding_fields_are_refused() {
   export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
   export FAKE_GH_title='t' FAKE_GH_body='b'
   : > "$case_dir/state/gh-axi.log"
+  seed_lane_meta "$case_dir/state" task-a "$wt"
   run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
     --tier T2 --wt "$wt" --base "$base" --head "$head" \
     --seat frontier=fable-5.1 --seat deep=opus-5 >/dev/null \
@@ -1070,6 +1092,7 @@ test_ui_round_dispatches_and_reconciles_the_design_lens() {
   export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
   export FAKE_GH_title='t' FAKE_GH_body='b'
   : > "$case_dir/state/gh-axi.log"
+  seed_lane_meta "$case_dir/state" task-a "$wt"
   # Exactly what the auto-dispatched action passes: no tier, no --ui-impacting.
   run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
     --wt "$wt" --base "$base" --head "$head" \
@@ -1151,6 +1174,7 @@ test_advisory_findings_carry_into_later_rounds() {
   export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
   export FAKE_GH_title='t' FAKE_GH_body='b'
   : > "$case_dir/state/gh-axi.log"
+  seed_lane_meta "$case_dir/state" task-a "$wt"
   local seats='--seat frontier=fable-5.1 --seat deep=opus-5 --seat advisory:design-ux=astra'
   # shellcheck disable=SC2086
   run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
@@ -1223,6 +1247,7 @@ test_a_red_reconcile_revokes_the_green_marker() {
   export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
   export FAKE_GH_title='t' FAKE_GH_body='b'
   : > "$case_dir/state/gh-axi.log"
+  seed_lane_meta "$case_dir/state" task-a "$wt"
   run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
     --tier T2 --wt "$wt" --base "$base" --head "$head" \
     --seat frontier=fable-5.1 --seat deep=opus-5 >/dev/null \
@@ -1396,6 +1421,279 @@ test_a_lens_the_round_does_not_own_is_refused() {
   pass "a lens the round does not own is refused rather than stored"
 }
 
+# Stage a T2 round whose frontier lens raised one BLOCKER, drive it to GREEN,
+# then re-open the finding. Sets CASE_DIR and FAKEBIN for the caller.
+setup_reopened_green_round() {
+  local name=$1 wt
+  CASE_DIR="$TMP_ROOT/$name"
+  FAKEBIN="$CASE_DIR/fakebin"
+  mkdir -p "$CASE_DIR/state" "$FAKEBIN"
+  read -r base head wt < <(make_repo "$CASE_DIR/wt")
+  add_fake_gh "$FAKEBIN"
+  add_fake_gh_axi "$FAKEBIN"
+  export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
+  export FAKE_GH_title='t' FAKE_GH_body='b'
+  : > "$CASE_DIR/state/gh-axi.log"
+  seed_lane_meta "$CASE_DIR/state" task-a "$wt"
+  run_adv "$CASE_DIR/state" "$FAKEBIN" dispatch task-a "$PR_URL" \
+    --tier T2 --wt "$wt" --base "$base" --head "$head" \
+    --seat frontier=fable-5.1 --seat deep=opus-5 >/dev/null \
+    || fail "$name: dispatch failed"
+  write_lens_report "$CASE_DIR/clean.md" GREEN ''
+  write_lens_report "$CASE_DIR/blocker.md" RED '  - id: f1
+    severity: BLOCKER
+    claim: unguarded
+    evidence: app.txt:1
+    problem: no guard
+    fix: guard it
+'
+  run_adv "$CASE_DIR/state" "$FAKEBIN" record-lens task-a \
+    --round 1 --lens frontier --report "$CASE_DIR/blocker.md" >/dev/null \
+    || fail "$name: frontier record failed"
+  run_adv "$CASE_DIR/state" "$FAKEBIN" record-lens task-a \
+    --round 1 --lens deep --report "$CASE_DIR/clean.md" >/dev/null \
+    || fail "$name: deep record failed"
+  run_adv "$CASE_DIR/state" "$FAKEBIN" resolve task-a --round 1 \
+    --finding frontier:f1 --disposition fixed_verified >/dev/null \
+    || fail "$name: resolve failed"
+  run_adv "$CASE_DIR/state" "$FAKEBIN" reconcile task-a --round 1 >/dev/null \
+    || fail "$name: the GREEN reconcile failed to post"
+  assert_present "$CASE_DIR/state/task-a.adversarial-review-green" \
+    "$name: the GREEN round wrote no marker"
+  run_adv "$CASE_DIR/state" "$FAKEBIN" resolve task-a --round 1 \
+    --finding frontier:f1 --disposition accepted_pending_fix >/dev/null \
+    || fail "$name: the re-open resolve failed"
+}
+
+# Regression: revocation was ordered behind two forge calls that exit on
+# failure, so a gh outage on a RED run left the marker an earlier GREEN wrote
+# on disk and the merge boundary read it as evidence for an ungreen PR.
+test_a_red_reconcile_revokes_the_marker_even_when_the_forge_fails() {
+  local case_dir fakebin rc marker
+  setup_reopened_green_round revoke-outage
+  case_dir=$CASE_DIR fakebin=$FAKEBIN
+  marker="$case_dir/state/task-a.adversarial-review-green"
+
+  # The forge goes down between the GREEN round and this RED one.
+  export FAKE_GH_BODY_FAIL=1
+  set +e
+  run_adv "$case_dir/state" "$fakebin" reconcile task-a --round 1 \
+    >"$case_dir/stdout" 2>"$case_dir/stderr"
+  rc=$?
+  set -e
+  unset FAKE_GH_BODY_FAIL
+  [ "$rc" -ne 0 ] || fail "revoke-outage: the reconcile reported success with the forge down"
+  assert_absent "$marker" \
+    "revoke-outage: a forge outage on a RED reconcile left the stale GREEN marker on disk"
+  if run_adv "$case_dir/state" "$fakebin" check-green task-a "$PR_URL" \
+    >/dev/null 2>&1; then
+    fail "revoke-outage: the merge boundary still cleared a PR whose newest round is RED"
+  fi
+  pass "a RED reconcile revokes the marker even when the forge post fails"
+}
+
+# Regression: the carry-forward only looked backwards, so reconciling an
+# EARLIER round after a later one had raised a BLOCKER never consulted it and
+# wrote the marker straight over an open finding.
+test_reconciling_an_earlier_round_sees_later_rounds() {
+  local case_dir fakebin wt out
+  case_dir="$TMP_ROOT/later-round"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$fakebin"
+  read -r base head wt < <(make_repo "$case_dir/wt")
+  add_fake_gh "$fakebin"
+  add_fake_gh_axi "$fakebin"
+  export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
+  export FAKE_GH_title='t' FAKE_GH_body='b'
+  : > "$case_dir/state/gh-axi.log"
+  seed_lane_meta "$case_dir/state" task-a "$wt"
+  local seats='--seat frontier=fable-5.1 --seat deep=opus-5'
+  # shellcheck disable=SC2086
+  run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --tier T2 --wt "$wt" --base "$base" --head "$head" $seats >/dev/null \
+    || fail "later-round: round 1 dispatch failed"
+  write_lens_report "$case_dir/clean.md" GREEN ''
+  write_lens_report "$case_dir/f1.md" RED '  - id: f1
+    severity: BLOCKER
+    claim: unguarded
+    evidence: app.txt:1
+    problem: no guard
+    fix: guard it
+'
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens frontier --report "$case_dir/f1.md" >/dev/null \
+    || fail "later-round: round 1 frontier record failed"
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens deep --report "$case_dir/clean.md" >/dev/null \
+    || fail "later-round: round 1 deep record failed"
+  out=$(run_adv "$case_dir/state" "$fakebin" reconcile task-a --round 1) \
+    || fail "later-round: round 1 reconcile failed to post"
+  assert_contains "$out" "round-1 RED" "later-round: the open BLOCKER did not keep round 1 RED"
+
+  # Round 2 at the same head raises a NEW BLOCKER nobody has disposed of.
+  write_lens_report "$case_dir/f9.md" RED '  - id: f9
+    severity: BLOCKER
+    claim: still unguarded
+    evidence: app.txt:1
+    problem: the guard is wrong
+    fix: guard it properly
+'
+  # shellcheck disable=SC2086
+  run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --tier T2 --wt "$wt" --base "$base" --head "$head" --round 2 $seats >/dev/null \
+    || fail "later-round: round 2 dispatch failed"
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 2 --lens frontier --report "$case_dir/f9.md" >/dev/null \
+    || fail "later-round: round 2 frontier record failed"
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 2 --lens deep --report "$case_dir/clean.md" >/dev/null \
+    || fail "later-round: round 2 deep record failed"
+
+  # Disposing of round 1's own finding and reconciling ROUND 1 must not clear
+  # the merge while round 2's finding is open.
+  run_adv "$case_dir/state" "$fakebin" resolve task-a --round 1 \
+    --finding frontier:f1 --disposition rejected_with_counterevidence >/dev/null \
+    || fail "later-round: resolve failed"
+  out=$(run_adv "$case_dir/state" "$fakebin" reconcile task-a --round 1) \
+    || fail "later-round: the round 1 re-reconcile failed to post"
+  assert_contains "$out" "round-1 RED" \
+    "later-round: reconciling round 1 ignored round 2's open BLOCKER"
+  assert_grep 'frontier:f9' "$case_dir/state/task-a.adversarial-review/round-1/reconciliation.md" \
+    "later-round: round 2's open BLOCKER is absent from the round 1 reconciliation"
+  assert_absent "$case_dir/state/task-a.adversarial-review-green" \
+    "later-round: an open later-round BLOCKER still wrote a loop-green marker"
+
+  # Disposing of it too is what closes the PR out.
+  run_adv "$case_dir/state" "$fakebin" resolve task-a --round 1 \
+    --finding frontier:f9 --disposition fixed_verified >/dev/null \
+    || fail "later-round: the second resolve failed"
+  out=$(run_adv "$case_dir/state" "$fakebin" reconcile task-a --round 1) \
+    || fail "later-round: the final reconcile failed to post"
+  assert_contains "$out" "round-1 GREEN" \
+    "later-round: disposing of every finding did not reach GREEN"
+  pass "reconciling an earlier round still sees a later round's open findings"
+}
+
+# Regression: the self-review refusal read only model=, which bin/fm-spawn.sh
+# records as the literal `default` for any lane launched without --model, so on
+# the ordinary lane it never fired and a lens could be seated on the very model
+# that wrote the change.
+test_a_placeholder_model_lane_still_refuses_self_seating() {
+  local case_dir fakebin wt out
+  case_dir="$TMP_ROOT/lane-identity"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$fakebin"
+  read -r base head wt < <(make_repo "$case_dir/wt")
+  add_fake_gh "$fakebin"
+  add_fake_gh_axi "$fakebin"
+  export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
+  export FAKE_GH_title='t' FAKE_GH_body='b'
+  : > "$case_dir/state/gh-axi.log"
+  # The ordinary lane: no --model at spawn, so model= is the placeholder and
+  # the harness is all that names it.
+  fm_write_meta "$case_dir/state/task-a.meta" "window=fm-task-a" \
+    "worktree=$wt" "harness=claude" "model=default"
+  write_lens_report "$case_dir/clean.md" GREEN ''
+  run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --tier T2 --wt "$wt" --base "$base" --head "$head" \
+    --seat frontier=claude --seat deep=opus-5 >/dev/null \
+    || fail "lane-identity: dispatch failed"
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens frontier --report "$case_dir/clean.md" >/dev/null \
+    || fail "lane-identity: frontier record failed"
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens deep --report "$case_dir/clean.md" >/dev/null \
+    || fail "lane-identity: deep record failed"
+  out=$(run_adv "$case_dir/state" "$fakebin" reconcile task-a --round 1) \
+    || fail "lane-identity: reconcile failed to post"
+  assert_contains "$out" "round-1 RED" \
+    "lane-identity: a lens seated on the placeholder-model lane reconciled GREEN"
+  assert_grep 'which is the lane that wrote the change' \
+    "$case_dir/state/task-a.adversarial-review/round-1/reconciliation.md" \
+    "lane-identity: the self-seated lens is not disclosed"
+  assert_absent "$case_dir/state/task-a.adversarial-review-green" \
+    "lane-identity: a self-seated round wrote a loop-green marker"
+
+  # --lane-model names the implementing model directly when the meta cannot.
+  run_adv "$case_dir/state" "$fakebin" dispatch task-b "$PR_URL" \
+    --tier T2 --wt "$wt" --base "$base" --head "$head" \
+    --lane-model grok-4.6 --seat frontier=grok-4.6 --seat deep=opus-5 >/dev/null \
+    || fail "lane-identity: the --lane-model dispatch failed"
+  run_adv "$case_dir/state" "$fakebin" record-lens task-b \
+    --round 1 --lens frontier --report "$case_dir/clean.md" >/dev/null \
+    || fail "lane-identity: task-b frontier record failed"
+  run_adv "$case_dir/state" "$fakebin" record-lens task-b \
+    --round 1 --lens deep --report "$case_dir/clean.md" >/dev/null \
+    || fail "lane-identity: task-b deep record failed"
+  out=$(run_adv "$case_dir/state" "$fakebin" reconcile task-b --round 1) \
+    || fail "lane-identity: the task-b reconcile failed to post"
+  assert_contains "$out" "round-1 RED" \
+    "lane-identity: a lens seated on the --lane-model reconciled GREEN"
+
+  # A lane nothing identifies refuses the seating rather than passing it.
+  run_adv "$case_dir/state" "$fakebin" dispatch task-c "$PR_URL" \
+    --tier T2 --wt "$wt" --base "$base" --head "$head" \
+    --seat frontier=fable-5.1 --seat deep=opus-5 >/dev/null \
+    || fail "lane-identity: the unidentified-lane dispatch failed"
+  run_adv "$case_dir/state" "$fakebin" record-lens task-c \
+    --round 1 --lens frontier --report "$case_dir/clean.md" >/dev/null \
+    || fail "lane-identity: task-c frontier record failed"
+  run_adv "$case_dir/state" "$fakebin" record-lens task-c \
+    --round 1 --lens deep --report "$case_dir/clean.md" >/dev/null \
+    || fail "lane-identity: task-c deep record failed"
+  out=$(run_adv "$case_dir/state" "$fakebin" reconcile task-c --round 1) \
+    || fail "lane-identity: the task-c reconcile failed to post"
+  assert_contains "$out" "round-1 RED" \
+    "lane-identity: a lane nothing identifies passed its seating"
+  assert_grep 'nothing identifies the lane' \
+    "$case_dir/state/task-c.adversarial-review/round-1/reconciliation.md" \
+    "lane-identity: the unresolvable lane identity is not disclosed"
+  pass "a placeholder-model lane still refuses a lens seated on it"
+}
+
+# The staged prompt is the generated interface delivered to the reviewer, and
+# lens_report_scan is its only consumer. The example block the prompt teaches
+# must therefore be a block record-lens accepts: reading it back out of the
+# staged prompt and feeding it in is what proves the two agree.
+test_the_prompt_teaches_a_report_shape_record_lens_accepts() {
+  local case_dir fakebin wt dir out
+  case_dir="$TMP_ROOT/prompt-shape"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$fakebin"
+  read -r base head wt < <(make_repo "$case_dir/wt")
+  add_fake_gh "$fakebin"
+  add_fake_gh_axi "$fakebin"
+  export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
+  export FAKE_GH_title='t' FAKE_GH_body='b'
+  : > "$case_dir/state/gh-axi.log"
+  seed_lane_meta "$case_dir/state" task-a "$wt"
+  run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --tier T2 --wt "$wt" --base "$base" --head "$head" \
+    --seat frontier=fable-5.1 --seat deep=opus-5 >/dev/null \
+    || fail "prompt-shape: dispatch failed"
+  dir="$case_dir/state/task-a.adversarial-review/round-1"
+  # The example report block the reviewer is told to copy, verbatim.
+  awk '/^verdict: /{grab=1} grab{print} /^blind_spots: /{if (grab) exit}' \
+    "$dir/prompt-frontier.md" > "$case_dir/from-prompt.md"
+  assert_grep 'severity: MAJOR' "$case_dir/from-prompt.md" \
+    "prompt-shape: the staged prompt carries no example report block"
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens frontier --report "$case_dir/from-prompt.md" >/dev/null \
+    || fail "prompt-shape: the shape the prompt teaches was refused by record-lens"
+  write_lens_report "$case_dir/clean.md" GREEN ''
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens deep --report "$case_dir/clean.md" >/dev/null \
+    || fail "prompt-shape: deep record failed"
+  # Its MAJOR is keyed, so it reaches reconciliation as an open finding.
+  out=$(run_adv "$case_dir/state" "$fakebin" reconcile task-a --round 1) \
+    || fail "prompt-shape: reconcile failed to post"
+  assert_contains "$out" "round-1 RED" \
+    "prompt-shape: the example block's MAJOR never reached reconciliation"
+  assert_grep 'frontier:f1' "$dir/reconciliation.md" \
+    "prompt-shape: the example block's finding was not keyed"
+  pass "the report shape the staged prompt teaches is one record-lens accepts"
+}
+
 test_condition_needs_a_pr_open_line
 test_watch_fires_on_pr_open_line
 test_dispatch_stages_evidence_and_posts
@@ -1423,3 +1721,7 @@ test_a_red_reconcile_revokes_the_green_marker
 test_one_model_cannot_seat_two_lenses
 test_a_transient_forge_failure_keeps_the_pr_pending
 test_a_lens_the_round_does_not_own_is_refused
+test_a_red_reconcile_revokes_the_marker_even_when_the_forge_fails
+test_reconciling_an_earlier_round_sees_later_rounds
+test_a_placeholder_model_lane_still_refuses_self_seating
+test_the_prompt_teaches_a_report_shape_record_lens_accepts

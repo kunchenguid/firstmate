@@ -45,13 +45,17 @@
 # does not close it: only a fixed_verified or rejected_with_counterevidence
 # disposition does, recorded in any round.
 #
-# Seats are checked for independence, not against a model catalogue. Every
-# lens in a round must name a seat, no two lenses in a round may name the SAME
-# seat, and no non-standard lens may name the lane's own model when the lane
-# records a real one. That last read is why `default` and its kin are refused
-# as seat values: bin/fm-spawn.sh records model=default for a lane launched
-# without an explicit --model, and a rule that compares against a placeholder
-# is a rule that never fires. Which concrete models fill which class is the
+# Seats are checked for independence, not against a model catalogue. Every lens
+# in a round must name a seat, no two lenses in a round may name the SAME seat,
+# and no non-standard lens may name the lane that wrote the change. That last
+# check needs the lane's identity, and bin/fm-spawn.sh records model=default for
+# any lane launched without an explicit --model - so the identity is the set of
+# every token that names this lane: the round's own lane_model= (dispatch
+# --lane-model), the recorded model= when it is real, the lane's harness, and
+# the configured secondmate model. `default` and its kin are refused as seat
+# values and dropped from that set, because a rule comparing against a
+# placeholder is a rule that never fires. A lane NOTHING identifies refuses the
+# seating rather than passing it. Which concrete models fill which class is the
 # skill's seat map, disclosed in the round comment rather than enumerated here.
 #
 # What the loop-green marker says is what the NEWEST reconciliation of that PR
@@ -69,7 +73,7 @@
 # Usage: fm-adversarial-review.sh <command> [args]
 #   dispatch <task-id> <pr-url> [--tier T1|T2|T3|T0] [--wt <path>]
 #     [--base <sha>] [--head <sha>] [--round N] [--reclaim] [--ui-impacting]
-#     [--seat SLOT=MODEL ...]
+#     [--seat SLOT=MODEL ...] [--lane-model MODEL]
 #     [--waiver-class C --waiver-reason R --waiver-hold <task-id>]
 #   record-lens <task-id> --round N --lens <slot> --report <file> [--seat MODEL]
 #   resolve <task-id> --round N --finding <lens>:<id> --disposition <d>
@@ -143,6 +147,42 @@ seat_is_placeholder() {
   case "$1" in
     ''|unassigned|default|none|unknown) return 0 ;;
   esac
+  return 1
+}
+
+# Everything that identifies the lane that WROTE the change, one token per
+# line. A non-standard lens seated on any of them is the implementer reviewing
+# their own work.
+#
+# bin/fm-spawn.sh records model=default for a lane launched without an explicit
+# --model, so the recorded model alone identifies almost no lane. The round's
+# own lane_model= (dispatch --lane-model) is the direct answer when the caller
+# knows it; the configured secondmate model token and the lane's harness name
+# are what remain when it does not. An EMPTY set means nothing identifies this
+# lane, and reconciliation refuses the seating rather than passing it: a seat
+# that cannot be shown independent is not evidence that it is.
+lane_identity_tokens() {
+  local id=$1 round_dir_path=$2 token
+  {
+    [ -z "$round_dir_path" ] || round_meta_get "$round_dir_path" lane_model
+    meta_get "$id" model 2>/dev/null || true
+    meta_get "$id" harness 2>/dev/null || true
+    if [ -x "$SCRIPT_DIR/fm-harness.sh" ]; then
+      FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-harness.sh" secondmate-model 2>/dev/null || true
+    fi
+  } | while IFS= read -r token; do
+    seat_is_placeholder "$token" || printf '%s\n' "$token"
+  done
+}
+
+lane_identity_matches() {
+  local tokens=$1 seat=$2 token
+  while IFS= read -r token; do
+    [ -n "$token" ] || continue
+    [ "$token" != "$seat" ] || return 0
+  done <<IDENTITY
+$tokens
+IDENTITY
   return 1
 }
 
@@ -444,14 +484,37 @@ write_prompt() {
     printf 'OUTPUT (markdown, terse): A. verdict + biggest risk. B. findings table |id|SEV\n'
     printf '(BLOCKER/MAJOR/MINOR/NIT)|claim|code evidence (file:line)|problem|fix|. C. blind spots.\n'
     printf 'D. top 3 must-fix. Cite real file:line for every claim; if unverifiable, say so.\n'
-    printf 'ALSO return the structured lens report (verdict, boundary_class: merge, findings with\n'
-    printf 'id/severity/claim/evidence/problem/fix, blind_spots) for the reconciler.\n'
+    printf '\n'
+    printf 'THEN end your reply with the structured lens report, in EXACTLY this shape. A\n'
+    printf 'machine reads it and refuses the whole report on any other shape, so do not\n'
+    printf 'reorder, rename, or reformat these lines:\n'
+    printf '\n'
+    printf 'verdict: GREEN\n'
+    printf 'boundary_class: merge\n'
+    printf 'findings:\n'
+    printf '  - id: f1\n'
+    printf '    severity: MAJOR\n'
+    printf '    claim: <the claim this falsifies>\n'
+    printf '    evidence: <file:line>\n'
+    printf '    problem: <what is wrong>\n'
+    printf '    fix: <smallest correct fix>\n'
+    printf 'blind_spots: <one line, or none seen>\n'
+    printf '\n'
+    printf 'RULES for that block: `verdict:` is GREEN or RED, uppercase, alone on its line.\n'
+    printf 'Every finding starts with `- id: <id>` and its NEXT field line is\n'
+    printf '`severity: <LEVEL>` where LEVEL is BLOCKER, MAJOR, MINOR, or NIT, uppercase.\n'
+    printf 'An id carries no colon and no spaces. severity never comes before its id, and\n'
+    printf 'an `id:` line without its leading dash is not a finding. Use `findings:` with\n'
+    printf 'nothing under it when you have none. The table in B is for humans; THIS block\n'
+    printf 'is the one the reconciler reads, and every finding in the table must appear in\n'
+    printf 'it with the same id and severity.\n'
   } > "$dir/prompt-$slot.md"
 }
 
 cmd_dispatch() {
   local id=$1 url=$2 tier=T2 tier_explicit=0 round=1 reclaim=0 ui=0 ui_explicit=0
   local wt='' base='' head='' waiver_class='' waiver_reason='' waiver_hold='' seats_args=''
+  local lane_model=''
   shift 2 || true
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -483,6 +546,16 @@ cmd_dispatch() {
       --waiver-class) waiver_class=${2-}; shift 2 ;;
       --waiver-reason) waiver_reason=${2-}; shift 2 ;;
       --waiver-hold) waiver_hold=${2-}; shift 2 ;;
+      --lane-model)
+        case "${2-}" in
+          *[[:space:]]*|'') fail "--lane-model must be a plain model id: ${2-}" 2 ;;
+        esac
+        if seat_is_placeholder "${2-}"; then
+          fail "--lane-model ${2-} names no model; name the model that implemented the change" 2
+        fi
+        lane_model=${2-}
+        shift 2
+        ;;
       --help|-h) usage; return 0 ;;
       *) fail "unknown dispatch flag: $1" 2 ;;
     esac
@@ -669,6 +742,7 @@ CLASSIFY
     printf 'round=%s\ncap=%s\nui_impacting=%s\nprose_source=%s\n' "$round" "$cap" "$ui" "$prose_source"
     printf 'slots=%s\n' "$(printf '%s' "$slots" | paste -sd' ' -)"
     printf 'advisory_slots=%s\n' "$advisory_slots"
+    printf 'lane_model=%s\n' "$lane_model"
     printf 'seats=%s\n' "$seats_args"
     [ "$tier" != T0 ] || printf 'waiver_class=%s\nwaiver_reason=%s\nwaiver_hold=%s\n' \
       "$waiver_class" "$waiver_reason" "$waiver_hold"
@@ -732,9 +806,11 @@ CLASSIFY
   printf 'dispatched: %s %s round-%s tier=%s head=%s\n' "$id" "$url" "$round" "$tier" "$head"
 }
 
-# Validate a structured lens report: one verdict line and one boundary line,
-# then a findings list where every finding carries an id and a severity.
-# Prints the verdict, then one id:severity line per finding.
+# Validate a structured lens report: one verdict line, then a findings list
+# where every finding carries an id and a severity. The boundary_class line the
+# dispatch prompt asks for is prose for the reviewer, not a field this reads.
+# Prints the verdict, then one id:severity line per finding. write_prompt
+# states this exact shape to the reviewer, because this is its only consumer.
 #
 # Every value is extracted by stripping its own label rather than by field
 # position, because the matching regexes tolerate spacing the field numbering
@@ -934,12 +1010,15 @@ recorded_slot_seat() {
   awk -v k="$slot" '$1 == k { s = $2 } END { if (s != "") print s }' "$file" 2>/dev/null || true
 }
 
-# Every resolutions file for this PR up to and including one round, oldest
-# first. A finding's disposition is the last one recorded for it in ANY of
-# them, so a fix verified in a later round closes the round that raised it.
-resolution_files_through() {
-  local id=$1 url=$2 upto=$3 k=1 d files=''
-  while [ "$k" -le "$upto" ]; do
+# Every resolutions file this PR has, oldest round first. A finding's
+# disposition is the last one recorded for it in ANY of them, so a fix verified
+# in a later round closes the round that raised it. The scan covers every round
+# rather than stopping at the one being reconciled: nothing makes the round
+# under reconciliation the newest one, and a disposition recorded in a later
+# round is still this PR's newest word on that finding.
+resolution_files_all() {
+  local id=$1 url=$2 k=1 d files=''
+  while [ "$k" -le "$FM_ADV_ROUND_SCAN_MAX" ]; do
     d=$(round_dir "$id" "$k")
     if [ -f "$d/meta" ] && [ "$(round_meta_get "$d" url)" = "$url" ] && [ -f "$d/resolutions" ]; then
       files="$files$d/resolutions
@@ -992,13 +1071,7 @@ cmd_reconcile() {
   slots=$(round_meta_get "$dir" slots)
   advisory_slots=$(round_advisory_slots "$dir")
   seats=$(round_meta_get "$dir" seats)
-  # bin/fm-spawn.sh records model=default for a lane launched without an
-  # explicit --model, so an unfiltered read makes the self-review refusal below
-  # compare against a word no seat is ever called and never fire. A lane whose
-  # model is only a placeholder has no identity to compare, and seat
-  # distinctness is what carries the independence rule for it.
-  lane_model=$(meta_get "$id" model 2>/dev/null || true)
-  if seat_is_placeholder "$lane_model"; then lane_model=''; fi
+  lane_identity=$(lane_identity_tokens "$id" "$dir")
   fm_pr_url_parse "$url" || fail "round meta has an invalid PR URL" 1
   url=$FM_PR_URL
   owner=$FM_PR_OWNER
@@ -1026,7 +1099,7 @@ cmd_reconcile() {
   finding_rows=
   seen_keys=' '
   seen_seats=' '
-  resolution_files=$(resolution_files_through "$id" "$url" "$round")
+  resolution_files=$(resolution_files_all "$id" "$url")
   # The advisory lens is reconciled exactly like a required one - its seat, its
   # verdict, and every MAJOR/BLOCKER it raises all carry full weight, and its
   # absence on a UI-impacting round is red per the intent. What "advisory"
@@ -1052,8 +1125,12 @@ cmd_reconcile() {
     if seat_is_placeholder "$seat"; then
       note_red "lens $slot has no assigned seat"
     else
-      if [ "$class" != standard ] && [ -n "$lane_model" ] && [ "$seat" = "$lane_model" ]; then
-        note_red "lens $slot was seated on the lane's own model $lane_model"
+      if [ "$class" != standard ]; then
+        if [ -z "$lane_identity" ]; then
+          note_red "lens $slot cannot be shown independent: nothing identifies the lane that wrote the change (record model= on the task or dispatch with --lane-model)"
+        elif lane_identity_matches "$lane_identity" "$seat"; then
+          note_red "lens $slot was seated on $seat, which is the lane that wrote the change"
+        fi
       fi
       case "$seen_seats" in
         *" $seat "*) note_red "lens $slot repeats the seat $seat another lens in this round already used" ;;
@@ -1122,11 +1199,20 @@ cmd_reconcile() {
     fi
   done
   # A fix round that simply stops reporting an earlier round's BLOCKER has not
-  # closed it. Every MAJOR/BLOCKER raised in an earlier round of this PR is
-  # re-checked here against the dispositions recorded in ANY round, so the only
-  # way out of the loop is through each finding rather than past it.
+  # closed it. Every MAJOR/BLOCKER this PR has raised in ANY round is re-checked
+  # here against the dispositions recorded in ANY round, so the only way out of
+  # the loop is through each finding rather than past it.
+  #
+  # The scan is not backwards-only. Nothing makes the round being reconciled the
+  # newest one this PR has, so reconciling an earlier round after a later one was
+  # dispatched would otherwise never look at the later round's open findings and
+  # would write the marker straight over them.
   prev_round=1
-  while [ "$prev_round" -lt "$round" ]; do
+  while [ "$prev_round" -le "$FM_ADV_ROUND_SCAN_MAX" ]; do
+    if [ "$prev_round" -eq "$round" ]; then
+      prev_round=$((prev_round + 1))
+      continue
+    fi
     prev_dir=$(round_dir "$id" "$prev_round")
     if [ -f "$prev_dir/meta" ] && [ "$(round_meta_get "$prev_dir" url)" = "$url" ]; then
       prev_slots=$(round_meta_get "$prev_dir" slots)
@@ -1161,6 +1247,23 @@ cmd_reconcile() {
     prev_round=$((prev_round + 1))
   done
   if [ "$red" = 0 ]; then recommendation=GREEN; else recommendation=RED; fi
+  # Revoking is local and fail-closed, so it runs BEFORE the two forge calls
+  # below - either of which can fail and exit the script. Ordered after them, a
+  # gh outage on a RED run left the marker an earlier GREEN wrote still on
+  # disk, and the merge boundary read it as evidence for a PR this very run had
+  # just determined RED. The GREEN path is the mirror image and is already
+  # correct: it posts first and writes the marker only afterwards, because a
+  # marker that does not exist refuses.
+  if [ "$recommendation" != GREEN ]; then
+    marker=$(green_file "$id")
+    if fm_adv_green_parse "$marker" 2>/dev/null && [ "$FM_ADV_GREEN_PR" = "$url" ]; then
+      rm -f -- "$marker" \
+        || fail "reconciled RED but could not revoke the stale loop-green marker" 1
+      printf 'revoked: %s loop-green marker for %s\n' "$id" "$url"
+    fi
+    sed -i.bak 's/^status=.*$/status=red/' "$dir/meta" 2>/dev/null || true
+    rm -f -- "$dir/meta.bak"
+  fi
   {
     printf '# Adversarial reconciliation: %s round-%s\n\n' "$id" "$round"
     printf "Tier %s, merge boundary, reviewed head \`%s\`, PR head \`%s\`.\n\n" "$tier" "$recorded_head" "${live_head:-unknown}"
@@ -1189,20 +1292,6 @@ cmd_reconcile() {
     write_green_marker "$id" "$url" "$recorded_head" "$tier" "$required_tier" \
       || fail "cannot write the loop-green marker" 1
     sed -i.bak 's/^status=.*$/status=green/' "$dir/meta" 2>/dev/null || true
-    rm -f -- "$dir/meta.bak"
-  else
-    # The newest reconciliation of a PR is what the merge boundary must read.
-    # An earlier GREEN round left a marker on disk, and nothing else ever
-    # removes one, so a round re-reconciled RED - a fix that turned out wrong,
-    # a lens that reported late - would otherwise leave the merge cleared by
-    # evidence this very run has just contradicted in the PR itself.
-    marker=$(green_file "$id")
-    if fm_adv_green_parse "$marker" 2>/dev/null && [ "$FM_ADV_GREEN_PR" = "$url" ]; then
-      rm -f -- "$marker" \
-        || fail "reconciled RED but could not revoke the stale loop-green marker" 1
-      printf 'revoked: %s loop-green marker for %s\n' "$id" "$url"
-    fi
-    sed -i.bak 's/^status=.*$/status=red/' "$dir/meta" 2>/dev/null || true
     rm -f -- "$dir/meta.bak"
   fi
   printf 'reconciled: %s round-%s %s\n' "$id" "$round" "$recommendation"
