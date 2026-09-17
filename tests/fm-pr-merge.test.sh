@@ -6,7 +6,8 @@
 # never fires.
 #
 # The test_* functions below name the covered merge, refusal, live-head,
-# away-authority, outcome-publication, and recovery behavior directly.
+# loop-green, away-authority, outcome-publication, and recovery behavior
+# directly.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -206,6 +207,21 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
+# Write the loop-green marker the merge guard requires: it must cover the
+# merging PR URL at the head fm-pr-check.sh will record. Args: case_dir url head
+# [task-id].
+write_green_marker() {
+  local case_dir=$1 url=$2 head=$3 id=${4:-task-x1}
+  printf 'pr=%s\nhead=%s\n' "$url" "$head" > "$case_dir/state/$id.adversarial-review-green"
+}
+
+# Stage a marker this case owns, so the shared fixture in run_pr_merge leaves it
+# exactly as written. Same arguments as write_green_marker.
+add_green_marker() {
+  write_green_marker "$@"
+  : > "$1/own-green-marker"
+}
+
 # gh mock that fails the merge call but succeeds live verify, so a real merge
 # failure is distinguishable from the recording step.
 add_gh_mocks_merge_fails() {
@@ -372,6 +388,17 @@ glab_merge_line() {
 
 run_pr_merge() {
   local case_dir=$1 rc; shift
+  # bin/fm-pr-merge.sh refuses a GitHub pull request without adversarial-review
+  # loop-green evidence, so every case that is not itself exercising that guard
+  # merges under a marker covering its own PR at the head its mocks report. A
+  # case that IS exercising the guard writes its own marker first, or drops the
+  # no-green-marker sentinel to keep the state dir empty of one; both are left
+  # untouched here.
+  if [ ! -f "$case_dir/no-green-marker" ] \
+    && [ ! -f "$case_dir/own-green-marker" ] \
+    && [ -f "$case_dir/github-head" ]; then
+    write_green_marker "$case_dir" "${2:-}" "$(cat "$case_dir/github-head")" "${1:-task-x1}"
+  fi
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_HOME="${FM_TEST_HOME:-$case_dir/home}" \
   FM_STATE_OVERRIDE="$case_dir/state" \
@@ -430,6 +457,7 @@ test_verified_merge_records_pr_and_head() {
   case_dir=$(make_case records-before-merge)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" deadbeefcafefeed0000000000000000deadbeef
+  add_green_marker "$case_dir" https://github.com/example/repo/pull/9 deadbeefcafefeed0000000000000000deadbeef
   : > "$case_dir/gh-axi.log"
 
   set +e
@@ -476,6 +504,7 @@ test_merge_failure_propagates_after_recording() {
   case_dir=$(make_case merge-fails)
   mkdir -p "$case_dir/wt"
   add_gh_mocks_merge_fails "$case_dir"
+  add_green_marker "$case_dir" https://github.com/example/repo/pull/13 1111111111111111111111111111111111111111
   : > "$case_dir/gh-axi.log"
 
   set +e
@@ -1276,6 +1305,7 @@ test_extra_merge_args_forwarded() {
   case_dir=$(make_case extra-args)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 2222222222222222222222222222222222222222
+  add_green_marker "$case_dir" https://github.com/example/repo/pull/15 2222222222222222222222222222222222222222
   : > "$case_dir/gh-axi.log"
 
   set +e
@@ -1478,6 +1508,7 @@ test_explicit_merge_method_not_overridden() {
   case_dir=$(make_case explicit-merge-method)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 5555555555555555555555555555555555555555
+  add_green_marker "$case_dir" https://github.com/example/repo/pull/22 5555555555555555555555555555555555555555
   : > "$case_dir/gh-axi.log"
 
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/22 -- --merge \
@@ -1492,6 +1523,7 @@ test_method_equals_merge_method_not_overridden() {
   case_dir=$(make_case method-equals-merge-method)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 7777777777777777777777777777777777777777
+  add_green_marker "$case_dir" https://github.com/example/repo/pull/23 7777777777777777777777777777777777777777
   : > "$case_dir/gh-axi.log"
 
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/23 -- --method=merge \
@@ -1506,6 +1538,7 @@ test_parses_pr_url_for_gh_axi() {
   case_dir=$(make_case url-parsing)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" 6666666666666666666666666666666666666666
+  add_green_marker "$case_dir" https://github.com/my-org/my-repo/pull/126 6666666666666666666666666666666666666666
   : > "$case_dir/gh-axi.log"
 
   run_pr_merge "$case_dir" task-x1 https://github.com/my-org/my-repo/pull/126 \
@@ -2145,6 +2178,73 @@ test_secondmate_without_parent_binding_is_loud() {
   assert_absent "$case_dir/state/.wake-queue" \
     "unbound-secondmate: a secondmate home fell back to the main-home record"
   pass "a secondmate home that cannot report upward says so instead of merging in silence"
+}
+
+test_missing_green_marker_refuses_before_poll() {
+  local case_dir rc
+  case_dir=$(make_case no-green-marker)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  # This case is the guard itself: keep the shared fixture from supplying one.
+  : > "$case_dir/no-green-marker"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/31 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "no-green-marker: fm-pr-merge should refuse without loop-green evidence"
+  assert_grep 'loop-green evidence is missing' "$case_dir/stderr" \
+    "no-green-marker: refusal did not name the missing loop-green evidence"
+  assert_absent "$case_dir/state/task-x1.check.sh" \
+    "no-green-marker: refusal armed a merge poll"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "no-green-marker: gh-axi pr merge was invoked without loop-green evidence"
+  pass "fm-pr-merge refuses before polling when the loop-green marker is missing"
+}
+
+test_wrong_pr_green_marker_refuses() {
+  local case_dir rc
+  case_dir=$(make_case wrong-pr-marker)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  add_green_marker "$case_dir" https://github.com/example/repo/pull/999 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/32 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "wrong-pr-marker: fm-pr-merge should refuse a marker for another PR"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "wrong-pr-marker: gh-axi pr merge was invoked for a PR the marker does not cover"
+  pass "fm-pr-merge refuses when the loop-green marker covers a different PR"
+}
+
+test_stale_green_head_refuses() {
+  local case_dir rc
+  case_dir=$(make_case stale-green-head)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" cccccccccccccccccccccccccccccccccccccccc
+  add_green_marker "$case_dir" https://github.com/example/repo/pull/33 dddddddddddddddddddddddddddddddddddddddd
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/33 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "stale-green-head: fm-pr-merge should refuse a stale loop-green head"
+  assert_grep 'but the PR is at' "$case_dir/stderr" \
+    "stale-green-head: refusal did not name the head mismatch"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "stale-green-head: gh-axi pr merge was invoked past a stale loop-green head"
+  pass "fm-pr-merge refuses when the loop-green head is stale against the recorded head"
 }
 
 test_github_zero_exit_queue_required_refuses_with_exact_retry
@@ -3107,3 +3207,6 @@ test_away_record_cannot_change_between_the_authority_read_and_the_merge
 test_a_grant_revoked_before_the_merge_refuses_it
 test_merge_refuses_when_the_away_record_cannot_be_locked
 test_allow_red_refused_on_gitlab
+test_missing_green_marker_refuses_before_poll
+test_wrong_pr_green_marker_refuses
+test_stale_green_head_refuses

@@ -6,6 +6,13 @@
 # request is addressed through glab by the project URL rebuilt from the parsed
 # host and path, so any instance works and no host is hardcoded.
 #
+# A GitHub pull request is refused unless the adversarial-review loop is GREEN
+# for it at the head being merged: bin/fm-adversarial-review.sh owns the marker
+# and this script only enforces it, before arming any merge poll and again
+# against the freshly recorded head. The marker is GitHub-shaped evidence (it
+# parses to a GitHub pull request URL), so a GitLab merge request is outside
+# what the loop currently covers and carries no such requirement here.
+#
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
 # A GitHub merge is refused unless every pre-merge condition holds, each read
@@ -323,6 +330,13 @@ if [ ! -f "$META" ] || [ -L "$META" ]; then
   echo "error: task metadata is unavailable" >&2
   exit 1
 fi
+# The loop-green marker must already cover this pull request before the merge
+# poll is armed, so a refusal leaves no poll behind. The head check further
+# below runs after the poll records the forge's current head.
+if [ "$PROVIDER" = github ]; then
+  "$SCRIPT_DIR/fm-adversarial-review.sh" check-green "$ID" "$URL" || exit 1
+fi
+
 if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
   echo "error: PR merge refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -1129,6 +1143,16 @@ require_current_away_authority || away_status=$?
 [ "$away_status" -eq 0 ] || exit "$away_status"
 require_recorded_pr_identity || exit 1
 record_pr_metadata || exit 1
+# When the forge supplied a current head, the green marker must be for that
+# exact head. Without a recorded head there is nothing to compare, and the
+# reviewed head stays auditable in the PR's round comments. RECORDED_HEAD is
+# the GitLab pre-check read above and is deliberately left alone here.
+if [ "$PROVIDER" = github ]; then
+  REVIEWED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+  if [ -n "$REVIEWED_HEAD" ]; then
+    "$SCRIPT_DIR/fm-adversarial-review.sh" check-green "$ID" "$URL" --head "$REVIEWED_HEAD" || exit 1
+  fi
+fi
 require_released_captain_hold || exit 1
 
 # Accepted confused-agent-grade limitation, as in bin/fm-lease-lib.sh, not an
