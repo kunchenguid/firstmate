@@ -6,9 +6,9 @@
 #   . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 #
 # Generic reporters, temp roots, git fixtures, and fail/pass/fm_test_cleanup
-# come from tests/lib.sh, pulled in below. This file owns the shared fake
-# no-mistakes, gh, gh-axi, tmux, ssh, and spawn-world helpers. Wake-queue mocks
-# stay in wake-helpers.sh; secondmate-lifecycle mocks stay in
+# come from tests/lib.sh, pulled in below. This file owns the shared fake-CLI
+# builders - every fm_test_fake_* below - and the spawn-world helpers.
+# Wake-queue mocks stay in wake-helpers.sh; secondmate-lifecycle mocks stay in
 # secondmate-helpers.sh.
 #
 # FM_TEST_NO_MISTAKES_VERSION is the single default version for the shared fake
@@ -27,21 +27,28 @@ FM_TEST_FIXTURES_SOURCED=1
 # equal to that floor so a bump is one constant here plus that production pin.
 export FM_TEST_NO_MISTAKES_VERSION=1.46.0
 export FM_TEST_NO_MISTAKES_FAKE_VERSION="no-mistakes version v${FM_TEST_NO_MISTAKES_VERSION} (fake)"
+# The timestamped form is the default banner: it is the shape the real CLI
+# prints, and the suites that pin a banner (bootstrap, session-start) pin this
+# form. Override a single case with FM_FAKE_NO_MISTAKES_VERSION.
 export FM_TEST_NO_MISTAKES_FAKE_VERSION_TS="${FM_TEST_NO_MISTAKES_FAKE_VERSION} 2026-06-27T00:02:18Z"
 export FM_TEST_GH_AXI_VERSION=0.1.29
+export FM_TEST_QUOTA_AXI_VERSION=0.1.29
+# Production floor lives in bin/fm-tasks-axi-lib.sh (FM_TASKS_AXI_MIN). Keep
+# this equal to that floor so a bump is one constant here plus that pin.
+export FM_TEST_TASKS_AXI_VERSION=0.2.4
 
 # --- fake no-mistakes -------------------------------------------------------
 
 # fm_test_fake_no_mistakes <fakebin>
-# Drops a no-mistakes stub that answers --version with
-# FM_TEST_NO_MISTAKES_FAKE_VERSION (or FM_FAKE_NO_MISTAKES_VERSION when set)
-# and exits 0 for every other invocation.
+# Drops a no-mistakes stub that answers --version with the shared timestamped
+# banner (or FM_FAKE_NO_MISTAKES_VERSION when set) and exits 0 for every other
+# invocation.
 fm_test_fake_no_mistakes() {
   local fakebin=$1
   cat > "$fakebin/no-mistakes" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = --version ]; then
-  printf '%s\\n' "\${FM_FAKE_NO_MISTAKES_VERSION:-$FM_TEST_NO_MISTAKES_FAKE_VERSION}"
+  printf '%s\\n' "\${FM_FAKE_NO_MISTAKES_VERSION:-$FM_TEST_NO_MISTAKES_FAKE_VERSION_TS}"
   exit 0
 fi
 exit 0
@@ -66,7 +73,7 @@ SH
   chmod +x "$fakebin/no-mistakes"
 }
 
-# --- fake gh / gh-axi -------------------------------------------------------
+# --- fake gh / axi CLIs / treehouse -----------------------------------------
 
 # fm_test_fake_gh <fakebin>
 # Authenticates (`gh auth status` exits 0) and otherwise exits 0.
@@ -89,7 +96,68 @@ fm_test_fake_gh_axi() {
   fm_fake_version_tool "$fakebin" gh-axi FM_FAKE_GH_AXI_VERSION "$FM_TEST_GH_AXI_VERSION"
 }
 
-# --- fake tmux / ssh / sleep ------------------------------------------------
+# fm_test_fake_quota_axi <fakebin>
+# Answers --version with FM_FAKE_QUOTA_AXI_VERSION or FM_TEST_QUOTA_AXI_VERSION.
+fm_test_fake_quota_axi() {
+  local fakebin=$1
+  fm_fake_version_tool "$fakebin" quota-axi FM_FAKE_QUOTA_AXI_VERSION "$FM_TEST_QUOTA_AXI_VERSION"
+}
+
+# fm_test_fake_treehouse <fakebin> [default-usage]
+# Answers `get --help` with <default-usage> (default: the lease-capable form)
+# and exits 0 otherwise. FM_FAKE_TREEHOUSE_LEASE_HELP=1 switches the help to
+# the lease-holder form, so a suite can drive both sides of spawn's
+# capability detection without owning a private copy of the stub.
+fm_test_fake_treehouse() {
+  local fakebin=$1 usage=${2:-Usage: treehouse get [--lease]}
+  cat > "$fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = get ] && [ "\${2:-}" = --help ]; then
+  if [ "\${FM_FAKE_TREEHOUSE_LEASE_HELP:-}" = 1 ]; then
+    printf '%s\\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
+  else
+    printf '%s\\n' '$usage'
+  fi
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+}
+
+# fm_test_fake_tasks_axi <fakebin> [version] [archive-body] [multi-id]
+# Answers --version (default FM_TEST_TASKS_AXI_VERSION), the two capability
+# helps the backlog gate probes (`update --help` advertises --body-file and,
+# unless archive-body is "no", --archive-body; `mv --help` shows the multi-id
+# usage unless multi-id is "no"), and exits 0 for every other invocation.
+fm_test_fake_tasks_axi() {
+  local fakebin=$1 version=${2:-$FM_TEST_TASKS_AXI_VERSION} archive_body=${3:-yes} multi_id=${4:-yes} archive_line mv_usage
+  archive_line='  --archive-body'
+  [ "$archive_body" = yes ] || archive_line=
+  mv_usage='usage: tasks-axi mv <id> [<id>...] --to <path-or-dir>'
+  [ "$multi_id" = yes ] || mv_usage='usage: tasks-axi mv <id> --to <path-or-dir>'
+  cat > "$fakebin/tasks-axi" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = --version ]; then
+  printf '%s\\n' '$version'
+  exit 0
+fi
+if [ "\${1:-}" = update ] && [ "\${2:-}" = --help ]; then
+  printf '%s\\n' 'usage: tasks-axi update <id> [flags]'
+  printf '%s\\n' '  --body-file <path>'
+  [ -z '$archive_line' ] || printf '%s\\n' '$archive_line'
+  exit 0
+fi
+if [ "\${1:-}" = mv ] && [ "\${2:-}" = --help ]; then
+  printf '%s\\n' '$mv_usage'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/tasks-axi"
+}
+
+# --- fake tmux / ssh / sleep / uname / curl / hashers -----------------------
 
 # fm_test_fake_tmux_spawn <fakebin>
 # Spawn-world tmux: pane_current_path from FM_FAKE_PANE_PATH, session named
@@ -220,6 +288,93 @@ printf '%s\n' "${1:-}" >> "${FM_SLEEP_LOG:-/dev/null}"
 exit 0
 SH
   chmod +x "$fakebin/sleep"
+}
+
+# fm_test_fake_uname <fakebin>
+# Answers -s/-m with FM_TEST_UNAME_S / FM_TEST_UNAME_M (Linux/x86_64 default).
+fm_test_fake_uname() {
+  local fakebin=$1
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -s) printf '%s\n' "${FM_TEST_UNAME_S:-Linux}" ;;
+  -m) printf '%s\n' "${FM_TEST_UNAME_M:-x86_64}" ;;
+  *) printf '%s\n' "${FM_TEST_UNAME_S:-Linux}" ;;
+esac
+SH
+  chmod +x "$fakebin/uname"
+}
+
+# fm_test_fake_curl <fakebin>
+# Download stub for installer tests: counts calls to CURL_COUNT, logs each URL
+# to CURL_URL_LOG, exits 22 for the first CURL_FAIL_UNTIL calls, else writes an
+# empty file to the -o target.
+fm_test_fake_curl() {
+  local fakebin=$1
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -f "${CURL_COUNT:-}" ] || count=$(cat "$CURL_COUNT")
+count=$((count + 1))
+[ -z "${CURL_COUNT:-}" ] || printf '%s\n' "$count" > "$CURL_COUNT"
+url=
+out=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o)
+      out=$2
+      shift 2
+      ;;
+    -*)
+      shift
+      ;;
+    *)
+      url=$1
+      shift
+      ;;
+  esac
+done
+[ -z "${CURL_URL_LOG:-}" ] || printf '%s\n' "$url" >> "$CURL_URL_LOG"
+fail_until=${CURL_FAIL_UNTIL:-0}
+[ "$count" -gt "$fail_until" ] || exit 22
+: > "$out"
+exit 0
+SH
+  chmod +x "$fakebin/curl"
+}
+
+# fm_test_fake_hasher <fakebin> <name>
+# sha256-style hasher stub: logs "$self $*" to HASHER_LOG and prints
+# SHA256_STUB_HASH for the file (shasum requires -a 256).
+fm_test_fake_hasher() {
+  local fakebin=$1 name=$2
+  cat > "$fakebin/$name" <<'SH'
+#!/usr/bin/env bash
+self=${0##*/}
+if [ -n "${HASHER_LOG:-}" ]; then
+  printf '%s\n' "$self $*" >> "$HASHER_LOG"
+fi
+file=$1
+if [ "$self" = shasum ]; then
+  algo=
+  file=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -a)
+        algo=$2
+        shift 2
+        ;;
+      *)
+        file=$1
+        shift
+        ;;
+    esac
+  done
+  [ "$algo" = 256 ] || exit 1
+fi
+printf '%s  %s\n' "${SHA256_STUB_HASH:?}" "$file"
+SH
+  chmod +x "$fakebin/$name"
 }
 
 # --- spawn-world ------------------------------------------------------------
