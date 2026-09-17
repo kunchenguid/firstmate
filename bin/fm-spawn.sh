@@ -1056,6 +1056,7 @@ HERDR_LAYOUT_ATTEMPT=
 HERDR_LAYOUT_OWNERSHIP_MODE=
 HERDR_LAYOUT_LEASE_HOLDER=-
 HERDR_LAYOUT_QUARANTINED=0
+HERDR_LAYOUT_ABORT_RESOLVED=0
 HERDR_LAYOUT_ENDPOINT_COMMITTED=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
@@ -1118,12 +1119,12 @@ spawn_abort_reconcile_fresh_herdr_layout() {
         "${HERDR_PROJECTION_ID:-}" \
       || return 1
   fi
-  rm -f -- "$HERDR_LAYOUT_ATTEMPT" || return 1
+  HERDR_LAYOUT_ABORT_RESOLVED=1
   HERDR_PROJECTION_ABORT_CLEANUP=0
 }
 
 spawn_abort_cleanup() {
-  local status=$? journal
+  local status=$? journal seeded_pruned
   if [ -n "$HERDR_LAYOUT_ATTEMPT" ] \
     && { [ -e "$HERDR_LAYOUT_ATTEMPT" ] || [ -L "$HERDR_LAYOUT_ATTEMPT" ]; }; then
     if ! spawn_abort_reconcile_fresh_herdr_layout; then
@@ -1167,11 +1168,13 @@ spawn_abort_cleanup() {
   fi
   if [ "$HERDR_LAYOUT_QUARANTINED" != 1 ] \
     && [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
+    seeded_pruned=$HERDR_PROJECTION_ABORT_SEEDED_PRUNED
+    [ "${FM_BACKEND_HERDR_SEEDED_PRUNE_CONFIRMED:-0}" != 1 ] || seeded_pruned=1
     if fm_backend_herdr_projection_cleanup_exact \
       "$HERDR_PROJECTION_ABORT_SESSION" \
       "$HERDR_PROJECTION_ABORT_TASK_PANE" \
       "$HERDR_PROJECTION_ABORT_SEEDED_PANE" \
-      "$HERDR_PROJECTION_ABORT_SEEDED_PRUNED"; then
+      "$seeded_pruned"; then
       journal=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
       if { [ ! -e "$journal" ] && [ ! -L "$journal" ]; } \
         || fm_backend_herdr_projection_journal_retire_closed_endpoint \
@@ -1240,7 +1243,8 @@ spawn_abort_cleanup() {
     fm_lock_release "$SPAWN_TASK_LOCK" || true
   fi
   if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ] \
-    && [ "$HERDR_LAYOUT_QUARANTINED" != 1 ]; then
+    && [ "$HERDR_LAYOUT_QUARANTINED" != 1 ] \
+    && [ "$HERDR_LAYOUT_ABORT_RESOLVED" != 1 ]; then
     if ! spawn_fresh_commit_rollback; then
       status=1
     fi
@@ -1271,7 +1275,25 @@ spawn_abort_cleanup() {
     && [ "$SPAWN_TREEHOUSE_LEASE_ROLLBACK_ARMED" = 1 ] \
     && [ -n "$HERDR_TREEHOUSE_LEASE_TX" ] \
     && { [ -e "$HERDR_TREEHOUSE_LEASE_TX" ] || [ -L "$HERDR_TREEHOUSE_LEASE_TX" ]; }; then
-    if fm_treehouse_lease_transaction_return "$HERDR_TREEHOUSE_LEASE_TX" \
+    if [ "$HERDR_LAYOUT_ABORT_RESOLVED" = 1 ]; then
+      if fm_treehouse_lease_transaction_return "$HERDR_TREEHOUSE_LEASE_TX" \
+        "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER" "$PROJ_ABS" >/dev/null \
+        && fm_treehouse_slot_owner_release \
+          "$WT" "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER" \
+        && fm_backend_herdr_layout_attempt_mark_released "$HERDR_LAYOUT_ATTEMPT" \
+        && spawn_finalize_released_fresh_herdr_layout; then
+        SPAWN_FRESH_COMMIT_PENDING=0
+        SPAWN_SLOT_CLAIMED=0
+        SPAWN_TREEHOUSE_LEASE_HELD=0
+        SPAWN_TREEHOUSE_LEASE_ROLLBACK_ARMED=0
+        HERDR_LAYOUT_ABORT_RESOLVED=0
+      else
+        HERDR_LAYOUT_QUARANTINED=1
+        SPAWN_FRESH_COMMIT_PENDING=0
+        echo "warning: could not finalize the exact Treehouse lease for aborted structural Herdr launch of $ID" >&2
+        status=1
+      fi
+    elif fm_treehouse_lease_transaction_return "$HERDR_TREEHOUSE_LEASE_TX" \
       "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER" "$PROJ_ABS" >/dev/null \
       && rm -f -- "$HERDR_TREEHOUSE_LEASE_TX"; then
       SPAWN_TREEHOUSE_LEASE_HELD=0
@@ -3065,7 +3087,7 @@ spawn_rebind_restored_herdr_layout_attempt() {
 }
 
 spawn_finalize_released_fresh_herdr_layout() {
-  local meta="$STATE/$ID.meta" holder lease_id busy_gen recorded_worktree
+  local meta="$STATE/$ID.meta" holder lease_id busy_gen recorded_worktree endpoint
   fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" \
     && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 8 ] \
     && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = released ] \
@@ -3087,14 +3109,18 @@ spawn_finalize_released_fresh_herdr_layout() {
     if [ -z "$recorded_worktree" ] && { [ -e "$(fm_meta_get "$meta" worktree)" ] || [ -L "$(fm_meta_get "$meta" worktree)" ]; }; then
       recorded_worktree=$(fm_treehouse_canonical_existing_path "$(fm_meta_get "$meta" worktree)") || return 1
     fi
+    endpoint="$(herdr_projection_meta_field_exact "$meta" herdr_tab_id 2>/dev/null || true):$(herdr_projection_meta_field_exact "$meta" herdr_pane_id 2>/dev/null || true)"
+    case "$endpoint" in
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE"|\
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE") ;;
+      *) return 1 ;;
+    esac
     [ "$(herdr_projection_meta_field_exact "$meta" endpoint_task_id 2>/dev/null || true)" = "$ID" ] \
       && [ "$(herdr_projection_meta_field_exact "$meta" treehouse_lease_holder 2>/dev/null || true)" = "$holder" ] \
       && [ "$(herdr_projection_meta_field_exact "$meta" treehouse_lease_id 2>/dev/null || true)" = "$lease_id" ] \
       && [ "$(herdr_projection_meta_field_exact "$meta" project 2>/dev/null || true)" = "$PROJ_ABS" ] \
       && [ "$(herdr_projection_meta_field_exact "$meta" herdr_session 2>/dev/null || true)" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" ] \
       && [ "$(herdr_projection_meta_field_exact "$meta" herdr_workspace_id 2>/dev/null || true)" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" ] \
-      && [ "$(herdr_projection_meta_field_exact "$meta" herdr_tab_id 2>/dev/null || true)" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB" ] \
-      && [ "$(herdr_projection_meta_field_exact "$meta" herdr_pane_id 2>/dev/null || true)" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" ] \
       && [ "$recorded_worktree" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKTREE" ] || return 1
     busy_gen=$(fm_meta_get "$meta" busy_gen)
     [ -z "$busy_gen" ] || "$FM_ROOT/bin/fm-busy-event.sh" retire "$STATE" "$ID" --gen "$busy_gen" >/dev/null 2>&1 || return 1
@@ -3559,6 +3585,7 @@ else
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
                 HERDR_PROJECTION_ABORT_TASK_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
                 HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+                HERDR_PROJECTION_ABORT_SEEDED_PRUNED=${FM_BACKEND_HERDR_PROJECTION_SEEDED_PRUNED:-0}
               fi
               exit 1
             fi
@@ -3572,7 +3599,7 @@ else
             HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
             HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
             HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
-            HERDR_PROJECTION_ABORT_SEEDED_PRUNED=1
+            HERDR_PROJECTION_ABORT_SEEDED_PRUNED=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PRUNED
             fm_backend_herdr_projection_order_best_effort \
               "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID"
             HERDR_HOME_ID=$(fm_backend_herdr_projection_home_identity "$HERDR_LABEL_HOME" 2>/dev/null || true)

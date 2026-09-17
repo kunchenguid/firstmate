@@ -1877,11 +1877,18 @@ fm_backend_herdr_launcher_identity() {  # <session>
 # exists alongside it, never right after workspace creation - and this
 # function independently re-checks the tab count as a second layer.
 fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_id> <seeded_tab_id> [focus-preserving]
-  local session=$1 wsid=$2 tab_id=$3 close_mode=${4:-direct} tabs tab_count current_label pane_id agent_out agent_status
+  local session=$1 wsid=$2 tab_id=$3 close_mode=${4:-direct} tabs tab_count match_count current_label pane_id agent_out agent_status
+  FM_BACKEND_HERDR_SEEDED_PRUNE_CONFIRMED=0
   [ -n "$tab_id" ] || return 0
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 0
   tab_count=$(printf '%s' "$tabs" | jq -r '.result.tabs? // [] | length' 2>/dev/null)
   case "$tab_count" in ''|*[!0-9]*|0|1) return 0 ;; esac
+  match_count=$(printf '%s' "$tabs" | jq -r --arg t "$tab_id" '[.result.tabs[]? | select(.tab_id == $t)] | length' 2>/dev/null)
+  if [ "$match_count" = 0 ]; then
+    FM_BACKEND_HERDR_SEEDED_PRUNE_CONFIRMED=1
+    return 0
+  fi
+  [ "$match_count" = 1 ] || return 0
   current_label=$(printf '%s' "$tabs" | jq -r --arg t "$tab_id" '.result.tabs[]? | select(.tab_id == $t) | .label' 2>/dev/null)
   [ "$current_label" = "1" ] || return 0
   pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || return 0
@@ -1890,10 +1897,12 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
   agent_status=$(printf '%s' "$agent_out" | jq -r '.result.agent.agent_status // empty' 2>/dev/null)
   [ "$agent_status" = working ] && return 0
   if [ "$close_mode" = focus-preserving ]; then
-    fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane_id"
+    fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane_id" || return 1
   else
     fm_backend_herdr_cli "$session" pane close "$pane_id" >/dev/null 2>&1 || true
+    return 0
   fi
+  FM_BACKEND_HERDR_SEEDED_PRUNE_CONFIRMED=1
 }
 
 # fm_backend_herdr_workspace_ensure: the workspace this spawn's task tab
@@ -2525,6 +2534,8 @@ fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-lab
   FM_BACKEND_HERDR_PROJECTION_TAB_ID=""
   FM_BACKEND_HERDR_PROJECTION_PANE_ID=""
   FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE=0
+  FM_BACKEND_HERDR_PROJECTION_SEEDED_PRUNED=0
+  FM_BACKEND_HERDR_SEEDED_PRUNE_CONFIRMED=0
 
   fm_backend_herdr_version_check || return 1
   session=$(fm_backend_herdr_session)
@@ -2593,6 +2604,7 @@ fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-lab
     echo "error: herdr presentation seeded-tab prune refused a focus-unsafe close; leaving its journal quarantined" >&2
     return 1
   fi
+  FM_BACKEND_HERDR_PROJECTION_SEEDED_PRUNED=${FM_BACKEND_HERDR_SEEDED_PRUNE_CONFIRMED:-0}
   active_tab=${focus_before#*$'\t'}
   if [ "$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID" != "$active_tab" ]; then
     fm_backend_herdr_projection_focus_restore "$session" "$focus_before" "seeded-tab prune" || {
@@ -2626,6 +2638,7 @@ fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-lab
     echo "error: disposable herdr presentation workspace did not converge to exactly one task pane" >&2
     return 1
   fi
+  FM_BACKEND_HERDR_PROJECTION_SEEDED_PRUNED=1
   return 0
 }
 

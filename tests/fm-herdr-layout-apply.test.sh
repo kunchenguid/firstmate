@@ -1068,6 +1068,11 @@ case "${1:-}" in
     done
     [ -f "$state" ]
     [ "$lease_id" = "$(jq -r '.lease_id' "$state")" ]
+    if [ -n "${FM_FAKE_STRUCT_RETURN_FAIL_ONCE:-}" ] \
+      && [ -e "$FM_FAKE_STRUCT_RETURN_FAIL_ONCE" ]; then
+      rm -f "$FM_FAKE_STRUCT_RETURN_FAIL_ONCE"
+      exit 75
+    fi
     rm -f "$state"
     ;;
 esac
@@ -1343,6 +1348,79 @@ assert_contains "$struct_post_out" "did not produce the expected Pi process" \
 assert_grep "return --force --if-lease-id $STRUCT_LEASE_ID $STRUCT_WT" "$STRUCT_TREEHOUSE_LOG" \
   "post-apply reconciliation did not return its exact Treehouse lease identity"
 pass "post-apply abort reconciliation owns cleanup without a duplicate close"
+
+rm -f "$STRUCT_TASK_CREATED" "$STRUCT_TASK_LABEL" "$STRUCT_CLOSED" "$STRUCT_TREEHOUSE_STATE" "$APPLIED" "$REQUEST"
+: > "$STRUCT_CLOSE_LOG"
+: > "$STRUCT_TREEHOUSE_LOG"
+INTERRUPTED_RETURN="$TMP_ROOT/interrupted-return"
+: > "$INTERRUPTED_RETURN"
+fm_test_spawn_brief "$STRUCT_HOME" interrupted-z1 "Keep cleanup recovery proof across an interrupted lease return."
+start_server success
+set +e
+interrupted_out=$(HERDR_SESSION=lab-structural \
+  FM_FAKE_STRUCT_MODE=postapply FM_FAKE_STRUCT_SOCKET="$SOCK" \
+  FM_FAKE_STRUCT_APPLIED="$APPLIED" FM_FAKE_STRUCT_REQUEST="$REQUEST" \
+  FM_FAKE_STRUCT_TASK_CREATED="$STRUCT_TASK_CREATED" FM_FAKE_STRUCT_TASK_LABEL="$STRUCT_TASK_LABEL" \
+  FM_FAKE_STRUCT_CLOSED="$STRUCT_CLOSED" FM_FAKE_STRUCT_CLOSE_LOG="$STRUCT_CLOSE_LOG" \
+  FM_FAKE_STRUCT_TREEHOUSE_LOG="$STRUCT_TREEHOUSE_LOG" FM_FAKE_STRUCT_TREEHOUSE_STATE="$STRUCT_TREEHOUSE_STATE" \
+  FM_FAKE_STRUCT_RETURN_FAIL_ONCE="$INTERRUPTED_RETURN" \
+  FM_FAKE_STRUCT_LEASE_ID="$STRUCT_LEASE_ID" FM_FAKE_STRUCT_WT="$STRUCT_WT" \
+  FM_FAKE_STRUCT_WORKSPACE_LABEL="$STRUCT_WORKSPACE_LABEL" FM_FAKE_STRUCT_PARENT_PID="$$" \
+  fm_test_run_spawn "$STRUCT_HOME" "$STRUCT_WT" "$STRUCT_FAKEBIN" \
+    interrupted-z1 "$STRUCT_PROJECT" --scout --harness pi --backend herdr)
+interrupted_status=$?
+set -e
+wait_server
+[ "$interrupted_status" -ne 0 ] || fail "interrupted lease return unexpectedly launched a worker"
+INTERRUPTED_META="$STRUCT_HOME/state/interrupted-z1.meta"
+INTERRUPTED_TX="$STRUCT_HOME/state/interrupted-z1.herdr-lease"
+INTERRUPTED_ATTEMPT="$STRUCT_HOME/state/interrupted-z1.herdr-launch"
+[ -e "$INTERRUPTED_META" ] && [ -e "$INTERRUPTED_TX" ] && [ -e "$INTERRUPTED_ATTEMPT" ] \
+  || fail "interrupted lease return discarded correlated recovery records"
+fm_backend_herdr_layout_attempt_snapshot "$INTERRUPTED_ATTEMPT" \
+  && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 6 ] \
+  && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = removed ] \
+  || fail "interrupted lease return lost its resolved structural launch proof"
+INTERRUPTED_ATTEMPT_ID=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_ID
+INTERRUPTED_HOLDER=$(sed -n 's/^treehouse_lease_holder=//p' "$INTERRUPTED_META")
+fm_treehouse_lease_transaction_snapshot "$INTERRUPTED_TX" \
+  && [ "$FM_TREEHOUSE_LEASE_TX_PHASE" = cleanup ] \
+  || fail "interrupted lease return lost its retryable cleanup receipt"
+set +e
+interrupted_retry_out=$(HERDR_SESSION=lab-structural \
+  FM_FAKE_STRUCT_MODE=postapply FM_FAKE_STRUCT_SOCKET="$SOCK" \
+  FM_FAKE_STRUCT_APPLIED="$APPLIED" FM_FAKE_STRUCT_REQUEST="$REQUEST" \
+  FM_FAKE_STRUCT_TASK_CREATED="$STRUCT_TASK_CREATED" FM_FAKE_STRUCT_TASK_LABEL="$STRUCT_TASK_LABEL" \
+  FM_FAKE_STRUCT_CLOSED="$STRUCT_CLOSED" FM_FAKE_STRUCT_CLOSE_LOG="$STRUCT_CLOSE_LOG" \
+  FM_FAKE_STRUCT_TREEHOUSE_LOG="$STRUCT_TREEHOUSE_LOG" FM_FAKE_STRUCT_TREEHOUSE_STATE="$STRUCT_TREEHOUSE_STATE" \
+  FM_FAKE_STRUCT_LEASE_ID="$STRUCT_LEASE_ID" FM_FAKE_STRUCT_WT="$STRUCT_WT" \
+  FM_FAKE_STRUCT_WORKSPACE_LABEL="$STRUCT_WORKSPACE_LABEL" FM_FAKE_STRUCT_PARENT_PID="$$" \
+  fm_test_run_spawn "$STRUCT_HOME" "$STRUCT_WT" "$STRUCT_FAKEBIN" \
+    interrupted-z1 "$STRUCT_PROJECT" --scout --harness pi --backend herdr)
+interrupted_retry_status=$?
+set -e
+[ "$interrupted_retry_status" -ne 0 ] || fail "interruption retry unexpectedly launched through the stale fixture"
+if [ -e "$INTERRUPTED_ATTEMPT" ]; then
+  fm_backend_herdr_layout_attempt_snapshot "$INTERRUPTED_ATTEMPT" \
+    || fail "interruption retry left a malformed structural receipt"
+  [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_ID" != "$INTERRUPTED_ATTEMPT_ID" ] \
+    || fail "interruption retry preserved the resolved launch receipt"
+fi
+if [ -e "$INTERRUPTED_TX" ]; then
+  fm_treehouse_lease_transaction_snapshot "$INTERRUPTED_TX" \
+    || fail "interruption retry left a malformed lease receipt"
+  [ "$FM_TREEHOUSE_LEASE_TX_HOLDER" != "$INTERRUPTED_HOLDER" ] \
+    || fail "interruption retry preserved the returned lease receipt"
+fi
+if [ -e "$INTERRUPTED_TX" ] && [ -e "$INTERRUPTED_META" ]; then
+  RETRY_HOLDER=$(sed -n 's/^treehouse_lease_holder=//p' "$INTERRUPTED_META")
+  PATH="$STRUCT_FAKEBIN:$PATH" fm_treehouse_lease_transaction_return \
+    "$INTERRUPTED_TX" interrupted-z1 "$RETRY_HOLDER" "$STRUCT_PROJECT" >/dev/null \
+    || fail "could not clean the interruption retry lease fixture"
+  fm_treehouse_slot_owner_release "$STRUCT_WT" interrupted-z1 "$RETRY_HOLDER"
+fi
+rm -f "$INTERRUPTED_META" "$INTERRUPTED_TX" "$INTERRUPTED_ATTEMPT" "$STRUCT_TREEHOUSE_STATE"
+pass "abort cleanup retains resolved launch proof through lease retirement"
 
 rm -f "$STRUCT_TASK_CREATED" "$STRUCT_TASK_LABEL" "$STRUCT_CLOSED" "$STRUCT_TREEHOUSE_STATE" "$APPLIED" "$REQUEST"
 : > "$STRUCT_CLOSE_LOG"

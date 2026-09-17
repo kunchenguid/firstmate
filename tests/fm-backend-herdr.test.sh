@@ -1893,6 +1893,37 @@ test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
   pass "herdr presentation create: exact response IDs yield one normal task pane with no workspace-close authority"
 }
 
+test_projection_create_retains_seed_prune_proof_after_late_failure() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/projection-pruned-late-failure"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"workspace":{"workspace_id":"w9"},"tab":{"tab_id":"w9:t1"},"root_pane":{"pane_id":"w9:p1"}}}\n' > "$resp/1.out"
+  printf '{"result":{"tab":{"tab_id":"w9:t2"},"root_pane":{"pane_id":"w9:p2"}}}\n' > "$resp/2.out"
+  printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/3.out"
+  printf '{"result":{"panes":[{"pane_id":"w9:p1","tab_id":"w9:t1"},{"pane_id":"w9:p2","tab_id":"w9:t2"}]}}\n' > "$resp/4.out"
+  printf '{"error":{"code":"agent_not_found"}}\n' > "$resp/5.out"
+  printf '{"result":{"pane":{"pane_id":"w9:p1","tab_id":"w9:t1","workspace_id":"w9"}}}\n' > "$resp/6.out"
+  printf '{"result":{"tabs":[{"tab_id":"w9:t1","label":"1","workspace_id":"w9"},{"tab_id":"w9:t2","label":"fm-task-p2","workspace_id":"w9"}]}}\n' > "$resp/7.out"
+  printf '{"error":{"code":"pane_not_found"}}\n' > "$resp/9.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" HERDR_SESSION=fmtest \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_projection_focus_snapshot() { printf "captain-ws\tcaptain-tab"; }
+      fm_backend_herdr_projection_focus_restore() { return 0; }
+      fm_backend_herdr_projection_create_task /tmp/proj label fm-task-p2 >/dev/null 2>&1
+      status=$?
+      printf "%s %s %s\n" "$status" \
+        "$FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE" \
+        "$FM_BACKEND_HERDR_PROJECTION_SEEDED_PRUNED"
+    ' "$ROOT") || fail "late projection failure probe did not complete"
+  [ "$out" = "1 1 1" ] \
+    || fail "late projection failure lost confirmed seeded-pane absence: $out"
+  assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p1' \
+    "late projection failure never crossed the seeded-pane prune boundary"
+  pass "herdr presentation create: late failures preserve confirmed seeded-pane pruning"
+}
+
 test_projection_create_never_closes_a_concurrent_same_label_tab() {
   local dir log resp fb out status
   dir="$TMP_ROOT/projection-concurrent-tab"; mkdir -p "$dir/responses"
@@ -5301,6 +5332,7 @@ test_presentation_preference_reports_three_distinct_states
 test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_journal_v2_binds_and_advances_exact_endpoint
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane
+test_projection_create_retains_seed_prune_proof_after_late_failure
 test_projection_create_never_closes_a_concurrent_same_label_tab
 test_projection_focus_snapshot_requires_exact_workspace_and_tab
 test_projection_close_restores_exact_prior_focus
