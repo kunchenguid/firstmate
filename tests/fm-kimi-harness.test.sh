@@ -198,6 +198,7 @@ test_kimi_launch_then_send_is_verified() {
   rm -rf "$task_tmp"
   rec=$(make_spawn_case success "$id")
   read_spawn_record "$rec"
+  mkdir -p "$HOME_DIR/config/tools/bin" "$HOME_DIR/config/tools/node_modules/.bin"
   out=$(FM_FAKE_KIMI_SWALLOW_FIRST=yes run_spawn \
     "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
     --model kimi-code/k3 --effort high)
@@ -223,6 +224,9 @@ test_kimi_launch_then_send_is_verified() {
   assert_present "$task_tmp/gotmp" "kimi spawn did not create its Go temp directory"
   assert_grep "export GOTMPDIR=$task_tmp/gotmp" "$CASE_DIR/tmux-calls.log" \
     "kimi spawn did not export its Go temp directory into the pane"
+  assert_grep "export PATH='$HOME_DIR/config/tools/bin:$HOME_DIR/config/tools/node_modules/.bin:$FAKEBIN_DIR:$BASE_PATH'" \
+    "$CASE_DIR/tmux-calls.log" \
+    "kimi spawn did not propagate its resolved home-local helper PATH into the pane"
   assert_grep "export FM_TASK_ID=$id" "$CASE_DIR/tmux-calls.log" \
     "kimi spawn did not mark the pane with its task id"
   assert_grep 'BEGIN FIRSTMATE KIMI TURN-END HOOK' "$HOME_DIR/.kimi-code/config.toml" \
