@@ -445,6 +445,60 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+# Print a generated brief's `# Project memory` section body.
+project_memory_section() {
+  awk '
+    /^# Project memory$/ { inside = 1; next }
+    inside && /^# / { exit }
+    inside { print }
+  ' "$1"
+}
+
+# The generated project-memory section must not tell an unrelated task to touch
+# project memory. fm-ensure-agents-md.sh renames, rewrites, and adds instruction
+# files, so a trigger keyed on repository file state ("if AGENTS.md or CLAUDE.md
+# already exists") attaches an agent-memory restructure to whatever PR the task
+# happens to be opening. Two properties together close it: every instruction to
+# RUN the helper carries the task-scoped gate, and the gate still admits the
+# tasks that legitimately need the helper.
+test_ship_project_memory_is_gated_on_this_task() {
+  local home id mode brief section runs gated
+  home="$TMP_ROOT/project-memory-gate-home"
+  mkdir -p "$home/data"
+  for mode in no-mistakes direct-PR local-only; do
+    id="brief-memory-gate-$mode"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "brief was not scaffolded for mode $mode"
+    section=$(project_memory_section "$brief")
+    [ -n "$section" ] || fail "mode $mode: brief has no # Project memory section"
+
+    # Structural, so a newly added unconditional run sentence fails here whatever
+    # its prose: the helper invocation appears at least once, and every line that
+    # carries it also carries the gate.
+    runs=$(printf '%s\n' "$section" | grep -c -F "fm-ensure-agents-md.sh .")
+    [ "${runs:-0}" -ge 1 ] \
+      || fail "mode $mode: project-memory section never tells the worker to run the helper"
+    gated=$(printf '%s\n' "$section" | grep -F "fm-ensure-agents-md.sh ." | grep -c -F "only when THIS task")
+    assert_equals "$runs" "${gated:-0}" \
+      "mode $mode: an instruction to run fm-ensure-agents-md.sh is not gated on THIS task having something to record"
+
+    assert_contains "$section" "is never a trigger on its own" \
+      "mode $mode: project-memory section still lets repository file state trigger the helper"
+    assert_contains "$section" "durable project-intrinsic knowledge" \
+      "mode $mode: project-memory gate no longer admits a task that produced durable knowledge"
+    assert_contains "$section" "the task itself is about this project's agent instruction files" \
+      "mode $mode: project-memory gate no longer admits a task whose own subject is project memory"
+    assert_contains "$section" "Never run it against firstmate's own repo root" \
+      "mode $mode: project-memory section lost the firstmate supervisor-contract carve-out"
+    assert_contains "$section" "belongs in that repo's shared tracked surface instead" \
+      "mode $mode: firstmate carve-out no longer names where firstmate-repo knowledge belongs"
+    assert_contains "$section" "Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge." \
+      "mode $mode: project-memory section lost the proportionality bar on hand-editing AGENTS.md"
+  done
+  pass "fm-brief.sh: project-memory helper fires only when the task has something to record"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -936,6 +990,7 @@ test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ask_user_escalation_format
 test_ship_project_memory_wording
+test_ship_project_memory_is_gated_on_this_task
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
