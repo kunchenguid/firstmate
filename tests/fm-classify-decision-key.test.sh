@@ -85,6 +85,31 @@ test_stated_key_is_honored_at_the_note_tail() {
   pass "a [key=x] token at the tail of the note opens and closes its own key, matching the head and before-colon positions"
 }
 
+test_ambiguous_embedded_bracket_tail_folds_to_default() {
+  local dir
+  dir=$(case_dir ambiguous-tail)
+  # An earlier unrelated "[key=...]" prose mention followed by a coincidental
+  # trailing "]" makes the tail-scan candidate itself contain a stray "["/"]".
+  # That must decline to match as a stated key (fold to "default", like a
+  # keyless line), never error the whole line out of the open set.
+  printf 'needs-decision: should the fold treat a[key=weird] tail differently]\n' > "$dir/t.status"
+  assert_fold "$dir/t.status" \
+    "$(printf 'default\tneeds-decision\tshould the fold treat a[key=weird] tail differently]\n')" \
+    "ambiguous embedded-bracket tail"
+  pass "an ambiguous double-bracket tail span folds to default instead of erroring the line out"
+}
+
+test_malformed_tail_key_never_collapses_to_default() {
+  local dir
+  dir=$(case_dir malformed-tail)
+  # A genuinely malformed single-bracket tail token (space inside, no nested
+  # brackets) must still be rejected outright, not folded to default - the
+  # same philosophy as the existing before-colon/head malformed-key cases.
+  printf 'needs-decision: colon-first malformed at tail [key=bad key]\n' > "$dir/t.status"
+  assert_fold "$dir/t.status" "" "malformed tail-position key"
+  pass "a malformed single-bracket tail key is rejected, never folded as default"
+}
+
 test_bare_keyless_line_still_folds_to_default() {
   local dir
   dir=$(case_dir keyless)
@@ -282,6 +307,8 @@ test_incremental_agrees_with_full_fold_across_appends() {
 
 test_stated_key_is_honored_in_both_positions
 test_stated_key_is_honored_at_the_note_tail
+test_ambiguous_embedded_bracket_tail_folds_to_default
+test_malformed_tail_key_never_collapses_to_default
 test_bare_keyless_line_still_folds_to_default
 test_resolution_closes_across_positions
 test_blocked_is_position_tolerant_like_needs_decision

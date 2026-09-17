@@ -577,7 +577,14 @@ _fm_key_at_note_tail() {  # <status-line> -> raw slug
   esac
   rest=${rest%"${rest##*[![:space:]]}"}
   case "$rest" in
-    *\[key=*\]) rest=${rest##*\[key=}; printf '%s' "${rest%\]}" ;;
+    *\[key=*\])
+      rest=${rest##*\[key=}
+      rest=${rest%\]}
+      case "$rest" in
+        *\[*|*\]*) return 1 ;;
+      esac
+      printf '%s' "$rest"
+      ;;
     *) return 1 ;;
   esac
 }
@@ -601,17 +608,23 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
   esac
   # A note-head or note-tail token that states this line's key (no
   # before-colon token, valid slug) is key metadata, not note text: strip it
-  # so every stated-key position yields the same note.
-  if ! _fm_key_before_colon "$unstamped" && k=$(_fm_key_at_note_head "$unstamped") \
-    && _fm_decision_slug_ok "$k"; then
-    n=${n#"[key=$k]"}
-    n=${n#"${n%%[![:space:]]*}"}
-  elif ! _fm_key_before_colon "$unstamped" && k=$(_fm_key_at_note_tail "$unstamped") \
-    && _fm_decision_slug_ok "$k"; then
-    n=${n%"${n##*[![:space:]]}"}
-    n=${n%"[key=$k]"}
-    n=${n%"${n##*[![:space:]]}"}
-  fi
+  # so every stated-key position yields the same note. A line with no
+  # "[key=" substring at all can never match either position, so skip both
+  # subshells for that common shape.
+  case "$unstamped" in
+    *\[key=*)
+      if ! _fm_key_before_colon "$unstamped" && k=$(_fm_key_at_note_head "$unstamped") \
+        && _fm_decision_slug_ok "$k"; then
+        n=${n#"[key=$k]"}
+        n=${n#"${n%%[![:space:]]*}"}
+      elif ! _fm_key_before_colon "$unstamped" && k=$(_fm_key_at_note_tail "$unstamped") \
+        && _fm_decision_slug_ok "$k"; then
+        n=${n%"${n##*[![:space:]]}"}
+        n=${n%"[key=$k]"}
+        n=${n%"${n##*[![:space:]]}"}
+      fi
+      ;;
+  esac
   printf '%s' "$n"
 }
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
@@ -622,8 +635,13 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
     k=${k#*\[key=}
     k=${k%%\]*}
   else
-    k=$(_fm_key_at_note_head "$unstamped") || k=$(_fm_key_at_note_tail "$unstamped") \
-      || { printf 'default'; return 0; }
+    case "$unstamped" in
+      *\[key=*)
+        k=$(_fm_key_at_note_head "$unstamped") || k=$(_fm_key_at_note_tail "$unstamped") \
+          || { printf 'default'; return 0; }
+        ;;
+      *) printf 'default'; return 0 ;;
+    esac
   fi
   _fm_decision_slug_ok "$k" || return 1
   printf '%s' "$k"
