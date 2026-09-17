@@ -134,7 +134,8 @@ pass "live Herdr submit confirm: Claude Code ($VERSION) on $HERDR_VER reports em
 # (measured 2026-09-17 against Muse Code 1.3.0), which is a route this leg
 # covers: an idle native baseline hands the verdict to the shared composer, so
 # the leg runs there just as it runs on a Herdr that registers nothing. Only a
-# pane already non-idle before the steer reports unverified and skips.
+# pane Herdr reports busy - working or blocked - before the steer reports
+# unverified and skips.
 # The installed-harness rule is deliberate: an absent Muse is
 # reported rather than fabricated as a pass, while an installed Muse must prove
 # its current renderer and send behavior before it can be trusted.
@@ -261,7 +262,7 @@ else
   # either - and it could not be trusted as one anyway, since
   # fm_backend_herdr_agent_status_raw returns the same empty string for a pane
   # with no registered agent and for an agent get that simply failed.
-  # working and blocked, and any status this adapter does not classify, are a
+  # working and blocked - the two statuses that classify busy - are the only
   # different shape: the pane was already busy before the steer, so no verdict
   # from that run is this leg's measurement. Those report unverified and skip
   # the leg exactly as an absent Muse does, leaving CHECKED untouched instead of
@@ -269,9 +270,17 @@ else
   # control. The check is read at the top of every tick so the gate below never
   # gets the chance to fail red over an argv identity or a composer shape that
   # such a run would never have measured.
-  muse_native_baseline_not_idle() {  # <raw-agent_status>
-    [ -n "$1" ] || return 1
-    [ "$(fm_backend_herdr_classify_submit_agent_status "$1")" != idle ]
+  # A raw `unknown` is neither busy nor a refusal, and must not skip: Herdr
+  # creates the agent record with its own `unknown` placeholder the moment it
+  # notices the harness and before the harness reports idle
+  # (docs/verification/runtime-backends.md "Stale agent registration"), and this
+  # loop polls straight across that transition from the second after the launch.
+  # It waits through the placeholder exactly as it waits for the composer to
+  # paint, and a status still unknown at the steer takes send_text_submit's
+  # footer-baseline branch, where the shared composer decides the verdict all
+  # the same.
+  muse_native_baseline_busy() {  # <raw-agent_status>
+    [ "$(fm_backend_herdr_classify_submit_agent_status "$1")" = busy ]
   }
 
   muse_idle=0
@@ -283,7 +292,7 @@ else
   muse_native_raw=
   while [ "$i" -lt 90 ]; do
     muse_native_raw=$(fm_backend_herdr_agent_status_raw "$SESSION" "$MUSE_PANE")
-    muse_native_baseline_not_idle "$muse_native_raw" && break
+    muse_native_baseline_busy "$muse_native_raw" && break
     muse_process=$(fm_backend_herdr_pane_process_state "$SESSION" "$MUSE_PANE")
     if [ "$muse_process" = agent ]; then
       muse_proc_json=$(lab pane process-info --pane "$MUSE_PANE" 2>/dev/null || true)
@@ -297,7 +306,7 @@ else
     i=$((i + 1))
     sleep 1
   done
-  if ! muse_native_baseline_not_idle "$muse_native_raw"; then
+  if ! muse_native_baseline_busy "$muse_native_raw"; then
     [ "$muse_idle" = 1 ] \
       || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER never reached a live muse-bin process with a shared empty composer in the lab pane (last process state '$muse_process', last argv surface '$muse_argv_surface', last exec identity '${muse_exec_name:-none}', last composer state '$muse_state')"
 
@@ -313,8 +322,8 @@ else
     muse_native_raw=$(fm_backend_herdr_agent_status_raw "$SESSION" "$MUSE_PANE")
   fi
 
-  if muse_native_baseline_not_idle "$muse_native_raw"; then
-    printf '# herdr reports the Muse pane in a non-idle native state (agent_status %s), so a steer from it would not be the idle-composer measurement this leg makes; Muse-on-Herdr submit confirmation was not verified here\n' \
+  if muse_native_baseline_busy "$muse_native_raw"; then
+    printf '# herdr reports the Muse pane already busy (agent_status %s), so a steer from it would not be the idle-composer measurement this leg makes; Muse-on-Herdr submit confirmation was not verified here\n' \
       "$muse_native_raw"
   else
     MUSE_TOKEN="FMHERDRMUSE$$_$RANDOM"
