@@ -3207,6 +3207,10 @@ teardown_treehouse_lease_transaction_prepare || {
 }
 require_owned_task_worktree_slot || exit 1
 if [ "$TREEHOUSE_LEASE_TX_PRESENT" = 1 ] \
+  && [ "$TREEHOUSE_LEASE_ALREADY_RETURNED" = 1 ]; then
+  fm_treehouse_slot_owner_release "$TREEHOUSE_LEASE_WORKTREE" "$ID"
+fi
+if [ "$TREEHOUSE_LEASE_TX_PRESENT" = 1 ] \
   && [ "$TREEHOUSE_LEASE_ALREADY_RETURNED" != 1 ] \
   && ! teardown_owns_worktree; then
   echo "REFUSED: task $ID's live structural Herdr Treehouse lease no longer owns its recorded slot; nothing was changed" >&2

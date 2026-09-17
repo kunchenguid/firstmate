@@ -1455,6 +1455,32 @@ test_structural_herdr_lease_teardown_is_transaction_driven() {
     || fail "post-return recovery returned another task's lease: $(cat "$dir/runtime.log")"
   [ "$(cat "$dir/herdr-state")" = dead ] || fail "post-return recovery left its endpoint live"
 
+  dir=$(make_case herdr-lease-returned-own-claim)
+  mark_case_as_treehouse_pool "$dir"
+  install_lease_aware_treehouse "$dir"
+  id=herdr-returned-own-z1
+  holder=fm-$id-dddddddddddddddddddddddddddddddd
+  lease_id=44444444444444444444444444444444
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=lab:w1:p1" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t1" "herdr_pane_id=w1:p1" \
+    "treehouse_lease_holder=$holder" "treehouse_lease_id=$lease_id"
+  fm_treehouse_lease_transaction_write "$dir/home/state/$id.herdr-lease" cleanup \
+    "$id" "$holder" "$dir/project" "$dir/worktree" "$lease_id" \
+    || fail "could not stage interrupted structural Herdr lease cleanup with an own claim"
+  claim_pool_slot "$dir" "$id"
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "post-return own-claim recovery failed: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "post-return own-claim recovery left task metadata"
+  assert_absent "$dir/home/state/$id.herdr-lease" "post-return own-claim recovery left its confirmed receipt"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "post-return own-claim recovery left its spent slot claim"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "post-return own-claim recovery returned an already-returned lease: $(cat "$dir/runtime.log")"
+  [ "$(cat "$dir/herdr-state")" = dead ] || fail "post-return own-claim recovery left its endpoint live"
+
   pass "fm-teardown: durable Herdr lease cleanup survives return and reassignment"
 }
 
