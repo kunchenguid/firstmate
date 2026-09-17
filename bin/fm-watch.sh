@@ -1788,6 +1788,18 @@ if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
 elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
   WATCHER_RECOVERY_PENDING=1
 fi
+# The exact recovery generation on record at handoff, captured once so a
+# handling successor can tell "the episode I was launched for" apart from any
+# later, unrelated episode minted while it keeps running. Empty when no
+# episode was open at handoff (the ordinary, non-recovery re-arm case).
+WATCHER_HANDLING_SUCCESSOR_GENERATION=
+if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
+  if ! fm_recovery_marker_snapshot "$WATCHER_DOWNTIME_MARKER"; then
+    echo "watcher: recovery state could not be inspected safely; retaining stale lock evidence" >&2
+    exit 1
+  fi
+  WATCHER_HANDLING_SUCCESSOR_GENERATION=${FM_RECOVERY_MARKER_TOKEN##*:}
+fi
 # Side-band ledger publication, detached from the poll loop.
 #
 # The poll loop owns the liveness beacon below, and fm-guard.sh reads that
@@ -1910,16 +1922,24 @@ retire_merged_pr_poll() {  # <id>
 }
 
 resurface_after_downtime() {
-  # Handling successors already have a predecessor-delivered wake on the way.
-  # Re-announcing from this cycle is what turned a lost handshake into an
-  # unbounded recovery loop; stay in the poll loop and supervise instead.
-  if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
-    return 0
-  fi
   if [ "$WATCHER_RECOVERY_PENDING" -ne 1 ]; then
     if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
       echo "watcher: recovery state could not be consumed safely" >&2
       exit 1
+    fi
+    if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ] && [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
+      # A handling successor already has a predecessor-delivered wake on the
+      # way for the exact generation open at handoff. Re-announcing that same
+      # generation from this cycle is what turned a lost handshake into an
+      # unbounded recovery loop, so suppress only it. A distinct generation
+      # minted since - e.g. by an external fm_wake_append while this successor
+      # keeps running - is a new, unrelated episode and must flow through
+      # normal recovery like any other watcher.
+      if ! fm_recovery_marker_snapshot "$WATCHER_DOWNTIME_MARKER"; then
+        echo "watcher: recovery state could not be inspected safely" >&2
+        exit 1
+      fi
+      [ "${FM_RECOVERY_MARKER_TOKEN##*:}" != "$WATCHER_HANDLING_SUCCESSOR_GENERATION" ] || return 0
     fi
     [ "$FM_RECOVERY_MARKER_ACTION" = recover ] || return 0
   fi
