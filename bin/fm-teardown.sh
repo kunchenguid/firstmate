@@ -2834,6 +2834,7 @@ validate_firstmate_home_children_removal() {
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
     fm_backend_validate_task_endpoint "$child_meta" "$child_id" || return 1
+    teardown_require_backend_prerequisites "$FM_BACKEND_VALIDATED_BACKEND" "$child_id" || return 1
     validate_pr_poll_cleanup "$sub_state" "$child_id" || return 1
     child_wt=$(meta_value "$child_meta" worktree)
     child_kind=$(meta_value "$child_meta" kind)
@@ -2882,12 +2883,13 @@ FMEOF
   return 1
 }
 
-teardown_herdr_require_prerequisites() {  # <task-id>
-  local task_id=$1 prerequisite
-  if ! fm_backend_source herdr; then
-    echo "error: herdr teardown prerequisites are unavailable for $task_id; nothing was changed - restore the adapter and rerun teardown" >&2
+teardown_require_backend_prerequisites() {  # <backend> <task-id>
+  local backend=$1 task_id=$2 prerequisite
+  if ! fm_backend_source "$backend"; then
+    echo "error: $backend teardown prerequisites are unavailable for $task_id; nothing was changed - restore the adapter and rerun teardown" >&2
     return 1
   fi
+  [ "$backend" = herdr ] || return 0
   for prerequisite in \
     fm_backend_herdr_parse_target \
     fm_backend_herdr_pane_presence_state \
@@ -2913,7 +2915,7 @@ teardown_herdr_require_prerequisites() {  # <task-id>
 
 teardown_herdr_preflight_target() {  # <target> <task-id>
   local target=$1 task_id=$2 session pane presence lock_path verified_lock_path lock_session held_path attempt
-  teardown_herdr_require_prerequisites "$task_id" || return 1
+  teardown_require_backend_prerequisites herdr "$task_id" || return 1
   if ! fm_backend_herdr_parse_target "$target"; then
     echo "error: herdr endpoint $target for $task_id could not be parsed exactly; nothing was changed - repair the endpoint metadata and rerun teardown" >&2
     return 1
@@ -3163,6 +3165,7 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
+teardown_require_backend_prerequisites "$BACKEND" "$ID" || exit 1
 require_exclusive_task_worktree_slot || exit 1
 require_owned_task_worktree_slot || exit 1
 
