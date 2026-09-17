@@ -1677,7 +1677,25 @@ EOF
 
   if [ "$has_meta" = 1 ]; then
     if [ "$(meta_value "$meta" decisions_reviewed)" != 1 ] || [ "$previous" != "$keys" ]; then
-      printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys" >> "$meta"
+      # The pr=/pr_head= pair is terminal in the meta file
+      # (bin/fm-pr-lib.sh sets post_pr_invalid for unrecognised keys after
+      # pr=). Rewrite rather than append so the decision keys land before the
+      # pr block and a live merge poll stays valid.
+      local _ch_tmp
+      _ch_tmp="$STATE/.$origin.meta.captain-hold.${BASHPID:-$$}"
+      {
+        grep -v -e '^decisions_reviewed=' -e '^decision_keys=' \
+                -e '^pr=' -e '^pr_head=' "$meta"
+        printf 'decisions_reviewed=1\ndecision_keys=%s\n' "$keys"
+        grep -e '^pr=' -e '^pr_head=' "$meta" || true
+      } > "$_ch_tmp" || {
+        rm -f -- "$_ch_tmp"
+        fail "could not rewrite task metadata for $origin"
+      }
+      if ! mv -f -- "$_ch_tmp" "$meta"; then
+        rm -f -- "$_ch_tmp"
+        fail "could not rewrite task metadata for $origin"
+      fi
     fi
     fm_lock_release "$CAPTAIN_META_LOCK"
     CAPTAIN_META_LOCK_HELD=0

@@ -25,6 +25,8 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -1558,6 +1560,48 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+# --- PR poll survival after relaunch ----------------------------------------
+
+POLL="$ROOT/bin/fm-pr-poll.sh"
+
+test_relaunch_does_not_disarm_a_live_pr_poll() {
+  local dir out rc state pr_url
+  dir=$(new_case pr-poll-survives rl43)
+  add_ship_task "$dir" rl43 claude
+  state="$dir/home/state"
+  pr_url=https://github.com/example/repo/pull/43
+
+  # Arm a PR poll: write pr=/pr_head= into the meta, then prepare and publish
+  # poll artifacts through the library's atomic path.
+  printf '%s\n' "pr=$pr_url" >> "$state/rl43.meta"
+  printf '%s\n' "pr_head=0123456789abcdef0123456789abcdef01234567" >> "$state/rl43.meta"
+
+  fm_pr_poll_prepare "$state" rl43 github "$pr_url" github.com example/repo 43 "$POLL" \
+    || fail "could not prepare PR poll artifacts"
+  fm_pr_poll_publish_prepared \
+    || fail "could not publish PR poll artifacts"
+
+  # Sanity: the poll validates before the relaunch.
+  fm_pr_poll_artifacts_valid "$state" rl43 "$POLL" \
+    || fail "PR poll artifacts did not validate before relaunch"
+
+  # Relaunch the task.
+  out=$(run_control "$dir" rl43 relaunch --note "continuing PR work"); rc=$?
+  expect_code 0 "$rc" "relaunch of a task with a live PR poll should succeed"$'\n'"$out"
+
+  # The poll must still validate after the relaunch.
+  fm_pr_poll_artifacts_valid "$state" rl43 "$POLL" \
+    || fail "PR poll artifacts were invalidated by the relaunch"
+
+  # And the PR metadata must still parse cleanly.
+  fm_pr_metadata_identity_parse "$state/rl43.meta" \
+    || fail "PR metadata identity parse failed after relaunch"
+  [ "$FM_PR_META_URL" = "$pr_url" ] \
+    || fail "PR URL changed after relaunch (got '$FM_PR_META_URL')"
+
+  pass "fm-control relaunch: a live PR poll survives the replacement launch publication"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
@@ -1611,3 +1655,4 @@ test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_relaunch_does_not_disarm_a_live_pr_poll

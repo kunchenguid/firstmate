@@ -194,11 +194,16 @@ TMP=
 [ -f "$INSTRUCTIONS" ] && [ -r "$INSTRUCTIONS" ] || { echo "error: ship instructions were not published as a readable file: $INSTRUCTIONS" >&2; exit 1; }
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
+# The pr=/pr_head= pair is terminal in the meta file (bin/fm-pr-lib.sh treats
+# anything after it except the five x_* keys as post_pr_invalid). Strip it
+# alongside the replaced keys and re-append it at the end so a promote never
+# invalidates a live merge poll.
+grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^pr=' -e '^pr_head=' "$META" > "$TMP"
 {
   echo "kind=ship"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
+  grep -e '^pr=' -e '^pr_head=' "$META" || true
 } >> "$TMP"
 if ! fm_backlog_atomic_transition publish "$TMP" "$META" "task record" "$STATE"; then
   rm -f -- "$TMP"
