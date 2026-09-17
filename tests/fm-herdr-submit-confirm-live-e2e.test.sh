@@ -194,10 +194,21 @@ else
   # pass line and into the verification record.
   # The suffix is shape-checked for the same reason: only a non-empty version
   # after the prefix may name a build.
+  # One definition of what this body's argv surfaces ARE, shared by both probes
+  # below so they can never disagree about whether argv is readable.
+  # A foreground group holds strangers: runtime-backends.md records <defunct>
+  # entries alongside a live harness, and a reaped process publishes no usable
+  # argv. Every surface is therefore normalized to a non-empty string before any
+  # string operation runs on it, because a lone "" or absent entry would
+  # otherwise abort the whole jq program and discard its live muse-bin sibling.
+  muse_argv_surfaces_jq='
+    [.result.process_info.foreground_processes[]?
+     | ((.argv? // []) | if type == "array" then (.[0]? // empty) else empty end),
+       (.argv0? // empty)]
+    | map(select(type == "string" and . != ""))'
+
   muse_pane_exec_name() {  # <process-info body>
-    printf '%s' "$1" | jq -r '
-      [.result.process_info.foreground_processes[]?
-       | ((.argv // [])[0] // empty), (.argv0 // empty)]
+    printf '%s' "$1" | jq -r "$muse_argv_surfaces_jq"'
       | map(split("/") | last)
       | map(select(test("^muse-bin-.+$")))
       | first // empty' 2>/dev/null || true
@@ -213,11 +224,10 @@ else
   muse_pane_argv_surface() {  # <process-info body>
     [ -n "$1" ] || { printf 'unreadable'; return 0; }
     printf '%s' "$1" | jq -r '
-      if (.result.process_info.foreground_processes | type) != "array"
+      if (.result.process_info.foreground_processes? | type) != "array"
          or ((.result.process_info.foreground_processes | length) == 0)
       then "unreadable"
-      elif ([.result.process_info.foreground_processes[]
-             | ((.argv // []) | length) > 0 or ((.argv0 // "") | length) > 0] | any)
+      elif (('"$muse_argv_surfaces_jq"') | length) > 0
       then "present"
       else "absent" end' 2>/dev/null || printf 'unreadable'
   }
