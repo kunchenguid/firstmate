@@ -2065,3 +2065,8 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+### Remote second mates
+
+Remote secondmate placement on omp was verified on 2026-09-16 with omp 18.1.20 on the studio2 remote host: the ordinary remote spawn from the primary and the host-local `fm-remote-secondmate-control.sh` `launch` and `relaunch` verbs accepted the harness and started the mate on Herdr in `fm-remote` through the same host-local secondmate launch contract as a local omp secondmate; [`remote-secondmates.md`](../remote-secondmates.md) owns that contract.
+Refresh this evidence by repeating that remote launch and relaunch after an omp upgrade on the remote host.
