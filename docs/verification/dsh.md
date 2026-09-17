@@ -10,7 +10,7 @@ The Stop-hook and watcher-continuity measurements were first written into [`supe
 | Field | Value |
 |---|---|
 | Version | DeepSeek Harness 0.1.5-rc.1 (`dsh-base` 0.1.5-rc.2) |
-| Verified | 2026-09-16 |
+| Verified | 2026-09-17 |
 | Binary | `dsh`, launched from an npm `npx` cache (`.bin/dsh`), a global npm install's `<prefix>/bin/dsh` symlink, an installed `@deepseek-ai/dsh/lib/bin.js`, or a source `apps/cli/src/bin.ts` |
 | Platform | macOS arm64 (Darwin 27.0.0) |
 | Role | PRIMARY only; refused for crewmate, scout and secondmate |

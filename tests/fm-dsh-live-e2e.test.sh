@@ -8,7 +8,7 @@
 # headless sessions to prove the integration contracts below still hold.
 #
 # Run explicitly with FM_DSH_LIVE_E2E=1 after a dsh upgrade, and before trusting
-# a refreshed docs/verification/supervision.md DSH entry. It fails naming the
+# a refreshed docs/verification/dsh.md live result. It fails naming the
 # harness and version rather than degrading quietly.
 #
 # The contracts, each of which was once assumed and later measured:
