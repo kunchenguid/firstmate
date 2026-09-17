@@ -1247,6 +1247,7 @@ test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented() {
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, home, bus }; })()`);
 const { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, home, bus } = globalThis.__t;
+import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 
 const requests = () => sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
@@ -1345,13 +1346,9 @@ for (const tool of mainTools) {
 if ([...messageTypes].sort().join(",") !== "firstmate-sessionstart-nudge,fm-branch-merge,fm-branch-process") throw new Error("operational message allowlist changed");
 const processed = nativeTools.get("fm_branch_processed");
 if (!processed) throw new Error("main did not receive its acknowledgement tool");
-const routineAck = await processed.execute("ack-routine", { through: routineSeq }, undefined, undefined, {});
-if (!routineAck.isError || !routineAck.content.some((item) => item.type === "text" && item.text.includes("not an unprocessed captain outcome"))) {
-  throw new Error(`a routine-sequence acknowledgement was not clearly refused: ${JSON.stringify(routineAck)}`);
-}
+await assert.rejects(() => processed.execute("ack-routine", { through: routineSeq }), /not an unprocessed captain outcome/);
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("a routine-sequence acknowledgement closed the open captain sequence");
-const tooFar = await processed.execute("ack-too-far", { through: seq + 100 }, undefined, undefined, {});
-if (!tooFar.isError) throw new Error("an acknowledgement beyond the read cursor was accepted");
+await assert.rejects(() => processed.execute("ack-too-far", { through: seq + 100 }), /not listed in the active processing request/);
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("a refused acknowledgement moved the marker");
 const ack = await processed.execute("ack", { through: seq }, undefined, undefined, {});
 if (ack.isError) throw new Error(`acknowledgement failed: ${JSON.stringify(ack)}`);
@@ -1389,10 +1386,7 @@ if (requests().length !== beforePair + 1 || !requests().at(-1).message.content.i
 const third = await report2.execute("captain-3", { task: "task-f", verdict: "captain", summary: "worker blocked on a missing credential" }, undefined, undefined, {});
 if (third.isError) throw new Error(`third captain report failed: ${JSON.stringify(third)}`);
 if (requests().length !== beforePair + 1) throw new Error("a widened sequence re-sent while the earlier request was pending");
-const unlisted = await processed.execute("ack-unlisted", { through: seqF }, undefined, undefined, {});
-if (!unlisted.isError || !unlisted.content.some((item) => item.type === "text" && item.text.includes("not listed in the active processing request"))) {
-  throw new Error(`an unlisted newer sequence was not clearly refused: ${JSON.stringify(unlisted)}`);
-}
+await assert.rejects(() => processed.execute("ack-unlisted", { through: seqF }), /not listed in the active processing request/);
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seqE, seqF])) {
   throw new Error(`an unlisted acknowledgement closed outcomes: ${unprocessedSeqs()}`);
 }
@@ -1425,14 +1419,174 @@ if (done.isError || unprocessedSeqs().length !== 0) throw new Error("the final a
 
 // A session that does not own the fleet lock cannot acknowledge anything.
 writeFileSync(`${home}/state/.lock`, "1\n");
-const foreign = await processed.execute("ack-foreign", { through: seqF }, undefined, undefined, {});
-if (!foreign.isError) throw new Error("a session without lock ownership acknowledged an outcome");
+await assert.rejects(() => processed.execute("ack-foreign", { through: seqF }), /does not own the fleet lock/);
 process.exit(0);
 EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "captain outcomes must be processed through a sequence-bound acknowledgement and re-presented until then: $out"
   pass "a captain outcome opens one sequence-keyed processing turn, survives empty and unrelated answers, is re-presented at run end and session start, and closes only on its acknowledgement"
+}
+
+test_new_captain_outcomes_reactivate_idle_next_turn_without_overlapping_requests() {
+  local repo home out status
+  repo="$TMP_ROOT/next-turn-arrival-root"
+  home="$TMP_ROOT/next-turn-arrival-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, piHandlers, home }; })()`);
+const { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx, piHandlers, home } = globalThis.__t;
+import assert from "node:assert/strict";
+import { readFileSync, writeFileSync } from "node:fs";
+const requests = () => sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
+const last = () => requests().at(-1);
+const rows = () => outcomeScript(["unprocessed"]).split("\n").filter(Boolean).map((row) => JSON.parse(row).seq);
+const run = async () => { await fire("agent_start", {}); await fire("agent_end", {}); await fire("agent_settled", {}); };
+const context = async (messages) => {
+  for (const handler of piHandlers.get("context") ?? []) messages = (await handler({ messages }))?.messages ?? messages;
+  return messages;
+};
+const asMessage = (sent) => ({ role: "custom", ...sent.message });
+const human = { role: "user", content: "unrelated human input, keep exactly" };
+await fire("session_start", {}, defaultSessionCtx);
+let finish;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finish = resolve; });
+const offer = dispatch("signal: initialise report tool");
+await settle(() => Boolean(finish), "branch prompt");
+const report = globalThis.__fmSessions[0].options.customTools.find((tool) => tool.name === "fm_branch_report");
+await report.execute("prime", { task: "branch-driver", verdict: "routine", summary: "initialised" });
+finish(); await offer.settlement;
+globalThis.__fmOnBranchPrompt = undefined;
+const ack = mainTools.find((tool) => tool.name === "fm_branch_processed");
+const publish = async (task) => {
+  const result = await report.execute(task, { task, verdict: "captain", summary: `${task} needs processing` });
+  assert.ok(!result.isError, JSON.stringify(result));
+  return JSON.parse(outcomeScript(["list", "--recent", "1"])).seq;
+};
+
+const a = await publish("task-a");
+await run(); await run();
+assert.equal(requests().length, 3);
+assert.equal(last().options.deliverAs, "nextTurn");
+const oldNext = asMessage(last());
+// Repeated idle reconciliations and routine notes cannot renew the budget.
+for (let i = 0; i < 3; i++) await fire("agent_settled", {});
+await report.execute("routine", { task: "task-a", verdict: "routine", summary: "unchanged" });
+assert.equal(requests().length, 3);
+const b = await publish("task-b");
+assert.equal(requests().length, 4, "new captain row stranded behind idle nextTurn");
+assert.deepEqual(last().options, { triggerTurn: true, deliverAs: "followUp" });
+assert.ok(last().message.content.includes(`[seq ${a}]`) && last().message.content.includes(`[seq ${b}]`));
+const active = asMessage(last());
+assert.notEqual(active.details.processingRequestId, oldNext.details.processingRequestId);
+assert.deepEqual(await context([oldNext, human, active, active]), [human, active], "stale queued copies must not convey a second grant");
+// Further arrivals while a triggered request has not started are coalesced at
+// settlement, never silently added to that request's acknowledgement authority.
+const c = await publish("task-c");
+const d = await publish("task-d");
+assert.equal(requests().length, 4);
+await assert.rejects(() => ack.execute("unlisted", { through: d }), /not listed in the active processing request/);
+await fire("agent_settled", {}); // not the triggered request's run
+assert.equal(requests().length, 4, "an unrelated settle spent the pending request's retry");
+assert.deepEqual(rows(), [a, b, c, d]);
+await run();
+assert.equal(requests().length, 5);
+assert.ok(last().message.content.includes(`through=${d}`));
+const routine = b - 1;
+const storeBefore = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8");
+for (const invalid of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "2", undefined]) {
+  await assert.rejects(() => ack.execute("invalid", { through: invalid }), /through must be a positive outcome sequence number/);
+}
+await assert.rejects(() => ack.execute("routine", { through: routine }), /not an unprocessed captain outcome/);
+assert.deepEqual(rows(), [a, b, c, d]);
+await ack.execute("partial", { through: b });
+assert.deepEqual(rows(), [c, d]);
+await assert.rejects(() => ack.execute("already-processed", { through: a }), /acknowledgement refused/);
+await run();
+assert.ok(last().message.content.includes(`through=${d}`));
+assert.ok(!last().message.content.includes(`[seq ${a}]`));
+await ack.execute("exact", { through: d });
+assert.deepEqual(rows(), []);
+assert.equal(readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8"), storeBefore, "acknowledgements must preserve durable outcome rows");
+assert.deepEqual(await context([oldNext, active, human]), [human]);
+
+// A request queued into a busy run is consumed without another agent_start.
+// Its message event, rather than the initial run's empty grant, owns settlement.
+await fire("agent_start", {});
+const busy = await publish("task-busy");
+const beforeBusySettle = requests().length;
+await fire("message_start", { message: asMessage(last()) });
+await fire("agent_end", {}); await fire("agent_settled", {});
+assert.equal(requests().length, beforeBusySettle + 1, "a consumed busy follow-up never reached its retry boundary");
+await ack.execute("busy-exact", { through: busy });
+await run();
+
+// If main acknowledges A and B arrives before that SAME run settles, the old
+// settlement must not consume B's already-triggered presentation.
+const e = await publish("task-e");
+await fire("agent_start", {});
+await ack.execute("exact-e", { through: e });
+const f = await publish("task-f");
+const beforeOldSettle = requests().length;
+await fire("agent_end", {}); await fire("agent_settled", {});
+assert.equal(requests().length, beforeOldSettle);
+await run(); await run();
+assert.equal(last().options.deliverAs, "nextTurn");
+// A human prompt has consumed the queued copy before agent_start. An arrival
+// in its preflight/busy/retry interval cannot widen that in-flight request.
+await fire("before_agent_start", { prompt: "human question" }, defaultSessionCtx);
+await publish("task-g");
+assert.equal(last().options.deliverAs, "nextTurn");
+await fire("agent_start", {});
+const h = await publish("task-h");
+await fire("agent_end", {}); // Pi may still retry; not settled yet
+const i = await publish("task-i");
+await assert.rejects(() => ack.execute("unlisted-retry", { through: h }), /not listed in the active processing request/);
+assert.equal(last().options.deliverAs, "nextTurn");
+await fire("agent_start", {}); await fire("agent_end", {}); await fire("agent_settled", {});
+assert.equal(last().options.triggerTurn, true);
+assert.ok(last().message.content.includes(`through=${i}`));
+assert.deepEqual(rows(), [f, f + 1, h, i]);
+
+// Replacement invalidates old context copies but recovers every durable row.
+const prior = asMessage(last());
+await fire("session_shutdown", {}); await fire("session_start", {}, defaultSessionCtx);
+const replacement = asMessage(last());
+assert.notEqual(prior.details.processingRequestId, replacement.details.processingRequestId);
+assert.deepEqual(await context([prior, oldNext, replacement, human]), [replacement, human]);
+assert.equal(last().options.triggerTurn, true);
+assert.deepEqual(rows(), [f, f + 1, h, i]);
+writeFileSync(`${home}/state/.lock`, "1\n");
+await assert.rejects(() => ack.execute("foreign", { through: i }), /does not own the fleet lock/);
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+// A fresh extension factory (as on cold restart/reload) must not reuse a
+// transcript request identity, even for its first request in the process.
+const coldHandlers = new Map();
+const coldRequests = [];
+const coldTools = [];
+const { default: freshExtension } = await import(process.env.PLUGIN);
+freshExtension({
+  on: (name, handler) => coldHandlers.set(name, handler),
+  registerTool: (tool) => coldTools.push(tool),
+  registerCommand() {}, registerEntryRenderer() {}, registerMessageRenderer() {},
+  appendEntry: (customType, data) => mainEntries.push({ type: "custom", customType, data }),
+  sendMessage: (message, options) => coldRequests.push({ message, options }),
+});
+await coldHandlers.get("session_start")({}, defaultSessionCtx);
+const cold = asMessage(coldRequests.find((sent) => sent.message.customType === "fm-branch-process"));
+assert.notEqual(cold.details.processingRequestId, requests()[0].message.details.processingRequestId);
+assert.deepEqual(coldHandlers.get("context")({ messages: [asMessage(requests()[0]), replacement, cold, human] }).messages, [cold, human]);
+await coldTools.find((tool) => tool.name === "fm_branch_processed").execute("replacement-exact", { through: i });
+assert.deepEqual(rows(), []);
+assert.equal(mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === b).length, 1);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "new captain membership must wake idle main without overlapping an in-flight processing request: $out"
+  pass "new captain outcomes reactivate idle nextTurn delivery; in-flight grants, retries, stale copies, replacement and durable rows remain guarded"
 }
 
 test_branch_cache_key_is_per_home_stable() {
@@ -4933,6 +5087,7 @@ test_branch_dispatch_two_stage_filter_and_prefix_contract
 test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery
 test_captain_outcome_is_exactly_once_across_crash_reload_and_unrelated_response
 test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented
+test_new_captain_outcomes_reactivate_idle_next_turn_without_overlapping_requests
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback

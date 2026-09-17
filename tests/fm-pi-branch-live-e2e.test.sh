@@ -991,3 +991,171 @@ if [ "$status" -ne 0 ] || [ "$out" != "STREAM_OK" ]; then
   fail "real-SDK streaming-time watcher delivery guard failed against pi-coding-agent $PI_VERSION: $out"
 fi
 pass "real Pi SDK $PI_VERSION queues a streaming-time watcher wake without before_agent_start, keeps the successor chain, and surfaces consumption of both follow-ups"
+
+# Processing delivery and refusal semantics through the REAL AgentSession,
+# ExtensionRunner and agent-core tool executor. Only the deterministic stream
+# function is substituted; no provider/credential/network call is made.
+processinghome="$TMP_ROOT/processing-home"
+processingdir="$TMP_ROOT/processing-agent-dir"
+mkdir -p "$processinghome/state" "$processinghome/config" "$processingdir"
+cat > "$processingdir/models.json" <<'JSON'
+{"providers":{"fm-processing-test":{"baseUrl":"https://fm-processing-test.invalid/v1","api":"openai-completions","apiKey":"fixture-only","models":[{"id":"offline","name":"offline","contextWindow":128000,"maxTokens":512}]}}}
+JSON
+PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$processinghome" \
+  FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$processinghome/state" \
+  PI_CODING_AGENT_DIR="$processingdir" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" \
+  node --input-type=module > "$TMP_ROOT/processing-output" 2>&1 <<'EOF'
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+const pkg = process.env.PI_PACKAGE_DIR;
+const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } =
+  await import(pathToFileURL(`${pkg}/dist/index.js`).href);
+const { runAgentLoop } = await import(pathToFileURL(`${pkg}/node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js`).href);
+const { default: branchExtension } = await import(pathToFileURL(process.env.PLUGIN).href);
+const home = process.env.FM_HOME;
+const agentDir = process.env.PI_CODING_AGENT_DIR;
+globalThis.fetch = async () => { throw new Error("network forbidden in processing guard"); };
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+const store = (args) => {
+  const result = spawnSync("bash", [`${process.env.FM_ROOT_OVERRIDE}/bin/fm-branch-outcome.sh`, ...args], { env: process.env, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
+};
+const rows = () => store(["unprocessed"]).split("\n").filter(Boolean).map((line) => JSON.parse(line).seq);
+const handlers = new Map();
+const requests = [];
+const inputs = [];
+const errors = [];
+const manager = SessionManager.inMemory(home);
+const settings = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+const loader = new DefaultResourceLoader({
+  cwd: home, agentDir, settingsManager: settings,
+  noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+  extensionFactories: [{ name: "processing-guard", factory: (pi) => {
+    branchExtension({ ...pi,
+      on(event, handler) { handlers.set(event, handler); pi.on(event, handler); },
+      sendMessage(message, options) {
+        if (message.customType === "fm-branch-process") requests.push({ message, options });
+        pi.sendMessage(message, options);
+      },
+    });
+    pi.on("context", (event) => { inputs.push(event.messages); });
+  } }],
+});
+await loader.reload();
+const runtime = await ModelRuntime.create({ authPath: `${agentDir}/auth.json`, modelsPath: `${agentDir}/models.json` });
+const model = runtime.getModel("fm-processing-test", "offline");
+assert.ok(model, "real Pi must resolve the isolated fixture model");
+const { session } = await createAgentSession({ cwd: home, agentDir, sessionManager: manager, settingsManager: settings,
+  resourceLoader: loader, modelRuntime: runtime, model, tools: ["fm_branch_processed"], thinkingLevel: "off" });
+const assistant = (content, stopReason = "stop") => ({ role: "assistant", content, stopReason,
+  api: model.api, provider: model.provider, model: model.id, timestamp: 0,
+  usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+const stream = (message) => ({ async *[Symbol.asyncIterator]() { yield { type: "done", message }; }, result: async () => message });
+let completions = 0;
+let plannedAck;
+let blockNext;
+session.agent.streamFunction = async () => {
+  completions++;
+  if (completions > 12) throw new Error("unchanged processing results created an unbounded turn loop");
+  if (blockNext) { const held = blockNext; blockNext = undefined; await held; }
+  const through = plannedAck;
+  plannedAck = undefined;
+  return stream(through === undefined ? assistant([{ type: "text", text: "unrelated answer" }]) :
+    assistant([{ type: "toolCall", id: "planned-ack", name: "fm_branch_processed", arguments: { through } }], "toolUse"));
+};
+await session.bindExtensions({ onError: (error) => errors.push(error) });
+const waitFor = async (predicate) => {
+  for (let i = 0; i < 600; i++) {
+    assert.deepEqual(errors, []);
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`processing guard timed out: ${completions} completions, ${requests.length} requests`);
+};
+// A real outcome append, then the extension's public reconciliation hooks.
+// This is synthetic state only; no branch model or watcher is started.
+const publish = async (task) => {
+  const seq = Number(store(["append", "--task", task, "--verdict", "captain", "--summary", `${task} needs processing`]));
+  await handlers.get("turn_end")({}, { sessionManager: manager, model });
+  await handlers.get("agent_settled")();
+  return seq;
+};
+const a = await publish("task-a");
+await waitFor(() => requests.length === 3 && session.isIdle);
+assert.equal(completions, 2);
+assert.equal(requests.at(-1).options.deliverAs, "nextTurn");
+const routine = Number(store(["append", "--task", "task-a", "--verdict", "routine", "--summary", "unchanged"]));
+const b = await publish("task-b");
+await waitFor(() => requests.length === 6 && session.isIdle);
+assert.equal(completions, 4, "new outcome must actively run without a human prompt");
+assert.deepEqual(rows(), [a, b]);
+const durable = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8");
+const tool = session.getToolDefinition("fm_branch_processed");
+assert.ok(tool);
+const executeThroughPi = async (through, expectedError, diagnostic) => {
+  let turn = 0;
+  const output = await runAgentLoop([{ role: "user", content: "synthetic acknowledgement", timestamp: 0 }],
+    { systemPrompt: "", messages: [], tools: [tool] }, { model, convertToLlm: (messages) => messages }, () => {}, undefined,
+    async () => stream(turn++ === 0 ? assistant([{ type: "toolCall", id: "ack", name: tool.name, arguments: { through } }], "toolUse") : assistant([])));
+  const result = output.find((message) => message.role === "toolResult");
+  assert.equal(result?.isError, expectedError, `real executor error flag for through=${through}`);
+  assert.match(result.content[0].text, diagnostic);
+};
+await executeThroughPi(0, true, /through must be a positive outcome sequence number/);
+await executeThroughPi(routine, true, /not an unprocessed captain outcome/);
+await executeThroughPi(b + 1, true, /not listed in the active processing request/);
+assert.deepEqual(rows(), [a, b]);
+writeFileSync(`${home}/state/.lock`, "1\n");
+await executeThroughPi(b, true, /does not own the fleet lock/);
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
+await executeThroughPi(a, false, /processed through seq/);
+assert.deepEqual(rows(), [b]);
+await executeThroughPi(a, true, /acknowledgement refused/);
+await executeThroughPi(b, false, /no captain outcome remains unprocessed/);
+assert.deepEqual(rows(), []);
+assert.equal(readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8"), durable);
+
+const c = await publish("task-c");
+await waitFor(() => requests.length === 9 && session.isIdle);
+assert.equal(completions, 6);
+const inputCount = inputs.length;
+plannedAck = c;
+// Pi really retains nextTurn copies across sendCustomMessage-triggered runs.
+// Its next human prompt consumes those old copies together. Only the current
+// request must reach the provider; no queue clearing or transcript rewrite.
+await session.prompt("human question stays intact");
+await waitFor(() => session.isIdle);
+const delivered = inputs[inputCount];
+const processing = delivered.filter((message) => message.role === "custom" && message.customType === "fm-branch-process");
+assert.equal(processing.length, 1, "stale nextTurn requests leaked into real Pi model context");
+assert.match(processing[0].content, new RegExp(`through=${c}`));
+assert.ok(delivered.some((message) => message.role === "user" && JSON.stringify(message.content).includes("human question stays intact")));
+assert.deepEqual(rows(), []);
+assert.equal(requests.length, 9, "an acknowledged request was requeued");
+assert.ok(manager.getEntries().some((entry) => entry.type === "custom_message" && entry.customType === "fm-branch-process" && entry.content.includes(`through=${a}`)), "context filtering must preserve the old transcript");
+// A real streaming main consumes the newly queued request in its existing
+// run. Only message_start witnesses that consumption; no agent_start repeats.
+let release;
+blockNext = new Promise((resolve) => { release = resolve; });
+const busyRun = session.prompt("busy fixture");
+await waitFor(() => completions === 9 && session.isStreaming);
+const d = await publish("task-d");
+release(); await busyRun;
+await waitFor(() => requests.length === 12 && session.isIdle);
+assert.equal(completions, 11, "busy follow-up must retain its bounded retry after consumption");
+assert.equal(requests.at(-1).options.deliverAs, "nextTurn");
+await executeThroughPi(d, false, /no captain outcome remains unprocessed/);
+assert.deepEqual(rows(), []);
+assert.deepEqual(errors, []);
+session.dispose();
+console.log("PROCESSING_OK");
+EOF
+status=$?
+out=$(cat "$TMP_ROOT/processing-output")
+if [ "$status" -ne 0 ] || [ "$out" != "PROCESSING_OK" ]; then
+  fail "real-SDK processing delivery/error guard failed against pi-coding-agent $PI_VERSION: $out"
+fi
+pass "real Pi SDK $PI_VERSION actively delivers new idle outcomes, filters stale queued requests, and flags refused acknowledgements as tool errors without advancing the store"
