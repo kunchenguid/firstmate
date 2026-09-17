@@ -236,7 +236,7 @@ run_layout() {
     lab-structural:w1:p2 w1 w1:t2 w1:p2 "$TMP_ROOT/worktree" \
     '{"EXACT_ENV":"yes","STALE_TEXT":"must-not-run"}' \
     '["/bin/sh","-c","exec pi --model fake --flag literal"]' \
-    "$ATTEMPT" 0123456789abcdef0123456789abcdef
+    "$ATTEMPT" 0123456789abcdef0123456789abcdef fresh task-z1 fm-task-z1
 }
 
 mkdir -p "$TMP_ROOT/worktree"
@@ -259,7 +259,7 @@ jq -e --arg cwd "$TMP_ROOT/worktree" '
   || fail "a structural-launch read escaped its exact named session"
 fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
   || fail "successful layout did not leave one durable bound attempt"
-[ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 2 ] \
+[ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 5 ] \
   || fail "successful layout attempt did not advance to exact replacement ids"
 fm_backend_herdr_layout_attempt_commit "$ATTEMPT" \
   || fail "successful layout did not retire its exact attempt"
@@ -267,7 +267,8 @@ fm_backend_herdr_layout_attempt_commit "$ATTEMPT" \
 [ ! -e "$RENAME_BEFORE_RETIRE" ] \
   || fail "successful layout cleared its correlation label before retiring the attempt"
 rm -f "$LABEL_CLEARED"
-fm_backend_herdr_layout_attempt_write "$ATTEMPT" 2 0123456789abcdef0123456789abcdef \
+fm_backend_herdr_layout_attempt_write "$ATTEMPT" 5 0123456789abcdef0123456789abcdef \
+  fresh task-z1 "$TMP_ROOT/worktree" fm-task-z1 \
   lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef w1:t3 w1:p3
 MODE=rename_failure
 fm_backend_herdr_layout_attempt_commit "$ATTEMPT" \
@@ -286,7 +287,8 @@ for mode in protocol schema workspace tab pane layout foreground socket; do
 done
 MODE=ok
 if fm_backend_herdr_layout_apply lab-structural:w1:p9 w1 w1:t2 w1:p2 \
-  "$TMP_ROOT/worktree" '{}' '["pi"]' "$ATTEMPT" 0123456789abcdef0123456789abcdef >/dev/null 2>&1; then
+  "$TMP_ROOT/worktree" '{}' '["pi"]' "$ATTEMPT" 0123456789abcdef0123456789abcdef \
+  fresh task-z1 fm-task-z1 >/dev/null 2>&1; then
   fail "layout adapter accepted a target/pane identity mismatch"
 fi
 pass "layout.apply refuses every protocol, schema, socket, session, container, layout, and foreground identity mismatch before mutation"
@@ -305,7 +307,7 @@ assert_no_grep 'pane close w1:p2' "$CALLS" \
   "post-mutation refusal targeted the stale pre-apply pane"
 fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
   || fail "post-response refusal lost its durable attempt"
-[ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 3 ] \
+[ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 6 ] \
   && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = removed ] \
   || fail "confirmed cleanup did not resolve the structural attempt"
 rm -f "$ATTEMPT"
@@ -318,7 +320,8 @@ if fm_backend_herdr_layout_discard_response_pane lab-structural w1:p3 >/dev/null
   fail "response-pane cleanup accepted an unreadable post-close pane response"
 fi
 rm -f "$CLOSED"
-fm_backend_herdr_layout_attempt_write "$ATTEMPT" 1 0123456789abcdef0123456789abcdef \
+fm_backend_herdr_layout_attempt_write "$ATTEMPT" 4 0123456789abcdef0123456789abcdef \
+  fresh task-z1 "$TMP_ROOT/worktree" fm-task-z1 \
   lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef
 MODE=reconcile
 if fm_backend_herdr_layout_attempt_reconcile_remove "$ATTEMPT" >/dev/null 2>&1; then
@@ -326,7 +329,7 @@ if fm_backend_herdr_layout_attempt_reconcile_remove "$ATTEMPT" >/dev/null 2>&1; 
 fi
 fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
   || fail "unreadable post-close reconciliation lost its durable attempt"
-[ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 1 ] \
+[ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 4 ] \
   || fail "unreadable post-close reconciliation advanced its durable attempt"
 rm -f "$ATTEMPT" "$CLOSED"
 MODE=ok
@@ -400,7 +403,7 @@ for response_mode in wrong-id error malformed timeout; do
   wait_server
   fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
     || fail "$response_mode response lost its durable attempt"
-  [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 1 ] \
+  [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 4 ] \
     || fail "$response_mode response invented replacement ids"
   MODE=reconcile
   fm_backend_herdr_layout_attempt_reconcile_remove "$ATTEMPT" \
@@ -435,16 +438,17 @@ set -e
 wait_server
 [ "$crash_status" -eq 3 ] || fail "crashed helper did not produce an uncertain adapter result"
 fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" || fail "crashed helper lost its durable attempt"
-[ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 1 ] || fail "crashed helper unexpectedly claimed replacement ids"
+[ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 4 ] || fail "crashed helper unexpectedly claimed replacement ids"
 MODE=reconcile
 fm_backend_herdr_layout_attempt_reconcile_remove "$ATTEMPT" \
   || fail "one exact crash replacement was not safely reconciled"
 fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" || fail "reconciliation erased ownership before lease cleanup"
-[ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 3 ] \
+[ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 6 ] \
   && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = removed ] \
   || fail "successful reconciliation did not publish its safe terminal result"
 rm -f "$ATTEMPT" "$CLOSED"
-fm_backend_herdr_layout_attempt_write "$ATTEMPT" 1 0123456789abcdef0123456789abcdef \
+fm_backend_herdr_layout_attempt_write "$ATTEMPT" 4 0123456789abcdef0123456789abcdef \
+  fresh task-z1 "$TMP_ROOT/worktree" fm-task-z1 \
   lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef
 MODE=reconcile_duplicate
 if fm_backend_herdr_layout_attempt_reconcile_remove "$ATTEMPT" >/dev/null 2>&1; then
@@ -461,6 +465,85 @@ wait_server
 [ "$result" = $'w1:t3\tw1:p3' ] || fail "safe retry did not launch after exact reconciliation"
 rm -f "$ATTEMPT"
 pass "crash quarantine refuses duplicates, reconciles one exact replacement, and permits a safe retry"
+
+for ownership_mode in fresh relaunch secondmate; do
+  lease_holder=-
+  expected_policy=retain
+  if [ "$ownership_mode" = fresh ]; then
+    lease_holder=fm-task-z1
+    expected_policy=release-fresh
+  fi
+  fm_backend_herdr_layout_attempt_write "$ATTEMPT" 4 0123456789abcdef0123456789abcdef \
+    "$ownership_mode" task-z1 "$TMP_ROOT/worktree" "$lease_holder" \
+    lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef \
+    || fail "$ownership_mode ownership record was refused"
+  fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
+    || fail "$ownership_mode ownership record was unreadable"
+  policy=$(fm_backend_herdr_layout_attempt_ownership_policy \
+    "$ownership_mode" task-z1 "$TMP_ROOT/worktree") \
+    || fail "$ownership_mode ownership policy was refused"
+  [ "$policy" = "$expected_policy" ] \
+    || fail "$ownership_mode ownership policy returned $policy"
+  for resolution in removed not-applied; do
+    action=$(fm_backend_herdr_layout_attempt_recovery_action \
+      "$ownership_mode" task-z1 "$TMP_ROOT/worktree" "$resolution") \
+      || fail "$ownership_mode $resolution recovery action was refused"
+    case "$ownership_mode:$resolution:$action" in
+      fresh:removed:release-fresh|fresh:not-applied:release-fresh|\
+      relaunch:removed:retain-retry|secondmate:removed:retain-retry|\
+      relaunch:not-applied:retain-continue|secondmate:not-applied:retain-continue) ;;
+      *) fail "$ownership_mode $resolution recovery action was unsafe: $action" ;;
+    esac
+  done
+  rm -f "$ATTEMPT"
+done
+fm_backend_herdr_layout_attempt_write "$ATTEMPT" 4 0123456789abcdef0123456789abcdef \
+  fresh task-z1 "$TMP_ROOT/worktree" fm-task-z1 \
+  lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef
+fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" || fail "worktree mismatch fixture was unreadable"
+rm -f "$CLOSED"
+if fm_backend_herdr_layout_attempt_ownership_policy \
+  fresh task-z1 "$TMP_ROOT/other-worktree" >/dev/null 2>&1; then
+  fail "ownership policy accepted a stale attempt worktree"
+fi
+[ -e "$ATTEMPT" ] || fail "worktree mismatch refusal retired the attempt record"
+[ ! -e "$CLOSED" ] || fail "worktree mismatch refusal closed a pane"
+rm -f "$ATTEMPT"
+if fm_backend_herdr_layout_attempt_write "$ATTEMPT" 4 0123456789abcdef0123456789abcdef \
+  relaunch task-z1 "$TMP_ROOT/worktree" fm-task-z1 \
+  lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef >/dev/null 2>&1; then
+  fail "relaunch ownership record accepted fresh lease authority"
+fi
+if fm_backend_herdr_layout_attempt_write "$ATTEMPT" 4 0123456789abcdef0123456789abcdef \
+  fresh task-z1 "$TMP_ROOT/worktree" - \
+  lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef >/dev/null 2>&1; then
+  fail "fresh ownership record accepted missing lease authority"
+fi
+cat > "$ATTEMPT" <<EOF
+version=3
+attempt=0123456789abcdef0123456789abcdef
+session=lab-structural
+workspace=w1
+old_tab=w1:t2
+old_pane=w1:p2
+label=fm-launch-0123456789abcdef0123456789abcdef
+new_tab=w1:t3
+new_pane=w1:p3
+resolution=removed
+EOF
+if fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" >/dev/null 2>&1; then
+  fail "legacy ownership-free attempt record was accepted"
+fi
+rm -f "$ATTEMPT"
+fm_backend_herdr_layout_attempt_write "$ATTEMPT" 4 0123456789abcdef0123456789abcdef \
+  secondmate task-z1 "$TMP_ROOT/worktree" - \
+  lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef
+printf '%s\n' 'unexpected=field' >> "$ATTEMPT"
+if fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" >/dev/null 2>&1; then
+  fail "contradictory attempt record was accepted"
+fi
+rm -f "$ATTEMPT"
+pass "ownership records release only proven fresh leases and retain relaunch and secondmate work"
 
 LEASE_LOG="$TMP_ROOT/lease-return.log"
 LEASE_BIN=$(fm_fakebin "$TMP_ROOT/lease-bin")

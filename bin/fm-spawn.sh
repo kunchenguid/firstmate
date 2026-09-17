@@ -1049,6 +1049,8 @@ SPAWN_SLOT_CLAIMED=0
 SPAWN_TREEHOUSE_LEASE_HELD=0
 SPAWN_TREEHOUSE_LEASE_HOLDER=
 HERDR_LAYOUT_ATTEMPT=
+HERDR_LAYOUT_OWNERSHIP_MODE=
+HERDR_LAYOUT_LEASE_HOLDER=-
 HERDR_LAYOUT_QUARANTINED=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
@@ -1089,8 +1091,16 @@ spawn_abort_cleanup() {
   local status=$?
   if [ -n "$HERDR_LAYOUT_ATTEMPT" ] \
     && { [ -e "$HERDR_LAYOUT_ATTEMPT" ] || [ -L "$HERDR_LAYOUT_ATTEMPT" ]; }; then
-    HERDR_LAYOUT_QUARANTINED=1
-    SPAWN_FRESH_COMMIT_PENDING=0
+    if fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" \
+      && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" -ge 5 ] \
+      && fm_backend_herdr_layout_attempt_reconcile_remove "$HERDR_LAYOUT_ATTEMPT" \
+      && fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" \
+      && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 6 ]; then
+      rm -f -- "$HERDR_LAYOUT_ATTEMPT" || HERDR_LAYOUT_QUARANTINED=1
+    else
+      HERDR_LAYOUT_QUARANTINED=1
+      SPAWN_FRESH_COMMIT_PENDING=0
+    fi
   fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
@@ -2932,25 +2942,44 @@ herdr_projection_existing_meta_allows_flat() { # <meta>
 }
 
 spawn_reconcile_herdr_layout_attempt() {
-  local meta="$STATE/$ID.meta" value worktree holder busy_gen
+  local meta="$STATE/$ID.meta" value worktree holder busy_gen expected_mode ownership_policy recovery_action resolution
   [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ] || {
     echo "error: task $ID has a quarantined Herdr structural launch attempt; retry with backend=herdr and the exact plain pi harness" >&2
     return 1
   }
   fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" || {
-    echo "error: task $ID's Herdr structural launch attempt record is malformed; refusing duplicate launch" >&2
+    echo "error: task $ID's Herdr structural launch attempt record is malformed, legacy, or unknown; refusing duplicate launch" >&2
     return 1
   }
+  if [ "$KIND" = secondmate ]; then
+    expected_mode=secondmate
+  elif [ "$RELAUNCH" -eq 1 ]; then
+    expected_mode=relaunch
+  else
+    expected_mode=fresh
+  fi
   fm_backlog_record_present "$meta" "task record" "$STATE" || {
     echo "error: task $ID's quarantined Herdr structural launch has no trustworthy task record; refusing duplicate launch" >&2
     return 1
   }
+  worktree=$(herdr_projection_meta_field_exact "$meta" worktree) || {
+    echo "error: task $ID's quarantined Herdr launch has no one authoritative worktree; refusing mutation" >&2
+    return 1
+  }
+  ownership_policy=$(fm_backend_herdr_layout_attempt_ownership_policy \
+    "$expected_mode" "$ID" "$worktree") || {
+    echo "error: task $ID's quarantined Herdr launch ownership or worktree contradicts its task record; refusing mutation" >&2
+    return 1
+  }
+  case "$expected_mode:$ownership_policy" in
+    fresh:release-fresh|relaunch:retain|secondmate:retain) ;;
+    *) return 1 ;;
+  esac
   for value in \
     "backend:herdr" \
     "project:$PROJ_ABS" \
     "herdr_session:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" \
-    "herdr_workspace_id:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" \
-    "treehouse_lease_holder:fm-$ID"; do
+    "herdr_workspace_id:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE"; do
     [ "$(herdr_projection_meta_field_exact "$meta" "${value%%:*}" 2>/dev/null || true)" = "${value#*:}" ] || {
       echo "error: task $ID's quarantined Herdr launch does not match its exact task record; refusing duplicate launch" >&2
       return 1
@@ -2958,24 +2987,63 @@ spawn_reconcile_herdr_layout_attempt() {
   done
   value="$(herdr_projection_meta_field_exact "$meta" herdr_tab_id 2>/dev/null || true):$(herdr_projection_meta_field_exact "$meta" herdr_pane_id 2>/dev/null || true)"
   if [ "$value" != "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE" ]; then
-    [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" -ge 2 ] \
+    [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" -ge 5 ] \
       && [ "$value" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" ] || {
       echo "error: task $ID's quarantined Herdr launch endpoint does not match its attempt; refusing duplicate launch" >&2
       return 1
     }
   fi
-  worktree=$(herdr_projection_meta_field_exact "$meta" worktree) || return 1
-  holder=$(herdr_projection_meta_field_exact "$meta" treehouse_lease_holder) || return 1
-  fm_treehouse_pool_slot "$PROJ_ABS" "$worktree" || {
-    echo "error: task $ID's quarantined Herdr launch no longer names its exact Treehouse slot; refusing duplicate launch" >&2
-    return 1
-  }
-  fm_treehouse_slot_owner_state "$worktree" "$ID"
-  [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || {
-    echo "error: task $ID no longer owns its quarantined Treehouse slot; refusing duplicate launch" >&2
-    return 1
-  }
+  case "$expected_mode" in
+    fresh)
+      holder=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LEASE_HOLDER
+      [ "$holder" = "fm-$ID" ] \
+        && [ "$(herdr_projection_meta_field_exact "$meta" treehouse_lease_holder 2>/dev/null || true)" = "$holder" ] || {
+        echo "error: task $ID's quarantined fresh launch lacks exact acquisition proof; refusing lease mutation" >&2
+        return 1
+      }
+      fm_treehouse_pool_slot "$PROJ_ABS" "$worktree" || {
+        echo "error: task $ID's quarantined fresh launch no longer names its exact Treehouse slot; refusing duplicate launch" >&2
+        return 1
+      }
+      fm_treehouse_slot_owner_state "$worktree" "$ID"
+      [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || {
+        echo "error: task $ID no longer owns its quarantined Treehouse slot; refusing duplicate launch" >&2
+        return 1
+      }
+      ;;
+    relaunch)
+      [ "$(herdr_projection_meta_field_exact "$meta" kind 2>/dev/null || true)" != secondmate ] || {
+        echo "error: ordinary relaunch quarantine names a persistent secondmate; refusing mutation" >&2
+        return 1
+      }
+      ;;
+    secondmate)
+      [ "$(herdr_projection_meta_field_exact "$meta" kind 2>/dev/null || true)" = secondmate ] || {
+        echo "error: secondmate quarantine does not name persistent secondmate ownership; refusing mutation" >&2
+        return 1
+      }
+      ;;
+  esac
   fm_backend_herdr_layout_attempt_reconcile_remove "$HERDR_LAYOUT_ATTEMPT" || return 1
+  fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" || return 1
+  [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 6 ] || return 1
+  resolution=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION
+  recovery_action=$(fm_backend_herdr_layout_attempt_recovery_action \
+    "$expected_mode" "$ID" "$worktree" "$resolution") || return 1
+  case "$recovery_action" in
+    retain-continue)
+      rm -f -- "$HERDR_LAYOUT_ATTEMPT" || return 1
+      echo "notice: retired task $ID's non-mutating structural Herdr attempt; retained its record, lease, and local work" >&2
+      return 0
+      ;;
+    retain-retry)
+      rm -f -- "$HERDR_LAYOUT_ATTEMPT" || return 1
+      echo "notice: removed task $ID's exact structural Herdr replacement; retained its record, lease, and local work for a safe retry" >&2
+      return 2
+      ;;
+    release-fresh) ;;
+    *) return 1 ;;
+  esac
   fm_treehouse_lease_return_exact "$PROJ_ABS" "$worktree" "$holder" >/dev/null || {
     echo "error: exact Herdr replacement was reconciled, but task $ID's Treehouse lease could not be returned; refusing duplicate launch" >&2
     return 1
@@ -2988,12 +3056,19 @@ spawn_reconcile_herdr_layout_attempt() {
   [ -z "$busy_gen" ] || "$FM_ROOT/bin/fm-busy-event.sh" retire "$STATE" "$ID" --gen "$busy_gen" >/dev/null 2>&1 || return 1
   fm_backlog_atomic_transition remove "$meta" "quarantined task record" "$STATE" || return 1
   rm -f -- "$HERDR_LAYOUT_ATTEMPT" || return 1
-  echo "notice: reconciled task $ID's prior structural Herdr launch and safely released its isolated copy" >&2
+  echo "notice: reconciled task $ID's prior fresh structural Herdr launch and safely released its isolated copy" >&2
 }
 
-if [ "$RELAUNCH" -eq 0 ] \
-  && { [ -e "$HERDR_LAYOUT_ATTEMPT" ] || [ -L "$HERDR_LAYOUT_ATTEMPT" ]; }; then
-  spawn_reconcile_herdr_layout_attempt || exit 1
+if [ -e "$HERDR_LAYOUT_ATTEMPT" ] || [ -L "$HERDR_LAYOUT_ATTEMPT" ]; then
+  if spawn_reconcile_herdr_layout_attempt; then
+    :
+  else
+    reconcile_status=$?
+    if [ "$reconcile_status" -eq 2 ]; then
+      echo "error: task $ID's exact replacement was removed; retry the relaunch now that its quarantine is retired" >&2
+    fi
+    exit 1
+  fi
 fi
 
 # Backlog preflight (bin/fm-backlog-transition-lib.sh). This spawn is about to
@@ -4541,9 +4616,23 @@ print(json.dumps(["/bin/sh", "-c", sys.stdin.read()], separators=(",", ":")))
 ') || exit 1
   HERDR_LAYOUT_OLD_TAB_ID=$HERDR_TAB_ID
   HERDR_LAYOUT_OLD_PANE_ID=$HERDR_PANE_ID
+  if [ "$KIND" = secondmate ]; then
+    HERDR_LAYOUT_OWNERSHIP_MODE=secondmate
+  elif [ "$RELAUNCH" -eq 1 ]; then
+    HERDR_LAYOUT_OWNERSHIP_MODE=relaunch
+  else
+    HERDR_LAYOUT_OWNERSHIP_MODE=fresh
+    [ "$SPAWN_TREEHOUSE_LEASE_HELD" = 1 ] \
+      && [ "$SPAWN_TREEHOUSE_LEASE_HOLDER" = "fm-$ID" ] || {
+      echo "error: fresh structural Herdr launch has no exact acquired Treehouse lease proof" >&2
+      exit 1
+    }
+    HERDR_LAYOUT_LEASE_HOLDER=$SPAWN_TREEHOUSE_LEASE_HOLDER
+  fi
   HERDR_LAYOUT_ATTEMPT_ID=$(python3 -c 'import os; print(os.urandom(16).hex())') || exit 1
   if HERDR_LAYOUT_BINDING=$(fm_backend_herdr_layout_apply "$T" "$HERDR_WORKSPACE_ID" "$HERDR_TAB_ID" "$HERDR_PANE_ID" \
-    "$WT" "$HERDR_LAYOUT_ENV" "$HERDR_LAYOUT_COMMAND" "$HERDR_LAYOUT_ATTEMPT" "$HERDR_LAYOUT_ATTEMPT_ID"); then
+    "$WT" "$HERDR_LAYOUT_ENV" "$HERDR_LAYOUT_COMMAND" "$HERDR_LAYOUT_ATTEMPT" "$HERDR_LAYOUT_ATTEMPT_ID" \
+    "$HERDR_LAYOUT_OWNERSHIP_MODE" "$ID" "$HERDR_LAYOUT_LEASE_HOLDER"); then
     :
   else
     HERDR_LAYOUT_STATUS=$?

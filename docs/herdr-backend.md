@@ -89,11 +89,14 @@ The request payload travels over the helper's stdin, so allowlisted credentials 
 The local client exposes no general Herdr control surface and accepts only that one request shape.
 It binds a random request id, rejects protocol errors and mismatched responses, and returns only replacement ids that Firstmate re-reads from the same named session.
 
-Immediately before the request, Firstmate publishes `state/<id>.herdr-launch` with a random non-sensitive attempt identity and the exact old session, workspace, tab, and pane.
+Immediately before the request, Firstmate publishes `state/<id>.herdr-launch` with a random non-sensitive attempt identity, the exact old session, workspace, tab, and pane, and one validated ownership mode: fresh allocation, ordinary relaunch, or persistent secondmate.
+A fresh record binds the exact acquired `fm-<id>` lease; relaunch and secondmate records carry no lease-return authority.
 A confirmed response advances that record to the returned replacement ids.
-A timeout, malformed response, wrong response id, helper crash, or other uncertain post-send result preserves the task record, holder-bound Treehouse lease, and attempt record, and every retry refuses until the exact named session proves either that the old pane remains or that one random-label-correlated replacement was removed.
-Ambiguous, duplicate, renamed, or unverifiable replacements stay quarantined.
-The attempt record is cleared only after safe retry cleanup or after the replacement's presentation and task metadata have both been rebound.
+A timeout, malformed response, wrong response id, helper crash, or other uncertain post-send result preserves the task record, lease, local work, and attempt record, and every retry refuses until the exact named session proves either that the old pane remains or that one random-label-correlated replacement was removed.
+Only fresh allocation recovery can return its proven lease and remove its provisional task record.
+Relaunch and secondmate recovery retires only the exact attempt and replacement pane, preserving persistent ownership and all retained work before a safe retry.
+Legacy, unknown, malformed, contradictory, stale-worktree, ambiguous, duplicate, renamed, or unverifiable records stay quarantined without mutation.
+The attempt record is cleared only after mode-safe retry cleanup or after the replacement's presentation and task metadata have both been rebound.
 
 The worker counts as launched only after the replacement pane reports the exact plain-Pi process, Herdr's public `pane report-agent` operation registers it as Pi, and a fresh inventory read confirms that registration is live.
 Only then do the task record and any presentation journal advance from the old tab and pane ids to the returned replacement ids.
