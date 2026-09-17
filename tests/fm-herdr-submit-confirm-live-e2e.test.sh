@@ -132,7 +132,9 @@ pass "live Herdr submit confirm: Claude Code ($VERSION) on $HERDR_VER reports em
 
 # Herdr 0.9.0 registers a native idle agent for Muse panes (measured 2026-09-17
 # against Muse Code 1.3.0), so on current Herdr this leg's pre-check reports it
-# unverified and skips. The installed-harness rule is deliberate: an absent Muse is
+# unverified and skips as soon as that registration is observed, before the
+# readiness gate below can require anything further of the pane.
+# The installed-harness rule is deliberate: an absent Muse is
 # reported rather than fabricated as a pass, while an installed Muse must prove
 # its current renderer and send behavior before it can be trusted.
 # The leg drives a real Muse with --provider echo under an isolated XDG lab,
@@ -246,13 +248,32 @@ else
   # rather than failed, so readiness degrades to the two signals that host can
   # give and the leg runs on with the honest version-unknown placeholder. An
   # unreadable body degrades nothing: it keeps waiting.
+  #
+  # The native-route pre-check is the first thing every tick reads, and it ends
+  # the wait the moment Herdr publishes an agent_status for this pane. It is a
+  # best-effort route preference, not proof: a readable native status means
+  # fm_backend_herdr_send_text_submit would take its native branch instead of
+  # the composer one this leg is about, so a verdict from this run could not be
+  # attributed to either. It proves nothing on its own, because
+  # fm_backend_herdr_agent_status_raw returns the same empty string for a pane
+  # with no registered agent and for an agent get that simply failed.
+  # A Herdr that starts registering an agent for Muse panes is an upstream
+  # improvement rather than a firstmate defect, so it reports unverified and
+  # skips the leg exactly as an absent Muse does, leaving CHECKED untouched
+  # instead of turning an unchanged repository red. That is why it is read
+  # ahead of the readiness signals rather than after them: on such a Herdr the
+  # leg cannot measure anything, so the gate below must never get the chance to
+  # fail red over an argv identity or a composer shape no steer would have used.
   muse_idle=0
   i=0
   muse_state=unread
   muse_process=unread
   muse_exec_name=
   muse_argv_surface=unread
+  muse_native_raw=
   while [ "$i" -lt 90 ]; do
+    muse_native_raw=$(fm_backend_herdr_agent_status_raw "$SESSION" "$MUSE_PANE")
+    [ -n "$muse_native_raw" ] && break
     muse_process=$(fm_backend_herdr_pane_process_state "$SESSION" "$MUSE_PANE")
     if [ "$muse_process" = agent ]; then
       muse_proc_json=$(lab pane process-info --pane "$MUSE_PANE" 2>/dev/null || true)
@@ -266,29 +287,18 @@ else
     i=$((i + 1))
     sleep 1
   done
-  [ "$muse_idle" = 1 ] \
-    || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER never reached a live muse-bin process with a shared empty composer in the lab pane (last process state '$muse_process', last argv surface '$muse_argv_surface', last exec identity '${muse_exec_name:-none}', last composer state '$muse_state')"
-
-  # The build that ran is the build this record may name, and the gate above
-  # already read it off the pane before opening. It stays version-unknown on a
-  # Herdr that published no argv to read it from.
-  [ -z "$muse_exec_name" ] || MUSE_VERSION=${muse_exec_name#muse-bin-}
-
-  # Best-effort route preference, not proof: a readable native status here means
-  # fm_backend_herdr_send_text_submit would take its native branch instead of
-  # the composer one this leg is about, so a verdict from this run could not be
-  # attributed to either. It proves nothing on its own, because
-  # fm_backend_herdr_agent_status_raw returns the same empty string for a pane
-  # with no registered agent and for an agent get that simply failed.
-  # A Herdr that starts registering an agent for Muse panes is an upstream
-  # improvement rather than a firstmate defect, so this reports unverified and
-  # skips the leg exactly as an absent Muse does, leaving CHECKED untouched
-  # instead of turning an unchanged repository red.
-  muse_raw=$(fm_backend_herdr_agent_status_raw "$SESSION" "$MUSE_PANE")
-  if [ -n "$muse_raw" ]; then
+  if [ -n "$muse_native_raw" ]; then
     printf '# herdr now registers a native agent for the Muse pane (agent_status %s), so a steer would take the native branch rather than the composer fallback this leg covers; Muse-on-Herdr submit confirmation was not verified here\n' \
-      "$muse_raw"
+      "$muse_native_raw"
   else
+    [ "$muse_idle" = 1 ] \
+      || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER never reached a live muse-bin process with a shared empty composer in the lab pane (last process state '$muse_process', last argv surface '$muse_argv_surface', last exec identity '${muse_exec_name:-none}', last composer state '$muse_state')"
+
+    # The build that ran is the build this record may name, and the gate above
+    # already read it off the pane before opening. It stays version-unknown on a
+    # Herdr that published no argv to read it from.
+    [ -z "$muse_exec_name" ] || MUSE_VERSION=${muse_exec_name#muse-bin-}
+
     MUSE_TOKEN="FMHERDRMUSE$$_$RANDOM"
     muse_verdict=$(fm_backend_herdr_send_text_submit "$MUSE_TARGET" "Reply with exactly $MUSE_TOKEN and nothing else." 3 0.4 0.4) \
       || fail "send_text_submit failed to run against Muse Code ($MUSE_VERSION) on $HERDR_VER"
