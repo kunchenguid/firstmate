@@ -91,6 +91,7 @@ command -v node >/dev/null 2>&1 || refuse "node is required to record project tr
 # store in project content, not the launching user's own config. Refuse that
 # shape rather than guessing or writing into the worktree. Absolute and
 # home-relative overrides resolve to the same store in both processes.
+# shellcheck disable=SC2088 # Matching the literal '~' prefix, not expanding it; Pi expands it itself.
 case ${PI_CODING_AGENT_DIR:-} in
   '' | /* | '~' | '~/'*) ;;
   *) refuse "PI_CODING_AGENT_DIR '$PI_CODING_AGENT_DIR' is a relative path, so it does not identify the launching user's own store; set it to an absolute or home-relative path" ;;
