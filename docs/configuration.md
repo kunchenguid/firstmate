@@ -436,7 +436,10 @@ This section is the single owner of the canonical schema and its per-field seman
   ],
   "default": [
     { "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>" }
-  ]
+  ],
+  "harness_defaults": {
+    "<adapter>": { "model": "<optional model>", "effort": "<optional effort>" }
+  }
 }
 ```
 
@@ -459,15 +462,19 @@ A profile `floor` contains only `scope` and `min_percent`, always uses that prof
 An absent or unknown named row also makes the candidate unrankable and is reported as an unverifiable floor, not as a known shortfall.
 `ultra` is native-only: the model-aware validation contract and launch mapping are owned by `bin/fm-harness.sh validate-native-effort` and `bin/fm-spawn.sh` respectively.
 Codex `max` is valid when the profile selects `gpt-5.6-luna`, whose installed catalog entry supports that reasoning level.
-An omitted model or effort means the selected harness uses its own default for that axis.
+An omitted model or effort falls through the optional top-level `harness_defaults` object before reaching the selected harness's own default for that axis.
+`harness_defaults` maps a verified harness name to a profile object carrying only `model` and `effort`, both optional; a ship or scout spawn applies the resolved harness's entry only when neither an explicit captain `--model`/`--effort` override nor the matched rule's (or `default`'s) own profile already set that axis, so the precedence is explicit override, then matched profile, then `harness_defaults`, then the runtime's own persisted default.
+Model identifiers are not portable across harnesses (Sonnet is `sonnet` to `claude` and `claude-sonnet-4-6` to `agy`), which is why this is keyed per harness rather than a single default model.
+Secondmate spawns never consult it, matching `config/crew-dispatch.json`'s existing secondmate exemption above.
+For agy, an explicit or `harness_defaults`-supplied `--model` is also confirmed after launch rather than trusted blind: `bin/fm-spawn.sh` owns the exact log-file mechanics, and [`docs/verification/agy.md`](verification/agy.md) records why agy's own `--model` flag cannot be trusted alone (it falls back to the account's persisted default silently under this interactive launch, unlike its `-p` print mode, which refuses loudly).
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
-If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
+If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`; `harness_defaults` still applies afterward on the model/effort axes alone.
 Except for `ultra`, which refuses unsupported profiles under the native-effort contract above, an effort value the chosen harness does not accept is recorded as `effort=` in task meta for traceability but omitted from the launch flags.
 Bootstrap reports unsupported harness/model/effort combinations as a `CREW_DISPATCH` diagnostic when they are visible in the file.
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`; its Pi default declares the `claude` provider required for typed resolution of that Anthropic model.
 When the file exists, bootstrap validates it with `jq`.
-Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
-Malformed JSON, malformed rules, an empty or malformed profile array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`.
+Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, one fact for the optional default profile set, and one fact per `harness_defaults` entry.
+Malformed JSON, malformed rules, an empty or malformed profile array, a malformed `harness_defaults` entry, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`.
 While typed resolution is active, malformed `approval`, `floor`, and present `provider` declarations receive the same diagnostic; without the key those inert declarations preserve the pre-existing bootstrap behavior.
 Missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.

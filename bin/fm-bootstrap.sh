@@ -1151,9 +1151,12 @@ crew_dispatch_validate() {
       elif ($value | type) == "object" then [$value]
       else []
       end;
+    def harness_default_profiles:
+      (.harness_defaults // {}) | to_entries | map({harness: .key} + .value);
     def configured_profiles:
       ([(.rules // [])[]? | profiles(.use?)[]?]
-        + (if has("default") then [profiles(.default)[]?] else [] end));
+        + (if has("default") then [profiles(.default)[]?] else [] end)
+        + (if has("harness_defaults") then harness_default_profiles else [] end));
     def malformed_optional_fields($items):
       ($items | any(has("model") and (((.model | type) != "string") or (.model | length) == 0)))
       or ($items | any(has("effort") and (((.effort | type) != "string") or (.effort | length) == 0)))
@@ -1206,6 +1209,12 @@ crew_dispatch_validate() {
       else "default profile model and effort must be non-empty strings when present"
       end
     elif $typed and has("default") and malformed_profile_floors([profiles(.default)[]?]) then "default profile floor needs scope and min_percent 0..100"
+    elif has("harness_defaults") and (.harness_defaults | type) != "object" then "harness_defaults must be an object"
+    elif has("harness_defaults") and ([(.harness_defaults // {}) | to_entries[] | select((.value | type) != "object")] | length) > 0 then "each harness_defaults entry must be an object"
+    elif has("harness_defaults") and malformed_optional_fields(harness_default_profiles) then
+      if $typed then "harness_defaults model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
+      else "harness_defaults model and effort must be non-empty strings when present"
+      end
     else
       (configured_profiles
         | map(.harness)
@@ -1237,7 +1246,8 @@ crew_dispatch_validate() {
       end;
     (["BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json"]
       + [(.rules // [])[]? | "BOOTSTRAP_INFO: crew dispatch rule: " + (.when | tostring) + " -> " + profile_set(.use; .select?)]
-      + (if has("default") then ["BOOTSTRAP_INFO: crew dispatch default: " + profile_set(.default; null)] else [] end))
+      + (if has("default") then ["BOOTSTRAP_INFO: crew dispatch default: " + profile_set(.default; null)] else [] end)
+      + [(.harness_defaults // {}) | to_entries[] | "BOOTSTRAP_INFO: crew dispatch harness default: " + profile({harness: .key} + .value)])
     | .[]
   ' "$file"
   fi

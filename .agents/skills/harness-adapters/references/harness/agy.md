@@ -19,7 +19,8 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 | Autonomy | `--dangerously-skip-permissions` auto-approves tool calls for the run. |
 | Marker | None; a live TUI carries no `AGY_*` or `ANTIGRAVITY_*` variable. |
 | Resume | `--continue` and `--conversation` exist but carry no verified pane-resume contract; use deterministic relaunch. |
-| Model | `--model <id>` with the bare catalog id from `agy models` (for example `gemini-3.8-flash-high`); `bin/fm-spawn.sh` refuses a requested id a reachable listing omits. The listing is a remote fetch, so the probe runs stdin-detached under the shared hard bound and an unreachable or hung listing launches unvalidated with a notice. |
+| Model | `--model <id>` with the bare catalog id from `agy models` (for example `gemini-3.8-flash-high`); `bin/fm-spawn.sh` refuses a requested id a reachable listing omits. The listing is a remote fetch, so the probe runs stdin-detached under the shared hard bound and an unreachable or hung listing launches unvalidated with a notice. The flag itself cannot be trusted alone: agy 1.2.2-1.2.5 accept an unsupported model silently under this interactive launch (no error, no non-zero exit, the session runs the account's own persisted default) and refuse loudly only under `-p` print mode - see "Model verification" below. |
+| Model default | `config/crew-dispatch.json`'s optional `harness_defaults.agy.model`/`.effort` fill an omitted `--model`/`--effort` when no dispatch profile set it either (`../../../../../docs/configuration.md` "Crew dispatch profiles"), so a home can pin a captain-chosen default model per harness instead of falling through to whatever the account's own settings currently persist. |
 | Effort | `--effort low\|medium\|high`; `xhigh` and `max` stay in task metadata under the record-and-omit contract. |
 | Composer | Borderless bare `>` row, which the shared classifier reads as `unknown` under the dead-shell rule, never `empty`; steering confirms delivery through native agent-state and the delivery footer instead, the cursor precedent. |
 
@@ -30,6 +31,14 @@ There is no launch flag that suppresses the dialog, but agy honours a `trustedWo
 The post-launch readiness gate is the backstop: it answers a dialog that renders anyway with a single Enter, then requires a busy verdict (Herdr's native `working` status or the pinned `esc to cancel` row) before the spawn reports success, and on a path that was not pre-registered it never counts a busy verdict as ready until the dialog has been answered, because Herdr's native verdict can precede the dialog.
 A pane whose brief cannot be confirmed to run in the worktree fails the spawn, records the failure in the task status, and closes the endpoint.
 Never steer into a pane still showing the dialog; a spawn that reported success has already cleared it.
+
+## Model verification
+
+Every agy launch that requests a model carries `--log-file` pointed at `state/<task-id>.agy-launch.log`, because the launch flag alone does not prove which model ran: agy 1.2.2-1.2.5 resolve an unsupported `--model` silently under this interactive launch, logging `resolver.go: Model ID <x> not in local config, defaulting to CCPA` and then running the account's persisted default with no error and exit 0, while `-p` print mode refuses the same request loudly.
+`agy_verify_model_override` in `../../../../../bin/fm-spawn.sh` reads that log after the post-launch readiness gate confirms the pane is busy, and requires the LAST `model_config_manager.go:327] Propagating selected model override to backend: label="..."` line to name the catalog label `agy_model_validate` matched for the requested id.
+An earlier `failed to apply model override` line and the `defaulting to CCPA` line above are not signals: both were observed on a live valid launch too, before the catalog finished loading; only the final propagation line is trustworthy.
+The check only runs when a concrete model was requested and the pre-launch catalog probe reached it (an unreachable catalog already launched unvalidated with its own notice, leaving nothing to compare against); a mismatch or a log that never gets the line refuses the spawn and closes the endpoint, naming both the requested model and that the log disagreed.
+`../../../../../docs/verification/agy.md` records the live transcripts this behavior was verified against.
 
 ## Credential precondition
 
@@ -46,7 +55,7 @@ agy is deliberately absent from the session-lock name vocabulary in `../../../..
 
 `../../../../../bin/fm-spawn.sh` arms no busy generation for agy and writes no sidecar, exactly because no writer could ever clear a seeded record.
 `fm_busy_agy_tail_busy` matches the pinned `esc to cancel` status row alone, hardcoded with no environment override, and `fm_busy_classify` reports `unknown agy-regex` rather than idle when it is absent, because a long turn can scroll the marker out of the captured tail.
-Teardown removes nothing agy-specific because the spawn leaves nothing behind.
+Teardown removes only the model-verification log at `state/<task-id>.agy-launch.log`; the spawn arms no busy generation and leaves nothing else agy-specific behind.
 
 ## Primary integration
 

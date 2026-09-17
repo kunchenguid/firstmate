@@ -77,6 +77,17 @@ export FM_BACKEND=tmux
 BLIND_BIN=$(fm_fakebin "$TMP_ROOT/blind-ancestry")
 fm_fake_blind_ancestry "$BLIND_BIN"
 
+# Section D below resolves config/crew-dispatch.json through the real jq, kept
+# in its own isolated fakebin (never a system bin dir, which can carry an
+# unrelated same-named tool alongside jq) rather than widening BASE_PATH.
+JQ_BIN=$(fm_fakebin "$TMP_ROOT/jq-bin")
+JQ_REAL=$(command -v jq) || fail "test needs jq"
+cat > "$JQ_BIN/jq" <<SH
+#!/usr/bin/env bash
+exec '$JQ_REAL' "\$@"
+SH
+chmod +x "$JQ_BIN/jq"
+
 # ===========================================================================
 # A) fm-harness.sh secondmate resolution + fallback (deterministic detect_own)
 # ===========================================================================
@@ -170,6 +181,40 @@ extra whitespace between tokens is tolerated^grok   grok-4    xhigh^grok^grok-4^
 leading/trailing blank lines and a comment are skipped^# a comment\n\nclaude opus low\n^claude^opus^low
 ROWS
   pass "C1 fm-harness.sh secondmate-model/secondmate-effort resolve the optional tokens; bare harness stays empty (backward-compat)"
+}
+
+# ===========================================================================
+# D) fm-harness.sh crew-dispatch-default-model / crew-dispatch-default-effort
+# ===========================================================================
+# config/crew-dispatch.json's optional top-level harness_defaults maps a
+# harness name to {model, effort} (docs/configuration.md "Crew dispatch
+# profiles"). bin/fm-bootstrap.sh's crew_dispatch_validate is the schema's
+# single validator, so these subcommands trust an already-valid file and stay
+# silent, never crashing, on one that is not.
+#   <label>^<harness>^<file-body-or-ABSENT>^<expect-model>^<expect-effort>
+test_crew_dispatch_default_tokens() {
+  local label harness body exp_model exp_effort case_dir cfg got_m got_e n
+  n=0
+  while IFS='^' read -r label harness body exp_model exp_effort; do
+    [ -n "$label" ] || continue
+    n=$((n + 1))
+    case_dir="$TMP_ROOT/crew-dispatch-default-$n"
+    cfg="$case_dir/config"
+    mkdir -p "$cfg"
+    [ "$body" = ABSENT ] || printf '%s\n' "$body" > "$cfg/crew-dispatch.json"
+    got_m=$(PATH="$JQ_BIN:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" crew-dispatch-default-model "$harness")
+    got_e=$(PATH="$JQ_BIN:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" crew-dispatch-default-effort "$harness")
+    [ "$got_m" = "$exp_model" ] || fail "$label: model resolved '$got_m', expected '$exp_model'"
+    [ "$got_e" = "$exp_effort" ] || fail "$label: effort resolved '$got_e', expected '$exp_effort'"
+  done <<'ROWS'
+absent file -> empty model/effort^agy^ABSENT^^
+no harness_defaults key -> empty model/effort^agy^{"rules":[]}^^
+requested harness has a model only^agy^{"harness_defaults":{"agy":{"model":"claude-sonnet-4-6"}}}^claude-sonnet-4-6^
+requested harness has model and effort^claude^{"harness_defaults":{"agy":{"model":"claude-sonnet-4-6"},"claude":{"model":"sonnet","effort":"medium"}}}^sonnet^medium
+requested harness absent from the map -> empty^codex^{"harness_defaults":{"agy":{"model":"claude-sonnet-4-6"}}}^^
+malformed JSON stays silent, never a crash^agy^{not json^^
+ROWS
+  pass "D1 fm-harness.sh crew-dispatch-default-model/effort resolve config/crew-dispatch.json's harness_defaults"
 }
 
 # ===========================================================================
@@ -2631,6 +2676,7 @@ SH
 test_harness_resolution
 test_cursor_marker_detection
 test_secondmate_model_effort_tokens
+test_crew_dispatch_default_tokens
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
 test_propagate_lib

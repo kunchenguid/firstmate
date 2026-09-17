@@ -1088,7 +1088,7 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   case_dir="$TMP_ROOT/dispatch-active"
   mkdir -p "$case_dir/home/config"
   printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
-  printf '%s\n' '{"rules":[{"when":"fresh news","use":{"harness":"grok"},"why":"current context"},{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]},{"when":"legacy feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"quota-balanced"}],"default":[{"harness":"pi","model":"anthropic/claude-sonnet-5","effort":"high"},{"harness":"grok","model":"grok-4.5","effort":"high"}]}' > "$case_dir/home/config/crew-dispatch.json"
+  printf '%s\n' '{"rules":[{"when":"fresh news","use":{"harness":"grok"},"why":"current context"},{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]},{"when":"legacy feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"quota-balanced"}],"default":[{"harness":"pi","model":"anthropic/claude-sonnet-5","effort":"high"},{"harness":"grok","model":"grok-4.5","effort":"high"}],"harness_defaults":{"agy":{"model":"claude-sonnet-4-6"},"claude":{"model":"sonnet","effort":"medium"}}}' > "$case_dir/home/config/crew-dispatch.json"
   fakebin=$(make_fake_toolchain "$case_dir")
   add_real_jq "$fakebin"
 
@@ -1099,7 +1099,7 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_BOOTSTRAP_VERBOSE_FACTS=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
 
-  expect=$'BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json\nBOOTSTRAP_INFO: crew dispatch rule: fresh news -> grok\nBOOTSTRAP_INFO: crew dispatch rule: big feature -> quota-balanced[claude/claude-sonnet-5/high, codex/gpt-5.5/high]\nBOOTSTRAP_INFO: crew dispatch rule: legacy feature -> quota-balanced[claude, codex]\nBOOTSTRAP_INFO: crew dispatch default: quota-balanced[pi/anthropic/claude-sonnet-5/high, grok/grok-4.5/high]'
+  expect=$'BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json\nBOOTSTRAP_INFO: crew dispatch rule: fresh news -> grok\nBOOTSTRAP_INFO: crew dispatch rule: big feature -> quota-balanced[claude/claude-sonnet-5/high, codex/gpt-5.5/high]\nBOOTSTRAP_INFO: crew dispatch rule: legacy feature -> quota-balanced[claude, codex]\nBOOTSTRAP_INFO: crew dispatch default: quota-balanced[pi/anthropic/claude-sonnet-5/high, grok/grok-4.5/high]\nBOOTSTRAP_INFO: crew dispatch harness default: agy/claude-sonnet-4-6\nBOOTSTRAP_INFO: crew dispatch harness default: claude/sonnet/medium'
   [ "$out" = "$expect" ] || fail "active dispatch verbose info block mismatch"$'\n'"expected: $expect"$'\n'"actual:   $out"
   pass "bootstrap surfaces active crew-dispatch rules only as verbose BOOTSTRAP_INFO"
 }
@@ -1180,6 +1180,16 @@ default array profile without harness is flagged^{"default":[{"model":"gpt-5.5"}
 default array malformed effort is flagged^{"default":[{"harness":"codex","effort":3}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present
 default profile floor without min_percent is flagged^{"default":[{"harness":"codex","floor":{"scope":"all_models"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile floor needs scope and min_percent 0..100
 default profile floor provider override is flagged^{"default":{"harness":"codex","floor":{"scope":"all_models","min_percent":50,"provider":"claude"}}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile floor needs scope and min_percent 0..100
+harness default model and effort are accepted^{"harness_defaults":{"agy":{"model":"claude-sonnet-4-6"},"claude":{"model":"sonnet","effort":"medium"}}}^empty^
+harness default model only is accepted^{"harness_defaults":{"agy":{"model":"claude-sonnet-4-6"}}}^empty^
+harness default that is not an object is flagged^{"harness_defaults":["agy"]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - harness_defaults must be an object
+harness default entry that is not an object is flagged^{"harness_defaults":{"agy":"sonnet"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each harness_defaults entry must be an object
+harness default with malformed model is flagged^{"harness_defaults":{"agy":{"model":5}}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - harness_defaults model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present
+harness default with empty model is flagged^{"harness_defaults":{"agy":{"model":""}}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - harness_defaults model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present
+harness default unverified harness is flagged^{"harness_defaults":{"spaceship":{"model":"x"}}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: spaceship
+harness default unsupported cursor effort is flagged^{"harness_defaults":{"cursor":{"effort":"high"}}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: cursor:high
+harness default ordinary pi ultra is refused^{"harness_defaults":{"pi":{"effort":"ultra"}}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: pi:ultra
+harness default native pi ultra is accepted^{"harness_defaults":{"pi":{"model":"codex-native/gpt-6-astra","effort":"ultra"}}}^empty^
 ROWS
 
   case_dir="$TMP_ROOT/dispatch-opt-in-gate"
@@ -1199,6 +1209,12 @@ ROWS
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ "$out" = 'CREW_DISPATCH: invalid config/crew-dispatch.json - default profile model and effort must be non-empty strings when present' ] \
     || fail "no-key default-profile diagnostic changed from main, got: $out"
+
+  printf '%s\n' '{"harness_defaults":{"agy":{"model":5}}}' > "$case_dir/home/config/crew-dispatch.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = 'CREW_DISPATCH: invalid config/crew-dispatch.json - harness_defaults model and effort must be non-empty strings when present' ] \
+    || fail "no-key harness_defaults diagnostic changed from main, got: $out"
 
   printf '%s\n' '{"rules":[{"when":"legacy metadata","approval":"firstmate","floor":{"scope":"all_models","min_percent":200,"provider":"CLAUDE"},"use":{"harness":"claude","provider":"Anthropic","floor":{"scope":"all_models"}}}]}' > "$case_dir/home/config/crew-dispatch.json"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \

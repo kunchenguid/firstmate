@@ -32,6 +32,11 @@
 #      a process view naming agy is live and refuses replacement, a registered
 #      status over a proven shell-only pane is the explicit stale-agent state,
 #      and nothing short of that shared proof flips an agy pane to agent-free.
+#   8. A requested --model is confirmed after launch, not trusted blind: agy
+#      accepts an unsupported model silently under this interactive launch
+#      (docs/verification/agy.md), so the spawn always passes --log-file and
+#      refuses unless the log's LAST "Propagating selected model override to
+#      backend: label=..." line names the requested model's catalog label.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -498,6 +503,27 @@ case "${1:-}" in
         *--prompt-interactive*)
           printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
           printf 'launched\n' > "$FM_FAKE_AGY_STATE"
+          # Stand-in for the real agy process's own --log-file output, so
+          # agy_verify_model_override (bin/fm-spawn.sh) has something to read.
+          # FM_FAKE_AGY_LOG_LABEL forces a specific (possibly wrong) label;
+          # FM_FAKE_AGY_LOG_SKIP=1 leaves the log empty. Otherwise the label is
+          # looked up from the requested --model against the same fixed
+          # catalog the fake `agy models` below prints.
+          if [ "${FM_FAKE_AGY_LOG_SKIP:-0}" != 1 ]; then
+            fake_agy_logfile=$(printf '%s\n' "$literal" | sed -n "s/.*--log-file '\([^']*\)'.*/\1/p")
+            fake_agy_label=${FM_FAKE_AGY_LOG_LABEL:-}
+            if [ -z "$fake_agy_label" ]; then
+              case "$literal" in
+                *"--model 'gemini-3.8-flash-high'"*) fake_agy_label='Gemini 3.8 Flash (High)' ;;
+                *"--model 'gemini-3.8-flash-medium'"*) fake_agy_label='Gemini 3.8 Flash (Medium)' ;;
+                *"--model 'gemini-3.8-flash-low'"*) fake_agy_label='Gemini 3.8 Flash (Low)' ;;
+              esac
+            fi
+            if [ -n "$fake_agy_logfile" ] && [ -n "$fake_agy_label" ]; then
+              printf 'I0000 00:00:00.000000       1 model_config_manager.go:327] Propagating selected model override to backend: label="%s"\n' \
+                "$fake_agy_label" >> "$fake_agy_logfile"
+            fi
+          fi
           ;;
       esac
       exit 0
@@ -586,9 +612,24 @@ EOF
 # lookup under this base PATH, and both read agy's settings store with node,
 # which runners do not keep in the system bin dirs. Carry the directory the
 # invoking environment resolves node from, the fm-kimi-harness shape.
+# Deliberately NOT jq's own directory: a system agy install can live beside
+# jq (Homebrew's /opt/homebrew/bin carries both), which would leak a real agy
+# onto PATH the moment a case removes the fakebin's own copy. The
+# harness_defaults tests get a wrapped real jq inside their own case-scoped
+# fakebin instead (add_real_jq_to_agy_fakebin below).
 NODE_BIN=$(command -v node) || fail "test needs node"
 NODE_BIN_DIR=$(dirname "$NODE_BIN")
 BASE_PATH=${FM_TEST_BASE_PATH:-$NODE_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
+
+add_real_jq_to_agy_fakebin() {  # <fakebin>
+  local fakebin=$1 real_jq
+  real_jq=$(command -v jq 2>/dev/null) || fail "test needs jq"
+  cat > "$fakebin/jq" <<SH
+#!/usr/bin/env bash
+exec '$real_jq' "\$@"
+SH
+  chmod +x "$fakebin/jq"
+}
 
 run_agy_spawn() {
   local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
@@ -607,7 +648,10 @@ run_agy_spawn() {
     FM_FAKE_AGY_ASSUME_TRUSTED="${FM_FAKE_AGY_ASSUME_TRUSTED:-0}" \
     FM_FAKE_AGY_RACE="${FM_FAKE_AGY_RACE:-0}" \
     FM_FAKE_AGY_ANSWER="${FM_FAKE_AGY_ANSWER:-works}" \
+    FM_FAKE_AGY_LOG_LABEL="${FM_FAKE_AGY_LOG_LABEL:-}" \
+    FM_FAKE_AGY_LOG_SKIP="${FM_FAKE_AGY_LOG_SKIP:-0}" \
     FM_AGY_READY_POLLS=4 FM_AGY_POLL_INTERVAL=0 FM_AGY_MODELS_TIMEOUT=${FM_AGY_MODELS_TIMEOUT:-1} \
+    FM_AGY_MODEL_VERIFY_TIMEOUT=${FM_AGY_MODEL_VERIFY_TIMEOUT:-1} \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness agy --mode no-mistakes --yolo off "$@" 2>&1
 }
@@ -627,9 +671,12 @@ test_agy_launch_carries_the_brief_with_model_effort_and_autonomy() {
   assert_contains "$launch" "--model 'gemini-3.8-flash-low'" "agy launch did not carry the requested model"
   assert_contains "$launch" "--effort 'low'" "agy launch did not carry the requested effort"
   assert_contains "$launch" "--dangerously-skip-permissions" "agy launch omitted unattended autonomy"
+  assert_contains "$launch" "--log-file '$HOME_DIR/state/$id.agy-launch.log'" \
+    "agy launch did not pass its task-scoped model-verification log path"
   assert_contains "$launch" "env -u CLAUDECODE" "agy launch did not clear the inherited launcher marker"
   assert_not_contains "$launch" "__AGYBIN__" "agy launch left its binary placeholder unsubstituted"
   assert_not_contains "$launch" "__MODELFLAG__" "agy launch left its model placeholder unsubstituted"
+  assert_not_contains "$launch" "__AGYLOGFILE__" "agy launch left its log-file placeholder unsubstituted"
   assert_not_contains "$launch" "__BRIEF__" "agy launch left its brief placeholder unsubstituted"
   meta="$HOME_DIR/state/$id.meta"
   assert_grep 'harness=agy' "$meta" "agy meta did not record its harness"
@@ -652,6 +699,97 @@ test_agy_effort_xhigh_is_recorded_but_omitted() {
   meta="$HOME_DIR/state/$id.meta"
   assert_grep 'effort=xhigh' "$meta" "agy meta did not retain the unsupported effort axis"
   pass "fm-spawn: agy omits xhigh from the launch but records it in task metadata"
+}
+
+test_agy_model_override_confirmed_from_log() {
+  local id rec out rc logfile
+  id="agy-modelverify-ok-z17-$$"
+  rec=$(make_agy_spawn_case modelverify-ok "$id")
+  read_agy_spawn_record "$rec"
+  out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model gemini-3.8-flash-low)
+  rc=$?
+  expect_code 0 "$rc" "a confirmed model override should let the spawn succeed"
+  logfile="$HOME_DIR/state/$id.agy-launch.log"
+  assert_grep 'label="Gemini 3.8 Flash (Low)"' "$logfile" \
+    "the fake agy launch did not record the expected model override line"
+  pass "fm-spawn: agy confirms the requested model from its own --log-file output before reporting success"
+}
+
+test_agy_model_override_mismatch_fails_the_spawn() {
+  local id rec out rc
+  id="agy-modelverify-mismatch-z18-$$"
+  rec=$(make_agy_spawn_case modelverify-mismatch "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_AGY_LOG_LABEL='Claude Opus 4.6 (Thinking)' run_agy_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model gemini-3.8-flash-low) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a model override that silently fell back to a different model must fail the spawn"
+  assert_contains "$out" "did not confirm requested model 'gemini-3.8-flash-low' took effect" \
+    "the mismatch refusal lacked its concrete reason"
+  assert_grep "failed: agy in window" "$HOME_DIR/state/$id.status" \
+    "a failed model-override check did not record the failure in the task status"
+  assert_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
+    "a failed model-override check left its launched endpoint running"
+  pass "fm-spawn: agy refuses the spawn when its log records a different model than requested"
+}
+
+test_agy_model_override_never_recorded_fails_the_spawn() {
+  local id rec out rc
+  id="agy-modelverify-missing-z19-$$"
+  rec=$(make_agy_spawn_case modelverify-missing "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_AGY_LOG_SKIP=1 run_agy_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model gemini-3.8-flash-low) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a log that never records a model override must fail the spawn"
+  assert_contains "$out" "never recorded which model took effect" \
+    "the missing-override refusal lacked its concrete reason"
+  pass "fm-spawn: agy refuses the spawn when its log never records a model override"
+}
+
+test_agy_harness_default_model_and_effort_fill_an_omitted_axis() {
+  local id rec out rc launch meta
+  id="agy-hdefault-z20-$$"
+  rec=$(make_agy_spawn_case hdefault "$id")
+  read_agy_spawn_record "$rec"
+  add_real_jq_to_agy_fakebin "$FAKEBIN_DIR"
+  printf '%s\n' '{"harness_defaults":{"agy":{"model":"gemini-3.8-flash-medium","effort":"low"}}}' \
+    > "$HOME_DIR/config/crew-dispatch.json"
+  out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "agy spawn should fall back to the configured harness default model"
+  launch=$(cat "$CASE_DIR/launch.log")
+  assert_contains "$launch" "--model 'gemini-3.8-flash-medium'" \
+    "agy launch did not apply config/crew-dispatch.json's harness_defaults model"
+  assert_contains "$launch" "--effort 'low'" \
+    "agy launch did not apply config/crew-dispatch.json's harness_defaults effort"
+  meta="$HOME_DIR/state/$id.meta"
+  assert_grep 'model=gemini-3.8-flash-medium' "$meta" "agy meta did not record the harness-default model"
+  assert_grep 'effort=low' "$meta" "agy meta did not record the harness-default effort"
+  pass "fm-spawn: agy applies config/crew-dispatch.json's harness_defaults when no explicit model/effort is given"
+}
+
+test_agy_explicit_model_overrides_harness_default() {
+  local id rec out rc launch
+  id="agy-hdefault-override-z21-$$"
+  rec=$(make_agy_spawn_case hdefault-override "$id")
+  read_agy_spawn_record "$rec"
+  add_real_jq_to_agy_fakebin "$FAKEBIN_DIR"
+  printf '%s\n' '{"harness_defaults":{"agy":{"model":"gemini-3.8-flash-medium"}}}' \
+    > "$HOME_DIR/config/crew-dispatch.json"
+  out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model gemini-3.8-flash-low)
+  rc=$?
+  expect_code 0 "$rc" "an explicit --model should still win over config/crew-dispatch.json's harness_defaults"
+  launch=$(cat "$CASE_DIR/launch.log")
+  assert_contains "$launch" "--model 'gemini-3.8-flash-low'" \
+    "an explicit --model was overridden by config/crew-dispatch.json's harness_defaults"
+  assert_not_contains "$launch" "gemini-3.8-flash-medium" \
+    "the harness_defaults model leaked into the launch despite an explicit --model"
+  pass "fm-spawn: an explicit --model still wins over config/crew-dispatch.json's harness_defaults"
 }
 
 test_agy_unlisted_model_refuses_before_pane_creation() {
@@ -877,11 +1015,13 @@ test_agy_spawn_arms_no_busy_wiring() {
   expect_code 0 "$rc" "agy spawn should succeed"
   statedir="$HOME_DIR/state"
   [ -e "$statedir/$id.busy-gen" ] && fail "agy spawn armed a busy generation nothing could clear" || true
+  [ -e "$statedir/$id.agy-launch.log" ] || fail "agy spawn did not write its model-verification log"
   for sidecar in "$statedir/$id.agy-"*; do
     [ -e "$sidecar" ] || continue
-    fail "agy spawn left an adapter sidecar behind: $sidecar"
+    [ "$sidecar" = "$statedir/$id.agy-launch.log" ] && continue
+    fail "agy spawn left an unexpected adapter sidecar behind: $sidecar"
   done
-  pass "fm-spawn: agy arms no busy wiring and writes no sidecar"
+  pass "fm-spawn: agy arms no busy wiring beyond its own model-verification log"
 }
 
 test_agy_ancestry_detects_the_native_command_name
@@ -899,6 +1039,11 @@ test_herdr_lone_unregistered_pane_is_agent_free
 test_herdr_malformed_and_failed_reads_stay_unknown
 test_agy_launch_carries_the_brief_with_model_effort_and_autonomy
 test_agy_effort_xhigh_is_recorded_but_omitted
+test_agy_model_override_confirmed_from_log
+test_agy_model_override_mismatch_fails_the_spawn
+test_agy_model_override_never_recorded_fails_the_spawn
+test_agy_harness_default_model_and_effort_fill_an_omitted_axis
+test_agy_explicit_model_overrides_harness_default
 test_agy_unlisted_model_refuses_before_pane_creation
 test_agy_unreachable_listing_launches_unvalidated
 test_agy_hung_listing_is_cut_off_and_launches

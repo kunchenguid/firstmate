@@ -7,7 +7,7 @@ The skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../../.age
 
 | Field | Value |
 |---|---|
-| Version | `agy 1.2.0`; the send-confirmation timing below was re-measured on `agy 1.2.1` (2026-09-12) |
+| Version | `agy 1.2.0`; the send-confirmation timing below was re-measured on `agy 1.2.1` (2026-09-12); the "Model verification" section below was verified on `agy 1.2.5` (2026-09-17, macOS, no Herdr) |
 | Verified | 2026-09-10 |
 | Binary | `/home/andpod/.local/bin/agy`, an ELF 64-bit Go-compiled single executable |
 | Platform | Linux x64 (Arch, kernel 7.2.3) |
@@ -86,6 +86,54 @@ The bare `gemini-3.8-flash` id from this home's previous config is not listed; o
 `bin/fm-spawn.sh`'s `agy_model_validate` refuses a requested id a reachable `agy models` listing omits, and launches unvalidated with a stderr notice when the listing is unreachable.
 The listing is a remote fetch (`Fetching available models...`), so the probe runs with stdin detached under the shared hard bound from `bin/fm-timeout-lib.sh` (15 seconds by default, `FM_AGY_MODELS_TIMEOUT`; a non-positive or non-numeric value clamps back to that default, because a non-positive bound is not a bound); a stalled fetch or a sign-in prompt is cut off and falls through to the unvalidated launch instead of blocking the spawn before any pane exists.
 Print mode (`agy -p "Reply with exactly: AGY_PRINT_PROBE_OK" --model gemini-3.8-flash-low`) returned the exact reply with exit 0 in about 8 seconds, proving the credential path without a pane.
+
+## Model verification: -i falls back silently to the account default, -p refuses loudly
+
+Re-verified 2026-09-17 on `agy 1.2.5` (macOS, `/Users/codihuston/.local/bin/agy`, signed-in Google account, this task's own disposable worktree, no Herdr) against the captain's own `~/.gemini/antigravity-cli/` account state, whose `settings.json` carried `"model": "Claude Opus 4.6 (Thinking)"` as the persisted default at the time.
+A pty was required for `-i`/`--prompt-interactive` (`bubbletea: could not open TTY` without one), provided here with `script -q /dev/null`.
+
+A valid catalog id ran clean, with the last propagation line naming the requested model:
+
+```
+$ script -q /dev/null agy -i "Reply with exactly AGY_PROBE_OK and nothing else" \
+    --model claude-sonnet-4-6 --log-file "$PWD/valid.log" --dangerously-skip-permissions --new-project
+$ grep -n 'Propagating selected model override' valid.log
+133:I0917 16:53:09.889647     306 model_config_manager.go:327] Propagating selected model override to backend: label="Claude Sonnet 4.6 (Thinking)"
+164:I0917 16:53:11.236832     482 model_config_manager.go:327] Propagating selected model override to backend: label="Claude Sonnet 4.6 (Thinking)"
+168:I0917 16:53:11.237414     642 model_config_manager.go:327] Propagating selected model override to backend: label="Claude Sonnet 4.6 (Thinking)"
+$ grep -n 'failed to apply model override' valid.log
+94:E0917 16:53:09.049077       1 common.go:333] failed to apply model override: failed to resolve model: model claude-sonnet-4-6 is not recognized as a known model or custom model in settings
+```
+
+That `failed to apply model override` line fired on this VALID run too, before the catalog finished loading, confirming it is never a fallback signal by itself.
+
+An id absent from the catalog (`claude-sonnet-4-6-nonexistent`) ran with no error and no nonzero exit, silently on the account's own persisted default instead:
+
+```
+$ script -q /dev/null agy -i "Reply with exactly AGY_PROBE_OK and nothing else" \
+    --model claude-sonnet-4-6-nonexistent --log-file "$PWD/invalid.log" --dangerously-skip-permissions --new-project
+$ grep -n 'not in local config' invalid.log
+1:I0917 16:53:39.313829       1 resolver.go:85] Model ID claude-sonnet-4-6-nonexistent not in local config, defaulting to CCPA
+$ grep -n 'Propagating selected model override' invalid.log
+123:I0917 16:53:40.043377     322 model_config_manager.go:327] Propagating selected model override to backend: label="Claude Opus 4.6 (Thinking)"
+158:I0917 16:53:40.784875     477 model_config_manager.go:327] Propagating selected model override to backend: label="Claude Opus 4.6 (Thinking)"
+163:I0917 16:53:40.786516     555 model_config_manager.go:327] Propagating selected model override to backend: label="Claude Opus 4.6 (Thinking)"
+```
+
+"Claude Opus 4.6 (Thinking)" is the account's own persisted `settings.json` default, not the requested model, and no stderr or nonzero exit distinguished this run from the valid one above; only the log disagreed.
+The same request in print mode refused instead:
+
+```
+$ agy -p "Reply with exactly AGY_PROBE_OK and nothing else" --model claude-sonnet-4-6-nonexistent --new-project
+error: invalid model selection (--model "claude-sonnet-4-6-nonexistent" --effort ""): model claude-sonnet-4-6-nonexistent is not recognized as a known model or custom model in settings
+Available models:
+  ...
+$ echo $?
+1
+```
+
+This confirms every fact `agy_verify_model_override` (`bin/fm-spawn.sh`) depends on: the `-i` fallback is silent end to end, the last `Propagating selected model override to backend: label="..."` line is the only trustworthy signal, and it survives from `agy 1.2.0` through `1.2.5`.
+`bin/fm-spawn.sh` matches the id to its catalog label through the same `agy models` listing used above (`gemini-3.8-flash-high\tGemini 3.8 Flash (High)`, confirmed tab-separated with `od -c`), never a baked-in mapping.
 
 ## Busy state: the pinned status row, unknown on absence
 

@@ -13,6 +13,14 @@
 #                                        config/secondmate-harness, or empty when absent.
 #        fm-harness.sh secondmate-effort   print the optional EFFORT token from
 #                                        config/secondmate-harness, or empty when absent.
+#        fm-harness.sh crew-dispatch-default-model <harness>
+#                                        print config/crew-dispatch.json's
+#                                        harness_defaults[<harness>].model, or
+#                                        empty when the file, the key, or jq is
+#                                        absent (docs/configuration.md "Crew
+#                                        dispatch profiles").
+#        fm-harness.sh crew-dispatch-default-effort <harness>
+#                                        the same for harness_defaults[<harness>].effort.
 #        fm-harness.sh validate-native-effort <harness> <model> <effort>
 #                                        Refuse ultra unless the harness is pi or
 #                                        pi-signed and the model explicitly names
@@ -484,6 +492,19 @@ resolve_secondmate_effort() {
   secondmate_field 3
 }
 
+# Print config/crew-dispatch.json's harness_defaults[<harness>][<field>], or
+# nothing when the file, jq, the key, or that field is absent. Bootstrap's
+# crew_dispatch_validate (fm-bootstrap.sh) is the schema's single validator;
+# this reads the already-valid file, so a missing jq degrades to silence
+# rather than a second error path.
+crew_dispatch_default_field() {  # <harness> <field>
+  local harness=$1 field=$2 file
+  file="$CONFIG/crew-dispatch.json"
+  [ -n "$harness" ] && [ -f "$file" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  jq -r --arg h "$harness" --arg f "$field" '(.harness_defaults // {})[$h][$f] // empty' "$file" 2>/dev/null
+}
+
 validate_native_effort() {
   local harness=${1:-} model=${2:-} effort=${3:-}
   [ "$effort" = ultra ] || return 0
@@ -519,5 +540,7 @@ case "${1:-}" in
   secondmate) resolve_secondmate ;;
   secondmate-model) resolve_secondmate_model ;;
   secondmate-effort) resolve_secondmate_effort ;;
+  crew-dispatch-default-model) crew_dispatch_default_field "${2:-}" model ;;
+  crew-dispatch-default-effort) crew_dispatch_default_field "${2:-}" effort ;;
   *) detect_own ;;
 esac

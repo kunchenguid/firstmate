@@ -174,6 +174,16 @@
 #   the file governs the spawn, its model/effort tokens are re-resolved on every
 #   respawn exactly like the harness axis, and explicit --model/--effort flags
 #   still win over the file's tokens.
+#   For a ship or scout spawn, config/crew-dispatch.json's optional
+#   harness_defaults{<harness>: {model, effort}} supplies the same fallback for
+#   the resolved HARNESS when neither an explicit --model/--effort flag nor a
+#   dispatch profile's own model/effort set that axis; docs/configuration.md
+#   "Crew dispatch profiles" owns the schema. For agy, a requested --model is
+#   also confirmed after launch: agy_verify_model_override reads the
+#   --log-file this spawn always passes and refuses the spawn when the log's
+#   last recorded model override does not name the requested model, because
+#   agy 1.2.2-1.2.5 accept an unsupported model silently under this
+#   interactive launch instead of refusing as -p print mode does.
 #   A --secondmate spawn also propagates the primary's declared inherited local
 #   material, so the secondmate's OWN crewmates inherit primary config and the
 #   secondmate receives the primary's read-only shared captain-preference file
@@ -284,6 +294,9 @@
 #     __GEMINISETTINGS__ firstmate-owned per-task gemini settings file (busy-state hooks)
 #     __ROVOBIN__   resolved, rovo-verified executable for a rovo launch
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
+#     __AGYLOGFILE__ absolute path to state/<task-id>.agy-launch.log (--log-file),
+#                  read once after launch to confirm which model actually took
+#                  effect; see agy_verify_model_override below
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -1616,9 +1629,18 @@ omp_model_validate() { # <omp-bin> <model>
 # sign-in prompt can never block the spawn before any pane exists. An
 # unreachable listing establishes nothing (harness-adapters
 # model-and-effort.md) and launches unvalidated with a notice.
+#
+# On a match, also sets AGY_MODEL_LABEL to the catalog's human-readable label
+# for the requested id (for example "Claude Sonnet 4.6 (Thinking)"), tab-split
+# from the same listing. agy_verify_model_override reads it after launch to
+# confirm the label that actually took effect, because agy 1.2.2-1.2.5 accept
+# an unsupported --model silently under -i (no error, no non-zero exit,
+# session runs the account's persisted default) and refuse loudly only under
+# -p; live-verified on 1.2.5 (docs/verification/agy.md).
 agy_model_validate() {  # <agy-bin> <model>
   local bin=$1 model=$2 listing rc=0 bound=${FM_AGY_MODELS_TIMEOUT:-15}
   case "$bound" in ''|*[!0-9]*|0*) bound=15 ;; esac
+  AGY_MODEL_LABEL=
   [ -n "$model" ] && [ "$model" != default ] || return 0
   listing=$(fm_run_timed "$bound" "$bin" models 2>/dev/null < /dev/null) || rc=$?
   if [ "$rc" -ne 0 ] || [ -z "$listing" ]; then
@@ -1630,6 +1652,7 @@ agy_model_validate() {  # <agy-bin> <model>
     return 0
   fi
   if printf '%s\n' "$listing" | awk '{print $1}' | grep -qxF -- "$model"; then
+    AGY_MODEL_LABEL=$(printf '%s\n' "$listing" | awk -F'\t' -v m="$model" '$1 == m { print $2; exit }')
     return 0
   fi
   echo "error: agy model '$model' is not listed by 'agy models'; choose a listed id or omit --model" >&2
@@ -1766,7 +1789,12 @@ launch_template() {
   # TUI), so bin/fm-harness.sh must not read an agy worker as its launcher.
   # agy exposes no hook surface, so busy state is a rendered-tail fallback
   # (bin/fm-busy-lib.sh) and nothing is armed below.
-  agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __AGYBIN__ --prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)" __MODELFLAG____EFFORTFLAG__--dangerously-skip-permissions' ;;
+  # --log-file always carries this task's own path so agy_verify_model_override
+  # can read back which model actually took effect: agy 1.2.2-1.2.5 accept an
+  # unsupported --model silently under this interactive mode (no error, no
+  # non-zero exit, session runs the account's persisted default) rather than
+  # refusing as -p print mode does, so the launch flag alone cannot be trusted.
+  agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __AGYBIN__ --prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)" __MODELFLAG____EFFORTFLAG__--log-file __AGYLOGFILE__ --dangerously-skip-permissions' ;;
   # grok (Grok Build TUI): a positional prompt starts the supervised interactive
   # session. --always-approve auto-approves every tool execution (verified: the
   # crewmate runs fully autonomously, no permission gate), which an unattended
@@ -2004,6 +2032,11 @@ agy)
     echo "error: agy executable not found on PATH; install Antigravity CLI or select a different verified harness" >&2
     exit 1
   }
+  # Task-scoped so a stale line from a prior launch (this task's earlier agy
+  # attempt, or a relaunch) can never be misread as this launch's outcome by
+  # agy_verify_model_override below.
+  AGY_LOG_FILE="$STATE/$ID.agy-launch.log"
+  rm -f "$AGY_LOG_FILE"
   ;;
 esac
 
@@ -2024,6 +2057,28 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
       case "$SM_EFFORT" in
       low | medium | high | xhigh | max | ultra) EFFORT=$SM_EFFORT ;;
       *) echo "warning: config/secondmate-harness effort token '$SM_EFFORT' is not one of low, medium, high, xhigh, max, ultra; ignoring" >&2 ;;
+      esac
+    fi
+  fi
+fi
+# config/crew-dispatch.json's optional harness_defaults names a per-harness
+# fallback model/effort, applied only when neither an explicit --model/--effort
+# flag nor a resolved dispatch profile set the axis (docs/configuration.md
+# "Crew dispatch profiles"). Without it, an omitted model falls through to the
+# runtime's own persisted default, which is exactly how every agy dispatch
+# landed on a captain-exhausted model before this existed. Secondmates are
+# exempt, matching config/crew-dispatch.json's own scope.
+if [ "$KIND" != secondmate ]; then
+  if [ "$MODEL_SET" -eq 0 ]; then
+    CD_MODEL=$("$SCRIPT_DIR/fm-harness.sh" crew-dispatch-default-model "$HARNESS")
+    [ -z "$CD_MODEL" ] || MODEL=$CD_MODEL
+  fi
+  if [ "$EFFORT_SET" -eq 0 ]; then
+    CD_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" crew-dispatch-default-effort "$HARNESS")
+    if [ -n "$CD_EFFORT" ]; then
+      case "$CD_EFFORT" in
+      low | medium | high | xhigh | max | ultra) EFFORT=$CD_EFFORT ;;
+      *) echo "warning: config/crew-dispatch.json harness_defaults effort '$CD_EFFORT' for '$HARNESS' is not one of low, medium, high, xhigh, max, ultra; ignoring" >&2 ;;
       esac
     fi
   fi
@@ -3412,6 +3467,7 @@ rovo_endpoint_cleanup() {
 # answered; on an unregistered path it keeps polling for the dialog instead.
 AGY_TRUST_DIALOG='Do you trust the contents of this project?'
 AGY_TRUST_ANSWERED=0
+AGY_OVERRIDE_LINE='Propagating selected model override to backend: label='
 
 agy_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
@@ -3450,6 +3506,46 @@ agy_spawn_fail() {  # <detail>
   printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
   rovo_endpoint_cleanup
+}
+
+# Confirms the requested --model is the model that actually took effect,
+# because agy 1.2.2-1.2.5 accept an unsupported model silently under this
+# interactive launch (no error, no non-zero exit, the session simply runs the
+# account's own persisted default) rather than refusing as -p print mode
+# does - live-verified on 1.2.5 (docs/verification/agy.md). Only runs when a
+# concrete model was requested and agy_model_validate matched it against a
+# reachable catalog (AGY_MODEL_LABEL set); an unreachable catalog already
+# launched unvalidated with its own notice, leaving nothing to compare
+# against here. Reads the log written by --log-file: an earlier "Model ID <x>
+# not in local config, defaulting to CCPA" line fires identically for a valid
+# and an invalid model and is never the signal, and a valid launch also logs
+# one harmless "failed to apply model override" line before the catalog
+# loads - only the LAST line starting AGY_OVERRIDE_LINE names the model that
+# actually ran.
+agy_verify_model_override() {
+  local bound=${FM_AGY_MODEL_VERIFY_TIMEOUT:-15} interval=0.5 i=0 max got
+  case "$bound" in ''|*[!0-9]*|0*) bound=15 ;; esac
+  [ -n "$MODEL" ] && [ "$MODEL" != default ] || return 0
+  [ -n "$AGY_MODEL_LABEL" ] || return 0
+  max=$((bound * 2))
+  got=
+  while [ "$i" -lt "$max" ]; do
+    if [ -s "$AGY_LOG_FILE" ]; then
+      got=$(grep -F "$AGY_OVERRIDE_LINE" "$AGY_LOG_FILE" 2>/dev/null | tail -n 1)
+      [ -z "$got" ] || break
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  if [ -z "$got" ]; then
+    echo "error: agy log '$AGY_LOG_FILE' never recorded which model took effect for requested model '$MODEL' (catalog label '$AGY_MODEL_LABEL'); cannot confirm the session is running it" >&2
+    return 1
+  fi
+  case "$got" in
+  *"label=\"$AGY_MODEL_LABEL\""*) return 0 ;;
+  esac
+  echo "error: agy was launched with --model '$MODEL' (catalog label '$AGY_MODEL_LABEL') but its own log's last model override recorded a different model actually took effect" >&2
+  return 1
 }
 
 if [ "$RELAUNCH" -eq 1 ]; then
@@ -4263,7 +4359,10 @@ pi | pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
 cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
 omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
-agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
+agy)
+  LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"}
+  LAUNCH=${LAUNCH//__AGYLOGFILE__/"$(shell_quote "$AGY_LOG_FILE")"}
+  ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
@@ -4448,6 +4547,10 @@ if [ "$HARNESS" = agy ]; then
     else
       agy_spawn_fail "agy never showed its folder-trust dialog on an unregistered worktree in window $T, so the brief could not be confirmed to run there"
     fi
+    exit 1
+  fi
+  if ! agy_verify_model_override; then
+    agy_spawn_fail "agy in window $T did not confirm requested model '$MODEL' took effect; refusing rather than risk a silent fallback to the account's persisted default"
     exit 1
   fi
 fi
