@@ -3162,6 +3162,31 @@ fm_backend_herdr_layout_attempt_snapshot() { # <file>
   fi
 }
 
+fm_backend_herdr_projection_journal_retire_removed_attempt() { # <journal> <task-id> <attempt-file>
+  local journal=$1 id=$2 attempt_file=$3 journal_tab journal_pane
+  fm_backend_herdr_layout_attempt_snapshot "$attempt_file" || return 1
+  [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 6 ] \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" = fresh ] \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_TASK" = "$id" ] \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = removed ] || return 1
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || return 1
+  [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] \
+    && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" ] \
+    && [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" ] || return 1
+  journal_tab=$FM_BACKEND_HERDR_JOURNAL_TAB_ID
+  journal_pane=$FM_BACKEND_HERDR_JOURNAL_PANE_ID
+  case "$journal_tab:$journal_pane" in
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OLD_PANE"|\
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE") ;;
+    *) return 1 ;;
+  esac
+  [ "$(fm_backend_herdr_pane_presence_state \
+    "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE")" = dead ] \
+    && [ "$(fm_backend_herdr_pane_presence_state \
+      "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" "$journal_pane")" = dead ] || return 1
+  rm -f -- "$journal"
+}
+
 fm_backend_herdr_layout_attempt_ownership_policy() { # <expected-mode> <task> <worktree>
   local expected_mode=$1 task=$2 worktree=$3
   [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" = "$expected_mode" ] \
@@ -3329,10 +3354,15 @@ fm_backend_herdr_layout_attempt_restore_shell() { # <file> <tab> <pane>
   workspace=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE
   attempt=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_ID
   restore_label="fm-restore-$attempt"
-  fm_backend_herdr_pane_matches_harness "$session" "$pane" pi || {
-    echo "error: quarantined Herdr replacement is not one independently confirmed plain Pi; refusing restoration" >&2
+  if fm_backend_herdr_pane_matches_harness "$session" "$pane" pi; then
+    :
+  elif [ "$(fm_backend_herdr_pane_agent_state "$session" "$pane")" = no-agent ] \
+    && [ "$(fm_backend_herdr_pane_process_state "$session" "$pane")" = shell ]; then
+    :
+  else
+    echo "error: quarantined Herdr replacement is neither one independently confirmed plain Pi nor its agent-free launch shell; refusing restoration" >&2
     return 1
-  }
+  fi
   protocol=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null \
     | jq -r '[.client.protocol, .server.protocol] | if length == 2 and all(.[]; type == "number") then map(tostring) | join("/") else empty end' 2>/dev/null)
   [ "$protocol" = "$FM_BACKEND_HERDR_LAYOUT_APPLY_PROTOCOL/$FM_BACKEND_HERDR_LAYOUT_APPLY_PROTOCOL" ] || return 1
@@ -3390,7 +3420,7 @@ print(json.dumps({"cwd": sys.argv[1], "env": {}, "command": [sys.argv[2], "-i", 
 # structurally replaces one confirmed Pi with an inert shell, preserving the
 # workspace and tab while making the next relaunch retryable.
 fm_backend_herdr_layout_attempt_reconcile() { # <file>
-  local file=$1 panes count candidate info old_present=0 new_tab candidate_label restore_label state restore_status
+  local file=$1 panes count candidate info old_present=0 new_tab candidate_label restore_label restore_status
   fm_backend_herdr_layout_attempt_snapshot "$file" || {
     echo "error: Herdr structural launch attempt record is malformed; refusing duplicate launch" >&2
     return 1
@@ -3470,19 +3500,12 @@ fm_backend_herdr_layout_attempt_reconcile() { # <file>
       fm_backend_herdr_layout_attempt_resolve "$file" removed "$new_tab" "$candidate"
       ;;
     relaunch|secondmate)
-      state=$(fm_backend_herdr_pane_agent_state "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" "$candidate")
-      if [ "$state" = no-agent ] \
-        && [ "$(fm_backend_herdr_pane_process_state "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" "$candidate")" = shell ]; then
-        fm_backend_herdr_layout_attempt_resolve "$file" restored \
-          "$new_tab" "$candidate" "$new_tab" "$candidate"
-      else
-        fm_backend_herdr_layout_attempt_restore_shell "$file" "$new_tab" "$candidate" || {
-          restore_status=$?
-          [ "$restore_status" -eq 2 ] \
-            && echo "error: inert-shell restoration has an uncertain result; preserving structural launch quarantine" >&2
-          return 1
-        }
-      fi
+      fm_backend_herdr_layout_attempt_restore_shell "$file" "$new_tab" "$candidate" || {
+        restore_status=$?
+        [ "$restore_status" -eq 2 ] \
+          && echo "error: inert-shell restoration has an uncertain result; preserving structural launch quarantine" >&2
+        return 1
+      }
       ;;
     *) return 1 ;;
   esac

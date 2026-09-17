@@ -121,7 +121,7 @@ fm_backend_herdr_cli() { # <session> <args...>
     "workspace list")
       if [ "$MODE" = workspace ]; then
         printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w9"}]}}'
-      elif [ "$MODE" = reconcile_retain ] || [ "$MODE" = remove_original ]; then
+      elif [ "$MODE" = reconcile_retain ] || [ "$MODE" = reconcile_shell ] || [ "$MODE" = remove_original ]; then
         printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"anchor","focused":true,"active_tab_id":"anchor:t1"},{"workspace_id":"w1","focused":false,"active_tab_id":"w1:t3"}]}}'
       else
         printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1"}]}}'
@@ -140,7 +140,7 @@ fm_backend_herdr_cli() { # <session> <args...>
         return 0
       fi
       case "$MODE" in
-        reconcile|reconcile_duplicate|reconcile_missing|reconcile_retain) return 1 ;;
+        reconcile|reconcile_duplicate|reconcile_missing|reconcile_retain|reconcile_shell) return 1 ;;
         pane) printf '%s\n' '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t9","pane_id":"w1:p2"}}}' ;;
         *) printf '%s\n' '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2"}}}' ;;
       esac
@@ -197,7 +197,7 @@ fm_backend_herdr_cli() { # <session> <args...>
           printf '%s\n' '{"result":{"panes":[{"workspace_id":"w1","tab_id":"w1:t3","pane_id":"w1:p3","label":"fm-launch-0123456789abcdef0123456789abcdef"},{"workspace_id":"w1","tab_id":"w1:t4","pane_id":"w1:p4","label":"fm-launch-0123456789abcdef0123456789abcdef"}]}}'
           ;;
         reconcile_missing) printf '%s\n' '{"result":{"panes":[]}}' ;;
-        reconcile_retain)
+        reconcile_retain|reconcile_shell)
           printf '%s\n' '{"result":{"panes":[{"workspace_id":"w1","tab_id":"w1:t3","pane_id":"w1:p3","label":"fm-launch-0123456789abcdef0123456789abcdef"}]}}'
           ;;
         *)
@@ -244,6 +244,8 @@ fm_backend_herdr_cli() { # <session> <args...>
     "pane process-info --pane w1:p3")
       if [ "$MODE" = wrong-agent ]; then
         printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p3","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"codex","argv0":"codex","argv":["codex"],"cmdline":"codex"}]}}}'
+      elif [ "$MODE" = reconcile_shell ]; then
+        printf '%s\n' "{\"result\":{\"type\":\"pane_process_info\",\"process_info\":{\"pane_id\":\"w1:p3\",\"shell_pid\":$$,\"foreground_processes\":[{\"pid\":$$,\"name\":\"sh\",\"argv0\":\"/bin/sh\",\"argv\":[\"/bin/sh\"]}]}}}"
       else
         printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p3","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"node","argv0":"pi","argv":["pi","--model","fake"],"cmdline":"pi --model fake"}]}}}'
       fi
@@ -424,6 +426,34 @@ rm -f "$ATTEMPT" "$OLD_CLOSED"
 MODE=ok
 pass "fresh not-applied recovery closes and durably retires its exact original shell"
 
+JOURNAL="$TMP_ROOT/task.herdr-presentation"
+TOKEN=abcdefghijklmnopqrstuv
+WORKSPACE_LABEL=$(fm_backend_herdr_projection_workspace_label task-z1 "$TOKEN")
+printf 'version=1\ntask_id=task-z1\nprojection_id=%s\n' "$TOKEN" > "$JOURNAL"
+fm_backend_herdr_layout_attempt_write "$ATTEMPT" 6 0123456789abcdef0123456789abcdef \
+  fresh task-z1 "$TMP_ROOT/worktree" fm-task-z1 \
+  lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef \
+  w1:t3 w1:p3 removed
+fm_backend_herdr_projection_journal_write_v2 \
+  "$JOURNAL" task-z1 "$TOKEN" "$TMP_ROOT" lab-structural w1 w1:t9 w1:p9 \
+  anchor firstmate "$WORKSPACE_LABEL" fm-task-z1
+: > "$CLOSED"
+: > "$OLD_CLOSED"
+if fm_backend_herdr_projection_journal_retire_removed_attempt \
+  "$JOURNAL" task-z1 "$ATTEMPT" >/dev/null 2>&1; then
+  fail "fresh recovery retired a presentation journal bound to another endpoint"
+fi
+[ -e "$JOURNAL" ] || fail "mismatched presentation journal was not preserved"
+fm_backend_herdr_projection_journal_write_v2 \
+  "$JOURNAL" task-z1 "$TOKEN" "$TMP_ROOT" lab-structural w1 w1:t2 w1:p2 \
+  anchor firstmate "$WORKSPACE_LABEL" fm-task-z1
+fm_backend_herdr_projection_journal_retire_removed_attempt \
+  "$JOURNAL" task-z1 "$ATTEMPT" \
+  || fail "fresh recovery did not retire its exact removed endpoint's presentation journal"
+[ ! -e "$JOURNAL" ] || fail "fresh recovery left its correlated presentation journal behind"
+rm -f "$ATTEMPT" "$CLOSED" "$OLD_CLOSED"
+pass "fresh recovery retires only the presentation journal bound to its removed endpoint"
+
 HELPER_PAYLOAD="$TMP_ROOT/helper-payload.json"
 printf '%s\n' '{"cwd":"/tmp/worktree","env":{"OPENAI_API_KEY":"credential-must-stay-off-argv"},"command":["pi"]}' > "$HELPER_PAYLOAD"
 for response_mode in wrong-id error malformed; do
@@ -555,6 +585,30 @@ rm -f "$ATTEMPT"
 pass "crash quarantine refuses duplicates, reconciles one exact replacement, and permits a safe retry"
 
 rm -f "$ATTEMPT"
+fm_backend_herdr_layout_attempt_write "$ATTEMPT" 5 0123456789abcdef0123456789abcdef \
+  relaunch task-z1 "$TMP_ROOT/worktree" - \
+  lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef w1:t3 w1:p3
+MODE=reconcile_shell
+rm -f "$APPLIED"
+start_server success
+fm_backend_herdr_layout_attempt_reconcile "$ATTEMPT" \
+  || fail "retained launch shell did not pass through structural restoration"
+wait_server
+[ -e "$APPLIED" ] || fail "retained launch shell bypassed structural restoration"
+jq -e --arg env_bin "$(command -v env)" '
+  .params.root.command == [$env_bin, "-i", "/bin/sh"]
+  and .params.root.env == {}
+  and .params.root.label == "fm-restore-0123456789abcdef0123456789abcdef"
+' "$REQUEST" >/dev/null || fail "retained launch shell restoration inherited destination environment values"
+fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
+  || fail "launch-shell restoration lost its durable transaction"
+[ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 7 ] \
+  && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESTORE_PANE" = w1:p4 ] \
+  || fail "launch-shell restoration accepted the credential-bearing source shell as restored"
+rm -f "$ATTEMPT"
+MODE=ok
+pass "retained launch shells are structurally replaced with credential-free inert shells"
+
 fm_backend_herdr_layout_attempt_write "$ATTEMPT" 5 0123456789abcdef0123456789abcdef \
   relaunch task-z1 "$TMP_ROOT/worktree" - \
   lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef w1:t3 w1:p3

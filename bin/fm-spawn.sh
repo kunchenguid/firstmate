@@ -3023,7 +3023,7 @@ spawn_rebind_restored_herdr_layout_attempt() {
 }
 
 spawn_reconcile_herdr_layout_attempt() {
-  local meta="$STATE/$ID.meta" value worktree holder busy_gen expected_mode ownership_policy recovery_action resolution lock_for_restore=0
+  local meta="$STATE/$ID.meta" value worktree holder busy_gen expected_mode ownership_policy recovery_action resolution journal lock_for_restore=0
   [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ] || {
     echo "error: task $ID has a quarantined Herdr structural launch attempt; retry with backend=herdr and the exact plain pi harness" >&2
     return 1
@@ -3159,6 +3159,14 @@ spawn_reconcile_herdr_layout_attempt() {
         && ! fm_backend_herdr_layout_attempt_remove_original "$HERDR_LAYOUT_ATTEMPT"; then
         spawn_herdr_presentation_order_lock_release
         echo "error: task $ID's original Herdr shell could not be removed exactly; preserving structural launch quarantine" >&2
+        return 1
+      fi
+      journal=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
+      if { [ -e "$journal" ] || [ -L "$journal" ]; } \
+        && ! fm_backend_herdr_projection_journal_retire_removed_attempt \
+          "$journal" "$ID" "$HERDR_LAYOUT_ATTEMPT"; then
+        spawn_herdr_presentation_order_lock_release
+        echo "error: task $ID's presentation record could not be bound to the removed Herdr endpoint; preserving structural launch quarantine" >&2
         return 1
       fi
       spawn_herdr_presentation_order_lock_release
