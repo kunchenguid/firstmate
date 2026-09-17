@@ -394,29 +394,6 @@ secondmate_sync() {
   REMOTE_SECOND_MATE_NUDGE_MESSAGE=$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE
   SECOND_MATE_NUDGE_PENDING_DIR="$STATE/.secondmate-nudge-pending"
 
-  # The reread nudge has no reply protocol: a secondmate just re-reads AGENTS.md
-  # and continues idling, with nothing that would ever write a corr= line back.
-  # Sent as an ordinary marked message it would durably expect a report that can
-  # never arrive, escalating into an open decision that re-announces on every
-  # later session start even though nothing is actually wrong. Send it through
-  # fm-send's fire-and-forget plane instead (same plane bin/fm-secondmate-reconcile.sh
-  # uses for its own no-reply-expected nudge) so no pending-reply expectation is
-  # ever created for it. The delivery id is deterministic per (id, seed) so a
-  # retry of the same nudge reuses the same id instead of registering as new.
-  secondmate_nudge_delivery_id() {  # <id> <seed>
-    local id=$1 seed=$2 digest
-    if command -v shasum >/dev/null 2>&1; then
-      digest=$(printf '%s' "$id:$seed" | shasum -a 256 | awk '{print $1}') || return 1
-    elif command -v sha256sum >/dev/null 2>&1; then
-      digest=$(printf '%s' "$id:$seed" | sha256sum | awk '{print $1}') || return 1
-    elif command -v openssl >/dev/null 2>&1; then
-      digest=$(printf '%s' "$id:$seed" | openssl dgst -sha256 2>/dev/null | awk '{print $NF}') || return 1
-    else
-      return 1
-    fi
-    printf '%s' "$digest" | cut -c1-16
-  }
-
   secondmate_nudge_marker_path() {
     fm_secondmate_nudge_marker_path "$STATE" "$1"
   }
@@ -437,7 +414,7 @@ secondmate_sync() {
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record retry marker"
       return 0
     fi
-    did=$(secondmate_nudge_delivery_id "$id" "$commit") || {
+    did=$(fm_secondmate_nudge_delivery_id "$id" "$commit") || {
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot compute delivery id"
       return 0
     }
@@ -514,7 +491,7 @@ secondmate_sync() {
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target is not at recorded instruction commit"
         continue
       }
-      did=$(secondmate_nudge_delivery_id "$id" "$commit") || {
+      did=$(fm_secondmate_nudge_delivery_id "$id" "$commit") || {
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot compute delivery id"
         continue
       }
@@ -662,7 +639,7 @@ secondmate_sync() {
     fi
     [ "$remote_pending" -eq 0 ] || nudge_needed=1
     if [ "$converged" -eq 1 ] && [ "$nudge_needed" -eq 1 ]; then
-      did=$(secondmate_nudge_delivery_id "$id" "$remote_generation") || {
+      did=$(fm_secondmate_nudge_delivery_id "$id" "$remote_generation") || {
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot compute delivery id"
         fm_lock_release "$remote_lock" || true
         return 0

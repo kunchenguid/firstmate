@@ -373,6 +373,14 @@ test_unprovable_runtime_falls_back() {
     "a mate that cannot be restarted should not be asked to persist first"
   assert_grep 're-read your AGENTS.md' "$dir/home/state/sm1.inbox/001.msg" \
     "the fallback should hand the mate the ordinary re-read message"
+  # The nudge has no reply protocol, so it must ride the fire-and-forget plane:
+  # a marked send would open a decision nothing could ever close.
+  assert_grep 'delivery=' "$dir/home/state/sm1.inbox/001.msg" \
+    "the fallback nudge should ride the fire-and-forget plane"
+  assert_no_grep 'corr=' "$dir/home/state/sm1.inbox/001.msg" \
+    "the fallback nudge must not open a correlation"
+  [ -z "$(ls -A "$dir/home/state/pending-replies" 2>/dev/null)" ] \
+    || fail "the fallback nudge created an unanswerable pending-reply expectation"
   pass "T3 a runtime that cannot prove a restart falls back to the re-read message"
 }
 
