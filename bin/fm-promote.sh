@@ -38,6 +38,8 @@
 # its value against the registry; bin/fm-project-mode.sh's header owns the
 # binding and bin/fm-dod-lib.sh owns what it changes for the worker, including
 # the refusal of a forge on local-only.
+# A kind=executor task is refused: an executor already ships its own pull request,
+# so re-scope its GitHub issue and relaunch it (bin/fm-control.sh <task-id> relaunch).
 # Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>]
 set -eu
 

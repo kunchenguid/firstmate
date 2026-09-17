@@ -11,6 +11,8 @@
 # before anything is marked, recorded, or typed, because an empty marked
 # secondmate request delivers only marker and correlation bytes and leaves the
 # parent waiting on a reply to nothing.
+# A kind=executor target is refused: a one-shot executor reads no steering inbox
+# (bin/fm-executor-lib.sh), so re-scope its GitHub issue and relaunch it instead.
 # Special keys instead of text: fm-send.sh <target> --key Enter
 # Key support is backend-specific: tmux/herdr support Escape, Enter, and C-c;
 # Orca currently supports Enter and C-c only, and rejects Escape.
