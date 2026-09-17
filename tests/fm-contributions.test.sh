@@ -788,8 +788,59 @@ test_late_owner_keeps_failure_episode_suppressed() {
   pass 'a late owner does not restart a shared forge failure episode'
 }
 
+test_disable_retires_registration_and_blocks_rearm() {
+  local home out
+  home=$(new_home optout-block)
+  forge_home "$home"
+  wrap_forge "$home"
+  with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
+    || fail 'could not register delivery before opting out'
+  [ -f "$home/state/contributions.check.sh" ] || fail 'fixture did not register the contribution check'
+  : > "$home/forge/calls"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" disable >/dev/null || fail 'disable failed'
+  [ -f "$home/config/contributions-poll-disabled" ] || fail 'disable left no durable opt-out'
+  [ ! -e "$home/state/contributions.check.sh" ] || fail 'disable left the check registered'
+  [ ! -e "$home/state/contributions.check-trust" ] || fail 'disable left the trust binding'
+  # Startup arming and PR registration cannot restore disabled polling.
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" arm --if-owned >/dev/null \
+    || fail 'startup arming failed under opt-out'
+  with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
+    || fail 'PR registration failed under opt-out'
+  [ ! -e "$home/state/contributions.check.sh" ] || fail 'an arm path restored disabled polling'
+  # PR registration still performs its own explicit head read; only the
+  # contribution poll and its arm paths must stay forge-silent.
+  grep -vF 'pr view https://github.com/o/r/pull/8' "$home/forge/calls" > "$home/forge/contribution-calls" || true
+  [ ! -s "$home/forge/contribution-calls" ] \
+    || fail "opted-out registration read a forge beyond the explicit head read: $(cat "$home/forge/contribution-calls")"
+  : > "$home/forge/calls"
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'disabled poll failed'
+  [ -z "$out" ] || fail "disabled poll printed: $out"
+  [ ! -s "$home/forge/calls" ] || fail "disabled polling read a forge: $(cat "$home/forge/calls")"
+  pass 'disable retires the check and every arm path stays a no-op with zero forge reads'
+}
+
+test_enable_restores_registration() {
+  local home
+  home=$(new_home optout-restore)
+  forge_home "$home"
+  wrap_forge "$home"
+  rm -rf "$home/config"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" disable >/dev/null \
+    || fail 'disable failed with no prior registration'
+  [ -f "$home/config/contributions-poll-disabled" ] || fail 'disable without registration left no opt-out'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" enable >/dev/null || fail 'enable failed'
+  [ ! -e "$home/config/contributions-poll-disabled" ] || fail 'enable left the opt-out flag'
+  [ -f "$home/state/contributions.check.sh" ] || fail 'enable did not restore the contribution check'
+  [ -f "$home/state/contributions.check-trust" ] || fail 'enable did not rebind the check trust'
+  : > "$home/forge/calls"
+  registered_checks "$home" >/dev/null
+  grep -F 'api repos/o/r/pulls/8' "$home/forge/calls" >/dev/null \
+    || fail 'restored registration did not observe the owned contribution'
+  pass 'enable removes the opt-out and restores observation of owned contributions'
+}
+
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_failure_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_failure_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_disable_retires_registration_and_blocks_rearm test_enable_restores_registration; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"

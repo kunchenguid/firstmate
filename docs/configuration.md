@@ -215,6 +215,15 @@ The bound is required rather than cosmetic because churn and pane staleness read
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
 
+## Contribution poll opt-out (config/contributions-poll-disabled)
+
+`config/contributions-poll-disabled` is an optional local, gitignored presence flag that durably opts this home out of automatic contribution observation.
+`bin/fm-contributions.sh disable` writes it and retires any registered contribution check through `bin/fm-check-unregister.sh`; `bin/fm-contributions.sh enable` removes it and re-arms observation for owned contributions.
+While the flag exists, `poll` and every automatic `arm` path - startup session arming and PR registration - are silent no-ops, so no GitHub subprocess runs and neither path can restore the poll.
+Explicitly requested forge operations, the exact merged-state PR poll, and every other check are unaffected; cached contribution records stay readable without a forge read.
+The flag is per home and is not inherited by secondmate homes, which set their own posture.
+Only the file's presence is read; `bin/fm-contributions.sh`'s header owns the exact enable and disable procedure.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true` and pins `commands.lint` to `bin/fm-lint.sh`, the same owner CI invokes.
