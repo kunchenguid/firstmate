@@ -297,7 +297,9 @@ newest_remote_inbox_corr() {
 # The newest record itself. A reread nudge rides the fire-and-forget plane and
 # carries a delivery= id and no corr=, so it is asserted on the record body.
 newest_remote_inbox_record() {
-  ls -1 "$REMOTE_HOME"/state/parent-route/ios.inbox/*.msg 2>/dev/null | tail -1
+  local records=("$REMOTE_HOME"/state/parent-route/ios.inbox/*.msg)
+  [ -e "${records[0]}" ] || return 0
+  printf '%s\n' "${records[${#records[@]} - 1]}"
 }
 
 seed_env() {
