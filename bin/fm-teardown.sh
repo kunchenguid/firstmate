@@ -5,6 +5,12 @@
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
 # clone for PR-based ship tasks.
+# Local teardown requires this task's recorded runtime adapter and, for forced
+# secondmate retirement, every descendant's adapter before destructive cleanup.
+# A missing or unreadable adapter fails with exit 1 before processes are reaped,
+# branches, copies, endpoints, or task records are removed, or a pending backlog
+# close is written. Restore the adapter and rerun; --force cannot override this
+# prerequisite refusal, which is separate from an attempted endpoint close.
 # An endpoint whose close could not do its job REFUSES before any record naming
 # it is removed: those records are the only thing that names what survived, so
 # reporting such a close as a completed cleanup strands the endpoint instead of

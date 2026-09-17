@@ -613,6 +613,9 @@ fm_backend_expected_label_of_selector() {  # <raw-target> <state-dir>
 }
 
 # fm_backend_source: source the named backend's adapter file, once per shell.
+# Check readability before `.`: Apple Bash 3.2 can abort on an unavailable source
+# file before `|| return 1` handles it, with an EXIT trap leaving a zero status.
+# The guard keeps that failure on the caller's ordinary refusal path.
 # Each adapter is an independently linted canonical root. The /dev/null source
 # boundaries keep runtime dispatch from importing all five adapter ASTs into
 # every dispatcher consumer while preserving the runtime source operations.
