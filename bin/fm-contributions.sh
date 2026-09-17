@@ -43,7 +43,7 @@
 # A URL whose last good observation is merged or closed is final: it is
 # never re-read, stays fresh, and a stale error beside it is cleared once.
 # A genuine failure prints its unavailable line only when it starts an episode
-# (the prior record had no error); a successful read ends the episode.
+# (no prior owner has an error); a successful read ends the episode.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
 # FM_CONTRIBUTIONS_READY_LABEL selects the equivalent triage label, default
 # ready-for-pr. Labels are matched case-insensitively and exactly.
@@ -317,10 +317,10 @@ poll() {
     # An observation the budget cut short is unmeasured, not unavailable: keep
     # every owner's prior record so the URL is observed first next poll.
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || break
-    # Wake once per failure episode: only when some non-final owner's prior read succeeded.
+    # Wake once per failure episode: only when no owner has a prior error.
     if [ "$observed" -ne 0 ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
-      'any($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
-        . == null or (.error == null and (.observation.state | IN("merged","closed") | not)))' "${row[@]:1}" >/dev/null; then
+      'all($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
+        .error == null)' "${row[@]:1}" >/dev/null; then
       printf 'contributions: observation unavailable for %s\n' "$url"
     fi
     case "$url" in */issues/*) kind=issue ;; *) kind="pr" ;; esac
@@ -330,11 +330,6 @@ poll() {
       jq -n --slurpfile saved "$TMP/saved.json" --arg task "$task" --arg url "$url" --arg kind "$kind" '
         ([$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first)
         // {url:$url,kind:$kind,checked_at:null,observation:null,verdict:null,seen:[],pending:[],notified:[]}' > "$old"
-      # A newly linked owner is observed; an owner already holding a final record keeps it.
-      if jq -e '.observation.state | IN("merged","closed")' "$old" >/dev/null; then
-        settle_final "$url" "$task"
-        continue
-      fi
       if [ "$observed" -eq 0 ]; then
         jq -n --arg now "$NOW" --slurpfile old "$old" --slurpfile observation "$TMP/observation.json" '
           $old[0] as $old | $observation[0] as $o
