@@ -507,6 +507,8 @@ assert_no_projection_mutation_since() {  # <line-count> <case-name>
 HOME_DIR="$TMP_ROOT/home"
 PROJECT_DIR="$TMP_ROOT/project"
 RECOVERY_PROJECT_DIR="$TMP_ROOT/recovery-project"
+CROSS_PROJECT_A="$TMP_ROOT/cross-project-a"
+CROSS_PROJECT_B="$TMP_ROOT/cross-project-b"
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/config" \
   "$HOME_DIR/data/anchor" "$HOME_DIR/data/shape" \
   "$HOME_DIR/data/order-a" "$HOME_DIR/data/order-b" \
@@ -532,6 +534,8 @@ write_ship_brief "$HOME_DIR" lock-contended 'Projection lock contention fixture.
 write_ship_brief "$HOME_DIR" default-on 'Projection default-on fixture.'
 make_project "$PROJECT_DIR"
 make_project "$RECOVERY_PROJECT_DIR"
+make_project "$CROSS_PROJECT_A"
+make_project "$CROSS_PROJECT_B"
 
 # Keep one ordinary primary task live so the durable firstmate workspace is
 # first and remains present while disposable workers are projected around it.
@@ -1103,7 +1107,9 @@ MULTI_EXPECTED=$(printf '%s\n' \
   || fail "multi-home topology was not owning-parent grouped: $MULTI_LABELS"
 pass "real Herdr lab: primary and two secondmate homes each own a top-level contiguous child block"
 
-# Concurrent cross-home wave under the one session lock.
+# Concurrent cross-home wave under the one session lock. Each home uses an
+# independent Treehouse pool because the production project lock deliberately
+# refuses simultaneous allocation from one pool before Herdr is reached.
 mkdir -p "$HOME_DIR/data/pcw" "$SECOND_HOME_A/data/acw" "$SECOND_HOME_B/data/bcw"
 write_ship_brief "$HOME_DIR" pcw 'Cross-home concurrent primary.'
 write_ship_brief "$SECOND_HOME_A" acw 'Cross-home concurrent A.'
@@ -1111,9 +1117,9 @@ write_ship_brief "$SECOND_HOME_B" bcw 'Cross-home concurrent B.'
 WAVE_CROSS_FOCUS=$(focus_audit_line_count)
 spawn_task pcw "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/pcw.out" 2> "$TMP_ROOT/pcw.err" &
 PCW_PID=$!
-spawn_task acw "$SECOND_HOME_A" "$PROJECT_DIR" > "$TMP_ROOT/acw.out" 2> "$TMP_ROOT/acw.err" &
+spawn_task acw "$SECOND_HOME_A" "$CROSS_PROJECT_A" > "$TMP_ROOT/acw.out" 2> "$TMP_ROOT/acw.err" &
 ACW_PID=$!
-spawn_task bcw "$SECOND_HOME_B" "$PROJECT_DIR" > "$TMP_ROOT/bcw.out" 2> "$TMP_ROOT/bcw.err" &
+spawn_task bcw "$SECOND_HOME_B" "$CROSS_PROJECT_B" > "$TMP_ROOT/bcw.out" 2> "$TMP_ROOT/bcw.err" &
 BCW_PID=$!
 wait "$PCW_PID" || fail "cross-home concurrent primary failed: $(cat "$TMP_ROOT/pcw.err")"
 wait "$ACW_PID" || fail "cross-home concurrent A failed: $(cat "$TMP_ROOT/acw.err")"

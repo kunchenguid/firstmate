@@ -780,7 +780,7 @@ test_bootstrap_relative_home_writes_absolute_poll_shim() {
 }
 
 test_bootstrap_reports_missing_x_dependency() {
-  local home fakebin out tool tool_path
+  local home fakebin out bash_env
   home="$TMP_ROOT/boot-missing-x"; mkdir -p "$home"
   fakebin=$(fm_fakebin "$home")
   fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi curl
@@ -794,10 +794,6 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/gh-axi"
-  for tool in dirname grep tail; do
-    tool_path=$(command -v "$tool") || fail "test host must provide $tool"
-    ln -s "$tool_path" "$fakebin/$tool"
-  done
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
@@ -806,6 +802,18 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/gh"
+  bash_env="$home/no-jq.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = jq ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+jq() {
+  return 127
+}
+SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
@@ -816,7 +824,7 @@ exit 0
 SH
   chmod +x "$fakebin/treehouse"
   printf 'FMX_PAIRING_TOKEN=tok-missing\n' > "$home/.env"
-  out=$(PATH="$fakebin" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
     "$BASH" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_contains "$out" "MISSING: jq" "bootstrap must report missing jq when X mode is opted in"
   assert_not_contains "$out" "FMX: X mode on" "bootstrap must not announce X mode when a dependency is missing"
