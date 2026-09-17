@@ -493,6 +493,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/vigie.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/voice-relay.md",
       "audience": "operator-current"
     },
