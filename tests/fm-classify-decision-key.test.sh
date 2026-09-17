@@ -2,7 +2,8 @@
 # tests/fm-classify-decision-key.test.sh - decision-key position tolerance in
 # the open-decisions fold (bin/fm-classify-lib.sh). A "[key=<slug>]" token is
 # documented between the verb and the colon (needs-decision [key=x]: note), but
-# workers commonly write the colon first (needs-decision: [key=x] note); that
+# workers commonly write the colon first (needs-decision: [key=x] note) or
+# trail the token at the end of the note (needs-decision: note [key=x]); that
 # stated key must be honored, never silently folded into the shared "default"
 # bucket where an answer can close the wrong record (issue #2109). Also covers
 # status_line_verb's bracket-tag stripping: a remote secondmate reply prepends
@@ -65,6 +66,23 @@ test_stated_key_is_honored_in_both_positions() {
   [ "$before" = "$after" ] \
     || fail "the two key positions folded to different records: '$before' vs '$after'"
   pass "a stated [key=X] opens X whether it precedes or follows the verb colon"
+}
+
+test_stated_key_is_honored_at_the_note_tail() {
+  local dir expected
+  dir=$(case_dir tail-position)
+  # A third real-world shape: crewmates commonly write the "[key=x]" token at
+  # the very END of the note rather than at its head. That trailing token must
+  # open and close its own key too, never silently collapse into "default"
+  # (the fold rule's only place - not the stale-cursor sidecar - that could
+  # cause a genuinely resolved decision to keep reading as open forever).
+  printf 'needs-decision: pick the cadence [key=stream-b-b4-trigger-run]\n' > "$dir/t.status"
+  expected=$(printf 'stream-b-b4-trigger-run\tneeds-decision\tpick the cadence\n')
+  assert_fold "$dir/t.status" "$expected" "trailing-bracket needs-decision"
+
+  printf 'resolved: answered monthly [key=stream-b-b4-trigger-run]\n' >> "$dir/t.status"
+  assert_fold "$dir/t.status" "" "trailing-bracket resolved closes the trailing-bracket open"
+  pass "a [key=x] token at the tail of the note opens and closes its own key, matching the head and before-colon positions"
 }
 
 test_bare_keyless_line_still_folds_to_default() {
@@ -263,6 +281,7 @@ test_incremental_agrees_with_full_fold_across_appends() {
 }
 
 test_stated_key_is_honored_in_both_positions
+test_stated_key_is_honored_at_the_note_tail
 test_bare_keyless_line_still_folds_to_default
 test_resolution_closes_across_positions
 test_blocked_is_position_tolerant_like_needs_decision

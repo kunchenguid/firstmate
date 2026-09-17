@@ -429,17 +429,21 @@ status_event_recorded() {  # <status-file> <new-status-line>
 # Decision key grammar (backward-compatible with the existing "<verb>: <note>"
 # format): an OPTIONAL "[key=<slug>]" token names the decision. Its documented
 # position sits between the verb and the colon, and a complete token at the
-# head of the note is accepted as an EQUIVALENT position, because that
-# misplaced-colon shape is common real worker output whose stated key must
-# never silently collapse into the shared "default" bucket (issue #2109):
+# head OR the tail of the note is each accepted as an EQUIVALENT position,
+# because both misplaced-colon shapes are common real worker output whose
+# stated key must never silently collapse into the shared "default" bucket
+# (issue #2109; the tail position specifically):
 #   needs-decision [key=api-shape]: <summary>
 #   needs-decision: [key=api-shape] <summary>
+#   needs-decision: <summary> [key=api-shape]
 #   resolved       [key=api-shape]: <how it was decided>
-# Both positions state the same key and yield the same note (a consumed
-# note-head token is key metadata, stripped from the note); when both positions
-# carry a token, the documented before-colon one wins and the note-head token
-# stays note text. A token deeper inside the note is prose, never a stated key,
-# so a summary merely MENTIONING "[key=x]" cannot open or close that decision.
+# All three positions state the same key and yield the same note (a consumed
+# note-head or note-tail token is key metadata, stripped from the note); when
+# more than one position carries a token, the documented before-colon one wins
+# over either note position, and the note-head one wins over the note-tail one.
+# A token deeper inside the note - neither the very first nor the very last
+# thing in it - is prose, never a stated key, so a summary merely MENTIONING
+# "[key=x]" cannot open or close that decision.
 # A line with no token in either position uses the key "default", preserving
 # the historical one-open-decision-per-task behavior (a bare "resolved:" closes
 # "default"). A stated key whose slug fails the charset below is rejected (the
@@ -556,6 +560,27 @@ _fm_key_at_note_head() {  # <status-line> -> raw slug
     *) return 1 ;;
   esac
 }
+# Raw slug of a complete "[key=<slug>]" token at the TAIL of the note (the
+# last thing on the line, ignoring trailing whitespace) - the form crewmates
+# write in practice ("needs-decision: note text [key=x]"), which the head-only
+# parse above silently missed and folded into the shared "default" bucket
+# (issue: distinct needs-decision/resolved pairs collapsing so a decision that
+# was genuinely answered never reads as closed). Fails when the line has no
+# colon or no complete token at that exact tail position; slug charset
+# validity is the caller's check via _fm_decision_slug_ok, exactly as for the
+# other two positions.
+_fm_key_at_note_tail() {  # <status-line> -> raw slug
+  local rest
+  case "$1" in
+    *:*) rest=${1#*:} ;;
+    *) return 1 ;;
+  esac
+  rest=${rest%"${rest##*[![:space:]]}"}
+  case "$rest" in
+    *\[key=*\]) rest=${rest##*\[key=}; printf '%s' "${rest%\]}" ;;
+    *) return 1 ;;
+  esac
+}
 # 0 when a stated key slug is well-formed: nonempty, A-Za-z0-9._- only.
 _fm_decision_slug_ok() {  # <slug>
   case "$1" in
@@ -574,13 +599,18 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
     *:*) n=${unstamped#*:}; n=${n#"${n%%[![:space:]]*}"} ;;
     *) printf '%s' "$unstamped"; return 0 ;;
   esac
-  # A note-head token that states this line's key (no before-colon token, valid
-  # slug) is key metadata, not note text: strip it so both stated-key positions
-  # yield the same note.
+  # A note-head or note-tail token that states this line's key (no
+  # before-colon token, valid slug) is key metadata, not note text: strip it
+  # so every stated-key position yields the same note.
   if ! _fm_key_before_colon "$unstamped" && k=$(_fm_key_at_note_head "$unstamped") \
     && _fm_decision_slug_ok "$k"; then
     n=${n#"[key=$k]"}
     n=${n#"${n%%[![:space:]]*}"}
+  elif ! _fm_key_before_colon "$unstamped" && k=$(_fm_key_at_note_tail "$unstamped") \
+    && _fm_decision_slug_ok "$k"; then
+    n=${n%"${n##*[![:space:]]}"}
+    n=${n%"[key=$k]"}
+    n=${n%"${n##*[![:space:]]}"}
   fi
   printf '%s' "$n"
 }
@@ -592,7 +622,8 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
     k=${k#*\[key=}
     k=${k%%\]*}
   else
-    k=$(_fm_key_at_note_head "$unstamped") || { printf 'default'; return 0; }
+    k=$(_fm_key_at_note_head "$unstamped") || k=$(_fm_key_at_note_tail "$unstamped") \
+      || { printf 'default'; return 0; }
   fi
   _fm_decision_slug_ok "$k" || return 1
   printf '%s' "$k"
