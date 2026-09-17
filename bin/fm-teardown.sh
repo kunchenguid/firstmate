@@ -2816,11 +2816,15 @@ preflight_descendant_treehouse_slots() {
       continue
     fi
     fm_backend_validate_task_endpoint "$meta" "$task_id" || return 1
-    require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
+    # Ownership before exclusivity, same as the parent's own slot: when the
+    # claim proves this child's slot was reassigned, the exclusive scan would
+    # deadlock against the claimant's surviving record, so it is skipped and
+    # the child's slot steps are gated off below.
     owner_rc=0
     require_owned_worktree_slot_record "$task_id" "$worktree" || owner_rc=$?
     case "$owner_rc" in
-      0|"$TEARDOWN_SLOT_REASSIGNED_RC") ;;
+      0) require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1 ;;
+      "$TEARDOWN_SLOT_REASSIGNED_RC") ;;
       *) return 1 ;;
     esac
   done
@@ -3163,8 +3167,15 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
-require_exclusive_task_worktree_slot || exit 1
+# Ownership first: when the slot's own claim proves it was reassigned to
+# another task, this record is the stale one and the exclusive-record scan
+# below would deadlock against the claimant's surviving record - each
+# teardown refusing on the other. The claim resolves that case, so the scan
+# runs only while this task still owns the slot.
 require_owned_task_worktree_slot || exit 1
+if teardown_owns_worktree; then
+  require_exclusive_task_worktree_slot || exit 1
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 

@@ -999,6 +999,47 @@ test_own_and_absent_slot_claims_still_tear_down() {
 
   pass "fm-teardown: a task's own slot claim, and an unclaimed slot, both still tear down"
 }
+# The live deadlock from 2026-09-16: the stale task's record survives while the
+# slot's owner claim and a second record both name the live task. Before the
+# ownership check ran first, each teardown's exclusive-record scan refused on
+# the other's record, so neither task could ever be torn down.
+test_reassigned_slot_with_surviving_claimant_record_deadlocks_neither_task() {
+  local dir stale=stale-task live=live-task rc
+
+  dir=$(make_case slot-deadlock)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$stale.meta" \
+    "window=firstmate:fm-$stale" "endpoint_task_id=$stale" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$live.meta" \
+    "window=firstmate:fm-$live" "endpoint_task_id=$live" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$live" "$dir/home"
+
+  # The stale record tears down first: its claim check proves the slot was
+  # reassigned, so the exclusive scan must not refuse on the live record.
+  set +e
+  run_case "$dir" "$stale" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "stale task's teardown deadlocked against the live record: $(cat "$dir/stderr")"
+  assert_reassigned_slot_left_alone "$dir" "$stale" "$live" "deadlocked stale record"
+  assert_present "$dir/home/state/$live.meta" "stale teardown removed the live task's record"
+  assert_present "$dir/worktree/sentinel" "stale teardown reset the live task's slot"
+
+  # The live record then tears down normally: its own claim and the now-sole
+  # record agree, so the slot is returned and its claim released.
+  run_case "$dir" "$live" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "live task's teardown deadlocked against the stale record: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$live.meta" "live teardown left the task record"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "live teardown left its spent slot claim behind"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "live teardown did not return its own pool slot: $(cat "$dir/runtime.log")"
+
+  pass "fm-teardown: a reassigned slot with a surviving claimant record deadlocks neither teardown"
+}
+
 
 # The tmux shim used by the endpoint-close tests below: every subcommand
 # reaches the real isolated server, so presence is always read from real tmux.
@@ -1389,6 +1430,7 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
+test_reassigned_slot_with_surviving_claimant_record_deadlocks_neither_task
 test_remote_seeded_home_returns_its_uncontested_slot
 test_remote_seeded_home_still_refuses_a_slot_its_child_holds
 test_remote_layout_homes_serialize_on_one_project_lock
