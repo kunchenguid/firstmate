@@ -1647,6 +1647,36 @@ FM_CMUX_CLAUDE_COMPOSER_LIVE=1 bin/fm-test-run.sh tests/fm-cmux-claude-composer-
 That guard still addresses the worker by task selector, so it no longer reaches the typed submit path and is not a current refresh entry point for this guarantee.
 The portable classifier regression is `tests/fm-backend-cmux.test.sh`.
 
+## Paseo
+
+The current compatibility floor is Paseo 0.8, and the active live evidence uses Paseo 0.8.0 on macOS.
+The bundled CLI was found at `/Applications/Paseo.app/Contents/Resources/bin/paseo`, and the daemon was already healthy on `127.0.0.1:6767` (`paseo status`).
+
+Real live checks used a throwaway `fm-test-` scoped workspace and one probe terminal, torn down at the end of the pass.
+
+Current active CLI findings:
+
+| Guarantee | Command shape | Result |
+| --- | --- | --- |
+| Workspace create | `workspace create --path <dir> --isolation local --json` | Created workspace `wks_c39c8031dc81f592`. |
+| Terminal create | `terminal create --workspace <id> --cwd <dir> --name <name> --json` | Created one terminal bound to that workspace, unfocused. |
+| Literal send | `terminal send-keys <id> -l -- <text>` | Left text unsubmitted. |
+| Submit | `terminal send-keys <id> Enter` | Submitted the pending literal. |
+| Capture | `terminal capture <id> -S --json` (also `--ansi` for styled reads) | Returned `{terminalId, lines[], totalLines}`; the probe round-trip echoed `hello-paseo-probe` back in `lines`. |
+| Kill | `terminal kill <id>` | Removed the probe terminal. |
+| Workspace inventory | `workspace ls` | Listed the live workspace. |
+| Workspace rename | `workspace rename <id> <title>` | Set the free-form user-visible title; `workspace ls` echoes it back in `name`, never parsed for routing. |
+| Worktree create | `worktree create` | Available; Treehouse remains the worktree provider, so this adapter never calls it. |
+
+Running inside a Paseo-managed terminal exposes `PASEO_AGENT_ID`, `PASEO_AGENT_CWD`, and `PASEO_CLI` in the process environment, plus `__CFBundleIdentifier=sh.paseo.desktop` from LaunchServices - the two signals `fm_backend_detect` consults, primary marker first, bundle id as the fallback for an environment whose wrapper stripped the `PASEO_*` variables.
+
+```sh
+tests/fm-backend-paseo.test.sh
+tests/fm-backend-paseo-smoke.test.sh
+```
+
+The real smoke proves daemon reachability, workspace/terminal creation, current-path probing, send and keys, bounded capture, and guarded exact cleanup, mirroring the cmux smoke's shape against Paseo's own CLI surface.
+
 ## Codex App host tools
 
 A reusable Desktop host-tool smoke ran on 2026-07-06 against Codex Desktop bundle version 26.623.101652, build 4674, bundle id `com.openai.codex`.
