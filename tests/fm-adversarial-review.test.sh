@@ -27,6 +27,11 @@
 #   (n) record-lens --seat seats a round dispatched with no seats
 #   (o) a --base narrower than the PR's own base is refused
 #   (p) a MAJOR/BLOCKER from an earlier round stays RED until it is disposed of
+#   (q) a lens report whose id or severity cannot be read is refused rather
+#     than parsed into a finding that vanishes from reconciliation
+#   (r) a --seat carrying a line break cannot rewrite the round meta
+#   (s) --round is held to a number outside dispatch too
+#   (t) a lane with no resolvable worktree does not starve the other PRs
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -739,6 +744,193 @@ test_tier_floor_is_enforced_at_dispatch_and_at_check_green() {
   pass "the derived tier floor is enforced at dispatch and again at check-green"
 }
 
+# Regression: the scanner read the id and severity by awk field POSITION while
+# matching by a regex that tolerates any spacing, so `severity:BLOCKER` parsed
+# to an EMPTY severity, sailed past record-lens, and then missed
+# reconciliation's BLOCKER|MAJOR branch - a BLOCKER that reconciled GREEN.
+test_unreadable_finding_fields_are_refused() {
+  local case_dir fakebin wt out
+  case_dir="$TMP_ROOT/lens-parse"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$fakebin"
+  read -r base head wt < <(make_repo "$case_dir/wt")
+  add_fake_gh "$fakebin"
+  add_fake_gh_axi "$fakebin"
+  export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
+  export FAKE_GH_title='t' FAKE_GH_body='b'
+  : > "$case_dir/state/gh-axi.log"
+  run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --tier T2 --wt "$wt" --base "$base" --head "$head" \
+    --seat frontier=fable-5.1 --seat deep=opus-5 >/dev/null \
+    || fail "lens-parse: dispatch failed"
+
+  # A BLOCKER whose severity label carries no space after the colon.
+  write_lens_report "$case_dir/tight.md" RED '  - id: a1
+    severity: MAJOR
+  - id: b2
+    severity:BLOCKER
+'
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens frontier --report "$case_dir/tight.md" >/dev/null \
+    || fail "lens-parse: a readable tight-severity report was refused"
+  run_adv "$case_dir/state" "$fakebin" resolve task-a --round 1 \
+    --finding frontier:a1 --disposition fixed_verified >/dev/null \
+    || fail "lens-parse: resolving a1 failed"
+  write_lens_report "$case_dir/clean.md" GREEN ''
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens deep --report "$case_dir/clean.md" >/dev/null \
+    || fail "lens-parse: deep record failed"
+  out=$(run_adv "$case_dir/state" "$fakebin" reconcile task-a --round 1) \
+    || fail "lens-parse: reconcile failed to post"
+  assert_contains "$out" "round-1 RED" \
+    "lens-parse: a BLOCKER written as 'severity:BLOCKER' reconciled GREEN"
+  assert_grep 'frontier:b2' "$case_dir/state/task-a.adversarial-review/round-1/reconciliation.md" \
+    "lens-parse: the tight-severity BLOCKER is missing from the reconciliation"
+  assert_absent "$case_dir/state/task-a.adversarial-review-green" \
+    "lens-parse: an unreconciled BLOCKER wrote a loop-green marker"
+
+  # An id carrying a colon would corrupt the id:severity key, and an id line
+  # with nothing after the label carries no id at all: both are refused.
+  write_lens_report "$case_dir/colon.md" RED '  - id: a:b
+    severity: MAJOR
+'
+  if run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens advisory:design-ux --report "$case_dir/colon.md" >/dev/null 2>&1; then
+    fail "lens-parse: an id containing a colon was recorded"
+  fi
+  write_lens_report "$case_dir/noid.md" RED '  -id: c3
+    severity: MAJOR
+'
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens advisory:design-ux --report "$case_dir/noid.md" >/dev/null \
+    || fail "lens-parse: a dash-tight id line was refused instead of read"
+  pass "a lens report whose id or severity cannot be read is refused"
+}
+
+# Regression: --seat went into the round meta verbatim, and round_meta_get
+# takes the LAST matching line, so a seat carrying newlines appended its own
+# tier=/required_tier=/slots= lines below the real ones and talked a T3 change
+# down to a two-lens T2 round.
+test_seat_cannot_rewrite_the_round_meta() {
+  local case_dir fakebin wt
+  case_dir="$TMP_ROOT/seat-injection"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$fakebin" "$case_dir/wt"
+  wt="$case_dir/wt"
+  git -C "$wt" init -q
+  git -C "$wt" commit -q --allow-empty -m init
+  mkdir -p "$wt/auth"
+  printf 'token\n' > "$wt/auth/session.go"
+  git -C "$wt" add -A
+  git -C "$wt" commit -q -m 'add session handling'
+  base=$(git -C "$wt" rev-parse 'HEAD~1')
+  head=$(git -C "$wt" rev-parse HEAD)
+  add_fake_gh "$fakebin"
+  add_fake_gh_axi "$fakebin"
+  export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
+  export FAKE_GH_title='t' FAKE_GH_body='b'
+  : > "$case_dir/state/gh-axi.log"
+  if run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --wt "$wt" --base "$base" --head "$head" \
+    --seat "$(printf 'frontier=x\nslots=frontier deep\ntier=T2\nrequired_tier=T2')" \
+    >"$case_dir/stdout" 2>"$case_dir/stderr"; then
+    fail "seat-injection: a seat carrying line breaks was accepted"
+  fi
+  assert_grep 'SLOT=MODEL' "$case_dir/stderr" \
+    "seat-injection: the refusal does not name the seat shape"
+  assert_absent "$case_dir/state/task-a.adversarial-review/round-1/meta" \
+    "seat-injection: the refused dispatch still wrote a round meta"
+  # A waiver reason is free text that lands in the same record.
+  if run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --tier T0 --wt "$wt" --base "$base" --head "$head" \
+    --waiver-class trivial --waiver-hold task-a \
+    --waiver-reason "$(printf 'ok\nstatus=green')" \
+    >"$case_dir/stdout" 2>"$case_dir/stderr"; then
+    fail "seat-injection: a waiver reason carrying a line break was accepted"
+  fi
+  assert_grep 'line break' "$case_dir/stderr" \
+    "seat-injection: the refusal does not name the line break"
+  pass "a seat or waiver reason carrying a line break cannot rewrite the round meta"
+}
+
+test_round_is_validated_outside_dispatch() {
+  local case_dir fakebin cmd
+  case_dir="$TMP_ROOT/round-shape"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$fakebin"
+  add_fake_gh "$fakebin"
+  add_fake_gh_axi "$fakebin"
+  : > "$case_dir/state/gh-axi.log"
+  : > "$case_dir/report.md"
+  for cmd in record-lens resolve reconcile; do
+    case "$cmd" in
+      record-lens)
+        run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+          --round ../../escape --lens frontier --report "$case_dir/report.md" \
+          >/dev/null 2>"$case_dir/stderr" && fail "round-shape: $cmd took a traversal round"
+        ;;
+      resolve)
+        run_adv "$case_dir/state" "$fakebin" resolve task-a \
+          --round ../../escape --finding frontier:f1 --disposition fixed_verified \
+          >/dev/null 2>"$case_dir/stderr" && fail "round-shape: $cmd took a traversal round"
+        ;;
+      reconcile)
+        run_adv "$case_dir/state" "$fakebin" reconcile task-a \
+          --round ../../escape >/dev/null 2>"$case_dir/stderr" \
+          && fail "round-shape: $cmd took a traversal round"
+        ;;
+    esac
+    assert_grep 'invalid round' "$case_dir/stderr" \
+      "round-shape: $cmd did not refuse the round for its shape"
+  done
+  pass "--round is held to a number outside dispatch too"
+}
+
+# Regression: dispatch fails before it creates the round directory, so a lane
+# whose worktree is gone stayed pending forever - every fire re-selected it,
+# failed again, and left the watch refusing to re-arm, starving every other PR.
+test_an_unstageable_lane_does_not_starve_the_others() {
+  local case_dir fakebin wt out rc
+  case_dir="$TMP_ROOT/unstageable"
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$fakebin"
+  read -r base head wt < <(make_repo "$case_dir/wt")
+  add_fake_gh "$fakebin"
+  add_fake_gh_axi "$fakebin"
+  export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
+  export FAKE_GH_title='t' FAKE_GH_body='b'
+  : > "$case_dir/state/gh-axi.log"
+  # task-dead's worktree was returned; task-live is an ordinary lane.
+  fm_write_meta "$case_dir/state/task-dead.meta" "window=fm-task-dead" \
+    "worktree=$case_dir/gone"
+  fm_write_meta "$case_dir/state/task-live.meta" "window=fm-task-live" \
+    "worktree=$wt"
+  printf 'done: PR %s\n' https://github.com/example/repo/pull/7 \
+    > "$case_dir/state/task-dead.status"
+  printf 'done: PR %s\n' "$PR_URL" > "$case_dir/state/task-live.status"
+
+  run_adv "$case_dir/state" "$fakebin" condition \
+    || fail "unstageable: the condition went false with lanes pending"
+  set +e
+  out=$(run_adv "$case_dir/state" "$fakebin" action 2>"$case_dir/stderr")
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "unstageable: the failed lane was not reported as a failure"
+  assert_contains "$out" "dispatched: task-live" \
+    "unstageable: the live lane never got its loop"
+  assert_absent "$case_dir/state/task-dead.adversarial-review/round-1/diff.patch" \
+    "unstageable: the dead lane staged evidence from a worktree that is gone"
+  assert_absent "$case_dir/state/task-dead.adversarial-review-green" \
+    "unstageable: the undispatchable lane was cleared for merge"
+  # The failed claim is what stops the next fire re-selecting it forever.
+  assert_grep 'status=failed' "$case_dir/state/task-dead.adversarial-review/round-1/meta" \
+    "unstageable: the undispatchable lane recorded no failed round"
+  out=$(run_adv "$case_dir/state" "$fakebin" condition 2>/dev/null; printf 'rc=%s' "$?")
+  assert_contains "$out" "rc=1" \
+    "unstageable: the dead lane is still pending after its round was claimed failed"
+  pass "an undispatchable lane claims a failed round instead of starving the others"
+}
+
 test_condition_needs_a_pr_open_line
 test_watch_fires_on_pr_open_line
 test_dispatch_stages_evidence_and_posts
@@ -754,3 +946,7 @@ test_ensure_watch_rearms_after_a_fire
 test_record_lens_seats_a_round_dispatched_without_seats
 test_narrower_base_than_the_pr_base_is_refused
 test_open_findings_carry_into_later_rounds
+test_unreadable_finding_fields_are_refused
+test_seat_cannot_rewrite_the_round_meta
+test_round_is_validated_outside_dispatch
+test_an_unstageable_lane_does_not_starve_the_others

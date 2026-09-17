@@ -188,10 +188,16 @@
 # Each `--names <text>` narrows it further: the newest record's captain decision
 # must contain that literal text, so a gate can require the captain to have
 # spoken about ITS subject rather than about some other call on the same row.
-# That decision region is bounded above by the record it belongs to but runs to
-# the end of the body below, which preserves the pre-answer text, so a caller
-# must ask for something specific enough that the prior body cannot supply it -
-# a fixed grant phrase AND the subject's own identifier, never one alone.
+# THE REGION THAT TEXT IS MATCHED AGAINST IS THE CAPTAIN'S WORDS AND NOTHING
+# ELSE. The record is written above the preserved pre-answer body with no
+# terminator between them, so the lines below `Captain decision:` run straight
+# on into text the person who RAISED the call wrote - including the question
+# that asked for the very thing the gate is checking. Matching against that
+# would let a captain's "no" satisfy a gate because the question quoted its own
+# subject. So the region is cut back to exactly the bytes whose sha256 equals
+# the `Decision digest:` that same record carries, and a record whose decision
+# cannot be recovered that way answers no to every `--names` rather than
+# falling back to the looser text.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
@@ -1929,19 +1935,60 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
   exit 2
 }
 
-# The newest resolution record's captain decision text. Records are prepended,
-# so the newest one runs from the first `Captain decision:` line to the next
-# resolution record. Bounded above by the record that follows it and below by
-# the end of the body, which is why a caller asking --names must ask for
-# something specific enough that the preserved prior body cannot supply it.
+# The newest resolution record's captain decision text, and ONLY that text.
+#
+# Records are prepended, so the newest one starts at the first `Captain
+# decision:` line; an older record below it terminates the scan, but on a first
+# answer there is nothing below except the preserved pre-answer body, which the
+# gated party wrote. `load_decision` digests the decision with trailing
+# newlines already stripped and `resolution_block` records that digest, so the
+# true end of the decision is the line prefix whose sha256 reproduces it. Only
+# prefixes that end where the writer could have ended - at a blank line, which
+# is the separator `write_resolution_record` puts before the old body, or at the
+# end of the region - are candidates. No digest match means no decision text:
+# callers get nothing rather than a region padded with somebody else's words.
 newest_captain_decision() {  # <shown-body>
-  local body
+  local body digest region candidate n total
+  local -a lines=()
+  digest=$(recorded_decision_digest "$1") || return 1
+  case "$digest" in
+    ''|*[!0-9a-f]*) return 1 ;;
+  esac
   body=$(decode_shown_value "$1") || return 1
-  printf '%s\n' "$body" | awk '
+  region=$(printf '%s\n' "$body" | awk '
     /^Resolution recorded by fm-(captain|decision)-hold\.$/ { if (capture) exit; next }
     capture { print; next }
     /^Captain decision:$/ { capture = 1 }
-  '
+  ')
+  [ -n "$region" ] || return 1
+  while IFS= read -r candidate; do
+    lines+=("$candidate")
+  done <<REGION
+$region
+REGION
+  total=${#lines[@]}
+  [ "$total" -gt 0 ] || return 1
+  candidate=''
+  n=0
+  while [ "$n" -lt "$total" ]; do
+    if [ "$n" -eq 0 ]; then
+      candidate=${lines[0]}
+    else
+      candidate="$candidate
+${lines[$n]}"
+    fi
+    n=$((n + 1))
+    # A recorded decision is at most 8192 bytes, and prefixes only grow, so
+    # nothing past that can be the decision.
+    [ "${#candidate}" -le 8192 ] || return 1
+    if [ "$n" -eq "$total" ] || [ -z "${lines[$n]}" ]; then
+      if [ "$(sha256_text "$candidate")" = "$digest" ]; then
+        printf '%s' "$candidate"
+        return 0
+      fi
+    fi
+  done
+  return 1
 }
 
 command_answered() {  # <task-id> [--names <text>]...

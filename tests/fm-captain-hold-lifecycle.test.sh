@@ -3242,6 +3242,49 @@ test_answered_is_true_only_after_the_captain_spoke() {
   pass "answered is true only once a captain answer naming its subject is recorded"
 }
 
+# Regression: the --names region ran from `Captain decision:` to the END of the
+# body, which still holds the pre-answer text the person who RAISED the call
+# wrote. A question quoting its own subject therefore satisfied a gate about
+# that subject - so a captain's refusal granted the very thing it refused.
+test_answered_names_match_only_the_captains_own_words() {
+  local home id rc
+  home=$(make_home captain-answered-region)
+  id=sample-answered-region
+  # The lane's own body carries the question firstmate wrote, naming both the
+  # grant phrase and the PR. `answer` preserves that text below its record.
+  tasks_in "$home" add "$id" "Ship the waiver fixture" --kind ship \
+    --repo sample --start \
+    --body "May we take an adversarial-review waiver for https://github.com/o/r/pull/9?" \
+    >/dev/null || fail "could not create the region fixture"
+  run_captain "$home" hold "$id" --reason "waiver decision pending" \
+    >/dev/null || fail "could not hold the region fixture"
+
+  printf 'No. Run the loop.\n' > "$home/region-no.txt"
+  run_captain "$home" answer "$id" --release --decision-file "$home/region-no.txt" \
+    >/dev/null || fail "could not record the captain refusal"
+  run_captain "$home" answered "$id" >/dev/null 2>&1 \
+    || fail "answered was false after a recorded captain refusal"
+  rc=0
+  run_captain "$home" answered "$id" \
+    --names 'adversarial-review waiver' \
+    --names 'https://github.com/o/r/pull/9' >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] \
+    || fail "a captain refusal satisfied --names from the question it refused (rc=$rc)"
+
+  # The same call, now actually granted in the captain's own words.
+  run_captain "$home" hold "$id" --reason "waiver decision pending" \
+    >/dev/null || fail "could not re-hold the region fixture"
+  printf 'Yes - take an adversarial-review waiver for https://github.com/o/r/pull/9.\n' \
+    > "$home/region-yes.txt"
+  run_captain "$home" answer "$id" --release --decision-file "$home/region-yes.txt" \
+    >/dev/null || fail "could not record the captain grant"
+  run_captain "$home" answered "$id" \
+    --names 'adversarial-review waiver' \
+    --names 'https://github.com/o/r/pull/9' >/dev/null 2>&1 \
+    || fail "a genuine captain grant did not satisfy its own --names"
+  pass "--names matches the captain's own decision, never the question it answered"
+}
+
 test_pr_merge_entrypoint_refuses_a_captain_held_task() {
   local home pr_id pr repo wt rc
   home=$(make_home held-merge-entrypoints)
@@ -4100,6 +4143,7 @@ test_relocated_report_does_not_wedge_an_answer_before_replay
 test_teardown_retains_captain_calls_in_a_relocated_backlog
 test_merge_approval_releases_before_zero_done_retention
 test_answered_is_true_only_after_the_captain_spoke
+test_answered_names_match_only_the_captains_own_words
 test_pr_merge_entrypoint_refuses_a_captain_held_task
 test_local_merge_entrypoint_refuses_a_captain_held_task
 test_pr_merge_entrypoint_separates_an_unreadable_record_from_an_absent_one

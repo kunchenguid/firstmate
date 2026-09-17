@@ -89,6 +89,8 @@ SELF="$SCRIPT_DIR/fm-adversarial-review.sh"
 
 BODY_BEGIN='<!-- fm-adversarial-review:start -->'
 BODY_END='<!-- fm-adversarial-review:end -->'
+FM_ADV_NL='
+'
 
 usage() {
   sed -n '2,/^set -eu/p' "$SELF" | sed 's/^# \{0,1\}//'
@@ -188,6 +190,26 @@ slot_class() {
 round_meta_get() {
   local dir=$1 key=$2
   grep -E "^$key=" "$dir/meta" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+# The round meta is a line-per-key record whose reader takes the LAST match, so
+# any caller-supplied value carrying a line break could append a second tier=,
+# slots=, or required_tier= line below the real one and be read back instead.
+# Nothing with a line break is ever written into it.
+meta_value_safe() {
+  case "$1" in
+    *"$FM_ADV_NL"*|*$'\r'*) return 1 ;;
+  esac
+  return 0
+}
+
+# A round number names a directory under the review state dir, so every command
+# that takes one holds it to the same shape dispatch does rather than letting a
+# traversal through round_dir.
+require_round_number() {
+  case "${1-}" in
+    ''|*[!0-9]*|0*) fail "invalid round: ${1-}" 2 ;;
+  esac
 }
 
 # Parse the loop-green marker strictly: exactly one pr=, head=, tier=, and
@@ -381,7 +403,21 @@ cmd_dispatch() {
       --round) round=${2-}; shift 2 ;;
       --reclaim) reclaim=1; shift ;;
       --ui-impacting) ui=1; ui_explicit=1; shift ;;
-      --seat) seats_args="$seats_args ${2-}"; shift 2 ;;
+      --seat)
+        case "${2-}" in
+          *[[:space:]]*|'') fail "--seat must be SLOT=MODEL with no whitespace: ${2-}" 2 ;;
+          *=*) ;;
+          *) fail "--seat must be SLOT=MODEL: ${2-}" 2 ;;
+        esac
+        case "${2%%=*}" in
+          ''|*[!A-Za-z0-9_:.-]*) fail "--seat slot must be a plain slot name: ${2%%=*}" 2 ;;
+        esac
+        case "${2#*=}" in
+          '') fail "--seat needs a model after the =: ${2-}" 2 ;;
+        esac
+        seats_args="$seats_args ${2-}"
+        shift 2
+        ;;
       --waiver-class) waiver_class=${2-}; shift 2 ;;
       --waiver-reason) waiver_reason=${2-}; shift 2 ;;
       --waiver-hold) waiver_hold=${2-}; shift 2 ;;
@@ -389,6 +425,9 @@ cmd_dispatch() {
       *) fail "unknown dispatch flag: $1" 2 ;;
     esac
   done
+  meta_value_safe "$waiver_class" || fail "--waiver-class cannot contain a line break" 2
+  meta_value_safe "$waiver_reason" || fail "--waiver-reason cannot contain a line break" 2
+  meta_value_safe "$wt" || fail "--wt cannot contain a line break" 2
   fm_pr_task_id_valid "$id" || fail "invalid task id" 2
   fm_pr_url_parse "$url" || fail "invalid PR URL" 2
   [ "$FM_PR_PROVIDER" = github ] || fail "adversarial review supports GitHub PRs only" 2
@@ -400,9 +439,7 @@ cmd_dispatch() {
     T0|T1|T2|T3) ;;
     *) fail "unknown tier: $tier (want T0, T1, T2, or T3)" 2 ;;
   esac
-  case "$round" in
-    ''|*[!0-9]*|0*) fail "invalid round: $round" 2 ;;
-  esac
+  require_round_number "$round"
   if [ "$tier" = T0 ]; then
     [ -n "$waiver_class" ] && [ -n "$waiver_reason" ] \
       || fail "T0 needs --waiver-class and --waiver-reason on explicit captain words" 2
@@ -424,6 +461,7 @@ cmd_dispatch() {
   fi
   [ ! "$round" -gt "$cap" ] || [ "$tier" = T0 ] || fail "round exceeds cap"
   wt=$(resolve_wt "$id" "$wt") || fail "no lane worktree (pass --wt or record worktree= in task meta)" 1
+  meta_value_safe "$wt" || fail "the lane worktree path cannot contain a line break" 1
   if [ -z "$head" ]; then
     head=$(forge_head "$url") || fail "cannot resolve the PR head from the forge (pass --head)" 1
   fi
@@ -599,27 +637,58 @@ CLASSIFY
 # Validate a structured lens report: one verdict line and one boundary line,
 # then a findings list where every finding carries an id and a severity.
 # Prints the verdict, then one id:severity line per finding.
+#
+# Every value is extracted by stripping its own label rather than by field
+# position, because the matching regexes tolerate spacing the field numbering
+# does not: `severity:BLOCKER` put the severity in $1, so a BLOCKER parsed to
+# an empty severity, passed record-lens, and then missed reconciliation's
+# BLOCKER|MAJOR branch entirely. An id is rejected outright when it is empty or
+# carries a colon, because the colon is what separates id from severity in the
+# line below and in the resolution keys built from it.
 lens_report_scan() {
   awk '
     /^[[:space:]]*verdict:[[:space:]]*(GREEN|RED)[[:space:]]*$/ {
-      if (saw_verdict == 0) { verdict = $2; saw_verdict = 1 }
+      if (saw_verdict == 0) {
+        value = $0
+        sub(/^[[:space:]]*verdict:[[:space:]]*/, "", value)
+        sub(/[[:space:]]+$/, "", value)
+        verdict = value
+        saw_verdict = 1
+      }
       next
     }
     /^[[:space:]]*-[[:space:]]*id:[[:space:]]*[^[:space:]]/ {
-      if (current != "") { printf "MALFORMED missing-severity %s\n", current }
-      current = $3
-      for (i = 4; i <= NF; i++) { current = current "-" $i }
-      severity = ""
+      if (current != "") { printf "MALFORMED missing-severity %s\n", current; bad = 1 }
+      value = $0
+      sub(/^[[:space:]]*-[[:space:]]*id:[[:space:]]*/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      gsub(/[[:space:]]+/, "-", value)
+      if (value == "" || index(value, ":") > 0) {
+        printf "MALFORMED unusable-id %s\n", (value == "" ? "(empty)" : value)
+        bad = 1
+        current = ""
+        next
+      }
+      current = value
       next
     }
     /^[[:space:]]*severity:[[:space:]]*(BLOCKER|MAJOR|MINOR|NIT)[[:space:]]*$/ {
-      severity = $2
-      if (current != "") { printf "FINDING %s:%s\n", current, severity; current = "" }
+      value = $0
+      sub(/^[[:space:]]*severity:[[:space:]]*/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      if (value == "") {
+        printf "MALFORMED unusable-severity %s\n", (current == "" ? "(no-id)" : current)
+        bad = 1
+        current = ""
+        next
+      }
+      if (current != "") { printf "FINDING %s:%s\n", current, value; current = "" }
       next
     }
     END {
       if (saw_verdict == 0) { print "MALFORMED missing-verdict"; exit 1 }
       if (current != "") { printf "MALFORMED missing-severity %s\n", current; exit 1 }
+      if (bad) { exit 1 }
       print "VERDICT " verdict
     }
   ' "$1"
@@ -639,6 +708,7 @@ cmd_record_lens() {
   done
   fm_pr_task_id_valid "$id" || fail "invalid task id" 2
   [ -n "$round" ] && [ -n "$lens" ] && [ -n "$report" ] || fail "record-lens needs --round, --lens, --report" 2
+  require_round_number "$round"
   # The seat is only known once the lens actually runs, so a round dispatched
   # without one is seated here rather than being unseatable forever.
   if [ -n "$seat" ]; then
@@ -689,6 +759,7 @@ cmd_resolve() {
   done
   fm_pr_task_id_valid "$id" || fail "invalid task id" 2
   [ -n "$round" ] && [ -n "$finding" ] || fail "resolve needs --round and --finding" 2
+  require_round_number "$round"
   case "$disposition" in
     unresolved|rejected_with_counterevidence|accepted_pending_fix|fixed_verified) ;;
     *) fail "unknown disposition: $disposition" 2 ;;
@@ -799,6 +870,7 @@ cmd_reconcile() {
   done
   fm_pr_task_id_valid "$id" || fail "invalid task id" 2
   [ -n "$round" ] || fail "reconcile needs --round" 2
+  require_round_number "$round"
   dir=$(round_dir "$id" "$round")
   [ -f "$dir/meta" ] || fail "round $round was never dispatched for $id" 1
   url=$(round_meta_get "$dir" url)
@@ -989,6 +1061,12 @@ cmd_reconcile() {
 # A PR needs a loop when no round dir and no loop-green marker cover its URL.
 # Task ids come from status filenames and are validated before any path is
 # built from them, so a stray file can never escape the state dir.
+#
+# Selection deliberately does NOT require the lane to be stageable: a PR-open
+# line with a worktree that is not resolvable yet is still a PR that owes a
+# loop. What keeps such a lane from starving the others is that the action
+# claims its round as failed (mark_dispatch_failed) rather than leaving it to
+# be re-selected and fail again on every later fire.
 pending_loops() {
   local f base id line url marker rdir has_round meta_url rd
   shopt -s nullglob
@@ -1028,6 +1106,26 @@ pending_loops() {
   shopt -u nullglob
 }
 
+# Claim round 1 as failed for a PR the action could not dispatch. Dispatch's own
+# failures all happen before it creates the round directory, so without this the
+# same unstageable entry is re-selected on every fire, fails again, and keeps
+# the watch from ever re-arming. A failed round is reclaimable with --reclaim
+# once the cause is fixed, and no marker is written, so the merge still refuses.
+mark_dispatch_failed() {
+  local id=$1 url=$2 reason=$3 dir
+  meta_value_safe "$url" && meta_value_safe "$reason" || return 1
+  dir=$(round_dir "$id" 1)
+  mkdir -p "$(review_dir "$id")" 2>/dev/null || return 1
+  if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
+    mkdir "$dir" 2>/dev/null || return 1
+  fi
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+  [ ! -f "$dir/meta" ] || return 0
+  printf 'url=%s\nboundary=merge\nround=1\ndispatch_error=%s\nstatus=failed\n' \
+    "$url" "$reason" > "$dir/meta" || return 1
+  chmod 0600 "$dir/meta" || return 1
+}
+
 cmd_condition() {
   if [ -n "$(pending_loops | head -1)" ]; then
     return 0
@@ -1040,7 +1138,9 @@ cmd_condition() {
 # window with no loop until somebody noticed. No --tier is passed, so each
 # dispatch adopts the tier its own change requires. One failure is reported and
 # does not abandon the rest, and any failure exits nonzero so the fire is
-# captured as action-failed and firstmate is woken with the evidence.
+# captured as action-failed and firstmate is woken with the evidence. A failure
+# also claims its round as failed, so the next fire moves on to the other PRs
+# instead of hitting the same unstageable lane and failing again forever.
 cmd_action() {
   local pending line id url rc=0 dispatched=0
   pending=$(pending_loops | sort -u)
@@ -1054,6 +1154,8 @@ cmd_action() {
     else
       rc=1
       printf 'actionable: adversarial-review dispatch failed for %s %s\n' "$id" "$url" >&2
+      mark_dispatch_failed "$id" "$url" dispatch-failed \
+        || printf 'actionable: %s stays pending; its failed round could not be recorded\n' "$id" >&2
     fi
   done <<PENDING
 $pending
