@@ -600,7 +600,9 @@ const pi = {
 async function fire(event, payload, ctx) {
   const eventCtx = ctx;
   if (eventCtx?.sessionManager) activeMainSession = eventCtx.sessionManager;
-  for (const handler of piHandlers.get(event) ?? []) await handler(payload, eventCtx);
+  let result;
+  for (const handler of piHandlers.get(event) ?? []) result = await handler(payload, eventCtx);
+  return result;
 }
 function makeOffer(message, projects = [approvedProject], heartbeat = false, eligible = projects.length > 0 || heartbeat) {
   const offer = {
@@ -1311,22 +1313,27 @@ if (!requests()[1].message.content.includes(`[seq ${seq}] task-d: ${decision}`))
 // prompt because the triggered budget for this sequence set is spent.
 await runOf(() => mainEntries.push({ type: "message", message: { role: "assistant", content: "The retry safe-stopped; diagnosis is underway." } }));
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("an unrelated answer advanced the processed marker");
-if (requests().length !== 3) throw new Error(`an unrelated answer did not re-present the outcome: ${requests().length} requests`);
-if (requests()[2].options.deliverAs !== "nextTurn" || requests()[2].options.triggerTurn) {
-  throw new Error(`after the triggered budget the request must ride the next prompt: ${JSON.stringify(requests()[2].options)}`);
-}
-// A quiet settle with the copy still queued does not queue a duplicate.
+if (requests().length !== 2) throw new Error("an exhausted request reserved a Pi queue slot");
 await fire("agent_settled", {});
-if (requests().length !== 3) throw new Error("a duplicate next-turn copy was queued");
-// The captain's next prompt consumes that copy; settling unacknowledged queues one more.
+if (requests().length !== 2) throw new Error("an exhausted request opened another turn");
+// Pi injects the parked request with the next actual prompt, not at idle.
+const deferred = await fire("before_agent_start", { prompt: "ordinary captain question" }, defaultSessionCtx);
+if (!deferred?.message?.content.includes(`[seq ${seq}] task-d: ${decision}`)) throw new Error("the next prompt lost its parked request");
+if (deferred.message.display !== false) throw new Error("passive re-presentation must stay hidden");
 await runOf(() => mainEntries.push({ type: "message", message: { role: "assistant", content: "Captain, shipshape." } }));
-if (requests().length !== 4 || requests()[3].options.deliverAs !== "nextTurn") throw new Error("the outcome stopped being re-presented on later prompts");
+const again = await fire("before_agent_start", { prompt: "\u2063FIRSTMATE_OP: v1 watcher: synthetic ordinary wake" }, defaultSessionCtx);
+if (!again?.message?.content.includes(`[seq ${seq}]`)) throw new Error("the outcome stopped being re-presented on later prompts");
+await runOf();
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("a paraphrase advanced the processed marker");
+writeFileSync(`${home}/state/.lock`, "1\n");
+const foreignPrompt = await fire("before_agent_start", { prompt: "foreign owner" }, defaultSessionCtx);
+if (foreignPrompt?.message) throw new Error("a non-owner injected staged processing content");
+writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
 
 // A session replacement re-presents with a fresh triggered budget.
 await fire("session_shutdown", {});
 await fire("session_start", {}, defaultSessionCtx);
-if (requests().length !== 5 || requests()[4].options.triggerTurn !== true) throw new Error("session start did not re-present the unprocessed outcome with its own turn");
+if (requests().length !== 3 || requests()[2].options.triggerTurn !== true) throw new Error("session start did not re-present the unprocessed outcome with its own turn");
 if (mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === seq).length !== 1) {
   throw new Error("re-presentation duplicated the visible entry");
 }
@@ -1433,6 +1440,51 @@ EOF
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "captain outcomes must be processed through a sequence-bound acknowledgement and re-presented until then: $out"
   pass "a captain outcome opens one sequence-keyed processing turn, survives empty and unrelated answers, is re-presented at run end and session start, and closes only on its acknowledgement"
+}
+
+test_new_captain_outcome_is_not_held_by_an_exhausted_request() {
+  local repo home out status
+  repo="$TMP_ROOT/parked-processing-root"
+  home="$TMP_ROOT/parked-processing-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+await eval(`(async () => { ${process.env.DRIVER_PRELUDE}; globalThis.__t = { fire, dispatch, settle, sentToMain, outcomeScript, defaultSessionCtx }; })()`);
+const { fire, dispatch, settle, sentToMain, outcomeScript, defaultSessionCtx } = globalThis.__t;
+const requests = () => sentToMain.filter((sent) => sent.message.customType === "fm-branch-process" && sent.options.triggerTurn);
+await fire("session_start", {}, defaultSessionCtx);
+const first = Number(outcomeScript(["append", "--task", "task-d", "--verdict", "captain", "--summary", "first action"]));
+await fire("turn_end", {}, defaultSessionCtx);
+await fire("agent_settled", {});
+// Two ignored turns spend the bounded retry budget. No captain input follows.
+for (let i = 0; i < 2; i += 1) {
+  await fire("agent_start", {});
+  await fire("agent_end", {});
+  await fire("agent_settled", {});
+}
+if (requests().length !== 2) throw new Error("the two-attempt bound changed");
+let finish;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finish = resolve; });
+const offer = dispatch("signal: new action");
+if (!offer.accepted) throw new Error("new action was not accepted");
+await settle(() => !!finish, "branch prompt");
+const report = globalThis.__fmSessions[0].options.customTools.find((tool) => tool.name === "fm_branch_report");
+const result = await report.execute("new", { task: "branch-driver", verdict: "captain", summary: "new harmless action" }, undefined, undefined, {});
+if (result.isError) throw new Error(JSON.stringify(result));
+finish();
+await offer.settlement;
+const second = JSON.parse(outcomeScript(["list", "--recent", "1"])).seq;
+if (requests().length !== 3 || !requests().at(-1).message.content.includes(`[seq ${second}]`)) {
+  throw new Error("a new captain outcome was starved behind the exhausted request");
+}
+if (!requests().at(-1).message.content.includes(`[seq ${first}]`)) throw new Error("the older unhandled action was dropped");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "changed membership must wake main without captain input: $out"
+  pass "new captain outcomes restart the budget without dropping older unhandled actions"
 }
 
 test_branch_cache_key_is_per_home_stable() {
@@ -4933,6 +4985,7 @@ test_branch_dispatch_two_stage_filter_and_prefix_contract
 test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery
 test_captain_outcome_is_exactly_once_across_crash_reload_and_unrelated_response
 test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented
+test_new_captain_outcome_is_not_held_by_an_exhausted_request
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback
