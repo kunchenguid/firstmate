@@ -20,8 +20,8 @@
     },
     {
       "when": "executor tasks (one-shot headless work against a scoped GitHub issue, dispatched with fm-spawn.sh --executor).",
-      "use": { "harness": "opencode", "model": "<provider/model>" },
-      "why": "A cheap metered model is enough when the issue is the whole specification and firstmate reviews the real diff before merge. If this runtime sends code to a third-party API, this text is where the captain records which projects are permitted for it; firstmate never infers that permission from a project's name or location."
+      "use": { "harness": "opencode", "model": "<provider/model>", "provider": "your-quota-provider" },
+      "why": "A cheap metered model is enough when the issue is the whole specification and firstmate reviews the real diff before merge. The provider names the quota-axi family typed resolution reads for this multi-provider harness. If this runtime sends code to a third-party API, this text is where the captain records which projects are permitted for it; firstmate never infers that permission from a project's name or location."
     }
   ],
   "default": [

@@ -688,7 +688,7 @@ tests/fm-bearings-snapshot.test.sh 171176
 tests/fm-bootstrap-network-parallel.test.sh 9539
 tests/fm-bootstrap.test.sh 46634
 tests/fm-branch-supervision.test.sh 8915
-tests/fm-brief-executor.test.sh 1200
+tests/fm-brief-executor.test.sh 600
 tests/fm-busy-adapter-wiring.test.sh 27817
 tests/fm-busy-state.test.sh 2990
 tests/fm-calm-claude-mod-live-e2e.test.sh 46
@@ -710,15 +710,15 @@ tests/fm-composer-matrix-live-e2e.test.sh 47
 tests/fm-contributions.test.sh 35676
 tests/fm-control-relaunch.test.sh 137013
 tests/fm-control.test.sh 39524
-tests/fm-crew-state-executor.test.sh 2500
+tests/fm-crew-state-executor.test.sh 1000
 tests/fm-cursor-harness.test.sh 30212
 tests/fm-cursor-primary-live-e2e.test.sh 72
 tests/fm-cursor-primary.test.sh 52269
 tests/fm-daemon.test.sh 27262
 tests/fm-dispatch-resolve.test.sh 4397
 tests/fm-documentation-audiences.test.sh 847
-tests/fm-executor-headless-flags-live-e2e.test.sh 6000
-tests/fm-executor-poll.test.sh 3500
+tests/fm-executor-headless-flags-live-e2e.test.sh 1500
+tests/fm-executor-poll.test.sh 1700
 tests/fm-extension-binding.test.sh 9053
 tests/fm-fleet-snapshot-view.test.sh 17465
 tests/fm-fleet-sync.test.sh 35983
@@ -807,7 +807,7 @@ tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh 46
 tests/fm-sessionstart-nudge.test.sh 66247
 tests/fm-shared-captain-inheritance.test.sh 5687
 tests/fm-spawn-dispatch-profile.test.sh 138433
-tests/fm-spawn-executor.test.sh 15000
+tests/fm-spawn-executor.test.sh 27000
 tests/fm-spawn-pool-base-freshen.test.sh 62249
 tests/fm-spawn-worktree-settle.test.sh 8482
 tests/fm-startup-memory-budget.test.sh 7392
