@@ -1871,12 +1871,12 @@ report_lavish_discovery_failure() {
 }
 
 procevent_reconcile_tick() {
-  local discovery_error status=0
+  local discovery_error fm_home="$FM_HOME" status=0
 
   if ! fm_root_is_secondmate_home "$FM_ROOT" \
     && fm_primary_scope_matches "$FM_ROOT" "$STATE"; then
-    if discovery_error=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-      "$SCRIPT_DIR/fm-procevent-lavish.sh" discover "$FM_HOME" 2>&1 >/dev/null); then
+    if discovery_error=$(FM_HOME="$fm_home" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-procevent-lavish.sh" discover "$fm_home" 2>&1 >/dev/null); then
       rm -f -- "$STATE/.lavish-discovery-failed" || status=1
     else
       report_lavish_discovery_failure "$discovery_error" || status=1
