@@ -260,7 +260,7 @@ fm_backend_name() {
   if fm_backend_detect >/dev/null; then
     detected=$FM_BACKEND_DETECTED
     if [ "$detected" = herdr ]; then
-      echo "NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out." >&2
+      echo "NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the supported herdr backend. Set config/backend or pass --backend tmux to opt out." >&2
     fi
     if [ "$detected" = cmux ]; then
       case "$FM_BACKEND_DETECT_SIGNAL" in
