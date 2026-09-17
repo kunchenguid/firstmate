@@ -144,7 +144,11 @@ fm_lease_live() {
   fm_lease_read "$1" || return 1
   [ -n "$FM_LEASE_ACTOR" ] || return 1
   [ -n "$FM_LEASE_PID" ] || return 1
-  kill -0 "$FM_LEASE_PID" 2>/dev/null || return 1
+  # fm_pid_alive (fm-wake-lib.sh) rejects a zombie pid, unlike a bare
+  # `kill -0`; every caller of this file already sources fm-wake-lib.sh
+  # first, but load it defensively so a direct sourcing still gets that check.
+  fm_lease_lock_helpers
+  fm_pid_alive "$FM_LEASE_PID" || return 1
   lock_pid=$(head -n 1 "$STATE/.lock" 2>/dev/null || true)
   case "$lock_pid" in ''|0|1|*[!0-9]*) return 1 ;; esac
   [ "$FM_LEASE_PID" = "$lock_pid" ]
