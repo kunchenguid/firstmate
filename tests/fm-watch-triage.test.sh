@@ -687,6 +687,10 @@ test_secondmate_status_signal_never_absorbed_classifier() {
 }
 
 # --- benign wakes are absorbed ONLY when the crew is provably working ---------
+# kunchenguid/firstmate#3285 shape 1 (a signal: on a working: progress append)
+# and shape 2 (a turn-ended from a worker polling its own pipeline) are already
+# this absorb, unconditional on current main - the two tests immediately below
+# are that executable proof.
 
 test_provably_working_signal_absorbed() {
   local dir state fakebin out status_file pid

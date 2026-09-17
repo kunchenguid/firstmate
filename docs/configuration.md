@@ -215,6 +215,16 @@ The bound is required rather than cosmetic because churn and pane staleness read
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
 
+## Paused-run-failed absorb (config/paused-run-failed-absorb)
+
+The optional local, gitignored `config/paused-run-failed-absorb` presence flag opts this home into a default-off reconciliation in `bin/fm-crew-state.sh`: a crew's own declared external-wait pause (`paused:`) may outrank a run-step that has since failed or been cancelled out from under it, such as the no-mistakes daemon itself dying mid-run ([kunchenguid/firstmate#3285](https://github.com/kunchenguid/firstmate/issues/3285)).
+With the flag absent, a failed or cancelled run-step stays authoritative exactly as before, matching the needs-decision/blocked reconciliation.
+Opted in, a `paused:` last line that is fresher than `FM_PAUSED_RUN_FAILED_ABSORB_SECS` (default `3600`) outranks a `failed` run-step, so the emitted state reads `paused` instead of `failed`; a stale one, or an invalid bound, surfaces as `failed` exactly as before.
+The bound is measured off the status log's own mtime rather than a new marker file, keeping `fm-crew-state.sh`'s documented read-only/side-effect-free contract - it costs a `stat`, never a write.
+This differs from the needs-decision/blocked reconciliation, which only annotates the detail: a declared pause changes the emitted STATE because the crew never actually stopped waiting, only the run underneath it did, so both `bin/fm-watch.sh`'s stale path and `bin/fm-inactive-reconcile.sh` would otherwise present it as a captain-facing terminal outcome for a crew that is exactly where it said it would be.
+`bin/fm-watch.sh`'s own stale-path pane-aliveness check (`pause_state_class`) remains the backstop for a truly wedged pane either way, since it never trusts a declared pause on liveness alone.
+The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true` and pins `commands.lint` to `bin/fm-lint.sh`, the same owner CI invokes.
@@ -1115,6 +1125,7 @@ FM_WATCH_CYCLE_LOG_KEEP_LINES=1000   # newest complete lifecycle rows considered
 FM_WATCHER_STALE_GRACE=300   # defaults to FM_GUARD_GRACE if set, else the poll-derived grace (docs/turnend-guard.md "Guard grace and the poll cadence"); seconds a live watcher lock may have a stale beacon before re-arm errors
 FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals into one wake
 FM_TURNEND_CHURN_ABSORB_SECS=900   # longest one endpoint's bare turn-ends may be deferred on pane-churn evidence alone; only consulted when config/turnend-churn-absorb is present
+FM_PAUSED_RUN_FAILED_ABSORB_SECS=3600   # longest a declared paused: log line may outrank a failed/cancelled run-step, measured off the status log's own mtime; only consulted when config/paused-run-failed-absorb is present; an invalid value fails closed (surfaces immediately)
 FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'   # captain-relevant status regex; nonterminal progress verbs remain excluded even when their prose matches
 FM_CLASSIFY_PAUSED_VERB=paused     # leading status verb for a declared external wait; excluded from FM_CAPTAIN_RE and distinct from blocked
 FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates, unless that pane's own worker declared a wait that has not elapsed, which takes the FM_PAUSE_RESURFACE_SECS recheck below instead; stale panes whose crew is not provably working surface immediately unless admitted directly to the declared-wait cadence, while a live idle declared wait still surfaces once before that cadence bounds repeats
