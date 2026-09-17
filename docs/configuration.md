@@ -55,6 +55,7 @@ Restore fetches the latest exact PR head, recreates its recorded head branch rat
 tmux and Herdr, whose agent state is verifiable, still prove the restored endpoint's previous agent is dead before launching; only zellij, Orca, and cmux rely on the recorded exact endpoint identity instead.
 Orca exposes no live terminal cwd, so its relaunch instead proves that Orca still binds the recorded worktree id to the recorded path and moves the terminal there explicitly.
 The task record, PR monitor, backlog item, instructions, and branch/head/base reconstruction identity remain after local release, so cleanup never depends on conversation memory.
+Diff review of a released task needs no restore: `bin/fm-review-diff.sh` reads it from the project clone under the contract in its header, and final teardown retires the task's `refs/fm-review/<task-id>/` and `refs/fm-workspace/<task-id>/` refs from that clone.
 
 For pools created before scoped roots existed, `bin/fm-workspace.sh audit-legacy [<root>]` runs Treehouse's global conservative prune classifier as a dry run.
 `bin/fm-workspace.sh reclaim-legacy [<root>]` executes only those verified clean, merged, idle candidates.
