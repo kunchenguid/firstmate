@@ -2996,6 +2996,16 @@ fm_backend_herdr_current_path() {  # <target>
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
 }
 
+fm_backend_herdr_layout_lease_holder_valid() { # <task> <holder>
+  local task=$1 holder=$2 prefix token
+  case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  prefix="fm-$task-"
+  case "$holder" in "$prefix"*) ;; *) return 1 ;; esac
+  token=${holder#"$prefix"}
+  [ "${#token}" = 32 ] || return 1
+  case "$token" in *[!0-9a-f]*) return 1 ;; esac
+}
+
 fm_backend_herdr_layout_attempt_write() { # <file> <version> <attempt> <ownership-mode> <task> <worktree> <lease-holder|-> <session> <workspace> <old-tab> <old-pane> <label> [<new-tab> <new-pane> <resolution> [<restore-tab> <restore-pane>]]
   local file=$1 version=$2 attempt=$3 ownership_mode=$4 task=$5 worktree=$6 lease_holder=$7
   local session=$8 workspace=$9 old_tab=${10} old_pane=${11} label=${12}
@@ -3014,7 +3024,7 @@ fm_backend_herdr_layout_attempt_write() { # <file> <version> <attempt> <ownershi
   done
   case "$ownership_mode" in
     fresh)
-      [ "$lease_holder" = "fm-$task" ] || return 1
+      fm_backend_herdr_layout_lease_holder_valid "$task" "$lease_holder" || return 1
       ;;
     relaunch|secondmate)
       [ "$lease_holder" = - ] || return 1
@@ -3118,7 +3128,9 @@ fm_backend_herdr_layout_attempt_snapshot() { # <file>
   case "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKTREE" in /*) ;; *) return 1 ;; esac
   case "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" in
     fresh)
-      [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LEASE_HOLDER" = "fm-$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_TASK" ] || return 1
+      fm_backend_herdr_layout_lease_holder_valid \
+        "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_TASK" \
+        "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LEASE_HOLDER" || return 1
       ;;
     relaunch|secondmate)
       [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LEASE_HOLDER" = - ] || return 1
@@ -3213,7 +3225,8 @@ fm_backend_herdr_layout_attempt_ownership_policy() { # <expected-mode> <task> <w
     && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKTREE" = "$worktree" ] || return 1
   case "$expected_mode" in
     fresh)
-      [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LEASE_HOLDER" = "fm-$task" ] || return 1
+      fm_backend_herdr_layout_lease_holder_valid "$task" \
+        "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LEASE_HOLDER" || return 1
       printf '%s\n' release-fresh
       ;;
     relaunch|secondmate)

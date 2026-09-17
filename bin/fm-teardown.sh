@@ -958,6 +958,13 @@ fi
 
 WT=$(fm_meta_get "$META" worktree)
 PROJ=$(fm_meta_get "$META" project)
+TREEHOUSE_LEASE_TX="$STATE/$ID.herdr-lease"
+TREEHOUSE_LEASE_TX_PRESENT=0
+TREEHOUSE_LEASE_ALREADY_RETURNED=0
+TREEHOUSE_LEASE_HOLDER=
+TREEHOUSE_LEASE_ID=
+TREEHOUSE_LEASE_WORKTREE=
+TREEHOUSE_LEASE_RESULT=
 T_ORCA=
 [ "$BACKEND" != orca ] || T_ORCA=$T
 if [ "${FM_TEARDOWN_GUARD_DONE:-0}" != 1 ]; then
@@ -2292,7 +2299,40 @@ require_owned_task_worktree_slot() {
 }
 
 teardown_owns_worktree() {
-  [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ]
+  [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ] \
+    && [ "$TREEHOUSE_LEASE_ALREADY_RETURNED" != 1 ]
+}
+
+teardown_treehouse_lease_transaction_prepare() {
+  local canonical_worktree
+  if [ ! -e "$TREEHOUSE_LEASE_TX" ] && [ ! -L "$TREEHOUSE_LEASE_TX" ]; then
+    return 0
+  fi
+  [ "$BACKEND" = herdr ] || return 1
+  fm_treehouse_lease_transaction_snapshot "$TREEHOUSE_LEASE_TX" || return 1
+  TREEHOUSE_LEASE_HOLDER=$(fm_meta_get "$META" treehouse_lease_holder)
+  TREEHOUSE_LEASE_ID=$(fm_meta_get "$META" treehouse_lease_id)
+  [ -n "$TREEHOUSE_LEASE_HOLDER" ] \
+    && [ "$TREEHOUSE_LEASE_HOLDER" = "$FM_TREEHOUSE_LEASE_TX_HOLDER" ] \
+    && [ -n "$TREEHOUSE_LEASE_ID" ] \
+    && [ "$TREEHOUSE_LEASE_ID" = "$FM_TREEHOUSE_LEASE_TX_ID" ] \
+    && [ "$FM_TREEHOUSE_LEASE_TX_TASK" = "$ID" ] || return 1
+  fm_treehouse_lease_transaction_reconcile "$TREEHOUSE_LEASE_TX" \
+    "$ID" "$TREEHOUSE_LEASE_HOLDER" "$PROJ" || return 1
+  canonical_worktree=$WT
+  if [ -e "$WT" ] || [ -L "$WT" ]; then
+    canonical_worktree=$(fm_treehouse_canonical_existing_path "$WT") || return 1
+  fi
+  [ "$FM_TREEHOUSE_LEASE_TX_WORKTREE" = "$canonical_worktree" ] \
+    && [ "$FM_TREEHOUSE_LEASE_TX_ID" = "$TREEHOUSE_LEASE_ID" ] || return 1
+  TREEHOUSE_LEASE_WORKTREE=$FM_TREEHOUSE_LEASE_TX_WORKTREE
+  case "$FM_TREEHOUSE_LEASE_TX_RESULT" in
+    acquired|cleanup) ;;
+    returned) TREEHOUSE_LEASE_ALREADY_RETURNED=1 ;;
+    *) return 1 ;;
+  esac
+  TREEHOUSE_LEASE_RESULT=$FM_TREEHOUSE_LEASE_TX_RESULT
+  TREEHOUSE_LEASE_TX_PRESENT=1
 }
 
 firstmate_home_has_treehouse_slot() {
@@ -3161,7 +3201,17 @@ remove_secondmate_registry_entry() {
 }
 
 require_exclusive_task_worktree_slot || exit 1
+teardown_treehouse_lease_transaction_prepare || {
+  echo "REFUSED: task $ID's structural Herdr Treehouse lease transaction is invalid or contradicts live ownership; nothing was changed" >&2
+  exit 1
+}
 require_owned_task_worktree_slot || exit 1
+if [ "$TREEHOUSE_LEASE_TX_PRESENT" = 1 ] \
+  && [ "$TREEHOUSE_LEASE_ALREADY_RETURNED" != 1 ] \
+  && ! teardown_owns_worktree; then
+  echo "REFUSED: task $ID's live structural Herdr Treehouse lease no longer owns its recorded slot; nothing was changed" >&2
+  exit 1
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
@@ -3437,53 +3487,37 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
-  TREEHOUSE_LEASE_HOLDER=$(fm_meta_get "$META" treehouse_lease_holder)
-  TREEHOUSE_LEASE_ID=$(fm_meta_get "$META" treehouse_lease_id)
-  TREEHOUSE_LEASE_TX="$STATE/$ID.herdr-lease"
-  TREEHOUSE_RETURN_NEEDED=1
-  if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ] && [ -n "$TREEHOUSE_LEASE_HOLDER" ]; then
-    [ -n "$TREEHOUSE_LEASE_ID" ] \
-      && fm_treehouse_lease_transaction_reconcile "$TREEHOUSE_LEASE_TX" \
-        "$ID" "$TREEHOUSE_LEASE_HOLDER" "$PROJ" \
-      && [ "$FM_TREEHOUSE_LEASE_TX_WORKTREE" = "$WT" ] \
-      && [ "$FM_TREEHOUSE_LEASE_TX_ID" = "$TREEHOUSE_LEASE_ID" ] || {
-      echo "error: structural Herdr Treehouse lease identity does not match its durable cleanup transaction; teardown aborted" >&2
-      exit 1
-    }
-    case "$FM_TREEHOUSE_LEASE_TX_RESULT" in
-      acquired)
-        fm_treehouse_lease_transaction_write "$TREEHOUSE_LEASE_TX" cleanup \
-          "$ID" "$TREEHOUSE_LEASE_HOLDER" "$PROJ" "$WT" "$TREEHOUSE_LEASE_ID" || exit 1
-        ;;
-      cleanup) ;;
-      returned) TREEHOUSE_RETURN_NEEDED=0 ;;
-      *)
-        echo "error: structural Herdr Treehouse lease cleanup has no exact acquired identity; teardown aborted" >&2
-        exit 1
-        ;;
-    esac
-  fi
-  if [ "$TREEHOUSE_RETURN_NEEDED" = 1 ]; then
-    teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" \
-      "$TREEHOUSE_LEASE_HOLDER" "$TREEHOUSE_LEASE_ID" || {
-      echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-      exit 1
-    }
-  fi
-  if [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ] && [ -n "$TREEHOUSE_LEASE_HOLDER" ]; then
-    if [ "$TREEHOUSE_RETURN_NEEDED" = 1 ]; then
-      fm_treehouse_lease_transaction_write "$TREEHOUSE_LEASE_TX" returned \
-        "$ID" "$TREEHOUSE_LEASE_HOLDER" "$PROJ" "$WT" "$TREEHOUSE_LEASE_ID" || {
-        echo "error: Treehouse returned the isolated copy but its confirmed-return state could not be persisted" >&2
-        exit 1
-      }
+  if [ "$TREEHOUSE_LEASE_TX_PRESENT" = 1 ]; then
+    if [ "$TREEHOUSE_LEASE_RESULT" = acquired ]; then
+      fm_treehouse_lease_transaction_write "$TREEHOUSE_LEASE_TX" cleanup \
+        "$ID" "$TREEHOUSE_LEASE_HOLDER" "$PROJ" "$WT" "$TREEHOUSE_LEASE_ID" || exit 1
     fi
+  else
+    TREEHOUSE_LEASE_HOLDER=$(fm_meta_get "$META" treehouse_lease_holder)
+    TREEHOUSE_LEASE_ID=$(fm_meta_get "$META" treehouse_lease_id)
+  fi
+  TREEHOUSE_RETURN_WORKTREE=$WT
+  [ "$TREEHOUSE_LEASE_TX_PRESENT" != 1 ] \
+    || TREEHOUSE_RETURN_WORKTREE=$TREEHOUSE_LEASE_WORKTREE
+  teardown_treehouse_return "$TREEHOUSE_RETURN_WORKTREE" "$PROJ" "worktree" "$post_lock_cleanup_check" \
+    "$TREEHOUSE_LEASE_HOLDER" "$TREEHOUSE_LEASE_ID" || {
+    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+    exit 1
+  }
+  if [ "$TREEHOUSE_LEASE_TX_PRESENT" = 1 ]; then
+    fm_treehouse_lease_transaction_write "$TREEHOUSE_LEASE_TX" returned \
+      "$ID" "$TREEHOUSE_LEASE_HOLDER" "$PROJ" "$WT" "$TREEHOUSE_LEASE_ID" || {
+      echo "error: Treehouse returned the isolated copy but its confirmed-return state could not be persisted" >&2
+      exit 1
+    }
     fm_treehouse_lease_transaction_reconcile "$TREEHOUSE_LEASE_TX" \
       "$ID" "$TREEHOUSE_LEASE_HOLDER" "$PROJ" \
       && [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = returned ] || {
       echo "error: Treehouse lease return could not be confirmed against its exact identity" >&2
       exit 1
     }
+    TREEHOUSE_LEASE_RESULT=returned
+    TREEHOUSE_LEASE_ALREADY_RETURNED=1
   fi
   # The slot is back in the pool, so this task's claim on it is spent. Dropping
   # it here - and only after a return that succeeded - keeps a returned slot
@@ -3622,12 +3656,13 @@ else
   fi
 fi
 if [ -e "$STATE/$ID.herdr-lease" ] || [ -L "$STATE/$ID.herdr-lease" ]; then
-  fm_treehouse_lease_transaction_snapshot "$STATE/$ID.herdr-lease" \
+  [ "$TREEHOUSE_LEASE_TX_PRESENT" = 1 ] \
+    && [ "$TREEHOUSE_LEASE_ALREADY_RETURNED" = 1 ] \
+    && fm_treehouse_lease_transaction_snapshot "$STATE/$ID.herdr-lease" \
     && [ "$FM_TREEHOUSE_LEASE_TX_PHASE" = returned ] \
     && [ "$FM_TREEHOUSE_LEASE_TX_TASK" = "$ID" ] \
-    && fm_treehouse_lease_transaction_reconcile "$STATE/$ID.herdr-lease" \
-      "$ID" "$FM_TREEHOUSE_LEASE_TX_HOLDER" "$FM_TREEHOUSE_LEASE_TX_PROJECT" \
-    && [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = returned ] || {
+    && [ "$FM_TREEHOUSE_LEASE_TX_HOLDER" = "$TREEHOUSE_LEASE_HOLDER" ] \
+    && [ "$FM_TREEHOUSE_LEASE_TX_ID" = "$TREEHOUSE_LEASE_ID" ] || {
     echo "error: structural Herdr Treehouse cleanup is not durably confirmed returned; retaining its lease record" >&2
     exit 1
   }
@@ -3645,6 +3680,8 @@ if [ -d "$STATE" ]; then
 fi
 if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
   echo "teardown $ID complete (window $T, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
+elif [ "$TREEHOUSE_LEASE_ALREADY_RETURNED" = 1 ] && [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ]; then
+  echo "teardown $ID complete (window $T, returned worktree $WT)"
 elif teardown_owns_worktree; then
   echo "teardown $ID complete (window $T, worktree $WT)"
 else

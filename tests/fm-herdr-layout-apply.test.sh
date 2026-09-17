@@ -26,6 +26,7 @@ CALLS="$TMP_ROOT/calls.log"
 SERVER_PID=
 MODE=ok
 CLOSE_READBACK=dead
+TEST_LEASE_HOLDER=fm-task-z1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 layout_schema() {
   cat <<'JSON'
@@ -305,7 +306,7 @@ run_layout() {
     lab-structural:w1:p2 w1 w1:t2 w1:p2 "$TMP_ROOT/worktree" \
     '{"EXACT_ENV":"yes","STALE_TEXT":"must-not-run"}' \
     '["/bin/sh","-c","exec pi --model fake --flag literal"]' \
-    "$ATTEMPT" 0123456789abcdef0123456789abcdef fresh task-z1 fm-task-z1
+    "$ATTEMPT" 0123456789abcdef0123456789abcdef fresh task-z1 "$TEST_LEASE_HOLDER"
 }
 
 mkdir -p "$TMP_ROOT/worktree"
@@ -337,7 +338,7 @@ fm_backend_herdr_layout_attempt_commit "$ATTEMPT" \
   || fail "successful layout cleared its correlation label before retiring the attempt"
 rm -f "$LABEL_CLEARED"
 fm_backend_herdr_layout_attempt_write "$ATTEMPT" 5 0123456789abcdef0123456789abcdef \
-  fresh task-z1 "$TMP_ROOT/worktree" fm-task-z1 \
+  fresh task-z1 "$TMP_ROOT/worktree" "$TEST_LEASE_HOLDER" \
   lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef w1:t3 w1:p3
 MODE=rename_failure
 fm_backend_herdr_layout_attempt_commit "$ATTEMPT" \
@@ -362,7 +363,7 @@ rm -f "$ATTEMPT"
 MODE=ok
 if fm_backend_herdr_layout_apply lab-structural:w1:p9 w1 w1:t2 w1:p2 \
   "$TMP_ROOT/worktree" '{}' '["pi"]' "$ATTEMPT" 0123456789abcdef0123456789abcdef \
-  fresh task-z1 fm-task-z1 >/dev/null 2>&1; then
+  fresh task-z1 "$TEST_LEASE_HOLDER" >/dev/null 2>&1; then
   fail "layout adapter accepted a target/pane identity mismatch"
 fi
 pass "layout.apply refuses every protocol, schema, socket, session, container, layout, and foreground identity mismatch before mutation"
@@ -420,7 +421,7 @@ assert_no_grep 'pane close w1:p8' "$CALLS" \
 rm -f "$ATTEMPT" "$CLOSED"
 MODE=focused_cleanup
 fm_backend_herdr_layout_attempt_write "$ATTEMPT" 4 0123456789abcdef0123456789abcdef \
-  fresh task-z1 "$TMP_ROOT/worktree" fm-task-z1 \
+  fresh task-z1 "$TMP_ROOT/worktree" "$TEST_LEASE_HOLDER" \
   lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef
 if fm_backend_herdr_layout_attempt_reconcile "$ATTEMPT" >/dev/null 2>&1; then
   fail "quarantine reconciliation closed the active tab viewed by a foreground client"
@@ -452,7 +453,7 @@ if fm_backend_herdr_projection_cleanup_exact lab-structural w1:p3 '' >/dev/null 
 fi
 rm -f "$CLOSED"
 fm_backend_herdr_layout_attempt_write "$ATTEMPT" 4 0123456789abcdef0123456789abcdef \
-  fresh task-z1 "$TMP_ROOT/worktree" fm-task-z1 \
+  fresh task-z1 "$TMP_ROOT/worktree" "$TEST_LEASE_HOLDER" \
   lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef
 MODE=reconcile
 if fm_backend_herdr_layout_attempt_reconcile "$ATTEMPT" >/dev/null 2>&1; then
@@ -469,7 +470,7 @@ pass "structural cleanup advances only after explicit pane absence"
 
 rm -f "$ATTEMPT" "$OLD_CLOSED"
 fm_backend_herdr_layout_attempt_write "$ATTEMPT" 6 0123456789abcdef0123456789abcdef \
-  fresh task-z1 "$TMP_ROOT/worktree" fm-task-z1 \
+  fresh task-z1 "$TMP_ROOT/worktree" "$TEST_LEASE_HOLDER" \
   lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef \
   w1:t2 w1:p2 not-applied
 MODE=remove_original
@@ -485,7 +486,7 @@ fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
 [ "$(grep -c '^lab-structural|pane close w1:p2$' "$CALLS")" -eq 1 ] \
   || fail "fresh not-applied recovery did not close exactly one original pane"
 fm_backend_herdr_layout_attempt_write "$ATTEMPT" 6 0123456789abcdef0123456789abcdef \
-  fresh task-z1 "$TMP_ROOT/worktree" fm-task-z1 \
+  fresh task-z1 "$TMP_ROOT/worktree" "$TEST_LEASE_HOLDER" \
   lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef \
   w1:t2 w1:p2 not-applied
 fm_backend_herdr_layout_attempt_remove_original "$ATTEMPT" \
@@ -501,7 +502,7 @@ TOKEN=abcdefghijklmnopqrstuv
 WORKSPACE_LABEL=$(fm_backend_herdr_projection_workspace_label task-z1 "$TOKEN")
 printf 'version=1\ntask_id=task-z1\nprojection_id=%s\n' "$TOKEN" > "$JOURNAL"
 fm_backend_herdr_layout_attempt_write "$ATTEMPT" 6 0123456789abcdef0123456789abcdef \
-  fresh task-z1 "$TMP_ROOT/worktree" fm-task-z1 \
+  fresh task-z1 "$TMP_ROOT/worktree" "$TEST_LEASE_HOLDER" \
   lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef \
   w1:t3 w1:p3 removed
 fm_backend_herdr_projection_journal_write_v2 \
@@ -644,7 +645,7 @@ fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" || fail "reconciliation eras
   || fail "successful reconciliation did not publish its safe terminal result"
 rm -f "$ATTEMPT" "$CLOSED"
 fm_backend_herdr_layout_attempt_write "$ATTEMPT" 4 0123456789abcdef0123456789abcdef \
-  fresh task-z1 "$TMP_ROOT/worktree" fm-task-z1 \
+  fresh task-z1 "$TMP_ROOT/worktree" "$TEST_LEASE_HOLDER" \
   lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef
 MODE=reconcile_duplicate
 if fm_backend_herdr_layout_attempt_reconcile "$ATTEMPT" >/dev/null 2>&1; then
@@ -857,7 +858,7 @@ for ownership_mode in fresh relaunch secondmate; do
   lease_holder=-
   expected_policy=retain
   if [ "$ownership_mode" = fresh ]; then
-    lease_holder=fm-task-z1
+    lease_holder=$TEST_LEASE_HOLDER
     expected_policy=release-fresh
   fi
   fm_backend_herdr_layout_attempt_write "$ATTEMPT" 4 0123456789abcdef0123456789abcdef \
@@ -887,7 +888,7 @@ for ownership_mode in fresh relaunch secondmate; do
   rm -f "$ATTEMPT"
 done
 fm_backend_herdr_layout_attempt_write "$ATTEMPT" 4 0123456789abcdef0123456789abcdef \
-  fresh task-z1 "$TMP_ROOT/worktree" fm-task-z1 \
+  fresh task-z1 "$TMP_ROOT/worktree" "$TEST_LEASE_HOLDER" \
   lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef
 fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" || fail "worktree mismatch fixture was unreadable"
 rm -f "$CLOSED"
@@ -1030,14 +1031,14 @@ case "${1:-}" in
       [ "$previous" != --lease-holder ] || holder=$arg
       previous=$arg
     done
-    printf '%s\n' "$holder" > "$state"
+    jq -cn --arg path "${FM_FAKE_STRUCT_WT:?}" --arg id "${FM_FAKE_STRUCT_LEASE_ID:?}" --arg holder "$holder" \
+      '{name:"slot",path:$path,status:"leased",lease_id:$id,lease_holder:$holder}' > "$state"
     jq -cn --arg path "${FM_FAKE_STRUCT_WT:?}" --arg id "${FM_FAKE_STRUCT_LEASE_ID:?}" --arg holder "$holder" \
       '{path:$path,lease_id:$id,lease_holder:$holder,leased_at:"2026-01-01T00:00:00Z",base_branch:"main"}'
     ;;
   status)
     if [ -f "$state" ]; then
-      jq -cn --arg path "${FM_FAKE_STRUCT_WT:?}" --arg id "${FM_FAKE_STRUCT_LEASE_ID:?}" --arg holder "$(cat "$state")" \
-        '[{name:"slot",path:$path,status:"leased",lease_id:$id,lease_holder:$holder}]'
+      jq -cs '.' "$state"
     else
       printf '%s\n' '[]'
     fi
@@ -1049,7 +1050,8 @@ case "${1:-}" in
       [ "$previous" != --if-lease-id ] || lease_id=$arg
       previous=$arg
     done
-    [ "$lease_id" = "${FM_FAKE_STRUCT_LEASE_ID:?}" ]
+    [ -f "$state" ]
+    [ "$lease_id" = "$(jq -r '.lease_id' "$state")" ]
     rm -f "$state"
     ;;
 esac
@@ -1177,42 +1179,83 @@ export FM_FAKE_STRUCT_TREEHOUSE_STATE="$STRUCT_TREEHOUSE_STATE"
 export FM_FAKE_STRUCT_LEASE_ID="$STRUCT_LEASE_ID"
 export FM_FAKE_STRUCT_WT="$STRUCT_WT"
 LEASE_TX="$TMP_ROOT/lease-transaction"
+LEASE_TX_OTHER="$TMP_ROOT/lease-transaction-other"
+STRUCT_PROJECT_LINK="$TMP_ROOT/structural-project-link"
+STRUCT_WT_LINK="$TMP_ROOT/structural-worktree-link"
+ln -s "${STRUCT_PROJECT##*/}" "$STRUCT_PROJECT_LINK"
+ln -s "${STRUCT_WT#$TMP_ROOT/}" "$STRUCT_WT_LINK"
 : > "$STRUCT_TREEHOUSE_LOG"
-rm -f "$STRUCT_TREEHOUSE_STATE" "$LEASE_TX"
-fm_treehouse_lease_transaction_write "$LEASE_TX" intent lease-z1 fm-lease-z1 \
+rm -f "$STRUCT_TREEHOUSE_STATE" "$LEASE_TX" "$LEASE_TX_OTHER"
+if fm_treehouse_lease_transaction_write "$LEASE_TX" intent lease-z1 fm-lease-z1 \
+  "$STRUCT_PROJECT" - - >/dev/null 2>&1; then
+  fail "lease transaction accepted a cross-home-colliding holder"
+fi
+fm_treehouse_lease_transaction_write "$LEASE_TX" intent lease-z1 fm-lease-z1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
   "$STRUCT_PROJECT" - - || fail "lease transaction did not publish holder intent"
 fm_treehouse_lease_transaction_snapshot "$LEASE_TX" \
   && [ "$FM_TREEHOUSE_LEASE_TX_PHASE" = intent ] \
   || fail "lease transaction intent was not durable"
 PATH="$STRUCT_FAKEBIN:$PATH" fm_treehouse_lease_transaction_reconcile \
-  "$LEASE_TX" lease-z1 fm-lease-z1 "$STRUCT_PROJECT" \
+  "$LEASE_TX" lease-z1 fm-lease-z1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb "$STRUCT_PROJECT" \
   && [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = retry ] \
   && [ ! -e "$LEASE_TX" ] \
   || fail "pre-acquisition crash recovery did not retire an unspent intent"
-fm_treehouse_lease_transaction_write "$LEASE_TX" intent lease-z1 fm-lease-z1 \
-  "$STRUCT_PROJECT" - - || fail "lease transaction could not republish holder intent"
-printf '%s\n' fm-lease-z1 > "$STRUCT_TREEHOUSE_STATE"
+jq -cn --arg path "$STRUCT_WT" --arg id 22222222222222222222222222222222 \
+  --arg holder fm-lease-z1-cccccccccccccccccccccccccccccccc \
+  '{name:"slot",path:$path,status:"leased",lease_id:$id,lease_holder:$holder}' > "$STRUCT_TREEHOUSE_STATE"
+fm_treehouse_lease_transaction_write "$LEASE_TX_OTHER" intent lease-z1 \
+  fm-lease-z1-dddddddddddddddddddddddddddddddd "$STRUCT_PROJECT" - - \
+  || fail "second home could not persist its distinct lease intent"
 PATH="$STRUCT_FAKEBIN:$PATH" fm_treehouse_lease_transaction_reconcile \
-  "$LEASE_TX" lease-z1 fm-lease-z1 "$STRUCT_PROJECT" \
+  "$LEASE_TX_OTHER" lease-z1 fm-lease-z1-dddddddddddddddddddddddddddddddd "$STRUCT_PROJECT" \
+  && [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = retry ] \
+  && [ ! -e "$LEASE_TX_OTHER" ] \
+  || fail "same-task intent adopted another home's uniquely held lease"
+rm -f "$STRUCT_TREEHOUSE_STATE"
+fm_treehouse_lease_transaction_write "$LEASE_TX" intent lease-z1 fm-lease-z1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$STRUCT_PROJECT_LINK" - - || fail "lease transaction rejected a symlinked project spelling"
+fm_treehouse_lease_transaction_snapshot "$LEASE_TX" \
+  && [ "$FM_TREEHOUSE_LEASE_TX_PROJECT" = "$STRUCT_PROJECT" ] \
+  || fail "lease transaction did not persist canonical project identity"
+jq -cn --arg path "$STRUCT_WT_LINK" --arg id "$STRUCT_LEASE_ID" \
+  --arg holder fm-lease-z1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  '{name:"slot",path:$path,status:"leased",lease_id:$id,lease_holder:$holder}' > "$STRUCT_TREEHOUSE_STATE"
+PATH="$STRUCT_FAKEBIN:$PATH" fm_treehouse_lease_transaction_reconcile \
+  "$LEASE_TX" lease-z1 fm-lease-z1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb "$STRUCT_PROJECT_LINK" \
   && [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = acquired ] \
   && [ "$FM_TREEHOUSE_LEASE_TX_WORKTREE" = "$STRUCT_WT" ] \
   && [ "$FM_TREEHOUSE_LEASE_TX_ID" = "$STRUCT_LEASE_ID" ] \
-  || fail "post-acquisition crash recovery did not bind the authoritative lease identity"
-fm_treehouse_lease_transaction_write "$LEASE_TX" cleanup lease-z1 fm-lease-z1 \
-  "$STRUCT_PROJECT" "$STRUCT_WT" "$STRUCT_LEASE_ID" \
+  || fail "post-acquisition recovery did not bind canonical project and worktree identities"
+fm_treehouse_lease_transaction_write "$LEASE_TX" cleanup lease-z1 fm-lease-z1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  "$STRUCT_PROJECT_LINK" "$STRUCT_WT_LINK" "$STRUCT_LEASE_ID" \
   || fail "lease transaction did not persist cleanup intent"
-rm -f "$STRUCT_TREEHOUSE_STATE"
+printf 'task=other-z1\nhome=%s\n' "$TMP_ROOT/other-home" > "$STRUCT_POOL/slot/.fm-slot-owner"
+jq -cn --arg path "$STRUCT_WT" --arg id 33333333333333333333333333333333 \
+  --arg holder fm-other-z1-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+  '{name:"slot",path:$path,status:"leased",lease_id:$id,lease_holder:$holder}' > "$STRUCT_TREEHOUSE_STATE"
 PATH="$STRUCT_FAKEBIN:$PATH" fm_treehouse_lease_transaction_reconcile \
-  "$LEASE_TX" lease-z1 fm-lease-z1 "$STRUCT_PROJECT" \
+  "$LEASE_TX" lease-z1 fm-lease-z1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb "$STRUCT_PROJECT_LINK" \
   && [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = returned ] \
   && [ "$FM_TREEHOUSE_LEASE_TX_PHASE" = returned ] \
-  || fail "post-return crash recovery did not persist confirmed return"
+  || fail "post-return crash recovery was blocked by slot reassignment"
 PATH="$STRUCT_FAKEBIN:$PATH" fm_treehouse_lease_transaction_reconcile \
-  "$LEASE_TX" lease-z1 fm-lease-z1 "$STRUCT_PROJECT" \
+  "$LEASE_TX" lease-z1 fm-lease-z1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb "$STRUCT_PROJECT" \
   && [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = returned ] \
   || fail "confirmed lease return was not idempotent"
-rm -f "$LEASE_TX"
-pass "Treehouse lease transactions recover every acquisition and return transition"
+RETURNED_HISTORY="$TMP_ROOT/returned-history"
+mkdir -p "$RETURNED_HISTORY"
+fm_treehouse_lease_transaction_write "$LEASE_TX_OTHER" cleanup history-z1 \
+  fm-history-z1-ffffffffffffffffffffffffffffffff "$STRUCT_PROJECT_LINK" \
+  "$RETURNED_HISTORY" 44444444444444444444444444444444 \
+  || fail "cleanup history could not be persisted"
+rmdir "$RETURNED_HISTORY"
+fm_treehouse_lease_transaction_snapshot "$LEASE_TX_OTHER" \
+  && PATH="$STRUCT_FAKEBIN:$PATH" fm_treehouse_lease_transaction_reconcile \
+    "$LEASE_TX_OTHER" history-z1 fm-history-z1-ffffffffffffffffffffffffffffffff "$STRUCT_PROJECT_LINK" \
+  && [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = returned ] \
+  || fail "pruned post-return worktree history became unreadable"
+rm -f "$LEASE_TX" "$LEASE_TX_OTHER" "$STRUCT_TREEHOUSE_STATE" "$STRUCT_POOL/slot/.fm-slot-owner"
+pass "Treehouse lease transactions isolate homes and recover canonical crash states"
 : > "$STRUCT_CLOSE_LOG"
 rm -f "$STRUCT_TASK_CREATED" "$STRUCT_TASK_LABEL" "$STRUCT_CLOSED" "$STRUCT_TREEHOUSE_STATE" "$APPLIED" "$REQUEST"
 fm_test_spawn_brief "$STRUCT_HOME" preapply-z1 "Clean a flat structural pane after pre-apply refusal."
@@ -1300,7 +1343,7 @@ fm_backend_herdr_layout_attempt_snapshot "$HELD_ATTEMPT" \
   && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = not-applied ] \
   || fail "focused pre-apply refusal did not preserve its non-mutating recovery state"
 [ -f "$STRUCT_TREEHOUSE_STATE" ] \
-  && [ "$(cat "$STRUCT_TREEHOUSE_STATE")" = fm-preapply-held-z1 ] \
+  && [ "$(jq -r '.lease_holder' "$STRUCT_TREEHOUSE_STATE")" = "$(sed -n 's/^treehouse_lease_holder=//p' "$STRUCT_HOME/state/preapply-held-z1.meta")" ] \
   || fail "focused pre-apply refusal lost its exact live Treehouse lease"
 fm_treehouse_lease_transaction_snapshot "$STRUCT_HOME/state/preapply-held-z1.herdr-lease" \
   && [ "$FM_TREEHOUSE_LEASE_TX_PHASE" = acquired ] \

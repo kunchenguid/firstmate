@@ -91,7 +91,7 @@ The local client exposes no general Herdr control surface and accepts only that 
 It binds a random request id, rejects protocol errors and mismatched responses, and returns only replacement ids that Firstmate re-reads from the same named session.
 
 Immediately before the request, Firstmate publishes `state/<id>.herdr-launch` with a random non-sensitive attempt identity, the exact old session, workspace, tab, and pane, and one validated ownership mode: fresh allocation, ordinary relaunch, or persistent secondmate.
-A fresh record binds the exact acquired `fm-<id>` lease; relaunch and secondmate records carry no lease-return authority.
+A fresh record binds the exact acquired `fm-<id>-<transaction>` lease; relaunch and secondmate records carry no lease-return authority.
 A response advances that record to replacement ids only after the named session independently confirms their workspace, tab, pane, and random launch label. A mismatched response is never used as a close target; cleanup reconciles only the random launch label.
 A timeout, malformed response, wrong response id, helper crash, or other uncertain post-send result preserves the task record, lease, local work, and attempt record, and every retry refuses until the exact named session proves either that the old pane remains or that one random-label-correlated replacement was safely reconciled.
 Only fresh allocation recovery can return its proven lease and remove its provisional task record.
@@ -104,7 +104,7 @@ The worker counts as launched only after the replacement pane reports the exact 
 Only then do the task record and any presentation journal advance from the old tab and pane ids to the returned replacement ids.
 A failure after replacement targets the returned pane for exact cleanup and never reports spawn success.
 If backlog ownership cannot commit after launch, abort cleanup closes and confirms that exact live endpoint before removing its task record or returning its holder-bound Treehouse lease; an unconfirmed close preserves all three for reconciliation.
-Normal teardown and pre-launch aborts return the durable Treehouse lease only when its exact immutable lease id, `fm-<id>` holder, project, and worktree all match the durable transaction.
+Normal teardown and pre-launch aborts return the durable Treehouse lease only when its exact immutable lease id, transaction-unique holder, canonical project, and canonical worktree all match the durable transaction.
 Generic Enter behavior for post-launch interaction is unchanged.
 
 This structural path applies only to the exact `pi` harness.
