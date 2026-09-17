@@ -26,6 +26,31 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Project-local homes, the launcher, and the projects root
+
+A Firstmate home is the directory holding `data/`, `state/`, `config/`, and the `.tasks.toml` backlog config; the tracked code root supplies `AGENTS.md`, `bin/`, skills, and docs.
+The two are independent: `FM_HOME` selects the home and `FM_ROOT_OVERRIDE` (or the script's own location) selects the code root, so one global install can serve many homes.
+
+The `firstmate` launcher (`bin/firstmate`, intended on `PATH`) resolves the home for a primary session, then `cd`s to the install root and execs the harness so instructions, hooks, and extensions load exactly as they do from a checkout.
+Home resolution order: an explicit `FM_HOME` always wins; otherwise the nearest `.firstmate/` ancestor of the caller's directory (a nested `.firstmate/` shadows an outer org home); otherwise, outside any git repository or with `--global`, the global home (`$HOME/.firstmate` when it exists, else the install root); a directory inside a git repository with no `.firstmate/` ancestor refuses to guess and names the init commands.
+The caller's directory is exported as `FM_LAUNCH_DIR` and printed by the session-start digest.
+The harness is `--harness <name>`, then the home's `config/primary-harness` (one token), then `claude`; remaining arguments pass through to the harness.
+
+`firstmate init --org` scaffolds `.firstmate/` at the current directory (an org root), and `firstmate init` inside a git repository scaffolds a per-project home at that repo's root and registers the repository itself.
+Both write `config/projects-root` (below), a `.tasks.toml` backlog config, and a whitelist-style `.firstmate/.gitignore`, and add the home to the enclosing repository's `.git/info/exclude` when one exists.
+`.firstmate/` is private by default; to share a config item with a team, commit it by appending an exact-path negation such as `!config/crew-harness` to `.firstmate/.gitignore` and removing the parent-level ignore - `data/` and `state/` are never shared.
+
+`config/projects-root` holds one line naming the directory whose children are this home's projects: a relative path resolves against the home, and `firstmate init` writes `..` so an org home's projects are the org root's sibling repositories.
+Resolution order for the effective projects root is `FM_PROJECTS_OVERRIDE`, then `config/projects-root`, then `$FM_HOME/projects`; `bin/fm-projects-lib.sh` owns the contract and every script that computes a projects root consumes it.
+A malformed `config/projects-root` fails loudly rather than falling back.
+
+Discovery is not authority: sibling repositories under a `config/projects-root` home are discoverable for intake and registry rebuild (`bin/fm-projects.sh discover`), but only registered `data/projects.md` entries and `data/project-paths.json` aliases are eligible for refresh, spawn, seeding, or landing.
+`data/project-paths.json` is a flat JSON object `{"<alias>": "<absolute-path>"}` registering a project that lives outside the projects root.
+The central resolver maps a project argument to a path in this order: a `projects/<name>` argument prefers the legacy `$FM_HOME/projects/<name>` clone then resolves `<name>` as an alias; a bare alias resolves through `data/project-paths.json`, then `<projects-root>/<alias>`, then `$FM_HOME/projects/<alias>`; any other path passes through unchanged.
+Task metadata records `project_name=` (the stable alias or basename) beside `project=` (the absolute path), and `bin/fm-captain-hold.sh` derives a held task's repo from it.
+A whole-fleet refresh touches only registered projects in a `config/projects-root` home and keeps the legacy direct-children glob everywhere else; the refresh itself is unchanged - fetch, fast-forward only when clean and on the default branch, and loud `STUCK:` reports otherwise.
+Homes without `config/projects-root` behave exactly as before, and `FM_HOME` semantics are unchanged.
+
 ## Calm preference (config/calm)
 
 The Pi Calm extension and the Claude Code Calm mod share the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, so one `/calm` choice applies on either harness.

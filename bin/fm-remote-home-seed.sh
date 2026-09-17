@@ -28,8 +28,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-projects-lib.sh
+. "$SCRIPT_DIR/fm-projects-lib.sh"
 REG="$DATA/secondmates.md"
 MAX_MANIFEST_BYTES=1048576
 
@@ -172,8 +174,11 @@ EOF
   # An origin named on the command line is authoritative. Reading one from a
   # clone this home happens to have is only a convenience for the already-cloned
   # case; it is never a reason to create one.
-  if [ -z "$ORIGIN" ] && [ -d "$PROJECTS/$project/.git" ]; then
-    ORIGIN=$(git -C "$PROJECTS/$project" remote get-url origin 2>/dev/null || true)
+  if [ -z "$ORIGIN" ]; then
+    PROJECT_DIR=$(fm_project_resolve "$FM_HOME" "$CONFIG" "$DATA" "$project" || true)
+    if [ -n "$PROJECT_DIR" ] && [ -d "$PROJECT_DIR/.git" ]; then
+      ORIGIN=$(git -C "$PROJECT_DIR" remote get-url origin 2>/dev/null || true)
+    fi
   fi
   [ -n "$ORIGIN" ] \
     || die "project $project has no origin; pass $project=<origin-url> so the remote host can clone it"

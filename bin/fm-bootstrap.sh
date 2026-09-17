@@ -163,10 +163,12 @@ unset TYPESAFE_API_KEY
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
-PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+# shellcheck source=bin/fm-projects-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-projects-lib.sh"
+PROJECTS=$(fm_projects_root "$FM_HOME" "$CONFIG") || exit 1
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh disable=SC1091
@@ -280,16 +282,14 @@ secondmate_note_respawned() {  # <id>
 fleet_sync_origin_backed_project_count() {
   local count proj
   count=0
-  [ -d "$PROJECTS" ] || { echo 0; return 0; }
-  for proj in "$PROJECTS"/*; do
+  while IFS= read -r proj; do
     [ -d "$proj" ] || continue
     git -C "$proj" rev-parse --git-dir >/dev/null 2>&1 || continue
     git -C "$proj" remote get-url origin >/dev/null 2>&1 || continue
     count=$((count + 1))
-  done
+  done < <(fm_project_sync_candidates "$FM_HOME" "$CONFIG" "$DATA")
   echo "$count"
 }
-
 fleet_sync_bootstrap_timeout() {
   local count timeout
   if [ -n "${FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT:-}" ]; then

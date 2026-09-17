@@ -2,7 +2,7 @@
 # Provision and route persistent secondmate homes.
 #
 # Usage:
-#   fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}
+#   fm-home-seed.sh <id> <home|-> {<project>...|--no-projects} [--projects-root <dir>]
 #       Provision <home> as an isolated firstmate home. If <home> is "-", acquire
 #       a fresh firstmate worktree via "treehouse get --lease", which durably
 #       leases the worktree under the secondmate <id> so the home survives with
@@ -26,6 +26,16 @@
 #       when no filled charter brief exists. Set FM_SECONDMATE_SCOPE='<scope>'
 #       to override the registry routing scope. Otherwise the registry summary
 #       and scope are derived from the filled charter brief.
+#       --projects-root <dir> seeds an org-shaped home: the child's projects
+#       live as siblings under <dir> (recorded in the child's
+#       config/projects-root, absolute or relative to the child home), no
+#       projects/ directory is required or created, each named project must
+#       already exist as a sibling git repo and is REGISTERED into the child's
+#       data/projects.md instead of cloned, and no-mistakes initialization is
+#       left to that project's own tasks. A preexisting child
+#       config/projects-root selects the same mode and must agree with the
+#       flag. Discovery is not authority: only the named projects are
+#       registered.
 #   fm-home-seed.sh validate
 #       Refuse records that operational consumers cannot parse, unavailable or
 #       unsafe registry files when present, non-absolute or unresolvable homes,
@@ -36,11 +46,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 REG="$DATA/secondmates.md"
 SUB_HOME_MARKER=".fm-secondmate-home"
 SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
+# shellcheck source=bin/fm-projects-lib.sh
+. "$SCRIPT_DIR/fm-projects-lib.sh"
+PROJECTS=$(fm_projects_root "$FM_HOME" "$CONFIG") || exit 1
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
@@ -51,7 +64,7 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
 usage() {
-  echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
+  echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects} [--projects-root <dir>]" >&2
   echo "       fm-home-seed.sh validate" >&2
 }
 
@@ -276,10 +289,14 @@ validate_operational_dir() {
     return 1
   fi
 }
-
 validate_operational_dirs() {
   local home=$1 name
   for name in data state config projects; do
+    # An org-shaped home holds no projects/ directory; its projects live as
+    # siblings under its config/projects-root.
+    if [ "$name" = projects ] && fm_projects_root_is_custom "$home/config"; then
+      continue
+    fi
     validate_operational_dir "$home" "$name" || return 1
   done
 }
@@ -456,9 +473,39 @@ EOF
   return 1
 }
 
+# seed_project_source <project>: print the source directory for a seed
+# project. Ordinary seeds clone from this home's projects root; an org-shaped
+# seed (SEED_PROJECTS_ROOT set) registers the child's sibling instead.
+seed_project_source() {
+  local project=$1
+  if [ -n "${SEED_PROJECTS_ROOT:-}" ]; then
+    printf '%s/%s\n' "$SEED_PROJECTS_ROOT" "$project"
+  else
+    printf '%s/%s\n' "$PROJECTS" "$project"
+  fi
+}
+
+# register_org_project <project>: the org-mode counterpart of clone_project.
+# The sibling must already exist as the root of its own git work tree; nothing
+# is cloned, created, or initialized - registration in the child's
+# data/projects.md (sync_project_registry) is the whole operation.
+register_org_project() {
+  local project=$1 src top
+  src=$(seed_project_source "$project")
+  [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
+  top=$(git -C "$src" rev-parse --show-toplevel 2>/dev/null) || {
+    echo "error: project $project at $src is not a git repo" >&2
+    return 1
+  }
+  [ "$top" = "$(cd "$src" && pwd -P)" ] || {
+    echo "error: project $project at $src is not the root of its own git work tree" >&2
+    return 1
+  }
+}
+
 clone_project() {
   local project=$1 home=$2 src dst url dst_url mode
-  src="$PROJECTS/$project"
+  src=$(seed_project_source "$project")
   dst=$(validate_project_destination "$home" "$project") || return 1
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
@@ -486,7 +533,7 @@ EOF
 
 validate_seed_project() {
   local project=$1 src mode url
-  src="$PROJECTS/$project"
+  src=$(seed_project_source "$project")
   [ -d "$src" ] || { echo "error: project $project not found at $src" >&2; return 1; }
   git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "error: project $project is not a git repo" >&2; return 1; }
   read -r mode _ <<EOF
@@ -641,6 +688,9 @@ seed_rollback() {
     elif [ "$SEED_HOME_CREATED" = 1 ]; then
       seed_remove_created_home "$SEED_HOME"
     else
+      if [ "${SEED_PROJECTS_ROOT_CREATED:-0}" = 1 ]; then
+        rm -f -- "$SEED_HOME/config/projects-root" 2>/dev/null || true
+      fi
       if [ -n "${SEED_CREATED_PROJECTS_FILE:-}" ] && [ -f "$SEED_CREATED_PROJECTS_FILE" ]; then
         while IFS= read -r project_path; do
           [ -n "$project_path" ] || continue
@@ -800,17 +850,32 @@ refuse_projectful_projectless_charter() {
 
 seed_home() {
   local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope
-  local no_projects=0 arg
+  local no_projects=0 arg projects_root_arg=
   local filtered=()
   shift 2
   # A deliberate --no-projects signal (anywhere in the project position) seeds a
   # project-less home; an accidental omission with no signal still fails loudly.
-  for arg in "$@"; do
-    if [ "$arg" = "--no-projects" ]; then
-      no_projects=1
-    else
-      filtered+=("$arg")
-    fi
+  # --projects-root <dir> (or =<dir>) seeds an org-shaped home whose projects
+  # are preexisting siblings under <dir>, registered rather than cloned.
+  while [ $# -gt 0 ]; do
+    arg=$1
+    shift
+    case "$arg" in
+      --no-projects)
+        no_projects=1
+        ;;
+      --projects-root)
+        [ $# -ge 1 ] || { echo "error: --projects-root requires a directory" >&2; return 1; }
+        projects_root_arg=$1
+        shift
+        ;;
+      --projects-root=*)
+        projects_root_arg=${arg#--projects-root=}
+        ;;
+      *)
+        filtered+=("$arg")
+        ;;
+    esac
   done
   if [ "${#filtered[@]}" -gt 0 ]; then
     set -- "${filtered[@]}"
@@ -821,6 +886,35 @@ seed_home() {
     [ $# -eq 0 ] || { echo "error: --no-projects cannot be combined with a project list" >&2; return 1; }
   else
     [ $# -gt 0 ] || { echo "error: secondmate needs at least one project, or --no-projects for a project-less home" >&2; return 1; }
+  fi
+  [ -z "$projects_root_arg" ] || [ "$no_projects" -eq 0 ] || {
+    echo "error: --projects-root cannot be combined with --no-projects" >&2
+    return 1
+  }
+
+  # Resolve the org-mode projects root before project validation: the flag
+  # wins, then a preexisting child config/projects-root. The flag's relative
+  # value resolves against the caller's cwd here and is recorded verbatim for
+  # the child (fm-projects-lib.sh resolves it against the child home).
+  SEED_PROJECTS_ROOT=
+  if [ -n "$projects_root_arg" ]; then
+    case "$projects_root_arg" in
+      /*) SEED_PROJECTS_ROOT=$projects_root_arg ;;
+      *) SEED_PROJECTS_ROOT=$(cd "$projects_root_arg" 2>/dev/null && pwd -P) || {
+           echo "error: --projects-root directory cannot be resolved: $projects_root_arg" >&2
+           return 1
+         } ;;
+    esac
+    [ -d "$SEED_PROJECTS_ROOT" ] || {
+      echo "error: --projects-root is not a directory: $projects_root_arg" >&2
+      return 1
+    }
+  elif [ "$requested_home" != "-" ] && [ -f "$requested_home/config/projects-root" ]; then
+    SEED_PROJECTS_ROOT=$(fm_projects_root "$requested_home" "$requested_home/config") || return 1
+    [ -d "$SEED_PROJECTS_ROOT" ] || {
+      echo "error: $requested_home/config/projects-root does not resolve to a directory: $SEED_PROJECTS_ROOT" >&2
+      return 1
+    }
   fi
 
   mkdir -p "$STATE" || return 1
@@ -851,6 +945,7 @@ seed_home() {
   SEED_SUB_REG_EXISTED=0
   SEED_CHARTER_EXISTED=0
   SEED_MARKER_EXISTED=0
+  SEED_PROJECTS_ROOT_CREATED=0
   if [ -f "$REG" ]; then
     SEED_PARENT_REG_EXISTED=1
     cp "$REG" "$SEED_BACKUP_DIR/parent-secondmates.md"
@@ -872,6 +967,22 @@ seed_home() {
   SEED_HOME="$home"
   validate_registry_home_text "$home" || return 1
   validate_home_assignment "$id" "$home"
+  if [ -n "$projects_root_arg" ]; then
+    mkdir -p "$home/config"
+    if [ -f "$home/config/projects-root" ]; then
+      # Compare resolved roots, not raw text: the file may hold a relative
+      # path that names the same directory as the flag.
+      local existing_root
+      existing_root=$(fm_projects_root "$home" "$home/config") || return 1
+      [ "$existing_root" = "$SEED_PROJECTS_ROOT" ] || {
+        echo "error: $home/config/projects-root already names $existing_root, not $SEED_PROJECTS_ROOT" >&2
+        return 1
+      }
+    else
+      printf '%s\n' "$SEED_PROJECTS_ROOT" > "$home/config/projects-root"
+      SEED_PROJECTS_ROOT_CREATED=1
+    fi
+  fi
   validate_operational_dirs "$home" || return 1
   validate_seed_leaf_files "$home" || return 1
   validate_existing_parent_binding "$home" || return 1
@@ -881,7 +992,10 @@ seed_home() {
       refuse_projectful_projectless_charter "$id" "$SEED_PARENT_BRIEF" || return 1
     fi
   fi
-  mkdir -p "$DATA" "$home/data" "$home/state" "$home/config" "$home/projects"
+  mkdir -p "$DATA" "$home/data" "$home/state" "$home/config"
+  if [ -z "$SEED_PROJECTS_ROOT" ]; then
+    mkdir -p "$home/projects"
+  fi
   if [ -f "$home/data/projects.md" ]; then
     SEED_SUB_REG_EXISTED=1
     cp "$home/data/projects.md" "$SEED_BACKUP_DIR/sub-projects.md"
@@ -928,20 +1042,28 @@ seed_home() {
     return 1
   }
 
-  for project in "$@"; do
-    project_dst=$(validate_project_destination "$home" "$project") || return 1
-    [ -e "$project_dst" ] || printf '%s\n' "$project_dst" >> "$SEED_CREATED_PROJECTS_FILE"
-    clone_project "$project" "$home"
-  done
-  sync_project_registry "$home" "$@"
-  for project in "$@"; do
-    project_dst=$(validate_project_destination "$home" "$project") || return 1
-    if seed_project_was_created "$project_dst"; then
-      initialize_no_mistakes_project "$home" "$project" 1
-    else
-      initialize_no_mistakes_project "$home" "$project" 0
-    fi
-  done
+  if [ -n "$SEED_PROJECTS_ROOT" ]; then
+    # Org-shaped seed: siblings are registered, never cloned or initialized.
+    for project in "$@"; do
+      register_org_project "$project"
+    done
+    sync_project_registry "$home" "$@"
+  else
+    for project in "$@"; do
+      project_dst=$(validate_project_destination "$home" "$project") || return 1
+      [ -e "$project_dst" ] || printf '%s\n' "$project_dst" >> "$SEED_CREATED_PROJECTS_FILE"
+      clone_project "$project" "$home"
+    done
+    sync_project_registry "$home" "$@"
+    for project in "$@"; do
+      project_dst=$(validate_project_destination "$home" "$project") || return 1
+      if seed_project_was_created "$project_dst"; then
+        initialize_no_mistakes_project "$home" "$project" 1
+      else
+        initialize_no_mistakes_project "$home" "$project" 0
+      fi
+    done
+  fi
 
   cp "$SEED_PARENT_BRIEF" "$home/data/charter.md"
 

@@ -54,6 +54,8 @@ Set `FM_SECONDMATE_CHARTER='<charter>'` to fill the charter text and `FM_SECONDM
 If you scaffold without `FM_SECONDMATE_CHARTER`, replace the `{TASK}` placeholder before seeding.
 Pass `--no-projects` instead of a project list to scaffold a project-less charter for a domain whose subject is the firstmate repo itself, whose home is a firstmate worktree and whose crews take pooled worktrees of the same repo.
 `--no-projects` is mutually exclusive with a project list, and omitting both still fails loudly, so an accidental omission is never mistaken for a deliberate project-less seed.
+`--projects-root <dir>` seeds an org-shaped home whose projects are the preexisting sibling repositories under `<dir>`: the seed writes `config/projects-root` (relative to the home), skips the `projects/` operational-directory requirement, and registers each named sibling in `data/projects.md` instead of cloning it - a named project that is not a sibling directory under that root fails loudly.
+It is mutually exclusive with `--no-projects`, and a secondmate home may be org-shaped only when the captain's org layout genuinely scopes to that secondmate's domain.
 Re-seeding a populated home as project-less is refused non-destructively when the home contains project clones or `data/projects.md` entries.
 Retire or clean that home first, and re-scaffold a stale project-bearing charter with `--no-projects` before seeding.
 Keep custom charter text focused on the persistent responsibility, available project clones, and genuinely domain-specific hard rules.
@@ -63,7 +65,7 @@ Preserve the generated charter sections unless the domain genuinely needs a hard
 Provision a local persistent home and registry entry after the charter is filled:
 
 ```sh
-bin/fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}
+bin/fm-home-seed.sh <id> <home|-> {<project>...|--no-projects} [--projects-root <dir>]
 ```
 
 Provision a whole remote home through its configured SSH host with:

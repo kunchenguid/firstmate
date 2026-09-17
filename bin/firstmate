@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+# firstmate - project-local launcher and home scaffold.
+#
+# Usage:
+#   firstmate [--global] [--harness <name>] [harness args...]
+#       Resolve this launch's Firstmate home, then exec the harness from the
+#       install root (the git clone this script lives in):
+#         1. explicit $FM_HOME always wins;
+#         2. the nearest .firstmate/ ancestor of the caller's cwd;
+#         3. --global, or a cwd outside any git repository, falls back to the
+#            global home ($HOME/.firstmate when it exists, else the install
+#            root - today's unset-FM_HOME semantics);
+#         4. a cwd inside a git repository with no .firstmate/ ancestor
+#            refuses to guess and names `firstmate init` (per-project home at
+#            the repo root), `firstmate init --org` (org home at an org root),
+#            and `firstmate --global`.
+#       The harness runs with cwd = install root so AGENTS.md, hooks, and
+#       extensions load exactly as they do from a checkout today; the caller's
+#       directory is preserved in FM_LAUNCH_DIR and printed by the
+#       session-start digest. Harness selection: --harness, then the resolved
+#       home's config/primary-harness, then claude. Remaining args pass
+#       through to the harness verbatim.
+#   firstmate init [--org]
+#       Scaffold a .firstmate/ home. --org creates it at the current directory
+#       (an org root whose sibling directories are the projects); without
+#       --org it must run inside a git repository and creates a per-project
+#       home at that repo's root, registering the repo itself. Both write
+#       config/projects-root=.., a .tasks.toml backlog config, and a
+#       whitelist-style .firstmate/.gitignore, and add the home to the
+#       enclosing repository's .git/info/exclude when one exists.
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+usage() {
+  cat >&2 <<'EOF'
+usage: firstmate [--global] [--harness <name>] [harness args...]
+       firstmate init [--org]
+EOF
+}
+
+die() { echo "firstmate: $*" >&2; exit 1; }
+
+# nearest_firstmate_home <dir>: print the nearest .firstmate/ ancestor, or nothing.
+nearest_firstmate_home() {
+  local dir=$1
+  dir=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
+  while :; do
+    if [ -d "$dir/.firstmate" ]; then
+      printf '%s\n' "$dir/.firstmate"
+      return 0
+    fi
+    [ "$dir" = "/" ] && return 1
+    dir=$(dirname "$dir")
+  done
+}
+
+# repo_top <dir>: print the enclosing git worktree root, or nothing.
+repo_top() {
+  git -C "$1" rev-parse --show-toplevel 2>/dev/null
+}
+
+# exclude_firstmate_dir <home-dir>: add the home to the enclosing repo's
+# .git/info/exclude (local-only, never committed) when one exists.
+exclude_firstmate_dir() {
+  local home=$1 top rel pattern exclude
+  top=$(repo_top "$home") || return 0
+  rel=${home#"$top"/}
+  case "$rel" in
+    "$home") return 0 ;; # home is not under the repo top
+  esac
+  pattern="/$rel/"
+  exclude="$top/.git/info/exclude"
+  [ -f "$exclude" ] || { mkdir -p "$(dirname "$exclude")" && : > "$exclude"; }
+  grep -qxF "$pattern" "$exclude" 2>/dev/null && return 0
+  printf '%s\n' "$pattern" >> "$exclude"
+  echo "firstmate: added $pattern to $exclude"
+}
+
+# scaffold_home <dir> [--register-self]: create the .firstmate/ layout.
+scaffold_home() {
+  local home=$1 register=${2:-}
+  mkdir -p "$home/data" "$home/state" "$home/config"
+  printf '..\n' > "$home/config/projects-root"
+  if [ -f "$INSTALL_ROOT/.tasks.toml" ]; then
+    cp "$INSTALL_ROOT/.tasks.toml" "$home/.tasks.toml"
+  else
+    printf 'backend = "markdown"\n\n[markdown]\npath = "data/backlog.md"\narchive = "data/done-archive.md"\ndone_keep = 10\n' > "$home/.tasks.toml"
+  fi
+  cat > "$home/.gitignore" <<'EOF'
+# .firstmate/ is private operational state and stays uncommitted by default.
+# To share a config item with the team, append a negation for its exact path
+# below the config/* line, e.g.:
+#   !config/crew-harness
+# Keep data/, state/, and every non-whitelisted config item private.
+*
+!.gitignore
+!config/
+config/*
+# Whitelist shared config items below this line, one exact path per line.
+EOF
+  if [ "$register" = "--register-self" ]; then
+    local top name mode
+    top=$(repo_top "$home") || die "internal: --register-self outside a repo"
+    name=$(basename "$top")
+    if git -C "$top" remote get-url origin >/dev/null 2>&1; then
+      mode="no-mistakes-prod-only"
+    else
+      mode="local-only"
+    fi
+    printf -- '- %s [%s] - this repository (added %s)\n' "$name" "$mode" "$(date +%F)" \
+      > "$home/data/projects.md"
+  fi
+}
+
+cmd_init() {
+  local org=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --org) org=1 ;;
+      -h | --help) usage; exit 0 ;;
+      *) usage; die "unknown init argument: $1" ;;
+    esac
+    shift
+  done
+
+  local target home existing
+  if [ "$org" -eq 1 ]; then
+    target=$(pwd -P)
+  else
+    target=$(repo_top .) || die "firstmate init must run inside a git repository (or use --org at an org root)"
+  fi
+  home="$target/.firstmate"
+  [ -e "$home" ] && die "$home already exists"
+  existing=$(nearest_firstmate_home "$(dirname "$target")" || true)
+
+  scaffold_home "$home" "$([ "$org" -eq 0 ] && echo --register-self)"
+  exclude_firstmate_dir "$home"
+
+  echo "firstmate: created $home"
+  echo "firstmate: projects root is $target (config/projects-root=..)"
+  if [ -n "$existing" ]; then
+    echo "firstmate: note - launches under $target now resolve to this home, shadowing $existing"
+  fi
+  if [ "$org" -eq 1 ]; then
+    local discovered=()
+    local child top_name
+    for child in "$target"/*; do
+      [ -d "$child" ] || continue
+      [ "$child" = "$home" ] && continue
+      top_name=$(repo_top "$child" 2>/dev/null || true)
+      [ "$top_name" = "$(cd "$child" && pwd -P)" ] || continue
+      discovered+=("$(basename "$child")")
+    done
+    if [ "${#discovered[@]}" -gt 0 ]; then
+      echo "firstmate: discoverable sibling repos: ${discovered[*]}"
+      echo "firstmate: discovery is not authority - register each project in $home/data/projects.md before firstmate may refresh, spawn, seed, or land it"
+    fi
+  else
+    echo "firstmate: registered $(basename "$target") in $home/data/projects.md"
+  fi
+  echo "firstmate: run \`firstmate\` from anywhere under $target to launch against this home"
+}
+
+cmd_launch() {
+  local global=0 harness='' harness_set=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --global) global=1 ;;
+      --harness)
+        [ $# -ge 2 ] || die "--harness requires a value"
+        harness=$2
+        harness_set=1
+        shift
+        ;;
+      --harness=*)
+        harness=${1#--harness=}
+        harness_set=1
+        ;;
+      -h | --help) usage; exit 0 ;;
+      *) break ;;
+    esac
+    shift
+  done
+
+  local home=
+  if [ -n "${FM_HOME:-}" ]; then
+    home=$FM_HOME
+  elif [ "$global" -eq 0 ] && home=$(nearest_firstmate_home .); then
+    :
+  elif [ "$global" -eq 0 ] && repo_top . >/dev/null 2>&1; then
+    die "no .firstmate/ home found above $(pwd -P).
+  Run 'firstmate init' at a repo root for a per-project home,
+       'firstmate init --org' at an org root, or 'firstmate --global' for the global home."
+  else
+    if [ -d "$HOME/.firstmate" ]; then
+      home=$HOME/.firstmate
+    else
+      home=$INSTALL_ROOT
+    fi
+  fi
+  [ -d "$home" ] || die "resolved home does not exist: $home"
+
+  if [ "$harness_set" -eq 0 ]; then
+    if [ -f "$home/config/primary-harness" ] && [ ! -L "$home/config/primary-harness" ]; then
+      harness=$(sed -n '1p' "$home/config/primary-harness" | tr -d '[:space:]')
+    fi
+    [ -n "$harness" ] || harness=claude
+  fi
+  command -v "$harness" >/dev/null 2>&1 || die "harness not found on PATH: $harness"
+
+  export FM_HOME=$home
+  export FM_ROOT_OVERRIDE=$INSTALL_ROOT
+  FM_LAUNCH_DIR=$(pwd -P)
+  export FM_LAUNCH_DIR
+  cd "$INSTALL_ROOT"
+  exec "$harness" "$@"
+}
+
+case "${1:-}" in
+  init)
+    shift
+    cmd_init "$@"
+    ;;
+  -h | --help)
+    usage
+    exit 0
+    ;;
+  *)
+    cmd_launch "$@"
+    ;;
+esac

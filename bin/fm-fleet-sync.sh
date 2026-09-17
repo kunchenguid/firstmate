@@ -26,18 +26,25 @@
 # fetch_with_packed_refs_lock_guard and the FM_FLEET_SYNC_PACKED_REFS_LOCK_* knobs.
 # Usage: fm-fleet-sync.sh [<project-dir-or-name>]
 # The single-project form accepts either a path (absolute, or relative to the
-# caller's cwd) or a bare "<name>"/"projects/<name>" form, resolved against
-# this home's projects dir ($FM_HOME/projects, or $FM_PROJECTS_OVERRIDE).
-# Bare names and "projects/<name>" forms prefer this home's projects dir before
-# falling back to an explicit path. Example: from anywhere,
-# `fm-fleet-sync.sh dotfiles-private` syncs just that one clone, same as
-# passing its full projects/dotfiles-private path.
+# caller's cwd) or a bare "<name>"/"projects/<name>" form, resolved through
+# bin/fm-projects-lib.sh's central contract: data/project-paths.json, then the
+# projects root, then the legacy $FM_HOME/projects clone. Example: from
+# anywhere, `fm-fleet-sync.sh dotfiles-private` syncs just that one clone,
+# same as passing its full path.
+# A home with config/projects-root (an org home) refreshes only REGISTERED
+# projects - data/projects.md and data/project-paths.json aliases - because
+# every sibling of the org root is a user working copy and discovery is not
+# authority. Every other home keeps the legacy direct-children glob.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
-PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# shellcheck source=bin/fm-projects-lib.sh
+. "$SCRIPT_DIR/fm-projects-lib.sh"
+PROJECTS=$(fm_projects_root "$FM_HOME" "$CONFIG") || exit 1
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # Inert unless FM_TIMING_LOG names a file; only the deferred network stage sets it.
@@ -73,6 +80,17 @@ fi
 [ $# -le 1 ] || { usage; exit 1; }
 
 project_label() {
+  local alias
+  # Under a custom projects root every synced path came from a registered
+  # alias, so the alias is the label and the registry lookup key; a path with
+  # no alias (a stale manifest entry, say) falls through to the legacy rules.
+  if fm_projects_root_is_custom "$CONFIG"; then
+    alias=$(fm_project_alias_for_path "$FM_HOME" "$CONFIG" "$DATA" "$PROJ" 2>/dev/null || true)
+    if [ -n "$alias" ]; then
+      printf '%s\n' "$alias"
+      return 0
+    fi
+  fi
   case "$PROJ" in
     "$PROJECTS"/*) basename "$PROJ" ;;
     projects/*) basename "$PROJ" ;;
@@ -80,39 +98,24 @@ project_label() {
   esac
 }
 
-# resolve_project_arg <arg>: accept a path (used as-is when it already exists)
-# or a bare/"projects/<name>" project name, resolved against $PROJECTS. Falls
-# back to the original argument unresolved so a genuinely bad path still hits
-# sync_project's existing "not a directory" skip.
+# resolve_project_arg <arg>: route through the central resolver (manifest,
+# projects root, legacy clone), then keep the historical cwd fallback for a
+# bare name that is itself a directory. Falls back to the original argument
+# unresolved so a genuinely bad path still hits sync_project's existing
+# "not a directory" skip.
 resolve_project_arg() {
-  local arg=$1 candidate
+  local arg=$1 resolved
+  resolved=$(fm_project_resolve "$FM_HOME" "$CONFIG" "$DATA" "$arg") || return 1
   case "$arg" in
-    projects/*)
-      candidate="$PROJECTS/${arg#projects/}"
-      if [ -d "$candidate" ]; then
-        printf '%s\n' "$candidate"
-        return 0
-      fi
-      ;;
-    */*)
-      if [ -d "$arg" ]; then
-        printf '%s\n' "$arg"
-        return 0
-      fi
-      ;;
+    */*) ;;
     *)
-      candidate="$PROJECTS/$arg"
-      if [ -d "$candidate" ]; then
-        printf '%s\n' "$candidate"
-        return 0
-      fi
-      if [ -d "$arg" ]; then
+      if [ "$resolved" = "$arg" ] && [ -d "$arg" ]; then
         printf '%s\n' "$arg"
         return 0
       fi
       ;;
   esac
-  printf '%s\n' "$arg"
+  printf '%s\n' "$resolved"
 }
 
 default_branch() {
@@ -445,10 +448,13 @@ if [ $# -eq 1 ]; then
   exit 0
 fi
 
-[ -d "$PROJECTS" ] || exit 0
-for proj in "$PROJECTS"/*; do
-  [ -e "$proj" ] || continue
-  [ -d "$proj" ] || continue
+# Materialize the candidate list before syncing: sync_project runs git, and a
+# credential prompt on a piped `while read` would eat the remaining list.
+sync_candidates=()
+while IFS= read -r proj; do
+  [ -n "$proj" ] && sync_candidates+=("$proj")
+done < <(fm_project_sync_candidates "$FM_HOME" "$CONFIG" "$DATA")
+for proj in ${sync_candidates[@]+"${sync_candidates[@]}"}; do
   # Per-clone elapsed, so a fleet refresh that runs long names WHICH clone cost
   # the time instead of only its total. Recording is a no-op unless the deferred
   # network stage asked for it.

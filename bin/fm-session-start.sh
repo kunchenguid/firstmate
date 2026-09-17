@@ -624,6 +624,11 @@ if [ "$REEMIT" -eq 1 ]; then
 else
   section "SESSION START - $FM_HOME"
 fi
+# The directory the captain launched from, recorded by the bin/firstmate
+# launcher; absent for a direct harness launch from a checkout.
+if [ -n "${FM_LAUNCH_DIR:-}" ]; then
+  printf 'Launched from: %s\n' "$FM_LAUNCH_DIR"
+fi
 # --- 1. lock -----------------------------------------------------------
 stage lock
 subsection "LOCK"
