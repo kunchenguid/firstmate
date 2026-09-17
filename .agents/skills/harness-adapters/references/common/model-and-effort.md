@@ -12,7 +12,7 @@ Effort precedence is a per-task captain instruction, then applicable dispatch pr
 Never replace either higher-precedence value.
 Use the fallback only when neither specifies effort.
 
-Use `low` for straightforward bounded work and `high` for difficult work. Consider `xhigh` only for genuinely very difficult work, where `high` is insufficient.
+Use `low` for well-understood work with an explicit bounded path and `high` for difficult work. Consider `xhigh` only for genuinely very difficult work, where `high` is insufficient.
 Choose intermediate levels as complexity, uncertainty, blast radius, or open-ended reasoning rises.
 If an adapter lacks `xhigh`, cap at its highest supported non-`max` level rather than silently omitting the intent.
 Never select `max` through this fallback; only an explicit per-task or standing captain preference permits it.
