@@ -43,9 +43,11 @@ When teardown releases a slot, the supervising home re-evaluates its queue and d
 Project Firstmates may seed only local child routes until distributed locking is available.
 Remote descendants beneath a project Firstmate fail closed because a remote home cannot safely claim against the local authority lock.
 The current seed workflow creates the project Firstmate locally; remote project-Firstmate provisioning is not yet supported.
-Root remote ordinary seeding snapshots the current project-authority identities and refuses canonical-origin overlap before contacting the host.
+Root remote ordinary seeding records the canonical identities of the exact origins it provisions and refuses overlap with current project authorities before contacting the host.
+The root route's `repo-identities:` field is authoritative; the runtime attestation is refreshed from it and never inferred from a same-named root clone.
 The remote home records the checked root authorities and its own cloned repository scope in `.fm-secondmate-parent`, and project spawns fail closed when that snapshot is absent, malformed, out of scope, or overlapping.
-Re-provision older projectful remote homes before spawning project work; this attestation preserves non-overlapping remote routes but does not provide distributed locking.
+Legacy projectful remote routes without durable identities fail closed until they are re-provisioned with explicit `project=origin` values.
+This attestation preserves non-overlapping remote routes but does not provide distributed locking.
 Child outcomes remain in their immediate parent's home, and the project Firstmate reports only its correlated decisions and concise milestones to root.
 Its `/stow` may cascade one hop to its registered ordinary-secondmate children, while an ordinary secondmate never cascades.
 
@@ -61,8 +63,11 @@ A local route uses:
 A whole-home remote route uses:
 
 ```markdown
-- <id> - <one-sentence charter summary> (host: <ssh-alias>; root: <absolute-remote-code-root>; home: <absolute-remote-home>; scope: <natural-language responsibility>; projects: <project-a>, <project-b>; added <date>)
+- <id> - <one-sentence charter summary> (host: <ssh-alias>; root: <absolute-remote-code-root>; home: <absolute-remote-home>; scope: <natural-language responsibility>; projects: <project-a>, <project-b>; repo-identities: <project>=sha256:<canonical-origin-hash>, ...; added <date>)
 ```
+
+The generated `repo-identities:` field binds each remote route's project names to the canonical identities actually seeded on that host and must not be hand-edited.
+Projectful legacy remote entries without this field cannot prove repository overlap safety and require explicit-origin re-provisioning.
 
 Each registry entry stays concise and single-line: the summary is one sentence naming the durable charter, `scope:` is the natural-language intake responsibility, `projects:` is the non-exclusive clone list, and any extra prose is limited to genuinely domain-specific hard rules that change routing or safety for that secondmate.
 Natural-language summary and `scope:` text may contain parentheses and semicolons; keep the generated `(home: ...; scope: ...; projects: ...; added ...)` suffix intact so operational consumers resolve its explicit field markers.

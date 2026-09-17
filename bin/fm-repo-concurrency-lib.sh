@@ -17,6 +17,8 @@ FM_REPO_SCOPE_LEASE_TASK_HOME=
 FM_REPO_SCOPE_LEASE_TASK_ID=
 FM_REPO_SCOPE_ROOT_LOCK=
 FM_REPO_SCOPE_ROOT_LOCK_HELD=0
+FM_REPO_SCOPE_REMOTE_IDENTITY_RECORDS=
+FM_REPO_SCOPE_REMOTE_IDENTITIES=
 
 fm_repo_scope_hash() {  # <text>
   if command -v shasum >/dev/null 2>&1; then
@@ -153,9 +155,87 @@ fm_repo_scope_registered_authority_identities() {  # <root-secondmates-registry>
   done < "$registry"
 }
 
-fm_repo_scope_refuse_remote_ordinary_overlap() {  # <registry> <root-projects> <candidate-identity>
-  local registry=$1 projects_root=$2 candidate_identity=$3 line entry_home entry_projects name repo identity registry_dir
-  local -a names=()
+fm_repo_scope_remote_identity_records_parse() {  # <route-id> <projects-csv> <identity-records>
+  local route_id=$1 projects_csv=$2 identity_records=$3 name identity entry seen_names=' ' seen_record_names=' ' seen_identities=' ' record_count=0
+  local -a names=() records=()
+  FM_REPO_SCOPE_REMOTE_IDENTITY_RECORDS=
+  FM_REPO_SCOPE_REMOTE_IDENTITIES=
+  if [ -z "$projects_csv" ]; then
+    [ -z "$identity_records" ] || [ "$identity_records" = none ] || {
+      FM_REPO_SCOPE_LAST_ERROR="remote ordinary route $route_id records repository identities without a project scope"
+      return 1
+    }
+    return 0
+  fi
+  if [ -z "$identity_records" ] || [ "$identity_records" = none ]; then
+    FM_REPO_SCOPE_LAST_ERROR="cannot prove remote ordinary route $route_id's repository identities; re-provision it with explicit project origins"
+    return 1
+  fi
+  IFS=, read -r -a names <<< "$projects_csv"
+  for name in "${names[@]+"${names[@]}"}"; do
+    name=${name#"${name%%[![:space:]]*}"}
+    name=${name%"${name##*[![:space:]]}"}
+    case "$name" in ''|*[!A-Za-z0-9._-]*)
+      FM_REPO_SCOPE_LAST_ERROR="remote ordinary route $route_id has an invalid project name"
+      return 1
+      ;;
+    esac
+    case "$seen_names" in *" $name "*)
+      FM_REPO_SCOPE_LAST_ERROR="remote ordinary route $route_id repeats project $name"
+      return 1
+      ;;
+    esac
+    seen_names="$seen_names$name "
+  done
+  IFS=, read -r -a records <<< "$identity_records"
+  for entry in "${records[@]+"${records[@]}"}"; do
+    case "$entry" in *=*) name=${entry%%=*}; identity=${entry#*=} ;; *)
+      FM_REPO_SCOPE_LAST_ERROR="remote ordinary route $route_id has a malformed repository identity record"
+      return 1
+      ;;
+    esac
+    name=${name#"${name%%[![:space:]]*}"}
+    name=${name%"${name##*[![:space:]]}"}
+    identity=${identity#"${identity%%[![:space:]]*}"}
+    identity=${identity%"${identity##*[![:space:]]}"}
+    case "$identity" in *=*|'')
+      FM_REPO_SCOPE_LAST_ERROR="remote ordinary route $route_id has a malformed repository identity for $name"
+      return 1
+      ;;
+    esac
+    [[ "$identity" =~ ^sha256:[[:xdigit:]]{64}$ ]] || {
+      FM_REPO_SCOPE_LAST_ERROR="remote ordinary route $route_id has an invalid repository identity for $name"
+      return 1
+    }
+    case "$seen_names" in *" $name "*) ;; *)
+      FM_REPO_SCOPE_LAST_ERROR="remote ordinary route $route_id records an identity for undeclared project $name"
+      return 1
+      ;;
+    esac
+    case "$seen_identities" in *" $identity "*)
+      FM_REPO_SCOPE_LAST_ERROR="remote ordinary route $route_id repeats repository identity $identity"
+      return 1
+      ;;
+    esac
+    case "$seen_record_names" in *" $name "*)
+      FM_REPO_SCOPE_LAST_ERROR="remote ordinary route $route_id repeats project identity $name"
+      return 1
+      ;;
+    esac
+    seen_record_names="$seen_record_names$name "
+    seen_identities="$seen_identities$identity "
+    FM_REPO_SCOPE_REMOTE_IDENTITY_RECORDS+="$name=$identity"$'\n'
+    FM_REPO_SCOPE_REMOTE_IDENTITIES+="$identity"$'\n'
+    record_count=$((record_count + 1))
+  done
+  [ "$record_count" -eq "${#names[@]}" ] || {
+    FM_REPO_SCOPE_LAST_ERROR="remote ordinary route $route_id identity count does not match its project scope"
+    return 1
+  }
+}
+
+fm_repo_scope_refuse_remote_ordinary_overlap() {  # <registry> <candidate-identity>
+  local registry=$1 candidate_identity=$2 line entry_home entry_projects entry_id identity_record identity registry_dir
   registry_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
   # shellcheck source=bin/fm-secondmate-registry-lib.sh
   . "$registry_dir/fm-secondmate-registry-lib.sh"
@@ -173,33 +253,21 @@ fm_repo_scope_refuse_remote_ordinary_overlap() {  # <registry> <root-projects> <
     [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ] || continue
     entry_home=$SECONDMATE_REGISTRY_HOME
     entry_projects=$SECONDMATE_REGISTRY_PROJECTS
-    [ -n "$entry_projects" ] || continue
-    names=()
-    IFS=, read -r -a names <<< "$entry_projects"
-    for name in "${names[@]}"; do
-      name=${name#"${name%%[![:space:]]*}"}
-      name=${name%"${name##*[![:space:]]}"}
-      case "$name" in ''|*[!A-Za-z0-9._-]*)
-        FM_REPO_SCOPE_LAST_ERROR="remote route $entry_home has an invalid project scope"
-        return 1
-        ;;
-      esac
-      repo="$projects_root/$name"
-      identity=$(fm_repo_scope_canonical_origin_identity "$repo" 2>/dev/null) || {
-        FM_REPO_SCOPE_LAST_ERROR="cannot prove remote ordinary route $entry_home's ownership of $name; restore its local clone before creating project Firstmate authority"
-        return 1
-      }
-      if [ "$identity" = "$candidate_identity" ]; then
-        FM_REPO_SCOPE_LAST_ERROR="repository $name is already in remote ordinary route $entry_home; refusing overlapping project Firstmate authority"
+    entry_id=$SECONDMATE_REGISTRY_ID
+    fm_repo_scope_remote_identity_records_parse "$entry_id" "$entry_projects" "$SECONDMATE_REGISTRY_REPO_IDENTITIES" || return 1
+    while IFS= read -r identity_record; do
+      [ -n "$identity_record" ] || continue
+      identity=${identity_record#*=}
+      if [ "${identity#sha256:}" = "$candidate_identity" ]; then
+        FM_REPO_SCOPE_LAST_ERROR="repository ${identity_record%%=*} is already in remote ordinary route $entry_home; refusing overlapping project Firstmate authority"
         return 1
       fi
-    done
+    done <<< "$FM_REPO_SCOPE_REMOTE_IDENTITY_RECORDS"
   done < "$registry"
 }
 
-fm_repo_scope_audit_remote_overlaps() {  # <registry> <root-projects>
-  local registry=$1 projects_root=$2 line entry_home entry_projects name repo identity authority_ids authority_identity registry_dir
-  local -a names=()
+fm_repo_scope_audit_remote_overlaps() {  # <registry>
+  local registry=$1 line entry_home entry_projects entry_id identity_record identity authority_ids authority_identity registry_dir
   registry_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
   # shellcheck source=bin/fm-secondmate-registry-lib.sh
   . "$registry_dir/fm-secondmate-registry-lib.sh"
@@ -214,30 +282,19 @@ fm_repo_scope_audit_remote_overlaps() {  # <registry> <root-projects>
     [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ] || continue
     entry_home=$SECONDMATE_REGISTRY_HOME
     entry_projects=$SECONDMATE_REGISTRY_PROJECTS
-    [ -n "$entry_projects" ] || continue
-    names=()
-    IFS=, read -r -a names <<< "$entry_projects"
-    for name in "${names[@]}"; do
-      name=${name#"${name%%[![:space:]]*}"}
-      name=${name%"${name##*[![:space:]]}"}
-      case "$name" in ''|*[!A-Za-z0-9._-]*)
-        FM_REPO_SCOPE_LAST_ERROR="remote route $entry_home has an invalid project scope"
-        return 1
-        ;;
-      esac
-      repo="$projects_root/$name"
-      identity=$(fm_repo_scope_canonical_origin_identity "$repo" 2>/dev/null) || {
-        FM_REPO_SCOPE_LAST_ERROR="cannot prove repository scope for remote ordinary route $entry_home project $name"
-        return 1
-      }
+    entry_id=$SECONDMATE_REGISTRY_ID
+    fm_repo_scope_remote_identity_records_parse "$entry_id" "$entry_projects" "$SECONDMATE_REGISTRY_REPO_IDENTITIES" || return 1
+    while IFS= read -r identity_record; do
+      [ -n "$identity_record" ] || continue
+      identity=${identity_record#*=}
       while IFS= read -r authority_identity; do
         [ -n "$authority_identity" ] || continue
-        [ "$identity" != "$authority_identity" ] || {
-          FM_REPO_SCOPE_LAST_ERROR="remote ordinary route $entry_home overlaps project Firstmate repository $name"
+        [ "${identity#sha256:}" != "$authority_identity" ] || {
+          FM_REPO_SCOPE_LAST_ERROR="remote ordinary route $entry_home overlaps project Firstmate repository ${identity_record%%=*}"
           return 1
         }
       done <<< "$authority_ids"
-    done
+    done <<< "$FM_REPO_SCOPE_REMOTE_IDENTITY_RECORDS"
   done < "$registry"
 }
 

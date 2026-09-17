@@ -847,7 +847,7 @@ refuse_duplicate_project_authority() {
       fi
     fi
   done < "$REG"
-  fm_repo_scope_refuse_remote_ordinary_overlap "$REG" "$PROJECTS" "$candidate_repo_key" || {
+  fm_repo_scope_refuse_remote_ordinary_overlap "$REG" "$candidate_repo_key" || {
     printf 'error: %s\n' "$FM_REPO_SCOPE_LAST_ERROR" >&2
     return 1
   }
