@@ -4,7 +4,7 @@
 
 **Ticket:** [PLAT-1332](https://redventures.atlassian.net/browse/PLAT-1332) established the mechanism. **Closes** [PLAT-1327](https://redventures.atlassian.net/browse/PLAT-1327) (the PAT expires 2026-12-01).
 
-**Goal:** in `auto-merge` mode, zapp merges the pull request itself as `bankrate-bender` instead of approving as `BankrateBot` and arming GitHub's auto-merge. `BankrateBot`, its PAT, the `/zapp/approver` secret and `approver.ts` all come out. zapp drops from three identities to two.
+**Goal:** in `auto-merge` mode, zapp merges the pull request itself as `bankrate-bender` instead of approving as `BankrateBot` and arming GitHub's auto-merge. `approver.ts` comes out and zapp stops calling `BankrateBot` entirely, dropping to two acting identities. **The credential itself is deleted in a separate follow-up PR (Task 4b), not this one** — Terraform destroys the secret resource, so removing it here would make the deploy the point of no return and leave no rollback except re-minting a PAT under pressure.
 
 **Scope is deliberately narrow.** `auto-merge` mode only. `assisted` mode keeps `enablePullRequestAutoMerge` unchanged — a human approves there, so nothing about it needs to move. No bug fixes, no adjacent cleanups, no follow-ups folded in. Anything discovered along the way gets its own ticket, not a commit in this PR.
 
@@ -85,15 +85,36 @@ mutation($id: ID!, $oid: GitObjectID!, $method: PullRequestMergeMethod!) {
 
 **Verification:** tests covering assisted-unchanged, auto-merge-merges, freeze-blocks-the-merge, and `shouldMerge: false` does nothing.
 
-## Task 4 — Delete the approver
+## Task 4 — Stop calling the approver, but leave the credential standing
 
-- [ ] Delete `src/pipeline/05-actuate/approver.ts` and its tests.
+**This task is deliberately incomplete, and that is the point.** The code path goes; the secret stays. See "Rollback" below for why — in short, Terraform destroys the secret resource, so removing it here would make the deploy itself the point of no return.
+
+- [ ] Delete `src/pipeline/05-actuate/approver.ts` and its tests. Nothing calls it after Task 3.
 - [ ] Remove `getApproverConfig` / `ApproverConfig` from `src/platform/secrets.ts`.
 - [ ] Remove `APPROVER_SECRET_NAME` from `src/entrypoints/contract.ts`'s required-env list.
-- [ ] Remove the `/zapp/approver` secret from Terraform — **all four places**: `init.tf`, `secrets.tf`, `iam.tf`'s resources list, and `main.tf`'s `environment` block. PLAT-1267 shipped three of four once; do not repeat that.
-- [ ] `approver_auth_failed` is a **load-bearing log string** — `infrastructure/terraform/alarms.tf` has a log metric filter matching it literally. Remove the alarm in the same change or it silently monitors a string nothing emits.
 
-**Verification:** `grep -ri approver src/ infrastructure/` returns nothing but intentional history. The contract test proves the env var is gone.
+**DO NOT, in this PR:**
+
+- Touch the `/zapp/approver` secret in Terraform (`init.tf`, `secrets.tf`, `iam.tf`'s resources list, `main.tf`'s `environment` block).
+- Remove the `approver_auth_failed` metric filter from `infrastructure/terraform/alarms.tf`.
+- Revoke, delete or rotate `BankrateBot`'s PAT.
+- Remove `@BankrateBot` from any repository's `CODEOWNERS`.
+
+Leaving `main.tf`'s `environment` block intact means the Lambda still receives `APPROVER_SECRET_NAME` as an unread env var. That is intentional dead configuration for the length of one deploy cycle. Note it in the PR description so a reviewer does not "tidy" it.
+
+**Verification:** `grep -ri approver src/` returns nothing but intentional history. `grep -ri approver infrastructure/` still returns the secret and the alarm — that is the expected state, not an oversight. The contract test proves the env var is no longer required.
+
+## Task 4b — Delete the credential (SEPARATE PR, AFTER a real merge is observed)
+
+Its own pull request, opened only after a real dependabot pull request has been merged end to end on `platform-agent` by `bankrate-bender` in production. Its own ticket, so it cannot be swept into the first PR's review.
+
+- [ ] Remove the `/zapp/approver` secret from Terraform — **all four places**: `init.tf`, `secrets.tf`, `iam.tf`'s resources list, and `main.tf`'s `environment` block. PLAT-1267 shipped three of four once; do not repeat that.
+- [ ] `approver_auth_failed` is a **load-bearing log string** — `alarms.tf` has a log metric filter matching it literally. Remove the alarm in the same change or it silently monitors a string nothing emits.
+- [ ] Revoke `BankrateBot`'s PAT.
+- [ ] Remove `@BankrateBot` from `CODEOWNERS` across the enrolled repositories (roughly 25 files).
+- [ ] Close [PLAT-1327](https://redventures.atlassian.net/browse/PLAT-1327).
+
+**Verification:** `grep -ri approver src/ infrastructure/` returns nothing but intentional history.
 
 ## Task 5 — Human-facing output
 
@@ -137,8 +158,12 @@ Gate 12 fails closed on a check it cannot see (it looks for a name, does not fin
 
 ## Rollback
 
-- [ ] Revert the PR. `assisted` mode is untouched, so the enable path still exists.
-- [ ] The PAT and `/zapp/approver` must not be destroyed until a real merge has been observed in production. Delete the secret in a **follow-up** change, not this one.
+The whole reason Task 4 is split. Terraform **destroys** the secret resource, so removing `/zapp/approver` in the same pull request would make the deploy itself the point of no return: reverting the code would not bring the secret value back, and you would be re-minting a PAT under time pressure while dependency merges are broken.
+
+- [ ] Revert the PR. `assisted` mode is untouched, so `enablePullRequestAutoMerge` still exists and the approval path is one revert away rather than a rewrite.
+- [ ] Because Task 4 leaves the secret, its IAM grant and the alarm in place, a revert restores a **working** approval path with no infrastructure change and no credential re-issue.
+- [ ] `@BankrateBot` also stays in `CODEOWNERS` until Task 4b, so a reverted build can still satisfy code-owner review immediately.
+- [ ] Only after a real production merge is observed does Task 4b close the door.
 
 ## Explicitly out of scope
 
