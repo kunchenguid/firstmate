@@ -27,6 +27,15 @@ Collect completed per-script measurements for every member before calculating a 
 A cancelled lane's elapsed duration is only a lower bound; its unfinished scripts have no completed duration for that invocation.
 The complete historical run supplies tail-script hints, not a completion time for any later cancelled invocation or for the rebalanced jobs.
 
+## Growth since the 2026-08-20 proof
+
+Rebalancing buys room; it does not explain why several of these scripts grew far past ordinary test-count growth.
+Dividing each hint in `portable_parallel_weight_hints` in [`bin/fm-test-run.sh`](../bin/fm-test-run.sh) - the one authoritative source of per-script durations - by the same script's duration in [fm-test-isolation-proof.json](fm-test-isolation-proof.json), five of the 24 candidates grew more than fourfold: `tests/fm-pr-merge.test.sh` 17.7x, `tests/fm-lint.test.sh` 16.8x, `tests/fm-pi-primary-types.test.sh` 14.4x, `tests/fm-captain-hold-lifecycle.test.sh` 8.4x, and `tests/fm-test-run.test.sh` 4.4x.
+Every other candidate stayed within 2.4x, and eight shrank.
+Those two sources are different measurement batches - a concurrent isolation proof against the slowest retained serial CI run - so read the ratios as the order of the growth, not as an exact multiple.
+The two worst in absolute terms, the lifecycle test at ~296s and the lint test at ~164s, now dominate their shards on their own.
+Root-causing that growth is a separate, already-filed piece of work; this note exists so the next person sees it rather than only the new packing.
+
 ## Parallel lanes
 
 The two parallel lanes use longest-processing-time assignment over those hints.
@@ -58,6 +67,8 @@ Each shard is still strictly serial in itself, and separate runners mean no two 
 
 Assignment is longest-processing-time bin packing over per-script duration hints embedded in `bin/fm-test-run.sh`.
 The embedded hints include the slowest measurements retained from the `fm-test-timing-portable-serial-*` artifacts of three green CI runs on 2026-09-01, [33558082172](https://github.com/kunchenguid/firstmate/actions/runs/33558082172), [33523597838](https://github.com/kunchenguid/firstmate/actions/runs/33523597838), and [33463326167](https://github.com/kunchenguid/firstmate/actions/runs/33463326167), the completed-script measurements from [run 34342484144](https://github.com/kunchenguid/firstmate/actions/runs/34342484144), plus the 5121 ms native-Windows focused runner measurement for `tests/fm-pi-windows-shell-invocation.test.sh` from 2026-09-06T21:02Z.
+The 27 hints added on 2026-09-18 for previously unhinted serial scripts are the exception: they were measured locally, not on `ubuntu-latest`, so they are estimates that establish a weight rather than a CI-proven one, and the caveat above applies to them in full - replace them from `fm-test-timing-portable-serial-*` artifacts at the next refresh.
+A reader seeing `serial_unhinted=0` should therefore read it as "every script carries a weight", not as "every weight came from CI".
 Taking the slowest of several CI runs rather than a single run keeps the balance honest on a slow runner.
 A script with no hint gets the conservative `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default.
 Hints only affect balance: the coverage guard keeps the partition complete and disjoint whatever they say, so a stale hint costs a slower shard rather than lost coverage.

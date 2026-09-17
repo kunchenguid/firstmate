@@ -2,10 +2,22 @@
 // shim and print what the renderer actually produced, so board behavior is
 // asserted through the real template rather than by reading its source.
 //
-// Usage: node board-render-harness.mjs <built-board.html>
-// Prints one JSON document:
-//   { stats:[{n,label}], underway:[{title,sub,badges}],
-//     charted:[{title,sub,badges,pickable}], empty, more, error }
+// Usage: node board-render-harness.mjs <built-board.html> [clicks-json]
+// clicks-json (optional): an array of actions replayed in order after the
+// initial render, so filter-bar and dispatch-picker interactions can be
+// exercised the same way a captain's click would:
+//   {"id":"<element id>"} or
+//   {"selector":".bb-chip","container":"<id, default bb-filterbar>","match":{...}}
+//     both click the found element (matched against its dataset or, when a
+//     match value isn't found there, the same-named property, e.g. "value"
+//     for a checkbox);
+//   the same shape with a "set" object instead of a click assigns those
+//   properties directly (e.g. {"set":{"checked":true}} to tick a checkbox
+//   without going through its own click handler), optionally followed by
+//   {"fire":"input"} to dispatch that event the way typing would.
+// Prints one JSON document: { stats:[{n,label}], charted:[{title,sub,badges,pickable}],
+// filterbar:{chips,clearHidden}, deck:{...},
+// sections:{underway|landed|charted:{rows:[{repo,hidden,title,sub,badges}],empty}} }
 import { readFileSync } from "node:fs";
 
 const html = readFileSync(process.argv[2], "utf8");
@@ -214,24 +226,24 @@ const stats = strip.children.map((t) => ({
   label: t.children.find((c) => c.className.includes("bb-stat__label"))?.textContent,
 }));
 
-const rowsOf = (container) =>
-  container.children
-    .filter((r) => r.className.split(/\s+/).includes("bb-row"))
-    .map((row) => {
-      const main = row.children.find((c) => c.className.includes("bb-row__main"));
-      return {
-        title: main?.children.find((c) => c.className.includes("bb-row__title"))?.textContent ?? "",
-        sub: main?.children.find((c) => c.className.includes("bb-row__sub"))?.textContent ?? "",
-        badges: badgesOf(row),
-        pickable: row.children.some((c) => c.className.includes("bb-pick") && !c.className.includes("spacer")),
-      };
-    });
-
-const uw = byId.get("bb-underway") || new Node("div");
-const underway = rowsOf(uw);
-
 const ch = byId.get("bb-charted") || new Node("div");
-const charted = rowsOf(ch);
+const charted = ch.children
+  .filter((r) => r.className.split(/\s+/).includes("bb-row"))
+  .map((row) => {
+    // Charted rows are a <details>/<summary> disclosure: the pick and main
+    // content live one level deeper, inside the summary, so this looks
+    // through the whole row rather than only its direct children.
+    const main = row.querySelectorAll(".bb-row__main")[0];
+    const pick = row.querySelectorAll(".bb-pick")[0];
+    return {
+      title: main?.children.find((c) => c.className.includes("bb-row__title"))?.textContent ?? "",
+      sub: main?.children.find((c) => c.className.includes("bb-row__sub"))?.textContent ?? "",
+      badges: badgesOf(row.querySelectorAll(".bb-row__summary")[0] || row),
+      pickable: !!pick,
+      checked: !!pick && !!pick.checked,
+      hidden: !!row.hidden,
+    };
+  });
 // A fail-closed render replaces the page body instead of the board sections, so
 // surface it rather than reporting an empty board as a successful render.
 const errorText = [...byId.entries()]
@@ -241,5 +253,103 @@ const errorText = [...byId.entries()]
 const empty = ch.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent);
 const more = ch.children.filter((c) => c.className.includes("bb-morechip")).map((c) => c.textContent);
 
-process.stdout.write(
-  JSON.stringify({ stats, underway, charted, empty, more, error: errorText }) + "\n");
+// Captain's Call answer rows, so the write-your-own option is asserted through
+// the real renderer rather than by reading the template's source.
+const cc = byId.get("bb-call") || new Node("div");
+const collect = (node, out) => {
+  for (const c of node.children) {
+    if (c.className.split(/\s+/).includes("bb-opt")) out.push(c);
+    collect(c, out);
+  }
+  return out;
+};
+const call_options = collect(cc, []).map((lab) => {
+  const radio = lab.children.find((c) => c.tagName === "input" && c.type === "radio");
+  const body = lab.children.find((c) => c.className.includes("bb-opt__body"));
+  const field = body ? body.children.find((c) => c.tagName === "input" && c.type === "text") : undefined;
+  return {
+    value: radio ? radio.value : null,
+    own: lab.className.split(/\s+/).includes("bb-opt--own"),
+    has_radio: Boolean(radio),
+    has_field: Boolean(field),
+    placeholder: field ? (field.attributes.placeholder ?? field.placeholder ?? "") : "",
+  };
+});
+
+// Filter bar: every chip's group/key/label/count/active state, plus whether
+// the "show everything" clear control is currently visible.
+const filterBarNode = byId.get("bb-filterbar") || new Node("div");
+const filterChips = filterBarNode.querySelectorAll(".bb-chip").map((chip) => ({
+  group: chip.dataset.group,
+  key: chip.dataset.key,
+  label: chip.children[0]?.textContent ?? "",
+  count: Number((chip.children[1]?.textContent ?? "").replace(/[()]/g, "")),
+  active: chip.classList.contains("is-active"),
+}));
+const clearNode = filterBarNode.querySelectorAll(".bb-filter__clear")[0];
+const filterbar = { chips: filterChips, clearHidden: clearNode ? !!clearNode.hidden : true };
+
+// Captain's Call deck: every dealt card (tagged with repo/type) plus whether
+// it is the one currently shown, and the stack counter text the captain
+// actually reads.
+const deckNode = byId.get("bb-call") || new Node("div");
+const deckCards = deckNode.children
+  .filter((c) => c.className.split(/\s+/).includes("bb-decision"))
+  .map((c) => ({
+    repo: c.dataset.repo,
+    type: c.dataset.type,
+    hidden: !!c.hidden,
+    title: c.querySelectorAll(".bb-decision__title")[0]?.textContent ?? "",
+    // Flags are the board's whole answer to a badly composed card: it says
+    // what is wrong on the card's face and deals it anyway.
+    flags: c.querySelectorAll(".bb-flag").map((f) => ({
+      kind: f.children[0]?.textContent ?? "",
+      text: f.children[1]?.textContent ?? "",
+    })),
+    queued: c.classList.contains("is-queued"),
+    limit: c.querySelectorAll(".bb-limit")[0]?.textContent ?? "",
+  }));
+const deckEmpty = deckNode.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent);
+const deck = {
+  cards: deckCards,
+  visibleCount: deckCards.filter((c) => !c.hidden).length,
+  stackText: (byId.get("bb-stack-count") || new Node("span")).textContent,
+  empty: deckEmpty,
+  focused: focused ? focused.className : null,
+};
+
+// The three project-scoped rows sections: repo tag, hidden flag and the
+// title/sub/badges each row actually renders, plus whatever empty-state
+// message is currently showing (if any).
+function sectionState(id) {
+  const node = byId.get(id) || new Node("div");
+  return {
+    rows: node.children
+      .filter((c) => c.className.split(/\s+/).includes("bb-row"))
+      .map((c) => {
+        const main = c.querySelectorAll(".bb-row__main")[0];
+        return {
+          repo: c.dataset.repo,
+          hidden: !!c.hidden,
+          title: main?.children.find((x) => x.className.includes("bb-row__title"))?.textContent ?? "",
+          sub: main?.children.find((x) => x.className.includes("bb-row__sub"))?.textContent ?? "",
+          badges: badgesOf(c.querySelectorAll(".bb-row__summary")[0] || c),
+        };
+      }),
+    empty: node.children.filter((c) => c.className.includes("bb-empty")).map((c) => c.textContent),
+  };
+}
+const sections = {
+  underway: sectionState("bb-underway"),
+  landed: sectionState("bb-landed"),
+  charted: sectionState("bb-charted"),
+};
+
+// The Charted Next dispatch bar: what it currently tells the captain and
+// whether the "queue dispatch order" button would fire.
+const dispatch = {
+  count: (byId.get("bb-dispatch-count") || new Node("span")).textContent,
+  disabled: !!(byId.get("bb-dispatch-btn") || new Node("button")).disabled,
+};
+
+process.stdout.write(JSON.stringify({ stats, charted, empty, more, call_options, error: errorText, filterbar, deck, sections, dispatch, queued }) + "\n");

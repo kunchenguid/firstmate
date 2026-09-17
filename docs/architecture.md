@@ -15,6 +15,7 @@ So a delivered ordinary crew task whose last line stays `done: PR ...` bounds re
 The first hash still alarms, each new hash inside that window is absorbed, and a new hash after the window re-surfaces the hold; a terminal pane hash that never changes stays inert after its first alarm exactly as it did before this bound.
 A delivered task also bounds that alarm on its own armed PR merge poll, which is already the thing watching the PR: a `done:` line whose validated poll artifacts are published takes the same cadence whether or not the work was ever held.
 Because that poll reports only a merge and is silent on every other outcome, the bound stays a cadence rather than an absolute silence, so a PR closed unmerged still re-surfaces its finished task; retiring the poll at merge lifts the bound outright.
+While the away-posture record exists it is absolute like the captain-held one, since nobody is there to act on a delivered task either way.
 The throttle is scoped to both the current captain-call lifecycle and the status-log state, so releasing and re-holding the same task without a status append starts a fresh window whose first new hash alarms.
 The merge-poll throttle is scoped the same way to the poll's own canonical PR beside that status-log state, so a replacement PR armed for the same task starts its own window.
 A secondmate reaches the stale path only for a wait declared in its status line, so a hold recorded only in the backlog while its last line is `working:` or `done:` is outside this guard.

@@ -305,7 +305,7 @@ a { color: inherit; text-decoration: none; }
    opens the full item instead of being caught by Lavish's annotation editor
    (native disclosure controls are exempt from that, the way buttons and
    radios already are on this board). ---- */
-.bb-row--chart { padding: 0; }
+.bb-row--chart { display: block; padding: 0; }
 .bb-row--chart > summary { list-style: none; cursor: pointer; }
 .bb-row--chart > summary::-webkit-details-marker { display: none; }
 .bb-row--chart > summary::marker { content: ""; }
@@ -979,8 +979,16 @@ __FM_BEARINGS_BOARD_DATA__
   if (!chartedQueued(data.charted).length && !chartedMoreQueued) {
     ch.appendChild(el("div", "bb-empty", "Nothing is queued."));
   }
+  var chRows = [];
   chartedOrder(data.charted).forEach(function (t) {
-    var row = el("div", "bb-row");
+    /* a native <details>/<summary> disclosure: the click that opens it is a
+       native interaction, so Lavish's annotation editor leaves it alone the
+       same way it already leaves buttons and radios alone, and the captain
+       gets the full title, reason, repo, and detail on open. */
+    var row = el("details", "bb-row bb-row--chart");
+    row.dataset.repo = repoKey(t.repo);
+    chRows.push(row);
+    var summary = el("summary", "bb-row__summary");
     if (t.dispatchable && !isWarning(t)) {
       anyPickable = true;
       var pick = document.createElement("input");
