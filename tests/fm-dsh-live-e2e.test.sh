@@ -37,6 +37,10 @@
 #   8. The tracked patch keeps every permission preset dsh-base offers. A patch
 #      replaces a row's whole config, so a permission row carrying only its
 #      default silently drops the read-only preset from every picker.
+#   9. A session holding the fleet lock refuses a second one into read-only. DSH
+#      gives hooks no session identity, so a live peer is recognized only by the
+#      launcher shape in its argv; if that stops matching, two captains share one
+#      home and every guard reads the wrong fleet.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -62,6 +66,8 @@ mkdir -p "$WORK" "$PROBE"
 cleanup() {
   tmux kill-session -t firstmate 2>/dev/null || true
   rm -rf "$PROFILE_DIR" 2>/dev/null || true
+  [ -n "${LOCK_PROFILE_DIR:-}" ] && rm -rf "$LOCK_PROFILE_DIR" 2>/dev/null
+  [ -n "${LOCK_HOLDER_PID:-}" ] && kill "$LOCK_HOLDER_PID" 2>/dev/null
   rm -rf "$TMP_ROOT" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -295,3 +301,53 @@ case "$presets" in
   "ok "*) pass "live dsh $BASE_VERSION: the tracked patch keeps dsh-base's permission presets (${presets#ok })" ;;
   *) fail "live dsh $BASE_VERSION: $presets" ;;
 esac
+
+# --- 9. a second concurrent session is refused into read-only ----------------
+# The fleet lock matches its holder by launcher path in argv, and DSH gives hook
+# and tool subprocesses no session identity of their own, so the question is
+# whether a live DSH session is recognizable as the lock owner at all. The
+# positive half is proven by contract 2's own run; this is the refusal half. The
+# holder is a live node whose argv carries a dsh launcher shape, which is what
+# bin/fm-session-lock-lib.sh's fm_harness_pid_alive demands of a lock holder, so
+# it stands in for another live session without needing two real ones.
+LOCK_HOME="$TMP_ROOT/lock-home"
+LOCK_WORK="$TMP_ROOT/lock-work"
+LOCK_PROFILE="${PROFILE}lock"
+LOCK_PROFILE_DIR="${DSH_HOME:-$HOME/.dsh}/profiles/$LOCK_PROFILE"
+mkdir -p "$LOCK_HOME/state" "$LOCK_WORK/holder/node_modules/.bin"
+
+# A dsh-shaped process that outlives the session below. comm is node and argv
+# carries `/.bin/dsh`, the shape fm_dsh_args_evidence accepts.
+cat > "$LOCK_WORK/holder/node_modules/.bin/dsh" <<'SH'
+#!/usr/bin/env node
+setTimeout(function () {}, 600000)
+SH
+chmod +x "$LOCK_WORK/holder/node_modules/.bin/dsh"
+node "$LOCK_WORK/holder/node_modules/.bin/dsh" >/dev/null 2>&1 &
+LOCK_HOLDER_PID=$!
+sleep 2
+
+# The lock this session must find and refuse. Nothing writes it but us, so an
+# unchanged value after the run is proof the second session did not take it.
+printf '%s\n' "$LOCK_HOLDER_PID" > "$LOCK_HOME/state/.lock"
+
+# A profile that mounts the TRACKED hooks, because the refusal happens inside the
+# real session-start digest: the probe hooks above never run it. The tracked
+# patch supplies the bridge mount, so this profile's own patch stays empty.
+dsh --profile "$LOCK_PROFILE" --from-default-profile headless --dump-config >/dev/null 2>&1 \
+  || fail "could not create the throwaway profile '$LOCK_PROFILE'"
+dsh plugin --profile "$LOCK_PROFILE" add "@deepseek-ai/dsh-hooks-claude-code@$BASE_VERSION" >/dev/null 2>&1 \
+  || fail "could not install @deepseek-ai/dsh-hooks-claude-code@$BASE_VERSION into '$LOCK_PROFILE'"
+printf -- '- id: permission\n  config:\n    defaultPreset: danger-full-access\n' > "$LOCK_PROFILE_DIR/cordis.patch.yml"
+
+( cd "$LOCK_WORK" && FM_DSH_HARNESS=dsh FM_ROOT="$ROOT" FM_HOME="$LOCK_HOME" \
+    FM_STATE_OVERRIDE="$LOCK_HOME/state" \
+    dsh --profile "$LOCK_PROFILE" --patch "$ROOT/.dsh/profile.patch.yml" \
+    "Without using any tools, reply with ONLY the word PING." >"$LOCK_WORK/out" 2>&1 ) || true
+
+held=$(cat "$LOCK_HOME/state/.lock" 2>/dev/null || true)
+[ "$held" = "$LOCK_HOLDER_PID" ] \
+  || fail "live dsh $BASE_VERSION: a session took a lock already held by a live dsh (pid $LOCK_HOLDER_PID -> ${held:-<empty>}); the refusal the fleet lock depends on did not happen"
+[ -f "$LOCK_HOME/state/.dsh-sessionstart-delivered" ] \
+  || fail "live dsh $BASE_VERSION: the second session left the lock alone but delivered no digest at all, so the read-only path was never exercised"
+pass "live dsh $BASE_VERSION: a session holding the fleet lock refuses a second one into read-only"

@@ -138,6 +138,19 @@ Two more defects surfaced when the digest was driven through a real DSH host:
 | Inside the digest the host is the ninth process above `fm-harness.sh` (hooks wrapper, adapter and its command substitution, `fm-session-start.sh` and its timeout wrapper), but the DSH ancestry walk stopped at eight, so `FM_DSH_HARNESS` was refused and the digest named no harness | `fm_dsh_ancestry` walks sixteen parents, the depth the session lock already walks |
 DSH supplies **no session-open `source` field**, so the digest always runs as a first startup and cannot re-emit after a compaction — a real limitation, not a design choice.
 
+## The fleet lock refuses a second session
+
+The lock records its owner as a pid and matches it against the caller's harness ancestry, and DSH gives hook and tool subprocesses no session identity of their own — the host reports `comm=node`, so identity rests on the launcher shape in its argv.
+Both halves were measured on 2026-09-17 with the tracked hooks mounted, a throwaway `FM_HOME` and `FM_STATE_OVERRIDE`, and the real checkout as `FM_ROOT`, so the real `bin/fm-dsh-sessionstart.sh` and `bin/fm-session-start.sh` ran:
+
+- **Acquisition.** A headless session wrote `state/.lock` with the harness pid and wrote the once-per-session gate afterwards, so the digest owned the fleet lock rather than falling into its read-only path.
+- **Refusal.** With `state/.lock` already holding a live node process whose argv carries a dsh launcher shape — which is what `fm_harness_pid_alive` demands of a lock holder — a second headless session delivered `READ-ONLY SESSION - FLEET LOCK OWNERSHIP WAS NOT VERIFIED` and left the lock untouched, so it did not take over the home.
+
+`tests/fm-dsh-live-e2e.test.sh` asserts the refusal as its ninth contract: it holds the lock with a live dsh-shaped process, runs a session against it, and fails if the lock changes hands or if no digest was delivered at all.
+That contract makes the lock owner's ancestry match a live, guarded property rather than an inference from the portable lock suite.
+
+Forking a session while one is live therefore produces a read-only session, not a second captain.
+
 ## PreToolUse: deny blocks, but only with a matched bridge
 
 Both matcher rows fire with the shell tool — the catch-all `.*` row and the lowercase `bash` row.
@@ -308,12 +321,11 @@ Ranked by how likely each is to be mistaken for working.
 
 | Item | State |
 |---|---|
-| Two concurrent DSH sessions are distinguishable | **unproven.** The lock matches a host by launcher path in argv, but DSH gives hook and tool subprocesses no session identity (`comm=node`), so the acceptance gate that a second concurrent session is refused into read-only has no live test |
 | The DSH state files and teardown | **not applicable, by ownership.** `state/.dsh-sessionstart-delivered`, `state/.turnend-dsh-blocks` (+ lock) and `state/.dsh-turnend-fail-open` are home-scoped and session-keyed, and each is self-healing: the gate holds the delivered session id and the next session rewrites it, the budget ledger is discarded once the episode ages past `FM_DSH_TURNEND_BUDGET_WINDOW`, and the alarm latch is cleared by the guard's healthy reset. `bin/fm-teardown.sh`'s volatile sweep is per-task (`$STATE/$ID.*`), and DSH never produces per-task state because it never runs as a crewmate — the same shape as Claude's own `state/.turnend-claude-blocks`, which teardown does not name either. `state/` is gitignored, so no exclude rule is missing |
 | The session-death blind window | **unclosable from inside DSH.** No `Stop` fires, so nothing re-arms; recovery happens at the NEXT session start via `state/.watcher-down` → `check: rearm-resurface`, and the only out-of-band closure is an OS-level scheduler. [`docs/supervision-protocols/dsh.md`](../supervision-protocols/dsh.md) states this rather than papering over it |
 | Away mode (`/afk`, `/quiet`) | **blocked.** The daemon's only delivery is typing a batched digest into the supervisor's pane after proving the composer empty; DSH has no pane and no inject-into-session primitive, so escalations would buffer forever. Registering it without a delivery channel is worse than not having it: a leftover `state/.afk` makes `fm_afk_daemon_owns_supervision` prove "supervision healthy" and silently redefines the guard's predicate |
 | DSH-subagent crewmates | **blocked.** No per-delegation working directory and no child-dispose path, and DSH's own pre-stable tool surface is not a steering endpoint |
-| Session identity for the lock | **partially mitigated.** Identity is `ps`-ancestry based and `fm_pid_identity` prefers `/proc`, which was never measured under the sandbox |
+| Session identity for the lock | **measured for the live case.** The lock owner is matched by `ps` ancestry against the launcher shape in argv, and the refusal was driven live (see The fleet lock refuses a second session). `fm_pid_identity` still prefers `/proc`, which macOS does not provide, so that path remains unexercised here |
 | Relay (X/Discord) | **out of scope for this deployment.** No pairing token, and it needs `curl`, `jq` and a wake-into-session path |
 | Calm, voice, Lavish board | **out of scope.** Module hooks, a TTY with PortAudio, and a live `lavish-axi` session respectively |
 | In-process extension hosts (Pi, omp, OpenCode) | **out of scope.** DSH's bridge is command-only |
@@ -338,15 +350,21 @@ bin/fm-dsh-preflight.sh --profile <name> --patch .dsh/profile.patch.yml
 Run the preflight on its own with the tracked patch, as `bin/fm-dsh-launch.sh` passes it.
 The launcher applies `.dsh/profile.patch.yml` with `--patch` and never copies it into the profile, so without it the preflight composes a configuration the host never boots with: sessions on DSH's `standard` preset, an inferred permission preset and dsh-base's unpinned hook sandbox mode, each reported as a failure whose remedy the launch does not need.
 
-As measured on 2026-09-17, the portable suite passes 46 cases.
-Against dsh 0.1.5-rc.1 / dsh-base 0.1.5-rc.2 the live guard passed its five session contracts — a matching bridge pin passes the preflight, `UserPromptSubmit` context reaches the FIRST request, a `bash`-matcher deny blocks the command (sentinel absent), a blocking `Stop` forces one bounded continuation (2 firings), and a hook subprocess inherits the host's harness marker.
-Its sixth contract, that the documented `web` launch renders `AGENTS.md` whole through the `firstmate` preset, was added after that run; it needs no credentials, and it was run on its own against the same dsh.
-The five-contract run predates the preflight's hook sandbox-mode check, so on its own it is not evidence that the first contract still passes.
-On 2026-09-16, after `.dsh/profile.patch.yml` pinned the `sandbox-policy` row, the guard was run again with `DSH_PERMISSION_MODE` unset and passed all six contracts: the first contract's preflight read the composed hook sandbox mode as `danger-full-access` from the pin alone, and the documented `web` launch rendered `AGENTS.md` whole through the `firstmate` preset at budget 262144.
-That is the evidence for the first contract after the sandbox check; the guard no longer unsets the variable for that contract, because the preflight now refuses every `!!js` mode whatever the environment holds, so a pin removed from the tracked patch cannot pass on a value inherited from the caller's shell.
-Its seventh contract, that the launcher's own `web` exec composes the tracked patch and loads the plugin tree with it applied once, was added after both; its commands were run on their own against dsh 0.1.5-rc.1 in a disposable `DSH_HOME`, where they pass and the previous launcher failed them with the parent-option refusal and `duplicate loader entry id`, and the whole guard has not been rerun since.
-Its eighth contract, that the tracked patch keeps every permission preset `dsh-base` offers, was added with the restated preset table: a patch replaces a row's whole config, and the earlier `permission` row carrying only `defaultPreset` left DSH offering `workspace-write` and `danger-full-access` but no `read-only`.
-Its composition, through DSH's own layer composer and the permission plugin's own config schema over dsh-base 0.1.5-rc.2, was run on its own: without the table the tracked patch resolved to those two presets, and with it to all three, matching `dsh-base`.
+As measured on 2026-09-17, the portable suite passes 46 cases, and against dsh 0.1.5-rc.1 / dsh-base 0.1.5-rc.2 the live guard passed all nine contracts:
+
+1. a matching bridge pin passes the preflight with the tracked patch;
+2. `UserPromptSubmit` context reaches the FIRST request;
+3. a `bash`-matcher deny blocks the command, with the sentinel absent;
+4. a blocking `Stop` forces one bounded continuation (2 firings);
+5. a hook subprocess inherits the host's harness marker;
+6. the documented `web` launch renders `AGENTS.md` whole through the `firstmate` preset at budget 262144;
+7. the launcher's own `web` exec loads the plugin tree with the tracked patch applied once;
+8. the tracked patch keeps every permission preset `dsh-base` offers, `read-only` included;
+9. a session holding the fleet lock refuses a second one into read-only.
+
+Contracts 6 through 9 were each added after an earlier run and were exercised on their own first; the run above is the first covering all nine together.
+The first contract was also run with `DSH_PERMISSION_MODE` unset once the `sandbox-policy` pin landed, and the preflight read `danger-full-access` from the pin alone.
+The guard no longer unsets that variable, because the preflight now refuses every `!!js` mode whatever the environment holds, so a pin removed from the tracked patch cannot pass on a value inherited from the caller's shell.
 
 The live guard resolves the running `dsh-base` version beside the installed `dsh` and fails by name and version rather than degrading quietly; it needs `node`, `jq` and `pnpm`, and it keeps the real harness home on purpose.
 
