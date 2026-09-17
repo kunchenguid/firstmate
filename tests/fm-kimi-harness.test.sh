@@ -191,7 +191,7 @@ EOF
 }
 
 test_kimi_launch_then_send_is_verified() {
-  local id rec out rc launch pointer brief_real meta task_tmp
+  local id rec out rc launch pointer brief_real meta task_tmp path_line first_send_line treehouse_line
   id="kimi-success-z1-$$"
   task_tmp="/tmp/fm-$id"
   KIMI_RUNTIME_TASK_TMP=$task_tmp
@@ -227,6 +227,12 @@ test_kimi_launch_then_send_is_verified() {
   assert_grep "export PATH='$HOME_DIR/config/tools/bin:$HOME_DIR/config/tools/node_modules/.bin:$FAKEBIN_DIR:$BASE_PATH'" \
     "$CASE_DIR/tmux-calls.log" \
     "kimi spawn did not propagate its resolved home-local helper PATH into the pane"
+  path_line=$(grep -n "export PATH=" "$CASE_DIR/tmux-calls.log" | head -1 | cut -d: -f1)
+  first_send_line=$(grep -n "send-keys" "$CASE_DIR/tmux-calls.log" | head -1 | cut -d: -f1)
+  treehouse_line=$(grep -n "treehouse get" "$CASE_DIR/tmux-calls.log" | head -1 | cut -d: -f1)
+  [ -n "$path_line" ] && [ "$path_line" = "$first_send_line" ] && \
+    [ -n "$treehouse_line" ] && [ "$path_line" -lt "$treehouse_line" ] \
+    || fail "kimi spawn did not export its resolved PATH before the first pane helper command"
   assert_grep "export FM_TASK_ID=$id" "$CASE_DIR/tmux-calls.log" \
     "kimi spawn did not mark the pane with its task id"
   assert_grep 'BEGIN FIRSTMATE KIMI TURN-END HOOK' "$HOME_DIR/.kimi-code/config.toml" \
