@@ -277,11 +277,14 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
     | ([$final[] | select(.error == null)] | first) // ($final | first)' > "$TMP/final.json"
   for task in "$@"; do
     fm_pr_task_id_valid "$task" || { printf 'contributions: invalid durable task id\n'; continue; }
-    jq -n --slurpfile final "$TMP/final.json" '
-      $final[0] + {error:null,pending:[],notified:[]}' > "$TMP/row.json"
-    if ! jq -ne --slurpfile saved "$TMP/saved.json" --slurpfile row "$TMP/row.json" \
-      --arg task "$task" --arg url "$url" '
-        [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first == $row[0]' >/dev/null; then
+    jq -n --slurpfile saved "$TMP/saved.json" --arg task "$task" --arg url "$url" '
+      [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first' > "$TMP/old.json"
+    if jq -e '. == null' "$TMP/old.json" >/dev/null; then
+      jq -n --slurpfile final "$TMP/final.json" '
+        $final[0] + {error:null,pending:[],notified:[]}' > "$TMP/row.json"
+      write_record "$task" "$TMP/row.json"
+    elif jq -e '.error != null' "$TMP/old.json" >/dev/null; then
+      jq '.error = null' "$TMP/old.json" > "$TMP/row.json"
       write_record "$task" "$TMP/row.json"
     fi
   done
