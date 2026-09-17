@@ -871,6 +871,39 @@ test_turn_ended_churning_pane_absorbed() {
   pass "a bare turn-end from a pane that churned since the previous poll is absorbed"
 }
 
+test_turn_ended_churn_preserves_existing_deadline() {
+  local dir state fakebin out capture_file window key pid since
+  dir=$(make_case turn-ended-churn-existing-deadline); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-codexdeadline"
+  : > "$state/codexdeadline.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexdeadline.meta"
+  printf 'rendered after the previous poll' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'the previous render')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  since=$(( $(date +%s) - 30 ))
+  printf '%s' "$since" > "$state/.churn-since-$key"
+  printf '2\n' > "$state/.wedge-escalations-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_TURNEND_CHURN_ABSORB_SECS=600 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$BASH" "$WATCH" > "$out" 2> "$dir/watch.err" &
+  pid=$!
+  wait_for_absorbed "$state" "$pid" "absorbed benign signal:" \
+    || { reap "$pid"; fail "a churning turn-end within its existing deadline was not absorbed: $(cat "$out" "$dir/watch.err")"; }
+  reap "$pid"
+  [ ! -s "$out" ] || fail "existing-deadline absorb printed output: $(cat "$out" "$dir/watch.err")"
+  [ ! -s "$state/.wake-queue" ] || fail "existing-deadline absorb queued a wake"
+  [ "$(cat "$state/.churn-since-$key")" = "$since" ] \
+    || fail "absorbing another turn-end reset the existing deferral window"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "existing-deadline absorb retained the prior wedge escalation"
+  unset FM_FAKE_CREW_STATE
+  pass "a churning turn-end within its existing deadline is absorbed without extending it"
+}
+
 test_turn_ended_churn_resets_prior_stale_classification() {
   local dir state fakebin out capture_file window key old_hash active_hash pid i
   dir=$(make_case turn-ended-churn-resets-stale); state="$dir/state"; fakebin="$dir/fakebin"
@@ -5472,6 +5505,11 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
 }
 
 
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit 0
+fi
+
 test_status_span_actionable_classifier
 test_status_span_survives_a_later_routine_append
 test_status_span_respects_decision_closure
@@ -5492,6 +5530,7 @@ test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
 test_turn_ended_grace_coalescing_keeps_later_signature
 test_turn_ended_churning_pane_absorbed
+test_turn_ended_churn_preserves_existing_deadline
 test_turn_ended_churn_resets_prior_stale_classification
 test_turn_ended_churn_resets_wedge_state_before_stale_poll
 test_turn_ended_still_pane_surfaced
