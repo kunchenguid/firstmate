@@ -140,7 +140,7 @@ fm_project_manifest_pairs() {
 fm_project_manifest_lookup() {
   local data=$1 alias=$2 pairs key val
   case "$alias" in
-    *'"'*|*'\'*)
+    *\"*|*\\*)
       echo "error: project alias contains a byte the manifest cannot hold: $alias" >&2
       return 1
       ;;
