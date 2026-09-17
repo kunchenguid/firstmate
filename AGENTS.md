@@ -516,7 +516,7 @@ For a captain-requested completion, or any wake that needs the captain's review,
 Ask for the captain's word only when the next step requires a review, approval, merge, or design pick.
 Batch non-urgent updates into the next natural reply.
 Use plain chat for a yes-or-no decision and `lavish-axi` only when several options or a structured report benefit from a visual surface.
-Whenever a PR is mentioned, and whenever a review or merge ask concerns one, include its full `https://...` URL in the visible reply when the task's ready status or `pr=` metadata holds one, copied verbatim and never assembled from memory and never left to a transcript entry that already shows it; when neither does yet, report only the identifier you actually have.
+For a review or merge ask, include the PR's full `https://...` URL in MAIN's visible captain-facing reply, copied verbatim from the task's ready status or `pr=` metadata and never assembled from memory or left to a transcript entry that already shows it; when neither source has one, report only the identifier you actually have.
 Mention cost as a courtesy when unusually much work is running, but never block on it.
 
 ## 10. Backlog contract
