@@ -124,6 +124,10 @@
 #
 # --contribution-input prints only the canonical backlog/tasks ownership pair,
 # without worker observations or cross-home collection, for the home-local poll.
+# It stages that pair privately before printing it, so a pair this command cannot
+# read, stage, or hand back names the failure on stderr and exits nonzero with no
+# output: its consumer must never read a missing or partial ownership pair as a
+# home that owns nothing.
 # Compatibility: JSON is the primary machine-readable surface.
 # Human views must render this output instead of parsing state files again.
 set -u
