@@ -747,7 +747,7 @@ pass "retained relaunch restoration preserves source identity and creates one cr
 RELAUNCH_HOME="$TMP_ROOT/relaunch-home"
 RELAUNCH_PROJECT="$TMP_ROOT/relaunch-project"
 RELAUNCH_WT="$TMP_ROOT/relaunch-worktree"
-RELAUNCH_ID=layout-relaunch
+RELAUNCH_ID='layout-relaunch'
 RELAUNCH_ATTEMPT="$RELAUNCH_HOME/state/$RELAUNCH_ID.herdr-launch"
 RELAUNCH_FAKEBIN=$(fm_fakebin "$TMP_ROOT/relaunch-fake")
 fm_git_worktree "$RELAUNCH_PROJECT" "$RELAUNCH_WT" "task-$RELAUNCH_ID"
@@ -879,7 +879,7 @@ for ownership_mode in fresh relaunch secondmate; do
   expected_policy=retain
   if [ "$ownership_mode" = fresh ]; then
     lease_holder=$TEST_LEASE_HOLDER
-    expected_policy=release-fresh
+    expected_policy='release-fresh'
   fi
   fm_backend_herdr_layout_attempt_write "$ATTEMPT" 4 0123456789abcdef0123456789abcdef \
     "$ownership_mode" task-z1 "$TMP_ROOT/worktree" "$lease_holder" \
@@ -1221,7 +1221,7 @@ LEASE_TX_OTHER="$TMP_ROOT/lease-transaction-other"
 STRUCT_PROJECT_LINK="$TMP_ROOT/structural-project-link"
 STRUCT_WT_LINK="$TMP_ROOT/structural-worktree-link"
 ln -s "${STRUCT_PROJECT##*/}" "$STRUCT_PROJECT_LINK"
-ln -s "${STRUCT_WT#$TMP_ROOT/}" "$STRUCT_WT_LINK"
+ln -s "${STRUCT_WT#"$TMP_ROOT"/}" "$STRUCT_WT_LINK"
 : > "$STRUCT_TREEHOUSE_LOG"
 rm -f "$STRUCT_TREEHOUSE_STATE" "$LEASE_TX" "$LEASE_TX_OTHER"
 if fm_treehouse_lease_transaction_write "$LEASE_TX" intent lease-z1 fm-lease-z1 \
@@ -1378,7 +1378,8 @@ interrupted_out=$(HERDR_SESSION=lab-structural \
 interrupted_status=$?
 set -e
 wait_server
-[ "$interrupted_status" -ne 0 ] || fail "interrupted lease return unexpectedly launched a worker"
+[ "$interrupted_status" -ne 0 ] \
+  || fail "interrupted lease return unexpectedly launched a worker: $interrupted_out"
 INTERRUPTED_META="$STRUCT_HOME/state/interrupted-z1.meta"
 INTERRUPTED_TX="$STRUCT_HOME/state/interrupted-z1.herdr-lease"
 INTERRUPTED_ATTEMPT="$STRUCT_HOME/state/interrupted-z1.herdr-launch"
@@ -1406,7 +1407,8 @@ interrupted_retry_out=$(HERDR_SESSION=lab-structural \
     interrupted-z1 "$STRUCT_PROJECT" --scout --harness pi --backend herdr)
 interrupted_retry_status=$?
 set -e
-[ "$interrupted_retry_status" -ne 0 ] || fail "interruption retry unexpectedly launched through the stale fixture"
+[ "$interrupted_retry_status" -ne 0 ] \
+  || fail "interruption retry unexpectedly launched through the stale fixture: $interrupted_retry_out"
 if [ -e "$INTERRUPTED_ATTEMPT" ]; then
   fm_backend_herdr_layout_attempt_snapshot "$INTERRUPTED_ATTEMPT" \
     || fail "interruption retry left a malformed structural receipt"
@@ -1608,7 +1610,7 @@ else
   SERVER_PID=
 fi
 [ "$retained_success_status" -ne 0 ] \
-  || fail "retained receipt retirement failure unexpectedly reported success"
+  || fail "retained receipt retirement failure unexpectedly reported success: $retained_success_out"
 RETAINED_ATTEMPT="$STRUCT_HOME/state/$RETAINED_ID.herdr-launch"
 [ -f "$RETAINED_ATTEMPT" ] \
   || fail "retained receipt retirement failure discarded retry authority"
@@ -1875,7 +1877,7 @@ fm_test_spawn_brief "$NON_PI_HOME" non-pi-kimi-fail "Clean a projected non-Pi en
 mkdir -p "$NON_PI_HOME/user-home/.kimi-code"
 printf '%s\n' 'default_model = "test"' > "$NON_PI_HOME/user-home/.kimi-code/config.toml"
 set +e
-non_pi_kimi_out=$(HERDR_SESSION=lab-structural HERDR_PANE_ID= \
+non_pi_kimi_out=$(HERDR_SESSION=lab-structural HERDR_PANE_ID='' \
   FM_FAKE_TREEHOUSE_LOG="$NON_PI_TREEHOUSE_LOG" FM_KIMI_READY_POLLS=1 \
   fm_test_run_spawn "$NON_PI_HOME" "$NON_PI_WT" "$NON_PI_FAKEBIN" \
     non-pi-kimi-fail "$NON_PI_PROJECT" --scout --harness kimi --backend herdr)
@@ -1921,7 +1923,7 @@ exec '$REAL_TASKS_AXI' "\$@"
 SH
   chmod +x "$NON_PI_FAKEBIN/tasks-axi"
   set +e
-  non_pi_backlog_out=$(HERDR_SESSION=lab-structural HERDR_PANE_ID= \
+  non_pi_backlog_out=$(HERDR_SESSION=lab-structural HERDR_PANE_ID='' \
     FM_FAKE_TREEHOUSE_LOG="$NON_PI_TREEHOUSE_LOG" \
     fm_test_run_spawn "$NON_PI_HOME" "$NON_PI_WT" "$NON_PI_FAKEBIN" \
       "$BACKLOG_ID" "$NON_PI_PROJECT" --harness pi-signed --backend herdr \

@@ -28,7 +28,8 @@ It is also auto-detected when the primary runs natively under `HERDR_ENV=1` and 
 A tmux pane nested inside Herdr resolves to tmux because the innermost multiplexer wins.
 An auto-detected Herdr spawn prints an opt-out notice.
 
-Spawn stops before creating a Herdr container or acquiring a task worktree when `herdr`, `jq`, or the protocol floor is unavailable.
+Spawn stops before creating a Herdr container or acquiring a task worktree when `herdr`, `jq`, or the general protocol-14 floor is unavailable.
+Plain-Pi launch checks the exact protocol-20 schema only after publishing its recoverable task container and, for fresh work, durable lease records.
 No separate first-run provisioning is required.
 
 The required CI lane uses the pinned installers in `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`.
@@ -83,7 +84,9 @@ Closing its last tab can remove the workspace, and the next spawn recreates it.
 
 A plain `pi` worker on Herdr protocol 20 starts by replacing the fresh task tab's single shell pane through the bundled `layout.apply` schema instead of typing a command into that shell.
 This avoids treating terminal input acceptance as worker-process readiness and prevents pending shell-editor text from joining or delaying the launch command.
-Before acquisition, Firstmate publishes `state/<id>.herdr-lease` with the task's unique holder intent. It then binds Treehouse's returned lease id and authoritative worktree, records cleanup intent before return, and retains confirmed-return state until task cleanup completes. Retries reconcile each phase against `treehouse status --json`, and returns use the immutable lease id rather than holder text alone.
+Before acquisition, Firstmate publishes `state/<id>.herdr-lease` with the task's transaction-unique holder intent.
+It then binds Treehouse's returned immutable lease id and authoritative canonical worktree, records cleanup intent before return, and retains confirmed-return state until correlated task cleanup completes.
+Retries reconcile each phase against `treehouse status --json`, and structural returns use only the validated immutable lease id rather than holder text alone.
 Firstmate validates the exact named session, protocol, live schema, workspace, single-pane tab, pane, foreground shell, and Unix socket, then sends one argv array with the exact working directory through `bin/backends/herdr-layout-apply.py`.
 The replacement inherits the environment of the Herdr daemon that created the destination pane, matching destination-pane semantics, while Firstmate sends only its non-sensitive task, temporary-directory, and trace overrides.
 The request payload travels over the helper's stdin, so allowlisted credentials and launch values never enter helper process arguments, logs, or durable attempt state.
@@ -91,19 +94,25 @@ The local client exposes no general Herdr control surface and accepts only that 
 It binds a random request id, rejects protocol errors and mismatched responses, and returns only replacement ids that Firstmate re-reads from the same named session.
 
 Immediately before the request, Firstmate publishes `state/<id>.herdr-launch` with a random non-sensitive attempt identity, the exact old session, workspace, tab, and pane, and one validated ownership mode: fresh allocation, ordinary relaunch, or persistent secondmate.
-A fresh record binds the exact acquired `fm-<id>-<transaction>` lease; relaunch and secondmate records carry no lease-return authority.
-A response advances that record to replacement ids only after the named session independently confirms their workspace, tab, pane, and random launch label. A mismatched response is never used as a close target; cleanup reconciles only the random launch label.
-A timeout, malformed response, wrong response id, helper crash, or other uncertain post-send result preserves the task record, lease, local work, and attempt record, and every retry refuses until the exact named session proves either that the old pane remains or that one random-label-correlated replacement was safely reconciled.
-Only fresh allocation recovery can return its proven lease and remove its provisional task record.
-Relaunch and secondmate recovery structurally replaces one independently confirmed exact Pi with an inert shell in the same named session, workspace, and tab, then transactionally rebinds task and presentation records before allowing a retry.
+A fresh attempt binds the transaction-unique `fm-<id>-<token>` holder recorded in the correlated lease transaction; relaunch and secondmate attempts carry no lease-return authority.
+A response advances the attempt record to replacement ids only after the named session independently confirms their workspace, tab, pane, and random launch label.
+A mismatched response is never used as a close target; cleanup reconciles only the random launch label.
+A timeout, malformed response, wrong response id, helper crash, or other uncertain post-send result preserves the task record, local work, attempt record, and any fresh lease.
+Every retry refuses until the exact named session proves either that the old pane remains or that one random-label-correlated replacement was safely reconciled.
+An exact rebound live Pi whose task record proves the replacement was committed is preserved, and its leftover receipt is retired without launching or restoring another endpoint.
+Fresh-mode committed recovery additionally requires that the configured backlog transition is either durably committed or not applicable.
+During launch recovery, only an unresolved fresh allocation can return its proven lease and remove its provisional task record.
+Unresolved relaunch and secondmate recovery structurally replaces one independently confirmed exact Pi with an inert shell in the same named session, workspace, and tab, then transactionally rebinds task and presentation records before allowing a retry.
 The restoration starts the shell through an explicit empty-environment argv, preserves focus, and remains quarantined if its response or any identity cannot be proved.
 Legacy, unknown, malformed, contradictory, stale-worktree, ambiguous, duplicate, renamed, or unverifiable records stay quarantined without mutation.
-The attempt record is cleared only after mode-safe retry cleanup or after the replacement's presentation and task metadata have both been rebound.
+The attempt record is cleared only after mode-safe retry cleanup or after endpoint readiness, presentation handling, task-record rebinding, and backlog ownership commit have all succeeded.
 
-The worker counts as launched only after the replacement pane reports the exact plain-Pi process, Herdr's public `pane report-agent` operation registers it as Pi, and a fresh inventory read confirms that registration is live.
-Only then do the task record and any presentation journal advance from the old tab and pane ids to the returned replacement ids.
-A failure after replacement targets the returned pane for exact cleanup and never reports spawn success.
-If backlog ownership cannot commit after launch, abort cleanup closes and confirms that exact live endpoint before removing its task record or returning its holder-bound Treehouse lease; an unconfirmed close preserves all three for reconciliation.
+The replacement endpoint counts as ready only after its pane reports the exact plain-Pi process, Herdr's public `pane report-agent` operation registers it as Pi, and a fresh inventory read confirms that registration is live.
+Only then do the task record and any bound presentation journal advance from the old tab and pane ids to the returned replacement ids.
+Spawn success still waits for backlog ownership to commit before receipt retirement is attempted.
+If receipt retirement then fails, the exact committed worker and its retry authority remain intact rather than entering destructive abort cleanup.
+A failure after replacement but before commit targets the returned pane for mode-aware exact cleanup and never reports spawn success.
+If fresh-launch backlog ownership cannot commit, abort cleanup closes and confirms that exact live endpoint before removing its task record or returning its Treehouse lease; an unconfirmed close preserves all three for reconciliation.
 Normal teardown and pre-launch aborts return the durable Treehouse lease only when its exact immutable lease id, transaction-unique holder, canonical project, and canonical worktree all match the durable transaction.
 Generic Enter behavior for post-launch interaction is unchanged.
 

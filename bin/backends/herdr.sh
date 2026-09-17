@@ -58,7 +58,9 @@
 #
 # Requires: herdr (CLI + socket), jq (JSON parsing). Bootstrap detects these
 # through fm_backend_required_tools only when herdr is the resolved backend;
-# this adapter also gates them again before spawning.
+# this adapter also gates them again before spawning. Exact plain-Pi launch
+# additionally requires python3 and exact client/server protocol 20 for its
+# schema-pinned structural request.
 
 # FM_HOME fallback: every real caller (fm-spawn.sh, fm-peek.sh, fm-send.sh,
 # fm-teardown.sh, fm-watch.sh, fm-crew-state.sh) already sets FM_HOME as a
@@ -2646,6 +2648,7 @@ fm_backend_herdr_projection_create_task() {  # <cwd> <workspace-label> <task-lab
     echo "error: disposable herdr presentation workspace did not converge to exactly one task pane" >&2
     return 1
   fi
+  # shellcheck disable=SC2034 # Output global consumed by fm-spawn.sh after this sourced helper returns.
   FM_BACKEND_HERDR_PROJECTION_SEEDED_PRUNED=1
   return 0
 }

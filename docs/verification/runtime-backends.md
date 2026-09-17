@@ -877,7 +877,7 @@ Its bounded output includes:
 ```text
 ok - layout.apply preserves exact cwd/environment/argv and binds only response ids re-read from the named session
 ok - layout.apply refuses every protocol, schema, socket, session, container, layout, and foreground identity mismatch before mutation
-ok - layout.apply cleans only the exact returned pane after a post-mutation identity refusal
+ok - layout.apply reconciles only the independently verified launch label after an identity refusal
 ok - retained relaunch restoration preserves source identity and creates one credential-free inert shell
 ok - agent inventory registration requires exact plain-Pi process identity and is re-read from Herdr
 ok - task metadata rebinding is exact, preserves trace metadata, and refuses ambiguous records

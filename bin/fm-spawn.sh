@@ -43,8 +43,10 @@
 #   agent-free on a backend with a recovery-grade agent-state classifier (tmux
 #   or herdr), and clears the previous harness's per-task wiring before arming
 #   the new incarnation. The replacement still never starts outside the copy
-#   holding the work: a Herdr shell that has drifted out of the recorded
-#   worktree is told once to return, and only a shell that will not go refuses.
+#   holding the work: an interactive Herdr shell that has drifted out of the
+#   recorded worktree is told once to return, and only a shell that will not go
+#   refuses; exact plain Pi instead addresses that worktree directly through its
+#   structural layout request.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
@@ -94,8 +96,8 @@
 #   plus authoritative metadata may replace one exact agent-free husk in place.
 #   The journal, visible token, and labels alone are never endpoint or ownership
 #   authority, and every ambiguous recovery stays on the flat fallback after
-#   duplicate-agent risk is independently absent. Treehouse allocation and task
-#   metadata are unchanged.
+#   duplicate-agent risk is independently absent. Presentation selection itself
+#   does not alter Treehouse allocation or task metadata.
 #   A clean projected create or exact resume makes one bounded attempt to hold
 #   the one session-scoped presentation-order lock (keyed by named session plus
 #   canonical socket, outside any home's state/) through launch handoff. Lock
@@ -3156,11 +3158,11 @@ spawn_reconcile_herdr_layout_attempt() {
     expected_mode=fresh
   fi
   if [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 8 ]; then
-    [ "$expected_mode" = fresh ] \
-      && spawn_finalize_released_fresh_herdr_layout || {
+    if [ "$expected_mode" != fresh ] \
+      || ! spawn_finalize_released_fresh_herdr_layout; then
       echo "error: task $ID's released structural launch receipt could not be finalized safely" >&2
       return 1
-    }
+    fi
     return 0
   fi
   fm_backlog_record_present "$meta" "task record" "$STATE" || {
@@ -4021,12 +4023,12 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
           SPAWN_TREEHOUSE_LEASE_ID=$FM_TREEHOUSE_LEASE_TX_ID
           ;;
         cleanup|returned)
-          fm_treehouse_lease_transaction_return "$HERDR_TREEHOUSE_LEASE_TX" \
+          if ! fm_treehouse_lease_transaction_return "$HERDR_TREEHOUSE_LEASE_TX" \
             "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER" "$PROJ_ABS" >/dev/null \
-            && rm -f -- "$HERDR_TREEHOUSE_LEASE_TX" || {
+            || ! rm -f -- "$HERDR_TREEHOUSE_LEASE_TX"; then
             echo "error: task $ID's prior structural Herdr Treehouse lease cleanup could not be confirmed" >&2
             exit 1
-          }
+          fi
           ;;
         retry|absent) ;;
         *) exit 1 ;;
@@ -4050,13 +4052,13 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       SPAWN_TREEHOUSE_LEASE_ID=$(printf '%s' "$TREEHOUSE_LEASE_JSON" | jq -r \
         --arg holder "$SPAWN_TREEHOUSE_LEASE_HOLDER" \
         'select(.lease_holder == $holder and (.path | type == "string") and (.lease_id | type == "string")) | .lease_id' 2>/dev/null)
-      [ -n "$WT" ] && [ -n "$SPAWN_TREEHOUSE_LEASE_ID" ] \
-        && fm_treehouse_pool_slot "$PROJ_ABS" "$WT" \
-        && fm_treehouse_lease_transaction_write "$HERDR_TREEHOUSE_LEASE_TX" acquired \
-          "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER" "$PROJ_ABS" "$WT" "$SPAWN_TREEHOUSE_LEASE_ID" || {
+      if [ -z "$WT" ] || [ -z "$SPAWN_TREEHOUSE_LEASE_ID" ] \
+        || ! fm_treehouse_pool_slot "$PROJ_ABS" "$WT" \
+        || ! fm_treehouse_lease_transaction_write "$HERDR_TREEHOUSE_LEASE_TX" acquired \
+          "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER" "$PROJ_ABS" "$WT" "$SPAWN_TREEHOUSE_LEASE_ID"; then
         echo "error: treehouse returned an invalid structural Herdr lease identity; preserving its acquisition intent for exact reconciliation" >&2
         exit 1
-      }
+      fi
       WT=$(fm_treehouse_canonical_existing_path "$WT") || {
         echo "error: treehouse returned a structural Herdr worktree that could not be canonicalized" >&2
         exit 1
@@ -5050,12 +5052,12 @@ print(json.dumps(["/bin/sh", "-c", sys.stdin.read()], separators=(",", ":")))
     HERDR_LAYOUT_OWNERSHIP_MODE=relaunch
   else
     HERDR_LAYOUT_OWNERSHIP_MODE=fresh
-    [ "$SPAWN_TREEHOUSE_LEASE_HELD" = 1 ] \
-      && fm_treehouse_lease_holder_valid \
-        "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER" || {
+    if [ "$SPAWN_TREEHOUSE_LEASE_HELD" != 1 ] \
+      || ! fm_treehouse_lease_holder_valid \
+        "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER"; then
       echo "error: fresh structural Herdr launch has no exact acquired Treehouse lease proof" >&2
       exit 1
-    }
+    fi
     HERDR_LAYOUT_LEASE_HOLDER=$SPAWN_TREEHOUSE_LEASE_HOLDER
   fi
   HERDR_LAYOUT_ATTEMPT_ID=$(python3 -c 'import os; print(os.urandom(16).hex())') || exit 1
