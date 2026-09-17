@@ -18,7 +18,10 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 LAB = pathlib.Path(tempfile.mkdtemp(prefix="fm-turnend-foreign-owner-"))
 OUT = LAB / "evidence"
 OUT.mkdir()
-FAKE = LAB / "synthetic-claude"
+# Basename must be an exact FM_HARNESS_NAMES entry. Linux procps comm= is the
+# 15-char kernel name, so "synthetic-claude" becomes "synthetic-claud" and
+# never matches the claude regex, so fm-lock.sh exits without writing .lock.
+FAKE = LAB / "claude"
 FAKE.symlink_to("/bin/bash")
 PROCS = []
 
@@ -80,13 +83,23 @@ def start(env, command, name):
     return process
 
 
-def until(test, seconds=20):
+def until(test, seconds=20, message="condition timed out"):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         if test():
             return
         time.sleep(0.1)
-    raise RuntimeError("condition timed out")
+    raise RuntimeError(message() if callable(message) else message)
+
+
+def session_lock_text(path):
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        text = path.read_text().strip()
+    except OSError:
+        return None
+    return text if text.isdigit() else None
 
 
 PAYLOAD = json.dumps({"session_id": "synthetic-second", "stop_hook_active": True})
@@ -130,15 +143,25 @@ try:
     root, env = make("nonowner")
     owner = start(
         env,
-        '"$FM_ROOT_OVERRIDE/bin/fm-lock.sh"; touch "$FM_HOME/state/owner-ready"; while :; do sleep 1; done',
+        '"$FM_ROOT_OVERRIDE/bin/fm-lock.sh" && touch "$FM_HOME/state/owner-ready" && while :; do sleep 1; done',
         "owner-idle.txt",
     )
-    until(lambda: (root / "state/owner-ready").exists())
+    lock_path = root / "state/.lock"
+    until(
+        lambda: session_lock_text(lock_path) is not None,
+        message=lambda: "synthetic owner did not publish a readable state/.lock; owner log="
+        + (OUT / "owner-idle.txt").read_text(errors="replace"),
+    )
+    until(
+        lambda: (root / "state/owner-ready").exists(),
+        message="synthetic owner published state/.lock but did not reach owner-ready",
+    )
     beat = root / "state/.last-watcher-beat"
     beat.touch()
     old_time = time.time() - 600
     os.utime(beat, (old_time, old_time))
-    lock_owner = (root / "state/.lock").read_text().strip()
+    lock_owner = session_lock_text(lock_path)
+    require(lock_owner is not None, "state/.lock vanished after the owner-ready wait")
     print("SETUP live synthetic owner=", owner.pid, "lock=", lock_owner, flush=True)
 
     acquisition = run(
@@ -171,7 +194,10 @@ try:
         'printf \'%s\\n\' \'{"session_id":"replacement","stop_hook_active":true}\' | "$FM_ROOT_OVERRIDE/bin/fm-claude-stop-autoarm.sh"; printf "replacement_rc=%s\\n" "$?"; sleep 1',
         "replacement.txt",
     )
-    until(lambda: (root / "state/.watch.lock/pid").exists())
+    until(
+        lambda: (root / "state/.watch.lock/pid").is_file(),
+        message="replacement owner did not publish state/.watch.lock/pid",
+    )
     watcher_pid = (root / "state/.watch.lock/pid").read_text().strip()
     print("COUNTERFACTUAL dead original owner: watcher=", watcher_pid, flush=True)
     healthy = guard(env, "replacement-owned healthy watcher")
