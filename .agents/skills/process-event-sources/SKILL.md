@@ -146,7 +146,7 @@ The `when` adapter's guarantees are part of the operating contract in [`docs/con
 Also never claim that a source cannot refresh its owning home's lease: that rule is confused-agent-grade and a deliberately marker-stripping source is out of scope, per the operating contract in [`docs/configuration.md`](../../../docs/configuration.md#process-to-event-sources-stateprocevent).
 
 The currently published `lavish-axi poll` destructively clears feedback before returning it.
-The Lavish adapter therefore atomically snapshots matching pending dock prompts before polling and retains that snapshot until the generic runner durably captures a result; if the poll clears the store and loses its output, the next invocation recovers the snapshot through the same process-event source and wake owner.
+The Lavish adapter therefore atomically snapshots matching pending dock prompts before polling and retains that snapshot until the generic runner durably captures it; if the snapshot exceeds the per-result bound, successive invocations emit ordered chunks and advance a private cursor only after each chunk is durably captured, then the final chunk removes the snapshot through the same process-event source and wake owner.
 Responses that never appeared in the Lavish session store remain outside the adapter's narrow recovery boundary.
 The remote-reply adapter removes that particular pre-capture window by never consuming its source, but it cannot recover bytes truly lost from the remote log itself.
 Say these boundaries plainly wherever the behavior is described.

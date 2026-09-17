@@ -236,13 +236,15 @@ PY
 }
 
 cmd_retire() {
-  local artifact=${1-} id snapshot
+  local artifact=${1-} id snapshot cursor
   [ -n "$artifact" ] || usage
   id=$(cmd_source_id "$artifact") || exit 1
   snapshot=$(recovery_snapshot_path "$id")
+  cursor=$(recovery_cursor_path "$id")
   [ ! -L "$snapshot" ] || die "Lavish recovery snapshot must not be a symlink"
+  [ ! -L "$cursor" ] || die "Lavish recovery cursor must not be a symlink"
   "$SCRIPT_DIR/fm-procevent.sh" retire "$id" || return
-  rm -f -- "$snapshot" || die "cannot remove Lavish recovery snapshot"
+  rm -f -- "$snapshot" "$cursor" || die "cannot remove Lavish recovery state"
 }
 
 # The bounded quiet retry described in the header. The bound is a constant
@@ -339,6 +341,84 @@ recovery_snapshot_path() {  # <source-id>
   printf '%s/procevent/%s.lavish-pending\n' "$STATE" "$1"
 }
 
+recovery_cursor_path() {  # <source-id>
+  printf '%s/procevent/%s.lavish-pending.cursor\n' "$STATE" "$1"
+}
+
+emit_recovery_snapshot() {  # <snapshot-file> <cursor-file>
+  local snapshot=$1 cursor=$2 limit=${FM_PROCEVENT_MAX_OUTPUT_BYTES:-1048576}
+  python3 - "$snapshot" "$cursor" "$limit" <<'PY'
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+
+snapshot_path, cursor_path, limit_text = sys.argv[1:]
+try:
+    limit = int(limit_text)
+except ValueError:
+    raise SystemExit(2)
+if limit < 0:
+    raise SystemExit(2)
+with open(snapshot_path, "rb") as fh:
+    snapshot = fh.read()
+if len(snapshot) <= limit:
+    sys.stdout.buffer.write(snapshot)
+    raise SystemExit(0)
+
+digest = hashlib.sha256(snapshot).hexdigest()
+start = 0
+try:
+    cursor_stat = os.lstat(cursor_path)
+    if stat.S_ISLNK(cursor_stat.st_mode) or not stat.S_ISREG(cursor_stat.st_mode):
+        raise SystemExit(2)
+    with open(cursor_path, encoding="ascii") as fh:
+        cursor_digest, cursor_offset = fh.read().strip().split("\t", 1)
+    if cursor_digest == digest and cursor_offset.isdigit():
+        start = int(cursor_offset)
+except FileNotFoundError:
+    pass
+except (OSError, ValueError):
+    raise SystemExit(2)
+if start < 0 or start >= len(snapshot):
+    raise SystemExit(2)
+try:
+    remaining = snapshot[start:].decode("utf-8")
+except UnicodeDecodeError:
+    raise SystemExit(2)
+ended = bool(re.search(rb"(?m)^  session_ended: (?:true|True|TRUE)\s*$", snapshot))
+
+def render(count):
+    payload = remaining[:count]
+    end = start + len(payload.encode("utf-8"))
+    final = end == len(snapshot)
+    envelope = (
+        "session:\n"
+        "  status: feedback\n"
+        f"  session_ended: {'true' if final and ended else 'false'}\n"
+        f"chunk: {digest},{start},{end},{len(snapshot)},{1 if final else 0}\n"
+        "payload: " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+    )
+    return envelope.encode("utf-8")
+
+low, high = 1, len(remaining)
+best = None
+while low <= high:
+    middle = (low + high) // 2
+    candidate = render(middle)
+    if len(candidate) <= limit:
+        best = candidate
+        low = middle + 1
+    else:
+        high = middle - 1
+if best is None:
+    raise SystemExit(2)
+sys.stdout.buffer.write(best)
+PY
+}
+
 snapshot_pending_prompts() {  # <artifact> <snapshot-file>
   local artifact=$1 snapshot=$2 store tmp rc
   store="${LAVISH_AXI_STATE_DIR:-$HOME/.lavish-axi}/state.json"
@@ -412,16 +492,19 @@ PY
 }
 
 cmd_poll() {
-  local artifact=${1-} id snapshot snapshot_rc delay attempt=0 response cleanup_command rc filter_rc iteration_started
+  local artifact=${1-} id snapshot cursor snapshot_rc delay attempt=0 response cleanup_command rc filter_rc iteration_started
   local pipeline_status
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   id=$(cmd_source_id "$artifact") || exit 1
   snapshot=$(recovery_snapshot_path "$id")
+  cursor=$(recovery_cursor_path "$id")
   [ ! -L "$snapshot" ] || die "Lavish recovery snapshot must not be a symlink"
+  [ ! -L "$cursor" ] || die "Lavish recovery cursor must not be a symlink"
   if [ -f "$snapshot" ] && [ ! -L "$snapshot" ]; then
-    cat -- "$snapshot"
+    emit_recovery_snapshot "$snapshot" "$cursor" \
+      || die "cannot emit the next Lavish recovery chunk"
     return 0
   fi
   snapshot_pending_prompts "$artifact" "$snapshot"
@@ -713,6 +796,33 @@ cmd_read() {
   local file=${1-} lifecycle session_ended
   [ -n "$file" ] || usage
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
+  if awk 'NR <= 8 && /^chunk: [0-9a-f]+,[0-9]+,[0-9]+,[0-9]+,[01]$/ { found=1 } END { exit !found }' "$file"; then
+    python3 - "$file" <<'PY'
+import json
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    lines = fh.read().splitlines()
+chunk = next((line for line in lines[:8] if line.startswith("chunk: ")), "")
+match = re.fullmatch(r"chunk: ([0-9a-f]{64}),(\d+),(\d+),(\d+),([01])", chunk)
+payload_line = next((line for line in lines if line.startswith("payload: ")), "")
+if not match or not payload_line:
+    raise SystemExit(1)
+start, end, total, final = map(int, match.groups()[1:])
+payload = json.loads(payload_line[len("payload: "):])
+if not isinstance(payload, str) or len(payload.encode("utf-8")) != end - start:
+    raise SystemExit(1)
+print(f"LAVISH RECOVERY CHUNK bytes {start + 1}-{end} of {total}")
+for line in payload.splitlines():
+    print("| " + line)
+if payload.endswith("\n"):
+    print("|")
+print("END LAVISH RECOVERY CHUNK")
+print("recovery_complete: " + ("yes" if final else "no"))
+PY
+    return
+  fi
   lifecycle=$(cmd_classify "$file")
   session_ended=$(session_field "$file" session_ended)
   perl -e '
@@ -846,14 +956,91 @@ cmd_read() {
 }
 
 cmd_capture_committed() {
-  local id=${1-} result=${2-} snapshot
+  local id=${1-} result=${2-} snapshot cursor
   [ "$#" -eq 2 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   [ -f "$result" ] && [ ! -L "$result" ] || die "result file does not exist: $result"
   [ "$(cmd_classify "$result")" = feedback ] || return 0
   snapshot=$(recovery_snapshot_path "$id")
+  cursor=$(recovery_cursor_path "$id")
   [ ! -L "$snapshot" ] || return 1
-  rm -f -- "$snapshot"
+  [ ! -L "$cursor" ] || return 1
+  if awk 'NR <= 8 && /^chunk: [0-9a-f]+,[0-9]+,[0-9]+,[0-9]+,[01]$/ { found=1 } END { exit !found }' "$result"; then
+    python3 - "$snapshot" "$cursor" "$result" <<'PY'
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+import tempfile
+
+snapshot_path, cursor_path, result_path = sys.argv[1:]
+snapshot_stat = os.lstat(snapshot_path)
+if stat.S_ISLNK(snapshot_stat.st_mode) or not stat.S_ISREG(snapshot_stat.st_mode):
+    raise SystemExit(1)
+with open(snapshot_path, "rb") as fh:
+    snapshot = fh.read()
+digest = hashlib.sha256(snapshot).hexdigest()
+with open(result_path, encoding="utf-8") as fh:
+    lines = fh.read().splitlines()
+line = next((item for item in lines[:8] if item.startswith("chunk: ")), "")
+match = re.fullmatch(r"chunk: ([0-9a-f]{64}),(\d+),(\d+),(\d+),([01])", line)
+if not match:
+    raise SystemExit(1)
+result_digest, start, end, total, final = match.groups()
+start, end, total, final = map(int, (start, end, total, final))
+payload_line = next((item for item in lines if item.startswith("payload: ")), "")
+try:
+    payload = json.loads(payload_line[len("payload: "):])
+except (json.JSONDecodeError, TypeError):
+    raise SystemExit(1)
+if (
+    result_digest != digest
+    or total != len(snapshot)
+    or not (0 <= start < end <= total)
+    or not isinstance(payload, str)
+    or payload.encode("utf-8") != snapshot[start:end]
+):
+    raise SystemExit(1)
+current = 0
+try:
+    cursor_stat = os.lstat(cursor_path)
+    if stat.S_ISLNK(cursor_stat.st_mode) or not stat.S_ISREG(cursor_stat.st_mode):
+        raise SystemExit(1)
+    with open(cursor_path, encoding="ascii") as fh:
+        cursor_digest, cursor_offset = fh.read().strip().split("\t", 1)
+    if cursor_digest == digest and cursor_offset.isdigit():
+        current = int(cursor_offset)
+except FileNotFoundError:
+    pass
+except (OSError, ValueError):
+    raise SystemExit(1)
+if start != current or final != (end == total):
+    raise SystemExit(1)
+if final:
+    os.unlink(snapshot_path)
+    try:
+        os.unlink(cursor_path)
+    except FileNotFoundError:
+        pass
+else:
+    directory = os.path.dirname(cursor_path)
+    fd, temporary = tempfile.mkstemp(prefix=".lavish-cursor.", dir=directory)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="ascii") as fh:
+            fh.write(f"{digest}\t{end}\n")
+        os.replace(temporary, cursor_path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+PY
+    return
+  fi
+  rm -f -- "$snapshot" "$cursor"
 }
 
 case "${1-}" in

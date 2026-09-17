@@ -886,7 +886,8 @@ cmd_start() {
       fm_procevent_source_lock_release "$id"
       die "cannot prepare the source launch boundary: $id"
     }
-    perl "$SCRIPT_DIR/fm-procevent-extension-capture.pl" \
+    FM_PROCEVENT_MAX_OUTPUT_BYTES=$MAX_OUTPUT_BYTES \
+      perl "$SCRIPT_DIR/fm-procevent-extension-capture.pl" \
       9 8 6 "$id" "$adapter" "$FM_PROCEVENT_EXTENSION_ID" \
       "$FM_PROCEVENT_EXTENSION_VERSION" "$FM_PROCEVENT_EXTENSION_CAPABILITY_VERSION" \
       "$FM_PROCEVENT_EXTENSION_PACKAGE_DIGEST" "$FM_PROCEVENT_EXTENSION_BINDING_DIGEST" \
@@ -945,7 +946,8 @@ EOF
       fm_procevent_source_lock_release "$id"
       die "cannot retain the source output boundary: $id"
     }
-    "${ARGV[@]}" >&5 5>&- 4<&- 2>/dev/null &
+    FM_PROCEVENT_MAX_OUTPUT_BYTES=$MAX_OUTPUT_BYTES \
+      "${ARGV[@]}" >&5 5>&- 4<&- 2>/dev/null &
     launch_pid=$!
     exec 5>&-
     rm -f -- "$launch_ready"

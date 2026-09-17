@@ -676,7 +676,7 @@ with open(store, "w", encoding="utf-8") as fh:
         "prompts": [{
             "uid": "",
             "prompt": "survive destructive poll",
-            "text": "the captain's dock reply",
+            "text": "the captain's complete dock reply: " + ("0123456789abcdef" * 64),
             "attachments": [{"path": "/tmp/recovered.png", "mime": "image/png"}],
         }],
     }}}, fh)
@@ -715,42 +715,82 @@ PATH="$RECOVERY_BIN:$PATH" pe "$HRECOVERY" start "$recovery_id" >/dev/null
   || fail "the failed destructive poll's partial result was not captured"
 assert_present "$HRECOVERY/state/procevent/$recovery_id.lavish-pending" \
   "a failed poll's partial capture does not acknowledge the complete recovery snapshot"
-PATH="$RECOVERY_BIN:$PATH" FM_PROCEVENT_MAX_OUTPUT_BYTES=256 \
-  pe "$HRECOVERY" start "$recovery_id" >/dev/null
+RECOVERY_SNAPSHOT="$HRECOVERY/state/procevent/$recovery_id.lavish-pending"
+RECOVERY_EXPECTED="$TMP_ROOT/lavish-recovery-expected"
+RECOVERY_PRESENTATION="$TMP_ROOT/lavish-recovery-presentation"
+cp "$RECOVERY_SNAPSHOT" "$RECOVERY_EXPECTED"
+: > "$RECOVERY_PRESENTATION"
+recovery_sequence=1
+while [ -f "$RECOVERY_SNAPSHOT" ]; do
+  recovery_sequence=$((recovery_sequence + 1))
+  [ "$recovery_sequence" -le 64 ] || fail "bounded recovery did not converge"
+  PATH="$RECOVERY_BIN:$PATH" FM_PROCEVENT_MAX_OUTPUT_BYTES=256 \
+    pe "$HRECOVERY" start "$recovery_id" >/dev/null
+  RECOVERY_RESULT="$HRECOVERY/state/procevent-inbox/$recovery_id.$recovery_sequence.result"
+  assert_present "$RECOVERY_RESULT" "bounded recovery captured chunk $recovery_sequence"
+  [ "$(wc -c < "$RECOVERY_RESULT" | tr -d ' ')" -le 256 ] \
+    || fail "recovery chunk $recovery_sequence exceeded the configured bound"
+  assert_grep 'chunk: ' "$RECOVERY_RESULT" \
+    "bounded recovery result $recovery_sequence carries progress identity"
+  FM_HOME="$HRECOVERY" "$ROOT/bin/fm-procevent-lavish.sh" read "$RECOVERY_RESULT" \
+    >> "$RECOVERY_PRESENTATION"
+  if [ -f "$RECOVERY_SNAPSHOT" ]; then
+    assert_present "$HRECOVERY/state/procevent/$recovery_id.source" \
+      "a non-final recovery chunk retains its source"
+  fi
+done
+[ "$recovery_sequence" -gt 2 ] || fail "oversized recovery did not emit multiple chunks"
 [ "$(cat "$RECOVERY_COUNT")" = 1 ] \
-  || fail "recovery polled the already-cleared source again"
-[ "$(count_results "$HRECOVERY" "$recovery_id")" = 2 ] \
-  || fail "the bounded recovery result was not captured"
-RECOVERY_RESULT="$HRECOVERY/state/procevent-inbox/$recovery_id.2.result"
-assert_grep 'status: feedback' "$RECOVERY_RESULT" \
-  "the bounded recovery result retains its feedback lifecycle"
-assert_present "$HRECOVERY/state/procevent/$recovery_id.lavish-pending" \
-  "a truncated capture does not acknowledge the complete recovery snapshot"
-assert_present "$HRECOVERY/state/procevent/$recovery_id.source" \
-  "a truncated terminal capture retains its recovery source"
-PATH="$RECOVERY_BIN:$PATH" pe "$HRECOVERY" start "$recovery_id" >/dev/null
-[ "$(cat "$RECOVERY_COUNT")" = 1 ] \
-  || fail "complete recovery polled the already-cleared source again"
-[ "$(count_results "$HRECOVERY" "$recovery_id")" = 3 ] \
-  || fail "the retained complete dock reply was not captured after truncation"
-RECOVERY_RESULT="$HRECOVERY/state/procevent-inbox/$recovery_id.3.result"
-assert_grep 'survive destructive poll' "$RECOVERY_RESULT" \
-  "the recovered result retains the captain's prompt"
-recovery_read=$(FM_HOME="$HRECOVERY" "$ROOT/bin/fm-procevent-lavish.sh" read "$RECOVERY_RESULT")
-assert_contains "$recovery_read" "/tmp/recovered.png" \
-  "the recovered presentation retains attachment metadata"
+  || fail "chunked recovery polled the already-cleared source again"
+[ "$(count_results "$HRECOVERY" "$recovery_id")" = "$recovery_sequence" ] \
+  || fail "chunked recovery did not capture every bounded result"
+python3 - "$RECOVERY_EXPECTED" "$HRECOVERY/state/procevent-inbox" "$recovery_id" "$recovery_sequence" <<'PY'
+import json
+import re
+import sys
+
+expected_path, inbox, source_id, final_sequence = sys.argv[1:]
+with open(expected_path, "rb") as fh:
+    expected = fh.read()
+recovered = bytearray()
+position = 0
+for sequence in range(2, int(final_sequence) + 1):
+    with open(f"{inbox}/{source_id}.{sequence}.result", encoding="utf-8") as fh:
+        lines = fh.read().splitlines()
+    chunk = next(line for line in lines if line.startswith("chunk: "))
+    match = re.fullmatch(r"chunk: ([0-9a-f]{64}),(\d+),(\d+),(\d+),([01])", chunk)
+    if not match:
+        raise SystemExit(f"invalid recovery chunk metadata in sequence {sequence}")
+    start, end, total, final = map(int, match.groups()[1:])
+    payload = json.loads(next(line for line in lines if line.startswith("payload: "))[9:])
+    encoded = payload.encode("utf-8")
+    if start != position or end != start + len(encoded) or total != len(expected):
+        raise SystemExit(f"non-contiguous recovery chunk at sequence {sequence}")
+    if final != (sequence == int(final_sequence)):
+        raise SystemExit(f"incorrect final marker at sequence {sequence}")
+    recovered.extend(encoded)
+    position = end
+if bytes(recovered) != expected:
+    raise SystemExit("bounded chunks did not reconstruct the complete recovery snapshot")
+PY
+[ "$(grep -c '^LAVISH RECOVERY CHUNK bytes ' "$RECOVERY_PRESENTATION")" = "$((recovery_sequence - 1))" ] \
+  || fail "the adapter did not present every captured recovery chunk"
+assert_grep 'recovery_complete: yes' "$RECOVERY_PRESENTATION" \
+  "the final recovered presentation is marked complete"
 assert_absent "$HRECOVERY/state/procevent/$recovery_id.lavish-pending" \
-  "durable capture retires the recovery snapshot"
+  "the final durable chunk retires the recovery snapshot"
+assert_absent "$HRECOVERY/state/procevent/$recovery_id.lavish-pending.cursor" \
+  "the final durable chunk retires its progress cursor"
 assert_absent "$HRECOVERY/state/procevent/$recovery_id.source" \
-  "a complete terminal recovery retires its source"
-[ "$(wake_payloads "$HRECOVERY" | grep -c "procevent lavish $recovery_id 3" || true)" = 1 ] \
-  || fail "the complete recovered reply did not use the process-event wake owner"
+  "the final terminal recovery chunk retires its source"
+[ "$(wake_payloads "$HRECOVERY" | grep -c "procevent lavish $recovery_id $recovery_sequence" || true)" = 1 ] \
+  || fail "the final recovered chunk did not use the process-event wake owner"
 printf 'obsolete snapshot\n' > "$HRECOVERY/state/procevent/$recovery_id.lavish-pending"
 FM_HOME="$HRECOVERY" "$ROOT/bin/fm-procevent-lavish.sh" retire "$RECOVERY_ART" >/dev/null
 assert_absent "$HRECOVERY/state/procevent/$recovery_id.lavish-pending" \
   "public retirement removes the adapter recovery snapshot"
 unset RECOVERY_ART RECOVERY_COUNT LAVISH_AXI_STATE_DIR
-pass "pending dock prompts survive failed partial and bounded captures"
+pass "pending dock prompts survive failure and converge through bounded chunks"
 
 # --- primary watcher automatically registers Lavish sessions ---------------
 HAUTOLAVISH="$TMP_ROOT/hauto-lavish"; new_home "$HAUTOLAVISH"
