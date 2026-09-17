@@ -3894,11 +3894,6 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
-if [ -n "${FM_TEST_ONLY:-}" ]; then
-  "$FM_TEST_ONLY"
-  exit $?
-fi
-
 test_teardown_adapter_prerequisites
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
