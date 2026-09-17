@@ -3524,6 +3524,92 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection() {
   pass "repeated busy turn-age escalations reuse the existing escalation counter and demand deep inspection at the threshold"
 }
 
+# A healthy idle secondmate's own wake loop never writes a completed-turn
+# marker in THIS home (its turns end in its own home), and its pane can still
+# render a native busy-looking footer that ticks every poll (the same masking
+# condition as the changing-hash ship fixture above). Without the secondmate
+# exemption inside busy_turn_bound_check, that combination ages past
+# BUSY_TURN_MAX_SECS and wedge-escalates a healthy mate every
+# FM_STALE_ESCALATE_SECS. This proves the bound is absorbed silently instead:
+# no wedge timer is ever started, and repeated polls past the threshold never
+# escalate a possible wedge.
+test_secondmate_busy_no_completed_turn_absorbed_not_wedge_escalated() {
+  local dir state fakebin out capture_file window key pid sig
+  dir=$(make_case secondmate-busy-no-turn); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-mate-ticking"
+  printf 'Working... (3600.1s)' > "$capture_file"
+  printf 'window=%s\nkind=secondmate\nharness=pi\n' "$window" > "$state/mate-ticking.meta"
+  record_pi_busy "$state" mate-ticking
+  printf 'working: setup complete\n' > "$state/mate-ticking.status"
+  sig=$(seen_sig "$state/mate-ticking.status"); printf '%s' "$sig" > "$state/.seen-mate-ticking_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  touch -t 200001010000 "$state/mate-ticking.meta"
+  # No pre-seeded .hash-<key>: a real ticking elapsed footer never repeats, so
+  # every poll lands on the changing-hash branch, same as the ship fixture.
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "an idle secondmate's busy-looking pane past the turn-age bound was escalated: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "an idle secondmate's busy-looking pane past the turn-age bound printed a wake reason: $(cat "$out")"
+  [ ! -e "$state/.stale-since-$key" ] || fail "an idle secondmate's busy-looking pane past the turn-age bound started a wedge timer"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional secondmate busy-turn-age priming stop"
+
+  # Several more polls, each past the (now short) STALE_ESCALATE_SECS wedge
+  # threshold, must still never escalate: the exemption is unconditional for an
+  # undeclared secondmate, not merely a one-poll grace.
+  printf 'Working... (3601.2s)' > "$capture_file"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a repeated poll of an idle secondmate's busy-looking pane was escalated: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a repeated poll of an idle secondmate's busy-looking pane printed a wake reason: $(cat "$out")"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a repeated poll of an idle secondmate's busy-looking pane started a wedge timer"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "an idle secondmate accrued a wedge escalation count"
+  reap "$pid"
+  pass "an idle secondmate with no completed-turn marker is absorbed, never wedge-escalated"
+}
+
+# Direct function-level proof that busy_turn_bound_check itself owns the
+# exemption, independent of any earlier caller-side gate: source the watcher as
+# a library (the source guard at its bottom returns before the lock/loop) and
+# call the function straight, once for kind=secondmate (must absorb, return 0,
+# never touch the since/escalation files) and once for kind=ship on the same
+# fixture (must still start the wedge timer and return 1), so the two assertions
+# together pin the exemption to the kind check and not to a coincidence of the
+# fixture.
+test_busy_turn_bound_check_secondmate_exemption_is_unconditional() (
+  local state ssf ewf rc
+  state=$(fm_test_tmproot busy-turn-bound-check-direct)
+  FM_STATE_OVERRIDE="$state"
+  export FM_STATE_OVERRIDE
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-watch.sh"
+  printf 'window=test:fm-direct\nkind=secondmate\nharness=pi\n' > "$state/direct.meta"
+  printf 'working: setup complete\n' > "$state/direct.status"
+  ssf="$state/.stale-since-direct"; ewf="$state/.wedge-escalations-direct"
+  rc=0
+  busy_turn_bound_check test:fm-direct direct deadbeef "$ssf" "$ewf" || rc=$?
+  [ "$rc" -eq 0 ] || fail "busy_turn_bound_check did not absorb (return 0) an idle secondmate"
+  [ ! -e "$ssf" ] || fail "busy_turn_bound_check started a wedge timer for an idle secondmate"
+  [ ! -e "$ewf" ] || fail "busy_turn_bound_check started an escalation count for an idle secondmate"
+
+  printf 'window=test:fm-direct\nkind=ship\nharness=pi\n' > "$state/direct.meta"
+  rc=0
+  busy_turn_bound_check test:fm-direct direct deadbeef "$ssf" "$ewf" || rc=$?
+  [ "$rc" -eq 1 ] || fail "busy_turn_bound_check absorbed an ordinary ship task instead of routing it to the wedge timer"
+  [ -e "$ssf" ] || fail "busy_turn_bound_check did not start a wedge timer for an ordinary ship task"
+  pass "busy_turn_bound_check itself absorbs an idle secondmate and still wedge-times an ordinary crew"
+)
+
 # --- declared pause + busy pane: the busy-turn bound must honor the declaration
 # A single foreground call can keep a declared external wait semantically busy
 # past the completed-turn bound, bypassing the ordinary stale-pause path.
@@ -5126,6 +5212,8 @@ test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_native_progress_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
+test_secondmate_busy_no_completed_turn_absorbed_not_wedge_escalated
+test_busy_turn_bound_check_secondmate_exemption_is_unconditional
 test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once

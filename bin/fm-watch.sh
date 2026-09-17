@@ -1207,6 +1207,17 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
     handle_paused_stale "$win" "$task" "$h"
     return 0
   fi
+  # A secondmate's quiet pane is healthy by design, exactly like the poll-path
+  # gate above skips a secondmate's own busy-window pass: a secondmate never
+  # writes a completed-turn marker for an idle turn, so this bound would
+  # otherwise wedge-escalate a healthy idle secondmate every re-arm. Absorb it
+  # silently instead of starting the wedge timer. A secondmate with a declared
+  # wait already returned above through the paused branch, so this exemption
+  # only ever reaches an undeclared, healthy idle secondmate.
+  if [ "$(window_kind "$win")" = secondmate ]; then
+    triage_log "absorbed busy-no-completed-turn bound for idle secondmate: $win"
+    return 0
+  fi
   wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task"
   return 1
 }
