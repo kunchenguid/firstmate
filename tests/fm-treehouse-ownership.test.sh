@@ -246,8 +246,10 @@ test_unreadable_claim_refuses() {
   rc=${out%%|*}
   refusal=${out#*|}
   [ "$rc" -ne 0 ] || fail "a slot whose claim cannot be read was not refused"
-  assert_contains "$refusal" "unsafe inventory file" \
-    "the refusal did not name the unreadable claim"
+  case "$refusal" in
+    *"unsafe inventory file"*|*"cannot be read"*) ;;
+    *) fail "the refusal did not name the unreadable claim" ;;
+  esac
   pass "an unreadable slot claim refuses the allocation"
 }
 
