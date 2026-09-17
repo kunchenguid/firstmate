@@ -1591,6 +1591,15 @@ const messages = {
     stopReason: "toolUse",
     content: [{ type: "text", text: substantiveMultilineText }, toolCall],
   },
+  mixedBlocks: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [
+      { type: "text", text: "MIXED_SHORT_WORKING_NOTE" },
+      { type: "text", text: substantiveLongText },
+      toolCall,
+    ],
+  },
   // The genuine reply that ends a response, which Calm never hides.
   finalReply: {
     ...assistantBase,
@@ -1660,6 +1669,8 @@ if (rendered("midTurn").length !== 0) {
 }
 requireVisible("substantiveLong", "SUBSTANTIVE_LONG_MIDTURN_REPORT", "Calm on");
 requireVisible("substantiveMultiline", "SUBSTANTIVE_MIDTURN_REPORT", "Calm on");
+requireHidden("mixedBlocks", "MIXED_SHORT_WORKING_NOTE", "Calm on");
+requireVisible("mixedBlocks", "SUBSTANTIVE_LONG_MIDTURN_REPORT", "Calm on");
 requireHidden("truncatedMidTurn", "TRUNCATED_MIDTURN_NOTE", "Calm on");
 // Pi owns the wording of its truncation notice; Calm must leave that row's own notice
 // standing rather than collapsing an incomplete response to nothing.

@@ -39,13 +39,6 @@ function isMidTurnAssistantMessage(message: AssistantMessage): boolean {
   );
 }
 
-function assistantMessageText(message: AssistantMessage): string {
-  return message.content.reduce(
-    (text, block) => text + (block.type === "text" ? block.text : ""),
-    "",
-  );
-}
-
 // Keep the introduction-version symbol stable so a compatible upgrade cannot
 // double-patch a live process.
 const CALM_ASSISTANT_LAYOUT_PATCH = Symbol.for(
@@ -86,7 +79,9 @@ export function installCalmAssistantLayout(): void {
     const hideWorkingNote =
       patch.hidesWorkingNote() &&
       isMidTurnAssistantMessage(message) &&
-      !calmTextIsSubstantive(assistantMessageText(message));
+      message.content.some(
+        (block) => block.type === "text" && !calmTextIsSubstantive(block.text),
+      );
     const presentationMessage =
       hideThinking || hideWorkingNote
         ? {
@@ -94,7 +89,11 @@ export function installCalmAssistantLayout(): void {
             content: message.content.filter(
               (block) =>
                 !(hideThinking && block.type === "thinking") &&
-                !(hideWorkingNote && block.type === "text"),
+                !(
+                  hideWorkingNote &&
+                  block.type === "text" &&
+                  !calmTextIsSubstantive(block.text)
+                ),
             ),
           }
         : message;
