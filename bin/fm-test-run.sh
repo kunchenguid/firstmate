@@ -1424,10 +1424,11 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       ;;
     bin/fm-model-policy-lib.sh)
-      # The forbidden-model decision, and the two scripts that refuse with it.
+      # The forbidden-model decision, and the three scripts that refuse with it.
       printf '%s\n' "__script__:fm-model-policy.test.sh"
       printf '%s\n' "__script__:fm-spawn-dispatch-profile.test.sh"
       printf '%s\n' "__script__:fm-bootstrap.test.sh"
+      printf '%s\n' "__script__:fm-control-relaunch.test.sh"
       ;;
     bin/fm-env-lib.sh)
       # The one .env accessor, sourced by bin/fm-x-lib.sh (Relay token) and

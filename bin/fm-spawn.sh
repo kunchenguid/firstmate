@@ -56,8 +56,8 @@
 #   The resolved model is then checked against this home's forbidden-model policy
 #   (config/model-denylist, bin/fm-model-policy-lib.sh) before any worktree or
 #   endpoint is provisioned: a denied model, an unnamed one, or a raw launch
-#   command carrying a denied fragment refuses the spawn instead of launching it.
-#   A home without that file is unaffected.
+#   command carrying a denied fragment or naming no model refuses the spawn
+#   instead of launching it. A home without that file is unaffected.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -2039,10 +2039,12 @@ fi
 # resolved profile and before worktree or endpoint provisioning, so a home that
 # forbids a model pays a refusal instead of a launch (bin/fm-model-policy-lib.sh
 # owns the file format and the decision). A raw launch command is operator-written
-# shell whose model flag cannot be parsed out, so its whole text is scanned for
-# denied fragments and the unnamed-model rule cannot apply to it.
+# shell Firstmate cannot parse for the model it will run, so its whole text is
+# scanned for denied fragments AND it must carry an explicit --model; leaving it
+# exempt would make the policy's one bypass the easiest path to the account
+# default it exists to refuse.
 if [ "$RAW_LAUNCH" = 1 ]; then
-  fm_model_policy_check_command "$CONFIG" "$LAUNCH $MODEL" || {
+  fm_model_policy_check_command "$CONFIG" "$LAUNCH" "$MODEL" || {
     echo "error: spawn refused: $FM_MODEL_POLICY_ERROR" >&2
     exit 1
   }

@@ -41,9 +41,11 @@ check() {
   return 1
 }
 
+# check_command <config-dir> <launch-command> <model>: run the raw-launch gate,
+# print its reason, return its code.
 check_command() {
   FM_MODEL_POLICY_ERROR=""
-  if fm_model_policy_check_command "$1" "$2"; then
+  if fm_model_policy_check_command "$1" "$2" "$3"; then
     return 0
   fi
   printf '%s\n' "$FM_MODEL_POLICY_ERROR"
@@ -101,7 +103,6 @@ test_unnamed_model_is_refused_by_default() {
   config=$(make_config unnamed 'fable')
   out=$(check "$config" "") && fail "an unnamed model must be refused by default"
   assert_contains "$out" "no model is named" "refusal must say the model is unnamed"
-  assert_contains "$out" "allow-unspecified-model" "refusal must name the directive that accepts harness defaults"
   # `default` is the sentinel fm-spawn records for an unnamed model, so it must
   # be read as one rather than as a model literally called "default".
   out=$(check "$config" default) && fail "the 'default' sentinel must be read as an unnamed model"
@@ -111,16 +112,20 @@ test_unnamed_model_is_refused_by_default() {
   pass "an unnamed model is refused, because the vendor default would decide instead"
 }
 
-test_directive_accepts_harness_defaults_without_weakening_the_denylist() {
+test_unnamed_model_has_no_opt_out() {
   local config out
-  config=$(make_config directive 'fable
+  # The rule has no exemption on purpose: an opt-out is the one component that
+  # would hand the choice back to the vendor account default.
+  config=$(make_config no-opt-out 'fable
 allow-unspecified-model')
-  check "$config" "" || fail "the directive must accept an unnamed model"
-  check "$config" default || fail "the directive must accept the 'default' sentinel"
-  out=$(check "$config" claude-fable-5) \
-    && fail "the directive must not weaken the denied fragments"
-  assert_contains "$out" "matches 'fable'" "denied fragments must still refuse under the directive"
-  pass "allow-unspecified-model accepts harness defaults and nothing else"
+  out=$(check "$config" "") && fail "no entry may exempt a spawn from naming a model"
+  assert_contains "$out" "no model is named" "an unnamed model must still be refused"
+  # A line that reads like a directive is just another denied fragment.
+  out=$(check "$config" my-allow-unspecified-model-build) \
+    && fail "an ordinary entry must still deny a model containing it"
+  assert_contains "$out" "matches 'allow-unspecified-model'" \
+    "a directive-looking line is an ordinary denied fragment"
+  pass "the unnamed-model rule has no opt-out, and no line grants one"
 }
 
 test_comments_and_blank_lines_are_not_entries() {
@@ -183,25 +188,37 @@ test_empty_policy_file_still_requires_an_explicit_model() {
   pass "the file's presence activates the policy even before any entry is listed"
 }
 
-test_launch_command_scan_covers_operator_written_shell() {
+test_launch_command_requires_a_named_model_and_scans_its_text() {
   local config out
   config=$(make_config raw 'fable')
-  out=$(check_command "$config" 'claude --model claude-fable-5 --dangerously-skip-permissions') \
+  # The command text is scanned for denied fragments...
+  out=$(check_command "$config" 'claude --model claude-fable-5' claude-fable-5) \
     && fail "a launch command carrying a denied fragment must refuse"
   assert_contains "$out" "launch command contains 'fable'" "the refusal must name the matched entry"
-  check_command "$config" 'claude --model claude-opus-5' \
-    || fail "a launch command with a permitted model must not refuse"
-  # The unnamed-model rule cannot be decided from arbitrary shell, so a command
-  # with no model flag is deliberately not refused on that ground.
-  check_command "$config" 'some-harness --yolo' \
-    || fail "a launch command with no model flag must not trip the unnamed-model rule"
-  pass "a raw launch command is scanned for denied fragments only"
+  # ...and the model must be named explicitly, because arbitrary shell cannot be
+  # parsed for the model it will run and guessing wrong launches the forbidden one.
+  out=$(check_command "$config" 'some-harness --yolo' '') \
+    && fail "a raw launch command with no explicit model must refuse"
+  assert_contains "$out" "cannot be parsed for the model it will run" \
+    "the refusal must say why the explicit flag is required"
+  assert_contains "$out" "explicit --model" "the refusal must say what to add"
+  out=$(check_command "$config" 'some-harness --yolo' default) \
+    && fail "the 'default' sentinel must not satisfy the explicit-model requirement"
+  assert_contains "$out" "cannot be parsed" "the sentinel must refuse as unnamed"
+  # A named, denied model refuses even when the command text itself is clean.
+  out=$(check_command "$config" 'some-harness --yolo' anthropic/claude-fable-5) \
+    && fail "a denied model named on the flag must refuse"
+  assert_contains "$out" "matches 'fable'" "the refusal must name the matched entry"
+  # And the supported form still launches.
+  check_command "$config" 'custom-agent --flag' claude-opus-5 \
+    || fail "a raw launch command naming a permitted model must not refuse"
+  pass "a raw launch command is scanned for denied fragments and must name its model"
 }
 
 test_absent_file_leaves_the_launch_command_scan_off() {
   local config
   config=$(make_config raw-absent)
-  check_command "$config" 'claude --model claude-fable-5' \
+  check_command "$config" 'claude --model claude-fable-5' '' \
     || fail "with no policy file, no launch command may be refused"
   pass "the launch command scan is off in a home with no policy"
 }
@@ -211,12 +228,12 @@ test_denied_fragment_matches_every_spelling
 test_permitted_model_launches
 test_refusal_names_where_the_value_came_from
 test_unnamed_model_is_refused_by_default
-test_directive_accepts_harness_defaults_without_weakening_the_denylist
+test_unnamed_model_has_no_opt_out
 test_comments_and_blank_lines_are_not_entries
 test_alias_is_denied_only_when_listed
 test_unusable_policy_file_refuses_rather_than_evaporating
 test_empty_policy_file_still_requires_an_explicit_model
-test_launch_command_scan_covers_operator_written_shell
+test_launch_command_requires_a_named_model_and_scans_its_text
 test_absent_file_leaves_the_launch_command_scan_off
 
 echo "# all fm-model-policy tests passed"

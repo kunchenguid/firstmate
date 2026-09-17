@@ -5,13 +5,13 @@
 # A home whose operator must never spend on a particular model cannot rely on
 # every dispatch profile being re-read by eye. config/model-denylist makes that
 # an enforced local policy: this library owns the file format and the refusal
-# decision, bin/fm-bootstrap.sh applies it when it validates configuration, and
+# decision, bin/fm-bootstrap.sh applies it when it validates configuration,
 # bin/fm-spawn.sh applies it to the fully resolved profile before a worker is
-# launched. docs/configuration.md "Forbidden models" owns the operator contract.
+# launched, and bin/fm-control.sh applies it before a relaunch stops the running
+# agent. docs/configuration.md "Forbidden models" owns the operator contract.
 #
 # File format, one item per line:
 #   - Text from the first "#" to end of line is a comment; blank lines are skipped.
-#   - "allow-unspecified-model" is the one reserved directive (see below).
 #   - Every other line is a denied fragment: a model is refused when the
 #     fragment appears anywhere in its lowercased text. Fragments rather than
 #     exact ids, because one vendor model reaches Firstmate under several
@@ -23,20 +23,19 @@
 #   - A present-but-unusable file (symlink, directory, unreadable) is an error
 #     that refuses, never a policy that quietly evaporates.
 #
-# Naming no model at all is refused by default: the model then comes from the
-# harness's own account-level default, which the vendor controls and can change
-# to the very model the operator forbade. An operator who accepts that risk
-# records it with the "allow-unspecified-model" directive, which is visible in
-# the file rather than inferred from an omission.
+# Naming no model at all is refused, with no opt-out: the model would otherwise
+# come from the harness's own account-level default, which the vendor controls
+# and can change to the very model the operator forbade. A home that forbids a
+# model names one everywhere; an exemption from this rule is the single thing
+# that would restore the hole it closes.
 #
 # Vendor aliases ("best" and friends) resolve to a concrete model inside the
 # harness, and that mapping changes without notice, so Firstmate cannot resolve
 # one without asking the vendor and spending on the answer. An alias is denied
 # only when the operator lists it, which is exactly why an unnamed model is
-# refused by default.
+# refused.
 
 FM_MODEL_POLICY_FILE="model-denylist"
-FM_MODEL_POLICY_ALLOW_UNSPECIFIED="allow-unspecified-model"
 
 # Set by the functions below; read by callers after a non-zero return.
 FM_MODEL_POLICY_ERROR=""
@@ -44,8 +43,6 @@ FM_MODEL_POLICY_ERROR=""
 FM_MODEL_POLICY_ACTIVE=0
 # Loaded denied fragments, one per line, lowercased and trimmed.
 FM_MODEL_POLICY_ENTRIES=""
-# 1 when the loaded file allows an unnamed model.
-FM_MODEL_POLICY_UNSPECIFIED_OK=0
 
 # fm_model_policy_load <config-dir>
 # Loads the policy, or reports why a present file cannot be trusted.
@@ -54,7 +51,6 @@ fm_model_policy_load() {
   FM_MODEL_POLICY_ERROR=""
   FM_MODEL_POLICY_ACTIVE=0
   FM_MODEL_POLICY_ENTRIES=""
-  FM_MODEL_POLICY_UNSPECIFIED_OK=0
   path="$config_dir/$FM_MODEL_POLICY_FILE"
   if [ -L "$path" ]; then
     FM_MODEL_POLICY_ERROR="config/$FM_MODEL_POLICY_FILE is symlinked; a forbidden-model policy must be a plain file in this home"
@@ -78,10 +74,6 @@ fm_model_policy_load() {
     entry=${entry#"${entry%%[![:space:]]*}"}
     entry=${entry%"${entry##*[![:space:]]}"}
     [ -n "$entry" ] || continue
-    if [ "$entry" = "$FM_MODEL_POLICY_ALLOW_UNSPECIFIED" ]; then
-      FM_MODEL_POLICY_UNSPECIFIED_OK=1
-      continue
-    fi
     FM_MODEL_POLICY_ENTRIES="$FM_MODEL_POLICY_ENTRIES$entry
 "
   done <<EOF
@@ -109,9 +101,18 @@ EOF
   return 1
 }
 
+# fm_model_policy_unnamed <model>
+# True when <model> names nothing: empty, whitespace, or the "default" sentinel
+# fm-spawn records for a spawn that named no model.
+fm_model_policy_unnamed() {
+  local model=$1
+  model=${model#"${model%%[![:space:]]*}"}
+  model=${model%"${model##*[![:space:]]}"}
+  [ -z "$model" ] || [ "$model" = default ]
+}
+
 # fm_model_policy_check <config-dir> <model> [<origin>]
-# The model gate. An empty model, or the "default" sentinel fm-spawn records for
-# one, is an unnamed model. Returns 1 with FM_MODEL_POLICY_ERROR set on refusal.
+# The model gate. Returns 1 with FM_MODEL_POLICY_ERROR set on refusal.
 # <origin> names where the refused value came from, for a caller that resolved
 # it from several places and would otherwise send the operator hunting through
 # config files; a caller whose own prefix already says where omits it.
@@ -119,13 +120,8 @@ fm_model_policy_check() {
   local config_dir=$1 model=$2 origin=${3:-} hit
   fm_model_policy_load "$config_dir" || return 1
   [ "$FM_MODEL_POLICY_ACTIVE" = 1 ] || return 0
-  model=${model#"${model%%[![:space:]]*}"}
-  model=${model%"${model##*[![:space:]]}"}
-  if [ -z "$model" ] || [ "$model" = default ]; then
-    if [ "$FM_MODEL_POLICY_UNSPECIFIED_OK" = 1 ]; then
-      return 0
-    fi
-    FM_MODEL_POLICY_ERROR="no model is named, so the harness would pick one from its own account default; config/$FM_MODEL_POLICY_FILE requires an explicit model (add the line '$FM_MODEL_POLICY_ALLOW_UNSPECIFIED' to that file to accept harness defaults)"
+  if fm_model_policy_unnamed "$model"; then
+    FM_MODEL_POLICY_ERROR="no model is named, so the harness would pick one from its own account default; config/$FM_MODEL_POLICY_FILE requires an explicit model"
     return 1
   fi
   if hit=$(fm_model_policy_denied_entry "$model"); then
@@ -136,18 +132,29 @@ fm_model_policy_check() {
   return 0
 }
 
-# fm_model_policy_check_command <config-dir> <launch-command>
-# The gate for an operator-written raw launch command, whose model flag
-# Firstmate cannot parse out of arbitrary shell. Only the denied fragments are
-# applied, scanned across the whole command text; the unnamed-model rule cannot
-# be decided here and is deliberately not applied.
+# fm_model_policy_check_command <config-dir> <launch-command> <model>
+# The gate for an operator-written raw launch command. Three rules, all of which
+# must pass: no denied fragment anywhere in the command text, an explicitly
+# named <model>, and a <model> the policy permits.
+#
+# The explicit model is required because this text is arbitrary shell that
+# Firstmate cannot parse for the model it will run. Recognizing one inside it
+# would be guesswork, and guessing wrong here launches the forbidden model, so
+# an unrecognizable command refuses and says what to add instead.
 fm_model_policy_check_command() {
-  local config_dir=$1 command=$2 hit
+  local config_dir=$1 command=$2 model=${3:-} hit
   fm_model_policy_load "$config_dir" || return 1
   [ "$FM_MODEL_POLICY_ACTIVE" = 1 ] || return 0
   if hit=$(fm_model_policy_denied_entry "$command"); then
-    # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
     FM_MODEL_POLICY_ERROR="launch command contains '$hit', denied by config/$FM_MODEL_POLICY_FILE"
+    return 1
+  fi
+  if fm_model_policy_unnamed "$model"; then
+    FM_MODEL_POLICY_ERROR="a raw launch command cannot be parsed for the model it will run, so config/$FM_MODEL_POLICY_FILE requires an explicit --model naming it"
+    return 1
+  fi
+  if hit=$(fm_model_policy_denied_entry "$model"); then
+    FM_MODEL_POLICY_ERROR="model '$model' matches '$hit' in config/$FM_MODEL_POLICY_FILE (model came from the --model flag)"
     return 1
   fi
   return 0

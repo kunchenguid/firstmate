@@ -491,10 +491,9 @@ A present file that cannot be trusted - symlinked, not a regular file, or unread
 Each non-directive line is a denied fragment, matched case-insensitively against any part of the requested model.
 Fragments rather than exact ids, because one vendor model reaches Firstmate under several spellings, and one operator's forbidden model is another's default.
 
-`allow-unspecified-model` is the one reserved directive.
-Without it, a profile or spawn that names no model at all is refused too: the model then comes from the harness's own account-level default, which the vendor controls and can change to the very model the operator forbade.
+A profile or spawn that names no model at all is refused too, with no opt-out: the model would otherwise come from the harness's own account-level default, which the vendor controls and can change to the very model the operator forbade.
 The literal model `default`, which is what Firstmate records for a spawn that named none, counts as naming no model.
-With it, the home accepts harness defaults again, and that acceptance is visible in the file rather than inferred from an omission.
+A home that forbids a model therefore names one everywhere, which is the discipline the policy exists to enforce rather than a hardship; an exemption from this rule would be the single thing that restores the hole it closes.
 
 A vendor alias such as `best` resolves to a concrete model inside the harness, and that mapping changes without notice, so Firstmate cannot resolve one without asking the vendor and spending on the answer.
 An alias is denied only when the operator lists it, which is exactly why an unnamed model is refused by default; list every alias that could reach a forbidden model.
@@ -506,9 +505,9 @@ Two enforcement points:
   A home with no policy file is reported too, as a plain fact rather than a warning: enforcement that exists only where someone remembered to write the file is still a configuration dependency, `config/` is gitignored, and a new or re-created home would otherwise start unguarded with nothing saying so.
 - `bin/fm-spawn.sh` checks the fully resolved profile before provisioning a worktree or endpoint, so a denied model, an unnamed model from any path, or a raw launch command carrying a denied fragment refuses the spawn instead of launching it.
   Its refusal names the model, the entry that matched it, and whether the value came from the `--model` flag or from `config/secondmate-harness`, so the file to correct is in the message rather than somewhere among the home's configuration.
-  A raw launch command is operator-written shell whose model flag cannot be parsed out, so its whole text is scanned for denied fragments and the unnamed-model rule cannot apply to it.
+  A raw launch command is operator-written shell Firstmate cannot parse for the model it will run, so its whole text is scanned for denied fragments and it must also carry an explicit `--model`; recognizing a model inside arbitrary shell would be guesswork, and guessing wrong there launches the forbidden model, so an unrecognizable command refuses and says what to add.
 
-The policy binds crewmate, scout, and secondmate launches alike, including relaunches through `bin/fm-control.sh`, so a task recorded without a model needs one named on its relaunch, or the directive present, before it can restart.
+The policy binds crewmate, scout, and secondmate launches alike, including relaunches through `bin/fm-control.sh`, which refuses before it stops the running agent, so a task recorded without a model needs one named on its relaunch before it can restart.
 It does not reach Pi's `/supervision-model` pin, which selects the supervision branch's own model from Pi's catalog; that is a named residual hole in the guarantee, not a completed boundary, and it is tracked as backlog item `supervision-branch-model-policy`.
 The fix belongs at branch-build time rather than in the picker, because the read side also covers pins written before the policy existed.
 See [`docs/examples/model-denylist`](examples/model-denylist) for a starting point to copy into local `config/model-denylist`.

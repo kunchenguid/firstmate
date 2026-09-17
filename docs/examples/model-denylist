@@ -13,10 +13,10 @@
 # one without asking the vendor and spending on the answer. An alias is denied
 # only when you list it.
 #
-# By default a profile or spawn that names NO model is refused as well, because
-# the harness would then take its own account-level default, which the vendor
-# controls and can change to the very model you forbade. Uncomment the directive
-# at the bottom to accept harness defaults again.
+# While this file exists, every profile and every spawn must NAME a model, and a
+# raw launch command must carry an explicit --model as well. There is no opt-out
+# from that rule: naming no model hands the choice to the vendor's account
+# default, which is the same hole a denied alias would leave open.
 
 # The model whose cost this home has ruled out, under every spelling.
 fable
@@ -24,6 +24,3 @@ fable
 # Aliases that resolve to a model rather than naming one.
 best
 latest
-
-# Accept harness defaults again, recorded here rather than left implicit.
-#allow-unspecified-model
