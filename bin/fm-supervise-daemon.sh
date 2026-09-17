@@ -41,15 +41,23 @@
 #     drain and acknowledges it only after routing completes.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
-#   - Bounded wedge latency: a stale pane without a declared wait is escalated
-#     only after it has been idle for STALE_ESCALATE_SECS
-#     (configurable), rechecked once. A wedged crewmate is therefore detected
-#     within STALE_ESCALATE_SECS + a tick, never lost. A declared wait - either a
+#   - Bounded wedge latency: a stale pane without a declared wait or a live run
+#     step reporting recent activity is escalated only after it has been idle for
+#     STALE_ESCALATE_SECS (configurable), rechecked once. A crewmate without that
+#     positive activity evidence is therefore detected within
+#     STALE_ESCALATE_SECS + a tick, never lost. A declared wait - either a
 #     paused: external wait or a verified captain-held transfer, per
 #     fm-classify-lib.sh's combined predicate - instead gets its own longer
 #     PAUSE_RESURFACE_SECS recheck, never a wedge escalation, whether its pane
 #     reads idle or busy; only a status append that stops declaring the wait
-#     ends that routing. A captain-held transfer is not rechecked at all while
+#     ends that routing. A crew parked on a LIVE, still-moving no-mistakes run step
+#     (fm-classify-lib.sh's crew_is_validating) is a declared wait it never had to
+#     write down - the pipeline runs its work outside the pane - and takes the same
+#     PAUSE_RESURFACE_SECS recheck instead of a wedge escalation; the verdict is
+#     read once, at the moment an escalation would otherwise fire, and a parked
+#     gate, failed run, run whose own activity has gone quiet, or pane with no run
+#     step keeps the unchanged schedule.
+#     A captain-held transfer is not rechecked at all while
 #     the away-posture record (state/.afk-contract) exists: nobody is there to
 #     answer it, and the return brief lists it.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
@@ -94,10 +102,11 @@
 #                                   captain-relevant escalation for matching
 #                                   kinds.
 #          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
-#                                   as a possible wedge (default 240)
-#          FM_PAUSE_RESURFACE_SECS  seconds a declared wait stays declared,
-#                                   idle or busy, before it re-surfaces as a
-#                                   recheck (default 14400, four hours); an
+#                                   as a possible wedge (default 240), unless a
+#                                   live run step still reports recent activity
+#          FM_PAUSE_RESURFACE_SECS  seconds before a declared wait or a quiet
+#                                   pane explained by a live run step re-surfaces
+#                                   as a recheck (default 14400, four hours); an
 #                                   `until` time cannot extend this bound, and a
 #                                   captain-held transfer is never rechecked
 #                                   while the away-posture record exists
@@ -429,8 +438,11 @@ classify_stale() {  # <window> <state> [<span-record> <span-status>]
     # (fm-classify-lib.sh owns which declarations qualify): an idle pane is
     # EXPECTED, so this is not a wedge. The caller records a pause marker (long
     # re-surface cadence in housekeeping) rather than a wedge stale marker. Cheap:
-    # reuses the status line already read, no fm-crew-state.sh call, mirroring the
-    # daemon's existing status-log classification.
+    # reuses the status line already read, mirroring the daemon's existing
+    # status-log classification. Housekeeping's own stale recheck is the one place
+    # that does read fm-crew-state.sh, and only inside its at-threshold branch: at
+    # most once per crew per FM_STALE_ESCALATE_SECS, and each of those reads can
+    # chain no-mistakes invocations bounded at FM_CREW_STATE_NM_TIMEOUT apiece.
     printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
     return
   fi
@@ -487,10 +499,44 @@ stale_marker_record() {  # <window> <state>  — create if absent
   [ -e "$marker" ] || _now > "$marker"
 }
 
-stale_marker_remove() {  # <window> <state>
-  local win=$1 state=$2 key
-  key=$(_stale_key "$(window_to_task "$win" "$state")")
-  rm -f "$state/.subsuper-stale-$key"
+stale_marker_remove() {  # <task> <state>
+  local task=$1 state=$2 key
+  key=$(_stale_key "$task")
+  rm -f "$state/.subsuper-stale-$key" "$state/.subsuper-validating-$key"
+}
+
+# Defer ONE possible-wedge escalation for a window whose crew is parked on a LIVE
+# no-mistakes run step (crew_is_validating in fm-classify-lib.sh owns that verdict,
+# and its narrowness is what keeps a parked approval or fix-review gate escalating).
+# A validating pipeline executes the crew's work outside the pane, so an idle pane
+# is expected while that pipeline continues to report recent activity.
+#
+# Deliberately a DEFERRAL, not a silence, in the same bounded shape the declared-wait
+# recheck above uses: the wedge marker is reset so a run that ENDS while the pane
+# stays quiet escalates within one FM_STALE_ESCALATE_SECS, and a .subsuper-validating
+# marker ages the deferral so a run outliving any real one re-surfaces once every
+# FM_PAUSE_RESURFACE_SECS rather than going silent forever. The recheck names the run
+# rather than an external dependency or the captain, because the crew's pipeline - not
+# a human - is what has to move for the wait to clear.
+# The crew-state read costs one bounded call and runs ONLY here, at the moment an
+# escalation would otherwise fire: at most once per window per FM_STALE_ESCALATE_SECS,
+# never on the per-poll classification path.
+# Takes the caller's <key> rather than re-deriving it from the task, so the
+# markers it ages are the exact files the housekeeping loop iterated.
+validating_defer() {  # <window> <state> <key>
+  local win=$1 state=$2 key=$3 marker epoch vage
+  marker="$state/.subsuper-validating-$key"
+  [ -e "$marker" ] || _now > "$marker"
+  # Content epoch, not mtime, exactly as the stale and pause markers beside it age:
+  # the file is rewritten on every recheck, so mtime would restart the window.
+  epoch=$(cat "$marker" 2>/dev/null || _now)
+  case "$epoch" in ''|*[!0-9]*) epoch=$(_now) ;; esac
+  vage=$(( $(_now) - epoch ))
+  _now > "$state/.subsuper-stale-$key"
+  [ "$vage" -ge "${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}" ] || return 0
+  if escalate_add "$state" "validating ${vage}s (a live validation run explains the quiet pane, rechecked on a long cadence not a wedge; confirm the run is still moving): $win"; then
+    _now > "$marker"
+  fi
 }
 
 # Pause marker: state/.subsuper-paused-<key> holds the epoch a declared wait (a
@@ -500,42 +546,41 @@ stale_marker_remove() {  # <window> <state>
 # per window. Recording is create-if-absent so the timestamp is stable across a
 # churny pane (many distinct stale hashes map to one marker), keeping the cadence
 # hash-immune.
-pause_marker_record() {  # <window> <state> - create if absent
-  local win=$1 state=$2 key marker
-  key=$(_stale_key "$(window_to_task "$win" "$state")")
+pause_marker_record() {  # <task> <state> - create if absent
+  local task=$1 state=$2 key marker
+  key=$(_stale_key "$task")
   marker="$state/.subsuper-paused-$key"
   [ -e "$marker" ] || _now > "$marker"
 }
 
-pause_marker_remove() {  # <window> <state>
-  local win=$1 state=$2 key
-  key=$(_stale_key "$(window_to_task "$win" "$state")")
+pause_marker_remove() {  # <task> <state>
+  local task=$1 state=$2 key
+  key=$(_stale_key "$task")
   rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-pause-until-due-$key"
 }
 
-clear_pause_tracking() {  # <window> <state>
-  local win=$1 state=$2 task key watcher_key
-  task=$(window_to_task "$win" "$state")
+clear_pause_tracking() {  # <window> <task> <state>
+  local win=$1 task=$2 state=$3 key watcher_key
   key=$(_stale_key "$task")
   watcher_key=$(_stale_key "$win")
   rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-pause-until-due-$key" "$state/.subsuper-stale-$key" \
     "$state/.paused-$watcher_key" "$state/.paused-rechecked-$watcher_key" "$state/.paused-resurfaced-$watcher_key" \
     "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key" \
-    "$state/.writing-since-$watcher_key" "$state/.writing-resurfaced-$watcher_key" \
+    "$state/.defer-since-$watcher_key" "$state/.defer-resurfaced-$watcher_key" \
+    "$state/.subsuper-validating-$key" \
     "$state/.waiting-resurfaced-$watcher_key"
 }
 
-reconcile_pause_tracking() {  # <window> <state> <last-status-line>
-  local win=$1 state=$2 last=$3 task key marker watcher_key
-  task=$(window_to_task "$win" "$state")
+reconcile_pause_tracking() {  # <window> <task> <state> <last-status-line>
+  local win=$1 task=$2 state=$3 last=$4 key marker watcher_key
   key=$(_stale_key "$task")
   marker="$state/.subsuper-paused-$key"
   watcher_key=$(_stale_key "$win")
   if status_is_paused_or_captain_held "$last"; then
-    stale_marker_remove "$win" "$state"
-    pause_marker_record "$win" "$state"
+    stale_marker_remove "$task" "$state"
+    pause_marker_record "$task" "$state"
   elif [ -e "$marker" ] || [ -e "$state/.paused-$watcher_key" ]; then
-    clear_pause_tracking "$win" "$state"
+    clear_pause_tracking "$win" "$task" "$state"
   fi
 }
 
@@ -550,13 +595,13 @@ migrate_watcher_pause_markers() {  # <state>
     watcher_key=$(_stale_key "$win")
     last=$(last_status_line "$state/$task.status")
     if status_is_paused_or_captain_held "$last" || [ -e "$state/.subsuper-paused-$key" ] || [ -e "$state/.paused-$watcher_key" ]; then
-      reconcile_pause_tracking "$win" "$state" "$last"
+      reconcile_pause_tracking "$win" "$task" "$state" "$last"
     fi
   done
 }
 
 sync_pause_markers_from_signal() {  # <state> <signal files>
-  local state=$1 paths=$2 f last task win
+  local state=$1 paths=$2 f last task win pair
   local -a files
   read -r -a files <<<"$paths"
   for f in "${files[@]}"; do
@@ -564,9 +609,10 @@ sync_pause_markers_from_signal() {  # <state> <signal files>
     [ -e "$f" ] || continue
     last=$(last_status_line "$f")
     task=$(basename "$f"); task=${task%.status}
-    win=$(window_for_task "$task" "$state" 2>/dev/null || true)
+    pair=$(window_and_task_for_key "$task" "$state" 2>/dev/null || true)
+    win=${pair%%$'\t'*}
     [ -n "$win" ] || continue
-    reconcile_pause_tracking "$win" "$state" "$last"
+    reconcile_pause_tracking "$win" "$task" "$state" "$last"
   done
 }
 
@@ -1020,7 +1066,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason
+  local state=$1 now due f key task win pair marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1060,25 +1106,33 @@ housekeeping() {  # <state>
     key="${marker##*.subsuper-stale-}"
     # Reconstruct the backend target from metadata, with the live tmux list as the
     # legacy fallback for old markers that predate meta lookup.
-    win=$(window_for_task "$key" "$state" 2>/dev/null || true)
+    pair=$(window_and_task_for_key "$key" "$state" 2>/dev/null || true)
+    win=${pair%%$'\t'*}
+    task=${pair#*$'\t'}
     if [ -z "$win" ]; then
-      # Window gone (task torn down): drop the marker, nothing to escalate.
-      rm -f "$marker"; continue
+      # Window gone (task torn down): drop the marker and its deferral chain,
+      # nothing to escalate.
+      rm -f "$marker" "$state/.subsuper-validating-$key"; continue
     fi
-    task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
     if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
-      reconcile_pause_tracking "$win" "$state" "$last"
+      reconcile_pause_tracking "$win" "$task" "$state" "$last"
       continue
     fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
     stale_window_is_busy "$win" "$state"
+    # Both the verdict and the removal name the task this loop is iterating, never
+    # one re-derived from the window: two metas can share a window value, and a
+    # re-derivation answers with the first of them, which would read the wrong
+    # crew's state and leave this marker in place to re-enter every pass.
     case "$?" in
-      0) rm -f "$marker" ;;
-      2) rm -f "$marker" ;;
-      *) if escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"; then
-           stale_marker_remove "$win" "$state"
+      0) rm -f "$marker" "$state/.subsuper-validating-$key" ;;
+      2) rm -f "$marker" "$state/.subsuper-validating-$key" ;;
+      *) if crew_is_validating "$task"; then
+           validating_defer "$win" "$state" "$key"
+         elif escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"; then
+           rm -f "$marker" "$state/.subsuper-validating-$key"
          fi ;;
     esac
   done
@@ -1102,14 +1156,15 @@ housekeeping() {  # <state>
   for marker in "$state"/.subsuper-paused-*; do
     [ -e "$marker" ] || continue
     key="${marker##*.subsuper-paused-}"
-    win=$(window_for_task "$key" "$state" 2>/dev/null || true)
+    pair=$(window_and_task_for_key "$key" "$state" 2>/dev/null || true)
+    win=${pair%%$'\t'*}
+    task=${pair#*$'\t'}
     if [ -z "$win" ]; then
       rm -f "$marker"; continue
     fi
-    task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
     if [ -z "$last" ] || ! status_is_paused_or_captain_held "$last"; then
-      reconcile_pause_tracking "$win" "$state" "$last"
+      reconcile_pause_tracking "$win" "$task" "$state" "$last"
       continue
     fi
     marker_epoch=$(cat "$marker" 2>/dev/null || echo "$now")
@@ -1205,19 +1260,23 @@ housekeeping() {  # <state>
   fi
 }
 
-# Find a recorded or live window target whose task id matches the marker key.
-window_for_task() {  # <task-key> [state]
+# Find a recorded or live window target whose task id matches the marker key, and
+# report that task id alongside it as `<window>\t<task>`. Both travel together
+# because _stale_key is lossy and a window value can be shared by two metas, so a
+# caller that re-derives the task from the window alone can be answered with the
+# other meta's task and then decide about one task while its marker names another.
+window_and_task_for_key() {  # <task-key> [state]
   local key=$1 state=${2:-$(_state_root)} meta task w t
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
     task=$(basename "$meta"); task=${task%.meta}
     [ "$(_stale_key "$task")" = "$key" ] || continue
     w=$(fm_backend_target_of_meta "$meta")
-    [ -n "$w" ] && { printf '%s' "$w"; return 0; }
+    [ -n "$w" ] && { printf '%s\t%s' "$w" "$task"; return 0; }
   done
   for w in $(tmux list-windows -a -F '#{session_name}:#{window_name}' 2>/dev/null | grep ':fm-' || true); do
     t=$(window_to_task "$w" "$state")
-    [ "$(_stale_key "$t")" = "$key" ] && { printf '%s' "$w"; return 0; }
+    [ "$(_stale_key "$t")" = "$key" ] && { printf '%s\t%s' "$w" "$t"; return 0; }
   done
   return 1
 }
@@ -1412,7 +1471,7 @@ handle_wake() {  # <reason> <state>
   if [ "$kind" = stale ] && [ "$action" = escalate ]; then
     task=$(window_to_task "$arg" "$state")
     last=$(last_status_line "$state/$task.status")
-    reconcile_pause_tracking "$arg" "$state" "$last"
+    reconcile_pause_tracking "$arg" "$task" "$state" "$last"
   fi
   case "$action" in
     escalate)
@@ -1420,7 +1479,7 @@ handle_wake() {  # <reason> <state>
       if escalate_add "$state" "$distilled"; then
         # A terminal-stale escalate must not leave a persistence marker behind, or
         # housekeeping re-escalates the same pane as a false wedge later.
-        [ "$kind" = "stale" ] && stale_marker_remove "$arg" "$state"
+        [ "$kind" = "stale" ] && stale_marker_remove "$task" "$state"
         mark_escalated_seen "$state" "$capture" || classification_failed=1
         [ "${FM_ESCALATE_BATCH_SECS:-$ESCALATE_BATCH_SECS_DEFAULT}" -le 0 ] && { escalate_flush "$state" || true; }
       else
@@ -1433,8 +1492,9 @@ handle_wake() {  # <reason> <state>
       # wedge stale marker, so a pane that transitioned working->declared-wait is not
       # still wedge-aged. Only stale produces this action.
       if [ "$kind" = "stale" ]; then
-        stale_marker_remove "$arg" "$state"
-        pause_marker_record "$arg" "$state"
+        task=$(window_to_task "$arg" "$state")
+        stale_marker_remove "$task" "$state"
+        pause_marker_record "$task" "$state"
       fi
       log "self-handle (paused): $reason -> $distilled"
       ;;
@@ -1461,9 +1521,9 @@ handle_wake() {  # <reason> <state>
           fi
         fi
         if [ "$_clear_wedge" = 1 ]; then
-          stale_marker_remove "$arg" "$state"
+          stale_marker_remove "$task" "$state"
         else
-          pause_marker_remove "$arg" "$state"
+          pause_marker_remove "$task" "$state"
           stale_marker_record "$arg" "$state"
         fi
       fi

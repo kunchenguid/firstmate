@@ -633,6 +633,70 @@ test_active_run_is_authoritative() {
   pass "active run-step is authoritative"
 }
 
+# (a2) The `activity: <recent|quiet>` fact a working run-step line publishes. It is
+# the PIPELINE's own recency verdict for the step it claims is executing, and this
+# file is its single owner, so a supervisor never re-derives recency: bin/fm-classify-lib.sh's
+# crew_is_validating requires the recent token before it will read a quiet pane as
+# an explained wait instead of a possible wedge. Positive evidence only - a record
+# that still says running while nothing executes it must not read as alive.
+test_working_run_step_publishes_activity_recency() {
+  reset_fakes
+  local d out; d=$(new_case activity-recency)
+  make_repo_on_branch "$d/wt" fm/feat-ar
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ar.meta" "window=fm:fm-feat-ar" "worktree=$d/wt" "kind=ship"
+
+  FM_FAKE_AXI_STATUS="$(run_fixing_active_recent fm/feat-ar)"
+  out=$(run_crew_state "$d" feat-ar)
+  assert_contains "$out" "state: working" "a fixing run with fresh activity is working"
+  assert_contains "$out" "activity: recent" "a step the pipeline reports moving publishes recent"
+
+  # The shape a run record keeps after its step process is killed or hangs: the
+  # record still says fixing, but the pipeline's own last_activity reads quiet.
+  FM_FAKE_AXI_STATUS="$(run_fixing_active_quiet fm/feat-ar)"
+  out=$(run_crew_state "$d" feat-ar)
+  assert_contains "$out" "state: working" "a quiet step is still a working run record"
+  assert_contains "$out" "activity: quiet" "a step the pipeline reports quiet publishes quiet"
+  assert_not_contains "$out" "activity: recent" "a quiet step must not publish recency"
+
+  # No active_steps table at all is an absence of evidence, never recency.
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-ar)"
+  out=$(run_crew_state "$d" feat-ar)
+  assert_contains "$out" "state: working" "a running record with no active-steps table is still working"
+  assert_contains "$out" "activity: quiet" "a run record with no active-steps table is not recency"
+
+  # Only a live step carries the fact; a gate has no step activity to report.
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-ar)"
+  out=$(run_crew_state "$d" feat-ar)
+  assert_contains "$out" "state: parked" "an approval gate is parked"
+  assert_not_contains "$out" "activity:" "a parked gate publishes no activity fact"
+  pass "a working run-step line publishes the pipeline's own activity-recency verdict"
+}
+
+# (a3) The coarse ledger fallback binds this crew's run from the runs list while
+# `axi status` is answering about ANOTHER branch, so the active_steps table in that
+# answer describes someone else's step. Coarse therefore reports quiet: borrowing a
+# foreign run's liveness is exactly the false-alive reading the fact exists to stop.
+test_coarse_run_never_borrows_another_runs_activity() {
+  reset_fakes
+  local d short out; d=$(new_case activity-coarse)
+  make_repo_on_branch "$d/wt" fm/feat-ac
+  short=$(git -C "$d/wt" rev-parse --short=7 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ac.meta" "window=fm:fm-feat-ac" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_fixing_active_recent fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-09-17 22:10
+  running    fm/feat-ac ${short}  2026-09-17 22:05
+EOF
+)"
+  out=$(run_crew_state "$d" feat-ac)
+  assert_contains "$out" "state: working" "the coarse ledger row binds as a working run"
+  assert_contains "$out" "validating (background run)" "coarse resolution keeps coarse run detail"
+  assert_contains "$out" "activity: quiet" "the coarse path must not borrow the other branch's activity"
+  pass "a coarse-resolved run never borrows another run's activity recency"
+}
+
 # (b) needs-decision log + a resumed (running/fixing) run = SUPERSEDED
 test_stale_needs_decision_superseded() {
   reset_fakes
@@ -2928,6 +2992,8 @@ EOF
 }
 
 test_active_run_is_authoritative
+test_working_run_step_publishes_activity_recency
+test_coarse_run_never_borrows_another_runs_activity
 test_stale_needs_decision_superseded
 test_stale_blocked_superseded
 test_daemon_claim_over_live_run_reads_run_alive

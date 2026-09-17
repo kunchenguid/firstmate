@@ -24,6 +24,13 @@
 #
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
+# A `working` run-step line ends its detail with one further fact,
+# `activity: <recent|quiet>`: the PIPELINE's own recency verdict for the step it
+# says is executing (nm_run_activity_is_recent). This file is the single owner of
+# that signal; supervisors read the token off this line rather than re-deriving
+# recency, so a run record that still says running while nothing executes it is
+# distinguishable here from one that is genuinely moving.
+#
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
 #      recording remote_host= is a remote secondmate: its worktree and endpoint
@@ -892,6 +899,19 @@ if [ "$HAVE_RUN" = 1 ]; then
       fi
       ;;
   esac
+
+  # Publish the pipeline's own recency verdict for the step it claims is running,
+  # so a supervisor can tell a moving run from a record that merely still says
+  # running. Positive evidence only: the coarse ledger fallback has no steps table
+  # for THIS run (and its $RUN_OUT may describe another branch's run entirely), so
+  # it can never read recent.
+  if [ "$RUN_STATE" = working ]; then
+    if [ "$RUN_SOURCE" != coarse ] && nm_run_activity_is_recent; then
+      RUN_DETAIL="$RUN_DETAIL${SEP}activity: recent"
+    else
+      RUN_DETAIL="$RUN_DETAIL${SEP}activity: quiet"
+    fi
+  fi
 
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi

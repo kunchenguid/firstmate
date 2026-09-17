@@ -26,6 +26,15 @@ TMP_ROOT=$(fm_test_tmproot fm-daemon-tests)
 FM_DAEMON_PRIMARY_HARNESS=claude
 export FM_DAEMON_PRIMARY_HARNESS
 
+# housekeeping's stale recheck asks fm-classify-lib.sh whether a window about to be
+# wedge-escalated is a crew parked on a live validation run. Point the whole suite at
+# one hermetic fake so that read never reaches a real worktree or no-mistakes; its
+# default verdict is `unknown`, which is NOT a live run step, so every test that does
+# not set FM_FAKE_CREW_STATE keeps the plain possible-wedge behavior it pins.
+mkdir -p "$TMP_ROOT/crew-state-bin"
+FM_CREW_STATE_BIN=$(make_fake_crew_state "$TMP_ROOT/crew-state-bin")
+export FM_CREW_STATE_BIN
+
 test_afk_start_refuses_when_flag_cannot_be_written() {
   local dir state out status
   dir=$(make_supercase afk-start-flag-unwritable)
@@ -757,6 +766,158 @@ test_enriched_wedge_under_declared_wait_uses_pause_cadence() {
   [ ! -e "$state/.subsuper-paused-$key" ] \
     || fail "pause tracking survived a status append that no longer declares the wait"
   pass "an enriched wedge under a declared wait uses the pause cadence and restores wedge detection on resume"
+}
+
+# The away supervisor's stale recheck escalated a possible wedge on elapsed idle
+# time alone. A crew parked on a live no-mistakes run legitimately renders nothing
+# for minutes at a time because the run executes outside the pane. A live run step
+# is a declared wait the crew never had to write down: it defers the wedge timer and
+# is rechecked on the long PAUSE_RESURFACE_SECS cadence instead of escalating.
+test_stale_validating_run_step_defers_instead_of_wedging() {
+  local dir state fakebin task win pane key
+  dir=$(make_supercase stale-validating-defer)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task=validating-v1; win="sess:fm-$task"; pane="$dir/pane.txt"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
+  printf 'working: dispatching the implementation\n' > "$state/$task.status"
+  printf 'idle prompt $\n' > "$pane"
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running) · activity: recent' \
+    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 housekeeping "$state"
+
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "a live validation run escalated as a possible wedge: $(cat "$state/.subsuper-escalations")"
+  [ -e "$state/.subsuper-validating-$key" ] \
+    || fail "the deferral did not record when the live validation run was first seen"
+  # Deferral, not cancellation: the wedge timer restarts so a run that ends without
+  # the pane resuming still escalates within one STALE_ESCALATE_SECS.
+  [ -e "$state/.subsuper-stale-$key" ] \
+    || fail "the deferral dropped wedge aging instead of restarting it"
+  [ "$(( $(date +%s) - $(cat "$state/.subsuper-stale-$key") ))" -lt 240 ] \
+    || fail "the deferral left the wedge timer aged past the threshold"
+  pass "a live validation run step defers the wedge timer instead of escalating"
+}
+
+# The narrowing is what keeps the fix safe: bin/fm-crew-state.sh reports a parked
+# approval or fix-review gate as `parked`, never as a working run step, so a gate
+# that needs firstmate can never reach the deferral and is never silenced.
+test_stale_parked_gate_still_wedges() {
+  local dir state fakebin task win pane key
+  dir=$(make_supercase stale-parked-gate)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task=parked-v2; win="sess:fm-$task"; pane="$dir/pane.txt"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
+  printf 'working: dispatching the implementation\n' > "$state/$task.status"
+  printf 'idle prompt $\n' > "$pane"
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_FAKE_CREW_STATE='state: parked · source: run-step · awaiting approval' \
+    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 housekeeping "$state"
+
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null \
+    || fail "a parked gate was absorbed as a live validation run: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  [ ! -e "$state/.subsuper-validating-$key" ] \
+    || fail "a parked gate recorded validation deferral tracking"
+  pass "a parked approval gate still escalates as a possible wedge"
+}
+
+# The other half of the narrowing, and the reason genuine wedge detection is not
+# lost: `axi status` keeps reporting a step `running` after its process is killed
+# or hangs, so the state word alone would hold a wedged pipeline on the 4h recheck
+# cadence forever. The pipeline's own recency verdict is what the deferral requires,
+# so a run recorded running whose activity has gone quiet keeps the ordinary
+# FM_STALE_ESCALATE_SECS wedge schedule.
+test_stale_quiet_run_step_still_wedges() {
+  local dir state fakebin task win pane key
+  dir=$(make_supercase stale-quiet-run-step)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task=quietrun-v4; win="sess:fm-$task"; pane="$dir/pane.txt"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
+  printf 'working: dispatching the implementation\n' > "$state/$task.status"
+  printf 'idle prompt $\n' > "$pane"
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running) · activity: quiet' \
+    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 housekeeping "$state"
+
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null \
+    || fail "a run recorded running but reported quiet was absorbed as a live validation run: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  [ ! -e "$state/.subsuper-validating-$key" ] \
+    || fail "a quiet run step recorded validation deferral tracking"
+  pass "a run step recorded running whose own activity went quiet still escalates as a possible wedge"
+}
+
+# Two metas can carry the same window value, and resolving a stale marker's window
+# back to a task answers with the first of them. The deferral verdict must read the
+# crew the marker is about, or a sibling's live run silences the wedged task's
+# marker on every pass and its escalation never arrives.
+test_stale_verdict_reads_the_markers_own_task() {
+  local dir state fakebin win pane
+  dir=$(make_supercase stale-shared-window)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  win="sess:fm-shared"; pane="$dir/pane.txt"
+  fm_write_meta "$state/a-live.meta" "window=$win" "backend=tmux"
+  fm_write_meta "$state/b-wedged.meta" "window=$win" "backend=tmux"
+  printf 'working: dispatching the implementation\n' > "$state/a-live.status"
+  printf 'working: dispatching the implementation\n' > "$state/b-wedged.status"
+  printf 'idle prompt $\n' > "$pane"
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-b-wedged"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_FAKE_CREW_STATE_a_live='state: working · source: run-step · validating (running) · activity: recent' \
+    FM_FAKE_CREW_STATE_b_wedged='state: working · source: run-step · validating (running) · activity: quiet' \
+    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 housekeeping "$state"
+
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null \
+    || fail "a sibling task's live run silenced the wedged task's marker: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+  [ ! -e "$state/.subsuper-validating-b-wedged" ] \
+    || fail "the deferral recorded against a task whose own run step was quiet"
+  pass "the stale verdict reads the crew its own marker names, not a window sibling's"
+}
+
+# The deferral is bounded, not unbounded silence: a run that outlives any real one
+# re-surfaces once per PAUSE_RESURFACE_SECS as a recheck (never a wedge) so a
+# genuinely stuck validation still reaches the captain.
+test_stale_validating_resurfaces_on_pause_cadence() {
+  local dir state fakebin task win pane key escalations
+  dir=$(make_supercase stale-validating-resurface)
+  state="$dir/state"; fakebin="$dir/fakebin"
+  task=validating-v3; win="sess:fm-$task"; pane="$dir/pane.txt"
+  key=$(printf '%s' "$task" | tr ':/.' '___')
+  fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
+  printf 'working: dispatching the implementation\n' > "$state/$task.status"
+  printf 'idle prompt $\n' > "$pane"
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$key"
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-validating-$key"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running) · activity: recent' \
+    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 housekeeping "$state"
+
+  escalations=0
+  [ -s "$state/.subsuper-escalations" ] \
+    && escalations=$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')
+  [ "$escalations" = 1 ] \
+    || fail "the bounded validation recheck produced $escalations escalations, expected exactly one"
+  grep -F "validating" "$state/.subsuper-escalations" >/dev/null \
+    || fail "the one escalation was not a validation recheck"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null \
+    && fail "the bounded validation recheck was mislabeled a possible wedge"
+  [ "$(( $(date +%s) - $(cat "$state/.subsuper-validating-$key") ))" -lt 3600 ] \
+    || fail "the recheck did not reset its own window, so it would repeat every poll"
+  pass "a long-running validation re-surfaces once per pause cadence, never as a wedge"
 }
 
 test_stale_terminal_escalates() {
@@ -2791,6 +2952,11 @@ test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
 test_enriched_wedge_under_declared_wait_uses_pause_cadence
+test_stale_validating_run_step_defers_instead_of_wedging
+test_stale_parked_gate_still_wedges
+test_stale_quiet_run_step_still_wedges
+test_stale_verdict_reads_the_markers_own_task
+test_stale_validating_resurfaces_on_pause_cadence
 test_stale_terminal_escalates
 test_stale_actionable_wait_escalates_and_keeps_pause_cadence
 test_stale_paused_classifies_pause
