@@ -2487,6 +2487,51 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
   pass "a parked live worker surfaces once, absorbs pane churn for the whole re-surface window, then re-surfaces when it elapses"
 }
 
+# A wait declared again after the worker left it is a NEW declaration, even word
+# for word identical to the one before: the intervening non-wait event ended the
+# first wait, so the second one's first stale inspection must reach the captain
+# instead of inheriting the first wait's re-surface throttle.
+test_live_identical_wait_declared_again_after_leaving_it_surfaces() {
+  local spec name status_line interlude dir state fakebin out capture_file statusf window key
+  local sig wakes
+  for spec in \
+    'paused-redeclared|paused: waiting on CI|working: fixing the CI failure' \
+    'captain-held-reheld|captain-held [key=route]: awaiting the captain on the routing call|resolved [key=route]: captain chose the direct route'
+  do
+    name=${spec%%|*}; spec=${spec#*|}
+    status_line=${spec%%|*}; interlude=${spec#*|}
+    dir=$(make_case "$name"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/parked.status"
+    window="test:fm-parked"
+    printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/parked.meta"
+    printf '%s\n' "$status_line" > "$statusf"
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+
+    printf 'parked, elapsed 1s' > "$capture_file"
+    printf '%s' "$(hash_text 'parked, elapsed 1s')" > "$state/.hash-$key"
+    printf '1\n' > "$state/.count-$key"
+    parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
+      || fail "[$name] first sight of the declared wait did not surface"
+    ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the first surface"
+
+    printf '%s\n' "$interlude" >> "$statusf"
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
+    parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb \
+      || fail "[$name] watcher exited while the worker was off the wait"
+
+    printf '%s\n' "$status_line" >> "$statusf"
+    sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
+    printf 'parked again, elapsed 1s' > "$capture_file"
+    parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
+      || fail "[$name] the identical wait declared again inherited the previous wait's throttle"
+    wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+      "$state/.wake-queue" 2>/dev/null || echo 0)
+    [ "$wakes" -eq 1 ] || fail "[$name] the identical wait declared again produced $wakes wakes instead of one"
+  done
+  pass "a paused or captain-held wait declared again after leaving it surfaces on first inspection"
+}
+
 test_live_paused_until_controls_recheck_time() {
   local dir state fakebin out capture_file statusf window key sig wakes future past
   dir=$(make_case live-paused-until); state="$dir/state"; fakebin="$dir/fakebin"
@@ -5266,6 +5311,7 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
 test_absorbed_wait_cadence_survives_a_status_write_that_keeps_the_wait
 test_live_declared_wait_churn_honors_the_resurface_throttle
+test_live_identical_wait_declared_again_after_leaving_it_surfaces
 test_live_paused_until_controls_recheck_time
 test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict
 test_wedge_threshold_recheck_names_the_captain_for_a_held_lane
