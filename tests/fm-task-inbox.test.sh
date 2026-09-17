@@ -28,8 +28,11 @@
 #      watcher surfaces such a record exactly once instead of re-ringing.
 #   7. Kimi queued-input steer: a rung doorbell that leaves Kimi's queue block on
 #      screen is followed by exactly one Ctrl-S, from the ring and from a real
-#      watcher re-ring alike; no block, any other harness, or any backend but
-#      tmux sends no key at all.
+#      watcher re-ring alike, and the ring reports that steered outcome (4); no
+#      block, any other harness, or any backend but tmux sends no key at all.
+#      The ladder spends no attempt budget on a steered ring - a Kimi that stays
+#      mid-turn is re-rung past the budget without a stale wake - and resumes
+#      escalation from idle-pane attempts alone once the queue block is gone.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -332,7 +335,7 @@ test_ring_steers_queued_kimi_once() {
   : > "$log"; : > "$keys"; rc=0
   PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_KEY_LOG="$keys" FM_FAKE_TMUX_CAPTURE="$queued" \
     inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 kimi || rc=$?
-  [ "$rc" = 0 ] || fail "a rung kimi doorbell should return 0, got $rc"
+  [ "$rc" = 4 ] || fail "a kimi doorbell that was queued and steered should report the steered outcome 4, got $rc"
   grep -qF 'Firstmate instruction waiting' "$log" || fail "the kimi doorbell was not typed"
   [ "$(ctrl_s_count "$keys")" = 1 ] \
     || fail "a queued kimi doorbell should get exactly one Ctrl-S:"$'\n'"$(cat "$keys")"
@@ -364,41 +367,54 @@ test_ring_steers_queued_kimi_once() {
     inbox_lib "$state" fm_task_inbox_kimi_steer herdr sess:fm-t1 fm-t1 kimi || rc=$?
   [ "$rc" = 1 ] || fail "a non-tmux backend should report nothing sent (1), got $rc"
   [ ! -s "$keys" ] || fail "a non-tmux backend received a key:"$'\n'"$(cat "$keys")"
-  pass "inbox: a queued kimi doorbell gets exactly one Ctrl-S; no block, another harness, or another backend gets none"
+  pass "inbox: a queued kimi doorbell gets exactly one Ctrl-S and reports steered; no block, another harness, or another backend gets none"
 }
 
 test_watcher_rering_steers_queued_kimi() {
-  local dir state out log keys pid rec i=0
+  local dir state out log keys pid rec cap rings i=0
   dir=$(setup_watch_case kimi-rering)
   state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; keys="$dir/keys.log"
   : > "$log"; : > "$keys"
   fm_write_meta "$state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=kimi"
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
   age_path "$rec"
+  cap=$(kimi_queued_capture "$dir")
+  # Default attempt budget on purpose: a Kimi that stays mid-turn must be
+  # re-rung and steered well past it without a stale wake.
   watch_bg "$state" "$dir/fakebin" "$out" \
-    FM_SEND_LOG="$log" FM_KEY_LOG="$keys" FM_FAKE_TMUX_CAPTURE="$(kimi_queued_capture "$dir")" \
-    FM_TASK_INBOX_RING_MAX=99
+    FM_SEND_LOG="$log" FM_KEY_LOG="$keys" FM_FAKE_TMUX_CAPTURE="$cap"
   pid=$!
-  while [ "$i" -lt 100 ]; do
-    [ "$(ctrl_s_count "$keys")" = 0 ] || break
+  while [ "$i" -lt 400 ]; do
+    [ "$(grep -cF 'Firstmate instruction waiting' "$log")" -lt 5 ] || break
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.1
     i=$((i + 1))
   done
+  rings=$(grep -cF 'Firstmate instruction waiting' "$log" || true)
   kill -0 "$pid" 2>/dev/null \
-    || fail "a steered re-ring must not wake firstmate (watcher exited):"$'\n'"$(cat "$out")"
-  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
-  grep -qF 'Firstmate instruction waiting' "$log" \
-    || fail "the watcher never re-rang the kimi doorbell:"$'\n'"$(cat "$log")"
-  [ "$(ctrl_s_count "$keys")" -ge 1 ] \
-    || fail "the watcher's kimi re-ring sent no Ctrl-S:"$'\n'"$(cat "$keys")"
-  # The watcher is killed mid-cycle, so the last re-ring may not have reached
-  # its key yet; what must never happen is more keys than doorbells.
-  [ "$(ctrl_s_count "$keys")" -le "$(grep -cF 'Firstmate instruction waiting' "$log")" ] \
-    || fail "a re-ring must never send more than one Ctrl-S:"$'\n'"$(cat "$keys")"
+    || fail "a steered re-ring must not spend the attempt budget (watcher exited after $rings doorbells):"$'\n'"$(cat "$out")"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  [ "$rings" -ge 5 ] \
+    || { kill "$pid" 2>/dev/null; fail "the watcher should keep re-ringing a mid-turn kimi past the budget, got $rings doorbells:"$'\n'"$(cat "$log")"; }
+  [ "$(ctrl_s_count "$keys")" -ge 4 ] \
+    || { kill "$pid" 2>/dev/null; fail "the watcher's kimi re-rings sent too few Ctrl-S:"$'\n'"$(cat "$keys")"; }
+  # A re-ring is one doorbell then at most one key, and the watcher may be
+  # caught between them; what must never happen is more keys than doorbells.
+  [ "$(ctrl_s_count "$keys")" -le "$rings" ] \
+    || { kill "$pid" 2>/dev/null; fail "a re-ring must never send more than one Ctrl-S:"$'\n'"$(cat "$keys")"; }
   [ ! -s "$state/.wake-queue" ] \
-    || fail "a steered re-ring queued a wake:"$'\n'"$(cat "$state/.wake-queue")"
-  pass "watcher: a kimi re-ring that lands in the queue block is steered with one Ctrl-S and stays quiet"
+    || { kill "$pid" 2>/dev/null; fail "a steered re-ring queued a wake:"$'\n'"$(cat "$state/.wake-queue")"; }
+  # The turn ends without an acknowledgement and the queue block is gone: the
+  # budget resumes from idle-pane attempts alone, and the escalation counts
+  # only those.
+  cp "$(kimi_idle_capture "$dir")" "$cap"
+  wait_watcher_gone "$pid" 400 \
+    || { kill "$pid" 2>/dev/null; fail "an idle kimi that never acks must still escalate once the budget is spent:"$'\n'"$(cat "$log")"; }
+  [ "$(grep -cF 'unread firstmate instruction' "$state/.wake-queue" 2>/dev/null || true)" = 1 ] \
+    || fail "the escalation must fire exactly once:"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  grep -qF 'after 3 doorbell delivery attempts with an idle pane' "$state/.wake-queue" \
+    || fail "the escalation should count only the idle-pane attempts:"$'\n'"$(cat "$state/.wake-queue")"
+  grep -qF 'stale:' "$out" || fail "the watcher should exit through the ordinary stale wake:"$'\n'"$(cat "$out")"
+  pass "watcher: a kimi re-ring that lands in the queue block is steered with one Ctrl-S and spends no budget; escalation resumes once the queue is gone"
 }
 
 test_idempotent_write_dedups_exact_body() {
@@ -582,6 +598,20 @@ test_ring_ladder_policy() {
   printf '001.msg\t1\t100\n' > "$state/t1.inbox/.ring-state"
   action=$(FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=3 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
   [ "$action" = "ring $rec" ] || fail "an aged ladder should ring again, got: $action"
+  # A steered ring (outcome 4: a mid-turn Kimi queued the doorbell and it was
+  # injected) holds the spacing like any attempt but spends no budget however
+  # often it repeats; a plain ring afterwards resumes the budget where it was.
+  printf '001.msg\t2\t100\n' > "$state/t1.inbox/.ring-state"
+  for _ in 1 2 3; do
+    inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" 4
+  done
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=3 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = quiet ] || fail "a steered ring should hold the spacing window, got: $action"
+  action=$(FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_RING_MAX=3 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "ring $rec" ] || fail "steered rings must not spend the attempt budget, got: $action"
+  inbox_lib "$state" fm_task_inbox_record_ring "$state" t1 "$rec" 0
+  action=$(FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_RING_MAX=3 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "escalate $rec 3" ] || fail "a plain ring after steered rings should resume toward escalation, got: $action"
   printf '001.msg\t3\t100\n' > "$state/t1.inbox/.ring-state"
   action=$(FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=3 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
   [ "$action" = "escalate $rec 3" ] || fail "a spent ring budget should escalate, got: $action"
@@ -598,7 +628,7 @@ test_ring_ladder_policy() {
   age_path "$rec"
   action=$(FM_TASK_INBOX_GRACE_SECS=60 FM_TASK_INBOX_RING_MAX=3 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
   [ "$action" = "ring $rec" ] || fail "the next message should start a fresh ladder, got: $action"
-  pass "inbox: the re-ring ladder paces by grace, escalates once, and resets on ack"
+  pass "inbox: the re-ring ladder paces by grace, spends no budget on steered rings, escalates once, and resets on ack"
 }
 
 setup_watch_case() {  # <name> -> echoes case dir; state in <dir>/state

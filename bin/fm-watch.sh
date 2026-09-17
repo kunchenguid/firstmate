@@ -425,7 +425,10 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 # glob and produces nothing. When the ladder (fm_task_inbox_due_action, the
 # policy owner) reports a due action, a busy pane just waits - the record is
 # durable and the worker will reach a turn boundary - an idle pane gets one
-# delivery attempt, and a spent attempt budget surfaces as an ordinary stale
+# delivery attempt, an attempt that a mid-turn Kimi queued and that was steered
+# into its running turn (ring outcome 4) is spaced like any attempt but spends
+# no budget, because that queue block is the mid-turn proof the busy read lacks
+# for standalone Kimi, a spent attempt budget surfaces as an ordinary stale
 # wake for stuck-crewmate-recovery, and a pane whose agent is positively dead
 # or missing skips the ladder altogether: it is never typed into and surfaces
 # as that same stale wake exactly once. If the attempt's ladder write fails while
@@ -469,7 +472,7 @@ inbox_steer_check() {  # <window> <task>
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"
         return 0
       fi
-      if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec"; then
+      if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec" "$ring_rc"; then
         if [ ! -f "$rec" ]; then
           fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
           return 0

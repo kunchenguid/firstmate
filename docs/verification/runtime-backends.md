@@ -612,10 +612,10 @@ This guard is the refresh command after any harness upgrade; it spends a small n
 ### Kimi mid-turn steer
 
 A standalone Kimi that is mid-turn queues the doorbell instead of reading it, so the guard also steers a Kimi that is inside a long tool call.
-Verified on 2026-09-17 with Kimi Code 0.43.1, tmux 3.7c, macOS arm64, on an isolated private socket, in a throwaway folder, driving the real `bin/fm-send.sh`:
+Verified on 2026-09-17 with Kimi Code 0.43.1, tmux 3.7c, macOS arm64, on an isolated private socket, driving the real `bin/fm-send.sh`:
 
 ```sh
-FM_SEND_INBOX_LIVE_E2E=1 FM_SEND_INBOX_LIVE_HARNESSES=kimi FM_SEND_INBOX_LIVE_KIMI_CWD=<folder Kimi already trusts> tests/fm-send-inbox-doorbell-live-e2e.test.sh
+FM_SEND_INBOX_LIVE_E2E=1 FM_SEND_INBOX_LIVE_HARNESSES=kimi tests/fm-send-inbox-doorbell-live-e2e.test.sh
 ```
 
 ```text
@@ -643,6 +643,7 @@ The colon after `❯` is the doorbell's own shell no-op prefix, not part of Kimi
 Two queued lines render as two `❯` rows above one hint row, a line wider than the pane is truncated with `…` rather than wrapped, and one Ctrl-S injects every queued line.
 A Ctrl-S sent with nothing queued changed nothing on screen, both idle and mid-turn.
 Only tmux's key path was exercised; no other backend sends the key.
+The ring reports a steered doorbell distinctly and the watcher's re-ring ladder spends no attempt budget on it, so a Kimi that stays mid-turn is re-rung and steered past the budget without a stale wake; `tests/fm-task-inbox.test.sh` pins that ladder behavior with a fake pane.
 
 ## Gemini
 

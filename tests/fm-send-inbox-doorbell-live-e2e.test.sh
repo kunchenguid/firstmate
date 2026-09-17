@@ -29,9 +29,7 @@
 # and enter the running turn through the Ctrl-S steer that
 # fm_task_inbox_kimi_steer (bin/fm-task-inbox-lib.sh) sends, with no re-ring.
 # It fails naming the Kimi version when the queue block or the key binding
-# drifts. Kimi is resolved from PATH, then $HOME/.kimi-code/bin/kimi, and
-# launches in FM_SEND_INBOX_LIVE_KIMI_CWD (default: the repo root) so an
-# operator can name a folder Kimi already trusts.
+# drifts.
 #
 # Folder trust: harnesses launch with the repo root as cwd, which the
 # operator's machine has normally already trusted; a trust dialog is a real
@@ -195,12 +193,6 @@ check_harness_doorbell() {  # <name>
   tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
 }
 
-resolve_kimi() {
-  command -v kimi 2>/dev/null && return 0
-  [ -x "$HOME/.kimi-code/bin/kimi" ] || return 1
-  printf '%s\n' "$HOME/.kimi-code/bin/kimi"
-}
-
 kimi_pane() {  # <window>
   tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$1" 2>/dev/null || true
 }
@@ -212,18 +204,18 @@ kimi_busy_fail() {  # <version> <window> <message>
   tmux -L "$SOCKET" kill-window -t "$SESSION:$2" 2>/dev/null || true
 }
 
-check_kimi_busy_steer() {  # <kimi-binary>
-  local bin=$1 version win=hx-kimi-busy home task=live-kimi-busy acted rec handled i cwd ready_rc
-  version=$(harness_version "$bin")
-  cwd=${FM_SEND_INBOX_LIVE_KIMI_CWD:-$ROOT}
+check_kimi_busy_steer() {
+  local version win=hx-kimi-busy home task=live-kimi-busy acted rec handled i ready_rc
+  version=$(harness_version kimi)
   home="$LAB/kimi-busy-home"
   mkdir -p "$home/state"
   acted="$LAB/acted-kimi-busy"
-  tmux -L "$SOCKET" new-window -d -t "$SESSION:" -n "$win" -c "$cwd" -- "$bin" --auto \
+  tmux -L "$SOCKET" new-window -d -t "$SESSION:" -n "$win" -c "$ROOT" \
+    -- bash -lc "$(launch_cmd kimi)" \
     || { FAILED=1; printf 'not ok - kimi (%s) mid-turn steer: could not launch in the isolated tmux server\n' "$version" >&2; return 0; }
   wait_ready "$win"; ready_rc=$?
   if [ "$ready_rc" -ne 0 ]; then
-    kimi_busy_fail "$version" "$win" "the composer never read empty (a folder-trust dialog? set FM_SEND_INBOX_LIVE_KIMI_CWD to a trusted folder)"
+    kimi_busy_fail "$version" "$win" "the composer never read empty, so no turn could be started"
     return 0
   fi
   # Kimi's startup input window can turn an early Enter into a newline
@@ -293,8 +285,8 @@ done
 
 case " $HARNESSES " in
   *" kimi "*)
-    if KIMI_BIN=$(resolve_kimi); then
-      check_kimi_busy_steer "$KIMI_BIN"
+    if command -v kimi >/dev/null 2>&1; then
+      check_kimi_busy_steer
     else
       note "harness absent, mid-turn steer not verified here: kimi"
     fi

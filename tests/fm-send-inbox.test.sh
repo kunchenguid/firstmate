@@ -26,8 +26,9 @@
 #      marked, recorded, or typed - on the marked secondmate path that means
 #      no marker-only record and no pending-reply expectation.
 #  11. A doorbell that lands in a standalone Kimi's queued-input block is
-#      followed by exactly one Ctrl-S; the same screen under any other harness
-#      gets no key (bin/fm-task-inbox-lib.sh owns the decision).
+#      followed by exactly one Ctrl-S and reported as steered; the same screen
+#      under any other harness gets no key (bin/fm-task-inbox-lib.sh owns the
+#      decision).
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
 # shellcheck disable=SC2016
@@ -431,10 +432,15 @@ test_kimi_queued_doorbell_is_steered() {
   assert_contains "$(cat "$dir/send.log")" "Firstmate instruction waiting" "the kimi doorbell should be typed"
   [ "$(grep -c '^C-s$' "$keys")" = 1 ] \
     || fail "a queued kimi doorbell should get exactly one Ctrl-S:"$'\n'"$(cat "$keys")"
+  assert_contains "$(cat "$err")" "steered into its running turn" \
+    "fm-send should report the doorbell was queued by a mid-turn kimi and steered"
   : > "$keys"
   run_send "$dir" "$err" FM_KEY_LOG="$keys" -- t1 "and then push"
   if grep -q '^C-s$' "$keys"; then
     fail "an idle kimi must not receive Ctrl-S:"$'\n'"$(cat "$keys")"
+  fi
+  if grep -q 'steered into its running turn' "$err"; then
+    fail "an idle kimi must not be reported as steered:"$'\n'"$(cat "$err")"
   fi
   for harness in claude grok; do
     dir=$(setup_case "kimi-steer-$harness" "$harness")
@@ -444,7 +450,7 @@ test_kimi_queued_doorbell_is_steered() {
       fail "$harness must never receive Ctrl-S:"$'\n'"$(cat "$keys")"
     fi
   done
-  pass "fm-send inbox: a doorbell queued by a busy kimi gets one Ctrl-S; an idle kimi and other harnesses get none"
+  pass "fm-send inbox: a doorbell queued by a busy kimi gets one Ctrl-S and is reported steered; an idle kimi and other harnesses get none"
 }
 
 test_text_steer_rides_inbox
