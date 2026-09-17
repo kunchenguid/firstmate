@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Project discovery and resolution for this home (bin/fm-projects-lib.sh owns
-# the contract; docs/configuration.md "Projects root and project resolution"
-# owns the schema).
+# the contract; docs/configuration.md "Project-local homes, the launcher, and
+# the projects root" owns the schema).
 #
 # Usage:
 #   fm-projects.sh root                 print the effective projects root

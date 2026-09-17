@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Shared project-root and project-path resolution for the project-local home
-# model (docs/configuration.md "Projects root and project resolution").
+# model (docs/configuration.md "Project-local homes, the launcher, and the
+# projects root").
 #
 # This file is sourced; it has no side effects on source and defines no
 # variables of its own. Every function takes the home, config, and data
