@@ -399,15 +399,60 @@ forge_base() {
   gh pr view "$url" --json baseRefOid -q .baseRefOid 2>/dev/null
 }
 
+# Rewrite this host's absolute paths out of anything bound for the PR.
+#
+# PR-facing content is read on machines that are not this one, where a path
+# under this host's state dir or lane worktree resolves to nothing, so the
+# evidence it points at is unprovable from the PR. Nothing this script writes
+# names such a path any more, but the lens reports it inlines are written by a
+# reviewer that was handed the staged files by absolute path, so a report
+# citing one is expected rather than exceptional.
+#
+# A worktree prefix is dropped outright: `/tmp/wt-a/app.txt:12` becomes
+# `app.txt:12`, which is the same file the PR's own Files tab shows. A staged
+# path keeps its tail under a relative marker, so the reader can still tell
+# which piece of evidence was meant without being handed a path that lies about
+# being openable.
+#
+# This runs at the single chokepoint every PR-facing byte passes through rather
+# than at each writer, because the guarantee is about what reaches the forge.
+pr_portable_text() {
+  local wt=${FM_ADV_PR_WT:-}
+  awk -v state="$STATE" -v wt="$wt" '
+    function strip(line, prefix, repl,   i, out) {
+      if (prefix == "") return line
+      out = ""
+      while ((i = index(line, prefix)) > 0) {
+        out = out substr(line, 1, i - 1) repl
+        line = substr(line, i + length(prefix))
+      }
+      return out line
+    }
+    {
+      line = $0
+      # A prefix of "/" would eat every separator in the line, so an unset or
+      # root-valued source is left alone rather than built into one.
+      if (state != "" && state != "/") line = strip(line, state "/", "staged-evidence/")
+      if (wt != "" && wt != "/") line = strip(line, wt "/", "")
+      print line
+    }
+  '
+}
+
 # Post a comment file to the PR through gh-axi, the only mutation path.
 pr_comment() {
-  local number=$1 repo=$2 body_file=$3
-  gh-axi pr comment "$number" --repo "$repo" --body-file "$body_file" >/dev/null
+  local number=$1 repo=$2 body_file=$3 tmp rc=0
+  tmp=$(mktemp "${TMPDIR:-/tmp}/.fm-adv-comment.XXXXXX") || return 1
+  pr_portable_text < "$body_file" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  gh-axi pr comment "$number" --repo "$repo" --body-file "$tmp" >/dev/null || rc=$?
+  rm -f -- "$tmp"
+  return "$rc"
 }
 
 # Splice the loop status section into the PR body and push it back.
 sync_body_section() {
   local url=$1 number=$2 repo=$3 section=$4 current tmp in
+  section=$(printf '%s\n' "$section" | pr_portable_text)
   command -v gh >/dev/null 2>&1 || return 1
   current=$(gh pr view "$url" --json body -q .body 2>/dev/null) || return 1
   tmp=$(mktemp "${TMPDIR:-/tmp}/.fm-adv-body.XXXXXX") || return 1
@@ -782,12 +827,13 @@ CLASSIFY
       "$waiver_class" "$waiver_reason" "$waiver_hold"
     [ "$tier" = T0 ] || printf 'Tier floor derived from the reviewed change: %s (base %s).\n\n' \
       "$required_tier" "$base_source"
-    printf "Evidence staged before dispatch: diff \`%s\`, prose \`%s\`, file list \`%s\`, tree \`%s\`.\n\n" \
-      "$dir/diff.patch" "$dir/prose.md" "$dir/files.txt" "$wt"
+    printf "Evidence under review is this PR itself: its own diff of \`%s\` against \`%s\` (the Files tab of %s), its title and body, and every commit message on that head. Generated files are excluded from the reviewed diff.\n\n" \
+      "$head" "$base" "$url"
     printf 'Diff scope: %s files, %s.\n\n' "$files_count" "$numstat"
     printf 'Reviewers are read-only; reconciliation by firstmate lands in the next round comment.\n'
   } > "$dir/comment.md"
   section=$(printf "Adversarial review (tier %s): round %s dispatched at \`%s\`; recommendation pending." "$tier" "$round" "$head")
+  FM_ADV_PR_WT=$wt
   sync_body_section "$url" "$number" "$owner/$repo" "$section" \
     || fail_transient "cannot sync the PR body section"
   pr_comment "$number" "$owner/$repo" "$dir/comment.md" \
@@ -1071,6 +1117,7 @@ cmd_reconcile() {
   slots=$(round_meta_get "$dir" slots)
   advisory_slots=$(round_advisory_slots "$dir")
   seats=$(round_meta_get "$dir" seats)
+  FM_ADV_PR_WT=$(round_meta_get "$dir" wt)
   lane_identity=$(lane_identity_tokens "$id" "$dir")
   fm_pr_url_parse "$url" || fail "round meta has an invalid PR URL" 1
   url=$FM_PR_URL
@@ -1096,6 +1143,7 @@ cmd_reconcile() {
     note_red "head changed: reviewed $recorded_head, PR is at $live_head"
   fi
   lens_table=
+  lens_reports=
   finding_rows=
   seen_keys=' '
   seen_seats=' '
@@ -1150,6 +1198,16 @@ cmd_reconcile() {
     fi
     verdict=$(lens_report_scan "$report" | awk '$1=="VERDICT"{print $2}')
     lens_table="$lens_table- $slot: $verdict ($kind, seat ${seat:-unassigned})
+"
+    # The report itself goes into the PR, not a pointer to where it sits on this
+    # machine: a reader on another host has nothing else to read it from, and
+    # the loop's own evidence is only evidence if it is retrievable from the PR.
+    lens_reports="$lens_reports<details><summary>lens $slot report - ${verdict:-unreadable} ($kind, seat ${seat:-unassigned})</summary>
+
+$(cat "$report")
+
+</details>
+
 "
     if [ "$verdict" != GREEN ] && [ "$verdict" != RED ]; then
       note_red "lens $slot has no readable verdict"
@@ -1280,6 +1338,9 @@ cmd_reconcile() {
     printf '%s\n' "$lens_table"
     printf '%s\n' "$finding_rows"
     if [ -n "$reasons" ]; then printf 'Blocking reasons:\n%s\n' "$reasons"; fi
+    if [ -n "$lens_reports" ]; then
+      printf '\n### Lens reports\n\n%s' "$lens_reports"
+    fi
   } > "$dir/result-comment.md"
   section=$(printf "Adversarial review (tier %s): round %s %s at \`%s\`." "$tier" "$round" "$recommendation" "$recorded_head")
   sync_body_section "$url" "$number" "$owner/$repo" "$section" \

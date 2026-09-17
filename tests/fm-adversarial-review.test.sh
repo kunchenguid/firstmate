@@ -47,6 +47,9 @@
 #   (ae) a lane whose model= is the default placeholder still refuses a lens
 #     seated on it, and a lane nothing identifies refuses the seating
 #   (af) the report shape the staged prompt teaches is one record-lens accepts
+#   (ag) everything posted into the PR reads on another machine: no host-local
+#     path reaches the forge, and each lens report is inlined rather than
+#     pointed at
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -102,6 +105,31 @@ add_fake_gh_axi() {
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+exit 0
+SH
+  chmod +x "$fakebin/gh-axi"
+}
+
+# Fake gh-axi that also keeps the exact body every PR mutation carried, so a
+# test can assert on what the forge actually received rather than on the file
+# the script happened to stage beside it.
+add_capturing_gh_axi() {
+  local fakebin=$1
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+body= prev=
+for arg in "$@"; do
+  [ "$prev" = --body-file ] && body=$arg
+  prev=$arg
+done
+if [ -n "$body" ] && [ -f "$body" ]; then
+  {
+    printf '=== %s\n' "$*"
+    cat -- "$body"
+    printf '\n'
+  } >> "$FM_TEST_GH_AXI_BODIES"
+fi
 exit 0
 SH
   chmod +x "$fakebin/gh-axi"
@@ -1694,6 +1722,71 @@ test_the_prompt_teaches_a_report_shape_record_lens_accepts() {
   pass "the report shape the staged prompt teaches is one record-lens accepts"
 }
 
+# The PR is the only surface the evidence is read from, so everything the loop
+# posts has to stand on its own there: no path that only resolves on the host
+# that ran the loop, and the lens reports themselves inline rather than a
+# pointer to where they sit on that host.
+test_posted_evidence_is_readable_from_the_pr_alone() {
+  local case_dir="$TMP_ROOT/portable" wt dir posted
+  local fakebin="$case_dir/fakebin"
+  mkdir -p "$case_dir/state" "$fakebin"
+  read -r base head wt < <(make_repo "$case_dir/wt")
+  add_fake_gh "$fakebin"
+  add_capturing_gh_axi "$fakebin"
+  export FAKE_GH_headRefOid="$head" FAKE_GH_baseRefOid="$base"
+  export FAKE_GH_title='Add the feature' FAKE_GH_body='It works.'
+  posted="$case_dir/posted.md"
+  export FM_TEST_GH_AXI_BODIES="$posted"
+  : > "$case_dir/state/gh-axi.log"
+  : > "$posted"
+  seed_lane_meta "$case_dir/state" task-a "$wt"
+  run_adv "$case_dir/state" "$fakebin" dispatch task-a "$PR_URL" \
+    --tier T2 --wt "$wt" --base "$base" --head "$head" \
+    --seat frontier=fable-5.1 --seat deep=opus-5 >/dev/null \
+    || fail "portable: dispatch failed"
+  dir="$case_dir/state/task-a.adversarial-review/round-1"
+  # A reviewer cites what it was handed: the lane tree and the staged diff.
+  write_lens_report "$case_dir/frontier.md" GREEN "  - id: f1
+    severity: MINOR
+    claim: naming
+    evidence: $wt/app.txt:1
+    problem: terse greeting
+    fix: rename it
+"
+  write_lens_report "$case_dir/deep.md" RED "  - id: d1
+    severity: MAJOR
+    claim: empty state
+    evidence: $wt/app.txt:1
+    problem: no empty handling, per $dir/diff.patch
+    fix: guard it
+"
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens frontier --report "$case_dir/frontier.md" >/dev/null \
+    || fail "portable: frontier record failed"
+  run_adv "$case_dir/state" "$fakebin" record-lens task-a \
+    --round 1 --lens deep --report "$case_dir/deep.md" >/dev/null \
+    || fail "portable: deep record failed"
+  out=$(run_adv "$case_dir/state" "$fakebin" reconcile task-a --round 1) \
+    || fail "portable: reconcile failed to post"
+  assert_contains "$out" "round-1 RED" "portable: the open MAJOR did not stay RED"
+  assert_no_grep "$case_dir/state" "$posted" \
+    "portable: the PR carries a path under this host's state dir"
+  assert_no_grep "$wt/" "$posted" \
+    "portable: the PR carries this host's lane worktree path"
+  # What replaces the staged paths: the PR's own diff, and the reports themselves.
+  assert_grep "$PR_URL" "$posted" \
+    "portable: the round comment never points the reader at the PR's own diff"
+  assert_grep 'no empty handling' "$posted" \
+    "portable: the deep lens report was not inlined into the PR"
+  assert_grep 'terse greeting' "$posted" \
+    "portable: the frontier lens report was not inlined into the PR"
+  assert_grep 'evidence: app.txt:1' "$posted" \
+    "portable: a lens citation did not survive as a PR-relative file reference"
+  assert_grep '[deep:d1] MAJOR' "$posted" \
+    "portable: the findings table did not reach the PR"
+  pass "everything posted into the PR is readable from the PR alone"
+}
+
 test_condition_needs_a_pr_open_line
 test_watch_fires_on_pr_open_line
 test_dispatch_stages_evidence_and_posts
@@ -1725,3 +1818,4 @@ test_a_red_reconcile_revokes_the_marker_even_when_the_forge_fails
 test_reconciling_an_earlier_round_sees_later_rounds
 test_a_placeholder_model_lane_still_refuses_self_seating
 test_the_prompt_teaches_a_report_shape_record_lens_accepts
+test_posted_evidence_is_readable_from_the_pr_alone
