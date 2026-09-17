@@ -34,14 +34,12 @@ It stops at the finding, routes the decision to firstmate, and applies only the 
 4. Fix only what makes the deliverable wrong.
    Approve past wording, restatement, simplification, and documentation-polish findings even when the reviewer is right, unless the text is actually false.
    Approving one of those records that the deliverable is already correct; it neither concedes nor disputes the reviewer's reading, and it leaves no defect unfixed.
-5. Cap the work at three fix rounds per run, counting one round per gate response that opens a fix round: a `no-mistakes axi respond --action fix` the worker sends on its own judgment, never rounds the pipeline chains inside one of them and never a fresh three per gate or per step.
-   A fix response that carries a decision firstmate returned, or that retries an unfinished step such as a protected-path refusal, opens no round and does not count against the cap.
-   The cap is a proportionality rule with an advisory count, not an enforced limit: nothing records the count durably, so it resets on a context reset or a worker recovery.
-   It also bounds only what the worker initiates, not what the pipeline does inside one of those responses, so three of them can still chain into more fix rounds and more wall clock than the number suggests.
-   Step 4 is the binding half and holds at every round, while three is guidance for when to stop.
-   Once three rounds have run, approve every remaining finding that is not a correctness or contract defect and file it as its own backlog work item with `bin/fm-tasks-axi.sh add` rather than opening a fourth round.
+5. Cap the work at three fix rounds, counted across the whole run as the gate responses you open a fix round with, never the rounds the pipeline chains inside one of them - so three responses can still cost more wall clock than the number suggests.
+   Once three have run, approve every remaining finding that is not a correctness or contract defect and file it as its own backlog work item with `bin/fm-tasks-axi.sh add` rather than opening a fourth round.
    Review wall-clock is the dominant cost of a small change, so hours already spent are a reason to stop rather than evidence that another round is warranted.
    The cap bounds proportionality and never correctness: it is never authority to approve past a correctness or contract defect, which is still fixed at the fourth round and beyond, and the criteria in step 6 still escalate regardless of how many rounds have run.
+   Applying a decision firstmate returned once the cap is already reached, and retrying an unfinished step such as a protected-path refusal, open no round and do not count against the cap; before the cap every fix response counts, including one that carries a decision firstmate returned.
+   Step 4 is the binding half of this rule and the count is advisory: nothing records it durably, so a worker that cannot establish how many rounds this run has already opened treats the run as AT the cap and escalates rather than opening another round - an unknown count fails toward stopping, never toward a fresh three.
 6. Escalate only genuinely ambiguous findings:
    - a Fix that would materially expand the contract by adding a new guarantee, threat model, subsystem, abstraction, compatibility surface, state machine, continuous-monitoring requirement, generalized framework, or broader architecture not required by the accepted intent
    - a product or architecture call not settled by accepted intent
