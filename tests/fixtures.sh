@@ -102,6 +102,15 @@ fm_test_fake_gh_axi() {
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
 # cleanup and option operations are no-ops. Launch logging is env-gated, so
 # suites that do not set FM_FAKE_LAUNCH_LOG keep a silent send-keys.
+#
+# capture-pane intentionally answers empty here (no branch matches it), which
+# is exactly what a claude spawn's post-launch health gate
+# (bin/fm-spawn.sh claude_wait_for_working) needs to see: it only fails the
+# spawn when the pane RENDERS one of a few known blocking dialogs, so an empty
+# capture reads as healthy and every existing claude spawn fixture keeps
+# passing with no changes. A suite that wants to exercise the gate's own
+# failure paths renders one of those signatures instead - see
+# tests/fm-claude-startup-health.test.sh for the dedicated fake that does.
 fm_test_fake_tmux_spawn() {
   local fakebin=$1
   cat > "$fakebin/tmux" <<'SH'

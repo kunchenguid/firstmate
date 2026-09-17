@@ -3845,6 +3845,85 @@ agy_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
+# claude carries its brief on the launch command exactly like agy (a
+# positional prompt that auto-submits), so it needs no delivery gate either -
+# but unlike kimi/rovo/agy it had no post-launch confirmation at all: trust
+# pre-registration (bin/fm-claude-trust.sh) only removes the workspace-trust
+# and external-imports dialogs when it can prove the target is a genuine
+# isolated worktree or a seeded secondmate home, and a worker whose pane still
+# meets one of those dialogs - or a stale/expired credential - would sit there
+# indefinitely with nothing to catch it beyond a much later, much slower
+# stale-wake heuristic. This gate closes that gap deterministically at
+# startup, for every claude spawn kind (ship, scout, and secondmate carry the
+# same one-positional-brief launch shape).
+#
+# Deliberately NOT the kimi/rovo/agy shape of waiting for positive proof of a
+# busy turn: fm-spawn arms claude's busy record to busy/fm-spawn BEFORE the
+# brief is even sent (see the busy-state arm above), so a busy verdict alone
+# proves nothing here, and the one semantic proof that would - the record's
+# source flipping to claude-hook via the UserPromptSubmit hook this same
+# spawn installs - only ever fires from a REAL claude process, which most
+# fake-adapter test doubles across the suite do not run. Requiring it would
+# make every one of those doubles simulate a vendor hook or fail this gate.
+# Instead this only ever fails on POSITIVE evidence of one of three known
+# blocking renders - the workspace-trust dialog title, the external-imports
+# dialog title (harness-adapters claude.md owns both, verified against the
+# installed release), and a stale/expired credential's "Login expired" banner
+# (docs/remote-secondmates.md) - within a short settle window. All three
+# render synchronously at Claude's own startup, before the brief is ever
+# read, so the window only needs to be long enough for that startup check to
+# run, not for a full turn to complete; an ordinary pane that shows none of
+# them (an empty capture included, e.g. an inert test double) passes. None of
+# the three is safe to answer from here - firstmate's steering plane cannot
+# navigate a selection, and "Login expired" needs a human's credential fix -
+# so this only detects and reports, exactly like the trust script itself
+# refuses rather than guesses.
+CLAUDE_TRUST_DIALOG_TITLE='Quick safety check: Is this a project you created or one you trust?'
+CLAUDE_IMPORT_DIALOG_TITLE='Allow external CLAUDE.md file imports?'
+CLAUDE_LOGIN_EXPIRED='Login expired'
+CLAUDE_BLOCK_REASON=
+
+claude_capture() {
+  fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
+}
+
+claude_pane_blocking_reason() {  # <plain-pane-capture> -> prints a reason and returns 0, or returns 1
+  local pane=$1
+  if printf '%s\n' "$pane" | grep -Fq "$CLAUDE_TRUST_DIALOG_TITLE"; then
+    printf 'the workspace-trust dialog is showing, so pre-registration did not take effect'
+    return 0
+  fi
+  if printf '%s\n' "$pane" | grep -Fq "$CLAUDE_IMPORT_DIALOG_TITLE"; then
+    printf 'the external CLAUDE.md imports dialog is showing and firstmate cannot answer it on the captain'\''s behalf'
+    return 0
+  fi
+  if printf '%s\n' "$pane" | grep -Fq "$CLAUDE_LOGIN_EXPIRED"; then
+    printf 'claude reports "Login expired"; the launching credential store needs re-authentication'
+    return 0
+  fi
+  return 1
+}
+
+claude_wait_for_working() {
+  local i=0 max=${FM_CLAUDE_READY_POLLS:-6} interval=${FM_CLAUDE_POLL_INTERVAL:-0.5} pane reason
+  while [ "$i" -lt "$max" ]; do
+    pane=$(claude_capture)
+    if reason=$(claude_pane_blocking_reason "$pane"); then
+      CLAUDE_BLOCK_REASON=$reason
+      return 1
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 0
+}
+
+claude_spawn_fail() {  # <detail>
+  printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+  rovo_endpoint_cleanup
+}
+
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
@@ -4937,6 +5016,14 @@ if [ "$HARNESS" = agy ]; then
     exit 1
   fi
 fi
+case "$HARNESS" in
+  claude*)
+    if ! claude_wait_for_working; then
+      claude_spawn_fail "${CLAUDE_BLOCK_REASON:-claude did not confirm it started processing its brief} in window $T"
+      exit 1
+    fi
+    ;;
+esac
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
     if fm_config_reread_quarantine_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
