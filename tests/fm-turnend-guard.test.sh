@@ -2040,6 +2040,7 @@ test_hook_away_mode_blocks_on_dead_daemon() {
   out=$(run_hook "$dir" false); status=$?
   expect_code 2 "$status" "a daemon lock left by a dead daemon must not satisfy supervision"
   assert_contains "$out" "$AWAY_REQUIRED_REASON" "away-mode block must point at the daemon, not normal supervision"
+  assert_contains "$out" "daemon pid gone" "a dead daemon must be named distinctly from a stale beacon"
   pass "fm-turnend-guard: away mode blocks on a dead away-mode daemon"
 }
 
@@ -2056,6 +2057,7 @@ test_hook_away_mode_blocks_on_pid_reused_daemon() {
   wait "$pid" 2>/dev/null || true
   expect_code 2 "$status" "a live pid whose recorded identity does not match must not satisfy supervision"
   assert_contains "$out" "$AWAY_REQUIRED_REASON" "away-mode block must point at the daemon, not normal supervision"
+  assert_contains "$out" "daemon pid gone" "a pid-reused daemon must be named the same as a gone daemon, not a stale beacon"
   pass "fm-turnend-guard: away mode blocks on a pid-reused away-mode daemon lock"
 }
 
@@ -2075,6 +2077,8 @@ test_hook_away_mode_blocks_on_stale_beacon() {
   wait "$pid" 2>/dev/null || true
   expect_code 2 "$status" "a live daemon that stopped restarting its watcher must block once the beacon goes stale"
   assert_contains "$out" "$AWAY_REQUIRED_REASON" "away-mode block must point at the daemon, not normal supervision"
+  assert_contains "$out" "beacon stale" "a stuck watcher under a live daemon must be named distinctly from a gone daemon"
+  assert_not_contains "$out" "daemon pid gone" "a stale beacon under a live, identity-matched daemon is not a gone daemon"
   pass "fm-turnend-guard: away-mode daemon ownership never substitutes for a fresh beacon"
 }
 
@@ -2094,6 +2098,9 @@ test_hook_daemon_lock_is_ignored_without_away_mode() {
   wait "$pid" 2>/dev/null || true
   expect_code 2 "$status" "with away mode off the strict watcher predicate must be unchanged"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  assert_contains "$out" "no live watcher holds this home lock" \
+    "outside away mode the generic watcher phrasing must be unchanged"
+  assert_not_contains "$out" "daemon pid gone" "the away-mode daemon phrasing must not leak outside away mode"
   pass "fm-turnend-guard: a daemon lock proves nothing while away mode is off"
 }
 
