@@ -6,6 +6,8 @@
 # not an existing non-symlink directory is refused before removal.
 # Each existing named artifact must be an ordinary single-link file on the
 # state directory's device; only <id>.check.sh and <id>.check-trust are removed.
+# Retiring contributions here is not a durable opt-out: startup or PR
+# registration can restore it. Use fm-contributions.sh disable instead.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

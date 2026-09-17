@@ -311,9 +311,9 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
 poll() {
   local task url old kind error observed
   local -a row
-  # The durable opt-out precedes every effect: no lock, no read, no forge call.
   if poll_disabled; then return 0; fi
   acquire
+  if poll_disabled; then return 0; fi
   get_input
   read_saved
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
@@ -373,12 +373,8 @@ poll() {
   done < "$TMP/known.tsv"
 }
 
-arm() {
+arm_locked() {
   local device staged
-  # A durable opt-out makes every arm caller a silent no-op, so startup and PR
-  # registration cannot restore disabled polling.
-  if poll_disabled; then return 0; fi
-  acquire
   if [ "${1:-}" = --if-owned ]; then
     get_input; read_saved
     if [ "$ERRORS" -eq 0 ] && ! jq_lib -ne --slurpfile input "$TMP/input.json" \
@@ -393,14 +389,23 @@ arm() {
     "export FM_HOME=$(printf '%q' "$FM_HOME")" \
     "export FM_STATE_OVERRIDE=$(printf '%q' "$STATE")" \
     "export FM_DATA_OVERRIDE=$(printf '%q' "$DATA")" \
+    "export FM_CONFIG_OVERRIDE=$(printf '%q' "$CONFIG")" \
     "exec $(printf '%q' "$SCRIPT_DIR/fm-contributions.sh") poll" > "$staged"
   chmod 700 "$staged"
   mv -f -- "$staged" "$STATE/contributions.check.sh"
   "$SCRIPT_DIR/fm-check-register.sh" contributions
 }
 
+arm() {
+  if poll_disabled; then return 0; fi
+  acquire
+  if poll_disabled; then return 0; fi
+  arm_locked "${1:-}"
+}
+
 disable_poll() {
   local staged
+  acquire
   [ ! -L "$CONFIG" ] || fail 'config directory is a symlink'
   [ ! -L "$DISABLED_FLAG" ] || fail 'opt-out flag is a symlink'
   if [ ! -e "$DISABLED_FLAG" ]; then
@@ -419,6 +424,7 @@ disable_poll() {
 
 enable_poll() {
   local removed=0
+  acquire
   if [ -e "$CONFIG" ] || [ -L "$CONFIG" ]; then
     [ ! -L "$CONFIG" ] || fail 'config directory is a symlink'
     if [ -e "$DISABLED_FLAG" ] || [ -L "$DISABLED_FLAG" ]; then
@@ -427,7 +433,7 @@ enable_poll() {
       removed=1
     fi
   fi
-  arm --if-owned
+  arm_locked --if-owned
   if [ "$removed" = 1 ]; then
     printf 'enabled: config/contributions-poll-disabled removed\n'
   else
