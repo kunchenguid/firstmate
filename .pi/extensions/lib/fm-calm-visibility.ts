@@ -78,6 +78,10 @@ export function setCalmStockExportRendering(active: boolean): void {
   stockExportRendering = active;
 }
 
+export function calmPresentationStocksExportRendering(): boolean {
+  return stockExportRendering;
+}
+
 export function calmPresentationIsActive(): boolean {
   return calm;
 }
