@@ -63,6 +63,10 @@
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
+# Every ship and scout scaffold also carries the container-cleanup clause: name
+# task-started containers fm-<task-id>-*, reuse one another live task already
+# owns, and stop and remove them before reporting done; bin/fm-teardown.sh's
+# post-teardown warning is the removal backstop.
 # Ship tasks include a project-memory section so durable project-intrinsic
 # learnings can be committed to AGENTS.md through the project's delivery path;
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
@@ -216,6 +220,20 @@ When a terminal message says an instruction is waiting there - and at any natura
 The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox needs no action.
 EOF
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
+
+# The container-cleanup clause, shared by the ship and scout scaffolds. A
+# worker that starts containers (or comparable disposable local infrastructure)
+# names them fm-<task-id>-*, reuses a container another live task already owns,
+# and stops and removes its own before reporting done. bin/fm-teardown.sh's
+# post-teardown warning is the backstop for the removal half; removal authority
+# itself stays with the captain.
+IFS= read -r -d '' CONTAINER_SECTION <<EOF || true
+# Container cleanup
+If your task starts containers (or comparable disposable local infrastructure, such as a scratch database), name each one \`fm-$ID-...\`.
+Check for a running \`fm-*\` container another live task owns before you start one, and reuse it instead of starting a duplicate.
+Stop and remove every container you started before you report done.
+EOF
+CONTAINER_SECTION=${CONTAINER_SECTION%$'\n'}
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -414,6 +432,8 @@ The report is the only thing that survives, so anything worth keeping must be in
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
 
+$CONTAINER_SECTION
+
 $INBOX_SECTION
 
 # Definition of done
@@ -502,6 +522,8 @@ $ASK_USER_BLOCK
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+
+$CONTAINER_SECTION
 
 $INBOX_SECTION
 
