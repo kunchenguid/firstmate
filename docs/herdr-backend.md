@@ -155,18 +155,19 @@ A live or unknown recorded or token-matched endpoint refuses duplicate launch.
 Locked session start has one narrower cleanup for a restored projected child that is no longer current task state.
 It runs only when the current home has at least one ordinary presentation journal and considers only that home; a primary never recursively sweeps a secondmate home.
 Discovery starts from the exact current `└ <concise-task> · p:<22-character-token>` grammar, but a title or token alone is never mutation authority.
+Herdr workspace labels can carry a volatile leading `[N] ` position prefix; cleanup strips it before matching the title grammar or the journal's expected label.
 The title must contain exactly one token occurrence across the named-session snapshot and must equal the title derived from exactly one valid presentation journal in this home's own `state/`; a version 2 journal additionally must bind this exact physical home, named session, workspace, tab, and pane.
-The task's ordinary metadata must be absent, and the candidate must have exactly one tab and exactly one pane.
+The task's ordinary metadata must be absent, and the candidate must have exactly one tab with one or two panes: one idle shell pane, plus at most one owned `herdr-sidebar` pane.
 Before cleanup, Firstmate acquires the existing task-id spawn lock and then the shared named-session presentation lock.
 Inside both locks it takes one exact snapshot, requires one unambiguous non-target focus and the exact title, token, tab, and pane shape, positively confirms no registered agent, and reads Herdr's process information for the exact named-session pane.
-The process proof requires one recognized idle shell as both the shell process and the sole foreground process-group member, an operating-system process-table row for that shell, no child process, and a sleeping or idle shell state.
-The proof retries strict single samples for a bounded settle window because an idle interactive shell transiently hosts short-lived prompt helpers; a genuinely busy pane fails every sample.
-Any foreground command, child process, active shell job, unknown shell, unreadable process table, missing field, or API error preserves the pane.
-Firstmate immediately revalidates the same journal, metadata absence, workspace title and token uniqueness, one-tab and one-pane topology, exact pane relationship, absent agent, process proof, and non-target focus before calling the existing exact-pane focus-preserving close helper.
-It closes only that pane, never a workspace.
+The shell-pane proof requires one recognized idle shell as both the shell process and the sole foreground process-group member, an operating-system process-table row for that shell, no child process, and a sleeping or idle shell state.
+A sidebar pane is accepted only with its `herdr-sidebar-explorer` metadata token, exactly one `herdr-sidebar` foreground process outside the shell group with argv exactly `["herdr-sidebar"]`, and an OS-proven shell owning only that child with no other jobs; the proof retries a bounded settle window like the shell proof.
+At most one sidebar pane is accepted, every pane must be agent-free, and the sidebar closes before the shell pane.
+Firstmate immediately revalidates the same journal, metadata absence, workspace title and token uniqueness, one-tab topology, exact pane set, absent agent, process proof, and non-target focus before calling the existing exact-pane focus-preserving close helper.
 The matching journal is retired only after the exact pane is positively confirmed gone; an unconfirmed close retains the journal, while a confirmed close may retire it even when focus restoration reported an error after the close.
 A second run finds no matching title or journal and is a no-op.
-A malformed or missing title or token, duplicate token, zero or multiple journal matches, cross-home version 2 binding, current metadata, registered or unknown agent, extra tab or pane, active target, busy lock, changed revalidation, unreadable check, or any error preserves the candidate and lets session startup continue with at most a concise warning.
+A separate journal-first sweep retires a version 2 journal only when the task has no metadata, the journal binds this exact home and session, its title has no workspace match, and two consecutive complete snapshots prove the bound workspace, tab, and pane all absent; anything unreadable, version 1, cross-home, or ambiguous preserves the journal.
+A malformed or missing title or token, duplicate token, zero or multiple journal matches, cross-home version 2 binding, current metadata, registered or unknown agent, extra tab, more than two panes, an unproven sidebar, active target, busy lock, changed revalidation, unreadable check, or any error preserves the candidate and lets session startup continue with at most a concise warning.
 
 Operational compromises:
 
@@ -175,7 +176,7 @@ Operational compromises:
 - Recovery of an existing presentation journal deliberately refuses the spawn when the shared presentation lock is contended rather than falling back flat, and default-on makes that refusal reachable in any Herdr home.
 - Existing layouts are not force-renamed or rearranged.
 - Missing or ambiguous restart bindings fall back to the ordinary home workspace while the old projection remains untouched.
-- Crashes, lost responses, failed exact-pane cleanup, or human renames can leave quarantined spaces; session start removes only the exact home-local, uniquely journal-correlated, childless idle-shell shape above.
+- Crashes, lost responses, failed exact-pane cleanup, or human renames can leave quarantined spaces; session start removes only the exact home-local, uniquely journal-correlated shape above.
 - Spaces have no cross-home cleanup path, and a secondmate child can clean up only from its exact home.
 - Every stale-looking space outside that narrow startup proof still requires manual cleanup in Herdr's UI after human inspection.
 - Regaining a dedicated space after degradation requires stopping the flat task, manually checking the stale projection, and clearing its journal before a genuinely fresh launch.

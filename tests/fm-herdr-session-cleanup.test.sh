@@ -74,7 +74,19 @@ fm_lock_try_acquire() {
   mkdir "$1" 2>/dev/null
 }
 fm_lock_release() { rm -rf -- "$1"; }
-fm_backend_herdr_pane_idle_shell_pid() { [ ! -e "$FIXTURE_DIR/process-unsafe" ] && printf '67\n'; }
+fm_backend_herdr_pane_idle_shell_pid() {
+  [ ! -e "$FIXTURE_DIR/process-unsafe" ] || return 1
+  [ ! -e "$FIXTURE_DIR/sidebar-only" ] || return 1
+  [ ! -e "$FIXTURE_DIR/sidebar" ] || [ "$2" != w2:p2 ] || return 1
+  printf '67\n'
+}
+fm_herdr_cleanup_sidebar() {
+  if [ -e "$FIXTURE_DIR/sidebar-only" ]; then
+    [ "$2" = w2:p1 ]
+    return
+  fi
+  [ -e "$FIXTURE_DIR/sidebar" ] && [ "$2" = w2:p2 ]
+}
 fm_backend_herdr_projection_focus_snapshot() {
   [ ! -e "$FIXTURE_DIR/focus-unreadable" ] || return 1
   printf 'w1\t%s' "$(cat "$FIXTURE_DIR/active-tab")"
@@ -115,23 +127,40 @@ fixture_tabs() {
 }
 
 fixture_panes() {
-  local count i
+  local count i tab_number
   count=$(cat "$FIXTURE_DIR/panes")
   printf '['
   i=1
   while [ "$i" -le "$count" ]; do
     [ "$i" -eq 1 ] || printf ','
+    tab_number=$i
+    [ ! -e "$FIXTURE_DIR/sidebar" ] || tab_number=1
     printf '{"pane_id":"%s:p%s","tab_id":"%s:t%s","workspace_id":"%s","agent_status":"unknown"}' \
-      "$WS" "$i" "$WS" "$i" "$WS"
+      "$WS" "$i" "$WS" "$tab_number" "$WS"
     i=$((i + 1))
   done
   printf ']'
 }
 
 fm_backend_herdr_cli() {
-  local _session=$1 first=${2:-} second=${3:-} title tabs panes
+  local _session=$1 first=${2:-} second=${3:-} target=${4:-} title tabs panes
   shift
   [ ! -e "$FIXTURE_DIR/error-${first}-${second}" ] || return 1
+  if [ -e "$FIXTURE_DIR/orphan" ]; then
+    case "$first $second" in
+      "api snapshot")
+        if [ -e "$FIXTURE_DIR/partial-snapshot" ]; then
+          printf '%s\n' '{"result":{"snapshot":{"workspaces":[]}}}'
+        else
+          printf '%s\n' '{"result":{"snapshot":{"workspaces":[],"tabs":[],"panes":[],"agents":[]}}}'
+        fi
+        return 0 ;;
+      "workspace list") printf '%s\n' '{"result":{"workspaces":[]}}'; return 0 ;;
+    esac
+  fi
+  if [ "$first $second" = "pane get" ] && [ -e "$FIXTURE_DIR/sidebar-closed" ] && [ "$target" = w2:p2 ]; then
+    printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2; return 1
+  fi
   if [ -e "$FIXTURE_DIR/closed" ]; then
     case "$first $second" in
       "pane get") printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2; return 1 ;;
@@ -159,7 +188,7 @@ fm_backend_herdr_cli() {
       printf '{"result":{"panes":'; fixture_panes; printf '}}\n'
       ;;
     "pane get")
-      printf '{"result":{"pane":{"pane_id":"%s","tab_id":"%s","workspace_id":"%s"}}}\n' "$PANE" "$TAB" "$WS"
+      printf '{"result":{"pane":{"pane_id":"%s","tab_id":"%s","workspace_id":"%s"}}}\n' "$target" "$TAB" "$WS"
       ;;
     "agent get")
       case "$(cat "$FIXTURE_DIR/agent")" in
@@ -170,7 +199,7 @@ fm_backend_herdr_cli() {
       ;;
     "api snapshot")
       : > "$FIXTURE_DIR/snapshotted"
-      printf '{"result":{"snapshot":{"focused_workspace_id":"w1","focused_tab_id":"%s","focused_pane_id":"w1:p1","workspaces":' "$(cat "$FIXTURE_DIR/active-tab")"
+      printf '{"result":{"snapshot":{"agents":[],"focused_workspace_id":"w1","focused_tab_id":"%s","focused_pane_id":"w1:p1","workspaces":' "$(cat "$FIXTURE_DIR/active-tab")"
       fixture_workspaces
       printf ',"tabs":'; fixture_tabs
       printf ',"panes":'; fixture_panes
@@ -190,7 +219,12 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {
   [ ! -e "$FIXTURE_DIR/focus-refuse" ] || return 1
   [ "${3:-}" = no-agent ] || return 1
   printf '%s\n' "$*" >> "$CLOSE_LOG"
-  : > "$FIXTURE_DIR/closed"
+  if [ "$2" = w2:p2 ]; then
+    : > "$FIXTURE_DIR/sidebar-closed"
+    printf '1\n' > "$FIXTURE_DIR/panes"
+  else
+    : > "$FIXTURE_DIR/closed"
+  fi
 }
 
 write_v1() { # <id> [token]
@@ -277,10 +311,35 @@ reset_fixture; printf '2\n' > "$FIXTURE_DIR/panes"; assert_preserved "multiple p
 reset_fixture; : > "$FIXTURE_DIR/process-unsafe"; assert_preserved "non-idle shell"
 reset_fixture; : > "$FIXTURE_DIR/process-unsafe"; assert_preserved "child process or shell job"
 reset_fixture; : > "$FIXTURE_DIR/error-api-snapshot"; assert_preserved "unreadable snapshot"
-reset_fixture; : > "$FIXTURE_DIR/error-workspace-get"; assert_preserved "unreadable topology check"
 reset_fixture; : > "$FIXTURE_DIR/race"; assert_preserved "revalidation race"
 reset_fixture; printf '%s\n' "$TAB" > "$FIXTURE_DIR/active-tab"; assert_preserved "active target"
 reset_fixture; : > "$FIXTURE_DIR/focus-refuse"; assert_preserved "focus refusal"
+
+reset_fixture; write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"
+: > "$FIXTURE_DIR/sidebar"; printf '2\n' > "$FIXTURE_DIR/panes"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "sidebar topology kept journal"
+[ "$(cat "$CLOSE_LOG")" = "$(printf 'test w2:p2 no-agent\ntest w2:p1 no-agent')" ] || fail "sidebar did not close before agent pane"
+pass "owned sidebar closes before idle agent pane"
+
+reset_fixture; write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"; : > "$FIXTURE_DIR/sidebar-only"
+assert_preserved "sidebar-only topology with no idle shell"
+
+reset_fixture; printf '%s\n' "[4] $TITLE" > "$FIXTURE_DIR/title"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "leading [N] position prefix kept the journal"
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "leading [N] position prefix did not close exactly once"
+pass "leading [N] position prefix on the workspace label does not block cleanup"
+
+reset_fixture; write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"; : > "$FIXTURE_DIR/orphan"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "absent version 2 journal survived"
+[ ! -s "$CLOSE_LOG" ] || fail "orphan retirement closed a pane"
+pass "exact absent version 2 journal retires without pane mutation"
+reset_fixture; : > "$FIXTURE_DIR/orphan"; assert_preserved "unbound version 1 orphan"
+reset_fixture; write_cross_home_v2; : > "$FIXTURE_DIR/orphan"; assert_preserved "foreign-home orphan"
+reset_fixture; write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"; : > "$FIXTURE_DIR/orphan"; : > "$FIXTURE_DIR/partial-snapshot"; assert_preserved "incomplete absence snapshot"
+reset_fixture; write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"; : > "$FIXTURE_DIR/orphan"; : > "$FM_STATE_OVERRIDE/$ID.meta"; assert_preserved "orphan with task metadata"
 
 INTEGRATION_ROOT="$TMP_ROOT/bootstrap-integration"
 mkdir -p "$INTEGRATION_ROOT/home/state" "$INTEGRATION_ROOT/home/data" "$INTEGRATION_ROOT/home/config"
