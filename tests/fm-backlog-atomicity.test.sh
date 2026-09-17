@@ -2953,20 +2953,25 @@ test_manual_backend_home_dispatches_and_completes_without_touching_the_backlog()
 }
 
 test_a_secondmate_home_keeps_its_own_books() {
-  local case_dir id out
+  local case_dir home id out parent
   id=atomic-mate-b13
   case_dir=$(make_home mate-own-books "$id")
+  home=$(home_of "$case_dir")
+  parent="$case_dir/root-home"
+  mkdir -p "$parent/data" "$parent/state"
   # The mate's home is a firstmate home in its own right; the invariant is
   # single-host, so its own dispatch and completion keep its own two records
-  # paired with no parent involved.
-  printf '%s\n' mate-h1 > "$(home_of "$case_dir")/.fm-secondmate-home"
+  # paired without writing to the verified parent's backlog.
+  printf '%s\n' mate-h1 > "$home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\nparent_role=root\n' \
+    "$parent" > "$home/.fm-secondmate-parent"
   add_item "$case_dir" "$id"
 
   out=$(run_ship_spawn "$case_dir" "$id") || fail "mate-home spawn failed: $out"
   [ "$(row_state "$case_dir" "$id")" = in_flight ] \
     || fail "a mate's own dispatch left its item at $(row_state "$case_dir" "$id")"
 
-  rm -f "$(home_of "$case_dir")/state/$id.meta"
+  rm -f "$home/state/$id.meta"
   write_task_meta "$case_dir" "$id" ship local-only "spawn_gen=spawn-mate-close"
   out=$(run_teardown "$case_dir" "$id") || fail "mate-home teardown failed: $out"
   [ "$(row_state "$case_dir" "$id")" = "done" ] \

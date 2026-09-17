@@ -333,10 +333,11 @@ home_secondmate_id() {
 }
 
 report_to_parent() { # <task> <state> <outcome-key> <fingerprint> <pr>
-  local task=$1 state=$2 outcome_key=$3 fingerprint=$4 pr=$5 line
+  local task=$1 state=$2 outcome_key=$3 fingerprint=$4 pr=$5 line rc=0
   line="$state [key=$outcome_key]: inactive terminal child=$task fingerprint=$fingerprint"
   [ -z "$pr" ] || line="$line pr=$pr"
-  fm_parent_channel_report "$FM_HOME" "$STATE" "$line"
+  fm_parent_channel_report "$FM_HOME" "$STATE" "$line" || rc=$?
+  case "$rc" in 0|5) return 0 ;; *) return "$rc" ;; esac
 }
 
 # Queue the once-per-record notice that a parent report could not be written.
@@ -432,7 +433,9 @@ report_child_ledger_locked() { # <id> <meta>
   if [ -f "$data/$id/report.md" ] && [ ! -L "$data/$id/report.md" ]; then
     line="$line report=data/$id/report.md"
   fi
-  if fm_parent_channel_report "$FM_HOME" "$STATE" "$line"; then
+  local report_rc=0
+  fm_parent_channel_report "$FM_HOME" "$STATE" "$line" || report_rc=$?
+  if [ "$report_rc" -eq 0 ] || [ "$report_rc" -eq 5 ]; then
     mark_reported "$RECORD_PENDING" || return 1
     return 0
   fi

@@ -756,8 +756,10 @@ tests/fm-remote-secondmate-lifecycle-e2e.test.sh 209631
 tests/fm-remote-secondmate-parent-binding.test.sh 29562
 tests/fm-remote-secondmate-trace-context.test.sh 67096
 tests/fm-remote-transport-lanes.test.sh 63976
+tests/fm-repo-concurrency.test.sh 15000
 tests/fm-secondmate-harness.test.sh 151589
 tests/fm-secondmate-lifecycle-e2e.test.sh 8793
+tests/fm-spawn-treehouse-root.test.sh 52000
 tests/fm-secondmate-liveness.test.sh 18146
 tests/fm-secondmate-reconcile.test.sh 62726
 tests/fm-secondmate-restart.test.sh 119085

@@ -1923,6 +1923,52 @@ test_teardown_missing_busy_sidecar_completes() {
   pass "teardown completes when an exact busy-state sidecar is already absent"
 }
 
+test_teardown_releases_project_firstmate_repository_lease() {
+  local case_dir home project wt repo_hash repo_identity authority_hash authority_id lease rc
+  case_dir=$(make_case repo-lease-release)
+  home="$case_dir/home"
+  project="$home/projects/alpha"
+  wt="$case_dir/wt"
+  git -C "$case_dir/project" worktree remove --force "$wt"
+  mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  git clone -q "$case_dir/origin.git" "$project"
+  git -C "$project" worktree add -q -b fm/task-x1 "$wt" main
+  repo_hash=$(
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      FM_CONFIG_OVERRIDE="$home/config" bash -c \
+      '. "$1/bin/fm-wake-lib.sh"; . "$1/bin/fm-repo-concurrency-lib.sh"; fm_repo_scope_clone_identity "$2"' \
+      _ "$ROOT" "$project"
+  ) || fail "repo-lease-release: could not derive the canonical repository identity"
+  repo_identity="sha256:$repo_hash"
+  authority_hash=$(printf '%s' "$home\\nalpha\\n$repo_identity" | shasum -a 256 | awk '{print $1}')
+  authority_id="sha256:$authority_hash"
+  printf 'schema=fm-project-firstmate.v1\nproject=alpha\nrepo_identity=%s\nauthority_id=%s\nrepo_path=%s\n' \
+    "$repo_identity" "$authority_id" "$project" > "$home/.fm-project-firstmate"
+  printf '2\n' > "$home/config/repo-concurrency"
+  if ! FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      FM_CONFIG_OVERRIDE="$home/config" bash -c \
+      '. "$1/bin/fm-wake-lib.sh"; . "$1/bin/fm-repo-concurrency-lib.sh"; fm_repo_scope_acquire_task "$2" task-x1 "$3" 0' \
+      _ "$ROOT" "$home" "$project"; then
+    fail "repo-lease-release: could not acquire the teardown fixture lease"
+  fi
+  write_meta "$case_dir" direct-PR ship
+  mv "$case_dir/state/task-x1.meta" "$home/state/task-x1.meta"
+  sed -e "s|^worktree=.*|worktree=$wt|" -e "s|^project=.*|project=$project|" \
+    "$home/state/task-x1.meta" > "$home/state/task-x1.meta.tmp"
+  mv "$home/state/task-x1.meta.tmp" "$home/state/task-x1.meta"
+  lease=$(find "$home/state/.repo-concurrency/leases" -type f -name '*.lease' -print -quit)
+  [ -n "$lease" ] || fail "repo-lease-release: admission did not publish a lease"
+  touch "$home/state/.last-watcher-beat"
+  rc=0
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    PATH="$case_dir/fakebin:$PATH" "$TEARDOWN" task-x1 --force \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "repo-lease-release: teardown should succeed"
+  [ ! -e "$lease" ] || fail "repo-lease-release: teardown left the repository lease behind"
+  pass "teardown releases the project Firstmate repository lease"
+}
+
 test_herdr_teardown_clears_escalation_marker() {
   local case_dir marker
   case_dir=$(make_case herdr-marker-cleanup)
@@ -3000,6 +3046,7 @@ test_local_only_force_overrides_unpushed
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_home_teardown_delivers_final_line_or_refuses
 test_teardown_missing_busy_sidecar_completes
+test_teardown_releases_project_firstmate_repository_lease
 test_herdr_teardown_clears_escalation_marker
 test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes
 test_herdr_flat_teardown_refuses_records_on_unparseable_presence

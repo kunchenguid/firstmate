@@ -4,6 +4,10 @@ set -u
 
 # shellcheck source=tests/fixtures.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
+# shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+. "$ROOT/bin/fm-wake-lib.sh"
+# shellcheck source=bin/fm-repo-concurrency-lib.sh disable=SC1091
+. "$ROOT/bin/fm-repo-concurrency-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-repo-concurrency)
 PFM="$TMP_ROOT/project-firstmate"
@@ -22,7 +26,8 @@ fm_git_add_origin "$TMP_ROOT/alpha-source" "$REMOTE"
 REMOTE_ABS=$(cd "$REMOTE" && pwd -P)
 ORIGIN_URL="file://$REMOTE_ABS"
 git clone --quiet "$ORIGIN_URL" "$PFM/projects/alpha"
-repo_hash=$(printf '%s' "$(git -C "$PFM/projects/alpha" remote get-url origin)" | shasum -a 256 | awk '{print $1}')
+repo_hash=$(fm_repo_scope_clone_identity "$PFM/projects/alpha") \
+  || fail "project Firstmate repository identity could not be normalized"
 repo_identity="sha256:$repo_hash"
 authority_hash=$(printf '%s' "$PFM\\nalpha\\n$repo_identity" | shasum -a 256 | awk '{print $1}')
 authority_id="sha256:$authority_hash"
@@ -62,6 +67,10 @@ attempt_task() {
     rc=$?
   fi
   if [ "$rc" -eq 0 ]; then
+    [ "$FM_REPO_SCOPE_LOCK_HELD" = 0 ] || {
+      printf 'error:admission retained the authority lock\n'
+      return 1
+    }
     printf 'kind=ship\nproject=%s/projects/alpha\n' "$task_home" > "$task_home/state/$task_id.meta"
     fm_repo_scope_lock_release || return 1
     printf 'admitted\n'
@@ -117,6 +126,25 @@ ssh_identity=$(fm_repo_scope_canonical_origin_identity "$identity_repo") \
   || fail "SSH origin could not be normalized"
 [ "$https_identity" = "$ssh_identity" ] \
   || fail "equivalent HTTPS and SSH origins had different identities"
+
+local_root="$TMP_ROOT/local-root"
+local_project="$local_root/projects/local-only"
+mkdir -p "$local_root/data" "$local_root/state" "$local_root/projects"
+fm_git_init_commit "$local_project"
+printf -- '- alpha-pfm - project alpha (home: %s; scope: alpha; projects: alpha; added 2026-09-17)\n' "$PFM" \
+  > "$local_root/data/secondmates.md"
+FM_HOME="$local_root" FM_DATA_OVERRIDE="$local_root/data" FM_STATE_OVERRIDE="$local_root/state"
+export FM_HOME FM_DATA_OVERRIDE FM_STATE_OVERRIDE
+fm_repo_scope_root_route_guard "$local_root" "$local_project" \
+  || fail "local-only project without an origin was refused by the root route guard: $FM_REPO_SCOPE_LAST_ERROR"
+[ "$FM_REPO_SCOPE_ROOT_LOCK_HELD" = 0 ] \
+  || fail "root route guard retained the secondmate registry lock after admitting local-only work"
+[ ! -e "$local_root/state/.secondmates.lock" ] \
+  || fail "root route guard left its registry lock on disk after admitting local-only work"
+unset FM_DATA_OVERRIDE FM_STATE_OVERRIDE
+FM_HOME="$PFM"
+export FM_HOME
+
 alpha_identity=$(fm_repo_scope_canonical_origin_identity "$PFM/projects/alpha") \
   || fail "project Firstmate repository identity could not be normalized"
 
@@ -209,6 +237,11 @@ fi
 printf '%s\n' "$bootstrap_out" | grep -F 'REPO_CONCURRENCY: alpha active=2 limit=2 available=0' >/dev/null \
   || fail "project-home bootstrap did not print current repository capacity"
 
+git -C "$PFM/projects/alpha" remote set-url origin "$REMOTE_ABS"
+fm_repo_scope_validate_project "$PFM" "$PFM/projects/alpha" \
+  || fail "equivalent origin spelling invalidated the stable repository authority: $FM_REPO_SCOPE_LAST_ERROR"
+git -C "$PFM/projects/alpha" remote set-url origin "$ORIGIN_URL"
+
 for suffix in a b c; do
   task_home="$TMP_ROOT/child-$suffix"
   task_id="task-$suffix"
@@ -266,6 +299,13 @@ capacity=$(fm_repo_scope_reconcile_task_home "$PFM") || fail "missing-lease repa
 [ -f "$missing_lease" ] || fail "bootstrap-style repair did not restore a missing active-task lease"
 printf '%s\n' "$capacity" | grep -F 'active=2 limit=2 available=0' >/dev/null \
   || fail "repaired capacity report did not restore the correct active count"
+
+printf -- '- retired-child - retired alpha child (home: %s; scope: alpha tasks; projects: alpha; added 2026-09-17)\n' \
+  "$TMP_ROOT/retired-child" >> "$PFM/data/secondmates.md"
+capacity=$(fm_repo_scope_reconcile_task_home "$PFM") \
+  || fail "a registry entry whose retired child home is already absent wedged reconciliation"
+printf '%s\n' "$capacity" | grep -F 'active=2 limit=2 available=0' >/dev/null \
+  || fail "absent retired child changed repository capacity"
 
 spawn_home="$TMP_ROOT/child-$queued_suffix"
 spawn_id=spawn-denied

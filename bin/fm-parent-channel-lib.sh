@@ -51,6 +51,7 @@
 #   2  the identity marker exists but is unusable (symlink, NUL, bad id)
 #   3  the parent binding is missing or unreadable
 #   4  the append itself failed
+#   5  retained durably in the project Firstmate home instead of crossing the hop
 # A caller that has already recorded the outcome locally must surface a
 # non-zero return rather than treat it as delivered.
 #
@@ -148,7 +149,7 @@ fm_parent_channel_append_once() {  # <path> <line>
 # Publisher class, not untrusted line content, determines whether an event may
 # cross that boundary.
 fm_parent_channel_absorb_descendant_line() {  # <home> <line> [publisher-class]
-  local home=$1 class=${3:-worker-outcome}
+  local home=$1 line=$2 class=${3:-worker-outcome}
   if [ ! -e "$home/.fm-project-firstmate" ] && [ ! -L "$home/.fm-project-firstmate" ]; then
     return 1
   fi
@@ -157,7 +158,10 @@ fm_parent_channel_absorb_descendant_line() {  # <home> <line> [publisher-class]
     correlated|captain-hold|project-summary|project-decision|project-blocker|project-milestone)
       return 1
       ;;
-    worker-outcome) return 0 ;;
+    worker-outcome)
+      fm_parent_channel_append_once "$home/state/project-outcomes.log" "$line" || return 3
+      return 0
+      ;;
     *) return 2 ;;
   esac
 }
@@ -166,8 +170,9 @@ fm_parent_channel_absorb_descendant_line() {  # <home> <line> [publisher-class]
 _fm_parent_channel_report_typed() {  # <class> <home> <state> <line>
   local class=$1 home=$2 state=$3 line=$4 destination rc=0 absorb_rc=0
   fm_parent_channel_absorb_descendant_line "$home" "$line" "$class" || absorb_rc=$?
-  [ "$absorb_rc" -eq 0 ] && return 0
+  [ "$absorb_rc" -eq 0 ] && return 5
   [ "$absorb_rc" -ne 2 ] || return 3
+  [ "$absorb_rc" -ne 3 ] || return 4
   destination=$(fm_parent_channel_destination "$home" "$state") || rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
   fm_parent_channel_append_once "$destination" "$line" || return 4

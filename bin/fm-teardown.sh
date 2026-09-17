@@ -3407,13 +3407,14 @@ if [ "$KIND" = secondmate ]; then
       || echo "error: receiver wake restoration failed; recovery state remains at $HANDOFF_WAKE_RETIRE_STAGE" >&2
     exit "$rc"
   fi
+  remove_secondmate_registry_entry "$ID" \
+    || { echo "error: secondmate home was removed but its registry route could not be retired; the next reconciliation will ignore the absent home until the route is repaired" >&2; exit 1; }
   handoff_wake_retire_stage_commit \
-    || { echo "error: receiver wake cleanup failed; preserving the secondmate route for retry" >&2; exit 1; }
+    || { echo "error: receiver wake cleanup failed after the secondmate home and route were retired; startup recovery retains the staged cleanup" >&2; exit 1; }
   if [ "$PENDING_REPLIES_DIR_PRESENT" -eq 1 ]; then
     pending_replies_cleanup_for_task "$STATE/pending-replies" "$PENDING_REPLIES_DIR_REAL" \
-      || { echo "error: local pending-reply cleanup failed; preserving the secondmate route for retry" >&2; exit 1; }
+      || { echo "error: local pending-reply cleanup failed after the secondmate home and route were retired" >&2; exit 1; }
   fi
-  remove_secondmate_registry_entry "$ID"
 fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1

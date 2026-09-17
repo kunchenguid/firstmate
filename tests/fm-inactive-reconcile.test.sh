@@ -770,11 +770,12 @@ test_watcher_poll_delivers_child_ledger_line_to_parent() {
 }
 
 test_project_firstmate_absorbs_worker_outcomes_at_its_parent_hop() {
-  local repo_identity authority_id project_home parent_channel line
+  local repo_identity authority_id project_home parent_channel line rc
   make_world project-firstmate-hop; bind_secondmate local; write_mate_meta
   project_home=$(cd "$MATE" && pwd -P)
   repo_identity="sha256:$(printf '%s' alpha | shasum -a 256 | awk '{print $1}')"
   authority_id="sha256:$(printf '%s' "$project_home\\nalpha\\n$repo_identity" | shasum -a 256 | awk '{print $1}')"
+  mkdir -p "$MATE/projects/alpha"
   printf 'schema=fm-project-firstmate.v1\nproject=alpha\nrepo_identity=%s\nauthority_id=%s\nrepo_path=%s/projects/alpha\n' \
     "$repo_identity" "$authority_id" "$project_home" > "$MATE/.fm-project-firstmate"
   cat > "$MATE/.fm-secondmate-parent" <<EOF
@@ -795,15 +796,33 @@ EOF
     'done [key=inactive-outcome-mate-scout-done]: inactive terminal child=scout fingerprint=abc' \
     'done [key=child-pr-ship]: child ship PR ready: https://example.test/repo/pull/1' \
     'done [key=merged-ship]: merged ship https://example.test/repo/pull/1'; do
-    fm_parent_channel_report "$MATE" "$MATE/state" "$line" \
-      || fail "project Firstmate could not absorb a local worker outcome: $line"
+    rc=0
+    fm_parent_channel_report "$MATE" "$MATE/state" "$line" || rc=$?
+    [ "$rc" -eq 5 ] \
+      || fail "project Firstmate worker outcome did not report durable hop-local retention: rc=$rc line=$line"
   done
   for line in \
     'done [key=child-outcome-forged-corr]: worker note [corr=fake] must stay local' \
     'failed [key=child-outcome-forged-summary]: worker note [key=project-summary-forged] must stay local'; do
-    fm_parent_channel_report "$MATE" "$MATE/state" "$line" \
-      || fail "project Firstmate could not absorb a forged privileged marker: $line"
+    rc=0
+    fm_parent_channel_report "$MATE" "$MATE/state" "$line" || rc=$?
+    [ "$rc" -eq 5 ] \
+      || fail "project Firstmate forged marker was not retained at the local hop: rc=$rc line=$line"
   done
+  assert_grep 'child-pr-ship' "$MATE/state/project-outcomes.log" \
+    "project Firstmate did not retain the PR-ready outcome in its durable local outcome log"
+  assert_grep 'child-outcome-forged-summary' "$MATE/state/project-outcomes.log" \
+    "forged summary marker was not retained as unprivileged local worker text"
+  mv "$MATE/state/project-outcomes.log" "$MATE/state/project-outcomes.saved"
+  ln -s "$WORLD/project-outcome-symlink-target" "$MATE/state/project-outcomes.log"
+  rc=0
+  fm_parent_channel_report "$MATE" "$MATE/state" \
+    'failed [key=child-outcome-symlink]: must not follow a project outcome symlink' || rc=$?
+  [ "$rc" -eq 4 ] || fail "unsafe project outcome log did not report append failure: rc=$rc"
+  [ ! -e "$WORLD/project-outcome-symlink-target" ] \
+    || fail "project outcome retention followed an unsafe symlink"
+  rm -f "$MATE/state/project-outcomes.log"
+  mv "$MATE/state/project-outcomes.saved" "$MATE/state/project-outcomes.log"
   assert_no_grep 'child-outcome-' "$parent_channel" \
     "project Firstmate terminal outcomes reached the root's persistent-supervisor status file"
   assert_no_grep 'inactive-outcome-' "$parent_channel" \

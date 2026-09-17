@@ -40,10 +40,7 @@ fm_repo_scope_link_count() {  # <file>
 }
 
 fm_repo_scope_clone_identity() {  # <git-repository>
-  local repo=$1 origin
-  origin=$(git -C "$repo" remote get-url origin 2>/dev/null) || return 1
-  [ -n "$origin" ] || return 1
-  fm_repo_scope_hash "$origin"
+  fm_repo_scope_canonical_origin_identity "$1"
 }
 
 fm_repo_scope_canonical_origin_value() {  # <origin> [local-base]
@@ -305,8 +302,8 @@ fm_repo_scope_root_route_lock_release() {
 }
 
 fm_repo_scope_root_route_guard() {  # <task-home> <project-path>
-  local task_home=$1 project_path=$2 authority_status root_home parent_file registry line entry_id entry_home entry_projects
-  local target_identity entry_identity matched_id matched_home projects_list project
+  local task_home=$1 project_path=$2 authority_status root_home parent_file registry line entry_id entry_home
+  local target_identity='' entry_identity matched_id matched_home timeout=${FM_REPO_SCOPE_LOCK_TIMEOUT:-5}
   FM_REPO_SCOPE_LAST_ERROR=
   if fm_repo_scope_authority_for_home "$task_home"; then
     return 0
@@ -367,19 +364,18 @@ fm_repo_scope_root_route_guard() {  # <task-home> <project-path>
   # shellcheck source=bin/fm-secondmate-registry-lib.sh
   . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-secondmate-registry-lib.sh"
   FM_REPO_SCOPE_ROOT_LOCK=$(secondmate_registry_lock_path "$root_state")
-  fm_lock_acquire_wait "$FM_REPO_SCOPE_ROOT_LOCK" || {
+  case "$timeout" in ''|*[!0-9]*|0) timeout=5 ;; esac
+  fm_lock_acquire_wait_bounded "$FM_REPO_SCOPE_ROOT_LOCK" "$timeout" || {
     FM_REPO_SCOPE_LAST_ERROR="could not serialize repository routing with the root secondmate registry"
     return 1
   }
   FM_REPO_SCOPE_ROOT_LOCK_HELD=1
-  [ -e "$registry" ] || [ -L "$registry" ] || return 0
+  if [ ! -e "$registry" ] && [ ! -L "$registry" ]; then
+    fm_repo_scope_root_route_lock_release || return 1
+    return 0
+  fi
   secondmate_registry_validate_bindings "$registry" secondmate_registry_path_key || {
     FM_REPO_SCOPE_LAST_ERROR="root secondmate registry is unsafe while routing repository work: $SECONDMATE_REGISTRY_ERROR"
-    fm_repo_scope_root_route_lock_release || true
-    return 1
-  }
-  target_identity=$(fm_repo_scope_canonical_origin_identity "$project_path") || {
-    FM_REPO_SCOPE_LAST_ERROR="cannot establish the canonical origin identity for $project_path"
     fm_repo_scope_root_route_lock_release || true
     return 1
   }
@@ -394,8 +390,18 @@ fm_repo_scope_root_route_guard() {  # <task-home> <project-path>
     }
     entry_id=$SECONDMATE_REGISTRY_ID
     entry_home=$SECONDMATE_REGISTRY_HOME
-    entry_projects=$SECONDMATE_REGISTRY_PROJECTS
     if [ -e "$entry_home/.fm-project-firstmate" ] || [ -L "$entry_home/.fm-project-firstmate" ]; then
+      if [ -z "$target_identity" ]; then
+        if ! git -C "$project_path" config --local --get remote.origin.url >/dev/null 2>&1; then
+          fm_repo_scope_root_route_lock_release || return 1
+          return 0
+        fi
+        target_identity=$(fm_repo_scope_canonical_origin_identity "$project_path") || {
+          FM_REPO_SCOPE_LAST_ERROR="cannot establish the canonical origin identity for $project_path"
+          fm_repo_scope_root_route_lock_release || true
+          return 1
+        }
+      fi
       [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || {
         FM_REPO_SCOPE_LAST_ERROR="project Firstmate $entry_id has a remote route that cannot be verified locally"
         fm_repo_scope_root_route_lock_release || true
@@ -415,9 +421,6 @@ fm_repo_scope_root_route_guard() {  # <task-home> <project-path>
         matched_id=$entry_id
         matched_home=$entry_home
       fi
-    else
-      projects_list=", $entry_projects, "
-      case "$projects_list" in *", $(basename "$project_path"), "*) ;; *) continue ;; esac
     fi
   done < "$registry"
   if [ -n "$matched_id" ]; then
@@ -425,10 +428,12 @@ fm_repo_scope_root_route_guard() {  # <task-home> <project-path>
     fm_repo_scope_root_route_lock_release || true
     return 2
   fi
+  fm_repo_scope_root_route_lock_release || return 1
+  return 0
 }
 
 fm_repo_scope_marker_parse() {  # <project-firstmate-home>
-  local home=$1 file line schema='' project='' repo_id='' authority_id='' repo_path='' home_real expected_authority
+  local home=$1 file line schema='' project='' repo_id='' authority_id='' repo_path='' home_real repo_path_real expected_repo_path expected_authority
   local schema_count=0 project_count=0 repo_count=0 authority_count=0 path_count=0
   file="$home/.fm-project-firstmate"
   FM_REPO_SCOPE_HOME=
@@ -454,6 +459,11 @@ fm_repo_scope_marker_parse() {  # <project-firstmate-home>
   [[ "$authority_id" =~ ^sha256:[[:xdigit:]]{64}$ ]] || return 1
   case "$repo_path" in /*) ;; *) return 1 ;; esac
   home_real=$(cd "$home" && pwd -P) || return 1
+  expected_repo_path="$home_real/projects/$project"
+  [ -d "$repo_path" ] && [ ! -L "$repo_path" ] && [ -d "$expected_repo_path" ] && [ ! -L "$expected_repo_path" ] || return 1
+  repo_path_real=$(cd "$repo_path" && pwd -P) || return 1
+  expected_repo_path=$(cd "$expected_repo_path" && pwd -P) || return 1
+  [ "$repo_path_real" = "$expected_repo_path" ] || return 1
   expected_authority="sha256:$(fm_repo_scope_hash "$home_real\n$project\n$repo_id")" || return 1
   [ "$authority_id" = "$expected_authority" ] || return 1
   FM_REPO_SCOPE_HOME=$home_real
@@ -608,10 +618,22 @@ fm_repo_scope_limit() {  # <authority-home>
 }
 
 fm_repo_scope_lock_acquire() {  # <authority-home>
-  local home=$1
-  [ "$FM_REPO_SCOPE_LOCK_HELD" = 0 ] || return 0
-  FM_REPO_SCOPE_LOCK="$home/state/.repo-concurrency.lock"
-  fm_lock_acquire_wait "$FM_REPO_SCOPE_LOCK" || return 1
+  local home=$1 requested timeout=${FM_REPO_SCOPE_LOCK_TIMEOUT:-5}
+  requested="$home/state/.repo-concurrency.lock"
+  if [ "$FM_REPO_SCOPE_LOCK_HELD" != 0 ]; then
+    [ "$FM_REPO_SCOPE_LOCK" = "$requested" ] || {
+      FM_REPO_SCOPE_LAST_ERROR="repository concurrency lock is already held for a different authority"
+      return 1
+    }
+    return 0
+  fi
+  case "$timeout" in ''|*[!0-9]*|0) timeout=5 ;; esac
+  FM_REPO_SCOPE_LOCK=$requested
+  fm_lock_acquire_wait_bounded "$FM_REPO_SCOPE_LOCK" "$timeout" || {
+    FM_REPO_SCOPE_LAST_ERROR="repository concurrency authority is busy; retry after the current lease update finishes"
+    FM_REPO_SCOPE_LOCK=
+    return 1
+  }
   FM_REPO_SCOPE_LOCK_HELD=1
 }
 
@@ -760,6 +782,9 @@ fm_repo_scope_reconcile_home_locked() {  # <project-firstmate-home> [report:0|1]
           rm -rf -- "$tmp"
           exit 1
         }
+        if [ ! -e "$task_home" ] && [ ! -L "$task_home" ]; then
+          continue
+        fi
         [ -f "$task_home/.fm-secondmate-home" ] && [ ! -L "$task_home/.fm-secondmate-home" ] || {
           echo "error: project Firstmate child $SECONDMATE_REGISTRY_ID is not a seeded ordinary secondmate home" >&2
           rm -rf -- "$tmp"
@@ -942,21 +967,8 @@ fm_repo_scope_reconcile_task_home() {  # <project-firstmate-or-local-child-home>
   fi
 }
 
-fm_repo_scope_acquire_task() {  # <task-home> <task-id> <project-path> <relaunch:0|1>
-  local task_home=$1 task_id=$2 project_path=$3 relaunch=$4 authority_status lease limit count task_home_real tmp authority_home
-  FM_REPO_SCOPE_LEASE_CREATED=0
-  FM_REPO_SCOPE_LEASE_KEY=
-  if fm_repo_scope_validate_project "$task_home" "$project_path"; then
-    :
-  else
-    authority_status=$?
-    [ "$authority_status" -eq 1 ] && return 0
-    echo "error: $FM_REPO_SCOPE_LAST_ERROR" >&2
-    return 1
-  fi
-  authority_home=$FM_REPO_SCOPE_HOME
-  limit=$(fm_repo_scope_limit "$authority_home") || { echo "error: $FM_REPO_SCOPE_LAST_ERROR" >&2; return 1; }
-  fm_repo_scope_lock_acquire "$authority_home" || return 1
+fm_repo_scope_acquire_task_locked() {  # <authority-home> <task-home> <task-id> <relaunch:0|1>
+  local authority_home=$1 task_home=$2 task_id=$3 relaunch=$4 lease limit count task_home_real tmp
   fm_repo_scope_reconcile_home_locked "$authority_home" 0 || return 1
   limit=$(fm_repo_scope_limit "$authority_home") || { echo "error: $FM_REPO_SCOPE_LAST_ERROR" >&2; return 1; }
   task_home_real=$(cd "$task_home" && pwd -P) || return 1
@@ -975,6 +987,7 @@ fm_repo_scope_acquire_task() {  # <task-home> <task-id> <project-path> <relaunch
     echo "queued: repository subtree has $count active ship/scout tasks at its configured limit of $limit" >&2
     return 2
   fi
+  umask 077
   mkdir -p "$(dirname "$lease")" || return 1
   tmp="$lease.tmp.${BASHPID:-$$}"
   {
@@ -986,6 +999,26 @@ fm_repo_scope_acquire_task() {  # <task-home> <task-id> <project-path> <relaunch
   } > "$tmp" || return 1
   mv -f -- "$tmp" "$lease" || return 1
   FM_REPO_SCOPE_LEASE_CREATED=1
+}
+
+fm_repo_scope_acquire_task() {  # <task-home> <task-id> <project-path> <relaunch:0|1>
+  local task_home=$1 task_id=$2 project_path=$3 relaunch=$4 authority_status authority_home acquire_status=0 release_status=0
+  FM_REPO_SCOPE_LEASE_CREATED=0
+  FM_REPO_SCOPE_LEASE_KEY=
+  if fm_repo_scope_validate_project "$task_home" "$project_path"; then
+    :
+  else
+    authority_status=$?
+    [ "$authority_status" -eq 1 ] && return 0
+    echo "error: $FM_REPO_SCOPE_LAST_ERROR" >&2
+    return 1
+  fi
+  authority_home=$FM_REPO_SCOPE_HOME
+  fm_repo_scope_lock_acquire "$authority_home" || return 1
+  fm_repo_scope_acquire_task_locked "$authority_home" "$task_home" "$task_id" "$relaunch" || acquire_status=$?
+  fm_repo_scope_lock_release || release_status=$?
+  [ "$release_status" -eq 0 ] || return "$release_status"
+  return "$acquire_status"
 }
 
 fm_repo_scope_release_task() {  # <task-home> <task-id>

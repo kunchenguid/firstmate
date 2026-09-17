@@ -780,7 +780,7 @@ test_scout_and_secondmate_scaffold() {
     || fail "fm-brief.sh secondmate scaffold exited non-zero"
   brief="$BRIEF_HOME/data/brief-sm-q6/brief.md"
   assert_present "$brief" "secondmate charter was not scaffolded"
-  assert_grep "persistent second mate" "$brief" \
+  assert_grep "persistent secondmate" "$brief" \
     "secondmate charter must declare its role"
   assert_no_grep "## Captain's intent" "$brief" \
     "secondmate charter must not grow ship/scout Task subsections"

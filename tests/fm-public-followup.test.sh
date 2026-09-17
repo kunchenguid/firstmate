@@ -781,7 +781,7 @@ test_secondmate_teardown_requires_parent_binding() {
 assert_local_secondmate_parent_record() {
   local child=$1 parent=$2
   cmp -s "$child/.fm-secondmate-parent" <(
-    printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent"
+    printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\nparent_role=root\n' "$parent"
   ) || fail "real secondmate seeding must write the exact durable local parent record"
 }
 
@@ -1570,7 +1570,7 @@ SH
   ')
   assert_contains "$command" "--outcome-text" \
     "the exact rechain command must remain continuous through outcome text"
-  command=${command/"$ROOT/bin/fm-public-followup-emit.sh"/"$parent/fakebin/record-emit"}
+  command="  $parent/fakebin/record-emit${command#*"$ROOT/bin/fm-public-followup-emit.sh"}"
   command=${command//<value>/https://github.com/example/repo/pull/99}
   RECORD_ARGS="$command_log" bash -c "$command" \
     || fail "the exact rechain command must execute after filling its deliverable value"

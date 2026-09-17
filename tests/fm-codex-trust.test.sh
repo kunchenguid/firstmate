@@ -161,7 +161,7 @@ test_codex_spawn_pretrusts_before_launch() {
   fm_test_spawn_brief "$home" trustspawn
   out=$(FM_FAKE_LAUNCH_LOG="$launch_log" \
     fm_test_run_spawn "$home" "$wt" "$fakebin" trustspawn "$proj" codex \
-    --mode no-mistakes --yolo off)
+    --mode direct-PR --yolo off)
   expect_code 0 $? "the Codex spawn must succeed after pre-registration: $out"
   assert_trusted "$store" "$wt" "the Codex spawn did not pre-register its worktree"
   assert_present "$launch_log" "the Codex spawn sent no launch command"

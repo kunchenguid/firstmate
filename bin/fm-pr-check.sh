@@ -172,7 +172,7 @@ PR_YOLO=$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)
 READY_RC=0
 fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" || READY_RC=$?
 case "$READY_RC" in
-  0|1) ;;
+  0|1|5) ;;
   *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
 esac
 printf 'armed: state/%s.check.sh\n' "$ID"
