@@ -1009,6 +1009,26 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   kill "$worker" 2>/dev/null || true
   wait "$worker" 2>/dev/null || true
 
+  dir=$(make_case slot-same-id-new-holder)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$id" "$dir/other-home" \
+    fm-stale-task-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "legacy teardown rejected a same-id slot reassigned under a unique holder: $(cat "$dir/stderr")"
+  assert_reassigned_slot_left_alone "$dir" "$id" "$id" \
+    "legacy holderless task versus same-id unique holder"
+  assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" \
+    "lease_holder=fm-stale-task-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+    "legacy teardown rewrote the same-id holder identity"
+
   # A claim that exists but cannot be read as a claim proves nothing either way,
   # so it refuses rather than guessing the slot is still this task's.
   dir=$(make_case slot-claim-unreadable)
@@ -1517,7 +1537,35 @@ test_structural_herdr_lease_teardown_is_transaction_driven() {
     || fail "same-id reassignment recovery returned the new holder's lease: $(cat "$dir/runtime.log")"
   [ "$(cat "$dir/herdr-state")" = dead ] || fail "same-id reassignment recovery left the old endpoint live"
 
-  pass "fm-teardown: durable Herdr lease cleanup survives return and reassignment"
+  dir=$(make_case herdr-lease-pruned-symlink)
+  mark_case_as_treehouse_pool "$dir"
+  install_lease_aware_treehouse "$dir"
+  id=herdr-pruned-z1
+  holder=fm-$id-11111111111111111111111111111111
+  lease_id=77777777777777777777777777777777
+  physical_wt=$dir/pool/1/project
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=lab:w1:p1" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout" \
+    "backend=herdr" "herdr_session=lab" "herdr_workspace_id=w1" \
+    "herdr_tab_id=w1:t1" "herdr_pane_id=w1:p1" \
+    "treehouse_lease_holder=$holder" "treehouse_lease_id=$lease_id"
+  fm_treehouse_lease_transaction_write "$dir/home/state/$id.herdr-lease" cleanup \
+    "$id" "$holder" "$dir/project" "$dir/worktree" "$lease_id" \
+    || fail "could not stage interrupted cleanup through a symlinked slot path"
+  claim_pool_slot "$dir" "$id" "$dir/home" "$holder"
+  git -C "$dir/project" worktree remove --force "$physical_wt"
+  rm -f "$dir/worktree"
+
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "returned lease cleanup rejected its pruned symlink history: $(cat "$dir/stderr")"
+  assert_absent "$dir/home/state/$id.meta" "pruned-symlink recovery left task metadata"
+  assert_absent "$dir/home/state/$id.herdr-lease" "pruned-symlink recovery left its returned receipt"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "pruned-symlink recovery left its spent slot claim"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "pruned-symlink recovery returned an already-returned lease"
+
+  pass "fm-teardown: durable Herdr lease cleanup survives return, reassignment, and pruned symlink history"
 }
 
 test_already_gone_endpoint_still_completes_without_a_refusal() {

@@ -1475,8 +1475,17 @@ fm_treehouse_lease_transaction_return() { # <file> <task> <holder> <project>
 # copy teardown's landed-work checks inspect, and a returned slot carries no
 # untracked leftover from it.
 fm_treehouse_slot_owner_marker() {  # <worktree>
-  local worktree=$1 slot
-  slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P) || return 1
+  local worktree=$1 slot parent base
+  if slot=$(CDPATH='' cd -- "$worktree" 2>/dev/null && pwd -P); then
+    :
+  else
+    case "$worktree" in /*) ;; *) return 1 ;; esac
+    case "$worktree" in *$'\n'*) return 1 ;; esac
+    parent=$(CDPATH='' cd -- "$(dirname "$worktree")" 2>/dev/null && pwd -P) || return 1
+    base=$(basename "$worktree")
+    [ -n "$base" ] && [ "$base" != . ] && [ "$base" != .. ] || return 1
+    slot="$parent/$base"
+  fi
   printf '%s/.fm-slot-owner\n' "$(dirname "$slot")"
 }
 
@@ -1484,7 +1493,7 @@ fm_treehouse_slot_owner_marker() {  # <worktree>
 # The rename is atomic, so a reader either sees the old claim or the new one.
 fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home> [<lease-holder>]
   local worktree=$1 id=$2 home=$3 holder=${4:-} marker tmp
-  [ -n "$id" ] || return 1
+  [ -n "$id" ] && [ -d "$worktree" ] || return 1
   [ -z "$holder" ] || fm_treehouse_lease_holder_valid "$id" "$holder" || return 1
   marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 1
   # Only a plain claim file may be replaced: renaming onto a directory would
@@ -1512,8 +1521,8 @@ fm_treehouse_slot_owner_claim() {  # <worktree> <task-id> <home> [<lease-holder>
 # FM_TREEHOUSE_SLOT_OWNER_ID and FM_TREEHOUSE_SLOT_OWNER_HOME carry the recorded
 # claimant as evidence. The home is reported, never matched: a home that moved
 # must not turn a task's own slot into a refusal.
-fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
-  local worktree=$1 id=$2 marker line owner_id='' owner_home='' owner_holder=''
+fm_treehouse_slot_owner_state() {  # <worktree> <task-id> [<lease-holder>]
+  local worktree=$1 id=$2 expected_holder=${3:-} marker line owner_id='' owner_home='' owner_holder=''
   FM_TREEHOUSE_SLOT_OWNER=unsafe
   FM_TREEHOUSE_SLOT_OWNER_ID=
   FM_TREEHOUSE_SLOT_OWNER_HOME=
@@ -1538,7 +1547,9 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
   FM_TREEHOUSE_SLOT_OWNER_HOME=$owner_home
   # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
   FM_TREEHOUSE_SLOT_OWNER_HOLDER=$owner_holder
-  if [ "$owner_id" = "$id" ]; then
+  if [ "$owner_id" = "$id" ] \
+    && { [ -z "$owner_holder$expected_holder" ] \
+      || { [ -n "$owner_holder" ] && [ "$owner_holder" = "$expected_holder" ]; }; }; then
     FM_TREEHOUSE_SLOT_OWNER=mine
   else
     FM_TREEHOUSE_SLOT_OWNER=other
@@ -1550,9 +1561,8 @@ fm_treehouse_slot_owner_state() {  # <worktree> <task-id>
 # protects the slot's real owner.
 fm_treehouse_slot_owner_release() {  # <worktree> <task-id> [<lease-holder>]
   local worktree=$1 id=$2 holder=${3:-} marker
-  fm_treehouse_slot_owner_state "$worktree" "$id"
+  fm_treehouse_slot_owner_state "$worktree" "$id" "$holder"
   [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || return 0
-  [ -z "$holder" ] || [ "$FM_TREEHOUSE_SLOT_OWNER_HOLDER" = "$holder" ] || return 0
   marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 0
   rm -f "$marker" 2>/dev/null || true
 }

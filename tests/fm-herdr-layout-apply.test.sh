@@ -485,6 +485,12 @@ fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
   || fail "fresh original-shell removal did not publish its durable result"
 [ "$(grep -c '^lab-structural|pane close w1:p2$' "$CALLS")" -eq 1 ] \
   || fail "fresh not-applied recovery did not close exactly one original pane"
+fm_backend_herdr_layout_attempt_mark_released "$ATTEMPT" \
+  || fail "fresh cleanup did not publish its terminal released receipt"
+fm_backend_herdr_layout_attempt_snapshot "$ATTEMPT" \
+  && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 8 ] \
+  && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = released ] \
+  || fail "fresh cleanup terminal receipt did not remain readable"
 fm_backend_herdr_layout_attempt_write "$ATTEMPT" 6 0123456789abcdef0123456789abcdef \
   fresh task-z1 "$TMP_ROOT/worktree" "$TEST_LEASE_HOLDER" \
   lab-structural w1 w1:t2 w1:p2 fm-launch-0123456789abcdef0123456789abcdef \
@@ -1371,6 +1377,34 @@ assert_no_grep 'return --force' "$STRUCT_TREEHOUSE_LOG" \
   "successful structural launch invoked Treehouse return during normal exit"
 assert_grep "lease_holder=$SUCCESS_HOLDER" "$STRUCT_POOL/slot/.fm-slot-owner" \
   "successful structural launch did not bind its slot claim to the unique lease holder"
+SUCCESS_LABEL=$(jq -r '.params.root.label' "$REQUEST")
+SUCCESS_ATTEMPT_ID=${SUCCESS_LABEL#fm-launch-}
+fm_backend_herdr_layout_attempt_write "$STRUCT_HOME/state/success-z1.herdr-launch" 5 \
+  "$SUCCESS_ATTEMPT_ID" fresh success-z1 "$STRUCT_WT" "$SUCCESS_HOLDER" \
+  lab-structural w1 w1:t2 w1:p2 "$SUCCESS_LABEL" w1:t3 w1:p3 \
+  || fail "could not stage the post-commit crash receipt"
+SUCCESS_GETS=$(grep -c '^get ' "$STRUCT_TREEHOUSE_LOG" || true)
+set +e
+struct_recovery_out=$(HERDR_SESSION=lab-structural \
+  FM_FAKE_STRUCT_MODE=success FM_FAKE_STRUCT_SOCKET="$SOCK" \
+  FM_FAKE_STRUCT_APPLIED="$APPLIED" FM_FAKE_STRUCT_REQUEST="$REQUEST" \
+  FM_FAKE_STRUCT_TASK_CREATED="$STRUCT_TASK_CREATED" FM_FAKE_STRUCT_TASK_LABEL="$STRUCT_TASK_LABEL" \
+  FM_FAKE_STRUCT_CLOSED="$STRUCT_CLOSED" FM_FAKE_STRUCT_CLOSE_LOG="$STRUCT_CLOSE_LOG" \
+  FM_FAKE_STRUCT_TREEHOUSE_LOG="$STRUCT_TREEHOUSE_LOG" FM_FAKE_STRUCT_TREEHOUSE_STATE="$STRUCT_TREEHOUSE_STATE" \
+  FM_FAKE_STRUCT_LEASE_ID="$STRUCT_LEASE_ID" FM_FAKE_STRUCT_WT="$STRUCT_WT" \
+  FM_FAKE_STRUCT_WORKSPACE_LABEL="$STRUCT_WORKSPACE_LABEL" FM_FAKE_STRUCT_PARENT_PID="$$" \
+  fm_test_run_spawn "$STRUCT_HOME" "$STRUCT_WT" "$STRUCT_FAKEBIN" \
+    success-z1 "$STRUCT_PROJECT" --scout --harness pi --backend herdr)
+struct_recovery_status=$?
+set -e
+[ "$struct_recovery_status" -eq 0 ] \
+  || fail "post-commit receipt recovery failed: $struct_recovery_out"
+[ ! -e "$STRUCT_HOME/state/success-z1.herdr-launch" ] \
+  || fail "post-commit receipt recovery did not retire the exact receipt"
+[ "$(grep -c '^get ' "$STRUCT_TREEHOUSE_LOG" || true)" -eq "$SUCCESS_GETS" ] \
+  || fail "post-commit receipt recovery allocated a duplicate Treehouse lease"
+[ -f "$SUCCESS_META" ] && [ -f "$SUCCESS_TX" ] && [ -f "$STRUCT_TREEHOUSE_STATE" ] \
+  || fail "post-commit receipt recovery retired committed worker ownership"
 PATH="$STRUCT_FAKEBIN:$PATH" fm_treehouse_lease_transaction_return \
   "$SUCCESS_TX" success-z1 "$SUCCESS_HOLDER" "$STRUCT_PROJECT" >/dev/null \
   || fail "successful structural launch fixture cleanup could not return its lease"

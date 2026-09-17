@@ -2260,9 +2260,9 @@ require_exclusive_task_worktree_slot() {
 # would strand every task in flight across the change for no evidence at all.
 # Those keep exactly the record-scan protection they had before.
 TEARDOWN_SLOT_REASSIGNED_RC=3
-require_owned_worktree_slot_record() {  # <task-id> <worktree>
-  local record_id=$1 worktree=$2 marker
-  fm_treehouse_slot_owner_state "$worktree" "$record_id"
+require_owned_worktree_slot_record() {  # <task-id> <worktree> [<lease-holder>]
+  local record_id=$1 worktree=$2 holder=${3:-} marker
+  fm_treehouse_slot_owner_state "$worktree" "$record_id" "$holder"
   case "$FM_TREEHOUSE_SLOT_OWNER" in
     mine|absent) return 0 ;;
     other)
@@ -2285,7 +2285,7 @@ TEARDOWN_SLOT_REASSIGNED_HOME=
 require_owned_task_worktree_slot() {
   local slot rc=0
   slot=$(teardown_live_slot_path) || return 0
-  require_owned_worktree_slot_record "$ID" "$slot" || rc=$?
+  require_owned_worktree_slot_record "$ID" "$slot" "${TREEHOUSE_LEASE_HOLDER:-}" || rc=$?
   case "$rc" in
     0) return 0 ;;
     "$TEARDOWN_SLOT_REASSIGNED_RC")
@@ -2304,7 +2304,7 @@ teardown_owns_worktree() {
 }
 
 teardown_treehouse_lease_transaction_prepare() {
-  local canonical_worktree
+  local canonical_worktree recorded_worktree
   if [ ! -e "$TREEHOUSE_LEASE_TX" ] && [ ! -L "$TREEHOUSE_LEASE_TX" ]; then
     return 0
   fi
@@ -2319,9 +2319,15 @@ teardown_treehouse_lease_transaction_prepare() {
     && [ "$FM_TREEHOUSE_LEASE_TX_TASK" = "$ID" ] || return 1
   fm_treehouse_lease_transaction_reconcile "$TREEHOUSE_LEASE_TX" \
     "$ID" "$TREEHOUSE_LEASE_HOLDER" "$PROJ" || return 1
-  canonical_worktree=$WT
-  if [ -e "$WT" ] || [ -L "$WT" ]; then
+  recorded_worktree=$(fm_meta_get "$META" treehouse_lease_worktree)
+  if [ -n "$recorded_worktree" ]; then
+    canonical_worktree=$recorded_worktree
+  elif [ -e "$WT" ] || [ -L "$WT" ]; then
     canonical_worktree=$(fm_treehouse_canonical_existing_path "$WT") || return 1
+  elif [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = returned ]; then
+    canonical_worktree=$FM_TREEHOUSE_LEASE_TX_WORKTREE
+  else
+    return 1
   fi
   [ "$FM_TREEHOUSE_LEASE_TX_WORKTREE" = "$canonical_worktree" ] \
     && [ "$FM_TREEHOUSE_LEASE_TX_ID" = "$TREEHOUSE_LEASE_ID" ] || return 1

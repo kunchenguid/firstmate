@@ -3064,8 +3064,52 @@ spawn_rebind_restored_herdr_layout_attempt() {
   fm_backend_herdr_layout_attempt_commit_restored "$HERDR_LAYOUT_ATTEMPT"
 }
 
+spawn_finalize_released_fresh_herdr_layout() {
+  local meta="$STATE/$ID.meta" holder lease_id busy_gen recorded_worktree
+  fm_backend_herdr_layout_attempt_snapshot "$HERDR_LAYOUT_ATTEMPT" \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 8 ] \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_RESOLUTION" = released ] \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_OWNERSHIP_MODE" = fresh ] \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_TASK" = "$ID" ] || return 1
+  holder=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LEASE_HOLDER
+  if [ -e "$HERDR_TREEHOUSE_LEASE_TX" ] || [ -L "$HERDR_TREEHOUSE_LEASE_TX" ]; then
+    fm_treehouse_lease_transaction_reconcile "$HERDR_TREEHOUSE_LEASE_TX" \
+      "$ID" "$holder" "$PROJ_ABS" \
+      && [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = returned ] \
+      && [ "$FM_TREEHOUSE_LEASE_TX_WORKTREE" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKTREE" ] || return 1
+    lease_id=$FM_TREEHOUSE_LEASE_TX_ID
+  elif [ -e "$meta" ] || [ -L "$meta" ]; then
+    return 1
+  fi
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    fm_backlog_record_present "$meta" "task record" "$STATE" || return 1
+    recorded_worktree=$(herdr_projection_meta_field_exact "$meta" treehouse_lease_worktree 2>/dev/null || true)
+    if [ -z "$recorded_worktree" ] && { [ -e "$(fm_meta_get "$meta" worktree)" ] || [ -L "$(fm_meta_get "$meta" worktree)" ]; }; then
+      recorded_worktree=$(fm_treehouse_canonical_existing_path "$(fm_meta_get "$meta" worktree)") || return 1
+    fi
+    [ "$(herdr_projection_meta_field_exact "$meta" endpoint_task_id 2>/dev/null || true)" = "$ID" ] \
+      && [ "$(herdr_projection_meta_field_exact "$meta" treehouse_lease_holder 2>/dev/null || true)" = "$holder" ] \
+      && [ "$(herdr_projection_meta_field_exact "$meta" treehouse_lease_id 2>/dev/null || true)" = "$lease_id" ] \
+      && [ "$(herdr_projection_meta_field_exact "$meta" project 2>/dev/null || true)" = "$PROJ_ABS" ] \
+      && [ "$(herdr_projection_meta_field_exact "$meta" herdr_session 2>/dev/null || true)" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" ] \
+      && [ "$(herdr_projection_meta_field_exact "$meta" herdr_workspace_id 2>/dev/null || true)" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKSPACE" ] \
+      && [ "$(herdr_projection_meta_field_exact "$meta" herdr_tab_id 2>/dev/null || true)" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB" ] \
+      && [ "$(herdr_projection_meta_field_exact "$meta" herdr_pane_id 2>/dev/null || true)" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" ] \
+      && [ "$recorded_worktree" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_WORKTREE" ] || return 1
+    busy_gen=$(fm_meta_get "$meta" busy_gen)
+    [ -z "$busy_gen" ] || "$FM_ROOT/bin/fm-busy-event.sh" retire "$STATE" "$ID" --gen "$busy_gen" >/dev/null 2>&1 || return 1
+    fm_backlog_atomic_transition remove "$meta" "quarantined task record" "$STATE" || return 1
+  fi
+  if [ -e "$HERDR_TREEHOUSE_LEASE_TX" ] || [ -L "$HERDR_TREEHOUSE_LEASE_TX" ]; then
+    rm -f -- "$HERDR_TREEHOUSE_LEASE_TX" || return 1
+  fi
+  rm -f -- "$HERDR_LAYOUT_ATTEMPT" || return 1
+  echo "notice: finished task $ID's previously confirmed structural launch cleanup" >&2
+}
+
 spawn_reconcile_herdr_layout_attempt() {
-  local meta="$STATE/$ID.meta" value worktree holder lease_id busy_gen expected_mode ownership_policy recovery_action resolution journal lock_for_restore=0
+  local meta="$STATE/$ID.meta" value worktree holder lease_id busy_gen expected_mode ownership_policy recovery_action resolution journal
+  local lock_for_restore=0 gate_status row agent committed_receipt=0
   [ "$BACKEND" = herdr ] && [ "$HARNESS" = pi ] || {
     echo "error: task $ID has a quarantined Herdr structural launch attempt; retry with backend=herdr and the exact plain pi harness" >&2
     return 1
@@ -3080,6 +3124,14 @@ spawn_reconcile_herdr_layout_attempt() {
     expected_mode=relaunch
   else
     expected_mode=fresh
+  fi
+  if [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 8 ]; then
+    [ "$expected_mode" = fresh ] \
+      && spawn_finalize_released_fresh_herdr_layout || {
+      echo "error: task $ID's released structural launch receipt could not be finalized safely" >&2
+      return 1
+    }
+    return 0
   fi
   fm_backlog_record_present "$meta" "task record" "$STATE" || {
     echo "error: task $ID's quarantined Herdr structural launch has no trustworthy task record; refusing duplicate launch" >&2
@@ -3122,7 +3174,7 @@ spawn_reconcile_herdr_layout_attempt() {
     fresh)
       holder=$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_LEASE_HOLDER
       lease_id=$(herdr_projection_meta_field_exact "$meta" treehouse_lease_id 2>/dev/null || true)
-      fm_backend_herdr_layout_lease_holder_valid "$ID" "$holder" \
+      fm_treehouse_lease_holder_valid "$ID" "$holder" \
         && [ "$(herdr_projection_meta_field_exact "$meta" treehouse_lease_holder 2>/dev/null || true)" = "$holder" ] \
         && fm_treehouse_lease_transaction_reconcile "$HERDR_TREEHOUSE_LEASE_TX" \
           "$ID" "$holder" "$PROJ_ABS" \
@@ -3142,10 +3194,8 @@ spawn_reconcile_herdr_layout_attempt() {
           echo "error: task $ID's quarantined fresh launch no longer names its exact Treehouse slot; refusing duplicate launch" >&2
           return 1
         }
-        fm_treehouse_slot_owner_state "$worktree" "$ID"
-        [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] \
-          && { [ -z "$FM_TREEHOUSE_SLOT_OWNER_HOLDER" ] \
-            || [ "$FM_TREEHOUSE_SLOT_OWNER_HOLDER" = "$holder" ]; } || {
+        fm_treehouse_slot_owner_state "$worktree" "$ID" "$holder"
+        [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || {
           echo "error: task $ID no longer owns its quarantined Treehouse slot; refusing duplicate launch" >&2
           return 1
         }
@@ -3172,6 +3222,54 @@ spawn_reconcile_herdr_layout_attempt() {
   spawn_herdr_presentation_order_lock_acquire \
     "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" || return 1
   lock_for_restore=1
+  if [ "$expected_mode" = fresh ] \
+    && [ "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_VERSION" = 5 ] \
+    && [ "$FM_TREEHOUSE_LEASE_TX_RESULT" = acquired ]; then
+    if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
+      gate_status=0
+      row=
+      if fm_backlog_row_probe "$DATA" "$ID"; then
+        row=$FM_BACKLOG_ROW_STATE
+      else
+        spawn_herdr_presentation_order_lock_release
+        echo "error: task $ID's backlog state could not be read while reconciling its committed structural worker; preserving quarantine" >&2
+        return 1
+      fi
+      [ "$row" = "in_flight no no" ] && committed_receipt=1
+    else
+      gate_status=$?
+      if [ "$gate_status" -eq 1 ]; then
+        committed_receipt=1
+      else
+        spawn_herdr_presentation_order_lock_release
+        echo "error: task $ID's backlog configuration could not be resolved while reconciling its structural worker; preserving quarantine" >&2
+        return 1
+      fi
+    fi
+  fi
+  if [ "$committed_receipt" = 1 ]; then
+    value="$(herdr_projection_meta_field_exact "$meta" herdr_tab_id 2>/dev/null || true):$(herdr_projection_meta_field_exact "$meta" herdr_pane_id 2>/dev/null || true)"
+    [ "$value" = "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_TAB:$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" ] \
+      && fm_backend_herdr_layout_attempt_verify "$HERDR_LAYOUT_ATTEMPT" \
+      && [ "$(fm_backend_herdr_pane_agent_state \
+        "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" \
+        "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE")" = live ] \
+      && agent=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_SESSION" agent get \
+        "$FM_BACKEND_HERDR_LAYOUT_ATTEMPT_NEW_PANE" 2>/dev/null \
+        | jq -r '.result.agent.agent // empty' 2>/dev/null) \
+      && [ "$agent" = pi ] \
+      && fm_backend_herdr_layout_attempt_commit "$HERDR_LAYOUT_ATTEMPT" || {
+      spawn_herdr_presentation_order_lock_release
+      echo "error: task $ID's committed structural worker could not be verified exactly; preserving quarantine" >&2
+      return 1
+    }
+    spawn_herdr_presentation_order_lock_release
+    HERDR_PROJECTION_ABORT_CLEANUP=0
+    HERDR_LAYOUT_ENDPOINT_COMMITTED=1
+    SPAWN_FRESH_COMMIT_PENDING=0
+    echo "notice: retired task $ID's committed structural launch receipt without launching another worker" >&2
+    return 3
+  fi
   if ! fm_backend_herdr_layout_attempt_reconcile "$HERDR_LAYOUT_ATTEMPT"; then
     [ "$lock_for_restore" = 0 ] || spawn_herdr_presentation_order_lock_release
     return 1
@@ -3243,11 +3341,12 @@ spawn_reconcile_herdr_layout_attempt() {
     echo "error: task $ID's returned Treehouse slot claim could not be retired; refusing duplicate launch" >&2
     return 1
   }
+  fm_backend_herdr_layout_attempt_mark_released "$HERDR_LAYOUT_ATTEMPT" || return 1
   busy_gen=$(fm_meta_get "$meta" busy_gen)
   [ -z "$busy_gen" ] || "$FM_ROOT/bin/fm-busy-event.sh" retire "$STATE" "$ID" --gen "$busy_gen" >/dev/null 2>&1 || return 1
   fm_backlog_atomic_transition remove "$meta" "quarantined task record" "$STATE" || return 1
-  rm -f -- "$HERDR_LAYOUT_ATTEMPT" || return 1
   rm -f -- "$HERDR_TREEHOUSE_LEASE_TX" || return 1
+  rm -f -- "$HERDR_LAYOUT_ATTEMPT" || return 1
   echo "notice: reconciled task $ID's prior fresh structural Herdr launch and safely released its isolated copy" >&2
 }
 
@@ -3258,6 +3357,9 @@ if [ -e "$HERDR_LAYOUT_ATTEMPT" ] || [ -L "$HERDR_LAYOUT_ATTEMPT" ]; then
     reconcile_status=$?
     if [ "$reconcile_status" -eq 2 ]; then
       echo "error: task $ID's inert shell endpoint was restored; retry the relaunch now that its quarantine is retired" >&2
+    elif [ "$reconcile_status" -eq 3 ]; then
+      echo "spawned $ID by recovering its already-committed structural Herdr worker"
+      exit 0
     fi
     exit 1
   fi
@@ -4544,6 +4646,7 @@ preserve_relaunch_meta() {
     if [ "$SPAWN_TREEHOUSE_LEASE_HELD" = 1 ]; then
       echo "treehouse_lease_holder=$SPAWN_TREEHOUSE_LEASE_HOLDER"
       echo "treehouse_lease_id=$SPAWN_TREEHOUSE_LEASE_ID"
+      echo "treehouse_lease_worktree=$(real_path_or_raw "$WT")"
     fi
   fi
   if [ "$BACKEND" = zellij ]; then
@@ -4889,7 +4992,7 @@ print(json.dumps(["/bin/sh", "-c", sys.stdin.read()], separators=(",", ":")))
   else
     HERDR_LAYOUT_OWNERSHIP_MODE=fresh
     [ "$SPAWN_TREEHOUSE_LEASE_HELD" = 1 ] \
-      && fm_backend_herdr_layout_lease_holder_valid \
+      && fm_treehouse_lease_holder_valid \
         "$ID" "$SPAWN_TREEHOUSE_LEASE_HOLDER" || {
       echo "error: fresh structural Herdr launch has no exact acquired Treehouse lease proof" >&2
       exit 1
@@ -4960,8 +5063,8 @@ print(json.dumps(["/bin/sh", "-c", sys.stdin.read()], separators=(",", ":")))
     echo "error: structural Herdr launch returned a replacement pane but its task record could not be rebound" >&2
     exit 1
   fi
-  fm_backend_herdr_layout_attempt_commit "$HERDR_LAYOUT_ATTEMPT" || {
-    echo "error: structural Herdr launch could not retire its exact attempt record" >&2
+  fm_backend_herdr_layout_attempt_verify "$HERDR_LAYOUT_ATTEMPT" || {
+    echo "error: structural Herdr launch could not verify its exact attempt record" >&2
     exit 1
   }
   if [ "$HERDR_LAYOUT_OWNERSHIP_MODE" = fresh ]; then
@@ -5098,12 +5201,17 @@ if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
     echo "error: task $ID was republished but its backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); fix the backlog and re-run the relaunch" >&2
   fi
 fi
+if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -eq 0 ] \
+  && [ "$HERDR_LAYOUT_ENDPOINT_COMMITTED" = 1 ]; then
+  HERDR_PROJECTION_ABORT_CLEANUP=0
+  if ! fm_backend_herdr_layout_attempt_commit "$HERDR_LAYOUT_ATTEMPT"; then
+    echo "error: task $ID is committed In flight with its exact worker and lease preserved, but its structural launch receipt could not be retired; retry the spawn to finish receipt cleanup without launching another worker" >&2
+    SPAWN_BACKLOG_COMMIT_STATUS=1
+  fi
+fi
 trap - HUP INT TERM
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   exit "$SPAWN_BACKLOG_COMMIT_STATUS"
-fi
-if [ "$HERDR_LAYOUT_ENDPOINT_COMMITTED" = 1 ]; then
-  HERDR_PROJECTION_ABORT_CLEANUP=0
 fi
 if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   case "$SPAWN_DEFERRED_SIGNAL" in
