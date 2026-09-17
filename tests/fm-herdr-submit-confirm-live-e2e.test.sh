@@ -191,17 +191,35 @@ else
   # truncated (15 bytes on Linux, 16 on macOS), and a real muse identity
   # truncates mid-version to a build that never existed while still carrying the
   # muse-bin- prefix, so admitting it would put a fabricated version into the
-  # pass line and into the verification record. An unreadable argv leaves the
-  # honest version-unknown placeholder instead.
+  # pass line and into the verification record.
   # The suffix is shape-checked for the same reason: only a non-empty version
   # after the prefix may name a build.
-  muse_pane_exec_name() {
-    lab pane process-info --pane "$1" 2>/dev/null | jq -r '
+  muse_pane_exec_name() {  # <process-info body>
+    printf '%s' "$1" | jq -r '
       [.result.process_info.foreground_processes[]?
        | ((.argv // [])[0] // empty), (.argv0 // empty)]
       | map(split("/") | last)
       | map(select(test("^muse-bin-.+$")))
       | first // empty' 2>/dev/null || true
+  }
+
+  # muse_pane_argv_surface: whether this Herdr's process-info carries argv at
+  # all, as present|absent|unreadable. docs/herdr-backend.md records the
+  # argv/argv0/cmdline-bearing foreground_processes shape as verified live only
+  # on Herdr 0.9.0 while the supported floor is far below it, and the adapter
+  # itself falls back to .name when argv is missing, so an argv-less body is a
+  # supported host rather than a broken one and must be told apart from a body
+  # that could not be read.
+  muse_pane_argv_surface() {  # <process-info body>
+    [ -n "$1" ] || { printf 'unreadable'; return 0; }
+    printf '%s' "$1" | jq -r '
+      if (.result.process_info.foreground_processes | type) != "array"
+         or ((.result.process_info.foreground_processes | length) == 0)
+      then "unreadable"
+      elif ([.result.process_info.foreground_processes[]
+             | ((.argv // []) | length) > 0 or ((.argv0 // "") | length) > 0] | any)
+      then "present"
+      else "absent" end' 2>/dev/null || printf 'unreadable'
   }
 
   # An empty composer alone is not proof Muse is up: the shared classifier reads
@@ -211,17 +229,25 @@ else
   # classifier already owns as an agent name, so the launcher window satisfies
   # the process signal and a not-yet-painted row satisfies the composer signal on
   # the very same tick. The exec'd muse-bin-<version> identity is what separates
-  # the launcher from the TUI it becomes, so readiness demands all three.
+  # the launcher from the TUI it becomes, so readiness demands it wherever argv
+  # is readable at all.
+  # Where this Herdr publishes no argv surface, that separation is unavailable
+  # rather than failed, so readiness degrades to the two signals that host can
+  # give and the leg runs on with the honest version-unknown placeholder. An
+  # unreadable body degrades nothing: it keeps waiting.
   muse_idle=0
   i=0
   muse_state=unread
   muse_process=unread
   muse_exec_name=
+  muse_argv_surface=unread
   while [ "$i" -lt 90 ]; do
     muse_process=$(fm_backend_herdr_pane_process_state "$SESSION" "$MUSE_PANE")
     if [ "$muse_process" = agent ]; then
-      muse_exec_name=$(muse_pane_exec_name "$MUSE_PANE")
-      if [ -n "$muse_exec_name" ]; then
+      muse_proc_json=$(lab pane process-info --pane "$MUSE_PANE" 2>/dev/null || true)
+      muse_argv_surface=$(muse_pane_argv_surface "$muse_proc_json")
+      muse_exec_name=$(muse_pane_exec_name "$muse_proc_json")
+      if [ -n "$muse_exec_name" ] || [ "$muse_argv_surface" = absent ]; then
         muse_state=$(fm_backend_herdr_composer_state "$MUSE_TARGET")
         [ "$muse_state" = empty ] && { muse_idle=1; break; }
       fi
@@ -230,11 +256,12 @@ else
     sleep 1
   done
   [ "$muse_idle" = 1 ] \
-    || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER never reached a live muse-bin process with a shared empty composer in the lab pane (last process state '$muse_process', last exec identity '${muse_exec_name:-none}', last composer state '$muse_state')"
+    || fail "Muse Code ($MUSE_VERSION) on $HERDR_VER never reached a live muse-bin process with a shared empty composer in the lab pane (last process state '$muse_process', last argv surface '$muse_argv_surface', last exec identity '${muse_exec_name:-none}', last composer state '$muse_state')"
 
   # The build that ran is the build this record may name, and the gate above
-  # already read it off the pane before opening.
-  MUSE_VERSION=${muse_exec_name#muse-bin-}
+  # already read it off the pane before opening. It stays version-unknown on a
+  # Herdr that published no argv to read it from.
+  [ -z "$muse_exec_name" ] || MUSE_VERSION=${muse_exec_name#muse-bin-}
 
   # Best-effort route preference, not proof: a readable native status here means
   # fm_backend_herdr_send_text_submit would take its native branch instead of
