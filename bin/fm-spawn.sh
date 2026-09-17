@@ -34,8 +34,7 @@
 #   worker launched into an ordinary pooled task worktree, told through
 #   bin/fm-brief.sh --executor to close exactly one GitHub issue and open a pull
 #   request, and expected to EXIT when finished. --issue <N> is REQUIRED (a
-#   positive integer, recorded as issue=, with issue_url= recorded when the
-#   project's origin is github.com); --yolo stays REQUIRED because merge
+#   positive integer, recorded as issue=); --yolo stays REQUIRED because merge
 #   authority is unchanged by the kind; --mode is REFUSED because an executor's
 #   delivery is inherently direct-PR (recorded as mode=direct-PR so every
 #   mode-reading consumer keeps working), and the rigor that replaces the
@@ -229,7 +228,7 @@
 #   --scout records kind=scout in the task's meta (report deliverable, scratch worktree;
 #   see AGENTS.md task lifecycle); --secondmate records kind=secondmate and launches in a
 #   provisioned firstmate home; --executor records kind=executor, mode=direct-PR,
-#   yolo=, issue=, issue_url= when resolvable, executor_base=, and
+#   yolo=, issue=, executor_base=, and
 #   executor_launched= (the launch epoch the runtime bound counts from); the
 #   default is kind=ship.
 #   Before a secondmate launch, the home is fast-forwarded to the primary's
@@ -578,7 +577,6 @@ MODE=
 YOLO=
 ISSUE=
 ISSUE_SET=0
-ISSUE_URL=
 EXECUTOR_BASE=
 EXECUTOR_LAUNCHED=
 TRACEPARENT_ARG=
@@ -1632,7 +1630,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
   if [ "$KIND" = executor ]; then
     ISSUE=$(fm_meta_get "$RELAUNCH_META" issue)
-    ISSUE_URL=$(fm_meta_get "$RELAUNCH_META" issue_url)
     EXECUTOR_BASE=$(fm_meta_get "$RELAUNCH_META" executor_base)
     fm_executor_issue_valid "$ISSUE" || {
       echo "error: executor task $ID records no valid issue=; refusing to relaunch a worker with no issue to close" >&2
@@ -3909,18 +3906,22 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
 fi
 # The executor never creates a branch: the spawn checks out fm/<id> in the
 # fresh worktree and records its base commit, so the brief can name the branch
-# literally and the poll can count the executor's own commits. A relaunch
-# reuses the worktree exactly as the previous executor left it, so it warns
-# rather than resets when the checkout has drifted off that branch.
+# literally and the poll can count the executor's own commits. A fresh spawn
+# resets any fm/<id> a partially failed earlier spawn left behind onto the
+# freshened base, so the retry succeeds; git itself still refuses when another
+# worktree holds that branch, and its own message is what the error carries.
+# A relaunch reuses the worktree exactly as the previous executor left it, so
+# it warns rather than resets when the checkout has drifted off that branch.
 if [ "$KIND" = executor ]; then
   if [ "$RELAUNCH" -eq 0 ]; then
-    if ! git -C "$WT" checkout -q -b "fm/$ID" 2>/dev/null; then
-      echo "error: could not create the executor branch fm/$ID in $WT; inspect window $T" >&2
+    if ! executor_git_err=$(git -C "$WT" checkout -q -B "fm/$ID" 2>&1 >/dev/null); then
+      echo "error: could not create the executor branch fm/$ID in $WT${executor_git_err:+: $executor_git_err}; inspect window $T" >&2
       exit 1
     fi
     EXECUTOR_BASE=$(git -C "$WT" rev-parse --verify --quiet HEAD 2>/dev/null) || EXECUTOR_BASE=
     fm_executor_commit_valid "$EXECUTOR_BASE" || {
-      echo "error: could not record the executor branch base for $ID in $WT; inspect window $T" >&2
+      executor_git_err=$(git -C "$WT" rev-parse --verify HEAD 2>&1 >/dev/null || true)
+      echo "error: could not record the executor branch base for $ID in $WT${executor_git_err:+: $executor_git_err}; inspect window $T" >&2
       exit 1
     }
   elif [ "$(git -C "$WT" branch --show-current 2>/dev/null || true)" != "fm/$ID" ]; then
@@ -4434,14 +4435,9 @@ else
   fi
 fi
 
-# The executor's issue URL comes from the project's origin remote and is
-# recorded only when that remote is github.com (no network call); the launch
-# epoch is what FM_EXECUTOR_MAX_RUNTIME counts from, minted afresh for every
-# incarnation. A relaunch keeps the recorded issue_url.
+# The executor's launch epoch is what FM_EXECUTOR_MAX_RUNTIME counts from,
+# minted afresh for every incarnation.
 if [ "$KIND" = executor ]; then
-  if [ "$RELAUNCH" -eq 0 ]; then
-    ISSUE_URL=$(fm_executor_origin_issue_url "$PROJ_ABS" "$ISSUE" 2>/dev/null) || ISSUE_URL=
-  fi
   EXECUTOR_LAUNCHED=$(date +%s)
 fi
 META_WINDOW=$T
@@ -4463,7 +4459,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo issue issue_url executor_base executor_launched tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo issue executor_base executor_launched tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4480,7 +4476,6 @@ preserve_relaunch_meta() {
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
   if [ "$KIND" = executor ]; then
     echo "issue=$ISSUE"
-    [ -z "$ISSUE_URL" ] || echo "issue_url=$ISSUE_URL"
     echo "executor_base=$EXECUTOR_BASE"
     echo "executor_launched=$EXECUTOR_LAUNCHED"
   fi

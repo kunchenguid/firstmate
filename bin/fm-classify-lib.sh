@@ -549,7 +549,7 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   esac
   status_line_verb "$line" verb
   case "$line" in
-    *:*) case "$verb:$kind" in done:ship|done:scout|done:executor|failed:ship|failed:scout|failed:executor) return 0 ;; esac ;;
+    *:*) case "$verb:$kind" in done:ship|done:scout|failed:ship|failed:scout) return 0 ;; esac ;;
   esac
   case "$verb" in
     needs-decision|blocked|"$resolve"|"$held") ;;
@@ -680,7 +680,7 @@ status_key_closing_verb() {  # <status-file> <key>
   while IFS= read -r line || [ -n "$line" ]; do
     status_line_verb "$line" event
     case "$event:$kind" in
-      done:ship|done:scout|done:executor|failed:ship|failed:scout|failed:executor) ;;
+      done:ship|done:scout|failed:ship|failed:scout) ;;
       *)
         case "$event" in
           needs-decision|blocked|"$resolve"|"$held") ;;
