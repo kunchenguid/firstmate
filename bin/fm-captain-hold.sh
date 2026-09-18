@@ -52,6 +52,10 @@
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
+# The hold is also declared on the task's own status log, because watcher and
+# away-mode classification read that log's last event line rather than the
+# backlog; the status-log mirror paragraph beside the append helpers below
+# owns that contract.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -69,7 +73,10 @@
 # through a close, so an ordinary finished task cannot be dressed up as an
 # answered captain call. A hold that expired by date (`--until` in the past) is
 # still answerable: the surviving hold annotations, not tasks-axi's live
-# `held:` bit, prove the captain owned it.
+# `held:` bit, prove the captain owned it. Every settlement path - close,
+# release, repair, or an evidence-backed reconcile close - retracts the
+# status-log hold declaration itself, so a stopped worker cannot leave the
+# lane reading as still held.
 #
 # ONE KEYED-ANSWER INTAKE, FED BY EVERY CHANNEL.
 # "A keyed answer resolves its matching captain-held task" is a single
@@ -226,6 +233,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
+# shellcheck source=bin/fm-line-cap-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-line-cap-lib.sh"
 
 PARENT_HOLD_PUBLISHED=0
 publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
@@ -237,6 +247,56 @@ publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
     0|1) PARENT_HOLD_PUBLISHED=1 ;;
     *) printf 'actionable: task %s is held for the captain in this home but that did not reach the parent channel (rc=%s)\n' "$id" "$rc" >&2 ;;
   esac
+}
+
+# --- the status-log mirror of a hold ---------------------------------------
+#
+# Watcher and away-mode classification read the last event line of
+# state/<id>.status, never the backlog, so a hold recorded only in the
+# backlog leaves a held lane whose last line is `paused:` on the
+# declared-wait resurface cadence, and a released hold keeps reading as an
+# answer still owed. `hold` therefore declares the hold on that same log and
+# every settlement path retracts the declaration. Both lines are this
+# command's own: the operator-only `captain-held` verb under the
+# `captain-hold-<task>-<occurrence>` key attributes the declaration to the
+# hold command rather than disguising it as a worker line, the keyed pair
+# opens or closes no worker decision, and the retraction never depends on the
+# worker, so a stopped worker cannot make release impossible. Both appends
+# use the guarded self-announced append (bin/fm-wake-lib.sh) so the turn that
+# recorded the hold or the answer does not wake itself; an append failure is
+# reported on stderr rather than undoing the durable backlog record, exactly
+# like the parent channel.
+
+# Declare the hold on the task's status log unless its last event line
+# already declares one (a repeated hold, or a transfer command_complete
+# wrote): the declaration stands either way and must not be duplicated.
+status_declare_hold() {  # <task-id> <occurrence> <reason>
+  local id=$1 occurrence=$2 reason=$3 status_file line rc=0
+  status_file="$STATE/$id.status"
+  status_is_captain_held "$(last_status_line "$status_file")" && return 0
+  line="captain-held [key=captain-hold-$id-$occurrence]: $reason"
+  fm_cap_line_var "$line"
+  fm_wake_status_append_self_announced "$STATE" "$status_file" "$FM_LINE_CAP_LINE" || rc=$?
+  [ "$rc" -ne 2 ] \
+    || printf 'actionable: task %s is held for the captain in this home but the hold declaration could not be written to %s\n' \
+      "$id" "$status_file" >&2
+  return 0
+}
+
+# Retract the declaration once the call is settled, but only while the log's
+# last event line still declares the hold: a worker that already moved on
+# owns its own newer state, and a matching retry must not append again.
+status_retract_hold() {  # <task-id> <occurrence> <note>
+  local id=$1 occurrence=$2 note=$3 status_file line rc=0
+  status_file="$STATE/$id.status"
+  status_is_captain_held "$(last_status_line "$status_file")" || return 0
+  line="resolved [key=captain-hold-$id-$occurrence]: captain call $note by fm-captain-hold"
+  fm_cap_line_var "$line"
+  fm_wake_status_append_self_announced "$STATE" "$status_file" "$FM_LINE_CAP_LINE" || rc=$?
+  [ "$rc" -ne 2 ] \
+    || printf 'actionable: captain-held task %s is settled in this home but the hold retraction could not be written to %s\n' \
+      "$id" "$status_file" >&2
+  return 0
 }
 
 CAPTAIN_META_LOCK=
@@ -903,6 +963,7 @@ command_hold() {
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id lost its hold-set stamp while being held"
+  status_declare_hold "$id" "$occurrence" "$reason"
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
   printf '%s\n' "$id"
 }
@@ -1403,6 +1464,7 @@ publish_parent_resolution_then_retire() {  # <task-id> <occurrence> <note>
   local id=$1 occurrence=$2 note=$3 request
   request=$(reconcile_request_path "$id")
   publish_parent_hold "$id" "$occurrence" resolved "$note"
+  status_retract_hold "$id" "$occurrence" "$note"
   if [ -e "$request" ] && [ "$PARENT_HOLD_PUBLISHED" != 1 ]; then
     fail "could not publish the answered captain-held task $id to its parent"
   fi
@@ -1535,6 +1597,7 @@ reconcile_close() {
     publish_parent_hold "$id" "$occurrence" resolved reconciled
     [ "$PARENT_HOLD_PUBLISHED" = 1 ] \
       || fail "could not publish the reconciled captain-held task $id to its parent"
+    status_retract_hold "$id" "$occurrence" reconciled
     reconcile_request_retire "$id"
     printf 'reconciled: %s\n' "$id"
     return 0
@@ -1558,6 +1621,7 @@ reconcile_close() {
   publish_parent_hold "$id" "$occurrence" resolved reconciled
   [ "$PARENT_HOLD_PUBLISHED" = 1 ] \
     || fail "could not publish the reconciled captain-held task $id to its parent"
+  status_retract_hold "$id" "$occurrence" reconciled
   reconcile_request_retire "$id"
   printf 'reconciled: %s\n' "$id"
 }

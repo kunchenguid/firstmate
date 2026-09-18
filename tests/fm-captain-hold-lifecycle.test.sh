@@ -954,6 +954,117 @@ EOF
   pass "release frees held work with the captain's words recorded and the body preserved"
 }
 
+# Watcher and away-mode classification read the status log's last event line,
+# never the backlog, so hold declares the hold there and every settlement path
+# retracts the declaration - attributed to the hold command through the
+# captain-hold key, self-announced so the recording turn does not re-wake, and
+# never dependent on a live worker. A held lane whose last line was `paused:`
+# leaves the declared-wait cadence, a stopped worker cannot make release
+# impossible, and a worker's unrelated open decision survives both sides.
+test_hold_and_release_reach_the_status_log() {
+  local home id last open diverged_out
+  home=$(make_home status-mirror)
+  id=sample-gated-work
+  tasks_in "$home" add "$id" "Ship the gated sample" --kind ship --repo sample >/dev/null \
+    || fail "could not create the gated work item"
+  cat > "$home/state/$id.status" <<'EOF'
+working: mid implementation
+needs-decision [key=api-shape]: which sample API shape
+paused: waiting on the sample upstream release
+EOF
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"
+    fm_wake_status_mark_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/$id.status" \
+    || fail "could not prime the announced status baseline"
+  run_captain "$home" hold "$id" --reason "operator review pending" >/dev/null \
+    || fail "could not hold the gated work item"
+  grep -Fx "captain-held [key=captain-hold-$id-1]: operator review pending" \
+    "$home/state/$id.status" >/dev/null \
+    || fail "hold did not declare the hold on the task's status log"
+  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
+  bash -c '. "$1"; status_is_captain_held "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$last" \
+    || fail "a held lane's last status line does not classify as captain-held: $last"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_signal_seen_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/$id.status" \
+    || fail "the hold declaration re-woke the home that recorded it"
+  run_captain "$home" hold "$id" --reason "operator review pending" >/dev/null \
+    || fail "idempotent hold retry failed"
+  [ "$(grep -c '^captain-held ' "$home/state/$id.status")" = 1 ] \
+    || fail "a repeated hold duplicated the status-log declaration"
+
+  # Release retracts the declaration with no worker alive to write anything,
+  # and the worker's unrelated open decision survives both sides.
+  printf 'Proceed as planned.\n' > "$home/go.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/go.txt" --release >/dev/null \
+    || fail "answer --release failed on the held work item"
+  grep -Fx "resolved [key=captain-hold-$id-1]: captain call released by fm-captain-hold" \
+    "$home/state/$id.status" >/dev/null \
+    || fail "release did not retract the status-log declaration"
+  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
+  if bash -c '. "$1"; status_is_captain_held "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$last"; then
+    fail "a released lane still classifies as captain-held: $last"
+  fi
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_signal_seen_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/$id.status" \
+    || fail "the release retraction re-woke the home that recorded it"
+  open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
+  case "$open" in
+    api-shape$'\t'*) ;;
+    *) fail "hold or release disturbed the worker's own open decision: $open" ;;
+  esac
+
+  # A re-hold starts a new declaration, and a closing answer retracts it.
+  run_captain "$home" hold "$id" --reason "second operator review" >/dev/null \
+    || fail "could not re-hold the released work item"
+  grep -Fx "captain-held [key=captain-hold-$id-2]: second operator review" \
+    "$home/state/$id.status" >/dev/null \
+    || fail "re-hold did not declare a new lifecycle on the status log"
+  printf 'Ship it as reviewed.\n' > "$home/ship.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/ship.txt" >/dev/null \
+    || fail "answer could not close the re-held work item"
+  grep -Fx "resolved [key=captain-hold-$id-2]: captain call answered by fm-captain-hold" \
+    "$home/state/$id.status" >/dev/null \
+    || fail "a closing answer did not retract the status-log declaration"
+
+  # A decision-only hold creates the status log the classifier reads, and an
+  # evidence-backed reconcile close retracts it.
+  run_captain "$home" hold sample-plain-call \
+    --title "Pick a sample flavor" --reason "flavor choice pending" >/dev/null \
+    || fail "could not register the decision-only hold"
+  grep -Fx "captain-held [key=captain-hold-sample-plain-call-1]: flavor choice pending" \
+    "$home/state/sample-plain-call.status" >/dev/null \
+    || fail "a decision-only hold did not reach the status log"
+  run_captain "$home" bind sample-board >/dev/null \
+    || fail "could not bind the captured source"
+  printf 'sample-plain-call\n' \
+    | run_captain "$home" reconcile-requests --source-id sample-board \
+        --source "captured board result" >/dev/null \
+    || fail "could not record the reconcile request"
+  printf 'The premise dissolved: the sample upstream already ships it.\n' > "$home/evidence.txt"
+  run_captain "$home" reconcile close sample-plain-call \
+    --evidence-file "$home/evidence.txt" >/dev/null \
+    || fail "reconcile close failed on the held call"
+  grep -Fx "resolved [key=captain-hold-sample-plain-call-1]: captain call reconciled by fm-captain-hold" \
+    "$home/state/sample-plain-call.status" >/dev/null \
+    || fail "reconcile close did not retract the status-log declaration"
+
+  # The keyed retraction is the hold lifecycle's own namespace, so the
+  # divergence guard reads none of this as a captain call closed wrongly.
+  diverged_out=$(run_captain "$home" diverged) \
+    || fail "the divergence guard failed on a settled home"
+  [ -z "$diverged_out" ] \
+    || fail "the hold status mirror produced a false divergence signal: $diverged_out"
+  pass "hold and release mirror the hold on the status log the classifier reads"
+}
+
 # The hold-set stamp must be durable before the captain hold becomes visible.
 # A wrapper observes the real tasks-axi hold boundary, and a forced stamp-write
 # failure proves the command never publishes the hold without its timestamp.
@@ -4029,6 +4140,7 @@ test_retained_body_keeps_its_utf8_bytes
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work
+test_hold_and_release_reach_the_status_log
 test_hold_stamp_precedes_hold_visibility
 test_interrupted_answer_preserves_hold_age
 test_deferral_leaves_captains_call_until_due
