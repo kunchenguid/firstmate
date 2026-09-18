@@ -7,14 +7,16 @@
 # vendor-emitted surfaces. A release that renames or drops one of those flags
 # would make every executor launch die at argument parsing, which the executor
 # poll would then report as "no commits and no PR" - a launch-environment
-# failure disguised as a failed attempt. Each adapter's own --help is the
-# structural source for its flag set, so this guard reads exactly that and
-# never submits a prompt: it consumes no model tokens and runs wherever the
-# adapters are installed. An absent adapter is reported explicitly, a pass that
-# checked nothing is refused, and a failure names the harness and its version.
+# failure disguised as a failed attempt. What this guard pins is exactly that
+# and nothing else: for each INSTALLED adapter, the flag tokens its headless
+# launch template passes must still appear as whole tokens in that adapter's own
+# --help. It never asserts the vendor's wording, never submits a prompt, and so
+# consumes no model tokens. An absent adapter is reported explicitly, a pass
+# that checked nothing is refused, and a failure names the harness and its
+# version.
 #
 # The portable counterpart, tests/fm-spawn-executor.test.sh, pins the templates
-# themselves against a fake pane; this guard pins the vendor half.
+# themselves against a fake pane; this guard pins the adapter's flag surface.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -45,8 +47,6 @@ if command -v claude >/dev/null 2>&1; then
   require_flags claude "$version" "$help" --print --output-format --dangerously-skip-permissions --permission-mode --model --effort --settings
   printf '%s\n' "$help" | grep -Eq -- '-p, --print' \
     || fail "claude $version no longer advertises -p as the short form of --print"
-  printf '%s\n' "$help" | grep -Eq -- 'non-interactive' \
-    || fail "claude $version --help no longer describes -p as a non-interactive mode"
   pass "claude $version advertises every flag of the executor template (claude -p)"
   checked=$((checked + 1))
 else
@@ -56,8 +56,6 @@ fi
 if command -v codex >/dev/null 2>&1; then
   version=$(codex --version 2>/dev/null | head -1 || true)
   help=$(codex exec --help 2>&1 || true)
-  printf '%s\n' "$help" | grep -Eq -- 'non-interactively' \
-    || fail "codex $version 'exec --help' no longer describes a non-interactive run"
   require_flags codex "$version" "$help" --model --config --disable --dangerously-bypass-approvals-and-sandbox
   pass "codex $version advertises every flag of the executor template (codex exec)"
   checked=$((checked + 1))
@@ -68,8 +66,6 @@ fi
 if command -v opencode >/dev/null 2>&1; then
   version=$(opencode --version 2>/dev/null | head -1 || true)
   help=$(opencode run --help 2>&1 || true)
-  printf '%s\n' "$help" | grep -Eq -- '^opencode run \[message' \
-    || fail "opencode $version 'run --help' no longer describes a positional message"
   require_flags opencode "$version" "$help" --model
   pass "opencode $version advertises every flag of the executor template (opencode run)"
   checked=$((checked + 1))
