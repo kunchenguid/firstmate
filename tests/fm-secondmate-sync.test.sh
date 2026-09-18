@@ -455,6 +455,38 @@ test_bootstrap_sweep_nudges_only_instruction_change() {
   pass "T8 bootstrap sweeps live homes and sends exactly one marked nudge for the instruction change"
 }
 
+# The reread nudge has no reply protocol - a secondmate just re-reads AGENTS.md
+# and keeps idling - so it must never create a pending-reply expectation. Before
+# the fix, an ordinary marked send did exactly that, and the expectation could
+# never be answered: it would recover once, escalate once, and then reopen the
+# same decision on every later session start for a perfectly healthy, idle home.
+test_bootstrap_nudge_creates_no_pending_reply_expectation() {
+  local w c1 fakebin out log inbox_msg
+  w=$(new_world nudge-no-pending-reply)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  fakebin=$(make_fake_toolchain "$w")
+  log="$w/tmux.log"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" "BOOTSTRAP_INFO: nudged fm-sm-instr with" \
+    "nudge send should still succeed and report"
+  inbox_msg=$(cat "$w/home/state/sm-instr.inbox/001.msg")
+  assert_contains "$inbox_msg" "[fm-from-firstmate]" \
+    "nudge send should still use the marked fm-send secondmate path"
+  assert_contains "$inbox_msg" "delivery=" \
+    "nudge should ride the fire-and-forget plane (delivery= marker)"
+  assert_not_contains "$inbox_msg" "corr=" \
+    "nudge must not create a reply-bearing correlation"
+  [ ! -d "$w/home/state/pending-replies" ] || [ -z "$(ls -A "$w/home/state/pending-replies" 2>/dev/null)" ] \
+    || fail "nudge created an unanswerable pending-reply expectation: $(ls "$w/home/state/pending-replies")"
+  pass "the reread nudge never creates a pending-reply expectation it can never resolve"
+}
+
 test_bootstrap_nudge_send_uses_state_override() {
   local w c1 fakebin out log override_state marker
   w=$(new_world nudge-state-override)
@@ -1351,6 +1383,7 @@ test_ff_inflight_feature_branch
 test_no_fetch_in_local_path
 test_sweep_nudge_requires_instruction_change
 test_bootstrap_sweep_nudges_only_instruction_change
+test_bootstrap_nudge_creates_no_pending_reply_expectation
 test_bootstrap_nudge_send_uses_state_override
 test_bootstrap_nudge_retry_rejects_malformed_marker_id
 test_bootstrap_nudge_failure_records_retry_marker
