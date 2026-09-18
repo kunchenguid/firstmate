@@ -744,3 +744,23 @@ The flag-off session's settled screen, with the preference `on` on disk, drew Cl
 
 ✻ Sautéed for 8s · done 11:07 AM
 ```
+
+## 2026-09-18 omp 18.1.17 public-API probe for hide-ceremony
+
+Probed against the installed `omp --version` binary `omp/18.1.17` by loading a throwaway extension that inspected the live `ExtensionAPI` object:
+
+```text
+$ omp --version
+omp/18.1.17
+
+registerMessageRenderer: function (arity 2)
+registerAssistantThinkingRenderer: function (arity 1)
+registerCommand: function (arity 2)
+registerEntryRenderer: undefined
+```
+
+`registerMessageRenderer(customType, renderer)` stores a custom-type renderer used by `CustomMessageComponent`; returning a truthy empty component replaces the default custom-message chrome.
+`registerAssistantThinkingRenderer(renderer)` appends supplemental UI below each already-visible thinking block; it does not replace or hide the thinking block itself.
+`@oh-my-pi/pi-coding-agent` on this install also exports `InteractiveMode.addMessageToChat`, `UserMessageComponent`, `AssistantMessageComponent.updateContent`, and `AssistantMessageComponent.setHideThinkingBlock`, which the shipped OMP Calm adapters probe for operational user rows and thinking collapse.
+The working-ship / boat path was not probed for OMP and remains Pi-only.
+`tests/fm-calm-omp-extension.test.sh` owns the portable contract for preference persistence, `/calm`, operational-row hide/show, thinking collapse, and Calm-off restore against a fake OMP API.
