@@ -3973,6 +3973,54 @@ EOF
   pass "a same-head terminal rerun publishes the newest pull request"
 }
 
+# The ledger is a 200-row window, so a long-inactive crew - exactly what
+# bin/fm-inactive-reconcile.sh scans - routinely has no row for its branch at
+# all. An absent row is absence of contradicting evidence, not disproof, so the
+# reading keeps the pull request from the same record that supplied its state:
+# telling the captain the work is done while naming nothing to look at is its
+# own false report.
+test_terminal_reading_keeps_its_pr_when_the_ledger_has_no_row() {
+  reset_fakes
+  local d out; d=$(new_case terminal-pr-no-ledger-row)
+  make_repo_on_branch "$d/wt" fm/feat-s2m
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2m.meta" "window=fm:fm-feat-s2m" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed_with_pr fm/feat-s2m https://github.com/o/r/pull/4444)"
+  FM_FAKE_RUNS_LIST=""
+  out=$(run_crew_state "$d" feat-s2m)
+  assert_contains "$out" "state: done" "the attributed terminal reading still stands"
+  assert_contains "$out" "pr=https://github.com/o/r/pull/4444" \
+    "an absent ledger row does not withhold the delivered pull request"
+  assert_not_contains "$out" "state: unknown" "no ledger row means no contradiction"
+  pass "a terminal reading keeps its pull request when the ledger has no row"
+}
+
+# The run id is a FIELD of the published line, not a word inside a clause. The
+# precedence verdicts splice the reading's own detail into their sentences, so
+# the id must be appended once at the end - otherwise the ' · ' field separator
+# lands mid-clause and splits one sentence across two apparent fields. Only the
+# inventory path assigns a run id, so this needs a real overview: a plain status
+# TOON leaves the id empty and the defect invisible.
+test_precedence_verdict_reads_as_one_sentence_with_the_run_id_last() {
+  reset_fakes
+  local d out; d=$(new_case precedence-run-id-field)
+  make_repo_on_branch "$d/wt" fm/feat-s2n
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2n.meta" "window=fm:fm-feat-s2n" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  01RUN,fm/feat-s2n,failed,${FM_FAKE_RUN_HEAD},\"\""
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s2n)"
+  FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s2n f0f0f0f0  $(ledger_stamp_minutes_ago 30)"
+  out=$(run_crew_state "$d" feat-s2n)
+  assert_contains "$out" "state: unknown" "an unbindable newest row still reads unknown"
+  assert_contains "$out" "cannot be bound to the run failed; current state not provable here" \
+    "the verdict's sentence is not split by the run-id field"
+  assert_contains "$out" "not provable here · run: 01RUN" "the run id is the line's last field"
+  pass "a precedence verdict reads as one sentence with the run id last"
+}
+
 # A verdict taken from the ledger row must not be labelled with the attributed
 # run's identity. This arm fires only when the newest row is NOT provably the
 # attributed run - here it carries a different pull request at the same head -
@@ -6816,6 +6864,8 @@ test_later_completed_run_leaves_the_failure_unprovable
 test_unbindable_later_run_reports_unknown_not_failed
 test_unbindable_later_terminal_run_reports_unknown
 test_same_head_terminal_rerun_publishes_newest_pr
+test_terminal_reading_keeps_its_pr_when_the_ledger_has_no_row
+test_precedence_verdict_reads_as_one_sentence_with_the_run_id_last
 test_ledger_sourced_verdict_never_names_the_attributed_run_as_its_own
 test_coarse_terminal_reading_claims_no_supersession
 test_foreign_status_never_hides_coarse_terminal_pr

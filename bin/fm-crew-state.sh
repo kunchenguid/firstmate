@@ -160,8 +160,13 @@
 #      where a later ledger row leaves the current state unprovable it answers
 #      unknown, and otherwise the failed reading stands.
 #      Independently of outcome, a terminal reading publishes a PR only when the
-#      current-run evidence still attributes that reading; otherwise it
-#      publishes none.
+#      current-run evidence still attributes that reading, or when the ledger
+#      offers no row for this branch at all: an absent row is absence of
+#      contradicting evidence, not disproof, and one record cannot be
+#      authoritative for the verdict while being untrusted for the link that
+#      makes it actionable (the long-inactive crews bin/fm-inactive-reconcile.sh
+#      scans routinely have runs outside the listing window). A row that EXISTS
+#      and cannot be bound still publishes no PR.
 #      Every answer here is reached only AFTER rule 3 below has reconciled the
 #      status log, so rule 3's daemon-socket-down override outranks all of them,
 #      not merely a plainly attributed run record: an instrument failure must not
@@ -1408,7 +1413,7 @@ if [ "$HAVE_RUN" = 1 ]; then
         case "$LEDGER_STATUS" in
           completed|failed|cancelled) TERMINAL_PR=$NEWEST_PR ;;
         esac
-      elif [ "$NEWEST_ROW_AGREES" = 1 ]; then
+      elif [ "$NEWEST_ROW_AGREES" = 1 ] || [ -z "$NEWEST_STATUS" ]; then
         TERMINAL_PR=$RUN_PR
       fi
       ;;
@@ -1462,7 +1467,10 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
-  [ -z "$SELECTED_RUN_ID" ] || RUN_DETAIL="$RUN_DETAIL${SEP}run: $SELECTED_RUN_ID"
+  READING_DETAIL=$RUN_DETAIL
+  RUN_ID_FIELD=""
+  [ -z "$SELECTED_RUN_ID" ] || RUN_ID_FIELD="${SEP}run: $SELECTED_RUN_ID"
+  RUN_DETAIL="$RUN_DETAIL$RUN_ID_FIELD"
 
   # Apply the terminal-reading precedence contract owned by header rule 2b.
   if { [ "$RUN_STATE" = failed ] || [ "$RUN_STATE" = done ]; } \
@@ -1470,13 +1478,15 @@ if [ "$HAVE_RUN" = 1 ]; then
     if [ "$RUN_STATE" = failed ]; then
       case "$LEDGER_STATUS" in
         completed)
-          SUPERSEDED_DETAIL="run superseded by a newer completed run on this branch (earlier $RUN_DETAIL)"
+          SUPERSEDED_DETAIL="run superseded by a newer completed run on this branch (earlier $READING_DETAIL)"
+          [ -z "$SELECTED_RUN_ID" ] \
+            || SUPERSEDED_DETAIL="$SUPERSEDED_DETAIL${SEP}earlier run: $SELECTED_RUN_ID"
           TERMINAL_PR=$NEWEST_PR
           emit_run "done" "$SUPERSEDED_DETAIL" "$TERMINAL_PR"
           ;;
         failed|cancelled)
           if [ "$NEWEST_ROW_AGREES" != 1 ]; then
-            LEDGER_DETAIL="run $LEDGER_STATUS from the ledger's row for this worktree; the $RUN_DETAIL reading could not be bound to it"
+            LEDGER_DETAIL="run $LEDGER_STATUS from the ledger's row for this worktree; the $READING_DETAIL reading could not be bound to it"
             TERMINAL_PR=$NEWEST_PR
             emit_run failed "$LEDGER_DETAIL" "$TERMINAL_PR"
           fi
@@ -1487,7 +1497,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       '') ;;
       *)
         [ "$NEWEST_ROW_AGREES" = 1 ] || emit unknown run-step \
-          "the newest $NEWEST_STATUS ledger row on this branch cannot be bound to the $RUN_DETAIL; current state not provable here"
+          "the newest $NEWEST_STATUS ledger row on this branch cannot be bound to the $READING_DETAIL; current state not provable here$RUN_ID_FIELD"
         ;;
     esac
   fi
