@@ -57,7 +57,10 @@ fm_harness_path_name() {  # <path>
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
 #      is identified by its install path on macOS and by argv[0] on Linux.
-#   3. a bare interpreter (node, python) running a harness script path.
+#   3. a bare interpreter (node, python, bun) running a harness script path.
+#      Anchored names (pi, pi-signed, omp) never match this line as a
+#      substring, so each script-path word is also checked as an exact path
+#      component (e.g. bun /Users/x/.bun/bin/omp).
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
@@ -73,13 +76,22 @@ fm_harness_process_matches() {  # <comm> <args>
     case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
     return 0
   fi
-  # Bare interpreter (e.g. node): match the harness name in its script path.
+  # Bare interpreter (e.g. node, bun): match the harness name in its script
+  # path, either as a substring (unanchored names) or as an exact path
+  # component (anchored names such as omp, which a bun-launched install
+  # reports only inside argv, never as comm).
   case "$comm" in
-    *node*|*python*)
+    *node*|*python*|*bun*)
       if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
         case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
         return 0
       fi
+      for word in $args; do
+        if name=$(fm_harness_path_name "$word"); then
+          case "$name" in claude) FM_HARNESS_IS_CLAUDE=1 ;; esac
+          return 0
+        fi
+      done
       ;;
   esac
   # Cursor: its own owner decides, from Cursor's name or versioned install tree
