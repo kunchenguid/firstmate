@@ -157,6 +157,43 @@ fm_backend_tmux_window_inventory() {  # <session-target>
   return 1
 }
 
+# fm_backend_tmux_target_absent: whether tmux authoritatively reports the
+# exact recorded window gone. Prints one verdict:
+#   absent    - tmux answered a read and definitively does not have the
+#               window: the window is absent from a read inventory, or tmux
+#               answered that the session, or its whole server, is gone.
+#               tmux restores nothing across a restart, so a gone session's
+#               windows are genuinely gone.
+#   present   - a read inventory lists the exact window.
+#   uncertain - the inventory could not be read at all (a transient tmux
+#               problem, or tmux not on PATH), or the target does not parse.
+#               A caller that destroys state on absence must prune only on
+#               `absent`, never on `uncertain`.
+fm_backend_tmux_target_absent() {  # <target>
+  local target=$1 session window windows rc
+  case "$target" in
+    *:*:*|'':*|*:'') printf 'uncertain'; return 0 ;;
+    *:*) ;;
+    *) printf 'uncertain'; return 0 ;;
+  esac
+  session=${target%%:*}
+  window=${target#*:}
+  windows=$(fm_backend_tmux_window_inventory "$session")
+  rc=$?
+  case "$rc" in
+    2) printf 'absent' ;;
+    1) printf 'uncertain' ;;
+    0)
+      if printf '%s\n' "$windows" | grep -Fqx "$window"; then
+        printf 'present'
+      else
+        printf 'absent'
+      fi
+      ;;
+    *) printf 'uncertain' ;;
+  esac
+}
+
 # fm_backend_tmux_kill: remove one explicitly named task window.
 # Empty, omitted, and malformed targets return nonzero before invoking tmux so
 # tmux can never interpret an empty target as the caller's current window.

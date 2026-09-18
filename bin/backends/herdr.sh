@@ -2437,6 +2437,26 @@ fm_backend_herdr_endpoint_absence_recheck() {  # <target>
     || { printf 'unreadable'; return 0; }
   fm_backend_herdr_agent_state "$target"
 }
+# fm_backend_herdr_target_absent: whether herdr authoritatively reports the
+# exact recorded pane gone. Prints one verdict:
+#   absent    - a LIVE server answered `pane get` with pane_not_found for this
+#               exact pane (a closed pane, or a pane lost with its workspace).
+#               The server must have answered: a down or unreachable server
+#               proves nothing, because herdr restores its whole session layout
+#               on restart, so panes legitimately come back.
+#   present   - the pane exists.
+#   uncertain - everything else: server down or unreachable, a read that
+#               failed or timed out, an unparseable response, or a target
+#               that does not parse. A caller that destroys state on absence
+#               must prune only on `absent`, never on `uncertain`.
+fm_backend_herdr_target_absent() {  # <target>
+  fm_backend_herdr_parse_target "$1" || { printf 'uncertain'; return 0; }
+  case "$(fm_backend_herdr_pane_presence_state "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" in
+    dead) printf 'absent' ;;
+    present) printf 'present' ;;
+    *) printf 'uncertain' ;;
+  esac
+}
 
 # Backward-compatible three-state view for callers that only need a yes/no
 # agent verdict. The detailed state contract is owned by fm_backend_agent_state.
