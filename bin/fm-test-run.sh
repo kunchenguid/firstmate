@@ -145,6 +145,10 @@
 # shared files that map to the suites naming them; a fixture under
 # tests/fixtures/<dir>/ is mapped by that directory instead. Curated family arms
 # above those also name individual tests/ files explicitly.
+#
+# Every run, by every path, clears the ambient fleet environment before it starts
+# a script, so a suite started from inside a worker cannot reach the live home.
+# bin/fm-test-env-lib.sh owns that contract.
 set -eu
 
 now_ms() {
@@ -160,6 +164,17 @@ RUN_STARTED_MS=$(now_ms)
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
+
+# Clear the ambient fleet environment once, in this process, before anything can
+# start a test script. Every selected script - serial or --jobs worker - is a
+# child of this process, so no run path can hand a test the live home and no
+# caller has to remember a flag. bin/fm-test-env-lib.sh owns the pointer list.
+# shellcheck source=bin/fm-test-env-lib.sh
+. "$ROOT/bin/fm-test-env-lib.sh"
+fm_test_env_isolate || {
+  printf 'fm-test-run: refusing to run: the live fleet home is still reachable\n' >&2
+  exit 2
+}
 
 MODE=
 LIST_ONLY=0
@@ -1368,6 +1383,15 @@ families_for_changed_path() {
       # through run_script_bounded, so it cannot regress fixture Git isolation.
       printf '%s\n' pure-contract-unit
       ;;
+    bin/fm-test-env-lib.sh)
+      # Both runners source this to clear the ambient fleet environment before
+      # any script starts, so a change to it is only proven by running the
+      # scripts they drive.
+      printf '%s\n' pure-contract-unit
+      # It rewrites the environment every bounded suite inherits, which is the
+      # same surface the standalone fixture-isolation script proves.
+      printf '%s\n' "__script__:fm-test-fixtures.test.sh"
+      ;;
     bin/backends/herdr*|bin/fm-herdr-lab.sh|tests/herdr-test-safety.sh|tests/herdr-client-pair-fixture.sh)
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
@@ -2445,9 +2469,11 @@ if [ "$JOBS" -eq 1 ]; then
   done
 else
   # Bounded concurrent execution for admitted scripts. Each worker gets a
-  # private mode-0700 TMPDIR so mktemp roots cannot collide. Native Windows
-  # Bash layers report synthetic POSIX modes, so retain chmod there but enforce
-  # its observed mode only where the host reports real POSIX permissions.
+  # private mode-0700 TMPDIR so mktemp roots cannot collide - that is collision
+  # avoidance between concurrent workers; fleet-home isolation is already
+  # inherited from this process. Native Windows Bash layers report synthetic
+  # POSIX modes, so retain chmod there but enforce its observed mode only where
+  # the host reports real POSIX permissions.
   # Retries are never used as a green strategy.
   worker_n=0
   active_workers=0
@@ -2543,8 +2569,6 @@ else
       set +e
       export TMPDIR="$work/tmp"
       export TMP="$work/tmp"
-      unset FM_HOME FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_ROOT_OVERRIDE \
-        FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE FM_BACKEND 2>/dev/null || true
       cd "$ROOT" || exit 1
       begin_ms=$(now_ms)
       set +e
