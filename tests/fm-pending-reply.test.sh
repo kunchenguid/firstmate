@@ -512,7 +512,7 @@ test_concurrent_resolution_closes_escalation_once() {
     printf 'done [corr=%s]: concurrent delayed reply\n' "$corr" >> "$state/hibit.status"
 
     for _ in 1 2 3 4 5 6 7 8; do
-      fm_pending_reply_try_resolve "$state" "$corr" &
+      ( unset BASHPID; fm_pending_reply_try_resolve "$state" "$corr" ) &
     done
     wait
 
