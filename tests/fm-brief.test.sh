@@ -436,13 +436,19 @@ test_ship_project_memory_wording() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
+  assert_grep "$home/data/agents/some-proj.md" "$brief" \
+    "project-memory contract lost the active home's central agent-memory path"
   assert_grep "Record only project knowledge useful to almost every future session." "$brief" \
     "project-memory contract lost the durable-knowledge bar"
   assert_grep "prefer a pointer to the authoritative file, command, or doc over copying the detail" "$brief" \
     "project-memory contract lost pointer-over-copy guidance"
-  assert_grep "follow \`$ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract" "$brief" \
-    "project-memory contract no longer defers to the ensure helper"
-  pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
+  assert_grep "skip the memory edit for tasks that produced no durable project knowledge" "$brief" \
+    "project-memory contract lost the proportionality guidance"
+  assert_grep "Never create or modify \`AGENTS.md\`, \`CLAUDE.md\`, or any equivalent agent memory file inside the project repo." "$brief" \
+    "project-memory contract lost the repo-root agent-file ban"
+  assert_no_grep "fm-ensure-agents-md.sh" "$brief" \
+    "brief still routes project memory through the retired ensure helper"
+  pass "fm-brief.sh: ship project-memory contract points at central agent memory"
 }
 
 test_herdr_lab_contract_is_explicit_and_complete() {

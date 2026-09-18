@@ -20,6 +20,10 @@ This record owns concurrent isolation evidence for the portable parallel candida
 | failed | 0 |
 | wall duration | 113278 ms |
 
+- 2026-09-18: `tests/fm-ensure-agents-md.test.sh` was retired with `bin/fm-ensure-agents-md.sh` and removed from `bin/fm-test-isolation-proof.sh`'s candidate set and `bin/fm-test-run.sh`'s shard lists.
+  The surviving 23-candidate portable set is proven by the retained 24-candidate run, because a subset of a proven concurrent run at the same `--jobs 4` inherits the proof.
+  A refresh run on a fully provisioned host follows the Command line above to supersede this record; a 2026-09-18 rerun on a host without ruby, `tsc`, or PATH-visible pinned ShellCheck gate-skipped on those tools instead of re-proving the set, so this record remains the current archive.
+
 ## Candidate set
 
 - `tests/fm-arm-pretool-check.test.sh`

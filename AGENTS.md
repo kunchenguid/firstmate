@@ -87,6 +87,7 @@ config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCA
 config/watched-tools.json  optional list of the tools this home depends on, read by the update check armed with bin/fm-tool-update-check.sh; LOCAL, gitignored, firstmate-maintained but human-editable, and NOT inherited by secondmate homes; see docs/configuration.md "Watched tool updates"
 config/x-mode.env    generated Relay watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
+  agents/<project>.md  central agent memory for project-durable knowledge, one file per project; LOCAL, gitignored, created lazily under that directory's own README convention (section 6)
   backlog.md         task queue, dependencies, history
   captain.md         this home's domain-local captain preferences and working style; LOCAL, gitignored, canonical even if harness memory mirrors it, and updated with inspect-then-update
   captain-shared.md  main-authoritative shared captain preferences propagated read-only to secondmate homes; LOCAL, gitignored, owned by secondmate-provisioning
@@ -272,12 +273,13 @@ Route durable knowledge to its most specific owner:
 - Captain preferences shared across secondmate domains belong in the primary home's `data/captain-shared.md` under the `secondmate-provisioning` contract.
 - Fleet-local operational facts belong in curated, home-local `data/learnings.md`.
 - Task-scoped notes belong with the backlog item, and investigation findings belong in the scout report.
-- Knowledge useful to almost every contributor to one project belongs in that project's committed `AGENTS.md`.
+- Knowledge useful to almost every future session of one project belongs in the active home's central agent memory, `data/agents/<project>.md`, never in an agent memory file inside the project repo.
 - Knowledge general to every firstmate user belongs in this repo's shared tracked surface.
 
-Firstmate never writes a project's `AGENTS.md` directly.
-A crewmate creates or updates it lazily through the project's selected delivery path, using `bin/fm-ensure-agents-md.sh` and preferring pointers to authoritative sources over copied detail.
-Keep fleet delivery posture and captain-private strategy out of project memory.
+Agent memory files (`AGENTS.md`, `CLAUDE.md`, or equivalents) are never created or updated inside a captain's project repo, by firstmate or by a crewmate task.
+Project-durable knowledge is recorded in `data/agents/<project>.md` lazily, one file per project, following that directory's `README.md` convention and preferring pointers to authoritative sources over copied detail.
+This repo's own committed `AGENTS.md` is shared tracked template material, not a captain project file.
+Keep fleet delivery posture and captain-private strategy out of project-durable knowledge.
 When the captain invokes `/stow`, load the `stow` skill for its memory curation, knowledge routing, and persistence of the open work records this session is holding; it files and corrects only the open work that session is holding, and never reconciles the backlog against repository or PR reality.
 
 ## 7. Task lifecycle

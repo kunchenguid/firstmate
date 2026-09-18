@@ -63,11 +63,12 @@
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
-# Ship tasks include a project-memory section so durable project-intrinsic
-# learnings can be committed to AGENTS.md through the project's delivery path;
-# it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
-# over copied detail) and defers self-governance recognition and insertion to
-# fm-ensure-agents-md.sh's contract.
+# Ship tasks include a project-memory section pointing durable project-intrinsic
+# learnings at the active home's central agent memory, data/agents/<repo>.md
+# (convention owned by that directory's README.md); it carries the authoring bar
+# (widely useful knowledge only, pointers over copied detail, proportionate skip)
+# and the standing ban on creating or editing agent memory files inside the
+# project repo.
 # Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
 # fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
 # second owner of a contract that must stay current across relaunches.
@@ -506,11 +507,12 @@ $ASK_USER_BLOCK
 $INBOX_SECTION
 
 # Project memory
-If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
+Durable project knowledge this task produces is recorded in the ACTIVE HOME's central agent memory: \`$FM_HOME/data/agents/$REPO.md\`, one file per project, created lazily following the convention in that directory's \`README.md\`.
+That home-local file is gitignored private state and a named exception to rule 2; nothing else outside the worktree changes.
+Never create or modify \`AGENTS.md\`, \`CLAUDE.md\`, or any equivalent agent memory file inside the project repo.
 Record only project knowledge useful to almost every future session.
 For anything the codebase already shows, prefer a pointer to the authoritative file, command, or doc over copying the detail.
-If you touch a project \`AGENTS.md\`, follow \`$FM_ROOT/bin/fm-ensure-agents-md.sh\`'s self-governance contract in the same pass.
-Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced no durable project knowledge.
+Keep it proportionate: skip the memory edit for tasks that produced no durable project knowledge.
 
 $DOD
 EOF
