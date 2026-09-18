@@ -22,8 +22,11 @@
 #      ready on an unregistered path until the dialog has been answered (the
 #      Herdr native-busy-before-dialog race), and fails the spawn with endpoint
 #      cleanup when the brief cannot be confirmed to run in the worktree.
-#   5. agy is a crewmate/scout adapter only: a secondmate launch is refused,
-#      and nothing is armed as busy wiring because no writer could clear it.
+#   5. agy is a crewmate/scout adapter only and a secondmate launch is refused.
+#      Its turn-end hook is GLOBAL, so the spawn arms a busy generation and
+#      attributes a firing through a private per-task token: the hook must be
+#      inert for every session that token does not name, and a forged token
+#      must never escape the registry directory.
 #   6. The busy signature is the pinned `esc to cancel` status row alone; the
 #      free-floating `Generating...` word must never read busy on its own.
 #   7. Herdr's registry already tracks agy, and exit detection proves the
@@ -590,8 +593,15 @@ EOF
 # which runners do not keep in the system bin dirs. Carry the directory the
 # invoking environment resolves node from, the fm-kimi-harness shape.
 NODE_BIN=$(command -v node) || fail "test needs node"
-NODE_BIN_DIR=$(dirname "$NODE_BIN")
-BASE_PATH=${FM_TEST_BASE_PATH:-$NODE_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
+# Carry node WITHOUT carrying its whole directory: agy installs to ~/.local/bin,
+# which is also where many runners resolve node from, so putting that directory
+# on the base PATH leaks the host's real agy into cases that must see none - the
+# missing-binary case then found it and the spawn correctly refused to refuse.
+# A shim holding only node keeps the fixture's agy the only agy on PATH.
+NODE_SHIM_DIR="$TMP_ROOT/node-shim"
+mkdir -p "$NODE_SHIM_DIR"
+ln -sf "$NODE_BIN" "$NODE_SHIM_DIR/node"
+BASE_PATH=${FM_TEST_BASE_PATH:-$NODE_SHIM_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
 run_agy_spawn() {
   local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
@@ -869,22 +879,159 @@ test_agy_secondmate_is_refused() {
   pass "fm-spawn: agy cannot be launched as a secondmate"
 }
 
-test_agy_spawn_arms_no_busy_wiring() {
-  local id rec out rc statedir
-  id="agy-nowiring-z7-$$"
-  rec=$(make_agy_spawn_case nowiring "$id")
+test_agy_spawn_arms_the_turnend_wiring() {
+  local id rec out rc statedir token auth launch
+  id="agy-wiring-z7-$$"
+  rec=$(make_agy_spawn_case wiring "$id")
   read_agy_spawn_record "$rec"
   out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
     --model gemini-3.8-flash-low)
   rc=$?
   expect_code 0 "$rc" "agy spawn should succeed"
   statedir="$HOME_DIR/state"
-  [ -e "$statedir/$id.busy-gen" ] && fail "agy spawn armed a busy generation nothing could clear" || true
-  for sidecar in "$statedir/$id.agy-"*; do
-    [ -e "$sidecar" ] || continue
-    fail "agy spawn left an adapter sidecar behind: $sidecar"
+  [ -s "$statedir/$id.busy-gen" ] || fail "agy spawn did not arm a busy generation for its hook to clear"
+  [ -s "$statedir/$id.agy-turnend-token" ] || fail "agy spawn did not record its turn-end token sidecar"
+  IFS= read -r token <"$statedir/$id.agy-turnend-token"
+  case "$token" in
+  fm.????????????) ;;
+  *) fail "agy turn-end token '$token' is not a registry-minted name" ;;
+  esac
+  auth="$HOME_DIR/.gemini/antigravity-cli/fm-turn-end.d/$token"
+  [ -f "$auth" ] || fail "agy spawn did not mint its private turn-end registry entry"
+  assert_grep "gen=" "$auth" "the agy turn-end token carries no busy generation"
+  assert_grep "id=$id" "$auth" "the agy turn-end token names the wrong task"
+  assert_grep "turnend=" "$auth" "the agy turn-end token carries no turn-end marker path"
+  assert_grep "busy_event=" "$auth" "the agy turn-end token carries no busy-state writer path"
+  # The whole point of the env route: nothing is written into the project.
+  for stray in "$WT_DIR"/.fm-agy*; do
+    [ -e "$stray" ] || continue
+    fail "agy spawn wrote a pointer into the worktree: $stray"
   done
-  pass "fm-spawn: agy arms no busy wiring and writes no sidecar"
+  launch=$(cat "$CASE_DIR/launch.log")
+  assert_contains "$launch" "FM_TASK_ID='$id'" "agy launch did not export its task id to the hook"
+  assert_contains "$launch" "FM_AGY_TURNEND_TOKEN='$token'" "agy launch did not export its turn-end token"
+  assert_not_contains "$launch" "__AGYTOKEN__" "agy launch left its token placeholder unsubstituted"
+  pass "fm-spawn: agy arms busy wiring and exports its token without touching the worktree"
+}
+
+# The installed hook is global and shared with the captain's own agy sessions
+# and the Antigravity IDE, so these cases pin the two properties that keep that
+# safe: it edits only its own key, and it is inert without a registry-backed
+# token. They exercise the real installer and the real generated hook script.
+agy_turnend_install() {  # <home>
+  HOME="$1" "$ROOT/bin/fm-agy-turnend-hook.sh" install
+}
+
+test_agy_turnend_installer_owns_only_its_own_key() {
+  local home store rc out
+  home="$TMP_ROOT/turnend-install"
+  rm -rf "$home"
+  mkdir -p "$home/.gemini/config"
+  store="$home/.gemini/config/hooks.json"
+  printf '%s\n' '{"someone-elses-hook":{"Stop":[{"type":"command","command":"echo hi"}]}}' >"$store"
+  agy_turnend_install "$home" || fail "the agy turn-end installer refused a clean store"
+  assert_grep '"someone-elses-hook"' "$store" "the installer dropped a foreign hook key"
+  assert_grep '"firstmate-turn-end"' "$store" "the installer did not record its own hook key"
+  assert_grep '"timeout": 5' "$store" "the installer did not bound its handlers"
+  [ -x "$home/.gemini/antigravity-cli/fm-turn-end.sh" ] || fail "the installer did not install an executable hook script"
+  # Installing twice must converge rather than duplicate.
+  agy_turnend_install "$home" || fail "the agy turn-end installer is not idempotent"
+  out=$(grep -c '"firstmate-turn-end"' "$store")
+  expect_code 0 "$?" "counting the firstmate hook key should succeed"
+  [ "$out" -eq 1 ] || fail "installing twice left $out firstmate hook keys"
+  HOME="$home" "$ROOT/bin/fm-agy-turnend-hook.sh" remove || fail "the agy turn-end installer could not remove its key"
+  assert_grep '"someone-elses-hook"' "$store" "remove dropped a foreign hook key"
+  if grep -q '"firstmate-turn-end"' "$store"; then
+    fail "remove left the firstmate hook key behind"
+  fi
+  pass "fm-agy-turnend-hook.sh: owns only its own key and installs idempotently"
+}
+
+test_agy_turnend_installer_refuses_a_store_it_does_not_own() {
+  local home store rc
+  home="$TMP_ROOT/turnend-refuse"
+  rm -rf "$home"
+  mkdir -p "$home/.gemini/config"
+  store="$home/.gemini/config/hooks.json"
+  printf '%s\n' '["not","an","object"]' >"$store"
+  rc=0
+  agy_turnend_install "$home" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "the installer accepted a non-object hooks.json root"
+  assert_grep '["not","an","object"]' "$store" "the installer rewrote a store it should have refused"
+  printf '%s\n' '{}' >"$TMP_ROOT/turnend-refuse-target.json"
+  rm -f "$store"
+  ln -s "$TMP_ROOT/turnend-refuse-target.json" "$store"
+  rc=0
+  agy_turnend_install "$home" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "the installer followed a symlinked hooks.json"
+  pass "fm-agy-turnend-hook.sh: refuses a non-object root and a symlinked store"
+}
+
+test_agy_turnend_hook_is_inert_without_a_registry_token() {
+  local home hook out rc bad
+  home="$TMP_ROOT/turnend-inert"
+  rm -rf "$home"
+  mkdir -p "$home/.gemini/config"
+  agy_turnend_install "$home" >/dev/null || fail "installer setup failed"
+  hook="$home/.gemini/antigravity-cli/fm-turn-end.sh"
+  rc=0
+  out=$(printf '{}' | "$hook" stop) || rc=$?
+  expect_code 0 "$rc" "the agy hook must exit 0 with no token"
+  [ "$out" = '{"decision":"stop"}' ] || fail "the agy hook did not answer Stop with agy's required JSON: $out"
+  rc=0
+  out=$(printf '{}' | "$hook" pre-invocation) || rc=$?
+  expect_code 0 "$rc" "the agy hook must exit 0 on PreInvocation with no token"
+  [ "$out" = '{}' ] || fail "the agy hook did not answer PreInvocation with an empty JSON object: $out"
+  # A forged token must never resolve outside the registry directory.
+  for bad in "../escape" "/etc/passwd" "fm.short" "fm.WAYTOOLONGTOKEN" "fm.abc/../def"; do
+    rc=0
+    out=$(printf '{}' | FM_AGY_TURNEND_TOKEN="$bad" "$hook" stop) || rc=$?
+    expect_code 0 "$rc" "the agy hook must exit 0 for forged token '$bad'"
+    [ "$out" = '{"decision":"stop"}' ] || fail "forged token '$bad' changed the agy hook's answer: $out"
+  done
+  pass "fm-agy-turnend-hook.sh: the installed hook is inert without a registry-backed token"
+}
+
+test_agy_turnend_hook_records_both_turn_boundaries() {
+  local home hook reg statedir gen token auth record
+  home="$TMP_ROOT/turnend-record"
+  rm -rf "$home"
+  mkdir -p "$home/.gemini/config"
+  agy_turnend_install "$home" >/dev/null || fail "installer setup failed"
+  hook="$home/.gemini/antigravity-cli/fm-turn-end.sh"
+  reg="$home/.gemini/antigravity-cli/fm-turn-end.d"
+  statedir="$TMP_ROOT/turnend-record-state"
+  rm -rf "$statedir"
+  mkdir -p "$statedir"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$statedir" t1) || fail "could not arm a busy generation"
+  token="fm.aaaaaaaaaaaa"
+  auth="$reg/$token"
+  {
+    printf 'turnend=%s\n' "$statedir/t1.turn-ended"
+    printf 'busy_event=%s\n' "$ROOT/bin/fm-busy-event.sh"
+    printf 'state=%s\n' "$statedir"
+    printf 'id=%s\n' t1
+    printf 'gen=%s\n' "$gen"
+  } >"$auth"
+
+  printf '{}' | FM_AGY_TURNEND_TOKEN="$token" "$hook" stop >/dev/null || fail "the agy Stop hook exited non-zero"
+  record=$(cat "$statedir/t1.busy-state")
+  assert_contains "$record" "state=idle" "agy's Stop hook did not close the turn"
+  assert_contains "$record" "source=agy-hook" "agy's Stop hook did not record its own source"
+  [ -f "$statedir/t1.turn-ended" ] || fail "agy's Stop hook did not touch the watcher's turn-end marker"
+
+  printf '{}' | FM_AGY_TURNEND_TOKEN="$token" "$hook" pre-invocation >/dev/null || fail "the agy PreInvocation hook exited non-zero"
+  record=$(cat "$statedir/t1.busy-state")
+  assert_contains "$record" "state=busy" "agy's PreInvocation hook did not open the turn"
+  assert_contains "$record" "source=agy-hook" "agy's PreInvocation hook did not record its own source"
+
+  # A superseded incarnation must fail closed rather than rewrite the record.
+  printf 'turnend=%s\nbusy_event=%s\nstate=%s\nid=%s\ngen=%s\n' \
+    "$statedir/t1.turn-ended" "$ROOT/bin/fm-busy-event.sh" "$statedir" t1 "g-stale" >"$auth"
+  printf '{}' | FM_AGY_TURNEND_TOKEN="$token" "$hook" stop >/dev/null || fail "the agy hook exited non-zero on a stale generation"
+  assert_contains "$(cat "$statedir/t1.busy-state")" "state=busy" \
+    "a stale generation was allowed to rewrite the agy busy record"
+  pass "fm-agy-turnend-hook.sh: PreInvocation opens and Stop closes, and a stale generation is refused"
 }
 
 test_agy_ancestry_detects_the_native_command_name
@@ -916,4 +1063,8 @@ test_agy_unregistered_path_without_a_dialog_fails_the_spawn
 test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn
 test_agy_missing_binary_refuses_before_pane_creation
 test_agy_secondmate_is_refused
-test_agy_spawn_arms_no_busy_wiring
+test_agy_spawn_arms_the_turnend_wiring
+test_agy_turnend_installer_owns_only_its_own_key
+test_agy_turnend_installer_refuses_a_store_it_does_not_own
+test_agy_turnend_hook_is_inert_without_a_registry_token
+test_agy_turnend_hook_records_both_turn_boundaries
