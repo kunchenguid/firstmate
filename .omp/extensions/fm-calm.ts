@@ -75,7 +75,6 @@ const root = resolve(extensionDir, "../..");
 // Calm is on without touching model context or session storage.
 const FIRSTMATE_CUSTOM_MESSAGE_TYPES = [
   "firstmate-sessionstart-nudge",
-  "firstmate-synthetic-input-presentation",
 ] as const;
 
 function installCalmPresentationAdapter(name: string, install: () => void): void {
