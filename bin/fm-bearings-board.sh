@@ -54,14 +54,10 @@
 # hidden is worse than a card wrongly shown. Cleanup is therefore a normal
 # rebuild effect rather than a committed migration or direct state mutation.
 #
-# THE RECONCILE CHOICE. Every decision card carries the standard `reconcile`
-# option, injected here so the guarantee does not depend on the composer's
-# memory, and the payload validator reserves that value across every card type.
-# The validator's reservation scope must equal the adapter's reconcile
-# classification scope, which is all card types because the captured payload
-# carries no card type. Its meaning, and the reason it can never reach the
-# keyed-answer intake as a blind close, are owned by
-# docs/captain-hold-lifecycle.md.
+# CAPTAIN'S CALL CONTROLS. After stale-card filtering, build appends Reconcile
+# to each decision card, then enables freeform when the final effective option
+# count exceeds one while preserving an explicit freeform opt-in.
+# Authority contract: docs/captain-hold-lifecycle.md.
 #
 # Validation is fail-closed: the payload must be valid JSON with
 # schema=fm-bearings-board.v1 and every renderer-consumed field must satisfy
@@ -289,10 +285,7 @@ decision_card_is_stale() {  # <task-id> <landed-0-or-1>
   return 1
 }
 
-# Drop every stale decision card, then give every surviving decision card the
-# standard reconcile choice. Injecting it here is what makes "every decision
-# card offers reconcile" a property of the board rather than of the composer's
-# memory; the validator prevents duplicate decision options.
+# Drop stale decision cards, then normalize the surviving cards' controls.
 effective_payload() {  # <data.json> <dest.json>
   local data=$1 dest=$2 landed_keys key reason drop='' tmp landed=0
   landed_keys=$(jq -c '
@@ -334,6 +327,7 @@ effective_payload() {  # <data.json> <dest.json>
           hint: "Re-check the latest state, then close this with evidence or keep it open with a note"
         }]
         else . end
+      | if (.options | length) > 1 then .allow_freeform = true else . end
     ]' "$data" > "$dest" || return 1
 }
 

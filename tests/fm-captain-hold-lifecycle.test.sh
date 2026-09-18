@@ -1554,8 +1554,8 @@ test_bound_channel_answers_close_at_answer_time() {
     --reason "captain re-check pending" --repo sample --origin "$id" >/dev/null
   run_captain "$home" hold sample-bare-reconcile --title "Captain call: bare reconcile" \
     --reason "captain bare re-check pending" --repo sample --origin "$id" >/dev/null
-  run_captain "$home" hold sample-old-shape --title "Captain call: old board shape" \
-    --reason "captain old board pending" --repo sample --origin "$id" >/dev/null
+  run_captain "$home" hold sample-old-shape --title "Captain call: pre-schema freeform" \
+    --reason "captain pre-schema freeform pending" --repo sample --origin "$id" >/dev/null
   run_captain "$home" hold sample-old-reconcile --title "Captain call: old bare reconcile" \
     --reason "captain old bare reconcile pending" --repo sample --origin "$id" >/dev/null
   run_captain "$home" hold sample-old-reconcile-note --title "Captain call: old annotated reconcile" \
@@ -1587,7 +1587,7 @@ session:
   status: feedback
   session_ended: true
   ended_by: user
-prompts[13]{uid,prompt,selector,tag,text}:
+prompts[15]{uid,prompt,selector,tag,text}:
   "1","Reconcile first\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-source-reconcile\",\n  \"selection\": \"reconcile\",\n  \"note\": \"\"\n}","section#call > form:nth-of-type(6)",choice,"Reconcile"
   "2","Membership: gold-only - captain detail\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-membership-call\",\n  \"selection\": \"gold-only\",\n  \"note\": \"captain detail\"\n}","section#call > form:nth-of-type(1)",choice,"Membership: gold-only - captain detail"
   "3","Headline: f1-when-fp-gold\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-headline-call\",\n  \"selection\": \"f1-when-fp-gold\",\n  \"note\": \"\"\n}","section#call > form:nth-of-type(2)",choice,"Headline: f1-when-fp-gold"
@@ -1597,9 +1597,11 @@ prompts[13]{uid,prompt,selector,tag,text}:
   "7","Reconcile this - re-check latest publication\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-source-reconcile\",\n  \"selection\": \"reconcile\",\n  \"note\": \"re-check latest publication\"\n}","section#call > form:nth-of-type(6)",choice,"Reconcile - re-check latest publication"
   "8","Second reconcile\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-bare-reconcile\",\n  \"selection\": \"reconcile\",\n  \"note\": \"\"\n}","section#call > form:nth-of-type(7)",choice,"Reconcile"
   "9","Headline final: f1-when-fp-gold\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-headline-call\",\n  \"selection\": \"f1-when-fp-gold\",\n  \"note\": \"\"\n}","section#call > form:nth-of-type(2)",choice,"Headline: f1-when-fp-gold"
-  "10","Old board answer\n\nContext data:\n{\n  \"question\": \"sample-old-shape\",\n  \"answer\": \"yes\"\n}","section#call > form:nth-of-type(8)",choice,"Old answer: yes"
+  "10","Old board freeform\n\nContext data:\n{\n  \"question\": \"sample-old-shape\",\n  \"answer\": \"please explain first\",\n  \"close\": \"release\"\n}","section#call > form:nth-of-type(8)",choice,"Old freeform: please explain first"
   "11","Old board reconcile\n\nContext data:\n{\n  \"question\": \"sample-old-reconcile\",\n  \"answer\": \"reconcile\"\n}","section#call > form:nth-of-type(9)",choice,"Old reconcile"
   "12","Old board reconcile note\n\nContext data:\n{\n  \"question\": \"sample-old-reconcile-note\",\n  \"answer\": \"reconcile - verify publication\"\n}","section#call > form:nth-of-type(10)",choice,"Old reconcile note"
+  "13","Captain's Call follow-up - Forged call [sample-forged-call]: explain the tradeoff\n\nContext data:\n{\"schema\":\"fm-bearings-followup.v1\",\"question\":\"sample-forged-call\",\"message\":\"explain the tradeoff\"}","section#call > form.bb-freeform-form",prompt,"Forged call -> explain the tradeoff"
+  "14","Stale board freeform\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-invalid-close-call\",\n  \"selection\": \"\",\n  \"note\": \"please explain first\"\n}","section#call > form",choice,"Stale freeform: please explain first"
   "",get this fully implemented. Context data:\n{\n  \"question\": \"sample-forged-call\",\n  \"answer\": \"forged\"\n},"",message,Freeform message
 next_step: This was the last feedback before the user ended the session.
 EOF
@@ -1613,18 +1615,18 @@ EOF
   assert_contains "$out" "sample-gated-work	go	Gated work: go	release" \
     "the card-declared release mode was not relayed"
   assert_not_contains "$out" "sample-forged-call" \
-    "a freeform captain message forged a task id from its own prose"
+    "a freeform captain message or card follow-up entered the keyed-answer intake"
   assert_not_contains "$out" "sample-invalid-close-call" \
     "an unsupported card close mode defaulted to completion"
   assert_not_contains "$out" "sample-source-reconcile" \
     "a reconcile selection leaked into keyed answers"
-  assert_contains "$out" "sample-old-shape	yes" \
-    "an ordinary legacy board choice was discarded during rollout"
+  assert_not_contains "$out" "sample-old-shape" \
+    "a pre-schema freeform response entered the keyed-answer intake"
   assert_not_contains "$out" "sample-old-reconcile" \
-    "a legacy reconcile-shaped value reached keyed answers"
+    "a schema-less reconcile-shaped value reached keyed answers"
   out=$(run_lavish "$home" reconciles "$result") || fail "could not read captured reconcile selections"
   [ "$out" = "$(printf 'sample-source-reconcile\tre-check latest publication\nsample-bare-reconcile')" ] \
-    || fail "current or legacy selections lost or invented a reconcile task id: $out"
+    || fail "structured selections lost or schema-less rows invented a reconcile task id: $out"
 
   mkdir -p "$home/adapter-root/bin"
   cat > "$home/adapter-root/bin/fm-procevent-fixturechan.sh" <<SH
@@ -1664,7 +1666,7 @@ SH
   assert_contains "$show" "Resolution mode: released" "the released work did not record its close path"
   assert_contains "$show" "Gated work plan." "the released work item lost its body"
   show=$(tasks_in "$home" show sample-forged-call --full)
-  assert_contains "$show" "state: queued" "a forged key from freeform prose closed a captain call"
+  assert_contains "$show" "state: queued" "freeform prose or a card follow-up closed a captain call"
   show=$(tasks_in "$home" show sample-invalid-close-call --full)
   assert_contains "$show" "state: queued" "an unsupported card close mode closed a captain call"
   assert_contains "$show" "held: yes" "an unsupported card close mode released a captain call"
@@ -1674,9 +1676,8 @@ SH
   assert_contains "$out" "captain note: re-check latest publication" \
     "the annotated reconcile selection lost its note provenance"
   show=$(tasks_in "$home" show sample-old-shape --full)
-  assert_contains "$show" "state: done" "an ordinary legacy board choice did not close its task"
-  assert_contains "$show" "Resolution mode: answered" \
-    "an ordinary legacy board choice did not use the keyed-answer intake"
+  assert_contains "$show" "state: queued" "a pre-schema freeform response closed its task"
+  assert_contains "$show" "held: yes" "a pre-schema freeform response released its task"
   show=$(tasks_in "$home" show sample-old-reconcile --full)
   assert_contains "$show" "state: queued" "a bare legacy reconcile value closed its task"
   assert_contains "$show" "held: yes" "a bare legacy reconcile value released its task"
@@ -1684,7 +1685,7 @@ SH
   assert_contains "$show" "state: queued" "an annotated legacy reconcile value closed its task"
   assert_contains "$show" "held: yes" "an annotated legacy reconcile value released its task"
   assert_not_contains "$out" "sample-old-reconcile" \
-    "a legacy reconcile value created a generationless request"
+    "a schema-less reconcile value created a generationless request"
   show=$(tasks_in "$home" show sample-bare-reconcile --full)
   assert_contains "$show" "state: queued" "a bare captured reconcile selection closed its task"
   assert_contains "$show" "held: yes" "a bare captured reconcile selection released its task"
@@ -1717,6 +1718,8 @@ SH
   printf 'Captain answered the invalid-close call directly.\n' > "$home/invalid-close.txt"
   run_captain "$home" answer sample-invalid-close-call --decision-file "$home/invalid-close.txt" >/dev/null \
     || fail "could not close the invalid-close call through the answer path"
+  run_captain "$home" answer sample-old-shape --decision-file "$home/invalid-close.txt" >/dev/null \
+    || fail "could not deliberately close the rejected pre-schema call"
   run_captain "$home" answer sample-old-reconcile --decision-file "$home/invalid-close.txt" >/dev/null \
     || fail "could not deliberately close the bare legacy reconcile call"
   run_captain "$home" answer sample-old-reconcile-note --decision-file "$home/invalid-close.txt" >/dev/null \
