@@ -567,6 +567,16 @@ Live mode requires `FM_JEV_TOOL_GATE=live` plus both local gitignored presence f
 The script header owns flags, log schema, and mode resolution.
 The thin hook point is documented in [`docs/arm-pretool-check.md`](arm-pretool-check.md).
 
+## Shadow done verifier
+
+[`bin/fm-jev-done-verify.sh`](../bin/fm-jev-done-verify.sh) is a log-only helper firstmate may run when it sees a worker `done:` line on a ship or scout, before the captain-facing completion summary.
+It asks Jev one Choice (`evidenced`, `not_evidenced`, `need_human`) plus a strength Score, using the 0.7 confidence floor from the Jev caller library.
+`need_human` is required because a currently healthy system is not evidence the claimed repair happened.
+Each call appends one JSONL record to `state/<id>.jev-done.jsonl`.
+The helper never tears down a task, never writes `resolved` or `done` on the worker's behalf, and never reopens work from its score.
+When the verdict is `not_evidenced` or `need_human` at confidence at or above the floor, firstmate still shows the done line and only annotates the risk.
+The script header owns flags, output lines, and exit codes.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
