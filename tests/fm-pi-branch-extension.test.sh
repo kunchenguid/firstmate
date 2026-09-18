@@ -714,10 +714,9 @@ const untouched = cacheHandler({ type: "before_provider_request", payload: { mod
 if (untouched !== undefined) throw new Error("cache-key hook rewrote a provider payload with no prompt_cache_key");
 console.log(`CACHE_KEY=${rewriteA.prompt_cache_key}`);
 
-// 4. Two-stage filter, stage 2: routine while main is idle appends with no
-// turn; routine while main is busy defers to after the captain's next prompt;
-// captain-relevant persists a visible entry with no model turn. Store rows are
-// written before delivery and marked read only after it.
+// 4. Two-stage filter, stage 2: every routine result is durable but private;
+// only a captain intervention opens one hidden processing turn. Store rows are
+// written before the read cursor advances.
 const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
 const r1 = await report.execute("call-1", { task: "branch-driver", verdict: "routine", summary: "worker healthy, no action needed", wake: "signal: working" }, undefined, undefined, {});
 if (r1.isError) throw new Error(`routine report failed: ${JSON.stringify(r1)}`);
@@ -726,18 +725,13 @@ finishWakePrompt();
 // wait for the wake to settle so its task scope has been cleared.
 await offer.settlement;
 globalThis.__fmOnBranchPrompt = undefined;
-if (sentToMain.length !== 1) throw new Error("routine report did not merge exactly one note");
-if (sentToMain[0].message.customType !== "fm-branch-merge") throw new Error("merge note has the wrong custom type");
-if (sentToMain[0].options.triggerTurn) throw new Error("routine idle merge must not trigger a turn");
-if (sentToMain[0].options.deliverAs) throw new Error("routine idle merge must append immediately");
+if (sentToMain.length !== 0) throw new Error("routine report inserted a chat message");
 await fire("agent_start", {});
 await report.execute("call-2", { task: "task-9", verdict: "routine", summary: "still healthy" }, undefined, undefined, {});
-if (sentToMain[1].options.deliverAs !== "nextTurn" || sentToMain[1].options.triggerTurn) {
-  throw new Error(`routine busy merge must defer to nextTurn without a turn: ${JSON.stringify(sentToMain[1].options)}`);
-}
+if (sentToMain.length !== 0) throw new Error("busy routine report inserted a deferred chat message");
 await fire("agent_end", {});
 await report.execute("call-3", { task: "task-9", verdict: "captain", summary: "PR https://example.com/pr/9 checks green, ready for review" }, undefined, undefined, {});
-// A captain outcome opens exactly ONE sequence-keyed processing turn: a
+// A captain intervention opens exactly ONE sequence-keyed processing turn: a
 // hidden, typed request that names the sequence and carries the exact stored
 // summary. No unkeyed turn ever opens, and routine delivery is untouched.
 const processingRequests = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
@@ -753,40 +747,22 @@ if (!processingRequest.message.content.includes("[seq 3] task-9: PR https://exam
 if (sentToMain.some((sent) => sent.options.triggerTurn && sent.message.customType !== "fm-branch-process")) {
   throw new Error("an unkeyed turn opened on main");
 }
-if (sentToMain.length !== 3) throw new Error(`captain delivery changed routine delivery: ${JSON.stringify(sentToMain)}`);
+if (sentToMain.length !== 1) throw new Error(`captain delivery changed private routine delivery: ${JSON.stringify(sentToMain)}`);
 writeFileSync(`${home}/state/delivered-processing-request`, processingRequest.message.content);
-if (typeof sentToMain[0].message.content !== "string" || !sentToMain[0].message.content.startsWith("⛵ ")) {
-  throw new Error(`routine note missing sailboat prefix: ${sentToMain[0].message.content}`);
-}
-if (/branch merged|\[routine\]|\[captain\]/.test(sentToMain[0].message.content)) {
-  throw new Error(`routine note still has boilerplate: ${sentToMain[0].message.content}`);
-}
-// A routine note is rendered as a custom message. A captain outcome is a
-// versioned custom session entry whose exact store summary is its payload.
-if (sentToMain[0].message.display !== true) {
-  throw new Error(`routine note must render: display=${sentToMain[0].message.display}`);
-}
-writeFileSync(`${home}/state/delivered-routine-note`, sentToMain[0].message.content);
-const captainEntries = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome");
-if (captainEntries.length !== 1) throw new Error(`captain delivery count was ${captainEntries.length}, not 1`);
-const captainRecord = captainEntries[0].data;
-if (captainRecord.version !== 1 || captainRecord.seq !== 3 || captainRecord.task !== "task-9" || captainRecord.verdict !== "captain") {
-  throw new Error(`captain entry lost its identity: ${JSON.stringify(captainRecord)}`);
-}
-if (captainRecord.summary !== "PR https://example.com/pr/9 checks green, ready for review") {
-  throw new Error(`captain entry changed the exact summary: ${captainRecord.summary}`);
+if (mainEntries.some((entry) => entry.customType === "fm-branch-visible-outcome")) {
+  throw new Error("captain intervention inserted a visible anchor entry");
 }
 
 // The store (the owned durable contract) holds all three outcomes in order,
-// and each merged note advanced the read cursor.
+// and private reconciliation advanced the read cursor.
 const rows = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line));
 if (rows.length !== 3) throw new Error(`expected 3 store rows, got ${rows.length}`);
 if (rows[0].verdict !== "routine" || rows[2].verdict !== "captain") throw new Error("store verdicts out of order");
 if (rows[0].wake !== "signal: working") throw new Error("store lost the wake reason");
 if (outcomeScript(["unread"]) !== "") throw new Error("merged outcomes were not marked read");
 
-// 5. Main-side surfaces: the on-demand store reader tool and the merge-note
-// renderer.
+// 5. Main-side surfaces: the on-demand store reader stays visible on demand,
+// while legacy captain and routine presentation types render empty.
 const outcomesTool = mainTools.find((tool) => tool.name === "fm_branch_outcomes");
 if (!outcomesTool) throw new Error("fm_branch_outcomes was not registered on main");
 const renderTheme = {
@@ -860,47 +836,19 @@ const listedText = listed.content[0].text;
 if (listedText.split("\n").length !== 2 || !listedText.includes("checks green")) {
   throw new Error(`fm_branch_outcomes did not read the store: ${listedText}`);
 }
-if (!renderers.has("fm-branch-merge")) throw new Error("merge-note renderer missing");
-if (!entryRenderers.has("fm-branch-visible-outcome")) throw new Error("visible captain-outcome renderer missing");
-const assertRenderedNote = (note, glyph) => {
-  const fgCalls = [];
-  const rendered = renderers.get("fm-branch-merge")(
-    { content: note },
-    { expanded: false },
-    {
-      fg(color, text) {
-        fgCalls.push({ color, text });
-        return text;
-      },
-    },
-  );
-  if (!String(rendered.text).includes(glyph)) throw new Error(`renderer dropped ${glyph}: ${rendered.text}`);
-  if (String(rendered.text).includes("branch merged")) throw new Error(`renderer kept boilerplate: ${rendered.text}`);
-  if (rendered.paddingX === 0 && rendered.paddingY === 0) {
-    throw new Error("renderer still pads with 0,0 instead of outputPad");
-  }
-  if (rendered.paddingX !== 1 || rendered.paddingY !== 0) {
-    throw new Error(
-      `renderer padding should match real Pi messages (outputPad, 0), got ${rendered.paddingX},${rendered.paddingY}`,
-    );
-  }
-  const glyphCalls = fgCalls.filter((call) => call.text === glyph);
-  if (glyphCalls.length !== 1 || glyphCalls[0].color === "dim") {
-    throw new Error(`icon ${glyph} must carry color, not dim: ${JSON.stringify(fgCalls)}`);
-  }
-  const restCalls = fgCalls.filter((call) => call.text !== glyph);
-  if (restCalls.length === 0 || restCalls.some((call) => call.color !== "dim")) {
-    throw new Error(`note remainder must be dim: ${JSON.stringify(fgCalls)}`);
-  }
-};
-assertRenderedNote(sentToMain[0].message.content, "⛵");
-const captainRendered = entryRenderers.get("fm-branch-visible-outcome")(
-  captainEntries[0],
-  { expanded: false },
-  renderTheme,
-);
-if (captainRendered.text !== "⚓ [seq 3] task-9: PR https://example.com/pr/9 checks green, ready for review") {
-  throw new Error(`captain renderer changed the exact visible outcome: ${captainRendered.text}`);
+if (!renderers.has("fm-branch-merge")) throw new Error("legacy merge renderer missing");
+if (!entryRenderers.has("fm-branch-visible-outcome")) throw new Error("legacy captain renderer missing");
+if (renderers.get("fm-branch-merge")({ content: "⛵ legacy routine" }, {}, renderTheme).constructor.name !== "Container") {
+  throw new Error("legacy routine notes were not hidden");
+}
+if (entryRenderers.get("fm-branch-visible-outcome")({ data: {} }, {}, renderTheme).constructor.name !== "Container") {
+  throw new Error("legacy anchor entries were not hidden");
+}
+const processedTool = mainTools.find((tool) => tool.name === "fm_branch_processed");
+if (!processedTool) throw new Error("processed acknowledgement tool missing");
+if (processedTool.renderCall({}, renderTheme, {}).constructor.name !== "Container" ||
+    processedTool.renderResult({ content: [{ type: "text", text: "processed" }] }, {}, renderTheme, {}).constructor.name !== "Container") {
+  throw new Error("processed acknowledgement bookkeeping was rendered");
 }
 process.exit(0);
 EOF
@@ -916,8 +864,8 @@ EOF
   # The processing request must identify itself to main's model through the
   # real protocol executable: it is typed branch-outcome input whose body names
   # the sequence, the exact outcome, the acknowledgement tool, and the fact
-  # that nothing but that acknowledgement closes it. Routine notes remain
-  # plain rendered text rather than typed operational input.
+  # that nothing but that acknowledgement closes it. Routine outcomes never
+  # create a message at all.
   local kind body
   kind=$(./bin/fm-operational-input.sh kind < "$home/state/delivered-processing-request") \
     || fail "the processing request reaches main's model as unattributed text"
@@ -925,17 +873,14 @@ EOF
   body=$(./bin/fm-operational-input.sh body < "$home/state/delivered-processing-request") \
     || fail "the processing request envelope carries no readable body"
   case "$body" in
-    *"delivered automatically by the supervision branch."*"It was not typed by the captain."*"[seq 3] task-9: PR https://example.com/pr/9 checks green, ready for review"*) ;;
+    *"private supervision processing request"*"It was not typed by the captain"*"[seq 3] task-9: PR https://example.com/pr/9 checks green, ready for review"*) ;;
     *) fail "the processing request body lost its self-description or the outcome itself: $body" ;;
   esac
   case "$body" in
     *"do not re-drain, re-run, or acknowledge the wake."*"call fm_branch_processed with through=3 exactly once."*"never counts as processing."*) ;;
     *) fail "the processing request body lost the event-ownership boundary or the sequence-bound acknowledgement duty: $body" ;;
   esac
-  if ./bin/fm-operational-input.sh kind < "$home/state/delivered-routine-note" >/dev/null 2>&1; then
-    fail "routine note must stay plain rendered text, not typed operational input"
-  fi
-  pass "a captain outcome reaches main's model as one typed, sequence-keyed processing request while Calm turns routine notes into the replace-in-place current step and ordinary mode keeps them plain"
+  pass "a captain intervention reaches main through one hidden sequence-keyed processing request while routine outcomes stay private"
 }
 
 test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery() {
@@ -1009,7 +954,7 @@ globalThis.__fmOnBranchPrompt = async ({ session }) => {
     `resource-result-${fleetOperations.length}`,
     {
       task: "branch-driver",
-      verdict: directlyRequested ? "captain" : "routine",
+      verdict: "routine",
       summary: "healthy resource report: CPU 12%, memory 41%",
       wake: "signal: healthy resource result",
     },
@@ -1059,20 +1004,14 @@ await fire("agent_start", {}, mainCtx);
 const unsolicited = dispatch("signal: healthy resource result");
 if (!unsolicited.accepted) throw new Error("branch did not accept the unsolicited result");
 await settle(() => fleetOperations.length === 2, "unsolicited result acknowledgement");
-if (sentToMain.length !== 1 || sentToMain[0].options.triggerTurn) {
-  throw new Error(`unsolicited healthy result opened a main turn: ${JSON.stringify(sentToMain)}`);
-}
-const sailboat = sentToMain[0];
-if (sailboat.message.display !== true || !sailboat.message.content.startsWith("⛵ branch-driver:")) {
-  throw new Error(`unsolicited healthy result was not a rendered sailboat note: ${JSON.stringify(sailboat)}`);
-}
+if (sentToMain.length !== 0) throw new Error(`unsolicited routine result inserted a chat message: ${JSON.stringify(sentToMain)}`);
 
 const outcomes = mainTools.find((tool) => tool.name === "fm_branch_outcomes");
 if (!outcomes) throw new Error("main did not receive its outcome-reading permission surface");
-const visibleToMain = await outcomes.execute("main-reads-sailboat", { recent: 1 }, undefined, undefined, {});
+const visibleToMain = await outcomes.execute("main-reads-private-history", { recent: 1 }, undefined, undefined, {});
 const mainOutcomeText = visibleToMain.content.map((item) => item.text ?? "").join("\n");
 if (visibleToMain.isError || !mainOutcomeText.includes("healthy resource report: CPU 12%, memory 41%")) {
-  throw new Error(`main could not use the sailboat content through its existing permission path: ${JSON.stringify(visibleToMain)}`);
+  throw new Error(`main could not read the private durable outcome history: ${JSON.stringify(visibleToMain)}`);
 }
 if (fleetOperations.length !== 2) throw new Error("main's outcome read reprocessed the fleet event");
 
@@ -1095,9 +1034,7 @@ for (let index = 0; index < requestedPrompts.length; index += 1) {
     throw new Error(`pre-turn-end mirror changed long captain request ${index}`);
   }
   const visible = entries.filter((entry) => entry.customType === "fm-branch-visible-outcome");
-  if (visible.length !== index + 1 || visible.at(-1).data.summary !== "healthy resource report: CPU 12%, memory 41%") {
-    throw new Error(`requested result ${index} did not persist one exact visible outcome: ${JSON.stringify(visible)}`);
-  }
+  if (visible.length !== 0) throw new Error("requested routine result persisted a visible anchor entry");
 }
 const mirroredCaptainText = globalThis.__fmSessions[0].ops
   .filter((op) => op.kind === "custom" && op.message.customType === "fm-main-mirror")
@@ -1112,26 +1049,8 @@ if (mirroredCaptainText.some((text) =>
   throw new Error("canonical current or legacy operational input entered captain mirror context");
 }
 if ((globalThis.__fmPrompts ?? []).length !== 5) throw new Error("a handled fleet wake was rerun");
-let processingRequests = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
-if (sentToMain.length !== 1 + processingRequests.length) {
-  throw new Error(`captain results entered model delivery as unkeyed messages: ${JSON.stringify(sentToMain)}`);
-}
-if (processingRequests.length !== 1 || processingRequests[0].options.triggerTurn !== true) {
-  throw new Error(`captain results re-sent while the first keyed request was pending: ${JSON.stringify(processingRequests)}`);
-}
-await fire("agent_settled", {}, mainCtx);
-processingRequests = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
-if (processingRequests.length !== 2 || processingRequests[1].options.triggerTurn !== true) {
-  throw new Error(`the widened captain sequence set did not open one keyed turn at the run boundary: ${JSON.stringify(processingRequests)}`);
-}
-for (let seq = 2; seq <= 5; seq += 1) {
-  if (!processingRequests[1].message.content.includes(`[seq ${seq}] branch-driver: healthy resource report: CPU 12%, memory 41%`)) {
-    throw new Error(`the widened processing request lost seq ${seq}: ${processingRequests[1].message.content}`);
-  }
-}
-if (!processingRequests[1].message.content.includes("through=5")) {
-  throw new Error(`the widened processing request lost its highest acknowledgement key: ${processingRequests[1].message.content}`);
-}
+const processingRequests = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
+if (processingRequests.length !== 0) throw new Error(`routine results opened processing turns: ${JSON.stringify(processingRequests)}`);
 if (fleetOperations.length !== 10 || fleetOperations.some((operation) => operation.status !== 0)) {
   throw new Error(`fleet event ownership repeated or failed work: ${JSON.stringify(fleetOperations)}`);
 }
@@ -1142,8 +1061,8 @@ if (existsSync(`${home}/state/.wake-queue`) && readFileSync(`${home}/state/.wake
   throw new Error("acknowledged fleet wake remained queued for another owner");
 }
 const rows = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-if (rows.length !== 5 || rows[0].verdict !== "routine" || rows.slice(1).some((row) => row.verdict !== "captain")) {
-  throw new Error(`provider classifications were not recorded once in order: ${JSON.stringify(rows)}`);
+if (rows.length !== 5 || rows.some((row) => row.verdict !== "routine")) {
+  throw new Error(`routine classifications were not recorded once in order: ${JSON.stringify(rows)}`);
 }
 if (outcomeScript(["unread"]) !== "") throw new Error("merged outcomes remained unread for redelivery");
 process.exit(0);
@@ -1175,14 +1094,13 @@ mainEntries.push(
 );
 const summary1 = "Completed diagnosis: the cursor trusted an unrelated assistant response.";
 const seq1 = Number(outcomeScript(["append", "--task", "email-intake", "--verdict", "captain", "--summary", summary1]));
-// Crash boundary: appendEntry persisted, but mark-read did not happen.
-mainEntries.push({
-  type: "custom",
-  customType: "fm-branch-visible-outcome",
-  data: { version: 1, seq: seq1, task: "email-intake", verdict: "captain", summary: summary1, silent: false },
-});
+// Crash boundary: the durable row exists before the first session reload.
 await fire("session_start", {}, defaultSessionCtx);
-if (outcomeScript(["unread"]) !== "") throw new Error("reload did not advance the cursor after finding the persisted entry");
+if (outcomeScript(["unread"]) !== "") throw new Error("reload did not advance the private read cursor");
+if (mainEntries.some((entry) => entry.customType === "fm-branch-visible-outcome")) throw new Error("reload inserted a visible anchor");
+if (sentToMain.length !== 1 || !sentToMain[0].message.content.includes(`[seq ${seq1}] email-intake: ${summary1}`)) {
+  throw new Error(`reload did not open exactly one private processing request: ${JSON.stringify(sentToMain)}`);
+}
 
 const summary2 = "Second completed request stayed exact while main was streaming.";
 const seq2 = Number(outcomeScript(["append", "--task", "task-busy", "--verdict", "captain", "--summary", summary2]));
@@ -1190,38 +1108,28 @@ await fire("agent_start", {});
 await fire("session_shutdown", {});
 await fire("session_start", {}, defaultSessionCtx);
 await fire("agent_end", {});
-const visible = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome");
-if (visible.length !== 2 || visible[0].data.seq !== seq1 || visible[1].data.seq !== seq2) {
-  throw new Error(`reload recovery was not sequence-keyed and exactly once: ${JSON.stringify(visible)}`);
+if (sentToMain.length !== 2 || sentToMain.some((sent) => sent.message.customType !== "fm-branch-process")) {
+  throw new Error(`reload recovery queued an unexpected public or unkeyed message: ${JSON.stringify(sentToMain)}`);
 }
-if (visible[0].data.summary !== summary1 || visible[1].data.summary !== summary2) {
-  throw new Error(`visible delivery changed an exact stored summary: ${JSON.stringify(visible)}`);
-}
-if (sentToMain.some((sent) => sent.message.customType !== "fm-branch-process")) {
-  throw new Error(`captain recovery queued an unkeyed model message: ${JSON.stringify(sentToMain)}`);
-}
-// Recovery re-presents every still-unprocessed sequence in one keyed request.
 const recovered = sentToMain.at(-1)?.message.content ?? "";
 if (!recovered.includes(`[seq ${seq1}] email-intake: ${summary1}`) || !recovered.includes(`[seq ${seq2}] task-busy: ${summary2}`)) {
-  throw new Error(`reload did not re-present the unprocessed outcomes for processing: ${recovered}`);
+  throw new Error(`reload did not re-present the unprocessed outcomes for private processing: ${recovered}`);
 }
 
-// A second reload sees the cursor and must stay idempotent.
+// A second reload re-presents the same private set once, without adding an
+// anchor or changing the already-consumed read cursor.
 await fire("session_shutdown", {});
 await fire("session_start", {}, defaultSessionCtx);
-if (mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome").length !== 2) {
-  throw new Error("a second reload duplicated a visible captain outcome");
-}
+if (mainEntries.some((entry) => entry.customType === "fm-branch-visible-outcome")) throw new Error("a second reload inserted an anchor");
+if (sentToMain.length !== 3) throw new Error("a second reload did not re-present the private interventions");
 const rendered = entryRenderers.get("fm-branch-visible-outcome")(
-  visible[0],
+  { data: { version: 1, seq: seq1, task: "email-intake", verdict: "captain", summary: summary1, silent: false } },
   { expanded: false },
   { fg: (_color, text) => text },
 );
-if (rendered.text !== `⚓ [seq ${seq1}] email-intake: ${summary1}`) {
-  throw new Error(`renderer did not preserve exact outcome text: ${rendered.text}`);
-}
+if (rendered.constructor.name !== "Container") throw new Error("legacy anchor renderer exposed internal outcome text");
 
-// A reused sequence with different content cannot be treated as delivery.
+// An old conflicting anchor is ignored; the durable row remains authoritative.
 const seq3 = Number(outcomeScript(["append", "--task", "task-conflict", "--verdict", "captain", "--summary", "authoritative summary"]));
 mainEntries.push({
   type: "custom",
@@ -1230,11 +1138,9 @@ mainEntries.push({
 });
 await fire("session_shutdown", {});
 await fire("session_start", {}, defaultSessionCtx);
-if (!outcomeScript(["unread"]).includes('"seq":3')) {
-  throw new Error("conflicting sequence content advanced the cursor instead of failing closed");
-}
-if (mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === seq3).length !== 1) {
-  throw new Error("conflicting sequence content caused another entry to be appended");
+if (outcomeScript(["unread"]) !== "") throw new Error("an old anchor blocked private durable delivery");
+if (sentToMain.length !== 4 || !sentToMain.at(-1).message.content.includes("authoritative summary")) {
+  throw new Error("the durable row was not re-presented after an old conflicting anchor");
 }
 process.exit(0);
 EOF
@@ -1335,8 +1241,8 @@ if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error
 await fire("session_shutdown", {});
 await fire("session_start", {}, defaultSessionCtx);
 if (requests().length !== 5 || requests()[4].options.triggerTurn !== true) throw new Error("session start did not re-present the unprocessed outcome with its own turn");
-if (mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === seq).length !== 1) {
-  throw new Error("re-presentation duplicated the visible entry");
+if (mainEntries.some((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data?.seq === seq)) {
+  throw new Error("re-presentation inserted a visible entry for the active outcome");
 }
 
 // Only the sequence-bound acknowledgement closes it.
@@ -1536,9 +1442,7 @@ await heartbeatReport.execute(
   undefined,
   {},
 );
-const noopMerge = sentToMain[sentToMain.length - 1];
-if (noopMerge.options.triggerTurn) throw new Error("a no-op heartbeat pass must not open a main turn");
-if (noopMerge.message.display !== false) throw new Error("a no-op heartbeat pass must not render a merge note");
+if (sentToMain.length !== 0) throw new Error("a no-op heartbeat pass inserted a chat message");
 const storedNoop = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8")
   .trim()
   .split("\n")
@@ -1554,11 +1458,7 @@ await heartbeatReport.execute(
   undefined,
   {},
 );
-const fleetRoutineMerge = sentToMain[sentToMain.length - 1];
-if (fleetRoutineMerge.message.display !== true) throw new Error("a fleet routine action must render");
-if (!fleetRoutineMerge.message.content.startsWith("⛵ fleet: reconciled the backlog after completed work")) {
-  throw new Error(`fleet routine action note changed: ${fleetRoutineMerge.message.content}`);
-}
+if (sentToMain.length !== 0) throw new Error("a fleet routine action inserted a chat message");
 await heartbeatReport.execute(
   "task-routine",
   { task: "task-9", verdict: "routine", summary: "worker healthy, no action needed" },
@@ -1566,11 +1466,7 @@ await heartbeatReport.execute(
   undefined,
   {},
 );
-const taskRoutineMerge = sentToMain[sentToMain.length - 1];
-if (taskRoutineMerge.message.display !== true) throw new Error("a task-scoped routine outcome must render");
-if (!taskRoutineMerge.message.content.startsWith("⛵ task-9: worker healthy, no action needed")) {
-  throw new Error(`task-scoped routine note changed: ${taskRoutineMerge.message.content}`);
-}
+if (sentToMain.length !== 0) throw new Error("a task-scoped routine outcome inserted a chat message");
 await heartbeatReport.execute(
   "heartbeat-finding",
   { task: "fleet", verdict: "captain", summary: "task-2 has been stuck for an hour" },
@@ -1579,9 +1475,7 @@ await heartbeatReport.execute(
   {},
 );
 const captainEntries = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome");
-if (captainEntries.length !== 1 || captainEntries[0].data.summary !== "task-2 has been stuck for an hour") {
-  throw new Error(`captain-worthy heartbeat finding was not persisted visibly: ${JSON.stringify(captainEntries)}`);
-}
+if (captainEntries.length !== 0) throw new Error("captain-worthy heartbeat finding inserted a visible anchor");
 if (sentToMain.some((sent) => sent.options.triggerTurn && sent.message.customType !== "fm-branch-process")) {
   throw new Error("heartbeat outcome delivery opened an unkeyed model turn");
 }
@@ -2043,7 +1937,7 @@ if (existsSync(`${home}/state/.branch-eligible-rows`)) {
 const healthy = dispatch("signal: healthy branch turn");
 if (!healthy.accepted) throw new Error("one provider error latched the branch prematurely");
 await healthy.settlement;
-await settle(() => attempt === 2 && sentToMain.length === 1, "healthy branch report");
+await settle(() => attempt === 2 && !existsSync(`${home}/state/.branch-eligible-rows`), "healthy branch report");
 if (mainUserMessages.length !== 0) throw new Error("a healthy reported turn fell back to main");
 
 const third = dispatch("signal: provider error after reset");
@@ -2066,9 +1960,7 @@ if (attempt !== 4 || mainUserMessages.length !== 0) {
   throw new Error(`latched branch still prompted or emitted its own fallback: attempts=${attempt} fallbacks=${mainUserMessages.length}`);
 }
 const pauseNotes = sentToMain.filter((sent) => sent.message.content.includes("Supervision branch paused after repeated provider errors"));
-if (pauseNotes.length !== 1 || pauseNotes[0].message.content.includes("\n")) {
-  throw new Error(`the first latch must surface exactly one one-line note: ${JSON.stringify(pauseNotes)}`);
-}
+if (pauseNotes.length !== 0) throw new Error(`routine provider latch leaked a captain-facing note: ${JSON.stringify(pauseNotes)}`);
 
 // No provider attempt occurs inside the first five-minute cooldown. Exactly
 // one probe is accepted when it elapses, and all other wakes remain on main
@@ -2106,15 +1998,11 @@ if (dispatch("signal: inside extended cooldown").accepted) {
 now += 5 * 60 * 1000;
 const recoveryProbe = dispatch("signal: recovery probe after extended cooldown");
 if (!recoveryProbe.accepted) throw new Error("the branch did not re-probe after the extended cooldown elapsed");
-await settle(() => attempt === 6 && sentToMain.some((sent) => sent.message.content.includes("cooldown probe recovered the branch")), "successful recovery probe");
-// The recovery note is emitted when the wake SETTLES, which is after the
-// report note the condition above waits for.
+await settle(() => attempt === 6 && !existsSync(`${home}/state/.branch-eligible-rows`), "successful recovery probe");
 await recoveryProbe.settlement;
 if (mainUserMessages.length !== 0) throw new Error("a successful recovery probe also fell back to main");
 const recoveryNotes = sentToMain.filter((sent) => sent.message.content.includes("Supervision branch recovered after a successful cooldown probe"));
-if (recoveryNotes.length !== 1 || recoveryNotes[0].message.content.includes("\n")) {
-  throw new Error(`recovery must surface exactly one one-line note: ${JSON.stringify(recoveryNotes)}`);
-}
+if (recoveryNotes.length !== 0) throw new Error(`routine recovery leaked a captain-facing note: ${JSON.stringify(recoveryNotes)}`);
 
 // The durable report cleared both the latch and the old streak: one new
 // provider error falls back but does not latch, so a following wake still
@@ -2131,7 +2019,7 @@ if (existsSync(`${home}/state/.branch-eligible-rows`)) {
 }
 const afterRecoveryHealthy = dispatch("signal: healthy turn after one post-recovery error");
 if (!afterRecoveryHealthy.accepted) throw new Error("the successful probe did not clear the provider-error streak");
-await settle(() => attempt === 8 && sentToMain.some((sent) => sent.message.content.includes("post-recovery report proved")), "post-recovery healthy report");
+await settle(() => attempt === 8 && !existsSync(`${home}/state/.branch-eligible-rows`), "post-recovery healthy report");
 process.exit(0);
 EOF
   status=$?
@@ -3525,8 +3413,8 @@ test_cold_start_activates_after_lock_acquisition() {
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     FM_TEST_SKIP_LOCK=1 DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home, mainEntries, outcomeScript, defaultSessionCtx }; })()`);
-const { fire, dispatch, settle, home, mainEntries, outcomeScript, defaultSessionCtx } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home, mainEntries, sentToMain, outcomeScript, defaultSessionCtx }; })()`);
+const { fire, dispatch, settle, home, mainEntries, sentToMain, outcomeScript, defaultSessionCtx } = globalThis.__t;
 import { existsSync, writeFileSync } from "node:fs";
 
 const summary = "Recovered the stored captain result after cold startup.";
@@ -3541,9 +3429,12 @@ if (existsSync(`${home}/state/.pi-branch-extension-loaded`)) {
 }
 writeFileSync(`${home}/state/.lock`, `${process.pid}\n`);
 await fire("turn_end", {}, defaultSessionCtx);
+await fire("agent_settled", {});
 const visible = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome");
-if (visible.length !== 1 || visible[0].data.seq !== seq || visible[0].data.summary !== summary) {
-  throw new Error(`post-lock turn_end did not recover the exact captain outcome: ${JSON.stringify(visible)}`);
+if (visible.length !== 0) throw new Error(`post-lock recovery inserted a visible anchor: ${JSON.stringify(visible)}`);
+const processing = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
+if (processing.length !== 1 || !processing[0].message.content.includes(`[seq ${seq}] cold-result: ${summary}`)) {
+  throw new Error(`post-lock turn_end did not recover the exact private captain outcome: ${JSON.stringify(processing)}`);
 }
 if (outcomeScript(["unread"]) !== "") throw new Error("post-lock turn_end did not advance the outcome cursor");
 if (!dispatch("signal: after lock").accepted) throw new Error("branch refused a wake after the lock was acquired");
@@ -4479,6 +4370,11 @@ const many = await Promise.all(
 );
 finishWakePrompt();
 await offer.settlement;
+// The branch may finish while main is idle; the next main run boundary
+// widens the private request to include every intervention that arrived in
+// that branch turn.
+await fire("agent_start", {});
+await fire("agent_settled", {});
 for (const [index, result] of many.entries()) {
   if (result.isError) throw new Error(`interleaved delivery ${index} failed: ${JSON.stringify(result)}`);
 }
@@ -4495,18 +4391,15 @@ if (seqs.slice().sort((a, b) => a - b).join(",") !== seqs.join(",")) {
 if (new Set(seqs).size !== seqs.length) throw new Error(`a sequence was reused: ${seqs}`);
 
 const deliveredRoutine = sentToMain
-  .filter((sent) => sent.message.customType === "fm-branch-merge" && sent.message.content.includes("interleaved outcome "))
-  .map((sent) => sent.message.content);
-const routineSummaries = interleaved.filter((row) => row.verdict === "routine").map((row) => `⛵ branch-driver: ${row.summary}`);
-if (deliveredRoutine.join("|") !== routineSummaries.join("|")) {
-  throw new Error(`routine notes lost, duplicated, or reordered: ${JSON.stringify(deliveredRoutine)} vs ${JSON.stringify(routineSummaries)}`);
-}
+  .filter((sent) => sent.message.customType === "fm-branch-merge" && sent.message.content.includes("interleaved outcome "));
+if (deliveredRoutine.length !== 0) throw new Error(`routine outcomes leaked into chat: ${JSON.stringify(deliveredRoutine)}`);
 const deliveredCaptain = mainEntries
-  .filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.summary.startsWith("interleaved outcome "))
-  .map((entry) => entry.data.seq);
+  .filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.summary.startsWith("interleaved outcome "));
+if (deliveredCaptain.length !== 0) throw new Error(`captain outcomes inserted anchors: ${JSON.stringify(deliveredCaptain)}`);
+const privateRequests = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
 const captainSeqs = interleaved.filter((row) => row.verdict === "captain").map((row) => row.seq);
-if (deliveredCaptain.join(",") !== captainSeqs.join(",")) {
-  throw new Error(`captain entries lost, duplicated, or reordered: ${deliveredCaptain} vs ${captainSeqs}`);
+if (!privateRequests.some((sent) => captainSeqs.every((seq) => sent.message.content.includes(`[seq ${seq}]`)))) {
+  throw new Error(`captain outcomes were not retained in one private processing request: ${JSON.stringify(privateRequests)}`);
 }
 // Everything delivered is recorded as read, so a later reconciliation cannot
 // deliver any of it a second time.
@@ -4611,18 +4504,20 @@ await fire("session_start", {}, {
   sessionManager: { getSessionFile: () => `${home}/third.jsonl`, getEntries: () => thirdEntries },
 });
 const recovered = thirdEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome");
-if (recovered.length !== 1 || recovered[0].data.seq !== orphanSeq) {
-  throw new Error(`the replacement session did not deliver the stored row exactly once: ${JSON.stringify(recovered)}`);
+if (recovered.length !== 0) throw new Error(`the replacement session inserted a visible anchor: ${JSON.stringify(recovered)}`);
+const privateRecovery = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
+if (!privateRecovery.some((sent) => sent.message.content.includes(`[seq ${orphanSeq}] branch-driver: stored before the replacement`))) {
+  throw new Error(`the replacement session did not deliver the stored row privately: ${JSON.stringify(privateRecovery)}`);
 }
 if (outcomeScript(["unread"]) !== "") throw new Error("the replacement session did not advance the read cursor");
 
-// Reconciling again delivers nothing further: the cursor, not the transcript,
-// is what stops a second delivery.
+// Reconciling again sends no duplicate for the already-read row.
+const beforeReconcile = privateRecovery.length;
 await fire("turn_end", {}, {
   sessionManager: { getSessionFile: () => `${home}/third.jsonl`, getEntries: () => thirdEntries },
 });
-if (thirdEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome").length !== 1) {
-  throw new Error("a later reconciliation delivered the same captain outcome twice");
+if (sentToMain.filter((sent) => sent.message.customType === "fm-branch-process").length !== beforeReconcile) {
+  throw new Error("a later reconciliation duplicated the private delivery");
 }
 process.exit(0);
 EOF
@@ -4703,13 +4598,14 @@ if (outcomeScript(["unread"]) === "") throw new Error("a failed cursor advance s
 // advances, so nothing is lost and nothing is doubled.
 armStoreFailure("");
 await fire("turn_end", {}, defaultSessionCtx);
+await fire("agent_settled", {});
 const visible = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === failedSeq);
-if (visible.length !== 1) {
-  throw new Error(`the recovered captain outcome is not present exactly once: ${JSON.stringify(visible)}`);
-}
+if (visible.length !== 0) throw new Error(`the recovered captain outcome inserted an anchor: ${JSON.stringify(visible)}`);
+const recovered = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process" && sent.message.content.includes(`[seq ${failedSeq}]`));
+if (recovered.length !== 1) throw new Error(`the recovered captain outcome was not delivered privately exactly once: ${JSON.stringify(recovered)}`);
 if (outcomeScript(["unread"]) !== "") throw new Error("recovery did not advance the read cursor");
 await fire("turn_end", {}, defaultSessionCtx);
-if (mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === failedSeq).length !== 1) {
+if (sentToMain.filter((sent) => sent.message.customType === "fm-branch-process" && sent.message.content.includes(`[seq ${failedSeq}]`)).length !== 1) {
   throw new Error("a later reconciliation delivered the recovered outcome a second time");
 }
 finishWakePrompt();
@@ -4755,8 +4651,8 @@ SH
     FM_TEST_FAIL_ARM="$home/state/store-fail-arm" DRIVER_PRELUDE="$DRIVER_PRELUDE" \
     node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, outcomeScript, sentToMain, mainEntries, defaultSessionCtx }; })()`);
-const { fire, dispatch, settle, outcomeScript, sentToMain, mainEntries, defaultSessionCtx } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, outcomeScript, sentToMain, mainEntries, mainTools, defaultSessionCtx }; })()`);
+const { fire, dispatch, settle, outcomeScript, sentToMain, mainEntries, mainTools, defaultSessionCtx } = globalThis.__t;
 import { writeFileSync } from "node:fs";
 
 const failArm = process.env.FM_TEST_FAIL_ARM;
@@ -4765,8 +4661,8 @@ const storedRows = () => outcomeScript(["list", "--recent", "50"]).split("\n").f
 const routineCopies = (summary) => sentToMain.filter(
   (sent) => sent.message.customType === "fm-branch-merge" && sent.message.content.includes(summary),
 ).length;
-const captainCopies = (seq) => mainEntries.filter(
-  (entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === seq,
+const captainCopies = (seq) => sentToMain.filter(
+  (sent) => sent.message.customType === "fm-branch-process" && sent.message.content.includes(`[seq ${seq}]`),
 ).length;
 
 await fire("session_start", {}, defaultSessionCtx);
@@ -4784,21 +4680,19 @@ const routineFailed = await report.execute("routine-mark-read-fails", { task: "b
 if (!routineFailed.isError || !routineFailed.content[0].text.includes("visible delivery or cursor advancement failed")) {
   throw new Error(`a failed routine cursor advance did not surface as an error: ${JSON.stringify(routineFailed)}`);
 }
-if (routineCopies(routineSummary) !== 1) {
-  throw new Error(`the routine note was not delivered exactly once before the cursor failure: ${routineCopies(routineSummary)}`);
+if (routineCopies(routineSummary) !== 0) {
+  throw new Error(`the routine outcome leaked into chat before the cursor failure: ${routineCopies(routineSummary)}`);
 }
 let stored = storedRows();
 if (stored.length !== 1) throw new Error(`the failed cursor write changed the store: ${JSON.stringify(stored)}`);
 if (outcomeScript(["unread"]) === "") throw new Error("a failed cursor write still marked the routine row read");
 
-// The next reconciliation re-delivers it, because a routine note has no
-// sequence-keyed record to recognize. That second copy is the pre-existing
-// limitation; what must hold is that it is exactly one more, and that the
-// store and cursor recover.
+// The next reconciliation consumes it privately without creating a chat
+// message, and the store and cursor recover.
 armStoreFailure("");
 await fire("turn_end", {}, defaultSessionCtx);
-if (routineCopies(routineSummary) !== 2) {
-  throw new Error(`recovery did not re-deliver the routine note exactly once: ${routineCopies(routineSummary)}`);
+if (routineCopies(routineSummary) !== 0) {
+  throw new Error(`routine recovery leaked a chat message: ${routineCopies(routineSummary)}`);
 }
 if (outcomeScript(["unread"]) !== "") throw new Error("recovery did not advance the cursor past the routine row");
 stored = storedRows();
@@ -4807,8 +4701,8 @@ if (stored.length !== 1) throw new Error(`recovery changed the stored routine ro
 // Once the cursor is past it, no further reconciliation delivers it again:
 // the duplication window is the failed write, not an unbounded repeat.
 await fire("turn_end", {}, defaultSessionCtx);
-if (routineCopies(routineSummary) !== 2) {
-  throw new Error(`the routine note kept being re-delivered after the cursor advanced: ${routineCopies(routineSummary)}`);
+if (routineCopies(routineSummary) !== 0) {
+  throw new Error(`the routine outcome reappeared in chat after the cursor advanced: ${routineCopies(routineSummary)}`);
 }
 
 // The same failure on a captain row does NOT duplicate: its visible entry is
@@ -4818,22 +4712,26 @@ armStoreFailure("mark-read");
 const captainFailed = await report.execute("captain-mark-read-fails", { task: "branch-driver", verdict: "captain", summary: captainSummary }, undefined, undefined, {});
 if (!captainFailed.isError) throw new Error(`a failed captain cursor advance did not surface as an error: ${JSON.stringify(captainFailed)}`);
 const captainSeq = storedRows().find((row) => row.summary === captainSummary).seq;
-if (captainCopies(captainSeq) !== 1) throw new Error(`the captain entry was not written exactly once: ${captainCopies(captainSeq)}`);
+if (captainCopies(captainSeq) !== 0) throw new Error(`the captain outcome was presented before cursor recovery: ${captainCopies(captainSeq)}`);
 armStoreFailure("");
 await fire("turn_end", {}, defaultSessionCtx);
+await fire("agent_settled", {});
 if (captainCopies(captainSeq) !== 1) {
-  throw new Error(`recovery duplicated the captain entry: ${captainCopies(captainSeq)}`);
+  throw new Error(`recovery did not present the captain outcome privately exactly once: ${captainCopies(captainSeq)}`);
 }
 if (outcomeScript(["unread"]) !== "") throw new Error("recovery did not advance the cursor past the captain row");
 if (storedRows().length !== 2) throw new Error(`the store lost or duplicated a row across both failures: ${JSON.stringify(storedRows())}`);
 
-// The durable cursor, not this session, is what closes both windows: a new
-// main session reconciles and re-delivers neither of them.
+// Read-cursor recovery is separate from captain acknowledgement: acknowledge
+// the intervention, then a new session must not present it again.
+const processed = mainTools.find((tool) => tool.name === "fm_branch_processed");
+const ack = await processed.execute("ack", { through: captainSeq }, undefined, undefined, {});
+if (ack.isError) throw new Error(`the recovered captain outcome could not be acknowledged: ${JSON.stringify(ack)}`);
 finishWakePrompt();
 await offer.settlement.then(() => null, () => null);
 await fire("session_start", {}, defaultSessionCtx);
-if (routineCopies(routineSummary) !== 2 || captainCopies(captainSeq) !== 1) {
-  throw new Error(`a new session re-delivered an already-read outcome: routine=${routineCopies(routineSummary)} captain=${captainCopies(captainSeq)}`);
+if (routineCopies(routineSummary) !== 0 || captainCopies(captainSeq) !== 1) {
+  throw new Error(`a new session duplicated an acknowledged outcome: routine=${routineCopies(routineSummary)} captain=${captainCopies(captainSeq)}`);
 }
 process.exit(0);
 EOF

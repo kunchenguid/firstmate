@@ -10,10 +10,9 @@
 // actionable wake here (lib/fm-branch-dispatch.ts); the branch handles it with
 // real tools and reports through the fm_branch_report custom tool, which
 // writes the durable outcome store FIRST (bin/fm-branch-outcome.sh), then
-// persists a sequence-keyed visible record in main's transcript, and for a
-// captain-facing outcome opens one sequence-keyed processing turn on main
-// that stays open until main acknowledges that sequence (see
-// presentUnprocessedOutcomes).
+// consumes the row from the private read cursor; a captain-facing
+// intervention opens one sequence-keyed processing turn on main that stays
+// open until main acknowledges that sequence (see presentUnprocessedOutcomes).
 // Main's captain/assistant dialog is mirrored into the branch as read-only
 // fm-main-mirror context from Pi's
 // before_agent_start prompt and at main's turn_end. Pi-only by construction: this
@@ -28,7 +27,7 @@
 // the tool set is BRANCH_TOOL_NAMES in that fixed order on every spawn, and
 // one shared per-home prompt_cache_key is set for branch requests in a
 // before_provider_request hook - main keeps Pi's default per-session key.
-// Wakes, mirrored dialog, and merge notes are all appends at a tail.
+// Wakes, mirrored dialog, and private processing requests are all appends at a tail.
 //
 // Session-lock ownership: every branch side-effect boundary re-evaluates the
 // current extension generation and lock ownership LAZILY, the same way the
@@ -145,17 +144,18 @@ const BRANCH_TOOL_NAMES = ["read", "bash", "fm_branch_report"] as const;
 const branchCacheKey = `fm-branch-${createHash("sha256").update(fmHome).digest("hex").slice(0, 24)}`;
 
 const MIRROR_MESSAGE_CAP = 4000;
-const MERGE_NOTE_BOAT = "⛵";
-const VISIBLE_OUTCOME_ANCHOR = "⚓";
-const VISIBLE_OUTCOME_ENTRY_TYPE = "fm-branch-visible-outcome";
-// The processing half of the captain-outcome contract. The visible entry
-// above is the DISPLAY: crash-safe and exact-once. This hidden, typed request
-// is the PROCESSING: it opens the one turn in which main acts on the outcome,
-// and only main's explicit sequence-bound acknowledgement (fm_branch_processed)
-// closes it. An unrelated or empty answer leaves the sequence open, so it is
-// presented again at the end of the next main run and at session start. Pi
-// gives the model only a custom message's `content`, so the request carries
-// its own identity through the typed operational envelope.
+// Captain-facing branch outcomes use only the normal MAIN response now. These
+// legacy types remain registered with empty renderers so an older transcript
+// cannot reintroduce anchor rows or sailboat notes after reload.
+const LEGACY_MERGE_MESSAGE_TYPE = "fm-branch-merge";
+const LEGACY_VISIBLE_OUTCOME_ENTRY_TYPE = "fm-branch-visible-outcome";
+// The processing contract is private: it opens the one turn in which main
+// acts on an intervention, and only main's explicit sequence-bound
+// acknowledgement (fm_branch_processed) closes it. An unrelated or empty
+// answer leaves the sequence open, so it is presented again at the end of the
+// next main run and at session start. Pi gives the model only a custom
+// message's `content`, so the request carries its identity through the typed
+// operational envelope while its display flag stays false.
 const PROCESSING_MESSAGE_TYPE = "fm-branch-process";
 // Triggered re-presentations per unprocessed sequence set before the request
 // stops opening turns of its own and instead rides the captain's next prompt
@@ -170,10 +170,12 @@ const PROVIDER_ERROR_LATCH_THRESHOLD = 2;
 const PROVIDER_REPROBE_BASE_MS = 5 * 60 * 1000;
 const PROVIDER_REPROBE_MAX_MS = 60 * 60 * 1000;
 const PROCESSING_INSTRUCTION =
-  "This is a supervision processing request delivered automatically by the supervision branch. " +
-  "It was not typed by the captain. " +
-  "The outcomes below are already stored durably and already shown to the captain as anchor entries in this transcript; each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
-  "Process each outcome now as firstmate: give the captain a visible response where one is due, answer or escalate a decision, act on a blocker or failure, or record that no further action is needed. " +
+  "This is a private supervision processing request delivered automatically by the supervision branch. " +
+  "It was not typed by the captain and must not be rendered as captain-facing text. " +
+  "The outcomes below are already stored durably and each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
+  "Process each intervention as firstmate: give the captain one concise normal response only when a decision, approval, credential, destructive or security-sensitive choice, real failure or blocker, or review or merge action is genuinely needed. " +
+  "Routine completion, automatic recovery or delivery, progress, idle work, retries, stale recovery, duplicate terminal discovery, and unchanged fleet review stay private. " +
+  "If an outcome needs no new captain action or information, emit no visible assistant text at all. " +
   "When every outcome below is processed, call fm_branch_processed with through={N} exactly once. " +
   "Until that call the outcomes stay open and are presented again; an answer that does not make that call never counts as processing.";
 type MirrorItem = { tag: "captain" | "main"; text: string };
@@ -187,7 +189,6 @@ type OutcomeRow = {
   summary: string;
   silent: boolean;
 };
-type VisibleOutcomeRecord = OutcomeRow & { version: 1 };
 type ProviderRecovery = {
   cooldownMs: number;
   retryNotBefore: number;
@@ -470,20 +471,6 @@ function parseOutcomeRow(value: unknown): OutcomeRow | null {
   return { seq: row.seq, task: row.task, verdict: row.verdict, summary: row.summary, silent };
 }
 
-function parseVisibleOutcomeRecord(value: unknown): VisibleOutcomeRecord | null {
-  if (!value || typeof value !== "object" || (value as { version?: unknown }).version !== 1) return null;
-  const row = parseOutcomeRow(value);
-  return row ? { version: 1, ...row } : null;
-}
-
-function sameOutcome(left: OutcomeRow, right: OutcomeRow): boolean {
-  return left.seq === right.seq &&
-    left.task === right.task &&
-    left.verdict === right.verdict &&
-    left.summary === right.summary &&
-    left.silent === right.silent;
-}
-
 // Volatile mirror-collection state. Instance-scoped and cleared at the
 // session replacement boundary, so a replacement extension instance
 // reconstructs EXCLUSIVELY from the durable cursor: dialog collected but not
@@ -631,6 +618,12 @@ export default function (pi: ExtensionAPI) {
   // session generation.
   type ProcessingState = { sequences: string; through: number; triggered: number; pending: boolean; nextTurnQueued: boolean };
   let processing: ProcessingState | null = null;
+  // A processing turn may be needed only to close a durable intervention
+  // whose response is already known to be stale or empty. Hide the old
+  // no-op acknowledgement if a model emits it anyway; genuine intervention
+  // text remains the one normal captain-facing response.
+  let processingRunActive = false;
+  let processingPromptActive = false;
   let processedInitializedGeneration = -1;
   // One revision for BOTH selections: a model or effort change invalidates an
   // in-flight branch build exactly the same way.
@@ -672,12 +665,6 @@ export default function (pi: ExtensionAPI) {
     if (ctx?.modelRegistry) mainModelRegistry = ctx.modelRegistry;
   }
 
-  function deliverBranchHealthNote(text: string): void {
-    const message = { customType: "fm-branch-merge", content: `${MERGE_NOTE_BOAT} ${text}`, display: true };
-    if (mainStreaming) pi.sendMessage(message, { deliverAs: "nextTurn" });
-    else pi.sendMessage(message, {});
-  }
-
   function recordSettledProviderError(detail: string): void {
     consecutiveProviderErrors += 1;
     if (consecutiveProviderErrors < PROVIDER_ERROR_LATCH_THRESHOLD && !providerRecovery) return;
@@ -692,9 +679,6 @@ export default function (pi: ExtensionAPI) {
       retryNotBefore: Date.now() + cooldownMs,
       probeInFlight: false,
     };
-    if (firstLatch) {
-      deliverBranchHealthNote("Supervision branch paused after repeated provider errors; main will handle wakes while it cools down.");
-    }
   }
 
   function recordDurableBranchReport(reportGeneration: number, reportSelectionRevision: number): void {
@@ -703,7 +687,6 @@ export default function (pi: ExtensionAPI) {
     if (!providerRecovery) return;
     branchBroken = "";
     providerRecovery = null;
-    deliverBranchHealthNote("Supervision branch recovered after a successful cooldown probe.");
   }
 
   function finishProviderProbe(probeGeneration: number, probeSelectionRevision: number): void {
@@ -934,51 +917,12 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  // A captain outcome is delivered by a durable, rendered session entry, not
-  // by asking main's model to acknowledge a hidden custom message. The store
-  // sequence is the idempotency key: a reload after appendEntry but before
-  // mark-read finds the same record and advances the cursor without appending
-  // a duplicate. A conflicting record for one sequence fails closed.
-  function ensureVisibleCaptainOutcome(row: OutcomeRow): boolean {
-    if (!currentMainSession || row.verdict !== "captain") return false;
-    let matching = false;
-    for (const entry of currentMainSession.getEntries()) {
-      if (entry.type !== "custom" || entry.customType !== VISIBLE_OUTCOME_ENTRY_TYPE) continue;
-      const entrySeq = entry.data && typeof entry.data === "object"
-        ? (entry.data as { seq?: unknown }).seq
-        : undefined;
-      if (entrySeq !== row.seq) continue;
-      const recorded = parseVisibleOutcomeRecord(entry.data);
-      if (!recorded || !sameOutcome(recorded, row)) return false;
-      matching = true;
-    }
-    if (matching) return true;
-    const record: VisibleOutcomeRecord = { version: 1, ...row };
-    try {
-      pi.appendEntry(VISIBLE_OUTCOME_ENTRY_TYPE, record);
-    } catch {
-      return false;
-    }
-    return currentMainSession.getEntries().some((entry) => {
-      if (entry.type !== "custom" || entry.customType !== VISIBLE_OUTCOME_ENTRY_TYPE) return false;
-      const recorded = parseVisibleOutcomeRecord(entry.data);
-      return recorded !== null && sameOutcome(recorded, row);
-    });
-  }
-
-  function deliverRoutineOutcome(row: OutcomeRow): void {
-    const message = {
-      customType: "fm-branch-merge",
-      content: `${MERGE_NOTE_BOAT} ${row.task}: ${row.summary}`,
-      display: !(row.task === "fleet" && row.silent),
-    };
-    if (mainStreaming) pi.sendMessage(message, { deliverAs: "nextTurn" });
-    else pi.sendMessage(message, {});
-  }
-
-  // Captain rows that are read (their visible entry exists) but not yet
-  // acknowledged as processed by main, in sequence order. null means the store
-  // could not be read safely, never "nothing".
+  // Captain intervention rows are delivered only through the private typed
+  // processing request below. Routine rows are consumed from the durable
+  // store without adding any session message.
+  // Captain intervention rows that are read but not yet acknowledged as
+  // processed by main, in sequence order. null means the store could not be
+  // read safely, never "nothing".
   async function readUnprocessedOutcomes(expectedGeneration: number): Promise<OutcomeRow[] | null> {
     if (!(await generationOwnsLock(expectedGeneration))) return null;
     const listed = await runOutcomeScript(["unprocessed"]);
@@ -1057,13 +1001,13 @@ export default function (pi: ExtensionAPI) {
     return true;
   }
 
-  // Reconcile in sequence order so the cursor can never cross a captain row
-  // whose visible entry is absent. This is also the reload/crash recovery
-  // path and runs before new branch work is accepted. With `present`, every
-  // captain row that is now read but still unprocessed is handed to main as
-  // one processing request; callers that run inside a main turn (turn_end)
-  // leave presentation to the run boundary (agent_settled) instead, so one
-  // multi-tool run never receives duplicate requests.
+  // Reconcile in sequence order so every durable row is consumed once. This
+  // is also the reload/crash recovery path and runs before new branch work is
+  // accepted. With `present`, every captain intervention row that is now read
+  // but still unprocessed is handed to main as one private processing request;
+  // callers that run inside a main turn (turn_end) leave presentation to the
+  // run boundary (agent_settled) instead, so one multi-tool run never receives
+  // duplicate requests.
   async function reconcileUnreadOutcomes(expectedGeneration: number, present = true): Promise<boolean> {
     if (!(await generationOwnsLock(expectedGeneration))) return false;
     // One-time migration per generation: a home whose outcomes were all
@@ -1077,7 +1021,6 @@ export default function (pi: ExtensionAPI) {
     const unread = await runOutcomeScript(["unread"]);
     if (!unread.ok) return false;
     if (unread.stdout) {
-      if (!currentMainSession) return false;
       for (const line of unread.stdout.split("\n")) {
         let row: OutcomeRow | null = null;
         try {
@@ -1094,23 +1037,10 @@ export default function (pi: ExtensionAPI) {
         // unread and deliver it a second time; the cursor records that the
         // row WAS delivered, which stays true across a replacement.
         if (!(await generationOwnsLock(expectedGeneration))) return false;
-        // KNOWN PRE-EXISTING LIMITATION, unchanged by moving this work off Pi's
-        // render thread and tracked as
-        // fm-pi-routine-delivery-idempotency-followup-r1: if the mark-read
-        // below fails after a ROUTINE note was already delivered, the row stays
-        // unread and the next reconciliation sends that note a second time,
-        // because a routine note is a plain message with no sequence-keyed
-        // record to recognize. A captain row cannot duplicate that way -
-        // ensureVisibleCaptainOutcome finds its own earlier entry by store
-        // sequence. Closing the routine gap needs a durable, idempotent
-        // representation for routine delivery, which changes the delivery
-        // contract rather than this ordering, so it is deliberately not done
-        // here.
-        if (row.verdict === "captain") {
-          if (!ensureVisibleCaptainOutcome(row)) return false;
-        } else {
-          deliverRoutineOutcome(row);
-        }
+        // The durable row is the complete private presentation for routine
+        // outcomes, and the captain row's hidden processing request is the
+        // only captain-facing path. Marking read after this point preserves
+        // crash recovery without creating a duplicate transcript message.
         if (!(await runOutcomeScript(["mark-read", "--through", String(row.seq)])).ok) return false;
       }
     }
@@ -1130,7 +1060,7 @@ export default function (pi: ExtensionAPI) {
       name: "fm_branch_report",
       label: "Report supervision outcome",
       description:
-        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge it into the captain-facing main conversation. verdict captain persists an exact visible entry and opens one sequence-keyed processing turn on main that stays open until main acknowledges it; routine notes render unless silent marks a no-change heartbeat.",
+        "Record one handled fleet event durably. Routine outcomes stay private; verdict captain opens one hidden, sequence-keyed processing turn only when the captain genuinely needs to intervene.",
       parameters: Type.Object({
         task: Type.String({ description: "The task id the event belongs to (or 'fleet' for fleet-wide events)" }),
         verdict: Type.Union([Type.Literal("routine"), Type.Literal("captain")], {
@@ -1196,7 +1126,9 @@ export default function (pi: ExtensionAPI) {
             };
           }
           return {
-            content: [{ type: "text", text: `recorded seq ${appended.stdout} and delivered [${verdict}] into main` }],
+            content: [{ type: "text", text: verdict === "captain"
+              ? `recorded seq ${appended.stdout} for private intervention processing`
+              : `recorded seq ${appended.stdout} privately` }],
             details: undefined,
           };
         });
@@ -1576,6 +1508,7 @@ ${context.command}
     // Stage it verbatim and remember the future persisted index for turn_end's
     // duplicate suppression. Operational extension injections are not dialog.
     const prompt = event.prompt.trim();
+    processingPromptActive = Boolean(processing?.pending && prompt && isOperationalUserText(prompt));
     if (!prompt || isOperationalUserText(prompt)) return;
     const file = currentMainSession.getSessionFile() ?? "";
     const index = mirrorCollection.collectAnchor?.index ?? currentMainSession.getEntries().length;
@@ -1587,7 +1520,22 @@ ${context.command}
     mainStreaming = true;
     // Pi delivers a queued nextTurn copy with the prompt that starts this run,
     // so a fresh copy may be queued again once this run settles unacknowledged.
+    processingRunActive = processingPromptActive;
+    processingPromptActive = false;
     if (processing) processing.nextTurnQueued = false;
+  });
+  pi.on?.("message_end", (event) => {
+    if (!processingRunActive || event.message.role !== "assistant") return;
+    const content = event.message.content;
+    if (
+      Array.isArray(content) &&
+      content.some((part) => (part as { type?: unknown }).type === "toolCall")
+    ) return;
+    const normalized = textOfContent(content).replace(/\s+/g, " ").trim().toLowerCase();
+    if (normalized !== "captain, shipshape.") return;
+    // A replayed or already-settled intervention must not turn the durable
+    // processing check into a visible no-op acknowledgement.
+    return { message: { ...event.message, content: [] } };
   });
   pi.on?.("agent_end", () => {
     mainStreaming = false;
@@ -1600,6 +1548,8 @@ ${context.command}
   // reply that only paraphrased it - and is presented again.
   pi.on?.("agent_settled", async () => {
     mainStreaming = false;
+    processingRunActive = false;
+    processingPromptActive = false;
     if (processing) processing.pending = false;
     const settledGeneration = generation;
     await enqueueDelivery(async () => {
@@ -1707,6 +1657,8 @@ ${context.command}
     shuttingDown = true;
     generation += 1;
     processing = null;
+    processingRunActive = false;
+    processingPromptActive = false;
     pendingMirror.length = 0;
     currentMainSession = null;
     mirrorCollection.collectAnchor = null;
@@ -2127,31 +2079,16 @@ ${context.command}
     name: "fm_branch_processed",
     label: "Acknowledge processed supervision outcomes",
     description:
-      "Acknowledge that every captain-facing supervision outcome up to a sequence number has been processed by this conversation. Call it exactly once after handling a supervision processing request, with through set to the highest sequence that request listed; an outcome that is not acknowledged is presented again.",
+      "Privately acknowledge every supervision intervention in this processing request through its highest sequence number. Call exactly once; an outcome that is not acknowledged is presented again.",
     promptSnippet: "Acknowledge processed captain-facing supervision outcomes by sequence.",
     parameters: Type.Object({
       through: Type.Number({ description: "The highest outcome sequence number this conversation has processed" }),
     }),
     renderShell: "self",
-    renderCall: (_args, theme, context) => {
-      if (calmPresentation.stockExportRendering) throw new Error("Use Pi stock export rendering");
-      if (calmHides("assistant-tool-call")) return new Container();
-      const shellState = context.state as OutcomesToolShellState;
-      shellState.call = new Text(theme.fg("toolTitle", theme.bold("fm_branch_processed")), 0, 0);
-      return refreshOutcomesToolShell(shellState, theme, context);
-    },
-    renderResult: (result, _options, theme, context) => {
-      if (calmPresentation.stockExportRendering) throw new Error("Use Pi stock export rendering");
-      if (calmHides("tool-result")) return new Container();
-      const output = result.content
-        .filter((item) => item.type === "text")
-        .map((item) => normalizeOutcomesToolOutput(item.text))
-        .join("\n");
-      const shellState = context.state as OutcomesToolShellState;
-      shellState.result = output ? new Text(theme.fg("toolOutput", output), 0, 0) : new Container();
-      refreshOutcomesToolShell(shellState, theme, context);
-      return new Container();
-    },
+    // The acknowledgement is bookkeeping for the private processing request,
+    // not captain-facing content. Keep both tool slots empty in every mode.
+    renderCall: () => new Container(),
+    renderResult: () => new Container(),
     execute: async (_toolCallId, params) => {
       const raw = (params as { through?: unknown }).through;
       const through = typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 1 ? raw : null;
@@ -2204,32 +2141,9 @@ ${context.command}
     },
   });
 
-  // Captain outcomes are transcript entries rather than model messages. Their
-  // payload is the durable store row plus a schema version, and the renderer
-  // displays the exact stored summary without asking a model to paraphrase or
-  // acknowledge it.
-  pi.registerEntryRenderer?.(VISIBLE_OUTCOME_ENTRY_TYPE, (entry, _options, theme) => {
-    const record = parseVisibleOutcomeRecord(entry.data);
-    if (!record || record.verdict !== "captain") return undefined;
-    return new Text(
-      `${theme.fg("customMessageText", VISIBLE_OUTCOME_ANCHOR)}${theme.fg("dim", ` [seq ${record.seq}] ${record.task}: ${record.summary}`)}`,
-      1,
-      0,
-    );
-  });
-
-  // Pi only calls this renderer for a message with display: true, which every
-  // routine note uses except an explicitly silent fleet heartbeat.
-  pi.registerMessageRenderer?.("fm-branch-merge", (message, _options, theme) => {
-    const note = textOfContent(message.content);
-    const hasGlyph = note.startsWith(MERGE_NOTE_BOAT);
-    const rest = hasGlyph ? note.slice(MERGE_NOTE_BOAT.length).trimStart() : note;
-    if (calmHides("routine-supervision-note")) return new Container();
-    const outputPad = 1;
-    return new Text(
-      `${hasGlyph ? theme.fg("customMessageText", MERGE_NOTE_BOAT) : ""}${theme.fg("dim", hasGlyph ? ` ${rest}` : rest)}`,
-      outputPad,
-      0,
-    );
-  });
+  // Older sessions may still contain the former anchor entry or sailboat
+  // message. Keep their durable history but render both legacy forms empty so
+  // reload never puts internal ids or routine notes back into the transcript.
+  pi.registerEntryRenderer?.(LEGACY_VISIBLE_OUTCOME_ENTRY_TYPE, () => new Container());
+  pi.registerMessageRenderer?.(LEGACY_MERGE_MESSAGE_TYPE, () => new Container());
 }

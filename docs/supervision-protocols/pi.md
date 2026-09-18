@@ -21,17 +21,17 @@ When this session owns supervision and no legacy away daemon flag is active:
 
 The supervision branch is default-on (docs/pi-supervision-branch.md): whenever this session owns the fleet lock and no legacy away daemon flag is active, the watcher extension hands eligible task-local rows from ordinary actionable wakes, plus selected fleet-wide heartbeat reviews, to the in-process supervision branch while main-only rows remain queued for this conversation; the away-posture record alone leaves this path active.
 Decision-owned signal and stale routing, including whole-batch precedence and the independent heartbeat exception, is owned by [docs/pi-supervision-branch.md](../pi-supervision-branch.md#components-and-their-owners).
-A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is delivered silently with no rendered note, while every other routine outcome returns as an appended, rendered note that leads with ⛵ then the dim outcome text.
-A captain-facing outcome instead appears as one exact, sequence-keyed visible transcript entry, and then arrives in this conversation as one hidden supervision processing request listing each `[seq N] task: summary` it covers.
-That request is the one turn in which MAIN processes the outcome: give the captain a visible response where one is due, answer or escalate a decision, act on a blocker or failure, or record that no further action is needed, then call the `fm_branch_processed` tool with the highest sequence the request listed, exactly once.
-Only that call closes the outcome; an unrelated, empty, or paraphrased answer leaves it open, and the current unprocessed sequence set is presented again at the next run boundary and at session start until it is acknowledged.
-The persisted entry is already the captain-visible record, so MAIN must not re-emit it verbatim merely because it appeared; this prevents repetition but does not replace any captain-facing outcome response required by `AGENTS.md` section 9.
-Regression example - keep verbatim and never condense away: `[seq 41] claude-mod: implementation complete, ready for review` requires relaying a captain-facing outcome response, not just `Captain, shipshape.`.
-A merge ask with no URL that leans on the dim anchor violates `AGENTS.md` section 9.
+Every branch outcome is retained in the durable history, but routine outcomes stay private with no rendered note, no anchor, no sequence number, no task id, and no processing turn.
+A captain intervention arrives in this conversation only as one hidden supervision processing request listing each internal `[seq N] task: summary` it covers.
+That request is the one turn in which MAIN processes the outcome: give the captain one concise normal response only when a decision, approval, credential, destructive or security-sensitive choice, real failure or blocker action, or review or merge action is genuinely needed, then call the `fm_branch_processed` tool with the highest sequence the request listed, exactly once.
+If an outcome needs no new captain action or information, MAIN emits no visible assistant text, including no `Captain, shipshape.` acknowledgement.
+Only the acknowledgement closes the outcome; an unrelated, empty, or paraphrased answer leaves it open, and the current unprocessed sequence set is presented again at the next run boundary and at session start until it is acknowledged.
+The processing request and acknowledgement tool are private to MAIN and never become captain-facing bookkeeping.
+A merge or review response still follows `AGENTS.md` section 9 and includes the recorded full PR URL when one exists.
 Before MAIN steers, controls lifecycle, or cleans up a task, claim its lease with `bin/fm-lease.sh claim <task>` and release it afterwards; a refused claim means the branch is acting on that task right now.
 This conversation still receives every other fleet-wide or unresolvable wake, the branch's wakes when it is unavailable or a legacy away daemon flag is active, and every watcher-failure alarm regardless, so the arm and repair contract above is unchanged.
 Treat the merged fleet event as already handled for fleet operations: MAIN must not re-drain, re-run, or acknowledge it.
-Separately, MAIN applies judgment about whether and how to surface, summarize, reference, or incorporate a merged sailboat outcome in the captain conversation; event ownership does not decide the conversational treatment.
+Separately, MAIN applies the intervention policy above to decide whether a processed outcome needs one normal captain-facing response; event ownership does not decide the conversational treatment.
 Read the durable outcome store with the fm_branch_outcomes tool when the captain asks what happened.
 
 The turn-end guard extension lives at `__FM_PI_TURNEND_EXT__`.

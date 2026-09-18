@@ -19,18 +19,22 @@ import {
   installCalmToolLayout,
 } from "./lib/fm-calm-assistant-layout.ts";
 import { installCalmOperationalUserLayout } from "./lib/fm-calm-operational-user-layout.ts";
+import { classifyFirstmateCurrentOperationalText } from "./lib/fm-operational-input.ts";
 import {
   CALM_WORKING_SHIP_WIDGET_KEY,
   createCalmWorkingShipAnimation,
   createCalmWorkingShipWidget,
 } from "./lib/fm-calm-working-ship.ts";
 import {
+  calmOperationalRunIsActive,
+  calmPresentationHides,
   calmPresentationIsActive,
   clearCalmSteps,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
   setCalmRunActive,
   subscribeCalmPresentation,
   registerFirstmateSyntheticPresentation,
+  setCalmOperationalRun,
   setCalmPresentation,
   setCalmStockExportRendering,
 } from "./lib/fm-calm-visibility.ts";
@@ -75,7 +79,9 @@ export default function (pi: ExtensionAPI) {
     ui: ExtensionUIContext,
     forceStockVisibility = false,
   ): void => {
-    const showShip = agentRunActive && calmPresentationIsActive();
+    const showShip = agentRunActive &&
+      calmPresentationIsActive() &&
+      !calmOperationalRunIsActive();
     if (showShip !== workingShipShown) {
       workingShipShown = showShip;
       ui.setWidget(
@@ -134,6 +140,7 @@ export default function (pi: ExtensionAPI) {
     setCalmRunActive(false);
     clearCalmSteps();
     exportRendering = false;
+    setCalmOperationalRun(false);
     setCalmPresentation(loadCalmPreference());
     setCalmStockExportRendering(false);
     publishPresentationState();
@@ -166,6 +173,13 @@ export default function (pi: ExtensionAPI) {
       }, 0);
       return undefined;
     });
+  });
+
+  pi.on("before_agent_start", (event) => {
+    setCalmOperationalRun(Boolean(
+      typeof event.prompt === "string" &&
+      classifyFirstmateCurrentOperationalText(event.prompt.trim()),
+    ));
   });
 
   pi.on("agent_start", (_event, ctx) => {

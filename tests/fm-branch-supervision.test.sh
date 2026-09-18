@@ -50,7 +50,7 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *) fail "branch prompt lost the inlined recovery playbook" ;;
   esac
   case "$out_a" in
-    *"Report verdict captain for the finished result of work the captain requested, even when that result is healthy."*"A start or still-working update on requested work that brings no new artifact, finding, or decision is verdict routine."*"Keep an unsolicited routine outcome as verdict routine"*"Keep an unchanged fleet review silent"*) ;;
+    *"Report verdict captain only when the captain genuinely must intervene:"*"Report verdict routine for everything else, including requested work that completed without a captain action"*"An unchanged fleet review may still set silent true"*"A routine result never opens a main turn or adds a chat message."*) ;;
     *) fail "branch prompt lost the requested-result, progress-routine, or routine-silence rules" ;;
   esac
   case "$out_a" in
@@ -97,10 +97,10 @@ PY
   esac
   [ "$(cat "$store")" = "$snapshot" ] || fail "mark-read rewrote the append-only store"
 
-  # startup-replay must stop before an unread captain row. Only Pi's durable
-  # visible entry may acknowledge it, so the cursor cannot skip past it.
+  # startup-replay consumes routine rows privately but stops before an unread
+  # captain row so Pi can open its private processing request.
   replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || fail "startup-replay failed"
-  [ -z "$replay" ] || fail "startup-replay printed a captain row before Pi persisted its visible entry"
+  [ -z "$replay" ] || fail "startup-replay exposed a captain row before Pi opened processing"
   assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" \
     "https://example.com/pr/2" "startup-replay advanced past an unrendered captain row"
   [ "$(cat "$home/state/.branch-outcomes-cursor")" = 1 ] \
@@ -150,18 +150,18 @@ test_outcome_startup_replay_preserves_silence() {
     || fail "silent outcome append failed"
   FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task task-1 --verdict routine --summary 'worker recovered automatically' >/dev/null \
-    || fail "visible outcome append failed"
+    || fail "routine outcome append failed"
 
   replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || fail "mixed startup replay failed"
   assert_not_contains "$replay" "fleet reviewed, nothing changed" "startup replay printed a silent outcome"
-  assert_contains "$replay" "worker recovered automatically" "startup replay lost a visible routine outcome"
+  assert_not_contains "$replay" "worker recovered automatically" "startup replay exposed a routine outcome"
   [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" ] \
-    || fail "startup replay did not mark the silent and visible rows read"
+    || fail "startup replay did not privately consume the routine rows"
 
   printf '%s\n' '{"seq":3,"epoch":1,"task":"task-legacy","wake":"","verdict":"routine","summary":"legacy visible outcome"}' \
     >> "$home/state/branch-outcomes.jsonl"
   replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || fail "legacy startup replay failed"
-  assert_contains "$replay" "legacy visible outcome" "startup replay hid a legacy row with no silent field"
+  assert_not_contains "$replay" "legacy visible outcome" "startup replay exposed a legacy routine row"
   [ -z "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" ] \
     || fail "startup replay did not mark the legacy row read"
 
@@ -186,14 +186,14 @@ test_outcome_startup_replay_stops_at_captain_barrier() {
     --task task-3 --verdict routine --summary 'routine behind captain' >/dev/null || fail "trailing append failed"
 
   replay=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" startup-replay) || fail "barrier replay failed"
-  assert_contains "$replay" "leading routine" "startup replay lost the leading routine row"
+  assert_not_contains "$replay" "leading routine" "startup replay exposed the leading routine row"
   assert_not_contains "$replay" "captain must render in Pi" "startup replay rendered the captain row"
   assert_not_contains "$replay" "routine behind captain" "startup replay crossed the captain barrier"
   [ "$(cat "$home/state/.branch-outcomes-cursor")" = 1 ] || fail "cursor crossed the captain barrier"
   unread=$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread) || fail "barrier unread failed"
   assert_contains "$unread" '"seq":2' "captain row did not remain unread"
   assert_contains "$unread" '"seq":3' "row behind captain did not remain unread"
-  pass "startup replay cannot advance the cursor across an unrendered captain outcome"
+  pass "startup replay privately consumes routine rows but stops before a captain intervention"
 }
 
 test_outcome_cursor_corruption_fails_closed() {

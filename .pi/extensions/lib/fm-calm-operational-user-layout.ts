@@ -5,7 +5,10 @@
 // message delivery.
 import type { UserMessageComponent as PiUserMessageComponent } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
-import { calmPresentationHides } from "./fm-calm-visibility.ts";
+import {
+  calmPresentationHides,
+  setCalmOperationalRun,
+} from "./fm-calm-visibility.ts";
 import { classifyFirstmateCurrentOperationalText } from "./fm-operational-input.ts";
 
 type UserMessageConstructorArgs = ConstructorParameters<typeof PiUserMessageComponent>;
@@ -121,15 +124,19 @@ export function installCalmOperationalUserLayout(): void {
     options?: AddMessageOptions,
   ): void {
     if (message.role !== "user" || !contentIsTextOnly(message.content)) {
+      if (message.role === "user") setCalmOperationalRun(false);
       originalAddMessageToChat.call(this, message, options);
       return;
     }
 
     const text = this.getUserMessageText(message);
     if (!text || !patch.isOperationalInput(text)) {
+      setCalmOperationalRun(false);
       originalAddMessageToChat.call(this, message, options);
       return;
     }
+
+    setCalmOperationalRun(true);
 
     const component = new CalmOperationalUserMessageComponent(
       text,

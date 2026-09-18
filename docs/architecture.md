@@ -123,9 +123,9 @@ The resolver is also used by `fm-control.sh`, `fm-send.sh`, `fm-peek.sh`, `fm-pr
 The script headers own exact schemas, transition checks, and recovery mechanics.
 
 On a Pi primary, supervision is default-on: the watcher extension can hand eligible task-local rows from an ordinary actionable wake, plus selected fleet-wide heartbeat reviews, to a persistent in-process supervision conversation while main-only rows remain on the captain-facing path.
-The branch handles those rows, stores the outcome durably, and merges it back into main.
-A captain-facing outcome persists as one exact, sequence-keyed visible transcript entry and then opens one sequence-keyed processing turn on main, which only main's sequence-bound acknowledgement closes.
-[docs/pi-supervision-branch.md](pi-supervision-branch.md) owns row eligibility, dispatch architecture, deterministic outcome delivery, and processing re-presentation, while the generated [Pi supervision protocol](supervision-protocols/pi.md) owns MAIN's merged-event handling and acknowledgement duty; every other harness keeps the wake-to-main path unchanged.
+The branch handles those rows and stores every outcome durably, while only a captain intervention opens a private processing turn in main.
+That turn stays open until main's sequence-bound acknowledgement closes it, and the captain sees only one normal response when action is genuinely needed.
+[docs/pi-supervision-branch.md](pi-supervision-branch.md) owns row eligibility, dispatch architecture, private outcome delivery, and processing re-presentation, while the generated [Pi supervision protocol](supervision-protocols/pi.md) owns MAIN's merged-event handling and acknowledgement duty; every other harness keeps the wake-to-main path unchanged.
 
 ### Registered secondmate current state
 

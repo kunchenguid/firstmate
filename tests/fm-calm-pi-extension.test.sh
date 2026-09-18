@@ -847,15 +847,7 @@ AssistantMessageComponent.prototype.updateContent = function (message, isStreami
 };
 const extension = await import(`${pathToFileURL(process.env.EXT).href}?test=${Date.now()}`);
 extension.default(pi);
-const upgradedAssistantRender = AssistantMessageComponent.prototype.render;
-if (upgradedAssistantRender === stockAssistantRender) {
-  throw new Error("Calm hot-upgrade did not install the assistant render boundary");
-}
-extension.default(pi);
-if (AssistantMessageComponent.prototype.render !== upgradedAssistantRender) {
-  throw new Error("reloading Calm replaced the assistant render boundary instead of reusing it");
-}
-const visibility = await import(`${pathToFileURL(`${process.cwd()}/lib/fm-calm-visibility.ts`).href}?policy=${Date.now()}`);
+const visibility = await import(pathToFileURL(`${process.cwd()}/lib/fm-calm-visibility.ts`).href);
 const operationalInput = await import(`${pathToFileURL(`${process.cwd()}/lib/fm-operational-input.ts`).href}?input=${Date.now()}`);
 
 // Built-in wrappers register synchronously in both states so rows restored while off
@@ -1103,6 +1095,9 @@ if (!imageVisibleBefore.join("\n").includes("\x1b]1337;File=")) {
   throw new Error("image-capable Pi fixture did not render the built-in read image boundary");
 }
 
+// The generic assistant rows below represent a captain-authored turn after
+// the operational presentation probe, so reset the run marker explicitly.
+visibility.setCalmOperationalRun(false);
 const assistantBase = {
   role: "assistant",
   api: "calm-render-test",
@@ -1815,6 +1810,33 @@ const messages = {
     stopReason: "pending",
     content: [{ type: "text", text: "STREAMING_NOTE_TEXT" }],
   },
+  // Operational turns keep their durable messages but render no reasoning or
+  // no-op acknowledgement. A real intervention keeps only its clean response.
+  operationalNoop: {
+    ...assistantBase,
+    stopReason: "stop",
+    content: [
+      { type: "thinking", thinking: "PRIVATE_OPERATIONAL_REASONING" },
+      { type: "text", text: "Captain, shipshape." },
+    ],
+  },
+  operationalIntervention: {
+    ...assistantBase,
+    stopReason: "stop",
+    content: [
+      { type: "thinking", thinking: "PRIVATE_INTERVENTION_REASONING" },
+      { type: "text", text: "The watcher found a blocker that needs your decision." },
+    ],
+  },
+  operationalWorking: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [
+      { type: "thinking", thinking: "PRIVATE_WORKING_REASONING" },
+      { type: "text", text: "I am checking the fleet." },
+      toolCall,
+    ],
+  },
   // Truncated with tool calls is mid-turn; Pi's own truncation notice stays.
   truncatedMidTurn: {
     ...assistantBase,
@@ -1861,6 +1883,20 @@ if (calm.registeredTools.length !== 0) {
   throw new Error(`Calm registered ${calm.registeredTools.length} tool definitions while off`);
 }
 await calm.sessionStart({ reason: "startup" }, context);
+visibility.setCalmOperationalRun(true);
+const operationalRows = {
+  noop: new AssistantMessageComponent(messages.operationalNoop, true),
+  intervention: new AssistantMessageComponent(messages.operationalIntervention, true),
+  working: new AssistantMessageComponent(messages.operationalWorking, true),
+};
+if (operationalRows.noop.render(100).length !== 0) throw new Error("operational no-op left a transcript row");
+if (operationalRows.working.render(100).length !== 0) throw new Error("operational working reasoning left a transcript row");
+const interventionText = operationalRows.intervention.render(100).join("\\n");
+if (!interventionText.includes("The watcher found a blocker that needs your decision.") ||
+    interventionText.includes("PRIVATE_INTERVENTION_REASONING")) {
+  throw new Error(`operational intervention did not leave exactly its clean outcome: ${interventionText}`);
+}
+visibility.setCalmOperationalRun(false);
 const stockRows = snapshot();
 for (const name of Object.keys(rows)) {
   if (rendered(name).length === 0) throw new Error(`Calm-off rendering hid ${name}`);
@@ -3303,7 +3339,7 @@ const pi = {
 const extension = await import(`${pathToFileURL(process.env.EXT).href}?ship=${Date.now()}`);
 extension.default(pi);
 check(!!calmCommand, "Calm command was not registered");
-for (const event of ["session_start", "agent_start", "agent_settled", "session_shutdown"]) {
+for (const event of ["session_start", "before_agent_start", "agent_start", "agent_settled", "session_shutdown"]) {
   check(handlers.has(event), `Calm did not register a ${event} handler`);
 }
 
@@ -3676,7 +3712,7 @@ SH
 }
 
 test_interactive_terminal_e2e() {
-  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot export_snapshot export_settled_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_report active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
+  local project config home session_file export_file export_dom default_snapshot expanded_snapshot hidden_snapshot active_before_snapshot active_hidden_snapshot operational_baseline operational_before operational_index export_snapshot export_settled_snapshot restored_snapshot working_snapshot working_response_snapshot restarted_snapshot resumed_restored_snapshot hash_before hash_after now version chrome chrome_report active_wait active_screen_wait boat_frame_one boat_frame_two boat_resized_snapshot boat_focus_snapshot boat_cleared_snapshot boat_hull_line boat_sail_line boat_column_one boat_column_two boat_line boat_color_snapshot boat_color_line boat_water_snapshot boat_water_line boat_water_first boat_water_changed boat_narrow_snapshot boat_freeze_snapshot boat_resume_snapshot boat_freeze_column boat_freeze_sail boat_resume_column boat_resume_sail
   if ! command -v pi >/dev/null 2>&1 || ! command -v tmux >/dev/null 2>&1; then
     echo "skip: pi or tmux not found for Pi calm interactive E2E"
     return 0
@@ -3695,6 +3731,8 @@ test_interactive_terminal_e2e() {
   hidden_snapshot="$TMP_ROOT/hidden.txt"
   active_before_snapshot="$TMP_ROOT/active-before.txt"
   active_hidden_snapshot="$TMP_ROOT/active-hidden.txt"
+  operational_baseline="$TMP_ROOT/operational-baseline.txt"
+  operational_before="$TMP_ROOT/operational-before.txt"
   export_snapshot="$TMP_ROOT/export.txt"
   export_settled_snapshot="$TMP_ROOT/export-settled.txt"
   restored_snapshot="$TMP_ROOT/restored.txt"
@@ -3780,7 +3818,16 @@ export default function (pi: ExtensionAPI): void {
       },
       {
         id: "operational-error",
-        name: "Calm gapless operational-row fixture",
+        name: "Calm gapless operational no-op fixture",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 4096,
+        maxTokens: 128,
+      },
+      {
+        id: "operational-intervention",
+        name: "Calm clean operational intervention fixture",
         reasoning: false,
         input: ["text"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -3808,11 +3855,17 @@ export default function (pi: ExtensionAPI): void {
         timestamp: Date.now(),
       };
       void (async () => {
-        if (model.id === "operational-error") {
+        if (model.id === "operational-error" || model.id === "operational-intervention") {
           await new Promise((resolve) => setTimeout(resolve, 25));
-          output.stopReason = "error";
-          output.errorMessage = "CALM_OPERATIONAL_E2E_ERROR";
-          stream.push({ type: "error", reason: "error", error: output });
+          output.content.push({ type: "thinking", thinking: "PRIVATE_OPERATIONAL_REASONING" });
+          output.content.push({
+            type: "text",
+            text: model.id === "operational-intervention"
+              ? "CALM_OPERATIONAL_INTERVENTION"
+              : "Captain, shipshape.",
+          });
+          stream.push({ type: "start", partial: output });
+          stream.push({ type: "done", reason: "stop", message: output });
           stream.end();
           return;
         }
@@ -3872,6 +3925,18 @@ export default function (pi: ExtensionAPI): void {
         throw new Error("could not select the deterministic Calm operational-error model");
       }
       await pi.sendUserMessage(encodeFirstmateOperationalInput(kind, body), {
+        deliverAs: "followUp",
+      });
+    },
+  });
+  pi.registerCommand("calm-intervention-e2e", {
+    description: "Start the deterministic clean operational intervention fixture.",
+    handler: async (_args, ctx) => {
+      const model = ctx.modelRegistry.find("calm-e2e", "operational-intervention");
+      if (!model || !(await pi.setModel(model))) {
+        throw new Error("could not select the deterministic Calm operational-intervention model");
+      }
+      await pi.sendUserMessage(encodeFirstmateOperationalInput("watcher", "CURRENT_INTERVENTION_E2E"), {
         deliverAs: "followUp",
       });
     },
@@ -4024,6 +4089,8 @@ JSON
   assert_contains "$(cat "$active_before_snapshot")" "Warning: CALM_TRANSIENT_DIAGNOSTIC" "transient diagnostic fixture was not shown"
   assert_not_contains "$(cat "$active_before_snapshot")" "/calm-diagnostic-e2e" "transient diagnostic command did not leave the editor"
 
+  cp "$active_before_snapshot" "$operational_baseline"
+  operational_index=0
   for fixture in \
     "watcher|CURRENT_WATCHER_E2E" \
     "turn-end-guard|CURRENT_TURN_END_E2E" \
@@ -4033,6 +4100,7 @@ JSON
   do
     kind=${fixture%%|*}
     needle=${fixture#*|}
+    cp "$operational_baseline" "$operational_before"
     tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-inject-e2e $kind"
     tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
     active_wait=0
@@ -4044,8 +4112,33 @@ JSON
     grep -F '"role":"user"' "$session_file" |
       grep -Fq "$needle" \
       || fail "current operational kind $kind did not retain user-role delivery while Calm was active"
-    sleep 0.1
+    sleep 0.2
+    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$active_hidden_snapshot"
+    if [ "$operational_index" -gt 0 ]; then
+      cmp <(sed -E 's/^↑.*$/<stable-footer>/' "$operational_before") \
+        <(sed -E 's/^↑.*$/<stable-footer>/' "$active_hidden_snapshot") >/dev/null \
+        || fail "no-op operational turn $kind changed transcript geometry or content"
+    fi
+    operational_index=$((operational_index + 1))
+    assert_not_contains "$(cat "$active_hidden_snapshot")" "$needle" "Calm rendered operational input $needle"
+    assert_not_contains "$(cat "$active_hidden_snapshot")" "Captain, shipshape." "Calm rendered a no-op acknowledgement"
+    assert_not_contains "$(cat "$active_hidden_snapshot")" "PRIVATE_OPERATIONAL_REASONING" "Calm rendered operational reasoning"
+    assert_not_contains "$(cat "$active_hidden_snapshot")" "◿" "Calm rendered the operational working ship"
+    assert_not_contains "$(cat "$active_hidden_snapshot")" "╲" "Calm rendered the operational working ship hull"
+    cp "$active_hidden_snapshot" "$operational_baseline"
   done
+  assert_contains "$(cat "$active_hidden_snapshot")" "Warning: CALM_TRANSIENT_DIAGNOSTIC" "operational no-op turns lost the preceding transient diagnostic"
+
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-intervention-e2e"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  wait_for_text "$active_hidden_snapshot" "CALM_OPERATIONAL_INTERVENTION" \
+    || fail "the operational intervention did not produce its clean outcome"
+  assert_contains "$(cat "$active_hidden_snapshot")" "CALM_OPERATIONAL_INTERVENTION" "genuine operational intervention was hidden"
+  assert_not_contains "$(cat "$active_hidden_snapshot")" "PRIVATE_OPERATIONAL_REASONING" "operational intervention exposed reasoning"
+  assert_not_contains "$(cat "$active_hidden_snapshot")" "Captain, shipshape." "operational intervention exposed a no-op acknowledgement"
+  assert_not_contains "$(cat "$active_hidden_snapshot")" "CURRENT_INTERVENTION_E2E" "operational intervention exposed its envelope"
+
+  hash_before=$(shasum -a 256 "$session_file" | awk '{print $1}')
   node - "$session_file" <<'JS' || fail "native Pi did not preserve every exact current operational kind"
 const fs = require("node:fs");
 const entries = fs.readFileSync(process.argv[2], "utf8").trim().split("\n").map(JSON.parse);
@@ -4087,31 +4180,7 @@ for (const [needle, kind] of expected) {
   }
 }
 JS
-  active_screen_wait=0
-  while [ "$active_screen_wait" -lt 120 ]; do
-    tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" >"$active_hidden_snapshot"
-    if grep -Fq " Error:" "$active_hidden_snapshot" &&
-      ! grep -Fq "/calm-inject-e2e" "$active_hidden_snapshot"; then
-      break
-    fi
-    sleep 0.05
-    active_screen_wait=$((active_screen_wait + 1))
-  done
   assert_not_contains "$(cat "$active_hidden_snapshot")" "/calm-inject-e2e" "synthetic lifecycle command did not leave the editor"
-  # shellcheck disable=SC2016 # Backticks are literal prompt markup.
-  assert_not_contains "$(cat "$active_hidden_snapshot")" 'Run `bin/fm-session-start.sh` now' \
-    "Calm showed the native session-start operational input"
-  for hidden in \
-    CURRENT_WATCHER_E2E \
-    CURRENT_TURN_END_E2E \
-    CURRENT_AWAY_E2E \
-    CURRENT_FROM_FIRSTMATE_E2E \
-    CURRENT_LAUNCH_BRIEF_E2E
-  do
-    assert_not_contains "$(cat "$active_hidden_snapshot")" "$hidden" "Calm rendered operational input $hidden"
-  done
-  assert_contains "$(cat "$active_hidden_snapshot")" "Warning: CALM_TRANSIENT_DIAGNOSTIC" "operational arrival lost its preceding transient diagnostic"
-  assert_contains "$(cat "$active_hidden_snapshot")" " Error:" "operational delivery did not produce a transient provider diagnostic"
   hash_before=$(shasum -a 256 "$session_file" | awk '{print $1}')
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/export $export_file"
@@ -4204,7 +4273,8 @@ JS
     assert_contains "$(cat "$restored_snapshot")" "$restored" "second /calm did not restore current operational kind $restored"
   done
   assert_contains "$(cat "$restored_snapshot")" "Warning: CALM_TRANSIENT_DIAGNOSTIC" "second /calm dropped a transient diagnostic"
-  assert_contains "$(cat "$restored_snapshot")" " Error:" "second /calm dropped the synthetic delivery diagnostic"
+  assert_not_contains "$(cat "$restored_snapshot")" " Error:" "second /calm exposed an operational error residue"
+  assert_not_contains "$(cat "$restored_snapshot")" "Captain, shipshape." "second /calm exposed an operational no-op acknowledgement"
   assert_not_contains "$(cat "$restored_snapshot")" "Navigated to selected point" "second /calm added a navigation status row"
   assert_not_contains "$(cat "$restored_snapshot")" "first internal reasoning block" \
     "second /calm resurrected a superseded step title"

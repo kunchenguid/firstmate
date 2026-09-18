@@ -10,12 +10,18 @@
 import type { AssistantMessageComponent as PiAssistantMessageComponent } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import { calmTextIsSubstantive } from "./fm-calm-preservation.ts";
-import { calmPresentationHides } from "./fm-calm-visibility.ts";
+import {
+  calmOperationalRunIsActive,
+  calmPresentationHides,
+} from "./fm-calm-visibility.ts";
 
 type AssistantMessage = Parameters<PiAssistantMessageComponent["updateContent"]>[0];
 
 type AssistantMessagePresentationState = {
-  isStreaming: boolean;
+  hiddenThinkingLabel: string;
+  hideThinkingBlock: boolean;
+  lastMessage?: AssistantMessage;
+  operationalRun?: boolean;
 };
 
 type CalmAssistantPresentation = {
@@ -207,6 +213,29 @@ export function installCalmAssistantLayout(
     message: AssistantMessage,
   ): void {
     const state = this as unknown as AssistantMessagePresentationState;
+    // Pi reuses the same component while one assistant message streams and
+    // later invalidates it when Calm toggles. Capture the operational origin
+    // on first render so a later captain prompt cannot make an old private row
+    // visible during a redraw or reload.
+    const operationalRun = state.lastMessage === message
+      ? state.operationalRun ?? calmOperationalRunIsActive()
+      : calmOperationalRunIsActive();
+    state.operationalRun = operationalRun;
+    const hasToolCalls = message.content.some((block) => block.type === "toolCall");
+    const responseText = message.content
+      .filter((block) => block.type === "text")
+      .map((block) => block.type === "text" ? block.text : "")
+      .join("\n")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+    const isCleanOperationalResponse =
+      operationalRun &&
+      message.stopReason === "stop" &&
+      !hasToolCalls &&
+      Boolean(responseText) &&
+      responseText !== "captain, shipshape.";
+    const hideOperationalTurn = operationalRun && !isCleanOperationalResponse;
     const hideThinking =
       state.hiddenThinkingLabel === "" &&
       state.hideThinkingBlock &&
@@ -217,21 +246,28 @@ export function installCalmAssistantLayout(
       message.content.some(
         (block) => block.type === "text" && !calmTextIsSubstantive(block.text),
       );
-    const presentationMessage =
-      hideThinking || hideWorkingNote
+    const presentationMessage = hideOperationalTurn
+      ? { ...message, content: [], stopReason: undefined, errorMessage: undefined }
+      : operationalRun
         ? {
             ...message,
-            content: message.content.filter(
-              (block) =>
-                !(hideThinking && block.type === "thinking") &&
-                !(
-                  hideWorkingNote &&
-                  block.type === "text" &&
-                  !calmTextIsSubstantive(block.text)
-                ),
-            ),
+            content: message.content.filter((block) => block.type === "text"),
+            errorMessage: undefined,
           }
-        : message;
+        : hideThinking || hideWorkingNote
+          ? {
+              ...message,
+              content: message.content.filter(
+                (block) =>
+                  !(hideThinking && block.type === "thinking") &&
+                  !(
+                    hideWorkingNote &&
+                    block.type === "text" &&
+                    !calmTextIsSubstantive(block.text)
+                  ),
+              ),
+            }
+          : message;
 
     const hiddenNow = calmPresentationHides("assistant-thinking");
     if (hiddenNow) activeController.ownedThinkingMarkdown.add(markdown);
