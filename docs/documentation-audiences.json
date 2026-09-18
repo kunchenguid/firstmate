@@ -473,6 +473,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/captain-presence-telegram.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/devin.md",
       "audience": "maintainer-verification"
     },
