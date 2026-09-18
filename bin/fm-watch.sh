@@ -1293,22 +1293,12 @@ clear_pause_state() {  # <window-key>
   rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
 }
 
-# The hash-scoped half of clear_pause_tracking: the stale suppressor, its wedge
-# timer and escalation count, and both deferral chains the timer can take - the
-# write-deferral chain and the wait-deferral throttle. Split out so a caller
-# that must keep a window's DECLARATION-scoped pause state - its .paused-* flag,
-# recheck, and re-surface throttle - can still reset the per-hash half alone.
-clear_stale_hash_tracking() {  # <window-key>
-  local key=$1
-  clear_write_tracking "$key"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
-    "$STATE/.waiting-resurfaced-$key"
-}
-
 clear_pause_tracking() {  # <window-key>
   local key=$1
   clear_pause_state "$key"
-  clear_stale_hash_tracking "$key"
+  clear_write_tracking "$key"
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
+    "$STATE/.waiting-resurfaced-$key"
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -1340,12 +1330,8 @@ pause_state_class() {  # <window> <task>
   # which has no current-state mapping and so arrives as `none`. Without this
   # recovery that wait would be silenced by every caller rather than taking the
   # bounded re-surface cadence, and a forgotten declaration would rot invisibly.
-  [ "$class" = none ] && class=paused
-  case "$class" in
-    paused) date +%s > "$recheck_file" ;;
-    *) rm -f "$recheck_file" ;;
-  esac
-  printf '%s' "$class"
+  date +%s > "$recheck_file"
+  printf 'paused'
 }
 
 # The two records of one ordinary crew wait, and why its stale alarm reads both.
@@ -1473,8 +1459,8 @@ surface_nonterminal_stale() {  # <window> <hash>
     # A backlog hold is NOT a declared pause, and must not be dressed up as one:
     # the loop-top reconciliation and pause_state_class both read the status LINE,
     # so a .paused-* flag this line does not support would be cleared on the next
-    # poll - taking the throttle with it - and would hand the mate and dead-agent
-    # cadences a declaration they were never given. Only the shared re-surface
+    # poll - taking the throttle with it - and would hand the declared-wait
+    # cadence a declaration it was never given. Only the shared re-surface
     # marker is kept, which is the whole of what this bound needs.
     rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key"
   else
@@ -2608,15 +2594,6 @@ EOF
       if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
         case "$(pause_state_class "$w" "$task")" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;
-          # Inconclusive, but the declared wait itself still stands, so only the
-          # per-hash bookkeeping resets. The re-surface throttle bounds the
-          # DECLARATION, not the pane hash: an idle parked pane whose display
-          # ticks (a clock, a token counter) changes hash without changing what
-          # is being waited on, and clearing the throttle here would hand that
-          # same wait a fresh window on every tick - the first sight of each new
-          # hash reaches surface_nonterminal_stale below, so the whole declared
-          # wait would re-alarm far inside PAUSE_RESURFACE_SECS.
-          none)   clear_stale_hash_tracking "$key" ;;
           *)      clear_pause_tracking "$key" ;;
         esac
       elif [ "$paused_bound" -ne 0 ] && [ -e "$pf" ]; then
