@@ -2949,12 +2949,48 @@ fm_backend_herdr_current_path() {  # <target>
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
 }
 
-# fm_backend_herdr_send_text_line: send one line of TEXT then submit,
-# ATOMICALLY - mirrors tmux's `send-keys -t T text Enter`. Used for the fixed
-# spawn-time commands (treehouse get, the GOTMPDIR export). `pane run` types
-# the command and submits it in one call (verified).
+# fm_backend_herdr_wait_marker: wait for one literal marker across both accepted
+# CLI generations. Protocol 14 exposes `wait output`; later clients moved the
+# same request to `pane wait-output`. Only a usage refusal selects the legacy
+# form, while a normal timeout lets the caller retry without a second wait.
+fm_backend_herdr_wait_marker() {  # <pane-id> <marker>
+  local pane=$1 marker=$2 rc=0
+  if fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane wait-output "$pane" \
+    --match "$marker" --timeout 250 >/dev/null 2>&1; then
+    return 0
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 2 ] || return "$rc"
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" wait output "$pane" \
+    --match "$marker" --timeout 250 >/dev/null 2>&1
+}
+
+# fm_backend_herdr_wait_shell_ready: prove that pane input reaches a shell prompt
+# before sending a fixed spawn-time command. Startup readers can consume any
+# finite input prefix, so retry a harmless marker command and wait for its output
+# instead of guessing how many sacrificial bytes are enough.
+fm_backend_herdr_wait_shell_ready() {  # <pane-id>
+  local pane=$1 attempt=0 marker left right
+  marker="fm-herdr-ready-$$-${RANDOM:-0}"
+  left=${marker%????????}
+  right=${marker#"$left"}
+  while [ "$attempt" -lt 120 ]; do
+    fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$pane" \
+      "printf '%s%s\\n' '$left' '$right'" >/dev/null 2>&1 || return 1
+    if fm_backend_herdr_wait_marker "$pane" "$marker"; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+# fm_backend_herdr_send_text_line: send one fixed spawn-time command through
+# Herdr's atomic text-plus-Enter primitive after the shell readiness proof.
 fm_backend_herdr_send_text_line() {  # <target> <text>
   fm_backend_herdr_target_ready "$1" || return 1
+  fm_backend_herdr_wait_shell_ready "$FM_BACKEND_HERDR_PANE" || return 1
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1
 }
 
