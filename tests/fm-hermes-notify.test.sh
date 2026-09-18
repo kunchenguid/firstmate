@@ -396,6 +396,34 @@ test_resolve_reply_breaks_a_same_second_tie_by_actual_send_order() {
   pass "resolve-reply breaks a same-second sent_at tie by true send order, not alphabetically-last task id"
 }
 
+# Exercises the real next_seq() defined in bin/fm-hermes-notify.sh (sourced
+# unmodified, then invoked directly) from many truly concurrent processes
+# racing on the one shared counter file, the same way a burst of register/route
+# calls would. Before the counter's read-increment-write was lock-protected,
+# this reliably collapsed 20 concurrent callers down to only 3-4 distinct
+# values; with the lock every caller gets a unique one.
+test_next_seq_allocates_unique_values_under_concurrent_callers() {
+  local home i n=20
+  local -a pids
+  home=$(make_home seq-race)
+  mkdir -p "$home/state"
+  for i in $(seq 1 "$n"); do
+    (
+      FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+        bash -c '. "$1" presence status >/dev/null; next_seq' _ "$NOTIFY"
+    ) > "$home/seq-out-$i" &
+    pids+=("$!")
+  done
+  for pid in "${pids[@]}"; do
+    wait "$pid" || fail "a concurrent next_seq() call exited non-zero"
+  done
+  local unique_count
+  unique_count=$(cat "$home"/seq-out-* | sort -u | wc -l)
+  [ "$unique_count" -eq "$n" ] \
+    || fail "next_seq() allocated only $unique_count unique values across $n concurrent callers, not $n; the shared counter is not concurrency-safe"
+  pass "next_seq() allocates a unique value to every concurrent caller, so a burst of same-second sends keeps a deterministic tie-break"
+}
+
 test_register_truncates_the_reason_by_bytes_not_characters() {
   local home reason msg bytes
   home=$(make_home register-utf8-bytes)
@@ -531,6 +559,7 @@ test_resolve_reply_ignores_a_notification_whose_hold_already_closed
 test_resolve_reply_rejects_a_non_telegram_note
 test_register_flattens_a_label_that_attempts_to_forge_record_fields
 test_resolve_reply_breaks_a_same_second_tie_by_actual_send_order
+test_next_seq_allocates_unique_values_under_concurrent_callers
 test_register_truncates_the_reason_by_bytes_not_characters
 test_status_reports_absent_and_present_records
 test_presence_defaults_home_and_persists_transitions
