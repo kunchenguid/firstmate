@@ -391,7 +391,7 @@ Other ambient names must be listed explicitly, including custom credential-store
 The command shell and worker may still create their own variables.
 Allowed values come from the destination pane at execution time; they are neither copied from the invoking Firstmate process nor written into the launch command.
 The exception is a secondmate spawn or relaunch: additional allowlisted values are captured from the process running `fm-spawn.sh` into a private one-launch file that the secondmate removes before starting.
-This lets a persistent secondmate recover with the primary's current credentials instead of depending on stale pane state.
+This lets a persistent secondmate recover with credentials available to its launching process instead of depending on stale pane state.
 Listing a name does not provision it in a daemon's environment or transfer credentials to another machine.
 A remote host runs its own `fm-spawn.sh`, so a remote secondmate captures only its remote launching process environment.
 
@@ -411,7 +411,7 @@ Verify the selected provider login and Git transport after opting in; Firstmate 
 Raw launch commands run under noninteractive POSIX `sh` with this option and must use compatible syntax.
 The filter runs at the worker command boundary, after the terminal daemon and pane shell have started; it does not scrub either of those processes.
 This is not a sandbox: it cannot revoke same-user access to credential files, prevent tools or later shells from loading credentials again, or isolate processes from the same user's other processes.
-Regression coverage executes emitted launch commands with synthetic nonsecret values in [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh).
+Regression coverage executes ordinary and initial-secondmate launch commands with synthetic nonsecret values in [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh), while [`tests/fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh) covers the secondmate relaunch boundary.
 
 Every claude launch's inline `--settings` JSON also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, so a spawned worker never writes a Co-Authored-By trailer, Claude-Session link, or generated-with line into a commit or PR body regardless of which settings scopes end up loaded.
 
