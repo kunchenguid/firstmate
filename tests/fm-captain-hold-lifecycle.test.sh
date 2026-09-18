@@ -626,6 +626,39 @@ SH
   pass "captain-hold mutations address the beads backend without a markdown override"
 }
 
+# A Beads workspace with due.required and no types.custom captain type is the
+# live fleet shape. hold must still create a fresh captain row there: waive
+# due rather than invent one, and map to native type task rather than register
+# a Beads captain issue type.
+test_hold_creates_a_captain_row_when_beads_requires_due_without_custom_type() {
+  local fixture home beads id show issue_type
+  require_tasks_axi_beads "captain-hold create under due.required without types.custom" || return 0
+  fixture=$(make_beads_home due-required-no-custom-type)
+  home=${fixture%%|*}
+  beads=${fixture##*|}
+  printf '\ndue:\n    required: true\n' >> "$beads/config.yaml"
+  if bdrow "$beads" create "raw task" --id fm-raw-task --type task --json >/dev/null 2>&1; then
+    fail "bd created a task without --due; the due.required fixture is not in force"
+  fi
+  if bdrow "$beads" create "raw captain" --id fm-raw-captain --type captain --due 2099-01-01 --json >/dev/null 2>&1; then
+    fail "bd accepted --type captain; the fixture still has a types.custom captain registration"
+  fi
+  id=fm-fresh-captain-call
+  run_captain "$home" hold "$id" --title "Choose the sample route" \
+    --reason "captain must decide" --repo sample >/dev/null \
+    || fail "hold could not create a captain row under due.required without types.custom"
+  show=$(tasks_in "$home" show "$id") || fail "the created captain row is missing"
+  assert_contains "$show" "hold_kind: captain" \
+    "the created row is not captain-held"
+  assert_contains "$show" "kind: captain" \
+    "the created row lost its captain backlog kind"
+  issue_type=$(bdrow "$beads" show "$id" --json \
+    | jq -r 'if type == "array" then .[0].issue_type else .issue_type end')
+  [ "$issue_type" = task ] \
+    || fail "create did not map to native Beads type task, got ${issue_type:-empty}"
+  pass "hold creates a captain row when Beads requires due and has no captain type"
+}
+
 # Reproduces the loss exactly with privacy-safe synthetic names: the investigation
 # and visual review have ended, the only genuine unresolved captain call is report
 # prose, no held backlog item or open status exists, and the authoritative
@@ -4042,3 +4075,4 @@ test_complete_accepts_a_migrated_inventory_on_beads
 test_verify_names_the_unresolvable_legacy_id_once
 test_verify_resolves_a_pre_collapse_key_through_its_derived_marker
 test_captain_hold_mutations_address_the_beads_backend
+test_hold_creates_a_captain_row_when_beads_requires_due_without_custom_type
