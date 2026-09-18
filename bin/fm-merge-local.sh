@@ -106,31 +106,33 @@ git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { e
 
 if [ -n "$RECORDED_BASE" ]; then
   TARGET=$RECORDED_BASE
+  TARGET_REF="refs/heads/$TARGET"
   TARGET_DESC="this task's recorded delivery target branch"
-  git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$TARGET" >/dev/null || { echo "error: recorded delivery target branch '$TARGET' does not exist in $PROJ" >&2; exit 1; }
+  git -C "$PROJ" rev-parse --verify --quiet "$TARGET_REF" >/dev/null || { echo "error: recorded delivery target branch '$TARGET' does not exist in $PROJ" >&2; exit 1; }
 else
   TARGET=$(default_branch) || { echo "error: cannot determine the delivery target branch for $PROJ; the task records none and origin/HEAD, main, and master are all absent" >&2; exit 1; }
+  TARGET_REF="refs/heads/$TARGET"
   TARGET_DESC="this project's default branch, because the task records no delivery target branch"
 fi
 
 # The project's main checkout must be on the delivery target branch and clean, so
 # the fast-forward lands predictably (firstmate never writes here otherwise).
-cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
-[ "$cur" = "$TARGET" ] || { echo "error: $PROJ is on '$cur', expected '$TARGET' ($TARGET_DESC); cannot merge safely" >&2; exit 1; }
+cur=$(git -C "$PROJ" symbolic-ref --quiet HEAD 2>/dev/null || echo "")
+[ "$cur" = "$TARGET_REF" ] || { echo "error: $PROJ is on '${cur#refs/heads/}', expected '$TARGET' ($TARGET_DESC); cannot merge safely" >&2; exit 1; }
 if [ -n "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ]; then
   echo "error: $PROJ has a dirty working tree; refusing to merge into it" >&2
   exit 1
 fi
 
 # Clean fast-forward only: TARGET must be an ancestor of BRANCH.
-if ! git -C "$PROJ" merge-base --is-ancestor "$TARGET" "$BRANCH"; then
+if ! git -C "$PROJ" merge-base --is-ancestor "$TARGET_REF" "$BRANCH"; then
   echo "REFUSED: $BRANCH is not a fast-forward of $TARGET (it has diverged)." >&2
   echo "Measured against $TARGET - $TARGET_DESC." >&2
   echo "Have the crewmate rebase $BRANCH onto $TARGET, then retry." >&2
   exit 1
 fi
 
-before=$(git -C "$PROJ" rev-parse --short "$TARGET")
+before=$(git -C "$PROJ" rev-parse --short "$TARGET_REF")
 hold_status=0
 FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
   "$SCRIPT_DIR/fm-captain-hold.sh" open "$ID" --distinguish-absent || hold_status=$?
@@ -150,5 +152,5 @@ git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null || merge_status=$?
 fm_lock_release "$MERGE_CONTROL_LOCK" || true
 MERGE_CONTROL_LOCK=
 [ "$merge_status" -eq 0 ] || exit "$merge_status"
-after=$(git -C "$PROJ" rev-parse --short "$TARGET")
+after=$(git -C "$PROJ" rev-parse --short "$TARGET_REF")
 echo "merged $BRANCH into local $TARGET ($before -> $after) in $PROJ"

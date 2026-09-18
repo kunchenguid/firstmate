@@ -16,6 +16,7 @@
 #   (e) recorded base + diverged branch              -> REFUSE (never a merge commit)
 #   (f) recorded base that does not exist            -> REFUSE
 #   (g) mode is not local-only                       -> REFUSE
+#   (h) recorded base shadowed by a same-named tag   -> LANDS on the branch
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -162,6 +163,35 @@ ROWS
   pass "the clean-tree, checked-out-branch, fast-forward-only, target-exists and mode guards all still refuse"
 }
 
+# (h) A delivery target branch is an arbitrary name the task recorded, so unlike
+# `main` it can collide with a tag. git resolves a bare refname through refs/tags/
+# before refs/heads/, so a landing that names the target bare would measure the
+# fast-forward against the tag and report the tag's commits.
+test_a_same_named_tag_does_not_shadow_the_target_branch() {
+  local case_dir rc task_head base_before side proj
+  case_dir=$(make_case base-tag-shadow feat/stack feat/stack feat/stack)
+  proj="$case_dir/project"
+  task_head=$(branch_head "$case_dir" refs/heads/fm/task-m1)
+  base_before=$(branch_head "$case_dir" refs/heads/feat/stack)
+  # A commit off the task branch's line, tagged with the target branch's name.
+  side=$(git -C "$proj" commit-tree -p refs/heads/main -m "off the line" \
+    "$(git -C "$proj" rev-parse 'refs/heads/main^{tree}')")
+  git -C "$proj" tag feat/stack "$side"
+
+  set +e
+  run_merge_local "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "tag-shadow: a tag sharing the target branch's name must not refuse the landing"
+  [ "$(branch_head "$case_dir" refs/heads/feat/stack)" = "$task_head" ] \
+    || fail "tag-shadow: feat/stack did not fast-forward to the task branch"
+  assert_grep "merged fm/task-m1 into local feat/stack ($base_before -> $task_head)" "$case_dir/stdout" \
+    "tag-shadow: the report did not name the branch's own before and after commits"
+  pass "a tag sharing the delivery target branch's name does not decide the landing"
+}
+
 test_recorded_base_lands_on_that_branch
 test_absent_base_lands_on_the_default_branch
 test_every_guard_survives_the_recorded_base
+test_a_same_named_tag_does_not_shadow_the_target_branch
