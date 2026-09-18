@@ -3527,6 +3527,107 @@ test_captured_completed_history() {
   pass 'captured completed status yields to synthetic subsequent development'
 }
 
+# The v1.75.2 captures bind the real capped overview and a live stacked-branch
+# ci status to disposable repositories; see that capture directory's README.
+V1752=$ROOT/tests/captures/no-mistakes-v1.75.2
+
+# Persist the captured overview's visible rows as the complete inventory, so
+# the capped window resolves through the same read-only lookup as production.
+seed_v1752_inventory() {  # <case-dir>
+  local d=$1
+  NM_HOME="$d/nm"
+  mkdir -p "$NM_HOME"
+  python3 - "$NM_HOME/state.sqlite" "$d/wt" "$V1752/overview.toon" <<'PY'
+import csv
+import sqlite3
+import sys
+database, worktree, overview = sys.argv[1:]
+lines = open(overview).read().splitlines()
+start = lines.index("runs[10]{id,branch,status,head,pr}:") + 1
+rows = list(csv.reader(line.strip() for line in lines[start:start + 10]))
+with sqlite3.connect(database) as db:
+    db.executescript("""
+        CREATE TABLE repos (id TEXT PRIMARY KEY, working_path TEXT NOT NULL UNIQUE);
+        CREATE TABLE runs (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, branch TEXT NOT NULL,
+                           status TEXT NOT NULL, head_sha TEXT NOT NULL, created_at INTEGER NOT NULL);
+    """)
+    db.execute("INSERT INTO repos VALUES ('repo', ?)", (worktree,))
+    db.executemany("INSERT INTO runs VALUES (?, 'repo', ?, ?, ?, ?)",
+                   [(r[0], r[1], r[2], r[3], 100 - i) for i, r in enumerate(rows)])
+PY
+  FM_FAKE_AXI_HOME=$(sed "s#^repo: /captured/firstmate\$#repo: $d/wt#" "$V1752/overview.toon")
+}
+
+test_captured_v1752_capped_overview_without_branch_run() {
+  reset_fakes
+  local d out branch=fm/fm-prepublish-voice-classifier
+  d=$(new_case v1752-no-branch-run)
+  make_repo_on_branch "$d/wt" "$branch"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/voice.meta" "window=fm:fm-voice" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/voice.status"
+  seed_v1752_inventory "$d"
+  FM_FAKE_AXI_STATUS=$(cat "$V1752/no-branch-run.toon")
+  FM_FAKE_RUNS_LIST=$(cat "$V1752/runs.out")
+  assert_not_contains "$FM_FAKE_AXI_HOME" "$branch," 'the captured overview shows no row for this branch'
+  arm_idle_record "$d/state" voice
+  out=$(run_crew_state "$d" voice)
+  assert_not_contains "$out" 'state: unknown' 'a complete inventory with no branch run is absence, not an unreadable table'
+  assert_contains "$out" 'source: status-log' 'absence of any run defers to worker evidence'
+  rm "$NM_HOME/state.sqlite"
+  out=$(run_crew_state "$d" voice)
+  assert_contains "$out" 'state: unknown' 'an unreadable complete inventory still cannot establish absence'
+  pass 'captured v1.75.2 capped overview without a branch run reads as no run'
+}
+
+# The captured run was submitted from its worktree's HEAD, then its rebase
+# rewrote the stacked base, so its head is neither this copy's commit nor a
+# descendant of it and its object was never fetched here.
+captured_v1752_stacked_status() {  # <submitted-head> [pipeline-run-id]
+  awk -v submitted="$1" -v run="${2:-01M2SS4ZQEBBP3ZAV5WBZ5X4Z5}" '
+    /^    submitted_head:/ { print "    submitted_head: " submitted; next }
+    /^    run:/ { print "    run: \"" run "\""; next }
+    /^    head:/ && local_block { print "    head: " submitted; next }
+    /^  local:/ { local_block = 1 } /^  pipeline:/ { local_block = 0 }
+    { print }
+  ' "$V1752/stacked-ci.toon"
+}
+
+test_captured_v1752_stacked_rebased_ci_run() {
+  reset_fakes
+  local d out head branch=fm/fm-note-line-ends-declared-wait id=01M2SS4ZQEBBP3ZAV5WBZ5X4Z5
+  d=$(new_case v1752-stacked)
+  make_repo_on_branch "$d/wt" "$branch"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/stacked.meta" "window=fm:fm-stacked" "worktree=$d/wt" "kind=ship" "harness=claude"
+  seed_v1752_inventory "$d"
+  head=$(git -C "$d/wt" rev-parse HEAD)
+  FM_FAKE_AXI_STATUS=$(captured_v1752_stacked_status "$head")
+  FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
+  FM_FAKE_RUNS_LIST=$(cat "$V1752/runs.out")
+  [ -z "$(git -C "$d/wt" rev-parse --verify --quiet '2d3758963491d42624118e670ea1bd956dea2bb2^{commit}')" ] \
+    || fail 'the captured run head must be absent from this copy'
+  out=$(run_crew_state "$d" stacked)
+  assert_contains "$out" 'state: working · source: run-step' 'the run submitted from this exact commit keeps its live ci step'
+  assert_contains "$out" "$id" 'the stacked run keeps its captured id'
+  FM_FAKE_AXI_STATUS=$(captured_v1752_stacked_status "$head" 01M2R420V63BKXCNFG1SYG3WWZ)
+  FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
+  out=$(run_crew_state "$d" stacked)
+  assert_contains "$out" 'code identity unverified' 'another run'"'"'s submission record proves nothing'
+  FM_FAKE_AXI_STATUS=$(captured_v1752_stacked_status HEAD)
+  FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
+  out=$(run_crew_state "$d" stacked)
+  assert_contains "$out" 'code identity unverified' 'a submitted head must be a commit id, not a ref'
+  FM_FAKE_AXI_STATUS=$(captured_v1752_stacked_status "$head")
+  FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
+  git -C "$d/wt" commit -q --allow-empty -m 'local work after submission'
+  out=$(run_crew_state "$d" stacked)
+  assert_contains "$out" 'code identity unverified' 'local work after submission invalidates the binding'
+  pass 'captured v1.75.2 stacked rebased ci run binds only by its exact submitted head'
+}
+
+test_captured_v1752_capped_overview_without_branch_run
+test_captured_v1752_stacked_rebased_ci_run
 test_captured_axi_status_shapes
 test_captured_inventory_replay
 test_captured_authority_transition

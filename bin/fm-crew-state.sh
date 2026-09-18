@@ -43,7 +43,9 @@
 #      diverged from it, invalidates attribution. While the pipeline owns the
 #      branch (branch_sync.state=pipeline_owned), its own custody attribution
 #      binds an ACTIVE run without head equality (fm_nm_run_is_pipeline_owned_active
-#      in bin/fm-nm-run-lib.sh).
+#      in bin/fm-nm-run-lib.sh), and a selected ACTIVE run whose own record
+#      names exactly this worktree's HEAD as its submitted head binds even when
+#      its rebase rewrote history (fm_nm_run_is_submitted_from_worktree_active).
 #      A run head whose commit object the task copy never fetched (the pipeline
 #      committed its fix round in its own checkout) cannot be verified locally;
 #      that row is recognized only as a provable pipeline-owned continuation -
@@ -731,7 +733,8 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         if [ "$(fm_nm_run_status_class "$selected_status")" != "$current_class" ]; then
           emit unknown run-step "selected run status disagrees with inventory; run ids: $candidate_ids"
         fi
-        if nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT"; then
+        if nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT" \
+          || fm_nm_run_is_submitted_from_worktree_active "$RUN_OUT" "$WT" "$selected_id"; then
           HAVE_RUN=1
         elif [ -z "$(fm_nm_resolve_commit "$WT" "$(strip_quotes "$(nm_field head)")")" ]; then
           if fm_nm_run_is_active "$RUN_OUT" \
