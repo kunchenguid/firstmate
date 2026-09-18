@@ -379,9 +379,9 @@ An empty file enables filtering with only Firstmate's operational floor.
 For example, a provider using `OPENAI_API_KEY` and Git using an SSH agent could use:
 
 ```text
-# Provider credential already available in the destination pane
+# Provider credential available in the pane, or launcher for a secondmate
 OPENAI_API_KEY
-# Git over SSH using an existing agent
+# SSH agent socket available from the same launch source
 SSH_AUTH_SOCK
 ```
 
