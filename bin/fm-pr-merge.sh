@@ -4,7 +4,9 @@
 # The full canonical URL is parsed by bin/fm-pr-lib.sh. A GitHub pull request is
 # addressed through gh by the derived owner and repository; a GitLab merge
 # request is addressed through glab by the project URL rebuilt from the parsed
-# host and path, so any instance works and no host is hardcoded.
+# host and path, so any instance works and no host is hardcoded. A Gitea pull
+# request parses and can be watched by bin/fm-pr-check.sh, but merging one is
+# refused here before any state is recorded: no Gitea merge path is implemented.
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
@@ -372,6 +374,16 @@ if [ "$PROVIDER" = github ]; then
     echo "error: merging a GitHub pull request requires $GITHUB_MISSING on PATH" >&2
     exit 1
   fi
+fi
+
+# A Gitea pull request parses and can be watched, but merging one is not
+# implemented here. The refusal has to come before anything is recorded:
+# record_pr_metadata below arms the merge poll, so a later refusal would leave
+# a watch armed for a merge this script then declined to perform, reported as
+# an invalid request rather than as an unimplemented one.
+if [ "$PROVIDER" = gitea ]; then
+  printf 'error: merging a Gitea pull request is not supported; merge %s on the forge itself\n' "$URL" >&2
+  exit 1
 fi
 
 # The recorded head is read before bin/fm-pr-check.sh rewrites the metadata,
