@@ -49,7 +49,7 @@ A missed-reply escalation includes the complete first sighting path and line num
 
 ## Regression coverage
 
-`tests/fm-inactive-reconcile.test.sh` covers the ledger delivery against real ledgers with no harness: immediate done and failed delivery with note, PR, mode, posture, and report pointer, once-only delivery across polls, a line still being appended, the remote route, the yield of the inactive path to a terminal ledger, and the real watcher poll driving it.
+`tests/fm-inactive-reconcile.test.sh` covers the ledger delivery against real ledgers with no harness: immediate done and failed delivery with note, PR, mode, posture, and report pointer, once-only delivery across polls, a ship `done:` withheld while its named head exists only in the worker copy, a pending one still delivered after teardown removes that copy, a line still being appended, the remote route, the yield of the inactive path to a terminal ledger, and the real watcher poll driving it.
 `tests/fm-captain-hold-lifecycle.test.sh` covers a mate home publishing a hold, its answer, and a distinct occurrence on re-hold, and a main home publishing nothing.
 `tests/fm-pr-merge.test.sh` covers the PR-ready line at registration and the merge outcome's upward report.
 `tests/fm-teardown.test.sh` covers teardown delivering a child's final line and refusing when the channel cannot be written.

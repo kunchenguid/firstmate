@@ -15,13 +15,14 @@
 # bin/fm-parent-channel-lib.sh as
 #   <state> [key=child-outcome-<child>-<state>-<fp8>]: child <child> <state>: <note> [pr=<url>] [mode=<mode>] [yolo=<posture>] [report=data/<child>/report.md]
 # carrying the child's recorded PR, delivery mode, merge posture, and scout
-# report pointer. A ship `done:` is published only when bin/fm-dod-lib.sh
-# accepts the named head, so an unpushed copy is not reported upstream as
-# ready. The cadence path uses fm-crew-state.sh, which applies the same gate:
-# a no-mistakes pre-validation `done: {summary}` still reads done (the
-# pipeline handoff), while a CI-ready or direct-PR/local-only done
-# whose head lives only in the disposable copy reads blocked and is not a
-# terminal inactive outcome. A line still being appended (no trailing newline yet)
+# report pointer, without consulting fm-crew-state.sh. A ship `done:` is
+# published only when bin/fm-dod-lib.sh accepts the named head, so an
+# unpushed copy is not reported upstream as ready. The cadence path uses
+# fm-crew-state.sh, which applies the same gate: a no-mistakes
+# pre-validation `done: {summary}` still reads done (the pipeline handoff),
+# while a CI-ready or direct-PR/local-only done whose head lives only in the
+# disposable copy reads blocked and is not a terminal inactive outcome.
+# A line still being appended (no trailing newline yet)
 # is left for the next poll. This is what keeps a mate's PR-ready, finding,
 # and failure outcomes from depending on the mate model appending them
 # (docs/secondmate-parent-channel.md). A main home has no parent channel and
