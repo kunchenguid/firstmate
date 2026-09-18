@@ -251,6 +251,26 @@
 #   This is an exec environment boundary, not a sandbox for the pane's startup
 #   shell, credential files, same-user processes, or later shell initialization.
 #   See docs/configuration.md for provider/Git setup and supported limits.
+# Launch environment forwarding (config/launch-env-forward):
+#   A distinct opt-in from the allowlist above. Absent means no change: this
+#   process's own environment is never copied into a worker just because it
+#   holds a value (measured 08.09.2026, docs/configuration.md "Launch
+#   environment forwarding" - a long-lived backend daemon or session keeps its
+#   own environment, captured once, and does not pick up a later change to
+#   this process's environment, even a change from the same launcher script,
+#   so ordinary ambient inheritance cannot be assumed here). A present
+#   readable regular file names, one POSIX environment name per line (same
+#   format as launch-env-allowlist; blank lines and # comments ignored),
+#   variables to copy from THIS process's current environment into every
+#   fresh launch (ship, scout, secondmate, raw command, and relaunch). A named
+#   variable set in this process is sent into the pane as a literal
+#   `export NAME=value`, quoted, through the same pre-launch channel already
+#   used for GOTMPDIR/FM_TASK_ID/TRACEPARENT, so it reaches the worker
+#   regardless of backend or how stale that backend's own environment is. A
+#   named variable absent from this process stays absent in the worker;
+#   values are never invented. When launch-env-allowlist is also enabled,
+#   every forwarded name is added to its retained set so the explicit export
+#   is not then stripped by the exec-boundary filter.
 # Claude permission mode (config/claude-permission-mode):
 #   One token selecting the permission flag every claude launch (ship, scout,
 #   secondmate, and relaunch) carries. Absent or `bypass` keeps today's
@@ -438,12 +458,24 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     echo "error: config/launch-env-allowlist must be a readable regular file" >&2
     exit 1
   fi
-  if ! LAUNCH_ENV_NAMES=$(jq -Rrs '
-    split("\n") | map(select(. != "" and (startswith("#") | not))) |
-    if all(.[]; test("^[A-Za-z_][A-Za-z0-9_]*$")) then .[]
-    else error("expected environment names only") end
-  ' "$CONFIG/launch-env-allowlist" 2>/dev/null); then
+  if ! LAUNCH_ENV_NAMES=$(fm_config_env_name_list "$CONFIG/launch-env-allowlist"); then
     echo "error: config/launch-env-allowlist must contain one environment name per line, blank lines, or # comments" >&2
+    exit 1
+  fi
+fi
+# config/launch-env-forward (header above): a second, distinct opt-in - never
+# copies values by itself, and absent means no change to today's launch.
+if ! LAUNCH_ENV_FORWARD_ENABLED=$(fm_config_source_present "$CONFIG/launch-env-forward"); then
+  exit 1
+fi
+LAUNCH_ENV_FORWARD_NAMES=
+if [ "$LAUNCH_ENV_FORWARD_ENABLED" = 1 ]; then
+  if [ ! -f "$CONFIG/launch-env-forward" ] || [ ! -r "$CONFIG/launch-env-forward" ]; then
+    echo "error: config/launch-env-forward must be a readable regular file" >&2
+    exit 1
+  fi
+  if ! LAUNCH_ENV_FORWARD_NAMES=$(fm_config_env_name_list "$CONFIG/launch-env-forward"); then
+    echo "error: config/launch-env-forward must contain one environment name per line, blank lines, or # comments" >&2
     exit 1
   fi
 fi
@@ -4446,6 +4478,15 @@ spawn_record_traceparent() {
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# config/launch-env-forward (header above): copy each named variable's
+# CURRENT value out of this process, one explicit export per name, through
+# the same pre-launch channel as GOTMPDIR above. A name absent from this
+# process is skipped rather than forced empty.
+for env_fwd_name in $LAUNCH_ENV_FORWARD_NAMES; do
+  if [ "${!env_fwd_name+set}" = set ]; then
+    spawn_send_text_line "$T" "export $env_fwd_name=$(shell_quote "${!env_fwd_name}")"
+  fi
+done
 # Mark the pane as a task worker so bin/fm-test-run.sh can refuse to run the
 # suite in the repository's primary checkout. Ship and scout workers are the
 # ones assigned an isolated worktree; a secondmate runs its own home instead.
@@ -4478,7 +4519,7 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID \
     CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION \
     FM_TASK_ID \
-    $LAUNCH_ENV_NAMES; do
+    $LAUNCH_ENV_NAMES $LAUNCH_ENV_FORWARD_NAMES; do
     # Only validated names enter shell syntax. Values expand once, quoted, in
     # the pane shell and never become source text or spawn-process snapshots.
     # shellcheck disable=SC2016

@@ -169,5 +169,54 @@ state=$(fm_backend_agent_state tmux "$TARGET")
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
 pass "real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing"
 
+# --- environment staleness (measured 08.09.2026) and the fix channel --------
+# A real tmux server captures its environment once and keeps it; a variable
+# exported into the CALLING shell afterward - even into the exact process that
+# then runs `tmux new-window` - never reaches a freshly created window on its
+# own (docs/configuration.md "Launch environment forwarding
+# (config/launch-env-forward)"). bin/fm-spawn.sh's fix never tries to patch
+# that: it types the value directly into the new pane's own already-running
+# shell via fm_backend_tmux_send_text_line, the same channel already proven
+# for GOTMPDIR/FM_TASK_ID/TRACEPARENT, which is why it works regardless of how
+# stale the server's own environment is.
+ENV_WINDOW="fm-envcheck"
+ENV_TARGET="$SESSION:$ENV_WINDOW"
+FM_SMOKE_STALE_VAR=set-after-server-start
+export FM_SMOKE_STALE_VAR
+fm_backend_tmux_create_task "$SESSION" "$ENV_WINDOW" "$HOME" \
+  || fail "fm_backend_tmux_create_task failed to create the env-check window"
+SHELL_READY=false
+for _ in $(seq 1 100); do
+  tmux send-keys -t "$ENV_TARGET" C-c
+  tmux send-keys -t "$ENV_TARGET" -l "printf 'shell-%s\\n' ready"
+  tmux send-keys -t "$ENV_TARGET" Enter
+  if wait_for_capture_text "$ENV_TARGET" "shell-ready" 10; then
+    SHELL_READY=true
+    break
+  fi
+done
+[ "$SHELL_READY" = true ] || fail "the env-check tmux shell did not become ready"
+tmux send-keys -t "$ENV_TARGET" "clear && printf 'ambient=%s\\n' \"\${FM_SMOKE_STALE_VAR:-unset}\"" Enter
+wait_for_capture_text "$ENV_TARGET" "ambient=" || fail "the ambient-environment probe did not complete"
+out=$(fm_backend_tmux_capture "$ENV_TARGET" 20) || fail "fm_backend_tmux_capture failed after the ambient probe"
+case "$out" in
+  *"ambient=unset"*) : ;;
+  *) fail "real tmux: a variable exported into the calling shell after the server started should NOT reach a fresh window on its own (this is the measured gap config/launch-env-forward closes)"$'\n'"$out" ;;
+esac
+pass "real tmux: ordinary ambient inheritance does not carry a post-server-start export into a freshly created window"
+
+fm_backend_tmux_send_text_line "$ENV_TARGET" "export FM_SMOKE_STALE_VAR=delivered-via-send-text-line" \
+  || fail "fm_backend_tmux_send_text_line failed to send the explicit export"
+tmux send-keys -t "$ENV_TARGET" "printf 'explicit=%s\\n' \"\${FM_SMOKE_STALE_VAR:-unset}\"" Enter
+wait_for_capture_text "$ENV_TARGET" "explicit=" || fail "the explicit-export probe did not complete"
+out=$(fm_backend_tmux_capture "$ENV_TARGET" 20) || fail "fm_backend_tmux_capture failed after the explicit-export probe"
+case "$out" in
+  *"explicit=delivered-via-send-text-line"*) : ;;
+  *) fail "real tmux: fm_backend_tmux_send_text_line's explicit export should reach the pane regardless of ambient staleness"$'\n'"$out" ;;
+esac
+pass "real tmux: the explicit fm_backend_tmux_send_text_line export channel delivers the value despite the ambient gap above"
+
+fm_backend_tmux_kill "$ENV_TARGET"
+
 cleanup_all
 trap - EXIT
