@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fm-event-shadow-replay.sh [--live]
+# fm-event-shadow-replay.sh [--live | --response <json>]
 # Replays the committed sanitized eight-event set through fm-event-shadow.sh.
 # Default uses a synthetic response with one intentional high-confidence error
 # to exercise confusion reporting; it is not empirical model accuracy evidence.
@@ -16,8 +16,9 @@ STATE=${FM_STATE_OVERRIDE:-${FM_HOME:-$ROOT}/state}
 FIXTURES="$ROOT/tests/fixtures/event-shadow"
 case "${1:-}" in
   '') set -- --response "$FIXTURES/synthetic-response.json" ;;
+  --response) [ $# -eq 2 ] || exit 2 ;;
   --live) [ $# -eq 1 ] && [ -n "${TYPESAFE_API_KEY:-}" ] || { echo 'live replay requires runtime TYPESAFE_API_KEY' >&2; exit 2; }; set -- ;;
-  *) echo 'usage: fm-event-shadow-replay.sh [--live]' >&2; exit 2 ;;
+  *) echo 'usage: fm-event-shadow-replay.sh [--live | --response <json>]' >&2; exit 2 ;;
 esac
 [ -d "$STATE" ] || { echo 'create a private state directory and set FM_STATE_OVERRIDE first' >&2; exit 2; }
 # Isolate this call so a concurrent drain cannot confuse the measurement.
@@ -29,7 +30,8 @@ jq -s --slurpfile samples "$FIXTURES/samples.json" '
   .[0] as $call |
   ($call.results | map(. as $r | $r + {expected:($samples[0][]|select(.id==$r.id)|.expected)})) as $rows |
   {call:$call,confusion:($rows|group_by([.expected,.choice])|map({expected:.[0].expected,predicted:.[0].choice,count:length})),
-   errors:($rows|map(select(.expected!=.choice))),
+   errors:($rows|map(select((.abstained|not) and .expected!=.choice))),
+   abstentions:($rows|map(select(.abstained))),
    frontier_true_positives:($rows|map(select(.frontier_candidate and .expected=="declared_wait"))|length),
    frontier_false_positives:($rows|map(select(.frontier_candidate and .expected!="declared_wait"))|length),
    recommendation:"Keep shadow-only; this small declaration-only sample cannot establish safe autonomous behavior."}
