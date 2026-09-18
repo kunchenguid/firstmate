@@ -861,5 +861,10 @@ printf 'WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --a
   "$ACK_THROUGH" "${RECOVERY_MARKER_TOKEN##*:}" >&2
 
 (print_status_presentation "$RAW_ROWS") || true
+# Optional semantic evidence is annotation only, after raw rows and the ack
+# instruction are visible and all queue/presentation locks have been released.
+if [ "${FM_EVENT_SHADOW:-}" = 1 ]; then
+  printf '%s\n' "$RAW_ROWS" | FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-event-shadow.sh" || true
+fi
 assert_watcher_liveness
 exit 0
