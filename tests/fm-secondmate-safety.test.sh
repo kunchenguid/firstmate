@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2031,SC2100 # Fixture globals and hyphenated task IDs are intentional.
 # tests/fm-secondmate-safety.test.sh - secondmate home safety invariants:
 # the path-boundary matrices (seed/spawn/teardown), registry/charter/origin
-# validation, treehouse lease handling, no-mistakes initialization of new
+# validation, treehouse lease handling,
 # clones, child-worktree protection, and backlog-handoff safety. The happy-path
 # operator flow lives in fm-secondmate-lifecycle-e2e.test.sh; this file keeps the
 # destructive-invariant coverage that an e2e run cannot deterministically reach.
@@ -9,6 +10,8 @@ set -u
 
 # shellcheck source=tests/secondmate-helpers.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
+# shellcheck source=tests/fixtures.sh disable=SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-safety)
 export FM_BACKEND=tmux
@@ -57,9 +60,9 @@ test_fm_home_parameterization() {
   out=$(FM_HOME="$home_one" "$ROOT/bin/fm-project-mode.sh" app)
   [ "$out" = "local-only on" ] || fail "fm-project-mode did not read projects.md from FM_HOME"
   out=$(FM_HOME="$home_two" "$ROOT/bin/fm-project-mode.sh" app 2>/dev/null)
-  [ "$out" = "no-mistakes off" ] || fail "fm-project-mode did not isolate missing registry by home"
+  [ "$out" = "direct-PR off" ] || fail "fm-project-mode did not isolate missing registry by home"
 
-  FM_HOME="$home_one" "$ROOT/bin/fm-brief.sh" task-a app --mode no-mistakes >/dev/null || fail "brief scaffold failed under FM_HOME"
+  FM_HOME="$home_one" "$ROOT/bin/fm-brief.sh" task-a app --mode direct-PR >/dev/null || fail "brief scaffold failed under FM_HOME"
   brief="$home_one/data/task-a/brief.md"
   [ -f "$brief" ] || fail "brief was not written under FM_HOME/data"
   grep -F ">> '$home_one/state/task-a.status'" "$brief" >/dev/null || fail "brief did not shell-quote FM_HOME state path"
@@ -97,8 +100,8 @@ test_lock_status_is_per_home() {
 test_seed_allows_overlapping_clones_and_drops_owner() {
   # A project may appear in several secondmates' (non-exclusive) clone lists; the
   # registry never uses the legacy owns: field, and the removed `owner` subcommand
-  # stays gone. The full happy seed - charter copied, clones+origins, no-mistakes
-  # init, modes preserved - is asserted by fm-secondmate-lifecycle-e2e.
+  # stays gone. The full happy seed - charter copied and clones+origins - is
+  # asserted by fm-secondmate-lifecycle-e2e.
   local home design other
   home="$TMP_ROOT/overlap-main"
   design="$TMP_ROOT/overlap-design"
@@ -133,6 +136,287 @@ EOF
     fail "owner subcommand still succeeded after routing moved to scopes"
   fi
   pass "seed allows overlapping project clone lists and drops the owns/owner routing"
+}
+
+test_project_firstmate_seed_has_one_repository_authority() {
+  local home first duplicate ordinary child err origin fakebin launch_log output spawn_rc remote_child
+  local root_id before_backlog overlap overlap_id overlap_before convert convert_id before_convert
+  local root_brief_before root_data_before remote_root remote_first remote_route remote_task remote_identity remote_alpha_identity
+  local first_noncanonical registry_text
+  home="$TMP_ROOT/project-firstmate-seed-home"
+  first="$TMP_ROOT/project-firstmate-seed-first"
+  duplicate="$TMP_ROOT/project-firstmate-seed-duplicate"
+  ordinary="$TMP_ROOT/project-firstmate-seed-ordinary"
+  child="$TMP_ROOT/project-firstmate-seed-child"
+  err="$TMP_ROOT/project-firstmate-seed.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  origin="$TMP_ROOT/remotes/project-firstmate-alpha.git"
+  fm_git_add_origin "$home/projects/alpha" "$origin"
+  fm_git_init_commit "$home/projects/beta"
+  fm_git_add_origin "$home/projects/beta" "$TMP_ROOT/remotes/project-firstmate-beta.git"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='unregistered project authority' \
+    "$ROOT/bin/fm-home-seed.sh" unregistered-pfm "$TMP_ROOT/project-firstmate-unregistered" --project-firstmate beta >/dev/null 2>"$TMP_ROOT/project-firstmate-unregistered.err"; then
+    fail "project Firstmate authority was allowed for an unregistered repository"
+  fi
+  grep -F 'requires exactly one beta entry in' "$TMP_ROOT/project-firstmate-unregistered.err" >/dev/null \
+    || fail "unregistered project Firstmate refusal did not name the registration requirement"
+
+  remote_root="$TMP_ROOT/project-firstmate-remote-overlap-root"
+  remote_first="$TMP_ROOT/project-firstmate-remote-overlap-first"
+  mkdir -p "$remote_root/projects" "$remote_root/data" "$remote_root/state"
+  fm_git_init_commit "$remote_root/projects/alpha"
+  fm_git_add_origin "$remote_root/projects/alpha" "$TMP_ROOT/remotes/remote-overlap-alpha.git"
+  . "$ROOT/bin/fm-repo-concurrency-lib.sh"
+  remote_alpha_identity=$(fm_repo_scope_canonical_origin_identity "$remote_root/projects/alpha") \
+    || fail "remote overlap fixture identity could not be normalized"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$remote_root/data/projects.md"
+  printf -- '- remote-alpha - remote alpha (host: build; root: /srv/fm; home: /srv/alpha; scope: alpha tasks; projects: alpha; repo-identities: alpha=sha256:%s; added 2026-09-17)\n' \
+    "$remote_alpha_identity" \
+    > "$remote_root/data/secondmates.md"
+  if FM_HOME="$remote_root" FM_SECONDMATE_CHARTER='overlapping remote authority' \
+    "$ROOT/bin/fm-home-seed.sh" remote-alpha-pfm "$remote_first" --project-firstmate alpha >/dev/null 2>"$err"; then
+    fail "project Firstmate creation overlapped an existing remote ordinary route"
+  fi
+  grep -F 'already in remote ordinary route' "$err" >/dev/null \
+    || fail "project Firstmate remote-overlap refusal did not name the conflicting route"
+  [ ! -e "$remote_first" ] || fail "remote-overlap refusal created a project Firstmate home"
+  fm_git_init_commit "$remote_root/projects/beta"
+  fm_git_add_origin "$remote_root/projects/beta" "$TMP_ROOT/remotes/remote-overlap-beta.git"
+  printf '%s\n' '- beta [direct-PR] - beta project (added 2026-06-22)' >> "$remote_root/data/projects.md"
+  printf -- '- remote-unknown - remote project (host: build; root: /srv/fm; home: /srv/unknown; scope: unknown tasks; projects: unknown; added 2026-09-17)\n' \
+    >> "$remote_root/data/secondmates.md"
+  if FM_HOME="$remote_root" FM_SECONDMATE_CHARTER='uncertain remote authority' \
+    "$ROOT/bin/fm-home-seed.sh" remote-unknown-pfm "$remote_first" --project-firstmate beta >/dev/null 2>"$err"; then
+    fail "project Firstmate creation ignored an unverifiable remote ordinary scope"
+  fi
+  grep -F 'cannot prove remote ordinary route' "$err" >/dev/null \
+    || fail "uncertain remote-scope refusal did not explain the missing local clone proof"
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='invalid empty limit' \
+    "$ROOT/bin/fm-home-seed.sh" empty-limit-pfm "$TMP_ROOT/project-firstmate-empty-limit" \
+      --project-firstmate --repo-concurrency= alpha >/dev/null 2>"$TMP_ROOT/project-firstmate-empty-limit.err"; then
+    fail "project Firstmate seed silently replaced an explicit empty concurrency limit"
+  fi
+  grep -F 'repository concurrency limit must be a positive integer' "$TMP_ROOT/project-firstmate-empty-limit.err" >/dev/null \
+    || fail "empty repository concurrency limit did not report its validation error"
+  [ ! -e "$TMP_ROOT/project-firstmate-empty-limit" ] \
+    || fail "empty repository concurrency refusal created a project Firstmate home"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='own the alpha repository' \
+    FM_SECONDMATE_SCOPE='alpha repository work' \
+    "$ROOT/bin/fm-home-seed.sh" alpha-pfm "$first" --project-firstmate alpha >/dev/null \
+    || fail "project Firstmate seed failed"
+  [ "$(cat "$first/.fm-project-firstmate" | sed -n 's/^project=//p')" = alpha ] \
+    || fail "project Firstmate marker did not bind the selected repository"
+  [ "$(cat "$first/config/repo-concurrency")" = 2 ] \
+    || fail "new project Firstmate did not receive the default subtree limit of 2"
+  grep -F 'You are the explicit project Firstmate for the single repository' "$first/data/charter.md" >/dev/null \
+    || fail "project Firstmate charter did not explain its bounded repository role"
+  [ "$(git -C "$first/projects/alpha" remote get-url origin)" = "$(git -C "$home/projects/alpha" remote get-url origin)" ] \
+    || fail "project Firstmate clone did not preserve the repository identity"
+  first_noncanonical="$(dirname "$first")/./$(basename "$first")"
+  registry_text=$(<"$home/data/secondmates.md")
+  registry_text=${registry_text/"home: $first"/"home: $first_noncanonical"}
+  printf '%s\n' "$registry_text" > "$home/data/secondmates.md"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='own the alpha repository' \
+    FM_SECONDMATE_SCOPE='alpha repository work' \
+    "$ROOT/bin/fm-home-seed.sh" alpha-pfm "$first" --project-firstmate alpha >/dev/null \
+    || fail "project Firstmate reseed rejected its non-canonical registry spelling"
+  [ "$(grep -c '^- alpha-pfm ' "$home/data/secondmates.md")" -eq 1 ] \
+    || fail "project Firstmate reseed duplicated a non-canonically spelled home route"
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='overlapping remote ordinary route' \
+    "$ROOT/bin/fm-remote-home-seed.sh" remote-alpha remote-host /remote/root /remote/alpha \
+    "alpha=$origin" >"$TMP_ROOT/remote-pfm-overlap.out" 2>&1; then
+    fail "remote ordinary provisioning overlapped an existing project Firstmate"
+  fi
+  grep -F 'already owned by a project Firstmate' "$TMP_ROOT/remote-pfm-overlap.out" >/dev/null \
+    || fail "remote provisioning overlap refusal did not name the project Firstmate authority"
+  [ ! -e "$home/data/remote-alpha/brief.md" ] \
+    || fail "remote provisioning overlap refusal wrote a charter before admission"
+
+  remote_route="$TMP_ROOT/remote-pfm-overlap-runtime"
+  fm_test_spawn_home "$remote_route" codex
+  printf 'remote-alpha\n' > "$remote_route/.fm-secondmate-home"
+  git clone --quiet "$origin" "$remote_route/projects/alpha"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$remote_route/data/projects.md"
+  remote_identity=$(fm_repo_scope_canonical_origin_identity "$remote_route/projects/alpha") \
+    || fail "remote ordinary test clone identity could not be normalized"
+  remote_identity="sha256:$remote_identity"
+  printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_role=root\nrepo_scope_snapshot=fm-remote-repo-scope.v1\nrepo_scope_count=1\nrepo_authority_count=1\nrepo_scope_identity=%s\nrepo_authority_identity=%s\n' \
+    "$remote_identity" "$remote_identity" > "$remote_route/.fm-secondmate-parent"
+  remote_task=remote-bypass-alpha
+  fm_test_spawn_brief "$remote_route" "$remote_task" "remote ordinary work must not bypass project authority"
+  printf 'manual\n' > "$remote_route/config/backlog-backend"
+  fakebin=$(fm_test_make_spawn_fakebin "$TMP_ROOT/project-firstmate-remote-overlap-runtime")
+  launch_log="$TMP_ROOT/project-firstmate-remote-overlap-runtime.launch"
+  : > "$launch_log"
+  if output=$(FM_FAKE_LAUNCH_LOG="$launch_log" \
+    fm_test_run_spawn "$remote_route" "$remote_route/projects/alpha" "$fakebin" \
+      "$remote_task" "$remote_route/projects/alpha" --scout 2>&1); then
+    fail "remote ordinary runtime bypassed an overlapping project Firstmate authority"
+  fi
+  printf '%s\n' "$output" | grep -F 'owned by a root project Firstmate' >/dev/null \
+    || fail "remote ordinary runtime refusal did not provide project-authority routing guidance"
+  [ ! -e "$remote_route/state/$remote_task.meta" ] \
+    || fail "remote authority-overlap refusal published worker metadata"
+  [ ! -e "$remote_route/data/$remote_task/launch-brief.md" ] \
+    || fail "remote authority-overlap refusal published a worker overlay"
+  [ ! -s "$launch_log" ] || fail "remote authority-overlap refusal created an endpoint"
+
+  first_origin=$(git -C "$first/projects/alpha" remote get-url origin)
+  root_origin=$(git -C "$home/projects/alpha" remote get-url origin)
+  git -C "$first/projects/alpha" remote set-url origin 'git@example.com:owner/alpha.git'
+  git -C "$home/projects/alpha" remote set-url origin 'https://Example.com/owner/alpha.git'
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='duplicate alpha authority' \
+    "$ROOT/bin/fm-home-seed.sh" alpha-pfm-duplicate "$duplicate" --project-firstmate alpha >/dev/null 2>"$err"; then
+    fail "a second project Firstmate authority was allowed for the same repository"
+  fi
+  grep -F 'repository already has project Firstmate authority alpha-pfm' "$err" >/dev/null \
+    || fail "SSH and HTTPS aliases did not identify the existing repository authority"
+  git -C "$first/projects/alpha" remote set-url origin "$first_origin"
+  git -C "$home/projects/alpha" remote set-url origin "$root_origin"
+  [ ! -e "$duplicate" ] || fail "duplicate project Firstmate refusal left a new home behind"
+
+  printf '%s\n' '- beta [direct-PR] - beta project (added 2026-06-22)' >> "$home/data/projects.md"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='root level ordinary alpha domain' \
+    "$ROOT/bin/fm-home-seed.sh" alpha-ordinary "$ordinary" alpha >/dev/null \
+    || fail "root-level ordinary clone overlap was not preserved"
+  [ ! -e "$ordinary/.fm-project-firstmate" ] \
+    || fail "ordinary secondmate was accidentally marked as a project Firstmate"
+
+  fm_test_spawn_home "$home" codex
+  printf 'backend = "markdown"\n\n[markdown]\npath = "data/backlog.md"\narchive = "data/done-archive.md"\ndone_keep = 10\n' \
+    > "$home/.tasks.toml"
+  root_id=root-alpha-bypass
+  fm_test_spawn_brief "$home" "$root_id" "root dispatch must respect the alpha project authority"
+  TASKS_AXI_BACKEND=markdown tasks-axi add "$root_id" "root route guard" --kind scout \
+    --file "$home/data/backlog.md" >/dev/null || fail "could not seed the root route-guard backlog row"
+  before_backlog=$(cksum "$home/data/backlog.md")
+  root_brief_before=$(cksum "$home/data/$root_id/brief.md")
+  root_data_before=$(find "$home/data/$root_id" -type f -print | sort)
+  fakebin=$(fm_test_make_spawn_fakebin "$TMP_ROOT/project-firstmate-root-spawn")
+  launch_log="$TMP_ROOT/project-firstmate-root-spawn.launch"
+  : > "$launch_log"
+  if output=$(FM_FAKE_LAUNCH_LOG="$launch_log" \
+    fm_test_run_spawn "$home" "$home/projects/alpha" "$fakebin" \
+      "$root_id" "$home/projects/alpha" --scout); then
+    fail "root spawned work directly for a repository already owned by a project Firstmate"
+  else
+    spawn_rc=$?
+  fi
+  [ "$spawn_rc" -ne 0 ] || fail "root project-authority route refusal returned success"
+  printf '%s\n' "$output" | grep -F 'route this work through that authority instead of spawning it from this home' >/dev/null \
+    || fail "root bypass refusal did not provide project Firstmate route guidance"
+  [ ! -e "$home/state/$root_id.meta" ] || fail "root bypass refusal published task metadata"
+  [ ! -e "$home/data/$root_id/launch-brief.md" ] || fail "root bypass refusal published a launch overlay"
+  [ "$(find "$home/data/$root_id" -type f -print | sort)" = "$root_data_before" ] \
+    || fail "root bypass refusal changed task data files"
+  [ "$(cksum "$home/data/$root_id/brief.md")" = "$root_brief_before" ] \
+    || fail "root bypass refusal changed the source brief"
+  [ "$(cksum "$home/data/backlog.md")" = "$before_backlog" ] \
+    || fail "root bypass refusal changed the backlog"
+  [ ! -s "$launch_log" ] || fail "root bypass refusal created a worker endpoint"
+
+  overlap=$ordinary
+  overlap_id='ordinary-alpha-bypass'
+  fm_test_spawn_home "$overlap" codex
+  printf 'backend = "markdown"\n\n[markdown]\npath = "data/backlog.md"\narchive = "data/done-archive.md"\ndone_keep = 10\n' \
+    > "$overlap/.tasks.toml"
+  fm_test_spawn_brief "$overlap" "$overlap_id" "ordinary overlap must not bypass project authority"
+  TASKS_AXI_BACKEND=markdown tasks-axi add "$overlap_id" "ordinary child route guard" --kind scout \
+    --file "$overlap/data/backlog.md" >/dev/null || fail "could not seed the ordinary-child route-guard backlog row"
+  overlap_before=$(cksum "$overlap/data/backlog.md")
+  launch_log="$TMP_ROOT/project-firstmate-overlap-ordinary.launch"
+  : > "$launch_log"
+  if output=$(FM_FAKE_LAUNCH_LOG="$launch_log" \
+    fm_test_run_spawn "$overlap" "$overlap/projects/alpha" "$fakebin" \
+      "$overlap_id" "$overlap/projects/alpha" --scout); then
+    fail "overlapping ordinary secondmate spawned outside the project Firstmate"
+  else
+    spawn_rc=$?
+  fi
+  [ "$spawn_rc" -ne 0 ] || fail "ordinary-child project-authority route refusal returned success"
+  printf '%s\n' "$output" | grep -F 'route this work through that authority instead of spawning it from this home' >/dev/null \
+    || fail "ordinary-child overlap refusal did not provide route guidance"
+  [ ! -e "$overlap/state/$overlap_id.meta" ] || fail "ordinary-child overlap refusal published task metadata"
+  [ ! -e "$overlap/data/$overlap_id/launch-brief.md" ] || fail "ordinary-child overlap refusal published a launch overlay"
+  [ "$(cksum "$overlap/data/backlog.md")" = "$overlap_before" ] \
+    || fail "ordinary-child overlap refusal changed the backlog"
+  [ ! -s "$launch_log" ] || fail "ordinary-child overlap refusal created an endpoint"
+
+  convert="$TMP_ROOT/project-firstmate-conversion-home"
+  convert_id='convert-multiple-project-home'
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='existing ordinary home with two repositories' \
+    FM_SECONDMATE_SCOPE='alpha and beta domain work' \
+    "$ROOT/bin/fm-home-seed.sh" "$convert_id" "$convert" alpha beta >/dev/null \
+    || fail "could not seed the multi-project ordinary home conversion fixture"
+  before_convert=$(find "$convert" -type f -exec cksum {} + | sort)
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='convert one repository home' \
+    "$ROOT/bin/fm-home-seed.sh" "$convert_id" "$convert" --project-firstmate beta >/dev/null 2>"$err"; then
+    fail "project Firstmate conversion retained unrelated registered repositories"
+  fi
+  grep -F 'contains unrelated project data' "$err" >/dev/null \
+    || fail "multiple-project conversion refusal did not identify the extra repository: $(cat "$err")"
+  [ "$(find "$convert" -type f -exec cksum {} + | sort)" = "$before_convert" ] \
+    || fail "multiple-project conversion refusal mutated the existing ordinary home"
+  if FM_HOME="$first" FM_SECONDMATE_CHARTER='bad child authority' \
+    "$ROOT/bin/fm-home-seed.sh" nested-pfm "$TMP_ROOT/project-firstmate-seed-nested" --project-firstmate alpha >/dev/null 2>"$err"; then
+    fail "project Firstmate was allowed to recursively create another project Firstmate"
+  fi
+  grep -F 'cannot recursively seed project Firstmates' "$err" >/dev/null \
+    || fail "nested project Firstmate refusal did not explain the bounded topology"
+  FM_HOME="$first" FM_SECONDMATE_CHARTER='local alpha workers' \
+    "$ROOT/bin/fm-home-seed.sh" alpha-child "$child" alpha >/dev/null \
+    || fail "project Firstmate could not seed a local child for its owned repository"
+  grep -F 'parent_role=project-firstmate' "$child/.fm-secondmate-parent" >/dev/null \
+    || fail "local child secondmate did not record its project Firstmate parent role"
+
+  fakebin=$(fm_test_make_spawn_fakebin "$TMP_ROOT/project-firstmate-child-spawn")
+  launch_log="$TMP_ROOT/project-firstmate-child-spawn.launch"
+  if ! output=$(FM_BACKEND=tmux FM_SKIP_SECONDMATE_SYNC=1 FM_SKIP_SECONDMATE_INHERIT=1 \
+    FM_FAKE_LAUNCH_LOG="$launch_log" \
+    fm_test_run_spawn "$first" "$first/projects/alpha" "$fakebin" alpha-child "$child" --secondmate --harness codex 2>&1); then
+    fail "project Firstmate could not spawn its registered local child secondmate: $output"
+  fi
+  [ -f "$first/state/alpha-child.meta" ] || fail "project Firstmate child spawn did not publish its direct-report record"
+
+  fm_test_spawn_home "$ordinary" codex
+  remote_child=remote-child
+  printf -- '- %s - remote alpha workers (host: example; root: /remote/firstmate; home: /remote/child; scope: alpha worker tasks; projects: alpha; added 2026-09-17)\n' \
+    "$remote_child" > "$first/data/secondmates.md"
+  if output=$(FM_BACKEND=tmux fm_test_run_spawn "$first" "$first/projects/alpha" "$fakebin" "$remote_child" --secondmate 2>&1); then
+    fail "project Firstmate spawn was allowed to use a remote descendant route"
+  else
+    spawn_rc=$?
+  fi
+  [ "$spawn_rc" -ne 0 ] || fail "remote descendant spawn refusal returned success"
+  printf '%s\n' "$output" | grep -F 'remote descendants beneath a project Firstmate are unsupported' >/dev/null \
+    || fail "remote descendant spawn refusal did not explain the missing distributed lock"
+
+  launch_log="$TMP_ROOT/ordinary-nested-spawn.launch"
+  : > "$launch_log"
+  if output=$(FM_FAKE_LAUNCH_LOG="$launch_log" \
+    fm_test_run_spawn "$ordinary" "$ordinary/projects/alpha" "$fakebin" ordinary-child --secondmate 2>&1); then
+    fail "ordinary secondmate was allowed to spawn a nested secondmate"
+  else
+    spawn_rc=$?
+  fi
+  [ "$spawn_rc" -ne 0 ] || fail "ordinary secondmate nested-spawn refusal returned success"
+  printf '%s\n' "$output" | grep -F 'ordinary secondmates cannot spawn nested secondmates' >/dev/null \
+    || fail "ordinary secondmate nested-spawn refusal did not explain the hierarchy limit"
+  [ ! -s "$launch_log" ] || fail "ordinary secondmate nested-spawn refusal created an endpoint"
+
+  if FM_HOME="$ordinary" FM_SECONDMATE_CHARTER='bad recursive child' \
+    "$ROOT/bin/fm-home-seed.sh" ordinary-child "$TMP_ROOT/project-firstmate-seed-ordinary-child" alpha >/dev/null 2>"$err"; then
+    fail "ordinary secondmate was allowed to seed a child supervisor"
+  fi
+  grep -F 'ordinary secondmates cannot seed further supervisor homes' "$err" >/dev/null \
+    || fail "ordinary secondmate recursion refusal did not explain the bounded topology"
+  pass "project Firstmate seeding enforces one authority, bounded child scope, and non-overlapping root routes"
 }
 
 test_home_seed_validate_rejects_unparseable_registry_entry() {
@@ -876,7 +1160,7 @@ test_home_seed_refuses_local_only_project() {
   if FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
     fail "seed allowed a local-only project into a secondmate home"
   fi
-  grep -F 'project alpha is local-only; secondmate routes support only no-mistakes and direct-PR projects' "$err" >/dev/null \
+  grep -F 'project alpha is local-only; secondmate routes support only direct-PR projects' "$err" >/dev/null \
     || fail "seed did not explain local-only project rejection"
   [ ! -e "$subhome" ] || fail "seed created a subhome before rejecting a local-only project"
   pass "home seeding refuses local-only projects"
@@ -1140,70 +1424,6 @@ test_home_seed_resolves_relative_source_origins() {
   FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null \
     || fail "relative source origin did not compare equal on reseed"
   pass "home seeding resolves relative source origins against the source project"
-}
-
-test_home_seed_skips_initialized_existing_no_mistakes_projects() {
-  local home subhome err fakebin log origin
-  home="$TMP_ROOT/existing-initialized-home"
-  subhome="$TMP_ROOT/existing-initialized-subhome"
-  err="$TMP_ROOT/existing-initialized.err"
-  log="$TMP_ROOT/existing-initialized-no-mistakes.log"
-  mkdir -p "$home/projects" "$home/data" "$home/state"
-  fm_git_init_commit "$home/projects/alpha"
-  fm_git_init_commit "$home/projects/beta"
-  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/existing-alpha.git"
-  fm_git_add_origin "$home/projects/beta" "$TMP_ROOT/remotes/existing-beta.git"
-  git clone --quiet "$ROOT" "$subhome"
-  mkdir -p "$subhome/projects"
-  origin=$(git -C "$home/projects/alpha" remote get-url origin)
-  git clone --quiet "$origin" "$subhome/projects/alpha"
-  git -C "$subhome/projects/alpha" remote add no-mistakes "$TMP_ROOT/no-mistakes-alpha.git"
-  printf '%s\n' '- alpha - alpha project (added 2026-06-22)' '- beta - beta project (added 2026-06-22)' > "$home/data/projects.md"
-  fakebin=$(make_recording_no_mistakes "$TMP_ROOT/existing-initialized-fake")
-  : > "$log"
-
-  if PATH="$fakebin:$PATH" FM_FAKE_NO_MISTAKES_LOG="$log" FM_FAKE_NO_MISTAKES_FAIL_PROJECT=beta \
-    FM_HOME="$home" FM_SECONDMATE_CHARTER='existing init rollback scope' FM_SECONDMATE_SCOPE='existing init rollback scope' \
-    "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha beta >/dev/null 2>"$err"; then
-    fail "seed succeeded even though later no-mistakes initialization failed"
-  fi
-  grep -F 'failed to initialize no-mistakes for beta' "$err" >/dev/null \
-    || fail "seed did not explain later no-mistakes initialization failure"
-  grep -F "$subhome/projects/alpha" "$log" >/dev/null \
-    && fail "seed ran no-mistakes against an initialized existing clone"
-  [ ! -f "$subhome/projects/alpha/.no-mistakes-init" ] || fail "seed mutated initialized existing clone with no-mistakes init"
-  [ ! -f "$subhome/projects/alpha/.no-mistakes-doctor" ] || fail "seed mutated initialized existing clone with no-mistakes doctor"
-  [ ! -e "$subhome/projects/beta" ] || fail "failed seed left a newly cloned project after no-mistakes failure"
-  pass "home seeding skips initialized existing no-mistakes clones"
-}
-
-test_home_seed_refuses_uninitialized_existing_no_mistakes_project() {
-  local home subhome err fakebin log origin
-  home="$TMP_ROOT/existing-uninitialized-home"
-  subhome="$TMP_ROOT/existing-uninitialized-subhome"
-  err="$TMP_ROOT/existing-uninitialized.err"
-  log="$TMP_ROOT/existing-uninitialized-no-mistakes.log"
-  mkdir -p "$home/projects" "$home/data" "$home/state"
-  fm_git_init_commit "$home/projects/alpha"
-  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/uninitialized-alpha.git"
-  git clone --quiet "$ROOT" "$subhome"
-  mkdir -p "$subhome/projects"
-  origin=$(git -C "$home/projects/alpha" remote get-url origin)
-  git clone --quiet "$origin" "$subhome/projects/alpha"
-  printf '%s\n' '- alpha - alpha project (added 2026-06-22)' > "$home/data/projects.md"
-  fakebin=$(make_recording_no_mistakes "$TMP_ROOT/existing-uninitialized-fake")
-  : > "$log"
-
-  if PATH="$fakebin:$PATH" FM_FAKE_NO_MISTAKES_LOG="$log" \
-    FM_HOME="$home" FM_SECONDMATE_CHARTER='existing uninitialized scope' \
-    "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
-    fail "seed initialized a preexisting no-mistakes clone"
-  fi
-  grep -F 'refusing to mutate preexisting clone' "$err" >/dev/null \
-    || fail "seed did not explain uninitialized existing no-mistakes clone refusal"
-  [ ! -s "$log" ] || fail "seed ran no-mistakes before refusing an uninitialized existing clone"
-  [ ! -f "$subhome/projects/alpha/.no-mistakes-init" ] || fail "seed mutated uninitialized existing clone"
-  pass "home seeding refuses uninitialized existing no-mistakes clones"
 }
 
 test_home_seed_refuses_project_destinations_outside_subhome() {
@@ -1915,7 +2135,7 @@ worktree=$childwt
 project=$childproj
 harness=echo
 kind=ship
-mode=no-mistakes
+mode=direct-PR
 yolo=off
 EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/force-teardown-fake")
@@ -1967,7 +2187,7 @@ worktree=$childwt
 project=$childproj
 harness=echo
 kind=ship
-mode=no-mistakes
+mode=direct-PR
 yolo=off
 EOF
   done
@@ -2020,7 +2240,7 @@ worktree=$childwt
 project=$childproj
 harness=echo
 kind=ship
-mode=no-mistakes
+mode=direct-PR
 yolo=off
 EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/force-lock-child-fake")
@@ -2323,7 +2543,7 @@ worktree=$childwt
 project=$childproj
 harness=echo
 kind=ship
-mode=no-mistakes
+mode=direct-PR
 yolo=off
 EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/prevalidate-teardown-fake")
@@ -2378,7 +2598,7 @@ worktree=$childwt
 project=$childproj
 harness=echo
 kind=ship
-mode=no-mistakes
+mode=direct-PR
 yolo=off
 EOF
   printf '%s|%s\n' "$home" "$subhome"
@@ -2664,7 +2884,7 @@ worktree=$childwt
 project=$childproj
 harness=echo
 kind=ship
-mode=no-mistakes
+mode=direct-PR
 yolo=off
 EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/child-active-descendant-fake")
@@ -2715,7 +2935,7 @@ worktree=$childwt
 project=$childproj
 harness=echo
 kind=ship
-mode=no-mistakes
+mode=direct-PR
 yolo=off
 EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/child-repo-descendant-fake")
@@ -2760,7 +2980,7 @@ worktree=$childwt
 project=$childproj
 harness=echo
 kind=ship
-mode=no-mistakes
+mode=direct-PR
 yolo=off
 EOF
   fakebin=$(make_fake_tmux "$TMP_ROOT/unregistered-child-fake")
@@ -2957,6 +3177,7 @@ EOF
 test_fm_home_parameterization
 test_lock_status_is_per_home
 test_seed_allows_overlapping_clones_and_drops_owner
+test_project_firstmate_seed_has_one_repository_authority
 test_home_seed_validate_rejects_unparseable_registry_entry
 test_home_seed_refuses_broken_registry_symlink
 test_home_seed_refuses_unreadable_registry
@@ -2991,8 +3212,6 @@ test_home_seed_refuses_home_overlapping_registered_home
 test_home_seed_refuses_remote_backed_project_without_origin
 test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin
 test_home_seed_resolves_relative_source_origins
-test_home_seed_skips_initialized_existing_no_mistakes_projects
-test_home_seed_refuses_uninitialized_existing_no_mistakes_project
 test_home_seed_refuses_project_destinations_outside_subhome
 test_home_seed_refuses_operational_dirs_outside_subhome
 test_home_seed_refuses_unsafe_leaf_files

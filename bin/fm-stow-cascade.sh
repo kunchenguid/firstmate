@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2031,SC2100 # Parser globals are same-shell outputs; role labels are strings.
 # Enumerate this home's registered secondmates for an internal /stow cascade.
 # Usage: fm-stow-cascade.sh [--help]
 #
@@ -39,8 +40,8 @@
 # blocking the primary's own /stow. A local endpoint probe reads this host's
 # recorded backend in process, like every other caller of that contract.
 #
-# A secondmate home never cascades: secondmates do not own secondmates, so this
-# command reports the empty cascade there rather than reaching for a registry.
+# An ordinary secondmate home never cascades; only a primary or an explicitly
+# marked project Firstmate owns a registered child-home boundary.
 #
 # Exit status: 0 every home reported cleanly (or there were none); 3 at least
 # one home reported an exception and every home was still reported; 1 the
@@ -66,6 +67,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 REGISTRY="$DATA/secondmates.md"
 BUDGET_CMD=fm-startup-memory-budget.sh
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
+HOME_ROLE=primary
 
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
@@ -159,18 +161,27 @@ resolve_remote_transport() { # <id>
   esac
 }
 
-if [ -e "$FM_HOME/$SUB_HOME_MARKER" ] || [ -L "$FM_HOME/$SUB_HOME_MARKER" ]; then
+if { [ -e "$FM_HOME/$SUB_HOME_MARKER" ] || [ -L "$FM_HOME/$SUB_HOME_MARKER" ]; } \
+  && { [ ! -e "$FM_HOME/.fm-project-firstmate" ] && [ ! -L "$FM_HOME/.fm-project-firstmate" ]; }; then
   emit 'role=secondmate'
   emit 'secondmates=0'
   emit 'reason=a secondmate home stows its own memory only and never cascades'
   exit 0
 fi
-emit 'role=primary'
+if [ -e "$FM_HOME/.fm-project-firstmate" ] || [ -L "$FM_HOME/.fm-project-firstmate" ]; then
+  # shellcheck source=bin/fm-repo-concurrency-lib.sh disable=SC1091
+  . "$SCRIPT_DIR/fm-repo-concurrency-lib.sh"
+  fm_repo_scope_marker_parse "$FM_HOME" || die 'project Firstmate authority marker is invalid'
+  HOME_ROLE=project-firstmate
+  emit 'role=project-firstmate'
+else
+  emit 'role=primary'
+fi
 
 if [ ! -e "$REGISTRY" ] && [ ! -L "$REGISTRY" ]; then
   emit 'secondmates=0'
   emit 'exceptions=0'
-  emit 'reason=no secondmate registry in this home'
+  emit 'reason=no direct-report registry in this home'
   exit 0
 fi
 if ! secondmate_registry_validate_bindings "$REGISTRY" secondmate_registry_path_key; then
@@ -187,6 +198,9 @@ while IFS= read -r line || [ -n "$line" ]; do
   home=$SECONDMATE_REGISTRY_HOME
   remote=$SECONDMATE_REGISTRY_REMOTE
   host=$SECONDMATE_REGISTRY_HOST
+  if [ "$HOME_ROLE" = project-firstmate ] && [ "$remote" -eq 1 ]; then
+    die 'remote descendants beneath a project Firstmate are unsupported until distributed repository locking exists'
+  fi
   total=$((total + 1))
   rc=0
   printf '\n'

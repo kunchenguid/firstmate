@@ -33,7 +33,7 @@
 #     by the branch extension's generation-activation cleanup.
 #
 # THREAT MODEL (deliberate, captain-decided): these guards are
-# CONFUSED-AGENT-GRADE, the same grade bin/fm-gate-refuse-lib.sh documents
+# CONFUSED-AGENT-GRADE, the same grade documented by the boundary contract
 # for the gate refusal. They stop non-deliberate misuse - the injected actor
 # identity, the loud refusals, and the session-bound staleness make every
 # accidental cross-actor mutation fail loudly. A deliberately forging shell

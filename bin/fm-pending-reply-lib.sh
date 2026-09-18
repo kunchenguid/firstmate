@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2031 # Snapshot helpers intentionally return output globals to same-shell callers.
 # fm-pending-reply-lib.sh - parent-owned secondmate missed-report guards.
 #
 # When the main firstmate delivers a reply-bearing marked from-firstmate request

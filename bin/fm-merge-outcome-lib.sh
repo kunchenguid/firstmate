@@ -77,6 +77,12 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [autho
 
   if destination=$(fm_parent_channel_destination "$home" "$state"); then
     line="done [key=merged-$id]: merged $id $FM_PR_URL$suffix"
+    if fm_parent_channel_absorb_descendant_line "$home" "$line"; then
+      destination=
+    else
+      self_rc=$?
+      [ "$self_rc" -ne 2 ] || return 3
+    fi
   else
     self_rc=$?
     [ "$self_rc" -eq 1 ] || return 3

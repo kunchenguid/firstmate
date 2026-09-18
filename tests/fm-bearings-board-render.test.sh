@@ -170,13 +170,13 @@ test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status() {
   home=$(make_home underway-name)
   out=$(render_board "$home" '[
     {"id":"fm-board-name-r1","repo":"firstmate","name":"Show task names on the board",
-     "state":"working","kind":"ship","doing":"no-mistakes: review round 2"}
+     "state":"working","kind":"ship","doing":"validation: review round 2"}
   ]' '[]')
   printf '%s' "$out" | jq -e '
     (.underway | length) == 1
       and (.underway[0]
         | .title == "Show task names on the board"
-          and (.sub | test("no-mistakes: review round 2"))
+          and (.sub | test("validation: review round 2"))
           and (.sub | test("ship")) and (.sub | test("firstmate"))
           and [.badges[] | .text] == ["working"])
   ' >/dev/null || fail "an underway row did not lead with the task name: $out"

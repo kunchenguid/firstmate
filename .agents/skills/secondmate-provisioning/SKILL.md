@@ -14,6 +14,42 @@ metadata:
 Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
 
 Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate, and secondmates are idle by default.
+The only nested supervisor role is a project Firstmate, which owns exactly one registered repository and may seed only local ordinary secondmates for that same repository.
+Ordinary secondmates cannot seed children, and a repository can have only one registered project Firstmate authority.
+
+## Project Firstmates and repository capacity
+
+Use a project Firstmate when one repository needs a persistent supervisor and an isolated repository-wide worker limit.
+The root Firstmate remains the captain's only contact and creates and launches the project Firstmate as one of its direct reports.
+Load `project-management` as well when this workflow establishes project ownership for a registered repository.
+Future root requests for that repository route through its project Firstmate, even when ordinary secondmate clone lists overlap.
+
+Start the root Firstmate session in the Firstmate repository, then ask it in natural language: "Create and launch one persistent project Firstmate for buttertrip-mvp with a repository concurrency limit of 2."
+Root provisions the explicit authority with `bin/fm-home-seed.sh <id> <home|-> --project-firstmate buttertrip-mvp --repo-concurrency 2`, then launches it with `bin/fm-spawn.sh <id> --secondmate`.
+The route's scope should say that it owns all work for that repository, so subsequent root intake routes matching tasks there.
+Create exactly one project Firstmate for a repository; do not create multiple project Firstmates to increase capacity.
+Project Firstmate creation refuses overlap with a registered remote ordinary route, and fails closed when the root cannot prove that route's repository identity from a local clone.
+
+The project Firstmate's `config/repo-concurrency` controls all active ship and scout tasks in its own home and its registered local ordinary-secondmate homes.
+Persistent project Firstmates and ordinary secondmates do not consume worker slots.
+With a limit of 2, four tasks produce two admitted workers and two queued backlog items, not two project Firstmates.
+Admission claims are serialized by the project-home authority lock and use durable leases tied to each stable task-home path and task id.
+An admitted task keeps its slot through relaunch, and teardown releases it; bootstrap repairs missing and stale leases before reporting active, limit, and available capacity.
+The configured limit is a positive integer from 1 through 256, defaults to 2 for a newly seeded project Firstmate, and becomes unlimited if the config file is removed.
+The limit is project-home-local and is not inherited into child homes.
+Spawn refuses a task over capacity before creating its endpoint, worktree, or backlog transition, so excess work remains queued.
+When teardown releases a slot, the supervising home re-evaluates its queue and dispatches eligible work on its next normal intake pass; teardown never launches replacement work itself.
+
+Project Firstmates may seed only local child routes until distributed locking is available.
+Remote descendants beneath a project Firstmate fail closed because a remote home cannot safely claim against the local authority lock.
+The current seed workflow creates the project Firstmate locally; remote project-Firstmate provisioning is not yet supported.
+Root remote ordinary seeding records the canonical identities of the exact origins it provisions and refuses overlap with current project authorities before contacting the host.
+The root route's `repo-identities:` field is authoritative; the runtime attestation is refreshed from it and never inferred from a same-named root clone.
+The remote home records the checked root authorities and its own cloned repository scope in `.fm-secondmate-parent`, and project spawns fail closed when that snapshot is absent, malformed, out of scope, or overlapping.
+Legacy projectful remote routes without durable identities fail closed until they are re-provisioned with explicit `project=origin` values.
+This attestation preserves non-overlapping remote routes but does not provide distributed locking.
+Child outcomes remain in their immediate parent's home, and the project Firstmate reports only its correlated decisions and concise milestones to root.
+Its `/stow` may cascade one hop to its registered ordinary-secondmate children, while an ordinary secondmate never cascades.
 
 ## Routing table
 
@@ -27,8 +63,11 @@ A local route uses:
 A whole-home remote route uses:
 
 ```markdown
-- <id> - <one-sentence charter summary> (host: <ssh-alias>; root: <absolute-remote-code-root>; home: <absolute-remote-home>; scope: <natural-language responsibility>; projects: <project-a>, <project-b>; added <date>)
+- <id> - <one-sentence charter summary> (host: <ssh-alias>; root: <absolute-remote-code-root>; home: <absolute-remote-home>; scope: <natural-language responsibility>; projects: <project-a>, <project-b>; repo-identities: <project>=sha256:<canonical-origin-hash>, ...; added <date>)
 ```
+
+The generated `repo-identities:` field binds each remote route's project names to the canonical identities actually seeded on that host and must not be hand-edited.
+Projectful legacy remote entries without this field cannot prove repository overlap safety and require explicit-origin re-provisioning.
 
 Each registry entry stays concise and single-line: the summary is one sentence naming the durable charter, `scope:` is the natural-language intake responsibility, `projects:` is the non-exclusive clone list, and any extra prose is limited to genuinely domain-specific hard rules that change routing or safety for that secondmate.
 Natural-language summary and `scope:` text may contain parentheses and semicolons; keep the generated `(home: ...; scope: ...; projects: ...; added ...)` suffix intact so operational consumers resolve its explicit field markers.
@@ -73,7 +112,7 @@ bin/fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> {<projec
 ```
 
 You resolve each project's origin yourself - from the captain, the project registry, a clone that exists elsewhere, `gh-axi`, or an explicit paste - and name it as `<project>=<origin-url>`; the seed validates and transports what you supply.
-A remote seed therefore creates nothing in this home beyond the route, the charter brief, and a launch record once it is launched: never clone a project into `projects/`, initialize no-mistakes here, or run a fleet sync just to seed a remote secondmate.
+A remote seed therefore creates nothing in this home beyond the route, the charter brief, and a launch record once it is launched: never clone a project into `projects/` or run a fleet sync just to seed a remote secondmate.
 A bare `<project>` remains a convenience for a project this home already has cloned, whose configured origin is read instead.
 [`docs/remote-secondmates.md`](../../../docs/remote-secondmates.md#provision-a-route) owns the rest of the operator contract, and [`bin/fm-project-origin-lib.sh`](../../../bin/fm-project-origin-lib.sh) owns the accepted origin forms.
 Pass `--no-projects` in the project position to seed the project-less home described above; the same mutual-exclusion and fail-loud-on-omission rules apply.
@@ -153,11 +192,10 @@ Direct seed without a preexisting brief requires `FM_SECONDMATE_CHARTER`.
 Run `bin/fm-home-seed.sh validate` when checking registry integrity; its header owns the complete validation and refusal mechanics.
 
 Seeding is transactional.
-If validation, cloning, no-mistakes initialization, or registry update fails, generated briefs, new homes, new project clones, and registry edits are rolled back.
+If validation, cloning, or registry update fails, generated briefs, new homes, new project clones, and registry edits are rolled back.
 
-Secondmate project lists may include `no-mistakes` and `direct-PR` projects only.
+Secondmate project lists may include `direct-PR` projects only.
 `local-only` projects stay with the main firstmate.
-For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
 
 ## Record intake for an existing or inherited domain
 

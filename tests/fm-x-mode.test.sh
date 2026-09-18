@@ -780,10 +780,10 @@ test_bootstrap_relative_home_writes_absolute_poll_shim() {
 }
 
 test_bootstrap_reports_missing_x_dependency() {
-  local home fakebin out tool tool_path
+  local home fakebin out bash_env
   home="$TMP_ROOT/boot-missing-x"; mkdir -p "$home"
   fakebin=$(fm_fakebin "$home")
-  fm_fake_exit0 "$fakebin" tmux node no-mistakes chrome-devtools-axi curl
+  fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi curl
   fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
@@ -794,10 +794,6 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/gh-axi"
-  for tool in dirname grep tail; do
-    tool_path=$(command -v "$tool") || fail "test host must provide $tool"
-    ln -s "$tool_path" "$fakebin/$tool"
-  done
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = auth ] && [ "${2:-}" = status ]; then
@@ -806,6 +802,18 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/gh"
+  bash_env="$home/no-jq.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = jq ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+jq() {
+  return 127
+}
+SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
@@ -816,7 +824,7 @@ exit 0
 SH
   chmod +x "$fakebin/treehouse"
   printf 'FMX_PAIRING_TOKEN=tok-missing\n' > "$home/.env"
-  out=$(PATH="$fakebin" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
     "$BASH" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
   assert_contains "$out" "MISSING: jq" "bootstrap must report missing jq when X mode is opted in"
   assert_not_contains "$out" "FMX: X mode on" "bootstrap must not announce X mode when a dependency is missing"
@@ -2289,7 +2297,7 @@ test_link_records_request_and_timestamp() {
   local home meta out rc
   home="$TMP_ROOT/link-ok"; mkdir -p "$home/state"
   meta="$home/state/fix-login-k3.meta"
-  printf 'window=w\nworktree=/wt\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$meta"
+  printf 'window=w\nworktree=/wt\nkind=ship\nmode=direct-PR\nyolo=off\n' > "$meta"
   # No inbox and no relay reachable here: this test pins the request/timestamp
   # recording, not platform resolution, so fm-x-link's no-platform warning to
   # stderr is expected and dropped.
@@ -2316,7 +2324,7 @@ test_link_records_discord_platform_for_followups() {
   local home meta out rc reply
   home="$TMP_ROOT/link-discord-platform"; private_artifact_dir "$home/state/x-inbox"
   meta="$home/state/fix-discord.meta"
-  printf 'window=w\nworktree=/wt\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$meta"
+  printf 'window=w\nworktree=/wt\nkind=ship\nmode=direct-PR\nyolo=off\n' > "$meta"
   jq -cn '{request_id:"req-discord-follow",tweet_id:"discord:channel:message",reply_max_chars:1900,text:"question"}' \
     > "$home/state/x-inbox/req-discord-follow.json"
   private_artifact_file "$home/state/x-inbox/req-discord-follow.json"
@@ -2357,7 +2365,7 @@ test_link_resolves_platform_by_request_id_after_inbox_cleanup() {
   fakebin=$(make_fake_curl "$home")
   log="$home/curl.log"
   meta="$home/state/fix-after-cleanup.meta"
-  printf 'window=w\nworktree=/wt\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$meta"
+  printf 'window=w\nworktree=/wt\nkind=ship\nmode=direct-PR\nyolo=off\n' > "$meta"
   printf 'FMX_PAIRING_TOKEN=tok-reqctx\n' > "$home/.env"
   # No inbox file at all: the ack reply already cleaned it up before the link.
   # The relay resolves the platform by request_id.
@@ -2556,7 +2564,7 @@ test_meta_helpers_refuse_a_symlinked_task_record() {
   target="$TMP_ROOT/meta-symlink-foreign.meta"
   original="$TMP_ROOT/meta-symlink-foreign.expected"
 
-  printf '%s\n' 'window=w' 'kind=ship' 'mode=no-mistakes' 'yolo=off' > "$target"
+  printf '%s\n' 'window=w' 'kind=ship' 'mode=direct-PR' 'yolo=off' > "$target"
   cp "$target" "$original"
   ln -s "$target" "$meta"
   FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 \
@@ -2565,7 +2573,7 @@ test_meta_helpers_refuse_a_symlinked_task_record() {
   assert_no_grep "x_request=" "$target" "link wrote an X request through the symlink"
   assert_symlink_untouched "link"
 
-  printf '%s\n' 'window=w' 'kind=ship' 'mode=no-mistakes' 'yolo=off' \
+  printf '%s\n' 'window=w' 'kind=ship' 'mode=direct-PR' 'yolo=off' \
     'x_request=req-sym' 'x_request_ts=1700000000' 'x_followups=0' \
     'x_platform=x' 'x_reply_max_chars=280' > "$target"
   cp "$target" "$original"
@@ -2590,7 +2598,7 @@ test_meta_helpers_refuse_a_symlinked_task_record() {
   leftover=$(find "$home/state" -maxdepth 1 -name '.*.fm-x.*' -print 2>/dev/null || true)
   [ -z "$leftover" ] || fail "the clear helper left a staging file after refusing a dangling symlink: $leftover"
 
-  printf '%s\n' 'window=w' 'kind=ship' 'mode=no-mistakes' 'yolo=off' \
+  printf '%s\n' 'window=w' 'kind=ship' 'mode=direct-PR' 'yolo=off' \
     'x_request=req-sym' 'x_request_ts=1700000000' 'x_followups=0' \
     'x_platform=x' 'x_reply_max_chars=280' > "$target"
   cp "$target" "$original"
@@ -2700,7 +2708,7 @@ mk_linked_task() { # <home> <id> <request_id> <link-epoch> [starting-count]
   local home=$1 id=$2 rid=$3 ts=$4 count=${5:-} meta
   mkdir -p "$home/state"
   meta="$home/state/$id.meta"
-  printf 'window=w\nworktree=/wt\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$meta"
+  printf 'window=w\nworktree=/wt\nkind=ship\nmode=direct-PR\nyolo=off\n' > "$meta"
   FM_HOME="$home" FMX_NOW_OVERRIDE="$ts" "$ROOT/bin/fm-x-link.sh" "$id" "$rid" \
     --carry-count "${count:-0}" --carry-ts "$ts" --carry-platform x --carry-max 280 >/dev/null
 }

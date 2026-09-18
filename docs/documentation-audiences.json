@@ -39,10 +39,6 @@
       "target": "docs/documentation-audiences.md"
     },
     {
-      "source": ".no-mistakes.yaml",
-      "target": "docs/documentation-audiences.md"
-    },
-    {
       "source": "CONTRIBUTING.md",
       "target": "docs/documentation-audiences.md"
     },
@@ -511,10 +507,6 @@
     {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
-    },
-    {
-      "path": "tests/captures/no-mistakes-v1.70.1/README.md",
-      "audience": "maintainer-verification"
     }
   ]
 }

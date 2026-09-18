@@ -62,7 +62,7 @@ codex_global_flags() {
 
 test_installed_codex_disables_hooks_for_the_captured_crewmate_launch() {
   local launch flags state
-  launch=$(capture_codex_launch ship --mode no-mistakes --yolo off)
+  launch=$(capture_codex_launch ship --mode direct-PR --yolo off)
   flags=$(codex_global_flags "$launch")
 
   # The whole point: every flag firstmate will launch with, handed to the real

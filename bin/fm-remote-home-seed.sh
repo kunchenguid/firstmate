@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2031 # Registry parsers return output globals to same-shell callers.
 # Register and provision a whole secondmate home on an SSH-reachable host.
 #
 # Usage:
@@ -19,6 +20,10 @@
 # data/projects.md still owns the project's registered delivery mode, so an
 # unregistered or local-only project is refused rather than provisioned.
 # Seeding writes nothing under projects/ and needs no fleet sync first.
+# The root registry stores canonical identities for the exact origins sent to
+# the remote host so later authority checks never infer identity from names.
+# Existing projectful routes without that durable map require explicit origins
+# before they can be safely refreshed.
 #
 # Known provisioning failure rolls the registry back. SSH status 255 preserves
 # the route and any newly scaffolded brief because completion is unknown and a same-route rerun converges.
@@ -43,6 +48,8 @@ MAX_MANIFEST_BYTES=1048576
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-project-origin-lib.sh
 . "$SCRIPT_DIR/fm-project-origin-lib.sh"
+# shellcheck source=bin/fm-repo-concurrency-lib.sh
+. "$SCRIPT_DIR/fm-repo-concurrency-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -79,16 +86,28 @@ done
 case "$REMOTE_HOME/" in "$REMOTE_ROOT/"*) die "remote home must not be inside the remote code root" ;; esac
 case "$REMOTE_ROOT/" in "$REMOTE_HOME/"*) die "remote code root must not be inside the remote home" ;; esac
 
+if [ -e "$FM_HOME/.fm-project-firstmate" ] || [ -L "$FM_HOME/.fm-project-firstmate" ]; then
+  fm_repo_scope_marker_parse "$FM_HOME" || die "active project Firstmate authority marker is invalid"
+  die "remote descendant routes beneath a project Firstmate are unsupported until distributed repository locking exists; seed only local child homes"
+fi
+if [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ]; then
+  [ -f "$FM_HOME/.fm-secondmate-home" ] && [ ! -L "$FM_HOME/.fm-secondmate-home" ] \
+    || die "active secondmate identity marker is invalid"
+  die "ordinary secondmates cannot seed further supervisor homes"
+fi
+
 NO_PROJECTS=0
 PROJECT_NAMES=()
 PROJECT_ORIGINS=()
+PROJECT_ORIGIN_EXPLICIT=()
+PROJECT_IDENTITIES=()
 for arg in "$@"; do
   if [ "$arg" = --no-projects ]; then
     NO_PROJECTS=1
   else
     name=${arg%%=*}
     origin=
-    case "$arg" in *=*) origin=${arg#*=} ;; esac
+    case "$arg" in *=*) origin=${arg#*=}; PROJECT_ORIGIN_EXPLICIT+=(1) ;; *) PROJECT_ORIGIN_EXPLICIT+=(0) ;; esac
     safe_id "$name" || die "invalid project name: $name"
     case "$arg" in
       *=*) fm_project_origin_safe "$origin" \
@@ -103,6 +122,11 @@ if [ "$NO_PROJECTS" -eq 1 ]; then
 else
   [ "${#PROJECT_NAMES[@]}" -gt 0 ] || die "at least one project or --no-projects is required"
 fi
+EXISTING_ROUTE=0
+EXISTING_ROUTE_PROJECTS=
+EXISTING_ROUTE_REPO_IDENTITIES=
+EXISTING_ROUTE_IDENTITIES_VALID=0
+EXISTING_ROUTE_IDENTITY_RECORDS=
 
 mkdir -p "$STATE" || die "cannot create parent state directory"
 REGISTRY_LOCK=$(secondmate_registry_lock_path "$STATE")
@@ -114,13 +138,67 @@ if [ -e "$REG" ] || [ -L "$REG" ]; then
   secondmate_registry_validate_bindings "$REG" secondmate_registry_path_key \
     || die "$SECONDMATE_REGISTRY_ERROR"
   if secondmate_registry_line_for_id "$REG" "$ID"; then
+    EXISTING_ROUTE=1
+    EXISTING_ROUTE_PROJECTS=$SECONDMATE_REGISTRY_PROJECTS
+    EXISTING_ROUTE_REPO_IDENTITIES=$SECONDMATE_REGISTRY_REPO_IDENTITIES
     [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ] \
       && [ "$SECONDMATE_REGISTRY_HOST" = "$HOST" ] \
       && [ "$SECONDMATE_REGISTRY_ROOT" = "$REMOTE_ROOT" ] \
       && [ "$SECONDMATE_REGISTRY_HOME" = "$REMOTE_HOME" ] \
       || die "secondmate $ID is already registered to a different local or remote home"
+    if fm_repo_scope_remote_identity_records_parse "$ID" "$EXISTING_ROUTE_PROJECTS" "$EXISTING_ROUTE_REPO_IDENTITIES"; then
+      EXISTING_ROUTE_IDENTITIES_VALID=1
+      EXISTING_ROUTE_IDENTITY_RECORDS=$FM_REPO_SCOPE_REMOTE_IDENTITY_RECORDS
+    fi
   fi
 fi
+
+AUTHORITY_IDENTITIES=$(fm_repo_scope_registered_authority_identities "$REG") \
+  || die "${FM_REPO_SCOPE_LAST_ERROR:-cannot read project Firstmate authority identities}"
+PROJECT_INDEX=0
+for project in "${PROJECT_NAMES[@]+"${PROJECT_NAMES[@]}"}"; do
+  if [ "$EXISTING_ROUTE" -eq 1 ] && [ "$EXISTING_ROUTE_IDENTITIES_VALID" -eq 0 ] \
+    && [ "${PROJECT_ORIGIN_EXPLICIT[$PROJECT_INDEX]}" -ne 1 ]; then
+    die "existing remote route $ID lacks durable repository identities; re-provision project $project with an explicit project=origin URL"
+  fi
+  origin=${PROJECT_ORIGINS[$PROJECT_INDEX]}
+  origin_explicit=${PROJECT_ORIGIN_EXPLICIT[$PROJECT_INDEX]}
+  PROJECT_INDEX=$((PROJECT_INDEX + 1))
+  if [ -z "$origin" ] && [ -d "$PROJECTS/$project/.git" ]; then
+    origin=$(git -C "$PROJECTS/$project" config --local --get remote.origin.url 2>/dev/null || true)
+  fi
+  [ -n "$origin" ] || die "project $project has no origin; pass $project=<origin-url> so the remote host can clone it"
+  identity=$(fm_repo_scope_canonical_origin_value_identity "$origin" "$PROJECTS") \
+    || die "cannot establish canonical repository identity for remote project $project"
+  if [ "$origin_explicit" -eq 0 ] && [ "$EXISTING_ROUTE_IDENTITIES_VALID" -eq 1 ]; then
+    while IFS= read -r prior_record; do
+      [ -n "$prior_record" ] || continue
+      [ "${prior_record%%=*}" = "$project" ] || continue
+      prior_identity=${prior_record#*=}
+      [ "${prior_identity#sha256:}" = "$identity" ] \
+        || die "root clone $project does not match the identity recorded for remote route $ID; pass the route's explicit project=origin URL to refresh it"
+    done <<< "$EXISTING_ROUTE_IDENTITY_RECORDS"
+  fi
+  while IFS= read -r authority_identity; do
+    [ -n "$authority_identity" ] || continue
+    [ "$identity" != "$authority_identity" ] \
+      || die "project $project is already owned by a project Firstmate; remote ordinary homes cannot overlap that authority"
+  done <<< "$AUTHORITY_IDENTITIES"
+  PROJECT_IDENTITIES+=("$identity")
+done
+REPO_IDENTITY_RECORDS=
+SEEN_REPO_IDENTITIES=' '
+PROJECT_INDEX=0
+for project in "${PROJECT_NAMES[@]+"${PROJECT_NAMES[@]}"}"; do
+  identity=${PROJECT_IDENTITIES[$PROJECT_INDEX]}
+  PROJECT_INDEX=$((PROJECT_INDEX + 1))
+  case "$SEEN_REPO_IDENTITIES" in *" $identity "*)
+    die "remote route $ID repeats repository identity for project $project"
+    ;;
+  esac
+  SEEN_REPO_IDENTITIES="$SEEN_REPO_IDENTITIES$identity "
+  REPO_IDENTITY_RECORDS="${REPO_IDENTITY_RECORDS}${REPO_IDENTITY_RECORDS:+, }$project=sha256:$identity"
+done
 
 mkdir -p "$DATA"
 BRIEF="$DATA/$ID/brief.md"
@@ -159,13 +237,14 @@ PROJECTS_CSV=
 PROJECT_INDEX=0
 for project in "${PROJECT_NAMES[@]+"${PROJECT_NAMES[@]}"}"; do
   ORIGIN=${PROJECT_ORIGINS[$PROJECT_INDEX]}
+  REPO_IDENTITY=${PROJECT_IDENTITIES[$PROJECT_INDEX]}
   PROJECT_INDEX=$((PROJECT_INDEX + 1))
   MODE_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$project")
   read -r MODE _ <<EOF
 $MODE_LINE
 EOF
   case "$MODE" in
-    no-mistakes|direct-PR) ;;
+    direct-PR) ;;
     local-only) die "project $project is local-only and cannot be provisioned remotely" ;;
     *) die "project $project has unsupported delivery mode: $MODE" ;;
   esac
@@ -173,7 +252,7 @@ EOF
   # clone this home happens to have is only a convenience for the already-cloned
   # case; it is never a reason to create one.
   if [ -z "$ORIGIN" ] && [ -d "$PROJECTS/$project/.git" ]; then
-    ORIGIN=$(git -C "$PROJECTS/$project" remote get-url origin 2>/dev/null || true)
+    ORIGIN=$(git -C "$PROJECTS/$project" config --local --get remote.origin.url 2>/dev/null || true)
   fi
   [ -n "$ORIGIN" ] \
     || die "project $project has no origin; pass $project=<origin-url> so the remote host can clone it"
@@ -185,7 +264,8 @@ EOF
   ORIGIN_B64=$(printf '%s' "$ORIGIN" | encode)
   PROJECT_REG_B64=$(printf '%s' "$REGISTRY_LINE" | encode)
   MODE_B64=$(printf '%s' "$MODE" | encode)
-  printf 'project=%s|%s|%s|%s\n' "$NAME_B64" "$ORIGIN_B64" "$PROJECT_REG_B64" "$MODE_B64" >> "$TMP/project.records"
+  IDENTITY_B64=$(printf 'sha256:%s' "$REPO_IDENTITY" | encode)
+  printf 'project=%s|%s|%s|%s|%s\n' "$NAME_B64" "$ORIGIN_B64" "$PROJECT_REG_B64" "$MODE_B64" "$IDENTITY_B64" >> "$TMP/project.records"
   PROJECTS_CSV="${PROJECTS_CSV}${PROJECTS_CSV:+, }$project"
 done
 
@@ -201,6 +281,12 @@ done
   # nothing on the remote filesystem.
   printf 'parent_host_b64=%s\n' "$(printf '%s' "$HOST" | encode)"
   printf 'project_count=%s\n' "${#PROJECT_NAMES[@]}"
+  printf 'repo_scope_snapshot=fm-remote-repo-scope.v1\n'
+  printf 'repo_authority_count=%s\n' "$(printf '%s\n' "$AUTHORITY_IDENTITIES" | awk 'NF { count++ } END { print count + 0 }')"
+  while IFS= read -r authority_identity; do
+    [ -n "$authority_identity" ] || continue
+    printf 'repo_authority_identity=sha256:%s\n' "$authority_identity"
+  done <<< "$AUTHORITY_IDENTITIES"
   cat "$TMP/project.records"
 } > "$TMP/manifest"
 MANIFEST_BYTES=$(LC_ALL=C wc -c < "$TMP/manifest" | tr -d ' ')
@@ -210,8 +296,9 @@ MANIFEST_BYTES=$(LC_ALL=C wc -c < "$TMP/manifest" | tr -d ' ')
 TODAY=$(date +%F)
 REG_TMP="$TMP/secondmates.next"
 if [ -f "$REG" ]; then grep -vE "^- $ID( |$)" "$REG" > "$REG_TMP" || true; else : > "$REG_TMP"; fi
-printf -- '- %s - %s (host: %s; root: %s; home: %s; scope: %s; projects: %s; added %s)\n' \
-  "$ID" "$SUMMARY" "$HOST" "$REMOTE_ROOT" "$REMOTE_HOME" "$SCOPE" "$PROJECTS_CSV" "$TODAY" >> "$REG_TMP"
+printf -- '- %s - %s (host: %s; root: %s; home: %s; scope: %s; projects: %s; repo-identities: %s; added %s)\n' \
+  "$ID" "$SUMMARY" "$HOST" "$REMOTE_ROOT" "$REMOTE_HOME" "$SCOPE" "$PROJECTS_CSV" \
+  "${REPO_IDENTITY_RECORDS:-none}" "$TODAY" >> "$REG_TMP"
 mv -f -- "$REG_TMP" "$REG"
 if ! secondmate_registry_validate_bindings "$REG" secondmate_registry_path_key "$ID" "$REMOTE_HOME"; then
   if [ "$REG_EXISTED" -eq 1 ]; then cp "$TMP/registry.before" "$REG"; else rm -f -- "$REG"; fi

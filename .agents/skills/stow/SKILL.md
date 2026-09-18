@@ -28,7 +28,6 @@ Markers are compact trailing HTML comments, deliberately cheap because marker by
 ```markdown
 - Treehouse pool slots share one repo, so workers must create their task branch before editing. <!--a:2026-08-03-->
 - While state/.afk exists, the away-daemon owns triage (until the afk-wake fix lands; tracked: afk-pi-wake-bypass-r1). <!--p:2026-07-20-->
-- Never restart the shared no-mistakes daemon while runs are active. <!--P-->
 - Codex writes its trust prompt to stderr, not stdout. <!--a:2026-07-28/6-->
 ```
 
@@ -222,7 +221,7 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
      In a secondmate home, route a newly discovered shared preference to the main firstmate through marked status or a document pointer instead of editing the inherited file.
    - Project-intrinsic knowledge never goes directly into a project's `AGENTS.md`.
      Route it through a normal ship task so a crewmate records it with `bin/fm-ensure-agents-md.sh` and the project's delivery path.
-   - Knowledge general to every Firstmate user belongs in this repo's shared tracked material through the normal branch, no-mistakes, PR, and captain-merge path.
+   - Knowledge general to every Firstmate user belongs in this repo's shared tracked material through the normal branch, CI, PR, and captain-merge path.
    - For task-scoped notes, inspect the item with `bin/fm-tasks-axi.sh show <id> --full`, classify the change as new, duplicate, superseding, or obsolete, then use a considered replacement body through `bin/fm-tasks-axi.sh update <id> --body-file <path>`.
      Use `--archive-body` when recoverability matters.
      Never append.
@@ -274,12 +273,13 @@ In a primary home the receipt is written after the cascade below, not instead of
 
 ## Automatic cascade to secondmates
 
-In a primary home, every `/stow` cascades to every registered secondmate after this home's own required pass and knowledge sweep are complete.
-In a secondmate home, `/stow` curates that home only and never cascades further.
+In a primary home, every `/stow` cascades to every registered direct report after this home's own required pass and knowledge sweep are complete.
+A project Firstmate also cascades to its registered ordinary-secondmate children after its own pass, then reports the bounded result to root.
+An ordinary secondmate curates only its own home and never cascades.
 The cascade changes nothing until `/stow` is invoked: it adds no notification, no digest section, and no background work.
 
-Run `bin/fm-stow-cascade.sh` once the primary's own pass is done.
-It enumerates each registered secondmate exactly once, reports that home's own budget accounting, and resolves how the sweep reaches it; its header owns the stanza fields, the bound, and the exit codes.
+Run `bin/fm-stow-cascade.sh` once this home's own pass is done when this home is primary or a project Firstmate.
+It enumerates each registered direct report exactly once, reports that home's own budget accounting, and resolves how the sweep reaches it; its header owns the stanza fields, the bound, and the exit codes.
 Every home is judged against its own `config/startup-memory-budget` allowance, so never add homes together or treat one home's excess as another's.
 
 Act on each home by its reported `transport`:

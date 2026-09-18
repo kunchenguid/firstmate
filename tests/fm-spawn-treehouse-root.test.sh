@@ -39,7 +39,7 @@ run_worker_spawn() {
   : > "$LAUNCH_LOG"
   FM_FAKE_CMD_LOG="$COMMAND_LOG" FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
     fm_test_run_spawn "$HOME_DIR" "$WORKTREE_DIR" "$FAKEBIN_DIR" \
-    "$id" "$PROJECT_DIR" --mode no-mistakes --yolo off
+    "$id" "$PROJECT_DIR" --mode direct-PR --yolo off
 }
 
 assert_only_treehouse_command() {

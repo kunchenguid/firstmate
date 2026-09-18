@@ -131,11 +131,21 @@ bin/fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> {<projec
 
 Name each project's origin as `<project>=<origin-url>`.
 Resolve the concrete origin from the captain, the project registry, an existing clone anywhere, the forge, or an explicit paste rather than imposing one URL template.
-Seeding a project this machine has never cloned needs no clone under `projects/`, no `no-mistakes` initialization here, and no fleet sync first.
+Seeding a project this machine has never cloned needs no clone under `projects/` and no fleet sync first.
 A bare `<project>` is still accepted when this machine happens to have `projects/<project>`, whose configured origin is then read instead of being retyped.
 [`bin/fm-project-origin-lib.sh`](../bin/fm-project-origin-lib.sh) owns which URLs are accepted; it decides on structure and safety alone, so no forge, domain, or host is privileged and a self-hosted server works exactly as a hosted one does.
 The primary validates every resolved origin before transport, and the receiving host validates it again before cloning.
 The project's registered delivery mode still comes from this machine's `data/projects.md`, so an unregistered or `local-only` project is refused rather than provisioned.
+Root holds the secondmate registry lock while it snapshots project Firstmate repository identities and refuses a remote project whose canonical origin overlaps one of them.
+The root route record stores each project's canonical identity in `repo-identities:` based on the exact origins actually provisioned, not on root clones with matching names.
+Remote runtime attestation is refreshed from this durable map and records both the clone scope and the root authority snapshot in `.fm-secondmate-parent`.
+Remote project work fails closed if that snapshot is missing or invalid, if the task repository is outside the provisioned clone scope, or if it is owned by a project Firstmate.
+Projectful legacy remote routes without durable identities fail closed and must be re-provisioned with explicit `project=origin` values before spawning project work.
+Non-overlapping remote ordinary routes remain supported; this snapshot is a provisioning-time check, not distributed locking.
+
+Remote child routes beneath a project Firstmate are refused because the repository-wide admission lock is local to that project Firstmate's home.
+Use local child homes on the project Firstmate's host until distributed locking is available.
+The current route-seeding interface does not provision a remote project Firstmate authority.
 
 The seed records `host:`, `root:`, and `home:` in `data/secondmates.md`, gates the host on readiness, sends a bounded manifest, and lets the remote host clone its own Firstmate home and project origins.
 In the primary home, its durable registration effects are limited to that route and the charter brief under `data/<id>`; launch records are created only when the secondmate is launched.

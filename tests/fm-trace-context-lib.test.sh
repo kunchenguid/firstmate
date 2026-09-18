@@ -178,7 +178,7 @@ pass "Secondmate home-session state stays off or on despite later file state; am
 # --- recovery: a recorded value is reused verbatim, disabled still omits -----
 
 REC_META="$WORK/rec.meta"
-printf 'kind=ship\ntraceparent=%s\nmode=no-mistakes\n' "$VALID" > "$REC_META"
+printf 'kind=ship\ntraceparent=%s\nmode=direct-PR\n' "$VALID" > "$REC_META"
 out=$(TRACEPARENT='00-ffffffffffffffffffffffffffffffff-1111111111111111-01' \
   FM_TRACE_CONTEXT=on fm_trace_context_resolve "$CFG_ON" "$REC_META")
 [ "$out" = "$VALID" ] || fail "recovery must reuse the recorded traceparent verbatim, ignoring the ambient environment (got '$out')"

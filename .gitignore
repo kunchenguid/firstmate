@@ -2,10 +2,10 @@ projects/
 state/
 data/
 scratchpad*
-.no-mistakes/
 .lavish/
 .fm-secondmate-home
 .fm-secondmate-parent
+.fm-project-firstmate
 .DS_Store
 __pycache__/
 *.pyc

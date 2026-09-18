@@ -134,7 +134,7 @@ run_spawn() {
     FM_FAKE_TRACE_METADATA_APPEND_FAIL="${FM_FAKE_TRACE_METADATA_APPEND_FAIL:-0}" \
     FM_FAKE_META_PATH="$home/state/$1.meta" \
     FM_FAKE_LAUNCH_LOG="$launchlog" PATH="$fakebin:$PATH" \
-    "$SPAWN" "$@" --mode no-mistakes --yolo off 2>&1
+    "$SPAWN" "$@" --mode direct-PR --yolo off 2>&1
 }
 
 # Same, but with an explicit FM_TRACE_CONTEXT override, to prove the env decides.
@@ -152,7 +152,7 @@ run_spawn_tc() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$launchlog" PATH="$fakebin:$PATH" \
-    "$SPAWN" "$@" --mode no-mistakes --yolo off 2>&1
+    "$SPAWN" "$@" --mode direct-PR --yolo off 2>&1
 }
 
 start_trace_session() {
@@ -205,6 +205,12 @@ run_two_level() {
   mkdir -p "$sm/bin" "$sm/data"
   printf '# Firstmate\n' > "$sm/AGENTS.md"
   printf 'sm-%s\n' "$name" > "$sm/.fm-secondmate-home"
+  cat > "$sm/.fm-secondmate-parent" <<EOF
+schema=fm-secondmate-parent.v1
+route=local
+parent_home=$prim
+parent_role=root
+EOF
   printf 'charter\n' > "$sm/data/charter.md"
 
   # Spawn 1: the primary launches the secondmate; capture what it injects.
@@ -251,7 +257,7 @@ run_two_level() {
     FM_PROJECTS_OVERRIDE="$sm/projects" FM_CONFIG_OVERRIDE="$sm/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wwt" TMUX="fake,1,0" \
     FM_FAKE_LAUNCH_LOG="$wlog" PATH="$wfake:$PATH" \
-    "$SPAWN" "$worker_id" "$wproj" --mode no-mistakes --yolo off >/dev/null 2>&1 || true
+    "$SPAWN" "$worker_id" "$wproj" --mode direct-PR --yolo off >/dev/null 2>&1 || true
 
   TL_WORKER_TP=$(meta_traceparent "$sm/state/$worker_id.meta")
   TL_SM_FILE=absent

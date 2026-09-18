@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2031 # Registry parsers return output globals to same-shell callers.
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -15,15 +16,10 @@
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
 #   placeholders, an empty Task, an incomplete pair of Task subsections, or a
 #   `## Captain's intent` line opening with a Captain label or address.
-#   Every ship or scout spawn renders `launch-brief.md`; for a no-mistakes ship
-#   it also carries the current `--intent` contract and the extracted captain
-#   intent. A legacy mixed Task is accepted there only under bin/fm-dod-lib.sh's
-#   provenance-marking rules; unmarked legacy Tasks stop for migration rather
-#   than becoming intent. That library owns the parsing and intent rules. When
-#   the explicit mode carries less rigor than the project's standing posture, a
-#   loud one-line deviation notice is printed and the spawn continues.
-#   no-mistakes-prod-only is a registry policy rather than a task mode and is
-#   refused as a flag value.
+#   Every ship or scout spawn renders `launch-brief.md` from the current worker
+#   role contract.
+#   When the explicit mode carries less rigor than the project's standing posture,
+#   a loud one-line deviation notice is printed and the spawn continues.
 #   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
@@ -494,6 +490,10 @@ fi
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-repo-concurrency-lib.sh
+. "$SCRIPT_DIR/fm-repo-concurrency-lib.sh"
+# shellcheck source=bin/fm-secondmate-parent-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -504,8 +504,6 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
@@ -520,9 +518,6 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
-# Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
-# a direct report (see bin/fm-gate-refuse-lib.sh).
-fm_refuse_if_gate_agent
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -719,7 +714,7 @@ else
   # and record no delivery posture; secondmate spawns hardcode theirs.
   if [ "$KIND" = ship ]; then
     [ "$MODE_SET" -eq 1 ] || {
-      echo "error: ship spawns require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
+      echo "error: ship spawns require --mode <direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
       exit 1
     }
     [ "$YOLO_SET" -eq 1 ] || {
@@ -727,13 +722,9 @@ else
       exit 1
     }
     case "$MODE" in
-    no-mistakes | direct-PR | local-only) ;;
-    no-mistakes-prod-only)
-      echo "error: no-mistakes-prod-only is a registry policy, not a task mode; classify this task's surface and resolve it to no-mistakes or direct-PR at intake" >&2
-      exit 1
-      ;;
+    direct-PR | local-only) ;;
     *)
-      echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2
+      echo "error: --mode must be direct-PR or local-only (got '$MODE')" >&2
       exit 1
       ;;
     esac
@@ -1066,6 +1057,12 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+SPAWN_REPO_SCOPE_ACTIVE=0
+SPAWN_REPO_LEASE_CREATED=0
+SPAWN_ROOT_ROUTE_LOCK_ACTIVE=0
+SPAWN_REPO_AUTHORITY_HOME=
+SPAWN_REPO_AUTHORITY_ID=
+SPAWN_REPO_PROJECT=
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1192,6 +1189,21 @@ spawn_abort_cleanup() {
     if ! spawn_fresh_commit_rollback; then
       status=1
     fi
+  fi
+  if [ "$SPAWN_REPO_SCOPE_ACTIVE" = 1 ]; then
+    if [ "$SPAWN_REPO_LEASE_CREATED" = 1 ] &&
+      [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+      if ! fm_repo_scope_release_task "$FM_HOME" "$ID"; then
+        echo "warning: could not release provisional repository concurrency claim for $ID: $FM_REPO_SCOPE_LAST_ERROR" >&2
+        status=1
+      fi
+    fi
+    SPAWN_REPO_SCOPE_ACTIVE=0
+    SPAWN_REPO_LEASE_CREATED=0
+  fi
+  if [ "$SPAWN_ROOT_ROUTE_LOCK_ACTIVE" = 1 ]; then
+    fm_repo_scope_root_route_lock_release || true
+    SPAWN_ROOT_ROUTE_LOCK_ACTIVE=0
   fi
   if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
     SPAWN_META_LOCK_HELD=0
@@ -1418,7 +1430,41 @@ if [ "$RELAUNCH" -eq 0 ]; then
   fi
   SPAWN_TASK_SET_LOCK_HELD=1
 fi
+
+validate_secondmate_spawn_parent_authority() {  # <secondmate-id>
+  local id=$1 remote_route
+  SPAWN_REPO_AUTHORITY_HOME=
+  SPAWN_REPO_AUTHORITY_ID=
+  SPAWN_REPO_PROJECT=
+  if [ -e "$FM_HOME/.fm-project-firstmate" ] || [ -L "$FM_HOME/.fm-project-firstmate" ]; then
+    fm_repo_scope_marker_parse "$FM_HOME" || {
+      echo "error: active project Firstmate authority marker is invalid" >&2
+      return 1
+    }
+    [ -f "$FM_HOME/.fm-secondmate-home" ] && [ ! -L "$FM_HOME/.fm-secondmate-home" ] || {
+      echo "error: project Firstmate is missing its seeded secondmate identity marker" >&2
+      return 1
+    }
+    SPAWN_REPO_AUTHORITY_HOME=$FM_REPO_SCOPE_HOME
+    SPAWN_REPO_AUTHORITY_ID=$FM_REPO_SCOPE_AUTHORITY_ID
+    SPAWN_REPO_PROJECT=$FM_REPO_SCOPE_PROJECT
+    remote_route=$(secondmate_registry_field "$DATA/secondmates.md" "$id" remote 2>/dev/null || true)
+    [ "$remote_route" != 1 ] || {
+      echo "error: remote descendants beneath a project Firstmate are unsupported until distributed repository locking exists" >&2
+      return 1
+    }
+  elif [ -e "$FM_HOME/.fm-secondmate-home" ] || [ -L "$FM_HOME/.fm-secondmate-home" ]; then
+    if [ -f "$FM_HOME/.fm-secondmate-home" ] && [ ! -L "$FM_HOME/.fm-secondmate-home" ] \
+      && [ "$(<"$FM_HOME/.fm-secondmate-home")" = "$id" ]; then
+      return 0
+    fi
+    echo "error: ordinary secondmates cannot spawn nested secondmates; route work through their parent Firstmate" >&2
+    return 1
+  fi
+}
+
 if [ "$KIND" = secondmate ]; then
+  validate_secondmate_spawn_parent_authority "$ID" || exit 1
   if spawn_remote_secondmate "$ID"; then
     exit 0
   else
@@ -2744,12 +2790,52 @@ if [ "$KIND" = secondmate ]; then
     exit 1
   }
   PROJ_ABS=$(validate_firstmate_home_for_spawn "$ID" "$FIRSTMATE_HOME")
-  if [ -e "$DATA/secondmates.md" ] || [ -L "$DATA/secondmates.md" ]; then
+  if [ -n "$SPAWN_REPO_AUTHORITY_HOME" ]; then
+    if [ ! -f "$DATA/secondmates.md" ] || [ -L "$DATA/secondmates.md" ] \
+      || ! secondmate_registry_validate_bindings "$DATA/secondmates.md" resolve_path "$ID" "$FIRSTMATE_HOME"; then
+      echo "error: project Firstmate child $ID is not registered in its direct-report table${SECONDMATE_REGISTRY_ERROR:+: $SECONDMATE_REGISTRY_ERROR}" >&2
+      exit 1
+    fi
+    [ "$SECONDMATE_REGISTRY_MATCH_REMOTE" -eq 0 ] || {
+      echo "error: remote descendants beneath a project Firstmate are unsupported until distributed repository locking exists" >&2
+      exit 1
+    }
+    [ "$SECONDMATE_REGISTRY_MATCH_PROJECTS" = "$SPAWN_REPO_PROJECT" ] || {
+      echo "error: project Firstmate child $ID must clone only its owned repository $SPAWN_REPO_PROJECT" >&2
+      exit 1
+    }
+    SECONDMATE_PROJECTS=$SECONDMATE_REGISTRY_MATCH_PROJECTS
+    if ! fm_repo_scope_authority_for_home "$PROJ_ABS"; then
+      echo "error: project Firstmate child $ID has no valid local parent authority binding: $FM_REPO_SCOPE_LAST_ERROR" >&2
+      exit 1
+    fi
+    [ "$FM_REPO_SCOPE_HOME" = "$SPAWN_REPO_AUTHORITY_HOME" ] \
+      && [ "$FM_REPO_SCOPE_AUTHORITY_ID" = "$SPAWN_REPO_AUTHORITY_ID" ] \
+      && [ "$FM_REPO_SCOPE_PROJECT" = "$SPAWN_REPO_PROJECT" ] || {
+      echo "error: project Firstmate child $ID is bound to a different repository authority" >&2
+      exit 1
+    }
+  elif [ -e "$DATA/secondmates.md" ] || [ -L "$DATA/secondmates.md" ]; then
     if ! secondmate_registry_validate_bindings "$DATA/secondmates.md" resolve_path "$ID" "$FIRSTMATE_HOME"; then
       echo "error: $SECONDMATE_REGISTRY_ERROR" >&2
       exit 1
     fi
     SECONDMATE_PROJECTS=$SECONDMATE_REGISTRY_MATCH_PROJECTS
+    if [ -e "$PROJ_ABS/.fm-secondmate-parent" ] || [ -L "$PROJ_ABS/.fm-secondmate-parent" ]; then
+      fm_secondmate_parent_record_parse "$PROJ_ABS/.fm-secondmate-parent" || {
+        echo "error: secondmate $ID has an invalid parent binding" >&2
+        exit 1
+      }
+      if [ "$FM_SECONDMATE_PARENT_ROUTE" = local ]; then
+        current_home_real=$(cd "$FM_HOME" && pwd -P) || exit 1
+        target_parent_real=$(cd "$FM_SECONDMATE_PARENT_HOME" && pwd -P) || exit 1
+        if [ "$target_parent_real" != "$current_home_real" ] || \
+          { [ -n "$FM_SECONDMATE_PARENT_ROLE" ] && [ "$FM_SECONDMATE_PARENT_ROLE" != root ]; }; then
+          echo "error: root Firstmate cannot spawn a secondmate whose durable parent binding names another home" >&2
+          exit 1
+        fi
+      fi
+    fi
   fi
   WT="$PROJ_ABS"
   # Local-HEAD sync: before launch, fast-forward this secondmate's worktree to the
@@ -2842,45 +2928,10 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     echo "error: $BRIEF ## Captain's intent has an operator-address line: $ADDRESS_LINE; write the captain's actual words without a Captain label or address before spawn, since the heading already records provenance" >&2
     exit 1
   fi
-  if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
-    if fm_brief_task_heading_present "$BRIEF" "## Captain's intent"; then
-      CAPTAIN_INTENT=$(fm_brief_task_heading_body "$BRIEF" "## Captain's intent")
-    else
-      LEGACY_TASK_BODY=$(fm_brief_heading_body "$BRIEF" "# Task")
-      CAPTAIN_INTENT=$(fm_brief_marked_captain_words "$LEGACY_TASK_BODY")
-      if [ -z "$(printf '%s' "$CAPTAIN_INTENT" | tr -d '[:space:]')" ]; then
-        echo "error: legacy mixed # Task brief has no provenance-marked captain words for no-mistakes --intent; add [captain] lines or migrate to ## Captain's intent and ## Firstmate spec" >&2
-        exit 1
-      fi
-    fi
-  fi
-  # Use the existing launch-brief overlay for every worker kind, including
-  # pre-scope briefs and relaunches. Charters never enter this worker path.
-  SOURCE_BRIEF=$BRIEF
-  BRIEF="$DATA/$ID/launch-brief.md"
-  BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
-  {
-    fm_brief_worker_role "$STATE" "$ID" &&
-      printf '\n' &&
-      cat "$SOURCE_BRIEF" &&
-      if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
-        fm_brief_intent_overlay "$CAPTAIN_INTENT"
-      fi
-  } >"$BRIEF_TMP" || {
-    rm -f -- "$BRIEF_TMP"
-    echo "error: could not render current launch contract for $SOURCE_BRIEF" >&2
-    exit 1
-  }
-  if ! mv "$BRIEF_TMP" "$BRIEF"; then
-    rm -f -- "$BRIEF_TMP"
-    echo "error: could not publish current launch contract for $SOURCE_BRIEF" >&2
-    exit 1
-  fi
 fi
 
 delivery_rigor_rank() { # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in
-  no-mistakes) echo 3 ;;
   direct-PR) echo 2 ;;
   local-only) echo 1 ;;
   *) echo 0 ;;
@@ -2901,19 +2952,13 @@ if [ "$KIND" = ship ]; then
     exit 1
   fi
   # The registry holds the captain's standing posture, so dropping below it is
-  # allowed (a current explicit captain instruction wins) but never silent. An
-  # unregistered project resolves to the same no-mistakes standing default, which
-  # is why the notice names the standing posture rather than the registry line. A
-  # conditional policy is excluded: both of its legs are legitimate classifications.
+  # allowed (a current explicit captain instruction wins) but never silent.
   STANDING_MODE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null | cut -d' ' -f1) || STANDING_MODE=
-  if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] &&
+  if [ -n "$STANDING_MODE" ] &&
     [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
   fi
 fi
-
-BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
-BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
@@ -3244,6 +3289,57 @@ if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
   echo "error: task $ID has a pending authoritative backlog close at $STATE/$ID.backlog-close; finish or repair that close before dispatching a new worker" >&2
   exit 1
 fi
+
+if [ "$KIND" != secondmate ]; then
+  # Arm cleanup before the guard: it may acquire the root registry lock before
+  # returning, and an interrupted shell must still release that lock.
+  SPAWN_ROOT_ROUTE_LOCK_ACTIVE=1
+  if fm_repo_scope_root_route_guard "$FM_HOME" "$PROJ_ABS"; then
+    :
+  else
+    [ -n "$FM_REPO_SCOPE_LAST_ERROR" ] || FM_REPO_SCOPE_LAST_ERROR="repository route admission failed"
+    echo "error: $FM_REPO_SCOPE_LAST_ERROR" >&2
+    exit 1
+  fi
+  if fm_repo_scope_acquire_task "$FM_HOME" "$ID" "$PROJ_ABS" "$RELAUNCH"; then
+    REPO_SCOPE_STATUS=0
+  else
+    REPO_SCOPE_STATUS=$?
+  fi
+  if [ "$REPO_SCOPE_STATUS" -eq 2 ]; then
+    exit 2
+  fi
+  if [ "$REPO_SCOPE_STATUS" -ne 0 ]; then
+    [ -n "$FM_REPO_SCOPE_LAST_ERROR" ] || FM_REPO_SCOPE_LAST_ERROR="repository subtree admission failed"
+    echo "error: $FM_REPO_SCOPE_LAST_ERROR" >&2
+    exit 1
+  fi
+  SPAWN_REPO_SCOPE_ACTIVE=1
+  SPAWN_REPO_LEASE_CREATED=$FM_REPO_SCOPE_LEASE_CREATED
+fi
+
+if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+  # Publish this worker-role overlay only after authority admission succeeds.
+  SOURCE_BRIEF=$BRIEF
+  BRIEF="$DATA/$ID/launch-brief.md"
+  BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
+  {
+    fm_brief_worker_role "$STATE" "$ID" &&
+      printf '\n' &&
+      cat "$SOURCE_BRIEF"
+  } >"$BRIEF_TMP" || {
+    rm -f -- "$BRIEF_TMP"
+    echo "error: could not render current launch contract for $SOURCE_BRIEF" >&2
+    exit 1
+  }
+  if ! mv "$BRIEF_TMP" "$BRIEF"; then
+    rm -f -- "$BRIEF_TMP"
+    echo "error: could not publish current launch contract for $SOURCE_BRIEF" >&2
+    exit 1
+  fi
+fi
+BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
+BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
 
 W="fm-$ID"
 if [ "$RELAUNCH" -eq 1 ]; then
@@ -4325,7 +4421,7 @@ fi
 # validate/merge stages can branch on it. A ship task carries the explicit
 # per-task decision validated above; a secondmate's posture is fixed; a scout
 # records none at all, because its deliverable is a report rather than a merge
-# (fm-teardown.sh defaults an absent mode to no-mistakes, and fm-promote.sh
+# (fm-teardown.sh defaults an absent mode to direct-PR, and fm-promote.sh
 # requires an explicit mode when a scout is promoted to a ship task).
 if [ "$KIND" = secondmate ]; then
   MODE=secondmate
@@ -4825,6 +4921,16 @@ if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
 fi
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
+if [ "$SPAWN_REPO_SCOPE_ACTIVE" = 1 ]; then
+  SPAWN_REPO_SCOPE_ACTIVE=0
+  SPAWN_REPO_LEASE_CREATED=0
+fi
+if [ "$SPAWN_ROOT_ROUTE_LOCK_ACTIVE" = 1 ]; then
+  fm_repo_scope_root_route_lock_release || {
+    echo "warning: root repository route lock could not be released cleanly" >&2
+  }
+  SPAWN_ROOT_ROUTE_LOCK_ACTIVE=0
+fi
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"

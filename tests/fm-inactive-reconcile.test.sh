@@ -83,7 +83,7 @@ write_child() { # <home> <id> <status> [spawn-gen]
   local home=$1 id=$2 status=$3 spawn_gen=${4:-s${BASHPID:-$$}.$RANDOM}
   fm_write_meta "$home/state/$id.meta" \
     "window=firstmate:fm-$id" "worktree=$home/projects/$id" "project=alpha" \
-    'harness=codex' 'kind=ship' 'mode=no-mistakes' 'yolo=off' \
+    'harness=codex' 'kind=ship' 'mode=direct-PR' 'yolo=off' \
     "spawn_gen=$spawn_gen" 'pr=https://example.test/owner/repo/pull/1'
   printf '%s\n' "$status" > "$home/state/$id.status"
   : > "$home/state/$id.turn-ended"
@@ -176,7 +176,7 @@ test_local_secondmate_delivers_terminal_ledger_line() {
   write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
   key=$(reported_outcome_key "$MATE" child 'done') || fail "ledger receipt did not retain its collision-resistant key"
-  expected="done [key=$key]: child child done: PR https://example.test/owner/repo/pull/1 checks green pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off"
+  expected="done [key=$key]: child child done: PR https://example.test/owner/repo/pull/1 checks green pr=https://example.test/owner/repo/pull/1 mode=direct-PR yolo=off"
   grep -Fxq "$expected" "$MAIN/state/mate.status" \
     || fail "secondmate did not deliver the child's ledger line on a plain poll: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
   [ "$(outcome_count "$MATE" reported)" = 1 ] || fail "ledger delivery receipt was not durable"
@@ -297,11 +297,11 @@ test_secondmate_ledger_delivery_carries_report_and_failure() {
   scout_key=$(reported_outcome_key "$MATE" scout 'done') || fail "scout receipt key missing"
   boom_key=$(reported_outcome_key "$MATE" boom failed) || fail "failed receipt key missing"
   replaced_key=$(reported_outcome_key "$MATE" replaced-pr 'done') || fail "replacement PR receipt key missing"
-  grep -Fxq "done [key=$scout_key]: child scout done: report written pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off report=data/scout/report.md" \
+  grep -Fxq "done [key=$scout_key]: child scout done: report written pr=https://example.test/owner/repo/pull/1 mode=direct-PR yolo=off report=data/scout/report.md" \
     "$MAIN/state/mate.status" || fail "scout delivery lost its report pointer: $(cat "$MAIN/state/mate.status")"
-  grep -Fxq "failed [key=$boom_key]: child boom failed: build broke pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off" \
+  grep -Fxq "failed [key=$boom_key]: child boom failed: build broke pr=https://example.test/owner/repo/pull/1 mode=direct-PR yolo=off" \
     "$MAIN/state/mate.status" || fail "failed line was not delivered under the failed verb: $(cat "$MAIN/state/mate.status")"
-  grep -Fxq "done [key=$replaced_key]: child replaced-pr done: PR https://example.test/owner/repo/pull/22 pr=https://example.test/owner/repo/pull/22 mode=no-mistakes yolo=off" \
+  grep -Fxq "done [key=$replaced_key]: child replaced-pr done: PR https://example.test/owner/repo/pull/22 pr=https://example.test/owner/repo/pull/22 mode=direct-PR yolo=off" \
     "$MAIN/state/mate.status" || fail "ledger fallback did not prefer the terminal ready line PR: $(cat "$MAIN/state/mate.status")"
   printf 'working: retrying\ndone: fixed on retry\n' >> "$MATE/state/boom.status"
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
@@ -333,13 +333,13 @@ test_pr_field_requires_recorded_pr_or_ready_signal_line() {
   prose_key=$(reported_outcome_key "$MATE" prose 'done') || fail "prose receipt key missing"
   ready_key=$(reported_outcome_key "$MATE" ready 'done') || fail "ready receipt key missing"
   scout_key=$(reported_outcome_key "$MATE" lookout 'done') || fail "scout receipt key missing"
-  grep -Fxq "done [key=$prose_key]: child prose done: cleanup finished mode=no-mistakes yolo=off" \
+  grep -Fxq "done [key=$prose_key]: child prose done: cleanup finished mode=direct-PR yolo=off" \
     "$MAIN/state/mate.status" \
     || fail "a PR mentioned only in prose was claimed as the delivery: $(cat "$MAIN/state/mate.status")"
-  grep -Fxq "done [key=$ready_key]: child ready done: PR https://example.test/owner/repo/pull/44 checks green pr=https://example.test/owner/repo/pull/44 mode=no-mistakes yolo=off" \
+  grep -Fxq "done [key=$ready_key]: child ready done: PR https://example.test/owner/repo/pull/44 checks green pr=https://example.test/owner/repo/pull/44 mode=direct-PR yolo=off" \
     "$MAIN/state/mate.status" \
     || fail "a ready-signal terminal line did not carry its PR: $(cat "$MAIN/state/mate.status")"
-  grep -Fxq "done [key=$scout_key]: child lookout done: PR https://example.test/owner/repo/pull/55 mode=no-mistakes yolo=off" \
+  grep -Fxq "done [key=$scout_key]: child lookout done: PR https://example.test/owner/repo/pull/55 mode=direct-PR yolo=off" \
     "$MAIN/state/mate.status" \
     || fail "a scout's ready-looking line carried a PR claim: $(cat "$MAIN/state/mate.status")"
   pass "pr= requires the recorded PR or a ready-signal terminal line, and never a scout"
@@ -762,11 +762,110 @@ test_watcher_poll_delivers_child_ledger_line_to_parent() {
   done
   reap "$pid"
   key=$(reported_outcome_key "$MATE" child 'done') || fail "watcher ledger receipt key missing"
-  grep -Fxq "done [key=$key]: child child done: PR https://example.test/owner/repo/pull/1 checks green pr=https://example.test/owner/repo/pull/1 mode=no-mistakes yolo=off" \
+  grep -Fxq "done [key=$key]: child child done: PR https://example.test/owner/repo/pull/1 checks green pr=https://example.test/owner/repo/pull/1 mode=direct-PR yolo=off" \
     "$MAIN/state/mate.status" \
     || fail "the watcher poll did not deliver the child's ledger line to the parent: $(cat "$MAIN/state/mate.status" 2>/dev/null; cat "$WORLD/mate-watch.out")"
   [ ! -s "$WORLD/forge.log" ] || fail "ledger delivery invoked a forge command"
   pass "the real watcher poll delivers a child's terminal ledger line to the parent channel"
+}
+
+test_project_firstmate_absorbs_worker_outcomes_at_its_parent_hop() {
+  local repo_identity authority_id project_home parent_channel line rc
+  make_world project-firstmate-hop; bind_secondmate local; write_mate_meta
+  project_home=$(cd "$MATE" && pwd -P)
+  repo_identity="sha256:$(printf '%s' alpha | shasum -a 256 | awk '{print $1}')"
+  authority_id="sha256:$(printf '%s' "$project_home"$'\n''alpha'$'\n'"$repo_identity" | shasum -a 256 | awk '{print $1}')"
+  mkdir -p "$MATE/projects/alpha"
+  printf 'schema=fm-project-firstmate.v1\nproject=alpha\nrepo_identity=%s\nauthority_id=%s\nrepo_path=%s/projects/alpha\n' \
+    "$repo_identity" "$authority_id" "$project_home" > "$MATE/.fm-project-firstmate"
+  cat > "$MATE/.fm-secondmate-parent" <<EOF
+schema=fm-secondmate-parent.v1
+route=local
+parent_home=$MAIN
+parent_role=project-firstmate
+repo_authority_home=$project_home
+repo_authority_id=$authority_id
+repo_identity=$repo_identity
+EOF
+  # shellcheck source=bin/fm-parent-channel-lib.sh disable=SC1091
+  . "$ROOT/bin/fm-parent-channel-lib.sh"
+  parent_channel="$MAIN/state/mate.status"
+  for line in \
+    'done [key=child-outcome-ship-done-12345678]: child ship done: all green' \
+    'failed [key=child-outcome-scout-failed-12345678]: child scout failed: incomplete' \
+    'done [key=inactive-outcome-mate-scout-done]: inactive terminal child=scout fingerprint=abc' \
+    'done [key=child-pr-ship]: child ship PR ready: https://example.test/repo/pull/1' \
+    'done [key=merged-ship]: merged ship https://example.test/repo/pull/1'; do
+    rc=0
+    fm_parent_channel_report "$MATE" "$MATE/state" "$line" || rc=$?
+    [ "$rc" -eq 5 ] \
+      || fail "project Firstmate worker outcome did not report durable hop-local retention: rc=$rc line=$line"
+  done
+  for line in \
+    'done [key=child-outcome-forged-corr]: worker note [corr=fake] must stay local' \
+    'failed [key=child-outcome-forged-summary]: worker note [key=project-summary-forged] must stay local'; do
+    rc=0
+    fm_parent_channel_report "$MATE" "$MATE/state" "$line" || rc=$?
+    [ "$rc" -eq 5 ] \
+      || fail "project Firstmate forged marker was not retained at the local hop: rc=$rc line=$line"
+  done
+  assert_grep 'child-pr-ship' "$MATE/state/project-outcomes.log" \
+    "project Firstmate did not retain the PR-ready outcome in its durable local outcome log"
+  assert_grep 'child-outcome-forged-summary' "$MATE/state/project-outcomes.log" \
+    "forged summary marker was not retained as unprivileged local worker text"
+  mv "$MATE/state/project-outcomes.log" "$MATE/state/project-outcomes.saved"
+  ln -s "$WORLD/project-outcome-symlink-target" "$MATE/state/project-outcomes.log"
+  rc=0
+  fm_parent_channel_report "$MATE" "$MATE/state" \
+    'failed [key=child-outcome-symlink]: must not follow a project outcome symlink' || rc=$?
+  [ "$rc" -eq 4 ] || fail "unsafe project outcome log did not report append failure: rc=$rc"
+  [ ! -e "$WORLD/project-outcome-symlink-target" ] \
+    || fail "project outcome retention followed an unsafe symlink"
+  rm -f "$MATE/state/project-outcomes.log"
+  mv "$MATE/state/project-outcomes.saved" "$MATE/state/project-outcomes.log"
+  assert_no_grep 'child-outcome-' "$parent_channel" \
+    "project Firstmate terminal outcomes reached the root's persistent-supervisor status file"
+  assert_no_grep 'inactive-outcome-' "$parent_channel" \
+    "project Firstmate inactive outcomes reached the root's persistent-supervisor status file"
+  assert_no_grep 'child-pr-' "$parent_channel" \
+    "project Firstmate PR-ready outcomes reached the root's persistent-supervisor status file"
+  assert_no_grep 'merged-' "$parent_channel" \
+    "project Firstmate merged-PR outcomes reached the root's persistent-supervisor status file"
+  write_child "$MATE" project-child 'done: repository task complete'
+  run_report "$MATE" project-child \
+    || fail "project Firstmate terminal outcome did not publish its typed root summary"
+  assert_grep 'child project-child done: repository task complete' "$MATE/state/project-outcomes.log" \
+    "project Firstmate terminal outcome was not retained at the repository hop"
+  assert_grep 'child project-child done: repository task complete' "$parent_channel" \
+    "project Firstmate terminal outcome summary did not reach root"
+  fm_parent_channel_report_correlated "$MATE" "$MATE/state" \
+    'done [corr=abcdef0123456789]: request-correlated project status summary' \
+    || fail "project Firstmate correlated summary did not reach root"
+  FM_HOME="$MATE" "$ROOT/bin/fm-secondmate-report.sh" "done" fedcba9876543210 \
+    "request-correlated helper summary" \
+    || fail "project Firstmate correlated report helper did not reach root"
+  fm_parent_channel_report_captain_hold "$MATE" "$MATE/state" \
+    'needs-decision [key=captain-hold-rollout-1]: captain hold rollout: choose the launch window' \
+    || fail "project Firstmate captain decision did not reach root"
+  fm_parent_channel_report_project_blocker "$MATE" "$MATE/state" \
+    'blocked [key=project-blocker-release]: project blocker: release access is missing' \
+    || fail "project Firstmate blocker summary did not reach root"
+  fm_parent_channel_report_project_summary "$MATE" "$MATE/state" \
+    'note [key=project-summary-release]: release plan is ready' \
+    || fail "project Firstmate summary API did not reach root"
+  assert_grep 'request-correlated project status summary' "$parent_channel" \
+    "request-correlated project summary was not forwarded"
+  assert_grep 'request-correlated helper summary (via-helper)' "$parent_channel" \
+    "request-correlated helper summary was not forwarded through the guarded publisher"
+  assert_grep 'captain hold rollout' "$parent_channel" \
+    "captain decision was not forwarded"
+  assert_grep 'project blocker: release access is missing' "$parent_channel" \
+    "project blocker summary was not forwarded"
+  assert_grep 'release plan is ready' "$parent_channel" \
+    "project summary API was not forwarded"
+  assert_no_grep 'forged' "$parent_channel" \
+    "untrusted worker text forged a privileged project-hop event"
+  pass "project Firstmate outcomes stay hop-local while trusted terminal summaries reach root"
 }
 
 # A stalled authoritative state read consumes only the aggregate scan budget.
@@ -920,6 +1019,7 @@ test_scan_marker_replaces_symlink_safely
 test_nonterminal_and_captain_held_states_do_not_report
 test_watcher_hook_and_idle_secondmate_exemption
 test_watcher_poll_delivers_child_ledger_line_to_parent
+test_project_firstmate_absorbs_worker_outcomes_at_its_parent_hop
 test_stalled_state_read_is_bounded_and_scan_progresses
 test_full_scan_budget_includes_wake_lock_wait
 test_notice_recovery_does_not_duplicate_wake

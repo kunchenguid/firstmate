@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2031 # The parent parser returns output globals to same-shell callers.
 # fm-parent-channel-lib.sh - the one owner of a secondmate home's parent channel.
 #
 # WHY THIS EXISTS. A secondmate is a firstmate in its own home, and nobody reads
@@ -51,6 +52,7 @@
 #   2  the identity marker exists but is unusable (symlink, NUL, bad id)
 #   3  the parent binding is missing or unreadable
 #   4  the append itself failed
+#   5  retained durably in the project Firstmate home instead of crossing the hop
 # A caller that has already recorded the outcome locally must surface a
 # non-zero return rather than treat it as delivered.
 #
@@ -59,6 +61,8 @@
 _FM_PARENT_CHANNEL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$_FM_PARENT_CHANNEL_LIB_DIR/fm-secondmate-parent-lib.sh"
+# shellcheck source=bin/fm-repo-concurrency-lib.sh
+. "$_FM_PARENT_CHANNEL_LIB_DIR/fm-repo-concurrency-lib.sh"
 
 # shellcheck disable=SC2034 # Output globals read by sourcing callers.
 FM_PARENT_CHANNEL_ID=
@@ -142,10 +146,67 @@ fm_parent_channel_append_once() {  # <path> <line>
   printf '%s\n' "$line" >> "$path"
 }
 
-# Publish one parent-facing line from <home>. See the return codes above.
-fm_parent_channel_report() {  # <home> <state> <line>
-  local home=$1 state=$2 line=$3 destination rc=0
+# Project Firstmates are a hop boundary for child worker outcomes.
+# Publisher class, not untrusted line content, determines whether an event may
+# cross that boundary.
+fm_parent_channel_absorb_descendant_line() {  # <home> <line> [publisher-class]
+  local home=$1 line=$2 class=${3:-worker-outcome}
+  if [ ! -e "$home/.fm-project-firstmate" ] && [ ! -L "$home/.fm-project-firstmate" ]; then
+    return 1
+  fi
+  fm_repo_scope_marker_parse "$home" || return 2
+  case "$class" in
+    correlated|captain-hold|project-summary|project-decision|project-blocker|project-milestone)
+      return 1
+      ;;
+    worker-outcome)
+      fm_parent_channel_append_once "$home/state/project-outcomes.log" "$line" || return 3
+      return 0
+      ;;
+    *) return 2 ;;
+  esac
+}
+
+# Publish one parent-facing line from <home> using a typed publisher class.
+# Return 3 means the parent binding or project-authority marker is missing or unreadable.
+_fm_parent_channel_report_typed() {  # <class> <home> <state> <line>
+  local class=$1 home=$2 state=$3 line=$4 destination rc=0 absorb_rc=0
+  fm_parent_channel_absorb_descendant_line "$home" "$line" "$class" || absorb_rc=$?
+  [ "$absorb_rc" -eq 0 ] && return 5
+  [ "$absorb_rc" -ne 2 ] || return 3
+  [ "$absorb_rc" -ne 3 ] || return 4
   destination=$(fm_parent_channel_destination "$home" "$state") || rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
   fm_parent_channel_append_once "$destination" "$line" || return 4
+}
+
+# Raw child outcomes always stay at this hop, even when their note contains
+# text resembling a privileged correlation or project-summary marker.
+fm_parent_channel_report() {  # <home> <state> <line>
+  _fm_parent_channel_report_typed worker-outcome "$1" "$2" "$3"
+}
+
+# Only these named publishers may carry typed summaries across a project hop.
+fm_parent_channel_report_correlated() {  # <home> <state> <line>
+  _fm_parent_channel_report_typed correlated "$1" "$2" "$3"
+}
+
+fm_parent_channel_report_captain_hold() {  # <home> <state> <line>
+  _fm_parent_channel_report_typed captain-hold "$1" "$2" "$3"
+}
+
+fm_parent_channel_report_project_summary() {  # <home> <state> <line>
+  _fm_parent_channel_report_typed project-summary "$1" "$2" "$3"
+}
+
+fm_parent_channel_report_project_decision() {  # <home> <state> <line>
+  _fm_parent_channel_report_typed project-decision "$1" "$2" "$3"
+}
+
+fm_parent_channel_report_project_blocker() {  # <home> <state> <line>
+  _fm_parent_channel_report_typed project-blocker "$1" "$2" "$3"
+}
+
+fm_parent_channel_report_project_milestone() {  # <home> <state> <line>
+  _fm_parent_channel_report_typed project-milestone "$1" "$2" "$3"
 }
