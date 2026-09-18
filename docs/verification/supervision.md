@@ -298,12 +298,15 @@ no-mistakes runs --limit 400 | awk 'NF{print $1}' | sort | uniq -c
 ```
 
 Observed result: across the 313 stored runs the column holds only `running`, `completed`, `failed`, and `cancelled`.
-`checks-passed` is an axi OUTCOME and never appears in that column: the CLI describes such a run as "still monitoring until merged or closed", and a run observed live at its ci step reads `running`.
+`checks-passed` is an axi OUTCOME and never appears in that column; a run still at its ci step, which has no outcome yet, reads `running` there.
 
 Every captured run record agrees with that column in its own `status:` field - `failed.toon` reports `status: failed`, `superseded.toon` `status: cancelled`, `completed.toon` `status: completed` - so the record already carries the ledger's vocabulary once.
 The reader therefore derives the status it compares against from that field alone, normalising the live words (`ci`, `running`, `fixing`, `awaiting_approval`, `fix_review`) to `running`, rather than keeping a second mapping keyed on the outcome word.
-Two definitions of one fact can disagree, and the shape a disagreement produces here is a run that DID deliver a pull request failing to bind to its own ledger row and being published without it.
-Where a run record carrying any outcome sits beside a still-live ledger row, the liveness cross-check in the run-selection contract answers `unknown` before that comparison is reached, so the derivation is never the last guard against that shape.
+
+That derivation change removes a second definition; it is not observable, and the shapes were traced rather than assumed:
+a record carrying any outcome is terminal under the run-selection contract, so beside a still-live ledger row it is answered `unknown` by the liveness cross-check before the comparison is reached, on both the inventory and the ledger-fallback path.
+Where the comparison IS reached, the overview row and the record report the same run from the same store and therefore the same status word, which is the word the derivation now uses.
+The only input that separates the two derivations is a record whose `status:` disagrees with its own overview row, which the CLI does not produce - so no regression test can distinguish them, and none is claimed.
 
 Deterministic entry points:
 
