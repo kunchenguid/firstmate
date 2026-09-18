@@ -75,7 +75,7 @@ make_case() { # <name> <task-id> -> "case|home|project|pool|fakebin"
 }
 
 read_case_record() {
-  IFS='|' read -r CASE_DIR HOME_DIR PROJECT_DIR POOL_DIR FAKEBIN_DIR <<EOF
+  IFS='|' read -r _ HOME_DIR PROJECT_DIR POOL_DIR FAKEBIN_DIR <<EOF
 $1
 EOF
 }
