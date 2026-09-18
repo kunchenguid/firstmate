@@ -102,10 +102,13 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 NOTIFY_DIR="$STATE/hermes-notify"
 PRESENCE_RECORD="$STATE/captain-presence"
 NOTIFY_SEQ_FILE="$NOTIFY_DIR/.seq"
+NOTIFY_SEQ_LOCK="$NOTIFY_DIR/.seq.lock"
 CAPTAIN_HOLD="$SCRIPT_DIR/fm-captain-hold.sh"
 MAX_TEXT_BYTES=4000
 
@@ -279,12 +282,17 @@ truncate_to_max_bytes() {  # <text>
 next_seq() {
   local cur=0 tmp
   mkdir -p "$NOTIFY_DIR"
+  fm_lock_acquire_wait "$NOTIFY_SEQ_LOCK"
   [ -f "$NOTIFY_SEQ_FILE" ] && cur=$(cat "$NOTIFY_SEQ_FILE" 2>/dev/null)
   case "$cur" in ''|*[!0-9]*) cur=0 ;; esac
   cur=$((cur + 1))
-  tmp=$(mktemp "$NOTIFY_DIR/.seq.staging-XXXXXX") || return 1
+  tmp=$(mktemp "$NOTIFY_DIR/.seq.staging-XXXXXX") || {
+    fm_lock_release "$NOTIFY_SEQ_LOCK"
+    return 1
+  }
   printf '%s\n' "$cur" >"$tmp"
   mv "$tmp" "$NOTIFY_SEQ_FILE"
+  fm_lock_release "$NOTIFY_SEQ_LOCK"
   printf '%s\n' "$cur"
 }
 
