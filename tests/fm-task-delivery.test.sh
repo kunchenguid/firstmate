@@ -374,8 +374,13 @@ STUB
     "promoted no-mistakes worker did not receive the ask-user escalation rule"
   assert_grep "write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority)" "$payload" \
     "promoted no-mistakes worker did not receive the ask-user-only snapshot contract"
+  assert_grep "At a fix-round cap stop the same event and snapshot shape carries every finding still holding that gate instead" "$payload" \
+    "promoted no-mistakes worker did not receive the cap-stop snapshot clause"
   assert_grep 'needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file='"$home/data/promote-dod-no-mistakes/nm-<run>-findings.txt" "$payload" \
     "promoted no-mistakes worker did not receive the structured escalation event"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the cap-stop marker must stay literal
+  assert_grep 'reported with `fix-round-cap findings=` in place of `ask-user findings=`' "$payload" \
+    "promoted no-mistakes worker did not receive the distinguishable cap-stop marker"
   assert_grep "NEVER pass \`--yes\` (or \`-y\`)" "$payload" \
     "promoted no-mistakes worker did not receive the --yes prohibition"
   assert_grep "It is banned fleet-wide" "$payload" \

@@ -229,6 +229,7 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
    For a no-mistakes ask-user gate specifically, escalate all ask-user findings as one event plus one snapshot file, using that same shape even when the gate holds only a single ask-user finding: write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority), to \`$data/$id/nm-<run>-findings.txt\`, then report the gate with
    \`needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file=$data/$id/nm-<run>-findings.txt\`
    naming every ask-user finding id from that gate. The status line only points at the file; it never restates or summarizes a finding's content.
+   At a fix-round cap stop the same event and snapshot shape carries every finding still holding that gate instead, whatever action class it was assigned, reported with \`fix-round-cap findings=\` in place of \`ask-user findings=\` so firstmate can tell the two apart from the event alone.
 EOF
 }
 
@@ -282,12 +283,17 @@ Where a harness's own command limit is not established, assume it bounds command
 A killed or timed-out call is never evidence the daemon died: the daemon accepts your response immediately and runs the round in the background, so the call was only ever waiting for a read while the run kept working.
 Reattach and keep going rather than reporting the pipeline blocked; rule 7 owns the checks that decide when a pipeline block is real.
 
-Two firstmate-specific rules layer on top of that guidance:
-- ask-user findings are never yours to answer: escalate to firstmate using rule 6's ask-user format and stop.
+Three firstmate-specific rules layer on top of that guidance:
+- ask-user findings are never yours to answer: escalate to firstmate using rule 6's escalation format and stop.
   Firstmate applies \`ask-user-authority\` and obtains any required captain decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
+- Fix rounds are capped at three per run, counted as a \`no-mistakes axi respond --action fix\` you send on your own judgment and never rounds the pipeline chains inside one drive call; \`ask-user-authority\` step 5 owns that cap and every criterion for what is fixed past it.
+  Applying a decision firstmate returned once the cap is already reached, and retrying a protected-path-refusal gate after the reported edit is resolved, open no round and do not count against the cap; before the cap every fix response counts, including one that carries a decision firstmate returned.
+  Its proportionality half binds you on every gate you drive yourself: fix only what makes the deliverable wrong, and approve past wording, restatement, simplification, and documentation-polish findings even when the reviewer is right, unless the text is actually false.
+  Once you have opened three, do not open a fourth on your own judgment: escalate a gate that still holds actionable findings you would otherwise open a round for to firstmate using rule 6's escalation format and stop, and keep answering gates that hold nothing actionable.
+  If you cannot establish how many fix rounds this run has already opened - after a context reset or a recovery, for instance - treat the run as already at the cap and escalate rather than opening another round.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF

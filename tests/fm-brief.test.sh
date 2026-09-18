@@ -387,16 +387,22 @@ test_ask_user_escalation_format() {
 
   # A no-mistakes ask-user gate must escalate its ask-user findings as one status
   # event plus one verbatim findings snapshot file, using that same shape even
-  # for a single finding, never paraphrased into the status line.
+  # for a single finding, never paraphrased into the status line. A fix-round cap
+  # stop reuses that shape but widens the slice to every finding holding the gate.
   assert_grep "escalate all ask-user findings as one event plus one snapshot file" "$brief" \
     "ship rule 6 lost the one-event-plus-snapshot-file ask-user contract"
   assert_grep "using that same shape even when the gate holds only a single ask-user finding" "$brief" \
     "ship rule 6 must require the same shape for a single finding"
   assert_grep "write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority)" "$brief" \
     "ship rule 6 must limit the verbatim axi slice to ask-user findings"
+  assert_grep "At a fix-round cap stop the same event and snapshot shape carries every finding still holding that gate instead, whatever action class it was assigned" "$brief" \
+    "ship rule 6 must widen the snapshot slice at a fix-round cap stop"
   # shellcheck disable=SC2016  # single quotes are deliberate: backticks and the key/findings/file tokens must stay literal
   assert_grep 'needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file='"$home/data/$id/nm-<run>-findings.txt" "$brief" \
     "ship rule 6 must render the exact needs-decision ask-user status line"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the cap-stop marker must stay literal
+  assert_grep 'reported with `fix-round-cap findings=` in place of `ask-user findings=`' "$brief" \
+    "ship rule 6 must let firstmate tell a cap stop from an ask-user escalation by the event alone"
   assert_grep "$home/data/$id/nm-<run>-findings.txt" "$brief" \
     "ship rule 6 must point the snapshot file under this task's own data directory"
   assert_grep "The status line only points at the file; it never restates or summarizes a finding's content." "$brief" \
@@ -404,7 +410,7 @@ test_ask_user_escalation_format() {
 
   # The DOD's own ask-user paragraph must point back at rule 6's format
   # (one-owner rule) rather than restating or bare-citing it.
-  assert_grep "escalate to firstmate using rule 6's ask-user format" "$brief" \
+  assert_grep "escalate to firstmate using rule 6's escalation format" "$brief" \
     "no-mistakes DOD ask-user paragraph must point at rule 6's format instead of a bare citation"
   assert_no_grep "escalate to firstmate (rule 6) and stop." "$brief" \
     "no-mistakes DOD ask-user paragraph still uses the old bare rule-6 pointer"

@@ -27,6 +27,28 @@ test_primary_and_secondmate_instruction_generation() {
     "generated implementation brief does not explain the ask-user authority bypass"
   assert_no_grep 'the captain, not you, owns the ask-user decisions' "$ship" \
     "generated implementation brief retained conflicting captain-only wording"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'Fix rounds are capped at three per run, counted as a `no-mistakes axi respond --action fix` you send on your own judgment' "$ship" \
+    "generated implementation brief leaves the cap without an observable counting unit"
+  assert_grep 'Applying a decision firstmate returned once the cap is already reached, and retrying a protected-path-refusal gate after the reported edit is resolved, open no round' "$ship" \
+    "generated implementation brief counts post-cap returned decisions and protected-path retries against the cap"
+  assert_no_grep 'retrying an unfinished step' "$ship" \
+    "generated implementation brief keeps an undefined step-retry category the cap exemption can swallow"
+  assert_grep 'before the cap every fix response counts, including one that carries a decision firstmate returned' "$ship" \
+    "generated implementation brief lets firstmate-returned fix rounds run uncounted before the cap"
+  assert_grep 'approve past wording, restatement, simplification, and documentation-polish findings even when the reviewer is right, unless the text is actually false' "$ship" \
+    "generated implementation brief withholds the proportionality criterion from the worker that drives auto-fix gates"
+  # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
+  assert_grep 'Once you have opened three, do not open a fourth on your own judgment' "$ship" \
+    "generated implementation brief does not stop the worker opening a fourth fix round"
+  assert_grep 'keep answering gates that hold nothing actionable' "$ship" \
+    "generated implementation brief strands a capped run on an unsatisfiable escalation"
+  assert_grep 'If you cannot establish how many fix rounds this run has already opened' "$ship" \
+    "generated implementation brief leaves the worker no fail-closed rule for an unknown round count"
+  assert_grep 'treat the run as already at the cap and escalate rather than opening another round' "$ship" \
+    "generated implementation brief lets an unknown round count restart the cap at zero"
+  assert_no_grep 'not a correctness or contract defect' "$ship" \
+    "generated implementation brief restated the post-cap sorting criteria the skill owns"
 
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SECONDMATE_CHARTER='Handle sample work.' \
     "$BRIEF" authority-mate --secondmate --no-projects >/dev/null 2>&1
