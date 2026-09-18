@@ -179,6 +179,22 @@ test_spawn_launch_line_and_worker_wiring() {
   pass "fm-spawn: the omp launch line clears markers, pins posture, and wires the state-resident extension"
 }
 
+# The overlay's value is what omp reads, so parse it as YAML rather than
+# matching source bytes; a worker whose config resolves speech.enabled to
+# anything but false inherits the captain's text-to-speech posture.
+test_worker_overlay_pins_speech_off() {
+  command -v ruby >/dev/null 2>&1 || fail "ruby is required to parse the omp worker overlay as YAML"
+  local speech
+  speech=$(ruby -ryaml -e '
+doc = YAML.load_file(ARGV[0]) || {}
+speech = doc["speech"]
+puts speech.is_a?(Hash) ? speech["enabled"].inspect : "unset"
+' "$ROOT/.omp/fm-worker-overlay.yml") || fail "failed to parse .omp/fm-worker-overlay.yml as YAML"
+  [ "$speech" = "false" ] \
+    || fail "the omp worker overlay must resolve speech.enabled to false so a launched session never vocalizes; got: $speech"
+  pass "worker overlay: speech.enabled resolves to false"
+}
+
 test_spawn_model_validation_scoped_to_listed_providers() {
   local rec id out status
   rec=$(make_spawn_case model-refused omp omp-model-refused-q2)
@@ -577,6 +593,7 @@ EOF
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
+test_worker_overlay_pins_speech_off
 test_spawn_model_validation_scoped_to_listed_providers
 test_secondmate_launch_relies_on_discovery
 test_secondmate_config_pinned_model_is_validated
