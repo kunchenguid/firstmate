@@ -4142,31 +4142,35 @@ test_mid_run_done_log_does_not_mask_current_run_failure() {
   pass "a mid-run done line does not mask the current run's failure"
 }
 
-# Opposite direction 1: a done line the crew appended BEFORE the ledger's run
-# started is older, not newer, so it can never supply the current state. The
-# ledger row here is not the attributed run, so the ordering comparison - not
-# the current-run gate - is what declines the declaration.
+# Opposite direction 1: a done line the crew appended BEFORE its validation run
+# even started is older, not newer, and must never convert a real failure into a
+# false success. This is the routine ship shape - the crew reports its
+# implementation done, firstmate starts the run, the run fails - and the ledger
+# row is that very run.
 test_pre_run_done_log_does_not_mask_failed_run() {
   reset_fakes
-  local d; d=$(new_case pre-run-done-log)
+  local d short; d=$(new_case pre-run-done-log)
   make_repo_on_branch "$d/wt" fm/feat-s6
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-s6.meta" "window=fm:fm-feat-s6" "worktree=$d/wt" "kind=ship"
   printf 'done: implementation complete\n' > "$d/state/feat-s6.status"
   backdate_status_minutes_ago "$d/state/feat-s6.status" 120
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s6)"
-  FM_FAKE_RUNS_LIST="  failed     fm/feat-s6 f0f0f0f0  $(ledger_stamp_minutes_ago 60)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s6 ${short}  $(ledger_stamp_minutes_ago 60)"
   local out; out=$(run_crew_state "$d" feat-s6)
-  assert_not_contains "$out" "state: done" "a done line older than the run never masks the failure"
-  assert_contains "$out" "current state not provable here" "an older declaration cannot supply current truth"
+  assert_contains "$out" "state: failed" "a done line older than the run never masks the failure"
+  assert_contains "$out" "source: run-step" "the failure stays run-step sourced"
+  assert_not_contains "$out" "state: done" "an older declaration never becomes the reported state"
   pass "a pre-run done line does not mask a failed run"
 }
 
 test_same_minute_done_log_does_not_mask_failed_run() {
   reset_fakes
-  local d minute_epoch ledger_stamp status_stamp
+  local d short minute_epoch ledger_stamp status_stamp
   d=$(new_case same-minute-done-log)
   make_repo_on_branch "$d/wt" fm/feat-s6b
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-s6b.meta" "window=fm:fm-feat-s6b" "worktree=$d/wt" "kind=ship"
   printf 'done: implementation complete\n' > "$d/state/feat-s6b.status"
@@ -4177,11 +4181,38 @@ test_same_minute_done_log_does_not_mask_failed_run() {
     || date -d "@$((minute_epoch + 20))" '+%Y%m%d%H%M.%S')
   touch -t "$status_stamp" "$d/state/feat-s6b.status"
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s6b)"
-  FM_FAKE_RUNS_LIST="  failed     fm/feat-s6b f0f0f0f0  ${ledger_stamp}"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s6b ${short}  ${ledger_stamp}"
   local out; out=$(run_crew_state "$d" feat-s6b)
+  assert_contains "$out" "state: failed" "a done line inside the ledger minute cannot mask the failure"
+  assert_contains "$out" "source: run-step" "same-minute ordering leaves the failure authoritative"
   assert_not_contains "$out" "state: done" "minute truncation cannot convert the failure into success"
-  assert_contains "$out" "current state not provable here" "a same-minute line proves nothing about order"
   pass "a same-minute done line does not mask a failed run"
+}
+
+# Additional coverage for the minute-truncation rule itself, in the only shape
+# that reaches it: the ledger row cannot be bound to the attributed run, so the
+# ordering evidence decides between the declaration and an unprovable reading.
+# A line written inside the ledger's own minute proves nothing about order.
+test_same_minute_line_is_not_newer_than_an_unbindable_run() {
+  reset_fakes
+  local d minute_epoch ledger_stamp status_stamp
+  d=$(new_case same-minute-unbindable)
+  make_repo_on_branch "$d/wt" fm/feat-s6c
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s6c.meta" "window=fm:fm-feat-s6c" "worktree=$d/wt" "kind=ship"
+  printf 'done: implementation complete\n' > "$d/state/feat-s6c.status"
+  minute_epoch=$(( $(date +%s) / 60 * 60 - 120 ))
+  ledger_stamp=$(date -r "$minute_epoch" '+%Y-%m-%d %H:%M' 2>/dev/null \
+    || date -d "@$minute_epoch" '+%Y-%m-%d %H:%M')
+  status_stamp=$(date -r "$((minute_epoch + 20))" '+%Y%m%d%H%M.%S' 2>/dev/null \
+    || date -d "@$((minute_epoch + 20))" '+%Y%m%d%H%M.%S')
+  touch -t "$status_stamp" "$d/state/feat-s6c.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s6c)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s6c f0f0f0f0  ${ledger_stamp}"
+  local out; out=$(run_crew_state "$d" feat-s6c)
+  assert_not_contains "$out" "state: done" "a same-minute line is never taken as newer than the run"
+  assert_contains "$out" "current state not provable here" "a same-minute line proves nothing about order"
+  pass "a same-minute line is not newer than an unbindable run"
 }
 
 # Opposite direction 2: with no ledger row to order the records against, there is
@@ -6715,6 +6746,7 @@ test_mid_run_pause_does_not_mask_current_run_failure
 test_mid_run_done_log_does_not_mask_current_run_failure
 test_pre_run_done_log_does_not_mask_failed_run
 test_same_minute_done_log_does_not_mask_failed_run
+test_same_minute_line_is_not_newer_than_an_unbindable_run
 test_failed_run_without_ordering_evidence_still_surfaces
 test_needs_decision_log_never_supersedes_failed_run
 test_failed_run_detail_carries_no_pr_it_never_opened
