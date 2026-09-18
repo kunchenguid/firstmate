@@ -237,6 +237,7 @@ There is no two-phase journal and no additional tasks-axi release requirement.
 Locked startup convergence and `bin/fm-config-push.sh` transfer only the declared inherited-material allowlist.
 Changed live routes receive a marked instruction to re-read the transferred files.
 The primary records that remote nudge before delivery and retries it during locked startup convergence after a failed send.
+A nudge deferred because the mate is waiting on its own open decision or blocker keeps that record, and the primary's watcher sends it within one poll of that decision closing.
 Local secondmates retain their generation-specific local pointer contract; remote transfers do not copy those primary-local instruction paths.
 
 A live remote second mate is restarted with `relaunch`, which runs the ordinary [control plane](agent-control.md) on that host: the endpoint record there was written by a host-local launch and carries no remote placement, so the transaction, its checkpoint, and its postconditions are the local ones.

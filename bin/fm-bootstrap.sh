@@ -404,7 +404,9 @@ secondmate_sync() {
   }
 
   # fm-send exits 4 with a "deferred:" line while the mate waits on its own open
-  # decision; the retained marker retries the nudge at a later session start.
+  # decision; the retained marker retries the nudge at a later session start,
+  # and a remote route's deferral is also flagged so the watcher sends it once
+  # that decision closes (fm_secondmate_reread_mark_deferred).
   # The exit status is what classifies the result, not the shape of the output:
   # anything the send prints ahead of that line must not read as a failure.
   secondmate_nudge_unsent() {  # <id> <fm-send-output> <fm-send-status>
