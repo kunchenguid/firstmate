@@ -1653,20 +1653,22 @@ The portable classifier regression is `tests/fm-backend-cmux.test.sh`.
 The current compatibility floor is Paseo 0.8, and the active live evidence uses Paseo 0.8.0 on macOS.
 The bundled CLI was found at `/Applications/Paseo.app/Contents/Resources/bin/paseo`, and the daemon was already healthy on `127.0.0.1:6767` (`paseo status`).
 
-Real live checks used a throwaway `fm-test-` scoped workspace and one probe terminal, torn down at the end of the pass.
+Real live checks used a throwaway project directory, its shared `firstmate` workspace, and `fm-test-` scoped probe terminals, torn down (project included) at the end of the pass.
 
 Current active CLI findings:
 
 | Guarantee | Command shape | Result |
 | --- | --- | --- |
-| Workspace create | `workspace create --path <dir> --isolation local --json` | Created workspace `wks_c39c8031dc81f592`. |
-| Terminal create | `terminal create --workspace <id> --cwd <dir> --name <name> --json` | Created one terminal bound to that workspace, unfocused. |
+| Workspace create | `workspace create --path <dir> --isolation local --title firstmate --json` | Created the shared workspace under the project registered for `<dir>`; a second call for the same path reused that project and did not add another. |
+| Project registration | `project ls --json` | Paseo registers the project by path on workspace create and keeps it after its workspaces are archived; the adapter never runs `project create` or `project delete`. |
+| Workspace adoption | `workspace ls --json` | Reports the title in `name` and the cwd normalized (no doubled slash) but not symlink-resolved, so adoption matches the raw, logical, and physical path. Duplicate titles are allowed; the adapter adopts the first match. |
+| Terminal create | `terminal create --workspace <id> --cwd <dir> --name <name> --json` | Created one terminal tab bound to that workspace, unfocused; a second create in the same workspace added a sibling tab. |
 | Literal send | `terminal send-keys <id> -l -- <text>` | Left text unsubmitted. |
 | Submit | `terminal send-keys <id> Enter` | Submitted the pending literal. |
+| Escape | `terminal send-keys <id> Escape` | Accepted; in zsh's emacs keymap the bare Escape stays pending and fuses with the next key whatever the gap, so the smoke test never sends text right after it. |
 | Capture | `terminal capture <id> -S --json` (also `--ansi` for styled reads) | Returned `{terminalId, lines[], totalLines}`; the probe round-trip echoed `hello-paseo-probe` back in `lines`. |
-| Kill | `terminal kill <id>` | Removed the probe terminal. |
-| Workspace inventory | `workspace ls` | Listed the live workspace. |
-| Workspace rename | `workspace rename <id> <title>` | Set the free-form user-visible title; `workspace ls` echoes it back in `name`, never parsed for routing. |
+| Kill | `terminal kill <id>` | Removed only that tab; the sibling tab and the workspace stayed live. |
+| Stderr noise | any call from inside a Paseo agent | The CLI prints an Electron warning on stderr before its JSON, so parsed calls never merge stderr into stdout. |
 | Worktree create | `worktree create` | Available; Treehouse remains the worktree provider, so this adapter never calls it. |
 
 Running inside a Paseo-managed terminal exposes `PASEO_AGENT_ID`, `PASEO_AGENT_CWD`, and `PASEO_CLI` in the process environment, plus `__CFBundleIdentifier=sh.paseo.desktop` from LaunchServices - the two signals `fm_backend_detect` consults, primary marker first, bundle id as the fallback for an environment whose wrapper stripped the `PASEO_*` variables.
@@ -1676,7 +1678,7 @@ tests/fm-backend-paseo.test.sh
 tests/fm-backend-paseo-smoke.test.sh
 ```
 
-The real smoke proves daemon reachability, workspace/terminal creation, current-path probing, send and keys, bounded capture, and guarded exact cleanup, mirroring the cmux smoke's shape against Paseo's own CLI surface.
+The real smoke proves daemon reachability, shared-workspace creation and adoption, sibling tabs without a second project, current-path probing, send and keys, bounded capture, tab-only kill, and guarded exact cleanup, mirroring the cmux smoke's shape against Paseo's own CLI surface.
 
 ## Codex App host tools
 
