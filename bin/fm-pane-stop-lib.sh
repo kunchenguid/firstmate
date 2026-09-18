@@ -2,7 +2,6 @@
 # Conservative rendered stop recognition for fm-watch.sh; no network calls.
 # fm_pane_stop <harness> <pane> prints kind<TAB>provider<TAB>reset-delay<TAB>display.
 # Unknown reset delays use '-' (never infer a weekly reset date).
-# This table owns exact observed quota strings and documented startup dialogs.
 # Callers establish a live, idle worker first. Only standalone lines qualify;
 # quota errors must be in the last 12 nonblank lines, dialogs in the last 40.
 # An unknown error or changed vendor wording stays on ordinary stale triage.
@@ -31,15 +30,8 @@ fm_pane_stop() {
     done <<< "$recent"
   done <<'PATTERNS'
 grok|quota-exhausted|grok|^You hit your weekly limit[.!]?$
-pi,pi-signed,gemini|quota-exhausted|gemini|^Error: Quota reached\. Please wait (([0-9]{1,3})h)?(([0-9]{1,2})m)?(([0-9]{1,2})s)?[.!]?$
+pi,pi-signed|quota-exhausted|gemini|^Error: Quota reached\. Please wait (([0-9]{1,3})h)?(([0-9]{1,2})m)?(([0-9]{1,2})s)?[.!]?$
 pi,pi-signed|blocked-at-prompt|trust|^Trust project folder[?]?$
-claude|blocked-at-prompt|trust|^Quick safety check: Is this a project you created or one you trust\?$
-codex|blocked-at-prompt|trust|^Do you trust the contents of this directory\?$
-codex|blocked-at-prompt|hook-review|^Hooks need review - [0-9]+ hooks are new or changed$
-agy|blocked-at-prompt|trust|^Do you trust the contents of this project\?$
-gemini|blocked-at-prompt|trust|^Do you trust the files in this folder\?$
-kimi|blocked-at-prompt|trust|^Trust this folder\?$
-muse|blocked-at-prompt|trust|^Do you trust this workspace\?$
 PATTERNS
   return 1
 }

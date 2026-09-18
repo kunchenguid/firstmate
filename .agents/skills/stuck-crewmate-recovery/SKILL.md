@@ -75,9 +75,9 @@ Load `harness-adapters` and use the current dispatch resolver when available, th
 Relaunch the same task in place through `bin/fm-control.sh relaunch`, passing the selected harness, model, effort, and a progress note using its current help.
 Preserve existing work and report the recovery choice; silent automatic model switching is forbidden, and the watcher only reports evidence, never relaunches.
 If no eligible candidate can proceed, report the blocker and the reset estimate when known rather than repeatedly relaunching.
-`bin/fm-pane-stop-lib.sh` owns recognised patterns, and `bin/fm-watch.sh` owns the watcher-internal reset record; an unknown reset must not be invented.
+`bin/fm-pane-stop-lib.sh` recognises Grok's weekly-limit stop and Pi/pi-signed's Gemini `Quota reached` stop. The wake includes an absolute UTC reset time and the observed relative delay when known; an unknown reset must not be invented. `bin/fm-watch.sh` deduplicates stops with a watcher-internal pane-hash and generation record.
 
-A `blocked-at-prompt` wake instead identifies a documented startup trust or permission dialog, including workers that have not yet written a status event.
+A `blocked-at-prompt` wake instead identifies Pi/pi-signed's `Trust project folder` dialog, including workers that have not yet written a status event.
 Load `harness-adapters` and follow that harness's documented trust procedure; do not blindly send Enter or manufacture consent, because some dialogs require an operator decision and some default to exit.
 The watcher never accepts a prompt or changes trust settings.
 

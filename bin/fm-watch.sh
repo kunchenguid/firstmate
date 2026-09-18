@@ -442,30 +442,30 @@ window_backend() {
 # shellcheck source=bin/fm-pane-stop-lib.sh
 . "$SCRIPT_DIR/fm-pane-stop-lib.sh"
 
-# .pane-stop-<window-key> stores pane hash, provider, observed epoch, reset
-# epoch (or '-'), displayed delay, and busy generation as TSV. Stable panes
-# retain the first observation so a relative reset never slides forward with
-# each poll; a replacement generation re-arms even an identical display.
 pane_stop_stale_check() {
   local w=$1 task=$2 h=$3 pane=$4 key record parsed provider delay display now reset kind reason gen agent_state
   key=$(window_key "$w")
   record="$STATE/.pane-stop-$key"
   parsed=$(fm_pane_stop "$(window_harness "$w")" "$pane") || { rm -f "$record"; return 1; }
+  gen=$(fm_busy_current_gen "$STATE" "$task") || gen=-
+  if [ -f "$record" ] && [ "$(cut -f1 "$record")" = "$h" ] && [ "$(cut -f2 "$record")" = "$gen" ]; then return 0; fi
   if crew_is_provably_working "$task"; then rm -f "$record"; return 1; fi
   agent_state=$(fm_backend_agent_state "$(window_backend "$w")" "$w" 2>/dev/null) || agent_state=unreadable
   case "$agent_state" in dead|missing) rm -f "$record"; return 1 ;; esac
-  gen=$(fm_busy_current_gen "$STATE" "$task") || gen=-
-  if [ -f "$record" ] && [ "$(cut -f1 "$record")" = "$h" ] && [ "$(cut -f6 "$record")" = "$gen" ]; then return 0; fi
   IFS=$'\t' read -r kind provider delay display <<< "$parsed"
-  now=$(date +%s); reset=-
-  [ "$delay" = - ] || reset=$((now + delay))
+  if [ "$delay" != - ]; then
+    now=$(date +%s)
+    reset=$(date -u -r "$((now + delay))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+      || date -u -d "@$((now + delay))" +%Y-%m-%dT%H:%M:%SZ) || return 1
+    display="$reset ($display)"
+  fi
   if [ "$kind" = quota-exhausted ]; then
     reason="stale: $w ($kind: $provider, resets $display)"
   else
     reason="stale: $w ($kind: $provider $display)"
   fi
   fm_wake_append stale "$w" "$reason" || exit 1
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$h" "$provider" "$now" "$reset" "$display" "$gen" > "$record"
+  printf '%s\t%s\n' "$h" "$gen" > "$record"
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   wake "$reason"
