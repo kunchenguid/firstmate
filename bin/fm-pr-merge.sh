@@ -101,6 +101,12 @@
 #
 # Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [-- <extra forge merge args>]
 #
+# bin/fm-watch.sh invokes this same entrypoint itself when a task's armed merge
+# poll finds the PR still open and the task meta records yolo=on: the live
+# verification above is what decides the PR is green and mergeable, so a red,
+# unmergeable, or unverifiable PR is refused here and its poll stays armed.
+# Every guard in this script applies unchanged to that caller.
+#
 # On GitLab, this script confirms the MR is actually merged before reporting it;
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records
 # no landed outcome. bin/fm-merge-outcome-lib.sh owns a confirmed merge's

@@ -37,7 +37,7 @@ Treat model and provider knowledge as current discovery, not a permanent namespa
 Use the selected tool reference's authoritative surface in the current authenticated environment because availability changes by version, account, and configuration.
 
 For an unfamiliar namespace, establish support and provider identity from that harness's CLI help, model listing, or current documentation.
-An account-reaching listing that omits a model is concrete unsupported evidence; block the candidate and quote it.
+An account-reaching listing that omits a model is concrete unsupported evidence only when the tool reference records that omission as authoritative; block the candidate and quote it then, and treat an omission the reference records as a hiding rather than a proof as disclosed uncertainty instead.
 An unreachable surface establishes nothing; report uncertainty instead of a verdict.
 
 For a matched profile array, return to `quota-array-dispatch` only after establishing every candidate's harness support, provider relationship, and uncertainty.

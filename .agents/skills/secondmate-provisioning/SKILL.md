@@ -243,10 +243,9 @@ Run `bin/fm-teardown.sh <id>` for `kind=secondmate` only when the captain or mai
 
 The safety check is the secondmate's own home.
 Teardown refuses while its `state/*.meta` contains in-flight work.
-Non-forced retirement also refuses while any parent pending-reply for that id is still unresolved.
-A remote route delegates the in-flight guard to its configured host and additionally refuses while the primary has a pending handoff outbox.
+A remote route delegates the same guard to its configured host and additionally refuses while the primary has a pending handoff outbox or unresolved routed reply.
 SSH exit 255 preserves the route and local records because remote completion is unknown.
-When retirement proceeds, teardown kills the direct endpoint, removes every parent pending-reply record for that id including resolved leftovers and its delivery confirmation, removes the `data/secondmates.md` route, clears the main home metadata, and removes the retired secondmate home.
+When safe, teardown kills the direct endpoint, removes the `data/secondmates.md` route, clears the main home metadata, and removes the retired secondmate home.
 An endpoint close that could not be made stops the retirement before any record naming that endpoint is removed, so a cleanup never reports success for an agent that may still be live with nothing left on disk naming it.
 `--force` overrides that stop only for the retiring secondmate's own endpoint, never for a child endpoint inside forced cleanup, and a forced continue still names the endpoint you must then reconcile yourself; [`docs/verification/runtime-backends.md`](../../../docs/verification/runtime-backends.md) "Endpoint close" owns what each backend can prove about its own close.
 Removing a leased home releases its durable treehouse lease via `treehouse return`, so the pool slot is freed for reuse rather than left leased forever.

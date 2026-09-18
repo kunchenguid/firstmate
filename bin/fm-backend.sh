@@ -387,24 +387,30 @@ fm_backend_endpoint_atom_valid() {  # <value>
     ''|*[!A-Za-z0-9._@%+-]*) return 1 ;;
   esac
 }
-
-# An Orca worktree id is the composite `<orca id>::<absolute worktree path>`
-# that Orca itself returns, so the `:` and `/` characters every real value
-# carries make the simple-atom check reject it. Firstmate hands the id back to
-# Orca opaquely and resolves it through Orca before removing anything, so this
-# proves only the shape that can name one worktree: both halves of the first
-# `::` split present, and the path half absolute.
-fm_backend_orca_worktree_id_valid() {  # <value>
-  case "$1" in
-    *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;;
-    *::*) ;;
+# fm_backend_orca_worktree_id_valid: validate an Orca composite worktree
+# identity of the form <uuid>::<absolute-path> against the meta's recorded
+# worktree. The shared atom allowlist rejects ':' and '/', so Orca's
+# path-qualified ids need this dedicated check. The uuid half names the Orca
+# repo (shared by every worktree of that repo), so only the path half
+# distinguishes tasks: it must equal the recorded worktree exactly.
+fm_backend_orca_worktree_id_valid() {  # <worktree-id> <worktree>
+  local worktree_id=$1 worktree=$2 uuid_part rest path_part
+  [ -n "$worktree_id" ] && [ -n "$worktree" ] || return 1
+  case "$worktree_id" in
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  case "$worktree_id" in
+    *::*)
+      uuid_part=${worktree_id%%::*}
+      rest=${worktree_id#*::}
+      ;;
     *) return 1 ;;
   esac
-  [ -n "${1%%::*}" ] || return 1
-  case "${1#*::}" in
-    /*) ;;
-    *) return 1 ;;
-  esac
+  path_part=$rest
+  case "$path_part" in /*) ;; *) return 1 ;; esac
+  case "$uuid_part" in ????????-????-????-????-????????????) ;; *) return 1 ;; esac
+  case "$uuid_part" in *[!0-9a-fA-F-]*) return 1 ;; esac
+  [ "$path_part" = "$worktree" ] || return 1
 }
 
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
@@ -527,7 +533,7 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       }
       if [ "$window" != "fm-$id" ] \
         || ! fm_backend_endpoint_atom_valid "$terminal" \
-        || ! fm_backend_orca_worktree_id_valid "$worktree_id"; then
+        || ! fm_backend_orca_worktree_id_valid "$worktree_id" "$worktree"; then
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi
@@ -879,6 +885,26 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
     cmux) fm_backend_cmux_composer_state "$@" ;;
     zellij) fm_backend_zellij_composer_state "$@" ;;
     *) printf 'unknown' ;;
+  esac
+}
+
+# fm_backend_composer_content: the composer's normalized text content - what a
+# human typed or the harness restored - for callers that must compare content,
+# not just classify it (fm-send.sh's post-interrupt clear proof). Same thin-
+# adapter rule as the verdict: capture plus a capability descriptor fed to the
+# one shared extractor (bin/fm-composer-lib.sh,
+# fm_composer_extract_selected_content). Fails when the backend cannot capture
+# or no composer shape is provable.
+fm_backend_composer_content() {  # <backend> <target> [expected-label]
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_tmux_composer_content "$@" ;;
+    herdr) fm_backend_herdr_composer_content "$@" ;;
+    cmux) fm_backend_cmux_composer_content "$@" ;;
+    zellij) fm_backend_zellij_composer_content "$@" ;;
+    *) return 1 ;;
   esac
 }
 

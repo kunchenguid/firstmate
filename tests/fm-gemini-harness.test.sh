@@ -43,7 +43,7 @@ test_gemini_marker_outranks_inherited_claudecode() {
   # each marker alone must still produce its own verdict.
   out=$(env -u CLAUDECODE PATH="$fakebin:$base_path" GEMINI_CLI=1 "$HARNESS")
   [ "$out" = gemini ] || fail "GEMINI_CLI alone must detect gemini, got '$out'"
-  out=$(env -u GEMINI_CLI PATH="$fakebin:$base_path" CLAUDECODE=1 "$HARNESS")
+  out=$(env -u GEMINI_CLI -u OMPCODE PATH="$fakebin:$base_path" CLAUDECODE=1 "$HARNESS")
   [ "$out" = claude ] || fail "CLAUDECODE alone must still detect claude, got '$out'"
   # Cursor's marker still outranks gemini's, preserving the documented order.
   out=$(PATH="$fakebin:$base_path" CURSOR_AGENT=1 GEMINI_CLI=1 "$HARNESS")
@@ -135,7 +135,7 @@ test_gemini_node_bundle_is_not_ancestry_detectable() {
 const { spawnSync } = require('child_process');
 const env = { ...process.env };
 for (const k of ['GEMINI_CLI', 'CLAUDECODE', 'CURSOR_AGENT', 'CURSOR_INVOKED_AS',
-                 'PI_CODING_AGENT', 'GROK_AGENT']) delete env[k];
+                 'PI_CODING_AGENT', 'GROK_AGENT', 'OMPCODE']) delete env[k];
 const r = spawnSync(process.env.FM_HARNESS_BIN, { env, encoding: 'utf8' });
 process.stdout.write(r.stdout || '');
 JS
@@ -151,7 +151,7 @@ JS
 const { spawnSync } = require('child_process');
 const env = { ...process.env };
 for (const k of ['GEMINI_CLI', 'CLAUDECODE', 'CURSOR_AGENT', 'CURSOR_INVOKED_AS',
-                 'PI_CODING_AGENT', 'GROK_AGENT']) delete env[k];
+                 'PI_CODING_AGENT', 'GROK_AGENT', 'OMPCODE']) delete env[k];
 const r = spawnSync(process.env.FM_HARNESS_BIN, { env, encoding: 'utf8' });
 process.stdout.write(r.stdout || '');
 JS

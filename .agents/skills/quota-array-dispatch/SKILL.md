@@ -66,7 +66,7 @@ Deterministic shell must never map a model to a provider, a provider to a creden
 You establish those relations yourself, in the open, from the candidate's own authoritative catalog (`harness-adapters` owns the per-harness discovery surface) plus the one intake snapshot.
 
 Confirm the catalog lists the candidate's model and record the provider family it reports.
-A model the catalog does not list is concrete contradictory evidence: block that candidate and quote the catalog result.
+A model the catalog does not list is concrete contradictory evidence only when the harness's discovery surface makes that omission authoritative (the per-harness reference owns whether its listing can hide a resolvable model); an omission it can produce for a resolvable model is disclosed uncertainty, not a block.
 Apply quota at the granularity the vendor actually supplies.
 A provider-level or `all_models`/`all_products` scope bounds every model you established in that family, including one with no window of its own.
 A named-model or named-product scope is an additional bound for that model alone.

@@ -70,11 +70,11 @@ function applySgr(foreground, raw) {
 }
 
 function lastGlyphForeground(pane) {
-  const tokens = /\x1b\[([0-9;]*)m|⟩/gu;
+  const tokens = /\x1b\[([0-9;]*)m|[⟩❯]/gu;
   let foreground = null;
   let glyphForeground;
   for (const match of pane.matchAll(tokens)) {
-    if (match[0] === "⟩") {
+    if (match[0] === "⟩" || match[0] === "❯") {
       glyphForeground = foreground;
     } else {
       foreground = applySgr(foreground, match[1]);
@@ -91,10 +91,11 @@ function isBrightTruecolor(pane) {
 }
 
 const positive = "\x1b[38;2;90;160;255m\x1b[48;2;38;56;84m⟩";
+const positiveMuse13 = "\x1b[38;2;90;160;255m\x1b[48;2;38;56;84m❯";
 const brightThenDark = "\x1b[38;2;204;211;219mearlier bright\x1b[38;2;30;30;30m⟩";
 const brightThenMalformed = "\x1b[38;2;204;211;219mearlier bright\x1b[38;2m⟩";
 const brightThenOutOfRange = "\x1b[38;2;204;211;219mearlier bright\x1b[38;2;256;160;255m⟩";
-if (!isBrightTruecolor(positive) || isBrightTruecolor(brightThenDark) || isBrightTruecolor(brightThenMalformed) || isBrightTruecolor(brightThenOutOfRange)) process.exit(2);
+if (!isBrightTruecolor(positive) || !isBrightTruecolor(positiveMuse13) || isBrightTruecolor(brightThenDark) || isBrightTruecolor(brightThenMalformed) || isBrightTruecolor(brightThenOutOfRange)) process.exit(2);
 if (process.argv[2] === "--self-test") process.exit(0);
 
 const pane = fs.readFileSync(process.argv[2], "utf8");
@@ -142,10 +143,17 @@ export PATH
 
 "$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -n control -c "$WORKSPACE" \
   || fail "could not start the isolated tmux server"
+# Pin the pane's terminal capabilities: the drift guard asserts Muse's real
+# truecolor prompt styling, and Muse downgrades or disables color when the
+# inherited terminal environment says to (COLORTERM unset, or NO_COLOR from
+# the driving shell). The tmux server passes the ambient environment through
+# to panes, so a host running this guard from a colorless harness would fail
+# the glyph check for environmental rather than drift reasons.
 "$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n muse -c "$WORKSPACE" -- \
-  env XDG_CONFIG_HOME="$LAB/config" XDG_DATA_HOME="$LAB/data" \
-  MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on \
-  "$MUSE_BIN" --provider echo --yolo "firstmate Muse signal drift guard" \
+  env -u NO_COLOR XDG_CONFIG_HOME="$LAB/config" XDG_DATA_HOME="$LAB/data" \
+  TERM=xterm-256color COLORTERM=truecolor \
+  MUSE_NO_AUTO_UPDATE=1 MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on \
+  "$MUSE_BIN" --provider echo --echo-delay-ms 10000 --yolo "firstmate Muse signal drift guard" \
   || fail "could not launch Muse with the echo provider"
 
 SESSION_LOG=
@@ -196,6 +204,32 @@ tmux capture-pane -e -p -t "$TARGET" -S 0 -E - > "$CAPTURE" \
 muse_prompt_glyph_is_bright "$CAPTURE" \
   || fail "Muse's real prompt glyph is missing a bright effective truecolor foreground"
 pass "Muse's real bright prompt glyph classifies as an empty composer"
+
+# Exercise the real interrupt path: Ctrl-U only erased the final editable row
+# of a restored multiline prompt, despite a successful send and proof verdict.
+mkdir -p "$LAB/home/state"
+fm_write_meta "$LAB/home/state/live.meta" "window=$TARGET" "kind=ship" "harness=muse"
+printf 'sessions_root=%s\nworkspace_root=%s\nbinding_id=live\n' \
+  "$LAB/data/muse/sessions" "$WORKSPACE" > "$LAB/home/state/live.muse-session"
+printf 'first line\nsecond line' > "$LAB/prompt"
+tmux load-buffer "$LAB/prompt" || fail "could not load multiline prompt"
+tmux paste-buffer -p -t "$TARGET" || fail "could not paste multiline prompt"
+tmux send-keys -t "$TARGET" Enter || fail "could not submit multiline prompt"
+for _ in $(seq 1 100); do
+  [ "$(fm_busy_muse_run_state "$SESSION_LOG")" = busy ] && break
+  sleep 0.1
+done
+[ "$(fm_busy_muse_run_state "$SESSION_LOG")" = busy ] || fail "multiline echo turn never became busy"
+FM_HOME="$LAB/home" "$ROOT/bin/fm-send.sh" live --key Escape \
+  > "$LAB/send.out" 2> "$LAB/send.err" || fail "multiline interrupt failed: $(cat "$LAB/send.err")"
+for _ in $(seq 1 50); do
+  [ "$(fm_tmux_composer_state "$TARGET")" = empty ] && break
+  sleep 0.1
+done
+[ "$(fm_tmux_composer_state "$TARGET")" = empty ] || fail "multiline restored composer was not completely cleared"
+[ "$(fm_busy_muse_run_state "$SESSION_LOG")" = settled ] || fail "multiline turn was not cancelled"
+tmux display-message -p -t "$TARGET" '#{pane_id}' >/dev/null || fail "composer clear exited Muse"
+pass "Muse multiline restored prompt clears completely through fm-send"
 
 cleanup
 trap - EXIT

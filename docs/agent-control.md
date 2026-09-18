@@ -39,8 +39,8 @@ Interrupt never rewrites busy state as proof of its own success.
 Claude exposes no lifecycle acknowledgement for a manual interrupt, so delivery succeeds with `cancel=unconfirmed` and its adapter-owned busy state remains as observed.
 muse's session log records `terminal=cancelled` for the interrupted run, so the control plane reports `cancel=confirmed` only after observing that exact acknowledgement.
 
-An interrupt is not complete until the composer is empty.
-muse is the one verified adapter that restores the cancelled prompt back into its composer as real text, so its interrupt key is followed by a Ctrl+U clear; without it the next submitted line - including this plane's own exit command - would concatenate onto the restored prompt and submit both as one line.
+Both interrupt planes proof-gate the composer clear the same way: muse restores the cancelled prompt as real text only when the composer was empty at cancel time, so Ctrl+C is sent only after proving the composer content is a suffix of the cancelled run's recorded `started.prompt` (`bin/fm-busy-lib.sh`'s `fm_busy_muse_restored_prompt_verdict`).
+Fresh input or a provably empty composer skips the clear, so the captain's input is not clobbered; `fm-send.sh --key Escape` warns and skips on an unprovable proof, while this plane refuses loudly because the next lifecycle line would concatenate onto whatever remains.
 The clear is refused before anything is sent when the recorded backend cannot deliver it.
 
 `exit` reads the composer's state before typing the exit command and requires the exact `empty` verdict; a `pending` verdict refuses by naming the pending text, and any other verdict (`unknown`, `pending-unproven`, or an unreadable read) refuses as not proven empty, matching the fail-safe contract every other consumer that can overwrite composer input follows.
@@ -96,7 +96,7 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 - An adapter that is not verified for this task's kind is refused **before** the running agent is stopped, not after.
   Muse is a crewmate and scout adapter only, so relaunching a secondmate onto it refuses while its agent is still up rather than leaving that secondmate with no agent when the launch owner refuses.
 - A backend that cannot deliver the harness's interrupt key, or the composer clear that key needs, is refused rather than sent a different key.
-  Orca's terminal API exposes only an interrupt and an Enter, so it can deliver neither Escape nor Ctrl+U.
+  Orca's terminal API exposes only an interrupt and an Enter, so it cannot deliver Escape for harnesses that require it.
 - `exit` and `relaunch` require a backend with a recovery-grade agent-state classifier - tmux and herdr - because without one the "the agent stopped" postcondition cannot be proven.
   zellij, orca, and cmux are refused rather than reported as successful blind.
 - An ambiguous or unreadable endpoint state refuses.

@@ -1226,27 +1226,10 @@ _fm_composer_select_cursorless() {
     FM_COMPOSER_SELECTED_FIRST=$FM_COMPOSER_SCAN_LEFTBAR_START
     FM_COMPOSER_SELECTED_LAST=$FM_COMPOSER_SCAN_LEFTBAR_END
   fi
-  if [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -gt "$generic" ]; then
-    FM_COMPOSER_SELECTED_KIND=
-    return 1
-  fi
-  if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
-     && [ "$FM_COMPOSER_SCAN_PI_CLOSE" -gt "$generic" ] \
-     && [ "$generic" -lt "$FM_COMPOSER_SCAN_PI_OPEN" ]; then
-    generic=$FM_COMPOSER_SCAN_PI_CLOSE
-    FM_COMPOSER_SELECTED_KIND=pi
-    FM_COMPOSER_SELECTED_FIRST=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
-    FM_COMPOSER_SELECTED_LAST=$((FM_COMPOSER_SCAN_PI_CLOSE - 1))
-  fi
-  if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 0 ] \
-     && [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -gt "$generic" ]; then
-    FM_COMPOSER_SELECTED_KIND=
-    return 1
-  fi
-  if [ "$FM_COMPOSER_SCAN_SHELL_ROW" -gt "$generic" ]; then
-    FM_COMPOSER_SELECTED_KIND=
-    return 1
-  fi
+  # A bare composer's WRAP region extends the selection before the veto
+  # checks below: typed input continuing on the rows beneath the glyph row is
+  # bounded by blank rows, structural edges, and furniture rows, and the
+  # extended end is what the lone-separator veto measures adjacency against.
   if [ "$FM_COMPOSER_SELECTED_KIND" = bare ]; then
     next=$((FM_COMPOSER_SELECTED_LAST + 1))
     while :; do
@@ -1260,6 +1243,35 @@ _fm_composer_select_cursorless() {
       FM_COMPOSER_SELECTED_LAST=$next
       next=$((next + 1))
     done
+  fi
+  if [ "$FM_COMPOSER_SCAN_INCOMPLETE_BOX_FROM" -gt "$generic" ]; then
+    FM_COMPOSER_SELECTED_KIND=
+    return 1
+  fi
+  if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 1 ] \
+     && [ "$FM_COMPOSER_SCAN_PI_CLOSE" -gt "$generic" ] \
+     && [ "$generic" -lt "$FM_COMPOSER_SCAN_PI_OPEN" ]; then
+    generic=$FM_COMPOSER_SCAN_PI_CLOSE
+    FM_COMPOSER_SELECTED_KIND=pi
+    FM_COMPOSER_SELECTED_FIRST=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
+    FM_COMPOSER_SELECTED_LAST=$((FM_COMPOSER_SCAN_PI_CLOSE - 1))
+  fi
+  # A lone separator below the generic candidate normally vetoes the selection:
+  # it may be a pi composer's top rule with the pair cut off below the window.
+  # The exception is a separator directly adjacent below a bare composer's
+  # (extended) last row: muse 1.3.0 closes its bare composer with exactly that
+  # bottom rule, so the rule is the selected composer's own edge, not evidence
+  # of a newer shape beneath it.
+  if [ "$FM_COMPOSER_SCAN_PI_PAIR_FOUND" = 0 ] \
+     && [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -gt "$generic" ] \
+     && ! { [ "$FM_COMPOSER_SELECTED_KIND" = bare ] \
+            && [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -eq $((FM_COMPOSER_SELECTED_LAST + 1)) ]; }; then
+    FM_COMPOSER_SELECTED_KIND=
+    return 1
+  fi
+  if [ "$FM_COMPOSER_SCAN_SHELL_ROW" -gt "$generic" ]; then
+    FM_COMPOSER_SELECTED_KIND=
+    return 1
   fi
   if [ "$FM_COMPOSER_SELECTED_KIND" = box ] \
      || [ "$FM_COMPOSER_SELECTED_KIND" = leftbar ]; then
