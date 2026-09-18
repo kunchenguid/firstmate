@@ -352,6 +352,66 @@ test_register_flattens_a_label_that_attempts_to_forge_record_fields() {
   pass "an embedded newline in --label cannot forge a chat_id= or other record field"
 }
 
+# freeze_date <home> <epoch>: installs a `date` shim in <home>/fakebin whose
+# `date +%s` always returns <epoch> (everything else delegates to the real
+# `date`), so a test can force two real register calls into the same
+# wall-clock second and exercise resolve-reply's tie-break deterministically.
+freeze_date() {  # <home> <epoch>
+  local home=$1 epoch=$2 real_date
+  real_date=$(command -v date)
+  cat > "$home/fakebin/date" <<SH
+#!/usr/bin/env bash
+if [ "\$1" = "+%s" ]; then
+  printf '%s\n' "$epoch"
+  exit 0
+fi
+exec "$real_date" "\$@"
+SH
+  chmod +x "$home/fakebin/date"
+}
+
+test_resolve_reply_breaks_a_same_second_tie_by_actual_send_order() {
+  local home best_task tsv note_file
+  home=$(make_home resolve-reply-tie)
+  configure_hermes "$home" 'telegram:Rajiv [8629896233]'
+  hold_task "$home" zzz-notify-tie
+  hold_task "$home" aaa-notify-tie
+  freeze_date "$home" 1700000000
+  printf 'first reason\n' > "$home/reason-zzz.txt"
+  run_notify "$home" register zzz-notify-tie --reason-file "$home/reason-zzz.txt" >/dev/null \
+    || fail "register zzz-notify-tie failed"
+  printf 'second reason\n' > "$home/reason-aaa.txt"
+  run_notify "$home" register aaa-notify-tie --reason-file "$home/reason-aaa.txt" >/dev/null \
+    || fail "register aaa-notify-tie failed"
+  grep -q '^sent_at=1700000000$' "$home/state/hermes-notify/zzz-notify-tie.record" \
+    && grep -q '^sent_at=1700000000$' "$home/state/hermes-notify/aaa-notify-tie.record" \
+    || fail "the fixture did not actually force both sends into the same wall-clock second"
+  run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] confirmed"
+  note_file=$(latest_note "$home") || fail "no inbox note was written"
+  tsv=$(run_notify "$home" resolve-reply "$note_file") \
+    || fail "resolve-reply did not correlate a same-second reply to any open hold"
+  best_task=$(printf '%s\n' "$tsv" | cut -f1)
+  assert_equals "aaa-notify-tie" "$best_task" \
+    "resolve-reply picked $best_task on a same-second sent_at tie instead of aaa-notify-tie, the hold actually registered later"
+  pass "resolve-reply breaks a same-second sent_at tie by true send order, not alphabetically-last task id"
+}
+
+test_register_truncates_the_reason_by_bytes_not_characters() {
+  local home reason msg bytes
+  home=$(make_home register-utf8-bytes)
+  configure_hermes "$home" 'telegram:Rajiv [8629896233]'
+  hold_task "$home" sample-notify-utf8
+  reason=$(printf 'é%.0s' $(seq 1 4500))
+  printf '%s' "$reason" > "$home/reason.txt"
+  run_notify "$home" register sample-notify-utf8 --reason-file "$home/reason.txt" >/dev/null \
+    || fail "register failed"
+  msg=$(sed -n 's/^to=[^ ]* text=//p' "$home/hermes-send.log")
+  bytes=$(printf '%s' "$msg" | wc -c)
+  [ "$bytes" -le 4000 ] \
+    || fail "register sent a $bytes-byte message, exceeding Telegram's documented 4000-byte ceiling for multi-byte text"
+  pass "register truncates a multi-byte reason to Telegram's 4000-byte ceiling, not a 4000-character count"
+}
+
 test_status_reports_absent_and_present_records() {
   local home out
   home=$(make_home status)
@@ -470,6 +530,8 @@ test_resolve_reply_correlates_and_closes_through_the_keyed_intake
 test_resolve_reply_ignores_a_notification_whose_hold_already_closed
 test_resolve_reply_rejects_a_non_telegram_note
 test_register_flattens_a_label_that_attempts_to_forge_record_fields
+test_resolve_reply_breaks_a_same_second_tie_by_actual_send_order
+test_register_truncates_the_reason_by_bytes_not_characters
 test_status_reports_absent_and_present_records
 test_presence_defaults_home_and_persists_transitions
 test_home_and_away_route_only_eligible_notifications
