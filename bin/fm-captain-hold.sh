@@ -52,10 +52,10 @@
 # `--until` records the captain's own deferral date through `tasks-axi hold
 # --until`, so a "revisit later" answer is stored as a date instead of a live
 # card.
-# The hold is also declared on the task's own status log, because watcher and
-# away-mode classification read that log's last event line rather than the
-# backlog; the status-log mirror paragraph beside the append helpers below
-# owns that contract.
+# A held worker lane also gets the hold declared on its own status log,
+# because watcher and away-mode classification read that log's last event
+# line rather than the backlog; the status-log mirror paragraph beside the
+# append helpers below owns that contract.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -265,13 +265,17 @@ publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
 # use the guarded self-announced append (bin/fm-wake-lib.sh) so the turn that
 # recorded the hold or the answer does not wake itself; an append failure is
 # reported on stderr rather than undoing the durable backlog record, exactly
-# like the parent channel.
+# like the parent channel. Only a worker lane (state/<id>.meta) is mirrored:
+# nothing classifies a lane-less log, so a decision-only hold stays in the
+# backlog alone rather than minting a status log nobody owns or retires.
 
-# Declare the hold on the task's status log unless its last event line
-# already declares one (a repeated hold, or a transfer command_complete
-# wrote): the declaration stands either way and must not be duplicated.
+# Declare the hold on the lane's status log unless the task has no lane or the
+# log's last event line already declares one (a repeated hold, or a transfer
+# command_complete wrote): the declaration stands either way and must not be
+# duplicated.
 status_declare_hold() {  # <task-id> <occurrence> <reason>
   local id=$1 occurrence=$2 reason=$3 status_file line rc=0
+  [ -f "$STATE/$id.meta" ] || return 0
   status_file="$STATE/$id.status"
   status_is_captain_held "$(last_status_line "$status_file")" && return 0
   line="captain-held [key=captain-hold-$id-$occurrence]: $reason"

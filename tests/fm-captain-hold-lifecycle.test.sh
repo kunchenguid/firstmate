@@ -960,13 +960,15 @@ EOF
 # captain-hold key, self-announced so the recording turn does not re-wake, and
 # never dependent on a live worker. A held lane whose last line was `paused:`
 # leaves the declared-wait cadence, a stopped worker cannot make release
-# impossible, and a worker's unrelated open decision survives both sides.
+# impossible, and a worker's unrelated open decision survives both sides. A
+# decision-only hold has no lane, so it stays in the backlog alone.
 test_hold_and_release_reach_the_status_log() {
-  local home id last open diverged_out
+  local home id lane last open diverged_out
   home=$(make_home status-mirror)
   id=sample-gated-work
   tasks_in "$home" add "$id" "Ship the gated sample" --kind ship --repo sample >/dev/null \
     || fail "could not create the gated work item"
+  write_origin_meta "$home" "$id" ship
   cat > "$home/state/$id.status" <<'EOF'
 working: mid implementation
 needs-decision [key=api-shape]: which sample API shape
@@ -1034,26 +1036,29 @@ EOF
     "$home/state/$id.status" >/dev/null \
     || fail "a closing answer did not retract the status-log declaration"
 
-  # A decision-only hold creates the status log the classifier reads, and an
-  # evidence-backed reconcile close retracts it.
+  # A decision-only hold has no lane, so it mints no status log.
   run_captain "$home" hold sample-plain-call \
     --title "Pick a sample flavor" --reason "flavor choice pending" >/dev/null \
     || fail "could not register the decision-only hold"
-  grep -Fx "captain-held [key=captain-hold-sample-plain-call-1]: flavor choice pending" \
-    "$home/state/sample-plain-call.status" >/dev/null \
-    || fail "a decision-only hold did not reach the status log"
-  run_captain "$home" bind sample-board >/dev/null \
-    || fail "could not bind the captured source"
-  printf 'sample-plain-call\n' \
-    | run_captain "$home" reconcile-requests --source-id sample-board \
-        --source "captured board result" >/dev/null \
+  assert_absent "$home/state/sample-plain-call.status" \
+    "a decision-only hold created a status log with no lane to own it"
+
+  # An evidence-backed reconcile close retracts a held lane's declaration.
+  lane=sample-reconciled-lane
+  tasks_in "$home" add "$lane" "Scout the reconciled sample" --kind scout --repo sample >/dev/null \
+    || fail "could not create the reconciled lane"
+  write_origin_meta "$home" "$lane"
+  printf 'paused: waiting on the sample upstream\n' > "$home/state/$lane.status"
+  run_captain "$home" hold "$lane" --reason "upstream choice pending" >/dev/null \
+    || fail "could not hold the reconciled lane"
+  request_reconciles "$home" sample-board "$lane" \
     || fail "could not record the reconcile request"
   printf 'The premise dissolved: the sample upstream already ships it.\n' > "$home/evidence.txt"
-  run_captain "$home" reconcile close sample-plain-call \
+  run_captain "$home" reconcile close "$lane" \
     --evidence-file "$home/evidence.txt" >/dev/null \
-    || fail "reconcile close failed on the held call"
-  grep -Fx "resolved [key=captain-hold-sample-plain-call-1]: captain call reconciled by fm-captain-hold" \
-    "$home/state/sample-plain-call.status" >/dev/null \
+    || fail "reconcile close failed on the held lane"
+  grep -Fx "resolved [key=captain-hold-$lane-1]: captain call reconciled by fm-captain-hold" \
+    "$home/state/$lane.status" >/dev/null \
     || fail "reconcile close did not retract the status-log declaration"
 
   # The keyed retraction is the hold lifecycle's own namespace, so the
