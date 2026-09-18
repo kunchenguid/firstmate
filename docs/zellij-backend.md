@@ -64,9 +64,6 @@ Zellij's CLI action commands return exit 0 even for missing sessions or panes.
 The adapter therefore verifies session, terminal pane, and expected title before an operation and validates JSON or integer response shapes afterward.
 A pane can still disappear between verification and the operation; downstream submit, worktree-discovery, and stale detection report that narrow race rather than treating exit 0 as success.
 
-Creating the shared background session can birth the zellij server, which hands its startup environment to every later pane.
-That launch runs without the calling script's Firstmate settings or the launching agent session's identity markers, as owned by [`bin/fm-backend-server-env-lib.sh`](../bin/fm-backend-server-env-lib.sh); an existing session is reused unchanged.
-
 Every pane operation passes an explicit `--pane-id` because a new session can focus its release-notes plugin pane, whose numeric plugin id is in a separate namespace from terminal pane ids.
 
 `pane_cwd` follows a top-level shell `cd` but not the foreground subshell opened by `treehouse get`.

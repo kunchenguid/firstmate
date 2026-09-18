@@ -1119,6 +1119,24 @@ test_server_ensure_scrubs_home_and_harness_identity() {
   pass "fm_backend_herdr_server_ensure: births the server without the Firstmate namespace or agent-session markers, keeping operator environment and session routing"
 }
 
+test_server_ensure_keeps_remote_worker_birth_marker() {
+  local dir log marker fb output
+  dir="$TMP_ROOT/server-env-worker"; mkdir -p "$dir"; log="$dir/env"; marker="$dir/running"
+  fb=$(make_herdr_server_env_fakebin "$dir")
+  # The launcher is an fm-on command run by bin/fm-remote-job-worker.sh, whose
+  # server-birth provenance bin/fm-remote-herdr-owner-lib.sh later reads back
+  # from the server process's own environment.
+  PATH="$fb:$PATH" TEST_HERDR_SERVER_ENV_LOG="$log" TEST_HERDR_SERVER_MARKER="$marker" \
+    FM_REMOTE_JOB_ACTIVE=1 FM_CREW_STATE_META_OVERRIDE=/tmp/gone/t.meta \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_server_ensure fmtest' "$ROOT"
+  expect_code 0 $? "server_ensure should start from the remote-job worker"
+  output=$(cat "$log")
+  assert_contains "$output" "FM_REMOTE_JOB_ACTIVE=1" "server_ensure removed the remote-job worker birth marker"
+  ! printf '%s\n' "$output" | grep -q "^FM_CREW_STATE_META_OVERRIDE=" \
+    || fail "server_ensure leaked FM_CREW_STATE_META_OVERRIDE alongside the worker birth marker"
+  pass "fm_backend_herdr_server_ensure: keeps the remote-job worker birth marker FM_REMOTE_JOB_ACTIVE on the born server"
+}
+
 test_container_ensure_reuses_existing_workspace() {
   local dir log resp fb out
   dir="$TMP_ROOT/container-reuse"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -5262,6 +5280,7 @@ test_workspace_ensure_other_home_ignores_the_launcher_identity
 test_container_ensure_refuses_an_ambiguous_home_label
 test_container_ensure_starts_server_and_workspace
 test_server_ensure_scrubs_home_and_harness_identity
+test_server_ensure_keeps_remote_worker_birth_marker
 test_container_ensure_reuses_existing_workspace
 test_container_ensure_creates_with_no_focus_flag
 test_container_ensure_uses_secondmate_home_label

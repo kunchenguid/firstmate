@@ -24,8 +24,6 @@
 . "$FM_BACKEND_LIB_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-agent-process-lib.sh
 . "$FM_BACKEND_LIB_DIR/fm-agent-process-lib.sh"
-# shellcheck source=bin/fm-backend-server-env-lib.sh
-. "$FM_BACKEND_LIB_DIR/fm-backend-server-env-lib.sh"
 
 # fm_backend_tmux_resolve_bare_selector: the live-window-listing fallback for a
 # selector that is neither an explicit target nor a task selector routed
@@ -72,18 +70,11 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
 # firstmate itself runs inside tmux, else ensure a dedicated detached
 # "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;
 # prints the resolved session name.
-#
-# With no tmux server running, that `new-session` BIRTHS the server, whose
-# global environment is then this caller's environment for every window
-# created afterwards, so it runs without the caller's per-call Firstmate
-# settings or agent-session markers (bin/fm-backend-server-env-lib.sh). A
-# reused session or already-running server changes no environment.
 fm_backend_tmux_container_ensure() {
   if [ -n "${TMUX:-}" ]; then
     tmux display-message -p '#S'
   else
-    tmux has-session -t firstmate 2>/dev/null ||
-      ( fm_backend_server_env_scrub; exec tmux new-session -d -s firstmate )
+    tmux has-session -t firstmate 2>/dev/null || tmux new-session -d -s firstmate
     printf 'firstmate'
   fi
 }

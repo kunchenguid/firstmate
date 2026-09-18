@@ -223,7 +223,7 @@ An environment variable alone is not reliable when another Herdr server is runni
 When the selected named server is not running, the adapter births it without the calling script's Firstmate settings or the launching agent session's identity markers.
 Herdr passes its server startup environment to every later pane for the server's whole life, so whichever Firstmate call happens to start the server first would otherwise freeze its own per-call overrides, home selection, and agent-session markers into every later pane.
 For example, a one-task state-read override pointing at a since-deleted temporary folder would make every pane's `bin/fm-crew-state.sh` report no metadata, and an inherited Claude Code child-session marker would turn transcript saving off for every Claude session started in a pane.
-The scrub removes whole namespaces rather than a list of names seen so far, so a new override or marker cannot slip through; [`bin/fm-backend-server-env-lib.sh`](../bin/fm-backend-server-env-lib.sh) owns the namespaces and the operator account settings kept inside them, and the tmux and zellij adapters use the same owner.
+The scrub removes whole namespaces rather than a list of names seen so far, so a new override or marker cannot slip through; [`bin/fm-backend-server-env-lib.sh`](../bin/fm-backend-server-env-lib.sh) owns the namespaces and the few names kept inside them: the remote-job worker birth marker `FM_REMOTE_JOB_ACTIVE` and the operator account settings.
 An already-running server is reused without restart or environment changes.
 Explicit named-session routing and the operator's own launch environment remain intact.
 

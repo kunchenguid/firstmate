@@ -429,35 +429,6 @@ test_server_ensure_skips_attach_when_already_exists() {
   pass "fm_backend_zellij_server_ensure: reuses an existing session without calling attach"
 }
 
-test_server_ensure_births_without_launcher_session_env() {
-  local dir fb output name
-  dir="$TMP_ROOT/server-birth-env"; mkdir -p "$dir/fakebin"; fb="$dir/fakebin"
-  # A stateful stub: `attach -b` records the environment the new server is
-  # born with and makes the session exist. Its own settings deliberately live
-  # outside the Firstmate namespace the birth scrubs.
-  cat > "$fb/zellij" <<'SH'
-#!/usr/bin/env bash
-case "${1:-}" in
-  list-sessions) [ -e "$TEST_ZELLIJ_MARKER" ] && printf 'firstmate\n' ;;
-  attach) env > "$TEST_ZELLIJ_ENV_LOG"; : > "$TEST_ZELLIJ_MARKER" ;;
-esac
-exit 0
-SH
-  chmod +x "$fb/zellij"
-  PATH="$fb:$PATH" TEST_ZELLIJ_ENV_LOG="$dir/env" TEST_ZELLIJ_MARKER="$dir/running" TEST_ZELLIJ_SENTINEL=kept \
-    FM_CREW_STATE_META_OVERRIDE=/tmp/gone/t.meta FM_HOME=/tmp/wrong-home \
-    CLAUDECODE=1 CLAUDE_CODE_CHILD_SESSION=1 CLAUDE_CODE_SESSION_ID=s1 CLAUDE_CONFIG_DIR=/tmp/claude-config \
-    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_server_ensure firstmate' "$ROOT"
-  expect_code 0 $? "server_ensure should birth the session under a polluted launcher environment"
-  output=$(cat "$dir/env")
-  for name in FM_CREW_STATE_META_OVERRIDE FM_HOME CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID; do
-    ! printf '%s\n' "$output" | grep -q "^$name=" || fail "server_ensure leaked $name into the zellij server"
-  done
-  assert_contains "$output" "TEST_ZELLIJ_SENTINEL=kept" "server_ensure removed unrelated operator environment"
-  assert_contains "$output" "CLAUDE_CONFIG_DIR=/tmp/claude-config" "server_ensure removed the operator's Claude account selection"
-  pass "fm_backend_zellij_server_ensure: births the server without per-call Firstmate settings or agent-session markers"
-}
-
 # --- dispatch wiring (fm-backend.sh) ------------------------------------------
 
 test_dispatch_routes_zellij_backend() {
@@ -1344,7 +1315,6 @@ test_resolve_bare_selector_refuses_cross_session_ambiguous_untagged
 test_session_exists_true_when_listed
 test_session_exists_false_when_absent
 test_server_ensure_skips_attach_when_already_exists
-test_server_ensure_births_without_launcher_session_env
 test_dispatch_routes_zellij_backend
 test_dispatch_busy_state_unknown_for_zellij
 test_create_task_refuses_duplicate_label
