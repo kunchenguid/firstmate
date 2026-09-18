@@ -3,7 +3,8 @@
 Audience: maintainer verification.
 
 This record holds the active empirical evidence for the non-interactive one-shot launch forms `bin/fm-spawn.sh --executor` uses (its header owns the launch contract; [`configuration.md`](../configuration.md) "Executor launch" owns the operator-facing summary).
-The flags are vendor-emitted facts, so each adapter's own `--help` is the source and `tests/fm-executor-headless-flags-live-e2e.test.sh` is the token-free default-on guard that re-checks them on every host where an adapter is installed:
+The flags are vendor-emitted facts, so each adapter's own `--help` is the source and `tests/fm-executor-headless-flags-live-e2e.test.sh` is the token-free default-on guard that re-checks them on every host where an adapter is installed.
+It asserts the flag tokens each template passes and nothing else, so a vendor rewording of the help prose quoted below leaves it green:
 
 ```sh
 bin/fm-test-run.sh tests/fm-executor-headless-flags-live-e2e.test.sh
