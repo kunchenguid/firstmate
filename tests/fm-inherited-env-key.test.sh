@@ -81,6 +81,36 @@ test_key_line_converges_and_other_env_lines_stay_per_home() {
   pass "primary key line converges in place at mode 600 and leaves other .env lines per-home"
 }
 
+test_identical_destination_line_restores_mode_and_reports_unchanged() {
+  local rec primary second report err
+  rec=$(new_home_pair identical-mode)
+  primary=${rec%%|*}
+  second=${rec#*|}
+  printf 'TYPESAFE_API_KEY=%s\n' "$PRIMARY_KEY_VALUE" > "$primary/.env"
+  printf 'FMX_PAIRING_TOKEN=second-relay\nTYPESAFE_API_KEY=%s\n' "$PRIMARY_KEY_VALUE" > "$second/.env"
+  chmod 644 "$second/.env"
+  report="$TMP_ROOT/identical-mode.report"
+  err="$TMP_ROOT/identical-mode.err"
+
+  FM_CONFIG_INHERIT_REPORT="$report" propagate_secondmate_inheritance "$primary" "$second" >/dev/null 2>"$err" \
+    || fail "convergence over an identical hand-copied line should succeed"
+
+  assert_grep $'.env:TYPESAFE_API_KEY\tunchanged\trestored mode 600' "$report" \
+    "identical bytes at a loose mode should report unchanged with the mode restored"
+  assert_no_grep $'.env:TYPESAFE_API_KEY\tpushed' "$report" "identical bytes must not report pushed"
+  [ "$(file_mode "$second/.env")" = 600 ] || fail "identical hand-copied .env should be tightened to 600, got $(file_mode "$second/.env")"
+  [ "$(cat "$second/.env")" = "FMX_PAIRING_TOKEN=second-relay
+TYPESAFE_API_KEY=$PRIMARY_KEY_VALUE" ] || fail "identical destination bytes must not change"
+  assert_value_absent "$report" "propagation report"
+  assert_value_absent "$err" "stderr"
+
+  : > "$report"
+  FM_CONFIG_INHERIT_REPORT="$report" propagate_secondmate_inheritance "$primary" "$second" >/dev/null 2>&1 \
+    || fail "repeated convergence should succeed"
+  grep -qx $'.env:TYPESAFE_API_KEY\tunchanged\t' "$report" || fail "already-600 identical destination should report plain unchanged"
+  pass "identical destination line at mode 644 converges to 600 and reports unchanged"
+}
+
 test_absent_primary_key_removes_line_and_missing_files_are_quiet() {
   local rec primary second report
   rec=$(new_home_pair absence)
@@ -284,6 +314,7 @@ test_remote_route_reports_key_skipped_and_never_sends_it() {
 }
 
 test_key_line_converges_and_other_env_lines_stay_per_home
+test_identical_destination_line_restores_mode_and_reports_unchanged
 test_absent_primary_key_removes_line_and_missing_files_are_quiet
 test_unsafe_env_artifacts_are_rejected_without_leaking
 test_tracked_env_destination_is_skipped

@@ -525,11 +525,13 @@ inheritable_env_render() {
 # secondmate home's .env: the primary's last assignment line is carried
 # verbatim, and a key the primary does not set is removed downstream
 # (primary-authoritative). The destination is rewritten atomically at mode 600
-# only when its bytes would change, so a converged home never churns. Every
-# other destination line is preserved. Reports one line per key through
-# FM_CONFIG_INHERIT_REPORT with the same pushed/unchanged/skipped/error
-# vocabulary as config items; no report, diagnostic, or error ever carries a
-# value. Returns non-zero only on a real copy or inspection error.
+# only when its bytes would change, so a converged home never churns; a
+# byte-identical destination still has mode 600 restored, since the file holds
+# secret material. Every other destination line is preserved. Reports one line
+# per key through FM_CONFIG_INHERIT_REPORT with the same
+# pushed/unchanged/skipped/error vocabulary as config items; no report,
+# diagnostic, or error ever carries a value. Returns non-zero only on a real
+# copy or inspection error.
 propagate_inheritable_env() {
   local src_home=$1 dest_home=$2 src dest key item line tmp reason rc
   [ -n "$src_home" ] || return 1
@@ -584,7 +586,16 @@ propagate_inheritable_env() {
     fi
     if [ -f "$dest" ] && cmp -s "$tmp" "$dest"; then
       rm -f "$tmp" 2>/dev/null || true
-      record_inheritable_config_result "$item" unchanged ""
+      if [ "$(fm_inherit_file_mode "$dest")" = "$FM_INHERITABLE_ENV_MODE" ]; then
+        record_inheritable_config_result "$item" unchanged ""
+      elif chmod "$FM_INHERITABLE_ENV_MODE" "$dest" 2>/dev/null; then
+        record_inheritable_config_result "$item" unchanged "restored mode $FM_INHERITABLE_ENV_MODE"
+      else
+        reason="failed to restore mode $FM_INHERITABLE_ENV_MODE"
+        warn_inheritable_config_error "$item" "$dest" "$reason"
+        record_inheritable_config_result "$item" error "$reason"
+        rc=1
+      fi
       continue
     fi
     if chmod "$FM_INHERITABLE_ENV_MODE" "$tmp" 2>/dev/null && mv -f "$tmp" "$dest" 2>/dev/null; then
