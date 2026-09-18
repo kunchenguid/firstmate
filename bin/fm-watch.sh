@@ -27,7 +27,8 @@
 #                          line, since the crew's own log gets no new entry once
 #                          firstmate hands it to a no-mistakes validation. A declared
 #                          external-wait pause or verified captain-held transfer is
-#                          absorbed instead with its own long re-surface cadence,
+#                          normally absorbed with its own long re-surface cadence
+#                          (recognized idle pane stops below take precedence),
 #                          never as a wedge, and that recheck reason names which
 #                          human the wait is on. Only when neither absorb class
 #                          applies does the log's latest recognized status event decide:
@@ -76,6 +77,23 @@
 #                          agent, for human inspection only - never an automatic
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
+#   stale: <window> (quota-exhausted: <provider>, resets <estimate>)
+#   stale: <window> (blocked-at-prompt: <harness> trust)
+#                          recognized idle stops from fm-pane-stop-lib.sh bypass
+#                          ordinary stale/wedge triage, including declared pauses,
+#                          after two unchanged-hash polls. Secondmates and
+#                          away-silenced captain holds are excluded; positive
+#                          working evidence or a dead/missing agent rejects a stop.
+#                          A known reset is estimated from detection time plus the
+#                          rendered delay, printed as UTC ISO with that delay in
+#                          parentheses; otherwise it is 'unknown', not inferred.
+#                          .pane-stop-<key> stores hash<TAB>busy-generation, so an
+#                          unchanged stop skips repeat probes and wakes. Pane
+#                          churn or busy activity clears it; a new generation
+#                          permits reclassification. No prompt is answered and
+#                          no worker is relaunched. Recovery procedure:
+#                          .agents/skills/stuck-crewmate-recovery/SKILL.md.
+#                          Regression: tests/fm-watch-triage.test.sh.
 #   stale: <window> (unread firstmate instruction: ...)
 #                          the steering-inbox ladder spent its delivery-attempt
 #                          budget on an idle pane without an acknowledgement

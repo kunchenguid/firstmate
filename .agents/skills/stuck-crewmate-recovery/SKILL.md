@@ -72,12 +72,13 @@ Only positive socket refusal or absence is a daemon-down finding; escalate that 
 A `quota-exhausted` stale wake identifies a conservative rendered usage-limit stop, not a generic wedge.
 Confirm the targeted current state and pane still show that stop and that no active validation run owns the work before replacing the worker.
 Load `harness-adapters` and use the current dispatch resolver when available, then apply the ordinary dispatch eligibility and quota-array selection procedure to choose the next eligible candidate rather than retrying the exhausted model.
-Relaunch the same task in place through `bin/fm-control.sh relaunch`, passing the selected harness, model, effort, and a progress note using its current help.
+Relaunch the same task in place through `bin/fm-control.sh <task-id> relaunch`, passing the selected harness, model, effort, and a progress note using its current help.
 Preserve existing work and report the recovery choice; silent automatic model switching is forbidden, and the watcher only reports evidence, never relaunches.
 If no eligible candidate can proceed, report the blocker and the reset estimate when known rather than repeatedly relaunching.
-`bin/fm-pane-stop-lib.sh` recognises Grok's weekly-limit stop and Pi/pi-signed's Gemini `Quota reached` stop. The wake includes an absolute UTC reset time and the observed relative delay when known; an unknown reset must not be invented. `bin/fm-watch.sh` deduplicates stops with a watcher-internal pane-hash and generation record.
+`bin/fm-pane-stop-lib.sh` owns the supported rendered stops; `bin/fm-watch.sh`'s header owns wake timing, reset estimates, and deduplication.
+An unknown reset must not be invented.
 
-A `blocked-at-prompt` wake instead identifies Pi/pi-signed's `Trust project folder` dialog, including workers that have not yet written a status event.
+A `blocked-at-prompt` stale wake instead calls for trust handling, including workers that have not yet written a status event.
 Load `harness-adapters` and follow that harness's documented trust procedure; do not blindly send Enter or manufacture consent, because some dialogs require an operator decision and some default to exit.
 The watcher never accepts a prompt or changes trust settings.
 
