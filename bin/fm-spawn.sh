@@ -209,6 +209,15 @@
 #   fetching or resetting its base. An unreachable detected origin, unresolved
 #   default branch, or non-clean worktree refuses a fresh spawn rather than
 #   risking a PR based on stale history or discarding local work.
+#   With that clean base in place, a fresh ship or scout worktree also receives
+#   the project's configured untracked local material - environment files, local
+#   tool configuration, stored browser sessions - so the worker can run a dev
+#   server, e2e tests, and screenshots without anyone copying credentials by
+#   hand. bin/fm-local-material.sh owns the per-project list, link-versus-copy
+#   placement, and the refusal when a listed source is missing; an unconfigured
+#   project is a no-op. Every worker that receives material also gets that
+#   script's operating rules for it as a launch-brief section, including on
+#   relaunch, whose recorded worktree already holds what its own spawn placed.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -2581,6 +2590,19 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       fi
     fi
   fi
+  # The project's local material puts live credentials in the worktree, so the
+  # operating rules for handling them ride in the launch brief of every worker
+  # that receives any; bin/fm-local-material.sh owns both the placement and the
+  # rules. Resolving the section here rather than inside the composition below
+  # keeps a malformed manifest a named refusal instead of a truncated brief. A
+  # project that configures no material yields an empty section, so an
+  # unconfigured fleet gets exactly the brief it got before. Relaunches take the
+  # section too: their recorded worktree already holds the material this section
+  # governs.
+  if ! LOCAL_MATERIAL_SECTION=$("$FM_ROOT/bin/fm-local-material.sh" brief-section "$PROJ_ABS"); then
+    echo "error: could not resolve $PROJ_ABS local material for task $ID; fix config/project-local-material.json rather than launching a worker that would receive credentials without the rules for handling them" >&2
+    exit 1
+  fi
   # Use the existing launch-brief overlay for every worker kind, including
   # pre-scope briefs and relaunches. Charters never enter this worker path.
   SOURCE_BRIEF=$BRIEF
@@ -2589,6 +2611,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   {
     fm_brief_worker_role "$STATE" "$ID" &&
       printf '\n' &&
+      { [ -z "$LOCAL_MATERIAL_SECTION" ] || printf '%s\n\n' "$LOCAL_MATERIAL_SECTION"; } &&
       cat "$SOURCE_BRIEF" &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
         fm_brief_intent_overlay "$CAPTAIN_INTENT"
@@ -3677,6 +3700,20 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
+  # Carry the project's untracked local material - environment files, local tool
+  # configuration, stored browser sessions - into the worktree now that it exists
+  # and holds the base the worker will build on. Treehouse has no per-repo setup
+  # step to hang this on, so the spawn owns it; bin/fm-local-material.sh owns
+  # what is carried, how, and the refusal when a listed source is missing. This
+  # is the difference between a worktree a worker can run the app in and one that
+  # merely looks ready, so a refusal stops the spawn here rather than costing a
+  # whole validation round later. A relaunch is deliberately excluded: it reuses
+  # its recorded worktree as-is, and that worktree was equipped at its own spawn.
+  if ! SPAWN_LOCAL_MATERIAL=$("$FM_ROOT/bin/fm-local-material.sh" apply "$PROJ_ABS" "$WT" 2>&1); then
+    echo "error: could not place $PROJ_ABS local material in $WT for task $ID: $SPAWN_LOCAL_MATERIAL" >&2
+    exit 1
+  fi
+  [ -z "$SPAWN_LOCAL_MATERIAL" ] || echo "$SPAWN_LOCAL_MATERIAL"
 fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,

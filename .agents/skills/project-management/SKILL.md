@@ -70,6 +70,14 @@ After remote creation succeeds, clone it locally, add the registry entry, and in
 For a purely `local-only` project, create a local Git repository under its unused `projects/<name>` path, add the registry entry, and make no GitHub call.
 The captain's request to create that local project authorizes this local initialization, but it does not authorize an unmentioned remote repository.
 
+## Local material
+
+A clone holds only what the forge tracks, so a project whose work needs a running app - a dev server, an end-to-end suite, screenshots - gives every worktree cut from it none of the environment files, local tool configuration, or stored sessions that make the app start.
+At add, create, or initialize time, ask whether this project's work needs any of that, and record what it needs in `config/project-local-material.json` so every spawn carries it.
+[`docs/configuration.md`](../../../docs/configuration.md) "Project local material" owns the schema and [`bin/fm-local-material.sh`](../../../bin/fm-local-material.sh) owns the placement, including which files belong in which mode and which must never be listed.
+Skip this for a project whose work never runs the app.
+Leaving it unconfigured is not a safe default when the work does: it produces a worktree that looks ready and cannot test, and a worker that needs a server running will otherwise go looking for credentials elsewhere.
+
 ## Initialize
 
 Run no-mistakes initialization only for `no-mistakes` and `no-mistakes-prod-only` projects:

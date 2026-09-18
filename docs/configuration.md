@@ -12,7 +12,7 @@ This section is the single owner of the top-level operational-home layout; produ
 The tracked code root contains the shared instruction, skill, documentation, workflow, and `bin/` surfaces, while each effective `FM_HOME` contains private operational directories.
 `data/` holds durable private fleet records such as the project and secondmate registries, captain preferences, optional shared captain preferences, learnings, backlog, briefs, scout reports, and explicitly installed content-addressed extension packages under `data/extensions/packages/`.
 `state/` holds runtime records such as task metadata, append-only status events, endpoint signals, watcher and wake-queue coordination, inactive terminal-outcome receipts under `state/terminal-outcomes/`, enabled extension working namespaces under `state/extensions/`, away-mode state, generated Relay artifacts, parent-side remote ledger copies under `state/secondmate-summary-cache/`, one-shot Bearings reconcile requests under `state/reconcile-notify/`, private secondmate config-reread generations with their retry and quarantine state, per-task steering-inbox records under `state/<id>.inbox/` (`bin/fm-task-inbox-lib.sh`), and parent-owned secondmate pending-reply records under `state/pending-replies/` (`bin/fm-pending-reply-lib.sh`).
-`config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/`, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
+`config/` holds local gitignored operating choices, including explicit extension bindings under `config/extensions.d/` and the per-project untracked local material carried into task worktrees in `config/project-local-material.json`, and `projects/` holds the local project clones that Firstmate reads but changes only through the narrow guarded and concrete captain-approved exceptions in `AGENTS.md`.
 Untracked files and directories whose names begin with `scratchpad` are also gitignored, so temporary scratch does not make porcelain-based secondmate sync guards treat a home as dirty.
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
@@ -473,6 +473,67 @@ While typed resolution is active, malformed `approval`, `floor`, and present `pr
 Missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
+
+## Project local material (config/project-local-material.json)
+
+`config/project-local-material.json` is an optional local, gitignored file naming, per project, the untracked files a task worktree needs in order to run the app: environment files, local tool configuration, and stored browser sessions.
+Firstmate clones a project from its forge, so the clone holds only tracked content, and every pooled worktree cut from that clone inherits that same absence.
+Without this file a worker has no way to start a dev server or run an end-to-end suite, and the observed cost of that gap was not inconvenience: a worker that found no environment file copied one from a sibling checkout, got the production one, and wrote rows into live data.
+[`bin/fm-local-material.sh`](../bin/fm-local-material.sh) is the single owner of the schema, the placement, the refusals, and the operating rules the receiving worker is held to; this section is the operator-facing description of the file.
+
+`bin/fm-spawn.sh` consults it after a fresh ship or scout worktree reaches its clean base, and places every listed entry before the worker launches.
+A project the file does not name is a no-op, so an unconfigured fleet behaves exactly as it did before the file existed.
+A relaunch reuses its recorded worktree as-is and places nothing, because that worktree was equipped at its own spawn.
+Secondmate homes inherit the file from the primary, so a secondmate's own crewmates get the same equipped worktrees.
+
+Keys are project directory names, as they appear under `projects/`:
+
+```json
+{
+  "<project>": {
+    "source": "<absolute path>",
+    "environments": {
+      "default": "<relative path>",
+      "production": "<relative path>",
+      "production_note": "<why production is ever needed>"
+    },
+    "entries": [
+      { "path": "<relative path>", "mode": "link" },
+      { "path": "<relative path>", "mode": "copy" }
+    ]
+  }
+}
+```
+
+`entries` is required and non-empty; `source` and `environments` are optional.
+`source` is where the material is read from and defaults to the project's own clone under `projects/`; point it at the checkout where you actually maintain these files so a rotated value has one home rather than two.
+Each entry's `mode` is required and chooses between the two placements, which are not interchangeable:
+
+| Mode | Placement | Choose it when |
+| --- | --- | --- |
+| `link` | A symlink to the source file. | One source of truth is what you want: a rotated key reaches every live worktree at once, and the secret exists in one place on disk rather than one copy per worktree. This is the right default for environment files. |
+| `copy` | A real copy with its timestamp preserved. | The consumer decides freshness by modification time, or re-mints the file in place. A stored browser session is usually both, so a copy that reset the timestamp would present an expired session as current, and a symlink would race when one of several concurrent workers re-mints it. |
+
+`environments` states which environment the project's workers run in, and appears verbatim in each receiving worker's instructions: `default` is the environment a dev server starts in, `production` is the one a worker may use only when the captain names it, and the optional `production_note` records why that environment is ever needed.
+End-to-end tests and screenshots always run in the `default` environment, with no exception.
+Omitting `environments` omits those rules, which is correct for a project with only one environment.
+
+Do not list anything a worktree must own separately.
+A per-worktree dev-server port file is the standard example: ports are derived per worktree precisely so concurrent workers do not collide, so carrying one everywhere would reintroduce the collision, and its absence is correct rather than a gap.
+
+Every entry path is relative to the project.
+An absolute path, a `..` component, a path that resolves to the project root, a path git tracks, an unrecognized `mode`, an empty `entries` array, a `source` that is not an absolute existing directory, and malformed JSON are each refused by name.
+A path the project does not gitignore is refused too: placing it would leave every worktree reading as having uncommitted changes, which blocks that task's cleanup and invites a worker to commit a credential.
+Add such a path to the project's own `.gitignore` first.
+A listed source file that does not exist refuses the spawn before anything is placed, rather than producing a worktree that looks ready and cannot test.
+When the file exists, `jq` is required.
+
+This places live credentials into agent worktrees, which is the point and needs deliberate authorization.
+That is why the list is explicit and per-project rather than a sweep of whatever sits beside the project, and why the operating rules for handling those credentials travel with them into every receiving worker's instructions instead of being assumed.
+See [`docs/examples/project-local-material.json`](examples/project-local-material.json) for a starting point.
+
+Confirm a manifest before it reaches a spawn: write it, run `bin/fm-local-material.sh validate` to confirm it is well formed, then run `bin/fm-local-material.sh entries <project>` once per project to confirm each one resolves.
+Both subcommands are tooling for whoever writes the manifest rather than spawn-path code, so neither is called from `bin/fm-spawn.sh`.
 
 ## Typed dispatch resolution (.env TYPESAFE_API_KEY)
 
