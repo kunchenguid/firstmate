@@ -29,7 +29,7 @@ The losing definition's execution and render functions are both discarded, so un
 Pi's `getAllTools()` exposes tool metadata and source identity but not the executable or rendering functions needed to wrap another extension's full definition.
 It is also usable for reliable collision detection only after extension binding, which makes it suitable for the first same-session `/calm` activation but not for synchronous extension loading.
 Deferring registration to `session_start` is not an equivalent path: Pi constructs restored tool rows from an earlier tool-registry snapshot during reload, new-session, fork, and session switching, so those rows retain the definition captured before `session_start`.
-`tests/fm-calm-pi-extension.test.sh` covers the resulting split contract: no load-time claims while Calm is off, synchronous claims while it is already on, collision-checked first activation with a warning, preservation of a contested tool's execution, and the non-retroactive bound for rows rendered before first activation.
+`tests/fm-calm-pi-extension.test.sh` covers the resulting split contract: no load-time claims while the home holds an explicit stored `off`, synchronous claims whenever Calm loads on, which now includes a home with no stored choice, collision-checked first activation with a warning, preservation of a contested tool's execution, and the non-retroactive bound for rows rendered before first activation.
 
 ## Pi 0.81.1 end-to-end reproduction
 
