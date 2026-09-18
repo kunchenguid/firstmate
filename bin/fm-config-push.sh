@@ -30,7 +30,9 @@ This is local-material-only:
     (no message when config is unchanged unless a previous send failure is pending)
   - reports each live home and each inheritable item as pushed, unchanged,
     skipped, or error
-  - exits non-zero for real propagation errors or reread-send failures
+  - exits non-zero for real propagation errors or reread-send failures; a
+    reread deferred because the secondmate waits on its own open decision or
+    blocker keeps its retry and is not a failure
 
 Live homes come from state/*.meta records with kind=secondmate.
 data/secondmates.md is only a fallback for missing home= fields in older or
