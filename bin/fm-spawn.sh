@@ -4433,21 +4433,25 @@ EOF
     # kimi there is deliberately NO worktree pointer: agy's hook runs with the
     # config directory as its cwd, and the launched process exports the token
     # directly, so nothing is written into the project under test.
-    AGY_AUTH_DIR="$HOME/.gemini/antigravity-cli/fm-turn-end.d"
-    mkdir -p "$AGY_AUTH_DIR"
-    old_umask=$(umask)
-    umask 077
-    auth_file=$(mktemp "$AGY_AUTH_DIR/fm.XXXXXXXXXXXX")
-    umask "$old_umask"
-    {
-      printf 'turnend=%s\n' "$TURNEND"
-      printf 'busy_event=%s\n' "$FM_ROOT/bin/fm-busy-event.sh"
-      printf 'state=%s\n' "$STATE_REAL"
-      printf 'id=%s\n' "$ID"
-      printf 'gen=%s\n' "$BUSY_GEN"
-    } >"$auth_file"
-    printf '%s\n' "${auth_file##*/}" >"$STATE/$ID.agy-turnend-token"
-    AGY_TOKEN_ENV="FM_TASK_ID=$(shell_quote "$ID") FM_AGY_TURNEND_TOKEN=$(shell_quote "${auth_file##*/}") "
+    # Skipped for a raw launch, the gemini rule: that command carries no token
+    # placeholder to substitute, so a token minted here could never fire.
+    if [ "$RAW_LAUNCH" -eq 0 ]; then
+      AGY_AUTH_DIR="$HOME/.gemini/antigravity-cli/fm-turn-end.d"
+      mkdir -p "$AGY_AUTH_DIR"
+      old_umask=$(umask)
+      umask 077
+      auth_file=$(mktemp "$AGY_AUTH_DIR/fm.XXXXXXXXXXXX")
+      umask "$old_umask"
+      {
+        printf 'turnend=%s\n' "$TURNEND"
+        printf 'busy_event=%s\n' "$FM_ROOT/bin/fm-busy-event.sh"
+        printf 'state=%s\n' "$STATE_REAL"
+        printf 'id=%s\n' "$ID"
+        printf 'gen=%s\n' "$BUSY_GEN"
+      } >"$auth_file"
+      printf '%s\n' "${auth_file##*/}" >"$STATE/$ID.agy-turnend-token"
+      AGY_TOKEN_ENV="FM_TASK_ID=$(shell_quote "$ID") FM_AGY_TURNEND_TOKEN=$(shell_quote "${auth_file##*/}") "
+    fi
     ;;
   esac
 fi
