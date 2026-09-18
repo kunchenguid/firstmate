@@ -6375,6 +6375,24 @@ test_newer_failed_run_is_not_hidden_by_older_live_run() {
   pass 'newer failed run remains failed beside an older live run'
 }
 
+# A rerun that starts between the inventory read and the ledger read leaves a
+# live head-matching row the reader has never read and cannot bind to a run id,
+# so the honest answer is unknown, never a working verdict for that run.
+test_live_ledger_row_after_selection_reports_unknown() {
+  make_competing_runs_case rerun-window failed running
+  local d=$TMP_ROOT/rerun-window out short
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01OLD/')"
+  FM_FAKE_AXI_STATUS_RUN="$(run_failed fm/competing | sed 's/01RUN/01NEW/')"
+  FM_FAKE_RUNS_LIST="  running    fm/competing $short 2026-09-14 12:02
+  failed     fm/competing $short 2026-09-14 12:01"
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: unknown' 'an unbindable live replacement is never answered as working'
+  assert_contains "$out" 'current state not provable here' 'the unbindable replacement is named as unprovable'
+  assert_not_contains "$out" 'state: working' 'a run the reader never read cannot report working'
+  pass 'a live ledger row appearing after selection reports unknown'
+}
+
 test_unverifiable_run_selection_reports_unknown() {
   local mode rc=0
   for mode in missing wrong-id wrong-branch wrong-head missing-status malformed-table inventory-error selected-error; do
@@ -6762,6 +6780,7 @@ test_older_live_status_does_not_hide_newer_completed_run
 test_failed_selected_detail_read_is_not_attributed
 test_live_run_newer_than_selection_does_not_hide_newer_failed_run
 test_newer_failed_run_is_not_hidden_by_older_live_run
+test_live_ledger_row_after_selection_reports_unknown
 test_unverifiable_run_selection_reports_unknown
 test_legacy_conflicting_run_records_report_unknown
 

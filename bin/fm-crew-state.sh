@@ -131,8 +131,10 @@
 #      nothing newer contradicts it, because head identity binds whatever run
 #      last sat on this head, not necessarily this branch's current one - and a
 #      stale failure here is promoted into a captain-facing terminal outcome by
-#      bin/fm-inactive-reconcile.sh. Three records may outrank it: a later run
-#      the ledger PROVES is current (answering from that run), a later
+#      bin/fm-inactive-reconcile.sh. Three records may outrank it: a later
+#      COMPLETED run the ledger proves is current (answering from that run; a
+#      LIVE replacement carries no run id in the ledger, so it can never be
+#      proven current and falls to the unbindable case below), a later
 #      self-declared pause or done in the status log that the ledger's date
 #      proves post-dates the failed run by clearing its whole minute - and only
 #      while that ledger row is NOT the attributed run itself, since the date
@@ -1422,9 +1424,6 @@ if [ "$HAVE_RUN" = 1 ]; then
   # Apply the terminal-failure precedence contract owned by header rule 2b.
   if [ "$RUN_STATE" = failed ]; then
     case "$LEDGER_STATUS" in
-      running)
-        emit working run-step "run superseded by a newer run on this branch (earlier $RUN_DETAIL)"
-        ;;
       completed)
         SUPERSEDED_DETAIL="run superseded by a newer completed run on this branch (earlier $RUN_DETAIL)"
         TERMINAL_PR=$NEWEST_PR
