@@ -63,6 +63,11 @@ Repeat and edge cases:
 - A closed task is refused rather than reopened.
 - `--until` stores the captain's own deferral date through tasks-axi's date gate.
 
+Watcher and away-mode classification read the last event line of `state/<id>.status` rather than the backlog, so `hold` also declares the hold there as `captain-held [key=captain-hold-<task>-<n>]: <reason>`, attributed to the hold command through that keyed operator verb rather than disguised as a worker line.
+A repeated hold leaves the standing declaration untouched.
+Every settlement path - close, release, repair, or an evidence-backed reconcile close - retracts the declaration itself with the matching keyed `resolved` line, so a stopped worker can never leave the lane reading as an answer still owed.
+The keyed pair closes only the hold lifecycle's own key, so a worker's unrelated open status decisions survive both sides, and both mirror lines go through the guarded self-announced append, so the turn recording them does not re-wake its own home.
+
 ### Answering a call (`answer`)
 
 The `answer` subcommand records the captain's exact words and resolves the call in the same act.
@@ -521,6 +526,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
   This includes the `release` mode, mode-matched replay idempotence, and the refusal of drifted, mode-mismatched, absent, unheld, and already-closed keys.
 - The chat channel reaches the same intake.
 - Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
+- The status-log mirror holds: a held lane whose last line was `paused:` gains a self-announced `captain-held` declaration a repeated hold does not duplicate; release, closing answer, and reconcile close each retract it with no worker alive; a re-hold starts a new keyed lifecycle; a worker's unrelated open decision survives both sides; and the divergence guard stays silent over the mirror's own key.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
 - Deferral through `--until` leaves `captain_actionable` false until due.
 
