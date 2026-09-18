@@ -204,7 +204,7 @@ wedge_alarm_via_command() {  # <cmd> <summary>
     wedge_alarm_emit command "$summary" "$cmd"
     return $?
   fi
-  [ -n "$cmd" ] || { log "wedge alarm: empty command: channel; nothing to run"; return 1; }
+  [ -n "$cmd" ] || { fm_wedge_alarm_log "wedge alarm: empty command: channel; nothing to run"; return 1; }
   wedge_alarm_run_bounded command sh -c "$cmd" fm-wedge-alarm "$summary" \
     <<< "$summary" >/dev/null 2>&1
   rc=$?

@@ -260,9 +260,10 @@ test_launch_stop_tears_down_a_live_supervisor() {
   local home entry pid before out
   home=$(make_away_home launch-stop)
   entry=$(write_fake_daemon "$home")
-  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$CONTRACT" propose >/dev/null 2>&1 \
-    && FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$CONTRACT" confirm >/dev/null 2>&1 \
-    || fail "launch stop: could not confirm the fixture posture"
+  if ! FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$CONTRACT" propose >/dev/null 2>&1 \
+    || ! FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$CONTRACT" confirm >/dev/null 2>&1; then
+    fail "launch stop: could not confirm the fixture posture"
+  fi
   pid=$(start_supervisor "$home" "$entry")
   wait_for_generations "$home" 1 || fail "launch stop: the first daemon generation never started"
   wait_for 60 test -f "$home/state/.afk-daemon-run" \
