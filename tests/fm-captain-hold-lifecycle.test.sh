@@ -3713,9 +3713,13 @@ SH
   real_git=$(command -v git)
   local_ready="$local_home/local-validation-ready"
   local_release="$local_home/local-validation-release"
+  # The synchronization point is the before-image read the local landing takes
+  # once every validation has passed. bin/fm-merge-local.sh names the delivery
+  # target branch in FULL there (git resolves a bare name through refs/tags/
+  # first), so this stub matches refs/heads/<default branch>, not the bare name.
   cat > "$local_home/fakebin/git" <<'SH'
 #!/usr/bin/env bash
-if [ "$*" = "-C ${FM_TEST_RACE_REPO:-} rev-parse --short main" ]; then
+if [ "$*" = "-C ${FM_TEST_RACE_REPO:-} rev-parse --short refs/heads/main" ]; then
   output=$("$FM_TEST_REAL_GIT" "$@") || exit $?
   : > "$FM_TEST_RACE_READY"
   while [ ! -e "$FM_TEST_RACE_RELEASE" ]; do sleep 0.01; done
