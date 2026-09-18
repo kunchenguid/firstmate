@@ -166,9 +166,10 @@
 #      status log, so rule 3's daemon-socket-down override outranks all of them,
 #      not merely a plainly attributed run record: an instrument failure must not
 #      read as work failure. A verdict taken from the ledger row also names that
-#      row's status and PR together and reports the attributed run only as the
-#      earlier one, so a single line never labels one run's outcome with
-#      another run's identity.
+#      row's status and PR together and names the attributed run only as the
+#      reading that row could not be bound to, so a single line never labels one
+#      run's outcome with another run's identity, and never asserts a second,
+#      earlier run the unbindable row does not prove.
 #   3. Reconcile the status log through fm-classify-lib.sh's status_current_line:
 #      open decisions survive unrelated events and continuation prose cannot
 #      hide a declaration. Ship/scout terminal declarations supersede stale log
@@ -1475,7 +1476,7 @@ if [ "$HAVE_RUN" = 1 ]; then
           ;;
         failed|cancelled)
           if [ "$NEWEST_ROW_AGREES" != 1 ]; then
-            LEDGER_DETAIL="run $LEDGER_STATUS (earlier $RUN_DETAIL)"
+            LEDGER_DETAIL="run $LEDGER_STATUS from the ledger's row for this worktree; the $RUN_DETAIL reading could not be bound to it"
             TERMINAL_PR=$NEWEST_PR
             emit_run failed "$LEDGER_DETAIL" "$TERMINAL_PR"
           fi

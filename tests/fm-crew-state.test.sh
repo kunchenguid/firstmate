@@ -3977,8 +3977,8 @@ EOF
 # run's identity. This arm fires only when the newest row is NOT provably the
 # attributed run - here it carries a different pull request at the same head -
 # so the verdict word and the pull request both come from that row, and the
-# reading it superseded is named only inside its earlier clause, exactly as the
-# two sibling arms do.
+# attributed reading is named only as the reading that row could not be bound
+# to: an unbindable row does not prove a second, earlier run.
 test_ledger_sourced_verdict_never_names_the_attributed_run_as_its_own() {
   reset_fakes
   local d short out; d=$(new_case ledger-verdict-attribution)
@@ -3995,8 +3995,12 @@ EOF
   out=$(run_crew_state "$d" feat-s2k)
   assert_contains "$out" "pr=https://github.com/o/r/pull/2222" "the pull request comes from the newest ledger row"
   assert_not_contains "$out" "pull/1111" "the attributed run's pull request must not surface"
-  assert_contains "$out" "run failed (earlier " \
-    "the superseded reading appears only inside the earlier clause"
+  assert_contains "$out" "run failed from the ledger's row for this worktree" \
+    "the verdict names the row it came from"
+  assert_contains "$out" "the run failed reading could not be bound to it" \
+    "the attributed reading is named only as the one that row could not be bound to"
+  assert_not_contains "$out" "(earlier " \
+    "an unbindable ledger row must not assert a second, earlier run"
   assert_not_contains "$out" "run failed · pr=" \
     "a ledger-sourced verdict never stands bare beside another record's pull request"
   pass "a ledger-sourced verdict never names the attributed run as its own"
