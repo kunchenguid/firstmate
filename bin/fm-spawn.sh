@@ -71,7 +71,7 @@
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
 #   absent backend= means tmux. cmux and paseo do not support --secondmate
-#   spawns yet.
+#   spawns yet; an auto-detected paseo spawns a secondmate on tmux instead.
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
@@ -1428,7 +1428,7 @@ if [ "$RELAUNCH" -eq 0 ]; then
   if [ "$BACKEND_SET" -eq 1 ]; then
     BACKEND=$BACKEND_ARG
   else
-    BACKEND=$(fm_backend_name)
+    BACKEND=$(fm_backend_name "$KIND")
   fi
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1

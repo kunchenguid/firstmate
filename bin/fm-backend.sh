@@ -266,8 +266,10 @@ fm_backend_detect_cmux_app_is_ancestor() {
 # today's default-path behavior and callers must see zero change. The cmux
 # notice names the winning signal, so a fallback-detected cmux (bundle id or
 # ancestry, after the claude wrapper stripped CMUX_WORKSPACE_ID) is visibly
-# distinct from the primary-marker case.
-fm_backend_name() {
+# distinct from the primary-marker case. For a `secondmate` kind, an
+# auto-detected paseo (which refuses secondmates) resolves to tmux silently,
+# while an explicit paseo selection is returned as-is for the spawn to refuse.
+fm_backend_name() {  # [task-kind]
   local line v detected marker
   if [ -n "${FM_BACKEND:-}" ]; then
     printf '%s' "$FM_BACKEND"
@@ -286,6 +288,10 @@ fm_backend_name() {
   # globals survive into the notice below.
   if fm_backend_detect >/dev/null; then
     detected=$FM_BACKEND_DETECTED
+    if [ "$detected" = paseo ] && [ "${1-}" = secondmate ]; then
+      printf 'tmux'
+      return 0
+    fi
     if [ "$detected" = herdr ]; then
       echo "NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out." >&2
     fi

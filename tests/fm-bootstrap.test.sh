@@ -595,22 +595,25 @@ test_session_provider_backends_gate_own_cli_not_tmux() {
     # Toolchain has jq + treehouse but NOT the session CLI and NOT tmux.
     fakebin=$(make_fake_toolchain_no_tmux "$case_dir")
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
-      FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-    if [ "$backend" = herdr ]; then
-      missing="MISSING_MANUAL: herdr (instructions: https://herdr.dev)"
-    else
-      missing="MISSING: $cli"
-    fi
+      FM_BACKEND_PASEO_BUNDLE_BIN="$case_dir/no-paseo" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+    case "$backend" in
+      herdr) missing="MISSING_MANUAL: herdr (instructions: https://herdr.dev)" ;;
+      paseo) missing="MISSING_MANUAL: paseo (instructions: https://paseo.sh)" ;;
+      *) missing="MISSING: $cli" ;;
+    esac
     assert_contains "$out" "$missing" "backend=$backend must fail closed on its own missing session CLI"
-    if [ "$backend" = herdr ]; then
-      assert_not_contains "$out" "MISSING: herdr (install:" \
-        "backend=herdr must not advertise manual guidance as an executable install command"
-    fi
+    case "$backend" in
+      herdr|paseo)
+        assert_not_contains "$out" "MISSING: $backend (install:" \
+          "backend=$backend must not advertise manual guidance as an executable install command"
+        ;;
+    esac
     assert_not_contains "$out" "MISSING: tmux" "backend=$backend must not demand tmux when its own CLI is missing"
   done <<'ROWS'
 herdr^herdr
 zellij^zellij
 cmux^cmux
+paseo^paseo
 ROWS
   pass "bootstrap: a session-provider backend gates its own CLI, never a false tmux requirement"
 }

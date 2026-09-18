@@ -34,7 +34,7 @@ Verify setup by spawning a small task and confirming metadata contains `backend=
 
 `PASEO_AGENT_ID` is the primary Paseo runtime marker.
 On macOS only, detection falls back to `__CFBundleIdentifier=sh.paseo.desktop` when a wrapper stripped the `PASEO_*` variables.
-Detection checks tmux first, then Herdr, then Paseo, so a multiplexer nested inside Paseo remains the active backend (innermost wins: `TMUX` > `HERDR_ENV` > `PASEO_AGENT_ID`).
+Detection checks tmux first, then Herdr, then cmux and its fallback signals, then Paseo, so a multiplexer nested inside Paseo remains the active backend (innermost wins: `TMUX` > `HERDR_ENV` > `CMUX_WORKSPACE_ID` > `PASEO_AGENT_ID`).
 
 Auto-detection selects only the backend.
 It never grants credentials.
@@ -98,6 +98,7 @@ Durable history for a finished task therefore lives in the status log, the repor
 
 - Paseo is experimental, macOS-only, GUI-first, and requires the app running.
 - Secondmate spawns are unsupported until a per-home lifecycle design is verified.
+  An explicitly selected Paseo refuses `--secondmate`, while an auto-detected Paseo spawns the secondmate on tmux instead.
 - There is no native busy or push-event signal, and `fm_backend_agent_state` reports `unverified` for Paseo.
 - A target can disappear after structural readiness and before the operation.
 - Workspace and terminal ids are not assumed stable across daemon restarts; recovery re-resolves by terminal NAME.

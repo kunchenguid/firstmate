@@ -162,7 +162,7 @@ fm_backend_paseo_send_key "$TARGET" Escape || fail "send_key Escape failed"
 pass "real paseo: send_key Escape (natively supported) succeeds"
 
 fm_backend_paseo_send_key "$TARGET" C-c || fail "send_key C-c failed"
-pass "real paseo: send_key C-c (normalized to the verified 'C-c' token) succeeds"
+pass "real paseo: send_key C-c (the verified 'C-c' token) succeeds"
 
 # --- busy_state: always unknown (no native agent-state primitive) -----------
 

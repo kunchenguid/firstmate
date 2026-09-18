@@ -450,6 +450,64 @@ test_backend_name_autodetect_notice() {
   pass "fm_backend_name: auto-detect selects herdr or cmux (loud notice) or tmux (silent, including nested tmux-in-herdr/tmux-in-cmux)"
 }
 
+# Paseo auto-detection (docs/paseo-backend.md "Runtime detection"): the
+# PASEO_AGENT_ID marker, the sh.paseo.desktop bundle-id fallback, both ranked
+# below tmux/herdr/cmux, the EXPERIMENTAL notice naming the winning signal,
+# and a secondmate spawn resolving to tmux only when paseo was auto-detected.
+test_backend_paseo_autodetect() {
+  local dir cfg cfg_paseo out errfile
+
+  dir="$TMP_ROOT/paseo-autodetect"; cfg="$dir/config-empty"; cfg_paseo="$dir/config-paseo"
+  mkdir -p "$cfg" "$cfg_paseo"; printf 'paseo\n' > "$cfg_paseo/backend"
+  errfile="$dir/err.txt"
+
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH"; PASEO_AGENT_ID=agent-1
+    fm_backend_detect >/dev/null && printf '%s %s' "$FM_BACKEND_DETECTED" "$FM_BACKEND_DETECT_SIGNAL")
+  [ "$out" = "paseo PASEO_AGENT_ID" ] || fail "fm_backend_detect should report paseo from PASEO_AGENT_ID, got '$out'"
+
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; PATH="$FAKE_NONDARWIN_BIN:$PATH"; __CFBundleIdentifier=sh.paseo.desktop
+    fm_backend_detect >/dev/null && printf '%s %s' "$FM_BACKEND_DETECTED" "$FM_BACKEND_DETECT_SIGNAL")
+  [ "$out" = "paseo bundle-id" ] || fail "fm_backend_detect should report paseo from the sh.paseo.desktop bundle id, got '$out'"
+
+  out=$(unset HERDR_ENV CMUX_WORKSPACE_ID; TMUX='fake,1,0' PASEO_AGENT_ID=agent-1 fm_backend_detect)
+  [ "$out" = tmux ] || fail "tmux nested inside Paseo should win (innermost first), got '$out'"
+  out=$(unset TMUX CMUX_WORKSPACE_ID; HERDR_ENV=1 PASEO_AGENT_ID=agent-1 fm_backend_detect)
+  [ "$out" = herdr ] || fail "herdr nested inside Paseo should win (innermost first), got '$out'"
+  out=$(unset TMUX HERDR_ENV; CMUX_WORKSPACE_ID='fake-uuid' PASEO_AGENT_ID=agent-1 fm_backend_detect)
+  [ "$out" = cmux ] || fail "cmux's marker should win over PASEO_AGENT_ID, got '$out'"
+
+  : > "$errfile"
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" PASEO_AGENT_ID=agent-1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  [ "$out" = paseo ] || fail "fm_backend_name should auto-detect paseo from PASEO_AGENT_ID, got '$out'"
+  assert_contains "$(cat "$errfile")" "auto-detected paseo runtime (PASEO_AGENT_ID)" \
+    "the paseo auto-detect notice did not name PASEO_AGENT_ID"
+  assert_contains "$(cat "$errfile")" "EXPERIMENTAL paseo backend" \
+    "the paseo auto-detect notice lost the experimental warning"
+  assert_contains "$(cat "$errfile")" "--backend tmux" \
+    "the paseo auto-detect notice lost the opt-out"
+
+  : > "$errfile"
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; PATH="$FAKE_NONDARWIN_BIN:$PATH" __CFBundleIdentifier=sh.paseo.desktop FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name 2>"$errfile")
+  [ "$out" = paseo ] || fail "fm_backend_name should auto-detect paseo via the bundle-id fallback, got '$out'"
+  assert_contains "$(cat "$errfile")" "FALLBACK signal __CFBundleIdentifier=sh.paseo.desktop" \
+    "the fallback-detected paseo notice did not name the bundle-id fallback signal"
+
+  : > "$errfile"
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" PASEO_AGENT_ID=agent-1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name secondmate 2>"$errfile")
+  [ "$out" = tmux ] || fail "an auto-detected paseo should resolve a secondmate spawn to tmux, got '$out'"
+  [ -s "$errfile" ] && fail "the secondmate tmux fallback must not print the paseo notice"$'\n'"$(cat "$errfile")"
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; PATH="$FAKE_NONDARWIN_BIN:$PATH" __CFBundleIdentifier=sh.paseo.desktop FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name secondmate 2>/dev/null)
+  [ "$out" = tmux ] || fail "a bundle-id-detected paseo should resolve a secondmate spawn to tmux, got '$out'"
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH" PASEO_AGENT_ID=agent-1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name ship 2>/dev/null)
+  [ "$out" = paseo ] || fail "only a secondmate spawn falls back to tmux; a ship spawn should stay on paseo, got '$out'"
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PASEO_AGENT_ID=agent-1 FM_BACKEND=paseo FM_BACKEND_CONFIG_DIR="$cfg" fm_backend_name secondmate)
+  [ "$out" = paseo ] || fail "FM_BACKEND=paseo must stay paseo for a secondmate spawn so the spawn refuses it, got '$out'"
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PASEO_AGENT_ID=agent-1 FM_BACKEND='' FM_BACKEND_CONFIG_DIR="$cfg_paseo" fm_backend_name secondmate)
+  [ "$out" = paseo ] || fail "config/backend=paseo must stay paseo for a secondmate spawn so the spawn refuses it, got '$out'"
+
+  pass "fm_backend_detect/fm_backend_name: paseo auto-detects from PASEO_AGENT_ID or its bundle id below tmux/herdr/cmux, notices loudly, and an auto-detected paseo secondmate resolves to tmux"
+}
+
 # Explicit configuration (FM_BACKEND env or config/backend) always wins over
 # runtime auto-detection, even when a detection marker points the other way.
 test_backend_name_explicit_beats_detection() {
@@ -1145,6 +1203,7 @@ test_backend_detect_cmux_fallback_ancestry_comm_match
 test_backend_detect_cmux_fallback_ancestry_stops_at_launchd
 test_backend_name_cmux_fallback_notice
 test_backend_name_autodetect_notice
+test_backend_paseo_autodetect
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
