@@ -43,6 +43,8 @@ MAX_MANIFEST_BYTES=1048576
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-project-origin-lib.sh
 . "$SCRIPT_DIR/fm-project-origin-lib.sh"
+# shellcheck source=bin/fm-task-path-lib.sh
+. "$SCRIPT_DIR/fm-task-path-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -123,7 +125,7 @@ if [ -e "$REG" ] || [ -L "$REG" ]; then
 fi
 
 mkdir -p "$DATA"
-BRIEF="$DATA/$ID/brief.md"
+BRIEF=$(fm_task_path "$DATA" "$ID" brief.md)
 BRIEF_CREATED=0
 if [ ! -f "$BRIEF" ]; then
   [ -n "${FM_SECONDMATE_CHARTER:-}" ] || die "no filled charter at $BRIEF; set FM_SECONDMATE_CHARTER or scaffold one first"

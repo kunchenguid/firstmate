@@ -35,6 +35,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-task-path-lib.sh
+. "$SCRIPT_DIR/fm-task-path-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
@@ -144,7 +146,7 @@ if ! fm_backlog_record_present "$META" "task record" "$STATE"; then
 fi
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
 
-SCOUT_BRIEF="$DATA/$ID/brief.md"
+SCOUT_BRIEF=$(fm_task_path "$DATA" "$ID" brief.md)
 if fm_brief_task_placeholders_present "$SCOUT_BRIEF"; then
   echo "error: $SCOUT_BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; preserve the original ask in ## Captain's intent and fill the scout-time ## Firstmate spec; promotion generates a separate ship-time spec" >&2
   exit 1
@@ -173,7 +175,7 @@ fi
 # single owner (bin/fm-dod-lib.sh) rather than summarised into a hint line. A
 # promoted no-mistakes worker that never received the ask-user escalation rule or
 # the --yes ban is the delivery hole this file used to leave open.
-INSTRUCTIONS="$DATA/$ID/ship-instructions.md"
+INSTRUCTIONS=$(fm_task_path "$DATA" "$ID" ship-instructions.md)
 PROMOTION_ASK_USER_BLOCK=
 if [ "$MODE" = no-mistakes ]; then
   PROMOTION_ASK_USER_BLOCK=$(fm_ask_user_escalation_block "$DATA" "$ID")
@@ -207,9 +209,10 @@ EOF
   printf '\n'
   fm_dod_block "$MODE" "$ID"
 }
-mkdir -p "$DATA/$ID"
+TASK_DIR=$(fm_task_dir "$DATA" "$ID") || { echo "error: invalid task id: $ID" >&2; exit 2; }
+mkdir -p "$TASK_DIR"
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }
-TMP="$DATA/$ID/.ship-instructions.md.${BASHPID:-$$}"
+TMP=$(fm_task_path "$DATA" "$ID" ".ship-instructions.md.${BASHPID:-$$}")
 {
   cat <<EOF
 Your scout task has been promoted to a ship task, mode=$MODE. Your window, worktree, and context stay as they are; only the contract below changes.
@@ -233,7 +236,7 @@ TMP=
 # The current worker receives the instructions through fm-send, but a replacement
 # worker is launched from brief.md. Publish the same explicit precedence contract
 # there so a later relaunch cannot revive the original scout delivery rules.
-BRIEF_REPLACEMENT="$DATA/$ID/.brief.md.promote.${BASHPID:-$$}"
+BRIEF_REPLACEMENT=$(fm_task_path "$DATA" "$ID" ".brief.md.promote.${BASHPID:-$$}")
 {
   cat "$SCOUT_BRIEF"
   printf '\n\n'
@@ -243,7 +246,7 @@ BRIEF_REPLACEMENT="$DATA/$ID/.brief.md.promote.${BASHPID:-$$}"
   echo "error: could not render the promoted brief for mode=$MODE" >&2
   exit 1
 }
-BRIEF_ORIGINAL="$DATA/$ID/.brief.md.scout.${BASHPID:-$$}"
+BRIEF_ORIGINAL=$(fm_task_path "$DATA" "$ID" ".brief.md.scout.${BASHPID:-$$}")
 mv "$SCOUT_BRIEF" "$BRIEF_ORIGINAL" || {
   echo "error: could not stage the scout brief for promotion: $SCOUT_BRIEF" >&2
   exit 1

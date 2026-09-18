@@ -47,6 +47,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-secondmate-charter-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
+# shellcheck source=bin/fm-task-path-lib.sh
+. "$SCRIPT_DIR/fm-task-path-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
@@ -799,7 +801,7 @@ refuse_projectful_projectless_charter() {
 }
 
 seed_home() {
-  local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope
+  local id=$1 requested_home=$2 requested_abs home projects_csv project project_dst charter_summary charter_scope task_dir
   local no_projects=0 arg
   local filtered=()
   shift 2
@@ -845,7 +847,7 @@ seed_home() {
   SEED_CREATED_PROJECTS_FILE="$SEED_BACKUP_DIR/created-projects"
   : > "$SEED_CREATED_PROJECTS_FILE"
   SEED_PARENT_REG_EXISTED=0
-  SEED_PARENT_BRIEF="$DATA/$id/brief.md"
+  SEED_PARENT_BRIEF=$(fm_task_path "$DATA" "$id" brief.md)
   SEED_PARENT_BRIEF_CREATED=0
   SEED_PARENT_BRIEF_DIR_CREATED=0
   SEED_SUB_REG_EXISTED=0
@@ -905,7 +907,8 @@ seed_home() {
       echo "error: no filled secondmate charter brief at $SEED_PARENT_BRIEF; set FM_SECONDMATE_CHARTER or scaffold one and replace {TASK}" >&2
       return 1
     }
-    [ -d "$DATA/$id" ] || SEED_PARENT_BRIEF_DIR_CREATED=1
+    task_dir=$(fm_task_dir "$DATA" "$id") || return 1
+    [ -d "$task_dir" ] || SEED_PARENT_BRIEF_DIR_CREATED=1
     if [ "$no_projects" -eq 1 ]; then
       "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects
     else

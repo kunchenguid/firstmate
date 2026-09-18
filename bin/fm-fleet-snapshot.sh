@@ -219,6 +219,10 @@ esac
 # shellcheck source=bin/fm-landed-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-landed-lib.sh"  # FM_LANDED_JQ_DEFS: the shared landed selector
+# shellcheck source=bin/fm-merge-authority-lib.sh
+. "$SCRIPT_DIR/fm-merge-authority-lib.sh"
+# shellcheck source=bin/fm-task-path-lib.sh
+. "$SCRIPT_DIR/fm-task-path-lib.sh"
 
 usage() {
   cat <<'EOF'
@@ -617,7 +621,7 @@ prefetch_task_observations() {  # <meta> <id>
   endpoint_file="$SNAPSHOT_TASK_DIR/$id.endpoint"
   status_log="$STATE/$id.status"
   status_capture="$SNAPSHOT_TASK_DIR/$id.status"
-  report_path="$DATA/$id/report.md"
+  report_path=$(fm_task_path "$DATA" "$id" report.md)
   report_capture="$SNAPSHOT_TASK_DIR/$id.report"
 
   snapshot_task_generation_is_current "$meta" "$id" || generation_current=0
@@ -823,7 +827,7 @@ task_json_lines() {
     [ -f "$report_path" ] && report_present=1 || report_present=0
     meta_json=$(path_present_json "$original_meta" "$meta")
     status_json=$event_json
-    report_json=$(path_present_json "$DATA/$id/report.md" "$report_path")
+    report_json=$(path_present_json "$(fm_task_path "$DATA" "$id" report.md)" "$report_path")
     if [ -n "$worktree" ]; then worktree_json=$(path_present_json "$worktree"); else worktree_json=$(jq -n '{path:null,present:false}'); fi
     if [ -n "$home" ] && [ -n "$remote_host" ]; then
       home_json=$(jq -n --arg path "$home" '{path:$path,present:null}')
@@ -1940,9 +1944,10 @@ scout_report_lines() {
     jq -n '[]'
     return 0
   fi
-  LC_ALL=C find "$DATA" -mindepth 2 -maxdepth 2 -type f -name report.md -print \
+  fm_task_artifact_paths "$DATA" report.md \
     | sort \
     | while IFS= read -r report; do
+      [ -f "$report" ] && [ ! -L "$report" ] || continue
       id=$(basename "$(dirname "$report")")
       jq -n --arg id "$id" --arg path "$report" '{id:$id,path:$path}'
     done \

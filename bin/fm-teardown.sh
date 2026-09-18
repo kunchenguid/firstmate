@@ -273,6 +273,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-callsigns-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-task-path-lib.sh
+. "$SCRIPT_DIR/fm-task-path-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
@@ -1414,12 +1416,10 @@ work_is_landed() {
 # other ship carries the PR recorded on its own record.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
-  local data_relative
   BACKLOG_DONE_ARGS=()
   case "$KIND" in
     scout)
-      data_relative=$(fm_backlog_data_relative "$DATA") || return 1
-      BACKLOG_DONE_ARGS=(--report "$data_relative/$ID/report.md")
+      BACKLOG_DONE_ARGS=(--report "$(fm_task_relpath "$ID" report.md)")
       ;;
     *)
       if [ "$MODE" = local-only ]; then
@@ -3171,7 +3171,7 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
 fi
 
 if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
-  REPORT="$DATA/$ID/report.md"
+  REPORT=$(fm_task_path "$DATA" "$ID" report.md)
   if [ ! -f "$REPORT" ]; then
     echo "REFUSED: scout task $ID has no report at $REPORT." >&2
     echo "The report is the work product. Have the crewmate write it, or use --force after explicit discard approval." >&2

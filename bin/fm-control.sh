@@ -138,6 +138,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-task-path-lib.sh
+. "$SCRIPT_DIR/fm-task-path-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
@@ -814,7 +816,7 @@ do_relaunch() {
 
   case "$KIND" in
     ship|scout)
-      RELAUNCH_BRIEF="$DATA/$ID/brief.md"
+      RELAUNCH_BRIEF=$(fm_task_path "$DATA" "$ID" brief.md)
       [ -f "$RELAUNCH_BRIEF" ] \
         || die "task $ID has no instructions at $RELAUNCH_BRIEF; refusing to relaunch a worker with nothing to work from"
       [ "$NOTE_SET" = 1 ] && [ -n "$NOTE" ] \

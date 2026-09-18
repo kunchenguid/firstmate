@@ -214,6 +214,9 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-task-path-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-task-path-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
@@ -419,7 +422,9 @@ show_field_value() {  # <show-output> <field>
 
 origin_exists_here() {  # <origin-id>
   [ -f "$STATE/$1.meta" ] && return 0
-  [ -f "$DATA/$1/report.md" ] && return 0
+  local report_path
+  report_path=$(fm_task_path "$DATA" "$1" report.md) || return 1
+  [ -f "$report_path" ] && return 0
   task_show "$1"
 }
 

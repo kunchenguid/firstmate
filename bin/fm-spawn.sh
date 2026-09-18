@@ -385,6 +385,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-task-path-lib.sh
+. "$SCRIPT_DIR/fm-task-path-lib.sh"
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved raw_bytes
@@ -2292,15 +2294,16 @@ json_escape() {
 # every steer and its handled/ acknowledgement), and the status file itself.
 rovo_config_override_flag() {
   local effort=$1 data_dir=$2 state_dir=$3 id=$4
-  local data_real state_real agent_json paths_json config_json
+  local data_real state_real task_real agent_json paths_json config_json
   data_real=$(cd "$data_dir" && pwd -P) || return 1
   state_real=$(cd "$state_dir" && pwd -P) || return 1
+  task_real=$(fm_task_dir "$data_real" "$id") || return 1
   agent_json=
   case "$effort" in
   low | medium | high | max) agent_json="\"agent\":{\"efficiencyLevel\":\"$(json_escape "$effort")\"}," ;;
   esac
   paths_json=$(printf '"%s","%s","%s"' \
-    "$(json_escape "$data_real/$id")" \
+    "$(json_escape "$task_real")" \
     "$(json_escape "$state_real/$id.inbox")" \
     "$(json_escape "$state_real/$id.status")")
   config_json="{${agent_json}\"toolPermissions\":{\"allowedExternalPaths\":[$paths_json]}}"
@@ -2497,12 +2500,12 @@ if [ "$KIND" = secondmate ]; then
   if [ -f "$PROJ_ABS/data/charter.md" ]; then
     BRIEF="$PROJ_ABS/data/charter.md"
   else
-    BRIEF="$DATA/$ID/brief.md"
+    BRIEF=$(fm_task_path "$DATA" "$ID" brief.md)
   fi
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
-  BRIEF="$DATA/$ID/brief.md"
+  BRIEF=$(fm_task_path "$DATA" "$ID" brief.md)
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
@@ -2547,8 +2550,8 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   # Use the existing launch-brief overlay for every worker kind, including
   # pre-scope briefs and relaunches. Charters never enter this worker path.
   SOURCE_BRIEF=$BRIEF
-  BRIEF="$DATA/$ID/launch-brief.md"
-  BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
+  BRIEF=$(fm_task_path "$DATA" "$ID" launch-brief.md)
+  BRIEF_TMP=$(fm_task_path "$DATA" "$ID" ".launch-brief.md.${BASHPID:-$$}")
   {
     fm_brief_worker_role "$STATE" "$ID" &&
       printf '\n' &&

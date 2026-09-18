@@ -28,6 +28,8 @@
 # through the helpers below. Other mentions of `--intent` point here rather than
 # restating the rule.
 # Every heredoc here stays outside a command substitution: `VAR=$(cat <<EOF ...)`
+# shellcheck source=bin/fm-task-path-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-task-path-lib.sh"
 # breaks parsing of the whole file on Bash 3.2 (tests/fm-brief.test.sh).
 # fm_brief_worker_role owns the ship/scout role scope. bin/fm-spawn.sh is its one
 # emitter, supplying it first in every ship/scout launch brief and never to a
@@ -224,10 +226,11 @@ fm_brief_intent_address_line() {  # <file>
 }
 
 fm_ask_user_escalation_block() {  # <data-dir> <task-id>
-  local data=$1 id=$2
+  local data=$1 id=$2 findings_path
+  findings_path=$(fm_task_path "$data" "$id" 'nm-<run>-findings.txt') || return 1
   cat <<EOF
-   For a no-mistakes ask-user gate specifically, escalate all ask-user findings as one event plus one snapshot file, using that same shape even when the gate holds only a single ask-user finding: write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority), to \`$data/$id/nm-<run>-findings.txt\`, then report the gate with
-   \`needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file=$data/$id/nm-<run>-findings.txt\`
+   For a no-mistakes ask-user gate specifically, escalate all ask-user findings as one event plus one snapshot file, using that same shape even when the gate holds only a single ask-user finding: write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority), to \`$findings_path\`, then report the gate with
+   \`needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file=$findings_path\`
    naming every ask-user finding id from that gate. The status line only points at the file; it never restates or summarizes a finding's content.
 EOF
 }

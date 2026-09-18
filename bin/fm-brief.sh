@@ -94,6 +94,8 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-task-path-lib.sh
+. "$SCRIPT_DIR/fm-task-path-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 CREWMATE_PAUSE_WAIT_EXAMPLES='an upstream release, a rate-limit reset, a scheduled window, or your own validation round'
 
@@ -186,9 +188,11 @@ if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   exit 1
 fi
 
-BRIEF="$DATA/$ID/brief.md"
+TASK_DIR=$(fm_task_dir "$DATA" "$ID") || { echo "error: invalid task id: $ID" >&2; exit 2; }
+BRIEF=$(fm_task_path "$DATA" "$ID" brief.md)
+REPORT_PATH=$(fm_task_path "$DATA" "$ID" report.md)
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
-mkdir -p "$DATA/$ID"
+mkdir -p "$TASK_DIR"
 
 ASK_USER_BLOCK=
 if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
@@ -417,7 +421,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 $INBOX_SECTION
 
 # Definition of done
-Write your findings to \`$DATA/$ID/report.md\`.
+Write your findings to \`$REPORT_PATH\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 $LAVISH_LINE
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.

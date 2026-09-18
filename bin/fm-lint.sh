@@ -162,6 +162,37 @@ fm_lint_run_workflows() {
 # Backend adapters belong behind tasks-axi. Keep direct Beads CLI invocations
 # out of firstmate's core scripts so every configured backend follows the same
 # lifecycle path.
+fm_lint_run_task_path_purity() {
+  local findings path canonical
+  local -a task_path_roots
+  task_path_roots=()
+  if [ "$EXPLICIT_PATHS" -eq 0 ]; then
+    task_path_roots=(bin/*.sh bin/backends/*.sh)
+  else
+    for path in "${ROOTS[@]}"; do
+      [ -f "$path" ] || continue
+      # shellcheck disable=SC2016 # Perl, not the shell, expands $ARGV.
+      canonical=$($PERL_BIN -MCwd=realpath -e 'my $resolved = realpath($ARGV[0]); exit 1 unless defined $resolved; print $resolved;' "$path" 2>/dev/null) || continue
+      case "$canonical" in
+        "$ROOT"/bin/*.sh|"$ROOT"/bin/backends/*.sh) task_path_roots+=("$canonical") ;;
+      esac
+    done
+  fi
+  [ "${#task_path_roots[@]}" -gt 0 ] || return 0
+  findings=$(LC_ALL=C awk -v owner="$ROOT/bin/fm-task-path-lib.sh" '
+    FILENAME == owner { next }
+    /^[[:space:]]*#/ { next }
+    /\$(DATA|data|FM_DATA_OVERRIDE|FM_HOME|home|HOME)\/\$\{?(ID|id|task|TASK)\}?/ ||
+    /\$\{(DATA|data|FM_DATA_OVERRIDE|FM_HOME|home|HOME)\}\/\$\{?(ID|id|task|TASK)\}?/ {
+      print FILENAME ":" FNR ": direct per-task data path construction must use fm-task-path-lib.sh"
+    }
+  ' "${task_path_roots[@]}")
+  [ -z "$findings" ] || {
+    printf '%s\n' "$findings" >&2
+    return 1
+  }
+}
+
 fm_lint_run_backend_purity() {
   local findings path canonical
   local -a purity_roots
@@ -560,6 +591,7 @@ if [ "$CHANGED_MODE" -eq 1 ] && [ "$ROOT_COUNT" -eq 0 ]; then
   printf 'fm-lint.sh: no changed lint targets\n'
   overall_rc=0
   fm_lint_run_backend_purity || overall_rc=$?
+  fm_lint_run_task_path_purity || overall_rc=$?
   fm_lint_run_workflows || overall_rc=$?
   exit "$overall_rc"
 fi
@@ -874,8 +906,12 @@ fi
 
 purity_rc=0
 fm_lint_run_backend_purity || purity_rc=$?
+fm_lint_run_task_path_purity || task_path_rc=$?
 if [ "$overall_rc" -eq 0 ] && [ "$purity_rc" -ne 0 ]; then
   overall_rc=$purity_rc
+fi
+if [ "$overall_rc" -eq 0 ] && [ "${task_path_rc:-0}" -ne 0 ]; then
+  overall_rc=$task_path_rc
 fi
 
 if [ "$overall_rc" -eq 0 ]; then

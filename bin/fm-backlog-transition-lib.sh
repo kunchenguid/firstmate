@@ -78,6 +78,8 @@ FM_BACKLOG_CLOSE_REPLAY_RESULT=
 # library does not source fm-tasks-axi-lib.sh does not apply.
 # shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-task-path-lib.sh disable=SC1091
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-task-path-lib.sh"
 
 # Latched when a row read hits its bound. fm_backlog_row_show runs inside a
 # command substitution, so the subshell can READ this latch but cannot set it;
@@ -572,7 +574,7 @@ fm_backlog_row_artifact_supported() {
   local id=$1 flag=${2:-} value=${3:-}
   case "$flag" in
     --pr) return 0 ;;
-    --report) [ "$value" = "data/$id/report.md" ] ;;
+    --report) [ "$value" = "$(fm_task_relpath "$id" report.md)" ] ;;
     *) return 1 ;;
   esac
 }

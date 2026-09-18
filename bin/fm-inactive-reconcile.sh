@@ -96,6 +96,8 @@ CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-task-path-lib.sh
+. "$SCRIPT_DIR/fm-task-path-lib.sh"
 
 FM_INACTIVE_RECONCILE_SECS=${FM_INACTIVE_RECONCILE_SECS:-900}
 case "$FM_INACTIVE_RECONCILE_SECS" in
@@ -398,7 +400,7 @@ claim_inactive_report_for_ledger() { # <task> <incarnation> <state> <ledger-fing
 # delivered, or nothing is owed, and 1 when it is owed but the parent channel
 # could not be written (the notice is queued once per record).
 report_child_ledger_locked() { # <id> <meta>
-  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line
+  local id=$1 meta=$2 status last previous state note pr mode yolo data report_path incarnation fingerprint predecessor_head outcome_key line
   status="$STATE/$id.status"
   last=$(child_terminal_ledger_line "$status") || return 0
   state=$(status_line_verb "$last")
@@ -427,8 +429,9 @@ report_child_ledger_locked() { # <id> <meta>
   [ -z "$pr" ] || line="$line pr=$pr"
   [ -z "$mode" ] || line="$line mode=$mode"
   [ -z "$yolo" ] || line="$line yolo=$yolo"
-  if [ -f "$data/$id/report.md" ] && [ ! -L "$data/$id/report.md" ]; then
-    line="$line report=data/$id/report.md"
+  report_path=$(fm_task_path "$data" "$id" report.md) || return 1
+  if [ -f "$report_path" ] && [ ! -L "$report_path" ]; then
+    line="$line report=$(fm_task_relpath "$id" report.md)"
   fi
   if fm_parent_channel_report "$FM_HOME" "$STATE" "$line"; then
     mark_reported "$RECORD_PENDING" || return 1
