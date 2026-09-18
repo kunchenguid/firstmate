@@ -1,13 +1,13 @@
 # Orca runtime backend
 
-Orca is an experimental macOS backend in which the Orca app owns both the task worktree and terminal endpoint.
+Orca is an experimental backend in which the Orca app owns both the task worktree and terminal endpoint.
 The crewmate harness remains the agent process launched inside that endpoint.
 Firstmate agents load [`firstmate-orca`](../.agents/skills/firstmate-orca/SKILL.md) before operating or recovering this backend.
 
 ## Setup
 
-Pick Orca when you already use the Orca macOS app and want Orca-managed worktrees and terminals instead of Treehouse plus a session multiplexer.
-Orca is macOS-only, explicit-only, and does not support secondmate spawns.
+Pick Orca when you already use the Orca app and want Orca-managed worktrees and terminals instead of Treehouse plus a session multiplexer.
+Orca is explicit-only: nothing in the code gates this backend to macOS, and it is confirmed working on Linux, but it is never auto-detected regardless of platform.
 
 Prerequisites:
 
@@ -67,11 +67,17 @@ It never raw-deletes an Orca worktree.
 A close the CLI never attempted, because `orca` is not on the path, stops cleanup with the metadata intact even under `--force`: removing those records would leave nothing on disk naming a terminal that may still be live.
 Reinstall the CLI and rerun; [`verification/runtime-backends.md`](verification/runtime-backends.md) "Endpoint close" owns what this arm can and cannot prove about its own close.
 
+## Recovery
+
+`orca terminal show --terminal <handle> --json` reports the terminal's own `connected` and `agentIdentity` fields, and the recovery-grade classifier in `bin/backends/orca.sh` (`fm_backend_orca_agent_state`) reads those directly rather than scraping the composer.
+`connected=true` is `alive`, optionally downgraded to `ambiguous` when Orca reports an `agentIdentity` that the shared harness-process vocabulary (`bin/fm-agent-process-lib.sh`) does not recognize as a verified agent.
+`connected=false` is `dead`.
+A failed or unparseable read falls back to `orca status --json`: a separately confirmed ready runtime means the terminal is authoritatively gone (`missing`), while an unreachable runtime proves nothing either way (`unreadable`).
+Only `dead` and `missing` license unattended recovery, so this classifier is what makes secondmate spawns on this backend safe to auto-recover.
+
 ## Active limits
 
-- Orca is macOS-only and explicit-only.
 - The app must be running and report ready.
-- Secondmate spawns are unsupported.
 - Escape is unsupported.
 - Orca exposes no stable CLI version or protocol marker, so readiness is the compatibility gate rather than a version floor.
 - Only the verified terminal-handle and worktree result fields are accepted; speculative response shapes are rejected.

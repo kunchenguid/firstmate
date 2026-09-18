@@ -12,6 +12,13 @@
 # shellcheck source=bin/fm-composer-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/../fm-composer-lib.sh"
 
+# Shared, backend-neutral harness-process identity (bin/fm-agent-process-lib.sh):
+# reused here to judge Orca's own reported `agentIdentity` string against the
+# same verified-harness vocabulary every other backend uses, so "claude",
+# "codex", etc. cannot drift into a second identity list.
+# shellcheck source=bin/fm-agent-process-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/../fm-agent-process-lib.sh"
+
 fm_backend_orca_tool_check() {
   command -v orca >/dev/null 2>&1 || { echo "error: backend=orca selected but the 'orca' CLI is not installed" >&2; return 1; }
 }
@@ -194,6 +201,102 @@ fm_backend_orca_worktree_path() {
     return 1
   }
   printf '%s' "$path"
+}
+
+# fm_backend_orca_terminal_show_fields: read `orca terminal show`'s own
+# `connected` and `agentIdentity` fields for <terminal-id>, one per output
+# line as `connected=<true|false|unknown>` and `identity=<value-or-empty>`.
+# Exit 0 only for a successful, parseable read; exit 2 for a command failure
+# or an `ok: false` response (the terminal handle did not resolve, or some
+# other request-level error); exit 1 for unparseable JSON. The caller
+# (fm_backend_orca_agent_state) does not need to tell those failure shapes
+# apart itself - both mean "this read did not prove anything either way".
+fm_backend_orca_terminal_show_fields() {  # <terminal-id>
+  local terminal=$1 out
+  out=$(orca terminal show --terminal "$terminal" --json 2>/dev/null) || return 2
+  printf '%s' "$out" | node -e '
+const fs = require("fs");
+let data;
+try {
+  data = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch (err) {
+  process.exit(1);
+}
+if (data.ok === false) process.exit(2);
+const r = data.result || {};
+const term = r.terminal || r;
+const connected = term.connected;
+const identity = term.agentIdentity;
+const connStr = (typeof connected === "boolean") ? String(connected) : "unknown";
+process.stdout.write("connected=" + connStr + "\n");
+process.stdout.write("identity=" + (typeof identity === "string" ? identity : "") + "\n");
+'
+}
+
+# fm_backend_orca_agent_state: recovery-grade harness-agent state for one
+# recorded Orca terminal handle. See bin/fm-backend.sh's fm_backend_agent_state
+# for the shared state vocabulary. Built directly on `orca terminal show`'s own
+# `connected` and `agentIdentity` fields (docs/orca-backend.md "Recovery")
+# rather than text-scraping the composer, the same way the herdr adapter
+# cross-checks its own native pane/process fields instead of guessing from
+# rendered output.
+#
+# `connected=true` is `alive` - optionally strengthened by `agentIdentity`
+# reading as a verified harness through the shared
+# fm_agent_process_classify_name vocabulary when Orca reports one, and downgraded
+# to `ambiguous` when it reports an identity that classifier does not recognize
+# as an agent. An absent identity does not downgrade the verdict: Orca's own
+# `connected` flag is already the authoritative signal this adapter treats as
+# proof of a live agent process, mirroring how a verified harness name alone is
+# enough for tmux's `alive` verdict.
+# `connected=false` is `dead`: the terminal endpoint exists but confidently has
+# no live agent attached.
+#
+# A read that fails outright, returns `ok: false`, or omits `connected` cannot
+# by itself tell "the terminal is gone" apart from "Orca could not be asked
+# right now", so it falls back to the same two-source pattern
+# fm_backend_herdr_agent_state uses for its own failed pane read: a separately
+# confirmed ready Orca runtime means the failed read is authoritative
+# absence (`missing`), while an unreachable runtime means nothing was proven
+# either way (`unreadable`).
+fm_backend_orca_agent_state() {  # <terminal-id>
+  local terminal=$1 fields status connected identity
+  fm_backend_orca_tool_check || { printf 'unreadable'; return 0; }
+  fields=$(fm_backend_orca_terminal_show_fields "$terminal")
+  status=$?
+  if [ "$status" -eq 0 ]; then
+    connected=$(printf '%s\n' "$fields" | sed -n 's/^connected=//p')
+    identity=$(printf '%s\n' "$fields" | sed -n 's/^identity=//p')
+    case "$connected" in
+      true)
+        if [ -n "$identity" ] && [ "$(fm_agent_process_classify_name "$identity")" != agent ]; then
+          printf 'ambiguous'
+        else
+          printf 'alive'
+        fi
+        return 0
+        ;;
+      false)
+        printf 'dead'
+        return 0
+        ;;
+    esac
+  fi
+  if fm_backend_orca_runtime_check >/dev/null 2>&1; then
+    printf 'missing'
+  else
+    printf 'unreadable'
+  fi
+}
+
+# Backward-compatible three-state view for callers that only need a yes/no
+# agent verdict. The detailed state contract is owned by fm_backend_agent_state.
+fm_backend_orca_agent_alive() {  # <terminal-id>
+  case "$(fm_backend_orca_agent_state "$1")" in
+    alive) printf 'alive' ;;
+    dead|missing) printf 'dead' ;;
+    *) printf 'unknown' ;;
+  esac
 }
 
 fm_backend_orca_capture() {  # <terminal-id> <lines>

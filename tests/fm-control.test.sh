@@ -401,6 +401,18 @@ test_orca_refuses_an_escape_harness_interrupt() {
     echo "orca_worktree_id=wt-1::/orca/wt-1"
   } > "$dir/home/state/t1.meta.new"
   sed 's|^window=.*|window=fm-t1|' "$dir/home/state/t1.meta.new" > "$dir/home/state/t1.meta"
+  # The interrupt verb checks agent_state before the key-support refusal this
+  # test targets, so the fake Orca terminal must read alive (connected=true)
+  # rather than leaving the real `orca` CLI on PATH to answer for an endpoint
+  # it has never heard of.
+  cat > "$dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = terminal ] && [ "${2:-}" = show ]; then
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-1","connected":true,"agentIdentity":"claude"}}}\n'
+fi
+exit 0
+SH
+  chmod +x "$dir/fakebin/orca"
   out=$(run_control "$dir" t1 interrupt); rc=$?
   expect_code 1 "$rc" "an Escape harness on orca should refuse"
   assert_contains "$out" "cannot deliver" "refusal should name the undeliverable key"
