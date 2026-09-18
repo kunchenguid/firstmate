@@ -1,0 +1,12 @@
+columnSuffix: null
+handle: overlay2
+instructions: null
+name: 'Header Builder - Header Builder - Overlay'
+searchable: true
+settings:
+  default: false
+  offLabel: null
+  onLabel: null
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Lightswitch

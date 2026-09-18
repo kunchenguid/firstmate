@@ -1,0 +1,10 @@
+columnSuffix: null
+handle: topNavigationBackgroundColor
+instructions: null
+name: 'Top Navigation Background Color'
+searchable: true
+settings:
+  allowCustomColors: true
+translationKeyFormat: null
+translationMethod: site
+type: craft\fields\Color

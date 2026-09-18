@@ -1,0 +1,22 @@
+columnSuffix: null
+handle: color2
+instructions: null
+name: 'Background Properties - Background Color - Color'
+searchable: true
+settings:
+  allowSelfRelations: false
+  branchLimit: null
+  defaultPlacement: end
+  maintainHierarchy: true
+  maxRelations: null
+  minRelations: null
+  selectionLabel: 'Add Color'
+  showCardsInGrid: false
+  showSiteMenu: true
+  source: 'group:670ffd71-25be-4ec2-9d16-631c452c5c85' # Site Colors
+  targetSiteId: null
+  validateRelatedElements: false
+  viewMode: list
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Categories

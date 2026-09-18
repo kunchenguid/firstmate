@@ -1,0 +1,165 @@
+columnSuffix: null
+handle: columnWidth
+instructions: null
+name: 'Column Width'
+searchable: true
+settings:
+  customOptions: false
+  options:
+    -
+      __assoc__:
+        -
+          - label
+          - '1'
+        -
+          - value
+          - '1'
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - '2'
+        -
+          - value
+          - '2'
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - '3'
+        -
+          - value
+          - '3'
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - '4'
+        -
+          - value
+          - '4'
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - '5'
+        -
+          - value
+          - '5'
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - '6'
+        -
+          - value
+          - '6'
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - '7'
+        -
+          - value
+          - '7'
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - '8'
+        -
+          - value
+          - '8'
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - '9'
+        -
+          - value
+          - '9'
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - '10'
+        -
+          - value
+          - '10'
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - '11'
+        -
+          - value
+          - '11'
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - '12'
+        -
+          - value
+          - '12'
+        -
+          - default
+          - '1'
+    -
+      __assoc__:
+        -
+          - label
+          - 'Even Space'
+        -
+          - value
+          - evenSpace
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - Auto
+        -
+          - value
+          - auto
+        -
+          - default
+          - ''
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Dropdown

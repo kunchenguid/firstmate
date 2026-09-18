@@ -1,0 +1,55 @@
+color: null
+fieldLayouts:
+  6c86abde-8614-4d6a-aab5-b4bf4a77b9eb:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: a64d618c-89ce-44c5-9fb5-5ad3bb3ff0a4 # Subhead
+            handle: null
+            includeInCards: true
+            instructions: null
+            label: Subhead
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 8f9ce990-e6e7-4be7-8a1c-838a6c8fc195
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: b8f6d61b-084a-4e46-abb0-c32bdac2aa1b # Post Header Content - Post Header Content - Post Header Content
+            handle: postHeaderContent
+            includeInCards: false
+            instructions: null
+            label: 'Post Header Content'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 35323422-785d-4823-a0cd-03accd56eda5
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: b492b8e1-b1b7-477a-bdde-c9505bf9c366
+        userCondition: null
+handle: subhead
+hasTitleField: false
+icon: null
+name: 'Post Header Content'
+showSlugField: false
+showStatusField: true
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site

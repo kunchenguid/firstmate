@@ -1,0 +1,25 @@
+columnSuffix: null
+handle: richText2
+instructions: 'This is displayed in the white box in the header'
+name: 'Header Builder - Header Builder - Introduction Text'
+searchable: true
+settings:
+  availableTransforms: '*'
+  availableVolumes: ''
+  characterLimit: null
+  ckeConfig: 1dbd8cc1-8139-41b5-8949-331d6c73bfd5 # Standard
+  createButtonLabel: null
+  defaultTransform: null
+  expandEntryButtons: false
+  fullGraphqlData: false
+  parseEmbeds: false
+  purifierConfig: null
+  purifyHtml: true
+  showUnpermittedFiles: false
+  showUnpermittedVolumes: false
+  showWordCount: false
+  sourceEditingGroups: '*'
+  wordLimit: null
+translationKeyFormat: null
+translationMethod: none
+type: craft\ckeditor\Field

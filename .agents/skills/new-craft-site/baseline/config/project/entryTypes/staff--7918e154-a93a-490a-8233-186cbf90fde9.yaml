@@ -1,0 +1,159 @@
+color: null
+fieldLayouts:
+  c2acc1d7-0fea-4e18-911b-e5b1b593a12c:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            autocapitalize: true
+            autocomplete: false
+            autocorrect: true
+            class: null
+            dateAdded: '2024-11-15T14:41:13+00:00'
+            disabled: false
+            elementCondition: null
+            id: null
+            includeInCards: false
+            inputType: null
+            instructions: null
+            label: null
+            max: null
+            min: null
+            name: null
+            orientation: null
+            placeholder: null
+            providesThumbs: false
+            readonly: false
+            required: true
+            size: null
+            step: null
+            tip: null
+            title: null
+            type: craft\fieldlayoutelements\entries\EntryTitleField
+            uid: 966640fd-b45c-4c65-ac9f-0e961d439da9
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-11-15T16:01:03+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 0da09cff-7ad7-4db1-8e3a-6fe76ddf6f39 # Image
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: 'Profile Picture'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 7a5a096f-ba7a-46fc-a960-281882db0523
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-11-15T16:01:03+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 4ab01dec-3b51-4886-a539-52ddb4415f98 # Email Address
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 17cb0d7a-dc37-4261-bcc5-2c1414b9c18d
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-11-15T16:01:03+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: d7625746-583a-4de7-8eea-844315fb714c # Phone Number
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 0dc0ecc3-1b4a-4843-8071-ac502d508e3f
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-11-15T16:01:03+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 1df3dba8-cc15-4679-8193-926b38d5b40d # NMLS #
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 93bc75c2-0abf-4ad7-b3b1-24d059461a62
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-11-15T16:01:03+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: a6ca2e81-39bb-460f-9e00-58a7eb6b603c # Mobile Mortgage Link
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 99cb902f-eab7-4fd4-820f-191aba7f3de0
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: 29b8b132-e944-4abf-bb00-733704f786e8
+        userCondition: null
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2025-01-09T15:17:09+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 3edfbf04-acb7-4f07-9438-d402b314d4f7 # Author Bio
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 9e070fea-8c07-4172-823c-2d3e0adc14f5
+            userCondition: null
+            warning: null
+            width: 100
+        name: Blogs
+        uid: 5b294153-fb80-4c57-8dd0-af746cbec4c1
+        userCondition: null
+handle: staff
+hasTitleField: true
+icon: user-group
+name: Staff
+showSlugField: true
+showStatusField: true
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site

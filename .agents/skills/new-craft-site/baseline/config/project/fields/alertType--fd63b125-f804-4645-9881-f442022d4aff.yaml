@@ -1,0 +1,44 @@
+columnSuffix: null
+handle: alertType
+instructions: null
+name: 'Alert Type'
+searchable: false
+settings:
+  customOptions: false
+  options:
+    -
+      __assoc__:
+        -
+          - label
+          - Information
+        -
+          - value
+          - information
+        -
+          - default
+          - '1'
+    -
+      __assoc__:
+        -
+          - label
+          - Warning
+        -
+          - value
+          - warning
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - Danger
+        -
+          - value
+          - danger
+        -
+          - default
+          - ''
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Dropdown

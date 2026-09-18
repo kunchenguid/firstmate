@@ -1,0 +1,33 @@
+columnSuffix: null
+handle: portfolioDisplayType
+instructions: null
+name: 'Portfolio Display Type'
+searchable: false
+settings:
+  customOptions: false
+  options:
+    -
+      __assoc__:
+        -
+          - label
+          - Featured
+        -
+          - value
+          - featured
+        -
+          - default
+          - '1'
+    -
+      __assoc__:
+        -
+          - label
+          - Upcoming
+        -
+          - value
+          - upcoming
+        -
+          - default
+          - ''
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Dropdown

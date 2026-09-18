@@ -1,0 +1,315 @@
+columnSuffix: null
+handle: columnProperties3
+instructions: null
+name: 'Multi Column - Column Item - Column Properties'
+searchable: true
+settings:
+  addRowLabel: 'Add a new column property'
+  columns:
+    __assoc__:
+      -
+        - col3
+        -
+          __assoc__:
+            -
+              - heading
+              - 'Column Behavior'
+            -
+              - handle
+              - columnBehavior
+            -
+              - width
+              - 20%
+            -
+              - type
+              - select
+            -
+              - options
+              -
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Width
+                    -
+                      - value
+                      - col-
+                    -
+                      - default
+                      - true
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Offset
+                    -
+                      - value
+                      - offset-
+                    -
+                      - default
+                      - false
+      -
+        - col1
+        -
+          __assoc__:
+            -
+              - heading
+              - 'Column Breakpoint'
+            -
+              - handle
+              - columnBreakpoint
+            -
+              - width
+              - ''
+            -
+              - type
+              - select
+            -
+              - options
+              -
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - 'None : <576px '
+                    -
+                      - value
+                      - ''
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - 'SM: ≥540px'
+                    -
+                      - value
+                      - sm
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - 'MD: ≥720px'
+                    -
+                      - value
+                      - md
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - 'LG: ≥992px'
+                    -
+                      - value
+                      - lg
+                    -
+                      - default
+                      - true
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - 'XL: ≥1200px'
+                    -
+                      - value
+                      - xl
+                    -
+                      - default
+                      - false
+      -
+        - col2
+        -
+          __assoc__:
+            -
+              - heading
+              - 'Column Width'
+            -
+              - handle
+              - columnWidth
+            -
+              - width
+              - ''
+            -
+              - type
+              - select
+            -
+              - options
+              -
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - '1'
+                    -
+                      - value
+                      - '-1'
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - '2'
+                    -
+                      - value
+                      - '-2'
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - '3'
+                    -
+                      - value
+                      - '-3'
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - '4'
+                    -
+                      - value
+                      - '-4'
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - '5'
+                    -
+                      - value
+                      - '-5'
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - '6'
+                    -
+                      - value
+                      - '-6'
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - '7'
+                    -
+                      - value
+                      - '-7'
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - '8'
+                    -
+                      - value
+                      - '-8'
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - '9'
+                    -
+                      - value
+                      - '-9'
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - '10'
+                    -
+                      - value
+                      - '-10'
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - '11'
+                    -
+                      - value
+                      - '-11'
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - '12'
+                    -
+                      - value
+                      - '-12'
+                    -
+                      - default
+                      - true
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - Auto
+                    -
+                      - value
+                      - '-auto'
+                    -
+                      - default
+                      - false
+                -
+                  __assoc__:
+                    -
+                      - label
+                      - 'Even Space'
+                    -
+                      - value
+                      - ''
+                    -
+                      - default
+                      - false
+  defaults:
+    -
+      __assoc__:
+        -
+          - col3
+          - col-
+        -
+          - col1
+          - lg
+        -
+          - col2
+          - '-12'
+  maxRows: null
+  minRows: 1
+  staticRows: false
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Table

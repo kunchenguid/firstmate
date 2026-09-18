@@ -1,0 +1,31 @@
+columnSuffix: null
+handle: overlayBackgroundProperties
+instructions: null
+name: 'Overlay Background Properties'
+searchable: true
+settings:
+  createButtonLabel: null
+  defaultIndexViewMode: cards
+  enableVersioning: false
+  entryTypes:
+    -
+      __assoc__:
+        -
+          - uid
+          - 4e10c1b3-9a6c-4c4d-81d8-2b01505d7b8c # Background Color 2
+    -
+      __assoc__:
+        -
+          - uid
+          - 72a94308-88ae-40a2-a125-0858b5921477 # Background Image 2
+  includeTableView: false
+  maxEntries: 2
+  minEntries: null
+  pageSize: null
+  propagationKeyFormat: null
+  propagationMethod: all
+  showCardsInGrid: false
+  viewMode: blocks
+translationKeyFormat: null
+translationMethod: site
+type: craft\fields\Matrix

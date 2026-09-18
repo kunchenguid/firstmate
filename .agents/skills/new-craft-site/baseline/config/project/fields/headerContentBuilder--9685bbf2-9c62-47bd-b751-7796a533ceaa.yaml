@@ -1,0 +1,26 @@
+columnSuffix: null
+handle: headerContentBuilder
+instructions: 'Adding more blocks to this creates a slider.'
+name: 'Header Content Builder'
+searchable: false
+settings:
+  createButtonLabel: null
+  defaultIndexViewMode: cards
+  enableVersioning: false
+  entryTypes:
+    -
+      __assoc__:
+        -
+          - uid
+          - 98cac188-07a9-499c-853c-9b5f81dd20b8 # Header Builder Content
+  includeTableView: false
+  maxEntries: 1
+  minEntries: null
+  pageSize: null
+  propagationKeyFormat: null
+  propagationMethod: all
+  showCardsInGrid: false
+  viewMode: blocks
+translationKeyFormat: null
+translationMethod: site
+type: craft\fields\Matrix

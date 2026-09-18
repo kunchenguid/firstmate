@@ -1,0 +1,15 @@
+columnSuffix: yafmxtbw
+handle: eventStartDateTime
+instructions: null
+name: 'Event Start Date/Time'
+searchable: false
+settings:
+  max: null
+  min: null
+  minuteIncrement: 30
+  showDate: true
+  showTime: true
+  showTimeZone: true
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Date

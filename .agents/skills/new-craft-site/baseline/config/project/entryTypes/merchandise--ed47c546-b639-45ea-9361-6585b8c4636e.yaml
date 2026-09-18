@@ -1,0 +1,55 @@
+color: null
+fieldLayouts:
+  20b2680d-a54b-4aac-ade9-86d86891fe4a:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:33+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 1c60605e-f8f7-4d57-8df7-b1f6217eb24c # Merchandise - Merchandise - Image
+            handle: image
+            includeInCards: false
+            instructions: null
+            label: Image
+            providesThumbs: true
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: b4ed733d-dc31-4be3-8d7d-b1abe2b498f5
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:33+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: e2014e16-1909-49f5-9121-adb626928c34 # Merchandise - Merchandise - Merchandise URL
+            handle: null
+            includeInCards: true
+            instructions: null
+            label: 'Merchandise URL'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 27bea836-e5f2-4005-bbdd-7f1c1e773ed5
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: 838acdff-f3db-4484-9a7a-42328e6063ae
+        userCondition: null
+handle: merchandise
+hasTitleField: false
+icon: null
+name: Merchandise
+showSlugField: false
+showStatusField: true
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site

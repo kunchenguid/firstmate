@@ -1,0 +1,26 @@
+columnSuffix: ipdekwxi
+handle: answer
+instructions: null
+name: 'FAQ - FAQ - Answer'
+searchable: false
+settings:
+  availableTransforms: '*'
+  availableVolumes: '*'
+  characterLimit: null
+  ckeConfig: 124e8633-4881-4ff9-81fc-9694b5d51690 # Default
+  createButtonLabel: null
+  defaultTransform: null
+  expandEntryButtons: false
+  fullGraphqlData: false
+  parseEmbeds: false
+  purifierConfig: null
+  purifyHtml: true
+  showUnpermittedFiles: false
+  showUnpermittedVolumes: false
+  showWordCount: false
+  sourceEditingGroups:
+    - __ADMINS__
+  wordLimit: null
+translationKeyFormat: null
+translationMethod: none
+type: craft\ckeditor\Field

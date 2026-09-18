@@ -1,0 +1,108 @@
+color: null
+fieldLayouts:
+  7b9b5544-d611-4922-9763-c754716e0908:
+    cardView:
+      - 'layoutElement:b15239f8-324f-4112-ada6-52383fa6b2e1'
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: d2ee9c8c-6d21-4053-a299-2436147be5a5 # Address - Address - Address Title
+            handle: null
+            includeInCards: true
+            instructions: null
+            label: 'Address Title'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: b15239f8-324f-4112-ada6-52383fa6b2e1
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 78b6d166-5e56-4da6-9d80-f0da4e6ac7d9 # Address - Address - Street Address
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: 'Street Address'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: c9960a28-1a9e-477c-8af9-46cc92fcbb9e
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 9c576382-d9b4-4730-b435-34d2cb0ce1d1 # Address - Address - City
+            handle: city
+            includeInCards: false
+            instructions: null
+            label: City
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 50f1fb83-f448-4b5a-8640-95e7732b9226
+            userCondition: null
+            warning: null
+            width: 50
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 77495ad9-9c7a-45ff-9fd5-4596d214dc23 # Address - Address - State
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: State
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 5ad4d47d-a6c3-418a-8ef3-dc19864df4f2
+            userCondition: null
+            warning: null
+            width: 25
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 2aa9b25b-f0fb-4fdc-b81b-339ffa12cb86 # Address - Address - Zip
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: Zip
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 16f471af-facb-40c7-9803-659cf68da31d
+            userCondition: null
+            warning: null
+            width: 25
+        name: Content
+        uid: 12d3e676-0cc3-4f77-ba69-bd6b687e5312
+        userCondition: null
+handle: address
+hasTitleField: false
+icon: null
+name: Address
+showSlugField: false
+showStatusField: true
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site

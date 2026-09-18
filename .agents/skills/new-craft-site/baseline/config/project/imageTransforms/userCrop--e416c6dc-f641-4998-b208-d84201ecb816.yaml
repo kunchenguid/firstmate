@@ -1,0 +1,11 @@
+fill: null
+format: null
+handle: userCrop
+height: 300
+interlace: none
+mode: crop
+name: 'User Crop'
+position: top-center
+quality: null
+upscale: true
+width: 300

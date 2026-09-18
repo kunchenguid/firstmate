@@ -1,0 +1,77 @@
+columnSuffix: null
+handle: heroHeight
+instructions: 'Enter in a number to set as the hero height. Defaults to 500px.'
+name: 'Hero Height'
+searchable: true
+settings:
+  customOptions: false
+  options:
+    -
+      __assoc__:
+        -
+          - label
+          - 200
+        -
+          - value
+          - 200
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - 300
+        -
+          - value
+          - 300
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - 400
+        -
+          - value
+          - 400
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - 500
+        -
+          - value
+          - 500
+        -
+          - default
+          - 1
+    -
+      __assoc__:
+        -
+          - label
+          - 600
+        -
+          - value
+          - 600
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - 700
+        -
+          - value
+          - 700
+        -
+          - default
+          - ''
+translationKeyFormat: null
+translationMethod: site
+type: craft\fields\Dropdown

@@ -1,0 +1,22 @@
+columnSuffix: null
+handle: portfolioCategory
+instructions: null
+name: 'Portfolio Category'
+searchable: false
+settings:
+  allowSelfRelations: false
+  branchLimit: null
+  defaultPlacement: end
+  maintainHierarchy: true
+  maxRelations: null
+  minRelations: null
+  selectionLabel: null
+  showCardsInGrid: false
+  showSiteMenu: false
+  source: 'group:4299d306-6903-4506-acdc-6ce205a710fa'
+  targetSiteId: null
+  validateRelatedElements: false
+  viewMode: null
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Categories

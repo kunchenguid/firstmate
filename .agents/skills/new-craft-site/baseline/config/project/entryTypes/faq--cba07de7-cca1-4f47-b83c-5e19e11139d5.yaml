@@ -1,0 +1,55 @@
+color: null
+fieldLayouts:
+  ee243818-183f-48a3-abfd-1c39521c8406:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:32+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: c5584041-fb4e-42d6-8708-f594813c1b41 # FAQ - FAQ - Question
+            handle: null
+            includeInCards: true
+            instructions: null
+            label: Question
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 24a148ac-67d2-4ef2-95f5-1b1e34e053df
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:32+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 2311c82f-957e-4a4a-9a89-4d7c82be16e1 # FAQ - FAQ - Answer
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: Answer
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 6b46ebcc-9bd9-4f61-a4bb-08f78e6798b4
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: 69aa7ebe-025e-4c4b-9610-164eab6ed533
+        userCondition: null
+handle: faq
+hasTitleField: false
+icon: null
+name: FAQ
+showSlugField: false
+showStatusField: true
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site

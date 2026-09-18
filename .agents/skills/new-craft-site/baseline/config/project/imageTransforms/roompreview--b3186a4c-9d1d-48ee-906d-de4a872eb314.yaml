@@ -1,0 +1,11 @@
+fill: null
+format: jpg
+handle: roompreview
+height: 550
+interlace: none
+mode: crop
+name: roomPreview
+position: center-center
+quality: 60
+upscale: true
+width: 800

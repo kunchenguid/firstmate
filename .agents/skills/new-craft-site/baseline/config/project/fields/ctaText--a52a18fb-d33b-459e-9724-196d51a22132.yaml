@@ -1,0 +1,16 @@
+columnSuffix: null
+handle: ctaText
+instructions: null
+name: 'CTA Text'
+searchable: true
+settings:
+  byteLimit: null
+  charLimit: null
+  code: false
+  initialRows: 4
+  multiline: false
+  placeholder: Download
+  uiMode: normal
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\PlainText

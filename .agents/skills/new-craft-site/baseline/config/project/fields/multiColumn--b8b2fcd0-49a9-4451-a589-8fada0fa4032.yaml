@@ -1,0 +1,26 @@
+columnSuffix: null
+handle: multiColumn
+instructions: null
+name: 'Multi Column'
+searchable: true
+settings:
+  createButtonLabel: 'New Column'
+  defaultIndexViewMode: cards
+  enableVersioning: false
+  entryTypes:
+    -
+      __assoc__:
+        -
+          - uid
+          - d89afe87-68a3-4fbf-bd5e-dd1869ca520a # Column Item
+  includeTableView: false
+  maxEntries: null
+  minEntries: null
+  pageSize: null
+  propagationKeyFormat: null
+  propagationMethod: all
+  showCardsInGrid: false
+  viewMode: blocks
+translationKeyFormat: null
+translationMethod: site
+type: craft\fields\Matrix

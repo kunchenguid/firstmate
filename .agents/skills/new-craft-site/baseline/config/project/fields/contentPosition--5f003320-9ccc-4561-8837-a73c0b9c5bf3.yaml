@@ -1,0 +1,33 @@
+columnSuffix: null
+handle: contentPosition
+instructions: null
+name: 'Content Position'
+searchable: true
+settings:
+  customOptions: false
+  options:
+    -
+      __assoc__:
+        -
+          - label
+          - Left
+        -
+          - value
+          - ''
+        -
+          - default
+          - 1
+    -
+      __assoc__:
+        -
+          - label
+          - Right
+        -
+          - value
+          - order-lg-last
+        -
+          - default
+          - ''
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Dropdown

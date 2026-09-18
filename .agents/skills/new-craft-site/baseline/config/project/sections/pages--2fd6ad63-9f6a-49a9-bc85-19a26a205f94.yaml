@@ -1,0 +1,35 @@
+defaultPlacement: end
+enableVersioning: true
+entryTypes:
+  -
+    uid: 93be3a2e-cd8c-4e86-988b-eaff63a665a9 # Page
+  -
+    uid: 33799b51-9f1b-4628-a9cb-4ae1b857a184 # Product
+  -
+    uid: 9229e495-1fa9-4235-9b71-c4a545732665 # Web Link
+handle: pages
+maxAuthors: 1
+name: Pages
+previewTargets:
+  -
+    __assoc__:
+      -
+        - label
+        - 'Primary entry page'
+      -
+        - refresh
+        - '1'
+      -
+        - urlFormat
+        - '{url}'
+propagationMethod: all
+siteSettings:
+  a57193b9-dd25-415d-a670-e4b6a0c7b8cb: # $SYSTEM_NAME
+    enabledByDefault: true
+    hasUrls: true
+    template: index
+    uriFormat: '{% if object.level == 1 %}{slug}{% else %}{parent.uri}/{slug}{% endif %}'
+structure:
+  maxLevels: null
+  uid: 231c8edf-fba7-47c7-9b84-d2b55ac7bca5
+type: structure

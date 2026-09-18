@@ -1,0 +1,17 @@
+columnSuffix: null
+handle: tableMaker
+instructions: null
+name: 'Table Maker'
+searchable: false
+settings:
+  columnsAddRowLabel: null
+  columnsInstructions: null
+  columnsLabel: null
+  enableAlignmentColumn: true
+  enableWidthColumn: true
+  rowsAddRowLabel: null
+  rowsInstructions: null
+  rowsLabel: null
+translationKeyFormat: null
+translationMethod: none
+type: verbb\tablemaker\fields\TableMakerField
