@@ -1513,9 +1513,13 @@ families_for_changed_path() {
       # here selects the suites it can break rather than only
       # pure-contract-unit. Selection expands each emitted family to all of its
       # suites, so reasoning about which suites a needle matches, rather than
-      # which families, gives the wrong answer.
+      # which families, gives the wrong answer. The reference scan is not
+      # transitive, so match the helpers that source tests/lib.sh as well:
+      # several suites reach this owner only through one of them and never
+      # spell lib.sh themselves.
       printf '%s\n' pure-contract-unit
-      families_for_test_reference lib.sh \
+      families_for_test_reference lib.sh fixtures.sh wake-helpers.sh \
+        secondmate-helpers.sh \
         || printf '%s\n' "__unmapped__:$path"
       ;;
     bin/fm-test-run.sh)
