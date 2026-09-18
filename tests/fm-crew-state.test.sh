@@ -4042,19 +4042,21 @@ SH
   pass "a status append during snapshot leaves the failure authoritative"
 }
 
-# The original title case: the crew declared a bounded external wait AFTER the
-# failed run started, and the declaration was silently dropped, so the pane kept
-# producing wedge-suspect wakes for healthy work.
+# The original title case: the crew declared a bounded external wait after a
+# failed reading the ledger cannot bind to this run, and the declaration was
+# silently dropped, so the pane kept producing wedge-suspect wakes for healthy
+# work. The ledger row here sits at a head this worktree does not carry, so the
+# failure is not provably current and the crew's own later word is the better
+# witness.
 test_later_declared_pause_supersedes_failed_reading() {
   reset_fakes
-  local d short; d=$(new_case stale-failed-later-pause)
+  local d; d=$(new_case stale-failed-later-pause)
   make_repo_on_branch "$d/wt" fm/feat-s3
-  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-s3.meta" "window=fm:fm-feat-s3" "worktree=$d/wt" "kind=ship"
   printf 'paused: polling the CI run myself\n' > "$d/state/feat-s3.status"
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s3)"
-  FM_FAKE_RUNS_LIST="  failed     fm/feat-s3 ${short}  $(ledger_stamp_minutes_ago 60)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s3 f0f0f0f0  $(ledger_stamp_minutes_ago 60)"
   local out; out=$(run_crew_state "$d" feat-s3)
   assert_contains "$out" "state: paused" "the newer declared pause outranks the failed run"
   assert_contains "$out" "source: status-log" "the pause is status-log sourced"
@@ -4067,14 +4069,13 @@ test_later_declared_pause_supersedes_failed_reading() {
 # same defect and needs the same cover.
 test_later_declared_pause_supersedes_cancelled_reading() {
   reset_fakes
-  local d short; d=$(new_case stale-cancelled-later-pause)
+  local d; d=$(new_case stale-cancelled-later-pause)
   make_repo_on_branch "$d/wt" fm/feat-s4
-  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-s4.meta" "window=fm:fm-feat-s4" "worktree=$d/wt" "kind=ship"
   printf 'paused: waiting on the upstream release\n' > "$d/state/feat-s4.status"
   FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-s4)"
-  FM_FAKE_RUNS_LIST="  cancelled  fm/feat-s4 ${short}  $(ledger_stamp_minutes_ago 60)"
+  FM_FAKE_RUNS_LIST="  cancelled  fm/feat-s4 f0f0f0f0  $(ledger_stamp_minutes_ago 60)"
   local out; out=$(run_crew_state "$d" feat-s4)
   assert_contains "$out" "state: paused" "the newer declared pause outranks the cancelled run"
   assert_contains "$out" "source: status-log" "the pause is status-log sourced"
@@ -4086,19 +4087,39 @@ test_later_declared_pause_supersedes_cancelled_reading() {
 # left a terminal done line the failed run outranked.
 test_later_declared_done_supersedes_failed_reading() {
   reset_fakes
-  local d short; d=$(new_case stale-failed-later-done)
+  local d; d=$(new_case stale-failed-later-done)
   make_repo_on_branch "$d/wt" fm/feat-s5
-  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-s5.meta" "window=fm:fm-feat-s5" "worktree=$d/wt" "kind=ship"
   printf 'done: PR https://github.com/o/r/pull/2890 merged\n' > "$d/state/feat-s5.status"
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s5)"
-  FM_FAKE_RUNS_LIST="  failed     fm/feat-s5 ${short}  $(ledger_stamp_minutes_ago 60)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s5 f0f0f0f0  $(ledger_stamp_minutes_ago 60)"
   local out; out=$(run_crew_state "$d" feat-s5)
   assert_contains "$out" "state: done" "the newer terminal done line outranks the failed run"
   assert_contains "$out" "source: status-log" "the completion is status-log sourced"
   assert_contains "$out" "run failed" "the superseded failed run stays visible in the detail"
   pass "a later declared done supersedes a stale failed reading"
+}
+
+# The ledger date column stamps a run's START, so a declaration written after
+# that stamp can still predate the moment the run finished. When the ledger row
+# IS the attributed run, no mid-run declaration may outrank its failure.
+test_mid_run_pause_does_not_mask_current_run_failure() {
+  reset_fakes
+  local d short; d=$(new_case mid-run-pause-current-failure)
+  make_repo_on_branch "$d/wt" fm/feat-s5b
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s5b.meta" "window=fm:fm-feat-s5b" "worktree=$d/wt" "kind=ship"
+  printf 'paused: polling the CI run myself\n' > "$d/state/feat-s5b.status"
+  backdate_status_minutes_ago "$d/state/feat-s5b.status" 40
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s5b)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s5b ${short}  $(ledger_stamp_minutes_ago 60)"
+  local out; out=$(run_crew_state "$d" feat-s5b)
+  assert_contains "$out" "state: failed" "a mid-run pause cannot mask the current run's failure"
+  assert_contains "$out" "source: run-step" "the failure stays run-step sourced"
+  assert_not_contains "$out" "state: paused" "the declaration never becomes the reported state"
+  pass "a mid-run pause does not mask the current run's failure"
 }
 
 # Opposite direction 1: a done line the crew appended BEFORE its validation run
@@ -6655,6 +6676,7 @@ test_status_append_during_ordering_snapshot_keeps_failure
 test_later_declared_pause_supersedes_failed_reading
 test_later_declared_pause_supersedes_cancelled_reading
 test_later_declared_done_supersedes_failed_reading
+test_mid_run_pause_does_not_mask_current_run_failure
 test_pre_run_done_log_does_not_mask_failed_run
 test_same_minute_done_log_does_not_mask_failed_run
 test_failed_run_without_ordering_evidence_still_surfaces
