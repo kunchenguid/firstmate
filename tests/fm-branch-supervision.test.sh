@@ -964,37 +964,47 @@ EOF
 }
 
 test_away_spend_cap_is_rechecked_under_the_task_set_lock() {
-  local home root out_a out_b status_a status_b metas
+  local home root out hook i
   home="$TMP_ROOT/away-cap-lock-home"
   root="$TMP_ROOT/away-cap-lock-root"
   mkdir -p "$home/state" "$home/data" "$home/config" "$root"
   git init -q -b main "$root"
   git -C "$root" commit -q --allow-empty -m init
   ln -s "$ROOT/bin" "$root/bin"
-  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
-  cat > "$home/data/backlog.md" <<'EOF'
-## Queued
-- [ ] task-q1 - first queued spawn
-- [ ] task-q2 - second queued spawn
-
-## Done
-EOF
   FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" propose --spend 1 >/dev/null || fail "away propose failed"
   FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null || fail "away confirm failed"
 
+  hook="$home/after-early-cap"
+  cat > "$hook" <<HOOK
+#!/usr/bin/env bash
+set -eu
+: > "$home/early-cap-passed"
+i=0
+while [ ! -f "$home/competitor-published" ]; do
+  i=\$((i + 1))
+  [ "\$i" -lt 200 ] || exit 1
+  sleep 0.05
+done
+HOOK
+  chmod +x "$hook"
+
+  FM_TEST_SPAWN_AFTER_EARLY_CAP="$hook" \
   FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
     "$ROOT/bin/fm-spawn.sh" task-q1 --mode no-mistakes --yolo off \
     > "$home/q1.out" 2>&1 &
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
-    "$ROOT/bin/fm-spawn.sh" task-q2 --mode no-mistakes --yolo off \
-    > "$home/q2.out" 2>&1 &
+  i=0
+  while [ ! -f "$home/early-cap-passed" ]; do
+    i=$((i + 1))
+    [ "$i" -lt 200 ] || fail "spawn never reached the early spend-cap check: $(cat "$home/q1.out" 2>/dev/null || true)"
+    sleep 0.05
+  done
+  fm_write_meta "$home/state/task-live.meta" "window=fm-task-live" "kind=ship"
+  : > "$home/competitor-published"
   wait || true
-  out_a=$(cat "$home/q1.out" 2>/dev/null || true)
-  out_b=$(cat "$home/q2.out" 2>/dev/null || true)
-  metas=0
-  [ -f "$home/state/task-q1.meta" ] && metas=$((metas + 1))
-  [ -f "$home/state/task-q2.meta" ] && metas=$((metas + 1))
-  [ "$metas" -le 1 ] || fail "two concurrent spawns both published under spend cap 1: q1=$out_a q2=$out_b"
+  out=$(cat "$home/q1.out" 2>/dev/null || true)
+  assert_contains "$out" "caps concurrent workers at 1 and 1 ordinary task(s) are live" \
+    "the paused spawn did not recheck the cap after the competitor published: $out"
+  [ ! -f "$home/state/task-q1.meta" ] || fail "the stale-count spawn published after a competitor landed"
   pass "the away spend cap is rechecked under the task-set lock so concurrent spawns cannot both publish"
 }
 

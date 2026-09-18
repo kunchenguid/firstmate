@@ -126,7 +126,6 @@ import {
   type BranchPickerItem,
 } from "./lib/fm-branch-model-picker.ts";
 import {
-  classifyFirstmateCurrentOperationalText,
   classifyFirstmateOperationalText,
   encodeFirstmateOperationalInputWith,
 } from "./lib/fm-operational-input.ts";
@@ -230,6 +229,31 @@ const scriptEnv = {
 
 function offerEligible(offer: BranchDispatchOffer): boolean {
   return offer.eligible === true;
+}
+
+function isProcessingCustomMessage(message: { role?: string; customType?: string }): boolean {
+  return message.role === "custom" && message.customType === PROCESSING_MESSAGE_TYPE;
+}
+
+function wakeAcceptedOnlyBecauseAway(message: string): boolean {
+  if (!afkPostureRecordPresent(state)) return false;
+  const heartbeat = /^heartbeat($|:)/.test(message);
+  if (/^check:/.test(message)) return true;
+  const attended = scopeForUnreadWake(state, heartbeat, false);
+  const triggerKeys = /^signal:/.test(message)
+    ? message
+      .slice("signal:".length)
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((path) => path.split("/").pop() ?? path)
+    : /^stale:/.test(message)
+      ? [message.slice("stale:".length).trim().split(/\s+/, 1)[0]].filter(Boolean)
+      : [];
+  const taskIdentity = (key: string): string =>
+    attended.taskByWakeKey[key] ?? attended.taskByWakeKey[key.replace(/^fm-/, "")] ?? key;
+  const needsDecisionTasks = new Set(attended.needsDecisionKeys.map(taskIdentity));
+  if (triggerKeys.some((key) => needsDecisionTasks.has(taskIdentity(key)))) return true;
+  return !attended.eligible;
 }
 
 // Pi persists provider failures as ordinary assistant messages and resolves
@@ -653,7 +677,6 @@ export default function (pi: ExtensionAPI) {
   // session generation.
   type ProcessingState = { sequences: string; through: number; triggered: number; pending: boolean; nextTurnQueued: boolean };
   let processing: ProcessingState | null = null;
-  let queuedProcessingDelivery = false;
   let processedInitializedGeneration = -1;
   // One revision for BOTH selections: a model or effort change invalidates an
   // in-flight branch build exactly the same way.
@@ -1088,7 +1111,6 @@ export default function (pi: ExtensionAPI) {
     if (processing.triggered < PROCESSING_TRIGGERED_ATTEMPTS) {
       processing.triggered += 1;
       processing.pending = true;
-      queuedProcessingDelivery = true;
       pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
     } else if (!processing.nextTurnQueued) {
       processing.nextTurnQueued = true;
@@ -1448,7 +1470,7 @@ ${context.command}
     return `\n\n${AWAY_POSTURE_TAIL}\n${readback || "(the record's read-back could not be rendered; treat every grant and clause as unavailable and hold on doubt)"}`;
   }
 
-  function enqueueWake(message: string, acceptedGeneration: number, recoveryProbe = false, acceptedAway = false): Promise<void> {
+  function enqueueWake(message: string, acceptedGeneration: number, recoveryProbe = false, acceptedAwayOnly = false): Promise<void> {
     const acceptedSelectionRevision = branchSelectionRevision;
     const delivery = branchChain
       .then(async () => {
@@ -1489,7 +1511,7 @@ ${context.command}
         // metadata could not be read safely, or an unresolvable task-local
         // row) still falls back to main.
         if (scope.status === "empty" || (!scope.corrupted && scope.eligibleSeqs.length === 0)) {
-          if (acceptedAway) {
+          if (acceptedAwayOnly) {
             throw new Error("accepted away-only wake is no longer branch-eligible");
           }
           return;
@@ -1626,7 +1648,7 @@ ${context.command}
     if (branchBroken && !recoveryProbe) return; // main owns every wake inside the cooldown window
     if (!collectCurrentMainDialog()) return;
     if (recoveryProbe && providerRecovery) providerRecovery.probeInFlight = true;
-    offer.accept(enqueueWake(offer.message, generation, recoveryProbe, afkPostureRecordPresent(state)));
+    offer.accept(enqueueWake(offer.message, generation, recoveryProbe, wakeAcceptedOnlyBecauseAway(offer.message)));
   });
 
   // Pi awaits every extension event handler, so an awaited ownership read
@@ -1646,14 +1668,6 @@ ${context.command}
     // Stage it verbatim and remember the future persisted index for turn_end's
     // duplicate suppression. Operational extension injections are not dialog.
     const prompt = event.prompt.trim();
-    if (
-      classifyFirstmateCurrentOperationalText(prompt)?.trim() === "branch-outcome" &&
-      afkPostureRecordPresent(state)
-    ) {
-      processing = null;
-      ctx?.abort?.();
-      return;
-    }
     if (!prompt || isOperationalUserText(prompt)) return;
     const file = currentMainSession.getSessionFile() ?? "";
     const index = mirrorCollection.collectAnchor?.index ?? currentMainSession.getEntries().length;
@@ -1661,18 +1675,20 @@ ${context.command}
     mirrorCollection.stagedCaptain = { file, index, text: prompt };
   });
 
-  pi.on?.("agent_start", (_event, ctx) => {
+  pi.on?.("agent_start", () => {
     mainStreaming = true;
     // Pi delivers a queued nextTurn copy with the prompt that starts this run,
     // so a fresh copy may be queued again once this run settles unacknowledged.
     if (processing) processing.nextTurnQueued = false;
-    if (queuedProcessingDelivery && afkPostureRecordPresent(state)) {
-      queuedProcessingDelivery = false;
-      processing = null;
-      ctx?.abort?.();
-      return;
-    }
-    queuedProcessingDelivery = false;
+  });
+  pi.on?.("context", (event, ctx) => {
+    if (!afkPostureRecordPresent(state)) return;
+    const messages = event.messages ?? [];
+    const kept = messages.filter((message) => !isProcessingCustomMessage(message));
+    if (kept.length === messages.length) return;
+    processing = null;
+    if (!kept.some((message) => message.role === "user")) ctx?.abort?.();
+    return { messages: kept };
   });
   pi.on?.("agent_end", () => {
     mainStreaming = false;
@@ -1685,7 +1701,6 @@ ${context.command}
   // reply that only paraphrased it - and is presented again.
   pi.on?.("agent_settled", async () => {
     mainStreaming = false;
-    queuedProcessingDelivery = false;
     if (processing) processing.pending = false;
     const settledGeneration = generation;
     await enqueueDelivery(async () => {

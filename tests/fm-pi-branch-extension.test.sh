@@ -600,7 +600,9 @@ const pi = {
 async function fire(event, payload, ctx) {
   const eventCtx = ctx;
   if (eventCtx?.sessionManager) activeMainSession = eventCtx.sessionManager;
-  for (const handler of piHandlers.get(event) ?? []) await handler(payload, eventCtx);
+  let result;
+  for (const handler of piHandlers.get(event) ?? []) result = await handler(payload, eventCtx);
+  return result;
 }
 function makeOffer(message, projects = [approvedProject], heartbeat = false, eligible = projects.length > 0 || heartbeat) {
   const offer = {
@@ -1692,9 +1694,11 @@ finishPrompt();
 await attendedOffer.settlement;
 globalThis.__fmOnBranchPrompt = undefined;
 
-// 2. A captain outcome reported while attended opens its processing request;
-// the record appearing before that request is consumed suppresses the first
-// queued delivery rather than letting it open a parked-main turn.
+// 2. A captain outcome reported while main is already streaming queues a
+// followUp that joins this run. The record appearing before that follow-up
+// is consumed must strip the typed processing message at the context
+// boundary for followUp, nextTurn, and a dedicated processing turn.
+await fire("agent_start", {}, defaultSessionCtx);
 const first = await report.execute("c1", { task: "task-d", verdict: "captain", summary: "PR https://example.com/pr/1 is ready for review" }, undefined, undefined, {});
 if (first.isError) throw new Error(`attended captain report failed: ${JSON.stringify(first)}`);
 const seq1 = JSON.parse(outcomeScript(["list", "--recent", "1"])).seq;
@@ -1703,16 +1707,41 @@ const pending = requests()[0];
 if (pending.message.customType !== "fm-branch-process") {
   throw new Error(`the first queued request was not a processing delivery: ${JSON.stringify(pending.message)}`);
 }
+if (pending.options.triggerTurn !== true || pending.options.deliverAs !== "followUp") {
+  throw new Error(`the first queued request was not a streaming followUp: ${JSON.stringify(pending.options)}`);
+}
 if (!pending.message.content.includes(`[seq ${seq1}]`)) {
   throw new Error(`the first queued request lost seq ${seq1}: ${pending.message.content}`);
 }
 contract(["propose", "--grant", "task-d"]);
 contract(["confirm"]);
+const processingMsg = { role: "custom", customType: pending.message.customType, content: pending.message.content, display: false };
 let aborted = false;
 const abortCtx = { ...defaultSessionCtx, abort() { aborted = true; } };
-await fire("before_agent_start", { prompt: pending.message.content }, abortCtx);
-await fire("agent_start", {}, abortCtx);
-if (!aborted) throw new Error("the first queued processing request was not suppressed under the record");
+const followUpResult = await fire("context", {
+  messages: [{ role: "user", content: "captain still in this turn" }, processingMsg],
+}, abortCtx);
+if (aborted) throw new Error("stripping a followUp processing message aborted the streaming captain turn");
+if (followUpResult?.messages?.some((message) => message.customType === "fm-branch-process")) {
+  throw new Error(`followUp processing was not stripped: ${JSON.stringify(followUpResult)}`);
+}
+if (!followUpResult?.messages?.some((message) => message.role === "user")) {
+  throw new Error("followUp suppression dropped the captain turn");
+}
+aborted = false;
+const nextTurnResult = await fire("context", {
+  messages: [{ role: "user", content: "watcher: FAILED - repair the cycle" }, processingMsg],
+}, abortCtx);
+if (aborted) throw new Error("stripping a nextTurn processing message aborted the watcher-failure turn");
+if (nextTurnResult?.messages?.some((message) => message.customType === "fm-branch-process")) {
+  throw new Error(`nextTurn processing was not stripped: ${JSON.stringify(nextTurnResult)}`);
+}
+aborted = false;
+const idleResult = await fire("context", { messages: [processingMsg] }, abortCtx);
+if (!aborted) throw new Error("a dedicated processing turn was not suppressed under the record");
+if (idleResult?.messages?.some((message) => message.customType === "fm-branch-process")) {
+  throw new Error(`dedicated processing was not stripped: ${JSON.stringify(idleResult)}`);
+}
 await fire("agent_end", {});
 await fire("agent_settled", {});
 if (requests().length !== 1) throw new Error("a request pending when the record appeared was re-presented to the parked main");
@@ -1801,8 +1830,8 @@ test_away_only_wake_rejects_when_record_is_archived_before_drain() {
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { fire, home, realRoot, bus, makeOffer, mainUserMessages }; })()`);
-const { fire, home, realRoot, bus, makeOffer, mainUserMessages } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, home, realRoot, bus, makeOffer, mainUserMessages, approvedProject }; })()`);
+const { fire, home, realRoot, bus, makeOffer, mainUserMessages, approvedProject } = globalThis.__t;
 import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 
@@ -1833,12 +1862,30 @@ if ((globalThis.__fmPrompts ?? []).length !== 0) {
 if (mainUserMessages.length !== 0) {
   throw new Error("the rejected settlement leaked a main user message from the branch");
 }
+
+contract(["propose"]);
+contract(["confirm"]);
+writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tbranch-driver.status\tsignal: branch-driver.status\n");
+const taskLocal = makeOffer("signal: branch-driver.status", [approvedProject], false, true);
+bus.emit("fm-branch-supervision:dispatch", taskLocal);
+if (!taskLocal.accepted) throw new Error("the attended-eligible away wake was refused at accept");
+writeFileSync(`${home}/state/.wake-queue`, "");
+const quiet = await taskLocal.settlement.then(() => null, (error) => error);
+if (quiet instanceof Error) {
+  throw new Error(`an attended-eligible wake threw after it was drained: ${quiet.message}`);
+}
+if ((globalThis.__fmPrompts ?? []).length !== 0) {
+  throw new Error(`a drained task-local wake prompted the branch: ${JSON.stringify(globalThis.__fmPrompts)}`);
+}
+if (mainUserMessages.length !== 0) {
+  throw new Error("a drained task-local wake opened a redundant main turn");
+}
 process.exit(0);
 EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "an accepted away-only wake must reject after archive: $out"
-  pass "an accepted away-only wake rejects settlement when the record is archived before drain"
+  pass "an accepted away-only wake rejects after archive, while a drained task-local wake stays a quiet no-op"
 }
 
 test_away_claimed_heartbeat_on_a_task_wake_lifts_task_scoping() {
