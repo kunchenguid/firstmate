@@ -257,7 +257,7 @@ tests/fm-crew-state.test.sh
 
 ## No-mistakes run ledger and terminal run fields
 
-The terminal-failed supersession rule in `bin/fm-crew-state.sh` reads the run ledger's date column and a terminal run's `pr` field, so both were confirmed against the installed CLI on 2026-09-04 with no-mistakes v1.60.2 (eb4e379).
+The terminal-failed precedence rules in `bin/fm-crew-state.sh` read the run ledger's rows and a terminal run's `pr` field, so both were confirmed against the installed CLI on 2026-09-04 with no-mistakes v1.60.2 (eb4e379).
 
 Column layout and newest-first ordering:
 
@@ -279,7 +279,7 @@ ls -la ~/.no-mistakes/logs/01M186HDY76G4RJHW5Z7CFHQDB
 ```
 
 Observed result: `intent.log`, the run's first step, has mtime `30 Aug 10:03`, matching that run's ledger date `2026-08-30 10:03`, while `ci.log`, its last step, has mtime `30 Aug 11:13`.
-So the column can prove a status-log record older than a run, and can never prove one newer than the run finished, which is why `fm_nm_ledger_epoch` is used in that one direction only.
+The column therefore cannot order a status-log record against the moment a run finished, which is why the reader orders the crew's own word against the run not at all and answers unknown where currency cannot be proven.
 
 A terminal run that never reached its `pr` step emits no `pr` field at all:
 

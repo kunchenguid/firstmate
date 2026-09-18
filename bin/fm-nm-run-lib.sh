@@ -692,23 +692,8 @@ fm_nm_run_progress() {  # <toon-output>
   printf '%s\t%s\t%s\t%s\t%s\n' "$((done * 100 / total))" "$position" "$total" "$step" "$round"
 }
 
-# Local-time epoch for the ledger's date column ("YYYY-MM-DD HH:MM"); empty when
-# the column is absent or does not parse. The column stamps run start, not end,
-# so this epoch can prove only that a record predates the run. Dated evidence is
-# owned by docs/verification/supervision.md.
-fm_nm_ledger_epoch() {  # <YYYY-MM-DD HH:MM>
-  local stamp=$1
-  case "$stamp" in
-    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\ [0-9][0-9]:[0-9][0-9]) ;;
-    *) return 0 ;;
-  esac
-  date -j -f '%Y-%m-%d %H:%M' "$stamp" +%s 2>/dev/null \
-    || date -d "$stamp" +%s 2>/dev/null \
-    || true
-}
-
-# The branch's NEWEST ledger row as "<status>|<short-sha>|<epoch>|<pr>", or nothing when the
-# branch has no row. The ledger is newest-first and its newest row for a branch
+# The branch's NEWEST ledger row as "<status>|<short-sha>|<pr>", or nothing when
+# the branch has no row. The ledger is newest-first and its newest row for a branch
 # IS that branch's current run, which is the same rule
 # fm_nm_runs_status_for_worktree applies; this accessor exists because a caller
 # holding a TERMINAL run answer needs to know whether a LATER run has since
@@ -724,7 +709,7 @@ fm_nm_runs_newest_for_branch() {  # <branch> <runs-list-output>
     IFS=$' \t' read -r st br sha day clock pr extra <<< "$row"
     fm_nm_runs_row_valid "$st" "$br" "$sha" "$day" "$clock" "$pr" "$extra" || break
     [ "$br" = "$branch" ] || continue
-    printf '%s|%s|%s|%s' "$st" "$sha" "$(fm_nm_ledger_epoch "$day $clock")" "$pr"
+    printf '%s|%s|%s' "$st" "$sha" "$pr"
     return 0
   done <<< "$list"
   return 0

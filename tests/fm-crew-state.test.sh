@@ -3814,21 +3814,13 @@ outcome: cancelled
 EOF
 }
 
-# The ordering rule compares a real file mtime against the ledger's own local-time
-# date column, so these fixtures are anchored to the same clock the reader uses
-# rather than to a fixed calendar date.
+# The ledger's date column is validated as a real local-time stamp, so these
+# fixtures are anchored to the same clock the reader uses rather than to a fixed
+# calendar date.
 ledger_stamp_minutes_ago() {  # <minutes>
   local epoch
   epoch=$(( $(date +%s) - $1 * 60 ))
   date -r "$epoch" '+%Y-%m-%d %H:%M' 2>/dev/null || date -d "@$epoch" '+%Y-%m-%d %H:%M'
-}
-
-# Backdate a status log so it is provably OLDER than the failed run's ledger row.
-backdate_status_minutes_ago() {  # <status-file> <minutes>
-  local epoch stamp
-  epoch=$(( $(date +%s) - $2 * 60 ))
-  stamp=$(date -r "$epoch" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$epoch" +%Y%m%d%H%M.%S)
-  touch -t "$stamp" "$1"
 }
 
 # The reported live shape: `axi status` answers this branch's own FAILED run at
@@ -3862,10 +3854,12 @@ EOF
 
 # The record's second requested case: failed run, then a LATER SUCCESSFUL run.
 # The completed row's head is not an object in this copy, so the strict
-# attribution bar refuses to bind it - but it still proves the failed answer is
-# history, and the crew's own terminal line, appended after the failed run
-# began, says what actually happened.
-test_later_completed_run_supersedes_failed_reading() {
+# attribution bar refuses to bind it. It still proves the failed answer is
+# history. Re-pointed from `done`: that verdict came from the crew's own
+# terminal line, which the reader no longer orders against the run, so the
+# answer it owes is unknown - the stale failure is still not published, and no
+# unprovable success is published in its place.
+test_later_completed_run_leaves_the_failure_unprovable() {
   reset_fakes
   local d short; d=$(new_case stale-failed-later-completed)
   make_repo_on_branch "$d/wt" fm/feat-s2
@@ -3880,9 +3874,11 @@ test_later_completed_run_supersedes_failed_reading() {
 EOF
 )"
   local out; out=$(run_crew_state "$d" feat-s2)
-  assert_contains "$out" "state: done" "a later completed run outranks the failed reading"
+  assert_contains "$out" "state: unknown" "an unbindable completed row leaves the current state unproven"
   assert_not_contains "$out" "state: failed" "the superseded failed run must not surface"
-  pass "a later completed run supersedes a stale failed reading"
+  assert_not_contains "$out" "state: done" "an unbindable completed row is never published as a success"
+  assert_not_contains "$out" "source: status-log" "the crew's own word is never published as the verdict"
+  pass "a later unbindable completed run leaves the failure unprovable"
 }
 
 # Same ledger, no status log to explain the crew. An unbindable later run is not
@@ -4046,48 +4042,15 @@ test_cancelled_run_publishes_no_pr_for_active_rerun() {
   pass "a stale cancelled run publishes no pull request for an active rerun"
 }
 
-test_status_append_during_ordering_snapshot_keeps_failure() {
-  reset_fakes
-  local d reader out; d=$(new_case status-ordering-snapshot-race)
-  make_repo_on_branch "$d/wt" fm/feat-s2h
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-s2h.meta" "window=fm:fm-feat-s2h" "worktree=$d/wt" "kind=ship"
-  printf 'done: old completion\n' > "$d/state/feat-s2h.status"
-  backdate_status_minutes_ago "$d/state/feat-s2h.status" 120
-  reader="$d/status-size-reader"
-  cat > "$reader" <<'SH'
-#!/usr/bin/env bash
-set -u
-size=$(wc -c < "$1")
-if [ ! -e "$FM_STATUS_MUTATE_MARKER" ]; then
-  : > "$FM_STATUS_MUTATE_MARKER"
-  printf '%s\n' "$FM_STATUS_MUTATE_LINE" >> "$1"
-fi
-printf '%s\n' "$size"
-SH
-  chmod +x "$reader"
-  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s2h)"
-  FM_FAKE_RUNS_LIST="  failed     fm/feat-s2h f0f0f0f0  $(ledger_stamp_minutes_ago 60)"
-  FM_FAKE_STATUS_APPEND_FILE="$d/state/feat-s2h.status"
-  FM_FAKE_STATUS_APPEND_MARKER="$d/query-append.marker"
-  FM_FAKE_STATUS_APPEND_LINE='working: resumed during pipeline query'
-  out=$(FM_STATUS_SIZE_READER="$reader" \
-    FM_STATUS_MUTATE_MARKER="$d/snapshot-append.marker" \
-    FM_STATUS_MUTATE_LINE='paused: appended during snapshot' \
-    run_crew_state "$d" feat-s2h)
-  assert_not_contains "$out" "state: done" "the old done line cannot borrow the new file mtime"
-  assert_not_contains "$out" "state: paused" "a partial snapshot cannot override the failure"
-  assert_contains "$out" "current state not provable here" "a rejected snapshot leaves the reading unprovable"
-  pass "a status append during snapshot never supersedes the run"
-}
-
 # The original title case: the crew declared a bounded external wait after a
-# failed reading the ledger cannot bind to this run, and the declaration was
-# silently dropped, so the pane kept producing wedge-suspect wakes for healthy
-# work. The ledger row here sits at a head this worktree does not carry, so the
-# failure is not provably current and the crew's own later word is the better
-# witness.
-test_later_declared_pause_supersedes_failed_reading() {
+# failed reading the ledger cannot bind to this run, and that stale failure was
+# reported as the crew's current state, so the pane kept producing wedge-suspect
+# wakes for healthy work. The ledger row here sits at a head this worktree does
+# not carry, so the failure is not provably current. Re-pointed from the crew's
+# own word winning: the reader no longer orders the status log against the run
+# at all, so the answer it owes here is an honest unknown - the false failure is
+# still gone, and no crew word is minted as a verdict in its place.
+test_later_declared_pause_leaves_the_failure_unprovable() {
   reset_fakes
   local d; d=$(new_case stale-failed-later-pause)
   make_repo_on_branch "$d/wt" fm/feat-s3
@@ -4097,16 +4060,16 @@ test_later_declared_pause_supersedes_failed_reading() {
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s3)"
   FM_FAKE_RUNS_LIST="  failed     fm/feat-s3 f0f0f0f0  $(ledger_stamp_minutes_ago 60)"
   local out; out=$(run_crew_state "$d" feat-s3)
-  assert_contains "$out" "state: paused" "the newer declared pause outranks the failed run"
-  assert_contains "$out" "source: status-log" "the pause is status-log sourced"
-  assert_contains "$out" "polling the CI run myself" "the pause reason is preserved"
-  assert_contains "$out" "run failed" "the superseded failed run stays visible in the detail"
-  pass "a later declared pause supersedes a stale failed reading"
+  assert_contains "$out" "state: unknown" "an unbindable failed row is never reported as the current state"
+  assert_not_contains "$out" "state: failed" "the stale failure must not be published as current"
+  assert_not_contains "$out" "source: status-log" "the crew's own word is never published as the verdict"
+  assert_contains "$out" "current state not provable here" "the reader answers honestly instead of guessing"
+  pass "a stale failed reading behind a declared pause reads unknown"
 }
 
 # CANCELLED reads FAILED through the same inheritance path, so it inherits the
 # same defect and needs the same cover.
-test_later_declared_pause_supersedes_cancelled_reading() {
+test_later_declared_pause_leaves_the_cancelled_reading_unprovable() {
   reset_fakes
   local d; d=$(new_case stale-cancelled-later-pause)
   make_repo_on_branch "$d/wt" fm/feat-s4
@@ -4116,15 +4079,16 @@ test_later_declared_pause_supersedes_cancelled_reading() {
   FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-s4)"
   FM_FAKE_RUNS_LIST="  cancelled  fm/feat-s4 f0f0f0f0  $(ledger_stamp_minutes_ago 60)"
   local out; out=$(run_crew_state "$d" feat-s4)
-  assert_contains "$out" "state: paused" "the newer declared pause outranks the cancelled run"
-  assert_contains "$out" "source: status-log" "the pause is status-log sourced"
-  assert_contains "$out" "run cancelled" "the superseded cancelled run stays visible in the detail"
-  pass "a later declared pause supersedes a stale cancelled reading"
+  assert_contains "$out" "state: unknown" "an unbindable cancelled row is never reported as the current state"
+  assert_not_contains "$out" "source: status-log" "the crew's own word is never published as the verdict"
+  pass "a stale cancelled reading behind a declared pause reads unknown"
 }
 
 # The record's other masked case: an agent that was stopped after its PR merged
-# left a terminal done line the failed run outranked.
-test_later_declared_done_supersedes_failed_reading() {
+# left a terminal done line the failed run outranked. Re-pointed for the same
+# reason as the pause case - and this direction matters most, because publishing
+# the crew's `done:` over a failed run would be a captain-facing false success.
+test_later_declared_done_leaves_the_failure_unprovable() {
   reset_fakes
   local d; d=$(new_case stale-failed-later-done)
   make_repo_on_branch "$d/wt" fm/feat-s5
@@ -4134,16 +4098,17 @@ test_later_declared_done_supersedes_failed_reading() {
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s5)"
   FM_FAKE_RUNS_LIST="  failed     fm/feat-s5 f0f0f0f0  $(ledger_stamp_minutes_ago 60)"
   local out; out=$(run_crew_state "$d" feat-s5)
-  assert_contains "$out" "state: done" "the newer terminal done line outranks the failed run"
-  assert_contains "$out" "source: status-log" "the completion is status-log sourced"
-  assert_contains "$out" "run failed" "the superseded failed run stays visible in the detail"
-  pass "a later declared done supersedes a stale failed reading"
+  assert_contains "$out" "state: unknown" "an unbindable failed row is never reported as the current state"
+  assert_not_contains "$out" "state: done" "a crew's own word is never minted as a terminal success"
+  assert_not_contains "$out" "pull/2890" "no pull request is published from a status-log claim"
+  pass "a stale failed reading behind a declared done reads unknown"
 }
 
-# The same declaration must NOT be published while the branch's newest ledger
-# row is still LIVE: the ledger carries no run id, so a replacement that is
-# still validating can never be proven current, and a crew's own word must not
-# be minted as a terminal success over it.
+# A crew's own word must never be minted as a terminal success over a
+# replacement run that is still validating: the ledger carries no run id, so a
+# live row can never be proven current. Retained after the status-log ordering
+# rules were removed, because it pins the answer the reader owes for a live row
+# it cannot bind - unknown, from neither record.
 test_live_replacement_run_outranks_a_status_log_done() {
   reset_fakes
   local d; d=$(new_case live-replacement-done-log)
@@ -4151,7 +4116,6 @@ test_live_replacement_run_outranks_a_status_log_done() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-s5d.meta" "window=fm:fm-feat-s5d" "worktree=$d/wt" "kind=ship"
   printf 'done: implementation complete\n' > "$d/state/feat-s5d.status"
-  backdate_status_minutes_ago "$d/state/feat-s5d.status" 30
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s5d)"
   FM_FAKE_RUNS_LIST="  running    fm/feat-s5d f0f0f0f0  $(ledger_stamp_minutes_ago 60)"
   local out; out=$(run_crew_state "$d" feat-s5d)
@@ -4161,9 +4125,10 @@ test_live_replacement_run_outranks_a_status_log_done() {
   pass "a live replacement run outranks a status-log done"
 }
 
-# The ledger date column stamps a run's START, so a declaration written after
-# that stamp can still predate the moment the run finished. When the ledger row
-# IS the attributed run, no mid-run declaration may outrank its failure.
+# When the ledger row IS the attributed run, no self-declared pause may outrank
+# its failure, whenever the crew wrote it. The reader no longer orders the log
+# against the run at all, so this holds for a declaration written before, during
+# or after the run.
 test_mid_run_pause_does_not_mask_current_run_failure() {
   reset_fakes
   local d short; d=$(new_case mid-run-pause-current-failure)
@@ -4172,7 +4137,6 @@ test_mid_run_pause_does_not_mask_current_run_failure() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-s5b.meta" "window=fm:fm-feat-s5b" "worktree=$d/wt" "kind=ship"
   printf 'paused: polling the CI run myself\n' > "$d/state/feat-s5b.status"
-  backdate_status_minutes_ago "$d/state/feat-s5b.status" 40
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s5b)"
   FM_FAKE_RUNS_LIST="  failed     fm/feat-s5b ${short}  $(ledger_stamp_minutes_ago 60)"
   local out; out=$(run_crew_state "$d" feat-s5b)
@@ -4184,7 +4148,9 @@ test_mid_run_pause_does_not_mask_current_run_failure() {
 
 # The routine ship shape in the same AGREES=1 shape: the crew reports its
 # implementation done while the run is still going, the run then fails, and the
-# captain must still be told the run failed.
+# captain must still be told the run failed. Its sibling below fixes the same
+# shape with the declaration written before the run; the reader no longer
+# distinguishes the two, and must answer failed for both.
 test_mid_run_done_log_does_not_mask_current_run_failure() {
   reset_fakes
   local d; d=$(new_case mid-run-done-current-failure)
@@ -4192,7 +4158,6 @@ test_mid_run_done_log_does_not_mask_current_run_failure() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-s5c.meta" "window=fm:fm-feat-s5c" "worktree=$d/wt" "kind=ship"
   printf 'done: implementation complete\n' > "$d/state/feat-s5c.status"
-  backdate_status_minutes_ago "$d/state/feat-s5c.status" 40
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s5c)"
   local short; short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
   FM_FAKE_RUNS_LIST="  failed     fm/feat-s5c ${short}  $(ledger_stamp_minutes_ago 60)"
@@ -4200,104 +4165,13 @@ test_mid_run_done_log_does_not_mask_current_run_failure() {
   assert_contains "$out" "state: failed" "a mid-run done line cannot mask the current run's failure"
   assert_contains "$out" "source: run-step" "the failure stays run-step sourced"
   assert_not_contains "$out" "state: done" "the declaration never becomes the reported state"
-  assert_not_contains "$out" "$FM_CREW_STATE_WORD_OLDER_DETAIL" \
-    "a declaration the log places after the run's start is never claimed as older"
   pass "a mid-run done line does not mask the current run's failure"
 }
 
-# The ordering fact is a claim about the STATUS LOG, so a crew that declared
-# nothing at all must never receive it. The ledger row here is the attributed
-# run itself, the shape that most invites asserting an ordering from run
-# identity rather than from evidence.
-test_failed_run_without_a_declaration_claims_no_ordering() {
-  reset_fakes
-  local d short out
-  d=$(new_case no-declaration-ordering)
-  make_repo_on_branch "$d/wt" fm/feat-s6f
-  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-s6f.meta" "window=fm:fm-feat-s6f" "worktree=$d/wt" "kind=ship"
-  : > "$d/state/feat-s6f.status"
-  backdate_status_minutes_ago "$d/state/feat-s6f.status" 120
-  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s6f)"
-  FM_FAKE_RUNS_LIST="  failed     fm/feat-s6f ${short}  $(ledger_stamp_minutes_ago 60)"
-  out=$(run_crew_state "$d" feat-s6f)
-  assert_contains "$out" "state: failed" "the failure still stands"
-  assert_not_contains "$out" "$FM_CREW_STATE_WORD_OLDER_DETAIL" \
-    "a crew that declared nothing is never reported as having declared it earlier"
-  pass "a failure with no declaration at all claims no ordering"
-}
-
-# A blocked line is not a self-declared outcome, so ordering it before the run
-# says nothing about the crew's word on done or failed and must not be claimed.
-test_blocked_only_log_claims_no_ordering() {
-  reset_fakes
-  local d short out
-  d=$(new_case blocked-only-ordering)
-  make_repo_on_branch "$d/wt" fm/feat-s6g
-  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-s6g.meta" "window=fm:fm-feat-s6g" "worktree=$d/wt" "kind=ship"
-  printf 'blocked: waiting on a credential\n' > "$d/state/feat-s6g.status"
-  backdate_status_minutes_ago "$d/state/feat-s6g.status" 120
-  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s6g)"
-  FM_FAKE_RUNS_LIST="  failed     fm/feat-s6g ${short}  $(ledger_stamp_minutes_ago 60)"
-  out=$(run_crew_state "$d" feat-s6g)
-  assert_not_contains "$out" "$FM_CREW_STATE_WORD_OLDER_DETAIL" \
-    "a blocked line is never published as an outcome the run outranks"
-  pass "a blocked-only log claims no ordering over the run"
-}
-
-# The ordering fact bin/fm-inactive-reconcile.sh consumes. Without it that
-# reconciler reads the crew's stale `done:` line as a contradiction and drops
-# the failure instead of reporting it, so the reader owes the fact whenever it
-# has proven the declaration older than the run - here because the crew declared
-# done BEFORE its validation run even started.
-test_pre_run_done_log_publishes_the_ordering_fact() {
-  reset_fakes
-  local d short out
-  d=$(new_case pre-run-done-ordering-fact)
-  make_repo_on_branch "$d/wt" fm/feat-s6d
-  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-s6d.meta" "window=fm:fm-feat-s6d" "worktree=$d/wt" "kind=ship"
-  printf 'done: implementation complete\n' > "$d/state/feat-s6d.status"
-  backdate_status_minutes_ago "$d/state/feat-s6d.status" 120
-  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s6d)"
-  FM_FAKE_RUNS_LIST="  failed     fm/feat-s6d ${short}  $(ledger_stamp_minutes_ago 60)"
-  out=$(run_crew_state "$d" feat-s6d)
-  assert_contains "$out" "state: failed" "the failure still stands"
-  assert_contains "$out" "$FM_CREW_STATE_WORD_OLDER_DETAIL" \
-    "a declaration older than the run is published as such"
-  pass "a declaration ordered before the run publishes that ordering fact"
-}
-
-# The opposite: with no ordering evidence at all the reader has proven nothing
-# about the crew's word, so it must claim nothing - the reconciler then keeps
-# its contradiction guard.
-test_failure_without_ordering_evidence_claims_no_ordering() {
-  reset_fakes
-  local d out
-  d=$(new_case no-ordering-fact)
-  make_repo_on_branch "$d/wt" fm/feat-s6e
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-s6e.meta" "window=fm:fm-feat-s6e" "worktree=$d/wt" "kind=ship"
-  printf 'done: implementation complete\n' > "$d/state/feat-s6e.status"
-  backdate_status_minutes_ago "$d/state/feat-s6e.status" 40
-  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s6e)"
-  FM_FAKE_RUNS_LIST=""
-  out=$(run_crew_state "$d" feat-s6e)
-  assert_contains "$out" "state: failed" "the failure still stands"
-  assert_not_contains "$out" "$FM_CREW_STATE_WORD_OLDER_DETAIL" \
-    "an unproven ordering is never published as proven"
-  pass "a failure with no ordering evidence publishes no ordering fact"
-}
-
 # Opposite direction 1: a done line the crew appended BEFORE its validation run
-# even started is older, not newer, and must never convert a real failure into a
-# false success. This is the routine ship shape - the crew reports its
-# implementation done, firstmate starts the run, the run fails - and the ledger
-# row is that very run.
+# even started must never convert a real failure into a false success. This is
+# the routine ship shape - the crew reports its implementation done, firstmate
+# starts the run, the run fails - and the ledger row is that very run.
 test_pre_run_done_log_does_not_mask_failed_run() {
   reset_fakes
   local d short; d=$(new_case pre-run-done-log)
@@ -4306,7 +4180,6 @@ test_pre_run_done_log_does_not_mask_failed_run() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-s6.meta" "window=fm:fm-feat-s6" "worktree=$d/wt" "kind=ship"
   printf 'done: implementation complete\n' > "$d/state/feat-s6.status"
-  backdate_status_minutes_ago "$d/state/feat-s6.status" 120
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s6)"
   FM_FAKE_RUNS_LIST="  failed     fm/feat-s6 ${short}  $(ledger_stamp_minutes_ago 60)"
   local out; out=$(run_crew_state "$d" feat-s6)
@@ -4314,77 +4187,6 @@ test_pre_run_done_log_does_not_mask_failed_run() {
   assert_contains "$out" "source: run-step" "the failure stays run-step sourced"
   assert_not_contains "$out" "state: done" "an older declaration never becomes the reported state"
   pass "a pre-run done line does not mask a failed run"
-}
-
-test_same_minute_done_log_does_not_mask_failed_run() {
-  reset_fakes
-  local d short minute_epoch ledger_stamp status_stamp
-  d=$(new_case same-minute-done-log)
-  make_repo_on_branch "$d/wt" fm/feat-s6b
-  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-s6b.meta" "window=fm:fm-feat-s6b" "worktree=$d/wt" "kind=ship"
-  printf 'done: implementation complete\n' > "$d/state/feat-s6b.status"
-  minute_epoch=$(( $(date +%s) / 60 * 60 - 120 ))
-  ledger_stamp=$(date -r "$minute_epoch" '+%Y-%m-%d %H:%M' 2>/dev/null \
-    || date -d "@$minute_epoch" '+%Y-%m-%d %H:%M')
-  status_stamp=$(date -r "$((minute_epoch + 20))" '+%Y%m%d%H%M.%S' 2>/dev/null \
-    || date -d "@$((minute_epoch + 20))" '+%Y%m%d%H%M.%S')
-  touch -t "$status_stamp" "$d/state/feat-s6b.status"
-  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s6b)"
-  FM_FAKE_RUNS_LIST="  failed     fm/feat-s6b ${short}  ${ledger_stamp}"
-  local out; out=$(run_crew_state "$d" feat-s6b)
-  assert_contains "$out" "state: failed" "a done line inside the ledger minute cannot mask the failure"
-  assert_contains "$out" "source: run-step" "same-minute ordering leaves the failure authoritative"
-  assert_not_contains "$out" "state: done" "minute truncation cannot convert the failure into success"
-  pass "a same-minute done line does not mask a failed run"
-}
-
-# Additional coverage for the minute-truncation rule itself, in the only shape
-# that reaches it: the ledger row cannot be bound to the attributed run, so the
-# ordering evidence decides between the declaration and an unprovable reading.
-# A line written inside the ledger's own minute proves nothing about order.
-test_same_minute_line_is_not_newer_than_an_unbindable_run() {
-  reset_fakes
-  local d minute_epoch ledger_stamp status_stamp
-  d=$(new_case same-minute-unbindable)
-  make_repo_on_branch "$d/wt" fm/feat-s6c
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-s6c.meta" "window=fm:fm-feat-s6c" "worktree=$d/wt" "kind=ship"
-  printf 'done: implementation complete\n' > "$d/state/feat-s6c.status"
-  minute_epoch=$(( $(date +%s) / 60 * 60 - 120 ))
-  ledger_stamp=$(date -r "$minute_epoch" '+%Y-%m-%d %H:%M' 2>/dev/null \
-    || date -d "@$minute_epoch" '+%Y-%m-%d %H:%M')
-  status_stamp=$(date -r "$((minute_epoch + 20))" '+%Y%m%d%H%M.%S' 2>/dev/null \
-    || date -d "@$((minute_epoch + 20))" '+%Y%m%d%H%M.%S')
-  touch -t "$status_stamp" "$d/state/feat-s6c.status"
-  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s6c)"
-  FM_FAKE_RUNS_LIST="  failed     fm/feat-s6c f0f0f0f0  ${ledger_stamp}"
-  local out; out=$(run_crew_state "$d" feat-s6c)
-  assert_not_contains "$out" "state: done" "a same-minute line is never taken as newer than the run"
-  assert_contains "$out" "current state not provable here" "a same-minute line proves nothing about order"
-  pass "a same-minute line is not newer than an unbindable run"
-}
-
-# The log's mtime stamps its LAST append, but the selected declaration survives
-# later continuation prose, so the two can belong to different lines. When they
-# do, the mtime orders nothing and the reading must stay unprovable.
-test_prose_after_done_line_does_not_order_it_against_the_run() {
-  reset_fakes
-  local d; d=$(new_case prose-after-done-log)
-  make_repo_on_branch "$d/wt" fm/feat-s6d
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-s6d.meta" "window=fm:fm-feat-s6d" "worktree=$d/wt" "kind=ship"
-  printf 'done: implementation complete\nstill tidying up the docs\n' \
-    > "$d/state/feat-s6d.status"
-  backdate_status_minutes_ago "$d/state/feat-s6d.status" 55
-  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s6d)"
-  FM_FAKE_RUNS_LIST="  failed     fm/feat-s6d f0f0f0f0  $(ledger_stamp_minutes_ago 60)"
-  local out; out=$(run_crew_state "$d" feat-s6d)
-  assert_not_contains "$out" "state: done" "prose cannot lend its mtime to an older declaration"
-  assert_not_contains "$out" "source: status-log" "the declaration is not ordered against the run"
-  assert_contains "$out" "current state not provable here" "an unstamped declaration leaves the reading unprovable"
-  pass "later prose does not order an earlier done line against the run"
 }
 
 # Opposite direction 2: with no ledger row to order the records against, there is
@@ -6903,7 +6705,7 @@ test_local_advanced_past_run_head_invalidates
 test_pipeline_owned_active_run_beats_superseded_failed_row
 test_failed_run_with_no_later_run_still_surfaces
 test_later_active_run_supersedes_failed_reading
-test_later_completed_run_supersedes_failed_reading
+test_later_completed_run_leaves_the_failure_unprovable
 test_unbindable_later_run_reports_unknown_not_failed
 test_unbindable_later_terminal_run_reports_unknown
 test_same_head_terminal_rerun_publishes_newest_pr
@@ -6912,21 +6714,13 @@ test_stale_passed_run_publishes_no_pr_for_active_rerun
 test_cancelled_run_publishes_no_pr_for_active_rerun
 test_malformed_ledger_row_supplies_no_newest_evidence
 test_longer_ledger_sha_still_binds_the_current_run
-test_status_append_during_ordering_snapshot_keeps_failure
-test_later_declared_pause_supersedes_failed_reading
-test_later_declared_pause_supersedes_cancelled_reading
-test_later_declared_done_supersedes_failed_reading
+test_later_declared_pause_leaves_the_failure_unprovable
+test_later_declared_pause_leaves_the_cancelled_reading_unprovable
+test_later_declared_done_leaves_the_failure_unprovable
 test_live_replacement_run_outranks_a_status_log_done
 test_mid_run_pause_does_not_mask_current_run_failure
 test_mid_run_done_log_does_not_mask_current_run_failure
 test_pre_run_done_log_does_not_mask_failed_run
-test_pre_run_done_log_publishes_the_ordering_fact
-test_failure_without_ordering_evidence_claims_no_ordering
-test_failed_run_without_a_declaration_claims_no_ordering
-test_blocked_only_log_claims_no_ordering
-test_same_minute_done_log_does_not_mask_failed_run
-test_same_minute_line_is_not_newer_than_an_unbindable_run
-test_prose_after_done_line_does_not_order_it_against_the_run
 test_failed_run_without_ordering_evidence_still_surfaces
 test_needs_decision_log_never_supersedes_failed_run
 test_failed_run_detail_carries_no_pr_it_never_opened
