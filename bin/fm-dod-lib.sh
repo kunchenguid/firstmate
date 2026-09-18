@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-# Single owner of a ship task's mode-specific "Definition of done" block.
+# Single owner of a ship task's mode-specific "Definition of done" block and of
+# the named-head reachability gate that accepts a ship `done:` claim.
 # Sourced by bin/fm-brief.sh, which renders it into a generated ship brief, and by
 # bin/fm-promote.sh, which renders it into the ship instructions a promoted scout
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
+# bin/fm-crew-state.sh is the one current-state caller of the gate: a ship
+# `done:` is not current-state done while the named head exists only in the
+# worker's disposable copy. The check tests that head, not whether some branch
+# moved. Teardown's landed-work test remains the complete discard gate.
 # fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> prints the block on
 # stdout with no trailing blank line. The caller validates the mode; an unknown
 # mode is refused rather than silently rendered as the pipeline contract.
@@ -241,6 +246,7 @@ fm_dod_block() {  # <mode> <task-id>
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
+A \`done:\` line is accepted only when the named head is reachable from outside this disposable copy; the check tests that head, not merely that a branch moved.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
@@ -251,6 +257,7 @@ EOF
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
+A \`done:\` line is accepted only when the named head is reachable from outside this disposable copy; the check tests that head, not merely that a branch moved.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done: ready in branch fm/$id\` to the status file and stop.
 The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
@@ -261,6 +268,7 @@ EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
+A \`done:\` line is accepted only when the named head is reachable from outside this disposable copy; the check tests that head, not merely that a branch moved.
 When you believe it is complete, append \`done: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
@@ -296,4 +304,124 @@ EOF
       echo "error: fm_dod_block: unknown delivery mode '$mode'" >&2
       return 1 ;;
   esac
+}
+
+# Absolute path for git-dir or git-common-dir of <worktree>.
+fm_dod_abs_git_path() {  # <worktree> <--git-dir|--git-common-dir>
+  local wt=$1 flag=$2 path
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  path=$(git -C "$wt" rev-parse "$flag" 2>/dev/null) || return 1
+  [ -n "$path" ] || return 1
+  case "$path" in
+    /*) printf '%s\n' "$path" ;;
+    *) ( cd "$wt" && cd "$path" && pwd -P ) ;;
+  esac
+}
+
+# 0 when <worktree> is a linked git worktree (git-dir != git-common-dir).
+fm_dod_is_linked_worktree() {  # <worktree>
+  local wt=$1 git_dir common
+  git_dir=$(fm_dod_abs_git_path "$wt" --git-dir) || return 1
+  common=$(fm_dod_abs_git_path "$wt" --git-common-dir) || return 1
+  [ "$git_dir" != "$common" ]
+}
+
+# 0 when <sha> is contained in a ref under <namespace> in <repo>.
+# --contains tests that exact commit, so a branch that moved to a different
+# tip does not count.
+fm_dod_ref_contains() {  # <repo> <ref-namespace> <sha>
+  local repo=$1 ns=$2 sha=$3 hit
+  [ -n "$repo" ] && [ -d "$repo" ] || return 1
+  [ -n "$sha" ] || return 1
+  hit=$(git -C "$repo" for-each-ref --format='%(refname)' --contains="$sha" --count=1 "$ns" 2>/dev/null) || return 1
+  [ -n "$hit" ]
+}
+
+# Resolve the commit the worker named on a ship done: line. Preference:
+# an explicit 40-hex SHA in the note, then `ready in branch <name>` resolved
+# in the worktree, then the worktree HEAD. Never a recorded remote pr_head:
+# that is the branch that may have moved without the named fix.
+fm_dod_ship_done_named_head() {  # <worktree> <line>
+  local wt=$1 line=$2 note sha branch
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  case "$line" in
+    done:*) note=${line#done:} ;;
+    *) return 1 ;;
+  esac
+  while [ "${note# }" != "$note" ]; do
+    note=${note# }
+  done
+  sha=$(printf '%s\n' "$note" | awk '{
+    for (i = 1; i <= NF; i++)
+      if ($i ~ /^[0-9a-fA-F]{40}$/) { print $i; exit }
+  }')
+  if [ -n "$sha" ]; then
+    git -C "$wt" rev-parse --verify "${sha}^{commit}" 2>/dev/null
+    return
+  fi
+  case "$note" in
+    "ready in branch "*)
+      branch=${note#ready in branch }
+      branch=${branch%% *}
+      [ -n "$branch" ] || return 1
+      git -C "$wt" rev-parse --verify "${branch}^{commit}" 2>/dev/null
+      return
+      ;;
+  esac
+  git -C "$wt" rev-parse --verify HEAD 2>/dev/null
+}
+
+# 0 when <sha> is reachable from a ref that survives the disposable worktree:
+# any remote-tracking ref, or - for local-only - heads in the project clone
+# (a linked worktree's shared refs/heads, or a distinct standalone clone).
+fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> <sha>
+  local wt=$1 project=$2 mode=$3 sha=$4 wt_common proj_common
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  [ -n "$sha" ] || return 1
+  fm_dod_ref_contains "$wt" refs/remotes "$sha" && return 0
+  if [ -n "$project" ] && [ -d "$project" ] \
+    && git -C "$project" rev-parse --git-dir >/dev/null 2>&1; then
+    fm_dod_ref_contains "$project" refs/remotes "$sha" && return 0
+  fi
+  [ "$mode" = local-only ] || return 1
+  if fm_dod_is_linked_worktree "$wt"; then
+    fm_dod_ref_contains "$wt" refs/heads "$sha" && return 0
+    return 1
+  fi
+  [ -n "$project" ] && [ -d "$project" ] || return 1
+  git -C "$project" rev-parse --git-dir >/dev/null 2>&1 || return 1
+  wt_common=$(fm_dod_abs_git_path "$wt" --git-common-dir) || return 1
+  proj_common=$(fm_dod_abs_git_path "$project" --git-common-dir) || return 1
+  [ "$wt_common" != "$proj_common" ] || return 1
+  fm_dod_ref_contains "$project" refs/heads "$sha" && return 0
+  fm_dod_ref_contains "$project" refs/remotes "$sha"
+}
+
+# 0 when <line> is not a ship done: to gate, or when the named head is
+# reachable outside the worker's disposable copy. 1 when the claim is refused;
+# stdout then holds a one-line reason and no other output.
+fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line>
+  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 sha
+  case "$kind" in ship) ;; *) return 0 ;; esac
+  case "$line" in
+    done:*) ;;
+    *) return 0 ;;
+  esac
+  if [ -z "$wt" ] || [ ! -d "$wt" ]; then
+    printf '%s\n' "named head cannot be verified: worktree missing"
+    return 1
+  fi
+  if ! git -C "$wt" rev-parse --git-dir >/dev/null 2>&1; then
+    printf '%s\n' "named head cannot be verified: worktree is not a git copy"
+    return 1
+  fi
+  sha=$(fm_dod_ship_done_named_head "$wt" "$line") || {
+    printf '%s\n' "named head could not be resolved"
+    return 1
+  }
+  if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then
+    return 0
+  fi
+  printf '%s\n' "named head $sha is unreachable outside the worker copy"
+  return 1
 }

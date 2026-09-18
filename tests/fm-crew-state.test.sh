@@ -54,12 +54,16 @@ fm_git_identity fmtest fmtest@example.invalid
 
 # A real git repo checked out on <branch>, so the helper's branch attribution
 # (git symbolic-ref) resolves like it would for a live crew worktree.
+# Stamp origin/main at the current HEAD so a later ship done: is not refused
+# solely for being a fixture with no remote-tracking refs; tests that need an
+# unpreserved named head point those refs at a different commit.
 make_repo_on_branch() {  # <dir> <branch>
   local dir=$1 branch=$2
   mkdir -p "$dir"
   git -C "$dir" init -q
   git -C "$dir" commit -q --allow-empty -m init
   git -C "$dir" checkout -q -b "$branch"
+  git -C "$dir" update-ref refs/remotes/origin/main "$(git -C "$dir" rev-parse HEAD)"
   # Real worktree HEAD for run head-binding (fixtures read FM_FAKE_RUN_HEAD).
   FM_FAKE_RUN_HEAD=$(git -C "$dir" rev-parse HEAD)
   export FM_FAKE_RUN_HEAD
@@ -1677,6 +1681,60 @@ EOF
   pass "another branch's run is ignored, falls back"
 }
 
+# A ship done: whose named head lives only in the disposable copy is not
+# current-state done (issue 4768). The worker's claim stays a blocked
+# preservation failure rather than finished-and-safe.
+test_unpushed_ship_done_is_blocked() {
+  reset_fakes
+  local d sha out
+  d=$(new_case unpushed-done)
+  make_repo_on_branch "$d/wt" fm/unpushed
+  git -C "$d/wt" commit -q --allow-empty -m 'fix only in the worktree'
+  sha=$(git -C "$d/wt" rev-parse HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/unpushed.meta" \
+    "window=fm:fm-unpushed" "worktree=$d/wt" "project=$d/wt" \
+    "kind=ship" "mode=no-mistakes" "harness=claude"
+  printf 'done: PR https://example.test/o/r/pull/9 checks green\n' \
+    > "$d/state/unpushed.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" unpushed
+  out=$(run_crew_state "$d" unpushed)
+  assert_contains "$out" "state: blocked" "unpushed ship done: must not read as done"
+  assert_contains "$out" "source: status-log" "preservation refusal stays status-log sourced"
+  assert_contains "$out" "named head $sha is unreachable outside the worker copy" \
+    "refusal must name the unpushed head"
+  assert_not_contains "$out" "state: done" "unpushed ship done: must not remain done"
+  pass "unpushed ship done: is current-state blocked"
+}
+
+test_moved_remote_branch_without_named_head_is_blocked() {
+  reset_fakes
+  local d main_sha fix_sha out
+  d=$(new_case moved-branch)
+  make_repo_on_branch "$d/wt" fm/moved
+  main_sha=$(git -C "$d/wt" rev-parse refs/remotes/origin/main)
+  git -C "$d/wt" commit -q --allow-empty -m 'the actual fix'
+  fix_sha=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" update-ref refs/remotes/origin/fm/moved "$main_sha"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/moved.meta" \
+    "window=fm:fm-moved" "worktree=$d/wt" "project=$d/wt" \
+    "kind=ship" "mode=direct-PR" "harness=claude"
+  printf 'done: PR https://example.test/o/r/pull/8\n' > "$d/state/moved.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" moved
+  out=$(run_crew_state "$d" moved)
+  assert_contains "$out" "state: blocked" "a moved remote branch must not count as preserved"
+  assert_contains "$out" "named head $fix_sha is unreachable outside the worker copy" \
+    "refusal must name the missing fix, not the moved branch"
+  pass "moved remote branch without the named head is current-state blocked"
+}
+
 # (f) no run for this crew + a busy pane -> working via pane
 test_no_run_busy_pane() {
   reset_fakes
@@ -2059,7 +2117,7 @@ test_single_owner_terminal_declaration_supersedes_stale_decision() {
   reset_fakes
   local d kind opener terminal out key expected
   d=$(new_case terminal-stale-decision)
-  mkdir -p "$d/wt"
+  make_repo_on_branch "$d/wt" fm/task
   make_fakebin "$d" >/dev/null
   arm_idle_record "$d/state" task
   for kind in scout ship; do
@@ -3586,6 +3644,8 @@ test_unknown_status_row_keeps_newest_first_precedence
 test_terminal_run_without_live_sibling_is_unchanged
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
+test_unpushed_ship_done_is_blocked
+test_moved_remote_branch_without_named_head_is_blocked
 test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
