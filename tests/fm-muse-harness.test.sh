@@ -927,12 +927,7 @@ EOF
         printf '{"schema_version":1}\n' > "$home/xdgconfig/muse/auth.json"
         ;;
     esac
-    if [ "$setting" = allowed ]; then
-      out=$(FM_TEST_MUSE_WORKER_KEY=absent \
-        run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off)
-    else
-      out=$(run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off)
-    fi
+    out=$(run_muse_spawn "$home" "$proj" "$wt" "$fakebin" "$id" --mode no-mistakes --yolo off)
     status=$?
     if [ "$setting" = withheld ]; then
       expect_code 1 "$status" "withheld Muse key must not satisfy preflight"

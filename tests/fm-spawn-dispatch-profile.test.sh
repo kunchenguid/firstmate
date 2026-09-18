@@ -1024,7 +1024,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 # fake backend records delivery, while real shells exercise the env boundary.
 # No developer environment or credential values are inspected by these probes.
 test_launch_environment_allowlist() {
-  local setting rec id out status probe result expected launch value pane_shell pane_path snapshot snapshot_copy snapshot_mode
+  local setting rec id out status probe result expected launch value pane_shell pane_path
   # shellcheck disable=SC2016
   value='synthetic value; $(touch SHOULD_NOT_EXIST) `false` "quoted"'
   for setting in absent missing-config enabled empty; do
@@ -1042,42 +1042,32 @@ test_launch_environment_allowlist() {
 printf '%s\n' "${FM_TEST_AMBIENT_SENTINEL-unset}" "${FM_TEST_ALLOWED-unset}" \
   "${FM_TEST_EMPTY-unset}" "${FM_TEST_UNSET-unset}" "$HOME" "$PATH" "$TERM" "$TMUX" "$GOTMPDIR"
 SH
-    out=$(FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated FM_TEST_ALLOWED="$value" FM_TEST_EMPTY='' \
+    out=$(FM_TEST_AMBIENT_SENTINEL=launcher-unrelated FM_TEST_ALLOWED=launcher-value FM_TEST_EMPTY=launcher-value \
       run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
       "$id" "$PROJ_DIR" --harness "/bin/sh '$probe'")
     status=$?
     expect_code 0 "$status" "allowlist=$setting spawn should succeed: $out"
     launch=$(cat "$LAUNCH_LOG")
-    assert_not_contains "$launch" "$value" "allowlist=$setting leaked a source value into pane text"
-    snapshot="$HOME_DIR/state/$id.launch-env"
-    snapshot_copy=
-    if [ "$setting" = enabled ]; then
-      [ -f "$snapshot" ] || fail "enabled allowlist did not create a private source snapshot"
-      snapshot_mode=$(stat -c %a "$snapshot" 2>/dev/null || stat -f %Lp "$snapshot") \
-        || fail "could not read the source snapshot mode"
-      [ "$snapshot_mode" = 600 ] || fail "enabled allowlist source snapshot is not private"
-      snapshot_copy="$CASE_DIR/$id.launch-env.source"
-      cp "$snapshot" "$snapshot_copy" || fail "could not preserve the source snapshot for shell coverage"
-    else
-      [ ! -e "$snapshot" ] || fail "allowlist=$setting created an unexpected source snapshot"
-    fi
+    assert_not_contains "$launch" "launcher-value" "allowlist=$setting leaked a launcher value into pane text"
+    [ ! -e "$HOME_DIR/state/$id.launch-env" ] \
+      || fail "allowlist=$setting created a source snapshot for an ordinary raw-command ship"
     for pane_shell in /bin/sh /bin/bash /bin/zsh; do
       [ -x "$pane_shell" ] || continue
-      [ -z "$snapshot_copy" ] || cp "$snapshot_copy" "$snapshot"
       pane_path=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
         TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp \
         "$pane_shell" -c "printf %s \"\$PATH\"") \
         || fail "could not read $pane_shell startup PATH"
       result=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
       TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp \
+      FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated FM_TEST_ALLOWED="$value" FM_TEST_EMPTY='' \
       "$pane_shell" -c "$launch") || fail "allowlist=$setting emitted launch failed in $pane_shell"
       case "$setting" in
-        absent|missing-config|empty) expected=$(printf '%s\n' unset unset unset unset) ;;
+        absent|missing-config) expected=$(printf '%s\n' synthetic-unrelated "$value" '' unset) ;;
         enabled) expected=$(printf '%s\n' unset "$value" '' unset) ;;
+        empty) expected=$(printf '%s\n' unset unset unset unset) ;;
       esac
       expected="$expected"$'\n'"$HOME_DIR/user-home"$'\n'"$pane_path"$'\nxterm\nsynthetic-pane\n/synthetic/gotmp'
       [ "$result" = "$expected" ] || fail "allowlist=$setting worker environment mismatch: $result"
-      [ ! -e "$snapshot" ] || fail "allowlist=$setting left its source snapshot after worker exec"
     done
     pass "allowlist=$setting preserves the operational floor and filters only when opted in"
   done

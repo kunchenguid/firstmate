@@ -236,10 +236,10 @@
 #   blank lines and lines beginning with # are ignored. Invalid input refuses
 #   before launch, as do path inspection errors such as inaccessible config
 #   directories. An empty file retains only the operational floor below.
-#   Names are read once per spawn. The operational floor expands in the
-#   destination pane, while configured names are captured from this launcher
-#   into a mode-0600 one-launch state file, never the launch text. Unset names
-#   stay unset and empty values stay empty.
+#   Names are read once per spawn. For ordinary launches, values expand in the
+#   destination pane. For a secondmate spawn or relaunch, configured names are
+#   captured from this launcher into a mode-0600 one-launch state file. Values
+#   never enter the launch text; unset names stay unset and empty values stay empty.
 #   The fixed operational floor is HOME PATH USER LOGNAME SHELL TERM COLORTERM
 #   LANG LC_ALL LC_CTYPE TMPDIR TMP TEMP GOTMPDIR, plus backend identity/routing:
 #   TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH HERDR_PANE_ID
@@ -2221,18 +2221,14 @@ resolve_rovo_binary() {
 # rendered-screen check because an unauthenticated pane does not exit - it sits
 # on an OAuth device-code prompt ("Sign in at this page ... Waiting for
 # approval...") waiting for a human who is not there, which would look to
-# supervision like a wedged worker rather than a missing credential. With an
-# enabled allowlist that names META_API_KEY, the launch snapshot makes the
-# current fm-spawn process value worker-reachable. Otherwise tmux remains the
-# only backend with a preflight-readable worker environment.
+# supervision like a wedged worker rather than a missing credential.
 muse_worker_meta_api_key_present() {
   local session worker_env
   if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     case $'\n'"$LAUNCH_ENV_NAMES"$'\n' in
-    *$'\nMETA_API_KEY\n'*) [ -n "${META_API_KEY:-}" ] ;;
+    *$'\nMETA_API_KEY\n'*) ;;
     *) return 1 ;;
     esac
-    return
   fi
   [ "$BACKEND" = tmux ] || return 1
   if [ -n "${TMUX:-}" ]; then
@@ -4556,15 +4552,21 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
-  launch_env_snapshot_create || exit 1
   LAUNCH_ENV_PREFIX='/usr/bin/env -i'
+  if [ "$KIND" = secondmate ]; then
+    launch_env_snapshot_create || exit 1
+    launch_env_names=$(launch_env_operational_names)
+  else
+    launch_env_names=$(printf '%s\n%s\n' "$(launch_env_operational_names)" "$LAUNCH_ENV_NAMES")
+  fi
   while IFS= read -r env_name; do
-    # Only fixed operational names enter shell syntax. Their values expand in
-    # the destination pane, so its backend routing remains authoritative.
+    [ -n "$env_name" ] || continue
+    # Values for ordinary launches and the fixed operational names for
+    # secondmates expand in the destination pane.
     # shellcheck disable=SC2016
     printf -v env_arg '${%s+"%s=$%s"}' "$env_name" "$env_name" "$env_name"
     LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX $env_arg"
-  done < <(launch_env_operational_names)
+  done <<< "$launch_env_names"
   if [ -n "$SPAWN_TRACEPARENT" ]; then
     # shellcheck disable=SC2016
     LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX "'${TRACEPARENT+"TRACEPARENT=$TRACEPARENT"}'

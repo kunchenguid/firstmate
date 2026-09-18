@@ -332,12 +332,35 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
-test_relaunch_uses_allowlisted_launcher_environment_not_the_reused_pane() {
-  local dir out rc launch result expected value
-  dir=$(new_case allowlisted-env rl-env)
-  add_ship_task "$dir" rl-env claude
-  mkdir -p "$dir/home/config"
-  printf '%s\n' FM_TEST_ALLOWED FM_TEST_EMPTY FM_TEST_UNSET > "$dir/home/config/launch-env-allowlist"
+test_secondmate_relaunch_uses_allowlisted_launcher_environment_not_the_reused_pane() {
+  local dir home smhome out rc launch result expected value snapshot_mode
+  dir=$(new_case allowlisted-env sm-env)
+  home="$dir/home"
+  smhome="$dir/smhome"
+  mkdir -p "$home/config"
+  printf 'claude\n' > "$home/config/secondmate-harness"
+  printf '%s\n' FM_TEST_ALLOWED FM_TEST_EMPTY FM_TEST_UNSET > "$home/config/launch-env-allowlist"
+  fm_git_worktree "$dir/proj" "$smhome" sm-env-branch
+  mkdir -p "$smhome/state" "$smhome/data" "$smhome/bin"
+  printf 'sm-env\n' > "$smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$smhome/AGENTS.md"
+  printf '# charter\n' > "$smhome/data/charter.md"
+  {
+    echo "window=fmses:fm-sm-env"
+    echo "endpoint_task_id=sm-env"
+    echo "worktree=$smhome"
+    echo "project=$smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$smhome"
+    echo "projects="
+  } > "$home/state/sm-env.meta"
+  printf '%s\n' "fm-sm-env" > "$dir/fake/windows"
+  printf '%s' "$smhome" > "$dir/fake/cwd"
   # shellcheck disable=SC2016
   value='source value; $(touch SHOULD_NOT_EXIST) `false` "quoted"'
   cat > "$dir/fakebin/claude" <<'SH'
@@ -348,18 +371,23 @@ SH
   chmod +x "$dir/fakebin/claude"
 
   out=$(FM_TEST_ALLOWED="$value" FM_TEST_EMPTY='' FM_TEST_AMBIENT=must-not-cross \
-    run_control "$dir" rl-env relaunch --note "restore the filtered environment"); rc=$?
-  expect_code 0 "$rc" "an allowlisted relaunch should succeed"$'\n'"$out"
+    run_control "$dir" sm-env relaunch); rc=$?
+  expect_code 0 "$rc" "an allowlisted secondmate relaunch should succeed"$'\n'"$out"
+  snapshot_mode=$(stat -c %a "$home/state/sm-env.launch-env" 2>/dev/null \
+    || stat -f %Lp "$home/state/sm-env.launch-env") \
+    || fail "could not read the secondmate launch snapshot mode"
+  [ "$snapshot_mode" = 600 ] || fail "the secondmate launch snapshot is not private"
   launch=$(tail -n 1 "$dir/fake/literal")
   result=$(env -i HOME="$dir/user-home" PATH="$dir/fakebin:/usr/bin:/bin" TERM=xterm \
-    TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp /bin/sh -c "$launch") \
-    || fail "the relaunched allowlist command did not execute"
+    TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp FM_TEST_ALLOWED=pane-value \
+    FM_TEST_EMPTY=pane-value FM_TEST_UNSET=pane-value FM_TEST_AMBIENT=pane-value \
+    /bin/sh -c "$launch") || fail "the relaunched secondmate command did not execute"
   expected=$(printf '%s\n' "$value" '' '<unset>' '<unset>')
   [ "$result" = "$expected" ] \
-    || fail "the relaunched worker did not receive exactly the source allowlist: $result"
-  assert_absent "$dir/home/state/rl-env.launch-env" \
-    "the one-launch environment snapshot must be removed before the worker starts"
-  pass "fm-control relaunch: allowlisted launcher values survive without admitting unrelated pane variables"
+    || fail "the relaunched secondmate did not receive exactly the launcher allowlist: $result"
+  assert_absent "$home/state/sm-env.launch-env" \
+    "the one-launch environment snapshot must be removed before the secondmate starts"
+  pass "fm-control relaunch: secondmate launcher values survive without admitting pane variables"
 }
 
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
@@ -1712,7 +1740,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
-test_relaunch_uses_allowlisted_launcher_environment_not_the_reused_pane
+test_secondmate_relaunch_uses_allowlisted_launcher_environment_not_the_reused_pane
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
