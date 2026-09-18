@@ -228,8 +228,8 @@ $ glab api --hostname gitlab.com projects/gitlab-org%2Fcli/pipelines/2859197360/
 {"name":"dependency-scanning-profile-0","status":"success","started_at":"2026-09-17T18:36:05.751Z"}
 ```
 
-Each pipeline's jobs normalize into checks with the job name as the lane, so the existing newest-attempt-per-name projection stays meaningful across pushes.
-`success`, `failed`, `canceled`, and `skipped` are completed conclusions; `manual` and `scheduled` lanes normalize to a completed `skipped` conclusion, so an untriggered manual deploy job never keeps an open merge request classified as checks still running and the MR's own mergeability is what gates ready-to-merge; everything else stays in progress.
+Each pipeline's jobs normalize into checks with the job name as the lane, and GitLab lanes keep their pipeline id, so the newest-attempt-per-name projection orders lanes by pipeline recency first and the newest pipeline's lane wins per name across pushes.
+`success`, `failed`, `canceled`, and `skipped` are completed conclusions; `manual`, `scheduled`, and `blocked` lanes normalize to a completed `skipped` conclusion, so an untriggered manual deploy job or a job waiting on it never keeps an open merge request classified as checks still running and the MR's own mergeability is what gates ready-to-merge; everything else stays in progress.
 
 `glab api` paginates like `gh api` but has no `--slurp`, so the monitor fetches with `--paginate` and lets `jq -s` assemble the pages:
 

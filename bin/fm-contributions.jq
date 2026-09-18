@@ -32,7 +32,7 @@ def known($input; $saved):
    + [$saved[] | .task as $task | .records[] | {task:$task,url}])
   | unique_by([.task,.url]);
 def latest_checks:
-  group_by(.name) | map(sort_by([(.started_at // ""),(.id // 0)]) | last);
+  group_by(.name) | map(sort_by([(.pipeline // 0),(.started_at // ""),(.id // 0)]) | last);
 def projected($input; $saved; $now; $max_age):
   known($input; $saved) as $known
   | [$known[] as $k

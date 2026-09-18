@@ -26,8 +26,9 @@
 # permission come from the MR core, approvals become reviews, pipeline jobs
 # become checks, and non-system discussion notes and approvals by users other
 # than the author become comment and review events. Checks are normalized by
-# name, id, started_at, status and conclusion; projection picks the newest
-# attempt per distinct name. The last observation's lane names also disclose a
+# name, id, started_at, status and conclusion, and GitLab lanes carry their
+# pipeline id so projection picks the newest attempt per distinct name, newest
+# pipeline first. The last observation's lane names also disclose a
 # lane absent from the next head.
 # A verdict records the EXACT judged head, source URL, actor and summary. A
 # comment's arrival time never supplies its judged head. Record a prose verdict
@@ -292,7 +293,7 @@ observe_gitlab() { # canonical GitLab MR URL -> normalized JSON
     forge_gitlab "$host" "projects/$project/pipelines/$p/jobs?per_page=100" --paginate > "$TMP/jobs.raw" || return 1
     jq -s . "$TMP/jobs.raw" > "$TMP/jobs-page.json" || return 1
     jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/jobs-page.json" >/dev/null || return 1
-    jq -c '[.[] | .[]]' "$TMP/jobs-page.json" >> "$TMP/jobs.jsonl"
+    jq -c --argjson pipeline "$p" '[.[] | .[] | . + {pipeline:$pipeline}]' "$TMP/jobs-page.json" >> "$TMP/jobs.jsonl"
   done < "$TMP/pipeline-ids"
   # The MR core is rechecked after the read, like the GitHub path, so no lane
   # batch is judged against a head that moved while it was fetched.
@@ -317,9 +318,9 @@ observe_gitlab() { # canonical GitLab MR URL -> normalized JSON
        reviews:([$approvals[0].approved_by // [] | .[]
                  | {user:{login:.user.username},state:"APPROVED",submitted_at:(.created_at // ""),
                     commit_id:null,id:null,source:$c.web_url,body:""}]),
-       checks:([$jobs[] | .[]? | {name,id,
-         status:(if (.status | IN("manual","scheduled","success","failed","canceled","skipped")) then "completed" else "in_progress" end),
-         conclusion:(if (.status | IN("manual","scheduled")) then "skipped"
+       checks:([$jobs[] | .[]? | {name,id,pipeline,
+         status:(if (.status | IN("manual","scheduled","blocked","success","failed","canceled","skipped")) then "completed" else "in_progress" end),
+         conclusion:(if (.status | IN("manual","scheduled","blocked")) then "skipped"
                      elif (.status | IN("success","failed","canceled","skipped")) then .status
                      else null end),
          started_at:(.started_at // .created_at // "")}]),
