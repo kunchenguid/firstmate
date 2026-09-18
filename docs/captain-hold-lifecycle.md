@@ -61,6 +61,11 @@ Two channels feed that one intake today, and both are ordinary callers rather th
 Trusted external process-event adapters intentionally expose no answer operation and cannot feed this authority-bearing intake; [`extension-bindings.md`](extension-bindings.md#trust-boundary) owns that boundary.
 `bin/fm-procevent-lavish.sh answers` is one such adapter command; it reads only rows tagged `choice`, relays a card's declared close mode, and can never let freeform captain prose forge a task id or a mode.
 
+Repository-local PIDs are durable product records owned by the project authority, while the captain-held backlog item remains the workflow-state owner.
+Their `<project>/pid-<n>` routes are delivered by `bin/fm-product-decision.sh`, which resolves the actual task home and invokes this same guarded answer or reconcile intake there.
+An offline owner leaves a durable route journal for replay rather than copying a child request into the main home.
+The `product-decision-steward` skill owns the decision presentation and stewardship workflow.
+
 ## Reconcile: re-check reality, never a blind close
 
 A captain call can stop being a question without the captain ever answering it because the subject lands, the premise turns out to be false, or the choice becomes a matter of fact rather than the captain's to make.
@@ -102,7 +107,8 @@ No path here closes a captain call without either the captain's words through `a
 
 Three checks run, all on exact identity and none on prose:
 
-- The card's key is the captain-held task id, so `bin/fm-captain-hold.sh open --distinguish-absent` is asked whether that task is still an open captain call.
+- A local task card's key is its captain-held task id, so `bin/fm-captain-hold.sh open --distinguish-absent` is asked whether that task is still an open captain call.
+  Owner-qualified `<owner>/<task>` and repository-qualified `<project>/pid-<n>` keys are channel routes, not local task selectors, so the board keeps them from its captured structured snapshot instead of treating them as stale task ids.
   Exit 1 - present but closed, or no longer held for the captain - drops the card.
   Exit 2 means the answer could not be established and exit 3 means the task is absent from the main backlog, which includes a home carrying no backlog file at all; both keep the card, because a card wrongly shown is recoverable and a call wrongly hidden is not.
 - The payload's own `landed` rows are the recently-landed artifacts.

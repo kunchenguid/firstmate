@@ -47,6 +47,8 @@ For a contribution wake or linked-issue filing, go directly to Contribution foll
    For registered secondmates, use the snapshot's structured-home classification and provenance.
    A parent event or bounded terminal contradiction is fallback evidence, never authority over readable structured home state.
    A decision is simply a task held for the captain (`captain-hold-lifecycle`), whatever its kind.
+   A repository-local PID is separately projected from the authority home's bounded open-PID summary and uses its owner-qualified `<project>/pid-<n>` identity rather than masquerading as a root backlog task.
+   Its full record remains in the authoritative project Firstmate home and is never copied into startup context or the snapshot.
    The canonical snapshot assigns every captain hold exactly one bucket from structured fields only: `blocked` when any blocker is unresolved, else `dated` while `hold_until` is in the future, else `aged` when an undated hold has reached the configured age threshold, else `live`.
    Never use hold-reason or body prose to classify or place a decision.
    A `live` hold appears in Captain's Call; `blocked`, `dated`, and `aged` holds appear as disclosed Charted Next gates stating their structured reason.
@@ -98,11 +100,13 @@ For a contribution wake or linked-issue filing, go directly to Contribution foll
 
 Compose the payload from the same snapshot with the same ranking judgment as the chat digest, plus these board rules:
 
-- A Captain's Call decision key is the captain-held TASK ID from `decisions_open` (legacy `<origin>-decision-<key>` rows are already task ids); a merge card's key is `merge.<task-id>`; the Charted Next dispatch picker's key is `dispatch.charted`.
+- A Captain's Call decision key is the captain-held task id from `decisions_open` (legacy `<origin>-decision-<key>` rows are already task ids); a PID card keeps the snapshot's owner-qualified `<project>/pid-<n>` key; a merge card's key is `merge.<task-id>`; the Charted Next dispatch picker's key is `dispatch.charted`.
 - Before carding a hold, check that its SUBJECT has not already landed, and omit it when it has. `build` drops a card whose task or PR appears in the payload's own landed rows, and one whose task is no longer an open captain call. When a hold waits on one specific PR, put that PR in the card's `pr_url`. When it concerns a published version, put the artifact and numeric three-part version in the card's structured `subject`; landed rows for releases carry the same identity, and a matching or newer version drops the card. Identity matching is structured only, so verify any subject without one of these identities against current reality before carding it.
 - Never author a `reconcile` option on any card. `build` gives every decision card the standard reconcile choice itself, and the payload validator reserves that value across all card types; recommendations must name an authored option.
 - Compose exactly one decision card per captain-held task id. When one task carries multiple questions, consolidate all of them and their options into that card; never emit duplicate cards with the same task-id key.
 - Decision cards carry agent-authored copy: a short noun-phrase title, one-line `about` and `decide` context rows, and option labels with hints, with the recommended option marked.
+- For a PID card, use `decisions_open[].product_decision` as the source: explain the product question and user impact, show every option's pros and cons before the recommendation, and put the neutral consequences and recommendation rationale in `detail`.
+  Keep the option values lettered and set `recommend_value` to the recorded recommended option.
 - Card `type` (decision, merge, credential) is your composing judgment from the row's content; no backlog field types a card for you.
 - When the card's task is a captain-gated WORK item (the answer should free it to proceed rather than complete it), set the card's `close: "release"` so the answer lifts the hold instead of closing the task; question-shaped items omit it.
 - A Charted Next row's optional `kind` separates work from alarms: omit it (or set `"queued"`) for real queued work, and set `"warning"` on every action-free fleet-integrity notice - the `(main-inventory)` gate, the `(return-catchup)` gate, an unavailable secondmate home, and an inventory-mismatch repair notice. The board badges a warning row `needs repair` instead of `waiting` and leaves it out of the Charted Next count, so those rows never read as dispatchable queued work.
@@ -122,12 +126,16 @@ Never run `lavish-axi poll` for the board yourself: the armed source's supervise
 ### Handling a board wake
 
 A board answer arrives as an ordinary `procevent lavish <source-id> <sequence>` check wake. Identify it by comparing the wake source id with `bin/fm-procevent-lavish.sh source-id "$(bin/fm-bearings-board.sh path)"`, regardless of which answer kinds the result contains; then load `process-event-sources` and follow its contract for the result read, adapter classification, and the handled acknowledgement.
-Decision answers need no routing from you: the runner feeds the board's binding into `bin/fm-captain-hold.sh`'s one keyed-answer intake, which closes or releases each answered captain-held task at answer time; reconcile any `skipped:` key yourself with a direct `answer`, and when the captain's answer is "later", record it as a deferral with `bin/fm-captain-hold.sh hold <id> --reason "<reason>" --until <date>` instead of a closure.
+Ordinary task answers flow through `bin/fm-captain-hold.sh`'s one keyed-answer intake, which closes or releases the task in its owning home.
+An owner-qualified `<project>/pid-<n>` answer instead goes through `bin/fm-product-decision.sh`, which durably records the exact answer in the authority-home PID, routes it to the originating task owner, and uses that same guarded intake.
+Do not copy the decision into the root backlog or resolve a PID by creating a main-home request.
+Reconcile selections use the same owner-aware route to file the binding-checked request in the task-owning home.
+If a route reports durable queuing, retry it with `bin/fm-product-decision.sh retry-routes` from its owner home before claiming delivery.
+When the captain's answer is "later", record it as a deferral with `bin/fm-captain-hold.sh hold <id> --reason "<reason>" --until <date>` instead of a closure.
 A current structured Reconcile selection closes nothing: the versioned board context carries its exact selected option separately from any typed note, and the adapter routes that selection only into a durable re-check request while preserving the note as provenance.
 The rollout-compatible old context still feeds ordinary non-reconcile answers, but its bare or separator-annotated reconcile values and every structurally uncertain choice feed neither intake and remain announced for deliberate handling.
 Verify the call's latest state, then retire the request through `bin/fm-captain-hold.sh reconcile close <id> --evidence-file <path>` when it turns out to be moot, or `reconcile note <id> --note-file <path>` when it is genuinely still open.
 Both outcomes refuse without that pending board-created request, and `bin/fm-captain-hold.sh reconcile list` names every request still outstanding.
-A remote-secondmate card whose task is absent from the main backlog remains on the board unchanged, but its reconcile request is refused in the main home until the separately tracked owner-aware routing follow-up can query and mutate the authoritative secondmate home; handle the announced capture without claiming that a request or reconciliation succeeded.
 `captain-hold-lifecycle` owns why a reconcile may never be recorded as the captain's answer.
 Route the non-decision keys yourself:
 

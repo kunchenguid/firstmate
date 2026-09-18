@@ -229,6 +229,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/product-decision-steward/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/quiet/SKILL.md",
       "audience": "agent-runtime"
     },
