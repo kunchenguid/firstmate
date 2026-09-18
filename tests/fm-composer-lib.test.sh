@@ -705,6 +705,74 @@ test_matrix_opencode_leftbar_signals() {
   pass "matrix: opencode's left-bar composer reads empty everywhere and scans the full active run"
 }
 
+test_matrix_opencode_leftbar_cwd_furniture() {
+  # Real idle OpenCode 1.18.31, captured live on 2026-09-18 from a firstmate
+  # tmux worker pane (fixtures/opencode-1.18.31-cwd/opencode-1.18.31-idle-cwd.ansi,
+  # the styled 20-row tail exactly as fm_tmux_composer_capture feeds it, real
+  # cursor_y shifted by the 50 rows above the tail). The left-bar composer holds
+  # NO typed text: the pane's working directory and branch are drawn
+  # RIGHT-ALIGNED inside the composer rows above the Build footer, wrapped over
+  # three rail-width fragments ("~/.treehouse/harness-engineering-",
+  # "presentation-a32ea0/7/harness-", "engineering-presentation:fm/deck-07-")
+  # whose final fragment ("failure-modes") is drawn at the right end of the
+  # footer row itself. The fragments are RGB 128 grey - luminance exactly 128,
+  # ON the ghost-luma ceiling - so they survive ghost stripping and the
+  # classifier used to read them as unsent typed text: every idle 1.18.31 pane
+  # answered `pending`, which skipped the steering doorbell, the watcher's
+  # re-ring ladder, and fm-control.sh's typed /exit.
+  local screen composer fixture typed typed_row strip start expected_fragment
+  fixture="$ROOT/tests/fixtures/opencode-1.18.31-cwd/opencode-1.18.31-idle-cwd.ansi"
+  screen=$(<"$fixture")
+  # Cursor 14 = the real #{cursor_y} (64) minus the 50 rows above the tail:
+  # the cursor sits inside the composer's furniture rows, so the cursor-anchored
+  # left-bar read is the verdict the tmux adapter supplies.
+  assert_screen "opencode 1.18.31 idle cwd:branch furniture on tmux" empty "$CAPS_TMUX" "$screen" 14
+  # Cursorless profiles see the same furniture through the plain, style-free
+  # recognition, until the version's separate status rail below the floor row
+  # (which the classifier does not own here) invalidates the shape on a full
+  # capture; the cropped composer tail pins the furniture verdict itself.
+  composer=$(printf '%s\n' "$screen" | tail -n 9 | head -n 6)
+  assert_screen "opencode 1.18.31 cwd furniture on herdr" empty "$CAPS_STYLED" "$composer"
+  assert_screen "opencode 1.18.31 cwd furniture on zellij" empty "$CAPS_STYLED_NOID" "$composer"
+  assert_screen "opencode 1.18.31 cwd furniture on cmux/orca" empty "$CAPS_PLAIN" "$composer"
+  # Non-vacuousness: the fragments really survive ghost stripping (RGB 128 has
+  # luminance exactly 128, not below the ceiling) and the run really reaches the
+  # top furniture row, so the verdict above cannot come from blank rows alone.
+  expected_fragment="$(printf '~')/.treehouse/harness-engineering-"
+  strip=$(printf '%s\n' "$(_fm_composer_screen_row 2 "$composer")" | fm_composer_strip_ghost)
+  fm_composer_normalize_trim_var strip
+  case "$strip" in
+    '┃'*) strip=${strip#┃} ;;
+  esac
+  fm_composer_normalize_trim_var strip
+  [ "$strip" = "$expected_fragment" ] \
+    || fail "the top furniture fragment must survive ghost stripping intact, got '$strip'"
+  start=$(_fm_composer_leftbar_cwd_start "$composer" 0 5)
+  [ "$start" = 2 ] || fail "the fixture's furniture run must be recognised from its top row, got '$start'"
+
+  # Position decides, never shape alone: the same furniture with a LEFT-EDGE
+  # typed line directly above it keeps the composer pending, and a path-shaped
+  # string typed at the left edge is typed text even when the footer keeps its
+  # right-hand tail.
+  typed_row="  ${ESC}[38;2;92;156;245m┃${ESC}[38;2;255;255;255m${ESC}[48;2;30;30;30m  ${ESC}[38;2;238;238;238mReply with OK.${ESC}[0m"
+  typed="${typed_row}"$'\n'"$(tail -n 4 <<< "$composer")"
+  assert_screen "opencode 1.18.31 typed above cwd furniture on tmux" pending "$CAPS_TMUX" "$typed" 0
+  typed="  ${ESC}[38;2;92;156;245m┃${ESC}[38;2;255;255;255m${ESC}[48;2;30;30;30m  ${ESC}[38;2;238;238;238m/usr/local/bin/some/tool${ESC}[0m"$'\n'"$(tail -n 4 <<< "$composer")"
+  assert_screen "opencode left-edge typed path above cwd furniture on tmux" pending "$CAPS_TMUX" "$typed" 0
+
+  # The concatenation is load-bearing: a right-aligned single token that is
+  # not part of such a path, and a fragment run whose start is not a path
+  # prefix, stay typed content.
+  diverge=$'transcript line\n  ┃                                                              50.8K\n  ┃  Build · gpt-oss-120b Internal OVHcloud'
+  assert_screen "opencode right-aligned non-path token stays typed on tmux" pending "$CAPS_TMUX" "$diverge" 1
+  diverge=$'transcript line\n  ┃                                                                                                                     deck-07-\n  ┃  Build · gpt-oss-120b Internal OVHcloud                                                                          failure-modes'
+  assert_screen "opencode bare branch fragment without a path start stays typed" pending "$CAPS_TMUX" "$diverge" 1
+  # And a DIFFERENT machine's path:branch shape must classify by structure too.
+  assert_screen "opencode foreign-path cwd furniture on tmux" empty "$CAPS_TMUX" \
+    $'transcript line\n  ┃                                                             ~/other-projects/tools:fm/main\n  ┃  Build · gpt-oss-120b Internal OVHcloud' 1
+  pass "matrix: opencode 1.18.31's right-aligned cwd:branch furniture reads empty; left-edge text stays pending"
+}
+
 test_matrix_grok_titled_bottom_border() {
   # Grok 1.0.5 widened its titled BOTTOM border three columns past the top and
   # content rows. This is the idle capture from issue #3436; Herdr has no
@@ -1034,6 +1102,7 @@ test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
 test_matrix_pi_dollar_status_footer_is_empty
 test_matrix_opencode_leftbar_signals
+test_matrix_opencode_leftbar_cwd_furniture
 test_matrix_grok_titled_bottom_border
 test_matrix_claude_titled_top_rule
 test_matrix_kimi_bordered_shell_glyph_box
