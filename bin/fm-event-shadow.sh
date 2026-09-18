@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# fm-event-shadow.sh - opt-in, annotation-only JEV pilot for bare stale wakes.
+# fm-event-shadow.sh - opt-in, annotation-only JEV pilot for stale worker wakes.
 # Usage: fm-event-shadow.sh [--samples <json> [--response <json>]]
 # Otherwise reads already-presented wake TSV rows from stdin; never reads or
 # acknowledges the queue. FM_EVENT_SHADOW=1 enables it, all other values are off.
 # TYPESAFE_API_KEY must be injected in the environment (no .env fallback).
 # Uses the dispatch resolver's System One Choice protocol and five-second curl
-# bound. Sends at most eight independent stale questions in one request. Other
+# bound. Accepts bare stale and canonical possible-wedge reasons only (never
+# demand-deep-inspection). Sends at most eight questions in one request. Other
 # wake reasons, including deterministic quota/trust/CI/process reasons, bypass.
 # Looks up a unique local metadata window and sends only the last eight status
 # lines (4096 bytes maximum); these are untrusted declarations, not live facts.
@@ -63,7 +64,12 @@ else
   printf '[]\n' > "$TMP/events"
   count=0
   while IFS=$'\t' read -r epoch seq kind key payload; do
-    [ "$kind" = stale ] && [ "$payload" = "stale: $key" ] || continue
+    [ "$kind" = stale ] || continue
+    if [ "$payload" != "stale: $key" ]; then
+      suffix=${payload#"stale: $key "}
+      [ "$suffix" != "$payload" ] || continue
+      [[ "$suffix" =~ ^\(idle\ [0-9]+s,\ possible\ wedge,\ escalation\ [0-9]+\)$ ]] || continue
+    fi
     case "$seq" in ''|*[!0-9]*) continue ;; esac
     match='' matches=0
     for meta in "$STATE"/*.meta; do
