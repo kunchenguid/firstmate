@@ -51,14 +51,22 @@ export function installOmpCalmAssistantThinking(): void {
     [key: symbol]: CalmAssistantThinkingPatch | undefined;
   };
   const remembered = new Set<AssistantMessageComponentLike>();
+  const originalMessages = new WeakMap<AssistantMessageComponentLike, AssistantMessage>();
   const hidesThinking = (): boolean => calmPresentationHides("assistant-thinking");
   const hidesWorkingNote = (): boolean => calmPresentationHides("assistant-working-note");
+  let originalUpdateContent: AssistantMessageComponentLike["updateContent"] | undefined;
   const applyToRemembered = (): void => {
     const hide = hidesThinking();
+    const shouldHideWorkingNote = hidesWorkingNote();
     for (const component of remembered) {
       try {
         component.setHideThinkingBlock(hide);
-        component.invalidate();
+        const originalMessage = originalMessages.get(component);
+        if (!shouldHideWorkingNote && originalMessage && originalUpdateContent) {
+          originalUpdateContent.call(component, originalMessage);
+        } else {
+          component.invalidate();
+        }
       } catch {
         remembered.delete(component);
       }
@@ -94,10 +102,11 @@ export function installOmpCalmAssistantThinking(): void {
       };
     }
   ).prototype;
-  const originalUpdateContent = prototype.updateContent;
-  if (typeof originalUpdateContent !== "function") {
+  const stockUpdateContent = prototype.updateContent;
+  if (typeof stockUpdateContent !== "function") {
     throw new Error("Firstmate Calm requires OMP AssistantMessageComponent.updateContent");
   }
+  originalUpdateContent = stockUpdateContent;
   if (typeof prototype.setHideThinkingBlock !== "function") {
     throw new Error(
       "Firstmate Calm requires OMP AssistantMessageComponent.setHideThinkingBlock",
@@ -110,6 +119,7 @@ export function installOmpCalmAssistantThinking(): void {
     options?: { transient?: boolean },
   ): void {
     patch.remember(this);
+    originalMessages.set(this, message);
     const hideThinking = patch.hidesThinking();
     const hideWorkingNote =
       patch.hidesWorkingNote() &&
@@ -131,7 +141,7 @@ export function installOmpCalmAssistantThinking(): void {
           }
         : message;
     this.setHideThinkingBlock(hideThinking);
-    originalUpdateContent.call(this, presentationMessage, options);
+    stockUpdateContent.call(this, presentationMessage, options);
   };
 
   registry[CALM_ASSISTANT_THINKING_PATCH] = patch;

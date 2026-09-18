@@ -279,6 +279,9 @@ await calmCommand.handler("", { ui });
 if (opComponent.render(80).length === 0) {
   throw new Error("Calm-off must restore operational rows");
 }
+if (!(assistant.rendered || []).some((line) => line === "text:short note")) {
+  throw new Error(`Calm-off must restore the hidden working note, got ${JSON.stringify(assistant.rendered)}`);
+}
 assistant.updateContent({
   stopReason: "stop",
   content: [
