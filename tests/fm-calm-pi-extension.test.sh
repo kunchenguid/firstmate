@@ -743,7 +743,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const extPath = fileURLToPath(pathToFileURL(process.env.EXT).href);
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
-const [{ AssistantMessageComponent }, { CustomEntryComponent }, { ToolExecutionComponent }, { UserMessageComponent }, { InteractiveMode }, { initTheme, theme }, { Text, getKeybindings, setCapabilities }, { createToolHtmlRenderer }, { createReadToolDefinition, createBashToolDefinition, createEditToolDefinition, createWriteToolDefinition, createGrepToolDefinition, createFindToolDefinition, createLsToolDefinition }] = await Promise.all([
+const [{ AssistantMessageComponent }, { CustomEntryComponent }, { ToolExecutionComponent }, { UserMessageComponent }, { InteractiveMode }, { initTheme, theme }, { Text, getKeybindings, setCapabilities, stripTerminalSequences }, { createToolHtmlRenderer }, { createReadToolDefinition, createBashToolDefinition, createEditToolDefinition, createWriteToolDefinition, createGrepToolDefinition, createFindToolDefinition, createLsToolDefinition }] = await Promise.all([
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/assistant-message.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/custom-entry.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/tool-execution.js`).href),
@@ -1149,6 +1149,22 @@ const assistantComponents = [
   assistantThinkingTool,
   assistantProgress,
 ];
+const assistantBackgroundCases = [
+  new AssistantMessageComponent({
+    ...assistantBase,
+    content: [{ type: "text", text: "COMPLETED_ASSISTANT_RESPONSE" }],
+  }, true, undefined, "Thinking...", 1, markdownTransformers),
+  new AssistantMessageComponent({
+    ...assistantBase,
+    stopReason: "pending",
+    content: [{ type: "text", text: "LIVE_ASSISTANT_RESPONSE" }],
+  }, true, undefined, "Thinking...", 1, markdownTransformers),
+  new AssistantMessageComponent({
+    ...assistantBase,
+    content: [{ type: "text", text: "First paragraph.\n\nSecond paragraph.\n\n```ts\nconst background = true;\n```" }],
+  }, true, undefined, "Thinking...", 1, markdownTransformers),
+];
+const assistantStockRenders = assistantBackgroundCases.map((component) => component.render(100));
 let expanded = true;
 let editorText = "";
 let terminalInputHandler;
@@ -1220,6 +1236,25 @@ if (
 }
 
 await calmCommand.handler("", commandContext);
+const assistantBackground = "\x1b[48;2;122;31;92m";
+for (const [index, component] of assistantBackgroundCases.entries()) {
+  const rendered = component.render(100);
+  const stock = assistantStockRenders[index];
+  if (rendered.length !== stock.length) {
+    throw new Error(`Calm assistant background changed row count for case ${index}`);
+  }
+  if (JSON.stringify(rendered.map(stripTerminalSequences)) !== JSON.stringify(stock.map(stripTerminalSequences))) {
+    throw new Error(`Calm assistant background changed visible content for case ${index}`);
+  }
+  const visibleLines = rendered.filter((line) => stripTerminalSequences(line).trim() !== "");
+  if (visibleLines.some((line) => !line.includes(assistantBackground) || !line.endsWith("\x1b[49m"))) {
+    throw new Error(`Calm assistant background missing or unclosed for case ${index}`);
+  }
+  const narrow = component.render(40);
+  if (narrow.some((line) => stripTerminalSequences(line).trim() !== "" && !line.includes(assistantBackground))) {
+    throw new Error(`Calm assistant background did not repaint case ${index} at narrow width`);
+  }
+}
 if (expanded !== true || workingVisible !== true || hiddenThinkingLabel !== "" || statuses.get("firstmate-calm") !== undefined) {
   throw new Error("Calm did not preserve working visibility or apply its thinking and footer presentation controls");
 }
@@ -1430,6 +1465,11 @@ for (const { name, baseline, actual } of rows) {
     throw new Error(`${name} did not restore the expanded standard renderer`);
   }
 }
+for (const [index, component] of assistantBackgroundCases.entries()) {
+  if (JSON.stringify(component.render(100)) !== JSON.stringify(assistantStockRenders[index])) {
+    throw new Error(`turning Calm off did not restore assistant case ${index}`);
+  }
+}
 if (JSON.stringify(imageRow.render(100)) !== JSON.stringify(imageVisibleBefore)) {
   throw new Error("built-in read image row did not restore its ordinary call shell and image output");
 }
@@ -1514,7 +1554,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
-const [{ AssistantMessageComponent }, { initTheme }, { setCapabilities }] = await Promise.all([
+const [{ AssistantMessageComponent }, { initTheme }, { setCapabilities, stripTerminalSequences }] = await Promise.all([
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/components/assistant-message.js`).href),
   import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
   import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
@@ -1764,7 +1804,10 @@ requireHidden("expandedHistory", "PREEXISTING_STEP_TITLE", "Calm on");
 requireVisible("streaming", "STREAMING_NOTE_TEXT", "Calm on");
 requireVisible("truncatedFinal", "TRUNCATED_FINAL_TEXT", "Calm on");
 requireVisible("finalReply", "FINAL_REPLY_TEXT", "Calm on");
-if (JSON.stringify(rendered("finalReply")) !== stockRows.finalReply) {
+if (
+  JSON.stringify(rendered("finalReply").map(stripTerminalSequences)) !==
+  JSON.stringify(JSON.parse(stockRows.finalReply).map(stripTerminalSequences))
+) {
   throw new Error("Calm on changed the genuine final reply row");
 }
 if (JSON.stringify(messages) !== messagesBefore) {

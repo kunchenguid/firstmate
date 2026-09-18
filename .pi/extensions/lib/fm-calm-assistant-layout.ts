@@ -4,7 +4,8 @@
 // the otherwise-empty thinking spacer on Pi versions that export the class used by the
 // interactive UI. Both consume the same visibility state and only render shallow
 // presentation copies; messages, model context, session storage, and exports are never
-// changed.
+// changed. Calm paints the visible assistant range with a temporary high-contrast
+// magenta background without changing its geometry.
 import type {
   AssistantMessageComponent as PiAssistantMessageComponent,
   ExtensionAPI,
@@ -18,6 +19,12 @@ import {
   calmPresentationHides,
   calmStockExportRenderingIsActive,
 } from "./fm-calm-visibility.ts";
+
+const CALM_ASSISTANT_BACKGROUND = "\x1b[48;2;122;31;92m";
+const stripTerminalSequences = (text: string): string =>
+  text
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
 
 type AssistantMessage = Parameters<PiAssistantMessageComponent["updateContent"]>[0];
 
@@ -39,6 +46,8 @@ type CalmAssistantLayoutController = {
   ) => void;
   transform: MarkdownTransformer;
   originalUpdateContent: PiAssistantMessageComponent["updateContent"];
+  originalRender: PiAssistantMessageComponent["render"];
+  assistantRender: (component: PiAssistantMessageComponent, width: number) => string[];
   presentations: WeakMap<object, CalmAssistantPresentation>;
   ownedThinkingMessages: WeakSet<object>;
   ownedThinkingMarkdown: Set<string>;
@@ -96,10 +105,16 @@ export function installCalmAssistantLayout(
     if (typeof originalUpdateContent !== "function") {
       throw new Error("Firstmate Calm requires Pi AssistantMessageComponent.updateContent");
     }
+    const originalRender = AssistantMessageComponent.prototype.render;
+    if (typeof originalRender !== "function") {
+      throw new Error("Firstmate Calm requires Pi AssistantMessageComponent.render");
+    }
     const newController: CalmAssistantLayoutController = {
       render: () => {},
       transform: (markdown) => markdown,
       originalUpdateContent,
+      originalRender,
+      assistantRender: (component, width) => originalRender.call(component, width),
       presentations: new WeakMap(),
       ownedThinkingMessages: new WeakSet(),
       ownedThinkingMarkdown: new Set(),
@@ -112,9 +127,15 @@ export function installCalmAssistantLayout(
     ): void {
       newController.render(this, message, isStreaming);
     };
+    AssistantMessageComponent.prototype.render = function (width: number): string[] {
+      return newController.assistantRender(this, width);
+    };
   }
 
   const activeController = controller;
+  activeController.originalRender ??= AssistantMessageComponent.prototype.render;
+  activeController.assistantRender ??= (component, width) =>
+    activeController.originalRender.call(component, width);
   // Controllers created by the prior source revision survive /reload and lack the two
   // Markdown fields. Upgrade them in place before replacing either delegate.
   activeController.ownedThinkingMessages ??= new WeakSet();
@@ -133,6 +154,26 @@ export function installCalmAssistantLayout(
   pi.registerMarkdownTransformer((markdown, context) =>
     activeController.transform(markdown, context),
   );
+
+  activeController.assistantRender = (component, width): string[] => {
+    const lines = activeController.originalRender.call(component, width);
+    if (!calmPresentationHides("assistant-thinking") || lines.length === 0) return lines;
+
+    let firstVisible = -1;
+    let lastVisible = -1;
+    for (let index = 0; index < lines.length; index += 1) {
+      if (stripTerminalSequences(lines[index]).trim() !== "") {
+        if (firstVisible === -1) firstVisible = index;
+        lastVisible = index;
+      }
+    }
+    if (firstVisible === -1) return lines;
+    return lines.map((line, index) =>
+      index >= firstVisible && index <= lastVisible
+        ? `${CALM_ASSISTANT_BACKGROUND}${line}\x1b[49m`
+        : line,
+    );
+  };
 
   activeController.render = (component, message, isStreaming): void => {
     appendLatestCalmStep(message, isStreaming);
