@@ -149,8 +149,8 @@ test_uncertain_answer_is_unverified() {
   TYPESAFE_API_KEY=$KEY run code out err "$TEXT"
   [ "$code" = 3 ] || fail "an uncertain answer leaning clean must exit 3, got $code"
   assert_contains "$out" "uncertain: relayed_orders yes=0.4" "the uncertain category must be named"
-  [ "$(calls)" = 1 ] || fail "a well-formed uncertain answer needs no retry"
-  pass "fm-voice-check: an uncertain answer leaning clean is unverified, exit 3"
+  [ "$(calls)" = 2 ] || fail "an uncertain answer must be retried exactly once, got $(calls) calls"
+  pass "fm-voice-check: an uncertain answer leaning clean is retried once, then unverified, exit 3"
 }
 
 test_accepted_unverified_publishes_with_reason() {

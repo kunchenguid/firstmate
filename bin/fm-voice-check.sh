@@ -3,8 +3,8 @@
 # --intent string, for internal voice before it is published, opt-in.
 #
 # Usage:
-#   fm-voice-check.sh [--kind pr|issue|intent] [--language <name>]
-#                     [--accept-unverified <reason>] <text-file|->
+#   fm-voice-check.sh [--kind pr|issue|intent] [--accept-unverified <reason>]
+#                     <text-file|->
 #
 # Opt-in gate: the same TYPESAFE_API_KEY as bin/fm-dispatch-resolve.sh, from
 #   this process environment or a TYPESAFE_API_KEY= line in $FM_HOME/.env; the
@@ -20,7 +20,7 @@
 #                       merge", "in the new PR description, explain ...")
 #     quoted_answer     the operator's conversational answer, ruling, or words
 #                       quoted or reported
-#     other_language    prose in a language other than --language (English)
+#     other_language    prose in a language other than English
 #   The service only answers; every decision below is code.
 #
 # Decision, per category and then for the text:
@@ -30,7 +30,8 @@
 #   any flagged                                 -> status flagged, exit 1
 #   all clear                                   -> status clear, exit 0
 #   otherwise, or no usable answer (transport, timeout, HTTP, or malformed
-#   response, after one retry)                  -> status unverified, exit 3
+#   response)                                   -> one retry, then status
+#                                                  unverified, exit 3
 #   A flagged text is never published by this tool's verdict: no flag or
 #   override turns flagged into exit 0.
 #   --accept-unverified <reason> turns an unverified result (and only that) into
@@ -82,14 +83,13 @@ usage() {
   ' "$0"
 }
 
-KIND=pr LANGUAGE=English ACCEPT_UNVERIFIED='' INPUT=''
+KIND=pr ACCEPT_UNVERIFIED='' INPUT=''
 while [ $# -gt 0 ]; do
   case "$1" in
     --kind)
       [ $# -ge 2 ] || die "--kind needs a value"
       case "$2" in pr|issue|intent) KIND=$2 ;; *) die "--kind must be pr, issue, or intent" ;; esac
       shift 2 ;;
-    --language) [ $# -ge 2 ] && [ -n "$2" ] || die "--language needs a value"; LANGUAGE=$2; shift 2 ;;
     --accept-unverified)
       [ $# -ge 2 ] && [ -n "$(printf '%s' "$2" | tr -d '[:space:]')" ] || die "--accept-unverified needs a reason"
       ACCEPT_UNVERIFIED=$2; shift 2 ;;
@@ -143,7 +143,7 @@ unverified() {  # <reason> [<findings-json>]
 }
 
 REQUEST=$(jq -n --rawfile text "$TEXT_FILE" --arg model "$FM_TYPESAFE_MODEL" \
-  --arg artifact "$ARTIFACT" --arg language "$LANGUAGE" '
+  --arg artifact "$ARTIFACT" --arg language English '
   def q($i): {type: "choice", instructions: $i, criteria: {yes: "Yes, the text does this.", no: "No, the text does not do this."}};
   {
     model: $model,
@@ -171,14 +171,8 @@ attempt_post() {
     ok(.answers.quoted_answer) and ok(.answers.other_language)' "$RESP_FILE" >/dev/null 2>&1
 }
 
-if ! attempt_post && ! attempt_post; then
-  if [ "$FM_TYPESAFE_HTTP" = 200 ]; then
-    unverified "service response is not a yes/no answer for every category"
-  fi
-  unverified "service unavailable: http $FM_TYPESAFE_HTTP after ${FM_TYPESAFE_LATENCY_MS} ms"
-fi
-
-VERDICT=$(jq -c --argjson floor "$CONFIDENCE_FLOOR" '
+judge() {
+  jq -c --argjson floor "$CONFIDENCE_FLOOR" '
   [.answers | to_entries[]
    | select(.key == "operator_address" or .key == "relayed_orders" or .key == "quoted_answer" or .key == "other_language")
    | {category: .key, yes: .value.probabilities.yes, confidence: .value.confidence,
@@ -186,8 +180,22 @@ VERDICT=$(jq -c --argjson floor "$CONFIDENCE_FLOOR" '
               elif .value.confidence >= $floor then "clear"
               else "uncertain" end)}]
   | {flagged: map(select(.state == "flagged") | . + {line: "finding"}),
-     uncertain: map(select(.state == "uncertain") | . + {line: "uncertain"})}' "$RESP_FILE") \
-  || unverified "service response could not be judged"
+     uncertain: map(select(.state == "uncertain") | . + {line: "uncertain"})}' "$RESP_FILE"
+}
+
+attempt() {
+  VERDICT=''
+  attempt_post || return 1
+  VERDICT=$(judge) || { VERDICT=''; return 1; }
+  jq -e '(.flagged | length) > 0 or (.uncertain | length) == 0' <<<"$VERDICT" >/dev/null
+}
+
+if ! attempt && ! attempt && [ -z "$VERDICT" ]; then
+  if [ "$FM_TYPESAFE_HTTP" = 200 ]; then
+    unverified "service response is not a yes/no answer for every category"
+  fi
+  unverified "service unavailable: http $FM_TYPESAFE_HTTP after ${FM_TYPESAFE_LATENCY_MS} ms"
+fi
 
 if [ "$(jq '.flagged | length' <<<"$VERDICT")" -gt 0 ]; then
   emit flagged "internal voice found; do not publish this text, rewrite it for its public reader" \

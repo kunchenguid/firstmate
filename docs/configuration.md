@@ -516,7 +516,7 @@ This section is the single owner of the check's operator contract; the script he
 When on, the tool asks the service four closed yes/no questions over the text, one per category, and decides in code.
 A yes on any category, at any confidence, flags the text: publication stops, the category is reported, and no flag or override publishes it.
 A text is clear only when every category is a no at confidence 0.6 or above.
-When there is no verdict - the service is unreachable, times out after 20 seconds, returns an error, returns a malformed answer, or answers no below that confidence - the tool retries once for a missing or malformed answer, then reports the text as unverified and stops publication.
+When there is no verdict - the service is unreachable, times out after 20 seconds, returns an error, returns a malformed answer, or answers no below that confidence - the tool retries once within the same bound, then reports the text as unverified and stops publication.
 An unverified text publishes only through an explicit override for that one publication, with its reason printed, used only on the supervising firstmate's instruction.
 The check reports only a category, never a rewrite: the author corrects the flagged passages and checks again, at most twice, and a text still flagged after that escalates to the supervisor instead of looping.
 
