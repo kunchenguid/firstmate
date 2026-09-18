@@ -6,7 +6,11 @@
 # when neither file exists, promotes a real CLAUDE.md file when it is the only
 # file present (unless it is already the canonical pointer), converts a correct
 # CLAUDE.md -> AGENTS.md symlink into the pointer file, and refuses to clobber
-# distinct real files or wrong symlinks.
+# distinct real files or wrong symlinks. Skips writing a brand-new CLAUDE.md
+# pointer (neither file existed, or AGENTS.md existed with no CLAUDE.md) when
+# the invoking Claude Code is >= 2.1.277, which reads AGENTS.md natively; see
+# claude_supports_native_agents_md. Existing pointers and symlink conversions
+# are left alone by this gate for now.
 # Owns the canonical "## Maintaining this file" self-governance wording for
 # project AGENTS.md files, injecting it idempotently into created skeletons,
 # promoted CLAUDE.md files, and existing AGENTS.md files lacking both the exact
