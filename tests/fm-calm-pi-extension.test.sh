@@ -1786,28 +1786,31 @@ for (const persisted of ["on\n", "max\n", "max", null, "maybe\n", ""]) {
   requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm toggled off after restore");
 }
 // Only an explicit stored off restores as off: no built-ins are claimed at load and
-// session start keeps stock rendering until the captain toggles.
-writeFileSync(calmPreferencePath, "off\n", "utf8");
-visibility.setCalmPresentation(false);
-ui.setHiddenThinkingLabel(undefined);
-requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "scrambled live state");
-calm = await loadCalmExtension();
-if (calm.registeredTools.length !== 0) {
-  throw new Error(
-    `a session restored from an explicit off claimed ${calm.registeredTools.length} built-in tools instead of 0`,
-  );
-}
-for (const reason of ["startup", "resume", "new", "fork", "reload"]) {
-  await calm.sessionStart({ reason }, context);
-  requireVisible("midTurn", "MIDTURN_WORKING_NOTE", `${reason} session restored from explicit off`);
-  requireVisible("finalReply", "FINAL_REPLY_TEXT", `${reason} session restored from explicit off`);
-}
-await calm.calmCommand.handler("", context);
-if (readFileSync(calmPreferencePath, "utf8") !== "on\n") {
-  throw new Error("a session restored from explicit off did not toggle to on");
-}
-if (rendered("midTurn").length !== 0) {
-  throw new Error("Calm toggled on after an explicit-off restore left a working note visible");
+// session start keeps stock rendering until the captain toggles. A hand-written
+// casing of off carries the same explicit intent and must never resolve to on.
+for (const storedOff of ["off\n", "OFF\n", " Off \n"]) {
+  writeFileSync(calmPreferencePath, storedOff, "utf8");
+  visibility.setCalmPresentation(false);
+  ui.setHiddenThinkingLabel(undefined);
+  requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "scrambled live state");
+  calm = await loadCalmExtension();
+  if (calm.registeredTools.length !== 0) {
+    throw new Error(
+      `a session restored from ${JSON.stringify(storedOff)} claimed ${calm.registeredTools.length} built-in tools instead of 0`,
+    );
+  }
+  for (const reason of ["startup", "resume", "new", "fork", "reload"]) {
+    await calm.sessionStart({ reason }, context);
+    requireVisible("midTurn", "MIDTURN_WORKING_NOTE", `${reason} session restored from ${JSON.stringify(storedOff)}`);
+    requireVisible("finalReply", "FINAL_REPLY_TEXT", `${reason} session restored from ${JSON.stringify(storedOff)}`);
+  }
+  await calm.calmCommand.handler("", context);
+  if (readFileSync(calmPreferencePath, "utf8") !== "on\n") {
+    throw new Error(`a session restored from ${JSON.stringify(storedOff)} did not toggle to on`);
+  }
+  if (rendered("midTurn").length !== 0) {
+    throw new Error(`Calm toggled on after a ${JSON.stringify(storedOff)} restore left a working note visible`);
+  }
 }
 if (!existsSync(calmPreferencePath)) {
   throw new Error("Calm stopped persisting its preference file");
@@ -1817,7 +1820,7 @@ JS
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm mid-turn contract failed: $out"
   [ -z "$out" ] || fail "Pi calm mid-turn test printed output: $out"
-  pass "Pi calm on collapses mid-turn assistant working notes to zero height while an explicit off keeps them, leaves streaming, truncated-final, and genuine final replies untouched, never mutates the messages, ignores every /calm argument, restores an absent or unrecognized preference as ordinary Calm on, and restores a legacy persisted max the same way"
+  pass "Pi calm on collapses mid-turn assistant working notes to zero height while an explicit off keeps them, leaves streaming, truncated-final, and genuine final replies untouched, never mutates the messages, ignores every /calm argument, restores an absent or unrecognized preference as ordinary Calm on, restores a legacy persisted max the same way, and keeps any casing of a stored off off"
 }
 
 test_operational_followup_turn_e2e() {

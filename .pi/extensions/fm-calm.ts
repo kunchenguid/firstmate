@@ -162,12 +162,13 @@ export default function (pi: ExtensionAPI) {
   // "max" is the legacy value written by the removed third presentation level, whose
   // behavior is now ordinary Calm; a home upgraded from it restores as on rather than
   // dropping to off. Calm is on by default: an absent, unreadable, or unrecognized
-  // value resolves to on, and only an explicit stored "off" keeps Calm off.
+  // value resolves to on, and only an explicit stored "off", in any casing, keeps
+  // Calm off.
   // docs/configuration.md owns the persisted value schema.
   const loadCalmPreference = (): boolean => {
     let stored: string;
     try {
-      stored = readFileSync(calmPreferencePath, "utf8").trim();
+      stored = readFileSync(calmPreferencePath, "utf8").trim().toLowerCase();
     } catch {
       return true;
     }
