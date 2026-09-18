@@ -21,8 +21,8 @@ TMP_ROOT=$(fm_test_tmproot fm-backend-paseo-tests)
 # that call read from $FM_PASEO_RESPONSES/<n>.out, consumed IN ORDER (call 1
 # reads 1.out, call 2 reads 2.out, ...), mirroring
 # tests/fm-backend-cmux.test.sh's make_cmux_fakebin. A missing response file
-# means "succeed with empty stdout" (send-keys/terminal kill/workspace
-# archive/workspace rename are silent on success on the real CLI). `-v` and
+# means "succeed with empty stdout" (send-keys and terminal kill are silent
+# on success on the real CLI). `-v` and
 # `status` are handled specially (not call-counted, not consuming the
 # ordered response queue) since fm_backend_paseo_version_check/
 # fm_backend_paseo_daemon_state are called at points a test may not want to
@@ -342,23 +342,64 @@ test_create_task_creates_and_parses_ids() {
   name=$(paseo_expected_scoped_name fm-newtask)
   # 1: terminal ls --all --json (pre-create duplicate check) -> no match
   printf '[]' >"$dir/responses/1.out"
-  # 2: workspace create --path <dir> --isolation local --json -> workspaceId
-  jq -n '{workspaceId:"wks_bbbbbbbbbbbbbbbb"}' >"$dir/responses/2.out"
-  # 3: terminal create --workspace <id> --cwd <dir> --name <name> --json -> id
-  jq -n '{id:"cccccccc-2222-2222-2222-222222222222"}' >"$dir/responses/3.out"
-  # 4: workspace rename (silent on success)
+  # 2: workspace ls --json (adopt the shared per-project workspace) -> none yet
+  printf '[]' >"$dir/responses/2.out"
+  # 3: workspace create --path <dir> --isolation local --title firstmate --json -> workspaceId
+  jq -n '{workspaceId:"wks_bbbbbbbbbbbbbbbb"}' >"$dir/responses/3.out"
+  # 4: terminal create --workspace <id> --cwd <dir> --name <name> --json -> id
+  jq -n '{id:"cccccccc-2222-2222-2222-222222222222"}' >"$dir/responses/4.out"
   fb=$(make_paseo_fakebin "$dir")
   out=$(PATH="$fb:$PATH" FM_PASEO_LOG="$dir/log" FM_PASEO_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/paseo.sh"; fm_backend_paseo_create_task fm-newtask /tmp/proj' "$ROOT")
   [ "$out" = "cccccccc-2222-2222-2222-222222222222 wks_bbbbbbbbbbbbbbbb" ] \
     || fail "create_task should echo '<terminal_id> <workspace_id>', got '$out'"
-  assert_contains "$(cat "$dir/log")" $'\x1f''workspace'$'\x1f''create'$'\x1f''--path'$'\x1f''/tmp/proj'$'\x1f''--isolation'$'\x1f''local' \
-    "create_task did not call workspace create with the right path"
+  assert_contains "$(cat "$dir/log")" $'\x1f''workspace'$'\x1f''create'$'\x1f''--path'$'\x1f''/tmp/proj'$'\x1f''--isolation'$'\x1f''local'$'\x1f''--title'$'\x1f''firstmate' \
+    "create_task did not create the shared workspace with the right path and label"
   assert_contains "$(cat "$dir/log")" $'\x1f''terminal'$'\x1f''create'$'\x1f''--workspace'$'\x1f''wks_bbbbbbbbbbbbbbbb'$'\x1f''--cwd'$'\x1f''/tmp/proj'$'\x1f''--name'$'\x1f'"$name" \
     "create_task did not call terminal create with the right workspace/cwd/name"
-  assert_contains "$(cat "$dir/log")" $'\x1f''workspace'$'\x1f''rename'$'\x1f''wks_bbbbbbbbbbbbbbbb' \
-    "create_task did not rename the workspace to a human slug"
-  pass "fm_backend_paseo_create_task: creates a workspace+terminal and parses terminal_id/workspace_id from create responses"
+  case "$(cat "$dir/log")" in
+  *$'\x1f''project'$'\x1f'*) fail "create_task must never run a 'paseo project' command (Paseo registers the project by path)" ;;
+  esac
+  pass "fm_backend_paseo_create_task: creates the shared workspace once plus a terminal tab and parses terminal_id/workspace_id"
+}
+
+test_create_task_adopts_existing_shared_workspace() {
+  local dir fb out name
+  dir="$TMP_ROOT/create-task-adopt"
+  mkdir -p "$dir/responses"
+  name=$(paseo_expected_scoped_name fm-second)
+  # 1: terminal ls --all --json (pre-create duplicate check) -> a sibling task, different name
+  paseo_terminal_ls_response "$dir" 1 "aaaaaaaa-0000-0000-0000-000000000000" "wks_bbbbbbbbbbbbbbbb" "$(paseo_expected_scoped_name fm-first)"
+  # 2: workspace ls --json -> another project's firstmate workspace, an unrelated
+  #    workspace on this project, then this project's firstmate workspace
+  jq -n '[{workspaceId:"wks_other000000000000",name:"firstmate",cwd:"/tmp/other"},
+          {workspaceId:"wks_human00000000000",name:"Evidence Room",cwd:"/tmp/proj"},
+          {workspaceId:"wks_bbbbbbbbbbbbbbbb",name:"firstmate",cwd:"/tmp/proj"}]' >"$dir/responses/2.out"
+  # 3: terminal create -> id (no workspace create must happen)
+  jq -n '{id:"dddddddd-3333-3333-3333-333333333333"}' >"$dir/responses/3.out"
+  fb=$(make_paseo_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_PASEO_LOG="$dir/log" FM_PASEO_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/paseo.sh"; fm_backend_paseo_create_task fm-second /tmp/proj' "$ROOT")
+  [ "$out" = "dddddddd-3333-3333-3333-333333333333 wks_bbbbbbbbbbbbbbbb" ] \
+    || fail "create_task should reuse this project's firstmate workspace, got '$out'"
+  case "$(cat "$dir/log")" in
+  *$'\x1f''workspace'$'\x1f''create'$'\x1f'*) fail "create_task must not create a second workspace when the project's firstmate workspace is live" ;;
+  esac
+  assert_contains "$(cat "$dir/log")" $'\x1f''terminal'$'\x1f''create'$'\x1f''--workspace'$'\x1f''wks_bbbbbbbbbbbbbbbb'$'\x1f''--cwd'$'\x1f''/tmp/proj'$'\x1f''--name'$'\x1f'"$name" \
+    "create_task did not open the new tab inside the adopted workspace"
+  pass "fm_backend_paseo_create_task: adopts the project's live firstmate workspace by cwd+label and adds a tab (never a second workspace)"
+}
+
+test_workspace_label_uses_secondmate_prefix() {
+  local home out
+  home="$TMP_ROOT/label-2ndmate"
+  mkdir -p "$home"
+  printf 'abc12\n' >"$home/.fm-secondmate-home"
+  out=$(FM_HOME="$home" bash -c '. "$0/bin/backends/paseo.sh"; fm_backend_paseo_workspace_label' "$ROOT")
+  [ "$out" = "2ndmate-abc12" ] || fail "workspace label should be '2ndmate-abc12' for a secondmate home, got '$out'"
+  out=$(bash -c '. "$0/bin/backends/paseo.sh"; fm_backend_paseo_workspace_label' "$ROOT")
+  [ "$out" = firstmate ] || fail "workspace label should be 'firstmate' for the primary home, got '$out'"
+  pass "fm_backend_paseo_workspace_label: 'firstmate' for the primary home, '2ndmate-<id>' for a secondmate home (no path hash)"
 }
 
 # --- target_ready / capture ---------------------------------------------------
@@ -619,7 +660,7 @@ test_send_text_submit_send_failed_when_target_absent() {
 
 # --- kill: best-effort whole-endpoint reclaim ---------------------------------
 
-test_kill_closes_terminal_and_archives_workspace() {
+test_kill_closes_terminal_and_keeps_workspace() {
   local dir fb
   dir="$TMP_ROOT/kill"
   mkdir -p "$dir/responses"
@@ -628,9 +669,10 @@ test_kill_closes_terminal_and_archives_workspace() {
     bash -c '. "$0/bin/backends/paseo.sh"; fm_backend_paseo_kill "aaaaaaaa-0000-0000-0000-000000000000:wks_bbbbbbbbbbbbbbbb"' "$ROOT"
   assert_contains "$(cat "$dir/log")" $'\x1f''terminal'$'\x1f''kill'$'\x1f''aaaaaaaa-0000-0000-0000-000000000000' \
     "kill did not close the terminal"
-  assert_contains "$(cat "$dir/log")" $'\x1f''workspace'$'\x1f''archive'$'\x1f''wks_bbbbbbbbbbbbbbbb' \
-    "kill did not archive the workspace"
-  pass "fm_backend_paseo_kill: closes the terminal and archives the workspace"
+  case "$(cat "$dir/log")" in
+  *$'\x1f''workspace'$'\x1f''archive'$'\x1f'*) fail "kill must not archive the shared per-project workspace (sibling task tabs live in it)" ;;
+  esac
+  pass "fm_backend_paseo_kill: closes only the task's terminal tab and leaves the shared workspace alive"
 }
 
 test_kill_is_best_effort_when_terminal_kill_fails() {
@@ -643,8 +685,6 @@ test_kill_is_best_effort_when_terminal_kill_fails() {
     bash -c '. "$0/bin/backends/paseo.sh"; fm_backend_paseo_kill "aaaaaaaa-0000-0000-0000-000000000000:wks_bbbbbbbbbbbbbbbb"' "$ROOT"
   status=$?
   expect_code 0 "$status" "kill must stay best-effort (never fail) even when terminal kill fails"
-  assert_contains "$(cat "$dir/log")" $'\x1f''workspace'$'\x1f''archive'$'\x1f''wks_bbbbbbbbbbbbbbbb' \
-    "kill should still attempt workspace archive after a failed terminal kill"
   pass "fm_backend_paseo_kill: never fails even when terminal kill fails"
 }
 
@@ -707,6 +747,8 @@ test_daemon_state_down_on_unreachable
 test_ensure_running_returns_immediately_when_already_ok
 test_create_task_refuses_duplicate_name
 test_create_task_creates_and_parses_ids
+test_create_task_adopts_existing_shared_workspace
+test_workspace_label_uses_secondmate_prefix
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
 test_target_ready_rejects_label_mismatch
@@ -722,7 +764,7 @@ test_composer_state_real_text_is_pending
 test_composer_state_unknown_on_capture_failure
 test_send_text_submit_detects_landed_send
 test_send_text_submit_send_failed_when_target_absent
-test_kill_closes_terminal_and_archives_workspace
+test_kill_closes_terminal_and_keeps_workspace
 test_kill_is_best_effort_when_terminal_kill_fails
 test_list_live_filters_by_name_prefix
 test_secondmate_spawn_refuses_paseo_backend
