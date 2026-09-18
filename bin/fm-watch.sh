@@ -7,9 +7,10 @@
 # running no-mistakes step or a backend busy signal. A home that opts in with
 # config/turnend-churn-absorb lets a bare turn-end also use bounded pane churn
 # since the previous poll. Every other no-verb wake surfaces, so a crew
-# that finishes (or stops and waits) is never silently swallowed. A declared wait,
-# either a paused: external wait or a verified captain-held transfer, is the
-# separate idle absorb case and re-surfaces only on its long bounded cadence,
+# that finishes (or stops and waits) is never silently swallowed. A declared wait -
+# a paused: external wait, a verified captain-held transfer, or an open
+# needs-decision - is the separate idle absorb case and re-surfaces only on its
+# long bounded cadence,
 # although its initial no-verb status signal still surfaces in normal mode.
 # That cadence is hours long and condition-aware: a paused: line naming
 # `until <UTC ISO 8601>` is rechecked when that time passes, but a declared time
@@ -26,8 +27,9 @@
 #                          run-step or busy pane outranks even a captain-relevant log
 #                          line, since the crew's own log gets no new entry once
 #                          firstmate hands it to a no-mistakes validation. A declared
-#                          external-wait pause or verified captain-held transfer is
-#                          absorbed instead with its own long re-surface cadence,
+#                          external-wait pause, verified captain-held transfer, or
+#                          open needs-decision is absorbed instead with its own long
+#                          re-surface cadence,
 #                          never as a wedge, and that recheck reason names which
 #                          human the wait is on. Only when neither absorb class
 #                          applies does the log's latest recognized status event decide:
@@ -41,8 +43,9 @@
 #                          closer look instead of another routine supervision
 #                          resume. Unless afk is active. A pane about to escalate
 #                          whose worker declared why it is quiet - a `paused:`
-#                          external wait or a verified `captain-held` transfer -
-#                          is deferred to that same long recheck cadence instead
+#                          external wait, a verified `captain-held` transfer, or
+#                          an open `needs-decision` - is deferred to that same
+#                          long recheck cadence instead
 #                          (wedge_wait_evidence), and a pane whose own task
 #                          worktree was written during the quiet window is
 #                          deferred rather than escalated (wedge_defer_writing),
@@ -60,8 +63,9 @@
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
 #                          (state/<id>.turn-ended, or the spawn record before any
 #                          turn completes). Past that bound, a declared external
-#                          wait or verified captain-held transfer uses the long
-#                          pause recheck cadence; under daemon-backed afk an
+#                          wait, verified captain-held transfer, or open
+#                          needs-decision uses the long pause recheck cadence;
+#                          under daemon-backed afk an
 #                          external wait is instead handed to the daemon as this
 #                          plain reason once per declaration, while captain-held
 #                          work stays silent until return
@@ -1167,22 +1171,24 @@ busy_turn_over_age() {  # <task>
   [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
 }
 
-# Absorb a stale pane under a declared external-wait pause (paused:) or a
-# dead-agent captain-held transfer, and re-surface it once every
-# PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
-# stale poll once pause_state_class permits the bounded cadence, so it must be
-# cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
-# status file mtime, not a per-hash marker, so a churny idle pane (a ticking
-# clock, a token counter) cannot keep resetting the cadence the way a hash-tied
-# timer would. The bounded re-surface itself is the shared resurface_absorbed
-# above, throttled by this window's own .paused-resurfaced-<key> marker. Advances
-# the stale suppressor to <hash> and flags the key paused.
+# Absorb a stale pane under a declared external-wait pause (paused:), a
+# dead-agent captain-held transfer, or an open needs-decision, and re-surface it
+# once every PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly.
+# Called on any stale poll once pause_state_class permits the bounded cadence,
+# so it must be cheap: it NEVER re-reads crew state. The re-surface age is
+# anchored on the status file mtime, not a per-hash marker, so a churny idle
+# pane (a ticking clock, a token counter) cannot keep resetting the cadence the
+# way a hash-tied timer would. The bounded re-surface itself is the shared
+# resurface_absorbed above, throttled by this window's own
+# .paused-resurfaced-<key> marker. Advances the stale suppressor to <hash> and
+# flags the key paused.
 #
 # The recheck names WHICH human the declared wait is on, because that is the whole
 # point of a recheck the captain reads: an external dependency for paused:, and the
-# captain themself for a verified hold. Only the captain-held verb takes the second
-# wording; a caller that reached the bounded cadence off pause tracking alone, with
-# no declaring verb left on the log, keeps the external-wait wording it always had.
+# captain themself for a verified hold or an open needs-decision. Those two verbs
+# take their own wording; a caller that reached the bounded cadence off pause
+# tracking alone, with no declaring verb left on the log, keeps the external-wait
+# wording it always had.
 handle_paused_stale() {  # <window> <task> <hash>
   local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age
   key=$(window_key "$win")
@@ -1205,6 +1211,9 @@ handle_paused_stale() {  # <window> <task> <hash>
     fi
     detail="captain-held, awaiting the captain"
     reason="captain-held ${age}s, awaiting the captain - verified hold transfer, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
+  elif [ "$(status_line_verb "$last")" = needs-decision ]; then
+    detail="needs-decision, awaiting the captain"
+    reason="needs-decision ${age}s, awaiting the captain - open decision, rechecked on a long cadence not a wedge; answer the open decision"
   elif until=$(status_paused_until "$last"); then
     if [ "$now" -lt "$until" ] && [ "$age" -lt "$PAUSE_RESURFACE_SECS" ]; then
       triage_log "absorbed stale (paused until $(( until - now ))s from now, declared time not reached): $win"
