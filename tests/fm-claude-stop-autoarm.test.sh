@@ -595,6 +595,61 @@ test_positive_recovery_budget_contention_preserves_episode() {
   pass "auto-arm: budget contention preserves the episode and forces a reset retry"
 }
 
+# The reset's budget lock is shared with the synchronous turn-end guard, whose
+# publication at the same Stop boundary holds it only for a short critical
+# section. That transient overlap - not a holder that outlives the cycle - is
+# the race the bounded retry exists for: the reset must ride it out and close
+# clean instead of failing into the exit-2 rewake loop the suppressed path
+# creates on an otherwise healthy home.
+test_transient_budget_lock_publication_rides_out_the_reset() {
+  local dir out hook_pid status watcher watcher_id holder releaser i
+  dir=$(make_primary_dir "$TMP_ROOT/reset-transient-contention")
+  : > "$dir/state/task.meta"
+  : > "$dir/state/.turnend-claude-blocks"
+  : > "$dir/state/.claude-autoarm-failure-notified"
+  write_arm_fixture "$dir" reset-boundary
+  sleep 60 &
+  watcher=$!
+  watcher_id=$(watcher_identity "$dir" "$watcher") || fail "could not identify the transient-contention watcher"
+  record_watcher_lock "$dir" "$watcher" "$watcher_id"
+  touch "$dir/state/.last-watcher-beat"
+  out="$dir/state/hook.out"
+  run_autoarm_bg "$dir" "$out"
+  hook_pid=$RUN_AUTOARM_BG_PID
+  i=0
+  while [ ! -e "$dir/state/arm-waiting" ]; do
+    [ "$i" -lt 50 ] || fail "healthy owner never reached the reset boundary"
+    sleep 0.05
+    i=$((i + 1))
+  done
+  # A live holder that keeps the lock past the reset's first try but releases
+  # it well inside the retry window: exactly the shape of the guard's own
+  # publication racing this Stop.
+  sleep 60 &
+  holder=$!
+  mkdir -p "$dir/state/.turnend-claude-blocks.lock"
+  printf '%s\n' "$holder" > "$dir/state/.turnend-claude-blocks.lock/pid"
+  ( while [ ! -e "$dir/state/arm-release" ]; do sleep 0.02; done
+    sleep 0.1
+    rm -rf "$dir/state/.turnend-claude-blocks.lock" ) &
+  releaser=$!
+  : > "$dir/state/arm-release"
+  wait "$hook_pid"; status=$?
+  wait "$releaser" 2>/dev/null || true
+  expect_code 0 "$status" \
+    "a transient budget-lock publication at the Stop boundary must not fail the episode reset"
+  [ "$(epoch_outcome "$dir")" = clean ] \
+    || fail "transient contention recorded '$(epoch_outcome "$dir")' instead of a clean reset"
+  assert_absent "$dir/state/.turnend-claude-blocks" \
+    "the retried reset left the block budget behind"
+  assert_absent "$dir/state/.claude-autoarm-failure-notified" \
+    "the retried reset left the failure notice behind"
+  kill "$holder" "$watcher" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  wait "$watcher" 2>/dev/null || true
+  pass "auto-arm: a budget-lock publication overlapping the Stop boundary rides out through the reset's bounded retry"
+}
+
 test_owner_mutex_contention_preserves_failure_episode_reset() {
   local dir out hook_pid status watcher watcher_id holder i
   dir=$(make_primary_dir "$TMP_ROOT/reset-owner-contention")
@@ -1250,6 +1305,7 @@ test_unverified_clean_close_exhausts_retries
 test_post_alarm_actionable_close_is_suppressed
 test_benign_cycle_end_with_live_watcher_is_silent
 test_positive_recovery_budget_contention_preserves_episode
+test_transient_budget_lock_publication_rides_out_the_reset
 test_owner_mutex_contention_preserves_failure_episode_reset
 test_arms_for_x_mode_poll_need_without_inflight
 test_arms_for_registered_custom_check_without_inflight

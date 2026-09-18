@@ -1948,6 +1948,57 @@ if ! fm_procevent_launch_confirm_seconds >/dev/null; then
   exit 1
 fi
 
+# A live holder whose lock records no pid identity is unauditable: every
+# identity-verifying consumer (fm_watcher_lock_matches_pid, so
+# fm_watcher_healthy) fails forever against it, while the holder keeps the
+# beacon fresh by polling - the home presents as supervised by a watcher
+# nothing can ever prove is the right one, and the fail-closed identity write
+# at startup is what keeps new locks from joining it. This takeover heals a
+# lock that already carries the defect. It engages only when the holder is alive
+# and passed the caller's stale checks, the lock names THIS home and THIS
+# watcher script, and a fresh identity of the holder pid proves by command
+# line that the pid really is this watcher - TERM-only-with-verified-identity,
+# the same discipline as fm-watch-arm.sh --restart and
+# fm_autoarm_release_abandoned. The replaced watcher's EXIT trap releases the
+# lock and publishes its downtime marker, which the ordinary startup below
+# consumes; one resurface wake is the whole cost of the repair. Returns 0 only
+# when this process now holds the lock; returns 1 when the lock is not this
+# defect's shape so the caller yields normally; prints its own refusal and
+# exits 1 when a corrupt lock cannot be proven safe to replace.
+watcher_corrupt_lock_takeover() {
+  local holder lock_identity fresh_identity wait_polls
+  holder=$FM_LOCK_HELD_PID
+  lock_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
+  [ -n "$lock_identity" ] && return 1
+  [ "$(cat "$WATCH_LOCK/fm-home" 2>/dev/null || true)" = "$FM_HOME" ] || return 1
+  [ "$(cat "$WATCH_LOCK/watcher-path" 2>/dev/null || true)" = "$WATCH_PATH" ] || return 1
+  # A healthy watcher writes its identity in the first moments after claiming
+  # the lock, so require the lock to have outlived that startup moment before
+  # judging it corrupt: a merely concurrent start is then never mistaken for
+  # one, and ordinary singleton contention still yields instead of churning.
+  [ "$(fm_path_age "$WATCH_LOCK")" -ge 5 ] || return 1
+  fresh_identity=$(fm_pid_identity "$holder" 2>/dev/null || true)
+  case "$fresh_identity" in
+    *"$WATCH_PATH"*) ;;
+    *)
+      echo "watcher: lock held by live pid $holder records no watcher identity and its live identity does not prove this watcher script; inspect or stop that watcher before re-arming." >&2
+      exit 1
+      ;;
+  esac
+  echo "watcher: replacing pid $holder - its lock records no watcher identity (unauditable) and its live identity proves this watcher script"
+  kill -TERM "$holder" 2>/dev/null || true
+  wait_polls=0
+  until fm_lock_try_acquire "$WATCH_LOCK"; do
+    [ "$wait_polls" -lt 100 ] || {
+      echo "watcher: replaced pid $holder did not release the lock within the bounded wait; inspect before re-arming." >&2
+      exit 1
+    }
+    sleep 0.1
+    wait_polls=$((wait_polls + 1))
+  done
+  return 0
+}
+
 if ! fm_lock_try_acquire "$WATCH_LOCK"; then
   BEAT="$STATE/.last-watcher-beat"
   if [ -n "${FM_LOCK_HELD_PID:-}" ]; then
@@ -1961,11 +2012,19 @@ if ! fm_lock_try_acquire "$WATCH_LOCK"; then
       echo "watcher: lock held by live pid $FM_LOCK_HELD_PID but no heartbeat exists; inspect or stop that watcher before re-arming." >&2
       exit 1
     fi
-    echo "watcher: already running pid $FM_LOCK_HELD_PID"
+    takeover_holder=$FM_LOCK_HELD_PID
+    if watcher_corrupt_lock_takeover; then
+      echo "watcher: took over the lock of unauditable pid $takeover_holder"
+    else
+      takeover_status=$?
+      [ "$takeover_status" -eq 1 ] || exit "$takeover_status"
+      echo "watcher: already running pid $FM_LOCK_HELD_PID"
+      exit 0
+    fi
   else
     echo "watcher: already running"
+    exit 0
   fi
-  exit 0
 fi
 WATCHER_RECOVERY_PENDING=0
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
@@ -2087,8 +2146,33 @@ printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
 FM_WATCH_DELIVERY_PID=$WATCHER_PID
-FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
-printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+# The lock's pid-identity is what makes this watcher auditable: every
+# identity-verifying consumer (fm_watcher_lock_matches_pid, so
+# fm_watcher_healthy) permanently fails against a lock whose identity is
+# empty, while this watcher still keeps the beacon fresh by polling - an
+# unauditable supervisor nothing can prove healthy and nothing may replace.
+# So the identity write is fail-closed: retry the identity read briefly,
+# never leave an empty or half-written identity file behind, and refuse to
+# supervise (typed failure line, EXIT trap releases the lock) when the
+# identity cannot be produced and confirmed by read-back. A watcher this
+# home cannot identify must not supervise it.
+identity_attempts=0
+while :; do
+  FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
+  [ -n "$FM_WATCH_DELIVERY_IDENTITY" ] && break
+  [ "$identity_attempts" -lt 5 ] || {
+    echo "watcher: FAILED - could not read this watcher's own pid identity after repeated attempts; refusing to run unauditable"
+    exit 1
+  }
+  sleep 0.1
+  identity_attempts=$((identity_attempts + 1))
+done
+if ! printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null \
+   || [ "$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)" != "$FM_WATCH_DELIVERY_IDENTITY" ]; then
+  rm -f "$WATCH_LOCK/pid-identity" 2>/dev/null || true
+  echo "watcher: FAILED - could not publish this watcher's pid identity into the lock; refusing to run unauditable"
+  exit 1
+fi
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 

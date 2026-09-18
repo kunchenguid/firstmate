@@ -2049,6 +2049,112 @@ test_recovery_backfills_a_recorded_link_on_an_already_done_item() {
   pass "recovery backfills recorded links onto already Done items"
 }
 
+# tasks-axi only records a --pr link in GitHub's /pull/<number> shape, but a
+# completion link is evidence first: a GitLab .../-/merge_requests/<n> URL the
+# teardown recorded must still close its row and keep the link archived, not
+# fail the close forever. Replay is the recovery path those stuck records ride.
+test_recovery_closes_a_gitlab_merge_request_link_as_archived_evidence() {
+  local case_dir id out
+  id=atomic-heal-gitlab-mr-b15
+  case_dir=$(make_home heal-gitlab-mr)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-gitlab\narg=--pr\narg=https://git.nevint.com/pe/pe-algo-agent/-/merge_requests/13\n' \
+    "$id" "$(home_of "$case_dir")/data" \
+    > "$(home_of "$case_dir")/state/$id.backlog-close"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start left a GitLab-linked item at $(row_state "$case_dir" "$id"): $out"
+  assert_grep 'https://git.nevint.com/pe/pe-algo-agent/-/merge_requests/13' "$(backlog_of "$case_dir")" \
+    "the replayed GitLab close dropped the completion link the cleanup had recorded"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a replayed GitLab close left its record behind"
+  pass "session start closes a GitLab merge request link as archived evidence"
+}
+
+# The three records the incident left permanently stuck, in their exact recorded
+# shape: the same home-close marker carrying a --pr pair whose link tasks-axi
+# cannot record structurally. Each must replay to a closed row with its MR link
+# archived, on a fresh start, with no per-link manual repair.
+test_recovery_replays_the_incident_stuck_gitlab_close_records() {
+  local case_dir id out link
+  link=https://git.nevint.com/pe/pe-algo-agent/-/merge_requests/13
+  case_dir=$(make_home heal-gitlab-stuck)
+  for id in bds-cost-api-paths bds-dispatch-value-sentinel bds-preceding-tasks; do
+    add_item "$case_dir" "$id"
+    start_item "$case_dir" "$id"
+    printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-%s\narg=--pr\narg=%s\n' \
+      "$id" "$(home_of "$case_dir")/data" "$id" "$link" \
+      > "$(home_of "$case_dir")/state/$id.backlog-close"
+  done
+
+  out=$(run_bootstrap "$case_dir")
+  for id in bds-cost-api-paths bds-dispatch-value-sentinel bds-preceding-tasks; do
+    [ "$(row_state "$case_dir" "$id")" = "done" ] \
+      || fail "session start left stuck record $id at $(row_state "$case_dir" "$id"): $out"
+    assert_grep "$link" "$(backlog_of "$case_dir")" \
+      "the replay of $id dropped its recorded merge request link"
+    assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+      "the replay of $id left its pending-close record behind"
+  done
+  pass "the incident's stuck GitLab close records all replay to closed rows"
+}
+
+# The adapter a close uses when tasks-axi cannot record the link structurally.
+# A marker carries at most one flag pair, but the library's callers may compose
+# flags, and tasks-axi accepts at most one --note: an adapted link must fold
+# into an existing note rather than emit a second --note tasks-axi would reject,
+# while a supported GitHub link beside a note passes both through unchanged.
+test_done_adapts_an_unrecordable_pr_link_beside_a_note() {
+  local case_dir id gitlab github run out rc
+  case_dir=$(make_home done-adapt-note)
+  gitlab=https://git.nevint.com/pe/pe-algo-agent/-/merge_requests/13
+  github=https://github.com/example/repo/pull/17
+  run() {  # <id> [flag...]
+    local id=$1 rc=0 out
+    shift
+    out=$(FM_HOME="$(home_of "$case_dir")" PATH="$case_dir/fakebin:$PATH" bash -c '
+        # shellcheck disable=SC1090,SC1091
+        . "$1/bin/fm-tasks-axi-lib.sh"
+        # shellcheck disable=SC1090,SC1091
+        . "$1/bin/fm-backlog-transition-lib.sh"
+        fm_backlog_done "$2" "$3" "$4" "$5" "$6" "$7"
+      ' _ "$ROOT" "$(home_of "$case_dir")/data" "$id" "$@") || rc=$?
+    printf '%s' "$out"
+    return "$rc"
+  }
+
+  id=atomic-done-note-then-gitlab
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  run "$id" --note "local main" --pr "$gitlab" \
+    || fail "a note-then-GitLab close failed instead of folding the link into the note"
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "the note-then-GitLab close left the row at $(row_state "$case_dir" "$id")"
+  assert_grep "local main PR $gitlab" "$(backlog_of "$case_dir")" \
+    "a GitLab link after a note did not fold into that note's value"
+
+  id=atomic-done-gitlab-then-note
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  run "$id" --pr "$gitlab" --note "local main" \
+    || fail "a GitLab-then-note close failed instead of folding the link into the note"
+  assert_grep "PR $gitlab local main" "$(backlog_of "$case_dir")" \
+    "a note after a GitLab link did not append into the adapted note's value"
+
+  id=atomic-done-github-beside-note
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  run "$id" --note "local main" --pr "$github" \
+    || fail "a supported GitHub link beside a note failed to close"
+  grep -E "^- \[x\] $id .*$github" "$(backlog_of "$case_dir")" >/dev/null \
+    || fail "a supported GitHub link was demoted from its Done row to a plain note"
+  assert_grep 'local main' "$(backlog_of "$case_dir")" \
+    "the note beside a supported GitHub link was dropped"
+  pass "done adapts an unrecordable pr link into the note without demoting GitHub links"
+}
+
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read() {
   local case_dir id out
   id=atomic-heal-read-error-b10
@@ -3054,6 +3160,9 @@ test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
+test_recovery_closes_a_gitlab_merge_request_link_as_archived_evidence
+test_recovery_replays_the_incident_stuck_gitlab_close_records
+test_done_adapts_an_unrecordable_pr_link_beside_a_note
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_recovery_retry_preserves_incomplete_cleanup_warning
 test_recovery_finishes_a_close_for_the_same_meta_incarnation

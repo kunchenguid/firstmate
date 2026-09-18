@@ -1348,11 +1348,25 @@ fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
 }
 
 fm_failure_episode_reset() {
-  local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
+  local state=$1 mode=${2:-acquire} lock current pid acquired=0 path attempt
   lock="$state/.turnend-claude-blocks.lock"
   case "$mode" in
     acquire)
-      fm_lock_try_acquire "$lock" || return 1
+      # The synchronous turn-end guard publishes its block budget under this
+      # same lock at the same Stop boundary (budget_account_current_epoch in
+      # bin/fm-turnend-guard.sh), so a single try_acquire races that short
+      # critical section. Every holder of this lock finishes without waiting
+      # on the auto-arm, so a bounded retry - the same window
+      # fm_autoarm_write_owned uses - always terminates once the section
+      # ends. The old single try made a lost race fail the reset, which the
+      # Stop-owned auto-arm then translated into an endless exit-2 rewake
+      # loop on an otherwise healthy home.
+      attempt=0
+      until fm_lock_try_acquire "$lock"; do
+        [ "$attempt" -lt 20 ] || return 1
+        sleep 0.02
+        attempt=$((attempt + 1))
+      done
       acquired=1
       ;;
     held)
