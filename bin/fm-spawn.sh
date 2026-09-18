@@ -270,17 +270,19 @@
 #   selection (bin/fm-worker-account-lib.sh). A missing file refuses before any
 #   endpoint exists and names the file to create; Firstmate never treats an
 #   ambient or vendor-default login as consent. `ordinary` is the explicit
-#   selection of that vendor default root. Any other value is one absolute path
-#   to an existing account root. A Pi root can hold several provider identities,
-#   so config/pi-account also names the provider this home may spend; a launch
-#   whose --model names a different provider, or names no provider, refuses.
-#   Declarations are home-local and never inherited. A ship or scout reads the
-#   active home; a secondmate is a supervisor and reads the launching home.
-#   Relaunch uses that same home. The selected root is exported onto the launch
-#   and, for Claude, environment credentials ranked above its stored login are
-#   shed. The selection follows the resolved harness, so a raw launch whose
-#   executable is claude, pi, or pi-signed receives it too. No credential files
-#   are copied or transferred.
+#   selection of that vendor default (for Claude, CLAUDE_CONFIG_DIR unset). Any
+#   other value is one absolute path to an existing account root. A Pi root can
+#   hold several provider identities, so config/pi-account also names the
+#   provider this home may spend; a launch whose --model names a different
+#   provider, or names no provider, refuses. A final `environment` line selects
+#   the runner's environment credentials as well. Declarations are home-local
+#   and never inherited. A ship or scout reads the active home; a local
+#   secondmate is a supervisor and reads the launching home. Relaunch uses that
+#   same home. The selected root is exported onto the launch and, for Claude
+#   without `environment`, environment credentials ranked above its stored
+#   login are shed. The selection follows the resolved harness, so a raw launch
+#   whose executable is claude, pi, or pi-signed receives it too. No credential
+#   files are copied or transferred.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
@@ -2078,29 +2080,22 @@ fi
 # account. A secondmate is a supervisor, so it reads this launching home's files
 # (CONFIG), never an ambient CLAUDE_CONFIG_DIR and never the secondmate home's
 # own worker declarations.
-WORKER_ACCOUNT_ROOT=
-WORKER_ACCOUNT_PROVIDER=
-PI_LAUNCH_MODEL=$MODEL
+ACCOUNT_MODEL=$MODEL
 if [ "${RAW_LAUNCH:-0}" = 1 ]; then
-  PI_LAUNCH_MODEL=$(fm_worker_account_raw_model "$LAUNCH")
+  ACCOUNT_MODEL=$(fm_worker_account_raw_model "$LAUNCH")
 fi
+WORKER_ACCOUNT=$(fm_worker_account_select "$HARNESS" "$CONFIG" "$FM_HOME" "$ACCOUNT_MODEL" "${PI_BIN:-$HARNESS}") || exit 1
+WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT%%$'\t'*}
+WORKER_ACCOUNT_ENV=${WORKER_ACCOUNT#*$'\t'}
 case "$HARNESS" in
-claude | pi | pi-signed)
-  worker_account=$(fm_worker_account_resolve "$HARNESS" "$CONFIG" "$FM_HOME") || exit 1
-  WORKER_ACCOUNT_ROOT=${worker_account%%$'\t'*}
-  WORKER_ACCOUNT_PROVIDER=${worker_account#*$'\t'}
-  case "$HARNESS" in
-  claude)
-    fm_worker_account_preflight claude "$WORKER_ACCOUNT_ROOT" claude "$MODEL" || exit 1
+claude)
+  if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
     export CLAUDE_CONFIG_DIR=$WORKER_ACCOUNT_ROOT
-    ;;
-  pi | pi-signed)
-    fm_worker_account_pi_guard "$WORKER_ACCOUNT_PROVIDER" "$PI_LAUNCH_MODEL" || exit 1
-    fm_worker_account_preflight "$HARNESS" "$WORKER_ACCOUNT_ROOT" "$PI_BIN" "$PI_LAUNCH_MODEL" || exit 1
-    export PI_CODING_AGENT_DIR=$WORKER_ACCOUNT_ROOT
-    ;;
-  esac
+  else
+    unset CLAUDE_CONFIG_DIR
+  fi
   ;;
+pi | pi-signed) export PI_CODING_AGENT_DIR=$WORKER_ACCOUNT_ROOT ;;
 esac
 
 secondmate_registry_value() {
@@ -4432,11 +4427,17 @@ esac
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` or `pi` in the
 # pane would spend the destination shell's ambient account. Prefix the selected
-# root onto the launch instead. Claude also sheds environment credentials its
-# documented authentication precedence ranks above the root's stored login.
+# root onto the launch instead; the ordinary Claude account is CLAUDE_CONFIG_DIR
+# unset. Unless the home declared `environment`, Claude also sheds environment
+# credentials its documented authentication precedence ranks above the root's
+# stored login.
 case "$HARNESS" in
 claude)
-  LAUNCH="$(fm_worker_account_shed_prefix claude) CLAUDE_CONFIG_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
+  if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
+    LAUNCH="$(fm_worker_account_claude_env "$WORKER_ACCOUNT_ENV") CLAUDE_CONFIG_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
+  else
+    LAUNCH="$(fm_worker_account_claude_env "$WORKER_ACCOUNT_ENV") -u CLAUDE_CONFIG_DIR $LAUNCH"
+  fi
   ;;
 pi | pi-signed)
   LAUNCH="PI_CODING_AGENT_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"

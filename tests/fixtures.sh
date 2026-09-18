@@ -291,12 +291,13 @@ fm_test_config_claude_account() {
 # selected account: a quota-axi answering `auth --json --provider claude`, and
 # fm-fake-pi-auth for a fake pi to exec on `auth check`. The preflight scrubs
 # its environment, so each answers from a .fake-auth file inside the selected
-# root, holding the status to report; absent means authenticated.
+# root (for ordinary Claude, with CLAUDE_CONFIG_DIR unset, $HOME/.claude),
+# holding the status to report; absent means authenticated.
 fm_test_fake_account_auth() {
   local fakebin=$1
   cat > "$fakebin/quota-axi" <<'SH'
 #!/bin/sh
-status=$(cat "${CLAUDE_CONFIG_DIR:-/nonexistent}/.fake-auth" 2>/dev/null) || status=available
+status=$(cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.fake-auth" 2>/dev/null) || status=available
 printf '{"schemaVersion":1,"auth":[{"provider":"claude","sources":[{"source":"keychain","status":"%s"}]}]}\n' "$status"
 SH
   chmod +x "$fakebin/quota-axi"

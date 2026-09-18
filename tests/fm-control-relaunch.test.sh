@@ -1111,6 +1111,26 @@ test_missing_worktree_refuses_before_stopping_anything() {
   pass "fm-control relaunch: an unaccountable local copy refuses before the agent is touched"
 }
 
+test_unusable_worker_account_refuses_before_stopping_anything() {
+  local dir out rc
+  dir=$(new_case noaccount rl10b)
+  add_ship_task "$dir" rl10b claude
+  rm -f "$dir/home/config/claude-account"
+  out=$(run_control "$dir" rl10b relaunch --note "x"); rc=$?
+  expect_code 1 "$rc" "a relaunch from a home without a Claude account should refuse"
+  assert_contains "$out" "config/claude-account" "the refusal should name the file to create"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "an account refusal must not stop the agent"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "an account refusal must send nothing"
+  printf '%s\n' "$dir/home/accounts/claude" > "$dir/home/config/claude-account"
+  printf 'missing\n' > "$dir/home/accounts/claude/.fake-auth"
+  out=$(run_control "$dir" rl10b relaunch --note "x"); rc=$?
+  expect_code 1 "$rc" "a relaunch onto a Claude account with no login should refuse"
+  assert_contains "$out" "holds no usable login" "the refusal should say the account cannot authenticate"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a lapsed login must not stop the agent"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a lapsed login must send nothing"
+  pass "fm-control relaunch: an undeclared or unusable worker account refuses before the agent is touched"
+}
+
 test_missing_instructions_refuse_before_stopping_anything() {
   local dir out rc
   dir=$(new_case nobrief rl11)
@@ -1715,6 +1735,7 @@ test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
 test_missing_worktree_refuses_before_stopping_anything
+test_unusable_worker_account_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
 test_checkpoint_refuses_uninspectable_head_and_status

@@ -7,7 +7,7 @@
 #
 # docs/configuration.md "Worker accounts" owns the operator-facing contract
 # and the reasons the other runners carry no declaration. Sourced by
-# bin/fm-spawn.sh.
+# bin/fm-spawn.sh and bin/fm-control.sh.
 #
 # Required runners, each a credential file inside a root its vendor lets a
 # process select:
@@ -15,10 +15,12 @@
 #   pi, pi-signed   PI_CODING_AGENT_DIR   config/pi-account
 #
 # A missing declaration refuses; nothing treats an ambient or vendor-default
-# login as consent. `ordinary` is the explicit selection of that vendor
-# default root ($HOME/.claude or $HOME/.pi/agent). Any other value is one
-# absolute path to an existing readable, searchable directory. Firstmate
-# never copies credentials or changes a global login.
+# login as consent. `ordinary` is the explicit selection of the vendor default:
+# for Claude that is CLAUDE_CONFIG_DIR unset, because Claude keys its macOS
+# Keychain entry to any CLAUDE_CONFIG_DIR that is set, even $HOME/.claude; for
+# Pi it is $HOME/.pi/agent. Any other value is one absolute path to an existing
+# readable, searchable directory. Firstmate never copies credentials or changes
+# a global login.
 #
 # A Pi root can hold several provider identities at once, so selecting the
 # root alone is insufficient. config/pi-account names the root on line 1 and
@@ -28,10 +30,22 @@
 # work/personal boundary: a home declares the provider it spends, so an
 # extra identity sitting in a shared root cannot be used by accident.
 #
+# Environment credentials (Claude's API key, auth token, setup-token, cloud
+# provider switches, profiles; a Pi provider's API key variable) are ambient
+# unless the declaration ends with one more line, `environment`. Without it, a
+# Claude launch sheds the ones Claude ranks above the root's stored /login, and
+# the preflight below proves the root itself can authenticate. With it, the
+# launch keeps them, and no preflight runs: their values come from the worker
+# pane at execution time, which spawn cannot read. The selected root stays the
+# fallback when none is present. Pi ranks its root's stored credentials above
+# environment variables, so a Pi launch never sheds anything.
+#
 # Declarations are home-local and never inherited. A ship or scout reads the
-# active home's files. A secondmate is a supervisor and reads the launching
-# home's files, never its own home's worker declarations and never an ambient
-# CLAUDE_CONFIG_DIR. Relaunch and startup recovery use that same home.
+# active home's files. A local secondmate is a supervisor and reads the
+# launching home's files, never its own home's worker declarations and never
+# an ambient CLAUDE_CONFIG_DIR; a remote secondmate's host-local launch reads
+# its own remote home's files. Relaunch and startup recovery use that same
+# home.
 #
 # Preflight: the runner's own non-interactive check, run with only HOME, PATH,
 # TMPDIR, and the selected root in its environment, so a provider key left in
@@ -41,8 +55,9 @@
 # root's own .claude.json records a login (oauthAccount): quota-axi 0.1.41
 # answers an empty root skipped/keychain_presence_check_failed with
 # credentialPresent true, while a keychain-only /login still writes
-# oauthAccount to that file. Pi: `pi auth check --provider <the launch
-# model's provider> --json --no-refresh`, and only status "ready" passes.
+# oauthAccount to that file ($HOME/.claude.json for the ordinary account).
+# Pi: `pi auth check --provider <the launch model's provider> --json
+# --no-refresh`, and only status "ready" passes.
 # That command loads no extensions, so an extension-registered provider comes
 # back not_ready/provider_not_found; only that one answer falls through to
 # `pi --list-models <provider>`, which does load them, and the launch passes
@@ -67,31 +82,11 @@ FM_WORKER_ACCOUNT_CLAUDE_SHED="CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CL
 # model id may legitimately end in ":fast" or ":slow", which are not levels.
 FM_WORKER_ACCOUNT_PI_THINKING="off minimal low medium high xhigh max"
 
-# fm_worker_account_var <harness>
-# Prints the environment variable the launch receives; returns 1 for a runner
-# with no declaration.
-fm_worker_account_var() {
-  case "$1" in
-  claude) printf 'CLAUDE_CONFIG_DIR\n' ;;
-  pi | pi-signed) printf 'PI_CODING_AGENT_DIR\n' ;;
-  *) return 1 ;;
-  esac
-}
-
-# fm_worker_account_ordinary_root <harness>
-# Prints the vendor default root for <harness>. HOME must be set.
-fm_worker_account_ordinary_root() {
-  case "$1" in
-  claude) printf '%s/.claude\n' "${HOME:?HOME is required to resolve an ordinary Claude account}" ;;
-  pi | pi-signed) printf '%s/.pi/agent\n' "${HOME:?HOME is required to resolve an ordinary Pi account}" ;;
-  *) return 1 ;;
-  esac
-}
-
 # fm_worker_account_read <harness> <file>
-# Prints "root<TAB>provider" for a valid declaration. Provider is empty for
-# Claude. Parses bytes before the shell can drop NULs or trailing newlines;
-# paths are literal, not shell expressions. Returns 0 on success, 3 when the
+# Prints "root<TAB>provider<TAB>environment" for a valid declaration. Provider
+# is empty for Claude; the last field is `environment` or empty. Parses bytes
+# before the shell can drop NULs or trailing newlines; paths are literal, not
+# shell expressions. Returns 0 on success, 3 when the
 # file does not exist, 4 when it cannot be inspected (one error already
 # printed), 5 when it is not a readable regular file, and 6 when its contents
 # are not a valid declaration. Callers own the message for each refusal.
@@ -106,31 +101,18 @@ fm_worker_account_read() {
     (-f $f && -r _) or exit 5;
     open(my $fh, "<", $f) or exit 5;
     my $body = do { local $/; <$fh> } // "";
-    my ($root, $provider) = ("", "");
+    my ($root, $provider, $env) = ("", "", "");
     if ($harness eq "claude") {
-      $body =~ /\A(ordinary|\/[^\x00-\x1f\x7f]*)\n\z/ or exit 6;
-      $root = $1;
+      $body =~ /\A(ordinary|\/[^\x00-\x1f\x7f]*)\n(?:(environment)\n)?\z/ or exit 6;
+      ($root, $env) = ($1, $2 // "");
     } elsif ($harness eq "pi" || $harness eq "pi-signed") {
-      $body =~ /\A(ordinary|\/[^\x00-\x1f\x7f]*)\n([A-Za-z0-9][A-Za-z0-9._-]*)\n\z/ or exit 6;
-      $root = $1;
-      $provider = $2;
+      $body =~ /\A(ordinary|\/[^\x00-\x1f\x7f]*)\n([A-Za-z0-9][A-Za-z0-9._-]*)\n(?:(environment)\n)?\z/ or exit 6;
+      ($root, $provider, $env) = ($1, $2, $3 // "");
     } else {
       exit 6;
     }
-    print $root, "\t", $provider;
+    print $root, "\t", $provider, "\t", $env;
   ' -- "$1" "$2"
-}
-
-# fm_worker_account_resolve_root <harness> <token>
-# Maps `ordinary` to the vendor default root; any other token is already a
-# path. Prints the absolute root.
-fm_worker_account_resolve_root() {
-  local harness=$1 token=$2
-  if [ "$token" = ordinary ]; then
-    fm_worker_account_ordinary_root "$harness"
-  else
-    printf '%s\n' "$token"
-  fi
 }
 
 # fm_worker_account_pi_provider <model>
@@ -184,10 +166,12 @@ fm_worker_account_raw_model() {
 }
 
 # fm_worker_account_resolve <harness> <config-dir> <home>
-# Prints "root<TAB>provider" for the validated declaration. On refusal prints
-# one error naming the runner, the home, and the file, and returns 1.
+# Prints "root<TAB>provider<TAB>environment" for the validated declaration.
+# Root is empty for ordinary Claude, meaning CLAUDE_CONFIG_DIR unset. On
+# refusal prints one error naming the runner, the home, and the file, and
+# returns 1.
 fm_worker_account_resolve() {
-  local harness=$1 config=$2 home=$3 runner file fallback cfg token provider root rc
+  local harness=$1 config=$2 home=$3 runner file fallback cfg token root rc
   # shellcheck disable=SC2088  # The fallbacks are literal text for the refusal.
   case "$harness" in
   claude)
@@ -218,21 +202,23 @@ fm_worker_account_resolve() {
     ;;
   *)
     if [ "$runner" = Pi ]; then
-      echo "error: config/$file must contain an ordinary-or-absolute root on line 1 and the provider this home may spend on line 2: $cfg" >&2
+      echo "error: config/$file must contain an ordinary-or-absolute root on line 1, the provider this home may spend on line 2, and optionally 'environment' on line 3: $cfg" >&2
     else
-      echo "error: config/$file must contain exactly 'ordinary' or one absolute path, followed by one newline: $cfg" >&2
+      echo "error: config/$file must contain 'ordinary' or one absolute path on line 1, and optionally 'environment' on line 2: $cfg" >&2
     fi
     return 1
     ;;
   esac
-  provider=${token#*$'\t'}
-  token=${token%%$'\t'*}
-  root=$(fm_worker_account_resolve_root "$harness" "$token") || return 1
-  if [ ! -d "$root" ] || [ ! -r "$root" ] || [ ! -x "$root" ]; then
+  root=${token%%$'\t'*}
+  if [ "$root" = ordinary ]; then
+    root=
+    [ "$runner" = Claude ] || root="${HOME:?HOME is required to resolve an ordinary Pi account}/.pi/agent"
+  fi
+  if [ -n "$root" ] && { [ ! -d "$root" ] || [ ! -r "$root" ] || [ ! -x "$root" ]; }; then
     echo "error: config/$file must name a readable, searchable existing directory (ordinary means $fallback): $cfg -> $root" >&2
     return 1
   fi
-  printf '%s\t%s\n' "$root" "$provider"
+  printf '%s\t%s\n' "$root" "${token#*$'\t'}"
 }
 
 # fm_worker_account_pi_guard <declared-provider> <model>
@@ -277,17 +263,24 @@ fm_worker_account_pi_model_listed() {
 
 # fm_worker_account_preflight <harness> <root> <executable> [<model>]
 # Returns 0 only when the runner's own check says the root can authenticate
-# the launch; otherwise prints one error and returns 1.
+# the launch; otherwise prints one error and returns 1. An empty Claude root is
+# the ordinary account, checked with CLAUDE_CONFIG_DIR unset.
 fm_worker_account_preflight() {
   local harness=$1 root=$2 executable=$3 model=${4:-} out verdict provider
   local -a clean=(env -i "HOME=${HOME:-}" "PATH=$PATH")
   [ -z "${TMPDIR:-}" ] || clean+=("TMPDIR=$TMPDIR")
   case "$harness" in
   claude)
-    out=$(fm_run_timed "$FM_WORKER_ACCOUNT_PREFLIGHT_SECONDS" "${clean[@]}" "CLAUDE_CONFIG_DIR=$root" \
+    local logged_in=false who="the Claude account $root" login="CLAUDE_CONFIG_DIR=$root claude"
+    if [ -n "$root" ]; then
+      clean+=("CLAUDE_CONFIG_DIR=$root")
+    else
+      who="the ordinary Claude account"
+      login="env -u CLAUDE_CONFIG_DIR claude"
+    fi
+    out=$(fm_run_timed "$FM_WORKER_ACCOUNT_PREFLIGHT_SECONDS" "${clean[@]}" \
       quota-axi auth --json --provider claude 2>/dev/null </dev/null)
-    local logged_in=false
-    [ "$(jq -r 'has("oauthAccount")' "$root/.claude.json" 2>/dev/null)" != true ] || logged_in=true
+    [ "$(jq -r 'has("oauthAccount")' "${root:-${HOME:-}}/.claude.json" 2>/dev/null)" != true ] || logged_in=true
     verdict=$(printf '%s\n' "$out" | jq -r --argjson logged_in "$logged_in" '
       [.auth[]? | select(.provider == "claude") | .sources[]?] as $s |
       if any($s[]; .status == "available" or .status == "expired" or
@@ -296,7 +289,7 @@ fm_worker_account_preflight() {
       else ($s | map("\(.source)=\(.status)") | join(", "))
       end' 2>/dev/null)
     [ "$verdict" != ready ] || return 0
-    echo "error: the Claude account $root holds no usable login (quota-axi auth: ${verdict:-no answer}); log in under it with CLAUDE_CONFIG_DIR=$root claude, then /login, or select another root in config/claude-account" >&2
+    echo "error: $who holds no usable login (quota-axi auth: ${verdict:-no answer}); log in under it with $login, then /login, select another root in config/claude-account, or declare environment credentials there" >&2
     return 1
     ;;
   pi | pi-signed)
@@ -329,14 +322,39 @@ fm_worker_account_preflight() {
   esac
 }
 
-# fm_worker_account_shed_prefix <harness>
-# Prints an `env -u ...` launch prefix removing the environment credentials
-# that would outrank the selected Claude root, or nothing for a runner without
-# one.
-fm_worker_account_shed_prefix() {
+# fm_worker_account_select <harness> <config-dir> <home> <model> <executable>
+# The whole launch-time decision: resolves the home's declaration, holds a Pi
+# launch to the declared provider, and runs the preflight unless the home
+# declared environment credentials. Prints "root<TAB>environment" for a runner
+# with a declaration and nothing for any other runner; on refusal prints one
+# error and returns 1. bin/fm-control.sh runs it before a relaunch stops the
+# live agent, and bin/fm-spawn.sh before any endpoint exists.
+fm_worker_account_select() {
+  local harness=$1 config=$2 home=$3 model=$4 executable=$5 selection root rest
+  case "$harness" in
+  claude | pi | pi-signed) ;;
+  *) return 0 ;;
+  esac
+  selection=$(fm_worker_account_resolve "$harness" "$config" "$home") || return 1
+  root=${selection%%$'\t'*}
+  rest=${selection#*$'\t'}
+  if [ "$harness" != claude ]; then
+    fm_worker_account_pi_guard "${rest%%$'\t'*}" "$model" || return 1
+  fi
+  if [ -z "${rest#*$'\t'}" ]; then
+    fm_worker_account_preflight "$harness" "$root" "$executable" "$model" || return 1
+  fi
+  printf '%s\t%s\n' "$root" "${rest#*$'\t'}"
+}
+
+# fm_worker_account_claude_env <environment>
+# Prints the `env` launch prefix for a selected Claude account. It unsets the
+# environment credentials Claude ranks above the root's stored /login unless
+# the home declared `environment`, which selects them. The caller appends the
+# root assignment, or -u CLAUDE_CONFIG_DIR for the ordinary account.
+fm_worker_account_claude_env() {
   local var prefix=env
-  [ "$1" = claude ] || return 0
-  for var in $FM_WORKER_ACCOUNT_CLAUDE_SHED; do
+  [ -n "$1" ] || for var in $FM_WORKER_ACCOUNT_CLAUDE_SHED; do
     prefix="$prefix -u $var"
   done
   printf '%s\n' "$prefix"

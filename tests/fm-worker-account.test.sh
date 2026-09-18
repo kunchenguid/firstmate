@@ -72,18 +72,35 @@ test_missing_pi_declaration_refuses() {
   pass "a missing Pi account declaration refuses with the file to create"
 }
 
-test_ordinary_claude_selects_the_vendor_default_root() {
-  local dir home root provider
+test_ordinary_claude_selects_the_unset_config_dir() {
+  local dir out
   dir="$TMP_ROOT/lib-ordinary-claude"
-  home="$dir/user"
-  mkdir -p "$home/.claude" "$dir/config"
+  mkdir -p "$dir/config"
   printf 'ordinary\n' > "$dir/config/claude-account"
-  HOME="$home" IFS=$'\t' read -r root provider <<EOF
-$(HOME="$home" fm_worker_account_resolve claude "$dir/config" "$dir")
-EOF
-  [ "$root" = "$home/.claude" ] || fail "ordinary Claude root was '$root', not $home/.claude"
-  [ -z "$provider" ] || fail "Claude resolve must not invent a provider"
-  pass "ordinary explicitly selects the vendor default Claude root"
+  out=$(fm_worker_account_resolve claude "$dir/config" "$dir") || fail "ordinary Claude must resolve"
+  # Claude keys its Keychain entry to any CLAUDE_CONFIG_DIR that is set, so the
+  # default login is reachable only with the variable unset: an empty root.
+  [ "$out" = $'\t\t' ] || fail "ordinary Claude must resolve to an empty root, no provider, no environment; got '$out'"
+  pass "ordinary Claude selects the default login, with CLAUDE_CONFIG_DIR unset"
+}
+
+test_environment_line_is_an_explicit_selection() {
+  local dir err
+  dir="$TMP_ROOT/lib-environment"
+  mkdir -p "$dir/config" "$dir/accounts/work"
+  err=$(mktemp "$TMP_ROOT/env-err.XXXXXX")
+  printf '%s\nenvironment\n' "$dir/accounts/work" > "$dir/config/claude-account"
+  [ "$(fm_worker_account_resolve claude "$dir/config" "$dir")" = "$dir/accounts/work"$'\t\tenvironment' ] || \
+    fail "a Claude root followed by environment must resolve with the environment selection"
+  printf 'ordinary\nfake\nenvironment\n' > "$dir/config/pi-account"
+  mkdir -p "$dir/user/.pi/agent"
+  [ "$(HOME="$dir/user" fm_worker_account_resolve pi "$dir/config" "$dir")" = "$dir/user/.pi/agent"$'\tfake\tenvironment' ] || \
+    fail "a Pi root and provider followed by environment must resolve with the environment selection"
+  printf '%s\nenv\n' "$dir/accounts/work" > "$dir/config/claude-account"
+  fm_worker_account_resolve claude "$dir/config" "$dir" >/dev/null 2>"$err" && \
+    fail "a second line other than environment must refuse"
+  assert_contains "$(cat "$err")" "optionally 'environment'" "refusal must name the accepted second line"
+  pass "a final environment line is the explicit selection of environment credentials"
 }
 
 test_explicit_claude_path_is_the_selected_root() {
@@ -279,26 +296,97 @@ test_spawn_codex_does_not_require_an_account_declaration() {
   pass "runners without a selectable account root still launch without a declaration"
 }
 
-test_spawn_claude_ordinary_uses_the_vendor_default_under_throwaway_home() {
+test_spawn_claude_ordinary_uses_the_default_login_under_throwaway_home() {
   local rec world home fakebin wt launchlog out launch id=ordinary-claude
   rec=$(make_world spawn-ordinary claude)
   read_world "$rec"
   world=$WORLD
   home=$HOME_DIR
   fakebin=$FAKEBIN_DIR
-  mkdir -p "$home/user-home/.claude"
+  mkdir -p "$world/ambient-claude"
   printf 'ordinary\n' > "$home/config/claude-account"
+  # A keychain-only default login: quota-axi skips the keychain, and only
+  # $HOME/.claude.json records the login, never $HOME/.claude/.claude.json.
+  mkdir -p "$home/user-home"
+  printf '{"oauthAccount":{"emailAddress":"a@example.test"}}\n' > "$home/user-home/.claude.json"
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/bin/sh
+printf '%s\n' '{"schemaVersion":1,"auth":[{"provider":"claude","sources":[{"source":"keychain","status":"skipped","credentialPresent":true}]}]}'
+SH
+  chmod +x "$fakebin/quota-axi"
   wt="$world/wt"
   fm_git_worktree "$world/proj" "$wt" wt-ordinary
   fm_test_spawn_brief "$home" "$id"
   launchlog="$world/launch.log"
-  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$world/ambient-claude" \
+    run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
     "$id" "$world/proj" --mode no-mistakes --yolo off --harness claude 2>&1)
   expect_code 0 "$?" "ordinary Claude spawn should succeed"$'\n'"$out"
   launch=$(cat "$launchlog")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$home/user-home/.claude'" \
-    "ordinary must resolve to the throwaway HOME's vendor default, not an ambient store"
-  pass "ordinary is an explicit selection of the vendor default Claude root"
+  assert_contains "$launch" "-u CLAUDE_CONFIG_DIR " \
+    "ordinary must launch with CLAUDE_CONFIG_DIR unset, the only way Claude reads its default login"
+  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
+    "ordinary must not point Claude at any config dir, not even \$HOME/.claude"
+  [ "$(jq -r --arg p "$wt" '.projects[$p].hasTrustDialogAccepted' "$home/user-home/.claude.json")" = true ] || \
+    fail "ordinary must pre-trust the worktree in \$HOME/.claude.json, the store the default login uses"
+  assert_absent "$world/ambient-claude/.claude.json" "ordinary must not write the ambient CLAUDE_CONFIG_DIR store"
+  pass "ordinary Claude launches, trusts, and preflights the default login with CLAUDE_CONFIG_DIR unset"
+}
+
+test_spawn_claude_environment_keeps_environment_credentials() {
+  local rec world home fakebin wt launchlog out launch id=environment-claude
+  rec=$(make_world spawn-environment claude)
+  read_world "$rec"
+  world=$WORLD
+  home=$HOME_DIR
+  fakebin=$FAKEBIN_DIR
+  # An API-key or cloud-provider home: the root holds no /login at all.
+  printf 'missing\n' > "$home/accounts/claude/.fake-auth"
+  wt="$world/wt"
+  fm_git_worktree "$world/proj" "$wt" wt-environment
+  fm_test_spawn_brief "$home" "$id"
+  launchlog="$world/launch.log"
+  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
+    "$id" "$world/proj" --mode no-mistakes --yolo off --harness claude 2>&1)
+  expect_code 1 "$?" "a root without a login and without environment must refuse"$'\n'"$out"
+  assert_contains "$out" "declare environment credentials" "refusal must offer the environment selection"
+  printf '%s\nenvironment\n' "$home/accounts/claude" > "$home/config/claude-account"
+  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
+    "$id" "$world/proj" --mode no-mistakes --yolo off --harness claude 2>&1)
+  expect_code 0 "$?" "a declared environment selection should launch"$'\n'"$out"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$home/accounts/claude'" \
+    "the selected root must stay the launch's config dir"
+  assert_not_contains "$launch" "-u ANTHROPIC_API_KEY" \
+    "a declared environment selection must keep the API key"
+  assert_not_contains "$launch" "-u CLAUDE_CODE_USE_BEDROCK" \
+    "a declared environment selection must keep the cloud provider switch"
+  pass "a declared environment selection keeps Claude's environment credentials"
+}
+
+test_spawn_pi_environment_admits_a_provider_the_root_has_not_stored() {
+  local rec world home fakebin wt launchlog out id=environment-pi
+  rec=$(make_world spawn-pi-environment pi)
+  read_world "$rec"
+  world=$WORLD
+  home=$HOME_DIR
+  fakebin=$FAKEBIN_DIR
+  printf 'not_ready\n' > "$home/accounts/pi/.fake-auth"
+  wt="$world/wt"
+  fm_git_worktree "$world/proj" "$wt" wt-pi-environment
+  fm_test_spawn_brief "$home" "$id"
+  launchlog="$world/launch.log"
+  out=$(ANTHROPIC_API_KEY=ambient-key run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
+    "$id" "$world/proj" --mode no-mistakes --yolo off --harness pi --model fake/test 2>&1)
+  expect_code 1 "$?" "an ambient provider key must not answer for a root without the provider"$'\n'"$out"
+  assert_contains "$out" "cannot authenticate" "refusal must say the root cannot authenticate"
+  printf '%s\nfake\nenvironment\n' "$home/accounts/pi" > "$home/config/pi-account"
+  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
+    "$id" "$world/proj" --mode no-mistakes --yolo off --harness pi --model fake/test 2>&1)
+  expect_code 0 "$?" "a declared environment selection should launch Pi"$'\n'"$out"
+  assert_contains "$(cat "$launchlog")" "PI_CODING_AGENT_DIR='$home/accounts/pi'" \
+    "the selected Pi root must stay the launch's agent dir"
+  pass "a declared environment selection lets Pi use its provider's environment key"
 }
 
 test_preflight_refuses_a_skipped_keychain_without_a_recorded_login() {
@@ -308,16 +396,12 @@ test_preflight_refuses_a_skipped_keychain_without_a_recorded_login() {
   world=$WORLD
   home=$HOME_DIR
   fakebin=$FAKEBIN_DIR
-  printf 'skipped\n' > "$home/accounts/claude/.fake-auth"
-  printf '{"oauthAccount":true}\n' > "$home/accounts/claude/.claude.json.wrong"
   printf '{"schemaVersion":1}\n' > "$home/accounts/claude/.claude.json"
   wt="$world/wt"
   fm_git_worktree "$world/proj" "$wt" wt-empty
   fm_test_spawn_brief "$home" "$id"
   launchlog="$world/launch.log"
-  # quota-axi fake reports the file's status; skipped plus no oauthAccount must refuse.
-  printf '{"schemaVersion":1,"auth":[{"provider":"claude","sources":[{"source":"keychain","status":"skipped","credentialPresent":true}]}]}\n' \
-    > "$home/accounts/claude/.quota-out"
+  # skipped plus no oauthAccount must refuse.
   cat > "$fakebin/quota-axi" <<SH
 #!/bin/sh
 printf '%s\n' '{"schemaVersion":1,"auth":[{"provider":"claude","sources":[{"source":"keychain","status":"skipped","credentialPresent":true}]}]}'
@@ -359,7 +443,8 @@ test_secondmate_launch_reads_the_launching_home_not_its_own() {
 
 test_missing_claude_declaration_refuses
 test_missing_pi_declaration_refuses
-test_ordinary_claude_selects_the_vendor_default_root
+test_ordinary_claude_selects_the_unset_config_dir
+test_environment_line_is_an_explicit_selection
 test_explicit_claude_path_is_the_selected_root
 test_pi_declaration_requires_a_provider
 test_pi_ordinary_with_provider_resolves
@@ -371,6 +456,8 @@ test_spawn_claude_ignores_ambient_config_dir
 test_spawn_pi_refuses_a_provider_the_home_did_not_declare
 test_spawn_pi_refuses_an_unqualified_model
 test_spawn_codex_does_not_require_an_account_declaration
-test_spawn_claude_ordinary_uses_the_vendor_default_under_throwaway_home
+test_spawn_claude_ordinary_uses_the_default_login_under_throwaway_home
+test_spawn_claude_environment_keeps_environment_credentials
+test_spawn_pi_environment_admits_a_provider_the_root_has_not_stored
 test_preflight_refuses_a_skipped_keychain_without_a_recorded_login
 test_secondmate_launch_reads_the_launching_home_not_its_own

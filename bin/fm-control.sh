@@ -138,6 +138,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-worker-account-lib.sh
+. "$SCRIPT_DIR/fm-worker-account-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -698,6 +700,13 @@ resolve_relaunch_profile() {
   if [ "$TARGET_EFFORT" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" || return 1
   fi
+  # The launch owner refuses an undeclared or unusable worker account the same
+  # way, but only after the old agent has been stopped.
+  local account_model=$TARGET_MODEL
+  [ "$account_model" != default ] || account_model=
+  [ -n "$account_model" ] || [ "$KIND" != secondmate ] || account_model=$CONFIG_MODEL
+  fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$FM_HOME" \
+    "$account_model" "$TARGET_HARNESS" >/dev/null || return 1
 }
 
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch
