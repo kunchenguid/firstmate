@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, PRESENTATION_UNAVAILABLE, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, NETWORK_CHECKS, HOME_SUMMARY, BACKLOG_RECONCILE, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, or FMX - or reports that an interrupted backlog cleanup may have left an endpoint or local copy, or when a standalone bin/fm-bootstrap.sh or bin/fm-startup-network.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, PRESENTATION_UNAVAILABLE, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, STARTUP_MEMORY_BUDGET, CREW_DISPATCH invalid, FLEET_SYNC, NETWORK_CHECKS, HOME_SUMMARY, BACKLOG_RECONCILE, SECONDMATE_SYNC, SECONDMATE_LIVENESS, SECONDMATE_HANDOFF, NUDGE_SECONDMATES, FMX, or CLAUDE_PRIMARY_AUTO_MODE - or reports that an interrupted backlog cleanup may have left an endpoint or local copy, or when a standalone bin/fm-bootstrap.sh or bin/fm-startup-network.sh run prints one of those lines.
   A silent bootstrap section, or any other BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -74,3 +74,6 @@ When any diagnostic needs captain attention, report the plain consequence and re
   Inspect the reason, keep the pending marker under `state/.secondmate-nudge-pending/` intact, and rerun session start after the endpoint or metadata issue is fixed so bootstrap can retry the exact same marked send on the same local or remote route.
 - `FMX: X mode on ...` / `FMX: X mode off ...` - bootstrap confirmed or removed the local Relay poll artifacts (`docs/configuration.md` "Relay (.env)"); the emitted line still carries Relay's former `X mode` wording.
   Only when a running watcher needs the cadence transition applied immediately, restart the home-scoped watcher through the emitted harness supervision protocol; bootstrap deliberately never restarts the watcher itself.
+- `CLAUDE_PRIMARY_AUTO_MODE: ...` - this primary session is confirmed running Claude Code's auto permission mode, and firstmate's own sanctioned local landings, projects/ fast-forward merges and pulls, and path-scoped stash have no opt-in allow rules yet, so the classifier will keep denying them one at a time instead of a captain-visible, predictable pattern.
+  Tell the captain in plain terms what this costs (every local landing and deploy becomes a manual handoff) and point at `docs/configuration.md` "Claude permission mode for the primary session" for the copy-pasteable rule pack; never add the rules yourself; `config/claude-permission-mode` is a different, worker-only setting and does not fix this.
+  This is a one-shot nudge (`state/.claude-primary-auto-mode-notified`): it will not print again after this session holds the fleet lock once, whether or not the captain acts on it.
