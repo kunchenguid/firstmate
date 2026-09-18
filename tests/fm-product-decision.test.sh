@@ -104,6 +104,12 @@ printf '%s' "$summary" | jq -e '.total == 0 and .open == [] and .omitted == 0' >
   || fail 'summary exposed a decision before any record was created'
 
 write_input pid-create
+perl -e 'print "{\"padding\":\"", "x" x 70000, "\"}\n"' > "$TMP_ROOT/pid-oversized.json"
+if run_pid create --input "$TMP_ROOT/pid-oversized.json" > /dev/null 2> "$TMP_ROOT/pid-oversized.err"; then
+  fail 'the schema accepted an oversized product-decision input'
+fi
+grep -F 'input exceeds 65536 bytes' "$TMP_ROOT/pid-oversized.err" > /dev/null \
+  || fail 'the oversized-input refusal did not explain its durable-record bound'
 jq '.decision_type="technical"' "$TMP_ROOT/pid-create.json" > "$TMP_ROOT/pid-invalid.json"
 if run_pid create --input "$TMP_ROOT/pid-invalid.json" >/dev/null 2>&1; then
   fail 'the schema accepted a technical execution question as a product decision'

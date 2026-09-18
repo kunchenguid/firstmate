@@ -11,7 +11,7 @@ metadata:
 # Product decision steward
 
 This is a reusable responsibility for an ordinary secondmate, not a supervisor kind or a second decision queue.
-The project Firstmate remains the repository authority and captain-facing surface, while the steward owns product judgment and delegates repository edits as ordinary tracked work.
+The root Firstmate remains the captain-facing surface, the project Firstmate remains the repository authority, and the steward owns product judgment and delegates repository edits as ordinary tracked work.
 
 ## Scope
 

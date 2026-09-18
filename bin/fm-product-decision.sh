@@ -43,7 +43,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 
 fail() { printf 'fm-product-decision: %s\n' "$*" >&2; exit 2; }
-usage() { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 now_utc() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 sha256() {
   if command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{print $1}'
@@ -116,6 +116,7 @@ resolve_authority() {
 validate_input() {  # <input-json>
   local input=$1
   [ -f "$input" ] && [ ! -L "$input" ] || fail "input must be a regular non-symlinked file: $input"
+  [ "$(wc -c < "$input" | tr -d ' ')" -le 65536 ] || fail 'input exceeds 65536 bytes'
   jq -e --arg project "$PROJECT_NAME" '
     . as $x
     | ($x.schema == "fm-product-decision-input.v1")
@@ -130,8 +131,10 @@ validate_input() {  # <input-json>
     and ($x.options | type == "array" and length >= 2 and length <= 8)
     and (($x.options | map(.label)) == (["A","B","C","D","E","F","G","H"][:($x.options | length)]))
     and all($x.options[]; (.title | type == "string" and length > 0 and length <= 600)
-      and (.pros | type == "array" and length > 0 and all(.[]; type == "string" and length > 0))
-      and (.cons | type == "array" and length > 0 and all(.[]; type == "string" and length > 0))
+      and (.pros | type == "array" and length > 0 and length <= 8
+        and all(.[]; type == "string" and length > 0 and length <= 1000))
+      and (.cons | type == "array" and length > 0 and length <= 8
+        and all(.[]; type == "string" and length > 0 and length <= 1000))
       and (.consequences | type == "string" and length > 0 and length <= 1200))
     and ($x.recommendation | type == "string" and length > 0 and length <= 1200)
     and (($x.answer_mode // "release") == "release" or ($x.answer_mode // "release") == "done")
@@ -141,7 +144,8 @@ validate_input() {  # <input-json>
     and ($x.consequences | type == "string" and length > 0 and length <= 2000)
     and ($x.affected | type == "object")
     and all([$x.affected.requirements, $x.affected.docs, $x.affected.tasks][];
-      type == "array" and all(.[]; type == "string" and length > 0 and length <= 500))
+      type == "array" and length <= 64
+      and all(.[]; type == "string" and length > 0 and length <= 500))
   ' "$input" >/dev/null 2>&1 || fail 'input does not meet the product-decision presentation contract'
 }
 
@@ -825,6 +829,7 @@ command_retry_routes() {
       [ -f "$pid_file" ] && [ ! -L "$pid_file" ] || continue
       pid_status=$(jq -r '.status // "invalid"' "$pid_file" 2>/dev/null || true)
       [ "$pid_status" = answer-pending ] || continue
+      pending=$((pending + 1))
       pid=$(jq -r '.key' "$pid_file")
       if command_retry "$pid"; then
         :
