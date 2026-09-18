@@ -61,6 +61,7 @@ export function installOmpCalmAssistantThinking(): void {
     AssistantMessageComponentLike,
     AssistantMessageUpdateOptions | undefined
   >();
+  const presentationMessages = new WeakMap<AssistantMessageComponentLike, AssistantMessage>();
   const hidesThinking = (): boolean => calmPresentationHides("assistant-thinking");
   const hidesWorkingNote = (): boolean => calmPresentationHides("assistant-working-note");
   let originalUpdateContent: AssistantMessageComponentLike["updateContent"] | undefined;
@@ -135,8 +136,11 @@ export function installOmpCalmAssistantThinking(): void {
     options?: AssistantMessageUpdateOptions,
   ): void {
     patch.remember(this);
-    originalMessages.set(this, message);
-    originalOptions.set(this, options);
+    const isInvalidationReentry = presentationMessages.get(this) === message;
+    if (!isInvalidationReentry) {
+      originalMessages.set(this, message);
+      originalOptions.set(this, options);
+    }
     const hideThinking = patch.hidesThinking();
     const hideWorkingNote =
       patch.hidesWorkingNote() &&
@@ -158,6 +162,7 @@ export function installOmpCalmAssistantThinking(): void {
           }
         : message;
     this.setHideThinkingBlock(hideThinking);
+    presentationMessages.set(this, presentationMessage);
     stockUpdateContent.call(this, presentationMessage, options);
   };
 
