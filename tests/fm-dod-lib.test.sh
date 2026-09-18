@@ -12,8 +12,13 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-dod-lib)
 fm_git_identity fmtest fmtest@example.invalid
 
-accept_done() {  # <kind> <mode> <worktree> <project> <line> [meta]
+accept_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta>]
   fm_dod_accept_ship_done "$@"
+}
+
+write_merge_marker() {  # <state> <id> <provider> <host> <path> <number>
+  printf '%s\n' fm-pr-poll-merge-notified-v1 "$3" "$4" "$5" "$6" > "$1/$2.pr-poll-merge-notified"
+  chmod 600 "$1/$2.pr-poll-merge-notified"
 }
 
 test_scout_done_is_not_gated() {
@@ -180,24 +185,87 @@ test_free_text_sha_is_not_the_named_head() {
 }
 
 test_recorded_merged_pr_is_landed_after_prune() {
-  local repo wt sha meta state
+  local repo wt meta state
   repo="$TMP_ROOT/merged-repo"
   wt="$TMP_ROOT/merged-wt"
   state="$TMP_ROOT/merged-state"
   mkdir -p "$state"
   fm_git_worktree "$repo" "$wt" fm/merged
-  git -C "$wt" commit -q --allow-empty -m 'fix'
-  sha=$(git -C "$wt" rev-parse HEAD)
-  git -C "$wt" update-ref refs/remotes/origin/fm/merged "$sha"
+  git -C "$wt" commit -q --allow-empty -m 'fix, squash-merged and branch pruned'
   meta="$state/merged.meta"
-  printf 'kind=ship\nmode=direct-PR\nworktree=%s\nproject=%s\npr=https://example.test/o/r/pull/7\npr_head=%s\n' \
-    "$wt" "$repo" "$sha" > "$meta"
-  printf '%s\n' \
-    fm-pr-poll-merge-notified-v1 github example.test o/r 7 > "$state/merged.pr-poll-merge-notified"
-  git -C "$wt" update-ref -d refs/remotes/origin/fm/merged
-  accept_done ship direct-PR "$wt" "$repo" "done: PR https://example.test/o/r/pull/7" "$meta" \
+  printf 'kind=ship\nmode=direct-PR\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/7\n' \
+    "$wt" "$repo" > "$meta"
+  write_merge_marker "$state" merged github github.com o/r 7
+  accept_done ship direct-PR "$wt" "$repo" "done: PR https://github.com/o/r/pull/7" "$state" merged "$meta" \
     || fail "recorded merged PR was refused after its remote-tracking ref was pruned"
   pass "a recorded merged PR satisfies the gate after prune"
+}
+
+test_merge_marker_binds_to_the_named_pr() {
+  local repo wt meta state reason rc sha
+  repo="$TMP_ROOT/bind-repo"
+  wt="$TMP_ROOT/bind-wt"
+  state="$TMP_ROOT/bind-state"
+  mkdir -p "$state"
+  fm_git_worktree "$repo" "$wt" fm/bind
+  git -C "$wt" commit -q --allow-empty -m 'second PR head, never pushed'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  meta="$state/bind.meta"
+  printf 'kind=ship\nmode=direct-PR\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/7\n' \
+    "$wt" "$repo" > "$meta"
+  write_merge_marker "$state" bind github github.com o/r 7
+  reason=$(accept_done ship direct-PR "$wt" "$repo" "done: PR https://github.com/o/r/pull/9" "$state" bind "$meta")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "merge of recorded PR 7 accepted an unpushed done naming PR 9"
+  case "$reason" in
+    *"named head $sha is unreachable outside the worker copy") ;;
+    *) fail "PR 9 refusal did not name the unpushed head: $reason" ;;
+  esac
+  write_merge_marker "$state" bind github github.com other/r 7
+  accept_done ship direct-PR "$wt" "$repo" "done: PR https://github.com/o/r/pull/7" "$state" bind "$meta" >/dev/null \
+    && fail "merge marker for another repository's PR 7 was accepted"
+  pass "the merged-PR short-circuit applies only to the recorded PR the done line names"
+}
+
+test_forge_recorded_head_is_accepted_without_local_object() {
+  local repo wt meta state forge_head
+  repo="$TMP_ROOT/forge-repo"
+  wt="$TMP_ROOT/forge-wt"
+  state="$TMP_ROOT/forge-state"
+  mkdir -p "$state"
+  fm_git_worktree "$repo" "$wt" fm/forge
+  git -C "$wt" commit -q --allow-empty -m 'worker head, not pushed from this copy'
+  # The pipeline's own commit: on the forge and in the gate repo, never
+  # fetched into the worker clone.
+  forge_head=0123456789abcdef0123456789abcdef01234567
+  meta="$state/forge.meta"
+  printf 'kind=ship\nmode=no-mistakes\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/5\npr_head=%s\n' \
+    "$wt" "$repo" "$forge_head" > "$meta"
+  accept_done ship no-mistakes "$wt" "$repo" "done: PR https://github.com/o/r/pull/5 checks green" \
+    "$state" forge "$meta" \
+    || fail "forge-recorded pr_head the worker clone never fetched was refused"
+  accept_done ship no-mistakes "$wt" "$repo" "done: PR https://github.com/o/r/pull/6 checks green" \
+    "$state" forge "$meta" >/dev/null \
+    && fail "pr_head recorded for PR 5 was accepted for a done naming PR 6"
+  pass "a forge-recorded head for the named PR is accepted without a local object"
+}
+
+test_ci_ready_variants_are_gated() {
+  local repo wt line rc
+  repo="$TMP_ROOT/variant-repo"
+  wt="$TMP_ROOT/variant-wt"
+  fm_git_worktree "$repo" "$wt" fm/variant
+  git -C "$wt" commit -q --allow-empty -m 'only in the disposable copy'
+  for line in \
+    'done: PR https://github.com/o/r/pull/5 checks green, risk low' \
+    'done: PR https://github.com/o/r/pull/5 - checks green' \
+    'done: PR https://github.com/o/r/pull/5 checks green.' \
+    'done: PR https://github.com/o/r/pull/5 (checks green)'; do
+    rc=0
+    accept_done ship no-mistakes "$wt" "$repo" "$line" >/dev/null || rc=$?
+    [ "$rc" -eq 1 ] || fail "no-mistakes CI-ready variant skipped the gate: $line"
+  done
+  pass "no-mistakes CI-ready done: with extra text is gated"
 }
 
 test_non_done_lines_are_not_gated() {
@@ -221,6 +289,9 @@ test_moved_branch_without_named_head_is_refused
 test_pr_pull_ref_is_tested_not_later_head
 test_free_text_sha_is_not_the_named_head
 test_recorded_merged_pr_is_landed_after_prune
+test_merge_marker_binds_to_the_named_pr
+test_forge_recorded_head_is_accepted_without_local_object
+test_ci_ready_variants_are_gated
 test_local_only_linked_branch_is_accepted
 test_local_only_detached_head_is_refused
 test_standalone_local_only_needs_distinct_project_ref

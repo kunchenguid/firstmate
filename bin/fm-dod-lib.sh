@@ -12,9 +12,10 @@
 # accepted while the named head exists only in the worker's disposable copy.
 # The check tests that head, not whether some branch moved. In no-mistakes
 # mode the pre-validation `done: {summary}` is the pipeline handoff and is
-# not gated; only the later `done: PR <url> checks green` is. A recorded
-# merged PR (state/<id>.pr-poll-merge-notified matching meta pr=) satisfies
-# the gate after squash-merge prune. Teardown's landed-work test remains the
+# not gated; only the later CI-ready `done: PR <url> checks green` is. A done
+# naming the task's recorded pr= passes when the forge holds that head: a
+# forge-reported pr_head= or a recorded merge
+# (state/<id>.pr-poll-merge-notified). Teardown's landed-work test remains the
 # complete discard gate.
 # fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> prints the block on
 # stdout with no trailing blank line. The caller validates the mode; an unknown
@@ -49,6 +50,9 @@
 # conflicting role is superseded rather than duplicated.
 # fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
 # ordinary ship brief and the durable contract written during scout promotion.
+
+# shellcheck source=bin/fm-pr-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-pr-lib.sh"
 
 fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
@@ -357,32 +361,26 @@ fm_dod_done_note() {  # <line>
   printf '%s\n' "$note"
 }
 
-# 0 when <line> is the no-mistakes CI-ready form `done: PR <url> checks green`.
-fm_dod_is_ci_ready_done() {  # <line>
-  local note url rest
-  note=$(fm_dod_done_note "$1") || return 1
-  case "$note" in
-    PR\ https://*|PR\ http://*) ;;
-    *) return 1 ;;
+# 0 when a done: note reports the no-mistakes CI-ready PR (`PR <url> checks
+# green`, with any surrounding text). bin/fm-crew-state.sh takes its CI-ready
+# path on this same test, so every CI-ready line it acts on is gated.
+fm_dod_note_reports_ci_ready() {  # <note>
+  case "$1" in
+    *PR*"checks green"*|*"checks green"*PR*) return 0 ;;
   esac
-  url=${note#PR }
-  rest=${url#* }
-  [ "$rest" != "$url" ] || return 1
-  [ "$rest" = "checks green" ]
+  return 1
 }
 
 # 0 when this ship done: is one the named-head gate must accept or refuse.
 # no-mistakes pre-validation done: is the pipeline handoff and is not gated.
 # Empty mode is treated as no-mistakes, the unregistered-project default.
 fm_dod_should_gate_ship_done() {  # <kind> <mode> <line>
+  local note
   [ "$1" = ship ] || return 1
-  case "$3" in
-    done:*) ;;
-    *) return 1 ;;
-  esac
+  note=$(fm_dod_done_note "$3") || return 1
   case "$2" in
     direct-PR|local-only) return 0 ;;
-    no-mistakes|'') fm_dod_is_ci_ready_done "$3" ;;
+    no-mistakes|'') fm_dod_note_reports_ci_ready "$note" ;;
     *) return 1 ;;
   esac
 }
@@ -409,55 +407,44 @@ fm_dod_pr_url_number() {  # <url>
   printf '%s\n' "$n"
 }
 
-# 0 when <meta>'s recorded pr= has a matching merge-notified marker, the
-# poll's durable merged verdict (bin/fm-pr-lib.sh).
-fm_dod_recorded_merged_pr() {  # <meta>
-  local meta=$1 id state_dir marker pr n marked
+# The last recorded <key>= value in <meta>, or empty.
+fm_dod_meta_value() {  # <meta> <key>
+  grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2-
+}
+
+# 0 when <url> is the task's recorded pr= and the forge holds its head:
+# bin/fm-pr-check.sh recorded the forge's pr_head= for it, or the merge poll
+# recorded it merged (<state>/<id>.pr-poll-merge-notified, bin/fm-pr-lib.sh).
+# That head is stored outside the worker copy even when this clone never
+# fetched it or fleet sync pruned its branch after a squash merge.
+fm_dod_recorded_pr_on_forge() {  # <state> <id> <meta> <url>
+  local state=$1 id=$2 meta=$3 url=$4
   [ -n "$meta" ] && [ -f "$meta" ] || return 1
-  id=${meta##*/}
-  id=${id%.meta}
-  state_dir=${meta%/*}
-  marker="$state_dir/$id.pr-poll-merge-notified"
-  [ -f "$marker" ] || return 1
-  [ "$(sed -n '1p' "$marker")" = fm-pr-poll-merge-notified-v1 ] || return 1
-  marked=$(sed -n '5p' "$marker")
-  [ -n "$marked" ] || return 1
-  pr=$(grep '^pr=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-)
-  n=$(fm_dod_pr_url_number "$pr") || return 1
-  [ "$n" = "$marked" ]
+  [ "$(fm_dod_meta_value "$meta" pr)" = "$url" ] || return 1
+  [ -z "$(fm_dod_meta_value "$meta" pr_head)" ] || return 0
+  ( fm_pr_url_parse "$url" \
+    && fm_pr_poll_merge_already_notified "$state" "$id" \
+      "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" )
 }
 
 # Resolve the commit a ship done: names. `done: PR <url>...` uses that PR's
-# head (meta pr_head= when pr= is the same URL, else refs/pull/<n>/head or a
-# remote-tracking pull ref). Any other done: uses the worktree HEAD. There is
-# no free-text SHA scan: a SHA that happens to appear in the note is not the
-# named head.
-fm_dod_ship_done_named_head() {  # <worktree> <line> [meta]
-  local wt=$1 line=$2 meta=${3:-} note url n sha pull_ref
+# head from a local pull ref (refs/pull/<n>/head or a remote-tracking pull
+# ref). Any other done: uses the worktree HEAD. There is no free-text SHA
+# scan: a SHA that happens to appear in the note is not the named head.
+fm_dod_ship_done_named_head() {  # <worktree> <line>
+  local wt=$1 line=$2 note url n sha pull_ref
   [ -n "$wt" ] && [ -d "$wt" ] || return 1
   note=$(fm_dod_done_note "$line") || return 1
-  if url=$(fm_dod_pr_url_from_done_note "$note"); then
-    if [ -n "$meta" ] && [ -f "$meta" ]; then
-      if [ "$(grep '^pr=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-)" = "$url" ]; then
-        sha=$(grep '^pr_head=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-)
-        if [ -n "$sha" ]; then
-          git -C "$wt" rev-parse --verify "${sha}^{commit}" 2>/dev/null
-          return
-        fi
-      fi
+  if url=$(fm_dod_pr_url_from_done_note "$note") && n=$(fm_dod_pr_url_number "$url"); then
+    if sha=$(git -C "$wt" rev-parse --verify "refs/pull/${n}/head^{commit}" 2>/dev/null); then
+      printf '%s\n' "$sha"
+      return 0
     fi
-    n=$(fm_dod_pr_url_number "$url") || n=
-    if [ -n "$n" ]; then
-      if sha=$(git -C "$wt" rev-parse --verify "refs/pull/${n}/head^{commit}" 2>/dev/null); then
-        printf '%s\n' "$sha"
-        return 0
-      fi
-      pull_ref=$(git -C "$wt" for-each-ref --format='%(refname)' --count=1 \
-        "refs/remotes/*/pull/${n}/head" 2>/dev/null) || true
-      if [ -n "$pull_ref" ]; then
-        git -C "$wt" rev-parse --verify "${pull_ref}^{commit}" 2>/dev/null
-        return
-      fi
+    pull_ref=$(git -C "$wt" for-each-ref --format='%(refname)' --count=1 \
+      "refs/remotes/*/pull/${n}/head" 2>/dev/null) || true
+    if [ -n "$pull_ref" ]; then
+      git -C "$wt" rev-parse --verify "${pull_ref}^{commit}" 2>/dev/null
+      return
     fi
     # No local pull ref yet: the PR head is the branch the worker just pushed,
     # which is this copy's HEAD. A later unpushed commit then is the named head
@@ -492,29 +479,17 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
   fm_dod_ref_contains "$project" refs/remotes "$sha"
 }
 
-# 0 when <sha> is already accepted as landed (recorded merged PR) or is
-# reachable outside the disposable worktree. Optional <meta> enables the
-# merged-PR short-circuit. Linked-worktree local branches are never treated
-# as preserved for PR-based modes.
-fm_dod_ship_head_accepted() {  # <worktree> <project> <mode> <sha> [meta]
-  local wt=$1 project=$2 mode=$3 sha=$4 meta=${5:-}
-  [ -n "$sha" ] || return 1
-  if [ -n "$meta" ] && fm_dod_recorded_merged_pr "$meta"; then
-    return 0
-  fi
-  fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"
-}
-
-# 0 when <line> is not a ship done: to gate, or when the named head is
-# reachable outside the worker's disposable copy (or a recorded merged PR
-# already landed it). 1 when the claim is refused; stdout then holds a
-# one-line reason and no other output. Optional <meta> supplies pr=,
-# pr_head=, and the merge-notified marker. Optional <named_sha> is the
-# already-resolved head (fm-pr-check.sh passes the forge SHA).
-fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [meta] [named_sha]
-  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 meta=${6:-} named=${7:-} sha
+# 0 when <line> is not a ship done: to gate, when it names the task's recorded
+# PR whose head the forge holds, or when its named head is reachable outside
+# the worker's disposable copy. 1 when the claim is refused; stdout then holds
+# a one-line reason and no other output. <state> <id> <meta> supply pr=,
+# pr_head=, and the merge-notified marker; <meta> may be a captured copy
+# (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
+fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta>]
+  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
-  if [ -n "$meta" ] && fm_dod_recorded_merged_pr "$meta"; then
+  if url=$(fm_dod_pr_url_from_done_note "$(fm_dod_done_note "$line")") \
+    && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$url"; then
     return 0
   fi
   if [ -z "$wt" ] || [ ! -d "$wt" ]; then
@@ -525,17 +500,10 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [meta] 
     printf '%s\n' "named head cannot be verified: worktree is not a git copy"
     return 1
   fi
-  if [ -n "$named" ]; then
-    sha=$(git -C "$wt" rev-parse --verify "${named}^{commit}" 2>/dev/null) || {
-      printf '%s\n' "named head could not be resolved"
-      return 1
-    }
-  else
-    sha=$(fm_dod_ship_done_named_head "$wt" "$line" "$meta") || {
-      printf '%s\n' "named head could not be resolved"
-      return 1
-    }
-  fi
+  sha=$(fm_dod_ship_done_named_head "$wt" "$line") || {
+    printf '%s\n' "named head could not be resolved"
+    return 1
+  }
   if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then
     return 0
   fi

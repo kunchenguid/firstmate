@@ -1710,6 +1710,35 @@ test_unpushed_ship_done_is_blocked() {
   pass "unpushed ship done: is current-state blocked"
 }
 
+# Fleet snapshot hands crew-state a captured meta copy outside state/. The
+# poll's merge marker stays in the live state dir, so a squash-merged PR whose
+# branch fleet sync pruned still reads done there.
+test_merged_pr_reads_done_under_captured_meta() {
+  reset_fakes
+  local d out
+  d=$(new_case merged-captured)
+  make_repo_on_branch "$d/wt" fm/merged
+  git -C "$d/wt" commit -q --allow-empty -m 'squash-merged fix, branch pruned'
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/merged.meta" \
+    "window=fm:fm-merged" "worktree=$d/wt" "project=$d/wt" \
+    "kind=ship" "mode=direct-PR" "harness=claude" "pr=https://github.com/o/r/pull/7"
+  printf '%s\n' fm-pr-poll-merge-notified-v1 github github.com o/r 7 \
+    > "$d/state/merged.pr-poll-merge-notified"
+  chmod 600 "$d/state/merged.pr-poll-merge-notified"
+  printf 'done: PR https://github.com/o/r/pull/7\n' > "$d/state/merged.status"
+  mkdir -p "$d/captured"
+  cp "$d/state/merged.meta" "$d/captured/merged.meta"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" merged
+  out=$(FM_CREW_STATE_META_OVERRIDE="$d/captured/merged.meta" run_crew_state "$d" merged)
+  assert_contains "$out" "state: done" "recorded merged PR must read done under a captured meta"
+  assert_not_contains "$out" "state: blocked" "merge marker must be read from the live state dir"
+  pass "recorded merged PR reads done under the fleet snapshot's captured meta"
+}
+
 test_no_mistakes_prevalidation_done_stays_done() {
   reset_fakes
   local d out
@@ -3666,6 +3695,7 @@ test_terminal_run_without_live_sibling_is_unchanged
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_unpushed_ship_done_is_blocked
+test_merged_pr_reads_done_under_captured_meta
 test_no_mistakes_prevalidation_done_stays_done
 test_moved_remote_branch_without_named_head_is_blocked
 test_no_run_busy_pane

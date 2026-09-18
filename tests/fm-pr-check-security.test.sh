@@ -131,19 +131,13 @@ make_case() {
   git -C "$dir/wt" init -q
   git -C "$dir/wt" commit -q --allow-empty -m init
   git -C "$dir/wt" update-ref refs/remotes/origin/main "$(git -C "$dir/wt" rev-parse HEAD)"
-  git -C "$dir/wt" rev-parse HEAD > "$dir/wt-head"
   cat > "$fake_root/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'guard\n' >> "$FM_TEST_GUARD_LOG"
 SH
   chmod +x "$fake_root/bin/fm-guard.sh"
-  # Default the forge head to this copy's HEAD so merge/re-arm paths that
-  # omit FM_TEST_GH_HEAD still name a commit git can resolve. An explicit
-  # FM_TEST_GH_HEAD, including the newline-injection case, still wins.
-  {
-    printf '%s\n' '#!/usr/bin/env bash' \
-      ": \"\${FM_TEST_GH_HEAD:=$(tr -d '\n' < "$dir/wt-head")}\""
-    cat <<'SH'
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "api graphql")
@@ -196,7 +190,6 @@ case " $* " in
     ;;
 esac
 SH
-  } > "$fakebin/gh"
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
@@ -251,31 +244,21 @@ write_poll_meta() {
 
 
 run_check_entry() {
-  local dir=$1 head
+  local dir=$1
   shift
-  head=${FM_TEST_GH_HEAD:-}
-  if [ -z "$head" ] && [ -f "$dir/wt-head" ]; then
-    head=$(cat "$dir/wt-head")
-  fi
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
-    FM_TEST_GH_HEAD="$head" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
 
 run_merge_entry() {
-  local dir=$1 head
+  local dir=$1
   shift
-  head=${FM_TEST_GH_HEAD:-}
-  if [ -z "$head" ] && [ -f "$dir/wt-head" ]; then
-    head=$(cat "$dir/wt-head")
-  fi
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
-    FM_TEST_GH_HEAD="$head" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
@@ -541,15 +524,19 @@ test_invalid_entrypoints_have_zero_side_effects() {
   pass "PR and teardown entrypoints reject invalid arguments before every side effect"
 }
 
+# With no forge-reported head (gh cannot supply one), the named head is the
+# worker copy's HEAD, and a HEAD that exists only there is refused.
 test_unpushed_named_head_refuses_registration() {
   local dir sha
   dir=$(make_case unpushed-named-head)
   write_task_meta "$dir"
   git -C "$dir/wt" commit -q --allow-empty -m 'only in the copy'
   sha=$(git -C "$dir/wt" rev-parse HEAD)
-  FM_TEST_GH_HEAD=$sha run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
+  FM_TEST_GH_HEAD=unavailable run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
     > "$dir/stdout" 2> "$dir/stderr" && fail "unpushed PR head was registered"
-  grep -q 'named head' "$dir/stderr" || fail "refusal did not name the unreachable head: $(cat "$dir/stderr")"
+  grep -Fq "named head $sha is unreachable outside the worker copy" "$dir/stderr" \
+    || fail "refusal did not name the unreachable head: $(cat "$dir/stderr")"
+  ! grep -q '^pr=' "$dir/home/state/task-a.meta" || fail "unpushed PR head still recorded pr="
   [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "unpushed PR head still armed a poll"
   pass "fm-pr-check refuses to register a PR whose named head is only in the worker copy"
 }
@@ -558,7 +545,7 @@ test_valid_recording_and_merge_derivation() {
   local dir expected sidecar count rc
   dir=$(make_case valid-recording)
   write_task_meta "$dir"
-  expected=$(cat "$dir/wt-head")
+  expected=0123456789abcdef0123456789abcdef01234567
   FM_TEST_GH_HEAD=$expected run_check_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 \
     > "$dir/stdout" 2> "$dir/stderr" || fail "valid direct check failed"
 
@@ -850,7 +837,7 @@ sleep 0.3
 SH
     chmod +x "$dir/fakebin/cp"
 
-    FM_TEST_GH_HEAD=$(cat "$dir/wt-head") \
+    FM_TEST_GH_HEAD=0123456789abcdef0123456789abcdef01234567 \
       run_check_entry "$dir" task-a https://github.com/o/r/pull/1 > "$dir/direct.out" 2> "$dir/direct.err" &
     direct_pid=$!
     i=0

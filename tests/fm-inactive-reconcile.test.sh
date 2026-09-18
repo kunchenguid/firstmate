@@ -171,20 +171,40 @@ test_main_direct_terminal_presentation_receipt() {
   pass "main direct terminal presentation has a durable receipt"
 }
 
-# An unpushed CI-ready ship done: is not a parent-facing ready signal.
+# An unpushed CI-ready ship done: is not a parent-facing ready signal. The
+# ledger pass reads the child's line before any PR is recorded for it, so the
+# gate tests the worker copy's HEAD.
 test_unpushed_ci_ready_done_is_not_published() {
-  local sha
   make_world unpushed-ready; bind_secondmate local
-  write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/1 checks green, risk low'
   git -C "$MATE/projects/child" commit -q --allow-empty -m 'only in the copy'
-  sha=$(git -C "$MATE/projects/child" rev-parse HEAD)
-  awk -v sha="$sha" '{ sub(/^pr_head=.*/, "pr_head=" sha); print }' \
-    "$MATE/state/child.meta" > "$MATE/state/child.meta.tmp"
+  grep -v '^pr=\|^pr_head=' "$MATE/state/child.meta" > "$MATE/state/child.meta.tmp"
   mv "$MATE/state/child.meta.tmp" "$MATE/state/child.meta"
   FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
   [ ! -s "$MAIN/state/mate.status" ] || fail "unpushed CI-ready done: was published upstream"
   [ "$(outcome_count "$MATE" reported)" = 0 ] || fail "unpushed CI-ready done: left a delivery receipt"
   pass "unpushed CI-ready ship done: is not published upstream"
+}
+
+# The ledger pass runs on every poll, so a ship done: already delivered does
+# not pay for the git reachability check again.
+test_delivered_ledger_done_skips_git_gate() {
+  local real_git
+  make_world gate-once; bind_secondmate local
+  write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/2 checks green'
+  real_git=$(command -v git)
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> %q\nexec %q "$@"\n' \
+    "$WORLD/git.log" "$real_git" > "$WORLD/fakebin/git"
+  chmod +x "$WORLD/fakebin/git"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  [ "$(outcome_count "$MATE" reported)" = 1 ] || fail "pushed CI-ready done: was not delivered"
+  [ -s "$WORLD/git.log" ] || fail "first delivery did not test the named head"
+  : > "$WORLD/git.log"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  [ ! -s "$WORLD/git.log" ] || fail "a poll after delivery re-ran the git gate: $(cat "$WORLD/git.log")"
+  [ "$(grep -c 'child-outcome-child-done' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "the delivered done: was published again"
+  pass "a delivered ship done: skips the git gate on later polls"
 }
 
 # A secondmate delivers a child's terminal ledger line to the parent on the
@@ -919,6 +939,7 @@ SH
 
 test_main_direct_terminal_presentation_receipt
 test_unpushed_ci_ready_done_is_not_published
+test_delivered_ledger_done_skips_git_gate
 test_local_secondmate_delivers_terminal_ledger_line
 test_secondmate_multiline_terminal_outcome_is_delivered_once
 test_secondmate_unterminated_prose_reports_run_outcome
