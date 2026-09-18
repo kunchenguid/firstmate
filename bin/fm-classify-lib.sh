@@ -2134,8 +2134,11 @@ signal_crew_provably_working() {  # <file> ...
 # captain-relevant; 1 otherwise, including the no-status case. A 1 only means
 # "non-terminal"; the always-on watcher then applies crew_is_provably_working,
 # while the away-mode daemon applies its persistence recheck.
+# Read through status_wait_line, because this verdict gates the declared-wait
+# branch: a note: under a live wait that mentions a legacy token such as
+# `merged` must not take the terminal path the wait would otherwise hold.
 stale_is_terminal() {  # <window> <state>
   local win=$1 state=$2 last
-  last=$(last_status_line "$state/$(window_to_task "$win" "$state").status")
+  last=$(status_wait_line "$state/$(window_to_task "$win" "$state").status")
   [ -n "$last" ] && status_is_captain_relevant "$last"
 }

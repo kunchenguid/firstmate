@@ -306,6 +306,11 @@ test_stale_is_terminal_classifier() {
   stale_is_terminal "sess:fm-prose-pause" "$state" && fail "prose mentioning a legacy token escalated a multi-line pause as terminal"
   status_is_paused_or_captain_held "$(last_status_line "$state/prose-pause.status")" \
     || fail "prose mentioning a legacy token hid a multi-line pause from the wait cadence"
+  printf 'paused: waiting on the upstream release\nnote: upstream PR merged, waiting for the tag\n' > "$state/noted-pause.status"
+  stale_is_terminal "sess:fm-noted-pause" "$state" && fail "a note: mentioning a legacy token ended a declared wait as terminal"
+  printf 'working: rebasing\nnote: upstream PR merged, waiting for the tag\n' > "$state/noted-work.status"
+  stale_is_terminal "sess:fm-noted-work" "$state" \
+    || fail "a note: after leaving a wait changed its captain relevance"
   stale_is_terminal "sess:fm-missing" "$state" && fail "stale with no status classified terminal"
   pass "stale_is_terminal: terminal status surfaces, non-terminal and no-status are benign"
 }
@@ -2685,7 +2690,7 @@ test_note_under_declared_wait_keeps_the_wait() {
     ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the first sight"
 
     # A note: under the live wait: no wake before the cadence.
-    note_wait_write "$state" 'note: CI queue is long today, nothing to do yet'
+    note_wait_write "$state" 'note: upstream PR merged and its checks green, waiting for the tag'
     printf 'idle after the note\n' > "$capture_file"
     note_wait_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb "$command" \
       || fail "[$name] a note: under the declared wait woke the supervisor: $(cat "$state/.wake-queue" 2>/dev/null)"
