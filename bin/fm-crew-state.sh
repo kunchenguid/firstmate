@@ -1481,9 +1481,9 @@ if [ "$HAVE_RUN" = 1 ]; then
   RUN_DETAIL="$RUN_DETAIL$RUN_ID_FIELD"
 
   # Apply the terminal-reading precedence contract owned by header rule 2b.
-  if { [ "$RUN_STATE" = failed ] || [ "$RUN_STATE" = done ]; } \
+  if { [ "$RUN_STATE" = "failed" ] || [ "$RUN_STATE" = "done" ]; } \
     && [ "$RUN_SOURCE" != coarse ]; then
-    if [ "$RUN_STATE" = failed ]; then
+    if [ "$RUN_STATE" = "failed" ]; then
       case "$LEDGER_STATUS" in
         completed)
           SUPERSEDED_DETAIL="run superseded by a newer completed run on this branch (earlier $READING_DETAIL)"
