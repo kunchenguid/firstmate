@@ -509,7 +509,7 @@ The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`]
 
 ## Pre-publication voice check (.env TYPESAFE_API_KEY)
 
-`bin/fm-voice-check.sh` checks a pull request or issue description, or the `--intent` string a no-mistakes pipeline will publish, for internal voice before it reaches a public artifact: direct address to the operator, relayed supervisor orders to the worker, a quoted operator answer, and prose in a language other than the artifact's.
+`bin/fm-voice-check.sh` checks a pull request or issue description, or the `--intent` string a no-mistakes pipeline will publish, for internal voice before it reaches a public artifact: direct address to the operator, relayed supervisor orders to the worker, a quoted operator answer, and prose in a language other than English, the fixed language every checked artifact is expected to be written in.
 It uses the same opt-in key as "Typed dispatch resolution" above; with no key it prints one `voice-check: off` line on stderr, exits 0, and makes no network call, so publication behaves exactly as it does without the check.
 This section is the single owner of the check's operator contract; the script header owns its exact flags, output lines, and exit codes.
 
