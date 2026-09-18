@@ -408,6 +408,7 @@ family_for_basename() {
     fm-remote-entrypoint.test.sh|fm-remote-secondmate-parent-binding.test.sh|\
     fm-send-remote-delivery.test.sh|fm-spawn-pool-base-freshen.test.sh|\
     fm-test-fixture-cleanup.test.sh|fm-test-fixtures.test.sh|\
+    fm-voice-check.test.sh|\
     fm-voice-relay.test.sh|fm-wake-drain-open-decisions-cursor.test.sh|\
     fm-wake-drain-open-decisions.test.sh|fm-wake-drain-outcome-backstop.test.sh)
       printf '%s\n' standalone
@@ -827,6 +828,7 @@ tests/fm-turnend-foreign-owner-arm-fix.test.sh 2397
 tests/fm-turnend-guard.test.sh 33450
 tests/fm-update.test.sh 11572
 tests/fm-vendor-auth-probe.test.sh 45255
+tests/fm-voice-check.test.sh 2500
 tests/fm-voice-relay.test.sh 32486
 tests/fm-wake-daemon-lifecycle-e2e.test.sh 7477
 tests/fm-wake-drain-open-decisions-cursor.test.sh 38506
@@ -1449,11 +1451,21 @@ families_for_changed_path() {
     bin/fm-dispatch-resolve.sh)
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       ;;
+    bin/fm-voice-check.sh)
+      printf '%s\n' "__script__:fm-voice-check.test.sh"
+      printf '%s\n' "__script__:fm-task-delivery.test.sh"
+      ;;
+    bin/fm-typesafe-lib.sh)
+      # The one typesafe.ai client, sourced by both typed-resolution tools.
+      printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
+      printf '%s\n' "__script__:fm-voice-check.test.sh"
+      ;;
     bin/fm-env-lib.sh)
-      # The one .env accessor, sourced by bin/fm-x-lib.sh (Relay token) and
-      # bin/fm-dispatch-resolve.sh (TYPESAFE_API_KEY).
+      # The one .env accessor, sourced by bin/fm-x-lib.sh (Relay token),
+      # bin/fm-dispatch-resolve.sh, and bin/fm-voice-check.sh (TYPESAFE_API_KEY).
       printf '%s\n' pr-forge
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
+      printf '%s\n' "__script__:fm-voice-check.test.sh"
       ;;
     .pi/extensions/fm-branch-supervision.ts|.pi/extensions/lib/fm-async-exec.ts|\
     .pi/extensions/lib/fm-branch-dispatch.ts|.pi/extensions/lib/fm-native-contract.ts)

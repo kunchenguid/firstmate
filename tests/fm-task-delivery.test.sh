@@ -830,6 +830,99 @@ EOF
   pass "fm-spawn/fm-promote: authorized intent preserves exact words and refuses operator-address lines"
 }
 
+# The opt-in pre-publication voice check (bin/fm-voice-check.sh) runs on the
+# intent a no-mistakes pipeline will publish. The service is stubbed at its
+# network boundary with a fake curl; spawn and promotion must stop on a flagged
+# or unverified intent before anything is published or recorded, publish an
+# unverified one only with the explicit override, and behave as before when
+# the key is absent.
+write_voice_curl() {  # <fakebin> <clean|flagged|down> <call-log>
+  local fakebin=$1
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'VOICE_MODE=%q\nVOICE_LOG=%q\n' "$2" "$3"
+    cat <<'SH'
+printf 'call\n' >> "$VOICE_LOG"
+out=''
+while [ $# -gt 0 ]; do
+  case "$1" in -o) out=$2; shift 2 ;; *) shift ;; esac
+done
+cat >/dev/null
+[ "$VOICE_MODE" = down ] && exit 7
+ans() { printf '{"type":"choice","choice":"%s","confidence":0.9,"probabilities":{"yes":%s,"no":%s}}' "$1" "$2" "$3"; }
+clean=$(ans no 0.02 0.98)
+quoted=$clean
+[ "$VOICE_MODE" = flagged ] && quoted=$(ans yes 0.97 0.03)
+printf '{"model":"jev-test","answers":{"operator_address":%s,"relayed_orders":%s,"quoted_answer":%s,"other_language":%s}}' \
+  "$clean" "$clean" "$quoted" "$clean" > "$out"
+printf 200
+SH
+  } > "$fakebin/curl"
+  chmod +x "$fakebin/curl"
+}
+
+test_spawn_and_promote_run_the_intent_voice_check() {
+  local rec home proj fakebin out status log id
+  rec=$(make_home voice-check)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  log="$TMP_ROOT/voice-check/curl.log"
+
+  write_voice_curl "$fakebin" flagged "$log"
+  id='voice-off'
+  write_brief "$home" "$id" no-mistakes
+  out=$(unset TYPESAFE_API_KEY; run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
+  assert_present "$home/data/$id/launch-brief.md" "key absent: the intent must publish exactly as before"
+  assert_not_contains "$out" "voice check" "key absent: spawn must not mention the voice check"
+  [ ! -f "$log" ] || fail "key absent: spawn must make no network call"
+
+  id='voice-flagged'
+  write_brief "$home" "$id" no-mistakes
+  out=$(TYPESAFE_API_KEY=test-key run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off \
+    --voice-accept-unverified 'an override must not clear a flag')
+  status=$?
+  [ "$status" -ne 0 ] || fail "flagged: spawn must refuse"
+  assert_contains "$out" "did not pass the pre-publication voice check" "flagged: refusal must say why"
+  assert_contains "$out" "finding: quoted_answer" "flagged: refusal must report the category"
+  assert_absent "$home/data/$id/launch-brief.md" "flagged: the intent must not be published to the worker"
+  assert_absent "$home/state/$id.meta" "flagged: spawn must not record the task"
+
+  write_voice_curl "$fakebin" down "$log"
+  id='voice-down'
+  write_brief "$home" "$id" no-mistakes
+  out=$(TYPESAFE_API_KEY=test-key run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unverified: spawn must refuse without the override"
+  assert_contains "$out" "could not be verified" "unverified: refusal must say the intent is unverified"
+  assert_contains "$out" "--voice-accept-unverified" "unverified: refusal must name the explicit override"
+  assert_absent "$home/data/$id/launch-brief.md" "unverified: the intent must not be published without the override"
+  out=$(TYPESAFE_API_KEY=test-key run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off \
+    --voice-accept-unverified 'service outage, instructed')
+  assert_contains "$out" "accepted-unverified: service outage, instructed" "override: the reason must be printed"
+  assert_present "$home/data/$id/launch-brief.md" "override: the unverified intent must publish"
+
+  write_voice_curl "$fakebin" clean "$log"
+  id='voice-clean'
+  write_brief "$home" "$id" no-mistakes
+  out=$(TYPESAFE_API_KEY=test-key run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
+  assert_present "$home/data/$id/launch-brief.md" "clean: the intent must publish"
+  assert_not_contains "$out" "voice check" "clean: spawn must stay quiet about the check"
+
+  write_voice_curl "$fakebin" flagged "$log"
+  id='voice-promote'
+  write_brief "$home" "$id"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
+  out=$(TYPESAFE_API_KEY=test-key PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "flagged: promotion must refuse"
+  assert_contains "$out" "did not pass the pre-publication voice check" "flagged: promotion refusal must say why"
+  assert_absent "$home/data/$id/ship-instructions.md" "flagged: promotion must not publish the intent"
+  assert_grep 'kind=scout' "$home/state/$id.meta" "flagged: refused promotion changed the task record"
+  pass "fm-spawn/fm-promote: the intent voice check stops flagged and unverified intents and is off without a key"
+}
+
 test_spawn_refreshes_legacy_worker_roles() {
   local rec home proj fakebin kind id out brief project_kind first_line role_line supervisor_line
   rec=$(make_home worker-roles)
@@ -882,6 +975,7 @@ EOF
 
 test_authorized_intent_keeps_words_without_composed_address
 test_spawn_refreshes_legacy_worker_roles
+test_spawn_and_promote_run_the_intent_voice_check
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch

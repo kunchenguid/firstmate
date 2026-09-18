@@ -15,6 +15,11 @@
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
 #   placeholders, an empty Task, an incomplete pair of Task subsections, or a
 #   `## Captain's intent` line opening with a Captain label or address.
+#   A no-mistakes ship spawn also runs the opt-in pre-publication voice check
+#   (bin/fm-voice-check.sh) on that intent, which the pipeline publishes as the
+#   PR intent, and refuses a flagged or unverified result;
+#   --voice-accept-unverified <reason> accepts an unverified result for this one
+#   spawn only on an explicit instruction, and never a flagged one.
 #   Every ship or scout spawn renders `launch-brief.md`; for a no-mistakes ship
 #   it also carries the current `--intent` contract and the extracted captain
 #   intent. A legacy mixed Task is accepted there only under bin/fm-dod-lib.sh's
@@ -524,6 +529,7 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+VOICE_ACCEPT_UNVERIFIED=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -570,6 +576,9 @@ for a in "$@"; do
     traceparent)
       TRACEPARENT_ARG=$a
       TRACEPARENT_SET=1
+      ;;
+    voice-accept-unverified)
+      VOICE_ACCEPT_UNVERIFIED=$a
       ;;
     *)
       echo "error: internal parser state for --$want_value" >&2
@@ -619,6 +628,7 @@ for a in "$@"; do
     YOLO=${a#--yolo=}
     YOLO_SET=1
     ;;
+  --voice-accept-unverified) want_value=voice-accept-unverified ;;
   --traceparent) want_value=traceparent ;;
   --traceparent=*)
     TRACEPARENT_ARG=${a#--traceparent=}
@@ -2580,6 +2590,10 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
         exit 1
       fi
     fi
+    fm_intent_voice_check "$CAPTAIN_INTENT" "$VOICE_ACCEPT_UNVERIFIED" || {
+      fm_intent_voice_refusal "$BRIEF" "$?" spawn --voice-accept-unverified
+      exit 1
+    }
   fi
   # Use the existing launch-brief overlay for every worker kind, including
   # pre-scope briefs and relaunches. Charters never enter this worker path.

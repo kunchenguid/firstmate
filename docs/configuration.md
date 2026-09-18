@@ -502,10 +502,33 @@ The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captai
 By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates.
 Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
 
-The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
+The resolver, the voice check below, and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments; [`bin/fm-typesafe-lib.sh`](../bin/fm-typesafe-lib.sh) is the one service client both tools share.
 The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
 The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
+
+## Pre-publication voice check (.env TYPESAFE_API_KEY)
+
+`bin/fm-voice-check.sh` checks a pull request or issue description, or the `--intent` string a no-mistakes pipeline will publish, for internal voice before it reaches a public artifact: direct address to the operator, relayed supervisor orders to the worker, a quoted operator answer, and prose in a language other than the artifact's.
+It uses the same opt-in key as "Typed dispatch resolution" above; with no key it prints one `voice-check: off` line on stderr, exits 0, and makes no network call, so publication behaves exactly as it does without the check.
+This section is the single owner of the check's operator contract; the script header owns its exact flags, output lines, and exit codes.
+
+When on, the tool asks the service four closed yes/no questions over the text, one per category, and decides in code.
+A yes on any category, at any confidence, flags the text: publication stops, the category is reported, and no flag or override publishes it.
+A text is clear only when every category is a no at confidence 0.6 or above.
+When there is no verdict - the service is unreachable, times out after 20 seconds, returns an error, returns a malformed answer, or answers no below that confidence - the tool retries once for a missing or malformed answer, then reports the text as unverified and stops publication.
+An unverified text publishes only through an explicit override for that one publication, with its reason printed, used only on the supervising firstmate's instruction.
+The check reports only a category, never a rewrite: the author corrects the flagged passages and checks again, at most twice, and a text still flagged after that escalates to the supervisor instead of looping.
+
+Publication points and how far each is enforced:
+
+- `bin/fm-spawn.sh` and `bin/fm-promote.sh` run the check in code on a no-mistakes ship's `## Captain's intent`, which the pipeline later publishes verbatim as the PR intent; a flagged or unverified intent refuses the spawn or promotion before anything is published or recorded, and that refusal is the escalation to the supervisor, who rewrites and retries.
+  Their `--voice-accept-unverified <reason>` flag is the override for an unverified intent and never clears a flagged one.
+- The worker's final `--intent` string and a direct-PR worker's title and description are checked by instruction only: `bin/fm-dod-lib.sh` renders the check, the bounded correction, and the status escalation into the worker's definition of done.
+  The no-mistakes pipeline creates the PR itself, so this repository cannot gate its publication in code.
+- Firstmate checks a PR or issue description it publishes itself before sending it.
+
+The live evaluation against past fleet descriptions is recorded in [`verification/voice-check.md`](verification/voice-check.md).
 
 ## Toolchain
 
@@ -1091,7 +1114,7 @@ FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainl
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
 FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
-TYPESAFE_API_KEY=       # typed dispatch resolution opt-in, from the environment or .env; absent means bin/fm-dispatch-resolve.sh is off (docs/configuration.md "Typed dispatch resolution")
+TYPESAFE_API_KEY=       # typed dispatch resolution and pre-publication voice check opt-in, from the environment or .env; absent means bin/fm-dispatch-resolve.sh and bin/fm-voice-check.sh are off (docs/configuration.md "Typed dispatch resolution", "Pre-publication voice check")
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)

@@ -45,6 +45,7 @@
 #
 # Environment:
 #   TYPESAFE_API_KEY is the only resolver-specific environment setting.
+#   bin/fm-typesafe-lib.sh owns the shared service client and key handling.
 #
 # Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
 #   the captain-approval gate, or fm-spawn.sh validation; it publishes one
@@ -68,11 +69,11 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-env-lib.sh"
 # shellcheck source=bin/fm-timing-lib.sh
 . "$SCRIPT_DIR/fm-timing-lib.sh"
+# shellcheck source=bin/fm-typesafe-lib.sh
+. "$SCRIPT_DIR/fm-typesafe-lib.sh"
 
 CONFIDENCE_FLOOR=0.6
-TS_MODEL=jev-latest
-TS_BASE=https://api.typesafe.ai
-TS_TIMEOUT=5
+TS_MODEL=$FM_TYPESAFE_MODEL
 DEFAULT_WHEN="No listed rule applies to this task."
 
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
@@ -99,10 +100,7 @@ while [ $# -gt 0 ]; do
 done
 
 # ---- opt-in gate ---------------------------------------------------------------
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-  TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
-fi
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
+if ! fm_typesafe_key_resolve "$FM_HOME/.env"; then
   echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
   exit 0
 fi
@@ -236,13 +234,9 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
         }
       }
     }')
-  T0=$(fm_timing_now_ms)
-  HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
-    -X POST "$TS_BASE/v1/systemone" -H 'Content-Type: application/json' \
-    -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$TYPESAFE_API_KEY_PRIVATE") \
-    --data-binary @- 2>/dev/null) || HTTP=000
-  T1=$(fm_timing_now_ms)
-  LAT_MS=$(( T1 - T0 ))
+  fm_typesafe_post "$RESP_FILE" <<<"$REQUEST"
+  HTTP=$FM_TYPESAFE_HTTP
+  LAT_MS=$FM_TYPESAFE_LATENCY_MS
   [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
 jq -e --slurpfile rules "$RULES" '
     (($rules[0].rules | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"] | sort) as $choices |
