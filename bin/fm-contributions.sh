@@ -14,15 +14,21 @@
 # Every URL explicitly linked by a structured backlog row or a task's pr= is
 # owned. Previously observed URLs remain in data/<task>/contributions.json after
 # endpoint teardown. Repository-wide PR discovery never establishes ownership.
-# GitHub PRs and issues are supported; other forges remain visibly unmeasured.
+# GitHub pull requests and issues and GitLab merge requests are supported; no
+# other forge URL shape is owned.
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,
 # observation, verdict, seen event tokens, pending events, and notified tokens.
 # observation is one coherent forge read (a PR head is rechecked after fetching
-# checks/reviews). Checks are normalized by name, id, started_at, status and
-# conclusion; projection picks the newest attempt per distinct name. The last
-# observation's lane names also disclose a lane absent from the next head.
+# checks/reviews). GitLab merge requests read through glab api with that same
+# coherent recheck: state, draft, mergeability, and the current user's merge
+# permission come from the MR core, approvals become reviews, pipeline jobs
+# become checks, and non-system discussion notes and approvals by users other
+# than the author become comment and review events. Checks are normalized by
+# name, id, started_at, status and conclusion; projection picks the newest
+# attempt per distinct name. The last observation's lane names also disclose a
+# lane absent from the next head.
 # A verdict records the EXACT judged head, source URL, actor and summary. A
 # comment's arrival time never supplies its judged head. Record a prose verdict
 # only after its source identifies that head; otherwise leave it unbound and
@@ -175,36 +181,52 @@ write_record() { # task record-json-file
   mv -f -- "$staged" "$file"
 }
 
-forge() {
+forge_timed() { # command... : one forge read bounded by the poll budget
   local remaining bounded=0 rc=0
   remaining=$((DEADLINE - $(date +%s)))
   # The budget, not the forge, refused this read.
   [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; return 1; }
   if [ "$remaining" -le 5 ]; then bounded=1; else remaining=5; fi
-  fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
-    gh "$@" 2> "$TMP/forge.err" || rc=$?
+  fm_run_timed "$remaining" "$@" 2> "$TMP/forge.err" || rc=$?
   # A read killed at the budget's own deadline is budget exhaustion too.
   [ "$rc" -ne 124 ] || [ "$bounded" -eq 0 ] || BUDGET_EXHAUSTED=1
   return "$rc"
 }
 
-observe() { # canonical GitHub URL -> normalized JSON
+forge_github() { # gh args...
+  forge_timed env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 gh "$@"
+}
+
+forge_gitlab() { # host glab api args...
+  local host=$1; shift
+  forge_timed env GITLAB_HOST="$host" glab api --hostname "$host" "$@"
+}
+
+observe() { # canonical URL -> normalized JSON
+  local url=$1
+  case "$url" in
+    https://github.com/*) observe_github "$url" ;;
+    */-/merge_requests/*) observe_gitlab "$url" ;;
+    *) return 1 ;;
+  esac
+}
+
+observe_github() { # canonical GitHub URL -> normalized JSON
   local url=$1 part number kind endpoint head after label
-  case "$url" in https://github.com/*) ;; *) return 1 ;; esac
   part=${url#https://github.com/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
   case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
-  forge api "$endpoint" > "$TMP/core.json" || return 1
+  forge_github api "$endpoint" > "$TMP/core.json" || return 1
   jq -e '(.state == "open" or .state == "closed") and (.user.login | type == "string")' "$TMP/core.json" >/dev/null || return 1
-  forge api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" || return 1
+  forge_github api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" || return 1
   jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null || return 1
   if [ "$kind" = pull ]; then
     head=$(jq -er '.head.sha | select(test("^[a-fA-F0-9]{40}$"))' "$TMP/core.json") || return 1
-    forge api "$endpoint/reviews?per_page=100" --paginate --slurp > "$TMP/reviews.json" || return 1
-    forge api "$endpoint/comments?per_page=100" --paginate --slurp > "$TMP/inline.json" || return 1
-    forge api "repos/$part/commits/$head/check-runs?filter=all&per_page=100" --paginate --slurp > "$TMP/checks.json" || return 1
-    forge api "repos/$part/commits/$head/statuses?per_page=100" --paginate --slurp > "$TMP/statuses.json" || return 1
-    forge api "repos/$part" > "$TMP/repo.json" || return 1
-    forge pr view "$url" --json headRefOid,reviewDecision > "$TMP/after.json" || return 1
+    forge_github api "$endpoint/reviews?per_page=100" --paginate --slurp > "$TMP/reviews.json" || return 1
+    forge_github api "$endpoint/comments?per_page=100" --paginate --slurp > "$TMP/inline.json" || return 1
+    forge_github api "repos/$part/commits/$head/check-runs?filter=all&per_page=100" --paginate --slurp > "$TMP/checks.json" || return 1
+    forge_github api "repos/$part/commits/$head/statuses?per_page=100" --paginate --slurp > "$TMP/statuses.json" || return 1
+    forge_github api "repos/$part" > "$TMP/repo.json" || return 1
+    forge_github pr view "$url" --json headRefOid,reviewDecision > "$TMP/after.json" || return 1
     after=$(jq -er .headRefOid "$TMP/after.json")
     [ "$head" = "$after" ] || { printf 'head changed during observation\n' > "$TMP/forge.err"; return 1; }
     jq -n --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
@@ -228,7 +250,7 @@ observe() { # canonical GitHub URL -> normalized JSON
                  author:.user.login,body:(.body // "" | .[:500])}))}' > "$TMP/observation.json" || return 1
   else
     label=${FM_CONTRIBUTIONS_READY_LABEL:-ready-for-pr}
-    forge api "repos/$part/issues/$number/events?per_page=100" --paginate --slurp > "$TMP/issue-events.json" || return 1
+    forge_github api "repos/$part/issues/$number/events?per_page=100" --paginate --slurp > "$TMP/issue-events.json" || return 1
     jq -n --slurpfile timeline "$TMP/issue-events.json" --arg label "$label" --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" '
       $core[0] as $c | {state:$c.state,head:null,
         ready:any($c.labels[]; (.name | ascii_downcase) == ($label | ascii_downcase)),
@@ -239,6 +261,81 @@ observe() { # canonical GitHub URL -> normalized JSON
           + [$timeline[0][] | .[] | select(.event == "labeled" and (.label.name | ascii_downcase) == ($label | ascii_downcase))
              | {token:("ready-for-pr:" + (.id | tostring)),type:"ready-for-pr",source:$c.html_url,head:null,body:"filed issue reached ready-for-pr"}])}' > "$TMP/observation.json" || return 1
   fi
+  validate_observation "$url" "$kind"
+}
+
+observe_gitlab() { # canonical GitLab MR URL -> normalized JSON
+  local url=$1 host project endpoint head after p kind
+  fm_pr_url_parse "$url" || return 1
+  [ "$FM_PR_PROVIDER" = gitlab ] || return 1
+  host=$FM_PR_HOST
+  project=${FM_PR_PATH//\//%2F}
+  endpoint="projects/$project/merge_requests/$FM_PR_NUMBER"
+  forge_gitlab "$host" "$endpoint" > "$TMP/core.json" || return 1
+  jq -e '(.state == "opened" or .state == "closed" or .state == "merged") and (.author.username | type == "string")' "$TMP/core.json" >/dev/null || return 1
+  head=$(jq -er '.sha | select(test("^[a-fA-F0-9]{40}$"))' "$TMP/core.json") || return 1
+  forge_gitlab "$host" "$endpoint/discussions?per_page=100" --paginate > "$TMP/discussions.raw" || return 1
+  jq -s . "$TMP/discussions.raw" > "$TMP/pages.json" || return 1
+  jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/pages.json" >/dev/null || return 1
+  mv "$TMP/pages.json" "$TMP/discussions.json"
+  forge_gitlab "$host" "$endpoint/approvals" > "$TMP/approvals.json" || return 1
+  forge_gitlab "$host" "$endpoint/pipelines?per_page=100" --paginate > "$TMP/pipelines.raw" || return 1
+  jq -s . "$TMP/pipelines.raw" > "$TMP/pages.json" || return 1
+  jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/pages.json" >/dev/null || return 1
+  mv "$TMP/pages.json" "$TMP/pipelines.json"
+  # Every pipeline the MR endpoint reports belongs to this merge request; each
+  # pipeline's jobs are the named lanes the schema normalizes, newest per name wins.
+  : > "$TMP/jobs.jsonl"
+  jq -r '[.[][] | select(.id != null)] | map(.id) | unique | .[]' "$TMP/pipelines.json" > "$TMP/pipeline-ids" || return 1
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    forge_gitlab "$host" "projects/$project/pipelines/$p/jobs?per_page=100" --paginate > "$TMP/jobs.raw" || return 1
+    jq -s . "$TMP/jobs.raw" > "$TMP/jobs-page.json" || return 1
+    jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/jobs-page.json" >/dev/null || return 1
+    jq -c '[.[] | .[]]' "$TMP/jobs-page.json" >> "$TMP/jobs.jsonl"
+  done < "$TMP/pipeline-ids"
+  # The MR core is rechecked after the read, like the GitHub path, so no lane
+  # batch is judged against a head that moved while it was fetched.
+  forge_gitlab "$host" "$endpoint" > "$TMP/after.json" || return 1
+  after=$(jq -er '.sha | select(test("^[a-fA-F0-9]{40}$"))' "$TMP/after.json") \
+    || { printf 'head changed during observation\n' > "$TMP/forge.err"; return 1; }
+  [ "$head" = "$after" ] || { printf 'head changed during observation\n' > "$TMP/forge.err"; return 1; }
+  kind=pull
+  jq -n --slurpfile core "$TMP/core.json" --slurpfile discussions "$TMP/discussions.json" \
+    --slurpfile approvals "$TMP/approvals.json" --slurpfile jobs "$TMP/jobs.jsonl" '
+    $core[0] as $c
+    | {head:$c.sha,
+       state:(if $c.state == "opened" then "open" else $c.state end),
+       draft:($c.draft // false),
+       mergeable:(if $c.merge_status == "can_be_merged" then "mergeable"
+                  elif $c.merge_status == "cannot_be_merged" then "conflicting"
+                  else "unknown" end),
+       can_merge:($c.user.can_merge // false),
+       review_decision:(if $approvals[0].approved == true then "APPROVED"
+                        elif $approvals[0].has_approval_rules == true then "REVIEW_REQUIRED"
+                        else "" end),
+       reviews:([$approvals[0].approved_by // [] | .[]
+                 | {user:{login:.user.username},state:"APPROVED",submitted_at:(.created_at // ""),
+                    commit_id:null,id:null,source:$c.web_url,body:""}]),
+       checks:([$jobs[] | .[]? | {name,id,
+         status:(if (.status | IN("success","failed","canceled","skipped")) then "completed" else "in_progress" end),
+         conclusion:(if (.status | IN("success","failed","canceled","skipped")) then .status else null end),
+         started_at:(.started_at // .created_at // "")}]),
+       events:(([$discussions[0] | add // [] | .[] | .notes[]]
+                 | map(select((.system // false) != true and .author.username != $c.author.username)
+                   | {token:("comment:" + (.id|tostring) + ":" + (.updated_at // .created_at // "")),
+                      type:"comment",source:($c.web_url + "#note_" + (.id|tostring)),
+                      head:null,author:.author.username,body:(.body // "" | .[:500])}))
+               + ($approvals[0].approved_by // []
+                  | map(select(.user.username != $c.author.username)
+                    | {token:("review:" + (.user.username|tostring) + ":" + (.created_at // "") + ":APPROVED"),
+                       type:"review",source:$c.web_url,head:null,author:.user.username,
+                       body:"approved this merge request"})))}' > "$TMP/observation.json" || return 1
+  validate_observation "$url" "$kind"
+}
+
+validate_observation() { # url kind : the observation must satisfy the record contract
+  local url=$1 kind=$2
   jq_lib -ne --arg url "$url" --arg kind "$kind" --slurpfile observed "$TMP/observation.json" '
     {schema:"fm-contributions.v1",task:"observation",records:[{url:$url,
       kind:(if $kind == "pull" then "pr" else "issue" end),pending:[],seen:[],observation:$observed[0]}]}
