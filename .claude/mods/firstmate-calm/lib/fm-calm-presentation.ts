@@ -14,7 +14,7 @@ import {
   parseCalmPreference,
   serializeCalmPreference,
   type CalmHomeEnvironment,
-} from "../../../../.pi/extensions/lib/fm-calm-preference.ts";
+} from "./fm-calm-preference.ts";
 import {
   CALM_PRESERVE_MIN_CHARS,
   calmTextIsSubstantive,
@@ -23,7 +23,7 @@ import {
 export { CALM_PRESERVE_MIN_CHARS } from "./fm-calm-preservation.ts";
 
 /** The environment variables that select the effective Firstmate home, as the mod reads them. */
-export type { CalmHomeEnvironment } from "../../../../.pi/extensions/lib/fm-calm-preference.ts";
+export type { CalmHomeEnvironment } from "./fm-calm-preference.ts";
 
 /** The parent of a path, with either separator; a bare name resolves to itself. */
 function parentDirectory(path: string): string {
@@ -51,7 +51,7 @@ export function calmPreferencePath(env: CalmHomeEnvironment, pluginRoot: string)
   return sharedCalmPreferencePath(env, calmCodeRootFromPluginRoot(pluginRoot));
 }
 
-export { parseCalmPreference, serializeCalmPreference } from "../../../../.pi/extensions/lib/fm-calm-preference.ts";
+export { parseCalmPreference, serializeCalmPreference } from "./fm-calm-preference.ts";
 
 /** The shape of one `turn.step` result this policy reads. */
 export type CalmStepOutcome = {
