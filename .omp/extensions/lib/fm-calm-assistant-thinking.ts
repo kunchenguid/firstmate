@@ -71,7 +71,9 @@ export function installOmpCalmAssistantThinking(): void {
       try {
         component.setHideThinkingBlock(hide);
         const originalMessage = originalMessages.get(component);
-        if (!shouldHideWorkingNote && originalMessage && originalUpdateContent) {
+        if (shouldHideWorkingNote && originalMessage) {
+          component.updateContent(originalMessage, originalOptions.get(component));
+        } else if (originalMessage && originalUpdateContent) {
           originalUpdateContent.call(component, originalMessage, originalOptions.get(component));
         } else {
           component.invalidate();
