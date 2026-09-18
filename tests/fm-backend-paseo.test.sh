@@ -422,6 +422,45 @@ SH
   pass "fm_backend_paseo_cli_json: keeps stderr out of parsed JSON and relays it only on failure"
 }
 
+test_create_task_adopts_own_paseo_workspace_first() {
+  local dir fb out name
+  dir="$TMP_ROOT/create-task-own-ws"
+  mkdir -p "$dir/responses"
+  name=$(paseo_expected_scoped_name fm-own)
+  printf '[]' >"$dir/responses/1.out"
+  # 2: workspace ls -> a 'firstmate'-titled workspace on this project AND the
+  #    tab's own workspace (PASEO_WORKSPACE_ID), titled by a human, same cwd.
+  jq -n '[{workspaceId:"wks_titled0000000000",name:"firstmate",cwd:"/tmp/proj"},
+          {workspaceId:"wks_own0000000000000",name:"Evidence Room",cwd:"/tmp/proj"}]' >"$dir/responses/2.out"
+  jq -n '{id:"eeeeeeee-4444-4444-4444-444444444444"}' >"$dir/responses/3.out"
+  fb=$(make_paseo_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_PASEO_LOG="$dir/log" FM_PASEO_RESPONSES="$dir/responses" PASEO_WORKSPACE_ID=wks_own0000000000000 \
+    bash -c '. "$0/bin/backends/paseo.sh"; fm_backend_paseo_create_task fm-own /tmp/proj' "$ROOT")
+  [ "$out" = "eeeeeeee-4444-4444-4444-444444444444 wks_own0000000000000" ] \
+    || fail "create_task should adopt the tab's own workspace (PASEO_WORKSPACE_ID) before a title match, got '$out'"
+  pass "fm_backend_paseo_create_task: adopts the workspace firstmate itself runs in (PASEO_WORKSPACE_ID) when its cwd is the project, ahead of the title lookup"
+}
+
+test_create_task_ignores_own_workspace_for_another_project() {
+  local dir fb out
+  dir="$TMP_ROOT/create-task-own-ws-other"
+  mkdir -p "$dir/responses"
+  printf '[]' >"$dir/responses/1.out"
+  # 2: the tab's own workspace belongs to ANOTHER project; no firstmate
+  #    workspace exists for /tmp/proj yet -> create one.
+  jq -n '[{workspaceId:"wks_own0000000000000",name:"firstmate",cwd:"/tmp/other"}]' >"$dir/responses/2.out"
+  jq -n '{workspaceId:"wks_new0000000000000"}' >"$dir/responses/3.out"
+  jq -n '{id:"ffffffff-5555-5555-5555-555555555555"}' >"$dir/responses/4.out"
+  fb=$(make_paseo_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_PASEO_LOG="$dir/log" FM_PASEO_RESPONSES="$dir/responses" PASEO_WORKSPACE_ID=wks_own0000000000000 \
+    bash -c '. "$0/bin/backends/paseo.sh"; fm_backend_paseo_create_task fm-other /tmp/proj' "$ROOT")
+  [ "$out" = "ffffffff-5555-5555-5555-555555555555 wks_new0000000000000" ] \
+    || fail "create_task must not adopt PASEO_WORKSPACE_ID when that workspace's cwd is another project, got '$out'"
+  assert_contains "$(cat "$dir/log")" $'\x1f''workspace'$'\x1f''create'$'\x1f''--path'$'\x1f''/tmp/proj' \
+    "create_task should create the project's own shared workspace instead"
+  pass "fm_backend_paseo_create_task: PASEO_WORKSPACE_ID for another project is ignored; the project's own shared workspace is created"
+}
+
 test_workspace_label_uses_secondmate_prefix() {
   local home out
   home="$TMP_ROOT/label-2ndmate"
@@ -799,12 +838,14 @@ test_secondmate_spawn_refuses_explicit_paseo_only() {
   out=$(paseo_secondmate_spawn "$dir" "$dir/config-paseo" '')
   assert_contains "$out" "backend=paseo does not support --secondmate" "fm-spawn.sh did not refuse --secondmate with config/backend=paseo"
 
+  # Ambient Paseo markers alone never select paseo, so with nothing configured
+  # the spawn stays on the tmux default and proceeds past backend selection.
   out=$(paseo_secondmate_spawn "$dir" "$dir/config" '')
   assert_not_contains "$out" "does not support --secondmate" \
-    "an auto-detected paseo must fall back to tmux for --secondmate instead of refusing"
+    "an unconfigured spawn inside Paseo must stay on tmux, not resolve paseo from PASEO_AGENT_ID"
   assert_contains "$out" "no firstmate home supplied" \
-    "the auto-detected --secondmate spawn should continue past backend selection to the home check"
-  pass "fm-spawn.sh: an explicit paseo refuses --secondmate (mirrors cmux/Orca) while an auto-detected paseo falls back to tmux"
+    "the unconfigured --secondmate spawn should continue past backend selection to the home check"
+  pass "fm-spawn.sh: an explicit paseo refuses --secondmate (mirrors cmux/Orca); ambient Paseo markers never select paseo"
 }
 
 # shellcheck source=/dev/null
@@ -826,6 +867,8 @@ test_ensure_running_returns_immediately_when_already_ok
 test_create_task_refuses_duplicate_name
 test_create_task_creates_and_parses_ids
 test_create_task_adopts_existing_shared_workspace
+test_create_task_adopts_own_paseo_workspace_first
+test_create_task_ignores_own_workspace_for_another_project
 test_workspace_ensure_adopts_logical_and_physical_cwd
 test_cli_json_keeps_stderr_out_of_parsed_output
 test_workspace_label_uses_secondmate_prefix

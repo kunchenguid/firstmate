@@ -59,19 +59,19 @@
 #   config/backend, then runtime auto-detection from the runtime firstmate's
 #   environment: $TMUX, HERDR_ENV=1, cmux runtime signals, or Paseo runtime
 #   signals (via bin/fm-backend.sh's fm_backend_detect, with cmux fallback
-#   details in docs/cmux-backend.md and Paseo fallback details in
-#   docs/paseo-backend.md),
+#   details in docs/cmux-backend.md),
 #   then tmux.
 #   Spawn-capable backends are the reference tmux adapter and experimental
 #   herdr, zellij, orca, cmux, and paseo. Orca owns both the task worktree and
 #   terminal, so ship/scout Orca spawns do not run treehouse get; cmux and
 #   paseo are session providers only, exactly like herdr/zellij, so they do. An
-#   auto-detected herdr, cmux, or paseo spawn prints a loud stderr notice;
-#   auto-detected tmux stays silent; zellij and orca are never auto-detected.
+#   auto-detected herdr or cmux spawn prints a loud stderr notice;
+#   auto-detected tmux stays silent; zellij, orca, and paseo are never
+#   auto-detected (paseo's markers leak into every descendant process).
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
 #   blocked backend contract. Default tmux spawns do not write backend= to meta;
 #   absent backend= means tmux. cmux and paseo do not support --secondmate
-#   spawns yet; an auto-detected paseo spawns a secondmate on tmux instead.
+#   spawns yet.
 #   A backend spawn refusal (missing dependency, version gate, unauthenticated
 #   socket, or unsupported secondmate mode) is terminal for that selected backend;
 #   callers must surface it instead of silently retrying another backend.
@@ -1428,7 +1428,7 @@ if [ "$RELAUNCH" -eq 0 ]; then
   if [ "$BACKEND_SET" -eq 1 ]; then
     BACKEND=$BACKEND_ARG
   else
-    BACKEND=$(fm_backend_name "$KIND")
+    BACKEND=$(fm_backend_name)
   fi
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1

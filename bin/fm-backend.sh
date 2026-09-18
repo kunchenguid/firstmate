@@ -26,11 +26,11 @@
 # marker) with no explicit backend setting - unlike Orca, which stays
 # never-auto-detected because it also owns the task worktree; see
 # docs/cmux-backend.md for its empirical basis. P6 adds bin/backends/paseo.sh,
-# also EXPERIMENTAL and spawn-capable, behind `--backend paseo`/
-# `FM_BACKEND=paseo`/`config/backend`, and behind runtime auto-detection when
-# firstmate itself is running inside a Paseo-managed terminal (primary
-# PASEO_AGENT_ID marker, or the sh.paseo.desktop bundle-id fallback) with no
-# explicit backend setting; see docs/paseo-backend.md for its empirical basis.
+# also EXPERIMENTAL and spawn-capable, EXPLICIT-ONLY like zellij and orca:
+# `--backend paseo`, `FM_BACKEND=paseo`, or config/backend, never runtime
+# auto-detection. Paseo stamps PASEO_* markers into every descendant process
+# (a tmux server started from a Paseo tab inherits them), so an inherited
+# marker is not a selection; see docs/paseo-backend.md.
 # Codex App is intentionally not in the known set yet.
 # docs/codex-app-backend.md owns that blocked backend contract.
 #
@@ -171,25 +171,10 @@ fm_backend_detect() {
     printf 'cmux'
     return 0
   fi
-  # Paseo mirrors cmux's two-signal shape (docs/paseo-backend.md "Runtime
-  # auto-detection" owns the empirical record): the primary PASEO_AGENT_ID
-  # marker injected into every process a Paseo-managed agent environment
-  # spawns, with the __CFBundleIdentifier=sh.paseo.desktop LaunchServices
-  # fallback for environments whose wrapper stripped the PASEO_* variables.
-  # Checked after $TMUX/HERDR_ENV/cmux (a terminal app is the outermost
-  # layer; an inner multiplexer marker always wins).
-  if [ -n "${PASEO_AGENT_ID:-}" ]; then
-    FM_BACKEND_DETECTED=paseo
-    FM_BACKEND_DETECT_SIGNAL=PASEO_AGENT_ID
-    printf 'paseo'
-    return 0
-  fi
-  if [ "${__CFBundleIdentifier:-}" = "sh.paseo.desktop" ]; then
-    FM_BACKEND_DETECTED=paseo
-    FM_BACKEND_DETECT_SIGNAL=bundle-id
-    printf 'paseo'
-    return 0
-  fi
+  # Paseo is deliberately NOT detected here. Its PASEO_* markers and the
+  # sh.paseo.desktop bundle id reach every descendant process, including a
+  # tmux server started from a Paseo tab, so their presence never proves the
+  # captain chose Paseo (docs/paseo-backend.md "Selection is explicit").
   return 1
 }
 
@@ -261,15 +246,14 @@ fm_backend_detect_cmux_app_is_ancestor() {
 # per-task `--backend` flag is parsed by the caller (fm-spawn.sh) and takes
 # precedence over this resolution entirely; it is not read here. Auto-detect
 # fires only when nothing was explicitly configured, so an explicit setting
-# always wins. Selecting herdr, cmux, or paseo via auto-detect prints one loud
-# stderr notice (all are experimental); auto-detecting tmux stays silent - it
-# is today's default-path behavior and callers must see zero change. The cmux
-# and paseo notices name the winning signal, so a fallback-detected one
-# (bundle id, or cmux ancestry, after a wrapper stripped the primary marker)
-# is visibly distinct from the primary-marker case. For a `secondmate` kind, an
-# auto-detected paseo (which refuses secondmates) resolves to tmux silently,
-# while an explicit paseo selection is returned as-is for the spawn to refuse.
-fm_backend_name() {  # [task-kind]
+# always wins. Selecting herdr or cmux via auto-detect prints one loud stderr
+# notice (both are experimental); auto-detecting tmux stays silent - it is
+# today's default-path behavior and callers must see zero change. The cmux
+# notice names the winning signal, so a fallback-detected one (bundle id, or
+# cmux ancestry, after a wrapper stripped the primary marker) is visibly
+# distinct from the primary-marker case. Paseo is never auto-detected, so it
+# only ever comes out of this function from FM_BACKEND or config/backend.
+fm_backend_name() {
   local line v detected marker
   if [ -n "${FM_BACKEND:-}" ]; then
     printf '%s' "$FM_BACKEND"
@@ -288,10 +272,6 @@ fm_backend_name() {  # [task-kind]
   # globals survive into the notice below.
   if fm_backend_detect >/dev/null; then
     detected=$FM_BACKEND_DETECTED
-    if [ "$detected" = paseo ] && [ "${1-}" = secondmate ]; then
-      printf 'tmux'
-      return 0
-    fi
     if [ "$detected" = herdr ]; then
       echo "NOTICE: auto-detected herdr runtime (HERDR_ENV=1) - spawning into the EXPERIMENTAL herdr backend. Set config/backend or pass --backend tmux to opt out." >&2
     fi
@@ -302,13 +282,6 @@ fm_backend_name() {  # [task-kind]
         *) marker="CMUX_WORKSPACE_ID" ;;
       esac
       echo "NOTICE: auto-detected cmux runtime ($marker) - spawning into the EXPERIMENTAL cmux backend. Set config/backend or pass --backend tmux to opt out." >&2
-    fi
-    if [ "$detected" = paseo ]; then
-      case "$FM_BACKEND_DETECT_SIGNAL" in
-        bundle-id) marker="FALLBACK signal __CFBundleIdentifier=sh.paseo.desktop; PASEO_AGENT_ID absent, stripped by a wrapper" ;;
-        *) marker="PASEO_AGENT_ID" ;;
-      esac
-      echo "NOTICE: auto-detected paseo runtime ($marker) - spawning into the EXPERIMENTAL paseo backend. Set config/backend or pass --backend tmux to opt out." >&2
     fi
     printf '%s' "$detected"
     return 0

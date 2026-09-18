@@ -1672,7 +1672,9 @@ Current active CLI findings:
 | Stderr noise | any call from inside a Paseo agent | The CLI prints an Electron warning on stderr before its JSON, so parsed calls never merge stderr into stdout. |
 | Worktree create | `worktree create` | Available; Treehouse remains the worktree provider, so this adapter never calls it. |
 
-Running inside a Paseo-managed terminal exposes `PASEO_AGENT_ID`, `PASEO_AGENT_CWD`, and `PASEO_CLI` in the process environment, plus `__CFBundleIdentifier=sh.paseo.desktop` from LaunchServices - the two signals `fm_backend_detect` consults, primary marker first, bundle id as the fallback for an environment whose wrapper stripped the `PASEO_*` variables.
+Running inside a Paseo agent exposes `PASEO_AGENT_ID`, `PASEO_AGENT_CWD`, and `PASEO_CLI`; a terminal tab created with `terminal create` exposes `PASEO_TERMINAL_ID`, `PASEO_WORKSPACE_ID`, `PASEO_CLI`, and no `PASEO_AGENT_ID`; both carry `__CFBundleIdentifier=sh.paseo.desktop` from LaunchServices (verified live 2026-09-18).
+None of them selects the backend: `fm_backend_detect` ignores every Paseo marker, because they reach every descendant process including a tmux server started from a Paseo tab.
+`PASEO_WORKSPACE_ID` is consulted only after an explicit selection, to adopt the tab's own workspace as the project's shared workspace.
 
 ```sh
 tests/fm-backend-paseo.test.sh
