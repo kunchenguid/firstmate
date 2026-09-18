@@ -221,6 +221,40 @@ add_fork_with_pushed_branch() {
   git -C "$case_dir/project" fetch -q fork
 }
 
+test_graphify_symlink_is_removed_before_worktree_return() {
+  local case_dir rc
+  case_dir=$(make_case graphify-teardown)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "graphify teardown fixture"
+  add_fork_with_pushed_branch "$case_dir"
+  mkdir -p "$case_dir/project/graphify-out"
+  printf '%s\n' 'source graph survives teardown' > "$case_dir/project/graphify-out/graph.json"
+  ln -s "$case_dir/project/graphify-out" "$case_dir/wt/graphify-out"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = return ]; then
+  if [ -L "$case_dir/wt/graphify-out" ]; then
+    echo 'graphify-out symlink was still present during Treehouse return' >&2
+    exit 1
+  fi
+  : > "$case_dir/graphify-removed-before-return"
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "teardown should remove the disposable graph link before returning the worktree"
+  [ ! -e "$case_dir/wt/graphify-out" ] && [ ! -L "$case_dir/wt/graphify-out" ] \
+    || fail "teardown left the worktree graphify-out link behind"
+  assert_present "$case_dir/graphify-removed-before-return" \
+    "Treehouse return did not observe graphify-out already removed"
+  assert_present "$case_dir/project/graphify-out/graph.json" \
+    "teardown removed the source clone's graph"
+  pass "teardown removes only the worktree graphify-out symlink before cleanup"
+}
+
 # Commit a real file change on the worktree's task branch (unlike wt_commit, which
 # makes an empty commit). A non-empty tree is what the content-in-default check
 # inspects. Args: case_dir file content [message]
@@ -3667,6 +3701,7 @@ EOF
 }
 
 test_local_only_fork_remote_allows
+test_graphify_symlink_is_removed_before_worktree_return
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses

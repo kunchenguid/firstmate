@@ -353,6 +353,7 @@
 # active without a markdown file; any active automatic backend without
 # compatible tasks-axi refuses before creating lifecycle state.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
+#   When the source clone has graphify-out/, a fresh or relaunch task worktree receives an absolute symlink to it before launch; an existing entry is preserved and link failures warn without blocking the spawn.
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
@@ -2851,6 +2852,28 @@ freshen_spawn_worktree_base() { # <worktree>
   fi
 }
 
+# Give task workers the source clone's watcher-maintained graph without copying or
+# rebuilding it. The source is optional, and every failure after its presence check
+# is deliberately reduced to a warning so graph availability can never block a spawn.
+link_spawn_graphify_out() { # <source-clone> <worktree>
+  local source_clone worktree source_graph target graph_real
+  source_clone=$1
+  worktree=$2
+  source_graph="$source_clone/graphify-out"
+  target="$worktree/graphify-out"
+  [ -d "$source_graph" ] || return 0
+  [ -e "$target" ] || [ -L "$target" ] || {
+    graph_real=$(CDPATH='' cd -- "$source_graph" 2>/dev/null && pwd -P) || {
+      echo "warning: could not resolve graphify-out in source clone '$source_clone'; continuing without a worktree link" >&2
+      return 0
+    }
+    if ! ln -s "$graph_real" "$target"; then
+      echo "warning: could not link graphify-out from '$graph_real' into worktree '$worktree'; continuing without the graph link" >&2
+    fi
+  }
+  return 0
+}
+
 herdr_projection_meta_field_exact() { # <meta> <key>
   local meta=$1 key=$2 count
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -3677,6 +3700,12 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
+fi
+
+# Link only after a ship or scout worktree is known and refreshed, so every
+# backend and pool shape reaches the same pre-launch handoff point.
+if [ "$KIND" != secondmate ]; then
+  link_spawn_graphify_out "$PROJ_ABS" "$WT"
 fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,
