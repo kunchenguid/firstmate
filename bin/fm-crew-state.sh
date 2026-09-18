@@ -148,12 +148,21 @@
 #      a later run on this branch that cannot be bound here (reported as unknown
 #      - history, but no proof of the present). Because the ledger has no run ID,
 #      an equal head does not identify a rerun; a terminal row supplies newer
-#      truth when its observable
-#      status, head, or PR differs, or when the state came from the coarse
-#      fallback. Nothing else does, and with no ordering evidence the failure
-#      stands, so a real failure is never hidden. Independently of outcome, a
-#      terminal reading publishes a PR only when the current-run evidence still
-#      attributes that reading; otherwise it publishes none.
+#      truth when its observable status, head, or PR differs, or when the state
+#      came from the coarse fallback. Nothing else does, and with no ordering
+#      evidence the failure stands, so a real failure is never hidden.
+#      Independently of outcome, a terminal reading publishes a PR only when the
+#      current-run evidence still attributes that reading; otherwise it
+#      publishes none.
+#      When that same ordering evidence instead places the crew's own last word
+#      BEFORE the run - the ledger row IS the attributed run, so the run's
+#      record is the later fact, or the declaration failed to clear the run's
+#      minute - the published failure carries the
+#      FM_CREW_STATE_WORD_OLDER_DETAIL field (bin/fm-classify-lib.sh owns the
+#      token). bin/fm-inactive-reconcile.sh needs it to tell the routine ship
+#      shape, a `done:` written mid-run of a run that then failed, apart from a
+#      crew word that genuinely post-dates the run, so the first is still
+#      reported to the captain instead of read as a contradiction and dropped.
 #   3. Reconcile the status log through fm-classify-lib.sh's status_current_line:
 #      open decisions survive unrelated events and continuation prose cannot
 #      hide a declaration. Ship/scout terminal declarations supersede stale log
@@ -1451,7 +1460,10 @@ if [ "$HAVE_RUN" = 1 ]; then
     # map_log_state owns the verb->state mapping, including the configurable
     # paused verb; snapshot_ordered_log uses fm-classify-lib.sh's portable file
     # readers to keep the line and its ordering evidence consistent.
-    if [ -n "$NEWEST_EPOCH" ] && [ "$NEWEST_ROW_AGREES" != 1 ] \
+    CREW_WORD_ORDERED_OLDER=0
+    if [ "$NEWEST_ROW_AGREES" = 1 ]; then
+      CREW_WORD_ORDERED_OLDER=1
+    elif [ -n "$NEWEST_EPOCH" ] \
       && [ "$(fm_nm_run_status_class "$NEWEST_STATUS")" = terminal ] \
       && snapshot_ordered_log; then
       if [ "$ORDERED_LOG_MTIME" -ge "$((NEWEST_EPOCH + 60))" ]; then
@@ -1462,6 +1474,8 @@ if [ "$HAVE_RUN" = 1 ]; then
               "$(status_line_note "$ORDERED_LOG_LINE")${SEP}later than the run ($RUN_DETAIL)"
             ;;
         esac
+      else
+        CREW_WORD_ORDERED_OLDER=1
       fi
     fi
     case "$NEWEST_STATUS" in
@@ -1471,6 +1485,8 @@ if [ "$HAVE_RUN" = 1 ]; then
           "a newer $NEWEST_STATUS run on this branch supersedes the earlier $RUN_DETAIL; current state not provable here"
         ;;
     esac
+    [ "$CREW_WORD_ORDERED_OLDER" != 1 ] \
+      || RUN_DETAIL="$RUN_DETAIL${SEP}$FM_CREW_STATE_WORD_OLDER_DETAIL"
   fi
 
   # Reconcile the status log. A needs-decision/blocked log line that the run-step

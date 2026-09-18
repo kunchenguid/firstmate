@@ -1196,6 +1196,41 @@ test_contradicted_success_is_not_promoted_for_presentation() {
   pass "a success the crew's own last word contradicts is never presented"
 }
 
+# The routine ship shape: the crew declares implementation done, firstmate's
+# validation run then fails, and the crew goes silent without appending
+# `failed:`. bin/fm-crew-state.sh orders that declaration before the run and
+# says so on its own line, so the failure is not contradicted and must still
+# reach the captain - a failure reaching nobody is the harm this path exists to
+# remove.
+test_mid_run_declaration_does_not_suppress_the_failure() {
+  local word_older payload
+  word_older=$(bash -c '. "$1"; printf %s "$FM_CREW_STATE_WORD_OLDER_DETAIL"' _ "$ROOT/bin/fm-classify-lib.sh")
+  [ -n "$word_older" ] || fail "the reader's ordering detail token is undefined"
+  make_world outcome-mid-run-done
+  write_child "$MAIN" child 'done: implementation complete'
+  FM_FAKE_CREW_STATE='failed' FM_FAKE_CREW_SOURCE='run-step' \
+    FM_FAKE_CREW_DETAIL="run failed · $word_older" run_reconcile "$MAIN" --startup
+  payload=$(queued_payload "$MAIN" 'inactive-outcome:')
+  [ -n "$payload" ] || fail "a failure the reader proved newer than the crew's word was dropped"
+  [ "$(outcome_count "$MAIN" pending)" = 1 ] \
+    || fail "no durable terminal outcome was minted for the failure"
+  pass "a failure the reader ordered after the crew's own word still reaches the captain"
+}
+
+# The mirror shape the branch is named for: a stale `paused:` line and a real
+# run failure the reader ordered after it.
+test_stale_pause_does_not_suppress_the_failure() {
+  local word_older
+  word_older=$(bash -c '. "$1"; printf %s "$FM_CREW_STATE_WORD_OLDER_DETAIL"' _ "$ROOT/bin/fm-classify-lib.sh")
+  make_world outcome-stale-pause
+  write_child "$MAIN" child 'paused: waiting on the pipeline'
+  FM_FAKE_CREW_STATE='failed' FM_FAKE_CREW_SOURCE='run-step' \
+    FM_FAKE_CREW_DETAIL="run failed · $word_older" run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+    || fail "a failure behind a stale pause line was dropped"
+  pass "a stale pause line does not suppress the failure that followed it"
+}
+
 # Direction guard: a crew that simply stopped mid-work has no self-declared
 # outcome to contradict the reader, so a genuine failure still reaches the
 # captain. Hiding real failures is equally wrong.
@@ -1279,6 +1314,8 @@ test_status_log_outcome_never_borrows_the_fresh_last_line_pr
 test_status_log_outcome_never_claims_a_mentioned_pr
 test_contradicted_failure_is_not_promoted_for_presentation
 test_contradicted_success_is_not_promoted_for_presentation
+test_mid_run_declaration_does_not_suppress_the_failure
+test_stale_pause_does_not_suppress_the_failure
 test_uncontradicted_failure_is_still_presented
 
 echo "all inactive reconciliation tests passed"

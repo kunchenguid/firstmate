@@ -59,7 +59,12 @@
 # built from that read, owned by terminal_outcome_corroborated and
 # terminal_outcome_pr below. It is manufactured only when the crew's own last
 # self-declared word (done, failed, or the configured paused verb) does not
-# contradict it, and its PR identity comes from the same record as its state -
+# contradict it - and that word contradicts nothing once the reader's own
+# ordering evidence has already placed it BEFORE the run it reported on, which
+# the reader publishes as the FM_CREW_STATE_WORD_OLDER_DETAIL field, so the
+# routine ship shape (`done:` written mid-run, the run then fails, the crew goes
+# silent) still reaches the captain - and its PR identity comes from the same
+# record as its state -
 # the run's own published PR for a run-step state, that line's own ready-signal
 # PR for a status-log state, and never a separately recorded task PR. Together they
 # prevent one captain-facing record from combining claims from different runs.
@@ -373,9 +378,16 @@ terminal_outcome_pr() { # <meta> <state-line>
   clean_field "$value"
 }
 
-# Enforce the header's independent captain-facing corroboration contract.
-terminal_outcome_corroborated() { # <state> <last-status-line>
-  local state=$1 last=$2 declared
+# Enforce the header's independent captain-facing corroboration contract. The
+# crew's own word disagrees only when the reader has not already ordered it
+# BEFORE the run it reported on: a declaration the reader proved older is the
+# routine ship shape (`done:` mid-run, then the run fails), not a contradiction,
+# and dropping it would hide a real failure from the captain entirely.
+terminal_outcome_corroborated() { # <state> <last-status-line> <state-line>
+  local state=$1 last=$2 line=${3:-} declared
+  case "$line" in
+    *"$STATE_LINE_SEP$FM_CREW_STATE_WORD_OLDER_DETAIL"*) return 0 ;;
+  esac
   if status_is_paused "$last"; then
     declared=paused
   else
@@ -591,7 +603,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     'state: failed '*) state='failed' ;;
     *) return 0 ;;
   esac
-  terminal_outcome_corroborated "$state" "$last" || return 0
+  terminal_outcome_corroborated "$state" "$last" "$state_line" || return 0
   pr=$(terminal_outcome_pr "$meta" "$state_line")
   incarnation=$(meta_incarnation "$meta")
   # The receipt identity binds structured fields only: a persistent child that

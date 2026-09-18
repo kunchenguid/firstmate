@@ -60,6 +60,13 @@ _FM_CLASSIFY_UNAME_S=${_FM_UNAME:-$(uname -s 2>/dev/null)}
 # or no-mistakes install; absent, it points at the real sibling script.
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 
+# One detail field of that reader's canonical state line, owned here because two
+# scripts read the same token: bin/fm-crew-state.sh publishes it on a terminal
+# run-step state whose ordering evidence places the crew's own last self-declared
+# word BEFORE the run's record, and bin/fm-inactive-reconcile.sh reads it to tell
+# a stale declaration apart from a crew word that genuinely post-dates the run.
+FM_CREW_STATE_WORD_OLDER_DETAIL='crew declaration precedes this run'
+
 # fm_run_timed, the shared hard bound the worktree write probe below puts around
 # its one filesystem walk. bin/fm-timeout-lib.sh owns bounded execution for this
 # repo, so nothing here re-derives the coreutils/BSD/perl selection. That library

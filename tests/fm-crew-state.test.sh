@@ -4200,7 +4200,54 @@ test_mid_run_done_log_does_not_mask_current_run_failure() {
   assert_contains "$out" "state: failed" "a mid-run done line cannot mask the current run's failure"
   assert_contains "$out" "source: run-step" "the failure stays run-step sourced"
   assert_not_contains "$out" "state: done" "the declaration never becomes the reported state"
+  assert_contains "$out" "$FM_CREW_STATE_WORD_OLDER_DETAIL" \
+    "the failure publishes that the crew's own word came before the run"
   pass "a mid-run done line does not mask the current run's failure"
+}
+
+# The ordering fact bin/fm-inactive-reconcile.sh consumes. Without it that
+# reconciler reads the crew's stale `done:` line as a contradiction and drops
+# the failure instead of reporting it, so the reader owes the fact whenever it
+# has proven the declaration older than the run - here because the crew declared
+# done BEFORE its validation run even started.
+test_pre_run_done_log_publishes_the_ordering_fact() {
+  reset_fakes
+  local d short out
+  d=$(new_case pre-run-done-ordering-fact)
+  make_repo_on_branch "$d/wt" fm/feat-s6d
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s6d.meta" "window=fm:fm-feat-s6d" "worktree=$d/wt" "kind=ship"
+  printf 'done: implementation complete\n' > "$d/state/feat-s6d.status"
+  backdate_status_minutes_ago "$d/state/feat-s6d.status" 120
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s6d)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s6d ${short}  $(ledger_stamp_minutes_ago 60)"
+  out=$(run_crew_state "$d" feat-s6d)
+  assert_contains "$out" "state: failed" "the failure still stands"
+  assert_contains "$out" "$FM_CREW_STATE_WORD_OLDER_DETAIL" \
+    "a declaration older than the run is published as such"
+  pass "a declaration ordered before the run publishes that ordering fact"
+}
+
+# The opposite: with no ordering evidence at all the reader has proven nothing
+# about the crew's word, so it must claim nothing - the reconciler then keeps
+# its contradiction guard.
+test_failure_without_ordering_evidence_claims_no_ordering() {
+  reset_fakes
+  local d out
+  d=$(new_case no-ordering-fact)
+  make_repo_on_branch "$d/wt" fm/feat-s6e
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s6e.meta" "window=fm:fm-feat-s6e" "worktree=$d/wt" "kind=ship"
+  printf 'done: implementation complete\n' > "$d/state/feat-s6e.status"
+  backdate_status_minutes_ago "$d/state/feat-s6e.status" 40
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s6e)"
+  FM_FAKE_RUNS_LIST=""
+  out=$(run_crew_state "$d" feat-s6e)
+  assert_contains "$out" "state: failed" "the failure still stands"
+  assert_not_contains "$out" "$FM_CREW_STATE_WORD_OLDER_DETAIL" \
+    "an unproven ordering is never published as proven"
+  pass "a failure with no ordering evidence publishes no ordering fact"
 }
 
 # Opposite direction 1: a done line the crew appended BEFORE its validation run
@@ -6830,6 +6877,8 @@ test_live_replacement_run_outranks_a_status_log_done
 test_mid_run_pause_does_not_mask_current_run_failure
 test_mid_run_done_log_does_not_mask_current_run_failure
 test_pre_run_done_log_does_not_mask_failed_run
+test_pre_run_done_log_publishes_the_ordering_fact
+test_failure_without_ordering_evidence_claims_no_ordering
 test_same_minute_done_log_does_not_mask_failed_run
 test_same_minute_line_is_not_newer_than_an_unbindable_run
 test_prose_after_done_line_does_not_order_it_against_the_run
