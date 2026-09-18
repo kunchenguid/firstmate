@@ -138,11 +138,12 @@ A `blocked`, `dated`, or `aged` hold leaves the default Captain's Call, renders 
 `--all-decisions` reveals every captain hold available within the remote-summary bound and drops its gate, so an available hold is never in both Captain's Call and Charted Next.
 An actively worked held task may also appear in Underway, which reports running work independently of those decision buckets.
 
-Three accepted limits remain deliberate:
+Four accepted limits remain deliberate:
 
 - A remote or secondmate hold retains the producer home's age and aging decision from the summary's capture time and threshold rather than being recomputed by the parent.
 - A rare concurrent answer-close and re-hold race can leave the newly re-held task without its age basis.
 - Cross-home summaries remain bounded by `FM_SNAPSHOT_SECONDMATE_DECISIONS` and `FM_SNAPSHOT_SECONDMATE_QUEUED`; a remote deferred hold beyond those bounds is not exported, so it can be neither gated nor revealed.
+- Outside a captain resolution record, an ordinary last body line on a Done row that matches `local <single-word>` is read as that row's landing note and published as a delivery artifact.
 
 Re-holding through the wrapper with `--until` remains the durable fix rather than relying on the projection safety net.
 [`bin/fm-landed-lib.sh`](../bin/fm-landed-lib.sh) owns Recently Landed's shared selection and artifact-display compatibility rules.
