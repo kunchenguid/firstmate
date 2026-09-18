@@ -136,7 +136,7 @@ fm_worker_account_pi_provider() {
 
 # fm_worker_account_raw_flag <raw launch command> <flag>
 # Prints the value of <flag> (--model or --provider) embedded in a raw launch
-# command, or nothing. A raw command is passed through verbatim, so fm-spawn's
+# command as a separate word, the only form Pi parses, or nothing. A raw command is passed through verbatim, so fm-spawn's
 # own flags do not reach the agent and only these values say which account a
 # raw Pi launch would spend. Model and provider ids carry no spaces, so word
 # splitting is enough; one layer of shell quoting around the value is removed.
@@ -149,13 +149,7 @@ fm_worker_account_raw_flag() {
       value=$word
       break
     fi
-    case "$word" in
-    "$flag") next=1 ;;
-    "$flag"=*)
-      value=${word#"$flag"=}
-      break
-      ;;
-    esac
+    [ "$word" != "$flag" ] || next=1
   done
   case "$value" in
   \'*\')

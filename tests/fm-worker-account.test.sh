@@ -159,8 +159,8 @@ test_pi_guard_requires_matching_provider_model() {
 test_raw_launch_flags_read_the_embedded_values() {
   [ "$(fm_worker_account_raw_flag 'pi --model fake/test --offline' --model)" = fake/test ] || \
     fail "space-separated --model was not read"
-  [ "$(fm_worker_account_raw_flag "pi --model='openai-codex/gpt-5.4'" --model)" = openai-codex/gpt-5.4 ] || \
-    fail "equals-form --model was not read"
+  [ -z "$(fm_worker_account_raw_flag "pi --model='openai-codex/gpt-5.4'" --model)" ] || \
+    fail "Pi does not parse --model=<value>, so it must not count as a model"
   [ -z "$(fm_worker_account_raw_flag 'pi --offline' --model)" ] || \
     fail "a raw command with no --model must yield an empty model"
   [ "$(fm_worker_account_raw_flag "pi --provider 'fake' --model fake/test" --provider)" = fake ] || \
@@ -330,6 +330,13 @@ test_spawn_raw_pi_command_must_pass_the_declared_provider() {
   status=$?
   expect_code 1 "$status" "a raw Pi command naming another provider must refuse"$'\n'"$out"
   assert_contains "$out" "passes 'openrouter'" "refusal must name the provider the command passes"
+  # Pi rejects --provider=<value> as an unknown option, so the worker would die
+  # at startup; the spawn must refuse instead.
+  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
+    "$id" "$world/proj" "pi --provider=fake --model fake/test" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 1 "$status" "a raw Pi command spelling --provider=<value> must refuse"$'\n'"$out"
+  assert_contains "$out" "must pass --provider fake" "refusal must name the form Pi parses"
   out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
     "$id" "$world/proj" "pi --provider fake --model fake/test" --mode no-mistakes --yolo off 2>&1)
   expect_code 0 "$?" "a raw Pi command passing the declared provider should launch"$'\n'"$out"
