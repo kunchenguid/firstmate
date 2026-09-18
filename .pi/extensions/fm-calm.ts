@@ -28,6 +28,8 @@ import {
   calmPresentationIsActive,
   clearCalmSteps,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
+  setCalmRunActive,
+  subscribeCalmPresentation,
   registerFirstmateSyntheticPresentation,
   setCalmPresentation,
   setCalmStockExportRendering,
@@ -64,6 +66,8 @@ export default function (pi: ExtensionAPI) {
   // this state; the next working period resumes it. session_start resets it so a fresh
   // Pi session starts at the normal initial position. Never module-global.
   const workingShipAnimation = createCalmWorkingShipAnimation();
+  let currentStepUi: ExtensionUIContext | undefined;
+  subscribeCalmPresentation(() => currentStepUi?.setStatus("firstmate-calm", undefined));
 
   // Single owner of Calm's working-row presentation choice. The widget is only created
   // or removed on a real transition, so repeated starts cannot duplicate its timer.
@@ -126,6 +130,8 @@ export default function (pi: ExtensionAPI) {
   registerFirstmateSyntheticPresentation(pi);
 
   pi.on("session_start", (_event, ctx) => {
+    currentStepUi = ctx.ui;
+    setCalmRunActive(false);
     clearCalmSteps();
     exportRendering = false;
     setCalmPresentation(loadCalmPreference());
@@ -163,7 +169,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("agent_start", (_event, ctx) => {
+    currentStepUi = ctx.ui;
     clearCalmSteps();
+    setCalmRunActive(true);
     agentRunActive = true;
     applyWorkingPresentation(ctx.ui);
   });
@@ -171,13 +179,16 @@ export default function (pi: ExtensionAPI) {
   // agent_settled is emitted from a finally block, so it also covers abort and failure.
   pi.on("agent_settled", (_event, ctx) => {
     agentRunActive = false;
+    setCalmRunActive(false);
     applyWorkingPresentation(ctx.ui);
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
     agentRunActive = false;
+    setCalmRunActive(false);
     clearCalmSteps();
     applyWorkingPresentation(ctx.ui);
+    currentStepUi = undefined;
   });
 
   pi.registerCommand("calm", {
@@ -186,7 +197,13 @@ export default function (pi: ExtensionAPI) {
       const active = !calmPresentationIsActive();
       persistCalmPreference(active);
       setCalmPresentation(active);
-      if (!active) clearCalmSteps();
+      currentStepUi = ctx.ui;
+      if (!active) {
+        setCalmRunActive(false);
+        clearCalmSteps();
+      } else if (agentRunActive) {
+        setCalmRunActive(true);
+      }
       publishPresentationState();
       applyWorkingPresentation(ctx.ui, true);
       // Pi re-runs every assistant row's layout from this call even when the label is

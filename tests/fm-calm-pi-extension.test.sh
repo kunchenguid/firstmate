@@ -1291,11 +1291,65 @@ if (assistantExpandedThinking.render(100).join("\n").includes("RAW_EXPANDED_THIN
   throw new Error("Calm's public Markdown transformer left expanded raw thinking visible");
 }
 if (
-  progressText.includes("Step 1: CURRENT_STEP_FROM_ASSISTANT") ||
+  !progressText.includes("Step 1: CURRENT_STEP_FROM_ASSISTANT") ||
   !commentaryText.includes("DURABLE_COMMENTARY_FROM_ASSISTANT")
 ) {
-  throw new Error(`Calm put an intermediate step outside the completed assistant row: ${progressText} / ${commentaryText}`);
+  throw new Error(`Calm did not keep the active step beside its commentary: ${progressText} / ${commentaryText}`);
 }
+const assertStepLayout = (text, expectedSteps) => {
+  const lines = text.split("\n");
+  const stepIndexes = expectedSteps.map((step) => lines.findIndex((line) => line.trim().startsWith(step)));
+  if (stepIndexes.some((index) => index < 0)) throw new Error(`missing step in ${text}`);
+  for (let index = 1; index < stepIndexes.length; index += 1) {
+    if (stepIndexes[index] !== stepIndexes[index - 1] + 1) throw new Error(`Calm inserted a blank row between steps: ${text}`);
+  }
+  const last = stepIndexes.at(-1);
+  if (last === undefined || lines[last + 1] !== "") throw new Error(`Calm did not insert one blank row before the response: ${text}`);
+  if (lines[last + 2]?.trim() !== "DURABLE_COMMENTARY_FROM_ASSISTANT") {
+    throw new Error(`Calm's blank row was not between the final step and response: ${text}`);
+  }
+};
+assertStepLayout(progressText, ["Step 1: CURRENT_STEP_FROM_ASSISTANT"]);
+const styledProgress = assistantProgress.render(100).join("\n");
+if (!styledProgress.includes("\x1b[38;2;166;112;145m")) {
+  throw new Error("Calm steps did not use the muted mauve foreground");
+}
+const activityRows = rows.map(({ actual }) => actual.render(100));
+if (activityRows.some((row) => row.length !== 0)) throw new Error("Calm exposed a hidden tool row while collecting activity");
+assistantProgress.updateContent(assistantProgressMessage, true);
+const activityText = stripTerminalSequences(assistantProgress.render(100).join("\n"));
+if (!activityText.includes("read · sample.txt")) throw new Error(`Calm did not show safe tool activity: ${activityText}`);
+const styledActivity = assistantProgress.render(100).join("\n");
+if (!styledActivity.includes("\x1b[2m\x1b[38;2;198;163;188m")) {
+  throw new Error("Calm activity did not use dim muted detail styling");
+}
+if (activityText.includes("CALM_RENDER_OUTPUT") || activityText.includes("Successfully replaced")) {
+  throw new Error(`Calm leaked tool output into its activity ticker: ${activityText}`);
+}
+await new Promise((resolve) => setTimeout(resolve, 500));
+const movedActivityText = stripTerminalSequences(assistantProgress.render(100).join("\n"));
+if (movedActivityText === activityText) throw new Error("Calm activity ticker did not move while overflowing");
+const narrowActivityText = stripTerminalSequences(assistantProgress.render(40).join("\n"));
+if (narrowActivityText.includes("read ·") || narrowActivityText.split("\n").some((line) => line.length > 40)) {
+  throw new Error(`Calm narrow layout wrapped or retained the activity ticker: ${narrowActivityText}`);
+}
+const safeActivities = [
+  ["read", { path: "/tmp/proof-secret/token.txt" }, "read · <temp>/token.txt"],
+  ["edit", { path: "/work/src/tokenizer.ts" }, "edit · src/tokenizer.ts"],
+  ["bash", { command: "API_TOKEN=hidden printf 'secret'" }, "bash · printf"],
+  ["write", { path: "credentials.txt", content: "PRIVATE_CONTENT" }, "write · <redacted>"],
+];
+for (const [tool, args, expected] of safeActivities) {
+  const actual = visibility.calmActivityForTool(tool, args, "/work");
+  if (actual !== expected || actual.includes("hidden") || actual.includes("PRIVATE_CONTENT") || actual.includes("proof-secret")) {
+    throw new Error(`Calm activity redaction changed: ${actual}`);
+  }
+}
+const activityCount = visibility.currentCalmActivity().length;
+visibility.appendCalmActivity("read · sample.txt");
+if (visibility.currentCalmActivity().length !== activityCount) throw new Error("Calm did not deduplicate repeated activity");
+for (let index = 0; index < 20; index += 1) visibility.appendCalmActivity(`tool-${index}`);
+if (visibility.currentCalmActivity().length > 12) throw new Error("Calm retained more activity than its bounded ticker cap");
 if (JSON.stringify([...widgets.keys()]) !== JSON.stringify(["firstmate-calm-working-ship"])) {
   throw new Error(`Calm did not retain only the working ship widget: ${[...widgets.keys()].join(",")}`);
 }
@@ -1303,12 +1357,13 @@ assistantProgress.updateContent(nextAssistantProgressMessage, true);
 progressText = stripTerminalSequences(assistantProgress.render(100).join("\n"));
 commentaryText = stripTerminalSequences(assistantProgress.render(100).join("\n"));
 if (
-  progressText.includes("Step 1: CURRENT_STEP_FROM_ASSISTANT") ||
-  progressText.includes("Step 2: NEXT_STEP_FROM_ASSISTANT") ||
+  !progressText.includes("Step 1: CURRENT_STEP_FROM_ASSISTANT") ||
+  !progressText.includes("Step 2: NEXT_STEP_FROM_ASSISTANT") ||
   (commentaryText.match(/DURABLE_COMMENTARY_FROM_ASSISTANT/g) || []).length !== 1
 ) {
-  throw new Error(`Calm placed an accumulated step before completion: ${progressText} / ${commentaryText}`);
+  throw new Error(`Calm did not keep accumulated active steps beside commentary: ${progressText} / ${commentaryText}`);
 }
+assertStepLayout(progressText, ["Step 1: CURRENT_STEP_FROM_ASSISTANT", "Step 2: NEXT_STEP_FROM_ASSISTANT"]);
 assistantProgress.updateContent({ ...nextAssistantProgressMessage, stopReason: "stop" }, false);
 await handlers.get("agent_settled")[0]({}, commandContext);
 commentaryText = stripTerminalSequences(assistantProgress.render(100).join("\n"));
@@ -1318,6 +1373,12 @@ if (
   (commentaryText.match(/DURABLE_COMMENTARY_FROM_ASSISTANT/g) || []).length !== 1
 ) {
   throw new Error("Calm finalization did not retain the accumulated steps and commentary once");
+}
+assertStepLayout(commentaryText, ["Step 1: CURRENT_STEP_FROM_ASSISTANT", "Step 2: NEXT_STEP_FROM_ASSISTANT"]);
+await new Promise((resolve) => setTimeout(resolve, 500));
+const settledAgain = stripTerminalSequences(assistantProgress.render(100).join("\n"));
+if (settledAgain !== commentaryText || settledAgain.includes("read · sample.txt")) {
+  throw new Error("Calm completed steps kept animating or retained transient tool activity");
 }
 presentationComponent.setExpanded(!expanded);
 if (presentationComponent.hasContent() || presentationComponent.render(100).length !== 0) {
@@ -1542,7 +1603,7 @@ JS
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm renderer and lifecycle contract failed: $out"
   [ -z "$out" ] || fail "Pi calm renderer test printed output: $out"
-  pass "Pi Calm renders distinct thinking lines as numbered display-only transcript content, keeps assistant commentary exactly once, never restores historical planning during Calm-off fallback, preserves execution/export data, leaves Pi's stock working row visible while idle, and persists its choice across session starts"
+  pass "Pi Calm renders distinct thinking lines as active numbered display-only content with muted styling, a right-side activity ticker, one final-response blank row, and preserved assistant commentary, history, exports, stock working row, and preference"
 }
 
 test_calm_mid_turn_working_notes() {
@@ -1767,20 +1828,23 @@ const liveMessage = {
   content: [{ type: "thinking", thinking: "LIVE_STEP_ONE" }],
 };
 live.updateContent(liveMessage, true);
-if (stripTerminalSequences(live.render(100).join("\n")).includes("Step 1: LIVE_STEP_ONE")) {
-  throw new Error("Calm placed an intermediate step outside the completed assistant row");
+let liveText = stripTerminalSequences(live.render(100).join("\n"));
+if (!liveText.includes("Step 1: LIVE_STEP_ONE")) {
+  throw new Error("Calm did not keep the active step on the live assistant row");
 }
 live.updateContent(liveMessage, true);
-if (stripTerminalSequences(live.render(100).join("\n")).includes("Step 1: LIVE_STEP_ONE")) {
+if (stripTerminalSequences(live.render(100).join("\n")) !== liveText) {
   throw new Error("Calm duplicated a repeated streaming update");
 }
 liveMessage.content[0].thinking = "LIVE_STEP_ONE\nLIVE_STEP_TWO";
 live.updateContent(liveMessage, true);
+liveText = stripTerminalSequences(live.render(100).join("\n"));
 if (
-  stripTerminalSequences(live.render(100).join("\n")).includes("Step 1: LIVE_STEP_ONE") ||
-  stripTerminalSequences(live.render(100).join("\n")).includes("Step 2: LIVE_STEP_TWO")
+  !liveText.includes("Step 1: LIVE_STEP_ONE") ||
+  !liveText.includes("Step 2: LIVE_STEP_TWO") ||
+  liveText.split("\n").some((line, index, lines) => line === "" && lines[index - 1]?.includes("Step 1:"))
 ) {
-  throw new Error("Calm rendered accumulated steps before the assistant response completed");
+  throw new Error(`Calm inserted an unexpected gap while steps were still active: ${liveText}`);
 }
 const finalMessage = {
   ...assistantBase,
@@ -1788,12 +1852,19 @@ const finalMessage = {
   content: [{ type: "text", text: "LIVE_FINAL_REPLY" }],
 };
 live.updateContent(finalMessage, false);
+liveText = stripTerminalSequences(live.render(100).join("\n"));
 if (
-  !stripTerminalSequences(live.render(100).join("\n")).includes("Step 1: LIVE_STEP_ONE") ||
-  !stripTerminalSequences(live.render(100).join("\n")).includes("Step 2: LIVE_STEP_TWO") ||
-  !stripTerminalSequences(live.render(100).join("\n")).includes("LIVE_FINAL_REPLY")
+  !liveText.includes("Step 1: LIVE_STEP_ONE") ||
+  !liveText.includes("Step 2: LIVE_STEP_TWO") ||
+  !liveText.includes("LIVE_FINAL_REPLY")
 ) {
   throw new Error("Calm replaced the completed step list when the response ended");
+}
+const liveLines = liveText.split("\n");
+const finalStepIndex = liveLines.findIndex((line) => line.trim().startsWith("Step 2:"));
+const finalReplyIndex = liveLines.findIndex((line) => line.trim() === "LIVE_FINAL_REPLY");
+if (finalReplyIndex !== finalStepIndex + 2 || liveLines[finalStepIndex + 1] !== "") {
+  throw new Error(`Calm did not separate the final step and final response with one blank row: ${liveText}`);
 }
 await calm.agentSettled({}, context);
 if (!stripTerminalSequences(live.render(100).join("\n")).includes("Step 2: LIVE_STEP_TWO")) {
@@ -1928,7 +1999,7 @@ JS
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm mid-turn contract failed: $out"
   [ -z "$out" ] || fail "Pi calm mid-turn test printed output: $out"
-  pass "Pi Calm keeps assistant commentary exactly once while transcript steps accumulate and settle, suppresses persisted and expanded superseded titles across reload and repeated Calm toggles, preserves final replies and message data, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on"
+  pass "Pi Calm keeps assistant commentary exactly once beside live and settled steps, freezes completed steps, suppresses persisted and expanded superseded titles across reload and repeated Calm toggles, preserves final replies and message data, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on"
 }
 
 test_operational_followup_turn_e2e() {

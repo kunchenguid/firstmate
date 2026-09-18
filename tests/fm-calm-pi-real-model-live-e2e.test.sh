@@ -77,7 +77,7 @@ seen_step_numbers=
 ordered_frame_count=0
 settled_polls=0
 final_text=
-MAGENTA_BACKGROUND=$'\033[48;2;122;31;92m'
+MUTED_PURPLE_BACKGROUND=$'\033[48;2;36;24;32m'
 step_titles="$EVIDENCE/step-titles.txt"
 : >"$step_titles"
 frame=0
@@ -141,8 +141,8 @@ for word in ONE TWO THREE; do
 done
 printf '%s' "$final_text" | grep -Fq '╲▁▁▁╱' \
   && fail "settled real-model transcript retained the sailing animation"
-printf '%s' "$final_text" | grep -Fq "$MAGENTA_BACKGROUND" \
-  || fail "settled real-model assistant rows did not carry Calm's magenta background ANSI"
+printf '%s' "$final_text" | grep -Fq "$MUTED_PURPLE_BACKGROUND" \
+  || fail "settled real-model assistant rows did not carry Calm's muted purple background ANSI"
 printf '%s' "$final_text" | grep -Fq 'REAL_TOOL_OUTPUT_' \
   && fail "settled real-model transcript retained a tool result while Calm was on"
 

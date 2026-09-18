@@ -4,8 +4,8 @@
 // the otherwise-empty thinking spacer on Pi versions that export the class used by the
 // interactive UI. Both consume the same visibility state and only render shallow
 // presentation copies; messages, model context, session storage, and exports are never
-// changed. Calm paints the visible assistant range with a temporary high-contrast
-// muted dark purple background without changing its geometry.
+// changed. Calm paints the visible assistant range with a temporary muted dark purple
+// background without changing its geometry.
 import type {
   AssistantMessageComponent as PiAssistantMessageComponent,
   ExtensionAPI,
@@ -16,12 +16,18 @@ import type {
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import {
   appendCalmStep,
+  appendCalmActivity,
+  calmActivityForTool,
   calmPresentationHides,
   calmStockExportRenderingIsActive,
+  calmTickerText,
   currentCalmSteps,
+  setCalmRenderRequester,
 } from "./fm-calm-visibility.ts";
 
 const CALM_ASSISTANT_BACKGROUND = "\x1b[48;2;36;24;32m";
+const CALM_STEP_FOREGROUND = "\x1b[38;2;166;112;145m";
+const CALM_ACTIVITY_FOREGROUND = "\x1b[38;2;198;163;188m";
 const stripTerminalSequences = (text: string): string =>
   text
     .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
@@ -114,22 +120,69 @@ function calmStepsPresentation(
   component: object,
   controller: CalmAssistantLayoutController,
 ): AssistantMessage {
-  const completed = message.stopReason === "stop" || message.stopReason === "length";
-  if (
-    calmStockExportRenderingIsActive() ||
-    !completed ||
-    controller.activeComponent !== component
-  ) return message;
+  if (calmStockExportRenderingIsActive() || controller.activeComponent !== component) return message;
   const steps = currentCalmSteps();
   if (!calmPresentationHides("assistant-thinking") || steps.length === 0) return message;
   const stepLines = steps.map((step, index) => `Step ${index + 1}: ${step}`).join("  \n");
   return {
     ...message,
     content: [
-      { type: "text", text: `${stepLines}  \n` },
+      { type: "text", text: stepLines },
       ...message.content,
     ],
   };
+}
+
+function visibleWidth(text: string): number {
+  return Array.from(stripTerminalSequences(text)).length;
+}
+
+function clipText(text: string, width: number): string {
+  return Array.from(text).slice(0, Math.max(0, width)).join("");
+}
+
+function renderCalmStepLine(step: string, index: number, width: number, active: boolean, indent: string): string {
+  const available = Math.max(0, width - visibleWidth(indent));
+  const fixed = `Step ${index + 1}: ${step}`;
+  const activityWidth = available - visibleWidth(fixed) - 2;
+  const clippedFixed = clipText(fixed, available);
+  const tickerText = active ? calmTickerText(Math.max(0, activityWidth)) : "";
+  const ticker = activityWidth >= 8 ? tickerText : "";
+  const detail = ticker === "" ? "" : `  \x1b[2m${CALM_ACTIVITY_FOREGROUND}${ticker}`;
+  return `${indent}${CALM_STEP_FOREGROUND}${clippedFixed}${detail}\x1b[0m`;
+}
+
+function renderCalmSteps(
+  lines: string[],
+  width: number,
+  steps: readonly string[],
+  active: boolean,
+): string[] {
+  if (steps.length === 0) return lines;
+  const rendered = [...lines];
+  let searchFrom = 0;
+  for (let index = 0; index < steps.length; index += 1) {
+    const marker = `Step ${index + 1}:`;
+    const lineIndex = rendered.findIndex((line, candidate) => {
+      if (candidate < searchFrom) return false;
+      return stripTerminalSequences(line).trimStart().startsWith(marker);
+    });
+    if (lineIndex < 0) continue;
+    const plain = stripTerminalSequences(rendered[lineIndex]);
+    const indent = plain.slice(0, plain.length - plain.trimStart().length);
+    rendered[lineIndex] = renderCalmStepLine(steps[index]!, index, width, active && index === steps.length - 1, indent);
+    searchFrom = lineIndex + 1;
+  }
+  const lastMarker = `Step ${steps.length}:`;
+  const lastStep = rendered.findIndex((line, candidate) =>
+    candidate >= searchFrom - 1 && stripTerminalSequences(line).trimStart().startsWith(lastMarker),
+  );
+  if (lastStep < 0) return rendered;
+  let next = lastStep + 1;
+  while (next < rendered.length && stripTerminalSequences(rendered[next]!).trim() === "") next += 1;
+  if (next === rendered.length) return rendered;
+  rendered.splice(lastStep + 1, next - lastStep - 1, "");
+  return rendered;
 }
 
 export function installCalmAssistantLayout(
@@ -196,16 +249,22 @@ export function installCalmAssistantLayout(
     const lines = activeController.originalRender.call(component, width);
     if (!calmPresentationHides("assistant-thinking") || lines.length === 0) return lines;
 
+    const stepLines = renderCalmSteps(
+      lines,
+      width,
+      currentCalmSteps(),
+      activeController.runFinalized !== true,
+    );
     let firstVisible = -1;
     let lastVisible = -1;
-    for (let index = 0; index < lines.length; index += 1) {
-      if (stripTerminalSequences(lines[index]).trim() !== "") {
+    for (let index = 0; index < stepLines.length; index += 1) {
+      if (stripTerminalSequences(stepLines[index]).trim() !== "") {
         if (firstVisible === -1) firstVisible = index;
         lastVisible = index;
       }
     }
-    if (firstVisible === -1) return lines;
-    return lines.map((line, index) =>
+    if (firstVisible === -1) return stepLines;
+    return stepLines.map((line, index) =>
       index >= firstVisible && index <= lastVisible
         ? `${CALM_ASSISTANT_BACKGROUND}${line}\x1b[49m`
         : line,
@@ -287,11 +346,19 @@ export function installCalmToolLayout(): void {
 
   const activeController = controller;
   activeController.render = (component, width): string[] => {
-    if (
+    const hidden =
       calmPresentationHides("assistant-tool-call") ||
       calmPresentationHides("tool-result") ||
-      calmPresentationHides("tool-image")
-    ) {
+      calmPresentationHides("tool-image");
+    if (hidden) {
+      const source = component as unknown as {
+        toolName?: unknown;
+        args?: unknown;
+        cwd?: unknown;
+        ui?: { requestRender?: () => void };
+      };
+      setCalmRenderRequester(source.ui?.requestRender?.bind(source.ui));
+      appendCalmActivity(calmActivityForTool(source.toolName, source.args, source.cwd));
       return [];
     }
     return activeController.originalRender.call(component, width);

@@ -9,7 +9,7 @@ fm_live_gate opt-in FM_CALM_PI_HERDR_LIVE_E2E herdr jq pi python3
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HERDR_LAB_HELPER="$ROOT/bin/fm-herdr-lab.sh"
-HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name calm-commentary-layout)
+HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name calm-step-detail-ticker)
 TMP_ROOT=$(fm_test_tmproot fm-calm-pi-herdr-live-e2e)
 PROJECT="$TMP_ROOT/project"
 HOME_DIR="$TMP_ROOT/home"
@@ -87,7 +87,9 @@ cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$PROJECT/.pi/extensions/l
 printf 'on\n' >"$HOME_DIR/config/calm"
 printf '%s\n' '{"terminal":{"clearOnShrink":false}}' >"$PI_CONFIG/settings.json"
 printf '%s\n' '{"type":"module"}' >"$PROJECT/package.json"
+ACTIVITY_PATH=calm-live-activity-abcdefghijklmnopqrstuvwxyz-0123456789-abcdefghijklmnopqrstuvwxyz-0123456789-abcdefghijklmnopqrstuvwxyz-0123456789-abcdefghijklmnopqrstuvwxyz-0123456789.txt
 printf '%s\n' 'calm live fixture' >"$PROJECT/calm-live-probe.txt"
+printf '%s\n' 'calm live activity fixture' >"$PROJECT/$ACTIVITY_PATH"
 
 cat >"$PROJECT/calm-live-provider.ts" <<'TS'
 import { appendFileSync } from "node:fs";
@@ -147,7 +149,7 @@ export default function (pi: ExtensionAPI): void {
           stream.end();
           return;
         }
-        await new Promise((resolve) => setTimeout(resolve, 250));
+        await new Promise((resolve) => setTimeout(resolve, completedSteps === 0 ? 250 : 1200));
         if (options?.signal?.aborted) return;
         thinking.thinking = plan;
         stream.push({ type: "thinking_delta", contentIndex: 0, delta: plan, partial: output });
@@ -165,7 +167,7 @@ export default function (pi: ExtensionAPI): void {
           type: "toolCall" as const,
           id: `calm-live-read-${completedSteps + 1}`,
           name: "read",
-          arguments: { path: "calm-live-probe.txt" },
+          arguments: { path: "calm-live-activity-abcdefghijklmnopqrstuvwxyz-0123456789-abcdefghijklmnopqrstuvwxyz-0123456789-abcdefghijklmnopqrstuvwxyz-0123456789-abcdefghijklmnopqrstuvwxyz-0123456789.txt" },
         };
         output.content.push(toolCall);
         stream.push({ type: "toolcall_start", contentIndex: 2, partial: output });
@@ -238,11 +240,16 @@ seen_one=0
 seen_two=0
 seen_three=0
 final_text=
-MAGENTA_BACKGROUND=$'\033[48;2;122;31;92m'
+MUTED_PURPLE_BACKGROUND=$'\033[48;2;36;24;32m'
+ACTIVITY_PREFIX='read ·'
+first_activity_line=
+second_activity_line=
+activity_moves=0
 assert_current_layout() { # <frame> <exact step text>
   local frame=$1 step=$2 step_line anchor_line
   step_line=$(printf '%s\n' "$frame" | grep -Fn "$step" | tail -1 | cut -d: -f1)
   anchor_line=$(printf '%s\n' "$frame" | grep -Fn '╲▁▁▁╱' | tail -1 | cut -d: -f1)
+  [ -n "$anchor_line" ] || anchor_line=$(printf '%s\n' "$frame" | grep -Fn '────────────────' | tail -1 | cut -d: -f1)
   [ -n "$anchor_line" ] || anchor_line=$(printf '%s\n' "$frame" | grep -Fn 'CALM_LIVE_HERDR_FINAL' | tail -1 | cut -d: -f1)
   [ -n "$step_line" ] && [ -n "$anchor_line" ] && [ "$step_line" -lt "$anchor_line" ] \
     || fail "$step was not kept in the main transcript before the final response"
@@ -269,6 +276,18 @@ for i in $(seq 1 200); do
     seen_plan_one=1
     plan_step_one=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+: LIVE_PLAN_ONE' | sed -E 's/Step ([0-9]+).*/\1/' | tail -1)
     assert_current_layout "$final_text" "Step $plan_step_one: LIVE_PLAN_ONE"
+    activity_line=$(printf '%s\n' "$final_text" | grep -F "Step $plan_step_one: LIVE_PLAN_ONE" | tail -1)
+    if [ -n "$activity_line" ]; then
+      case "$activity_line" in
+        *"$ACTIVITY_PREFIX"*)
+          if [ -z "$first_activity_line" ]; then first_activity_line=$activity_line; fi
+          ;;
+      esac
+      if [ -n "$first_activity_line" ] && [ -z "$second_activity_line" ] && [ "$activity_line" != "$first_activity_line" ]; then
+        second_activity_line=$activity_line
+        activity_moves=1
+      fi
+    fi
   fi
   if printf '%s' "$final_text" | grep -Eq 'Step [0-9]+: LIVE_PLAN_TWO'; then
     seen_plan_two=1
@@ -305,12 +324,20 @@ done
   || fail "Calm step numbers did not increase monotonically: $plan_step_one, $plan_step_two, $plan_step_three"
 printf '%s' "$final_text" | grep -Fq 'CALM_LIVE_HERDR_FINAL' \
   || fail "real Pi/Herdr fixture did not settle its final response"
-printf '%s' "$final_text" | grep -Fq "$MAGENTA_BACKGROUND" \
-  || fail "real Pi/Herdr final assistant row did not carry Calm's magenta background ANSI"
+printf '%s' "$final_text" | grep -Fq "$MUTED_PURPLE_BACKGROUND" \
+  || fail "real Pi/Herdr final assistant row did not carry Calm's muted purple background ANSI"
+[ "$activity_moves" -eq 1 ] \
+  || fail "real Pi/Herdr did not move the right-side activity ticker while keeping the step prefix fixed"
 for number in 1 2 3; do
   printf '%s' "$final_text" | grep -Fq "Step $number: LIVE_PLAN_" \
     || fail "final Pi response did not retain Step $number in the completed assistant row"
 done
+final_step_line=$(printf '%s\n' "$final_text" | grep -Fn 'Step 3: LIVE_PLAN_THREE' | tail -1 | cut -d: -f1)
+final_response_line=$(printf '%s\n' "$final_text" | grep -Fn 'CALM_LIVE_HERDR_FINAL' | tail -1 | cut -d: -f1)
+[ -n "$final_step_line" ] && [ -n "$final_response_line" ] && [ "$final_response_line" -eq $((final_step_line + 2)) ] \
+  || fail "final Pi response did not place exactly one blank row between the last step and final response"
+[ "$(printf '%s\n' "$final_text" | sed -n "$((final_step_line + 1))p" | tr -d '[:space:]')" = "" ] \
+  || fail "final Pi response did not contain a blank row after the last step"
 printf '%s' "$final_text" | grep -Fq 'calm live fixture' \
   && fail "final Pi response retained the read tool result"
 for number in 1 2 3; do
@@ -326,4 +353,4 @@ grep -Fq 'LIVE_PLAN_THREE' "$session_file" || fail "third planning context was n
 grep -Fq 'COMMENTARY_1' "$session_file" || fail "first commentary context was not persisted"
 grep -Fq 'COMMENTARY_2' "$session_file" || fail "second commentary context was not persisted"
 grep -Fq 'COMMENTARY_3' "$session_file" || fail "third commentary context was not persisted"
-printf 'ok - real Pi %s in Herdr upgraded the retained prior Calm controller through /reload, kept each commentary row once beside its accumulated numbered transcript steps, hid thinking placeholders and read rows, ordered the steps and commentary above the ship, and settled with the completed steps attached to the final answer\n' "$(pi --version)"
+printf 'ok - real Pi %s in Herdr upgraded the retained prior Calm controller through /reload, kept each commentary row once beside fixed numbered steps, moved the safe right-side activity ticker, hid thinking placeholders and read rows, and settled with one blank row before the final answer\n' "$(pi --version)"
