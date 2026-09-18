@@ -105,6 +105,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 NOTIFY_DIR="$STATE/hermes-notify"
 PRESENCE_RECORD="$STATE/captain-presence"
+NOTIFY_SEQ_FILE="$NOTIFY_DIR/.seq"
 CAPTAIN_HOLD="$SCRIPT_DIR/fm-captain-hold.sh"
 MAX_TEXT_BYTES=4000
 
@@ -214,7 +215,7 @@ cmd_route() {
   fi
   message=$(cat "$message_file")
   [ -n "${message//[[:space:]]/}" ] || { printf 'fm-hermes-notify: refusing an empty message\n' >&2; exit 2; }
-  message=$(printf '%s' "$message" | cut -c1-"$MAX_TEXT_BYTES")
+  message=$(truncate_to_max_bytes "$message")
   digest=$(sha256_text "$message")
   record=$(route_record_path "$class" "$key")
   if [ -f "$record" ] && [ "$(record_field "$record" digest)" = "$digest" ] \
@@ -260,6 +261,33 @@ sha256_text() {  # <text>
   fi
 }
 
+# Trims text to MAX_TEXT_BYTES actual bytes, not locale-dependent characters,
+# matching Telegram's real per-message byte ceiling. `cut -c` counts locale
+# characters by default, which under a UTF-8 locale lets multi-byte text
+# survive well past the byte ceiling this promises.
+truncate_to_max_bytes() {  # <text>
+  local text=$1
+  local LC_ALL=C
+  printf '%s' "$text" | cut -c1-"$MAX_TEXT_BYTES"
+}
+
+# A strictly increasing counter, shared across every route/register send in
+# this NOTIFY_DIR, that records true send order. sent_at alone (whole-second
+# `date +%s`) cannot break a tie between two sends in the same wall-clock
+# second; this can, without depending on nanosecond clock resolution that
+# isn't portable across this project's supported platforms.
+next_seq() {
+  local cur=0 tmp
+  mkdir -p "$NOTIFY_DIR"
+  [ -f "$NOTIFY_SEQ_FILE" ] && cur=$(cat "$NOTIFY_SEQ_FILE" 2>/dev/null)
+  case "$cur" in ''|*[!0-9]*) cur=0 ;; esac
+  cur=$((cur + 1))
+  tmp=$(mktemp "$NOTIFY_DIR/.seq.staging-XXXXXX") || return 1
+  printf '%s\n' "$cur" >"$tmp"
+  mv "$tmp" "$NOTIFY_SEQ_FILE"
+  printf '%s\n' "$cur"
+}
+
 record_path() {  # <task-id>
   printf '%s/%s.record\n' "$NOTIFY_DIR" "$1"
 }
@@ -290,7 +318,10 @@ write_record() {  # <task-id> <chat_id> <label> <reason_digest> <lifecycle> <sta
     printf 'lifecycle=%s\n' "$(flatten "$lifecycle")"
     printf 'status=%s\n' "$(flatten "$status")"
     printf 'created_at=%s\n' "$(flatten "$created_at")"
-    [ -z "$sent_at" ] || printf 'sent_at=%s\n' "$(flatten "$sent_at")"
+    if [ -n "$sent_at" ]; then
+      printf 'sent_at=%s\n' "$(flatten "$sent_at")"
+      printf 'seq=%s\n' "$(next_seq)"
+    fi
     [ -z "$answered_at" ] || printf 'answered_at=%s\n' "$(flatten "$answered_at")"
   } >"$tmp"
   mv "$tmp" "$(record_path "$task")"
@@ -364,7 +395,7 @@ cmd_register() {
     printf 'fm-hermes-notify: refusing an empty reason\n' >&2
     exit 2
   }
-  reason=$(printf '%s' "$reason" | cut -c1-"$MAX_TEXT_BYTES")
+  reason=$(truncate_to_max_bytes "$reason")
   [ -n "$label" ] || label=$task
 
   local identity rc=0
@@ -459,7 +490,7 @@ cmd_resolve_reply() {
   reply=$(printf '%s\n' "$parsed" | sed -n '2,$p')
   reply=$(flatten "$reply")
 
-  local best='' best_sent_at=-1 file task status record_chat_id sent_at label rc
+  local best='' best_sent_at=-1 best_seq=-1 file task status record_chat_id sent_at seq label rc
   for file in "$NOTIFY_DIR"/*.record; do
     [ -e "$file" ] || continue
     status=$(record_field "$file" status)
@@ -473,9 +504,17 @@ cmd_resolve_reply() {
     [ "$rc" -eq 0 ] || continue
     sent_at=$(record_field "$file" sent_at)
     case "$sent_at" in ''|*[!0-9]*) sent_at=0 ;; esac
-    if [ "$sent_at" -ge "$best_sent_at" ]; then
+    seq=$(record_field "$file" seq)
+    case "$seq" in ''|*[!0-9]*) seq=0 ;; esac
+    # sent_at alone (whole-second resolution) cannot tell two same-second
+    # sends apart; seq (true send order, assigned once per record at the
+    # moment it becomes sent) breaks that tie deterministically instead of
+    # falling back to directory-glob (task id alphabetical) iteration order.
+    if [ "$sent_at" -gt "$best_sent_at" ] \
+        || { [ "$sent_at" -eq "$best_sent_at" ] && [ "$seq" -gt "$best_seq" ]; }; then
       best=$task
       best_sent_at=$sent_at
+      best_seq=$seq
       label=$(record_field "$file" label)
     fi
   done
