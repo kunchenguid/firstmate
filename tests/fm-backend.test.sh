@@ -461,12 +461,12 @@ test_backend_paseo_autodetect() {
   mkdir -p "$cfg" "$cfg_paseo"; printf 'paseo\n' > "$cfg_paseo/backend"
   errfile="$dir/err.txt"
 
-  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier; PATH="$FAKE_NONDARWIN_BIN:$PATH"; PASEO_AGENT_ID=agent-1
-    fm_backend_detect >/dev/null && printf '%s %s' "$FM_BACKEND_DETECTED" "$FM_BACKEND_DETECT_SIGNAL")
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier
+    PATH="$FAKE_NONDARWIN_BIN:$PATH" PASEO_AGENT_ID=agent-1 fm_backend_detect >/dev/null && printf '%s %s' "$FM_BACKEND_DETECTED" "$FM_BACKEND_DETECT_SIGNAL")
   [ "$out" = "paseo PASEO_AGENT_ID" ] || fail "fm_backend_detect should report paseo from PASEO_AGENT_ID, got '$out'"
 
-  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID; PATH="$FAKE_NONDARWIN_BIN:$PATH"; __CFBundleIdentifier=sh.paseo.desktop
-    fm_backend_detect >/dev/null && printf '%s %s' "$FM_BACKEND_DETECTED" "$FM_BACKEND_DETECT_SIGNAL")
+  out=$(unset TMUX HERDR_ENV CMUX_WORKSPACE_ID PASEO_AGENT_ID
+    PATH="$FAKE_NONDARWIN_BIN:$PATH" __CFBundleIdentifier=sh.paseo.desktop fm_backend_detect >/dev/null && printf '%s %s' "$FM_BACKEND_DETECTED" "$FM_BACKEND_DETECT_SIGNAL")
   [ "$out" = "paseo bundle-id" ] || fail "fm_backend_detect should report paseo from the sh.paseo.desktop bundle id, got '$out'"
 
   out=$(unset HERDR_ENV CMUX_WORKSPACE_ID; TMUX='fake,1,0' PASEO_AGENT_ID=agent-1 fm_backend_detect)
