@@ -941,6 +941,58 @@ test_executor_exit_sends_ctrl_c_and_reads_the_exit_marker() {
 }
 
 
+# The reviewer's live sequence: a long-running executor is stopped from the
+# control plane, and the supervisor's own state read must then agree that the
+# incarnation ended - without waiting out FM_EXECUTOR_MAX_RUNTIME. Ctrl-C kills
+# the one-shot before the pane shell reaches its half of the launch line, so
+# control's proved stop is the only thing that can leave the terminal record.
+test_executor_exit_leaves_the_task_reading_ended() {
+  local dir out rc base marker
+  dir=$(new_case exec-exit-state)
+  add_task "$dir" t1 opencode executor
+  base=$(git -C "$dir/wt-t1" rev-parse HEAD)
+  {
+    echo "issue=4"
+    echo "spawn_gen=s1000.1.1"
+    echo "executor_base=$base"
+    echo "executor_launched=$(( $(date +%s) - 120 ))"
+  } >> "$dir/home/state/t1.meta"
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$dir/fakebin/gh"
+  alive_as "$dir" opencode
+  out=$(FM_FAKE_INTERRUPT_STOPS_AGENT=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit on a long-running executor should stop it"$'\n'"$out"
+  assert_contains "$out" "stopped t1 harness=opencode" "exit should report the stop"
+  marker="$dir/home/state/t1.executor-exit"
+  [ -f "$marker" ] || fail "a proved stop must leave the incarnation's exit marker behind"
+  [ "$(cat "$marker")" = operator-exit ] \
+    || fail "the marker must say the operator ended it, got: $(cat "$marker")"
+  out=$(env PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_HOME="$dir/home" \
+    "$ROOT/bin/fm-crew-state.sh" t1 2>&1); rc=$?
+  expect_code 0 "$rc" "crew-state should read the stopped executor"$'\n'"$out"
+  assert_not_contains "$out" "state: working" "a stopped executor must not still read as working"
+  assert_contains "$out" "source: executor" "the read stays the executor's own"
+  pass "fm-control exit: a stopped executor reads as ended by the supervisor's own state read"
+}
+
+# A failed stop must leave the task honestly running: no marker is written
+# speculatively, so nothing claims a terminal outcome the process never had.
+test_executor_exit_that_fails_writes_no_marker() {
+  local dir out rc
+  dir=$(new_case exec-exit-nomarker)
+  add_task "$dir" t1 opencode executor
+  alive_as "$dir" opencode
+  out=$(FM_FAKE_NEVER_DIES=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "an executor that ignores the stop must fail closed"
+  [ ! -e "$dir/home/state/t1.executor-exit" ] \
+    || fail "an unconfirmed stop must not record an exit marker"
+  pass "fm-control exit: an unconfirmed stop records no exit marker, so the task still reads as running"
+}
+
 test_fm_send_refuses_an_executor_target() {
   local dir out rc
   dir=$(new_case exec-send)
@@ -995,4 +1047,6 @@ test_fm_send_still_marks_the_same_secondmate_task
 test_executor_kind_capability
 test_executor_interrupt_is_refused
 test_executor_exit_sends_ctrl_c_and_reads_the_exit_marker
+test_executor_exit_leaves_the_task_reading_ended
+test_executor_exit_that_fails_writes_no_marker
 test_fm_send_refuses_an_executor_target

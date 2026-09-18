@@ -62,8 +62,11 @@
 #              verdict; a process that survives it is sent SIGTERM through the
 #              foreground process group where the backend exposes it (tmux),
 #              never the pane shell itself, and an executor that still does not
-#              stop fails closed with exit=unconfirmed. Already exited is
-#              idempotent success.
+#              stop fails closed with exit=unconfirmed. Once - and only once -
+#              the stop is proved, it records that marker itself when the killed
+#              one-shot never let the pane shell write it, so every reader of
+#              the task agrees the incarnation ended and says it was the
+#              operator who ended it. Already exited is idempotent success.
 #   relaunch   Re-runs the one-shot command in the same worktree on the same
 #              fm/<id> branch, exactly as the previous executor left it, on the
 #              same or an explicitly chosen headless harness, model, and effort;
@@ -514,6 +517,16 @@ wait_executor_started() {  # <timeout>
   return 1
 }
 
+# record_operator_exit: after a PROVED stop, leave the incarnation's terminal
+# record behind. A Ctrl-C that killed the one-shot also kills the compound
+# launch list before the pane shell writes its half, so without this the task
+# would read as still running to every structural reader until the runtime
+# bound. Never called speculatively: an unconfirmed stop dies above instead.
+record_operator_exit() {
+  fm_executor_exit_marker_record_operator "$STATE" "$ID" \
+    || die "task $ID's executor stopped but its exit marker could not be recorded in $STATE, so the task would keep reading as running; fix the state directory and re-run exit"
+}
+
 # do_exit_executor: stop a one-shot executor process. Ctrl-C first, then
 # SIGTERM to the foreground process group where the backend exposes it, never
 # the pane shell; the postcondition is the exit marker or a dead classifier
@@ -537,6 +550,7 @@ do_exit_executor() {
   fm_backend_send_key "$BACKEND" "$T" C-c "$LABEL" \
     || die "Ctrl-C could not be delivered to task $ID on $BACKEND"
   if wait_executor_stopped "$EXIT_WAIT" >/dev/null; then
+    record_operator_exit
     printf 'stopped'
     return 0
   fi
@@ -551,6 +565,7 @@ do_exit_executor() {
 $(fm_backend_tmux_foreground_pids "$T")
 EOF
     if wait_executor_stopped "$EXIT_WAIT" >/dev/null; then
+      record_operator_exit
       printf 'stopped'
       return 0
     fi

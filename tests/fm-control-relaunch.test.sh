@@ -1768,6 +1768,9 @@ test_executor_relaunch_reruns_in_place_and_rearms_the_poll() {
   # A previous attempt's merge poll for a bounced pull request still owns the
   # check name and its sidecar; the relaunched executor's poll replaces both.
   cp "$ROOT/bin/fm-pr-poll.sh" "$dir/home/state/ex1.check.sh"; chmod 0600 "$dir/home/state/ex1.check.sh"
+  # The previous incarnation was stopped from the control plane, so its marker
+  # is the operator record; the new incarnation must inherit neither marker.
+  printf 'operator-exit\n' > "$dir/home/state/ex1.executor-exit"
   printf 'github\nhttps://github.com/o/r/pull/1\ngithub.com\no/r\n1\n' > "$dir/home/state/ex1.pr-poll"
 
   out=$(run_control "$dir" ex1 relaunch); rc=$?
@@ -1780,7 +1783,8 @@ test_executor_relaunch_reruns_in_place_and_rearms_the_poll() {
     || fail "the relaunch must record the branch base at the worktree's HEAD, so the poll counts only the new incarnation's commits"
   [ "$(meta_field "$dir" ex1 executor_launched)" != 1000 ] || fail "a relaunch must mint a fresh launch epoch"
   [ "$(meta_field "$dir" ex1 spawn_gen)" != s1000.1.1 ] || fail "a relaunch must mint a fresh incarnation"
-  [ ! -e "$dir/home/state/ex1.executor-exit" ] || fail "the previous run's exit marker must be cleared"
+  [ ! -e "$dir/home/state/ex1.executor-exit" ] \
+    || fail "the previous run's exit marker, operator-written or not, must be cleared with the freshly minted base"
   cmp -s "$ROOT/bin/fm-executor-poll.sh" "$dir/home/state/ex1.check.sh" \
     || fail "the relaunch must re-arm the executor poll over the stale merge poll"
   [ ! -e "$dir/home/state/ex1.pr-poll" ] || fail "the stale merge poll's sidecar must be retired"
