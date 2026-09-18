@@ -104,6 +104,14 @@ default_branch() {
 BRANCH="fm/$ID"
 git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $PROJ" >&2; exit 1; }
 
+# Every resolution below names the target in FULL as refs/heads/<target>, and the
+# checked-out-branch guard reads HEAD's unshortened symbolic ref for the same
+# reason: git resolves a bare name through refs/tags/ first, and `symbolic-ref
+# --short` returns `heads/<name>` when a tag shadows the branch, so a bare-name
+# guard or ancestry check would measure the tag instead of the branch this lands
+# on. bin/fm-review-diff.sh states that rule in full, and this file's own
+# tag-shadow regression in tests/fm-merge-local.test.sh pins it here.
+# The bare $TARGET stays in the human-facing messages, which only name it.
 if [ -n "$RECORDED_BASE" ]; then
   TARGET=$RECORDED_BASE
   TARGET_REF="refs/heads/$TARGET"

@@ -323,7 +323,7 @@ The `data/secondmates.md` line contract is owned by the [`secondmate-provisionin
 
 `no-mistakes` tasks run the full validation pipeline, `direct-PR` tasks open PRs without that pipeline, and `local-only` tasks stay local until firstmate performs an approved fast-forward merge.
 Each task's mode, `yolo` merge posture, and delivery target branch are firstmate's decision at intake.
-The mode is passed explicitly to `bin/fm-brief.sh`, and both values are passed explicitly to `bin/fm-spawn.sh` and `bin/fm-promote.sh`; each command refuses to guess the values it consumes.
+The mode is passed explicitly to `bin/fm-brief.sh`, and the mode and `yolo` posture are both passed explicitly to `bin/fm-spawn.sh` and `bin/fm-promote.sh`; each command refuses to guess the values it consumes.
 Work that lands on a long-lived branch rather than the repo default branch carries that branch as an explicit `--base` through the brief and the spawn, which records it in the task's metadata.
 A ship brief records its mode, and its delivery target branch when it has one, as a fixed machine-readable line, and the spawn refuses to launch on a different one, so the worker's instructions and the recorded task delivery cannot diverge.
 `bin/fm-teardown.sh` and `bin/fm-merge-local.sh` measure landing and the guarded local fast-forward against that recorded branch, name the branch they measured against so a refusal explains itself, and fall back to the default branch only when the task records none, never inferring one from a merge-base or the branch's shape; an inaccurate landed-work refusal is what trains an operator to reach for `--force`, the same flag that discards genuinely unlanded work.
