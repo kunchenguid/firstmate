@@ -14,6 +14,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import * as PiCodingAgent from "@earendil-works/pi-coding-agent";
 import {
+  appendCalmStep,
   calmPresentationHides,
   calmStockExportRenderingIsActive,
 } from "./fm-calm-visibility.ts";
@@ -57,6 +58,22 @@ type CalmToolLayoutController = {
 const CALM_TOOL_LAYOUT_CONTROLLER = Symbol.for(
   "firstmate:calm-tool-layout-controller:pi-0.85.1",
 );
+
+function appendLatestCalmStep(message: AssistantMessage, isStreaming: boolean): void {
+  if (!isStreaming || !calmPresentationHides("assistant-thinking")) return;
+  for (let index = message.content.length - 1; index >= 0; index -= 1) {
+    const block = message.content[index];
+    if (block.type !== "thinking") continue;
+    const line = block.thinking
+      .split(/\r?\n/)
+      .map((value) => value.trim())
+      .filter(Boolean)
+      .at(-1);
+    if (!line) return;
+    appendCalmStep(line.match(/^\*\*(.+)\*\*$/)?.[1] ?? line);
+    return;
+  }
+}
 
 export function installCalmAssistantLayout(
   pi: Pick<ExtensionAPI, "registerMarkdownTransformer">,
@@ -118,6 +135,7 @@ export function installCalmAssistantLayout(
   );
 
   activeController.render = (component, message, isStreaming): void => {
+    appendLatestCalmStep(message, isStreaming);
     const prior = activeController.presentations.get(component);
     const sourceMessage = message === prior?.rendered ? prior.source : message;
     const state = component as unknown as AssistantMessagePresentationState;

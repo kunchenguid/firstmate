@@ -4,7 +4,7 @@ Calm is a Pi-only conversation presentation toggle.
 It is off by default, and the last `/calm` choice persists for the effective Firstmate home across Pi session starts and resumes.
 
 While Calm is active and an agent run is under way, Calm hides Pi's built-in `Working...` row and shows a small two-row animated boat in its place.
-Each in-progress assistant thinking update is rendered as one replacing numbered `Step N:` row immediately above the boat, while assistant commentary remains on Pi's ordinary transcript surface above both.
+Each distinct in-progress assistant thinking update accumulates as a compact adjacent numbered `Step N: ...` line above the editor, while assistant commentary remains on Pi's ordinary transcript surface above both.
 The water fills the usable width with low one-cell Unicode bars, using standard ANSI blue for troughs and cyan for crests.
 The asymmetric three-cell `◿│◣` sail is centered over the five-cell `╲▁▁▁╱` hull, with a smaller standard ANSI yellow quarter sail, a larger standard ANSI red right sail, and a blue zero-height interior that keeps the water visible through the boat.
 The boat is deliberately calm: it moves one column every 880ms, while the long smooth wave advances one quarter-cell every 220ms so the surface stays alive between boat steps.
@@ -16,14 +16,14 @@ A fresh Pi session or new Calm extension lifetime starts at the normal initial p
 Very narrow terminals fall back to a smaller deterministic sprite.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
 Calm hides raw and collapsed assistant thinking, routine supervision notes, every Pi model-tool call, argument, result, image, timing, and collapsed shell, and canonically classified Firstmate operational user rows.
-Calm shows the latest live thinking line in a keyed widget, prefixed with an increasing `Step N:` counter, while the model is streaming.
-Each distinct streamed thinking line updates that component in place instead of accumulating planning transcript rows, and the component is inserted before the ship so later updates cannot move it below the animation.
+Calm shows each distinct streamed thinking line in the existing above-editor status presentation, prefixed with an increasing `Step N:` counter while the model is streaming.
+The lines stay adjacent without blank rows, remain visible after the response settles, and never become planning transcript rows.
 Assistant text is commentary rather than a step title and renders through Pi's ordinary assistant transcript component as it streams.
 That commentary remains visible exactly once after its tool turn, across later step replacement, finalization, session reload, and repeated Calm toggles, without adding a custom entry or changing the assistant message.
 When the response settles, live planning thinking is hidden while assistant commentary and the genuine final response stay visible.
 Once Calm has owned planning as step input, that historical planning stays hidden after reload and while Calm is off, including during explicit reasoning expansion, so superseded step titles never return to the conversation.
 Hidden planning thinking and routine supervision notes remain in their messages, model context, session storage, and `/export` artifacts.
-The transient step disappears when the main run settles, so commentary and the final answer remain as ordinary transcript output.
+The accumulated steps reset when a new agent run, session, Calm disable, or shutdown begins, so commentary and the final answer remain ordinary transcript output.
 The operational inputs Calm classifies remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
 The session-start nudge remains on its existing non-displayed custom-message path.
 
@@ -49,7 +49,7 @@ Calm off calls Pi's original renderer byte-for-byte, and stock export rendering 
 
 [`calm-mode-feasibility.md`](calm-mode-feasibility.md) owns the version-scoped renderer taxonomy, tool-component boundary, and empirical evidence.
 [`configuration.md`](configuration.md#pi-calm-preference-configcalm) owns the persisted preference file and resolution rules.
-`.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy, `.pi/extensions/lib/fm-calm-assistant-layout.ts` owns zero-height assistant and tool layout, `.pi/extensions/fm-calm.ts` owns current-step extraction and its keyed widget, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, `.pi/extensions/lib/fm-calm-working-ship.ts` owns the animated working presentation, and `.pi/extensions/fm-branch-supervision.ts` owns routine supervision-note delivery.
+`.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy and accumulated-step list, `.pi/extensions/lib/fm-calm-assistant-layout.ts` owns zero-height assistant and tool layout plus streamed-step extraction, `.pi/extensions/fm-calm.ts` owns lifecycle-bound status presentation, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, `.pi/extensions/lib/fm-calm-working-ship.ts` owns the animated working presentation, and `.pi/extensions/fm-branch-supervision.ts` owns routine supervision-note delivery.
 
 Regression entry points:
 

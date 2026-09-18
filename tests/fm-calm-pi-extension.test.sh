@@ -1227,10 +1227,8 @@ if (readFileSync(`${process.env.FM_HOME}/config/calm`, "utf8") !== "on\n") {
   throw new Error("Calm did not persist the active choice in the effective Firstmate home");
 }
 await handlers.get("agent_start")[0]({}, commandContext);
-await handlers.get("message_start")[0]({ message: assistantProgressMessage }, commandContext);
 assistantProgress.updateContent(assistantProgressMessage, true);
-await handlers.get("message_update")[0]({ message: assistantProgressMessage }, commandContext);
-let progressText = renderedWidget("firstmate-calm-current-step");
+let progressText = statuses.get("firstmate-calm") ?? "";
 let commentaryText = assistantProgress.render(100).join("\n");
 if (assistantExpandedThinking.render(100).join("\n").includes("RAW_EXPANDED_THINKING")) {
   throw new Error("Calm's public Markdown transformer left expanded raw thinking visible");
@@ -1242,34 +1240,26 @@ if (
 ) {
   throw new Error(`Calm did not separate the current thinking title from durable commentary: ${progressText} / ${commentaryText}`);
 }
-if (
-  JSON.stringify([...widgets.keys()]) !==
-  JSON.stringify(["firstmate-calm-current-step", "firstmate-calm-working-ship"])
-) {
-  throw new Error(`Calm did not install the current step above the working ship: ${[...widgets.keys()].join(",")}`);
+if (JSON.stringify([...widgets.keys()]) !== JSON.stringify(["firstmate-calm-working-ship"])) {
+  throw new Error(`Calm did not retain only the working ship widget: ${[...widgets.keys()].join(",")}`);
 }
 assistantProgress.updateContent(nextAssistantProgressMessage, true);
-await handlers.get("message_update")[0]({ message: nextAssistantProgressMessage }, commandContext);
-progressText = renderedWidget("firstmate-calm-current-step");
+progressText = statuses.get("firstmate-calm") ?? "";
 commentaryText = assistantProgress.render(100).join("\n");
 if (
-  !progressText.includes("Step 2: NEXT_STEP_FROM_ASSISTANT") ||
-  progressText.includes("CURRENT_STEP_FROM_ASSISTANT") ||
-  (commentaryText.match(/DURABLE_COMMENTARY_FROM_ASSISTANT/g) || []).length !== 1 ||
-  [...widgets.keys()][0] !== "firstmate-calm-current-step"
+  progressText !== "Step 1: CURRENT_STEP_FROM_ASSISTANT\nStep 2: NEXT_STEP_FROM_ASSISTANT" ||
+  (commentaryText.match(/DURABLE_COMMENTARY_FROM_ASSISTANT/g) || []).length !== 1
 ) {
-  throw new Error(`Calm did not replace only the prior step while retaining commentary once: ${progressText} / ${commentaryText}`);
+  throw new Error(`Calm did not accumulate compact steps while retaining commentary once: ${progressText} / ${commentaryText}`);
 }
 assistantProgress.updateContent(nextAssistantProgressMessage, false);
-await handlers.get("message_end")[0]({ message: nextAssistantProgressMessage }, commandContext);
 await handlers.get("agent_settled")[0]({}, commandContext);
 commentaryText = assistantProgress.render(100).join("\n");
 if (
-  statuses.get("firstmate-calm") !== undefined ||
-  widgets.has("firstmate-calm-current-step") ||
+  statuses.get("firstmate-calm") !== "Step 1: CURRENT_STEP_FROM_ASSISTANT\nStep 2: NEXT_STEP_FROM_ASSISTANT" ||
   (commentaryText.match(/DURABLE_COMMENTARY_FROM_ASSISTANT/g) || []).length !== 1
 ) {
-  throw new Error("Calm finalization did not retain commentary once while clearing the transient step");
+  throw new Error("Calm finalization did not retain the accumulated steps and commentary once");
 }
 presentationComponent.setExpanded(!expanded);
 if (presentationComponent.hasContent() || presentationComponent.render(100).length !== 0) {
@@ -1489,7 +1479,7 @@ JS
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm renderer and lifecycle contract failed: $out"
   [ -z "$out" ] || fail "Pi calm renderer test printed output: $out"
-  pass "Pi Calm separates thinking into one current-step component above the ship, keeps assistant commentary exactly once, never restores historical planning during Calm-off fallback, preserves execution/export data, leaves Pi's stock working row visible while idle, and persists its choice across session starts"
+  pass "Pi Calm accumulates distinct thinking lines as compact status steps, keeps assistant commentary exactly once, never restores historical planning during Calm-off fallback, preserves execution/export data, leaves Pi's stock working row visible while idle, and persists its choice across session starts"
 }
 
 test_calm_mid_turn_working_notes() {
@@ -1539,6 +1529,7 @@ const visibility = await import(pathToFileURL(`${process.cwd()}/lib/fm-calm-visi
 const calmPreferencePath = `${process.env.FM_HOME}/config/calm`;
 const components = [];
 const widgets = new Map();
+const statuses = new Map();
 const renderedWidget = (key) => widgets.get(key)?.({ requestRender() {} }).render(100).join("\n") ?? "";
 const ui = {
   getEditorText: () => "",
@@ -1548,7 +1539,9 @@ const ui = {
     // Pi's own fan-out: every mounted assistant row re-runs its layout.
     for (const component of components) component.setHiddenThinkingLabel(value ?? "Thinking...");
   },
-  setStatus() {},
+  setStatus(key, value) {
+    statuses.set(key, value);
+  },
   setToolsExpanded() {},
   setWorkingVisible() {},
   setWidget(key, value) {
@@ -1565,9 +1558,6 @@ async function loadCalmExtension() {
   let sessionStart;
   let agentStart;
   let agentSettled;
-  let messageStart;
-  let messageUpdate;
-  let messageEnd;
   let calmCommand;
   const pi = {
     events: { emit() {}, on() {} },
@@ -1575,9 +1565,6 @@ async function loadCalmExtension() {
       if (event === "session_start") sessionStart = handler;
       if (event === "agent_start") agentStart = handler;
       if (event === "agent_settled") agentSettled = handler;
-      if (event === "message_start") messageStart = handler;
-      if (event === "message_update") messageUpdate = handler;
-      if (event === "message_end") messageEnd = handler;
     },
     registerCommand(name, command) {
       if (name === "calm") calmCommand = command;
@@ -1593,19 +1580,10 @@ async function loadCalmExtension() {
   };
   const extension = await import(`${pathToFileURL(process.env.EXT).href}?instance=${Date.now()}-${Math.random()}`);
   extension.default(pi);
-  if (!calmCommand || !sessionStart || !agentStart || !agentSettled || !messageStart || !messageUpdate || !messageEnd) {
+  if (!calmCommand || !sessionStart || !agentStart || !agentSettled) {
     throw new Error("Calm extension did not register its command and lifecycle handlers");
   }
-  return {
-    calmCommand,
-    sessionStart,
-    agentStart,
-    agentSettled,
-    messageStart,
-    messageUpdate,
-    messageEnd,
-    registeredTools,
-  };
+  return { calmCommand, sessionStart, agentStart, agentSettled, registeredTools };
 }
 
 const assistantBase = {
@@ -1725,39 +1703,21 @@ const liveMessage = {
   stopReason: "pending",
   content: [{ type: "thinking", thinking: "LIVE_STEP_ONE" }],
 };
-await calm.messageStart({ message: liveMessage }, context);
 live.updateContent(liveMessage, true);
-await calm.messageUpdate({ message: liveMessage }, context);
-let liveStepText = renderedWidget("firstmate-calm-current-step");
-if (!liveStepText.includes("Step 1: LIVE_STEP_ONE") || live.render(100).length !== 0) {
-  throw new Error("live Calm thinking did not render as the first numbered widget");
+if (statuses.get("firstmate-calm") !== "Step 1: LIVE_STEP_ONE") {
+  throw new Error(`Calm did not show the first streamed step: ${statuses.get("firstmate-calm")}`);
 }
-liveMessage.content.push({ type: "text", text: "LIVE_DURABLE_COMMENTARY" });
 live.updateContent(liveMessage, true);
-await calm.messageUpdate({ message: liveMessage }, context);
-let liveCommentaryText = live.render(100).join("\n");
-liveStepText = renderedWidget("firstmate-calm-current-step");
-if (
-  !liveStepText.includes("Step 1: LIVE_STEP_ONE") ||
-  (liveCommentaryText.match(/LIVE_DURABLE_COMMENTARY/g) || []).length !== 1 ||
-  liveCommentaryText.includes("LIVE_STEP_ONE")
-) {
-  throw new Error(`live Calm did not separate assistant commentary from the thinking step: ${liveStepText} / ${liveCommentaryText}`);
+if (statuses.get("firstmate-calm") !== "Step 1: LIVE_STEP_ONE") {
+  throw new Error("Calm duplicated a repeated streaming update");
 }
 liveMessage.content[0].thinking = "LIVE_STEP_ONE\nLIVE_STEP_TWO";
 live.updateContent(liveMessage, true);
-await calm.messageUpdate({ message: liveMessage }, context);
-liveStepText = renderedWidget("firstmate-calm-current-step");
-liveCommentaryText = live.render(100).join("\n");
-if (
-  !liveStepText.includes("Step 2: LIVE_STEP_TWO") ||
-  liveStepText.includes("LIVE_STEP_ONE") ||
-  (liveCommentaryText.match(/LIVE_DURABLE_COMMENTARY/g) || []).length !== 1
-) {
-  throw new Error(`live Calm did not replace only the prior thinking step: ${liveStepText} / ${liveCommentaryText}`);
+if (statuses.get("firstmate-calm") !== "Step 1: LIVE_STEP_ONE\nStep 2: LIVE_STEP_TWO") {
+  throw new Error(`Calm did not accumulate compact numbered steps: ${statuses.get("firstmate-calm")}`);
 }
-if ((liveStepText.match(/Step [0-9]+:/g) || []).length !== 1) {
-  throw new Error(`live Calm thinking rendered more than one current widget: ${liveStepText}`);
+if (statuses.get("firstmate-calm").includes("\n\n")) {
+  throw new Error("Calm inserted blank rows between accumulated steps");
 }
 const finalMessage = {
   ...assistantBase,
@@ -1765,16 +1725,33 @@ const finalMessage = {
   content: [{ type: "text", text: "LIVE_FINAL_REPLY" }],
 };
 live.updateContent(finalMessage, false);
-await calm.messageEnd({ message: finalMessage }, context);
-await calm.agentSettled({}, context);
-const settledLiveText = live.render(100).join("\n");
-if (
-  !settledLiveText.includes("LIVE_FINAL_REPLY") ||
-  settledLiveText.includes("Step 2:") ||
-  widgets.has("firstmate-calm-current-step")
-) {
-  throw new Error("settled final assistant response retained the live step widget");
+if (statuses.get("firstmate-calm") !== "Step 1: LIVE_STEP_ONE\nStep 2: LIVE_STEP_TWO") {
+  throw new Error("Calm replaced the completed step list when the response ended");
 }
+await calm.agentSettled({}, context);
+if (statuses.get("firstmate-calm") !== "Step 1: LIVE_STEP_ONE\nStep 2: LIVE_STEP_TWO") {
+  throw new Error("Calm cleared the completed step list at settlement");
+}
+await calm.agentStart({}, context);
+if (statuses.get("firstmate-calm") !== undefined) {
+  throw new Error("Calm restored steps from the previous run at the next agent start");
+}
+const nextLive = new AssistantMessageComponent(undefined, false);
+components.push(nextLive);
+nextLive.updateContent({
+  ...assistantBase,
+  stopReason: "toolUse",
+  content: [{ type: "thinking", thinking: "NEXT_RUN_STEP" }],
+}, true);
+if (statuses.get("firstmate-calm") !== "Step 1: NEXT_RUN_STEP") {
+  throw new Error("Calm did not reset step numbering for the next run");
+}
+await calm.agentSettled({}, context);
+await calm.calmCommand.handler("", context);
+if (statuses.get("firstmate-calm") !== undefined) {
+  throw new Error("turning Calm off did not clear its completed step list");
+}
+await calm.calmCommand.handler("", context);
 requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm on");
 requireHidden("midTurn", "MIDTURN_STEP_TITLE", "Calm on");
 if ((renderedText("midTurn").match(/MIDTURN_WORKING_NOTE/g) || []).length !== 1) {
@@ -1882,7 +1859,7 @@ JS
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm mid-turn contract failed: $out"
   [ -z "$out" ] || fail "Pi calm mid-turn test printed output: $out"
-  pass "Pi Calm keeps assistant commentary exactly once across step replacement and finalization, suppresses persisted and expanded superseded titles across reload and repeated Calm toggles, preserves final replies and message data, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on"
+  pass "Pi Calm keeps assistant commentary exactly once while steps accumulate and settle, suppresses persisted and expanded superseded titles across reload and repeated Calm toggles, preserves final replies and message data, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on"
 }
 
 test_operational_followup_turn_e2e() {
@@ -3190,12 +3167,10 @@ check(liveTimers === 0, "toggling Calm on while idle started an animation timer"
 reset();
 await fire("agent_start");
 check(
-  ui.widgetOps.length === 2 &&
-    ui.widgetOps[0].key === "firstmate-calm-current-step" &&
-    ui.widgetOps[0].action === "set" &&
-    ui.widgetOps[1].key === CALM_WORKING_SHIP_WIDGET_KEY &&
-    ui.widgetOps[1].action === "set",
-  `Calm on did not install the transient step before the working ship: ${JSON.stringify(ui.widgetOps)}`,
+  ui.widgetOps.length === 1 &&
+    ui.widgetOps[0].key === CALM_WORKING_SHIP_WIDGET_KEY &&
+    ui.widgetOps[0].action === "set",
+  `Calm on did not install the working ship: ${JSON.stringify(ui.widgetOps)}`,
 );
 check(
   ui.widgetOps.every((operation) => operation.placement === undefined),
@@ -3226,7 +3201,7 @@ reset();
 for (let repeat = 0; repeat < 5; repeat += 1) await fire("agent_start");
 check(ui.widgetOps.length === 0, `repeated starts churned the working widget: ${JSON.stringify(ui.widgetOps)}`);
 check(liveTimers === 1, `repeated starts left ${liveTimers} animation timers`);
-check(ui.widgets.size === 2, `repeated starts left ${ui.widgets.size} widgets`);
+check(ui.widgets.size === 1, `repeated starts left ${ui.widgets.size} widgets`);
 check(shipWidget() === widget, "repeated starts replaced the running widget");
 
 // --- The animation drives Pi's renderer -------------------------------------------
@@ -3253,11 +3228,9 @@ check(freezeColumn > 0, `lifecycle continuity setup never left the left edge: ${
 reset();
 await fire("agent_settled");
 check(
-  ui.widgetOps.length === 2 &&
-    ui.widgetOps[0].key === "firstmate-calm-current-step" &&
-    ui.widgetOps[0].action === "clear" &&
-    ui.widgetOps[1].key === CALM_WORKING_SHIP_WIDGET_KEY &&
-    ui.widgetOps[1].action === "clear",
+  ui.widgetOps.length === 1 &&
+    ui.widgetOps[0].key === CALM_WORKING_SHIP_WIDGET_KEY &&
+    ui.widgetOps[0].action === "clear",
   `settling did not clear the working presentation: ${JSON.stringify(ui.widgetOps)}`,
 );
 check(liveTimers === 0, `settling left ${liveTimers} animation timers`);
@@ -3280,7 +3253,7 @@ check(
 reset();
 await fire("agent_start");
 check(liveTimers === 1, `resume start left ${liveTimers} animation timers instead of one`);
-check(ui.widgets.size === 2, "resume start did not install the step and working-ship widgets");
+check(ui.widgets.size === 1, "resume start did not install the working-ship widget");
 const resumedWidget = shipWidget();
 const resumeColumn = hullColumn(resumedWidget);
 const resumeSail = sailOf(resumedWidget.render(40));
@@ -3295,7 +3268,7 @@ for (let cycle = 0; cycle < 3; cycle += 1) {
   check(ui.widgets.size === 0, `cycle ${cycle} settle left a residual widget`);
   await fire("agent_start");
   check(liveTimers === 1, `cycle ${cycle} start left ${liveTimers} timers`);
-  check(ui.widgets.size === 2, `cycle ${cycle} start left ${ui.widgets.size} widgets`);
+  check(ui.widgets.size === 1, `cycle ${cycle} start left ${ui.widgets.size} widgets`);
   check(
     hullColumn(shipWidget()) >= freezeColumn,
     `cycle ${cycle} lost continuity after repeated settle/start`,

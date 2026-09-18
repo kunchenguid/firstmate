@@ -31,9 +31,9 @@ export const CALM_TRANSCRIPT_CLASSES = [
 export type CalmTranscriptClass = (typeof CALM_TRANSCRIPT_CLASSES)[number];
 
 // Calm is on or off. Assistant text stays on Pi's ordinary transcript surface while
-// assistant thinking supplies the transient current-step title. The assistant layout
-// separately retains ownership of thinking Calm has suppressed so toggling off cannot
-// reveal superseded planning history.
+// distinct streamed thinking lines accumulate as a transient above-editor step list.
+// The assistant layout separately retains ownership of thinking Calm has suppressed so
+// toggling off cannot reveal superseded planning history.
 const CALM_VISIBLE_CLASSES = new Set<CalmTranscriptClass>([
   "genuine-user-prompt",
   "genuine-agent-response",
@@ -69,6 +69,30 @@ type FirstmateSyntheticPresentation = {
 
 let calm = false;
 let stockExportRendering = false;
+let calmSteps: string[] = [];
+const calmStepListeners = new Set<(steps: readonly string[]) => void>();
+
+export function currentCalmSteps(): readonly string[] {
+  return calmSteps;
+}
+
+export function appendCalmStep(step: string): void {
+  const normalized = step.trim().replace(/\s+/g, " ");
+  if (normalized === "" || calmSteps.includes(normalized)) return;
+  calmSteps = [...calmSteps, normalized];
+  for (const listener of calmStepListeners) listener(calmSteps);
+}
+
+export function clearCalmSteps(): void {
+  if (calmSteps.length === 0) return;
+  calmSteps = [];
+  for (const listener of calmStepListeners) listener(calmSteps);
+}
+
+export function subscribeCalmSteps(listener: (steps: readonly string[]) => void): () => void {
+  calmStepListeners.add(listener);
+  return () => calmStepListeners.delete(listener);
+}
 
 export function calmTranscriptClassIsVisible(itemClass: CalmTranscriptClass): boolean {
   return CALM_VISIBLE_CLASSES.has(itemClass);

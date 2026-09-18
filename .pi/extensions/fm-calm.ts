@@ -12,9 +12,8 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import { getKeybindings, Text } from "@earendil-works/pi-tui";
+import { getKeybindings } from "@earendil-works/pi-tui";
 import {
   installCalmAssistantLayout,
   installCalmToolLayout,
@@ -27,36 +26,17 @@ import {
 } from "./lib/fm-calm-working-ship.ts";
 import {
   calmPresentationIsActive,
+  currentCalmSteps,
+  clearCalmSteps,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
   registerFirstmateSyntheticPresentation,
   setCalmPresentation,
   setCalmStockExportRendering,
+  subscribeCalmSteps,
 } from "./lib/fm-calm-visibility.ts";
 
 const extensionDir = dirname(fileURLToPath(import.meta.url));
 const root = resolve(extensionDir, "../..");
-const CALM_CURRENT_STEP_WIDGET_KEY = "firstmate-calm-current-step";
-
-type CurrentStep = {
-  key: string;
-  text: string;
-};
-
-function currentStep(message: AssistantMessage, messageSequence: number): CurrentStep | undefined {
-  for (let index = message.content.length - 1; index >= 0; index--) {
-    const block = message.content[index];
-    if (block.type !== "thinking") continue;
-    const lines = block.thinking
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-    const latest = lines.at(-1);
-    if (!latest) continue;
-    const text = latest.match(/^\*\*(.+)\*\*$/)?.[1] ?? latest;
-    return { key: `${messageSequence}:${index}:${lines.length}`, text };
-  }
-  return undefined;
-}
 
 // Each presentation adapter probes the exact Pi API it patches. If a future Pi removes
 // that API, only the affected adapter degrades; the rest of Calm keeps working.
@@ -81,64 +61,16 @@ export default function (pi: ExtensionAPI) {
   // continuations, retries, or compaction that stay inside the same run.
   let agentRunActive = false;
   let workingShipShown = false;
-  let currentStepWidgetShown = false;
-  let currentStepRequestRender: (() => void) | undefined;
-  let assistantMessageSequence = 0;
-  let currentStepKey: string | undefined;
-  let currentStepNumber = 0;
-  let currentStepText: string | undefined;
-
-  const clearCurrentStep = (): void => {
-    currentStepKey = undefined;
-    if (currentStepText === undefined) return;
-    currentStepText = undefined;
-    currentStepRequestRender?.();
+  let currentStepUi: ExtensionUIContext | undefined;
+  const updateCalmStepsPresentation = (): void => {
+    currentStepUi?.setStatus(
+      "firstmate-calm",
+      calmPresentationIsActive() && currentCalmSteps().length > 0
+        ? currentCalmSteps().map((step, index) => `Step ${index + 1}: ${step}`).join("\n")
+        : undefined,
+    );
   };
-
-  // Pi renders above-editor widgets in insertion order. Install this zero-height-until-
-  // needed component before the ship and update it in place, because setWidget()
-  // removes and re-adds an existing key and would move every new step below the ship.
-  const applyCurrentStepPresentation = (ui: ExtensionUIContext): void => {
-    const show = agentRunActive && calmPresentationIsActive();
-    if (show === currentStepWidgetShown) return;
-    currentStepWidgetShown = show;
-    if (!show) {
-      ui.setWidget(CALM_CURRENT_STEP_WIDGET_KEY, undefined);
-      currentStepRequestRender = undefined;
-      return;
-    }
-    ui.setWidget(CALM_CURRENT_STEP_WIDGET_KEY, (tui) => {
-      const requestRender = (): void => tui.requestRender();
-      currentStepRequestRender = requestRender;
-      return {
-        render: (width) =>
-          currentStepText === undefined
-            ? []
-            : new Text(currentStepText, 1, 0).render(width),
-        invalidate: () => {},
-        dispose: () => {
-          if (currentStepRequestRender === requestRender) {
-            currentStepRequestRender = undefined;
-          }
-        },
-      };
-    });
-  };
-
-  const showCurrentStep = (message: AssistantMessage): void => {
-    if (!agentRunActive || !calmPresentationIsActive()) {
-      clearCurrentStep();
-      return;
-    }
-    const step = currentStep(message, assistantMessageSequence);
-    if (!step) return;
-    if (step.key !== currentStepKey) {
-      currentStepKey = step.key;
-      currentStepNumber += 1;
-    }
-    currentStepText = `Step ${currentStepNumber}: ${step.text}`;
-    currentStepRequestRender?.();
-  };
+  subscribeCalmSteps(updateCalmStepsPresentation);
 
   // One animation instance per extension lifetime. Hiding the working widget freezes
   // this state; the next working period resumes it. session_start resets it so a fresh
@@ -206,22 +138,19 @@ export default function (pi: ExtensionAPI) {
   registerFirstmateSyntheticPresentation(pi);
 
   pi.on("session_start", (_event, ctx) => {
+    currentStepUi = ctx.ui;
+    clearCalmSteps();
     exportRendering = false;
     setCalmPresentation(loadCalmPreference());
     setCalmStockExportRendering(false);
     publishPresentationState();
     agentRunActive = false;
     workingShipShown = false;
-    currentStepWidgetShown = false;
-    currentStepRequestRender = undefined;
-    assistantMessageSequence = 0;
-    currentStepNumber = 0;
-    clearCurrentStep();
     // A genuine new session lifetime starts the boat at the normal initial position.
     workingShipAnimation.reset();
     applyWorkingPresentation(ctx.ui, true);
     ctx.ui.setHiddenThinkingLabel(calmPresentationIsActive() ? "" : undefined);
-    ctx.ui.setStatus("firstmate-calm", undefined);
+    updateCalmStepsPresentation();
     removeTerminalInputHandler?.();
     removeTerminalInputHandler = ctx.ui.onTerminalInput((data) => {
       if (!getKeybindings().matches(data, "tui.input.submit")) return undefined;
@@ -242,55 +171,34 @@ export default function (pi: ExtensionAPI) {
         exportRendering = false;
         setCalmStockExportRendering(false);
         publishPresentationState();
-        // setStatus requests a redraw without appending a transcript row, so the
-        // tool and operational adapters return to Calm without overwriting Pi's
-        // visible "Session exported to" confirmation.
-        ctx.ui.setStatus("firstmate-calm", undefined);
+        // Redraw the Calm status without overwriting Pi's visible export confirmation.
+        updateCalmStepsPresentation();
       }, 0);
       return undefined;
     });
   });
 
   pi.on("agent_start", (_event, ctx) => {
-    assistantMessageSequence = 0;
-    currentStepNumber = 0;
-    clearCurrentStep();
+    currentStepUi = ctx.ui;
+    clearCalmSteps();
     agentRunActive = true;
-    applyCurrentStepPresentation(ctx.ui);
     applyWorkingPresentation(ctx.ui);
-    ctx.ui.setStatus("firstmate-calm", undefined);
-  });
-
-  pi.on("message_start", (event) => {
-    if (event.message.role !== "assistant") return;
-    assistantMessageSequence += 1;
-    clearCurrentStep();
-  });
-
-  pi.on("message_update", (event) => {
-    if (event.message.role !== "assistant") return;
-    showCurrentStep(event.message);
-  });
-
-  pi.on("message_end", (event) => {
-    if (event.message.role === "assistant") clearCurrentStep();
+    updateCalmStepsPresentation();
   });
 
   // agent_settled is emitted from a finally block, so it also covers abort and failure.
   pi.on("agent_settled", (_event, ctx) => {
     agentRunActive = false;
-    clearCurrentStep();
-    applyCurrentStepPresentation(ctx.ui);
     applyWorkingPresentation(ctx.ui);
-    ctx.ui.setStatus("firstmate-calm", undefined);
+    updateCalmStepsPresentation();
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
     agentRunActive = false;
-    clearCurrentStep();
-    applyCurrentStepPresentation(ctx.ui);
+    clearCalmSteps();
     applyWorkingPresentation(ctx.ui);
-    ctx.ui.setStatus("firstmate-calm", undefined);
+    updateCalmStepsPresentation();
+    currentStepUi = undefined;
   });
 
   pi.registerCommand("calm", {
@@ -299,11 +207,11 @@ export default function (pi: ExtensionAPI) {
       const active = !calmPresentationIsActive();
       persistCalmPreference(active);
       setCalmPresentation(active);
+      if (!active) clearCalmSteps();
       publishPresentationState();
-      if (!active) clearCurrentStep();
-      applyCurrentStepPresentation(ctx.ui);
+      currentStepUi = ctx.ui;
       applyWorkingPresentation(ctx.ui, true);
-      ctx.ui.setStatus("firstmate-calm", undefined);
+      updateCalmStepsPresentation();
       // Pi re-runs every assistant row's layout from this call even when the label is
       // unchanged, which is what makes a toggle apply to rows already on screen.
       ctx.ui.setHiddenThinkingLabel(active ? "" : undefined);
