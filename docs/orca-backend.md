@@ -7,7 +7,7 @@ Firstmate agents load [`firstmate-orca`](../.agents/skills/firstmate-orca/SKILL.
 ## Setup
 
 Pick Orca when you already use the Orca app and want Orca-managed worktrees and terminals instead of Treehouse plus a session multiplexer.
-Orca is explicit-only: nothing in the code gates this backend to macOS, and it is confirmed working on Linux, but it is never auto-detected regardless of platform.
+Orca is explicit-only: nothing in the code gates this backend to macOS, but live verification (see [`verification/runtime-backends.md`](verification/runtime-backends.md#orca)) has only been run on macOS, and it is never auto-detected regardless of platform.
 
 Prerequisites:
 
