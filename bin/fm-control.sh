@@ -704,7 +704,6 @@ resolve_relaunch_profile() {
   # way, but only after the old agent has been stopped.
   local account_model=$TARGET_MODEL
   [ "$account_model" != default ] || account_model=
-  [ -n "$account_model" ] || [ "$KIND" != secondmate ] || account_model=$CONFIG_MODEL
   fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" "$FM_HOME" \
     "$account_model" "$TARGET_HARNESS" >/dev/null || return 1
 }

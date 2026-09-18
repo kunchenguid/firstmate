@@ -75,8 +75,10 @@
 FM_WORKER_ACCOUNT_PREFLIGHT_SECONDS=30
 
 # Credentials Claude Code ranks above the /login stored in its config root
-# (code.claude.com/docs/en/authentication, "Authentication precedence").
-FM_WORKER_ACCOUNT_CLAUDE_SHED="CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_PROFILE ANTHROPIC_FEDERATION_RULE_ID"
+# (code.claude.com/docs/en/authentication, "Authentication precedence"; the
+# AWS switches from code.claude.com/docs/en/claude-platform-on-aws and
+# code.claude.com/docs/en/amazon-bedrock, "Use the Mantle endpoint").
+FM_WORKER_ACCOUNT_CLAUDE_SHED="CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY CLAUDE_CODE_USE_ANTHROPIC_AWS CLAUDE_CODE_USE_MANTLE ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_PROFILE ANTHROPIC_FEDERATION_RULE_ID"
 
 # Thinking levels pi accepts as a trailing ":<level>" on a --model pattern; a
 # model id may legitimately end in ":fast" or ":slow", which are not levels.

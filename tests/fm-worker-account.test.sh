@@ -13,7 +13,6 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-worker-account-lib.sh"
 
-SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-worker-account)
 
 make_world() {
@@ -235,6 +234,10 @@ test_spawn_claude_ignores_ambient_config_dir() {
     "launch must not spend the ambient CLAUDE_CONFIG_DIR"
   assert_contains "$launch" "-u ANTHROPIC_API_KEY" \
     "Claude launch must shed environment credentials ranked above the selected root"
+  assert_contains "$launch" "-u CLAUDE_CODE_USE_MANTLE" \
+    "Claude launch must shed the AWS provider switches ranked above the selected root"
+  assert_contains "$launch" "-u CLAUDE_CODE_USE_ANTHROPIC_AWS" \
+    "Claude launch must shed the AWS provider switches ranked above the selected root"
   pass "a declared Claude account wins over an ambient CLAUDE_CONFIG_DIR"
 }
 
@@ -361,6 +364,8 @@ test_spawn_claude_environment_keeps_environment_credentials() {
     "a declared environment selection must keep the API key"
   assert_not_contains "$launch" "-u CLAUDE_CODE_USE_BEDROCK" \
     "a declared environment selection must keep the cloud provider switch"
+  assert_not_contains "$launch" "-u CLAUDE_CODE_USE_MANTLE" \
+    "a declared environment selection must keep the AWS provider switches"
   pass "a declared environment selection keeps Claude's environment credentials"
 }
 

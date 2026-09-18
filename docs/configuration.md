@@ -408,9 +408,9 @@ The check runs with only `HOME`, `PATH`, `TMPDIR`, and the selected root in its 
 [`bin/fm-worker-account-lib.sh`](../bin/fm-worker-account-lib.sh) owns resolution, validation, and the check.
 
 Environment credentials are ambient unless the file's last line is `environment`.
-Without that line, a Claude launch unsets the environment credentials Claude ranks above the `/login` stored in the root: `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_PROFILE`, and `ANTHROPIC_FEDERATION_RULE_ID`.
+Without that line, a Claude launch unsets the environment credentials Claude ranks above the `/login` stored in the root: `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_ANTHROPIC_AWS`, `CLAUDE_CODE_USE_MANTLE`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_PROFILE`, and `ANTHROPIC_FEDERATION_RULE_ID`.
 Pi ranks the credentials stored in its root above environment variables, so a Pi launch unsets nothing, and the check above refuses a provider the root has not stored.
-With the `environment` line, the launch keeps those credentials, so an API key, a `claude setup-token` token, or a Bedrock, Vertex, or Foundry setup authenticates the worker.
+With the `environment` line, the launch keeps those credentials, so an API key, a `claude setup-token` token, or a Bedrock, Vertex, Foundry, or Claude Platform on AWS setup authenticates the worker.
 No check runs then: the values come from the worker's pane when it starts, which the spawn cannot read.
 The selected root still supplies settings and is the fallback login when the pane has none of them.
 With `config/launch-env-allowlist` enabled, the credential names must also be listed there.

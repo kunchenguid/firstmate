@@ -908,6 +908,46 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop() {
   pass "fm-control relaunch: an adapter unverified for this task kind refuses before the agent is stopped"
 }
 
+# An explicit --harness drops the configured secondmate model, so the launch
+# owner receives no --model. The pre-stop account check must judge that same
+# empty model, or it passes, stops the agent, and the launch then refuses.
+test_secondmate_relaunch_onto_pi_without_a_model_refuses_before_stop() {
+  local dir home out rc
+  dir=$(new_case smpimodel sm8)
+  home="$dir/home"
+  mkdir -p "$home/config" "$home/data/sm8"
+  printf 'pi fake/test\n' > "$home/config/secondmate-harness"
+  fm_test_fake_pi_runner "$dir/fakebin" pi
+  printf '# secondmate brief\n' > "$home/data/sm8/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'sm8\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-sm8"
+    echo "endpoint_task_id=sm8"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/sm8.meta"
+  printf '%s\n' "fm-sm8" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  out=$(run_control "$dir" sm8 relaunch --harness pi); rc=$?
+  expect_code 1 "$rc" "a Pi secondmate relaunch with no --model should refuse"
+  assert_contains "$out" "names no provider" \
+    "the refusal should be the Pi account guard the launch would hit"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "the account refusal must land before the running agent is stopped"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "the account refusal must send nothing"
+  pass "fm-control relaunch: the pre-stop account check judges the model the launch will receive"
+}
+
 test_explicit_secondmate_harness_ignores_configured_profile_axes() {
   local dir home out rc
   dir=$(new_case smexplicit sm4)
@@ -1736,6 +1776,7 @@ test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
 test_missing_worktree_refuses_before_stopping_anything
 test_unusable_worker_account_refuses_before_stopping_anything
+test_secondmate_relaunch_onto_pi_without_a_model_refuses_before_stop
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
 test_checkpoint_refuses_uninspectable_head_and_status
