@@ -64,7 +64,8 @@
 # shape (`done:` written, the run then fails, the crew goes silent) still
 # reaches the captain. Its PR identity comes from the same record as its state -
 # the run's own published PR for a run-step state, that line's own ready-signal
-# PR for a status-log state, and never a separately recorded task PR. Together they
+# PR for a status-log state, and never a separately recorded task PR; a scout
+# delivers no PR on either path, so it carries none. Together they
 # prevent one captain-facing record from combining claims from different runs.
 # Working, paused, parked, blocked, unknown, persistent secondmates, and
 # captain-held work retain their existing supervision semantics.
