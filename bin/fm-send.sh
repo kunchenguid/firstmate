@@ -51,7 +51,8 @@
 # watcher re-rings an unacknowledged message while its endpoint remains
 # available, escalates after the bounded ladder, and instead routes a positively
 # dead or missing endpoint directly to recovery without typing. An explicit
-# fire-and-forget record is excluded from that ladder.
+# fire-and-forget record is excluded from that ladder; when its ring here was
+# skipped or failed, the watcher rings it exactly once more.
 # bin/fm-task-inbox-lib.sh owns the record format, the doorbell line, and the
 # re-ring ladder. The composer pre-check before the ring is ADVISORY only: when
 # the composer visibly holds pending text the ring is skipped with a notice and
@@ -1071,9 +1072,21 @@ else
     # bounded re-ring ladder or direct unavailable-endpoint recovery.
     ring_rc=0
     fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" || ring_rc=$?
+    ring_retry="the watcher will re-ring"
+    if [ -n "$FIRE_AND_FORGET_ID" ]; then
+      case "$ring_rc" in
+      1|2)
+        if fm_task_inbox_mark_retry "$STATE" "$INBOX_TASK_ID" "$INBOX_RECORD"; then
+          ring_retry="the watcher will ring it once more"
+        else
+          ring_retry="its one retry ring could not be recorded, so nothing will ring it again"
+        fi
+        ;;
+      esac
+    fi
     case "$ring_rc" in
-    1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
-    2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
+    1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and $ring_retry" >&2 ;;
+    2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and $ring_retry" >&2 ;;
     3) echo "fm-send: doorbell not typed because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
     esac
     exit 0
