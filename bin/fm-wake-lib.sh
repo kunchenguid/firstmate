@@ -2157,47 +2157,68 @@ fm_wake_status_mark_current() {  # <state> <status-file>
   fm_wake_status_seen_commit "$1" "$2" "$size" "$ident"
 }
 
-# Guarded self-announced status append - the one dedup primitive for a status
-# line THIS home's own machinery writes as bookkeeping it has already presented
-# in the very turn or tick that writes it (an answerer-closes resolved line, a
-# pending-reply escalation close, a captain-held transfer). Such a close must
-# not wake the session that wrote it, so this appends the line and then
-# advances the watcher's seen marker to cover exactly the appended bytes and
-# nothing else. The advance is provenance-gated and fails toward waking:
+# Guarded self-announced status append - the one dedup primitive for the status
+# lines THIS home's own machinery writes as bookkeeping it has already presented
+# in the very turn or tick that writes them (answerer-closes resolved lines, a
+# pending-reply escalation close, captain-held transfers). Such a close must
+# not wake the session that wrote it, so this appends one command's lines
+# together and then advances the watcher's seen marker to cover exactly the
+# appended bytes and nothing else. The advance is provenance-gated and fails
+# toward waking:
 #   - the marker advances only when this home already read every pre-append
-#     byte (the watcher's classified seen offset or the OPEN DECISIONS fold
-#     cursor equals the pre-append size), the post-append size equals that size
-#     plus exactly the appended bytes (no foreign write interleaved), AND the
-#     watcher's own span classifier finds no actionable event from its
-#     classified offset through the post-append end. The fold reads bytes it
-#     never prints, so a worker's `failed:` inside a folded span must still
-#     wake; classifying after the append keeps the just-closed decision from
-#     counting as live;
+#     byte, the post-append size equals that size plus exactly the appended
+#     bytes (no foreign write interleaved), AND the watcher's own span
+#     classifier finds no actionable event from its classified offset through
+#     the post-append end (classifying after the append keeps the just-closed
+#     decisions from counting as live);
+#   - "already read" means the watcher's classified seen offset equals the
+#     pre-append size, or the OPEN DECISIONS fold cursor does and every
+#     non-blank line the watcher has not classified yet is a keyed
+#     needs-decision, blocked or resolved line. The fold reads bytes it never
+#     prints, so a worker's `failed:`, `paused:`, `working:` or verb-less line
+#     there must still wake, and so must a captain-held line, which raises the
+#     watcher's needs-decision side-band;
 #   - on ANY other condition - a missing file, pending foreign bytes, an
-#     interleaved writer, an unreadable size or identity - the line is still
+#     interleaved writer, an unreadable size or identity - the lines are still
 #     appended but the marker is left alone, so the watcher surfaces the file
 #     normally.
 # A later, different line from any other writer grows the size past the marker
 # and wakes as before: task identity alone can never suppress new content.
 # Returns 0 appended and self-announced, 1 appended but left for the watcher
 # (the safe direction), 2 the append itself failed.
-fm_wake_status_append_self_announced() {  # <state> <status-file> <line>
-  local state=$1 file=$2 line=$3 pre_size='' pre_ident='' post_size post_ident classified folded span_rc=0
+fm_wake_status_append_self_announced() {  # <state> <status-file> <line>...
+  local state=$1 file=$2 line appended=0 pre_size='' pre_ident='' post_size post_ident classified folded lag span_rc=0
   local LC_ALL=C
+  shift 2
   _fm_wake_require_classify || return 1
   if [ -e "$file" ]; then
     pre_size=$(_fm_status_file_size "$file") || pre_size=''
     pre_ident=$(_fm_open_decisions_file_ident "$file") || pre_ident=''
   fi
-  printf '%s\n' "$line" >> "$file" || return 2
+  printf '%s\n' "$@" >> "$file" || return 2
   post_size=$(_fm_status_file_size "$file") || return 1
   post_ident=$(_fm_open_decisions_file_ident "$file") || return 1
   case "$pre_size$post_size" in ''|*[!0-9]*) return 1 ;; esac
   [ -n "$pre_ident" ] && [ "$post_ident" = "$pre_ident" ] || return 1
-  [ "$post_size" -eq $((pre_size + ${#line} + 1)) ] || return 1
+  for line in "$@"; do appended=$((appended + ${#line} + 1)); done
+  [ "$post_size" -eq $((pre_size + appended)) ] || return 1
   classified=$(fm_wake_signal_seen_size "$state" "$file")
-  folded=$(status_open_decisions_cursor_offset "$file") || folded=0
-  [ "$classified" = "$pre_size" ] || [ "$folded" = "$pre_size" ] || return 1
+  if [ "$classified" != "$pre_size" ]; then
+    folded=$(status_open_decisions_cursor_offset "$file") || folded=0
+    [ "$folded" = "$pre_size" ] && [ "$classified" -lt "$pre_size" ] || return 1
+    lag=$(_fm_status_read_span "$file" "$classified" "$((pre_size - classified))") || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+      case "$(status_line_verb "$line")" in
+        needs-decision|blocked|"${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}") ;;
+        *) return 1 ;;
+      esac
+      _fm_key_before_colon "$line" || _fm_key_at_note_head "$line" >/dev/null || return 1
+      _fm_decision_key "$line" >/dev/null || return 1
+    done <<EOF
+$lag
+EOF
+  fi
   status_span_first_actionable_record "$file" "$classified" >/dev/null || span_rc=$?
   [ "$span_rc" -eq 1 ] || return 1
   fm_wake_status_seen_commit "$state" "$file" "$post_size" "$post_ident" || return 1

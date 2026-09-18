@@ -659,34 +659,40 @@ fi
 # durably sent: enqueued on the inbox plane, submit-confirmed on the typed
 # plane. An append failure exits nonzero with the manual close
 # command; the decision then stays open and re-surfaces, never silently lost.
-# The close is this home's own bookkeeping, written by the very turn that
-# answered the decision, so it goes through the guarded self-announced append
-# (bin/fm-wake-lib.sh) and does not wake this same session again, including
-# when this home already folded those bytes through OPEN DECISIONS without a
-# matching watcher seen marker; any concurrent foreign status bytes, or an
-# actionable worker line the fold read but never listed, leave the watcher's
-# wake path untouched.
+# All of one answer's closes are this home's own bookkeeping, written by the
+# very turn that answered the decisions, so they go through ONE guarded
+# self-announced append (bin/fm-wake-lib.sh) and do not wake this same session
+# again, including when this home already folded those bytes through OPEN
+# DECISIONS without a matching watcher seen marker; any concurrent foreign
+# status bytes, or a worker line the fold read but never listed, leave the
+# watcher's wake path untouched.
 fm_send_close_resolved_keys() { # <answer-text>
-  local note=$1 k line close_note append_rc still manual_close_cmd
+  local note=$1 k close_note append_rc still manual_close_cmd close_lines=() i=0
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
   for k in $RESOLVE_STATUS_KEYS; do
     close_note=$(fm_send_resolve_close_note "$k" "$note")
-    line="resolved [key=$k]: $close_note"
-    fm_cap_line_var "$line"
-    printf -v manual_close_cmd "printf '%%s\\n' %q >> %q" "$FM_LINE_CAP_LINE" "$RESOLVE_STATUS_FILE"
-    append_rc=0
-    fm_wake_status_append_self_announced "$STATE" "$RESOLVE_STATUS_FILE" "$FM_LINE_CAP_LINE" || append_rc=$?
-    if [ "$append_rc" -eq 2 ]; then
-      echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE. Close it manually with: $manual_close_cmd - do not resend the answer." >&2
-      return 1
-    fi
-    still=$(status_open_decisions "$RESOLVE_STATUS_FILE")
+    fm_cap_line_var "resolved [key=$k]: $close_note"
+    close_lines+=("$FM_LINE_CAP_LINE")
+  done
+  [ "${#close_lines[@]}" -gt 0 ] || return 0
+  append_rc=0
+  fm_wake_status_append_self_announced "$STATE" "$RESOLVE_STATUS_FILE" "${close_lines[@]}" || append_rc=$?
+  if [ "$append_rc" -eq 2 ]; then
+    printf -v manual_close_cmd ' %q' "${close_lines[@]}"
+    printf -v manual_close_cmd "printf '%%s\\n'%s >> %q" "$manual_close_cmd" "$RESOLVE_STATUS_FILE"
+    echo "error: the answer was delivered to $T, but the close for decision key(s) '$RESOLVE_STATUS_KEYS' could not be appended to $RESOLVE_STATUS_FILE. Close it manually with: $manual_close_cmd - do not resend the answer." >&2
+    return 1
+  fi
+  still=$(status_open_decisions "$RESOLVE_STATUS_FILE")
+  for k in $RESOLVE_STATUS_KEYS; do
     case "$still" in
     "$k"$'\t'* | *$'\n'"$k"$'\t'*)
+      printf -v manual_close_cmd "printf '%%s\\n' %q >> %q" "${close_lines[$i]}" "$RESOLVE_STATUS_FILE"
       echo "error: the answer was delivered to $T, but decision key '$k' is still open in $RESOLVE_STATUS_FILE; it may have been reopened concurrently or the fold did not accept the close. Close it manually with: $manual_close_cmd - do not resend the answer." >&2
       return 1
       ;;
     esac
+    i=$((i + 1))
   done
 }
 

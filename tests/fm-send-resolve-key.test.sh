@@ -137,13 +137,13 @@ test_answer_send_closes_open_decision() {
   assert_contains "$(cat "$log")" "Firstmate instruction waiting" "the doorbell should be rung for the answer"
   grep -F 'resolved [key=api-shape]: answered: go with REST' "$home/state/t1.status" >/dev/null \
     || fail "fm-send did not append the closing resolved line:"$'\n'"$(cat "$home/state/t1.status")"
-  # The first drain above is the OPEN DECISIONS presentation, not a watcher
-  # seen-marker prime. The close must still be self-announced so the watcher
-  # does not wake this home to reread its own resolved line (issue 4767).
-  FM_STATE_OVERRIDE="$home/state" bash -c '
+  # The drain folded the worker's `working:` line but never listed it, so the
+  # close must leave the file for the watcher instead of marking it seen.
+  if FM_STATE_OVERRIDE="$home/state" bash -c '
     . "$1"; fm_wake_signal_seen_current "$2" "$3"
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t1.status" \
-    || fail "the answerer's close after OPEN DECISIONS drain was left to re-wake this home"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t1.status"; then
+    fail "the answerer's close hid a worker line the drain never listed"
+  fi
 
   out=$(drain_out "$home")
   if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
@@ -365,6 +365,37 @@ test_multiple_keys_close_together() {
     fail "an answered key is still open after a multi-key answer: $out"
   fi
   pass "fm-send --resolve-key: one answer closes each named key and only those"
+}
+
+# Issue 4767: the session-start drain listed both decisions (folding them
+# without a watcher seen marker), and one answer closes both. The closes are
+# this home's own bookkeeping, so the watcher must not wake it to reread them.
+test_multiple_keys_close_after_fold_is_self_announced() {
+  local dir fb log home rc out
+  dir="$TMP_ROOT/multi-fold"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home multi-fold)
+  fm_write_meta "$home/state/t7.meta" "window=sess:fm-t7" "kind=ship"
+  {
+    printf 'needs-decision [key=budget]: approve spend?\n'
+    printf 'needs-decision [key=vendor]: pick a vendor\n'
+  } > "$home/state/t7.status"
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F '[key=vendor]' >/dev/null \
+    || fail "precondition: the drain should list both decisions: $out"
+
+  run_send "$fb" "$home" "$log" t7 --resolve-key budget --resolve-key vendor \
+    "approve spend, pick acme"; rc=$?
+  expect_code 0 "$rc" "an answer resolving two folded keys should succeed"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_signal_seen_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t7.status" \
+    || fail "one answer's two closes after an OPEN DECISIONS drain were left to re-wake this home"
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "an answered folded key is still open: $out"
+  fi
+  pass "fm-send --resolve-key: one answer's closes after a drain fold never wake this home"
 }
 
 test_local_secondmate_answer_marked_and_closed() {
@@ -738,6 +769,7 @@ test_not_open_key_refuses_before_send
 test_failed_ring_still_closes_at_enqueue
 test_failed_enqueue_does_not_close
 test_multiple_keys_close_together
+test_multiple_keys_close_after_fold_is_self_announced
 test_local_secondmate_answer_marked_and_closed
 test_remote_secondmate_answer_closes_locally
 test_remote_reply_corr_tag_does_not_block_resolve_key

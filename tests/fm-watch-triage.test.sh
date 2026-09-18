@@ -1638,6 +1638,36 @@ test_self_announced_close_after_fold_still_surfaces_folded_worker_failure() {
   pass "a close after OPEN DECISIONS fold still surfaces a worker failure inside the folded span"
 }
 
+test_self_announced_close_after_fold_still_surfaces_folded_secondmate_pause() {
+  local dir state fakebin out status_file pid rc
+  dir=$(make_case self-close-folded-pause); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/mate.status"
+  printf 'kind=secondmate\n' > "$state/mate.meta"
+  printf 'needs-decision [key=budget]: approve spend?\n' > "$status_file"
+  prime_status_seen "$state" "$status_file" || fail "could not prime the announced baseline"
+  # A secondmate's pause carries no captain verb, and the fold never lists it,
+  # yet every secondmate append is parent-directed and must still wake.
+  printf 'paused: waiting on vendor quote\n' >> "$status_file"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    status_open_decisions_incremental "$2" >/dev/null
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$status_file" \
+    || fail "could not fold the open decision"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_wake_status_append_self_announced "$2" "$3" "resolved [key=budget]: answered: approved"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$status_file" || rc=$?
+  [ "$rc" -eq 1 ] || fail "a close over a folded secondmate pause was self-announced (rc=$rc)"
+  export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "the folded secondmate pause was swallowed by the supervisor's close"
+  grep -F "signal: $status_file" "$out" >/dev/null \
+    || fail "the folded secondmate pause did not surface as a signal: $(cat "$out")"
+  pass "a close after OPEN DECISIONS fold still surfaces a secondmate pause inside the folded span"
+}
+
 # --- actionable wakes are surfaced (queue + exit) ---------------------------
 
 test_actionable_signal_surfaced() {
@@ -5540,6 +5570,7 @@ test_secondmate_buried_block_wakes_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
 test_self_announced_close_after_open_decisions_fold_does_not_rewake
 test_self_announced_close_after_fold_still_surfaces_folded_worker_failure
+test_self_announced_close_after_fold_still_surfaces_folded_secondmate_pause
 test_actionable_signal_surfaced
 test_needs_decision_signal_payload_marked_for_branch_exclusion
 test_needs_decision_reconciliation_required_still_marked
