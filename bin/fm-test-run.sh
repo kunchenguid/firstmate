@@ -1523,7 +1523,13 @@ families_for_changed_path() {
       printf '%s\n' watcher-wake-lock
       printf '%s\n' "__script__:fm-procevent-quota.test.sh"
       ;;
-    bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
+    bin/fm-merge-local.sh)
+      # The guarded local-only landing shares the pr-forge family, and its own
+      # suite is not a family member yet (a new test stays serial until proven).
+      printf '%s\n' pr-forge
+      printf '%s\n' "__script__:fm-merge-local.test.sh"
+      ;;
+    bin/fm-pr-*|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
       ;;

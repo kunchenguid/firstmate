@@ -1570,6 +1570,30 @@ test_completion_closes_a_local_only_ship_before_reporting_success() {
   pass "completion closes a local-only ship, with its landing note, before reporting success"
 }
 
+# A local-only task that ships onto a long-lived feature branch lands on THAT
+# branch, so the durable completion note must name it. Recording "local main" for
+# such a task writes a permanent history entry that never happened, and the note
+# is history rather than a measurement, so it comes from the task's own recorded
+# base and is never re-derived from the project's git state.
+test_completion_notes_the_recorded_delivery_target_branch() {
+  local case_dir id out
+  id=atomic-close-base-b8
+  case_dir=$(make_home close-local-only-base)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  write_task_meta "$case_dir" "$id" ship local-only \
+    "spawn_gen=spawn-close-base" "base=feat/stack"
+
+  out=$(run_teardown "$case_dir" "$id") || fail "teardown failed: $out"
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "teardown reported success with the item still $(row_state "$case_dir" "$id")"
+  assert_grep 'local feat/stack' "$(backlog_of "$case_dir")" \
+    "a landing on the recorded delivery target branch was noted as some other branch"
+  assert_no_grep 'local main' "$(backlog_of "$case_dir")" \
+    "the completion note claimed a landing on main for a task that targets feat/stack"
+  pass "completion notes the landing on the task's recorded delivery target branch"
+}
+
 test_completion_closes_a_scout_with_its_report() {
   local case_dir id out
   id=atomic-close-b6
@@ -2027,6 +2051,127 @@ test_recovery_replays_a_close_an_interrupted_cleanup_left_open() {
   assert_not_contains "$out" "endpoint or local copy may remain" \
     "recovery claimed incomplete cleanup without task metadata"
   pass "session start finishes a close an interrupted cleanup recorded but never landed"
+}
+
+# The landing note is the one recorded argument that carries a space, so it rides
+# the pending-close record as `%20` and must come back out as the branch it named.
+# A replay that decoded to a fixed "local main" would rewrite a feature-branch
+# landing into a default-branch one during recovery - the same false history the
+# writer stopped producing.
+test_recovery_replays_a_landing_note_naming_its_delivery_target_branch() {
+  local case_dir id marker out
+  id=atomic-heal-note-base-b9
+  case_dir=$(make_home heal-pending-note-base)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  marker="$(home_of "$case_dir")/state/$id.backlog-close"
+  printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-note\narg=--note\narg=local%%20feat/stack\n' \
+    "$id" "$(home_of "$case_dir")/data" > "$marker"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start left the interrupted close at $(row_state "$case_dir" "$id"): $out"
+  assert_grep 'local feat/stack' "$(backlog_of "$case_dir")" \
+    "the replayed close did not decode the landing note back to its delivery target branch"
+  assert_no_grep 'local%20feat/stack' "$(backlog_of "$case_dir")" \
+    "the replayed close wrote the marker's encoded form into the backlog"
+  assert_no_grep 'local main' "$(backlog_of "$case_dir")" \
+    "the replayed close rewrote a feature-branch landing as a default-branch one"
+  assert_absent "$marker" "a replayed close left its record behind"
+  pass "recovery replays a landing note naming the task's delivery target branch"
+}
+
+# The landing note is a replayed argument, so its validator is security-adjacent:
+# it decides what a later bootstrap will hand back to `tasks-axi done`. These
+# drive the real writer, which stages the value and validates the marker it just
+# wrote, so a refused note leaves no pending close at all. Each rejection is its
+# own case: one combined assertion cannot show WHICH guard fired.
+write_close_note_marker() {  # <case-dir> <id> <note>
+  local case_dir=$1 id=$2 note=$3 home
+  home=$(home_of "$case_dir")
+  (
+    # shellcheck source=bin/fm-backlog-transition-lib.sh
+    . "$ROOT/bin/fm-backlog-transition-lib.sh"
+    fm_backlog_close_marker_write "$home/state" "$id" "$home/data" spawn-note-case --note "$note"
+  )
+}
+
+test_close_marker_note_refuses_whitespace_in_the_branch() {
+  local case_dir id rc=0
+  id=atomic-note-whitespace-b9
+  case_dir=$(make_home note-whitespace)
+  write_close_note_marker "$case_dir" "$id" 'local feat/two words' || rc=$?
+  [ "$rc" -ne 0 ] || fail "a landing note whose branch carries whitespace was accepted"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a refused landing note still published a pending close"
+  pass "the landing-note validator refuses whitespace in the branch"
+}
+
+test_close_marker_note_refuses_a_leading_dash() {
+  local case_dir id rc=0
+  id=atomic-note-dash-b9
+  case_dir=$(make_home note-dash)
+  write_close_note_marker "$case_dir" "$id" 'local -force' || rc=$?
+  [ "$rc" -ne 0 ] || fail "a landing note whose branch starts with a dash was accepted"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a note a replay could read as a flag still published a pending close"
+  pass "the landing-note validator refuses a branch a replay could read as a flag"
+}
+
+# This pins the OUTCOME, not one arm: a control byte in the note never reaches a
+# replay. The marker-wide control-byte guard rejects the record before any
+# per-argument check runs, so the note's own control-character arm is defence in
+# depth behind it rather than the thing under test here.
+test_close_marker_note_with_a_control_character_never_publishes_a_close() {
+  local case_dir id rc=0
+  id=atomic-note-control-b9
+  case_dir=$(make_home note-control)
+  write_close_note_marker "$case_dir" "$id" "$(printf 'local feat/a\tb')" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a landing note carrying a control character was accepted"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "a control-character landing note still published a pending close"
+  pass "a landing note carrying a control byte never publishes a pending close"
+}
+
+test_close_marker_note_refuses_a_branch_past_the_length_cap() {
+  local case_dir id rc=0 long
+  id=atomic-note-long-b9
+  case_dir=$(make_home note-long)
+  long=$(printf 'a%.0s' $(seq 257))
+  write_close_note_marker "$case_dir" "$id" "local $long" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a landing note past the length cap was accepted"
+  assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
+    "an oversized landing note still published a pending close"
+  pass "the landing-note validator refuses a branch past its length cap"
+}
+
+# `%` is legal in a git branch name and passes intake, so the marker escape must
+# survive it rather than refuse it: the encode escapes only the single separating
+# space and the decode strips exactly that prefix, so the two are inverses. A
+# global `%20` rewrite would corrupt such a branch, and refusing it here would
+# make teardown die on a marker it had just written itself.
+test_close_marker_note_round_trips_a_branch_containing_a_percent() {
+  local case_dir id marker backlog out
+  id=atomic-note-percent-b9
+  case_dir=$(make_home note-percent)
+  add_item "$case_dir" "$id"
+  start_item "$case_dir" "$id"
+  marker="$(home_of "$case_dir")/state/$id.backlog-close"
+  backlog=$(backlog_of "$case_dir")
+  write_close_note_marker "$case_dir" "$id" 'local feat/50%off' \
+    || fail "a git-legal branch containing % was refused by the landing-note validator"
+  assert_grep 'arg=local%20feat/50%off' "$marker" \
+    "the staged note did not escape exactly the separating space"
+
+  out=$(run_bootstrap "$case_dir")
+  [ "$(row_state "$case_dir" "$id")" = "done" ] \
+    || fail "session start left the interrupted close at $(row_state "$case_dir" "$id"): $out"
+  assert_grep 'local feat/50%off' "$backlog" \
+    "the replayed note did not decode back to the branch it named"
+  assert_no_grep 'local%20feat' "$backlog" \
+    "the replayed note leaked the marker's escaped form into the backlog"
+  assert_absent "$marker" "a replayed close left its record behind"
+  pass "a landing note whose branch contains % round-trips through stage, validate and replay"
 }
 
 test_recovery_backfills_a_recorded_link_on_an_already_done_item() {
@@ -3034,6 +3179,7 @@ test_dispatch_interruption_during_kimi_readiness_fails_before_commit
 test_dispatch_does_not_resurrect_a_row_closed_after_preflight
 test_dispatch_fails_when_its_row_vanishes_after_preflight
 test_completion_closes_a_local_only_ship_before_reporting_success
+test_completion_notes_the_recorded_delivery_target_branch
 test_completion_closes_a_scout_with_its_report
 test_completion_refuses_a_legacy_record_without_an_incarnation
 test_completion_refuses_ambiguous_incarnation_metadata
@@ -3053,6 +3199,12 @@ test_recovery_marks_an_owned_record_in_flight
 test_recovery_rejects_an_internal_worker_record_symlink
 test_recovery_ignores_a_symlinked_worker_record
 test_recovery_replays_a_close_an_interrupted_cleanup_left_open
+test_recovery_replays_a_landing_note_naming_its_delivery_target_branch
+test_close_marker_note_refuses_whitespace_in_the_branch
+test_close_marker_note_refuses_a_leading_dash
+test_close_marker_note_with_a_control_character_never_publishes_a_close
+test_close_marker_note_refuses_a_branch_past_the_length_cap
+test_close_marker_note_round_trips_a_branch_containing_a_percent
 test_recovery_backfills_a_recorded_link_on_an_already_done_item
 test_recovery_preserves_a_close_when_the_backlog_cannot_be_read
 test_recovery_retry_preserves_incomplete_cleanup_warning
