@@ -3252,6 +3252,57 @@ SH
   pass "herdr presentation ordering: only the exact new id moves; human spaces keep relative order"
 }
 
+test_workspace_lineage_report_declares_exact_parent_and_kind_tokens() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/lineage-report"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_lineage_report_best_effort fmtest w9 w1' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "successful lineage reporting must not fail"
+  [ -z "$out" ] || fail "successful lineage reporting emitted output: $out"
+  assert_contains "$(cat "$log")" "HERDR_SESSION=fmtest"$'\x1f'"workspace"$'\x1f'"report-metadata"$'\x1f'"w9"$'\x1f'"--source"$'\x1f'"firstmate"$'\x1f'"--token"$'\x1f'"parent=w1"$'\x1f'"--token"$'\x1f'"kind=task" \
+    "lineage report did not send the exact producer declaration: $(cat "$log")"
+  assert_contains "$(cat "$log")" $'\x1f''kind=task'$'\x1f''--session'$'\x1f''fmtest' \
+    "lineage report did not route through the named session"
+  pass "herdr lineage report: exact parent and kind tokens on the exact task workspace"
+}
+
+test_workspace_lineage_report_declares_nothing_without_a_parent() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/lineage-report-no-parent"; mkdir -p "$dir"
+  log="$dir/log"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_lineage_report_best_effort fmtest w9 ""' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "an empty parent must be a silent no-op, not a failure"
+  [ -z "$out" ] || fail "an empty parent emitted output: $out"
+  [ ! -s "$log" ] || fail "an empty parent still sent a herdr call: $(cat "$log")"
+  if ! PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_lineage_report_best_effort fmtest "" w1' "$ROOT" 2>&1; then
+    fail "an empty workspace id must be a successful no-op"
+  fi
+  [ ! -s "$log" ] || fail "an empty workspace id still sent a herdr call: $(cat "$log")"
+  pass "herdr lineage report: an empty parent or workspace id declares nothing"
+}
+
+test_workspace_lineage_report_failure_warns_without_failing_the_spawn() {
+  local dir log resp fb out status
+  dir="$TMP_ROOT/lineage-report-failure"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '1\n' > "$resp/1.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_lineage_report_best_effort fmtest wX w1' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "a failed lineage report must not fail the spawn"
+  assert_contains "$out" "could not declare task workspace lineage" \
+    "a failed lineage report did not print its best-effort warning"
+  pass "herdr lineage report: a failed report warns and leaves the spawn successful"
+}
+
 test_projection_order_failure_warns_without_cleanup_or_spawn_failure() {
   local dir log resp fb mover out status
   dir="$TMP_ROOT/projection-order-failure"; mkdir -p "$dir/responses"
@@ -5903,6 +5954,9 @@ test_projection_order_human_spaces_never_move_targets
 test_projection_order_failure_warns_without_cleanup_or_spawn_failure
 test_projection_order_ambiguous_existing_block_is_read_only
 test_projection_order_anchors_the_parent_by_exact_id
+test_workspace_lineage_report_declares_exact_parent_and_kind_tokens
+test_workspace_lineage_report_declares_nothing_without_a_parent
+test_workspace_lineage_report_failure_warns_without_failing_the_spawn
 test_projection_order_foreign_new_child_before_parent_is_read_only
 test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes

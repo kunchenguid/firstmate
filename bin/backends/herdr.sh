@@ -1645,6 +1645,35 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
   return 0
 }
 
+# fm_backend_herdr_workspace_lineage_report_best_effort: declare the projected
+# task workspace's lineage tokens on Herdr so consumers that group by declared
+# parentage (the muxr Spaces list) can fold the workspace under its owning
+# parent instead of rendering it as a top-level card.
+# Reports the display-only tokens parent=<parent-workspace-id> and kind=task
+# on <task-workspace-id>, the exact declaration the phone's grouping reads.
+# <parent-workspace-id> must be the same exact owning parent id the projection
+# was created under, never a label-derived guess: a wrong parent would hide a
+# working task under the wrong card, so an empty workspace or parent id
+# declares nothing at all.
+# Verified against real herdr 0.9.1 in an isolated lab session (see
+# docs/verification/runtime-backends.md "Herdr"): report-metadata merges per
+# token, so pre-existing tokens (a producer's tokens.task) survive, and a
+# failed report is a structured nonzero exit with no side effects.
+# This is display-only and always returns success: a task that launched
+# correctly but could not declare its lineage is still a working task, so any
+# failure prints one warning and leaves the workspace rendering top-level,
+# exactly as it did before lineage declaration existed.
+fm_backend_herdr_workspace_lineage_report_best_effort() {  # <session> <task-workspace-id> <parent-workspace-id>
+  local session=$1 workspace=$2 parent=$3
+  [ -n "$workspace" ] && [ -n "$parent" ] || return 0
+  if fm_backend_herdr_cli "$session" workspace report-metadata "$workspace" \
+    --source firstmate --token "parent=$parent" --token kind=task >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "warning: herdr presentation could not declare task workspace lineage for $workspace; it will render top-level" >&2
+  return 0
+}
+
 # fm_backend_herdr_server_ensure: start the herdr server for <session>
 # headless (no TUI client) if not already running, mirroring tmux's `tmux
 # has-session || tmux new-session -d`. Verified: a bare socket CLI call does
