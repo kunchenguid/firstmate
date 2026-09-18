@@ -428,7 +428,7 @@ expected_gate_skip_for_family() {
   case "$1" in
     real-herdr-gated) printf '%s\n' herdr ;;
     live-harness-optin) printf '%s\n' live-capability ;;
-    cmux|zellij|orca) printf '%s\n' optional-binary ;;
+    cmux|zellij|orca|paseo) printf '%s\n' optional-binary ;;
     snapshot-bearings) printf '%s\n' optional-binary ;;
     *) printf '%s\n' none ;;
   esac
@@ -449,6 +449,7 @@ snapshot-bearings
 cmux
 zellij
 orca
+paseo
 standalone
 unclassified
 EOF
@@ -1392,6 +1393,10 @@ families_for_changed_path() {
       ;;
     bin/backends/cmux*|tests/cmux-test-safety.sh)
       printf '%s\n' cmux
+      printf '%s\n' backend-dispatch
+      ;;
+    bin/backends/paseo*)
+      printf '%s\n' paseo
       printf '%s\n' backend-dispatch
       ;;
     bin/backends/orca*|bin/backends/tmux.sh)

@@ -183,7 +183,7 @@ test_version_check_refuses_missing_paseo() {
   pass "fm_backend_paseo_version_check: refuses loudly when paseo is not found on PATH or at the bundle path"
 }
 
-# --- target parsing, key normalization ---------------------------------------
+# --- target parsing -----------------------------------------------------------
 
 test_parse_target() {
   (. "$ROOT/bin/backends/paseo.sh"
@@ -197,31 +197,6 @@ test_parse_target() {
       exit 1
     }) || fail "fm_backend_paseo_parse_target did not split terminal:workspace correctly"
   pass "fm_backend_paseo_parse_target: splits '<terminal_id>:<workspace_id>' on the first colon"
-}
-
-test_normalize_key() {
-  (. "$ROOT/bin/backends/paseo.sh"
-    [ "$(fm_backend_paseo_normalize_key Enter)" = Enter ] || {
-      echo "Enter failed" >&2
-      exit 1
-    }
-    [ "$(fm_backend_paseo_normalize_key Escape)" = Escape ] || {
-      echo "Escape failed" >&2
-      exit 1
-    }
-    [ "$(fm_backend_paseo_normalize_key Esc)" = Escape ] || {
-      echo "Esc failed" >&2
-      exit 1
-    }
-    [ "$(fm_backend_paseo_normalize_key C-c)" = C-c ] || {
-      echo "C-c failed" >&2
-      exit 1
-    }
-    [ "$(fm_backend_paseo_normalize_key ctrl+c)" = C-c ] || {
-      echo "ctrl+c failed" >&2
-      exit 1
-    }) || fail "fm_backend_paseo_normalize_key did not map firstmate's key vocabulary to paseo's verified names"
-  pass "fm_backend_paseo_normalize_key: Enter/Escape/C-c map to paseo's verified Enter/Escape/C-c tokens"
 }
 
 test_scoped_name_uses_primary_home_label() {
@@ -390,6 +365,63 @@ test_create_task_adopts_existing_shared_workspace() {
   pass "fm_backend_paseo_create_task: adopts the project's live firstmate workspace by cwd+label and adds a tab (never a second workspace)"
 }
 
+# Paseo's `workspace ls` reports cwd normalized (no doubled slash) but not
+# symlink-resolved, so adoption must match the raw, logical, and physical path.
+test_workspace_ensure_adopts_logical_and_physical_cwd() {
+  local dir fb real link physical out
+  dir="$TMP_ROOT/ws-adopt-paths"
+  real="$dir/real-proj"
+  link="$dir/link-proj"
+  mkdir -p "$dir/responses" "$real"
+  ln -s "$real" "$link"
+  physical=$(cd "$real" && pwd -P)
+  fb=$(make_paseo_fakebin "$dir")
+
+  jq -n --arg cwd "$physical" '[{workspaceId:"wks_physical0000000",name:"firstmate",cwd:$cwd}]' >"$dir/responses/1.out"
+  out=$(PATH="$fb:$PATH" FM_PASEO_LOG="$dir/log" FM_PASEO_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/paseo.sh"; fm_backend_paseo_workspace_ensure "$1"' "$ROOT" "$link")
+  [ "$out" = wks_physical0000000 ] || fail "workspace_ensure should adopt a workspace listed under the symlink-resolved path, got '$out'"
+
+  rm -f "$dir/responses/.count"
+  jq -n --arg cwd "$link" '[{workspaceId:"wks_logical00000000",name:"firstmate",cwd:$cwd}]' >"$dir/responses/1.out"
+  out=$(PATH="$fb:$PATH" FM_PASEO_LOG="$dir/log" FM_PASEO_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/paseo.sh"; fm_backend_paseo_workspace_ensure "$1"' "$ROOT" "$dir//link-proj")
+  [ "$out" = wks_logical00000000 ] || fail "workspace_ensure should adopt a workspace listed under the logical (slash-normalized) path, got '$out'"
+
+  case "$(cat "$dir/log")" in
+  *$'\x1f''workspace'$'\x1f''create'$'\x1f'*) fail "workspace_ensure must adopt, never create, when a path spelling matches" ;;
+  esac
+  pass "fm_backend_paseo_workspace_ensure: adopts the shared workspace by its physical or slash-normalized logical cwd"
+}
+
+# When firstmate runs inside a Paseo agent the CLI prints an Electron warning
+# on stderr before its JSON; parsed calls must keep it out of stdout and relay
+# it only when the call fails.
+test_cli_json_keeps_stderr_out_of_parsed_output() {
+  local dir out status
+  dir="$TMP_ROOT/cli-json-stderr"
+  mkdir -p "$dir/fakebin"
+  cat >"$dir/fakebin/paseo" <<'SH'
+#!/bin/sh
+echo "Electron warning: fake" >&2
+printf '{"workspaceId":"wks_bbbbbbbbbbbbbbbb"}\n'
+exit "${FM_PASEO_FAKE_EXIT:-0}"
+SH
+  chmod +x "$dir/fakebin/paseo"
+
+  out=$(PATH="$dir/fakebin:$PATH" bash -c '. "$0/bin/backends/paseo.sh"; fm_backend_paseo_cli_json workspace create --json' "$ROOT" 2>"$dir/err")
+  status=$?
+  expect_code 0 "$status" "cli_json should succeed when the CLI does"
+  [ "$out" = '{"workspaceId":"wks_bbbbbbbbbbbbbbbb"}' ] || fail "cli_json stdout must be the CLI's JSON alone, got '$out'"
+  [ -s "$dir/err" ] && fail "cli_json must not relay the CLI's stderr on success"$'\n'"$(cat "$dir/err")"
+
+  out=$(PATH="$dir/fakebin:$PATH" FM_PASEO_FAKE_EXIT=7 bash -c '. "$0/bin/backends/paseo.sh"; fm_backend_paseo_cli_json workspace create --json' "$ROOT" 2>"$dir/err")
+  status=$?
+  expect_code 7 "$status" "cli_json should propagate the CLI's failure status"
+  assert_contains "$(cat "$dir/err")" "Electron warning: fake" "cli_json should relay the CLI's stderr when the call fails"
+  pass "fm_backend_paseo_cli_json: keeps stderr out of parsed JSON and relays it only on failure"
+}
+
 test_workspace_label_uses_secondmate_prefix() {
   local home out
   home="$TMP_ROOT/label-2ndmate"
@@ -496,7 +528,7 @@ test_capture_fails_when_target_not_ready() {
 
 # --- send_key / send_literal --------------------------------------------------
 
-test_send_key_normalizes_and_targets() {
+test_send_key_passes_key_through_to_recorded_terminal() {
   local dir fb
   dir="$TMP_ROOT/sendkey"
   mkdir -p "$dir/responses"
@@ -506,8 +538,8 @@ test_send_key_normalizes_and_targets() {
     bash -c '. "$0/bin/backends/paseo.sh"; fm_backend_paseo_send_key "aaaaaaaa-0000-0000-0000-000000000000:wks_bbbbbbbbbbbbbbbb" Escape' "$ROOT"
   expect_code 0 $? "send_key should succeed"
   assert_contains "$(cat "$dir/log")" $'\x1f''terminal'$'\x1f''send-keys'$'\x1f''aaaaaaaa-0000-0000-0000-000000000000'$'\x1f''Escape' \
-    "send_key did not normalize Escape and target the recorded terminal id"
-  pass "fm_backend_paseo_send_key: normalizes the key and targets the recorded terminal id"
+    "send_key did not pass Escape through unchanged to the recorded terminal id"
+  pass "fm_backend_paseo_send_key: passes the key through unchanged to the recorded terminal id"
 }
 
 test_send_literal_uses_separator_for_option_shaped_text() {
@@ -710,22 +742,42 @@ test_list_live_filters_by_name_prefix() {
   pass "fm_backend_paseo_list_live: lists only this home's scoped task terminals using plain fm-<id> labels"
 }
 
-# --- fm-spawn.sh: --secondmate refuses backend=paseo --------------------------
+# --- fm-spawn.sh: --secondmate refuses an explicit backend=paseo --------------
 
-test_secondmate_spawn_refuses_paseo_backend() {
-  local dir state data config projects out status
+# paseo_secondmate_spawn: run fm-spawn.sh --secondmate inside an ambient Paseo
+# agent environment (PASEO_AGENT_ID set, every other runtime marker cleared,
+# uname faked non-Darwin so no cmux fallback fires), varying only FM_BACKEND,
+# the config dir, and extra flags.
+paseo_secondmate_spawn() { # <dir> <config-dir> <FM_BACKEND-value> [fm-spawn args...]
+  local dir=$1 config=$2 backend=$3
+  shift 3
+  (unset TMUX HERDR_ENV CMUX_WORKSPACE_ID __CFBundleIdentifier
+    PATH="$dir/fakebin:$PATH" PASEO_AGENT_ID=fm-test-agent FM_BACKEND="$backend" \
+      FM_STATE_OVERRIDE="$dir/state" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$config" \
+      FM_PROJECTS_OVERRIDE="$dir/projects" "$ROOT/bin/fm-spawn.sh" sm-paseo-test --secondmate "$@" 2>&1)
+}
+
+test_secondmate_spawn_refuses_explicit_paseo_only() {
+  local dir out
   dir="$TMP_ROOT/secondmate-refuse"
-  state="$dir/state"
-  data="$dir/data"
-  config="$dir/config"
-  projects="$dir/projects"
-  mkdir -p "$state" "$data" "$config" "$projects"
-  out=$(FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" FM_PROJECTS_OVERRIDE="$projects" \
-    "$ROOT/bin/fm-spawn.sh" sm-paseo-test --secondmate --backend paseo 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "fm-spawn.sh should refuse a --secondmate spawn with --backend paseo"
-  assert_contains "$out" "does not support --secondmate" "fm-spawn.sh did not report the paseo secondmate refusal"
-  pass "fm-spawn.sh: refuses backend=paseo for --secondmate spawns (mirrors cmux/Orca; no secondmate launch design exists yet)"
+  mkdir -p "$dir/state" "$dir/data" "$dir/config" "$dir/config-paseo" "$dir/projects" "$dir/fakebin"
+  printf 'paseo\n' >"$dir/config-paseo/backend"
+  printf '#!/bin/sh\necho Linux\n' >"$dir/fakebin/uname"
+  chmod +x "$dir/fakebin/uname"
+
+  out=$(paseo_secondmate_spawn "$dir" "$dir/config" '' --backend paseo)
+  assert_contains "$out" "backend=paseo does not support --secondmate" "fm-spawn.sh did not refuse --secondmate with --backend paseo"
+  out=$(paseo_secondmate_spawn "$dir" "$dir/config" paseo)
+  assert_contains "$out" "backend=paseo does not support --secondmate" "fm-spawn.sh did not refuse --secondmate with FM_BACKEND=paseo"
+  out=$(paseo_secondmate_spawn "$dir" "$dir/config-paseo" '')
+  assert_contains "$out" "backend=paseo does not support --secondmate" "fm-spawn.sh did not refuse --secondmate with config/backend=paseo"
+
+  out=$(paseo_secondmate_spawn "$dir" "$dir/config" '')
+  assert_not_contains "$out" "does not support --secondmate" \
+    "an auto-detected paseo must fall back to tmux for --secondmate instead of refusing"
+  assert_contains "$out" "no firstmate home supplied" \
+    "the auto-detected --secondmate spawn should continue past backend selection to the home check"
+  pass "fm-spawn.sh: an explicit paseo refuses --secondmate (mirrors cmux/Orca) while an auto-detected paseo falls back to tmux"
 }
 
 # shellcheck source=/dev/null
@@ -736,7 +788,6 @@ test_version_check_accepts_newer_version
 test_version_check_refuses_old_version
 test_version_check_refuses_missing_paseo
 test_parse_target
-test_normalize_key
 test_scoped_name_uses_primary_home_label
 test_scoped_name_uses_secondmate_home_label
 test_dispatch_routes_paseo_backend
@@ -748,6 +799,8 @@ test_ensure_running_returns_immediately_when_already_ok
 test_create_task_refuses_duplicate_name
 test_create_task_creates_and_parses_ids
 test_create_task_adopts_existing_shared_workspace
+test_workspace_ensure_adopts_logical_and_physical_cwd
+test_cli_json_keeps_stderr_out_of_parsed_output
 test_workspace_label_uses_secondmate_prefix
 test_target_ready_fails_when_target_absent
 test_target_ready_checks_expected_label
@@ -755,7 +808,7 @@ test_target_ready_rejects_label_mismatch
 test_target_ready_recovers_stale_id_by_name
 test_capture_trims_locally
 test_capture_fails_when_target_not_ready
-test_send_key_normalizes_and_targets
+test_send_key_passes_key_through_to_recorded_terminal
 test_send_literal_uses_separator_for_option_shaped_text
 test_send_text_line_composes_literal_and_enter
 test_current_path_probes_with_marker
@@ -767,4 +820,4 @@ test_send_text_submit_send_failed_when_target_absent
 test_kill_closes_terminal_and_keeps_workspace
 test_kill_is_best_effort_when_terminal_kill_fails
 test_list_live_filters_by_name_prefix
-test_secondmate_spawn_refuses_paseo_backend
+test_secondmate_spawn_refuses_explicit_paseo_only

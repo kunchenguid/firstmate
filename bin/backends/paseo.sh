@@ -418,25 +418,12 @@ fm_backend_paseo_send_literal() { # <target> <text> [expected-label]
   fm_backend_paseo_cli terminal send-keys "$FM_BACKEND_PASEO_TERMINAL" -l -- "$2" >/dev/null 2>&1
 }
 
-# fm_backend_paseo_normalize_key: map firstmate's key vocabulary (Enter,
-# Escape, C-c, C-u) onto paseo's verified send-keys token names (finding #1:
-# Enter, Escape, and C-c verified live; C-u shares C-c's shape).
-fm_backend_paseo_normalize_key() { # <key>
-  case "$1" in
-  Enter | enter | RETURN | return) printf 'Enter' ;;
-  Escape | escape | Esc | esc) printf 'Escape' ;;
-  C-c | c-c | ctrl+c | Ctrl+c | Ctrl+C | ctrl-c) printf 'C-c' ;;
-  C-u | c-u | ctrl+u | Ctrl+u | Ctrl+U | ctrl-u) printf 'C-u' ;;
-  *) printf '%s' "$1" ;;
-  esac
-}
-
 # fm_backend_paseo_send_key: one named special key, as a token send (no -l).
+# Paseo's send-keys token names are firstmate's own Enter/Escape/C-c/C-u
+# vocabulary (finding #1), so the key passes through unchanged.
 fm_backend_paseo_send_key() { # <target> <key> [expected-label]
   fm_backend_paseo_target_ready "$1" "${3:-}" || return 1
-  local key
-  key=$(fm_backend_paseo_normalize_key "$2")
-  fm_backend_paseo_cli terminal send-keys "$FM_BACKEND_PASEO_TERMINAL" "$key" >/dev/null 2>&1
+  fm_backend_paseo_cli terminal send-keys "$FM_BACKEND_PASEO_TERMINAL" "$2" >/dev/null 2>&1
 }
 
 # fm_backend_paseo_send_text_line: send one line of TEXT then submit.
