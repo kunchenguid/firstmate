@@ -1375,12 +1375,15 @@ pause_state_class() {  # <window> <task>
 
 # The two records of one ordinary crew wait, and why its stale alarm reads both.
 #
-# status_is_paused_or_captain_held reads the status LINE a worker wrote, which is
+# status_is_paused_or_captain_held reads the status log's last LINE, which is
 # the only record when the worker itself is waiting. It is not the only record
-# there is: once firstmate hands work to the captain, the wait is written into the
-# BACKLOG by bin/fm-captain-hold.sh, and the worker's last line stays whatever it
-# was - routinely `done: PR ...` after a delivery, which no line predicate can
-# read as a wait. An alarm bounded only by the line therefore re-fires for the
+# there is: once firstmate hands work to the captain, bin/fm-captain-hold.sh
+# writes the wait into the BACKLOG and mirrors it onto a lane's log as a
+# `captain-held` line, but that line stops being the last one as soon as the
+# worker writes anything newer, and a hold recorded before the mirror existed
+# never reached the log at all. Either way the last line is whatever the worker
+# wrote - routinely `done: PR ...` after a delivery, which no line predicate can
+# read as a wait. An alarm bounded only by the line would then re-fire for the
 # captain's whole thinking time, on exactly the work they already have in hand.
 #
 # `open` is that record's own read-only predicate and owns its semantics: exit 0

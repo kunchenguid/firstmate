@@ -45,7 +45,9 @@
 # turn-ended mtime is older than that interval and whose last status is not
 # captain-held. In a secondmate home a child whose ledger already ends in a
 # terminal done or failed line belongs to the ledger-first path above and is
-# skipped here, so one outcome is never reported twice. It then uses
+# skipped here, so one outcome is never reported twice. Both paths read the
+# ledger past fm-captain-hold.sh's keyed hold mirror, so holding and releasing a
+# delivered child never turns its reported outcome into a new one. It then uses
 # fm-crew-state.sh as the sole current-state source.
 # Only a done or failed state is suspicious enough to create a durable terminal
 # outcome record or wake the supervisor.
@@ -351,6 +353,25 @@ notice_parent_report_failed() { # <record> <fingerprint> <payload>
   queue_notice_once "$record" "inactive-reconcile:$fingerprint" "$payload" || true
 }
 
+# The child's own latest status event, and with <previous-var> the event before
+# it: last_status_line read past bin/fm-captain-hold.sh's keyed hold mirror
+# (`captain-held` and `resolved [key=captain-hold-<id>-<n>]`), so a hold and its
+# release never displace the event the worker itself last wrote. Both
+# reconciliation paths read a child through this one view, keeping the terminal
+# outcome, its fingerprint, and the predecessor head they compare in step.
+child_status_event() { # <status> [<previous-var>]
+  local status=$1 id mirror scan=''
+  [ -f "$status" ] && [ -r "$status" ] || return 0
+  id=$(basename "$status" .status)
+  mirror="^(captain-held|resolved) \\[key=captain-hold-${id//./\\.}-[0-9]+\\]:"
+  if [ "$#" -gt 1 ] || ! scan=$(tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$status" 2>/dev/null \
+    | grep -Ev -- "$mirror" | _fm_status_event_scan); then
+    scan=$(grep -Ev -- "$mirror" "$status" | _fm_status_event_scan) || :
+  fi
+  [ "$#" -lt 2 ] || printf -v "$2" '%s' "${scan%%$'\n'*}"
+  printf '%s\n' "${scan##*$'\n'}"
+}
+
 # The whole terminal event a child's ledger states, or non-zero when the ledger
 # is absent, unusable, or states no done or failed event (1), or when that event
 # is the line still being appended (2, no trailing newline yet). The event is
@@ -360,7 +381,7 @@ notice_parent_report_failed() { # <record> <fingerprint> <payload>
 child_terminal_ledger_line() { # <status>
   local status=$1 snapshot last marker='__FM_LEDGER_SNAPSHOT_END__'
   [ -f "$status" ] && [ ! -L "$status" ] && [ -s "$status" ] || return 1
-  last=$(last_status_line "$status")
+  last=$(child_status_event "$status")
   case "$(status_line_verb "$last")" in done|failed) ;; *) return 1 ;; esac
   snapshot=$(cat "$status"; printf '%s' "$marker") || return 1
   case "$snapshot" in
@@ -411,7 +432,7 @@ report_child_ledger_locked() { # <id> <meta>
   outcome_key="child-outcome-$id-$state-${fingerprint:0:8}"
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct upstream "$pr" || return 1
   [ -n "$RECORD_PENDING" ] || return 0
-  last_status_line "$status" previous >/dev/null
+  child_status_event "$status" previous >/dev/null
   predecessor_head=$(sha256_text "$previous")
   if claim_inactive_report_for_ledger "$id" "$incarnation" "$state" "$fingerprint" "$predecessor_head"; then
     # The fallback line is already on the parent channel. This reported ledger
@@ -494,7 +515,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   state_line=$(fm_run_timed "$timeout" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_CREW_STATE_NO_FORGE=1 \
     "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
   [ "$state_rc" -ne 124 ] || return 3
-  last=$(last_status_line "$status")
+  last=$(child_status_event "$status")
   if [ -n "$self" ]; then
     child_terminal_ledger_line "$status" >/dev/null
     case "$?" in 0|2) return 0 ;; esac
