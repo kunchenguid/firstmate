@@ -1050,7 +1050,16 @@ test_agy_turnend_hook_records_both_turn_boundaries() {
   printf '{}' | FM_AGY_TURNEND_TOKEN="$token" "$hook" stop >/dev/null || fail "the agy hook exited non-zero on a stale generation"
   assert_contains "$(cat "$statedir/t1.busy-state")" "state=busy" \
     "a stale generation was allowed to rewrite the agy busy record"
-  pass "fm-agy-turnend-hook.sh: PreInvocation opens and Stop closes, and a stale generation is refused"
+
+  # The token name is validated before the registry is read, but the values
+  # inside a token are data too. fm-spawn only ever writes absolute paths.
+  printf 'turnend=%s\nbusy_event=%s\nstate=%s\nid=%s\ngen=%s\n' \
+    "relative/turn-ended" "relative/fm-busy-event.sh" "relative/state" t1 "$gen" >"$auth"
+  printf '{}' | FM_AGY_TURNEND_TOKEN="$token" "$hook" stop >/dev/null \
+    || fail "the agy hook exited non-zero on a relative-path token"
+  assert_contains "$(cat "$statedir/t1.busy-state")" "state=busy" \
+    "a relative-path token was allowed to rewrite the agy busy record"
+  pass "fm-agy-turnend-hook.sh: PreInvocation opens and Stop closes, and a stale generation or relative path is refused"
 }
 
 test_agy_ancestry_detects_the_native_command_name

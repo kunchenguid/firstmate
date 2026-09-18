@@ -122,6 +122,13 @@ while IFS='=' read -r key value; do
   esac
 done <"$auth"
 
+# The token name is validated above, but the values inside a token are data
+# too. fm-spawn only ever writes absolute paths, so anything else is a token
+# this hook did not write and must not act on.
+case "$busy_event" in /*) ;; *) emit ;; esac
+case "$state" in /*) ;; *) emit ;; esac
+case "$turnend" in /*) ;; *) emit ;; esac
+
 case "$event" in
 stop)
   busy_state=idle
