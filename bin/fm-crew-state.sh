@@ -1412,9 +1412,12 @@ if [ "$HAVE_RUN" = 1 ]; then
         && [ "$(strip_quotes "$(nm_field branch)")" = "$CREW_BRANCH" ] \
         && [ "$NEWEST_STATUS" = "$ATTRIBUTED_LEDGER_STATUS" ] \
         && [ "$NEWEST_PR" = "$RUN_PR" ]; then
-        case "$RUN_HEAD" in
-          "$NEWEST_SHA"*) [ -n "$NEWEST_SHA" ] && NEWEST_ROW_AGREES=1 ;;
-        esac
+        if [ -n "$NEWEST_SHA" ] && [ -n "$RUN_HEAD" ]; then
+          case "$RUN_HEAD" in
+            "$NEWEST_SHA"*) NEWEST_ROW_AGREES=1 ;;
+            *) case "$NEWEST_SHA" in "$RUN_HEAD"*) NEWEST_ROW_AGREES=1 ;; esac ;;
+          esac
+        fi
       fi
       if [ "$RUN_SOURCE" = coarse ]; then
         case "$LEDGER_STATUS" in

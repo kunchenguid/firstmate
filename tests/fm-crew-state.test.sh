@@ -3952,6 +3952,46 @@ EOF
   pass "a same-head terminal rerun publishes the newest pull request"
 }
 
+# Both readers of the `no-mistakes runs` listing must agree on when the ledger is
+# unreadable: a row the strict reader rejects must not still supply newest-row
+# evidence that unbinds the attributed run.
+test_malformed_ledger_row_supplies_no_newest_evidence() {
+  reset_fakes
+  local d short; d=$(new_case malformed-ledger-row)
+  make_repo_on_branch "$d/wt" fm/feat-s2i
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2i.meta" "window=fm:fm-feat-s2i" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s2i)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s2i ${short}  $(ledger_stamp_minutes_ago 60)  https://github.com/o/r/pull/3 stray"
+  local out; out=$(run_crew_state "$d" feat-s2i)
+  assert_contains "$out" "state: failed" "an unreadable ledger row never unbinds the attributed run"
+  assert_contains "$out" "source: run-step" "the attributed failure stays run-step sourced"
+  assert_not_contains "$out" "current state not provable here" "a rejected row supplies no supersession"
+  assert_not_contains "$out" "pull/3" "a rejected row publishes no pull request"
+  pass "a malformed ledger row supplies no newest-row evidence"
+}
+
+# Neither side's abbreviation length is fixed: the ledger may print a longer sha
+# than the run record's own head, and the current run must still bind.
+test_longer_ledger_sha_still_binds_the_current_run() {
+  reset_fakes
+  local d full url; d=$(new_case longer-ledger-sha)
+  url=https://github.com/o/r/pull/7
+  make_repo_on_branch "$d/wt" fm/feat-s2j
+  full=$(git -C "$d/wt" rev-parse HEAD)
+  FM_FAKE_RUN_HEAD=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  export FM_FAKE_RUN_HEAD
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2j.meta" "window=fm:fm-feat-s2j" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed_with_pr fm/feat-s2j "$url")"
+  FM_FAKE_RUNS_LIST="  completed  fm/feat-s2j ${full}  $(ledger_stamp_minutes_ago 60)  $url"
+  local out; out=$(FM_CREW_STATE_NO_FORGE=1 run_crew_state "$d" feat-s2j)
+  assert_contains "$out" "state: done" "the current run still reads done"
+  assert_contains "$out" "pr=$url" "a longer ledger sha still binds the run and keeps its pull request"
+  pass "a ledger sha longer than the run head still binds the current run"
+}
+
 test_foreign_status_never_hides_coarse_terminal_pr() {
   reset_fakes
   local d short; d=$(new_case foreign-status-terminal-pr)
@@ -6759,6 +6799,8 @@ test_same_head_terminal_rerun_publishes_newest_pr
 test_foreign_status_never_hides_coarse_terminal_pr
 test_stale_passed_run_publishes_no_pr_for_active_rerun
 test_cancelled_run_publishes_no_pr_for_active_rerun
+test_malformed_ledger_row_supplies_no_newest_evidence
+test_longer_ledger_sha_still_binds_the_current_run
 test_status_append_during_ordering_snapshot_keeps_failure
 test_later_declared_pause_supersedes_failed_reading
 test_later_declared_pause_supersedes_cancelled_reading
