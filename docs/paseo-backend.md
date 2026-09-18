@@ -23,22 +23,22 @@ The daemon listens on `127.0.0.1:6767` by default, and `paseo status` reports it
 The adapter starts the daemon with `paseo start` only when it is simply not up yet, and fails fast with a pointer here when a started daemon does not become reachable.
 
 Select Paseo with local `config/backend` containing `paseo`, `FM_BACKEND=paseo` for one launch, or an explicit request to Firstmate.
-It can also be runtime auto-detected when Firstmate itself runs inside a Paseo-managed agent environment.
+It is never runtime auto-detected; see "Selection is explicit" below.
 A spawn stops with an actionable setup message when the CLI, minimum version, `jq`, or daemon reachability is unavailable.
 
 Routine supervision uses `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'` without bringing the Paseo window forward.
 
 Verify setup by spawning a small task and confirming metadata contains `backend=paseo`, `paseo_terminal_id=`, and `paseo_workspace_id=`.
 
-## Runtime detection
+## Selection is explicit
 
-`PASEO_AGENT_ID` is the primary Paseo runtime marker.
-On macOS only, detection falls back to `__CFBundleIdentifier=sh.paseo.desktop` when a wrapper stripped the `PASEO_*` variables.
-Detection checks tmux first, then Herdr, then cmux and its fallback signals, then Paseo, so a multiplexer nested inside Paseo remains the active backend (innermost wins: `TMUX` > `HERDR_ENV` > `CMUX_WORKSPACE_ID` > `PASEO_AGENT_ID`).
+Paseo is explicit-only, like zellij and orca: `config/backend`, `FM_BACKEND=paseo`, or `--backend paseo` select it, and nothing else does.
+Paseo stamps its markers into every descendant process: a Paseo agent exports `PASEO_AGENT_ID`, a terminal tab exports `PASEO_TERMINAL_ID` and `PASEO_WORKSPACE_ID`, and both carry `__CFBundleIdentifier=sh.paseo.desktop`.
+A tmux server started from a Paseo tab inherits all of them, so their presence proves only that some ancestor was Paseo, never that the captain chose it.
+Reading them as a selection would make Paseo an ambient default, which "Authority is explicit and never inferred" rules out; `fm_backend_detect` therefore ignores them.
 
-Auto-detection selects only the backend.
-It never grants credentials.
-The spawn notice names the winning signal, and the spawn refusal explains how to finish Paseo setup or opt back into tmux.
+The markers are still useful once Paseo has been selected explicitly.
+When Firstmate itself runs inside a Paseo tab, `PASEO_WORKSPACE_ID` names that tab's workspace, and the adapter adopts it as the project's shared workspace when its cwd is the project, before falling back to the title lookup.
 
 ## Task shape and metadata
 
@@ -98,8 +98,8 @@ Durable history for a finished task therefore lives in the status log, the repor
 ## Active limits
 
 - Paseo is experimental, macOS-only, GUI-first, and requires the app running.
-- Secondmate spawns are unsupported until a per-home lifecycle design is verified.
-  [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns the `--secondmate` refusal and its tmux fallback for an auto-detected Paseo.
+- Secondmate spawns are unsupported until a per-home lifecycle design is verified; select `tmux` for a home that needs them.
+- `paseo run --cwd` is ignored when `PASEO_AGENT_ID` is set (reported on the upstream issue thread); the adapter never uses `paseo run`, only `terminal create --cwd`, which honours the path.
 - There is no native busy or push-event signal, and `fm_backend_agent_state` reports `unverified` for Paseo.
 - A target can disappear after structural readiness and before the operation.
 - Workspace and terminal ids are not assumed stable across daemon restarts; recovery re-resolves by terminal NAME.
