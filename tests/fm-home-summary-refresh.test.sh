@@ -45,13 +45,21 @@ command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
 cat > "$FAKEBIN/tmux" <<'SH'
 #!/usr/bin/env bash
-case "${1:-}" in
-  display-message) printf '%%1\n' ;;
-  capture-pane)
+command=
+for arg in "$@"; do
+  case "$arg" in
+    display-message|capture-pane) command=$arg; break ;;
+  esac
+done
+case "$command" in
+  display-message)
     if [ -n "${FM_TEST_STATE_READ_MARKER:-}" ]; then
       printf '%s\n' "$$" > "$FM_TEST_STATE_READ_MARKER"
       sleep "${FM_TEST_STATE_READ_SLEEP:-30}"
     fi
+    printf '%%1\n'
+    ;;
+  capture-pane)
     printf 'fixture pane\n> \n'
     ;;
 esac
