@@ -9,6 +9,7 @@ RECON="$ROOT/bin/fm-inactive-reconcile.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 WATCH="$ROOT/bin/fm-watch.sh"
 TMP_ROOT=$(fm_test_tmproot fm-inactive-reconcile)
+fm_git_identity fmtest fmtest@example.invalid
 
 set_mtime() { # <epoch> <path>
   local epoch=$1 path=$2 stamp
@@ -80,11 +81,17 @@ EOF
 }
 
 write_child() { # <home> <id> <status> [spawn-gen]
-  local home=$1 id=$2 status=$3 spawn_gen=${4:-s${BASHPID:-$$}.$RANDOM}
+  local home=$1 id=$2 status=$3 spawn_gen=${4:-s${BASHPID:-$$}.$RANDOM} sha
+  mkdir -p "$home/projects/$id"
+  git -C "$home/projects/$id" init -q
+  git -C "$home/projects/$id" commit -q --allow-empty -m init
+  sha=$(git -C "$home/projects/$id" rev-parse HEAD)
+  git -C "$home/projects/$id" update-ref refs/remotes/origin/main "$sha"
   fm_write_meta "$home/state/$id.meta" \
-    "window=firstmate:fm-$id" "worktree=$home/projects/$id" "project=alpha" \
+    "window=firstmate:fm-$id" "worktree=$home/projects/$id" "project=$home/projects/$id" \
     'harness=codex' 'kind=ship' 'mode=no-mistakes' 'yolo=off' \
-    "spawn_gen=$spawn_gen" 'pr=https://example.test/owner/repo/pull/1'
+    "spawn_gen=$spawn_gen" 'pr=https://example.test/owner/repo/pull/1' \
+    "pr_head=$sha"
   printf '%s\n' "$status" > "$home/state/$id.status"
   : > "$home/state/$id.turn-ended"
   age "$home/state/$id.meta" "$home/state/$id.status" "$home/state/$id.turn-ended"
@@ -162,6 +169,22 @@ test_main_direct_terminal_presentation_receipt() {
   FM_HOME="$MAIN" FM_STATE_OVERRIDE="$MAIN/state" "$DRAIN" --ack-through "$seq" --recovery-generation "$generation"
   [ "$(outcome_count "$MAIN" presented)" = 1 ] || fail "acknowledged presentation did not receive its own receipt"
   pass "main direct terminal presentation has a durable receipt"
+}
+
+# An unpushed CI-ready ship done: is not a parent-facing ready signal.
+test_unpushed_ci_ready_done_is_not_published() {
+  local sha
+  make_world unpushed-ready; bind_secondmate local
+  write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  git -C "$MATE/projects/child" commit -q --allow-empty -m 'only in the copy'
+  sha=$(git -C "$MATE/projects/child" rev-parse HEAD)
+  awk -v sha="$sha" '{ sub(/^pr_head=.*/, "pr_head=" sha); print }' \
+    "$MATE/state/child.meta" > "$MATE/state/child.meta.tmp"
+  mv "$MATE/state/child.meta.tmp" "$MATE/state/child.meta"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  [ ! -s "$MAIN/state/mate.status" ] || fail "unpushed CI-ready done: was published upstream"
+  [ "$(outcome_count "$MATE" reported)" = 0 ] || fail "unpushed CI-ready done: left a delivery receipt"
+  pass "unpushed CI-ready ship done: is not published upstream"
 }
 
 # A secondmate delivers a child's terminal ledger line to the parent on the
@@ -895,6 +918,7 @@ SH
 }
 
 test_main_direct_terminal_presentation_receipt
+test_unpushed_ci_ready_done_is_not_published
 test_local_secondmate_delivers_terminal_ledger_line
 test_secondmate_multiline_terminal_outcome_is_delivered_once
 test_secondmate_unterminated_prose_reports_run_outcome

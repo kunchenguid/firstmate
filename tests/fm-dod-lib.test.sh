@@ -12,7 +12,7 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-dod-lib)
 fm_git_identity fmtest fmtest@example.invalid
 
-accept_done() {  # <kind> <mode> <worktree> <project> <line>
+accept_done() {  # <kind> <mode> <worktree> <project> <line> [meta]
   fm_dod_accept_ship_done "$@"
 }
 
@@ -68,7 +68,7 @@ test_moved_branch_without_named_head_is_refused() {
   # The fork branch exists and moved, but only to a merge of the default
   # branch: reachability of that branch is not reachability of the named head.
   git -C "$wt" update-ref refs/remotes/origin/fm/moved "$main_sha"
-  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/3")
+  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: PR https://example.test/o/r/pull/3 checks green")
   rc=$?
   [ "$rc" -eq 1 ] || fail "moved remote branch without the named head was accepted"
   case "$reason" in
@@ -78,42 +78,15 @@ test_moved_branch_without_named_head_is_refused() {
   pass "a moved remote branch that lacks the named head is refused"
 }
 
-test_named_sha_is_tested_not_worktree_head() {
-  local repo wt named other
-  repo="$TMP_ROOT/named-repo"
-  wt="$TMP_ROOT/named-wt"
-  fm_git_worktree "$repo" "$wt" fm/named
-  git -C "$wt" commit -q --allow-empty -m 'named fix'
-  named=$(git -C "$wt" rev-parse HEAD)
-  git -C "$wt" update-ref refs/remotes/origin/fm/named "$named"
-  git -C "$wt" commit -q --allow-empty -m 'later unpushed commit'
-  other=$(git -C "$wt" rev-parse HEAD)
-  [ "$named" != "$other" ] || fail "fixture did not diverge HEAD from the named sha"
-  accept_done ship direct-PR "$wt" "$repo" "done: $named" \
-    || fail "explicit named sha on a remote was refused because HEAD moved"
-  accept_done ship direct-PR "$wt" "$repo" "done: $other" >/dev/null \
-    && fail "explicit named sha that is only in the worktree was accepted"
-  pass "the check tests the named sha, not merely worktree HEAD"
-}
-
-test_ready_in_branch_names_that_branch_tip() {
-  local repo wt feature_sha reason rc
-  repo="$TMP_ROOT/branch-repo"
-  wt="$TMP_ROOT/branch-wt"
-  fm_git_worktree "$repo" "$wt" fm/branch
-  git -C "$wt" commit -q --allow-empty -m 'branch tip'
-  feature_sha=$(git -C "$wt" rev-parse HEAD)
-  reason=$(accept_done ship no-mistakes "$wt" "$repo" "done: ready in branch fm/branch")
-  rc=$?
-  [ "$rc" -eq 1 ] || fail "ready-in-branch done: was accepted with the tip only in the worktree"
-  case "$reason" in
-    *"named head $feature_sha is unreachable outside the worker copy") ;;
-    *) fail "ready-in-branch refusal did not name the branch tip: $reason" ;;
-  esac
-  git -C "$wt" update-ref refs/remotes/origin/fm/branch "$feature_sha"
-  accept_done ship no-mistakes "$wt" "$repo" "done: ready in branch fm/branch" \
-    || fail "ready-in-branch tip on a remote was refused"
-  pass "ready in branch tests that branch tip, not some other ref"
+test_no_mistakes_prevalidation_done_is_not_gated() {
+  local repo wt
+  repo="$TMP_ROOT/preval-repo"
+  wt="$TMP_ROOT/preval-wt"
+  fm_git_worktree "$repo" "$wt" fm/preval
+  git -C "$wt" commit -q --allow-empty -m 'only in the disposable copy'
+  accept_done ship no-mistakes "$wt" "$repo" 'done: implementation complete' \
+    || fail "no-mistakes pre-validation done: must not require named-head reachability"
+  pass "no-mistakes pre-validation done: is not gated"
 }
 
 test_local_only_linked_branch_is_accepted() {
@@ -163,6 +136,70 @@ test_standalone_local_only_needs_distinct_project_ref() {
   pass "standalone local-only done: requires the named head in a distinct project clone"
 }
 
+test_pr_pull_ref_is_tested_not_later_head() {
+  local repo wt named other reason rc
+  repo="$TMP_ROOT/named-repo"
+  wt="$TMP_ROOT/named-wt"
+  fm_git_worktree "$repo" "$wt" fm/named
+  git -C "$wt" commit -q --allow-empty -m 'named fix'
+  named=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" update-ref refs/remotes/origin/fm/named "$named"
+  git -C "$wt" update-ref refs/pull/2/head "$named"
+  git -C "$wt" commit -q --allow-empty -m 'later unpushed commit'
+  other=$(git -C "$wt" rev-parse HEAD)
+  [ "$named" != "$other" ] || fail "fixture did not diverge HEAD from the PR head"
+  accept_done ship direct-PR "$wt" "$repo" "done: PR https://example.test/o/r/pull/2" \
+    || fail "PR pull-ref head on a remote was refused because HEAD moved"
+  reason=$(accept_done ship direct-PR "$wt" "$repo" "done: PR https://example.test/o/r/pull/9")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "PR form that falls back to unpushed HEAD was accepted"
+  case "$reason" in
+    *"named head $other is unreachable outside the worker copy") ;;
+    *) fail "fallback HEAD refusal did not name the unpushed commit: $reason" ;;
+  esac
+  pass "the check tests the PR pull-ref head, not merely later worktree HEAD"
+}
+
+test_free_text_sha_is_not_the_named_head() {
+  local repo wt old new reason rc
+  repo="$TMP_ROOT/hex-repo"
+  wt="$TMP_ROOT/hex-wt"
+  fm_git_worktree "$repo" "$wt" fm/hex
+  old=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" update-ref refs/remotes/origin/main "$old"
+  git -C "$wt" commit -q --allow-empty -m 'actual fix'
+  new=$(git -C "$wt" rev-parse HEAD)
+  reason=$(accept_done ship direct-PR "$wt" "$repo" "done: reverted $old and fixed the retry")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "free-text SHA on origin/main made an unpushed HEAD accept"
+  case "$reason" in
+    *"named head $new is unreachable outside the worker copy") ;;
+    *) fail "free-text SHA scan still selected the old commit: $reason" ;;
+  esac
+  pass "a 40-hex token in the note is not the named head"
+}
+
+test_recorded_merged_pr_is_landed_after_prune() {
+  local repo wt sha meta state
+  repo="$TMP_ROOT/merged-repo"
+  wt="$TMP_ROOT/merged-wt"
+  state="$TMP_ROOT/merged-state"
+  mkdir -p "$state"
+  fm_git_worktree "$repo" "$wt" fm/merged
+  git -C "$wt" commit -q --allow-empty -m 'fix'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" update-ref refs/remotes/origin/fm/merged "$sha"
+  meta="$state/merged.meta"
+  printf 'kind=ship\nmode=direct-PR\nworktree=%s\nproject=%s\npr=https://example.test/o/r/pull/7\npr_head=%s\n' \
+    "$wt" "$repo" "$sha" > "$meta"
+  printf '%s\n' \
+    fm-pr-poll-merge-notified-v1 github example.test o/r 7 > "$state/merged.pr-poll-merge-notified"
+  git -C "$wt" update-ref -d refs/remotes/origin/fm/merged
+  accept_done ship direct-PR "$wt" "$repo" "done: PR https://example.test/o/r/pull/7" "$meta" \
+    || fail "recorded merged PR was refused after its remote-tracking ref was pruned"
+  pass "a recorded merged PR satisfies the gate after prune"
+}
+
 test_non_done_lines_are_not_gated() {
   local repo wt
   repo="$TMP_ROOT/nongate-repo"
@@ -178,10 +215,12 @@ test_non_done_lines_are_not_gated() {
 
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
+test_no_mistakes_prevalidation_done_is_not_gated
 test_remote_containing_named_head_is_accepted
 test_moved_branch_without_named_head_is_refused
-test_named_sha_is_tested_not_worktree_head
-test_ready_in_branch_names_that_branch_tip
+test_pr_pull_ref_is_tested_not_later_head
+test_free_text_sha_is_not_the_named_head
+test_recorded_merged_pr_is_landed_after_prune
 test_local_only_linked_branch_is_accepted
 test_local_only_detached_head_is_refused
 test_standalone_local_only_needs_distinct_project_ref

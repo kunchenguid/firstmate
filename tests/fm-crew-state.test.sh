@@ -1710,6 +1710,27 @@ test_unpushed_ship_done_is_blocked() {
   pass "unpushed ship done: is current-state blocked"
 }
 
+test_no_mistakes_prevalidation_done_stays_done() {
+  reset_fakes
+  local d out
+  d=$(new_case preval-done)
+  make_repo_on_branch "$d/wt" fm/preval
+  git -C "$d/wt" commit -q --allow-empty -m 'fix only in the worktree'
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/preval.meta" \
+    "window=fm:fm-preval" "worktree=$d/wt" "project=$d/wt" \
+    "kind=ship" "mode=no-mistakes" "harness=claude"
+  printf 'done: implementation complete\n' > "$d/state/preval.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" preval
+  out=$(run_crew_state "$d" preval)
+  assert_contains "$out" "state: done" "no-mistakes pre-validation done: remains done"
+  assert_not_contains "$out" "state: blocked" "pre-validation done: must not be the named-head gate"
+  pass "no-mistakes pre-validation done: stays current-state done"
+}
+
 test_moved_remote_branch_without_named_head_is_blocked() {
   reset_fakes
   local d main_sha fix_sha out
@@ -3645,6 +3666,7 @@ test_terminal_run_without_live_sibling_is_unchanged
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_unpushed_ship_done_is_blocked
+test_no_mistakes_prevalidation_done_stays_done
 test_moved_remote_branch_without_named_head_is_blocked
 test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working

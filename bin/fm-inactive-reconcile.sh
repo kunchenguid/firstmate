@@ -15,8 +15,13 @@
 # bin/fm-parent-channel-lib.sh as
 #   <state> [key=child-outcome-<child>-<state>-<fp8>]: child <child> <state>: <note> [pr=<url>] [mode=<mode>] [yolo=<posture>] [report=data/<child>/report.md]
 # carrying the child's recorded PR, delivery mode, merge posture, and scout
-# report pointer, without consulting fm-crew-state.sh and without waiting for
-# the inactive cadence. A line still being appended (no trailing newline yet)
+# report pointer. A ship `done:` is published only when bin/fm-dod-lib.sh
+# accepts the named head, so an unpushed copy is not reported upstream as
+# ready. The cadence path uses fm-crew-state.sh, which applies the same gate:
+# a no-mistakes pre-validation `done: {summary}` still reads done (the
+# pipeline handoff), while an ungated CI-ready or direct-PR/local-only done
+# whose head lives only in the disposable copy reads blocked and is not a
+# terminal inactive outcome. A line still being appended (no trailing newline yet)
 # is left for the next poll. This is what keeps a mate's PR-ready, finding,
 # and failure outcomes from depending on the mate model appending them
 # (docs/secondmate-parent-channel.md). A main home has no parent channel and
@@ -96,6 +101,8 @@ CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-dod-lib.sh
+. "$SCRIPT_DIR/fm-dod-lib.sh"
 
 FM_INACTIVE_RECONCILE_SECS=${FM_INACTIVE_RECONCILE_SECS:-900}
 case "$FM_INACTIVE_RECONCILE_SECS" in
@@ -405,6 +412,12 @@ report_child_ledger_locked() { # <id> <meta>
   status="$STATE/$id.status"
   last=$(child_terminal_ledger_line "$status") || return 0
   state=$(status_line_verb "$last")
+  if [ "$state" = "done" ]; then
+    if ! fm_dod_accept_ship_done "$(meta_field "$meta" kind)" "$(meta_field "$meta" mode)" \
+      "$(meta_field "$meta" worktree)" "$(meta_field "$meta" project)" "$last" "$meta" >/dev/null; then
+      return 0
+    fi
+  fi
   pr=$(pr_for_task "$meta" "$last")
   incarnation=$(meta_incarnation "$meta")
   fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$last")

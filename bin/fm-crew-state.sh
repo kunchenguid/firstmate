@@ -188,26 +188,12 @@ fi
 # named-head reachability gate: that claim is blocked so a disposable copy is
 # not treated as finished-and-safe. Remote secondmates skip the local git
 # check; their worktree is on another host.
-ship_status_done_state() {  # <line>
-  if [ "$KIND" != ship ] || [ -n "${REMOTE_HOST:-}" ]; then
-    printf '%s\n' "done"
-    return 0
-  fi
-  if fm_dod_accept_ship_done "$KIND" "$(meta_value mode)" "$WT" "$(meta_value project)" "$1" >/dev/null; then
-    printf '%s\n' "done"
-    return 0
-  fi
-  printf '%s\n' blocked
-}
-
-# Re-read the gate in this shell so the refusal reason survives command
-# substitution around map_log_state.
 emit_ship_status_done() {  # [extra-detail]
   local extra=${1:-} reason
   if [ "$KIND" != ship ] || [ -n "${REMOTE_HOST:-}" ]; then
     emit "done" status-log "$(status_line_note "$LOG_LINE")${extra:+${SEP}$extra}"
   fi
-  if reason=$(fm_dod_accept_ship_done "$KIND" "$(meta_value mode)" "$WT" "$(meta_value project)" "$LOG_LINE"); then
+  if reason=$(fm_dod_accept_ship_done "$KIND" "$(meta_value mode)" "$WT" "$(meta_value project)" "$LOG_LINE" "$META"); then
     emit "done" status-log "$(status_line_note "$LOG_LINE")${extra:+${SEP}$extra}"
   fi
   emit blocked status-log "$reason"
@@ -222,7 +208,7 @@ map_log_state() {  # <line>
     working)        echo working ;;
     needs-decision) echo parked ;;
     blocked)        echo blocked ;;
-    done)           ship_status_done_state "$1" ;;
+    done)           echo "done" ;;
     failed)         echo failed ;;
     *)              echo unknown ;;
   esac
@@ -1066,11 +1052,11 @@ fi
 # the verb->state mapping (including the configurable paused verb), so reusing its
 # `unknown` verdict as the "not a state" test needs no second verb list here.
 if [ -n "$LOG_VERB" ]; then
+  if [ "$LOG_VERB" = "done" ]; then
+    emit_ship_status_done
+  fi
   LOG_STATE=$(map_log_state "$LOG_LINE")
   if [ "$LOG_STATE" != unknown ]; then
-    if [ "$LOG_STATE" = blocked ] && [ "$LOG_VERB" = "done" ]; then
-      emit_ship_status_done
-    fi
     emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
   fi
 fi
