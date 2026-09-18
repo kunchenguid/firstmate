@@ -78,8 +78,8 @@ fm_pid_identity() {
   # Git Bash/MSYS exposes these compatible files but its Cygwin ps rejects the
   # portable fallback's -o fields, so capability detection must not key on uname.
   # A /proc that is present but unreadable, truncated, or missing od falls through
-  # to the portable ps form instead of reporting no identity at all: an empty
-  # identity is what publishes an unconfirmable watcher lock.
+  # to the portable ps form instead of reporting no identity at all: watcher
+  # lock publication requires a non-empty, verifiable identity.
   if [ -r "$proc_root/$pid/stat" ] && [ -r "$proc_root/$pid/cmdline" ]; then
     starttime=
     cmdline_hex=
@@ -1063,7 +1063,7 @@ fm_lock_try_acquire() {
     return 1
   fi
   # A dead watcher lock that names another home stays put only while the beacon
-  # is fresh. Identity-missing own-home locks have no fm-home and remain
+  # is fresh. Identity-missing locks with absent or matching fm-home remain
   # reclaimable by liveness.
   if [ "$lockdir" = "$STATE/.watch.lock" ] \
     && fm_watch_lock_foreign_home_holds "$lockdir" "$STATE"; then
@@ -1118,9 +1118,9 @@ fm_lock_try_acquire() {
     return 1
   fi
 
-  # Only a lock that is really there records downtime: reaching the steal path
-  # with no lock at all means creation itself was refused, and no watcher went
-  # down for that.
+  # Only an existing lock records downtime here. A failed creation or a
+  # concurrent steal can leave no lock to recover; absence alone is not
+  # evidence of watcher downtime.
   if [ "$lockdir" = "$STATE/.watch.lock" ] \
     && { [ -e "$lockdir" ] || [ -L "$lockdir" ]; } \
     && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime; then

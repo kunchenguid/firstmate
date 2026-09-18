@@ -2066,10 +2066,12 @@ if ! FM_WATCH_PATH=$WATCH_PATH fm_lock_try_acquire "$WATCH_LOCK"; then
   elif [ "${FM_LOCK_IDENTITY_REFUSED:-}" = 1 ]; then
     # The one creation failure no retry can resolve: this host yields no
     # verifiable process identity, so no lock may be published and there is no
-    # peer watcher to defer to. Every other failed acquire - a lost creation or
-    # steal race - falls through to already-running, because it resolves itself
-    # into a single healthy watcher. Typed on stdout so bin/fm-watch-arm.sh
-    # relays the real reason instead of a generic no-fresh-beacon failure.
+    # peer watcher to defer to. A lost creation or steal race must retain the
+    # already-running fall-through so the arm can attach to the winner.
+    # Owner-record write failures also fall through, but are not identity
+    # refusals; the arm still requires a verified healthy successor.
+    # Typed on stdout so bin/fm-watch-arm.sh relays the real reason instead of
+    # a generic no-fresh-beacon failure.
     echo "watcher: FAILED - watcher lock could not be created: this host yields no verifiable process identity, which is required to publish one"
     exit 1
   else

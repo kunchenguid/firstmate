@@ -95,6 +95,10 @@ The same suite pins the counted-equals-presentable invariant against `bin/fm-gua
 
 ## Arm-layer cycle contract
 
+[`bin/fm-wake-lib.sh`](../bin/fm-wake-lib.sh)'s header owns the watcher singleton's atomic publication and stale-lock reclamation contract.
+When this host cannot provide a verifiable process identity, the watcher refuses lock publication, reports `watcher: FAILED - watcher lock could not be created: this host yields no verifiable process identity, which is required to publish one`, and exits nonzero; the arm relays that diagnostic.
+A refused creation with no existing watcher lock does not itself publish a downtime episode.
+
 `bin/fm-watch-arm.sh` never returns a clean empty success.
 An actionable child output returns that reason normally.
 A zero/empty child return rechecks the home lock and beacon, attaches to a verified healthy successor when one exists, or resolves the close against the watcher's bounded terminal-delivery ledger.
