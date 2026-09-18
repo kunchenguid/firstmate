@@ -11,8 +11,8 @@ Orca is explicit-only: nothing in the code gates this backend to macOS, and it i
 
 Prerequisites:
 
-- `/Applications/Orca.app` installed, running, and ready.
-- The `orca` CLI, installed with `brew install orca`.
+- The Orca app installed, running, and ready.
+- The `orca` CLI on `PATH`.
 - The universal harness and toolchain requirements in [`configuration.md`](configuration.md#toolchain).
 
 Select Orca with local `config/backend` containing `orca`, `FM_BACKEND=orca` for one launch, or an explicit request to Firstmate.
