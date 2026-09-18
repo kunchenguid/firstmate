@@ -396,6 +396,39 @@ window_backend() {
   echo tmux
 }
 
+# shellcheck source=bin/fm-pane-stop-lib.sh
+. "$SCRIPT_DIR/fm-pane-stop-lib.sh"
+
+# .pane-stop-<window-key> stores pane hash, provider, observed epoch, reset
+# epoch (or '-'), displayed delay, and busy generation as TSV. Stable panes
+# retain the first observation so a relative reset never slides forward with
+# each poll; a replacement generation re-arms even an identical display.
+pane_stop_stale_check() {
+  local w=$1 task=$2 h=$3 pane=$4 key record parsed provider delay display now reset kind reason gen agent_state
+  key=$(window_key "$w")
+  record="$STATE/.pane-stop-$key"
+  parsed=$(fm_pane_stop "$(window_harness "$w")" "$pane") || { rm -f "$record"; return 1; }
+  if crew_is_provably_working "$task"; then rm -f "$record"; return 1; fi
+  agent_state=$(fm_backend_agent_state "$(window_backend "$w")" "$w" 2>/dev/null) || agent_state=unreadable
+  case "$agent_state" in dead|missing) rm -f "$record"; return 1 ;; esac
+  gen=$(fm_busy_current_gen "$STATE" "$task") || gen=-
+  if [ -f "$record" ] && [ "$(cut -f1 "$record")" = "$h" ] && [ "$(cut -f6 "$record")" = "$gen" ]; then return 0; fi
+  IFS=$'\t' read -r kind provider delay display <<< "$parsed"
+  now=$(date +%s); reset=-
+  [ "$delay" = - ] || reset=$((now + delay))
+  if [ "$kind" = quota-exhausted ]; then
+    reason="stale: $w ($kind: $provider, resets $display)"
+  else
+    reason="stale: $w ($kind: $provider $display)"
+  fi
+  fm_wake_append stale "$w" "$reason" || exit 1
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$h" "$provider" "$now" "$reset" "$display" "$gen" > "$record"
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  wake "$reason"
+  return 0
+}
+
 window_harness() {
   local w=$1 meta
   meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
@@ -706,7 +739,7 @@ signal_turnend_panes_churned() {  # <file> ...
     return 1
   done
   for key in "${churned_keys[@]}"; do
-    if ! rm -f "$STATE/.stale-$key" "$STATE/.wedge-escalations-$key"; then
+    if ! rm -f "$STATE/.stale-$key" "$STATE/.wedge-escalations-$key" "$STATE/.pane-stop-$key"; then
       for created in "${created_keys[@]+"${created_keys[@]}"}"; do
         rm -f "$STATE/.churn-since-$created"
       done
@@ -1523,7 +1556,7 @@ clear_pause_state() {  # <window-key>
 clear_stale_hash_tracking() {  # <window-key>
   local key=$1
   clear_write_tracking "$key"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.pane-stop-$key" \
     "$STATE/.waiting-resurfaced-$key"
 }
 
@@ -2757,6 +2790,9 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    if [ "$busy_now" -eq 0 ] || [ "$h" != "$prev" ]; then
+      rm -f "$STATE/.pane-stop-$key"
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
@@ -2768,6 +2804,8 @@ EOF
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$key" ;;
           esac
+        elif ! captain_held_silenced "$last" && pane_stop_stale_check "$w" "$task" "$h" "$tail40"; then
+          : # Explicit stops bypass the wedge ladder; never answer or relaunch here.
         elif afk_present; then
           # Daemon owns triage: one-shot per distinct stale hash, as before,
           # except that a captain-held pane is never handed over while the

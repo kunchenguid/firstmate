@@ -67,6 +67,20 @@ Never restart, stop, or update the shared daemon on a crewmate's claim.
 It is one instance serving every lane and home, so a restart kills other lanes' in-flight runs.
 Only positive socket refusal or absence is a daemon-down finding; escalate that finding, or a failed run record that names a daemon error, to the captain.
 
+## Quota-exhausted worker
+
+A `quota-exhausted` stale wake identifies a conservative rendered usage-limit stop, not a generic wedge.
+Confirm the targeted current state and pane still show that stop and that no active validation run owns the work before replacing the worker.
+Load `harness-adapters` and use the current dispatch resolver when available, then apply the ordinary dispatch eligibility and quota-array selection procedure to choose the next eligible candidate rather than retrying the exhausted model.
+Relaunch the same task in place through `bin/fm-control.sh relaunch`, passing the selected harness, model, effort, and a progress note using its current help.
+Preserve existing work and report the recovery choice; silent automatic model switching is forbidden, and the watcher only reports evidence, never relaunches.
+If no eligible candidate can proceed, report the blocker and the reset estimate when known rather than repeatedly relaunching.
+`bin/fm-pane-stop-lib.sh` owns recognised patterns, and `bin/fm-watch.sh` owns the watcher-internal reset record; an unknown reset must not be invented.
+
+A `blocked-at-prompt` wake instead identifies a documented startup trust or permission dialog, including workers that have not yet written a status event.
+Load `harness-adapters` and follow that harness's documented trust procedure; do not blindly send Enter or manufacture consent, because some dialogs require an operator decision and some default to exit.
+The watcher never accepts a prompt or changes trust settings.
+
 ## Live-endpoint escalation
 
 Escalate in order:
