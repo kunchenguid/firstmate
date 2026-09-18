@@ -321,13 +321,17 @@ It refuses Zellij, Orca, and cmux as supervisor backends rather than applying th
 For Herdr, target existence, native state, capture, composer state, and verified submit all route through the shared backend dispatcher and the explicit named-session CLI owner.
 The pane-independent max-defer alert is configured in [`wedge-alarm.md`](wedge-alarm.md).
 
-Harnesses with native tracked background execution can run the daemon in their terminal.
 Pi and pi-signed no longer launch the away daemon; their ordinary supervision session continues under the posture record.
-For another harness without native tracked background execution, `bin/fm-afk-launch.sh` creates a dedicated unfocused Herdr workspace, runs the daemon there with an explicit supervisor target and backend, records the exact daemon pane, and closes only that pane on stop.
+Every other harness uses the same terminal, including the harnesses that have native tracked background execution: a harness reaps its own background jobs on its own schedule, which takes the daemon and its watcher child down together, so that lifetime is not Firstmate's to rely on.
+`bin/fm-afk-launch.sh` creates a dedicated unfocused Herdr workspace, runs the daemon there with an explicit supervisor target and backend, records the exact daemon pane, and closes only that pane on stop.
 It never splits the captain's active tab and never uses shell `&`.
 Recovery reconciles only the recorded exact id.
+Away mode therefore requires a supported supervisor backend on every daemon harness; `start` refuses loudly on Zellij, Orca, and cmux.
 
-On stop, the daemon receives termination while `state/.afk` still exists so its final flush can run, the recorded terminal is closed, and the AFK flag is removed last.
+Inside that terminal `bin/fm-afk-daemon-run.sh` runs the daemon one generation at a time and starts the next one if a generation dies while the posture still stands, so recovery needs no model turn and survives a quota outage.
+Each recovered death is journalled for the return brief and raises the configured active alert.
+
+On stop, the daemon receives termination while `state/.afk` still exists so its final flush can run, the restart supervisor is stood down by exact identity before the recorded terminal is closed, and the AFK flag is removed last.
 A fresh entry clears stale transient escalation caches, while durable queue and task records remain authoritative.
 
 ## Destructive lab safety

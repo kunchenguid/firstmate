@@ -104,16 +104,29 @@ unit_pi_never_launches_the_daemon() {
     else
       fail "$harness: start did not refuse cleanly (rc=$rc): $out"
     fi
-    out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_TEST_HARNESS="$harness" \
-      bash -c '. "$1"; fm_afk_launch_primary_harness() { printf "%s" "$FM_TEST_HARNESS"; }; fm_afk_launch_main start-native' _ "$LAUNCH" 2>&1)
-    rc=$?
-    if [ "$rc" -ne 0 ] && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
-      pass "$harness: start-native refuses to prepare a daemon"
-    else
-      fail "$harness: start-native did not refuse (rc=$rc): $out"
-    fi
     rm -rf "$st"
   done
+}
+
+# The harness-native in-pane background job is retired: its lifetime belonged to
+# the harness, which reaps its own tracked jobs on its own schedule and takes the
+# daemon and its watcher child down together. Every daemon harness now uses the
+# tracked terminal, so the command itself must be gone rather than deprecated in
+# prose - a stale caller has to fail loudly instead of silently preparing state.
+unit_start_native_is_retired() {
+  local st out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-retired.XXXXXX")
+  mkdir -p "$st/state"
+  confirm_posture "$st" || fail "retired native launch: could not confirm fixture posture"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
+  rc=$?
+  if [ "$rc" -eq 2 ] && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ] \
+    && printf '%s' "$out" | grep -F 'Usage:' >/dev/null; then
+    pass "retired native launch: start-native is refused as unknown and prepares nothing"
+  else
+    fail "retired native launch: start-native was still accepted (rc=$rc): $out"
+  fi
+  rm -rf "$st"
 }
 
 unit_daemon_entry_requires_confirmation() {
@@ -121,7 +134,8 @@ unit_daemon_entry_requires_confirmation() {
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-entry-record.XXXXXX")
   mkdir -p "$st/state"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" propose --action merge --object 'task a PR' --when 'checks green' >/dev/null 2>&1
-  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
+    FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start 2>&1)
   rc=$?
   if [ "$rc" -ne 0 ] && [ -f "$st/state/.afk-contract.proposed" ] && [ ! -e "$st/state/.afk-contract" ] \
     && [ ! -e "$st/state/.afk" ] && printf '%s' "$out" | grep -F 'a confirmed away-posture record is required' >/dev/null; then
@@ -130,11 +144,17 @@ unit_daemon_entry_requires_confirmation() {
     fail "daemon entry: pending proposal was promoted or refusal was unclear (rc=$rc): $out"
   fi
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" confirm >/dev/null 2>&1
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
-    && [ -e "$st/state/.afk" ]; then
+  # With the record confirmed, the entry gets past the gate and only the
+  # unsupported backend stops it: a different refusal, from a later step.
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
+    FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] \
+    && printf '%s' "$out" | grep -F 'no non-visible daemon-launch primitive' >/dev/null \
+    && ! printf '%s' "$out" | grep -F 'a confirmed away-posture record is required' >/dev/null; then
     pass "daemon entry: an explicitly confirmed record permits lifecycle preparation"
   else
-    fail "daemon entry: rejected an explicitly confirmed record"
+    fail "daemon entry: rejected an explicitly confirmed record (rc=$rc): $out"
   fi
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
   rm -rf "$st"
@@ -160,7 +180,12 @@ unit_stop_archives_the_record_last() {
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-archive.XXXXXX")
   mkdir -p "$st/state"
   confirm_posture "$st" || fail "stop archive: could not confirm fixture posture"
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 || fail "stop archive: native entry failed"
+  # An away session whose terminal record is already gone (a reconciled crash):
+  # stop must still run its correct-ordered exit and archive the record last.
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_flag_write "$2" away
+  ' _ "$START" "$st/state" || fail "stop archive: could not write the away flag"
   epoch=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" field entered_epoch)
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 \
     && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-contract" ] \
@@ -173,7 +198,9 @@ unit_stop_archives_the_record_last() {
 }
 
 # ---------------------------------------------------------------------------
-# UNIT 1: fm_afk_clear_stale_artifacts removes exactly the three stale artifacts.
+# UNIT 1: fm_afk_clear_stale_artifacts removes exactly the session-scoped away
+# artifacts - the delivery buffer, its sidecar, the wedge marker, and the
+# daemon-restart journal the return brief reads as a supervision gap.
 # ---------------------------------------------------------------------------
 unit_clear_stale() {
   local st
@@ -182,6 +209,7 @@ unit_clear_stale() {
   : > "$st/state/.subsuper-escalations"
   : > "$st/state/.subsuper-escalations.since"
   : > "$st/state/.subsuper-inject-wedged"
+  : > "$st/state/.afk-daemon-restarts"
   : > "$st/state/.wake-queue"          # durable queue must be untouched
   # Source fm-afk-start.sh inside a child bash (it sets `set -eu` and would
   # otherwise leak that into this test shell) and call the clear helper.
@@ -189,8 +217,9 @@ unit_clear_stale() {
     bash -c '. "$1"; fm_afk_clear_stale_artifacts "$2"' _ "$START" "$st/state"
   if [ ! -e "$st/state/.subsuper-escalations" ] \
      && [ ! -e "$st/state/.subsuper-escalations.since" ] \
-     && [ ! -e "$st/state/.subsuper-inject-wedged" ]; then
-    pass "clear-stale: removes escalations buffer, sidecar, and wedge marker"
+     && [ ! -e "$st/state/.subsuper-inject-wedged" ] \
+     && [ ! -e "$st/state/.afk-daemon-restarts" ]; then
+    pass "clear-stale: removes escalations buffer, sidecar, wedge marker, and restart journal"
   else
     fail "clear-stale: stale artifacts survived"
   fi
@@ -734,29 +763,9 @@ unit_tmux_absence_distinguishes_probe_failure() {
   rm -rf "$st"
 }
 
-unit_native_lifecycle() {
-  local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native.XXXXXX")
-  mkdir -p "$st/state"
-  : > "$st/state/.subsuper-escalations"
-  confirm_posture "$st" || fail "native lifecycle: could not confirm fixture posture"
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
-    && [ "$(cut -f1 "$st/state/.afk-daemon-terminal")" = none ] \
-    && [ -e "$st/state/.afk" ] \
-    && [ ! -e "$st/state/.subsuper-escalations" ]; then
-    pass "native lifecycle: launcher owns state with no terminal"
-  else
-    fail "native lifecycle: state preparation or no-terminal record failed"
-  fi
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
-  if [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
-    pass "native lifecycle: uniform stop clears state without closing a terminal"
-  else
-    fail "native lifecycle: uniform stop retained state"
-  fi
-  rm -rf "$st"
-}
-
+# FM_AFK_STATE_PREPARED is what bin/fm-afk-daemon-run.sh passes on every
+# generation, so this is now the restart path's contract too: a restart must not
+# repeat the fresh-entry clear and throw away what the dead generation buffered.
 unit_native_entry_preserves_prepared_state() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native-entry.XXXXXX")
@@ -769,9 +778,9 @@ unit_native_entry_preserves_prepared_state() {
     fm_afk_start_main
   ' _ "$START" >/dev/null 2>&1
   if [ -e "$st/state/.afk" ] && [ -e "$st/state/.subsuper-escalations" ]; then
-    pass "native entry: launcher-prepared lifecycle state is not rewritten"
+    pass "prepared entry: launcher-prepared lifecycle state is not rewritten"
   else
-    fail "native entry: launcher-prepared lifecycle state was mutated"
+    fail "prepared entry: launcher-prepared lifecycle state was mutated"
   fi
   rm -rf "$st"
 }
@@ -1188,6 +1197,7 @@ e2e_tmux() {
 unit_clear_stale
 unit_propose_confirm_records_the_posture_without_a_daemon
 unit_pi_never_launches_the_daemon
+unit_start_native_is_retired
 unit_daemon_entry_requires_confirmation
 unit_failed_daemon_launch_preserves_confirmed_record
 unit_stop_archives_the_record_last
@@ -1210,7 +1220,6 @@ unit_record_failure_closes_terminal
 unit_readiness_failure_rolls_back_terminal
 unit_readiness_failure_preserves_unconfirmed_record
 unit_tmux_absence_distinguishes_probe_failure
-unit_native_lifecycle
 unit_native_entry_preserves_prepared_state
 unit_close_failure_preserves_record
 unit_record_publication_atomic

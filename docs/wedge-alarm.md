@@ -1,9 +1,11 @@
-# Away-mode injection wedge alarm
+# Away-mode wedge alarm
 
 The away-mode sub-supervisor (`bin/fm-supervise-daemon.sh`) buffers escalations and injects them into Firstmate's own pane.
 When injection cannot confirm a submit past `FM_MAX_DEFER_SECS`, `inject_wedge_alarm` raises a loud, rate-limited alarm so the stall never stays invisible.
+The daemon's restart supervisor (`bin/fm-afk-daemon-run.sh`) raises the same alert through the same channels when the daemon itself died and was restarted, so a recovered supervision outage is reported rather than absorbed silently.
 The active alert is pane-independent because a tmux status-line flash has no cross-backend equivalent and cannot reach an unattended captain reliably.
 The durable marker and tmux flash remain as additional signals.
+`bin/fm-wedge-alarm-lib.sh` is the single owner of the channel set, the per-channel notifiers, and the execution seam; each caller owns only its own rate limit, durable record, and summary.
 
 ## Channels
 
@@ -31,9 +33,10 @@ See [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 ## Test safety
 
 Every notifier routes through `FM_WEDGE_ALARM_EXEC` in `wedge_alarm_emit`.
-When the daemon is sourced as a library, that seam defaults to `discard`, so a test cannot accidentally post a real notification.
+When either caller is sourced as a library, that seam defaults to `discard`, so a test cannot accidentally post a real notification.
 `tests/wake-helpers.sh` replaces it with a recorder when a suite needs to assert channel selection and summary propagation.
 Production leaves the seam unset and uses the configured real channels.
 
 `tests/fm-daemon.test.sh` covers directive parsing, rate limiting, timeout and process-group cleanup, argv-safe dispatch, channel fallback, and safe `command:` summary delivery.
+`tests/fm-afk-daemon-run.test.sh` covers the second caller: a recovered daemon death raises the alert through the same seam with its own summary and title.
 [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) records the bounded manual macOS and Herdr channel proof.
