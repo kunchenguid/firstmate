@@ -142,7 +142,7 @@ These enums are stable inputs for backtests and Jev-style prompts.
 | `HOLD` | No change; keep learning or ride variance |
 | `PAUSE` | Stop delivery on the unit |
 | `REDUCE` | Lower budget or cap (prefer before pause on validated units) |
-| `SCALE_MODERATE` | Raise budget modestly on the existing unit (typical +15–40%) |
+| `SCALE_MODERATE` | Raise budget modestly on the existing unit (typical +15–30%, at most ~30% per step) |
 | `SCALE_AGGRESSIVE` | Larger raise or additional structural copy — higher risk |
 | `DUPLICATE_TEST` | New delivery unit / structure to test transfer (not the default scale path) |
 | `WAIT_WINDOW` | Decision deferred until the post-change or validation window closes |
