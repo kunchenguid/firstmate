@@ -21,10 +21,14 @@ type AssistantMessage = {
   content: ContentBlock[];
 };
 
+type AssistantMessageUpdateOptions = {
+  transient?: boolean;
+};
+
 type AssistantMessageComponentLike = {
   setHideThinkingBlock(hide: boolean): void;
   invalidate(): void;
-  updateContent(message: AssistantMessage, options?: { transient?: boolean }): void;
+  updateContent(message: AssistantMessage, options?: AssistantMessageUpdateOptions): void;
 };
 
 type CalmAssistantThinkingPatch = {
@@ -32,6 +36,7 @@ type CalmAssistantThinkingPatch = {
   hidesWorkingNote: () => boolean;
   remember: (component: AssistantMessageComponentLike) => void;
   applyToRemembered: () => void;
+  reset: () => void;
 };
 
 const CALM_ASSISTANT_THINKING_PATCH = Symbol.for(
@@ -52,6 +57,10 @@ export function installOmpCalmAssistantThinking(): void {
   };
   const remembered = new Set<AssistantMessageComponentLike>();
   const originalMessages = new WeakMap<AssistantMessageComponentLike, AssistantMessage>();
+  const originalOptions = new WeakMap<
+    AssistantMessageComponentLike,
+    AssistantMessageUpdateOptions | undefined
+  >();
   const hidesThinking = (): boolean => calmPresentationHides("assistant-thinking");
   const hidesWorkingNote = (): boolean => calmPresentationHides("assistant-working-note");
   let originalUpdateContent: AssistantMessageComponentLike["updateContent"] | undefined;
@@ -63,7 +72,7 @@ export function installOmpCalmAssistantThinking(): void {
         component.setHideThinkingBlock(hide);
         const originalMessage = originalMessages.get(component);
         if (!shouldHideWorkingNote && originalMessage && originalUpdateContent) {
-          originalUpdateContent.call(component, originalMessage);
+          originalUpdateContent.call(component, originalMessage, originalOptions.get(component));
         } else {
           component.invalidate();
         }
@@ -72,11 +81,15 @@ export function installOmpCalmAssistantThinking(): void {
       }
     }
   };
+  const reset = (): void => {
+    remembered.clear();
+  };
   const installed = registry[CALM_ASSISTANT_THINKING_PATCH];
   if (installed) {
     installed.hidesThinking = hidesThinking;
     installed.hidesWorkingNote = hidesWorkingNote;
     installed.applyToRemembered = applyToRemembered;
+    installed.reset = reset;
     return;
   }
 
@@ -87,6 +100,7 @@ export function installOmpCalmAssistantThinking(): void {
       remembered.add(component);
     },
     applyToRemembered,
+    reset,
   };
 
   const AssistantMessageComponent = (
@@ -116,10 +130,11 @@ export function installOmpCalmAssistantThinking(): void {
   prototype.updateContent = function (
     this: AssistantMessageComponentLike,
     message: AssistantMessage,
-    options?: { transient?: boolean },
+    options?: AssistantMessageUpdateOptions,
   ): void {
     patch.remember(this);
     originalMessages.set(this, message);
+    originalOptions.set(this, options);
     const hideThinking = patch.hidesThinking();
     const hideWorkingNote =
       patch.hidesWorkingNote() &&
@@ -153,4 +168,11 @@ export function applyOmpCalmThinkingToRememberedRows(): void {
     [key: symbol]: CalmAssistantThinkingPatch | undefined;
   };
   registry[CALM_ASSISTANT_THINKING_PATCH]?.applyToRemembered();
+}
+
+export function resetOmpCalmThinkingRememberedRows(): void {
+  const registry = globalThis as typeof globalThis & {
+    [key: symbol]: CalmAssistantThinkingPatch | undefined;
+  };
+  registry[CALM_ASSISTANT_THINKING_PATCH]?.reset();
 }

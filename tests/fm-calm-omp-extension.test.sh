@@ -69,13 +69,15 @@ export class AssistantMessageComponent {
   constructor() {
     this.hideThinkingBlock = false;
     this.lastMessage = undefined;
+    this.lastOptions = undefined;
   }
   setHideThinkingBlock(hide) { this.hideThinkingBlock = hide; }
   invalidate() {
     if (this.lastMessage) this.updateContent(this.lastMessage);
   }
-  updateContent(message) {
+  updateContent(message, options) {
     this.lastMessage = message;
+    this.lastOptions = options;
     this.rendered = [];
     for (const block of message.content) {
       if (block.type === "thinking" && this.hideThinkingBlock) continue;
@@ -264,7 +266,7 @@ assistant.updateContent({
     { type: "text", text: "short note" },
     { type: "toolCall" },
   ],
-});
+}, { transient: true });
 if (assistant.hideThinkingBlock !== true) {
   throw new Error("Calm-on must collapse thinking via setHideThinkingBlock");
 }
@@ -281,6 +283,26 @@ if (opComponent.render(80).length === 0) {
 }
 if (!(assistant.rendered || []).some((line) => line === "text:short note")) {
   throw new Error(`Calm-off must restore the hidden working note, got ${JSON.stringify(assistant.rendered)}`);
+}
+if (assistant.lastOptions?.transient !== true) {
+  throw new Error(`Calm-off must preserve transient update options, got ${JSON.stringify(assistant.lastOptions)}`);
+}
+await calmCommand.handler("", { ui });
+assistant.updateContent({
+  stopReason: "toolUse",
+  content: [
+    { type: "thinking", thinking: "secret plan" },
+    { type: "text", text: "stale note" },
+    { type: "toolCall" },
+  ],
+}, { transient: true });
+if ((assistant.rendered || []).some((line) => line === "text:stale note")) {
+  throw new Error("Calm-on must hide the replacement working note");
+}
+handlers.get("session_start")({ type: "session_start" }, { ui });
+await calmCommand.handler("", { ui });
+if ((assistant.rendered || []).some((line) => line === "text:stale note")) {
+  throw new Error("a new session must not restore an old assistant component");
 }
 assistant.updateContent({
   stopReason: "stop",

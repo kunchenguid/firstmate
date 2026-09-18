@@ -25,6 +25,7 @@ import {
 import {
   applyOmpCalmThinkingToRememberedRows,
   installOmpCalmAssistantThinking,
+  resetOmpCalmThinkingRememberedRows,
 } from "./lib/fm-calm-assistant-thinking.ts";
 import { installOmpCalmOperationalUserLayout } from "./lib/fm-calm-operational-user.ts";
 
@@ -181,6 +182,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on?.("session_start", (_event, ctx) => {
+    resetOmpCalmThinkingRememberedRows();
     setCalmPresentation(loadCalmPreference(preferencePath));
     publishPresentationState();
     applyLivePresentation(ctx.ui);
