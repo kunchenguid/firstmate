@@ -287,7 +287,6 @@ if (!(assistant.rendered || []).some((line) => line === "text:short note")) {
 if (assistant.lastOptions?.transient !== true) {
   throw new Error(`Calm-off must preserve transient update options, got ${JSON.stringify(assistant.lastOptions)}`);
 }
-await calmCommand.handler("", { ui });
 assistant.updateContent({
   stopReason: "toolUse",
   content: [
@@ -296,8 +295,12 @@ assistant.updateContent({
     { type: "toolCall" },
   ],
 }, { transient: true });
+if (!(assistant.rendered || []).some((line) => line === "text:stale note")) {
+  throw new Error("Calm-off must keep a newly rendered working note visible");
+}
+await calmCommand.handler("", { ui });
 if ((assistant.rendered || []).some((line) => line === "text:stale note")) {
-  throw new Error("Calm-on must hide the replacement working note");
+  throw new Error("Calm-on must hide an existing working note");
 }
 handlers.get("session_start")({ type: "session_start" }, { ui });
 await calmCommand.handler("", { ui });
