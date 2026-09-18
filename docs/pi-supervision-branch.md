@@ -78,7 +78,9 @@ Cancellation is preserved by the generation and lock-ownership rechecks the awai
 
 Two reads stay synchronous because Pi's own API is synchronous there, not as an optimization.
 Pi types its bash spawn hook as a plain function, so the guard on the branch's own shell commands cannot await; and the watcher reads `offer.accepted` the moment its dispatch event returns, so a session that does not own the fleet lock must still refuse a wake without waiting.
-Both read the same uncached ownership authority: the lock's process ancestry is walked in full every time it is asked, never cached, because reparenting and pid reuse can invalidate a remembered chain and this answer decides ownership rather than hinting at it.
+Both read the same uncached ownership authority: `state/.lock` is re-read every time it is asked, never cached, because this answer decides ownership rather than hinting at it.
+The branch owns the lock only when it names this Pi process's own pid, the same exact-pid rule as the watcher and turn-end guard extensions; no ancestry is walked or accepted, so a launcher or an enclosing session holding the lock is another session.
+Shell startup and shell ownership checks resolve a native Codex transport child to that same Pi pid, a boundary owned by `bin/fm-session-lock-lib.sh` and verified in [`verification/runtime-backends.md`](verification/runtime-backends.md#native-codex-through-pi).
 
 ## Lost-wake outcome backstop
 
