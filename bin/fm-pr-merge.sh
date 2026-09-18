@@ -941,6 +941,7 @@ require_current_away_authority() {
       return 2
     fi
   fi
+  fm_lease_forbid_branch "PR merge (fm-pr-merge)" --away-relocated
   require_away_merge_grant || return 1
   if [ "$FM_PR_AWAY_POSTURE" = true ] && [ "${#ALLOW_RED[@]}" -gt 0 ]; then
     echo "error: --allow-red is attended-only; while the away-posture record exists the green check is absolute" >&2

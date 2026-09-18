@@ -145,7 +145,11 @@ case "${1:-} ${2:-}" in
       *statusCheckRollup*)
         cat "$FM_TEST_GH_VIEW_JSON"
         if [ -f "${FM_TEST_AWAY_RECORD_AFTER_VIEW:-}" ]; then
-          cp "$FM_TEST_AWAY_RECORD_AFTER_VIEW" "$FM_STATE_OVERRIDE/.afk-contract"
+          if [ -s "${FM_TEST_AWAY_RECORD_AFTER_VIEW}" ]; then
+            cp "$FM_TEST_AWAY_RECORD_AFTER_VIEW" "$FM_STATE_OVERRIDE/.afk-contract"
+          else
+            rm -f "$FM_STATE_OVERRIDE/.afk-contract"
+          fi
         fi
         exit 0
         ;;
@@ -2841,6 +2845,38 @@ test_away_branch_actor_merges_only_with_a_grant() {
   pass "under the away-posture record the branch merges a granted green task, is held without a grant, cannot waive a red check, and is refused at the partition while attended"
 }
 
+# The race this closes: a granted branch merge passes the opening partition
+# because the live record exists, then the captain returns and archives that
+# record during the slow forge preflight. The locked authority recheck must
+# treat that archive as absence and refuse the branch before gh pr merge.
+# An empty away-record-after-view file is the mock's archive-during-view hook.
+test_away_branch_refuses_when_record_archived_during_preflight() {
+  local case_dir rc url head
+  head=a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7
+  url=https://github.com/example/repo/pull/127
+
+  case_dir=$(make_case away-branch-archived-during-preflight)
+  mkdir -p "$case_dir/wt" "$case_dir/home"
+  add_gh_mocks "$case_dir" "$head"
+  write_away_record "$case_dir" --grant task-x1
+  : > "$case_dir/away-record-after-view"
+  set +e
+  FM_SUPERVISION_ACTOR=branch FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 6 "$rc" "away-branch-archived-during-preflight: an archived record must refuse the branch under the lock"
+  assert_grep 'main is parked' "$case_dir/stderr" \
+    "away-branch-archived-during-preflight: the opening partition never saw the live record"
+  assert_grep 'the supervision branch never performs this action' "$case_dir/stderr" \
+    "away-branch-archived-during-preflight: refusal lost the partition wording"
+  assert_grep 'pr view' "$case_dir/gh.log" \
+    "away-branch-archived-during-preflight: the forge preflight never ran"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "away-branch-archived-during-preflight: gh pr merge ran after the record was archived"
+  pass "a branch merge refuses under the lock when the away record is archived during preflight"
+}
+
 test_away_posture_refuses_asynchronous_merge_paths() {
   local case_dir rc url head merge_line
   head=abababababababababababababababababababab
@@ -3173,6 +3209,7 @@ test_allow_red_is_refused_while_away
 test_allow_red_requires_one_separate_name
 test_away_grant_and_yolo_and_hold_for_return
 test_away_branch_actor_merges_only_with_a_grant
+test_away_branch_refuses_when_record_archived_during_preflight
 test_away_posture_refuses_asynchronous_merge_paths
 test_away_plan_gated_403_does_not_block_the_merge
 test_away_grant_does_not_bypass_red_or_identity
