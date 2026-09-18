@@ -127,6 +127,8 @@ fi
 exit 2
 SH
   chmod +x "$home/fakebin/hermes"
+  run_notify "$home" presence away >/dev/null \
+    || fail "could not put the test home into AWAY mode"
 }
 
 # Creates and holds a captain-facing task, returns nothing; the id is fixed by
@@ -342,6 +344,97 @@ test_status_reports_absent_and_present_records() {
   pass "status reports absent and present notification records without mutating anything"
 }
 
+test_presence_defaults_home_and_persists_transitions() {
+  local home out
+  home=$(make_home presence)
+  out=$(run_notify "$home" presence status)
+  assert_equals HOME "$out" "an absent presence record did not default HOME"
+  out=$(run_notify "$home" presence away)
+  assert_contains "$out" "now AWAY" "the AWAY transition was not clearly acknowledged"
+  assert_equals AWAY "$(run_notify "$home" presence status)" "AWAY did not persist across invocations"
+  out=$(run_notify "$home" presence away)
+  assert_contains "$out" "already AWAY" "an idempotent AWAY command was not acknowledged"
+  out=$(run_notify "$home" presence home)
+  assert_contains "$out" "now HOME" "the HOME transition was not clearly acknowledged"
+  printf 'schema=unknown\nmode=AWAY\n' > "$home/state/captain-presence"
+  assert_equals HOME "$(run_notify "$home" presence status)" "an invalid presence record did not fail safe to HOME"
+  pass "presence defaults HOME, acknowledges idempotent transitions, persists, and fails safe"
+}
+
+test_home_and_away_route_only_eligible_notifications() {
+  local home out calls rc
+  home=$(make_home presence-routing)
+  configure_hermes "$home" 'telegram:Rajiv [8629896233]'
+  printf 'A meaningful blocker needs attention.\n' > "$home/message.txt"
+  run_notify "$home" presence home >/dev/null
+  out=$(run_notify "$home" route blocker --message-file "$home/message.txt" --key blocked-one)
+  assert_contains "$out" "presence is HOME" "HOME did not suppress proactive routing"
+  calls=$(wc -l < "$home/hermes-send.log" | tr -d '[:space:]')
+  assert_equals 0 "$calls" "HOME proactively sent a blocker"
+  hold_task "$home" presence-hold
+  printf 'A Captain hold needs a decision.\n' > "$home/hold.txt"
+  out=$(run_notify "$home" register presence-hold --reason-file "$home/hold.txt")
+  assert_contains "$out" "presence is HOME" "HOME did not suppress a Captain hold"
+  run_notify "$home" presence away >/dev/null
+  out=$(run_notify "$home" register presence-hold --reason-file "$home/hold.txt")
+  assert_contains "$out" "sent:" "AWAY did not route a Captain hold"
+  out=$(run_notify "$home" route blocker --message-file "$home/message.txt" --key blocked-one)
+  assert_contains "$out" "sent:" "AWAY did not route an eligible blocker"
+  out=$(run_notify "$home" route blocker --message-file "$home/message.txt" --key blocked-one)
+  assert_contains "$out" "duplicate:" "a repeated routed event was not suppressed"
+  calls=$(wc -l < "$home/hermes-send.log" | tr -d '[:space:]')
+  assert_equals 2 "$calls" "duplicate suppression did not keep one send for each eligible event"
+  set +e
+  out=$(run_notify "$home" route routine --message-file "$home/message.txt" --key routine-one 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an ineligible routine event class was accepted"
+  pass "HOME stays quiet while AWAY routes only eligible classes with durable dedupe"
+}
+
+test_inbound_mode_and_status_commands_work_in_both_modes() {
+  local home note out
+  home=$(make_home inbound-commands)
+  configure_hermes "$home" 'telegram:Rajiv [8629896233]'
+  run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] I'm back home, stop proactive Telegram notifications"
+  note=$(latest_note "$home")
+  out=$(run_notify "$home" inbound "$note") || fail "natural-language HOME command failed"
+  assert_equals mode:HOME "$out" "natural-language HOME command was not classified"
+  assert_equals HOME "$(run_notify "$home" presence status)" "inbound HOME did not persist"
+  rm -f "$home/state/inbox"/*.note
+  run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] status report"
+  note=$(latest_note "$home")
+  out=$(run_notify "$home" inbound "$note") || fail "HOME status request failed"
+  assert_contains "$out" "request:status" "status request was unavailable at HOME"
+  rm -f "$home/state/inbox"/*.note
+  run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] I’m heading out, use Telegram"
+  note=$(latest_note "$home")
+  out=$(run_notify "$home" inbound "$note") || fail "natural-language AWAY command failed"
+  assert_equals mode:AWAY "$out" "natural-language AWAY command was not classified"
+  rm -f "$home/state/inbox"/*.note
+  run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] status"
+  note=$(latest_note "$home")
+  out=$(run_notify "$home" inbound "$note") || fail "AWAY status request failed"
+  assert_contains "$out" "request:status" "status request was unavailable at AWAY"
+  assert_grep 'Captain presence is now HOME' "$home/hermes-send.log" "HOME was not acknowledged on Telegram"
+  assert_grep 'Captain presence is now AWAY' "$home/hermes-send.log" "AWAY was not acknowledged on Telegram"
+  pass "Telegram mode commands and inbound status requests work in HOME and AWAY"
+}
+
+test_mode_commands_do_not_answer_or_release_holds() {
+  local home note show
+  home=$(make_home mode-authority)
+  configure_hermes "$home" 'telegram:Rajiv [8629896233]'
+  hold_task "$home" authority-hold
+  run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] Captain home"
+  note=$(latest_note "$home")
+  run_notify "$home" inbound "$note" >/dev/null || fail "Captain home command failed"
+  show=$(tasks_in "$home" show authority-hold --full)
+  assert_contains "$show" "held: yes" "a mode command removed the hold"
+  assert_contains "$show" "hold_kind: captain" "a mode command changed hold authorization semantics"
+  pass "presence commands change routing only and never answer or release a hold"
+}
+
 test_register_sends_and_records
 test_register_refuses_when_not_an_active_hold
 test_register_is_idempotent_within_same_lifecycle
@@ -353,3 +446,7 @@ test_resolve_reply_correlates_and_closes_through_the_keyed_intake
 test_resolve_reply_ignores_a_notification_whose_hold_already_closed
 test_resolve_reply_rejects_a_non_telegram_note
 test_status_reports_absent_and_present_records
+test_presence_defaults_home_and_persists_transitions
+test_home_and_away_route_only_eligible_notifications
+test_inbound_mode_and_status_commands_work_in_both_modes
+test_mode_commands_do_not_answer_or_release_holds
