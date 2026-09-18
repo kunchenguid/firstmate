@@ -330,7 +330,8 @@ family_for_basename() {
     fm-secondmate-restart.test.sh|\
     fm-secondmate-safety.test.sh|fm-secondmate-sync.test.sh|\
     fm-startup-memory-budget.test.sh|fm-stow-cascade.test.sh|\
-    fm-send-secondmate-marker.test.sh|fm-shared-captain-inheritance.test.sh)
+    fm-send-secondmate-marker.test.sh|fm-shared-captain-inheritance.test.sh|\
+    fm-inherited-env-key.test.sh)
       printf '%s\n' secondmate
       ;;
     fm-backlog-atomicity.test.sh|\
@@ -1452,9 +1453,11 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       ;;
     bin/fm-env-lib.sh)
-      # The one .env accessor, sourced by bin/fm-x-lib.sh (Relay token) and
-      # bin/fm-dispatch-resolve.sh (TYPESAFE_API_KEY).
+      # The one .env accessor, sourced by bin/fm-x-lib.sh (Relay token),
+      # bin/fm-dispatch-resolve.sh (TYPESAFE_API_KEY), and
+      # bin/fm-config-inherit-lib.sh (secret-class key inheritance).
       printf '%s\n' pr-forge
+      printf '%s\n' secondmate
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       ;;
     .pi/extensions/fm-branch-supervision.ts|.pi/extensions/lib/fm-async-exec.ts|\

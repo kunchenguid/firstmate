@@ -8,6 +8,8 @@
 # Only the inherited-material allowlist is writable or removable. Writes are
 # atomic ordinary-file replacements. Divergent data/captain-shared.md bytes are
 # quarantined before replacement or removal and its converged copy is read-only.
+# The home's .env is never on that allowlist: secret-class keys
+# (FM_INHERITABLE_ENV_KEYS) converge locally only and stay hand-managed here.
 set -eu
 
 FM_HOME=${FM_HOME:?FM_HOME is required}
@@ -20,7 +22,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
-usage() { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 file_link_count() {
   if [ "$(uname)" = Darwin ]; then /usr/bin/stat -f %l "$1" 2>/dev/null; else stat -c %h "$1" 2>/dev/null; fi
 }
