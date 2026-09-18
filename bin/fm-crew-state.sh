@@ -1282,15 +1282,9 @@ if [ "$HAVE_RUN" = 1 ]; then
     # it is what keeps a terminal outcome from being lent an older task's PR.
     RUN_PR=$(strip_quotes "$(nm_field pr)")
     outcome=$(strip_quotes "$(nm_field outcome)")
-    case "$outcome" in
-      passed|checks-passed) ATTRIBUTED_LEDGER_STATUS=completed ;;
-      failed|cancelled) ATTRIBUTED_LEDGER_STATUS=$outcome ;;
-      *)
-        case "$status" in
-          ci|running|fixing|awaiting_approval|fix_review) ATTRIBUTED_LEDGER_STATUS=running ;;
-          *) ATTRIBUTED_LEDGER_STATUS=$status ;;
-        esac
-        ;;
+    case "$status" in
+      ci|running|fixing|awaiting_approval|fix_review) ATTRIBUTED_LEDGER_STATUS=running ;;
+      *) ATTRIBUTED_LEDGER_STATUS=$status ;;
     esac
     awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E "$FM_NM_AWAITING_AGENT_RE" | head -1 || true)
     gate_status=$(nm_gate_status)
@@ -1492,7 +1486,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       '') ;;
       *)
         [ "$NEWEST_ROW_AGREES" = 1 ] || emit unknown run-step \
-          "a newer $NEWEST_STATUS run on this branch supersedes the earlier $RUN_DETAIL; current state not provable here"
+          "the newest $NEWEST_STATUS ledger row on this branch cannot be bound to the $RUN_DETAIL; current state not provable here"
         ;;
     esac
   fi

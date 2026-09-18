@@ -291,6 +291,20 @@ Observed result: `status: failed`, `review,failed` with `test` through `ci` stil
 The completed run above reports `pr: "https://github.com/kunchenguid/firstmate/pull/3281"` in the same field.
 That absence is what lets a terminal outcome take its pull-request identity from the same record as its state instead of an older recorded one.
 
+The ledger's first column is the RUN STATUS, not the axi outcome, established on 2026-09-19 against the installed no-mistakes v1.72.0 (9fcc865):
+
+```sh
+no-mistakes runs --limit 400 | awk 'NF{print $1}' | sort | uniq -c
+```
+
+Observed result: across the 313 stored runs the column holds only `running`, `completed`, `failed`, and `cancelled`.
+`checks-passed` is an axi OUTCOME and never appears in that column: the CLI describes such a run as "still monitoring until merged or closed", and a run observed live at its ci step reads `running`.
+
+Every captured run record agrees with that column in its own `status:` field - `failed.toon` reports `status: failed`, `superseded.toon` `status: cancelled`, `completed.toon` `status: completed` - so the record already carries the ledger's vocabulary once.
+The reader therefore derives the status it compares against from that field alone, normalising the live words (`ci`, `running`, `fixing`, `awaiting_approval`, `fix_review`) to `running`, rather than keeping a second mapping keyed on the outcome word.
+Two definitions of one fact can disagree, and the shape a disagreement produces here is a run that DID deliver a pull request failing to bind to its own ledger row and being published without it.
+Where a run record carrying any outcome sits beside a still-live ledger row, the liveness cross-check in the run-selection contract answers `unknown` before that comparison is reached, so the derivation is never the last guard against that shape.
+
 Deterministic entry points:
 
 ```sh

@@ -712,12 +712,29 @@ outcome: passed
 EOF
 }
 
-run_failed() {  # <branch>
+# A run whose checks have gone green and whose pull request is now waiting for a
+# merge decision: `checks-passed` is an axi OUTCOME, never a ledger status word,
+# and the run record carries the ledger's own vocabulary in its `status` field
+# (docs/verification/supervision.md, no-mistakes v1.72.0).
+run_checks_passed() {  # <branch> <pr>
   cat <<EOF
 run:
   id: "01RUN"
   branch: $1
   status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "$2"
+  findings: none
+outcome: checks-passed
+EOF
+}
+
+run_failed() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: failed
   head: "${FM_FAKE_RUN_HEAD:-abc1234}"
   pr: ""
   findings: none
@@ -802,7 +819,7 @@ run_failed_with_pr() {  # <branch> <pr>
 run:
   id: "01RUN"
   branch: $1
-  status: completed
+  status: failed
   head: "${FM_FAKE_RUN_HEAD:-abc1234}"
   pr: "$2"
   findings: none
@@ -3831,7 +3848,7 @@ run_cancelled() {  # <branch> [pr]
 run:
   id: "01RUN"
   branch: $1
-  status: completed
+  status: cancelled
   head: "${FM_FAKE_RUN_HEAD:-abc1234}"
   pr: "${2:-}"
   findings: none
@@ -3926,7 +3943,7 @@ EOF
   local out; out=$(run_crew_state "$d" feat-s2b)
   assert_contains "$out" "state: unknown" "an unbindable later run leaves the current state unproven"
   assert_not_contains "$out" "state: failed" "the superseded failed run must not surface"
-  assert_contains "$out" "supersedes" "the detail names the supersession"
+  assert_contains "$out" "cannot be bound" "the detail names the unbindable ledger row, not a proven newer run"
   pass "an unbindable later run reports unknown rather than a stale failure"
 }
 
@@ -4120,6 +4137,28 @@ test_cancelled_run_publishes_no_pr_for_active_rerun() {
   assert_not_contains "$out" "pr=" "a stale cancelled reading publishes no pull request for an active rerun"
   assert_not_contains "$out" "pull/1" "the stale cancelled run's pull request must not surface"
   pass "a stale cancelled run publishes no pull request for an active rerun"
+}
+
+# `checks-passed` is the one axi outcome nothing exercised, which is how an
+# outcome-keyed copy of the ledger's status vocabulary survived unchallenged. The
+# reader now derives the status it compares against from the run record's own
+# `status` field, so this outcome binds to its ledger row like any other and the
+# delivered pull request is named: reporting the work finished with nothing for
+# the captain to look at is its own false report.
+test_checks_passed_run_names_its_delivered_pull_request() {
+  reset_fakes
+  local d short; d=$(new_case checks-passed-pr)
+  make_repo_on_branch "$d/wt" fm/feat-s2j
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2j.meta" "window=fm:fm-feat-s2j" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-s2j https://github.com/o/r/pull/42)"
+  FM_FAKE_RUNS_LIST="  completed  fm/feat-s2j ${short}  $(ledger_stamp_minutes_ago 30)  https://github.com/o/r/pull/42"
+  local out; out=$(run_crew_state "$d" feat-s2j)
+  assert_contains "$out" "state: done" "a green, ready-for-review run reads done"
+  assert_contains "$out" "pr=https://github.com/o/r/pull/42" "the delivered pull request is named"
+  assert_not_contains "$out" "state: unknown" "the run's own ledger row binds to it"
+  pass "a checks-passed run names its delivered pull request"
 }
 
 # A terminal DONE reading is exactly as stale-able as a terminal failed one:
@@ -6821,6 +6860,7 @@ test_malformed_ledger_row_supplies_no_newest_evidence
 test_longer_ledger_sha_still_binds_the_current_run
 test_later_declared_pause_leaves_the_failure_unprovable
 test_later_declared_pause_leaves_the_cancelled_reading_unprovable
+test_checks_passed_run_names_its_delivered_pull_request
 test_contradicted_done_reading_is_never_published_as_success
 test_later_declared_done_leaves_the_failure_unprovable
 test_live_replacement_run_outranks_a_status_log_done
