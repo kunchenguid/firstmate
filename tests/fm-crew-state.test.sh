@@ -4215,6 +4215,27 @@ test_same_minute_line_is_not_newer_than_an_unbindable_run() {
   pass "a same-minute line is not newer than an unbindable run"
 }
 
+# The log's mtime stamps its LAST append, but the selected declaration survives
+# later continuation prose, so the two can belong to different lines. When they
+# do, the mtime orders nothing and the reading must stay unprovable.
+test_prose_after_done_line_does_not_order_it_against_the_run() {
+  reset_fakes
+  local d; d=$(new_case prose-after-done-log)
+  make_repo_on_branch "$d/wt" fm/feat-s6d
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s6d.meta" "window=fm:fm-feat-s6d" "worktree=$d/wt" "kind=ship"
+  printf 'done: implementation complete\nstill tidying up the docs\n' \
+    > "$d/state/feat-s6d.status"
+  backdate_status_minutes_ago "$d/state/feat-s6d.status" 55
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s6d)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s6d f0f0f0f0  $(ledger_stamp_minutes_ago 60)"
+  local out; out=$(run_crew_state "$d" feat-s6d)
+  assert_not_contains "$out" "state: done" "prose cannot lend its mtime to an older declaration"
+  assert_not_contains "$out" "source: status-log" "the declaration is not ordered against the run"
+  assert_contains "$out" "current state not provable here" "an unstamped declaration leaves the reading unprovable"
+  pass "later prose does not order an earlier done line against the run"
+}
+
 # Opposite direction 2: with no ledger row to order the records against, there is
 # no evidence the status line is newer, so the failed run stands.
 test_failed_run_without_ordering_evidence_still_surfaces() {
@@ -6747,6 +6768,7 @@ test_mid_run_done_log_does_not_mask_current_run_failure
 test_pre_run_done_log_does_not_mask_failed_run
 test_same_minute_done_log_does_not_mask_failed_run
 test_same_minute_line_is_not_newer_than_an_unbindable_run
+test_prose_after_done_line_does_not_order_it_against_the_run
 test_failed_run_without_ordering_evidence_still_surfaces
 test_needs_decision_log_never_supersedes_failed_run
 test_failed_run_detail_carries_no_pr_it_never_opened

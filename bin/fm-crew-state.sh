@@ -139,7 +139,10 @@
 #      proves post-dates the failed run by clearing its whole minute - and only
 #      while that ledger row is NOT the attributed run itself, since the date
 #      stamps a run's START and so can never prove a declaration newer than the
-#      moment the run finished - and finally
+#      moment the run finished, and only while that declaration is the log's
+#      last non-blank line, since the log's mtime stamps its last append and so
+#      orders nothing when later continuation prose sits behind the selected
+#      declaration - and finally
 #      a later run on this branch that cannot be bound here (reported as unknown
 #      - history, but no proof of the present). Because the ledger has no run ID,
 #      an equal head does not identify a rerun; a terminal row supplies newer
@@ -312,14 +315,16 @@ LOG_LINE=$(status_current_line "$LOG" "$KIND")
 LOG_VERB=$(status_line_verb "$LOG_LINE")
 
 snapshot_ordered_log() {
-  local before_mtime before_size before_ident line after_mtime after_size after_ident
+  local before_mtime before_size before_ident line last_line after_mtime after_size after_ident
   ORDERED_LOG_LINE=
   ORDERED_LOG_MTIME=
   [ -f "$LOG" ] || return 1
   before_mtime=$(_fm_status_file_mtime "$LOG") || return 1
   before_size=$(_fm_status_file_size "$LOG") || return 1
   before_ident=$(_fm_open_decisions_file_ident "$LOG") || return 1
-  line=$(last_status_line "$LOG" || true)
+  line=$(status_current_line "$LOG" "$KIND" || true)
+  last_line=$(awk 'NF { l = $0 } END { print l }' "$LOG") || return 1
+  [ -n "$line" ] && [ "$line" = "$last_line" ] || return 1
   after_mtime=$(_fm_status_file_mtime "$LOG") || return 1
   after_size=$(_fm_status_file_size "$LOG") || return 1
   after_ident=$(_fm_open_decisions_file_ident "$LOG") || return 1
