@@ -775,9 +775,14 @@ record_note() {
         echo "This task was relaunched. Continue from here; the local copy and every"
         echo "uncommitted change are exactly as the previous worker left them."
         echo
-        echo "First, check your instruction inbox: list $STATE/$ID.inbox/*.msg, act on"
-        echo "each message in numeric order, then mv each handled file into"
-        echo "$STATE/$ID.inbox/handled/. A steer sent before the relaunch survives there."
+        echo "First, check your instruction inbox: list $STATE/$ID.inbox/*.msg, read"
+        echo "and act on them in numeric order, and mv each into"
+        echo "$STATE/$ID.inbox/handled/ as soon as you have read it, leaving none"
+        echo "behind - that only confirms receipt, not that the requested work is done."
+        echo "If $STATE/$ID.inbox/handled/ exists and holds recent records, skim"
+        echo "those too: the previous worker acknowledged each on reading it, so one"
+        echo "may name work it had received but not finished. They may equally be done"
+        echo "already - check the current repo and task state before redoing anything."
         echo
         printf '%s\n' "$NOTE"
       } >> "$RELAUNCH_BRIEF" \
