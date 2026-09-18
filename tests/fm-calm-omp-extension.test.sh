@@ -248,6 +248,16 @@ handlers.get("session_start")({ type: "session_start" }, { ui });
 const mode = new Agent.InteractiveMode();
 const operational = { role: "user", content: process.env.OPERATIONAL_TEXT };
 const genuine = { role: "user", content: process.env.GENUINE_TEXT };
+const realOmpPresentationContext = {
+  chatContainer: { children: [], addChild(child) { this.children.push(child); } },
+  transcriptMessageComponents: new Map(),
+  getUserMessageText: mode.ctx.getUserMessageText,
+};
+Agent.InteractiveMode.prototype.addMessageToChat.call(realOmpPresentationContext, operational);
+const realOmpOperational = realOmpPresentationContext.chatContainer.children.at(-1);
+if (realOmpOperational.render(80).length !== 0) {
+  throw new Error("Calm-on must hide operational rows for OMP's presentation-context receiver");
+}
 mode.addMessageToChat(operational);
 mode.addMessageToChat(genuine);
 const [opComponent, genuineComponent] = mode.ctx.chatContainer.children;
