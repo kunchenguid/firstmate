@@ -1154,6 +1154,24 @@ test_status_log_outcome_never_borrows_the_fresh_last_line_pr() {
   pass "a status-log outcome takes no pull request from another line"
 }
 
+# Prose is not a delivery claim: a terminal line that merely mentions pull
+# requests names none of them as the delivery, so the abandoned one is never
+# reported to the captain.
+test_status_log_outcome_never_claims_a_mentioned_pr() {
+  local payload note
+  make_world outcome-pr-log-prose
+  note='closed https://example.test/owner/repo/pull/12, shipped instead as https://example.test/owner/repo/pull/34'
+  write_child "$MAIN" child "done: $note"
+  FM_FAKE_CREW_STATE='done' FM_FAKE_CREW_SOURCE='status-log' \
+    FM_FAKE_CREW_DETAIL="$note" run_reconcile "$MAIN" --startup
+  payload=$(queued_payload "$MAIN" 'inactive-outcome:')
+  [ -n "$payload" ] || fail "no terminal outcome was queued"
+  case "$payload" in
+    *'pr='*) fail "the terminal outcome claimed a pull request only mentioned in prose: $payload" ;;
+  esac
+  pass "a status-log outcome never claims a pull request mentioned in prose"
+}
+
 # The independent captain protection: when the reader reports a failure the
 # crew's own last self-declared word contradicts, the two records disagree and
 # nothing is manufactured for presentation. Ordinary supervision still owns it.
@@ -1258,6 +1276,7 @@ test_terminal_outcome_takes_the_pr_its_run_opened
 test_status_log_sourced_outcome_keeps_its_own_pr
 test_status_log_outcome_never_borrows_an_earlier_pr
 test_status_log_outcome_never_borrows_the_fresh_last_line_pr
+test_status_log_outcome_never_claims_a_mentioned_pr
 test_contradicted_failure_is_not_promoted_for_presentation
 test_contradicted_success_is_not_promoted_for_presentation
 test_uncontradicted_failure_is_still_presented

@@ -60,8 +60,8 @@
 # terminal_outcome_pr below. It is manufactured only when the crew's own last
 # self-declared word (done, failed, or the configured paused verb) does not
 # contradict it, and its PR identity comes from the same record as its state -
-# the run's own published PR for a run-step state, that line's own PR for a
-# status-log state, and never a separately recorded task PR. Together they
+# the run's own published PR for a run-step state, that line's own ready-signal
+# PR for a status-log state, and never a separately recorded task PR. Together they
 # prevent one captain-facing record from combining claims from different runs.
 # Working, paused, parked, blocked, unknown, persistent secondmates, and
 # captain-held work retain their existing supervision semantics.
@@ -346,21 +346,31 @@ state_line_pr() { # <state-line>
   printf '%s' "$rest"
 }
 
-# Enforce the header's same-record pull-request contract. A status-log PR is
-# accepted only in a mode's ready-signal shape, and a scout never carries one.
+# Read the status-log note the reader published as the line's first detail.
+state_line_note() { # <state-line>
+  local rest=${1#*"$STATE_LINE_SEP"source: }
+  [ "$rest" != "$1" ] || return 0
+  case "$rest" in *"$STATE_LINE_SEP"*) ;; *) return 0 ;; esac
+  rest=${rest#*"$STATE_LINE_SEP"}
+  case "$rest" in *"$STATE_LINE_SEP"*) rest=${rest%%"$STATE_LINE_SEP"*} ;; esac
+  printf '%s' "$rest"
+}
+
+# Enforce the header's same-record pull-request contract. A status-log state
+# carries a PR only in a mode's ready-signal shape, the same rule pr_for_task
+# applies, so a PR a worker merely mentioned in prose is never the delivery,
+# and a scout never carries one.
 terminal_outcome_pr() { # <meta> <state-line>
-  local meta=$1 line=$2 detail
+  local meta=$1 line=$2 value
   if [ "$(state_line_source "$line")" = run-step ]; then
     clean_field "$(state_line_pr "$line")"
     return 0
   fi
   [ "$(meta_field "$meta" kind)" != scout ] || return 0
-  detail=${line#*"$STATE_LINE_SEP"source: status-log"$STATE_LINE_SEP"}
-  [ "$detail" != "$line" ] || return 0
-  detail=${detail%%"$STATE_LINE_SEP"*}
-  clean_field "$(printf '%s\n' "$detail" \
+  value=$(printf '%s\n' "$(state_line_note "$line")" \
     | sed -nE 's|^PR (https?://[^[:space:])"]+/pull/[0-9]+)( checks green)?$|\1|p' \
-    | head -1 || true)"
+    | head -1 || true)
+  clean_field "$value"
 }
 
 # Enforce the header's independent captain-facing corroboration contract.
