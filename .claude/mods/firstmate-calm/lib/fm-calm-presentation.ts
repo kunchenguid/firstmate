@@ -54,12 +54,13 @@ export function calmPreferencePath(env: CalmHomeEnvironment, pluginRoot: string)
 
 /**
  * Whether a stored preference reads as Calm on. `max` is the legacy value of a removed
- * third level whose behavior is now ordinary Calm; absent or unrecognized reads as off.
+ * third level whose behavior is now ordinary Calm. Calm is on by default: an absent,
+ * unreadable, or unrecognized value reads as on, and only an explicit stored `off`
+ * keeps Calm off.
  */
 export function parseCalmPreference(stored: string | undefined): boolean {
-  if (stored === undefined) return false;
-  const value = stored.trim();
-  return value === "on" || value === "max";
+  if (stored === undefined) return true;
+  return stored.trim() !== "off";
 }
 
 /** The exact file content the Pi extension writes for the same choice. */

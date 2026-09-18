@@ -166,8 +166,13 @@ test_home_resolution() {
   mkdir -p \
     "$fixture/project/.pi/extensions/lib" \
     "$fixture/project/node_modules/@earendil-works" \
-    "$fixture/override" \
+    "$fixture/project/config" \
+    "$fixture/override/config" \
     "$fixture/launch-cwd"
+  # Each toggle below starts from an explicit stored off, so it exercises the
+  # off-to-on direction Calm's default-on resolution would otherwise skip.
+  printf '%s\n' off >"$fixture/override/config/calm"
+  printf '%s\n' off >"$fixture/project/config/calm"
   cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$PRESERVATION" "$fixture/project/.pi/extensions/lib/fm-calm-preservation.ts"
@@ -393,7 +398,8 @@ test_pi_compat_missing_adapter_exports() {
   fixture="$TMP_ROOT/missing-adapter-exports"
   mkdir -p \
     "$fixture/project/.pi/extensions/lib" \
-    "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
+    "$fixture/project/node_modules/@earendil-works/pi-coding-agent" \
+    "$fixture/project/node_modules/@earendil-works/pi-tui"
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$PRESERVATION" "$fixture/project/.pi/extensions/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
@@ -409,14 +415,22 @@ test_pi_compat_missing_adapter_exports() {
     'export function getMarkdownTheme() { return {}; }' \
     'export class UserMessageComponent {}' \
     >"$fixture/project/node_modules/@earendil-works/pi-coding-agent/index.js"
+  printf '%s\n' \
+    '{"name":"@earendil-works/pi-tui","type":"module","exports":"./index.js"}' \
+    >"$fixture/project/node_modules/@earendil-works/pi-tui/package.json"
+  printf '%s\n' \
+    'export class Container {}' \
+    >"$fixture/project/node_modules/@earendil-works/pi-tui/index.js"
 
   out=$(cd "$fixture/project" && node --input-type=module 2>&1 <<'JS'
 const assistant = await import("./.pi/extensions/lib/fm-calm-assistant-layout.ts");
 const operational = await import("./.pi/extensions/lib/fm-calm-operational-user-layout.ts");
+const visibility = await import("./.pi/extensions/lib/fm-calm-visibility.ts");
 
 for (const [name, install, expected] of [
   ["collapsed-thinking", assistant.installCalmAssistantLayout, "AssistantMessageComponent"],
   ["operational-user-row", operational.installCalmOperationalUserLayout, "InteractiveMode"],
+  ["synthetic-entry", visibility.installCalmSyntheticEntryPlaceholder, "InteractiveMode"],
 ]) {
   let reason;
   try {
@@ -454,6 +468,7 @@ test_builtin_gate_load_time() {
     "$fixture/project/.pi/extensions/lib" \
     "$fixture/project/node_modules/@earendil-works" \
     "$fixture/home-off/config" \
+    "$fixture/home-absent/config" \
     "$fixture/home-on/config"
   cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
@@ -467,12 +482,14 @@ test_builtin_gate_load_time() {
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
   ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
   printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
+  printf '%s\n' off >"$fixture/home-off/config/calm"
   printf '%s\n' on >"$fixture/home-on/config/calm"
 
   output_file="$fixture/node-output"
   (cd "$fixture/project" && \
     EXT="$fixture/project/.pi/extensions/fm-calm.ts" \
     HOME_OFF="$fixture/home-off" \
+    HOME_ABSENT="$fixture/home-absent" \
     HOME_ON="$fixture/home-on" \
     node --input-type=module) >"$output_file" 2>&1 <<'JS'
 import { pathToFileURL } from "node:url";
@@ -497,14 +514,28 @@ function fakePi() {
   return { pi, tools, handlers };
 }
 
-// Calm-off (config/calm absent for this home): load-time registration must be
-// entirely skipped, so a non-Calm user contests nothing.
+// Explicit off (config/calm="off" for this home): load-time registration must be
+// entirely skipped, so a captain who turned Calm off contests nothing.
 process.env.FM_HOME = process.env.HOME_OFF;
 const offRun = fakePi();
 const extensionOff = await import(`${pathToFileURL(process.env.EXT).href}?gate-off=${Date.now()}`);
 extensionOff.default(offRun.pi);
 if (offRun.tools.length !== 0) {
-  throw new Error(`Calm registered ${offRun.tools.length} built-ins while config/calm was absent: ${offRun.tools.map((t) => t.name).join(",")}`);
+  throw new Error(`Calm registered ${offRun.tools.length} built-ins while config/calm was an explicit off: ${offRun.tools.map((t) => t.name).join(",")}`);
+}
+
+// Default on (config/calm absent for this home): registration must happen
+// synchronously, during this same factory call, exactly the timing /reload's
+// pre-session_start transcript render depends on - not deferred to session_start
+// or later.
+process.env.FM_HOME = process.env.HOME_ABSENT;
+const absentRun = fakePi();
+const extensionAbsent = await import(`${pathToFileURL(process.env.EXT).href}?gate-absent=${Date.now()}`);
+extensionAbsent.default(absentRun.pi);
+const absentNames = absentRun.tools.map((t) => t.name).sort();
+const absentExpected = ["bash", "edit", "find", "grep", "ls", "read", "write"];
+if (JSON.stringify(absentNames) !== JSON.stringify(absentExpected)) {
+  throw new Error(`Calm registered ${JSON.stringify(absentNames)} synchronously at load with config/calm absent, expected ${JSON.stringify(absentExpected)}`);
 }
 
 // Calm-on (config/calm="on" for this home): registration must happen synchronously,
@@ -524,7 +555,7 @@ JS
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm gate-at-load-time path failed: $out"
   [ -z "$out" ] || fail "Pi calm gate-at-load-time test printed output: $out"
-  pass "Calm registers none of its 7 built-in tool wrappers at load while config/calm is off, and all 7 synchronously at load while config/calm is on"
+  pass "Calm registers none of its 7 built-in tool wrappers at load with an explicit stored off, and all 7 synchronously at load with a stored on or with no stored choice"
 }
 
 test_calm_activation_collision_and_regression_bound() {
@@ -556,6 +587,7 @@ test_calm_activation_collision_and_regression_bound() {
   ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
   printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
   printf '%s\n' 'export default function () {}' >"$fixture/project/foreign-bash-extension.ts"
+  printf '%s\n' off >"$fixture/home/config/calm"
 
   output_file="$fixture/node-output"
   (cd "$fixture/project" && \
@@ -633,9 +665,9 @@ try {
 } catch {
   threw = true;
 }
-if (threw) throw new Error("Calm's own factory threw while config/calm was absent and another extension already owned bash");
+if (threw) throw new Error("Calm's own factory threw while config/calm was an explicit off and another extension already owned bash");
 if (registry.size !== 1) {
-  throw new Error(`Calm registered built-ins at load time despite config/calm being absent: ${JSON.stringify(Array.from(registry.keys()))}`);
+  throw new Error(`Calm registered built-ins at load time despite config/calm being an explicit off: ${JSON.stringify(Array.from(registry.keys()))}`);
 }
 if (!calmCommand || !handlers.has("session_start")) {
   throw new Error("Calm did not finish registering its command and session handler");
@@ -758,7 +790,8 @@ test_rendering_and_session_lifecycle() {
   record_pi_version_evidence "$version" "Pi calm compatibility assumptions"
 
   fixture="$TMP_ROOT/renderer"
-  mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
+  mkdir -p "$fixture/home/config" "$fixture/lib" "$fixture/node_modules/@earendil-works"
+  printf '%s\n' off >"$fixture/home/config/calm"
   cp "$EXT" "$fixture/fm-calm.ts"
   cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
   cp "$PRESERVATION" "$fixture/lib/fm-calm-preservation.ts"
@@ -869,8 +902,8 @@ extension.default(pi);
 const visibility = await import(`${pathToFileURL(`${process.cwd()}/lib/fm-calm-visibility.ts`).href}?policy=${Date.now()}`);
 const operationalInput = await import(`${pathToFileURL(`${process.cwd()}/lib/fm-operational-input.ts`).href}?input=${Date.now()}`);
 
-// Registration is gated on config/calm at load (see fm-calm.ts's file header); this
-// fixture has no config/calm file, so nothing is registered yet. Every render-
+// Registration is gated on the resolved preference at load (see fm-calm.ts's file
+// header); this fixture holds an explicit stored off, so nothing is registered yet. Every render-
 // equivalence assertion below needs the wrapped definitions the way a user who kept
 // Calm on across a previous session would already have them, so force that here via
 // the same /calm command path a real activation uses, then round-trip back off so the
@@ -1477,7 +1510,8 @@ test_calm_mid_turn_working_notes() {
   record_pi_version_evidence "$version" "Pi calm mid-turn presentation"
 
   fixture="$TMP_ROOT/calm-mid-turn"
-  mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
+  mkdir -p "$fixture/home/config" "$fixture/lib" "$fixture/node_modules/@earendil-works"
+  printf '%s\n' off >"$fixture/home/config/calm"
   cp "$EXT" "$fixture/fm-calm.ts"
   cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
   cp "$PRESERVATION" "$fixture/lib/fm-calm-preservation.ts"
@@ -1493,7 +1527,7 @@ test_calm_mid_turn_working_notes() {
 
   output_file="$fixture/node-output"
   (cd "$fixture" && EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module) >"$output_file" 2>&1 <<'JS'
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const packageRoot = process.env.PI_PACKAGE_DIR;
@@ -1666,7 +1700,7 @@ const requireHidden = (name, needle, context) => {
 
 let calm = await loadCalmExtension();
 if (calm.registeredTools.length !== 0) {
-  throw new Error("Calm claimed built-in tools with no persisted preference");
+  throw new Error("Calm claimed built-in tools with an explicit stored off");
 }
 await calm.sessionStart({ reason: "startup" }, context);
 const stockRows = snapshot();
@@ -1727,9 +1761,12 @@ if (readFileSync(calmPreferencePath, "utf8") !== "off\n") {
 }
 
 // Restart from each persisted value, including the legacy "max" a home upgraded from
-// the removed third level still carries: every one restores ordinary Calm, never off.
-for (const persisted of ["on\n", "max\n", "max"]) {
-  writeFileSync(calmPreferencePath, persisted, "utf8");
+// the removed third level still carries, plus an absent file and unrecognized values:
+// every one restores ordinary Calm on, never off. Only an explicit stored off restores
+// off, which the block after this loop pins.
+for (const persisted of ["on\n", "max\n", "max", null, "maybe\n", ""]) {
+  if (persisted === null) rmSync(calmPreferencePath, { force: true });
+  else writeFileSync(calmPreferencePath, persisted, "utf8");
   // Scramble the live state the way a fresh process starts, then let a newly loaded
   // extension restore from the persisted file alone.
   visibility.setCalmPresentation(false);
@@ -1758,6 +1795,30 @@ for (const persisted of ["on\n", "max\n", "max"]) {
   }
   requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm toggled off after restore");
 }
+// Only an explicit stored off restores as off: no built-ins are claimed at load and
+// session start keeps stock rendering until the captain toggles.
+writeFileSync(calmPreferencePath, "off\n", "utf8");
+visibility.setCalmPresentation(false);
+ui.setHiddenThinkingLabel(undefined);
+requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "scrambled live state");
+calm = await loadCalmExtension();
+if (calm.registeredTools.length !== 0) {
+  throw new Error(
+    `a session restored from an explicit off claimed ${calm.registeredTools.length} built-in tools instead of 0`,
+  );
+}
+for (const reason of ["startup", "resume", "new", "fork", "reload"]) {
+  await calm.sessionStart({ reason }, context);
+  requireVisible("midTurn", "MIDTURN_WORKING_NOTE", `${reason} session restored from explicit off`);
+  requireVisible("finalReply", "FINAL_REPLY_TEXT", `${reason} session restored from explicit off`);
+}
+await calm.calmCommand.handler("", context);
+if (readFileSync(calmPreferencePath, "utf8") !== "on\n") {
+  throw new Error("a session restored from explicit off did not toggle to on");
+}
+if (rendered("midTurn").length !== 0) {
+  throw new Error("Calm toggled on after an explicit-off restore left a working note visible");
+}
 if (!existsSync(calmPreferencePath)) {
   throw new Error("Calm stopped persisting its preference file");
 }
@@ -1766,7 +1827,192 @@ JS
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm mid-turn contract failed: $out"
   [ -z "$out" ] || fail "Pi calm mid-turn test printed output: $out"
-  pass "Pi calm on collapses mid-turn assistant working notes to zero height while Calm off keeps them, leaves streaming, truncated-final, and genuine final replies untouched, never mutates the messages, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on"
+  pass "Pi calm on collapses mid-turn assistant working notes to zero height while an explicit off keeps them, leaves streaming, truncated-final, and genuine final replies untouched, never mutates the messages, ignores every /calm argument, restores an absent or unrecognized preference as ordinary Calm on, and restores a legacy persisted max the same way"
+}
+
+test_synthetic_entry_restore_hidden_toggle() {
+  local fixture out output_file status version
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "skip: node or npm not found for Pi calm synthetic-entry test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+  version=$(node -p "require('$PI_PACKAGE_DIR/package.json').version")
+  record_pi_version_evidence "$version" "Pi calm synthetic-entry restoration"
+
+  fixture="$TMP_ROOT/synthetic-restore"
+  # No config/calm file: Calm resolves on by default, so the synthetic row below
+  # restores hidden, which is exactly the construction Pi refuses to mount.
+  mkdir -p "$fixture/home/config" "$fixture/lib" "$fixture/node_modules/@earendil-works"
+  cp "$EXT" "$fixture/fm-calm.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
+  cp "$PRESERVATION" "$fixture/lib/fm-calm-preservation.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
+  cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
+  cp "$WORKING_SHIP_SPRITE" "$fixture/lib/fm-calm-working-ship-sprite.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/lib/fm-operational-input.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
+
+  output_file="$fixture/node-output"
+  (cd "$fixture" && EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module) >"$output_file" 2>&1 <<'JS'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const [{ InteractiveMode }, { initTheme }, { setCapabilities }] = await Promise.all([
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/interactive-mode.js`).href),
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
+  import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
+]);
+initTheme("dark");
+setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+
+// Read the method off the prototype at each call: loading Calm patches it, so a
+// reference captured before the load would drive the unpatched original.
+function addEntry(mode, entry) {
+  const addCustomEntryToChat = InteractiveMode.prototype.addCustomEntryToChat;
+  if (typeof addCustomEntryToChat !== "function") {
+    throw new Error("installed Pi has no InteractiveMode.addCustomEntryToChat for the placeholder to probe");
+  }
+  addCustomEntryToChat.call(mode, entry);
+}
+
+const entryRenderers = new Map();
+// Drive the same seam Pi drives at restore and on entry_appended: the real prototype
+// method with a stub presentation surface, so the placeholder and the expansion
+// round-trip below are Pi's own code paths, not a reimplementation.
+function stubMode() {
+  const children = [];
+  return {
+    chatContainer: {
+      children,
+      addChild(component) { children.push(component); },
+      removeChild(component) {
+        const index = children.indexOf(component);
+        if (index !== -1) children.splice(index, 1);
+      },
+    },
+    toolOutputExpanded: false,
+    streamingComponent: undefined,
+    session: { extensionRunner: { getEntryRenderer: (customType) => entryRenderers.get(customType) } },
+  };
+}
+
+const ui = {
+  getEditorText: () => "",
+  getToolsExpanded: () => false,
+  notify() {},
+  onTerminalInput: () => () => {},
+  setHiddenThinkingLabel() {},
+  setStatus() {},
+  setToolsExpanded() {},
+  setWidget() {},
+  setWorkingVisible() {},
+};
+const context = { ui };
+async function loadCalmExtension() {
+  let sessionStart;
+  const pi = {
+    events: { emit() {}, on() {} },
+    on(event, handler) {
+      if (event === "session_start") sessionStart = handler;
+    },
+    registerCommand() {},
+    registerEntryRenderer(customType, renderer) {
+      entryRenderers.set(customType, renderer);
+    },
+    registerTool() {},
+    getAllTools() {
+      return [];
+    },
+  };
+  const extension = await import(`${pathToFileURL(process.env.EXT).href}?synthetic=${Date.now()}-${Math.random()}`);
+  extension.default(pi);
+  if (!sessionStart) throw new Error("Calm extension did not register its session handler");
+  return { sessionStart };
+}
+
+const SYNTHETIC_TYPE = "firstmate-synthetic-input-presentation";
+const calm = await loadCalmExtension();
+const renderer = entryRenderers.get(SYNTHETIC_TYPE);
+if (typeof renderer !== "function") {
+  throw new Error("Calm did not register its synthetic entry renderer");
+}
+const entry = { type: "custom", customType: SYNTHETIC_TYPE, data: { content: "SYNTHETIC_RESTORE_PROBE", kind: "watcher" } };
+
+// Restore while on, after the session_start Pi always emits before its initial
+// render: Pi mounts nothing, so Calm must hold the row's place.
+await calm.sessionStart({ reason: "startup" }, context);
+const mode = stubMode();
+addEntry(mode, entry);
+if (mode.chatContainer.children.length !== 1) {
+  throw new Error(`restore-while-on mounted ${mode.chatContainer.children.length} rows instead of one placeholder`);
+}
+const decoy = { render: () => ["DECOY_ROW"] };
+mode.chatContainer.addChild(decoy);
+const standIn = mode.chatContainer.children[0];
+if (standIn.render(80).length !== 0) {
+  throw new Error("restored-hidden synthetic row was not zero height");
+}
+if (standIn.render(80).join("\n").includes("SYNTHETIC_RESTORE_PROBE")) {
+  throw new Error("restored-hidden synthetic row leaked its content");
+}
+if (typeof standIn.setExpanded !== "function") {
+  throw new Error("the placeholder is not expandable, so a toggle round-trip cannot reach it");
+}
+
+// Toggle off through the persisted preference and Pi's own expansion round-trip.
+writeFileSync(`${process.env.FM_HOME}/config/calm`, "off\n");
+await calm.sessionStart({ reason: "startup" }, context);
+standIn.setExpanded(true);
+standIn.setExpanded(false);
+if (mode.chatContainer.children.length !== 2) {
+  throw new Error("toggle-off changed the row count instead of swapping the row in place");
+}
+if (mode.chatContainer.children.includes(standIn)) {
+  throw new Error("toggle-off left the placeholder mounted alongside the real row");
+}
+const [restored, after] = mode.chatContainer.children;
+if (after !== decoy) throw new Error("toggle-off moved the neighboring row");
+if (!restored.render(80).join("\n").includes("SYNTHETIC_RESTORE_PROBE")) {
+  throw new Error("toggle-off did not restore the synthetic row in place");
+}
+
+// Toggle back on: the real row hides again through Pi's own rebuild.
+writeFileSync(`${process.env.FM_HOME}/config/calm`, "on\n");
+await calm.sessionStart({ reason: "startup" }, context);
+restored.setExpanded(true);
+restored.setExpanded(false);
+if (restored.render(80).length !== 0) {
+  throw new Error("toggle-on left the synthetic row visible");
+}
+
+// A second extension lifetime must not double-wrap the shared prototype.
+await loadCalmExtension();
+const mode2 = stubMode();
+addEntry(mode2, entry);
+if (mode2.chatContainer.children.length !== 1) {
+  throw new Error(`a second extension lifetime mounted ${mode2.chatContainer.children.length} rows for one hidden entry`);
+}
+
+// Foreign custom types pass through untouched: no renderer, no placeholder.
+addEntry(mode2, { type: "custom", customType: "something-else", data: {} });
+if (mode2.chatContainer.children.length !== 1) {
+  throw new Error("the placeholder path claimed a foreign custom entry");
+}
+JS
+  status=$?
+  out=$(cat "$output_file")
+  [ "$status" -eq 0 ] || fail "Pi calm synthetic-entry restoration failed: $out"
+  [ -z "$out" ] || fail "Pi calm synthetic-entry test printed output: $out"
+  pass "Pi calm holds a restored-hidden synthetic row behind a zero-height placeholder, restores it in place on toggle-off, hides it again on toggle-on, and never double-mounts across extension lifetimes"
 }
 
 test_operational_followup_turn_e2e() {
@@ -1987,7 +2233,7 @@ TS
       || fail "Pi follow-up $label case rendered a duplicate captain answer"
     assert_contains "$pane" "CAPTAIN_PROMPT_$label" "Pi follow-up $label case hid the genuine captain prompt"
     assert_contains "$pane" "MONITOR_HANDLED_${label}_ONE" "Pi follow-up $label case did not render the intended processing result"
-    if [ "$calm_state" = on ]; then
+    if [ "$calm_state" = on ] || [ "$calm_state" = default ]; then
       assert_not_contains "$pane" "MONITOR_${label}_ONE" "Pi follow-up $label case rendered a Calm-hidden operational user row"
       if [ "$label" = exact_watcher ]; then
         assert_not_contains "$pane" "FIRSTMATE WATCHER WAKE: signal: /home/fixture/github/kunchenguid/firstmate/state/oss-triage-t4.status" \
@@ -2132,7 +2378,7 @@ JS
   run_followup_case restart-before on restart_before 1
   local restart_session=$session_file
   run_followup_case restart-after on restart_after 1 "$restart_session"
-  pass "Pi operational follow-up E2E processes exact user-role notifications once while Calm hides current and adjacent rows, Calm off and absent render them, and restart preserves semantics"
+  pass "Pi operational follow-up E2E processes exact user-role notifications once while Calm hides current and adjacent rows, an explicit off and an absent extension render them, and restart preserves semantics"
 }
 
 test_hidden_block_geometry_e2e() {
@@ -2395,7 +2641,10 @@ test_working_ship_geometry_and_lifecycle() {
   record_pi_version_evidence "$version" "Pi Calm working-ship assumptions"
 
   fixture="$TMP_ROOT/working-ship"
-  mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
+  mkdir -p "$fixture/home/config" "$fixture/lib" "$fixture/node_modules/@earendil-works"
+  # The lifecycle arc below starts from an explicit stored off, so its first block
+  # observes stock behavior and its toggles exercise both directions.
+  printf '%s\n' off >"$fixture/home/config/calm"
   cp "$EXT" "$fixture/fm-calm.ts"
   cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
   cp "$PRESERVATION" "$fixture/lib/fm-calm-preservation.ts"
@@ -3637,41 +3886,56 @@ JSON
     "cd '$project' && env FM_HOME='$home' PI_CODING_AGENT_DIR='$config' FM_OPERATIONAL_INPUT_SCRIPT='$OPERATIONAL_INPUT' PI_OFFLINE=1 pi --approve --no-skills --no-prompt-templates --no-context-files --session '$session_file'; rc=\$?; printf '\nPI_EXIT=%s\n' \"\$rc\"; sleep 30"
   wait_for_text "$default_snapshot" "The deterministic tool example is complete." \
     || fail "Pi calm E2E did not reach the restored session transcript"
-  assert_contains "$(cat "$default_snapshot")" "CALM_E2E_OUTPUT" "calm mode was not off by default"
-  assert_contains "$(cat "$default_snapshot")" "fm_watch_arm_pi" "Calm-off transcript did not show the Firstmate watcher tool"
-  assert_contains "$(cat "$default_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "Calm-off transcript did not show the synthetic Firstmate presentation row"
-  assert_contains "$(cat "$default_snapshot")" "Thinking..." "reasoning fixture did not render Pi's collapsed thinking label"
+  # Calm is on by default: a fresh home with no stored choice hides supported rows
+  # from the first render, because load-time registration claims the built-ins before
+  # the restored transcript draws, so no pre-activation row survives here.
+  [ ! -e "$home/config/calm" ] \
+    || fail "Pi calm E2E persisted a Calm choice without a toggle"
+  assert_not_contains "$(cat "$default_snapshot")" "CALM_E2E_OUTPUT" "calm mode was not on by default"
+  assert_not_contains "$(cat "$default_snapshot")" "fm_watch_arm_pi" "default-on transcript showed the Firstmate watcher tool"
+  assert_not_contains "$(cat "$default_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "default-on transcript showed the synthetic Firstmate presentation row"
+  assert_not_contains "$(cat "$default_snapshot")" "Thinking..." "default-on transcript showed Pi's collapsed thinking label"
+  assert_not_contains "$(cat "$default_snapshot")" "I will run one command." "default-on transcript showed a mid-turn assistant working note"
+  assert_contains "$(cat "$default_snapshot")" "Show a deterministic tool example." "default-on transcript hid a genuine user prompt"
+  assert_contains "$(cat "$default_snapshot")" "The deterministic tool example is complete." "default-on transcript hid a genuine assistant response"
   assert_contains "$(cat "$default_snapshot")" "fm-calm.ts" "project-local Pi calm extension did not auto-load"
   # shellcheck disable=SC2016 # Backticks are literal prompt markup.
   assert_not_contains "$(cat "$default_snapshot")" 'Run `bin/fm-session-start.sh` now' \
-    "native session-start context unexpectedly rendered while Calm was off"
+    "native session-start context unexpectedly rendered while Calm was on by default"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" C-o
   wait_for_text "$expanded_snapshot" "escape to interrupt" \
     || fail "Ctrl+O did not retain Pi's ordinary startup and tool expansion behavior"
-  # The expansion redraw lands a frame or two after the footer hint, so wait for the
-  # tool output this block actually asserts instead of assuming one implies the other.
-  wait_for_text "$expanded_snapshot" "CALM_E2E_OUTPUT" \
-    || fail "ordinary Ctrl+O expansion hid tool activity while calm mode was off"
-  assert_contains "$(cat "$expanded_snapshot")" "CALM_E2E_OUTPUT" "ordinary Ctrl+O expansion hid tool activity while calm mode was off"
+  assert_not_contains "$(cat "$expanded_snapshot")" "CALM_E2E_OUTPUT" "ordinary Ctrl+O expansion restored tool activity while calm mode was on by default"
+  assert_contains "$(cat "$expanded_snapshot")" "The deterministic tool example is complete." "ordinary Ctrl+O expansion hid genuine conversation while calm mode was on by default"
 
+  # An explicit off restores Pi's stock rendering, including tool rows and thinking.
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
+  tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
+  wait_for_text "$restored_snapshot" "CALM_E2E_OUTPUT" \
+    || fail "first /calm did not restore tool result output"
+  [ "$(cat "$home/config/calm")" = off ] || fail "first /calm did not persist the explicit off choice"
+  assert_contains "$(cat "$restored_snapshot")" "fm_watch_arm_pi" "explicit off hid the Firstmate watcher tool shell"
+  assert_contains "$(cat "$restored_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "explicit off hid the synthetic Firstmate presentation row"
+  assert_contains "$(cat "$restored_snapshot")" "Thinking..." "explicit off hid Pi's collapsed thinking label"
+  assert_contains "$(cat "$restored_snapshot")" "I will run one command." "explicit off hid the mid-turn assistant working note"
+
+  # Toggling back on hides every supported row: with default-on load-time
+  # registration there is no pre-activation row in this session, so even the
+  # restored built-in tool rows collapse.
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
   active_screen_wait=0
   while [ "$active_screen_wait" -lt 120 ]; do
-    # Include scrollback: the built-in tool rows this documented bound keeps visible
-    # (see below) lengthen the transcript enough to push earlier genuine content, such
-    # as the original user prompt, above the plain viewport.
+    # Include scrollback: the restored transcript is long enough to push earlier
+    # genuine content, such as the original user prompt, above the plain viewport.
     tmux -L "$TMUX_SOCKET" capture-pane -p -t "$TMUX_SESSION" -S -600 >"$hidden_snapshot"
     # Wait for the redraw this block actually asserts: the collapsed-thinking adapter
-    # (unconditional, unaffected by the built-in tool gate below) hides, and the
-    # retained genuine rows are back on screen. Built-in tool rows from before this
-    # first-ever activation are a separate, documented exception (see fm-calm.ts's
-    # file header and docs/calm.md): Pi gives no way to re-point an already-rendered
-    # tool row at a definition registered later, so CALM_E2E_OUTPUT and friends stay
-    # on screen through this whole redraw rather than disappearing with it.
+    # hides, the restored built-in tool rows collapse, and the retained genuine rows
+    # are back on screen.
     if ! grep -Fq "Thinking..." "$hidden_snapshot" &&
       ! grep -Fq "/calm" "$hidden_snapshot" &&
       ! grep -Fq "I will run one command." "$hidden_snapshot" &&
+      ! grep -Fq "CALM_E2E_OUTPUT" "$hidden_snapshot" &&
       grep -Fq "FIRSTMATE WATCHER WAKE: can you explain this phrase?" "$hidden_snapshot" &&
       grep -Fq "The deterministic tool example is complete." "$hidden_snapshot"; then
       break
@@ -3679,20 +3943,16 @@ JSON
     sleep 0.05
     active_screen_wait=$((active_screen_wait + 1))
   done
-  # This session's built-in tool rows (bash/grep/find) were all rendered during the
-  # initial session restore, before Calm's first-ever activation in this session had
-  # claimed any built-in name; they keep their stock presentation for the rest of the
-  # session. This is the captain-accepted, documented bound on the collision fix (see
-  # fm-calm.ts's file header and docs/calm.md): the alternative was letting Calm
-  # silently disable a differently loaded extension's own bash/read/etc override. A
-  # fresh built-in tool call made after this same activation does hide correctly;
-  # that path is covered by this file's own test_calm_activation_collision_and
-  # _regression_bound against real Pi rendering components, not repeated here.
-  assert_contains "$(cat "$hidden_snapshot")" "CALM_E2E_OUTPUT" "a pre-activation built-in tool row unexpectedly hid; the documented bound regressed"
+  # Default-on load-time registration claimed every built-in before the restored
+  # transcript drew, so even the restored bash/grep/find rows collapse; the
+  # documented non-retroactive bound now applies only to a session that started with
+  # an explicit off, which test_calm_activation_collision_and_regression_bound pins
+  # against real Pi rendering components.
+  assert_not_contains "$(cat "$hidden_snapshot")" "CALM_E2E_OUTPUT" "a restored built-in tool row stayed visible after toggling Calm on"
   assert_not_contains "$(cat "$hidden_snapshot")" "calm transcript" "/calm added a persistent Calm status row"
-  [ "$(cat "$home/config/calm")" = on ] || fail "/calm did not persist its active choice"
-  assert_contains "$(cat "$hidden_snapshot")" "CALM_EXPORT_GREP" "a pre-activation grep row unexpectedly hid; the documented bound regressed"
-  assert_contains "$(cat "$hidden_snapshot")" "CALM_EXPORT_FIND" "a pre-activation find row unexpectedly hid; the documented bound regressed"
+  [ "$(cat "$home/config/calm")" = on ] || fail "second /calm did not persist its active choice"
+  assert_not_contains "$(cat "$hidden_snapshot")" "CALM_EXPORT_GREP" "a restored grep row stayed visible after toggling Calm on"
+  assert_not_contains "$(cat "$hidden_snapshot")" "CALM_EXPORT_FIND" "a restored find row stayed visible after toggling Calm on"
   assert_not_contains "$(cat "$hidden_snapshot")" "Thinking..." "/calm left collapsed thinking labels in the transcript"
   assert_not_contains "$(cat "$hidden_snapshot")" "fm_watch_arm_pi" "/calm left the Firstmate watcher tool call shell in the transcript"
   assert_not_contains "$(cat "$hidden_snapshot")" "watcher: started Pi extension arm child" "/calm left the Firstmate watcher tool result in the transcript"
@@ -3891,11 +4151,11 @@ JS
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
   wait_for_text "$restored_snapshot" "CALM_E2E_OUTPUT" \
-    || fail "second /calm did not restore tool result output"
+    || fail "third /calm did not restore tool result output"
   wait_for_text "$restored_snapshot" "/tmp/active-probe.status" \
-    || fail "second /calm did not restore a synthetic row received while Calm was active"
-  assert_contains "$(cat "$restored_snapshot")" "fm_watch_arm_pi" "second /calm did not restore the Firstmate watcher tool shell"
-  assert_contains "$(cat "$restored_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "second /calm did not restore the synthetic Firstmate user row"
+    || fail "third /calm did not restore a synthetic row received while Calm was active"
+  assert_contains "$(cat "$restored_snapshot")" "fm_watch_arm_pi" "third /calm did not restore the Firstmate watcher tool shell"
+  assert_contains "$(cat "$restored_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "third /calm did not restore the synthetic Firstmate user row"
   for restored in \
     CURRENT_WATCHER_E2E \
     CURRENT_TURN_END_E2E \
@@ -3903,13 +4163,13 @@ JS
     CURRENT_FROM_FIRSTMATE_E2E \
     CURRENT_LAUNCH_BRIEF_E2E
   do
-    assert_contains "$(cat "$restored_snapshot")" "$restored" "second /calm did not restore current operational kind $restored"
+    assert_contains "$(cat "$restored_snapshot")" "$restored" "third /calm did not restore current operational kind $restored"
   done
-  assert_contains "$(cat "$restored_snapshot")" "Warning: CALM_TRANSIENT_DIAGNOSTIC" "second /calm dropped a transient diagnostic"
-  assert_contains "$(cat "$restored_snapshot")" " Error:" "second /calm dropped the synthetic delivery diagnostic"
-  assert_not_contains "$(cat "$restored_snapshot")" "Navigated to selected point" "second /calm added a navigation status row"
-  assert_contains "$(cat "$restored_snapshot")" "Thinking..." "second /calm did not restore Pi's collapsed thinking labels"
-  assert_contains "$(cat "$restored_snapshot")" "I will run one command." "second /calm did not restore the mid-turn assistant working note"
+  assert_contains "$(cat "$restored_snapshot")" "Warning: CALM_TRANSIENT_DIAGNOSTIC" "third /calm dropped a transient diagnostic"
+  assert_contains "$(cat "$restored_snapshot")" " Error:" "third /calm dropped the synthetic delivery diagnostic"
+  assert_not_contains "$(cat "$restored_snapshot")" "Navigated to selected point" "third /calm added a navigation status row"
+  assert_contains "$(cat "$restored_snapshot")" "Thinking..." "third /calm did not restore Pi's collapsed thinking labels"
+  assert_contains "$(cat "$restored_snapshot")" "I will run one command." "third /calm did not restore the mid-turn assistant working note"
   assert_contains "$(cat "$restored_snapshot")" "escape to interrupt" "/calm changed the active Ctrl+O expansion state"
 
   hash_after=$(shasum -a 256 "$session_file" | awk '{print $1}')
@@ -3930,7 +4190,7 @@ JS
     sleep 0.05
     active_screen_wait=$((active_screen_wait + 1))
   done
-  [ "$(cat "$home/config/calm")" = on ] || fail "third /calm did not persist the active choice"
+  [ "$(cat "$home/config/calm")" = on ] || fail "fourth /calm did not persist the active choice"
 
   # Calm on plus a genuinely active run replaces Pi's stock working row with the boat.
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-boat-e2e"
@@ -4274,7 +4534,7 @@ JS
   [ "$(cat "$home/config/calm")" = off ] || fail "/calm after restart did not persist the inactive choice"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/quit"
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" M-s
-  pass "Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior"
+  pass "Pi calm native E2E starts on by default, restores stock rendering on an explicit off, replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, survives restart, and preserves export plus Ctrl+O behavior"
 }
 
 test_home_resolution
@@ -4285,6 +4545,7 @@ test_builtin_gate_load_time
 test_calm_activation_collision_and_regression_bound
 test_rendering_and_session_lifecycle
 test_calm_mid_turn_working_notes
+test_synthetic_entry_restore_hidden_toggle
 test_operational_followup_turn_e2e
 test_hidden_block_geometry_e2e
 test_working_ship_geometry_and_lifecycle

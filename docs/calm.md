@@ -2,7 +2,8 @@
 
 Calm is Firstmate's conversation-only transcript presentation toggle.
 It is fully supported on Pi, and available on Claude Code behind that harness's default-off early-access function-hooks flag, as the [Claude Code](#claude-code) section below describes.
-It is off by default, and the last `/calm` choice persists for the effective Firstmate home across session starts and resumes on either harness, through the one shared preference file [`configuration.md`](configuration.md#calm-preference-configcalm) owns.
+It is on by default: a home with no stored choice, an unreadable file, or an unrecognized value runs Calm on, while an explicit stored `off` keeps it off.
+The last `/calm` choice persists for the effective Firstmate home across session starts and resumes on either harness, through the one shared preference file [`configuration.md`](configuration.md#calm-preference-configcalm) owns.
 Across both harnesses, Calm evaluates each settled assistant text block from a model step that stopped to call tools, or exhausted its token limit while carrying tool calls.
 It hides a block only when its raw text contains no newline and its trimmed length is below `CALM_PRESERVE_MIN_CHARS` (240); a newline or at least 240 trimmed characters preserves the block as substantive captain-facing content, while streaming text and the genuine reply that ends a response remain visible.
 
@@ -39,14 +40,15 @@ These are supported-API boundaries rather than hidden-content failures.
 ## Pi compatibility
 
 Calm has no numeric Pi version minimum or maximum and never refuses Pi solely because its version is newer than a previously verified version.
-The collapsed-thinking and operational-user-row presentation adapters probe the exact Pi API seam they patch when Calm loads.
-If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable adapter and skips only that adapter; `/calm`, the other adapter, and unrelated Pi extensions remain available.
+The collapsed-thinking, operational-user-row, and synthetic-entry presentation adapters probe the exact Pi API seam they patch when Calm loads.
+The synthetic-entry adapter holds the place of a Firstmate row Pi refused to mount while hidden, so toggling Calm off restores it where it belongs.
+If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable adapter and skips only that adapter; `/calm`, the other adapters, and unrelated Pi extensions remain available.
 
 Calm's built-in tool presentation (`bash`, `read`, `edit`, `write`, `grep`, `find`, `ls`) shares Pi's single, unmerged override slot per name with any other extension that overrides the same tool.
-While the persisted Calm preference is off, Calm registers none of those overrides and therefore contests no built-in tool name.
-The first time Calm turns on in a session that started off, it claims every built-in name no other extension already owns, leaves every contested tool intact and callable, and displays a prominent warning naming the tools it skipped.
+While the home holds an explicit stored `off`, Calm registers none of those overrides and therefore contests no built-in tool name.
+The first time Calm turns on in a session that started with an explicit off, it claims every built-in name no other extension already owns, leaves every contested tool intact and callable, and displays a prominent warning naming the tools it skipped.
 Tool-call rows already on screen before that first toggle do not retroactively collapse; later rows for the names Calm claimed use Calm presentation.
-When a session starts or reloads with Calm already on, Calm must instead register all seven overrides synchronously so Pi can render restored rows with them.
+When a session starts or reloads with Calm on, which now includes every home without an explicit stored `off`, Calm instead registers all seven overrides synchronously so Pi can render restored rows with them.
 Pi provides no ownership check early enough for that load-time path, and the first registrant wins the complete tool definition.
 If the other extension wins, a session-start console diagnostic names the tool and winning extension; if Calm wins, Pi does not expose the losing registration, so the other extension's override is unavailable and cannot be named.
 

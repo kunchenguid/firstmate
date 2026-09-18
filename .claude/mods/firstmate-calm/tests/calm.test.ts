@@ -55,8 +55,8 @@ describe("activation", () => {
     await expectInert($, on, "true");
   });
 
-  test("registers /calm at session start and stays a pass-through while off", async ($, on) => {
-    const { clock, journal } = world(on);
+  test("registers /calm at session start and stays a pass-through with an explicit off", async ($, on) => {
+    const { clock, journal } = world(on, { preference: "off\n" });
     await $.session.start(sessionStart);
     expect(journal.commands).toEqual(["calm"]);
     expect(isStock(await $.ui.render(spinner()))).toBe(true);
@@ -81,15 +81,26 @@ describe("activation", () => {
     expect(isHidden(await $.ui.render(toolResult()))).toBe(true);
   });
 
-  test("reads an unrecognized value as off", async ($, on) => {
+  test("reads an absent preference as on", async ($, on) => {
+    world(on);
+    expect(isHidden(await $.ui.render(toolUse()))).toBe(true);
+    expect(isHidden(await $.ui.render(toolGroup()))).toBe(true);
+  });
+
+  test("reads an unrecognized value as on", async ($, on) => {
     world(on, { preference: "maybe\n" });
+    expect(isHidden(await $.ui.render(toolUse()))).toBe(true);
+  });
+
+  test("reads an explicit off as off", async ($, on) => {
+    world(on, { preference: "off\n" });
     expect(isStock(await $.ui.render(toolUse()))).toBe(true);
   });
 });
 
 describe("/calm", () => {
   test("toggles on: persists on, toasts, redraws every hooked drawing, and leaves no output row", async ($, on) => {
-    const { files, journal } = world(on);
+    const { files, journal } = world(on, { preference: "off\n" });
     await $.session.start(sessionStart);
     expect(isStock(await $.ui.render(toolUse()))).toBe(true);
     const answer = await $.command.run(calmCommand());
@@ -129,6 +140,7 @@ describe("/calm", () => {
 
   test("writes under FM_CONFIG_OVERRIDE when that override names the config directory", async ($, on) => {
     const { files } = world(on, { env: { FM_CONFIG_OVERRIDE: "/elsewhere/cfg" } });
+    files.set("/elsewhere/cfg/calm", "off\n");
     await $.command.run(calmCommand());
     expect(files.get("/elsewhere/cfg/calm")).toBe("on\n");
     expect(files.has(PREFERENCE)).toBe(false);
@@ -136,6 +148,7 @@ describe("/calm", () => {
 
   test("falls back to FM_ROOT_OVERRIDE, then the tracked code root above the plugin, when FM_HOME is unset", async ($, on) => {
     const { files } = world(on, { home: undefined, env: { FM_ROOT_OVERRIDE: "/root/override" } });
+    files.set("/root/override/config/calm", "off\n");
     await $.command.run(calmCommand());
     expect(files.get("/root/override/config/calm")).toBe("on\n");
   });
@@ -143,8 +156,10 @@ describe("/calm", () => {
   test("derives the home from the plugin folder when nothing names it", async ($, on) => {
     const { files } = world(on, { home: undefined });
     await $.command.run(calmCommand());
+    await $.command.run(calmCommand());
     const [path] = [...files.keys()];
     expect(path).toBeDefined();
+    expect(files.get(path!)).toBe("on\n");
     expect(path!).toEndWith("/config/calm");
     expect(path!.startsWith(HOME)).toBe(false);
     // Three levels above the plugin folder: the tracked code root, above `.claude/`.
@@ -196,8 +211,8 @@ describe("operational user rows", () => {
     }
   });
 
-  test("leaves every user row to the engine while off", async ($, on) => {
-    world(on);
+  test("leaves every user row to the engine with an explicit off", async ($, on) => {
+    world(on, { preference: "off\n" });
     for (const text of [...hiddenTexts, ...visibleTexts]) {
       expect(isStock(await $.ui.render(userMessage(text))), JSON.stringify(text)).toBe(true);
     }
@@ -366,8 +381,8 @@ describe("mid-turn working notes", () => {
     expect(isStock(await $.ui.render(assistantMessage("Sub note")))).toBe(true);
   });
 
-  test("records notes while off and hides them retroactively when toggled on", async ($, on) => {
-    world(on);
+  test("records notes with an explicit off and hides them retroactively when toggled on", async ($, on) => {
+    world(on, { preference: "off\n" });
     const set = stepper(on);
     set({
       chunks: [{ kind: "text", index: 0, text: "Checking." }, { kind: "stop", stopReason: "tool_use", usage: null }],

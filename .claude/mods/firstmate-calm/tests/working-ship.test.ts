@@ -176,7 +176,7 @@ describe("the working ship", () => {
   });
 
   test("leaves a theme change to the engine while Calm is off, and paints the new family once Calm turns on", async ($, on) => {
-    const { journal } = world(on, { theme: "dark" });
+    const { journal } = world(on, { preference: "off\n", theme: "dark" });
     await $.session.start({ cwd: "/work", surface: "terminal", isInteractive: true });
     const redrawsBefore = journal.invalidations.length;
     await $.config.set(themeChange("light", "dark"));

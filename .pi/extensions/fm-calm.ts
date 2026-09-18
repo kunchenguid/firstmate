@@ -13,8 +13,8 @@
 // docs/configuration.md owns the home-local Calm preference contract.
 //
 // Pi has one first-registration-wins ToolDefinition per tool name, with no merge or
-// unregister operation. Keep Calm-off registration empty; keep Calm-on load-time
-// registration synchronous because restored rows capture the registry before
+// unregister operation. Keep explicit-Calm-off registration empty; keep Calm-on
+// load-time registration synchronous because restored rows capture the registry before
 // session_start; and collision-check only the later first-activation path, when
 // getAllTools() is reliable. docs/calm-mode-feasibility.md owns the Pi-source evidence
 // and docs/calm.md owns the user-facing behavior and non-retroactive first-toggle bound.
@@ -58,6 +58,7 @@ import {
   calmPresentationHides,
   calmPresentationIsActive,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
+  installCalmSyntheticEntryPlaceholder,
   registerFirstmateSyntheticPresentation,
   setCalmPresentation,
   setCalmStockExportRendering,
@@ -122,6 +123,7 @@ function installCalmPresentationAdapter(name: string, install: () => void): void
 export default function (pi: ExtensionAPI) {
   installCalmPresentationAdapter("collapsed-thinking", installCalmAssistantLayout);
   installCalmPresentationAdapter("operational-user-row", installCalmOperationalUserLayout);
+  installCalmPresentationAdapter("synthetic-entry", installCalmSyntheticEntryPlaceholder);
 
   let exportRendering = false;
   let removeTerminalInputHandler: (() => void) | undefined;
@@ -161,15 +163,17 @@ export default function (pi: ExtensionAPI) {
   const calmPreferencePath = resolve(configDirectory, "calm");
   // "max" is the legacy value written by the removed third presentation level, whose
   // behavior is now ordinary Calm; a home upgraded from it restores as on rather than
-  // dropping to off. docs/configuration.md owns the persisted value schema.
+  // dropping to off. Calm is on by default: an absent, unreadable, or unrecognized
+  // value resolves to on, and only an explicit stored "off" keeps Calm off.
+  // docs/configuration.md owns the persisted value schema.
   const loadCalmPreference = (): boolean => {
     let stored: string;
     try {
       stored = readFileSync(calmPreferencePath, "utf8").trim();
     } catch {
-      return false;
+      return true;
     }
-    return stored === "on" || stored === "max";
+    return stored !== "off";
   };
   const persistCalmPreference = (active: boolean): void => {
     mkdirSync(dirname(calmPreferencePath), { recursive: true });
@@ -331,10 +335,11 @@ export default function (pi: ExtensionAPI) {
   // first activation.
   let builtInsRegistered = false;
 
-  // Gate on Calm already being on at load time. This must stay synchronous and
-  // unconditional here (see file header): a foreign-claim check is not reachable at
-  // this point, while deferral would make restored rows capture the wrong definition.
-  // A Calm-off session or reload registers nothing and creates no collision exposure.
+  // Gate on the resolved preference at load time: on unless the home holds an
+  // explicit stored off. This must stay synchronous and unconditional here (see file
+  // header): a foreign-claim check is not reachable at this point, while deferral
+  // would make restored rows capture the wrong definition.
+  // An explicit-off session or reload registers nothing and creates no collision exposure.
   if (loadCalmPreference()) {
     for (const tool of wrappedBuiltIns) pi.registerTool(tool);
     builtInsRegistered = true;
@@ -358,7 +363,7 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  // The first time Calm turns on in a session that started off, claim every
+  // The first time Calm turns on in a session that started with an explicit off, claim every
   // uncontested built-in and leave each contested tool and its owning extension
   // untouched. Tell the user which built-in Calm could not take over, since Calm's
   // presentation does not apply to it.
