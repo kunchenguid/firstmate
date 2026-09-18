@@ -128,14 +128,20 @@
 #      FAILED record whose daemon an explicit probe proves down reads unknown,
 #      never failed: an instrument failure must not read as work failure
 #      (nm_daemon_probe_down).
-#   2b. A TERMINAL FAILED reading (failed/cancelled) is authoritative only while
-#      nothing newer contradicts it, because head identity binds whatever run
-#      last sat on this head, not necessarily this branch's current one - and a
-#      stale failure here is promoted into a captain-facing terminal outcome by
-#      bin/fm-inactive-reconcile.sh. Two records may outrank it: a later
-#      COMPLETED run the ledger proves is current (answering from that run), and
-#      a later run on this branch that cannot be bound here (reported as unknown
-#      - history, but no proof of the present). Because the ledger has no run ID,
+#   2b. A TERMINAL reading - failed/cancelled OR done - is authoritative only
+#      while nothing newer contradicts it, because head identity binds whatever
+#      run last sat on this head, not necessarily this branch's current one -
+#      and a stale terminal reading here is promoted into a captain-facing
+#      terminal outcome by bin/fm-inactive-reconcile.sh. A false SUCCESS is the
+#      worse of the two mistakes, because nobody goes looking, so the currency
+#      test is the same in both directions: a later run on this branch that
+#      cannot be bound here is reported as unknown - history, but no proof of
+#      the present. A FAILED reading is additionally answered from a newer
+#      record where one states a terminal outcome for this worktree: a later
+#      COMPLETED run the ledger proves is current, or the ledger's own terminal
+#      verdict. A DONE reading claims no such verdict, because unknown is
+#      already the whole answer a contradicted success may publish.
+#      Because the ledger has no run ID,
 #      an equal head does not identify a rerun; a terminal row supplies newer
 #      truth when its observable status, head, or PR differs. Nothing else does,
 #      so a real failure is never hidden. The whole rule needs two records to
@@ -1463,24 +1469,25 @@ if [ "$HAVE_RUN" = 1 ]; then
 
   [ -z "$SELECTED_RUN_ID" ] || RUN_DETAIL="$RUN_DETAIL${SEP}run: $SELECTED_RUN_ID"
 
-  # Apply the terminal-failure precedence contract owned by header rule 2b.
-  if [ "$RUN_STATE" = failed ] && [ "$RUN_SOURCE" != coarse ]; then
-    case "$LEDGER_STATUS" in
-      completed)
-        SUPERSEDED_DETAIL="run superseded by a newer completed run on this branch (earlier $RUN_DETAIL)"
-        TERMINAL_PR=$NEWEST_PR
-        emit_run "done" "$SUPERSEDED_DETAIL" "$TERMINAL_PR"
-        ;;
-      failed|cancelled)
-        if [ "$NEWEST_ROW_AGREES" != 1 ]; then
-          LEDGER_DETAIL="run $LEDGER_STATUS"
-          [ "$LEDGER_STATUS" = failed ] || LEDGER_DETAIL="run cancelled"
-          LEDGER_DETAIL="$LEDGER_DETAIL (earlier $RUN_DETAIL)"
+  # Apply the terminal-reading precedence contract owned by header rule 2b.
+  if { [ "$RUN_STATE" = failed ] || [ "$RUN_STATE" = done ]; } \
+    && [ "$RUN_SOURCE" != coarse ]; then
+    if [ "$RUN_STATE" = failed ]; then
+      case "$LEDGER_STATUS" in
+        completed)
+          SUPERSEDED_DETAIL="run superseded by a newer completed run on this branch (earlier $RUN_DETAIL)"
           TERMINAL_PR=$NEWEST_PR
-          emit_run failed "$LEDGER_DETAIL" "$TERMINAL_PR"
-        fi
-        ;;
-    esac
+          emit_run "done" "$SUPERSEDED_DETAIL" "$TERMINAL_PR"
+          ;;
+        failed|cancelled)
+          if [ "$NEWEST_ROW_AGREES" != 1 ]; then
+            LEDGER_DETAIL="run $LEDGER_STATUS (earlier $RUN_DETAIL)"
+            TERMINAL_PR=$NEWEST_PR
+            emit_run failed "$LEDGER_DETAIL" "$TERMINAL_PR"
+          fi
+          ;;
+      esac
+    fi
     case "$NEWEST_STATUS" in
       '') ;;
       *)

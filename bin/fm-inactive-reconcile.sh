@@ -380,9 +380,10 @@ terminal_outcome_pr() { # <state-line> <kind>
 
 # Enforce the header's independent captain-facing corroboration contract. A
 # RUN-STEP state is the pipeline's own record of the run that just ended, and
-# rule 2b in bin/fm-crew-state.sh guarantees such a terminal reading is either
-# the attributed current run or an honest unknown, so a crew's own earlier prose
-# is the weaker witness and never vetoes it - otherwise the routine ship shape
+# rule 2b in bin/fm-crew-state.sh guarantees any terminal reading published this
+# way - done as well as failed - is either the attributed current run or an
+# honest unknown, so a crew's own earlier prose is the weaker witness and never
+# vetoes it - otherwise the routine ship shape
 # (`done:` written, the run then fails, the crew goes silent) would reach nobody.
 # The two sources are genuinely comparable only when the state itself came from
 # the status log, and there the crew's latest word still decides.
@@ -605,7 +606,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     *) return 0 ;;
   esac
   terminal_outcome_corroborated "$state" "$last" "$state_line" || return 0
-  pr=$(terminal_outcome_pr "$state_line" "$(meta_field "$meta" kind)")
+  pr=$(terminal_outcome_pr "$state_line" "$kind")
   incarnation=$(meta_incarnation "$meta")
   # The receipt identity binds structured fields only: a persistent child that
   # keeps appending routine prose after one terminal outcome must not mint a

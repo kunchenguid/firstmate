@@ -4122,6 +4122,28 @@ test_cancelled_run_publishes_no_pr_for_active_rerun() {
   pass "a stale cancelled run publishes no pull request for an active rerun"
 }
 
+# A terminal DONE reading is exactly as stale-able as a terminal failed one:
+# head identity binds whatever run last sat on this head, and
+# bin/fm-inactive-reconcile.sh promotes either reading straight into a
+# captain-facing terminal outcome. A false success is the worse of the two,
+# because nobody goes looking, so a newer branch row the reader cannot bind to
+# this run must leave the success unprovable rather than published.
+test_contradicted_done_reading_is_never_published_as_success() {
+  reset_fakes
+  local d; d=$(new_case stale-done-newer-row)
+  make_repo_on_branch "$d/wt" fm/feat-s2h
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2h.meta" "window=fm:fm-feat-s2h" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-s2h)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s2h f0f0f0f0  $(ledger_stamp_minutes_ago 60)"
+  local out; out=$(run_crew_state "$d" feat-s2h)
+  assert_contains "$out" "state: unknown" "an unbindable newer row leaves the done reading unprovable"
+  assert_not_contains "$out" "state: done" "a contradicted terminal success is never published"
+  assert_contains "$out" "current state not provable here" "the reader answers honestly instead of guessing"
+  assert_not_contains "$out" "pull/1" "the stale success publishes no pull request"
+  pass "a contradicted done reading is never published as a success"
+}
+
 # The original title case: the crew declared a bounded external wait after a
 # failed reading the ledger cannot bind to this run, and that stale failure was
 # reported as the crew's current state, so the pane kept producing wedge-suspect
@@ -6799,6 +6821,7 @@ test_malformed_ledger_row_supplies_no_newest_evidence
 test_longer_ledger_sha_still_binds_the_current_run
 test_later_declared_pause_leaves_the_failure_unprovable
 test_later_declared_pause_leaves_the_cancelled_reading_unprovable
+test_contradicted_done_reading_is_never_published_as_success
 test_later_declared_done_leaves_the_failure_unprovable
 test_live_replacement_run_outranks_a_status_log_done
 test_mid_run_pause_does_not_mask_current_run_failure
