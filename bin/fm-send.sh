@@ -663,8 +663,9 @@ fi
 # answered the decision, so it goes through the guarded self-announced append
 # (bin/fm-wake-lib.sh) and does not wake this same session again, including
 # when this home already folded those bytes through OPEN DECISIONS without a
-# matching watcher seen marker; any concurrent foreign status bytes leave the
-# watcher's wake path untouched.
+# matching watcher seen marker; any concurrent foreign status bytes, or an
+# actionable worker line the fold read but never listed, leave the watcher's
+# wake path untouched.
 fm_send_close_resolved_keys() { # <answer-text>
   local note=$1 k line close_note append_rc still manual_close_cmd
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')

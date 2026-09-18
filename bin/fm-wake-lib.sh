@@ -2157,27 +2157,6 @@ fm_wake_status_mark_current() {  # <state> <status-file>
   fm_wake_status_seen_commit "$1" "$2" "$size" "$ident"
 }
 
-# Highest byte offset this home already knows in <status-file>: the watcher's
-# classified seen position, the drain presentation cursor, or the open-decisions
-# fold cursor. Each owner already identity-checks and reads 0 when unknown, so
-# a missing cursor cannot inflate the result. The self-announced append uses
-# this instead of the reported signature alone: a drain that already folded
-# OPEN DECISIONS has presented those bytes to this session even when the
-# watcher has not yet written a matching .seen-* marker.
-fm_wake_status_home_known_offset() {  # <state> <status-file>
-  local classified=0 presented=0 folded=0 n known=0
-  _fm_wake_require_classify || { printf '0'; return 0; }
-  classified=$(status_presentation_marker_offset "$(fm_wake_signal_seen_path "$1" "$2")" "$2") \
-    || classified=0
-  presented=$(status_presentation_cursor_offset "$2") || presented=0
-  folded=$(status_open_decisions_cursor_offset "$2") || folded=0
-  for n in "$classified" "$presented" "$folded"; do
-    case "$n" in ''|*[!0-9]*) continue ;; esac
-    [ "$n" -gt "$known" ] && known=$n
-  done
-  printf '%s' "$known"
-}
-
 # Guarded self-announced status append - the one dedup primitive for a status
 # line THIS home's own machinery writes as bookkeeping it has already presented
 # in the very turn or tick that writes it (an answerer-closes resolved line, a
@@ -2185,39 +2164,42 @@ fm_wake_status_home_known_offset() {  # <state> <status-file>
 # not wake the session that wrote it, so this appends the line and then
 # advances the watcher's seen marker to cover exactly the appended bytes and
 # nothing else. The advance is provenance-gated and fails toward waking:
-#   - the marker advances when this home already knew every pre-append byte
-#     (classified seen offset, presentation cursor, or open-decisions fold
-#     cursor equals the pre-append size) AND the post-append size equals that
-#     size plus exactly the appended bytes (no foreign write interleaved);
-#   - a file created by this append is self-announced: the whole file is the
-#     bookkeeping line this home just wrote;
-#   - on ANY other condition - pending foreign bytes, an interleaved writer,
-#     an unreadable size or identity - the line is still appended but the
-#     marker is left alone, so the watcher surfaces the file normally.
+#   - the marker advances only when this home already read every pre-append
+#     byte (the watcher's classified seen offset or the OPEN DECISIONS fold
+#     cursor equals the pre-append size), the post-append size equals that size
+#     plus exactly the appended bytes (no foreign write interleaved), AND the
+#     watcher's own span classifier finds no actionable event from its
+#     classified offset through the post-append end. The fold reads bytes it
+#     never prints, so a worker's `failed:` inside a folded span must still
+#     wake; classifying after the append keeps the just-closed decision from
+#     counting as live;
+#   - on ANY other condition - a missing file, pending foreign bytes, an
+#     interleaved writer, an unreadable size or identity - the line is still
+#     appended but the marker is left alone, so the watcher surfaces the file
+#     normally.
 # A later, different line from any other writer grows the size past the marker
 # and wakes as before: task identity alone can never suppress new content.
 # Returns 0 appended and self-announced, 1 appended but left for the watcher
 # (the safe direction), 2 the append itself failed.
 fm_wake_status_append_self_announced() {  # <state> <status-file> <line>
-  local state=$1 file=$2 line=$3 existed=0 pre_size=0 pre_ident='' post_size post_ident known
+  local state=$1 file=$2 line=$3 pre_size='' pre_ident='' post_size post_ident classified folded span_rc=0
   local LC_ALL=C
   _fm_wake_require_classify || return 1
   if [ -e "$file" ]; then
-    existed=1
-    pre_size=$(_fm_status_file_size "$file") || return 1
+    pre_size=$(_fm_status_file_size "$file") || pre_size=''
     pre_ident=$(_fm_open_decisions_file_ident "$file") || pre_ident=''
   fi
   printf '%s\n' "$line" >> "$file" || return 2
   post_size=$(_fm_status_file_size "$file") || return 1
   post_ident=$(_fm_open_decisions_file_ident "$file") || return 1
   case "$pre_size$post_size" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$pre_ident" ] && [ "$post_ident" = "$pre_ident" ] || return 1
   [ "$post_size" -eq $((pre_size + ${#line} + 1)) ] || return 1
-  if [ "$existed" -eq 1 ]; then
-    [ -n "$pre_ident" ] && [ "$post_ident" = "$pre_ident" ] || return 1
-    known=$(fm_wake_status_home_known_offset "$state" "$file") || known=0
-    case "$known" in ''|*[!0-9]*) return 1 ;; esac
-    [ "$known" = "$pre_size" ] || return 1
-  fi
+  classified=$(fm_wake_signal_seen_size "$state" "$file")
+  folded=$(status_open_decisions_cursor_offset "$file") || folded=0
+  [ "$classified" = "$pre_size" ] || [ "$folded" = "$pre_size" ] || return 1
+  status_span_first_actionable_record "$file" "$classified" >/dev/null || span_rc=$?
+  [ "$span_rc" -eq 1 ] || return 1
   fm_wake_status_seen_commit "$state" "$file" "$post_size" "$post_ident" || return 1
   return 0
 }

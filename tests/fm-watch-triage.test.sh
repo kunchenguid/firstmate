@@ -1607,6 +1607,37 @@ test_self_announced_close_after_open_decisions_fold_does_not_rewake() {
   pass "a close after OPEN DECISIONS fold never wakes its own home, and the next real note still does"
 }
 
+test_self_announced_close_after_fold_still_surfaces_folded_worker_failure() {
+  local dir state fakebin out status_file pid rc
+  dir=$(make_case self-close-folded-failure); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/task.status"
+  printf 'needs-decision [key=budget]: approve spend?\n' > "$status_file"
+  prime_status_seen "$state" "$status_file" || fail "could not prime the announced baseline"
+  # While no watcher runs, the worker reports a failure and moves on. The
+  # session-start fold reads through both lines but lists only the open
+  # decision, so the supervisor's close must not hide the failure.
+  printf 'failed: crew c3 hit an unrecoverable migration error\nworking: retrying c3 in a fresh worktree\n' \
+    >> "$status_file"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    status_open_decisions_incremental "$2" >/dev/null
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$status_file" \
+    || fail "could not fold the open decision"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_wake_status_append_self_announced "$2" "$3" "resolved [key=budget]: answered: approved"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$status_file" || rc=$?
+  [ "$rc" -eq 1 ] || fail "a close over a folded worker failure was self-announced (rc=$rc)"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · idle worker'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "the folded worker failure was swallowed by the supervisor's close"
+  grep -F "signal: $status_file" "$out" >/dev/null \
+    || fail "the folded worker failure did not surface as a signal: $(cat "$out")"
+  pass "a close after OPEN DECISIONS fold still surfaces a worker failure inside the folded span"
+}
+
 # --- actionable wakes are surfaced (queue + exit) ---------------------------
 
 test_actionable_signal_surfaced() {
@@ -5508,6 +5539,7 @@ test_secondmate_status_note_surfaced_despite_busy_agent
 test_secondmate_buried_block_wakes_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
 test_self_announced_close_after_open_decisions_fold_does_not_rewake
+test_self_announced_close_after_fold_still_surfaces_folded_worker_failure
 test_actionable_signal_surfaced
 test_needs_decision_signal_payload_marked_for_branch_exclusion
 test_needs_decision_reconciliation_required_still_marked

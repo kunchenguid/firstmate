@@ -1569,17 +1569,16 @@ test_interruption_before_and_after_raw_commit() {
 # The guarded self-announced status append (fm_wake_status_append_self_announced)
 # and the seen-signature gate it shares with the watcher's signal scan. Both
 # directions of the dedup contract are pinned through the real library
-# functions: a file this home already knows (seen marker, presentation cursor,
-# or OPEN DECISIONS fold) plus the home's own bookkeeping close stays
+# functions: a file this home already knows (seen marker or OPEN DECISIONS
+# fold) plus the home's own bookkeeping close stays
 # announced (no wake), while ANY unannounced byte - a pending foreign line, a
 # missing cursor, a later different note - reads as wake-worthy.
 test_self_announced_append_guards() {
-  local dir state status folded created rc=0
+  local dir state status folded rc=0
   dir=$(make_case self-announced-append)
   state="$dir/state"
   status="$state/t.status"
   folded="$state/folded.status"
-  created="$state/created.status"
 
   run_wake_lib() {
     FM_STATE_OVERRIDE="$state" bash -c '
@@ -1654,13 +1653,6 @@ test_self_announced_append_guards() {
   printf 'blocked: worker still needs help\n' >> "$folded"
   run_wake_lib fm_wake_signal_seen_current "$state" "$folded" \
     && fail "a later worker line after a folded close was swallowed"
-
-  # A close that creates the status file wrote every byte in it.
-  run_wake_lib fm_wake_status_append_self_announced "$state" "$created" \
-    'resolved [key=k4]: answered: created by this home' \
-    || fail "a close that created the status file was not self-announced (rc=$?)"
-  run_wake_lib fm_wake_signal_seen_current "$state" "$created" \
-    || fail "a newly created self-announced file was left unannounced"
 
   pass "self-announced appends suppress only their own bytes and fail toward waking"
 }
