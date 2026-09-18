@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+# Behavioral regressions for fm-verification-skill-check.sh, the executable
+# shape contract behind the verification-skill generator skill.
+set -u
+
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+CHECK="$ROOT/bin/fm-verification-skill-check.sh"
+TMP_ROOT=$(fm_test_tmproot fm-verification-skill-check)
+
+# Build a minimal generated verification skill with the required shape.
+make_good_skill() {
+  local dir=$1
+  mkdir -p "$dir/features"
+  cat >"$dir/SKILL.md" <<'EOF'
+---
+name: verify-timetracker
+description: >-
+  Drive the timetracker CLI the way a user would and capture behavioral proof.
+  Use when a task changes timetracker behavior and the delivery gate needs evidence.
+---
+
+# verify-timetracker
+
+## Launch
+
+Run `./build.sh` once, then `bin/timetracker --data-dir "$RUN_DIR/data" start`.
+Ready when the startup line `listening on 127.0.0.1:8437` appears.
+Teardown: `bin/timetracker --data-dir "$RUN_DIR/data" stop`.
+
+## Doctor
+
+`bin/timetracker --data-dir "$RUN_DIR/data" status` must print the build
+revision and the data directory. Run it first whenever anything looks off.
+
+## Drive
+
+Start a timer: `bin/timetracker start "Writing report"`.
+Stop it: `bin/timetracker stop`.
+List entries: `bin/timetracker list --format json`.
+
+## Evidence
+
+Exercise the real user path: capture the command, stdout, stderr, and exit
+code, then re-read the stored entry with `bin/timetracker show <id>`.
+Store artifacts under "$RUN_DIR/artifacts/".
+
+## Cleanup
+
+Stop the instance you started and remove "$RUN_DIR/scratch".
+Never kill by process name; kill what you started.
+Evidence under "$RUN_DIR/artifacts/" survives cleanup.
+
+## Helpers
+
+`bin/timetracker` ships in the repo; every recipe above shows its invocation.
+EOF
+  cat >"$dir/features/README.md" <<'EOF'
+# Timetracker verification map
+
+Read the index, then the matching feature file as the recipe.
+EOF
+  cat >"$dir/features/track-time.md" <<'EOF'
+# Track time
+
+## Sub-features
+
+- `start` opens a timer.
+- `stop` closes it.
+
+## How to get to it (user POV)
+
+- Run `bin/timetracker start "Task name"` in a terminal.
+
+## Driving it with shell
+
+Preconditions: the instance is healthy per the doctor.
+
+- **Start.** Run `bin/timetracker start "Task name"`. Exit code 0.
+- **Proof.** `bin/timetracker list --format json` shows the entry.
+
+## Gotchas
+
+- A stopped instance prints an empty list, not an error.
+EOF
+}
+
+run_check() {
+  "$CHECK" "$1" 2>&1
+}
+
+test_accepts_well_shaped_skill() {
+  local dir out code
+  dir="$TMP_ROOT/good/verify-timetracker"
+  make_good_skill "$dir"
+  out=$(run_check "$dir") && code=0 || code=$?
+  expect_code 0 "$code" "well-shaped generated skill passes the shape check"
+  assert_contains "$out" "ok:" "passing output names the validated directory"
+}
+
+test_rejects_missing_sections() {
+  local dir out
+  dir="$TMP_ROOT/no-evidence/verify-timetracker"
+  make_good_skill "$dir"
+  sed -i '/^## Evidence$/,/^## Cleanup$/ { /^## Cleanup$/!d; }' "$dir/SKILL.md"
+  out=$(run_check "$dir") && fail "missing Evidence section must fail" || true
+  assert_contains "$out" "'## Evidence'" "missing-section failure names the section"
+}
+
+test_rejects_removed_kill_rule() {
+  local dir out
+  dir="$TMP_ROOT/no-kill-rule/verify-timetracker"
+  make_good_skill "$dir"
+  sed -i 's/Never kill by process name; kill what you started\.//' "$dir/SKILL.md"
+  out=$(run_check "$dir") && fail "cleanup without the kill rule must fail" || true
+  assert_contains "$out" "kill by process name" "cleanup failure names the kill rule"
+}
+
+test_rejects_missing_feature_map() {
+  local dir out
+  dir="$TMP_ROOT/no-features/verify-timetracker"
+  make_good_skill "$dir"
+  rm -rf "$dir/features"
+  out=$(run_check "$dir") && fail "missing feature map must fail" || true
+  assert_contains "$out" "features/README.md" "failure names the missing feature map"
+}
+
+test_rejects_leftover_placeholders() {
+  local dir out
+  dir="$TMP_ROOT/placeholder/verify-timetracker"
+  make_good_skill "$dir"
+  printf '\nSee the guide for <app> specifics.\n' >>"$dir/features/README.md"
+  out=$(run_check "$dir") && fail "leftover placeholder must fail" || true
+  assert_contains "$out" "placeholder or template marker" "failure names leftover placeholders"
+}
+
+test_rejects_name_directory_mismatch() {
+  local dir out
+  dir="$TMP_ROOT/mismatch/verify-othertool"
+  make_good_skill "$dir"
+  out=$(run_check "$dir") && fail "name/directory mismatch must fail" || true
+  assert_contains "$out" "does not match directory name" "failure names the mismatch"
+}
+
+test_rejects_generic_skill_name() {
+  local dir out
+  dir="$TMP_ROOT/generic-name/verification"
+  make_good_skill "$dir"
+  sed -i 's/^name: verify-timetracker$/name: verification/' "$dir/SKILL.md"
+  out=$(run_check "$dir") && fail "non verify- name must fail" || true
+  assert_contains "$out" "must start with verify-" "failure names the verify- prefix rule"
+}
+
+test_rejects_missing_skill_file() {
+  local dir out
+  dir="$TMP_ROOT/empty/verify-nothing"
+  mkdir -p "$dir"
+  out=$(run_check "$dir") && fail "missing SKILL.md must fail" || true
+  assert_contains "$out" "missing" "failure names the missing SKILL.md"
+}
+
+test_accepts_well_shaped_skill
+test_rejects_missing_sections
+test_rejects_removed_kill_rule
+test_rejects_missing_feature_map
+test_rejects_leftover_placeholders
+test_rejects_name_directory_mismatch
+test_rejects_generic_skill_name
+test_rejects_missing_skill_file
