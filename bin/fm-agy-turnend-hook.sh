@@ -6,7 +6,8 @@
 # install adds or replaces exactly one top-level "firstmate-turn-end" key and
 # preserves every other key; remove deletes only that key. A symlinked store, a
 # store this uid does not own, and a non-object root are each refused without a
-# write.
+# write, and a refusal raised after that point removes whatever the run created,
+# so a refused install leaves the home exactly as it found it.
 #
 # Usage:
 #   fm-agy-turnend-hook.sh install
@@ -41,7 +42,7 @@ unset CDPATH
 case "${1:-}" in
 install | remove) ACTION=$1 ;;
 -h | --help)
-  sed -n '2,37{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,38{s/^# \{0,1\}//;p;}' "$0"
   exit 0
   ;;
 *)
@@ -50,7 +51,25 @@ install | remove) ACTION=$1 ;;
   ;;
 esac
 
+CREATED_GEMINI_DIR=0
+CREATED_CONFIG_DIR=0
+CREATED_CLI_DIR=0
+CREATED_REGISTRY=0
+CREATED_HOOK_SCRIPT=0
+HOOK_SCRIPT_TMP=
+
+rollback_install() {
+  [ -n "$HOOK_SCRIPT_TMP" ] && rm -f "$HOOK_SCRIPT_TMP"
+  [ "$CREATED_HOOK_SCRIPT" -eq 1 ] && rm -f "$HOOK_SCRIPT"
+  [ "$CREATED_REGISTRY" -eq 1 ] && rmdir "$REGISTRY" 2>/dev/null
+  [ "$CREATED_CLI_DIR" -eq 1 ] && rmdir "$CLI_DIR" 2>/dev/null
+  [ "$CREATED_CONFIG_DIR" -eq 1 ] && rmdir "$CONFIG_DIR" 2>/dev/null
+  [ "$CREATED_GEMINI_DIR" -eq 1 ] && rmdir "$GEMINI_DIR" 2>/dev/null
+  return 0
+}
+
 refuse() {
+  rollback_install
   printf 'fm-agy-turnend-hook: refused: %s\n' "$1" >&2
   exit 1
 }
@@ -58,8 +77,9 @@ refuse() {
 [ -n "${HOME:-}" ] || refuse "HOME is unset."
 command -v node >/dev/null 2>&1 || refuse "node is required to edit agy's hooks.json safely."
 
-CONFIG_DIR="$HOME/.gemini/config"
-CLI_DIR="$HOME/.gemini/antigravity-cli"
+GEMINI_DIR="$HOME/.gemini"
+CONFIG_DIR="$GEMINI_DIR/config"
+CLI_DIR="$GEMINI_DIR/antigravity-cli"
 STORE="$CONFIG_DIR/hooks.json"
 REGISTRY="$CLI_DIR/fm-turn-end.d"
 HOOK_SCRIPT="$CLI_DIR/fm-turn-end.sh"
@@ -93,12 +113,18 @@ NODE
 fi
 
 if [ "$ACTION" = install ]; then
+  [ -d "$GEMINI_DIR" ] || CREATED_GEMINI_DIR=1
+  [ -d "$CONFIG_DIR" ] || CREATED_CONFIG_DIR=1
+  [ -d "$CLI_DIR" ] || CREATED_CLI_DIR=1
+  [ -d "$REGISTRY" ] || CREATED_REGISTRY=1
+  [ -e "$HOOK_SCRIPT" ] || CREATED_HOOK_SCRIPT=1
   mkdir -p "$CONFIG_DIR" "$REGISTRY" || refuse "could not create agy's config and registry directories."
   chmod 700 "$REGISTRY" 2>/dev/null || true
 
   # The hook script is self-contained and absolute: the worktree that installed
   # it is torn down after the task lands, and each home resolves its own
   # firstmate root through the per-task token instead.
+  HOOK_SCRIPT_TMP="$HOOK_SCRIPT.tmp.$$"
   {
     printf '%s\n' '#!/bin/sh'
     printf '%s\n' '# Firstmate agy turn-end hook. Installed and owned by bin/fm-agy-turnend-hook.sh.'
@@ -172,9 +198,10 @@ fi
 
 emit
 HOOKBODY
-  } >"$HOOK_SCRIPT.tmp.$$" || refuse "could not write the agy turn-end hook script."
-  chmod 700 "$HOOK_SCRIPT.tmp.$$" || refuse "could not set mode on the agy turn-end hook script."
-  mv -f "$HOOK_SCRIPT.tmp.$$" "$HOOK_SCRIPT" || refuse "could not install the agy turn-end hook script."
+  } >"$HOOK_SCRIPT_TMP" || refuse "could not write the agy turn-end hook script."
+  chmod 700 "$HOOK_SCRIPT_TMP" || refuse "could not set mode on the agy turn-end hook script."
+  mv -f "$HOOK_SCRIPT_TMP" "$HOOK_SCRIPT" || refuse "could not install the agy turn-end hook script."
+  HOOK_SCRIPT_TMP=
 fi
 
 # Read-modify-write with a fingerprint check before the rename and a readback

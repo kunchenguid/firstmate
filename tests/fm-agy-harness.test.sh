@@ -1126,6 +1126,29 @@ test_agy_turnend_installer_refuses_a_store_it_does_not_own() {
   pass "fm-agy-turnend-hook.sh: refuses a non-object root and a symlinked store without writing"
 }
 
+# The ownership guards refuse before any write, but the store edit itself can
+# still fail once they pass - a config directory this uid cannot write is the
+# reachable shape, because the writability guard only runs when the store
+# already exists. That refusal must leave the home as it found it too.
+test_agy_turnend_installer_leaves_nothing_behind_when_the_store_edit_fails() {
+  local home rc
+  if [ "$(id -u)" = 0 ]; then
+    pass "fm-agy-turnend-hook.sh: a failed store edit leaves nothing behind (skipped as root)"
+    return 0
+  fi
+  home="$TMP_ROOT/turnend-edit-fails"
+  rm -rf "$home"
+  mkdir -p "$home/.gemini/config"
+  chmod 500 "$home/.gemini/config"
+  rc=0
+  agy_turnend_install "$home" >/dev/null 2>&1 || rc=$?
+  chmod 700 "$home/.gemini/config"
+  [ "$rc" -ne 0 ] || fail "the installer reported success against a hooks.json directory it cannot write"
+  [ ! -e "$home/.gemini/config/hooks.json" ] || fail "a refused store edit still left a store behind"
+  assert_agy_home_untouched "$home" "failed store edit"
+  pass "fm-agy-turnend-hook.sh: a failed store edit leaves no hook script or registry behind"
+}
+
 # agy runs a hook `command` through `sh -c`, so the registered string is the
 # real interface, not the script path. This runs the string the installer wrote
 # exactly as agy would, from a home whose path contains a space: an unquoted
@@ -1280,6 +1303,7 @@ test_agy_pre_trusted_pane_that_never_renders_a_turn_fails_the_spawn
 test_agy_refused_hook_install_degrades_the_spawn_visibly
 test_agy_turnend_installer_owns_only_its_own_key
 test_agy_turnend_installer_refuses_a_store_it_does_not_own
+test_agy_turnend_installer_leaves_nothing_behind_when_the_store_edit_fails
 test_agy_turnend_command_fires_from_a_home_whose_path_has_a_space
 test_agy_turnend_hook_is_inert_without_a_registry_token
 test_agy_turnend_hook_records_both_turn_boundaries

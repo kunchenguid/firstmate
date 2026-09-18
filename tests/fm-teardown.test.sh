@@ -2334,11 +2334,20 @@ configure_secondmate_with_tmux_children() {  # <case-dir>
 }
 
 test_forced_secondmate_teardown_holds_descendant_lifecycle_locks() {
-  local case_dir home lock ready release holder_pid rc waited=0 child
+  local case_dir home lock ready release holder_pid rc waited=0 child agy_home agy_auth
   case_dir=$(make_case descendant-locks)
   write_meta "$case_dir" local-only secondmate
   configure_secondmate_with_tmux_children "$case_dir"
   home="$case_dir/secondmate-home"
+  # agy's private turn-end registry entry is reachable only through the child's
+  # state-side pointer, so a cleanup that drops the pointer without the entry
+  # leaves an orphan nothing can name again. HOME is case-local so the real
+  # registry is never touched.
+  agy_home="$case_dir/agy-home"
+  agy_auth="$agy_home/.gemini/antigravity-cli/fm-turn-end.d/fm.a1b2c3d4e5f6"
+  mkdir -p "${agy_auth%/*}"
+  printf 'id=child-a\n' > "$agy_auth"
+  printf '%s\n' fm.a1b2c3d4e5f6 > "$home/state/child-a.agy-turnend-token"
   : > "$case_dir/kill.log"
   : > "$case_dir/treehouse.log"
   cat > "$case_dir/fakebin/tmux" <<SH
@@ -2373,7 +2382,7 @@ SH
   [ -e "$ready" ] || fail "descendant-locks: the contending lifecycle action never acquired its lock"
 
   rc=0
-  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  HOME="$agy_home" run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
   if [ "$rc" -eq 0 ]; then
     : > "$release"
     wait "$holder_pid" 2>/dev/null || true
@@ -2394,12 +2403,18 @@ SH
     [ -e "$home/state/$child.meta" ] && [ -d "$case_dir/$child-wt" ] \
       || { : > "$release"; wait "$holder_pid" 2>/dev/null || true; fail "descendant-locks: refusal removed $child state or worktree"; }
   done
+  [ -e "$agy_auth" ] \
+    || { : > "$release"; wait "$holder_pid" 2>/dev/null || true; fail "descendant-locks: refusal retired a child's agy turn-end registry entry"; }
 
   : > "$release"
   wait "$holder_pid" 2>/dev/null || true
   rc=0
-  run_teardown "$case_dir" --force > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
+  HOME="$agy_home" run_teardown "$case_dir" --force > "$case_dir/retry.stdout" 2> "$case_dir/retry.stderr" || rc=$?
   expect_code 0 "$rc" "descendant-locks: uncontended retry should complete"
+  [ ! -e "$agy_auth" ] \
+    || fail "descendant-locks: child cleanup left the agy turn-end registry entry behind in the home"
+  [ ! -e "$home/state/child-a.agy-turnend-token" ] \
+    || fail "descendant-locks: child cleanup left the agy turn-end pointer behind"
   [ ! -e "$case_dir/state/task-x1.meta" ] && [ ! -d "$home" ] \
     || fail "descendant-locks: uncontended retry retained retired task state"
   [ -s "$case_dir/kill.log" ] && [ -s "$case_dir/treehouse.log" ] \
