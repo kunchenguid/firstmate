@@ -159,7 +159,7 @@ if [ -n "$PR_URL" ]; then
 fi
 
 USE_LOCAL_BASE=0
-if [ "$MODE" = local-only ]; then
+if [ "$MODE" = local-only ] && [ -n "$RECORDED_BASE" ]; then
   USE_LOCAL_BASE=1
 elif [ "$KIND" = scout ] && [ -n "$RECORDED_BASE" ] \
   && git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then

@@ -248,6 +248,24 @@ test_local_only_recorded_base_does_not_require_default_or_remote_ref() {
   pass "fm-review-diff uses a local recorded base without resolving the default"
 }
 
+test_local_only_without_recorded_base_uses_remote_default_ref() {
+  local case_dir out
+  case_dir=$(make_case local-only-default)
+  git -C "$case_dir/project" checkout -q --detach main
+  git -C "$case_dir/project" branch -D main >/dev/null
+  printf 'local-default-crew\n' > "$case_dir/wt/local-default-crew.txt"
+  git -C "$case_dir/wt" add local-default-crew.txt
+  git -C "$case_dir/wt" commit -qm "local default crew tip"
+  write_task_meta "$case_dir" "mode=local-only"
+
+  out=$(run_review_diff "$case_dir" task-x1)
+  assert_contains "$out" 'diff base: origin/main' \
+    "legacy local-only review did not use the remote default ref"
+  assert_contains "$out" '+local-default-crew' \
+    "legacy local-only review omitted crew changes"
+  pass "fm-review-diff preserves the remote-default fallback without a recorded base"
+}
+
 test_scout_recorded_local_base_when_remote_ref_is_absent() {
   local case_dir out
   case_dir=$(make_case scout-local-base)
@@ -340,6 +358,7 @@ test_legacy_brief_uses_symbolic_worktree_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_recorded_base_branch_is_compare_base
 test_local_only_recorded_base_does_not_require_default_or_remote_ref
+test_local_only_without_recorded_base_uses_remote_default_ref
 test_scout_recorded_local_base_when_remote_ref_is_absent
 test_recorded_base_branch_without_default
 test_recorded_crew_branch_ignores_parked_head
