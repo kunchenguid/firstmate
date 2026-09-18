@@ -185,6 +185,7 @@ An unconfirmed SSH transport (exit 255) is retried identically once, while a bud
 If delivery remains unconfirmed, only the exact `FM_PENDING_REPLY_EXISTING_CORR=<id>` resend command printed by `fm-send` is safe to run later because it preserves the request body and lets the remote enqueue deduplicate onto the same record; a plain rerun mints a different correlation and is not idempotent.
 When deduplication finds that the worker already moved the matching record into `handled/`, the resend exits successfully without ringing the doorbell again.
 The remote host runs no doorbell re-ring ladder of its own; a swallowed doorbell for an ordinary reply-bearing request surfaces through the parent's pending-reply recovery and escalation, whose recovery request rings the doorbell again when it is enqueued.
+A fire-and-forget record, such as a reconcile ask, gets its single retry ring only on the local plane: the remote steer leg owes no re-ring, so a swallowed remote doorbell for one waits for the next ring into that inbox, and a remote-side retry is known follow-up scope.
 `fm-peek.sh` and `fm-crew-state.sh` route remote-secondmate reads to the endpoint's host instead of consulting local worktree or backend state.
 An unreachable or unreadable remote read is unknown, not evidence that the endpoint is dead.
 
