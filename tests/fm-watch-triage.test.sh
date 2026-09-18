@@ -6603,6 +6603,173 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
 }
 
+# --- phantom-pane prune ------------------------------------------------------
+# A pane that vanishes while no task record references it must not leave its
+# per-pane markers behind as permanent bookkeeping: the watcher prunes them on
+# ONE authoritative absence verdict, emits at most one final notice, and never
+# escalates the vanished pane again - while a pane any record still references
+# keeps its markers and its whole escalation ladder whatever its liveness, and
+# an uncertain read (a backend that cannot be read) prunes nothing.
+
+phantom_prune_seed_markers() {  # <state> <key>
+  local state=$1 key=$2 pane_text='final render'
+  printf '%s' "$(hash_text "$pane_text")" > "$state/.hash-$key"
+  printf '2\n' > "$state/.count-$key"
+  printf '%s' "$(hash_text "$pane_text")" > "$state/.stale-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  printf '3\n' > "$state/.wedge-escalations-$key"
+  date +%s > "$state/.churn-since-$key"
+  printf 'missing deadbeef\n' > "$state/.dead-reported-$key"
+}
+
+phantom_prune_assert_markers() {  # <state> <key> present|gone <why>
+  local state=$1 key=$2 want=$3 why=$4 f
+  for f in hash count stale stale-since wedge-escalations churn-since dead-reported tracked; do
+    if [ "$want" = gone ]; then
+      [ ! -e "$state/.$f-$key" ] || fail "$why: .$f-$key survived the prune"
+    else
+      [ -e "$state/.$f-$key" ] || fail "$why: .$f-$key was pruned"
+    fi
+  done
+}
+
+test_phantom_pane_state_pruned_once_vanished() {
+  local dir state fakebin out capture window key pid
+  window="test:fm-phantom"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  dir=$(make_case phantom-prune); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture="$dir/pane.txt"
+  printf 'some live render\n' > "$capture"
+  printf 'window=%s\nkind=ship\nbackend=tmux\n' "$window" > "$state/phantom.meta"
+
+  # Phase A: the record is alive and the pane renders, so the watcher records
+  # the window in its own forward .tracked- map beside the first hash.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "watcher died tracking a live pane: $(cat "$out")"; }
+  reap "$pid"
+  [ -s "$state/.tracked-$key" ] || fail "the live poll recorded no .tracked- window map"
+  [ "$(cat "$state/.tracked-$key")" = "$(printf '%s\ttmux' "$window")" ] \
+    || fail "the .tracked- map recorded '$(cat "$state/.tracked-$key")' instead of the window and backend"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the tracking cycle"
+
+  # The lane wedged historically before it vanished: leftovers of a real
+  # escalation series sit beside the map the watcher just wrote.
+  phantom_prune_seed_markers "$state" "$key"
+
+  # Phase B: the record is torn down and the pane vanishes with it - the
+  # capture fails, and the session inventory no longer lists the window.
+  rm "$state/phantom.meta"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS="fm-unrelated" FM_FAKE_TMUX_FORBIDDEN_TARGET="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the watcher stayed up after pruning a vanished pane"; }
+  grep -F 'pane vanished, state pruned' "$out" >/dev/null \
+    || fail "the prune did not emit its single final notice: $(cat "$out")"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "a vanished pane's prune was reported as a wedge escalation"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 1 ] \
+    || fail "the prune queued $(wedge_stale_wakes "$state" "$window") wakes instead of one notice"
+  phantom_prune_assert_markers "$state" "$key" gone "a vanished record-less pane"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the prune notice"
+
+  # Phase C: with the record and the markers both gone, no later poll
+  # re-alarms the vanished pane - no notice, no escalation, no state.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS="fm-unrelated" FM_FAKE_TMUX_FORBIDDEN_TARGET="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the watcher exited after the pane was already pruned: $(cat "$out")"; }
+  reap "$pid"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "a pruned pane re-alarmed on a later poll: $(cat "$state/.wake-queue")"
+  phantom_prune_assert_markers "$state" "$key" gone "a pruned pane's markers"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the quiet post-prune cycle"
+  pass "a vanished record-less pane is pruned on one authoritative absence verdict, notices once, and never alarms again"
+}
+
+test_record_owned_pane_state_never_pruned() {
+  local dir state fakebin out window key pid
+  window="test:fm-owned"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  dir=$(make_case phantom-owned); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  printf 'window=%s\nkind=ship\nbackend=tmux\n' "$window" > "$state/owned.meta"
+  printf '%s\t%s\n' "$window" tmux > "$state/.tracked-$key"
+  phantom_prune_seed_markers "$state" "$key"
+
+  # The record still references the pane and the pane is gone: the prune must
+  # keep every marker regardless of liveness, and stay silent about it.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS="fm-unrelated" FM_FAKE_TMUX_FORBIDDEN_TARGET="$window" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the watcher exited over a record-owned pane: $(cat "$out")"; }
+  reap "$pid"
+  phantom_prune_assert_markers "$state" "$key" present "a record-owned vanished pane"
+  grep -F 'pane vanished, state pruned' "$out" >/dev/null \
+    && fail "a record-owned pane was announced as pruned"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "a record-owned vanished pane queued a wake: $(cat "$state/.wake-queue")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the owned-pane cycle"
+  pass "a pane a task record still references keeps its markers whatever the pane's liveness"
+}
+
+test_record_owned_pane_still_escalates_normally() {
+  local dir state fakebin out capture window key
+  local failed='state: failed · source: run-step · run failed'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  dir=$(wedge_threshold_fixture phantom-owned-live 'working: still compiling' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  printf '%s\t%s\n' "$window" tmux > "$state/.tracked-$key"
+
+  # The record is alive, the pane renders, and the endpoint reads alive: the
+  # sweep must not have touched the wedge ladder, which escalates unchanged.
+  FM_TEST_TMUX_WINDOWS=fm-wedge FM_TEST_PANE_COMMAND=grok \
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
+    || fail "an owned pane's wedge never escalated: $(cat "$out")"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    || fail "an owned pane's wedge lost its escalation wording: $(cat "$out")"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" -eq 1 ] \
+    || fail "an owned pane's wedge escalation count was $(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0), not 1"
+  # The ladder itself consumes the idle timer on escalation; the markers the
+  # fixture seeded and the sweep owns - above all the .tracked- map and the
+  # pane hash - survive it untouched.
+  for f in hash count stale wedge-escalations tracked; do
+    [ -e "$state/.$f-$key" ] || fail "an owned pane mid-escalation: .$f-$key was pruned"
+  done
+  ack_stopped_cycle "$state" || fail "could not acknowledge the owned wedge escalation"
+  pass "a pane a task record still references keeps its full wedge escalation ladder"
+}
+
+test_uncertain_read_keeps_phantom_state() {
+  local dir state fakebin out window key pid
+  window="test:fm-uncertain"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  dir=$(make_case phantom-uncertain); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  printf '%s\t%s\n' "$window" tmux > "$state/.tracked-$key"
+  phantom_prune_seed_markers "$state" "$key"
+
+  # The record is gone but the backend's inventory cannot be read at all: an
+  # uncertain read proves nothing either way, so nothing is pruned and
+  # nothing is announced.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_LIST_WINDOWS_FAIL=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the watcher exited on an uncertain read: $(cat "$out")"; }
+  reap "$pid"
+  phantom_prune_assert_markers "$state" "$key" present "an uncertain read"
+  grep -F 'pane vanished, state pruned' "$out" >/dev/null \
+    && fail "an uncertain read was announced as a prune"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "an uncertain read queued a wake: $(cat "$state/.wake-queue")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the uncertain-read cycle"
+  pass "an uncertain backend read never prunes a vanished pane's state"
+}
+
 # CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2
 # churn-deferral regression. The rest of this file is not a 3.2 snapshot suite.
 if [ -n "${FM_TEST_ONLY:-}" ]; then
@@ -6751,3 +6918,7 @@ test_captain_held_rechecked_under_a_quiet_record
 test_paused_until_near_future_is_quiet_before_the_cadence
 test_paused_until_wrong_year_is_bounded_by_the_cadence
 test_paused_until_that_passed_is_rechecked_before_the_cadence
+test_phantom_pane_state_pruned_once_vanished
+test_record_owned_pane_state_never_pruned
+test_record_owned_pane_still_escalates_normally
+test_uncertain_read_keeps_phantom_state

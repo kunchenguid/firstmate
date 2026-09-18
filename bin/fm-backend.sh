@@ -1021,6 +1021,28 @@ fm_backend_agent_state() {  # <backend> <target>
   esac
 }
 
+# fm_backend_target_absent: whether <backend> authoritatively reports the exact
+# recorded <target> gone. Prints one verdict: `absent` when a read happened and
+# the backend definitively does not have the target, `present` when a read
+# happened and the target exists, and `uncertain` when the read proves nothing
+# either way - the backend being down or unreachable, a timeout, an
+# unimplemented adapter, or an unparseable target. Each adapter owns what
+# "definitively" means for it (bin/backends/<name>.sh owns each contract); the
+# shared bar every implementation must hold is that absence is claimed only on
+# the backend's OWN authoritative answer, never on a failed read, because a
+# backend that restores state on restart (herdr) brings its targets back.
+# A caller that destroys per-window state on absence must prune only on
+# `absent` and keep everything on `uncertain`.
+fm_backend_target_absent() {  # <backend> <target>
+  local backend=$1 target=$2
+  fm_backend_source "$backend" || { printf 'uncertain'; return 0; }
+  case "$backend" in
+    tmux) fm_backend_tmux_target_absent "$target" ;;
+    herdr) fm_backend_herdr_target_absent "$target" ;;
+    *) printf 'uncertain' ;;
+  esac
+}
+
 # Backward-compatible three-state view for existing callers. An
 # authoritatively missing endpoint is confidently not a live agent, while every
 # ambiguous, unreadable, or unverified result stays unknown.

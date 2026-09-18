@@ -77,6 +77,14 @@
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
 #   stale: <window> (unread firstmate instruction: ...)
+#                          the steering-inbox ladder spent its delivery-attempt
+#                          budget on an idle pane without an acknowledgement
+#   stale: <window> (pane vanished, state pruned: no task record owns it and
+#   the backend confirms it is gone)
+#                          a vanished pane's orphaned per-pane markers were
+#                          pruned after one authoritative absence verdict; the
+#                          pane is gone from every later poll by construction,
+#                          so this is one notice, never a new escalation series
 #   stale: <window> (steering-inbox ladder bookkeeping unwritable: ...)
 #   stale: <window> (steering-inbox busy bookkeeping unwritable: ...)
 #                          steering-inbox recovery; bin/fm-task-inbox-lib.sh owns
@@ -488,8 +496,8 @@ window_label() {
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
-# .wedge-escalations-, .paused-*, .writing-*, .waiting-*), and live homes hold those markers on
-# disk under the current format, so the format lives here alone: a second copy is
+# .wedge-escalations-, .paused-*, .writing-*, .waiting-*, .tracked-), and live homes
+# hold those markers on disk under the current format, so the format lives here alone: a second copy is
 # how a future change to it silently orphans a window's markers instead of clearing
 # them. The helpers below take the derived key rather than re-deriving it, so one
 # poll of one window derives it once.
@@ -1720,6 +1728,58 @@ clear_pause_tracking() {  # <window-key>
   local key=$1
   clear_pause_state "$key"
   clear_stale_hash_tracking "$key"
+}
+
+# Phantom-pane prune. The per-window markers this watcher keeps (.hash-,
+# .count-, .stale-*, .wedge-escalations-, and their reset bookkeeping) outlive
+# the pane they describe: when a pane is closed outside its teardown, or lost
+# with its whole herdr workspace, and no task record references it anymore,
+# nothing evaluates the pane again - but nothing prunes the markers either, so
+# any path that keeps classifying the vanished pane escalates it every
+# FM_STALE_ESCALATE_SECS forever (observed live: one vanished pane reached 16+
+# demand-deep-inspection escalations after its record was torn down), and a
+# later pane that reuses the window key inherits dead bookkeeping such as an
+# old wedge-escalation count.
+#
+# The .tracked-<key> sidecar (window and backend, written once beside the
+# window's hash above) is the forward map that makes those markers findable
+# once no record names the window. Each poll cycle, every tracked key that no
+# meta references gets ONE authoritative verdict from
+# fm_backend_target_absent, and only its `absent` verdict prunes: the backend
+# answered a read and definitively does not have the pane. `present` keeps the
+# markers (an ownerless but live pane is a reconciliation matter, not silent
+# state loss), and so does `uncertain` - herdr unreachable, a read timeout, a
+# backend with no implementation: only confirmed absence prunes, never an
+# uncertain read, because herdr restores its whole session layout on restart
+# and a pruned marker cannot tell a restored pane's fresh bookkeeping from a
+# wedged one's.
+#
+# A window any meta references is never pruned here regardless of liveness:
+# the record's fate belongs to firstmate's record reconciliation, and its gone
+# agent already has wedge_dead_record's bounded once-only report. The prune
+# removes every marker the key owns, including the sidecar itself, and emits
+# at most one final notice before the key is gone - the absence of state is
+# what makes the notice impossible to repeat.
+phantom_pane_prune() {
+  local tracked key w backend verdict reason
+  for tracked in "$STATE"/.tracked-*; do
+    [ -e "$tracked" ] || continue
+    key=${tracked##*/.tracked-}
+    { IFS=$(printf '\t') read -r w backend; } < "$tracked" || continue
+    [ -n "$w" ] && [ -n "$backend" ] || continue
+    fm_backend_meta_for_window "$w" "$STATE" >/dev/null 2>&1 && continue
+    [ "$(fm_backend_target_absent "$backend" "$w")" = absent ] || continue
+    clear_pause_tracking "$key"
+    # The sidecar is removed LAST: a failed marker removal leaves it behind so
+    # the next cycle retries the whole prune, while a removed sidecar with
+    # markers left behind would strand the orphans unfindable.
+    rm -f "$STATE/.hash-$key" "$STATE/.count-$key" "$STATE/.churn-since-$key" \
+      "$STATE/.dead-reported-$key" || continue
+    rm -f "$tracked" || continue
+    reason="stale: $w (pane vanished, state pruned: no task record owns it and the backend confirms it is gone)"
+    fm_wake_append stale "$w" "$reason" || exit 1
+    wake "$reason"
+  done
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
@@ -3016,7 +3076,8 @@ EOF
     if [ "$kind" = secondmate ] && ! status_is_paused_or_captain_held "$last"; then
       continue
     fi
-    tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
+    backend=$(window_backend "$w")
+    tail40=$(fm_backend_capture "$backend" "$w" 40 "$(window_label "$w")" 2>/dev/null) || continue
     h=$(printf '%s' "$tail40" | hash_pane)
     hf="$STATE/.hash-$key"
     cf="$STATE/.count-$key"
@@ -3182,6 +3243,10 @@ EOF
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
+      # Record the forward window->key map beside the hash, so the
+      # phantom-pane prune can still find (and prune) this window's markers
+      # after the record that enumerated it is gone. Written once.
+      [ -e "$STATE/.tracked-$key" ] || printf '%s\t%s\n' "$w" "$backend" > "$STATE/.tracked-$key"
       paused_bound=1
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
         busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" && paused_bound=0
@@ -3211,6 +3276,12 @@ EOF
       fi
     fi
   done < <(recorded_windows)
+
+  # Phantom-pane prune: a pane the backend confirms gone, whose window no task
+  # record references, has its per-pane markers pruned (see phantom_pane_prune)
+  # instead of lingering until a reused key inherits them or a vanished pane's
+  # classification escalates forever.
+  phantom_pane_prune
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter
   # what. Time-based via .last-heartbeat mtime; interval doubles per consecutive

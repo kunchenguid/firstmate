@@ -481,6 +481,42 @@ test_recovery_grade_read_widens_only_at_its_own_boundary() {
   pass "herdr recovery-grade read: a stopped server means missing there, and nowhere else"
 }
 
+# The phantom-pane prune's absence primitive (fm_backend_herdr_target_absent),
+# whose bar is higher than the recovery-grade read above: only a pane_not_found
+# answered by a live server counts as `absent`, because a caller that destroys
+# state on absence must never prune on a read that proves nothing. The two
+# signals are driven apart on purpose: the same pane flips between `absent` and
+# `uncertain` on the server's answer alone, so the case cannot go quietly
+# vacuous if the presence read stops being consulted.
+test_target_absent_prunes_only_on_an_answered_pane_not_found() {
+  local dir resp log fb out
+
+  target_absent_case() {  # <dir-suffix> <pane-get-out> [pane-get-exit]
+    local dir="$TMP_ROOT/target-absent-$1" resp log fb
+    mkdir -p "$dir/responses"; resp="$dir/responses"; log="$dir/log"; : > "$log"
+    printf '%s\n' "$2" > "$resp/1.out"
+    [ -z "${3:-}" ] || printf '%s\n' "$3" > "$resp/1.exit"
+    fb=$(make_herdr_fakebin "$dir")
+    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_target_absent fmtest:w9:p7' "$ROOT"
+  }
+
+  out=$(target_absent_case gone '{"error":{"code":"pane_not_found","message":"pane fmtest:w9:p7 not found"}}')
+  [ "$out" = absent ] \
+    || fail "an answered pane_not_found must read absent, got '$out'"
+  out=$(target_absent_case present '{"result":{"pane":{"pane_id":"w9:p7"}}}')
+  [ "$out" = present ] \
+    || fail "a structurally present pane must read present, got '$out'"
+  out=$(target_absent_case unreadable 'Error: socket unavailable' 1)
+  [ "$out" = uncertain ] \
+    || fail "a failed pane read must never read absent, got '$out'"
+  # shellcheck disable=SC2016  # bash -c body: $0 is positional, not an expansion
+  out=$($BASH -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_target_absent no-colons' "$ROOT")
+  [ "$out" = uncertain ] \
+    || fail "an unparseable target must read uncertain, got '$out'"
+  pass "herdr target-absent: only a live server's pane_not_found is absence, every failed read is uncertain"
+}
+
 # --- stale agent registration over a shell-only pane (issue #4115) -----------
 #
 # Herdr keeps a Pi registration (`agent get` -> agent=pi, agent_status=idle)
@@ -6079,3 +6115,4 @@ test_wait_transition_stream_absorb_clears_then_timeout
 test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
+test_target_absent_prunes_only_on_an_answered_pane_not_found
