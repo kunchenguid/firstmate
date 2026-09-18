@@ -109,6 +109,14 @@
   ],
   "surfaces": [
     {
+      "path": ".agents/skills/ads-analytics/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/ads-analytics/references/client-treinar-servicos.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/afk/SKILL.md",
       "audience": "agent-runtime"
     },
