@@ -811,34 +811,24 @@ test_worker_role_scope() {
   pass "fm-brief: scaffolds leave the worker role scope to the launch boundary and keep the secondmate contract"
 }
 
-test_project_memory_registry_guidance_and_errors() {
-  local home brief out status
+test_project_memory_registry_is_rendered_only_at_launch() {
+  local home brief
   home="$TMP_ROOT/project-memory"
   mkdir -p "$home/config"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" no-memory sample-project --mode local-only >/dev/null || fail "unmapped brief failed"
   brief="$home/data/no-memory/brief.md"
   assert_no_grep '^# Project memory$' "$brief" "missing registry changed the brief"
   printf '%s\n' 'sample-project /tmp/project memory folder' > "$home/config/project-memory"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" with-memory sample-project --mode local-only >/dev/null || fail "mapped brief failed"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" with-memory sample-project --mode local-only >/dev/null || fail "mapped brief scaffold failed"
   brief="$home/data/with-memory/brief.md"
-  assert_grep '/tmp/project memory folder' "$brief" "mapped memory folder was omitted"
-  # shellcheck disable=SC2016 # The backticks are literal Markdown in the generated brief.
-  assert_grep 'Read `MEMORY.md` first' "$brief" "mapped brief did not direct workers to the index"
-  assert_grep 'append-only for workers' "$brief" "mapped brief did not protect concurrent index edits"
+  assert_no_grep '^# Project memory$' "$brief" "scaffold-time rendering left a stale memory pointer"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" path-form sample-project/ --mode local-only >/dev/null || fail "path-form brief failed"
-  assert_grep '/tmp/project memory folder' "$home/data/path-form/brief.md" "brief path form did not resolve the same project basename as spawn"
-  printf '%s\n' 'other-project /tmp/other memory' > "$home/config/project-memory"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" unmapped sample-project --mode local-only >/dev/null || fail "unmapped brief failed"
-  assert_no_grep '^# Project memory$' "$home/data/unmapped/brief.md" "an unrelated registry entry changed an unmapped brief"
-  printf '%s\n' 'malformed-line' > "$home/config/project-memory"
-  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" malformed sample-project --mode local-only 2>&1); status=$?
-  expect_code 1 "$status" "malformed project memory registry must refuse scaffold"
-  assert_contains "$out" 'config/project-memory:1' "malformed registry error did not name its line"
-  pass "fm-brief: project memory is opt-in, documented to workers, and malformed registry lines fail visibly"
+  assert_no_grep '^# Project memory$' "$home/data/path-form/brief.md" "launch-only memory pointer leaked into scaffold"
+  pass "fm-brief: mapped memory remains launch-time data rather than stale scaffold content"
 }
 
 test_worker_role_scope
-test_project_memory_registry_guidance_and_errors
+test_project_memory_registry_is_rendered_only_at_launch
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header

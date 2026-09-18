@@ -322,24 +322,6 @@ exit 0
 fi
 
 REPO=${POS[1]}
-PROJECT_NAME=${REPO%/}
-PROJECT_NAME=${PROJECT_NAME##*/}
-
-# Project memory is an optional home-local pointer; its registry parser is shared
-# with fm-spawn so brief guidance and Claude launch settings cannot disagree.
-# shellcheck source=bin/fm-project-memory-lib.sh
-. "$SCRIPT_DIR/fm-project-memory-lib.sh"
-fm_project_memory_lookup "$CONFIG" "$PROJECT_NAME" || exit 1
-PROJECT_MEMORY_SECTION=
-if [ -n "$FM_PROJECT_MEMORY_DIR" ]; then
-  # shellcheck disable=SC2016 # Literal Markdown brief lines contain backticks and must not be expanded.
-  PROJECT_MEMORY_SECTION=$(printf '%s\n' \
-    '# Project memory' \
-    "This project has durable memory at \`$FM_PROJECT_MEMORY_DIR\`." \
-    'Read `MEMORY.md` first, then open linked files relevant to this task.' \
-    'Record new lasting lessons as new files using the same frontmatter format, and add one line for each new file to `MEMORY.md`.' \
-    'The index is append-only for workers: never rewrite, reorder, or delete existing lines or other memory files; firstmates curate memory.')
-fi
 
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
@@ -394,8 +376,6 @@ cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 $TASK_SECTION
-
-$PROJECT_MEMORY_SECTION
 
 $HERDR_SECTION
 
@@ -457,8 +437,6 @@ cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
 $TASK_SECTION
-
-$PROJECT_MEMORY_SECTION
 
 $HERDR_SECTION
 

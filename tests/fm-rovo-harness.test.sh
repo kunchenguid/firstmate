@@ -182,10 +182,13 @@ run_spawn() {
 }
 
 test_rovo_launch_then_send_is_verified() {
-  local id rec out rc launch pointer brief_real meta data_real state_real
+  local id rec out rc launch pointer brief_real meta data_real state_real memory_dir
   id="rovo-success-z1-$$"
   rec=$(make_spawn_case success "$id")
   read_spawn_record "$rec"
+  memory_dir="$CASE_DIR/existing project memory"
+  mkdir -p "$memory_dir"
+  printf 'project %s\n' "$memory_dir" > "$HOME_DIR/config/project-memory"
   out=$(run_spawn \
     "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
     --model auto --effort high)
@@ -214,6 +217,9 @@ test_rovo_launch_then_send_is_verified() {
   meta="$HOME_DIR/state/$id.meta"
   assert_grep 'model=auto' "$meta" "rovo meta lost the requested model"
   assert_grep 'effort=high' "$meta" "rovo meta lost the requested effort"
+  assert_grep "project_memory=$memory_dir" "$meta" "rovo metadata omitted the project-memory mapping"
+  assert_contains "$(cat "$HOME_DIR/data/$id/launch-brief.md")" "$memory_dir" \
+    "rovo launch brief omitted the mapped project-memory folder"
   assert_not_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
     "a successful rovo spawn must never tear down the endpoint it just delivered into"
 
@@ -231,6 +237,8 @@ test_rovo_launch_then_send_is_verified() {
     "rovo launch's allowedExternalPaths grant omitted the steering inbox directory"
   assert_contains "$launch" "$state_real/$id.status" \
     "rovo launch's allowedExternalPaths grant omitted the status file"
+  assert_contains "$launch" "$memory_dir" \
+    "rovo launch's allowedExternalPaths grant omitted the mapped memory directory"
   pass "fm-spawn: rovo launches bare, waits for readiness, and delivers its brief pointer"
 }
 

@@ -48,3 +48,42 @@ fm_project_memory_lookup() {  # <config-dir> <project-name>
   done < "$file"
   FM_PROJECT_MEMORY_DIR=${value:-}
 }
+
+fm_project_memory_render_section() {  # <directory> <kind> <status-file> <report-file>
+  local dir=$1 kind=$2 status_file=$3 report_file=${4:-}
+  [ -n "$dir" ] || return 0
+  # shellcheck disable=SC2016 # These are literal instructions for the launched worker.
+  printf '%s\n' \
+    '# Project memory' \
+    "This project has durable memory at: $dir" \
+    'Read `MEMORY.md` first, then open linked files relevant to this task.' \
+    'Record new lasting lessons as new files using the same frontmatter format, and add one line for each new file to `MEMORY.md`.' \
+    'The index is append-only for workers: never rewrite, reorder, or delete existing lines or other memory files; firstmates curate memory.' \
+    ''
+  case "$kind" in
+    scout)
+      printf 'This modifies Rule 2 for this task only: the only permitted writes outside the worktree are the report file %s, the status file %s, and this exact project-memory directory: %s. No other outside writes are permitted.\n\n' "$report_file" "$status_file" "$dir"
+      ;;
+    *)
+      printf 'This modifies Rule 2 for this task only: the only permitted writes outside the worktree are the status file %s and this exact project-memory directory: %s. No other outside writes are permitted.\n\n' "$status_file" "$dir"
+      ;;
+  esac
+}
+
+fm_project_memory_render_brief() {  # <source-brief> <directory> <kind> <status-file> <report-file>
+  local source=$1 dir=$2 kind=$3 status_file=$4 report_file=${5:-} line found=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      '2. Stay inside this worktree;'*)
+        found=1
+        if [ "$kind" = scout ]; then
+          printf '2. Stay inside this worktree; the only files you may write outside it are the report file %s, the status file %s, and this exact project-memory directory: %s.\n' "$report_file" "$status_file" "$dir"
+        else
+          printf '2. Stay inside this worktree; modify nothing outside it except the status file %s and this exact project-memory directory: %s.\n' "$status_file" "$dir"
+        fi
+        ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done < "$source"
+  [ "$found" -eq 1 ] || return 0
+}

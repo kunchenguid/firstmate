@@ -464,10 +464,10 @@ Project names use the same identity as worker spawn, the project directory's bas
 Malformed lines, duplicate project entries, and unreadable or non-regular registry files are reported as errors.
 An absent registry or project entry leaves existing brief and launch behavior unchanged.
 
-`fm-brief.sh` adds read/write guidance for mapped folders to ship and scout briefs.
-Workers must read `MEMORY.md` first, add new lessons as new files, and append one index line per new file without rewriting existing memory; firstmates curate the folder.
-Claude workers also receive the mapped directory through `autoMemoryDirectory` in Firstmate's existing inline `--settings` object.
-The resolved directory is recorded as `project_memory=` in task metadata.
+The launch-time renderer in `bin/fm-project-memory-lib.sh` adds the worker memory instructions and exact write exception to ship and scout launch briefs, so relaunches use the current mapping.
+Claude workers receive the mapped directory through `autoMemoryDirectory` in Firstmate's existing inline `--settings` object, and Rovo receives it through its existing `allowedExternalPaths` grant.
+Codex receives the brief pointer; other harnesses are omitted because their adapter contracts do not establish access to an arbitrary external directory.
+The resolved directory is recorded as `project_memory=` in task metadata only when the selected harness is covered.
 The setting is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
