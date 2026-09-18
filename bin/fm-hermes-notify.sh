@@ -283,15 +283,15 @@ write_record() {  # <task-id> <chat_id> <label> <reason_digest> <lifecycle> <sta
     return 1
   }
   {
-    printf 'task=%s\n' "$task"
-    printf 'chat_id=%s\n' "$chat_id"
-    printf 'label=%s\n' "$label"
-    printf 'reason_digest=%s\n' "$digest"
-    printf 'lifecycle=%s\n' "$lifecycle"
-    printf 'status=%s\n' "$status"
-    printf 'created_at=%s\n' "$created_at"
-    [ -z "$sent_at" ] || printf 'sent_at=%s\n' "$sent_at"
-    [ -z "$answered_at" ] || printf 'answered_at=%s\n' "$answered_at"
+    printf 'task=%s\n' "$(flatten "$task")"
+    printf 'chat_id=%s\n' "$(flatten "$chat_id")"
+    printf 'label=%s\n' "$(flatten "$label")"
+    printf 'reason_digest=%s\n' "$(flatten "$digest")"
+    printf 'lifecycle=%s\n' "$(flatten "$lifecycle")"
+    printf 'status=%s\n' "$(flatten "$status")"
+    printf 'created_at=%s\n' "$(flatten "$created_at")"
+    [ -z "$sent_at" ] || printf 'sent_at=%s\n' "$(flatten "$sent_at")"
+    [ -z "$answered_at" ] || printf 'answered_at=%s\n' "$(flatten "$answered_at")"
   } >"$tmp"
   mv "$tmp" "$(record_path "$task")"
 }
