@@ -1,9 +1,9 @@
 # Calm mode
 
 Calm is Firstmate's conversation-only transcript presentation toggle.
-It is fully supported on Pi, and available on Claude Code behind that harness's default-off early-access function-hooks flag, as the [Claude Code](#claude-code) section below describes.
-It is off by default, and the last `/calm` choice persists for the effective Firstmate home across session starts and resumes on either harness, through the one shared preference file [`configuration.md`](configuration.md#calm-preference-configcalm) owns.
-Across both harnesses, Calm evaluates each settled assistant text block from a model step that stopped to call tools, or exhausted its token limit while carrying tool calls.
+It is fully supported on Pi, supported on OMP as hide-ceremony without the working boat, and available on Claude Code behind that harness's default-off early-access function-hooks flag, as the [Claude Code](#claude-code) section below describes.
+It is off by default, and the last `/calm` choice persists for the effective Firstmate home across session starts and resumes on those harnesses, through the one shared preference file [`configuration.md`](configuration.md#calm-preference-configcalm) owns.
+Across those harnesses, Calm evaluates each settled assistant text block from a model step that stopped to call tools, or exhausted its token limit while carrying tool calls.
 It hides a block only when its raw text contains no newline and its trimmed length is below `CALM_PRESERVE_MIN_CHARS` (240); a newline or at least 240 trimmed characters preserves the block as substantive captain-facing content, while streaming text and the genuine reply that ends a response remain visible.
 
 ## Pi
@@ -61,6 +61,27 @@ tests/fm-calm-pi-extension.test.sh
 tests/fm-pi-branch-extension.test.sh
 tests/fm-pi-primary-types.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
+```
+
+## OMP
+
+Calm on OMP is the `.omp/extensions/fm-calm.ts` extension, auto-discovered with the existing watcher and turn-end extensions.
+It shares the same `config/calm` preference and visibility policy as Pi, and registers `/calm` through OMP's public `registerCommand` seam.
+While Calm is on, canonically classified Firstmate operational user rows draw at zero height, collapsed thinking is hidden, and short mid-turn working notes follow the shared preservation rule above.
+Genuine user prompts and the genuine final assistant reply stay visible.
+Presentation only: model context, session storage, `/export`, watcher arming, and the turn-end guard stay unchanged.
+The animated working boat remains Pi-only on this slice; OMP leaves the stock working row alone.
+
+OMP's public `registerMessageRenderer` is keyed by custom message type, and `registerAssistantThinkingRenderer` adds supplemental UI below visible thinking rather than replacing it.
+The extension probes those seams and degrades each missing one with a diagnostic, then uses OMP-native `InteractiveMode` and `AssistantMessageComponent` adapters from `@oh-my-pi/pi-coding-agent` for operational user rows and thinking collapse.
+It never loads `.pi/extensions/fm-calm.ts` and never patches Pi packages.
+
+Regression entry points:
+
+```sh
+tests/fm-calm-omp-extension.test.sh
+tests/fm-omp-harness.test.sh
+FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh
 ```
 
 ## Claude Code

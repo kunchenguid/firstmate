@@ -15,8 +15,8 @@
 //     wake main has already drained is harmless (the queue is durable and the
 //     drain is idempotent); losing one across /new is not.
 //   - The Pi supervision branch is out of scope for omp: every actionable wake
-//     is delivered to main, so no branch offer is made and no calm presentation
-//     hooks exist.
+//     is delivered to main, so no branch offer is made here. Transcript Calm
+//     hide-ceremony lives in the sibling .omp/extensions/fm-calm.ts extension.
 //   - The arming tool is fm_watch_arm_omp and its human fallback
 //     /fm-watch-arm-omp; the loaded-build marker is state/.omp-watch-extension-loaded.
 //
