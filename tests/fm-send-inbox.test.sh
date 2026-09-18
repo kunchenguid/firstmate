@@ -475,6 +475,12 @@ test_automatic_send_waits_for_an_open_decision() {
   expect_code 0 "$rc" "a relayed captain hold must not defer an automatic send"
   [ -f "$dir/home/state/t1.inbox/003.msg" ] || fail "the automatic send beside a captain hold was not recorded"
 
+  # The parent's own blocker about a broken remote reply mirror is not a wait of the worker's.
+  printf 'blocked [key=remote-reply-continuity-t1]: remote reply continuity broke for t1 (gap)\n' >> "$status"
+  run_send "$dir" "$err" -- t1 --automatic "re-read your instructions"; rc=$?
+  expect_code 0 "$rc" "a parent-raised continuity blocker must not defer an automatic send"
+  [ -f "$dir/home/state/t1.inbox/004.msg" ] || fail "the automatic send beside a continuity blocker was not recorded"
+
   run_send "$dir" "$err" -- sess:fm-t1 --automatic "re-read your instructions"; rc=$?
   expect_code 1 "$rc" "--automatic needs a recorded task, not an explicit backend target"
   pass "fm-send inbox: an automatic send defers while the worker's own decision is open, and the answer still wakes it"

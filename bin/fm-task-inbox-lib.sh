@@ -64,7 +64,8 @@
 # Retry ring (fm_task_inbox_mark_retry): a fire-and-forget record never enters
 # the ladder, but when fm-send's ring at enqueue did not land
 # (fm_task_inbox_ring returned 1 or 2) it marks the record, and one grace later
-# the due action is `retry`: the watcher rings once more and spends the mark
+# the due action is `retry`: once the worker has no open decision of its own,
+# the watcher rings once more and spends the mark
 # whatever the result, so the record never rings a third time and never
 # escalates. Workers never list the inbox unprompted (bin/fm-brief.sh), so
 # without this retry the record would sit unread. A pending ordinary record's

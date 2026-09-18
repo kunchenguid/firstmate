@@ -2012,9 +2012,10 @@ test_config_reread_isolation_and_absent_and_send_failure() {
 
 # Contract: a local reread deferred because the mate waits on its own open
 # decision is not a failure: config-push exits 0, reports the deferral, keeps
-# the retry, and delivers the pointer once the decision closes.
+# the retry, and the watcher's --retry-deferred poll delivers the pointer once
+# the decision closes, not before.
 test_config_push_defers_reread_while_the_mate_waits_on_a_decision() {
-  local w head out status
+  local w head out status fakebin flag
   w=$(new_world config-reread-deferred)
   head=$(git -C "$w/main" rev-parse HEAD)
   add_sm_worktree "$w" sm "$head"
@@ -2030,13 +2031,26 @@ test_config_push_defers_reread_while_the_mate_waits_on_a_decision() {
   assert_not_contains "$out" "send failed" "a deferred reread is not a failed send"
   assert_not_contains "$out" "config-reread: sent" "a deferred reread must not claim delivery"
   assert_present "$(reread_pending_path "$w/sm")" "the deferred reread did not keep its retry marker"
+  flag="$w/home/state/.secondmate-reread-deferred/sm"
+  assert_present "$flag" "the deferral was not flagged for the watcher's retry"
+
+  fakebin=$(make_fake_toolchain "$w")
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" FM_SEND_SETTLE=0 \
+    FM_FAKE_TMUX_LOG="$w/config-reread-deferred.tmux.log" \
+    "$ROOT/bin/fm-config-push.sh" --retry-deferred >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "a retry that is still waiting on the decision is not a failure"
+  [ -z "$(inbox_stream "$w/home/state" sm)" ] || fail "the retry woke a mate still waiting on its decision"
+  assert_present "$flag" "a retry still waiting on the decision must stay flagged"
 
   printf 'resolved [key=pick]: answered: alpha\n' >> "$w/home/state/sm.status"
-  out=$(run_config_push "$w" "$w/config-reread-deferred.tmux.log" 2>/dev/null); status=$?
-  expect_code 0 "$status" "the retried reread should be delivered once the decision closes"
-  assert_contains "$out" "config-reread: sent" "the retried reread was not sent: $out"
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" FM_SEND_SETTLE=0 \
+    FM_FAKE_TMUX_LOG="$w/config-reread-deferred.tmux.log" \
+    "$ROOT/bin/fm-config-push.sh" --retry-deferred >/dev/null 2>&1; status=$?
+  expect_code 0 "$status" "the deferred reread should be delivered once the decision closes"
+  assert_contains "$(inbox_stream "$w/home/state" sm)" "CONFIG_REREAD: " "the deferred reread pointer was not delivered"
   assert_no_reread_pending "$w/sm"
-  pass "config-push defers a local reread while the mate waits on its decision, then delivers it"
+  [ ! -e "$flag" ] || fail "a delivered reread stayed flagged, so the watcher would keep retrying it"
+  pass "config-push defers a local reread while the mate waits on its decision, and the watcher retry delivers it once the decision closes"
 }
 
 test_config_reread_publication_failure_retries_exact_generation() {

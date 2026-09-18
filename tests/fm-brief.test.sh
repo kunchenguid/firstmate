@@ -928,6 +928,8 @@ test_workers_wait_without_spending_turns() {
     assert_grep "empty \`write_stdin\` polls of up to 300000 ms" "$brief" "$id: the Codex ceiling is missing"
     assert_grep "is the sanctioned foreground wait" "$brief" \
       "$id: the wait a Claude Code worker may use is not named"
+    assert_grep "reattach with \`no-mistakes axi run --wait\` instead, and never send the same \`respond\` again" "$brief" \
+      "$id: a timed-out respond must reattach with axi run, never resend its answer"
     assert_grep "never list the inbox on your own" "$brief" "$id: unprompted inbox listing is not forbidden"
     assert_no_grep "natural checkpoint" "$brief" "$id: the brief still invites unprompted inbox listing"
   done

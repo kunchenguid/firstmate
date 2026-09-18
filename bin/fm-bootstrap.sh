@@ -533,7 +533,7 @@ secondmate_sync() {
   # running home, send its literal-content reread instruction pointer so the
   # live agent does not keep applying stale defaults. Spawn/respawn already
   # re-reads at launch and needs no redundant nudge unless files changed after launch.
-  local id home home_real home_lock propagated_homes report reread_out reread_skip_pending
+  local id home home_real home_lock propagated_homes report reread_out reread_rc reread_skip_pending
   propagated_homes=""
   SECONDMATE_RESPAWNED_IDS=${SECONDMATE_RESPAWNED_IDS:-}
   while IFS='|' read -r id home _window _meta; do
@@ -583,17 +583,16 @@ secondmate_sync() {
     else
       echo "SECONDMATE_SYNC: secondmate $id: skipped: inheritance failed"
     fi
-    if ! reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+    reread_rc=0
+    reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_STATE_OVERRIDE="$STATE" \
       FM_CONFIG_REREAD_SKIP_PENDING="$reread_skip_pending" \
-      fm_config_send_reread_nudge "$id" "$home_real" "$report" 2>&1); then
-      if [ -n "$reread_out" ]; then
-        printf '%s\n' "$reread_out"
-      else
-        echo "CONFIG_REREAD: secondmate $id: send failed: unknown error"
-      fi
-    elif [ -n "$reread_out" ]; then
+      fm_config_send_reread_nudge "$id" "$home_real" "$report" 2>&1) || reread_rc=$?
+    [ "$reread_rc" -ne 4 ] || fm_secondmate_reread_mark_deferred "$STATE" "$id" || true
+    if [ -n "$reread_out" ]; then
       printf '%s\n' "$reread_out"
+    elif [ "$reread_rc" -ne 0 ]; then
+      echo "CONFIG_REREAD: secondmate $id: send failed: unknown error"
     fi
     rm -f "$report"
     fm_lock_release "$home_lock" || true
@@ -654,6 +653,7 @@ secondmate_sync() {
         rm -f "$remote_marker"
         [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: nudged remote fm-$id after convergence"
       else
+        [ "$send_rc" -ne 4 ] || fm_secondmate_reread_mark_deferred "$STATE" "$id" || true
         secondmate_nudge_unsent "$id" "$out" "$send_rc"
       fi
     elif [ "$converged" -eq 1 ]; then

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Push declared inherited local material to live secondmate homes.
-# Usage: fm-config-push.sh [--help]
+# Usage: fm-config-push.sh [--help | --retry-deferred]
 #
 # Mid-session convergence for inherited local material such as
 # config/crew-dispatch.json, config/backend, or data/captain-shared.md updates.
@@ -14,11 +14,14 @@
 # through their SSH route. Unchanged config and data/captain-shared.md-only
 # updates send no reread unless a previous send failure is pending for that home.
 # Warnings-only skips exit 0; real propagation or reread-send errors exit non-zero.
+# --retry-deferred propagates nothing; the watcher runs it to deliver rereads
+# deferred while their mate waited on its own open decision, once that decision
+# closes (fm_secondmate_reread_mark_deferred, bin/fm-secondmate-nudge-lib.sh).
 set -u
 
 usage() {
   cat <<'EOF'
-Usage: fm-config-push.sh [--help]
+Usage: fm-config-push.sh [--help | --retry-deferred]
 
 Push the primary firstmate home's declared inherited local material into each
 live secondmate home.
@@ -34,6 +37,10 @@ This is local-material-only:
     reread deferred because the secondmate waits on its own open decision or
     blocker keeps its retry and is not a failure
 
+--retry-deferred pushes nothing. It only delivers the rereads that were
+deferred for a secondmate whose own open decisions and blockers have since
+closed. The watcher runs it on its poll.
+
 Live homes come from state/*.meta records with kind=secondmate.
 data/secondmates.md is only a fallback for missing home= fields in older or
 incomplete meta records.
@@ -47,15 +54,19 @@ Environment overrides follow the rest of firstmate:
 EOF
 }
 
+RETRY_DEFERRED=0
 case "${1:-}" in
   -h|--help)
     usage
     exit 0
     ;;
+  --retry-deferred)
+    RETRY_DEFERRED=1
+    ;;
   "")
     ;;
   *)
-    echo "usage: fm-config-push.sh [--help]" >&2
+    echo "usage: fm-config-push.sh [--help | --retry-deferred]" >&2
     exit 2
     ;;
 esac
@@ -68,7 +79,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 SECONDMATES_MD="$DATA/secondmates.md"
 
-"$SCRIPT_DIR/fm-guard.sh" || true
+[ "$RETRY_DEFERRED" -eq 1 ] || "$SCRIPT_DIR/fm-guard.sh" || true
 
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
@@ -109,6 +120,53 @@ live_secondmate_meta_records "$STATE" "$SECONDMATES_MD" > "$records"
 if [ ! -s "$records" ]; then
   echo "config-push: no live secondmate homes found"
   exit 0
+fi
+
+# Each flagged reread is claimed under the same lock its convergence holds and
+# is flagged again only when it is deferred again or that lock is busy.
+retry_deferred_rereads() {
+  local id home meta flag remote_host lock marker rc failed=0
+  while IFS='|' read -r id home _window meta; do
+    flag=$(fm_secondmate_reread_deferred_path "$STATE" "$id") || continue
+    [ -f "$flag" ] || continue
+    [ -z "$(status_own_open_decisions "$STATE/$id.status")" ] || continue
+    rm -f -- "$flag"
+    remote_host=$(fm_meta_get "$meta" remote_host)
+    if [ -n "$remote_host" ]; then
+      lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id") || continue
+    else
+      validate_secondmate_home "$id" "$home" || continue
+      lock=$(fm_config_inherit_lock_path "$VALIDATED_HOME") || continue
+    fi
+    if ! fm_lock_try_acquire "$lock"; then
+      fm_secondmate_reread_mark_deferred "$STATE" "$id" || failed=1
+      continue
+    fi
+    rc=0
+    if [ -n "$remote_host" ]; then
+      marker=$(fm_secondmate_nudge_marker_path "$STATE" "$id")
+      if [ "$(fm_meta_get "$marker" remote)" = 1 ]; then
+        FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+          "$SCRIPT_DIR/fm-send.sh" "fm-$id" --automatic "$FM_REMOTE_SECOND_MATE_NUDGE_MESSAGE" >/dev/null 2>&1 || rc=$?
+        [ "$rc" -ne 0 ] || rm -f -- "$marker"
+      fi
+    else
+      FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
+        fm_config_reread_retry_pending "$id" "$VALIDATED_HOME" || rc=$?
+    fi
+    case "$rc" in
+      0) ;;
+      4) fm_secondmate_reread_mark_deferred "$STATE" "$id" || failed=1 ;;
+      *) failed=1 ;;
+    esac
+    fm_lock_release "$lock" || true
+  done < "$records"
+  return "$failed"
+}
+
+if [ "$RETRY_DEFERRED" -eq 1 ]; then
+  retry_deferred_rereads
+  exit
 fi
 
 echo "config-push: $FM_HOME -> live secondmate homes"
@@ -161,6 +219,7 @@ while IFS='|' read -r id home _window meta; do
           rm -f -- "$remote_marker"
           echo "  config-reread: sent"
         elif [ "$send_rc" -eq 4 ]; then
+          fm_secondmate_reread_mark_deferred "$STATE" "$id" || true
           echo "  config-reread: deferred while the mate waits on its open decision; retry retained"
         else
           echo "  config-reread: send failed; retry retained"
@@ -248,6 +307,7 @@ while IFS='|' read -r id home _window meta; do
     fi
     [ -z "$reread_out" ] || printf '%s\n' "$reread_out"
   elif [ "$reread_rc" -eq 4 ]; then
+    fm_secondmate_reread_mark_deferred "$STATE" "$id" || true
     printf '%s\n' "$reread_out"
   else
     errors=1
