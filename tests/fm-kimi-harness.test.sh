@@ -41,6 +41,26 @@ fake_screen() {
     ready)
       printf 'Welcome to Kimi Code!\ncontext: 0%% (0/256k)\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n'
       ;;
+    trust)
+      printf '╭─ Trust this folder? ─╮\n│ ↑↓ navigate · Enter select · Esc exit │\n│ %s │\n│ ❯ Trust this folder │\n│   Don'"'"'t trust │\n╰──────────────────────────────╯\n' "$FM_FAKE_PANE_PATH"
+      ;;
+    trust-decoy)
+      printf 'Trust this folder?\n%s\n❯ Trust this folder\nDon'"'"'t trust\n' "$FM_FAKE_PANE_PATH"
+      ;;
+    trust-partial)
+      printf 'Welcome to Kimi Code!\nTrust this folder?\n%s\nDon'"'"'t trust\n' "$FM_FAKE_PANE_PATH"
+      ;;
+    booting)
+      printf 'shell starting\n$ \n'
+      ;;
+    banner-only|banner-first)
+      printf 'Welcome to Kimi Code!\nstarting in %s\n' "$FM_FAKE_PANE_PATH"
+      ;;
+    blank-frame)
+      ;;
+    trust-wrapped)
+      printf '╭─ Trust this folder? ─╮\n│ ↑↓ navigate ·        │\n│ Enter select · Esc   │\n│ exit                 │\n│ %s │\n│ ❯ Trust this folder  │\n│   Don'"'"'t trust         │\n╰──────────────────────╯\n' "$FM_FAKE_PANE_PATH"
+      ;;
     pointer-typed)
       printf 'context: 0%% (0/256k)\n╭────────────────────────────────╮\n│ > Read the brief and follow it │\n│                                │\n╰────────────────────────────────╯\n'
       ;;
@@ -51,6 +71,12 @@ fake_screen() {
       printf 'shell starting\n$ \n'
       ;;
   esac
+}
+fake_history() {
+  if [ "${FM_FAKE_KIMI_HISTORY_KEEPS_DIALOG:-no}" = yes ] \
+     && [ -s "$FM_FAKE_KIMI_TRUST_ENTER_LOG" ]; then
+    printf '╭─ Trust this folder? ─╮\n│ ↑↓ navigate · Enter select · Esc exit │\n│ ❯ Trust this folder │\n│   Don'"'"'t trust │\n╰──────────────────────╯\n'
+  fi
 }
 fake_cursor_y() {
   case "$state" in
@@ -82,7 +108,10 @@ case "${1:-}" in
           ;;
         *)
           printf '%s\n' "$literal" >> "$FM_FAKE_POINTER_LOG"
-          printf 'pointer-typed\n' > "$FM_FAKE_KIMI_STATE"
+          case "$state" in
+            trust|trust-wrapped|trust-partial|trust-decoy|booting|banner-only|banner-first|blank-frame) ;;
+            *) printf 'pointer-typed\n' > "$FM_FAKE_KIMI_STATE" ;;
+          esac
           ;;
       esac
       exit 0
@@ -92,8 +121,29 @@ case "${1:-}" in
         case "$state" in
           launched)
             if [ "${FM_FAKE_KIMI_READY:-yes}" = yes ]; then
-              printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
+              case "${FM_FAKE_KIMI_TRUST:-remembered}" in
+                fresh) printf 'trust\n' > "$FM_FAKE_KIMI_STATE" ;;
+                decoy) printf 'trust-decoy\n' > "$FM_FAKE_KIMI_STATE" ;;
+                partial) printf 'trust-partial\n' > "$FM_FAKE_KIMI_STATE" ;;
+                late) printf 'booting\n' > "$FM_FAKE_KIMI_STATE" ;;
+                blink) printf 'banner-first\n' > "$FM_FAKE_KIMI_STATE" ;;
+                wrapped) printf 'trust-wrapped\n' > "$FM_FAKE_KIMI_STATE" ;;
+                *) printf 'ready\n' > "$FM_FAKE_KIMI_STATE" ;;
+              esac
             fi
+            ;;
+          trust|trust-wrapped)
+            printf 'enter\n' >> "$FM_FAKE_KIMI_TRUST_ENTER_LOG"
+            trust_enters=$(wc -l < "$FM_FAKE_KIMI_TRUST_ENTER_LOG" | tr -d ' ')
+            case "${FM_FAKE_KIMI_TRUST_CLEARS:-yes}" in
+              yes) printf 'ready\n' > "$FM_FAKE_KIMI_STATE" ;;
+              after-second)
+                [ "$trust_enters" -lt 2 ] || printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
+                ;;
+            esac
+            ;;
+          ready|delivered)
+            printf 'enter\n' >> "$FM_FAKE_KIMI_STRAY_ENTER_LOG"
             ;;
           pointer-typed)
             if [ "${FM_FAKE_KIMI_DELIVERY:-yes}" = yes ]; then
@@ -121,6 +171,26 @@ case "${1:-}" in
       esac
       case "$arg" in -S|-E) prev=$arg ;; *) prev= ;; esac
     done
+    if [ "$start" = -0 ] && [ "${FM_FAKE_TMUX_VISIBLE_FAILS:-no}" = yes ]; then
+      echo "can't find pane" >&2
+      exit 1
+    fi
+    case "$start" in
+      -0|-120)
+        case "$state" in
+          booting) printf 'banner-only\n' > "$FM_FAKE_KIMI_STATE" ;;
+          banner-first) printf 'blank-frame\n' > "$FM_FAKE_KIMI_STATE" ;;
+          blank-frame) printf 'banner-only\n' > "$FM_FAKE_KIMI_STATE" ;;
+          banner-only) printf 'trust\n' > "$FM_FAKE_KIMI_STATE" ;;
+        esac
+        ;;
+    esac
+    if [ "$start" = -0 ] && [ "${FM_FAKE_KIMI_BLANK_AFTER_TRUST:-no}" = yes ] \
+       && [ -s "$FM_FAKE_KIMI_TRUST_ENTER_LOG" ] && [ ! -f "$FM_FAKE_KIMI_BLANKED" ]; then
+      : > "$FM_FAKE_KIMI_BLANKED"
+      exit 0
+    fi
+    [ "$start" != -120 ] || fake_history
     case "$start:$end" in
       *[!0-9:]*|'':*|*:'') fake_screen ;;
       *) fake_screen | awk -v start="$start" -v end="$end" \
@@ -161,6 +231,8 @@ EOF
   : > "$case_dir/launch.log"
   : > "$case_dir/pointer.log"
   : > "$case_dir/kimi.state"
+  : > "$case_dir/trust-enter.log"
+  : > "$case_dir/stray-enter.log"
   : > "$case_dir/tmux-calls.log"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
 }
@@ -175,10 +247,18 @@ run_spawn() {
     FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
     FM_FAKE_POINTER_LOG="$case_dir/pointer.log" \
     FM_FAKE_KIMI_STATE="$case_dir/kimi.state" \
+    FM_FAKE_KIMI_TRUST_ENTER_LOG="$case_dir/trust-enter.log" \
+    FM_FAKE_KIMI_TRUST="${FM_FAKE_KIMI_TRUST:-remembered}" \
+    FM_FAKE_KIMI_TRUST_CLEARS="${FM_FAKE_KIMI_TRUST_CLEARS:-yes}" \
+    FM_FAKE_KIMI_HISTORY_KEEPS_DIALOG="${FM_FAKE_KIMI_HISTORY_KEEPS_DIALOG:-no}" \
+    FM_FAKE_KIMI_STRAY_ENTER_LOG="$case_dir/stray-enter.log" \
+    FM_FAKE_KIMI_BLANK_AFTER_TRUST="${FM_FAKE_KIMI_BLANK_AFTER_TRUST:-no}" \
+    FM_FAKE_KIMI_BLANKED="$case_dir/kimi.blanked" \
+    FM_FAKE_TMUX_VISIBLE_FAILS="${FM_FAKE_TMUX_VISIBLE_FAILS:-no}" \
     FM_FAKE_KIMI_SWALLOWED="$case_dir/kimi.swallowed" \
     FM_FAKE_KIMI_SWALLOW_FIRST="${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
-    FM_FAKE_BRIEF_REAL="$(cd "$home/data/tasks/$id" && pwd -P)/launch-brief.md" \
+    FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/launch-brief.md" \
     FM_KIMI_READY_POLLS="${FM_KIMI_READY_POLLS:-2}" FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness kimi --mode no-mistakes --yolo off "$@" 2>&1
@@ -522,6 +602,235 @@ test_kimi_readiness_gate_precedes_pointer() {
   pass "fm-spawn: kimi never sends the brief pointer before an observable ready signal"
 }
 
+test_kimi_fresh_worktree_trust_is_answered_and_verified() {
+  local id rec out rc
+  id=kimi-trust-z9
+  rec=$(make_spawn_case trust "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_KIMI_READY_POLLS=3 FM_FAKE_KIMI_TRUST=fresh run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "fresh Kimi trust dialog should advance into verified delivery"
+  assert_contains "$out" "spawned $id harness=kimi" \
+    "Kimi spawn did not continue after the trust dialog cleared"
+  [ "$(wc -l < "$CASE_DIR/trust-enter.log" | tr -d ' ')" = 1 ] \
+    || fail "a Kimi trust dialog that cleared on its first answer was answered again"
+  assert_grep "Read the brief at " "$CASE_DIR/pointer.log" \
+    "Kimi brief pointer was not delivered after trust and readiness verification"
+  pass "fm-spawn: a fresh Kimi worktree answers the exact trust dialog once and verifies advancement"
+}
+
+test_kimi_swallowed_trust_enter_is_retried_until_the_dialog_clears() {
+  local id rec out rc
+  id=kimi-trust-swallow-y3
+  rec=$(make_spawn_case trust-swallow "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_KIMI_READY_POLLS=5 FM_FAKE_KIMI_TRUST=fresh FM_FAKE_KIMI_TRUST_CLEARS=after-second run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "a swallowed first trust Enter should be retried into a verified spawn"
+  assert_contains "$out" "spawned $id harness=kimi" \
+    "Kimi spawn did not recover from a swallowed trust keypress"
+  [ "$(wc -l < "$CASE_DIR/trust-enter.log" | tr -d ' ')" = 2 ] \
+    || fail "Kimi trust dialog was not re-answered exactly until it cleared"
+  assert_grep "Read the brief at " "$CASE_DIR/pointer.log" \
+    "Kimi brief pointer was not delivered after the retried trust answer"
+  pass "fm-spawn: a swallowed Kimi trust keypress is re-sent until the dialog clears"
+}
+
+test_kimi_banner_before_the_dialog_paints_does_not_pass_readiness() {
+  local id rec out rc
+  id=kimi-trust-late-y5
+  rec=$(make_spawn_case trust-late "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_KIMI_READY_POLLS=5 FM_FAKE_KIMI_TRUST=late run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "a banner captured before the dialog painted should wait, then trust and deliver"
+  assert_contains "$out" "spawned $id harness=kimi" \
+    "Kimi spawn did not survive a banner captured before the trust dialog painted"
+  [ "$(wc -l < "$CASE_DIR/trust-enter.log" | tr -d ' ')" = 1 ] \
+    || fail "Kimi trust dialog painted after the banner was not answered exactly once"
+  [ "$(wc -l < "$CASE_DIR/pointer.log" | tr -d ' ')" = 1 ] \
+    || fail "Kimi brief pointer was not typed exactly once, after the dialog cleared"
+  assert_grep "Read the brief at " "$CASE_DIR/pointer.log" \
+    "Kimi brief pointer was not delivered once the late dialog cleared"
+  pass "fm-spawn: a Kimi banner captured before the trust dialog paints does not read as ready"
+}
+
+test_kimi_answered_dialog_left_in_history_does_not_restart_the_answer() {
+  local id rec out rc
+  id=kimi-trust-history-y6
+  rec=$(make_spawn_case trust-history "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_KIMI_READY_POLLS=3 FM_FAKE_KIMI_TRUST=fresh FM_FAKE_KIMI_HISTORY_KEEPS_DIALOG=yes run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "an answered trust dialog still in scrollback should not block the spawn"
+  assert_contains "$out" "spawned $id harness=kimi" \
+    "Kimi spawn did not complete with the answered trust dialog still in scrollback"
+  case "$out" in
+    *"did not clear"*) fail "Kimi reported a stuck trust dialog that had already cleared" ;;
+  esac
+  [ "$(wc -l < "$CASE_DIR/trust-enter.log" | tr -d ' ')" = 1 ] \
+    || fail "Kimi answered the trust dialog again from its scrollback copy"
+  assert_grep "Read the brief at " "$CASE_DIR/pointer.log" \
+    "Kimi brief pointer was not delivered past the scrollback copy of the dialog"
+  pass "fm-spawn: an answered Kimi trust dialog left in scrollback neither re-answers nor fails the spawn"
+}
+
+test_kimi_blank_viewport_frame_costs_only_its_poll() {
+  local id rec out rc
+  id=kimi-trust-blank-y7
+  rec=$(make_spawn_case trust-blank "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_KIMI_READY_POLLS=4 FM_FAKE_KIMI_TRUST=fresh FM_FAKE_KIMI_BLANK_AFTER_TRUST=yes \
+    FM_FAKE_KIMI_HISTORY_KEEPS_DIALOG=yes run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "a blank viewport frame should cost one poll, not the spawn"
+  assert_contains "$out" "spawned $id harness=kimi" \
+    "Kimi spawn did not survive a blank viewport frame after the trust answer"
+  case "$out" in
+    *"did not clear"*) fail "a blank viewport frame was reported as a stuck trust dialog" ;;
+  esac
+  [ "$(wc -l < "$CASE_DIR/trust-enter.log" | tr -d ' ')" = 1 ] \
+    || fail "Kimi answered the trust dialog again after a blank viewport frame"
+  [ ! -s "$CASE_DIR/stray-enter.log" ] \
+    || fail "Kimi sent a stray Enter into the live composer after a blank viewport frame"
+  assert_grep "Read the brief at " "$CASE_DIR/pointer.log" \
+    "Kimi brief pointer was not delivered after the blank viewport frame"
+  pass "fm-spawn: a blank Kimi viewport frame costs its poll and nothing else"
+}
+
+test_kimi_refuses_a_backend_without_a_viewport_capture() {
+  local id rec out rc
+  id=kimi-no-viewport-y8
+  rec=$(make_spawn_case no-viewport "$id")
+  read_spawn_record "$rec"
+  fm_fake_exit0 "$FAKEBIN_DIR" cmux
+  rc=0
+  out=$(FM_BACKEND=cmux run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a Kimi spawn on a backend without a viewport capture should refuse"
+  assert_contains "$out" "backend 'cmux' has no verified viewport-bounded capture" \
+    "Kimi refusal did not name the backend and the missing viewport capability"
+  [ ! -s "$CASE_DIR/trust-enter.log" ] \
+    || fail "Kimi pressed Enter on a backend it cannot read the viewport of"
+  [ ! -s "$CASE_DIR/launch.log" ] \
+    || fail "Kimi was launched on a backend without a viewport capture"
+  pass "fm-spawn: Kimi refuses a backend that cannot read the viewport, before launching"
+}
+
+test_kimi_answers_a_trust_dialog_with_a_wrapped_hint() {
+  local id rec out rc
+  id=kimi-trust-wrapped-y9
+  rec=$(make_spawn_case trust-wrapped "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_KIMI_READY_POLLS=3 FM_FAKE_KIMI_TRUST=wrapped run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "a trust dialog whose hint wrapped in a narrow pane should be answered"
+  assert_contains "$out" "spawned $id harness=kimi" \
+    "Kimi spawn did not survive a trust dialog with a wrapped navigation hint"
+  [ "$(wc -l < "$CASE_DIR/trust-enter.log" | tr -d ' ')" = 1 ] \
+    || fail "Kimi did not answer a trust dialog with a wrapped hint exactly once"
+  assert_grep "Read the brief at " "$CASE_DIR/pointer.log" \
+    "Kimi brief pointer was not delivered after the wrapped-hint dialog cleared"
+  pass "fm-spawn: a Kimi trust dialog with its hint wrapped across rows is answered normally"
+}
+
+test_kimi_blank_frame_between_banners_restarts_the_ready_count() {
+  local id rec out rc
+  id=kimi-trust-blink-z4
+  rec=$(make_spawn_case trust-blink "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_KIMI_READY_POLLS=6 FM_FAKE_KIMI_TRUST=blink run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "banners split by a blank frame should not read as two ready captures"
+  assert_contains "$out" "spawned $id harness=kimi" \
+    "Kimi spawn did not wait out a blank frame before the trust dialog painted"
+  [ "$(wc -l < "$CASE_DIR/trust-enter.log" | tr -d ' ')" = 1 ] \
+    || fail "Kimi did not answer the trust dialog that painted after the blank frame"
+  [ "$(wc -l < "$CASE_DIR/pointer.log" | tr -d ' ')" = 1 ] \
+    || fail "Kimi brief pointer was typed before the trust dialog painted"
+  pass "fm-spawn: a blank Kimi frame between banners restarts the two-capture ready count"
+}
+
+test_kimi_failed_viewport_read_fails_readiness_at_once() {
+  local id rec out rc
+  id=kimi-viewport-fail-z5
+  rec=$(make_spawn_case viewport-fail "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_KIMI_READY_POLLS=3 FM_FAKE_TMUX_VISIBLE_FAILS=yes FM_FAKE_KIMI_TRUST=fresh run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a Kimi spawn whose viewport read fails should fail"
+  assert_contains "$out" "could not read the visible viewport of backend 'tmux'" \
+    "failed Kimi viewport read was reported as something other than a capture failure"
+  [ ! -s "$CASE_DIR/trust-enter.log" ] \
+    || fail "Kimi pressed Enter without being able to read the viewport"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "Kimi pointer was sent without a readable viewport"
+  pass "fm-spawn: a failed Kimi viewport read fails readiness with the backend named"
+}
+
+test_kimi_partial_trust_dialog_blocks_the_ready_verdict() {
+  local id rec out rc
+  id=kimi-trust-partial-y4
+  rec=$(make_spawn_case trust-partial "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_KIMI_TRUST=partial run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a banner above an unanswered trust dialog should not pass readiness"
+  assert_contains "$out" "trust dialog text stayed on screen without the complete dialog" \
+    "partially rendered Kimi trust dialog lacked its concrete failure reason"
+  [ ! -s "$CASE_DIR/pointer.log" ] \
+    || fail "Kimi pointer was sent while trust dialog markers were still on screen"
+  [ ! -s "$CASE_DIR/trust-enter.log" ] \
+    || fail "Kimi answered a trust dialog it could not fully read"
+  pass "fm-spawn: Kimi refuses the ready verdict while trust dialog markers remain"
+}
+
+test_kimi_stuck_trust_dialog_fails_before_delivery() {
+  local id rec out rc
+  id=kimi-trust-stuck-y1
+  rec=$(make_spawn_case trust-stuck "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_KIMI_TRUST=fresh FM_FAKE_KIMI_TRUST_CLEARS=no run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a Kimi trust dialog that never clears should fail"
+  assert_contains "$out" "kimi trust dialog did not clear after selecting 'Trust this folder'" \
+    "stuck Kimi trust dialog lacked its concrete failure reason"
+  assert_contains "$out" "navigation hint, selected 'Trust this folder'" \
+    "stuck Kimi trust diagnostic did not name the observed dialog signals"
+  [ "$(wc -l < "$CASE_DIR/trust-enter.log" | tr -d ' ')" -gt 1 ] \
+    || fail "stuck Kimi trust dialog was not re-answered while it stayed on screen"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "Kimi pointer was sent through a stuck trust dialog"
+  assert_grep 'failed: kimi trust dialog did not clear' "$HOME_DIR/state/$id.status" \
+    "stuck Kimi trust dialog did not leave a supervisor-visible failure"
+  pass "fm-spawn: a Kimi trust dialog must visibly clear before brief delivery"
+}
+
+test_kimi_trust_detection_requires_the_complete_dialog() {
+  local id rec out rc
+  id=kimi-trust-decoy-y2
+  rec=$(make_spawn_case trust-decoy "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_KIMI_TRUST=decoy run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "an incomplete Kimi trust lookalike should not pass readiness"
+  assert_contains "$out" "trust dialog text stayed on screen without the complete dialog" \
+    "incomplete Kimi trust lookalike did not report the unanswerable dialog text"
+  [ ! -s "$CASE_DIR/trust-enter.log" ] \
+    || fail "Kimi answered an incomplete trust lookalike with Enter"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "Kimi pointer was sent through a trust lookalike"
+  pass "fm-spawn: Kimi trust detection requires every observed dialog signal"
+}
+
 test_kimi_detection_uses_ancestry_after_markers() {
   local dir fakebin cfg out
   dir="$TMP_ROOT/detection"
@@ -693,6 +1002,18 @@ test_kimi_falls_back_to_expanded_home_binary
 test_kimi_missing_binary_refuses_before_pane_creation
 test_kimi_unconfirmed_delivery_fails_loudly
 test_kimi_readiness_gate_precedes_pointer
+test_kimi_fresh_worktree_trust_is_answered_and_verified
+test_kimi_swallowed_trust_enter_is_retried_until_the_dialog_clears
+test_kimi_banner_before_the_dialog_paints_does_not_pass_readiness
+test_kimi_answered_dialog_left_in_history_does_not_restart_the_answer
+test_kimi_blank_viewport_frame_costs_only_its_poll
+test_kimi_refuses_a_backend_without_a_viewport_capture
+test_kimi_answers_a_trust_dialog_with_a_wrapped_hint
+test_kimi_blank_frame_between_banners_restarts_the_ready_count
+test_kimi_failed_viewport_read_fails_readiness_at_once
+test_kimi_partial_trust_dialog_blocks_the_ready_verdict
+test_kimi_stuck_trust_dialog_fails_before_delivery
+test_kimi_trust_detection_requires_the_complete_dialog
 test_kimi_detection_uses_ancestry_after_markers
 test_kimi_session_lock_identity
 test_kimi_busy_signature_is_scoped_to_spinner_lines
