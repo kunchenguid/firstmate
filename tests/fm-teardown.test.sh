@@ -226,8 +226,10 @@ add_fork_with_pushed_branch() {
 # inspects. Args: case_dir file content [message]
 wt_commit_file() {
   local case_dir=$1 file=$2 content=$3 msg=${4:-add $2}
+  mkdir -p "$(dirname "$case_dir/wt/$file")"
   printf '%s\n' "$content" > "$case_dir/wt/$file"
-  git -C "$case_dir/wt" add -- "$file"
+  # -f: a host's global excludes must not decide which fixture files get committed.
+  git -C "$case_dir/wt" add -f -- "$file"
   git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "$msg"
 }
 
@@ -1165,6 +1167,77 @@ test_dirty_worktree_refuses() {
   grep -q REFUSED "$case_dir/stderr" || fail "dirty-wt: no REFUSED line in stderr"
   grep -q "uncommitted changes" "$case_dir/stderr" || fail "dirty-wt: refusal did not cite uncommitted changes"
   pass "dirty worktree is refused even when its committed work has landed (dirty always wins)"
+}
+
+# Firstmate's own hook files are not the task's work at any git status: a project
+# that tracks .claude/settings.local.json shows spawn's hook wiring as modified,
+# and cleanup deletes these files itself, so neither a modified nor a deleted one
+# may block teardown. Without the filter, either change alone refuses.
+test_tracked_hook_file_changes_do_not_block_teardown() {
+  local case_dir rc
+  case_dir=$(make_case tracked-hook)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" .claude/settings.local.json '{}' "track claude settings"
+  wt_commit_file "$case_dir" .opencode/plugins/fm-busy-state.js '// plugin' "track opencode plugin"
+  append_pr_meta_url "$case_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  printf '%s\n' '{"hooks":{}}' > "$case_dir/wt/.claude/settings.local.json"
+  rm -f "$case_dir/wt/.opencode/plugins/fm-busy-state.js"
+  [ "$(git -C "$case_dir/wt" status --porcelain)" = \
+    "$(printf '%s\n' ' M .claude/settings.local.json' ' D .opencode/plugins/fm-busy-state.js')" ] \
+    || fail "tracked-hook: fixture did not leave exactly one modified and one deleted hook file"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "tracked-hook: modified or deleted tracked hook files must not block teardown"$'\n'"$(cat "$case_dir/stderr")"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "tracked-hook: teardown printed a REFUSED line"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "tracked-hook: teardown left task metadata after cleanup"
+  pass "tracked hook files that are modified or deleted do not block teardown"
+}
+
+# Gitignored credential files survive treehouse's return, so a reused pool slot
+# would hand them to the next task. Cleanup scrubs them before the return while
+# leaving ordinary ignored files and tracked credential-shaped files alone.
+test_ignored_credentials_are_scrubbed_before_worktree_return() {
+  local case_dir rc
+  case_dir=$(make_case cred-scrub)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" .gitignore $'.env\n*.log' "ignore local files"
+  wt_commit_file "$case_dir" settings.xml '<settings/>' "track build settings"
+  append_pr_meta_url "$case_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$case_dir/wt" rev-parse HEAD)"
+  printf '%s\n' 'TOKEN=not-a-real-secret' > "$case_dir/wt/.env"
+  printf '%s\n' 'build output' > "$case_dir/wt/debug.log"
+  { git -C "$case_dir/wt" check-ignore -q .env && git -C "$case_dir/wt" check-ignore -q debug.log; } \
+    || fail "cred-scrub: fixture files are not gitignored"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" return "*)
+    if [ -e "${FM_TEST_WT:?}/.env" ]; then state=present; else state=absent; fi
+    printf '.env %s at return\n' "$state" >> "${FM_TEST_TREEHOUSE_LOG:?}" ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  set +e
+  FM_TEST_WT="$case_dir/wt" FM_TEST_TREEHOUSE_LOG="$case_dir/treehouse.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "cred-scrub: teardown should succeed"$'\n'"$(cat "$case_dir/stderr")"
+  [ "$(cat "$case_dir/treehouse.log" 2>/dev/null)" = ".env absent at return" ] \
+    || fail "cred-scrub: the gitignored .env was still present when the worktree was returned"
+  assert_absent "$case_dir/wt/.env" "cred-scrub: gitignored .env survived cleanup"
+  assert_present "$case_dir/wt/debug.log" "cred-scrub: an ordinary ignored file was removed"
+  assert_present "$case_dir/wt/settings.xml" "cred-scrub: a tracked credential-shaped file was removed"
+  pass "gitignored credentials are scrubbed before the worktree is returned; other files are untouched"
 }
 
 test_gh_error_and_content_absent_refuses() {
@@ -3702,6 +3775,8 @@ test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
+test_tracked_hook_file_changes_do_not_block_teardown
+test_ignored_credentials_are_scrubbed_before_worktree_return
 test_gh_error_and_content_absent_refuses
 test_legacy_record_without_the_flag_refuses
 test_legacy_record_teardown_completes_when_landed_and_endpoint_dead
