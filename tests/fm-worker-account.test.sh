@@ -348,18 +348,22 @@ test_spawn_pi_without_auth_check_is_proved_by_its_model_list() {
   fm_git_worktree "$world/proj" "$wt" wt-pi-old
   fm_test_spawn_brief "$home" "$id"
   launchlog="$world/launch.log"
+  # The search lists near matches too, so a provider merely containing the
+  # declared name must not count.
+  printf 'fakeother claude-sonnet-4-5\n' > "$home/accounts/pi/.fake-models"
   out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
-    "$id" "$world/proj" --mode no-mistakes --yolo off --harness pi --model fake/test 2>&1)
+    "$id" "$world/proj" --mode no-mistakes --yolo off --harness pi --model fake/sonnet:high 2>&1)
   status=$?
-  expect_code 1 "$status" "a root that lists no model for the provider must refuse"$'\n'"$out"
-  assert_contains "$out" "does not list model 'fake/test'" "refusal must come from the model list"
+  expect_code 1 "$status" "a root that lists no model under the declared provider must refuse"$'\n'"$out"
+  assert_contains "$out" "lists no model for provider 'fake'" "refusal must come from the model list"
   assert_not_contains "$out" "cannot authenticate" \
     "a Pi without auth check must not be reported as unable to authenticate"
-  printf 'fake test\n' > "$home/accounts/pi/.fake-models"
+  # A --model pattern is not a catalog id; the provider is what the account spends.
+  printf 'fake claude-sonnet-4-5\n' > "$home/accounts/pi/.fake-models"
   out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
-    "$id" "$world/proj" --mode no-mistakes --yolo off --harness pi --model fake/test 2>&1)
-  expect_code 0 "$?" "a root whose model list serves the launch model should launch"$'\n'"$out"
-  pass "a Pi without auth check is proved ready by the models its root lists"
+    "$id" "$world/proj" --mode no-mistakes --yolo off --harness pi --model fake/sonnet:high 2>&1)
+  expect_code 0 "$?" "a root listing models under the declared provider should launch a pattern"$'\n'"$out"
+  pass "a Pi without auth check is proved ready by the provider its root lists"
 }
 
 test_spawn_pi_refuses_an_unqualified_model() {

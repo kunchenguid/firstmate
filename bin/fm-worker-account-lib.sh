@@ -68,9 +68,10 @@
 # because that command loads no extensions and so cannot see an
 # extension-registered provider, and any non-JSON answer, which is what a Pi
 # without `auth check` (0.84.0 and earlier) prints. The launch then passes
-# only when a listed row's provider and model columns both match exactly; no
-# listing within the bound refuses. --no-refresh keeps the check from rewriting a root's tokens while
-# other workers use them. A codex-native/<id> model is not checked: that
+# only when a listed row's provider column is exactly the launch model's
+# provider, the same provider-level question `auth check` answers; no such row
+# within the bound refuses. --no-refresh keeps the check from rewriting a
+# root's tokens while other workers use them. A codex-native/<id> model is not checked: that
 # provider comes from the pi-codex-native extension and signs in through
 # Codex's own login, which has no worker-account declaration.
 
@@ -84,10 +85,6 @@ FM_WORKER_ACCOUNT_PREFLIGHT_SECONDS=30
 # AWS switches from code.claude.com/docs/en/claude-platform-on-aws and
 # code.claude.com/docs/en/amazon-bedrock, "Use the Mantle endpoint").
 FM_WORKER_ACCOUNT_CLAUDE_SHED="CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY CLAUDE_CODE_USE_ANTHROPIC_AWS CLAUDE_CODE_USE_MANTLE ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_PROFILE ANTHROPIC_FEDERATION_RULE_ID"
-
-# Thinking levels pi accepts as a trailing ":<level>" on a --model pattern; a
-# model id may legitimately end in ":fast" or ":slow", which are not levels.
-FM_WORKER_ACCOUNT_PI_THINKING="off minimal low medium high xhigh max"
 
 # fm_worker_account_read <harness> <file>
 # Prints "root<TAB>provider<TAB>environment" for a valid declaration. Provider
@@ -259,27 +256,17 @@ fm_worker_account_pi_raw_provider() {
   return 1
 }
 
-# fm_worker_account_pi_model_listed <root> <executable> <provider> <model> <clean-env...>
-# Returns 0 when `pi --list-models` prints a row whose provider and model
-# columns are exactly this provider and this model's id. Fuzzy search means the
-# listing also carries near matches, so the columns are compared exactly and the
-# header row is skipped; a timeout, an unreadable root, or no matching row all
-# return 1.
-fm_worker_account_pi_model_listed() {
-  local root=$1 executable=$2 provider=$3 model=$4 want alt level out
-  shift 4
-  want=${model#*/}
-  alt=
-  for level in $FM_WORKER_ACCOUNT_PI_THINKING; do
-    [ "$want" != "${want%:"$level"}" ] || continue
-    alt=${want%:"$level"}
-    break
-  done
+# fm_worker_account_pi_provider_listed <root> <executable> <provider> <clean-env...>
+# Returns 0 when `pi --list-models` prints a row whose provider column is
+# exactly <provider>. Fuzzy search means the listing also carries near matches,
+# so the column is compared exactly and the header row is skipped; a timeout,
+# an unreadable root, or no matching row all return 1.
+fm_worker_account_pi_provider_listed() {
+  local root=$1 executable=$2 provider=$3 out
+  shift 3
   out=$(fm_run_timed "$FM_WORKER_ACCOUNT_PREFLIGHT_SECONDS" "$@" "PI_CODING_AGENT_DIR=$root" \
     "$executable" --list-models "$provider" 2>/dev/null </dev/null) || return 1
-  printf '%s\n' "$out" | awk -v p="$provider" -v a="$want" -v b="$alt" '
-    NR > 1 && $1 == p && ($2 == a || (b != "" && $2 == b)) { found = 1; exit }
-    END { exit !found }'
+  printf '%s\n' "$out" | awk -v p="$provider" 'NR > 1 && $1 == p { found = 1; exit } END { exit !found }'
 }
 
 # fm_worker_account_preflight <harness> <root> <executable> [<model>]
@@ -336,8 +323,8 @@ fm_worker_account_preflight() {
       # exists in every supported Pi, loads extensions, and lists only the
       # models a root can authenticate, so a listed row answers the same
       # question.
-      fm_worker_account_pi_model_listed "$root" "$executable" "$provider" "$model" "${clean[@]}" && return 0
-      echo "error: the Pi account $root does not list model '$model' (pi --list-models shows only the models a root can authenticate); log in under it with PI_CODING_AGENT_DIR=$root $harness, then /login, or pass a --model this root serves" >&2
+      fm_worker_account_pi_provider_listed "$root" "$executable" "$provider" "${clean[@]}" && return 0
+      echo "error: the Pi account $root lists no model for provider '$provider' (pi --list-models shows only the models a root can authenticate); log in under it with PI_CODING_AGENT_DIR=$root $harness, then /login, or pass --model as <provider>/<id> for a provider this root serves" >&2
       return 1
       ;;
     esac
