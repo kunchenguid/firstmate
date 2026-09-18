@@ -19,6 +19,7 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 MODE="$ROOT/bin/fm-project-mode.sh"
+PROJECT_BASE="$ROOT/bin/fm-project-base.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-base-branch)
 fm_git_identity
 
@@ -108,19 +109,15 @@ EOF
 # at intake rather than the spawn re-reading the registry, so the caller says so.
 run_base_spawn() {
   local id=$1 mode=${2:-no-mistakes} kind=${3:-ship}
-  local -a flags=()
-  if [ "$kind" = scout ]; then
-    flags+=(--scout)
-  else
-    flags+=(--mode "$mode" --yolo off)
-  fi
+  local kindflags=(--mode "$mode" --yolo off)
+  [ "$kind" != scout ] || kindflags=(--scout)
   FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
     FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" \
     PATH="$FAKEBIN_DIR:$PATH" \
-    "$SPAWN" "$id" "$PROJ_DIR" "${flags[@]}" 2>&1
+    "$SPAWN" "$id" "$PROJ_DIR" "${kindflags[@]}" 2>&1
 }
 
 head_sha() { git -C "$1" rev-parse HEAD; }
@@ -299,6 +296,123 @@ EOF
   pass "base= parses alongside the delivery mode without changing any existing line's mode"
 }
 
+# --- bin/fm-project-base.sh: the declaration lives IN THE REPO ---------------
+# A base kept only in one home's private data/projects.md tells no other home
+# anything: a second mate that owns a project found its base unset for exactly
+# that reason. The committed .firstmate-base file is what every clone can read,
+# including the typical shape where it is landed on develop and the abandoned
+# default branch never receives it.
+make_declared_clone() {  # <name> <branch-carrying-the-file> [file-content]
+  local name=$1 on=$2 content=${3:-develop}
+  local dir src bare clone
+  dir="$TMP_ROOT/declared/$name"
+  src="$dir/src"
+  bare="$dir/remote.git"
+  clone="$dir/clone"
+  mkdir -p "$dir"
+  git init -q "$src"
+  git -C "$src" symbolic-ref HEAD refs/heads/main
+  echo seed > "$src/file.txt"
+  git -C "$src" add file.txt
+  git -C "$src" commit -qm C0
+  if [ "$on" != main ]; then
+    git -C "$src" checkout -q -b "$on"
+  fi
+  printf '%s\n' "$content" > "$src/.firstmate-base"
+  git -C "$src" add .firstmate-base
+  git -C "$src" commit -qm declare
+  git -C "$src" checkout -q main
+  git clone -q --bare "$src" "$bare"
+  git -C "$src" remote add origin "file://$(cd "$bare" && pwd)"
+  git -C "$src" push -q origin --all
+  git clone -q "file://$(cd "$bare" && pwd)" "$clone"
+  printf '%s\n' "$clone"
+}
+
+test_declaration_is_read_from_the_branch_that_carries_it() {
+  local clone out
+  clone=$(make_declared_clone carried develop)
+  [ "$(git -C "$clone" symbolic-ref --short HEAD)" = main ] \
+    || fail "fixture clone should sit on main, the branch WITHOUT the declaration"
+  out=$("$PROJECT_BASE" "$clone")
+  [ "$out" = develop ] \
+    || fail "declaration on develop was not found from a clone checked out on main: got '$out'"
+  pass "a declaration landed only on the development branch is still read by a clone on the default branch"
+}
+
+test_declaration_beats_the_private_registry() {
+  local clone reg out
+  clone=$(make_declared_clone beats develop)
+  reg="$TMP_ROOT/declared/beats/data"
+  mkdir -p "$reg"
+  printf -- '- beats [no-mistakes base=stale-from-registry] - x (added 2026-01-01)\n' > "$reg/projects.md"
+  out=$(FM_DATA_OVERRIDE="$reg" "$PROJECT_BASE" "$clone" beats)
+  [ "$out" = develop ] \
+    || fail "the committed declaration must win over this home's private registry: got '$out'"
+  pass "the repository's own declaration wins over a home-private registry record"
+}
+
+test_registry_is_the_fallback_when_nothing_is_declared() {
+  local clone reg out
+  clone=$(make_declared_clone fallback develop)
+  git -C "$clone" push -q origin --delete develop
+  git -C "$clone" fetch -q --prune origin
+  reg="$TMP_ROOT/declared/fallback/data"
+  mkdir -p "$reg"
+  printf -- '- fallback [no-mistakes base=from-registry] - x (added 2026-01-01)\n' > "$reg/projects.md"
+  out=$(FM_DATA_OVERRIDE="$reg" "$PROJECT_BASE" "$clone" fallback)
+  [ "$out" = from-registry ] \
+    || fail "an undeclared project should fall back to its registry record: got '$out'"
+  out=$(FM_DATA_OVERRIDE="$TMP_ROOT/declared/fallback/absent" "$PROJECT_BASE" "$clone" fallback)
+  [ -z "$out" ] \
+    || fail "with no declaration and no registry the resolver must print nothing: got '$out'"
+  pass "the private registry remains the fallback for a project that has not adopted the file"
+}
+
+test_malformed_declaration_never_reaches_git() {
+  local clone out name
+  for name in dashed spaced; do
+    clone=$(make_declared_clone "$name" main)
+    case $name in
+      dashed) printf -- '--upload-pack=touch /tmp/pwn\n' > "$clone/.firstmate-base" ;;
+      spaced) printf 'develop; rm -rf /\n' > "$clone/.firstmate-base" ;;
+    esac
+    out=$("$PROJECT_BASE" "$clone")
+    [ "$out" = develop ] \
+      || fail "the malformed value should be skipped for the committed develop for $name: got '$out'"
+    [ "$out" != "$(cat "$clone/.firstmate-base")" ] \
+      || fail "a malformed declaration was passed through for $name: got '$out'"
+    case $out in
+      *' '*|-*) fail "resolver emitted an unusable branch name for $name: '$out'" ;;
+    esac
+  done
+  pass "a malformed declaration is rejected rather than handed to git"
+}
+
+# Stock macOS /bin/bash is 3.2, and the ref scan is the tier that finds a
+# declaration landed only on the development branch. A bash-4-only builtin there
+# fails at runtime, resolves nothing, and every caller silently falls back to the
+# stale repository default - the exact fault this change removes. CI runs this
+# one test under real /bin/bash 3.2 via FM_TEST_ONLY.
+test_declaration_resolves_under_stock_bash() {
+  local clone out
+  [ -x /bin/bash ] || { pass "resolver under /bin/bash skipped without /bin/bash"; return 0; }
+  clone=$(make_declared_clone stockbash develop)
+  [ "$(git -C "$clone" symbolic-ref --short HEAD)" = main ] \
+    || fail "fixture clone should sit on main, the branch WITHOUT the declaration"
+  out=$(/bin/bash "$PROJECT_BASE" "$clone")
+  [ "$out" = develop ] \
+    || fail "the resolver did not read the declaration under /bin/bash: got '$out'"
+  pass "the resolver reads a declaration from an unchecked-out branch under stock /bin/bash"
+}
+
+# CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the resolver's
+# bash-3.2 regression. The rest of this file is not a 3.2 snapshot suite.
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit 0
+fi
+
 test_registry_parse_is_backward_compatible
 test_recorded_base_is_checked_out
 test_unconfirmable_base_is_refused
@@ -307,5 +421,11 @@ test_unregistered_project_spawns_as_today
 test_missing_base_branch_is_refused
 test_local_only_prefers_local_branch
 
-echo "# all fm-spawn-base-branch tests passed"
 test_scout_also_starts_from_the_recorded_base
+test_declaration_is_read_from_the_branch_that_carries_it
+test_declaration_beats_the_private_registry
+test_registry_is_the_fallback_when_nothing_is_declared
+test_malformed_declaration_never_reaches_git
+test_declaration_resolves_under_stock_bash
+
+echo "# all fm-spawn-base-branch tests passed"

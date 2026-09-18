@@ -3815,6 +3815,61 @@ test_released_merge_passes_the_entrypoint_and_lands() {
   pass "a released merge passes the guarded entrypoint and remains recently landed"
 }
 
+# The captain's ruling is that the recorded development branch governs the merge
+# too: a local-only project that declares develop must land there, leaving the
+# repository default untouched. Against main the fast-forward would absorb the
+# whole development branch into it and leave develop without the work.
+test_local_merge_lands_on_the_declared_development_branch() {
+  local home id repo wt main_before wt_head
+  home=$(make_home local-merge-declared-branch)
+  id=sample-local-merge-declared
+  repo="$home/projects/sample-declared"
+  wt="$home/projects/$id"
+  fm_git_worktree "$repo" "$wt" "fm/$id"
+  git -C "$repo" checkout -q -b develop
+  printf 'develop\n' > "$repo/.firstmate-base"
+  git -C "$repo" add .firstmate-base
+  git -C "$repo" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'declare develop'
+  git -C "$wt" reset -q --hard develop
+  printf 'declared branch delivery\n' > "$wt/local.txt"
+  git -C "$wt" add local.txt
+  git -C "$wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'declared branch delivery'
+  tasks_in "$home" add "$id" "Ship the declared-branch change" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the declared-branch fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$wt" \
+    "project=$repo" "harness=codex" "kind=ship" "mode=local-only" \
+    "spawn_gen=fixture-$id"
+  printf 'done: local merge ready\n' > "$home/state/$id.status"
+  run_captain "$home" hold "$id" --reason "captain local merge approval pending" >/dev/null \
+    || fail "could not hold the declared-branch fixture"
+  printf 'Land the declared-branch change.\n' > "$home/declared-answer.txt"
+  run_captain "$home" answer "$id" --release \
+    --decision-file "$home/declared-answer.txt" >/dev/null \
+    || fail "could not release the declared-branch fixture"
+  main_before=$(git -C "$repo" rev-parse main)
+  wt_head=$(git -C "$wt" rev-parse HEAD)
+
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-merge-local.sh" "$id" \
+    > "$home/declared-merge.out" 2> "$home/declared-merge.err" \
+    || fail "the declared-branch merge was refused: $(cat "$home/declared-merge.err")"
+
+  [ "$(git -C "$repo" rev-parse develop)" = "$wt_head" ] \
+    || fail "the local merge did not fast-forward the declared development branch"
+  [ "$(git -C "$repo" rev-parse main)" = "$main_before" ] \
+    || fail "the local merge moved the repository default branch"
+
+  run_teardown "$home" "$id" > "$home/declared-teardown.out" 2> "$home/declared-teardown.err" \
+    || fail "cleanup refused work that was merged into the declared branch: $(cat "$home/declared-teardown.err")"
+  assert_no_grep REFUSED "$home/declared-teardown.err" \
+    "cleanup refused a worktree whose work is merged into the declared branch"
+  pass "a local-only merge lands on the declared development branch and cleanup agrees it is merged"
+}
+
 # "Cannot tell" is not permission to close. A ship row has no separate
 # inventory gate ahead of the close, so the predicate itself must refuse before
 # any destructive step when the hold cannot be read.
@@ -4034,6 +4089,7 @@ test_merge_entrypoints_validate_identity_and_state_before_locking
 test_merge_entrypoints_refuse_a_reused_task_incarnation
 test_merge_entrypoints_serialize_forced_teardown_before_task_reads
 test_released_merge_passes_the_entrypoint_and_lands
+test_local_merge_lands_on_the_declared_development_branch
 test_teardown_refuses_a_ship_when_the_captain_hold_cannot_be_read
 test_verify_resolves_a_hold_migrated_to_beads_notes
 test_verify_resolves_a_hold_migrated_under_the_configured_prefix

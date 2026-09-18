@@ -783,6 +783,39 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
+# A project that declares a development branch in .firstmate-base lands its
+# local-only work THERE, not on the repository default, so the merged-work check
+# must ask bin/fm-project-base.sh which branch that is. Against main this work is
+# unmerged and cleanup refuses, while bin/fm-merge-local.sh has already landed it
+# on develop - the two disagreeing is the defect.
+test_local_only_merged_to_declared_branch_allows() {
+  local case_dir rc wt_head main_before
+  case_dir=$(make_case merged-declared)
+  write_meta "$case_dir" local-only ship
+  git -C "$case_dir/project" checkout -q -b develop
+  printf 'develop\n' > "$case_dir/project/.firstmate-base"
+  git -C "$case_dir/project" add .firstmate-base
+  git -C "$case_dir/project" -c user.email=t@t -c user.name=t \
+    commit -q -m "declare develop"
+  git -C "$case_dir/project" checkout -q main
+  git -C "$case_dir/wt" reset -q --hard develop
+  wt_commit "$case_dir" "work on the declared branch"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/develop "$wt_head"
+  main_before=$(git -C "$case_dir/project" rev-parse main)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "merged-declared: teardown should succeed when work is merged into the declared branch"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "merged-declared: teardown printed a REFUSED line"
+  [ "$(git -C "$case_dir/project" rev-parse main)" = "$main_before" ] \
+    || fail "merged-declared: the repository default branch was moved"
+  pass "local-only worktree merged into the project's declared development branch is torn down"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -3671,6 +3704,7 @@ test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_local_only_merged_to_declared_branch_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed

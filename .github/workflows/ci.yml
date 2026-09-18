@@ -450,6 +450,18 @@ jobs:
             exit 1
           }
 
+          # Likewise the development-branch resolver: its ref scan must keep
+          # reading a declaration under stock bash 3.2, or every caller falls
+          # back to the stale repository default without a word.
+          base_output=$(FM_TEST_ONLY=test_declaration_resolves_under_stock_bash \
+            /bin/bash tests/fm-spawn-base-branch.test.sh)
+          printf '%s\n' "$base_output"
+          base_count=$(printf '%s\n' "$base_output" | grep -c '^ok - ')
+          [ "$base_count" -eq 1 ] || {
+            echo "::error::expected 1 project-base bash 3.2 resolver regression, got $base_count"
+            exit 1
+          }
+
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest
