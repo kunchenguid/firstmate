@@ -137,6 +137,13 @@ test_answer_send_closes_open_decision() {
   assert_contains "$(cat "$log")" "Firstmate instruction waiting" "the doorbell should be rung for the answer"
   grep -F 'resolved [key=api-shape]: answered: go with REST' "$home/state/t1.status" >/dev/null \
     || fail "fm-send did not append the closing resolved line:"$'\n'"$(cat "$home/state/t1.status")"
+  # The first drain above is the OPEN DECISIONS presentation, not a watcher
+  # seen-marker prime. The close must still be self-announced so the watcher
+  # does not wake this home to reread its own resolved line (issue 4767).
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_signal_seen_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t1.status" \
+    || fail "the answerer's close after OPEN DECISIONS drain was left to re-wake this home"
 
   out=$(drain_out "$home")
   if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then

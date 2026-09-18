@@ -1573,6 +1573,40 @@ test_self_announced_close_does_not_rewake_but_next_note_does() {
   pass "a self-announced close never wakes its own home, and the next real note still does"
 }
 
+test_self_announced_close_after_open_decisions_fold_does_not_rewake() {
+  local dir state fakebin out status_file pid rc
+  dir=$(make_case self-close-after-fold); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/task.status"
+  printf 'needs-decision [key=k1]: pick one\n' > "$status_file"
+  # Session-start drain folds OPEN DECISIONS without writing a watcher seen
+  # marker. That is the issue 4767 path: the supervisor then closes the listed
+  # decision and must not get a signal wake of its own resolved line.
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    status_open_decisions_incremental "$2" >/dev/null
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$status_file" \
+    || fail "could not fold the open decision"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_wake_status_append_self_announced "$2" "$3" "resolved [key=k1]: answered: closed after fold"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$status_file" || rc=$?
+  [ "$rc" -eq 0 ] || fail "the bookkeeping close after OPEN DECISIONS fold was not self-announced (rc=$rc)"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · idle worker'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a close after OPEN DECISIONS fold re-woke its own watcher: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "folded close printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "folded close enqueued a durable wake"; }
+  printf 'blocked: worker still needs help\n' >> "$status_file"
+  wait_for_exit "$pid" 100 || fail "a later worker line after a folded close was swallowed"
+  grep -F "signal: $status_file" "$out" >/dev/null \
+    || fail "the later worker line did not surface as a signal"
+  pass "a close after OPEN DECISIONS fold never wakes its own home, and the next real note still does"
+}
+
 # --- actionable wakes are surfaced (queue + exit) ---------------------------
 
 test_actionable_signal_surfaced() {
@@ -5473,6 +5507,7 @@ test_working_note_not_working_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
 test_secondmate_buried_block_wakes_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
+test_self_announced_close_after_open_decisions_fold_does_not_rewake
 test_actionable_signal_surfaced
 test_needs_decision_signal_payload_marked_for_branch_exclusion
 test_needs_decision_reconciliation_required_still_marked

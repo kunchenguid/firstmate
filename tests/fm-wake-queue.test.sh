@@ -1569,14 +1569,17 @@ test_interruption_before_and_after_raw_commit() {
 # The guarded self-announced status append (fm_wake_status_append_self_announced)
 # and the seen-signature gate it shares with the watcher's signal scan. Both
 # directions of the dedup contract are pinned through the real library
-# functions: a fully announced file plus the home's own bookkeeping close stays
+# functions: a file this home already knows (seen marker, presentation cursor,
+# or OPEN DECISIONS fold) plus the home's own bookkeeping close stays
 # announced (no wake), while ANY unannounced byte - a pending foreign line, a
-# missing marker, a later different note - reads as wake-worthy.
+# missing cursor, a later different note - reads as wake-worthy.
 test_self_announced_append_guards() {
-  local dir state status
+  local dir state status folded created rc=0
   dir=$(make_case self-announced-append)
   state="$dir/state"
   status="$state/t.status"
+  folded="$state/folded.status"
+  created="$state/created.status"
 
   run_wake_lib() {
     FM_STATE_OVERRIDE="$state" bash -c '
@@ -1588,6 +1591,13 @@ test_self_announced_append_guards() {
   printf 'working: first line\n' > "$status"
   run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
     && fail "a never-announced status file read as already announced"
+
+  # A close over those never-announced bytes must not swallow them.
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k0]: answered: too early' || rc=$?
+  [ "$rc" -eq 1 ] || fail "a close over never-announced bytes did not fail toward waking (rc=$rc)"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "a close over never-announced bytes swallowed the pending wake"
 
   # Prime the marker to current (the watcher just surfaced/absorbed everything).
   prime_status_seen "$state" "$status" || fail "could not prime the seen marker"
@@ -1608,7 +1618,7 @@ test_self_announced_append_guards() {
 
   # With that foreign line pending, a bookkeeping close must NOT advance the
   # marker over it: the close appends but the file stays wake-worthy.
-  local rc=0
+  rc=0
   run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
     'resolved [key=k1]: answered: second close' || rc=$?
   [ "$rc" -eq 1 ] || fail "a close over pending foreign bytes did not fail toward waking (rc=$rc)"
@@ -1624,6 +1634,33 @@ test_self_announced_append_guards() {
     || fail "a multibyte self-announced close was not suppressed (rc=$?)"
   run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
     || fail "multibyte byte accounting broke the self-announce guard"
+
+  # Issue 4767: a drain that folded OPEN DECISIONS has already presented those
+  # bytes to this home even when the watcher has not written a matching seen
+  # marker. The bookkeeping close must stay quiet; a later worker line must not.
+  printf 'needs-decision [key=k3]: pick one\n' > "$folded"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$folded" \
+    && fail "an unfolded file without a seen marker read as announced"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    status_open_decisions_incremental "$2" >/dev/null
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$folded" \
+    || fail "could not fold the open decision"
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$folded" \
+    'resolved [key=k3]: answered: folded close' \
+    || fail "a close after an OPEN DECISIONS fold was not self-announced (rc=$?)"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$folded" \
+    || fail "the folded close left unannounced bytes behind"
+  printf 'blocked: worker still needs help\n' >> "$folded"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$folded" \
+    && fail "a later worker line after a folded close was swallowed"
+
+  # A close that creates the status file wrote every byte in it.
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$created" \
+    'resolved [key=k4]: answered: created by this home' \
+    || fail "a close that created the status file was not self-announced (rc=$?)"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$created" \
+    || fail "a newly created self-announced file was left unannounced"
 
   pass "self-announced appends suppress only their own bytes and fail toward waking"
 }
