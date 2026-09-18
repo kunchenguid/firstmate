@@ -141,28 +141,47 @@ FM_CLASSIFY_EVENT_WINDOW_LINES=200
 # always reads the whole file, since a bounded window cannot bound two events.
 # This is an event read; status_current_line below reconciles open decisions.
 last_status_line() {  # <status-file> [<previous-event-var>]
-  local f=$1 scan=''
+  _fm_last_status_event '' "$@"
+}
+
+# last_status_line read past bin/fm-captain-hold.sh's hold mirror: the
+# `captain-held` declaration and `resolved` retraction it writes on a held
+# lane's log under the key captain-hold-<task>-<n>. Those lines are the hold
+# command's, not the worker's, so a reader of the worker's own state (crew
+# state, the terminal-outcome ledger) must not let them displace the event the
+# worker last wrote. The watcher and away-mode daemon read last_status_line
+# directly, because the hold is exactly what they need to see.
+last_worker_status_line() {  # <status-file> [<previous-event-var>]
+  local task=${1##*/}
+  task=${task%.status}
+  _fm_last_status_event "^(captain-held|resolved) \\[key=captain-hold-${task//./\\.}-[0-9]+\\]:" "$@"
+}
+
+_fm_last_status_event() {  # <skip-ere> <status-file> [<previous-event-var>]
+  local skip=$1 f=$2 scan=''
   [ -f "$f" ] && [ -r "$f" ] || return 0
-  if [ "$#" -gt 1 ]; then
-    scan=$(_fm_status_event_scan < "$f") || :
-  elif ! scan=$(tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null | _fm_status_event_scan); then
-    scan=$(_fm_status_event_scan < "$f") || :
+  if [ "$#" -gt 2 ]; then
+    scan=$(_fm_status_event_scan "$skip" < "$f") || :
+  elif ! scan=$(tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null | _fm_status_event_scan "$skip"); then
+    scan=$(_fm_status_event_scan "$skip" < "$f") || :
   fi
-  [ "$#" -lt 2 ] || printf -v "$2" '%s' "${scan%%$'\n'*}"
+  [ "$#" -lt 3 ] || printf -v "$3" '%s' "${scan%%$'\n'*}"
   printf '%s\n' "${scan##*$'\n'}"
 }
 
 # Print "<previous event>\n<latest event>" for the status lines on stdin, and
 # return 1 when the stream holds no recognized event at all, so a caller reading
 # a bounded window knows to widen it. A stream without events keeps its last
-# nonblank line as the latest, matching the read this replaced.
+# nonblank line as the latest, matching the read this replaced. Lines matching
+# a non-empty <skip-ere> are not part of the stream at all.
 # Keep decision-closing events: skipping a resolved line would revive its opener.
 # A bare legacy free-text line counts as an event only when a captain token leads
 # it, so continuation prose that merely mentions one cannot hide a declaration.
-_fm_status_event_scan() {
-  local line last='' prev='' fallback='' verb legacy_re
+_fm_status_event_scan() {  # [<skip-ere>]
+  local skip=${1:-} line last='' prev='' fallback='' verb legacy_re
   legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
   while IFS= read -r line || [ -n "$line" ]; do
+    [ -z "$skip" ] || ! [[ $line =~ $skip ]] || continue
     case "$line" in *[![:space:]]*) fallback=$line ;; *) continue ;; esac
     case "$line" in *:*) status_line_verb "$line" verb ;; *) verb='' ;; esac
     case "$verb" in
@@ -606,8 +625,8 @@ status_open_decisions() {  # <status-file> [<kind>]
 
 # Resolve the log's current declaration at one boundary for crew-state consumers.
 # Any decision the fold still holds open wins over unrelated events, and the
-# fold's most recently opened record supplies it; the latest recognized event
-# stands when nothing is open.
+# fold's most recently opened record supplies it; the worker's own latest event
+# (last_worker_status_line) stands when nothing is open.
 # Actual run/pane evidence is still reconciled by fm-crew-state.sh.
 status_current_line() {  # <status-file> <kind>
   local open key verb note current=''
@@ -617,7 +636,7 @@ status_current_line() {  # <status-file> <kind>
   done <<EOF
 $open
 EOF
-  [ -n "$current" ] || current=$(last_status_line "$1")
+  [ -n "$current" ] || current=$(last_worker_status_line "$1")
   printf '%s\n' "$current"
 }
 
