@@ -760,6 +760,22 @@ test_matrix_opencode_leftbar_cwd_furniture() {
   typed="  ${ESC}[38;2;92;156;245m┃${ESC}[38;2;255;255;255m${ESC}[48;2;30;30;30m  ${ESC}[38;2;238;238;238m/usr/local/bin/some/tool${ESC}[0m"$'\n'"$(tail -n 4 <<< "$composer")"
   assert_screen "opencode left-edge typed path above cwd furniture on tmux" pending "$CAPS_TMUX" "$typed" 0
 
+  # A composer holding only "/" - the first keystroke of a slash command -
+  # must never read empty. Its single character trivially clears the position
+  # gate, so only the "~/"-prefix check keeps it typed text: a bare "/" start
+  # is not accepted as the cwd rail (every evidenced fleet pane renders "~/..."),
+  # on the row directly above the footer and on top of the short-cwd rail alike.
+  # Styled profiles prove it real (pending); the unstyled profile keeps the
+  # leftbar's existing unknown deferral - never empty either way.
+  typed_row="  ${ESC}[38;2;92;156;245m┃${ESC}[38;2;255;255;255m${ESC}[48;2;30;30;30m  ${ESC}[38;2;238;238;238m/${ESC}[0m"
+  typed=$'transcript line\n'"${typed_row}"$'\n  ┃  Build · gpt-oss-120b Internal OVHcloud'
+  assert_screen "opencode lone slash above the footer stays pending on tmux" pending "$CAPS_TMUX" "$typed" 1
+  assert_screen "opencode lone slash above the footer stays pending on herdr" pending "$CAPS_STYLED" "$typed"
+  [ -z "$(_fm_composer_leftbar_cwd_start "$typed" 1 2)" ] \
+    || fail "a lone '/' above the footer must not be recognised as cwd furniture"
+  typed=$'transcript line\n  ┃  /\n  ┃  Build · gpt-oss-120b Internal OVHcloud'
+  assert_screen "opencode lone slash above the footer defers unstyled on cmux/orca" unknown "$CAPS_PLAIN" "$typed"
+
   # The path-prefix check is load-bearing: a right-aligned single token that
   # is not part of such a path, and a fragment run whose start is not a path
   # prefix, stay typed content.
@@ -796,6 +812,8 @@ test_matrix_opencode_leftbar_cwd_furniture() {
     || fail "the short fixture's one fragment must survive ghost stripping intact, got '$strip'"
   start=$(_fm_composer_leftbar_cwd_start "$composer" 0 5)
   [ "$start" = 4 ] || fail "the short fixture's run must start on the row directly above the footer, got '$start'"
+  typed="$(head -n 2 <<< "$composer")"$'\n'"${typed_row}"$'\n'"$(tail -n 3 <<< "$composer")"
+  assert_screen "opencode lone slash typed above the short cwd rail stays pending on tmux" pending "$CAPS_TMUX" "$typed" 2
   pass "matrix: opencode 1.18.31's right-aligned cwd:branch furniture reads empty; left-edge text stays pending"
 }
 

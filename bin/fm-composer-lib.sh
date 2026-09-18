@@ -1319,7 +1319,7 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
   if [ "$styled" = 1 ]; then printf 'pending'; else printf 'unknown'; fi
 }
 
-# OpenCode >= 1.18 renders the pane's working directory and git branch as a
+# OpenCode 1.18.31 (absent on 1.18.4) renders the pane's working directory and git branch as a
 # right-aligned "<cwd>:<branch>" indicator inside the composer's bottom rows:
 # the string wraps over up to three rail-width fragments on the rows
 # immediately above the mode/model footer row, and its final fragment is
@@ -1349,15 +1349,20 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 #     half the row, so real typed text - which starts at the left edge - is
 #     still typed text, and a path-shaped string a user typed there is
 #     typed text too (position, not shape alone, decides);
-#   - the fragments concatenate to a path, optionally followed by
-#     ":<branch>": beginning with "~/" or "/" and carrying no whitespace at
-#     all. The string's final fragment at the right end of the footer row
-#     is not read: that row is already furniture by the footer regex.
+#   - the fragments concatenate to a home-abbreviated path, optionally
+#     followed by ":<branch>": beginning with "~/" and carrying no
+#     whitespace at all. A bare "/" start is deliberately NOT accepted: a
+#     composer holding only "/" is the first keystroke of a slash command
+#     and must never read empty, every evidenced fleet pane renders its
+#     cwd as "~/..." (the worktree pools live under $HOME), and a worker
+#     outside $HOME merely keeps the old conservative pending. The string's
+#     final fragment at the right end of the footer row is not read: that
+#     row is already furniture by the footer regex.
 # Anything else - a left-edge token, a multi-word row, a fragment that is
 # not part of such a path - ends the walk and leaves the rows to the
 # ordinary verdict, so a wrong call can only ever defer (pending), never
-# read a real composer empty. A fragment with no "~/" or "/" start (a bare
-# tail continuation, or a rail whose string is too long for the composer's
+# read a real composer empty. A fragment with no "~/" start (a bare tail
+# continuation, or a rail whose string is too long for the composer's
 # visible rows) fails the check by construction, deferring instead.
 # The tests operate on the plain row (fm_composer_strip_ansi), so the
 # recognition is styling-independent and holds under any
@@ -1412,14 +1417,14 @@ _fm_composer_leftbar_cwd_start() {  # <screen> <first-row> <last-row>
   tilde=$(printf '~')
   tilde_slash="$tilde/"
   case "$joined" in
-    "$tilde_slash"*|'/'*) printf '%s\n' "$start"; return 0 ;;
+    "$tilde_slash"*) printf '%s\n' "$start"; return 0 ;;
   esac
   return 1
 }
 
 # _fm_composer_classify_leftbar: opencode's left-bar composer. Blank rows and
 # the idle hint read empty; the run's LAST row may be the mode/model footer
-# (composer furniture, never typed text), and OpenCode >= 1.18's right-aligned
+# (composer furniture, never typed text), and OpenCode 1.18.31's (absent on 1.18.4) right-aligned
 # cwd:branch furniture (the rows immediately above that footer, recognised by
 # _fm_composer_leftbar_cwd_start) is composer furniture too. Real content is
 # pending when styling can prove it real, unknown otherwise.
