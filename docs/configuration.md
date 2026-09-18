@@ -386,9 +386,13 @@ So `CLAUDE_CONFIG_DIR=~/.claude` is a separate, usually empty account, not the d
 `config/claude-account` holds `ordinary` or one absolute path on line 1.
 `config/pi-account` holds that same root token on line 1 and the provider this home may spend on line 2.
 Either file may end with one more line, `environment`, described below.
+Lines are separated by LF; the final newline is optional, and any other control character, including a CR, refuses.
 A Pi root can hold several provider identities at once, so selecting the root alone is insufficient.
 The launch `--model` must be `<that-provider>/<id>`; an unqualified model, or a provider the file does not name, refuses because the shared root's `defaultProvider` must never pick which identity a launch spends.
 That declared provider is the work/personal boundary: a home that has not named a provider cannot spend an extra identity merely because it is available in the shared root.
+The `--model` prefix alone does not bind Pi: when the named provider has no usable match, Pi falls back to an identical model id under another, authenticated provider, such as OpenRouter.
+So every managed Pi launch also passes `--provider <that-provider>`, which confines Pi's model lookup to that provider.
+A raw Pi launch command is launched as written, so it must pass that same `--provider` itself; a raw command without it, or naming another provider, refuses.
 
 Both files are local, gitignored, and deliberately not inherited.
 A ship or scout reads the active home.

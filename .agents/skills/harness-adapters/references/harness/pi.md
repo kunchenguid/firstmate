@@ -11,7 +11,7 @@ Verified on 2026-07-27 with Pi and Pi-signed 0.82.0 unless a fact gives another 
 | Exit command | `/quit`. |
 | Interrupt | Single Escape. |
 | Skill invocation | No separate verified form beyond normal command behavior; use natural language when the exact command is uncertain. |
-| Model flag | `--model <model>`. |
+| Model flag | `--model <model>`; Firstmate also passes `--provider` from `config/pi-account`, because Pi otherwise treats the model's provider prefix as a hint (`../../../docs/configuration.md` "Worker accounts"). |
 | Effort flag | `--thinking <low\|medium\|high\|xhigh\|max>`; both identities expose the same levels and completed the same model-qualified max-thinking smoke. |
 | Model discovery | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
 

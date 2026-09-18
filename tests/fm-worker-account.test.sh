@@ -156,14 +156,39 @@ test_pi_guard_requires_matching_provider_model() {
   pass "Pi launches must name the declared provider in --model"
 }
 
-test_raw_launch_model_reads_the_embedded_flag() {
-  [ "$(fm_worker_account_raw_model 'pi --model fake/test --offline')" = fake/test ] || \
+test_raw_launch_flags_read_the_embedded_values() {
+  [ "$(fm_worker_account_raw_flag 'pi --model fake/test --offline' --model)" = fake/test ] || \
     fail "space-separated --model was not read"
-  [ "$(fm_worker_account_raw_model "pi --model='openai-codex/gpt-5.4'")" = openai-codex/gpt-5.4 ] || \
+  [ "$(fm_worker_account_raw_flag "pi --model='openai-codex/gpt-5.4'" --model)" = openai-codex/gpt-5.4 ] || \
     fail "equals-form --model was not read"
-  [ -z "$(fm_worker_account_raw_model 'pi --offline')" ] || \
+  [ -z "$(fm_worker_account_raw_flag 'pi --offline' --model)" ] || \
     fail "a raw command with no --model must yield an empty model"
-  pass "a raw Pi command's embedded --model is the account the launch would spend"
+  [ "$(fm_worker_account_raw_flag "pi --provider 'fake' --model fake/test" --provider)" = fake ] || \
+    fail "a quoted --provider was not read"
+  [ -z "$(fm_worker_account_raw_flag 'pi --model fake/test' --provider)" ] || \
+    fail "a raw command with no --provider must yield an empty provider"
+  pass "a raw Pi command's embedded --model and --provider are the account the launch would spend"
+}
+
+test_declaration_final_newline_is_optional() {
+  local dir err
+  dir="$TMP_ROOT/lib-no-final-newline"
+  mkdir -p "$dir/config" "$dir/accounts/work" "$dir/user/.pi/agent"
+  err=$(mktemp "$TMP_ROOT/newline-err.XXXXXX")
+  printf 'ordinary' > "$dir/config/claude-account"
+  [ "$(fm_worker_account_resolve claude "$dir/config" "$dir")" = $'\t\t' ] || \
+    fail "'ordinary' without a final newline must resolve"
+  printf '%s\nenvironment' "$dir/accounts/work" > "$dir/config/claude-account"
+  [ "$(fm_worker_account_resolve claude "$dir/config" "$dir")" = "$dir/accounts/work"$'\t\tenvironment' ] || \
+    fail "a Claude root and environment without a final newline must resolve"
+  printf 'ordinary\nfake' > "$dir/config/pi-account"
+  [ "$(HOME="$dir/user" fm_worker_account_resolve pi "$dir/config" "$dir")" = "$dir/user/.pi/agent"$'\tfake\t' ] || \
+    fail "a Pi root and provider without a final newline must resolve"
+  printf 'ordinary\r\n' > "$dir/config/claude-account"
+  fm_worker_account_resolve claude "$dir/config" "$dir" >/dev/null 2>"$err" && \
+    fail "a CR inside a line must still refuse"
+  assert_contains "$(cat "$err")" "no other control characters" "refusal must name the control-character rule"
+  pass "a declaration's final newline is optional while other control bytes still refuse"
 }
 
 # --- spawn -------------------------------------------------------------------
@@ -260,6 +285,55 @@ test_spawn_pi_refuses_a_provider_the_home_did_not_declare() {
   assert_contains "$out" "openai-codex-work" "refusal must name the undeclared provider"
   assert_absent "$home/state/$id.meta" "an undeclared Pi provider must not publish metadata"
   pass "an undeclared Pi provider in a shared root cannot be spent"
+}
+
+test_spawn_pi_launch_pins_the_declared_provider() {
+  local rec world home fakebin wt launchlog out id=pi-pinned
+  rec=$(make_world spawn-pi-pinned pi)
+  read_world "$rec"
+  world=$WORLD
+  home=$HOME_DIR
+  fakebin=$FAKEBIN_DIR
+  wt="$world/wt"
+  fm_git_worktree "$world/proj" "$wt" wt-pinned
+  fm_test_spawn_brief "$home" "$id"
+  launchlog="$world/launch.log"
+  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
+    "$id" "$world/proj" --mode no-mistakes --yolo off --harness pi --model fake/test 2>&1)
+  expect_code 0 "$?" "a declared Pi spawn should succeed"$'\n'"$out"
+  # Without --provider, Pi resolves an id its prefix provider lacks under any
+  # other authenticated provider holding an identical id.
+  assert_contains "$(cat "$launchlog")" "--provider 'fake' --model 'fake/test'" \
+    "a Pi launch must pin the declared provider, not leave Pi to infer it from --model"
+  pass "a canonical Pi launch pins the declared provider"
+}
+
+test_spawn_raw_pi_command_must_pass_the_declared_provider() {
+  local rec world home fakebin wt launchlog out status id=pi-raw
+  rec=$(make_world spawn-pi-raw pi)
+  read_world "$rec"
+  world=$WORLD
+  home=$HOME_DIR
+  fakebin=$FAKEBIN_DIR
+  wt="$world/wt"
+  fm_git_worktree "$world/proj" "$wt" wt-raw
+  fm_test_spawn_brief "$home" "$id"
+  launchlog="$world/launch.log"
+  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
+    "$id" "$world/proj" "pi --model fake/test" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 1 "$status" "a raw Pi command without --provider must refuse"$'\n'"$out"
+  assert_contains "$out" "must pass --provider fake" "refusal must name the provider to pass"
+  assert_absent "$home/state/$id.meta" "a raw Pi command without --provider must not publish metadata"
+  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
+    "$id" "$world/proj" "pi --provider openrouter --model fake/test" --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  expect_code 1 "$status" "a raw Pi command naming another provider must refuse"$'\n'"$out"
+  assert_contains "$out" "passes 'openrouter'" "refusal must name the provider the command passes"
+  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
+    "$id" "$world/proj" "pi --provider fake --model fake/test" --mode no-mistakes --yolo off 2>&1)
+  expect_code 0 "$?" "a raw Pi command passing the declared provider should launch"$'\n'"$out"
+  pass "a raw Pi command must pass the declared --provider itself"
 }
 
 test_spawn_pi_refuses_an_unqualified_model() {
@@ -454,11 +528,14 @@ test_explicit_claude_path_is_the_selected_root
 test_pi_declaration_requires_a_provider
 test_pi_ordinary_with_provider_resolves
 test_pi_guard_requires_matching_provider_model
-test_raw_launch_model_reads_the_embedded_flag
+test_raw_launch_flags_read_the_embedded_values
+test_declaration_final_newline_is_optional
 test_spawn_refuses_claude_without_a_declaration_before_any_record
 test_spawn_refuses_pi_without_a_declaration
 test_spawn_claude_ignores_ambient_config_dir
 test_spawn_pi_refuses_a_provider_the_home_did_not_declare
+test_spawn_pi_launch_pins_the_declared_provider
+test_spawn_raw_pi_command_must_pass_the_declared_provider
 test_spawn_pi_refuses_an_unqualified_model
 test_spawn_codex_does_not_require_an_account_declaration
 test_spawn_claude_ordinary_uses_the_default_login_under_throwaway_home

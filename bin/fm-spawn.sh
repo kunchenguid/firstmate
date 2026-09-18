@@ -274,7 +274,10 @@
 #   other value is one absolute path to an existing account root. A Pi root can
 #   hold several provider identities, so config/pi-account also names the
 #   provider this home may spend; a launch whose --model names a different
-#   provider, or names no provider, refuses. A final `environment` line selects
+#   provider, or names no provider, refuses. A canonical Pi launch also carries
+#   --provider <declared>, so Pi cannot resolve --model under another provider;
+#   a raw Pi command must pass that --provider itself or it refuses. A final
+#   `environment` line selects
 #   the runner's environment credentials as well. Declarations are home-local
 #   and never inherited. A ship or scout reads the active home; a local
 #   secondmate is a supervisor and reads the launching home. Relaunch uses that
@@ -2082,11 +2085,13 @@ fi
 # own worker declarations.
 ACCOUNT_MODEL=$MODEL
 if [ "${RAW_LAUNCH:-0}" = 1 ]; then
-  ACCOUNT_MODEL=$(fm_worker_account_raw_model "$LAUNCH")
+  ACCOUNT_MODEL=$(fm_worker_account_raw_flag "$LAUNCH" --model)
 fi
 WORKER_ACCOUNT=$(fm_worker_account_select "$HARNESS" "$CONFIG" "$FM_HOME" "$ACCOUNT_MODEL" "${PI_BIN:-$HARNESS}") || exit 1
 WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT%%$'\t'*}
-WORKER_ACCOUNT_ENV=${WORKER_ACCOUNT#*$'\t'}
+WORKER_ACCOUNT_ENV=${WORKER_ACCOUNT##*$'\t'}
+WORKER_ACCOUNT_PROVIDER=${WORKER_ACCOUNT#*$'\t'}
+WORKER_ACCOUNT_PROVIDER=${WORKER_ACCOUNT_PROVIDER%%$'\t'*}
 case "$HARNESS" in
 claude)
   if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
@@ -2095,7 +2100,12 @@ claude)
     unset CLAUDE_CONFIG_DIR
   fi
   ;;
-pi | pi-signed) export PI_CODING_AGENT_DIR=$WORKER_ACCOUNT_ROOT ;;
+pi | pi-signed)
+  if [ "${RAW_LAUNCH:-0}" = 1 ]; then
+    fm_worker_account_pi_raw_provider "$WORKER_ACCOUNT_PROVIDER" "$LAUNCH" || exit 1
+  fi
+  export PI_CODING_AGENT_DIR=$WORKER_ACCOUNT_ROOT
+  ;;
 esac
 
 secondmate_registry_value() {
@@ -4392,6 +4402,9 @@ sq_ompcfg=$(shell_quote "${OMP_WORKER_CFG:-$FM_ROOT/.omp/fm-worker-overlay.yml}"
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
+case "$HARNESS" in
+pi | pi-signed) MODELFLAG="--provider $(shell_quote "$WORKER_ACCOUNT_PROVIDER") $MODELFLAG" ;;
+esac
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}

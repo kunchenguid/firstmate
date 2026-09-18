@@ -28,7 +28,11 @@
 # must match that declared provider; an unqualified model, or a provider the
 # file does not name, refuses before any endpoint exists. That is the
 # work/personal boundary: a home declares the provider it spends, so an
-# extra identity sitting in a shared root cannot be used by accident.
+# extra identity sitting in a shared root cannot be used by accident. The
+# prefix alone does not bind Pi: without --provider, Pi falls back to an
+# identical model id under another, authenticated provider. So every
+# canonical Pi launch also passes --provider <declared>, and a raw Pi command,
+# which Firstmate launches verbatim, must pass that same --provider itself.
 #
 # Environment credentials (Claude's API key, auth token, setup-token, cloud
 # provider switches, profiles; a Pi provider's API key variable) are ambient
@@ -86,9 +90,10 @@ FM_WORKER_ACCOUNT_PI_THINKING="off minimal low medium high xhigh max"
 
 # fm_worker_account_read <harness> <file>
 # Prints "root<TAB>provider<TAB>environment" for a valid declaration. Provider
-# is empty for Claude; the last field is `environment` or empty. Parses bytes
-# before the shell can drop NULs or trailing newlines; paths are literal, not
-# shell expressions. Returns 0 on success, 3 when the
+# is empty for Claude; the last field is `environment` or empty. The final
+# newline is optional; any other control byte, including a CR, refuses. Parses
+# bytes before the shell can drop NULs or trailing newlines; paths are literal,
+# not shell expressions. Returns 0 on success, 3 when the
 # file does not exist, 4 when it cannot be inspected (one error already
 # printed), 5 when it is not a readable regular file, and 6 when its contents
 # are not a valid declaration. Callers own the message for each refusal.
@@ -105,10 +110,10 @@ fm_worker_account_read() {
     my $body = do { local $/; <$fh> } // "";
     my ($root, $provider, $env) = ("", "", "");
     if ($harness eq "claude") {
-      $body =~ /\A(ordinary|\/[^\x00-\x1f\x7f]*)\n(?:(environment)\n)?\z/ or exit 6;
+      $body =~ /\A(ordinary|\/[^\x00-\x1f\x7f]*)(?:\n(environment))?\n?\z/ or exit 6;
       ($root, $env) = ($1, $2 // "");
     } elsif ($harness eq "pi" || $harness eq "pi-signed") {
-      $body =~ /\A(ordinary|\/[^\x00-\x1f\x7f]*)\n([A-Za-z0-9][A-Za-z0-9._-]*)\n(?:(environment)\n)?\z/ or exit 6;
+      $body =~ /\A(ordinary|\/[^\x00-\x1f\x7f]*)\n([A-Za-z0-9][A-Za-z0-9._-]*)(?:\n(environment))?\n?\z/ or exit 6;
       ($root, $provider, $env) = ($1, $2, $3 // "");
     } else {
       exit 6;
@@ -131,14 +136,14 @@ fm_worker_account_pi_provider() {
   esac
 }
 
-# fm_worker_account_raw_model <raw launch command>
-# Prints the value of the --model flag embedded in a raw launch command, or
-# nothing. A raw command is passed through verbatim, so fm-spawn's own --model
-# does not reach the agent and only this value says which account a raw Pi
-# launch would spend. Model ids carry no spaces, so word splitting is enough;
-# one layer of shell quoting around the value is removed.
-fm_worker_account_raw_model() {
-  local word next=0 value=
+# fm_worker_account_raw_flag <raw launch command> <flag>
+# Prints the value of <flag> (--model or --provider) embedded in a raw launch
+# command, or nothing. A raw command is passed through verbatim, so fm-spawn's
+# own flags do not reach the agent and only these values say which account a
+# raw Pi launch would spend. Model and provider ids carry no spaces, so word
+# splitting is enough; one layer of shell quoting around the value is removed.
+fm_worker_account_raw_flag() {
+  local flag=$2 word next=0 value=
   # ponytail: O(n) word split is enough because model ids carry no spaces; a
   # quoted argv parser is the upgrade if a raw command ever needs one.
   for word in $1; do
@@ -147,9 +152,9 @@ fm_worker_account_raw_model() {
       break
     fi
     case "$word" in
-    --model) next=1 ;;
-    --model=*)
-      value=${word#--model=}
+    "$flag") next=1 ;;
+    "$flag"=*)
+      value=${word#"$flag"=}
       break
       ;;
     esac
@@ -204,9 +209,9 @@ fm_worker_account_resolve() {
     ;;
   *)
     if [ "$runner" = Pi ]; then
-      echo "error: config/$file must contain an ordinary-or-absolute root on line 1, the provider this home may spend on line 2, and optionally 'environment' on line 3: $cfg" >&2
+      echo "error: config/$file must contain an ordinary-or-absolute root on line 1, the provider this home may spend on line 2, and optionally 'environment' on line 3, LF-separated with no other control characters: $cfg" >&2
     else
-      echo "error: config/$file must contain 'ordinary' or one absolute path on line 1, and optionally 'environment' on line 2: $cfg" >&2
+      echo "error: config/$file must contain 'ordinary' or one absolute path on line 1, and optionally 'environment' on line 2, LF-separated with no other control characters: $cfg" >&2
     fi
     return 1
     ;;
@@ -238,6 +243,19 @@ fm_worker_account_pi_guard() {
     return 1
   fi
   return 0
+}
+
+# fm_worker_account_pi_raw_provider <declared-provider> <raw launch command>
+# Returns 0 only when a raw Pi command passes --provider <declared-provider>.
+# Otherwise prints one error and returns 1: Firstmate cannot add the flag to a
+# command it launches verbatim, and without it Pi may resolve --model to an
+# identical id under another provider.
+fm_worker_account_pi_raw_provider() {
+  local declared=$1 provider
+  provider=$(fm_worker_account_raw_flag "$2" --provider)
+  [ "$provider" != "$declared" ] || return 0
+  echo "error: a raw Pi launch command must pass --provider $declared (config/pi-account); it passes '${provider:-none}', and without the declared provider Pi may resolve --model to an identical id under another provider" >&2
+  return 1
 }
 
 # fm_worker_account_pi_model_listed <root> <executable> <provider> <model> <clean-env...>
@@ -327,9 +345,9 @@ fm_worker_account_preflight() {
 # fm_worker_account_select <harness> <config-dir> <home> <model> <executable>
 # The whole launch-time decision: resolves the home's declaration, holds a Pi
 # launch to the declared provider, and runs the preflight unless the home
-# declared environment credentials. Prints "root<TAB>environment" for a runner
-# with a declaration and nothing for any other runner; on refusal prints one
-# error and returns 1. bin/fm-control.sh runs it before a relaunch stops the
+# declared environment credentials. Prints "root<TAB>provider<TAB>environment"
+# for a runner with a declaration and nothing for any other runner; on refusal
+# prints one error and returns 1. bin/fm-control.sh runs it before a relaunch stops the
 # live agent, and bin/fm-spawn.sh before any endpoint exists.
 fm_worker_account_select() {
   local harness=$1 config=$2 home=$3 model=$4 executable=$5 selection root rest
@@ -346,7 +364,7 @@ fm_worker_account_select() {
   if [ -z "${rest#*$'\t'}" ]; then
     fm_worker_account_preflight "$harness" "$root" "$executable" "$model" || return 1
   fi
-  printf '%s\t%s\n' "$root" "${rest#*$'\t'}"
+  printf '%s\t%s\n' "$root" "$rest"
 }
 
 # fm_worker_account_claude_env <environment>
