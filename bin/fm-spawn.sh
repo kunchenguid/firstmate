@@ -1950,7 +1950,7 @@ launch_template() {
   # FM_AGY_TURNEND_TOKEN, exported below and inherited by the hook child.
   # FM_TASK_ID rides along as the human-readable key for the same session.
   # Stop does NOT fire on a manual interrupt and agy has no session-end event,
-  # so bin/fm-control.sh closes the record itself on interrupt and the
+  # so firstmate closes the record itself on both interrupt planes and the
   # rendered-tail fallback in bin/fm-busy-lib.sh is retained for every window
   # in which no record exists.
   agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __AGYTOKEN____AGYBIN__ --prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)" __MODELFLAG____EFFORTFLAG__--dangerously-skip-permissions' ;;
