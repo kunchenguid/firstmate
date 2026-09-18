@@ -247,6 +247,21 @@ Default pattern:
 - material accumulated spend in a band the account treats as "proven enough"
 - recent window still clearing the approve economics (for example last 3 consecutive complete days)
 - scale = budget raise on the set where the unit already delivers, not blind duplication into a new structure
+- step size default: **at most ~30% budget increase per step** — reassess before stacking another raise
+- when cutting a losing unit's budget instead of pausing it outright, default cut is **about 30–50%**
+
+`PAUSE` and any `SCALE_*` decision require both **constancy** (the signal held across the window, not one lucky/unlucky day) and **performance** (the metrics actually clear/miss the gate) on **paired 3D and 7D windows** — never decide from ROAS or MC alone, and never from a single window in isolation. Always read CPA together with margin (MC/MC%) and ROAS; CPA alone can look fine while margin erodes, and vice versa.
+
+New (not-yet-approved) ads get looser, pre-defined pause thresholds so they have room to clear the initial validation window (see 6.1–6.2). Matured/approved ads need stricter constancy and performance evidence before a pause — see 6.8.
+
+#### 3D × 7D performance matrix (default actions)
+
+| 3D read | 7D read | Default action |
+|---|---|---|
+| Good | Good | Constancy confirmed — proceed with `SCALE_*` per the step-size default above |
+| Good | Bad | Recent bounce inside a weak lifetime — hold or gentle probe; do not scale off 3D alone |
+| Bad | Good | Likely noise or a short-lived external dip inside a proven unit — hold, or a small gentle scale if 7D is strongly clear; do not cut on 3D alone |
+| Bad | Bad | Sustained underperformance — hard cut or `PAUSE` per 6.8 |
 
 ### 6.6 Post-change observation window
 
