@@ -126,7 +126,12 @@ test_stale_pane_transient_persistent_resume() {
   fakebin="$dir/fakebin"
   win="sess:fm-stale-w2"
   key=$(printf '%s' "stale-w2" | tr ':/.' '___')
+  make_fake_crew_state "$fakebin" >/dev/null
+  fm_write_meta "$state/stale-w2.meta" "window=$win" "worktree=$dir/wt" "kind=ship" "harness=pi"
   printf 'working: compiling\n' > "$state/stale-w2.status"
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_CREW_STATE_BIN FM_FAKE_CREW_STATE
 
   # Transient: first stale observation self-handles and records a marker.
   stale_marker_record "$win" "$state"

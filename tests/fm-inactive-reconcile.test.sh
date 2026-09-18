@@ -942,13 +942,13 @@ SH
 }
 
 test_automatic_teardown_refusal_preserves_task() {
-  local attempt
+  local _
   make_world automatic-teardown-refused
   write_child "$MAIN" child 'done: green'
   awk '{ sub(/^kind=ship$/, "kind=scout"); print }' "$MAIN/state/child.meta" > "$MAIN/state/child.meta.tmp"
   mv "$MAIN/state/child.meta.tmp" "$MAIN/state/child.meta"
   age "$MAIN/state/child.meta"
-  for attempt in 1 2; do
+  for _ in 1 2; do
     FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup > "$WORLD/reconcile.out" 2>&1
     grep -Fq 'scout task child has no report' "$WORLD/reconcile.out" || fail "standard scout safety check did not refuse cleanup"
     [ -f "$MAIN/state/child.meta" ] && [ -f "$MAIN/state/child.status" ] || fail "teardown refusal removed task state"
@@ -960,11 +960,11 @@ test_automatic_teardown_refusal_preserves_task() {
 }
 
 test_failed_presentation_preserves_task_until_retry() {
-  local attempt
+  local _
   make_world presentation-failure
   write_child "$MAIN" child 'done: green'
   mkdir "$MAIN/state/.wake-queue"
-  for attempt in 1 2; do
+  for _ in 1 2; do
     if FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup > "$WORLD/reconcile.out" 2>&1; then
       fail "failed presentation append was reported as successful"
     fi

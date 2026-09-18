@@ -809,6 +809,7 @@ make_integration_base_case() {  # <name> <id> [<integration-branch>]
 }
 
 read_integration_case() {
+  # shellcheck disable=SC2034 # LOCAL_ONLY_TIP is part of the shared record shape
   IFS='|' read -r CASE_DIR HOME_DIR PROJECT_DIR POOL_DIR FAKEBIN_DIR INITIAL_SHA INTEGRATION_BRANCH INTEGRATION_TIP DEFAULT_TIP LOCAL_ONLY_TIP <<EOF
 $1
 EOF

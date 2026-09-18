@@ -223,6 +223,7 @@ EOF
 
 ## Firstmate spec
 $PROMOTION_SHIP_SPEC
+
 EOF
   promote_delivery_contract
 } > "$TMP" || { echo "error: could not render ship instructions for mode=$MODE" >&2; exit 1; }

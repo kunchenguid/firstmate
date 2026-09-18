@@ -234,6 +234,7 @@ test_presentation_policy() {
   cat >"$TMP_ROOT/policy.mjs" <<JS
 import { pathToFileURL } from "node:url";
 const policy = await import(pathToFileURL(${MOD@Q} + "/lib/fm-calm-presentation.ts").href);
+const piPreservation = await import(pathToFileURL(${ROOT@Q} + "/.pi/extensions/lib/fm-calm-preservation.ts").href);
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 const plugin = "/repo/.claude/mods/firstmate-calm";
 check(policy.calmPreferencePath({}, plugin) === "/repo/config/calm", "plugin-root fallback");
@@ -252,7 +253,18 @@ const shortNote = "Checking briefly.";
 const multiLineReply = "The result is substantive.\\nHere is the context needed to continue.";
 const atThresholdReply = "x".repeat(240);
 const belowThresholdNote = "x".repeat(239);
-check(policy.CALM_PRESERVE_MIN_CHARS === 240, "preservation threshold");
+check(policy.CALM_PRESERVE_MIN_CHARS === 240, "Claude preservation threshold");
+check(piPreservation.CALM_PRESERVE_MIN_CHARS === policy.CALM_PRESERVE_MIN_CHARS, "Pi and Claude preservation thresholds");
+for (const [text, expectedPreserved, label] of [
+  [belowThresholdNote, false, "239-character single line"],
+  [atThresholdReply, true, "240-character single line"],
+  [multiLineReply, true, "multi-line text"],
+]) {
+  const claudePreserved = !policy.stepTextIsWorkingNote({ stopReason: "tool_use", toolUses: [] }, text);
+  const piPreserved = piPreservation.calmTextIsSubstantive(text);
+  check(claudePreserved === expectedPreserved, "Claude did not classify " + label + " as expected");
+  check(piPreserved === expectedPreserved, "Pi did not classify " + label + " as expected");
+}
 check(policy.stepTextIsWorkingNote({ stopReason: "tool_use", toolUses: [] }, shortNote) === true, "short single-line tool_use note");
 check(policy.stepTextIsWorkingNote({ stopReason: "tool_use", toolUses: [] }, multiLineReply) === false, "multi-line tool_use reply");
 check(policy.stepTextIsWorkingNote({ stopReason: "tool_use", toolUses: [] }, atThresholdReply) === false, "threshold-length tool_use reply");
@@ -296,7 +308,7 @@ console.log("policy-ok");
 JS
   out=$(run_node "$TMP_ROOT/policy.mjs" 2>&1) || fail "presentation policy: $out"
   assert_contains "$out" "policy-ok" "the policy check did not complete"
-  pass "the Calm policy resolves the shared preference exactly as Pi does, reads on, max, and off as Pi does, and classifies working notes by stop reason, tool use, and restored transcript shape"
+  pass "the Calm policy resolves the shared preference exactly as Pi does, reads on, max, and off as Pi does, and shares Pi's 240-character-or-newline preservation behavior while classifying working notes by stop reason, tool use, and restored transcript shape"
 }
 
 # The classifier parity corpus: envelopes the shell owner encodes itself, its legacy
