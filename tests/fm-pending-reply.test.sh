@@ -494,8 +494,10 @@ test_foreign_blocker_is_not_selected_as_escalation() {
 }
 
 # Eight concurrent resolvers of one escalated record must append exactly one
-# keyed close (github.com/kunchenguid/firstmate/issues/3769). Repeated so an
-# intermittent double-append cannot hide behind one lucky schedule.
+# keyed close (github.com/kunchenguid/firstmate/issues/3769). Each resolver
+# unsets BASHPID so every Bash takes fm_current_pid's stock Bash 3.2 fallback,
+# where sibling subshells once shared $$ as lock owner and both closed. Repeated
+# so an intermittent double-append cannot hide behind one lucky schedule.
 test_concurrent_resolution_closes_escalation_once() {
   local trial home state corr rec
   for trial in 1 2 3 4 5; do
