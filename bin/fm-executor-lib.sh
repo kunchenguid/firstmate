@@ -15,7 +15,10 @@
 #   1. Process exit. bin/fm-spawn.sh appends `; printf '%s\n' "$?" >
 #      state/<id>.executor-exit` to the launch line, so the PANE SHELL - never
 #      the model - records that the one-shot command returned, on every
-#      adapter, raw command, and spawn-capable backend alike. Until that marker
+#      adapter, raw command, and spawn-capable backend alike. An operator-
+#      ordered stop ends the incarnation just as terminally, so
+#      bin/fm-control.sh's `exit` writes the same marker (`operator-exit`)
+#      once it has proved the process stopped. Until that marker
 #      exists the process is running, except that an endpoint the backend
 #      reports authoritatively missing also reads as exited (nothing is left
 #      to finish the work). A pane whose foreground is a bare shell but whose
@@ -128,6 +131,38 @@ fm_executor_exit_marker_path() {  # <state> <id>
 
 fm_executor_notified_path() {  # <state> <id>
   printf '%s/%s.executor-notified' "$1" "$2"
+}
+
+# Record an operator-initiated end of the incarnation. The pane shell writes
+# this marker with the one-shot's exit status when the command returns on its
+# own; bin/fm-control.sh's `exit` writes it here INSTEAD, and only after it has
+# proved the process stopped, so a Ctrl-C that killed the one-shot before the
+# pane shell reached its half of the launch line still leaves a terminal
+# record, and the marker says which of the two ends happened rather than
+# implying the command completed. The two writers cannot race - control writes
+# only over a process it has already seen dead - and the write is a rename over
+# a private temporary anyway, so no reader ever sees a partial marker. An
+# existing marker is left exactly as the pane shell wrote it.
+fm_executor_exit_marker_record_operator() {  # <state> <id>
+  local state=$1 id=$2 device marker tmp
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  device=$(fm_pr_file_device "$state") || return 1
+  marker=$(fm_executor_exit_marker_path "$state" "$id")
+  if [ -f "$marker" ] && [ ! -L "$marker" ]; then
+    return 0
+  fi
+  fm_pr_regular_destination_on_device_or_absent "$marker" "$device" || return 1
+  umask 077
+  tmp=$(mktemp "$state/.fm-executor-exit.XXXXXX") || return 1
+  if ! printf '%s\n' operator-exit > "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! fm_pr_regular_destination_on_device_or_absent "$marker" "$device" \
+    || ! mv -f -- "$tmp" "$marker"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  [ -f "$marker" ] && [ ! -L "$marker" ]
 }
 
 # Publish the byte-static poll as this task's slow check. A previous
