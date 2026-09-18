@@ -809,7 +809,7 @@ test_kimi_stuck_trust_dialog_fails_before_delivery() {
   [ "$(wc -l < "$CASE_DIR/trust-enter.log" | tr -d ' ')" -gt 1 ] \
     || fail "stuck Kimi trust dialog was not re-answered while it stayed on screen"
   [ ! -s "$CASE_DIR/pointer.log" ] || fail "Kimi pointer was sent through a stuck trust dialog"
-  assert_grep 'failed: kimi trust dialog did not clear' "$HOME_DIR/state/$id.status" \
+  assert_grep 'failed: kimi trust dialog did not clear' <(sed -E 's/ \[at=[0-9]+\]//' "$HOME_DIR/state/$id.status") \
     "stuck Kimi trust dialog did not leave a supervisor-visible failure"
   pass "fm-spawn: a Kimi trust dialog must visibly clear before brief delivery"
 }
