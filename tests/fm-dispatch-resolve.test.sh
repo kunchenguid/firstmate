@@ -230,8 +230,8 @@ assert_contains "$out" '  note: 1 eligible candidate(s) unranked (kimi)' "clear 
 assert_not_contains "$out" '--effort' "cursor profile without effort emits no --effort"
 argv=$(cat "$LOG/argv")
 assert_not_contains "$argv" "$KEY" "the key never appears on curl argv"
-assert_contains "$argv" 'https://api.typesafe.ai/v1/systemone' "the request uses the fixed typesafe.ai endpoint"
-assert_contains "$argv" $'--max-time\n5' "the request uses the fixed five-second timeout"
+assert_contains "$argv" 'https://api.typesafe.ai/v1/systemone' "the request uses the default typesafe.ai endpoint"
+assert_contains "$argv" $'--max-time\n25' "the request uses the default 25-second timeout"
 assert_contains "$argv" '@/dev/fd/3' "the header is read from a file descriptor"
 assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "curl receives the bearer header on fd 3"
 assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "the API key is absent from every child environment"
@@ -655,7 +655,21 @@ reset_log
 TYPESAFE_API_KEY=$KEY OPENROUTER_API_KEY=$OR_KEY JEV_ROUTE=openrouter run code out err "$BRIEF" --project pager
 assert_contains "$(cat "$LOG/argv")" 'https://openrouter.ai/api/alpha/decisions' "JEV_ROUTE=openrouter wins over a TypeSafe key"
 assert_equals "Authorization: Bearer $OR_KEY" "$(cat "$LOG/header")" "JEV_ROUTE=openrouter uses the OpenRouter bearer"
-pass "OpenRouter path is covered by fake curl"
+reset_log
+TYPESAFE_API_KEY=$KEY JEV_URL='https://openrouter.ai/api/alpha/decisions' JEV_TIMEOUT=9 \
+  run code out err "$BRIEF" --project pager
+assert_contains "$(cat "$LOG/argv")" 'https://openrouter.ai/api/alpha/decisions' "JEV_URL is used verbatim on the resolver"
+assert_not_contains "$(cat "$LOG/argv")" 'https://openrouter.ai/api/alpha/decisions/v1/systemone' "JEV_URL does not get /v1/systemone appended"
+assert_contains "$(cat "$LOG/argv")" $'--max-time\n9' "JEV_TIMEOUT reaches curl"
+reset_log
+printf '%s\n' "TYPESAFE_API_KEY=$KEY" 'JEV_URL=https://file.example/jev' 'JEV_MODEL=from-file' 'JEV_TIMEOUT=11' > "$HOME_DIR/.env"
+run code out err "$BRIEF" --project pager
+rm -f "$HOME_DIR/.env"
+assert_contains "$(cat "$LOG/argv")" 'https://file.example/jev' "resolver reads JEV_URL from .env"
+assert_equals 'from-file' "$(jq -r .model <"$LOG/body")" "resolver reads JEV_MODEL from .env"
+assert_contains "$(cat "$LOG/argv")" $'--max-time\n11' "resolver reads JEV_TIMEOUT from .env"
+unset JEV_URL JEV_TIMEOUT JEV_MODEL JEV_BASE JEV_ROUTE
+pass "OpenRouter path and URL/model/timeout overrides are covered by fake curl"
 
 # --- compact state default for OpenRouter; explicit compact drops later sections ---
 LONG_BRIEF="$TMP_ROOT/long-brief.md"

@@ -49,6 +49,8 @@
 #
 # Environment:
 #   TYPESAFE_API_KEY and/or OPENROUTER_API_KEY opt the resolver in.
+#   JEV_ROUTE, JEV_MODEL, JEV_URL, JEV_BASE, and JEV_TIMEOUT follow
+#   docs/configuration.md "Typed dispatch resolution" (env then .env).
 #   JEV_ROUTE=openrouter selects OpenRouter even when a TypeSafe key is also
 #   present. FM_JEV_DISPATCH_SHADOW=1 or config/jev-dispatch-shadow logs the
 #   Jev pick to state/jev-dispatch-shadow.jsonl and does not add spawn
@@ -112,7 +114,9 @@ fm_dispatch_shadow_on() {
 }
 
 fm_dispatch_route() {
-  case "${JEV_ROUTE:-}" in
+  local route
+  route=$(_fm_jev_cfg JEV_ROUTE)
+  case "$route" in
     openrouter) printf 'openrouter' ;;
     typesafe) printf 'typesafe' ;;
     '')
@@ -122,7 +126,7 @@ fm_dispatch_route() {
         printf 'openrouter'
       fi
       ;;
-    *) printf '%s' "${JEV_ROUTE}" ;;
+    *) printf '%s' "$route" ;;
   esac
 }
 

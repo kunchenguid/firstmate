@@ -14,9 +14,14 @@
 #     OPENROUTER_API_KEY, model typesafe/jev-1.13 unless JEV_MODEL is set.
 #   JEV_ROUTE=openrouter selects OpenRouter even when a TypeSafe key is also
 #   present. JEV_ROUTE=typesafe requires a TypeSafe key. With JEV_ROUTE unset,
-#   a TypeSafe key wins; otherwise a present OpenRouter key is used. Each key
-#   is taken from the process environment first, else from $FM_HOME/.env via
-#   fmx_env_get (bin/fm-env-lib.sh); the environment wins.
+#   a TypeSafe key wins; otherwise a present OpenRouter key is used. Each key,
+#   JEV_ROUTE, JEV_MODEL, JEV_TIMEOUT, JEV_URL, and JEV_BASE is taken from the
+#   process environment first, else from $FM_HOME/.env via fmx_env_get
+#   (bin/fm-env-lib.sh); the environment wins.
+#   JEV_URL is a complete POST URL used verbatim (nothing is appended).
+#   JEV_BASE applies only on the TypeSafe route when JEV_URL is unset: the
+#   default /v1/systemone path is appended to that origin. OpenRouter never
+#   receives /v1/systemone from JEV_BASE.
 #
 # Key handling matches bin/fm-dispatch-resolve.sh: the chosen secret lives in a
 # function-local non-exported variable and reaches curl only as an
@@ -50,9 +55,10 @@
 #     (exit 1) when the raw state exceeds JEV_STATE_MAX_BYTES (default 8192).
 #
 # Environment (library-specific):
-#   TYPESAFE_API_KEY, OPENROUTER_API_KEY, JEV_ROUTE, JEV_MODEL, JEV_TIMEOUT
-#   (positive integer seconds, default 5), JEV_CONFIDENCE_FLOOR,
-#   JEV_STATE_MAX_BYTES, FM_HOME.
+#   TYPESAFE_API_KEY, OPENROUTER_API_KEY, JEV_ROUTE, JEV_MODEL, JEV_URL,
+#   JEV_BASE, JEV_TIMEOUT (positive integer seconds, default 25),
+#   JEV_CONFIDENCE_FLOOR, JEV_STATE_MAX_BYTES, FM_HOME.
+#   docs/configuration.md "Typed dispatch resolution" owns the override names.
 #
 # bin/fm-dispatch-resolve.sh uses this library for the HTTP call.
 
@@ -72,13 +78,15 @@ _FM_JEV_ROOT="$(cd "$_FM_JEV_LIB_DIR/.." && pwd)"
 # shellcheck source=bin/fm-env-lib.sh
 . "$_FM_JEV_LIB_DIR/fm-env-lib.sh"
 
-FM_JEV_TYPESAFE_URL='https://api.typesafe.ai/v1/systemone'
+FM_JEV_TYPESAFE_BASE='https://api.typesafe.ai'
+FM_JEV_TYPESAFE_PATH='/v1/systemone'
+FM_JEV_TYPESAFE_URL="${FM_JEV_TYPESAFE_BASE}${FM_JEV_TYPESAFE_PATH}"
 FM_JEV_OPENROUTER_URL='https://openrouter.ai/api/alpha/decisions'
 FM_JEV_TYPESAFE_MODEL='jev-latest'
 FM_JEV_OPENROUTER_MODEL='typesafe/jev-1.13'
 FM_JEV_CONFIDENCE_FLOOR=0.7
 FM_JEV_STATE_MAX_BYTES=8192
-FM_JEV_TIMEOUT=5
+FM_JEV_TIMEOUT=25
 
 _fm_jev_err() {
   printf 'jev: %s\n' "$1" >&2
@@ -108,8 +116,20 @@ _fm_jev_home() {
   printf '%s' "${FM_HOME:-$_FM_JEV_ROOT}"
 }
 
+# Non-secret JEV_* value: process environment wins, else $FM_HOME/.env.
+_fm_jev_cfg() {
+  local key=$1 val
+  val=${!key-}
+  if [ -z "$val" ]; then
+    val=$(fmx_env_get "$key" "$(_fm_jev_home)/.env")
+  fi
+  printf '%s' "$val"
+}
+
 _fm_jev_timeout() {
-  local timeout=${JEV_TIMEOUT:-$FM_JEV_TIMEOUT}
+  local timeout
+  timeout=$(_fm_jev_cfg JEV_TIMEOUT)
+  [ -n "$timeout" ] || timeout=$FM_JEV_TIMEOUT
   case "$timeout" in
     ''|*[!0-9]*|0) printf '%s' "$FM_JEV_TIMEOUT" ;;
     *) printf '%s' "$timeout" ;;
@@ -137,7 +157,7 @@ _fm_jev_resolve_route() {
   if [ -z "$openrouter_key" ]; then
     openrouter_key=$(fmx_env_get OPENROUTER_API_KEY "$home/.env")
   fi
-  route=${JEV_ROUTE:-}
+  route=$(_fm_jev_cfg JEV_ROUTE)
   case "$route" in
     openrouter)
       if [ -z "$openrouter_key" ]; then
@@ -170,12 +190,25 @@ _fm_jev_resolve_route() {
   esac
   if [ "$_fm_jev_route" = openrouter ]; then
     _fm_jev_key=$openrouter_key
-    _fm_jev_url=$FM_JEV_OPENROUTER_URL
-    _fm_jev_model=${JEV_MODEL:-$FM_JEV_OPENROUTER_MODEL}
+    _fm_jev_model=$(_fm_jev_cfg JEV_MODEL)
+    [ -n "$_fm_jev_model" ] || _fm_jev_model=$FM_JEV_OPENROUTER_MODEL
   else
     _fm_jev_key=$typesafe_key
-    _fm_jev_url=$FM_JEV_TYPESAFE_URL
-    _fm_jev_model=${JEV_MODEL:-$FM_JEV_TYPESAFE_MODEL}
+    _fm_jev_model=$(_fm_jev_cfg JEV_MODEL)
+    [ -n "$_fm_jev_model" ] || _fm_jev_model=$FM_JEV_TYPESAFE_MODEL
+  fi
+  _fm_jev_url=$(_fm_jev_cfg JEV_URL)
+  if [ -z "$_fm_jev_url" ]; then
+    if [ "$_fm_jev_route" = openrouter ]; then
+      _fm_jev_url=$FM_JEV_OPENROUTER_URL
+    else
+      _fm_jev_url=$(_fm_jev_cfg JEV_BASE)
+      if [ -n "$_fm_jev_url" ]; then
+        _fm_jev_url=${_fm_jev_url%/}$FM_JEV_TYPESAFE_PATH
+      else
+        _fm_jev_url=$FM_JEV_TYPESAFE_URL
+      fi
+    fi
   fi
 }
 

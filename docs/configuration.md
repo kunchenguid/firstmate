@@ -531,6 +531,15 @@ bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name>        # TOON blo
 Firstmate invokes the resolve path directly after writing the brief, without a preflight; the absent-key off line is handled exactly like every other non-clear outcome.
 When on and at least one rule exists, the tool sends the project name plus either the whole brief or a compact 400-800 character intent summary as state and asks one Choice question whose options are every rule's `when` plus the fixed neutral option for no matching rule; the model never sees quota, catalogs, `why`, `use`, approvals, or credentials.
 The HTTP call goes through [`bin/fm-jev-lib.sh`](../bin/fm-jev-lib.sh): TypeSafe `/v1/systemone` when a TypeSafe key is present, or OpenRouter `/api/alpha/decisions` when `OPENROUTER_API_KEY` is set and `TYPESAFE_API_KEY` is not, or when `JEV_ROUTE=openrouter`.
+This section is the single owner of the Jev HTTP override names: each is read from the process environment first, else from `$FM_HOME/.env` via `fmx_env_get`, and the environment wins.
+`JEV_ROUTE` is `openrouter` or `typesafe`.
+`JEV_MODEL` replaces the route default (`jev-latest` on TypeSafe, `typesafe/jev-1.13` on OpenRouter).
+`JEV_TIMEOUT` is a positive integer second budget (default 25).
+`JEV_URL` is a complete POST URL used verbatim; nothing is appended to it, so an OpenRouter URL must not pick up `/v1/systemone`.
+`JEV_BASE` is a TypeSafe-shaped origin used only on the TypeSafe route when `JEV_URL` is unset; the default `/v1/systemone` path is appended to it.
+OpenRouter never receives that path from `JEV_BASE`.
+Every profile whose harness lacks one authoritative quota-axi provider family must declare `provider` on the live rules file; the resolver refuses that file before any request (see "Crew dispatch profiles" above).
+Pi profiles on `xai/grok-4.6` declare `provider: grok` because quota-axi families are never `xai`.
 `FM_JEV_DISPATCH_COMPACT=1` sends the compact intent summary instead of the whole brief, and that compact form is the default on the OpenRouter route.
 `FM_JEV_DISPATCH_EXTRA=1` adds log-only Choice questions for home `{main,agency,lay,frontend,zimmer}` (criteria from `data/secondmates.md` when readable) and deliverable `{ship,scout,neither}`; those answers are never auto-routing authority.
 Presence of gitignored `config/jev-dispatch-shadow`, or `FM_JEV_DISPATCH_SHADOW=1`, logs the Jev pick next to the resolved spawn axes into `state/jev-dispatch-shadow.jsonl` and does not add spawn authority beyond today's optional `clear` profile line.
@@ -552,7 +561,7 @@ Firstmate passes its profile line unless it states a reason to override, such as
 
 The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` and `OPENROUTER_API_KEY` before launching child processes, so the secret is absent from child environments.
 Keys reach `curl` only through `bin/fm-jev-lib.sh` as an Authorization header read from a file descriptor, never on argv, and nothing prints, logs, or writes them.
-The confidence floor stays 0.6 for the live profile path; route, model, and timeout follow the Jev caller library, with TypeSafe defaulting to `jev-latest` and OpenRouter to `typesafe/jev-1.13`.
+The confidence floor stays 0.6 for the live profile path; route, URL, model, and timeout follow the override names above, with TypeSafe defaulting to `jev-latest` at `https://api.typesafe.ai/v1/systemone` and OpenRouter to `typesafe/jev-1.13` at `https://openrouter.ai/api/alpha/decisions`.
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
 ## Jev caller library (.env TYPESAFE_API_KEY / OPENROUTER_API_KEY)
@@ -560,7 +569,7 @@ The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`]
 Shadow features that ask TypeSafe Jev share [`bin/fm-jev-lib.sh`](../bin/fm-jev-lib.sh) instead of each rolling a client.
 It is a sourceable library, not a user CLI; the script header owns route selection, models, key handling, helpers, and exact failure codes.
 Set `TYPESAFE_API_KEY` for the TypeSafe route, or `OPENROUTER_API_KEY` for OpenRouter when that is the only key or when `JEV_ROUTE=openrouter`.
-Typed dispatch resolution above uses this library for the HTTP call.
+Typed dispatch resolution above uses this library for the HTTP call and owns the `JEV_ROUTE`, `JEV_MODEL`, `JEV_URL`, `JEV_BASE`, and `JEV_TIMEOUT` names.
 
 ## Jev remainder tool-gate (FM_JEV_TOOL_GATE)
 
@@ -1179,8 +1188,11 @@ FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
 TYPESAFE_API_KEY=       # typed dispatch resolution opt-in, from the environment or .env; absent with OPENROUTER_API_KEY also absent means bin/fm-dispatch-resolve.sh is off (docs/configuration.md "Typed dispatch resolution"); also the TypeSafe route key for bin/fm-jev-lib.sh (docs/configuration.md "Jev caller library")
 OPENROUTER_API_KEY=     # optional OpenRouter Jev route for typed dispatch and bin/fm-jev-lib.sh; used when it is the only key or when JEV_ROUTE=openrouter (docs/configuration.md "Typed dispatch resolution" and "Jev caller library")
-JEV_ROUTE=              # optional; `openrouter` or `typesafe` selects the Jev route in bin/fm-jev-lib.sh
-JEV_MODEL=              # optional Jev model override for bin/fm-jev-lib.sh
+JEV_ROUTE=              # optional; `openrouter` or `typesafe` (docs/configuration.md "Typed dispatch resolution")
+JEV_MODEL=              # optional Jev model override (same section)
+JEV_URL=                # optional complete Jev POST URL, used verbatim (same section)
+JEV_BASE=               # optional TypeSafe origin; `/v1/systemone` is appended when JEV_URL is unset (same section)
+JEV_TIMEOUT=25          # optional Jev HTTP timeout in seconds; default 25 (same section)
 FM_JEV_TOOL_GATE=shadow # remainder Jev tool-gate after arm-command policy; live needs this plus two opt-in files; hard-ship is a do-not (docs/configuration.md "Jev remainder tool-gate")
 FM_JEV_SKILL_SELECT=shadow # once-per-session skill suggestion; live needs this plus config/jev-skill-select-live and still does not inject skills (docs/configuration.md "Jev skill selector")
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900

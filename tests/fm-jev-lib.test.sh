@@ -13,8 +13,8 @@ set -u
 . "$ROOT/bin/fm-jev-lib.sh"
 
 unset TYPESAFE_API_KEY OPENROUTER_API_KEY TYPESAFE_API_KEY_PRIVATE \
-  OPENROUTER_API_KEY_PRIVATE JEV_ROUTE JEV_MODEL JEV_TIMEOUT \
-  JEV_CONFIDENCE_FLOOR JEV_STATE_MAX_BYTES
+  OPENROUTER_API_KEY_PRIVATE JEV_ROUTE JEV_MODEL JEV_TIMEOUT JEV_URL \
+  JEV_BASE JEV_CONFIDENCE_FLOOR JEV_STATE_MAX_BYTES
 
 TMP_ROOT=$(fm_test_tmproot fm-jev-lib)
 HOME_DIR="$TMP_ROOT/home"
@@ -91,7 +91,7 @@ run_decide() {
   printf -v "$__exit" '%s' "$_code"
   printf -v "$__out" '%s' "$_out"
   printf -v "$__err" '%s' "$(cat "$_errfile")"
-  unset FAKE_CURL_HTTP FAKE_CURL_FAIL JEV_MODEL JEV_ROUTE
+  unset FAKE_CURL_HTTP FAKE_CURL_FAIL JEV_MODEL JEV_ROUTE JEV_URL JEV_BASE JEV_TIMEOUT
 }
 
 test_cli_is_not_a_user_command() {
@@ -166,6 +166,88 @@ test_jev_model_override() {
   expect_code 0 "$code" "JEV_MODEL override decide succeeds"
   assert_contains "$(cat "$LOG/body")" '"model": "jev-custom"' "JEV_MODEL overrides the default"
   pass "JEV_MODEL overrides the route default"
+}
+
+test_jev_url_is_used_verbatim() {
+  local code out err argv
+  unset OPENROUTER_API_KEY JEV_ROUTE JEV_MODEL JEV_BASE
+  TYPESAFE_API_KEY=$TS_KEY JEV_URL='https://openrouter.ai/api/alpha/decisions' \
+    run_decide code out err
+  expect_code 0 "$code" "JEV_URL override decide succeeds"
+  argv=$(cat "$LOG/argv")
+  assert_contains "$argv" 'https://openrouter.ai/api/alpha/decisions' "JEV_URL is the POST URL"
+  assert_not_contains "$argv" 'https://openrouter.ai/api/alpha/decisions/v1/systemone' "JEV_URL does not get /v1/systemone appended"
+  assert_not_contains "$argv" 'https://api.typesafe.ai/v1/systemone' "JEV_URL replaces the TypeSafe default"
+  pass "JEV_URL is a complete POST URL used verbatim"
+}
+
+test_jev_base_appends_typesafe_path() {
+  local code out err argv
+  unset OPENROUTER_API_KEY JEV_ROUTE JEV_MODEL JEV_URL
+  TYPESAFE_API_KEY=$TS_KEY JEV_BASE='https://jev.example' run_decide code out err
+  expect_code 0 "$code" "JEV_BASE override decide succeeds"
+  argv=$(cat "$LOG/argv")
+  assert_contains "$argv" 'https://jev.example/v1/systemone' "JEV_BASE gets /v1/systemone appended"
+  assert_not_contains "$argv" 'https://api.typesafe.ai/v1/systemone' "JEV_BASE replaces the TypeSafe origin"
+  pass "JEV_BASE keeps default path building from the origin"
+}
+
+test_jev_url_wins_over_jev_base() {
+  local code out err argv
+  unset OPENROUTER_API_KEY JEV_ROUTE JEV_MODEL
+  TYPESAFE_API_KEY=$TS_KEY JEV_BASE='https://jev.example' \
+    JEV_URL='https://gateway.example/jev' run_decide code out err
+  expect_code 0 "$code" "JEV_URL vs JEV_BASE decide succeeds"
+  argv=$(cat "$LOG/argv")
+  assert_contains "$argv" 'https://gateway.example/jev' "JEV_URL wins over JEV_BASE"
+  assert_not_contains "$argv" 'https://jev.example' "JEV_BASE is unused when JEV_URL is set"
+  pass "JEV_URL wins over JEV_BASE"
+}
+
+test_openrouter_route_ignores_jev_base() {
+  local code out err argv
+  TYPESAFE_API_KEY=$TS_KEY OPENROUTER_API_KEY=$OR_KEY JEV_ROUTE=openrouter \
+    JEV_BASE='https://openrouter.ai/api/alpha/decisions' run_decide code out err
+  expect_code 0 "$code" "OpenRouter plus JEV_BASE decide succeeds"
+  argv=$(cat "$LOG/argv")
+  assert_contains "$argv" 'https://openrouter.ai/api/alpha/decisions' "OpenRouter keeps its default URL"
+  assert_not_contains "$argv" '/v1/systemone' "OpenRouter does not receive /v1/systemone from JEV_BASE"
+  pass "OpenRouter ignores JEV_BASE so /v1/systemone is never appended"
+}
+
+test_jev_timeout_default_and_overrides() {
+  local code out err argv
+  unset OPENROUTER_API_KEY JEV_ROUTE JEV_MODEL JEV_URL JEV_BASE JEV_TIMEOUT
+  TYPESAFE_API_KEY=$TS_KEY run_decide code out err
+  expect_code 0 "$code" "default timeout decide succeeds"
+  argv=$(cat "$LOG/argv")
+  assert_contains "$argv" $'--max-time\n25' "default timeout is 25 seconds"
+  TYPESAFE_API_KEY=$TS_KEY JEV_TIMEOUT=9 run_decide code out err
+  argv=$(cat "$LOG/argv")
+  assert_contains "$argv" $'--max-time\n9' "JEV_TIMEOUT overrides the default"
+  pass "timeout defaults to 25s and JEV_TIMEOUT overrides it"
+}
+
+test_env_file_model_url_timeout_and_environment_wins() {
+  local code out err argv
+  unset TYPESAFE_API_KEY OPENROUTER_API_KEY JEV_ROUTE JEV_MODEL JEV_URL JEV_BASE JEV_TIMEOUT
+  printf '%s\n' "TYPESAFE_API_KEY=$TS_KEY" 'JEV_MODEL=from-file' \
+    'JEV_URL=https://file.example/jev' 'JEV_TIMEOUT=9' > "$HOME_DIR/.env"
+  run_decide code out err
+  expect_code 0 "$code" ".env override decide succeeds"
+  argv=$(cat "$LOG/argv")
+  assert_contains "$argv" 'https://file.example/jev' ".env JEV_URL is used verbatim"
+  assert_not_contains "$argv" '/v1/systemone' ".env JEV_URL does not get a path appended"
+  assert_contains "$(cat "$LOG/body")" '"model": "from-file"' ".env JEV_MODEL overrides the default"
+  assert_contains "$argv" $'--max-time\n9' ".env JEV_TIMEOUT overrides the default"
+  TYPESAFE_API_KEY=$TS_KEY JEV_MODEL=from-env JEV_URL='https://env.example/jev' \
+    JEV_TIMEOUT=11 run_decide code out err
+  rm -f "$HOME_DIR/.env"
+  argv=$(cat "$LOG/argv")
+  assert_contains "$argv" 'https://env.example/jev' "environment JEV_URL wins over .env"
+  assert_contains "$(cat "$LOG/body")" '"model": "from-env"' "environment JEV_MODEL wins over .env"
+  assert_contains "$argv" $'--max-time\n11' "environment JEV_TIMEOUT wins over .env"
+  pass ".env supplies URL, model, and timeout; the environment wins"
 }
 
 test_env_file_openrouter_key() {
@@ -330,6 +412,12 @@ test_typesafe_only_uses_typesafe_url
 test_typesafe_wins_when_both_keys_present
 test_jev_route_openrouter_overrides_typesafe_key
 test_jev_model_override
+test_jev_url_is_used_verbatim
+test_jev_base_appends_typesafe_path
+test_jev_url_wins_over_jev_base
+test_openrouter_route_ignores_jev_base
+test_jev_timeout_default_and_overrides
+test_env_file_model_url_timeout_and_environment_wins
 test_env_file_openrouter_key
 test_environment_key_wins_over_env_file
 test_missing_keys_do_not_call_curl
