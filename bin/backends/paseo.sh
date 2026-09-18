@@ -32,12 +32,11 @@
 # terminal NAME, and the recorded terminal id is validated against the live
 # inventory before every send.
 #
-# GUI-first, macOS-only: explicit selection (`--backend paseo`,
-# `FM_BACKEND=paseo`, config/backend) or runtime auto-detection when
-# firstmate itself is already running inside a Paseo-managed agent
-# environment (primary PASEO_AGENT_ID marker, with the documented
-# __CFBundleIdentifier=sh.paseo.desktop fallback), all inside
-# bin/fm-backend.sh's fm_backend_detect.
+# GUI-first, macOS-only, EXPLICIT-ONLY: `--backend paseo`, `FM_BACKEND=paseo`,
+# or config/backend. Never auto-detected: Paseo stamps PASEO_* markers and
+# the sh.paseo.desktop bundle id into every descendant process (a tmux server
+# started from a Paseo tab inherits them), so an inherited marker is not a
+# selection (docs/paseo-backend.md "Selection is explicit").
 #
 # Empirical findings from the live verification pass against the real Paseo
 # 0.8.0 CLI/daemon (docs/verification/runtime-backends.md#paseo owns the
@@ -271,14 +270,16 @@ fm_backend_paseo_workspace_label() {
   printf '%s' "${tag%-*}"
 }
 
-# fm_backend_paseo_workspace_ensure: the ONE shared workspace for <cwd>,
-# adopted when a live workspace already has this cwd and label (first match
-# wins, like herdr's label lookup; Paseo allows duplicates), created once
-# otherwise. Never creates or deletes a project: `workspace create --path`
-# reuses the project registered for <cwd> (finding #4). Echoes the
-# workspace id.
+# fm_backend_paseo_workspace_ensure: the ONE shared workspace for <cwd>.
+# Adopted, in order: the workspace firstmate itself is running in when a
+# Paseo tab exported PASEO_WORKSPACE_ID and that live workspace's cwd is the
+# project (herdr's launcher-identity rule, minus the pane ancestry Paseo
+# does not expose); else a live workspace with this cwd and label (first
+# match wins; Paseo allows duplicates); else created once. Never creates or
+# deletes a project: `workspace create --path` reuses the project registered
+# for <cwd> (finding #4). Echoes the workspace id.
 fm_backend_paseo_workspace_ensure() { # <cwd>
-  local cwd=$1 logical real label out wsid
+  local cwd=$1 logical real label list out wsid
   # Paseo reports the workspace cwd normalized (no doubled slashes) but NOT
   # symlink-resolved (verified live: a $TMPDIR/ path came back without the
   # doubled slash and without the /private prefix), so match the raw path,
@@ -286,7 +287,14 @@ fm_backend_paseo_workspace_ensure() { # <cwd>
   logical=$(cd "$cwd" 2>/dev/null && pwd) || logical=$cwd
   real=$(cd "$cwd" 2>/dev/null && pwd -P) || real=$cwd
   label=$(fm_backend_paseo_workspace_label)
-  wsid=$(fm_backend_paseo_cli workspace ls --json 2>/dev/null |
+  list=$(fm_backend_paseo_cli workspace ls --json 2>/dev/null) || list='[]'
+  wsid=""
+  if [ -n "${PASEO_WORKSPACE_ID:-}" ]; then
+    wsid=$(printf '%s' "$list" |
+      jq -r --arg id "$PASEO_WORKSPACE_ID" --arg cwd "$cwd" --arg logical "$logical" --arg real "$real" \
+        '.[]? | select(.workspaceId == $id and (.cwd == $cwd or .cwd == $logical or .cwd == $real)) | .workspaceId' 2>/dev/null | head -1)
+  fi
+  [ -n "$wsid" ] || wsid=$(printf '%s' "$list" |
     jq -r --arg want "$label" --arg cwd "$cwd" --arg logical "$logical" --arg real "$real" \
       '.[]? | select(.name == $want and (.cwd == $cwd or .cwd == $logical or .cwd == $real)) | .workspaceId' 2>/dev/null | head -1)
   if [ -n "$wsid" ]; then
