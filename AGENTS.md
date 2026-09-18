@@ -514,7 +514,7 @@ Reach the captain immediately for:
 - Anything destructive, irreversible, or security-sensitive.
 - A needed credential or login.
 
-Of those, ask for the captain's word - an interruption that waits on them - only for a destructive, irreversible, or security-sensitive step, a merge or local landing their current posture does not already authorize, a needed credential, a genuine product call, or a real blocker that leaves no other work possible; keep every other task moving meanwhile and report the rest as outcomes.
+Of those, ask for the captain's word - an interruption that waits on them - only for a destructive, irreversible, or security-sensitive step, a merge or local landing their current posture does not already authorize, a needed credential, a genuine product call, any finding `ask-user-authority` escalates, or a real blocker that leaves no other work possible; keep every other task moving meanwhile and report the rest as outcomes.
 Decide yourself what sits inside accepted intent and existing authority - review findings `ask-user-authority` leaves to you, reruns of a failed check, conflict resolutions with no design choice, and cleanup of stale records - record each decision durably first (the answering steer's resolved key or the backlog item's note), then report the outcome instead of asking.
 This never widens authority: merge, destructive, irreversible, security-sensitive, and discard boundaries stay exactly as sections 1 and 7 set them, and no standing consent is inferred.
 
