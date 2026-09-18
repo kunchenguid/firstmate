@@ -370,6 +370,127 @@ test_lock_live_steal_mutex_is_not_reclaimed() {
   pass "live steal mutex is not reclaimed"
 }
 
+lock_steal_max_depth() {  # <state>
+  FM_STATE_OVERRIDE="$1" bash -c '. "$1"; printf "%s\n" "$FM_LOCK_STEAL_MAX_DEPTH"' _ "$LIB"
+}
+
+# Each ".steal" mutex only exists because a previous acquirer of THAT mutex
+# died mid-transaction (e.g. TERM during a relaunch/interrupt cycle), so a
+# chain this deep is a faithful stand-in for accumulated real contention.
+# Populating exactly the bound's worth of dead levels, with the next slot
+# free, must still resolve exactly as before the bound was added.
+test_lock_steal_chain_recovers_within_bound() {
+  local dir state lockdir dead maxdepth path i rc newpid
+  dir=$(make_case lock-steal-chain-within-bound)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  maxdepth=$(lock_steal_max_depth "$state") || fail "could not read FM_LOCK_STEAL_MAX_DEPTH"
+  path="$lockdir"
+  i=0
+  while [ "$i" -lt "$maxdepth" ]; do
+    mkdir "$path" || fail "could not seed dead steal-chain level $i"
+    printf '%s\n' "$dead" > "$path/pid"
+    path="$path.steal"
+    i=$((i + 1))
+  done
+  rc=0
+  newpid=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then cat "$2/pid"; else exit 7; fi
+  ' _ "$LIB" "$lockdir") || rc=$?
+  [ "$rc" -eq 0 ] || fail "a dead-owner steal chain within the configured depth was not reclaimed (rc=$rc)"
+  [ "$newpid" != "$dead" ] || fail "steal-chain reclaim within the bound did not replace the dead pid"
+  [ ! -e "$path" ] || fail "the transient steal-of-steal mutex was left behind after reclaim ($path)"
+  [ ! -e "$lockdir.steal" ] || fail "an intermediate steal mutex was left behind after reclaim"
+  pass "a dead-owner steal chain within the configured depth is still reclaimed"
+}
+
+# One level deeper than the previous case: every mutex the recursion could
+# reach, including the deepest one it is allowed to touch, is already a dead
+# abandoned holder. Before the depth bound this made fm_lock_try_acquire
+# recurse into a fresh, still-deeper ".steal" every time, and enough real
+# relaunch/interrupt cycles grew that suffix until the path length crashed the
+# shell (reproduced live via fm-captain-hold.sh contending a task meta lock).
+# The fix must refuse at the bound instead of recursing further.
+test_lock_steal_chain_recursion_is_bounded() {
+  local dir state lockdir dead maxdepth path i out status
+  dir=$(make_case lock-steal-chain-bounded)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  maxdepth=$(lock_steal_max_depth "$state") || fail "could not read FM_LOCK_STEAL_MAX_DEPTH"
+  path="$lockdir"
+  i=0
+  while [ "$i" -le "$maxdepth" ]; do
+    mkdir "$path" || fail "could not seed dead steal-chain level $i"
+    printf '%s\n' "$dead" > "$path/pid"
+    path="$path.steal"
+    i=$((i + 1))
+  done
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
+  ' _ "$LIB" "$lockdir")
+  status=$?
+  [ "$status" -lt 128 ] || fail "acquire over an over-depth steal chain crashed the shell (status=$status): $out"
+  case "$out" in
+    *"rc=1"*) ;;
+    *) fail "acquire over an over-depth steal chain did not fail closed: $out" ;;
+  esac
+  case "$out" in
+    *"held=$dead"*) ;;
+    *) fail "bounded failure did not report the blocking dead pid: $out" ;;
+  esac
+  [ ! -e "$path" ] || fail "recursion grew a new steal mutex past the configured depth bound ($path)"
+  [ "$(cat "$lockdir/pid" 2>/dev/null || true)" = "$dead" ] \
+    || fail "the primary lock was mutated despite the bounded failure"
+  pass "a steal chain deeper than the configured bound fails closed instead of recursing further"
+}
+
+# Real concurrent contention against the same over-depth chain: every racer
+# must fail closed and none may crash, matching the live reproduction's
+# rapid relaunch/interrupt cycles hitting the same task meta lock at once.
+test_lock_steal_chain_bounded_under_concurrent_contention() {
+  local dir state lockdir dead maxdepth path i marker pids pid status crashed
+  dir=$(make_case lock-steal-chain-concurrent)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  marker="$dir/outcomes"
+  dead=$(dead_pid)
+  maxdepth=$(lock_steal_max_depth "$state") || fail "could not read FM_LOCK_STEAL_MAX_DEPTH"
+  path="$lockdir"
+  i=0
+  while [ "$i" -le "$maxdepth" ]; do
+    mkdir "$path" || fail "could not seed dead steal-chain level $i"
+    printf '%s\n' "$dead" > "$path/pid"
+    path="$path.steal"
+    i=$((i + 1))
+  done
+  : > "$marker"
+  pids=
+  i=1
+  while [ "$i" -le 10 ]; do
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      if fm_lock_try_acquire "$2"; then printf "acquired\n" >> "$3"; else printf "failed\n" >> "$3"; fi
+    ' _ "$LIB" "$lockdir" "$marker" &
+    pids="$pids $!"
+    i=$((i + 1))
+  done
+  crashed=0
+  for pid in $pids; do
+    wait "$pid"
+    status=$?
+    [ "$status" -lt 128 ] || crashed=1
+  done
+  [ "$crashed" -eq 0 ] || fail "concurrent acquires over an over-depth steal chain crashed the shell"
+  ! grep -q acquired "$marker" || fail "an over-depth steal chain was acquired despite the recursion bound"
+  [ ! -e "$path" ] || fail "concurrent contention grew the steal chain past the configured depth bound"
+  pass "concurrent contention against an over-depth steal chain fails closed without crashing"
+}
+
 test_lock_does_not_steal_live_lock() {
   local dir state lockdir live out lockpid
   dir=$(make_case lock-live-noop)
@@ -1175,6 +1296,9 @@ test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
+test_lock_steal_chain_recovers_within_bound
+test_lock_steal_chain_recursion_is_bounded
+test_lock_steal_chain_bounded_under_concurrent_contention
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
