@@ -468,7 +468,7 @@ Per rule, `when` and `use` are required; the top-level `rules` array itself may 
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
 Profile `model` and `effort` fields and rule `why` are optional.
-Rule `approval` and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
+Rule `approval` and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key--ai_gateway_api_key) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
 The resolver supplies the fixed neutral Choice option `No listed rule applies to this task.` for work that matches no listed rule.
 `approval` accepts only `"captain"` and means a task the rule matches is never dispatched from the tool's answer alone.
 A rule `floor` names the quota-axi `provider` and `scope` whose `effectivePercentRemaining` must be at least `min_percent` for the rule's profiles to apply.
@@ -490,18 +490,19 @@ Except for `ultra`, which refuses unsupported profiles under the native-effort c
 Bootstrap reports unsupported harness/model/effort combinations as a `CREW_DISPATCH` diagnostic when they are visible in the file.
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`; its Pi default declares the `claude` provider required for typed resolution of that Anthropic model.
 When the file exists, bootstrap validates it with `jq`.
-Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
+Schema-valid files stay silent by default except the typed-dispatch diagnostics owned under "Typed dispatch resolution" below; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
 Malformed JSON, malformed rules, an empty or malformed profile array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`.
-While typed resolution is active, malformed `approval`, `floor`, and present `provider` declarations receive the same diagnostic; without the key those inert declarations preserve the pre-existing bootstrap behavior.
+While typed resolution is active, malformed `approval`, `floor`, and present `provider` declarations receive the same diagnostic; without either typed key those inert declarations preserve the pre-existing bootstrap behavior.
 Missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
 
-## Typed dispatch resolution (.env TYPESAFE_API_KEY)
+## Typed dispatch resolution (.env TYPESAFE_API_KEY / AI_GATEWAY_API_KEY)
 
-`bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief with typesafe.ai's System One model (Jev), so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.
-It is off unless `TYPESAFE_API_KEY` is non-empty in the calling environment or the home's gitignored `.env` holds a `TYPESAFE_API_KEY=` line; the environment wins, matching the Relay and mail-plane contracts, and the Relay accessor in `bin/fm-env-lib.sh` reads the line.
-Off means one `dispatch-resolve: off` line on stderr, nothing on stdout, exit 0, and no network call, so firstmate dispatches exactly as it does without the tool.
+`bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief with TypeSafe's System One model (Jev), so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.
+It is off unless `TYPESAFE_API_KEY` or `AI_GATEWAY_API_KEY` is non-empty in the calling environment or the home's gitignored `.env`; the environment wins, matching the Relay and mail-plane contracts, and `bin/fm-env-lib.sh` reads `.env` lines.
+When both keys are present, the native TypeSafe transport (`POST https://api.typesafe.ai/v1/systemone`, model `jev-latest`) is preferred; otherwise the Vercel AI Gateway helper `bin/dispatch-jev/evaluate.mjs` runs (`typesafe-ai/jev` via AI SDK `experimental_evaluate`) and normalizes the answer to the same Choice shape.
+Off means one `dispatch-resolve: off` line on stderr naming both keys, nothing on stdout, exit 0, and no network call, so firstmate dispatches exactly as it does without the tool.
 This section is the single owner of the tool's operator contract; the script header owns its exact flags and output lines, and "Crew dispatch profiles" above owns the declared rule and profile fields it applies.
 Rules come only from the effective home's `config/crew-dispatch.json`; `FM_CONFIG_OVERRIDE` selects the config directory for tests and specialized setup like the other scripts.
 
@@ -520,14 +521,18 @@ On the opted-in path, duplicate concrete profiles with the same harness, model, 
 The result is one of `clear` (a `profile:` line ready for `fm-spawn.sh`), `ambiguous` (confidence below the floor), `escalate` (an approval-gated rule, unverifiable rule floor, nothing rankable, or a genuine tie), or `error` (API, network, malformed response metadata, rendering, or quota-axi failure), and every one of them exits 0.
 Response probabilities must contain exactly every offered choice, use numeric values from 0 through 1, and sum to approximately 1 within 0.01.
 Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, or missing `jq`, each reported and never selected around.
-Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
+Missing `curl` on the native TypeSafe path, or missing `node` / an unreadable Gateway helper on the Gateway path, is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
 The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captain-approval gate, or `fm-spawn.sh` validation; `AGENTS.md` section 4 owns what firstmate does with each outcome.
 By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates.
-Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
+Firstmate writes the full stdout TOON to `data/<id>/dispatch-resolve` and passes a `clear` profile line unless it writes `data/<id>/dispatch-override.md` with a one-line reason, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
 
-The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
-The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
-The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
+The resolver and bootstrap copy an environment-provided `TYPESAFE_API_KEY` or `AI_GATEWAY_API_KEY` into a non-exported private variable and unset both from their own environments before launching child processes, so the secret is absent from child environments except the Gateway helper child, which receives only `AI_GATEWAY_API_KEY`.
+The resolver sends the TypeSafe key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes either key.
+The native resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, confidence floor at 0.6, and request timeout at 5 seconds.
+The Gateway helper lives at `bin/dispatch-jev/evaluate.mjs` and needs its locked dependencies installed once per checkout (`cd bin/dispatch-jev && npm ci`; Node.js 22+).
+Resolver-specific settings are `TYPESAFE_API_KEY`, `AI_GATEWAY_API_KEY`, `FM_TYPED_DISPATCH` (`require`/`off` and aliases), and test-only `FM_DISPATCH_JEV_GATEWAY` (override path to the Gateway helper).
+Bootstrap emits `TYPED_DISPATCH: off (...)` when `config/crew-dispatch.json` exists without either key, and `CREW_DISPATCH: weak rules ...` when the rules cannot discriminate (fewer than two rules, or a single catch-all `when`).
+When typed dispatch is armed (`FM_TYPED_DISPATCH=require` or either key present) and the dispatch file exists, `bin/fm-spawn.sh` requires `data/<id>/dispatch-resolve` for fresh crewmate and scout spawns, matches a `clear` `profile:` line unless `data/<id>/dispatch-override.md` states a reason, and records `dispatch_*` fields in `state/<id>.meta`. `FM_TYPED_DISPATCH=off` (or `0`/`false`/`no`) disarms that gate even when a key is present. Relaunch and secondmate spawns stay exempt.
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
 ## Toolchain
@@ -1114,7 +1119,10 @@ FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainl
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
 FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
-TYPESAFE_API_KEY=       # typed dispatch resolution opt-in, from the environment or .env; absent means bin/fm-dispatch-resolve.sh is off (docs/configuration.md "Typed dispatch resolution")
+TYPESAFE_API_KEY=       # typed dispatch native TypeSafe opt-in; AI_GATEWAY_API_KEY= is the Gateway alternative while waitlisted; absent both means bin/fm-dispatch-resolve.sh is off (docs/configuration.md "Typed dispatch resolution")
+AI_GATEWAY_API_KEY=     # Vercel AI Gateway Jev transport for bin/fm-dispatch-resolve.sh (bin/dispatch-jev); used when TYPESAFE_API_KEY is absent
+FM_TYPED_DISPATCH=      # typed-dispatch spawn receipt gate: require/1/true/yes arms it; off/0/false/no disarms even with a key; unset follows key presence (docs/configuration.md "Typed dispatch resolution")
+FM_DISPATCH_JEV_GATEWAY= # test-only override path to bin/dispatch-jev/evaluate.mjs
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)

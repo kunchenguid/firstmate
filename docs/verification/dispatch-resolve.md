@@ -3,10 +3,12 @@
 Audience: maintainer verification.
 
 This record supports the opt-in `bin/fm-dispatch-resolve.sh` contract owned by [`../configuration.md`](../configuration.md) ("Typed dispatch resolution") and the declared rule and profile fields owned there under "Crew dispatch profiles".
-It records only facts that must be re-established when the typesafe.ai model, its API, or firstmate's dispatch rules change.
+It records only facts that must be re-established when the Jev transports (native TypeSafe or Vercel AI Gateway), their APIs, or firstmate's dispatch rules change.
 Task chronology, the captain's rules, and the briefs themselves stay in the private scout report.
 
-## The API the tool depends on
+## The APIs the tool depends on
+
+### Native TypeSafe
 
 Verified 2026-09-16 against `https://api.typesafe.ai`.
 `GET /v1/models` listed `jev-latest` and `jev-preview`, both released 2026-09-10; a `jev-latest` request answered as `jev-1.13.0`.
@@ -14,6 +16,13 @@ Verified 2026-09-16 against `https://api.typesafe.ai`.
 Observed error shapes: 401 `authentication_error` for a bad key, 403 when the header is missing, 422 with a `detail[].loc` naming the offending field, 400 `api_usage_error` for an unknown model, 405 on GET.
 No rate-limit headers were present on any response; every response carried `x-typesafe-request-id`.
 Observed end-to-end latency from a Mac was 123 to 348 ms per request, with the server's own upstream time at 4 to 60 ms.
+
+### Vercel AI Gateway helper
+
+The Gateway path is `bin/dispatch-jev/evaluate.mjs` (`typesafe-ai/jev` through AI SDK `experimental_evaluate`), selected when `AI_GATEWAY_API_KEY` is set and `TYPESAFE_API_KEY` is not.
+It normalizes the evaluate result to the same `answers.rule.{choice,confidence,probabilities}` shape the native path returns, so every post-answer gate stays shared.
+Locked dependencies install once per checkout with `cd bin/dispatch-jev && npm ci` (Node.js 22+); `bin/dispatch-jev/node_modules/` stays gitignored.
+Live Gateway smoke is deferred until a real `AI_GATEWAY_API_KEY` is available; the offline suite stubs the helper through `FM_DISPATCH_JEV_GATEWAY`.
 
 ## Live rule match against real briefs
 
@@ -55,19 +64,23 @@ Two default-labeled briefs became ambiguous.
 
 ## Offline behavior
 
-`tests/fm-dispatch-resolve.test.sh` drives the public interface with a fake `curl` that records argv, the request body, the header read from file descriptor 3, and whether the secret reached its environment, plus a fake `quota-axi` that performs the same environment check.
+`tests/fm-dispatch-resolve.test.sh` drives the public interface with a fake `curl` that records argv, the request body, the header read from file descriptor 3, and whether the TypeSafe secret reached its environment, plus a fake `quota-axi` that performs the same environment check.
 It proves firstmate can invoke the resolve path without a preflight, rules are snapshotted once from the isolated home's canonical `config/crew-dispatch.json`, and dynamic output fields are flattened to one line.
-It proves the absent key (environment and `.env`) prints one stderr line, nothing on stdout, exits 0, and never invokes `curl` or `quota-axi`.
+It proves both keys absent (environment and `.env`) prints one stderr line naming `TYPESAFE_API_KEY` and `AI_GATEWAY_API_KEY`, nothing on stdout, exits 0, and never invokes `curl`, the Gateway helper, or `quota-axi`.
 It proves absent, default-only, and empty-rules files return `no rules to match` without a model or quota request, while a broken rules-file symlink exits 2 as unreadable.
-It proves the documented starter configuration resolves its Pi default through the declared Claude provider, a `.env` key turns the tool on, and the environment wins over it.
-It proves the key is absent from child environments, never appears on `curl` argv, and arrives only as the bearer header on the descriptor.
-It proves the request uses the fixed endpoint and model, carries only the project, brief, and rule Choice with one option per rule plus the fixed neutral none option, and never carries `why`, `use`, or quota.
-It proves the clear, fixed-floor ambiguous with candidate evidence, escalate (approval with candidate evidence, unverifiable rule floor, tie, nothing rankable), known rule-floor fall-through, known and unverifiable profile-floor evidence, explicit-provider and provider-ID enforcement, authoritative Agy and explicit-provider Gemini routing, partial providers, eligible unranked candidates and their clear-result note, concrete quota vetoes and profile-floor shortfalls taking precedence over uncertainty, account-wide quota veto, limiting-bound ranking, missing-curl and quota-axi failures, HTTP 429 and 500, transport failure, malformed usage, zero-mass or malformed probabilities or confidence, malformed or duplicate profile, invalid selector, removed-option rejection, and out-of-range rule ID paths behave as the contract states, with configuration errors exiting 2 before any network call.
-`tests/fm-bootstrap.test.sh` proves bootstrap ignores resolver-only fields without the typed key, validates each malformed shape when the environment or home `.env` activates typed resolution, and prevents an environment-provided key from reaching child processes.
+It proves the documented starter configuration resolves its Pi default through the declared Claude provider, a `.env` TypeSafe or Gateway key turns the tool on, and the environment wins over it.
+It proves the TypeSafe key is absent from child environments, never appears on `curl` argv, and arrives only as the bearer header on the descriptor.
+It proves a Gateway-only path reaches `clear` through `FM_DISPATCH_JEV_GATEWAY` without calling `curl`, while the helper child alone receives `AI_GATEWAY_API_KEY`.
+It proves Gateway confidence prefers `answer.confidence`, then `providerMetadata.typesafe.confidence`, then `probabilities[answer.choice]`, never the global max across options, so a below-floor chosen mass stays `ambiguous` even when a sibling probability clears the floor (`bin/dispatch-jev/confidence.mjs`).
+It proves the request uses the fixed endpoint and model on the native path, carries only the project, brief, and rule Choice with one option per rule plus the fixed neutral none option, and never carries `why`, `use`, or quota.
+It proves the clear, fixed-floor ambiguous with candidate evidence, escalate (approval with candidate evidence, unverifiable rule floor, tie, nothing rankable), known rule-floor fall-through, known and unverifiable profile-floor evidence, explicit-provider and provider-ID enforcement, authoritative Agy and explicit-provider Gemini routing, partial providers, eligible unranked candidates and their clear-result note, concrete quota vetoes and profile-floor shortfalls taking precedence over uncertainty, account-wide quota veto, limiting-bound ranking, missing-curl and quota-axi failures, HTTP 429 and 500, transport failure, malformed usage, zero-mass or malformed probabilities or confidence, malformed or duplicate profile, invalid selector, removed-option rejection, and every non-clear outcome exiting 0 with no profile line.
+`tests/fm-bootstrap.test.sh` proves bootstrap ignores resolver-only fields without either typed key, validates each malformed shape when the environment or home `.env` activates typed resolution through `TYPESAFE_API_KEY` or `AI_GATEWAY_API_KEY`, prevents an environment-provided key from reaching child processes, and emits `TYPED_DISPATCH: off (...)` plus `CREW_DISPATCH: weak rules ...` for an unarmed or non-discriminating rules file.
+`tests/fm-spawn-dispatch-profile.test.sh` proves an armed typed-dispatch gate refuses a fresh ship spawn without `data/<id>/dispatch-resolve`, accepts a matching `clear` receipt and records `dispatch_*` meta provenance, refuses a clear mismatch without `data/<id>/dispatch-override.md`, accepts an override with `dispatch_source=override`, and lets `FM_TYPED_DISPATCH=off` disarm the gate even when a typed key is present.
 
 ```console
 $ bash tests/fm-dispatch-resolve.test.sh | tail -1
 # all fm-dispatch-resolve tests passed
 ```
 
-A live run needs a key and is not part of the suite; rerun the table above by pointing the tool at a brief with the key injected for that one command.
+A live native TypeSafe run needs `TYPESAFE_API_KEY` and is not part of the suite; rerun the table above by pointing the tool at a brief with that key injected for that one command.
+A live Gateway run needs a real `AI_GATEWAY_API_KEY` and remains deferred until one is available.

@@ -189,7 +189,7 @@ write_response "$RESPONSE" rule_4 0.9
 run code out err "$BRIEF" --project pager
 expect_code 0 "$code" "absent key exits 0"
 assert_equals '' "$out" "absent key prints nothing on stdout"
-assert_contains "$err" 'dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and' "absent key explains itself on stderr"
+assert_contains "$err" 'dispatch-resolve: off (TYPESAFE_API_KEY and AI_GATEWAY_API_KEY absent from the environment and' "absent key explains itself on stderr"
 assert_absent "$LOG/argv" "absent key never calls curl"
 assert_absent "$LOG/quota-axi.calls" "absent key never reads quota-axi"
 pass "absent key is off: one stderr line, exit 0, no network call"
@@ -634,5 +634,146 @@ run code out err --help
 expect_code 0 "$code" "--help exits 0"
 assert_contains "$out" 'Usage:' "--help prints usage"
 pass "configuration errors exit 2 before any network call"
+
+
+
+# Gateway transport: stub helper via FM_DISPATCH_JEV_GATEWAY, no TypeSafe key.
+GATEWAY_STUB="$TMP_ROOT/fake-gateway.mjs"
+cat > "$GATEWAY_STUB" <<'JS'
+#!/usr/bin/env node
+import { readFileSync, writeFileSync } from 'node:fs';
+const raw = readFileSync(0, 'utf8');
+const req = JSON.parse(raw);
+if (!req.state || !req.questions?.rule) {
+  console.error('bad request');
+  process.exit(1);
+}
+if (!process.env.AI_GATEWAY_API_KEY) {
+  console.error('missing AI_GATEWAY_API_KEY');
+  process.exit(1);
+}
+const choices = Object.keys(req.questions.rule.criteria || {}).sort();
+const probabilities = Object.fromEntries(choices.map((k) => [k, k === 'rule_4' ? 0.96 : 0.01]));
+// normalize tiny drift
+const sum = Object.values(probabilities).reduce((a, b) => a + b, 0);
+for (const k of Object.keys(probabilities)) probabilities[k] = probabilities[k] / sum;
+process.stdout.write(JSON.stringify({
+  model: 'typesafe-ai/jev',
+  answers: { rule: { type: 'choice', choice: 'rule_4', confidence: 0.91, probabilities } },
+  usage: { input_tokens: 100, output_tokens: 20 },
+}));
+JS
+chmod +x "$GATEWAY_STUB"
+unset TYPESAFE_API_KEY
+AI_GATEWAY_API_KEY=gw-test-key FM_DISPATCH_JEV_GATEWAY="$GATEWAY_STUB" \
+  PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+  run code out err "$BRIEF"
+expect_code 0 "$code" "gateway stub path exits 0"
+assert_contains "$out" 'status: clear' "gateway stub yields clear when rule_4 wins"
+assert_contains "$out" 'profile:' "gateway stub clear emits profile"
+assert_absent "$LOG/argv" "gateway path never calls curl"
+pass "gateway transport reaches clear via FM_DISPATCH_JEV_GATEWAY stub"
+
+# Gateway confidence must use the chosen option's mass, never the global max.
+# Reproduce: choice=rule_2 at 0.3 while rule_1 sits at 0.65 — clear would be wrong.
+command -v node >/dev/null 2>&1 || fail "node required for gateway confidence cases"
+CONF_MOD="$ROOT/bin/dispatch-jev/confidence.mjs"
+[ -r "$CONF_MOD" ] || fail "missing confidence module: $CONF_MOD"
+node --input-type=module - "$CONF_MOD" <<'JS'
+import { pathToFileURL } from 'node:url';
+import assert from 'node:assert/strict';
+const modPath = process.argv[2];
+const { resolveRuleConfidence } = await import(pathToFileURL(modPath).href);
+
+const probs = { rule_1: 0.65, rule_2: 0.3, rule_3: 0.02, rule_4: 0.02, default: 0.01 };
+assert.equal(
+  resolveRuleConfidence({ type: 'choice', choice: 'rule_2', probabilities: probs }, undefined),
+  0.3,
+  'chosen option mass wins over a higher sibling probability'
+);
+assert.equal(
+  resolveRuleConfidence(
+    { type: 'choice', choice: 'rule_2', confidence: 0.72, probabilities: probs },
+    { typesafe: { confidence: { rule: 0.9 } } }
+  ),
+  0.72,
+  'answer.confidence beats metadata and probabilities'
+);
+assert.equal(
+  resolveRuleConfidence(
+    { type: 'choice', choice: 'rule_2', probabilities: probs },
+    { typesafe: { confidence: { rule: 0.81 } } }
+  ),
+  0.81,
+  'metadata.rule beats probabilities when answer.confidence is absent'
+);
+assert.equal(
+  resolveRuleConfidence(
+    { type: 'choice', choice: 'rule_2', probabilities: probs },
+    { typesafe: { confidence: 0.77 } }
+  ),
+  0.77,
+  'bare metadata confidence is accepted'
+);
+assert.equal(
+  resolveRuleConfidence({ type: 'choice', choice: 'rule_2', probabilities: { rule_1: 0.9 } }, null),
+  null,
+  'missing chosen mass fails closed'
+);
+JS
+pass "gateway confidence prefers answer, metadata, then chosen mass (never global max)"
+
+LOW_MASS_STUB="$TMP_ROOT/fake-gateway-low-mass.mjs"
+CONF_MOD_URL=$(node -e 'process.stdout.write(require("url").pathToFileURL(process.argv[1]).href)' -- "$CONF_MOD")
+CONF_MOD_LIT=$(node -e 'process.stdout.write(JSON.stringify(process.argv[1]))' -- "$CONF_MOD_URL")
+cat > "$LOW_MASS_STUB" <<JS
+#!/usr/bin/env node
+import { readFileSync } from 'node:fs';
+import { resolveRuleConfidence } from $CONF_MOD_LIT;
+const raw = readFileSync(0, 'utf8');
+const req = JSON.parse(raw);
+if (!req.state || !req.questions?.rule) {
+  console.error('bad request');
+  process.exit(1);
+}
+if (!process.env.AI_GATEWAY_API_KEY) {
+  console.error('missing AI_GATEWAY_API_KEY');
+  process.exit(1);
+}
+const choices = Object.keys(req.questions.rule.criteria || {});
+const probabilities = Object.fromEntries(choices.map((k) => {
+  if (k === 'rule_1') return [k, 0.65];
+  if (k === 'rule_2') return [k, 0.3];
+  if (k === 'rule_3') return [k, 0.02];
+  if (k === 'rule_4') return [k, 0.02];
+  return [k, 0.01];
+}));
+const answer = { type: 'choice', choice: 'rule_2', probabilities };
+const confidence = resolveRuleConfidence(answer, undefined);
+if (typeof confidence !== 'number' || !Number.isFinite(confidence)) {
+  console.error('could not resolve answers.rule.confidence');
+  process.exit(1);
+}
+process.stdout.write(JSON.stringify({
+  model: 'typesafe-ai/jev',
+  answers: { rule: { type: 'choice', choice: 'rule_2', confidence, probabilities } },
+  usage: { input_tokens: 100, output_tokens: 20 },
+}));
+JS
+chmod +x "$LOW_MASS_STUB"
+cp "$BASE_RULES" "$RULES"
+reset_log
+unset TYPESAFE_API_KEY
+AI_GATEWAY_API_KEY=gw-test-key FM_DISPATCH_JEV_GATEWAY="$LOW_MASS_STUB" \
+  PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+  run code out err "$BRIEF"
+expect_code 0 "$code" "low-mass gateway choice exits 0"
+assert_contains "$out" 'status: ambiguous' "chosen mass 0.3 stays below the floor even when a sibling is 0.65"
+assert_contains "$out" 'confidence 0.3 below floor 0.6' "ambiguous reason uses the chosen option mass"
+assert_not_contains "$out" 'status: clear' "global max must not falsely clear the wrong rule"
+assert_absent "$LOG/argv" "low-mass gateway path never calls curl"
+pass "gateway chosen-mass confidence cannot clear a below-floor rule"
+
+
 
 printf '# all fm-dispatch-resolve tests passed\n'

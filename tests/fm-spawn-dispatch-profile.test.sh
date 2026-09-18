@@ -1418,6 +1418,104 @@ test_non_claude_harness_ignores_claude_permission_mode() {
   pass "config/claude-permission-mode changes claude launches only"
 }
 
+
+write_dispatch_receipt() {  # <home> <id> <status> [profile-line]
+  local home=$1 id=$2 status=$3 profile=${4:-}
+  mkdir -p "$home/data/$id"
+  {
+    echo "dispatch-resolve:"
+    echo "  status: $status"
+    echo "  rule: rule_1 (mechanical)   confidence: 0.91"
+    [ -z "$profile" ] || echo "  profile: $profile"
+  } > "$home/data/$id/dispatch-resolve"
+}
+
+write_dispatch_override() {  # <home> <id> <reason>
+  mkdir -p "$1/data/$2"
+  printf '%s\n' "$3" > "$1/data/$2/dispatch-override.md"
+}
+
+test_typed_dispatch_receipt_required_when_armed() {
+  local rec id out status
+  id=receipt-missing-z91
+  rec=$(make_spawn_case receipt-missing claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  out=$(FM_TYPED_DISPATCH=require run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness claude --model sonnet --effort medium)
+  status=$?
+  expect_code 1 "$status" "armed spawn without receipt should refuse"
+  assert_contains "$out" "dispatch-resolve" "armed spawn without receipt should mention dispatch-resolve"
+  assert_absent "$HOME_DIR/state/$id.meta" "refused spawn must not publish meta"
+  pass "typed dispatch armed without receipt refuses ship spawn"
+}
+
+test_typed_dispatch_clear_match_allows_and_records_meta() {
+  local rec id out status
+  id=receipt-match-z92
+  rec=$(make_spawn_case receipt-match claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  # Real resolve receipts use jq @sh quoting on profile values.
+  write_dispatch_receipt "$HOME_DIR" "$id" clear "--harness 'claude' --model 'sonnet' --effort 'medium'"
+  out=$(FM_TYPED_DISPATCH=require run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness claude --model sonnet --effort medium)
+  status=$?
+  expect_code 0 "$status" "matching clear receipt should spawn: $out"
+  assert_grep "dispatch_status=clear" "$HOME_DIR/state/$id.meta" "meta missing dispatch_status=clear"
+  assert_grep "dispatch_source=receipt" "$HOME_DIR/state/$id.meta" "meta missing dispatch_source=receipt"
+  assert_grep "dispatch_rule=rule_1" "$HOME_DIR/state/$id.meta" "meta should keep rule id only"
+  pass "clear matching receipt allows spawn and records provenance"
+}
+
+test_typed_dispatch_clear_mismatch_refuses_without_override() {
+  local rec id out status
+  id=receipt-mismatch-z93
+  rec=$(make_spawn_case receipt-mismatch claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  write_dispatch_receipt "$HOME_DIR" "$id" clear "--harness 'claude' --model 'sonnet' --effort 'medium'"
+  out=$(FM_TYPED_DISPATCH=require run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness claude --model opus --effort high)
+  status=$?
+  expect_code 1 "$status" "mismatch should refuse"
+  assert_contains "$out" "does not match clear dispatch receipt" "mismatch should name the receipt conflict"
+  pass "clear mismatch without override refuses"
+}
+
+test_typed_dispatch_override_allows_mismatch() {
+  local rec id out status
+  id=receipt-override-z94
+  rec=$(make_spawn_case receipt-override claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  write_dispatch_receipt "$HOME_DIR" "$id" clear "--harness 'claude' --model 'sonnet' --effort 'medium'"
+  write_dispatch_override "$HOME_DIR" "$id" 'captain asked for opus on this one'
+  out=$(FM_TYPED_DISPATCH=require run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness claude --model opus --effort high)
+  status=$?
+  expect_code 0 "$status" "override should allow mismatch: $out"
+  assert_grep "dispatch_source=override" "$HOME_DIR/state/$id.meta" "meta missing dispatch_source=override"
+  assert_grep "dispatch_override=captain asked for opus on this one" "$HOME_DIR/state/$id.meta" "meta missing override reason"
+  pass "override file allows clear profile mismatch"
+}
+
+test_typed_dispatch_off_disarms_despite_key() {
+  local rec id out status
+  id=receipt-off-z95
+  rec=$(make_spawn_case receipt-off claude "$id")
+  read_case_record "$rec"
+  enable_dispatch_profile "$HOME_DIR"
+  # Armed by key would refuse without a receipt; off must disarm that gate.
+  out=$(FM_TYPED_DISPATCH=off TYPESAFE_API_KEY=test-key run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --harness claude --model sonnet --effort medium)
+  status=$?
+  expect_code 0 "$status" "FM_TYPED_DISPATCH=off should spawn without receipt: $out"
+  assert_no_grep "dispatch_status=" "$HOME_DIR/state/$id.meta" "disarmed spawn must not write dispatch provenance"
+  pass "FM_TYPED_DISPATCH=off disarms receipt gate even when a typed key is present"
+}
+
+
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
@@ -1465,5 +1563,10 @@ test_claude_secondmate_launch_omits_task_control_channel_authority
 test_claude_crewmate_launch_carries_the_attribution_policy
 test_claude_secondmate_launch_carries_the_attribution_policy
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_typed_dispatch_receipt_required_when_armed
+test_typed_dispatch_clear_match_allows_and_records_meta
+test_typed_dispatch_clear_mismatch_refuses_without_override
+test_typed_dispatch_override_allows_mismatch
+test_typed_dispatch_off_disarms_despite_key
 
 echo "# all fm-spawn-dispatch-profile tests passed"

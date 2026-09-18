@@ -1,0 +1,10 @@
+{
+  "name": "fm-dispatch-jev",
+  "private": true,
+  "type": "module",
+  "description": "Vercel AI Gateway transport helper for fm-dispatch-resolve (Jev evaluation)",
+  "dependencies": {
+    "@ai-sdk/gateway": "4.0.85",
+    "ai": "7.0.105"
+  }
+}

@@ -1,29 +1,36 @@
 #!/usr/bin/env bash
 # fm-dispatch-resolve.sh - resolve one concrete crewmate or scout dispatch
-# profile from a task brief with typesafe.ai's System One model (Jev), opt-in.
+# profile from a task brief with Jev (TypeSafe System One), opt-in.
 #
 # Usage:
 #   fm-dispatch-resolve.sh <brief-file> [--project <name>]
 #
-# Opt-in gate: TYPESAFE_API_KEY non-empty in this process environment, else a
-#   TYPESAFE_API_KEY= line in $FM_HOME/.env read with fmx_env_get, the same
-#   accessor as FMX_PAIRING_TOKEN (bin/fm-env-lib.sh). The environment wins.
-#   Absent in both: one "dispatch-resolve: off" line on stderr, nothing on
-#   stdout, exit 0, no network call, so firstmate dispatches exactly as today.
-#   The key lives in one shell variable and reaches curl as a header read from
-#   a file descriptor, never on argv; nothing logs or writes it.
+# Opt-in gate: either TYPESAFE_API_KEY or AI_GATEWAY_API_KEY non-empty in this
+#   process environment, else the matching KEY= line in $FM_HOME/.env read with
+#   fmx_env_get (bin/fm-env-lib.sh). The environment wins for each key.
+#   Prefer native TypeSafe when TYPESAFE_API_KEY is set; otherwise use the
+#   Vercel AI Gateway helper (bin/dispatch-jev/evaluate.mjs) when
+#   AI_GATEWAY_API_KEY is set. Absent both: one "dispatch-resolve: off" line on
+#   stderr naming both keys, nothing on stdout, exit 0, no network call, so
+#   firstmate dispatches exactly as today. Each key lives in one shell variable
+#   and is unset from the child environment after copy; TypeSafe reaches curl as
+#   a header read from a file descriptor, never on argv; Gateway is exported only
+#   into the evaluate.mjs child. Nothing logs or writes either key.
 #
-# What it does when on with at least one rule: one POST to
-#   https://api.typesafe.ai/v1/systemone with the project name and the whole brief as
-#   state and ONE Choice question whose
+# What it does when on with at least one rule: one Jev Choice evaluation with
+#   the project name and the whole brief as state and ONE Choice question whose
 #   options are every rule's `when` from config/crew-dispatch.json plus one
-#   fixed generic none option. Jev returns the matched rule, a probability per
-#   option, and a confidence. Everything after that is jq: the confidence
-#   floor, the rule's declared `approval` and `floor`, each profile's declared
-#   `provider` and `floor`, the quota rows from ONE quota-axi --json snapshot,
-#   and the spendPriority argmax over the eligible candidates. The model never
-#   sees quota, catalogs, approvals, `why`, or `use`. With no rules, it returns
-#   a non-clear result so firstmate keeps using the existing intake.
+#   fixed generic none option. Native path: POST https://api.typesafe.ai/v1/systemone
+#   model jev-latest. Gateway path: AI SDK experimental_evaluate with
+#   gateway.evaluationModel('typesafe-ai/jev'), response normalized to the same
+#   answers.rule.{choice,confidence,probabilities} (+ optional usage/model)
+#   shape. Jev returns the matched rule, a probability per option, and a
+#   confidence. Everything after that is jq: the confidence floor, the rule's
+#   declared `approval` and `floor`, each profile's declared `provider` and
+#   `floor`, the quota rows from ONE quota-axi --json snapshot, and the
+#   spendPriority argmax over the eligible candidates. The model never sees
+#   quota, catalogs, approvals, `why`, or `use`. With no rules, it returns a
+#   non-clear result so firstmate keeps using the existing intake.
 #   docs/configuration.md "Crew dispatch profiles" owns the declared fields and
 #   "Typed dispatch resolution" owns this tool's operator contract.
 #
@@ -34,7 +41,7 @@
 #     reason: <why the status is not clear>
 #     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
 #     profile: --harness <h> [--model <m>] [--effort <e>]     (status clear only)
-#   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
+#   clear     -> write full stdout to data/<id>/dispatch-resolve and pass the profile line to fm-spawn.sh unless data/<id>/dispatch-override.md states a one-line reason
 #   ambiguous -> confidence below the floor; decide as today from the probabilities
 #   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
 #   error     -> API, network, response, or quota-axi failure; decide as today
@@ -44,7 +51,9 @@
 #   actionable, never selected around.
 #
 # Environment:
-#   TYPESAFE_API_KEY is the only resolver-specific environment setting.
+#   TYPESAFE_API_KEY and AI_GATEWAY_API_KEY are the resolver-specific settings.
+#   FM_DISPATCH_JEV_GATEWAY overrides the Gateway helper path (tests).
+#   FM_TYPED_DISPATCH is owned by fm-spawn.sh's receipt gate, not this resolver.
 #
 # Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
 #   the captain-approval gate, or fm-spawn.sh validation; it publishes one
@@ -54,6 +63,9 @@ set -u
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
 export -n TYPESAFE_API_KEY_PRIVATE 2>/dev/null || true
 unset TYPESAFE_API_KEY
+AI_GATEWAY_API_KEY_PRIVATE=${AI_GATEWAY_API_KEY:-}
+export -n AI_GATEWAY_API_KEY_PRIVATE 2>/dev/null || true
+unset AI_GATEWAY_API_KEY
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -102,8 +114,11 @@ done
 if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
   TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
 fi
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-  echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
+if [ -z "$AI_GATEWAY_API_KEY_PRIVATE" ]; then
+  AI_GATEWAY_API_KEY_PRIVATE=$(fmx_env_get AI_GATEWAY_API_KEY "$FM_HOME/.env")
+fi
+if [ -z "$TYPESAFE_API_KEY_PRIVATE" ] && [ -z "$AI_GATEWAY_API_KEY_PRIVATE" ]; then
+  echo "dispatch-resolve: off (TYPESAFE_API_KEY and AI_GATEWAY_API_KEY absent from the environment and $FM_HOME/.env)" >&2
   exit 0
 fi
 
@@ -220,23 +235,24 @@ RESP_FILE=$(mktemp) || die "mktemp failed"
 QUOTA=$(mktemp) || { rm -f "$RESP_FILE"; die "mktemp failed"; }
 trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA"' EXIT
 LAT_MS=null
-command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
-  REQUEST=$(jq -n --rawfile brief "$BRIEF" --arg project "$PROJECT" --arg model "$TS_MODEL" \
-    --arg none_criterion "$DEFAULT_WHEN" --slurpfile rules "$RULES" '
-    ($rules[0]) as $cfg |
-    ($cfg.rules | to_entries | map({key: ("rule_" + ((.key + 1) | tostring)), value: .value.when}) | from_entries) as $criteria |
-    {
-      model: $model,
-      state: {task: {project: $project, brief: $brief}},
-      questions: {
-        rule: {
-          type: "choice",
-          instructions: "Which ONE dispatch rule best fits `task` (read `task.brief` and `task.project`)? Each option is the rule'"'"'s own matching condition; pick `default` when no rule'"'"'s condition is met, including when a rule'"'"'s own exemption text excludes this task.",
-          criteria: ($criteria + {default: $none_criterion})
-        }
+REQUEST=$(jq -n --rawfile brief "$BRIEF" --arg project "$PROJECT" --arg model "$TS_MODEL" \
+  --arg none_criterion "$DEFAULT_WHEN" --slurpfile rules "$RULES" '
+  ($rules[0]) as $cfg |
+  ($cfg.rules | to_entries | map({key: ("rule_" + ((.key + 1) | tostring)), value: .value.when}) | from_entries) as $criteria |
+  {
+    model: $model,
+    state: {task: {project: $project, brief: $brief}},
+    questions: {
+      rule: {
+        type: "choice",
+        instructions: "Which ONE dispatch rule best fits `task` (read `task.brief` and `task.project`)? Each option is the rule'"'"'s own matching condition; pick `default` when no rule'"'"'s condition is met, including when a rule'"'"'s own exemption text excludes this task.",
+        criteria: ($criteria + {default: $none_criterion})
       }
-    }')
-  T0=$(fm_timing_now_ms)
+    }
+  }')
+T0=$(fm_timing_now_ms)
+if [ -n "$TYPESAFE_API_KEY_PRIVATE" ]; then
+  command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
     -X POST "$TS_BASE/v1/systemone" -H 'Content-Type: application/json' \
     -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$TYPESAFE_API_KEY_PRIVATE") \
@@ -244,6 +260,26 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   T1=$(fm_timing_now_ms)
   LAT_MS=$(( T1 - T0 ))
   [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
+else
+  GATEWAY_HELPER="${FM_DISPATCH_JEV_GATEWAY:-$SCRIPT_DIR/dispatch-jev/evaluate.mjs}"
+  [ -r "$GATEWAY_HELPER" ] || emit_error "gateway helper not readable: $GATEWAY_HELPER"
+  command -v node >/dev/null 2>&1 || emit_error "node not installed"
+  GATEWAY_PAYLOAD=$(jq -c --argjson timeout_ms "$(( TS_TIMEOUT * 1000 ))" \
+    '{state: .state, questions: .questions, timeoutMs: $timeout_ms}' <<<"$REQUEST") \
+    || emit_error "could not build gateway payload"
+  GATEWAY_ERR=$(mktemp) || emit_error "mktemp failed"
+  if ! printf '%s' "$GATEWAY_PAYLOAD" | AI_GATEWAY_API_KEY="$AI_GATEWAY_API_KEY_PRIVATE" \
+    node "$GATEWAY_HELPER" >"$RESP_FILE" 2>"$GATEWAY_ERR"; then
+    T1=$(fm_timing_now_ms)
+    LAT_MS=$(( T1 - T0 ))
+    gw_msg=$(head -c 200 "$GATEWAY_ERR" 2>/dev/null | tr '\n' ' ')
+    rm -f "$GATEWAY_ERR"
+    emit_error "gateway helper failed after ${LAT_MS} ms: ${gw_msg:-no stderr}"
+  fi
+  rm -f "$GATEWAY_ERR"
+  T1=$(fm_timing_now_ms)
+  LAT_MS=$(( T1 - T0 ))
+fi
 jq -e --slurpfile rules "$RULES" '
     (($rules[0].rules | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"] | sort) as $choices |
     (.answers.rule.choice | type) == "string" and

@@ -515,6 +515,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-env-lib.sh
+. "$SCRIPT_DIR/fm-env-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -538,6 +540,11 @@ MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
+DISPATCH_META_STATUS=
+DISPATCH_META_RULE=
+DISPATCH_META_CONFIDENCE=
+DISPATCH_META_OVERRIDE=
+DISPATCH_META_SOURCE=
 POS=()
 want_value=
 for a in "$@"; do
@@ -2062,6 +2069,125 @@ fi
 if [ "$HARNESS" = agy ]; then
   agy_model_validate "$AGY_BIN" "$MODEL" || exit 1
 fi
+
+# Typed-dispatch receipt gate (G3/G5) and meta provenance (G4).
+# Armed when FM_TYPED_DISPATCH=require (or a truthy alias) or a typed key is
+# present, and config/crew-dispatch.json exists. FM_TYPED_DISPATCH=off (or a
+# falsey alias) disarms even when a key is present. Relaunch and secondmate
+# are exempt.
+fm_typed_dispatch_armed() {
+  case "${FM_TYPED_DISPATCH:-}" in
+  off | 0 | false | no) return 1 ;;
+  require | 1 | true | yes) return 0 ;;
+  esac
+  local key=${TYPESAFE_API_KEY:-}
+  [ -n "$key" ] || key=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
+  [ -n "$key" ] || key=${AI_GATEWAY_API_KEY:-}
+  [ -n "$key" ] || key=$(fmx_env_get AI_GATEWAY_API_KEY "$FM_HOME/.env")
+  [ -n "$key" ]
+}
+
+fm_dispatch_override_reason() {
+  local file=$1 line
+  [ -f "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+    '' | \#*) continue ;;
+    *)
+      printf '%s\n' "$line"
+      return 0
+      ;;
+    esac
+  done <"$file"
+  return 1
+}
+
+# Sets DISPATCH_META_STATUS/RULE/CONFIDENCE/OVERRIDE/SOURCE for meta write.
+validate_dispatch_receipt_for_spawn() {
+  DISPATCH_META_STATUS=
+  DISPATCH_META_RULE=
+  DISPATCH_META_CONFIDENCE=
+  DISPATCH_META_OVERRIDE=
+  DISPATCH_META_SOURCE=
+  [ "$RELAUNCH" -eq 0 ] || return 0
+  [ "$KIND" != secondmate ] || return 0
+  [ -f "$CONFIG/crew-dispatch.json" ] || return 0
+  fm_typed_dispatch_armed || return 0
+
+  local receipt="$DATA/$ID/dispatch-resolve"
+  local override="$DATA/$ID/dispatch-override.md"
+  local status profile_line want_h want_m want_e have_override=0 reason
+
+  if [ ! -f "$receipt" ]; then
+    echo "error: typed dispatch is armed and config/crew-dispatch.json is active - write data/$ID/dispatch-resolve from bin/fm-dispatch-resolve.sh before spawning (or set FM_TYPED_DISPATCH=off). For a deliberate profile override, also write data/$ID/dispatch-override.md with a one-line reason." >&2
+    exit 1
+  fi
+
+  status=$(awk '
+    $1 == "status:" { print $2; exit }
+    $1 == "dispatch-resolve:" { next }
+  ' "$receipt")
+  [ -n "$status" ] || status=$(awk '/^  status:/{print $2; exit}' "$receipt")
+  DISPATCH_META_STATUS=${status:-unknown}
+  # Resolve emits "rule: <id> (<when>)   confidence: <n>" on one line; keep the id only.
+  DISPATCH_META_RULE=$(awk '/^  rule:/{print $2; exit}' "$receipt")
+  DISPATCH_META_CONFIDENCE=$(awk '/confidence:/{
+    for (i=1;i<=NF;i++) if ($i ~ /^confidence:/) { print $(i+1); exit }
+    if ($1 == "confidence:") { print $2; exit }
+  }' "$receipt")
+  profile_line=$(awk '/^  profile:/{sub(/^  profile: /,""); print; exit}' "$receipt")
+
+  if reason=$(fm_dispatch_override_reason "$override"); then
+    have_override=1
+    DISPATCH_META_OVERRIDE=$reason
+    DISPATCH_META_SOURCE=override
+  fi
+
+  case "$status" in
+  clear)
+    if [ "$have_override" -eq 1 ]; then
+      return 0
+    fi
+    [ -n "$profile_line" ] || {
+      echo "error: data/$ID/dispatch-resolve status is clear but has no profile: line; re-run bin/fm-dispatch-resolve.sh or write data/$ID/dispatch-override.md" >&2
+      exit 1
+    }
+    want_h=
+    want_m=
+    want_e=
+    # Receipt profile lines are jq @sh-quoted (same contract as resolve tests).
+    # shellcheck disable=SC2086
+    eval "set -- $profile_line"
+    while [ $# -gt 0 ]; do
+      case "$1" in
+      --harness) want_h=$2; shift 2 ;;
+      --model) want_m=$2; shift 2 ;;
+      --effort) want_e=$2; shift 2 ;;
+      *) shift ;;
+      esac
+    done
+    [ -n "$want_h" ] || {
+      echo "error: clear dispatch receipt for $ID has no --harness in profile:" >&2
+      exit 1
+    }
+    if [ "$HARNESS" != "$want_h" ] ||
+      { [ -n "$want_m" ] && [ "${MODEL:-}" != "$want_m" ]; } ||
+      { [ -n "$want_e" ] && [ "${EFFORT:-}" != "$want_e" ]; }; then
+      echo "error: spawn profile does not match clear dispatch receipt for $ID (receipt: $profile_line; spawn: --harness $HARNESS${MODEL:+ --model $MODEL}${EFFORT:+ --effort $EFFORT}). Pass the receipt profile, or write data/$ID/dispatch-override.md with a one-line reason." >&2
+      exit 1
+    fi
+    DISPATCH_META_SOURCE=receipt
+    ;;
+  off | ambiguous | escalate | error | unknown | '')
+    DISPATCH_META_SOURCE=${DISPATCH_META_SOURCE:-hand}
+    ;;
+  *)
+    DISPATCH_META_SOURCE=${DISPATCH_META_SOURCE:-hand}
+    ;;
+  esac
+}
+
+validate_dispatch_receipt_for_spawn "$@"
 
 secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
@@ -4175,6 +4301,13 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  if [ "$RELAUNCH" -eq 0 ]; then
+    [ -z "${DISPATCH_META_STATUS:-}" ] || echo "dispatch_status=$DISPATCH_META_STATUS"
+    [ -z "${DISPATCH_META_RULE:-}" ] || echo "dispatch_rule=$DISPATCH_META_RULE"
+    [ -z "${DISPATCH_META_CONFIDENCE:-}" ] || echo "dispatch_confidence=$DISPATCH_META_CONFIDENCE"
+    [ -z "${DISPATCH_META_SOURCE:-}" ] || echo "dispatch_source=$DISPATCH_META_SOURCE"
+    [ -z "${DISPATCH_META_OVERRIDE:-}" ] || echo "dispatch_override=$DISPATCH_META_OVERRIDE"
+  fi
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
