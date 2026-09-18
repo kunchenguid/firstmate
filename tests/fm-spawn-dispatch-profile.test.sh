@@ -451,6 +451,50 @@ test_codex_omits_max_effort_for_unsupported_model() {
   pass "codex omits max for models without the catalog capability"
 }
 
+# Codex parks a crewmate launch forever on its unanswerable hook-trust modal
+# unless the launch turns the hook layer off. These two cases pin the split:
+# a crewmate runs hook-free, a secondmate keeps the project hooks that carry its
+# own primary-session turn-end guard and session-start digest.
+test_codex_crewmate_launch_disables_the_hook_layer() {
+  local rec id out status launch
+  id=profile-codex-hooks-z4c
+  rec=$(make_spawn_case profile-codex-hooks codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex crewmate spawn should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--disable hooks" \
+    "codex crewmate launch did not disable the hook layer that blocks it on a trust modal"
+  # The opposite posture: this flag RUNS the untrusted hooks instead of
+  # disabling them, so a launch must never reach for it.
+  assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
+    "codex crewmate launch ran the operator's untrusted hooks instead of disabling them"
+  # Firstmate goes blind without the turn-end signal, which rides this same
+  # launch rather than any hook.
+  assert_contains "$launch" "notify=" \
+    "codex crewmate launch lost the turn-end notify program"
+  pass "a codex crewmate launches with no hook layer and keeps its turn-end signal"
+}
+
+test_codex_secondmate_launch_keeps_the_hook_layer() {
+  local rec id sm out status launch
+  id=profile-codex-secondmate-hooks-z4d
+  rec=$(make_spawn_case profile-codex-secondmate-hooks codex "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "codex secondmate spawn should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--disable hooks" \
+    "codex secondmate launch disabled the project hooks its own primary supervision depends on"
+  pass "a codex secondmate keeps the project hook layer its primary session runs on"
+}
+
 test_grok_threads_model_and_reasoning_effort() {
   local rec id out status launch
   id=profile-grok-z5
@@ -1386,6 +1430,8 @@ test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
 test_codex_threads_model_and_max_effort
 test_codex_omits_max_effort_for_unsupported_model
+test_codex_crewmate_launch_disables_the_hook_layer
+test_codex_secondmate_launch_keeps_the_hook_layer
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort

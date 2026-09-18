@@ -181,3 +181,29 @@ $pids
 EOF
   return 1
 }
+
+# True when state dir $1 records a live verified harness outside this process's
+# contiguous harness ancestry. Sets FM_SESSION_LOCK_FOREIGN_OWNER_PID for a
+# diagnostic caller. Malformed, missing, dead, and ancestry-uncertain locks are
+# not foreign-owner evidence.
+# shellcheck disable=SC2034 # Output global, read by the sourcing guard caller.
+FM_SESSION_LOCK_FOREIGN_OWNER_PID=
+fm_session_lock_foreign_owner_live() {
+  local state=$1 lock_pid pids pid
+  FM_SESSION_LOCK_FOREIGN_OWNER_PID=
+  [ -f "$state/.lock" ] && [ ! -L "$state/.lock" ] || return 1
+  lock_pid=$(cat "$state/.lock" 2>/dev/null || true)
+  case "$lock_pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  fm_harness_pid_alive "$lock_pid" || return 1
+  pids=$(fm_harness_ancestry_pids) || return 1
+  while IFS= read -r pid; do
+    [ "$pid" = "$lock_pid" ] && return 1
+  done <<EOF
+$pids
+EOF
+  # shellcheck disable=SC2034 # Output global, read by the sourcing guard caller.
+  FM_SESSION_LOCK_FOREIGN_OWNER_PID=$lock_pid
+  return 0
+}
