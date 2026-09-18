@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Parity guard for firstmate's shell-lint definition.
 #
-# bin/fm-lint.sh must be the single owner that BOTH CI
-# (.github/workflows/ci.yml) and the pre-push gate (.no-mistakes.yaml
-# commands.lint) invoke, so the local lint can never diverge from CI again.
+# bin/fm-lint.sh is the single owner invoked by CI
+# (.github/workflows/ci.yml) and by the pre-push gate (.no-mistakes.yaml
+# commands.lint). CI runs its two full-rigor canonical partitions; the local
+# gate uses its context-selected default. Their selection differs deliberately,
+# while this owner keeps analysis flags, configuration, and tool versions from
+# drifting.
 # Regression origin: with no commands.lint configured, the local no-mistakes
-# lint step never ran the deterministic
-# `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh`, so PRs passed local
-# validation yet failed that exact check in CI on info/warning findings such as
-# SC2015, SC1007, and SC2034. A second axis was tool-version skew: CI's
-# ShellCheck floated with the runner image and still emitted SC2015, which
-# ShellCheck retired in 0.11.0. fm-lint.sh now pins one exact version and both
-# gates resolve it, so command, file set, config, AND version all match.
+# lint step never ran the deterministic shell lint, so PRs passed local
+# validation yet failed CI on info/warning findings such as SC2015, SC1007, and
+# SC2034. A second axis was tool-version skew: CI's ShellCheck floated with the
+# runner image and still emitted SC2015, which ShellCheck retired in 0.11.0.
 set -u
 
 # shellcheck source=tests/lib.sh
