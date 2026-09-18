@@ -154,15 +154,19 @@
 #      Independently of outcome, a terminal reading publishes a PR only when the
 #      current-run evidence still attributes that reading; otherwise it
 #      publishes none.
-#      When that same ordering evidence instead places the crew's own last word
-#      BEFORE the run - the ledger row IS the attributed run, so the run's
-#      record is the later fact, or the declaration failed to clear the run's
-#      minute - the published failure carries the
+#      When that same ordering evidence instead places the crew's own last
+#      self-declared outcome (done, failed, or the configured paused verb)
+#      BEFORE the run - the declaration is the log's last line and its mtime
+#      does not clear the run's minute - the published failure carries the
 #      FM_CREW_STATE_WORD_OLDER_DETAIL field (bin/fm-classify-lib.sh owns the
 #      token). bin/fm-inactive-reconcile.sh needs it to tell the routine ship
-#      shape, a `done:` written mid-run of a run that then failed, apart from a
-#      crew word that genuinely post-dates the run, so the first is still
-#      reported to the captain instead of read as a contradiction and dropped.
+#      shape, a `done:` written before the run that then failed, apart from a
+#      crew word that may post-date the run, so the first is still reported to
+#      the captain instead of read as a contradiction and dropped. The ordering
+#      comes from the LOG, never from the ledger row merely being the attributed
+#      run: the row's date stamps that run's START, so it orders nothing against
+#      the moment the run finished. With no declaration, or with none of this
+#      evidence, the field is absent and the reader claims no ordering.
 #   3. Reconcile the status log through fm-classify-lib.sh's status_current_line:
 #      open decisions survive unrelated events and continuation prose cannot
 #      hide a declaration. Ship/scout terminal declarations supersede stale log
@@ -1461,21 +1465,23 @@ if [ "$HAVE_RUN" = 1 ]; then
     # paused verb; snapshot_ordered_log uses fm-classify-lib.sh's portable file
     # readers to keep the line and its ordering evidence consistent.
     CREW_WORD_ORDERED_OLDER=0
-    if [ "$NEWEST_ROW_AGREES" = 1 ]; then
-      CREW_WORD_ORDERED_OLDER=1
-    elif [ -n "$NEWEST_EPOCH" ] \
+    if [ -n "$NEWEST_EPOCH" ] \
       && [ "$(fm_nm_run_status_class "$NEWEST_STATUS")" = terminal ] \
       && snapshot_ordered_log; then
+      LOG_STATE=$(map_log_state "$ORDERED_LOG_LINE")
       if [ "$ORDERED_LOG_MTIME" -ge "$((NEWEST_EPOCH + 60))" ]; then
-        LOG_STATE=$(map_log_state "$ORDERED_LOG_LINE")
-        case "$LOG_STATE" in
-          paused|done)
-            emit "$LOG_STATE" status-log \
-              "$(status_line_note "$ORDERED_LOG_LINE")${SEP}later than the run ($RUN_DETAIL)"
-            ;;
-        esac
+        if [ "$NEWEST_ROW_AGREES" != 1 ]; then
+          case "$LOG_STATE" in
+            paused|done)
+              emit "$LOG_STATE" status-log \
+                "$(status_line_note "$ORDERED_LOG_LINE")${SEP}later than the run ($RUN_DETAIL)"
+              ;;
+          esac
+        fi
       else
-        CREW_WORD_ORDERED_OLDER=1
+        case "$LOG_STATE" in
+          paused|done|failed) CREW_WORD_ORDERED_OLDER=1 ;;
+        esac
       fi
     fi
     case "$NEWEST_STATUS" in

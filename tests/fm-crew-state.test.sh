@@ -4200,9 +4200,52 @@ test_mid_run_done_log_does_not_mask_current_run_failure() {
   assert_contains "$out" "state: failed" "a mid-run done line cannot mask the current run's failure"
   assert_contains "$out" "source: run-step" "the failure stays run-step sourced"
   assert_not_contains "$out" "state: done" "the declaration never becomes the reported state"
-  assert_contains "$out" "$FM_CREW_STATE_WORD_OLDER_DETAIL" \
-    "the failure publishes that the crew's own word came before the run"
+  assert_not_contains "$out" "$FM_CREW_STATE_WORD_OLDER_DETAIL" \
+    "a declaration the log places after the run's start is never claimed as older"
   pass "a mid-run done line does not mask the current run's failure"
+}
+
+# The ordering fact is a claim about the STATUS LOG, so a crew that declared
+# nothing at all must never receive it. The ledger row here is the attributed
+# run itself, the shape that most invites asserting an ordering from run
+# identity rather than from evidence.
+test_failed_run_without_a_declaration_claims_no_ordering() {
+  reset_fakes
+  local d short out
+  d=$(new_case no-declaration-ordering)
+  make_repo_on_branch "$d/wt" fm/feat-s6f
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s6f.meta" "window=fm:fm-feat-s6f" "worktree=$d/wt" "kind=ship"
+  : > "$d/state/feat-s6f.status"
+  backdate_status_minutes_ago "$d/state/feat-s6f.status" 120
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s6f)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s6f ${short}  $(ledger_stamp_minutes_ago 60)"
+  out=$(run_crew_state "$d" feat-s6f)
+  assert_contains "$out" "state: failed" "the failure still stands"
+  assert_not_contains "$out" "$FM_CREW_STATE_WORD_OLDER_DETAIL" \
+    "a crew that declared nothing is never reported as having declared it earlier"
+  pass "a failure with no declaration at all claims no ordering"
+}
+
+# A blocked line is not a self-declared outcome, so ordering it before the run
+# says nothing about the crew's word on done or failed and must not be claimed.
+test_blocked_only_log_claims_no_ordering() {
+  reset_fakes
+  local d short out
+  d=$(new_case blocked-only-ordering)
+  make_repo_on_branch "$d/wt" fm/feat-s6g
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s6g.meta" "window=fm:fm-feat-s6g" "worktree=$d/wt" "kind=ship"
+  printf 'blocked: waiting on a credential\n' > "$d/state/feat-s6g.status"
+  backdate_status_minutes_ago "$d/state/feat-s6g.status" 120
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s6g)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s6g ${short}  $(ledger_stamp_minutes_ago 60)"
+  out=$(run_crew_state "$d" feat-s6g)
+  assert_not_contains "$out" "$FM_CREW_STATE_WORD_OLDER_DETAIL" \
+    "a blocked line is never published as an outcome the run outranks"
+  pass "a blocked-only log claims no ordering over the run"
 }
 
 # The ordering fact bin/fm-inactive-reconcile.sh consumes. Without it that
@@ -6879,6 +6922,8 @@ test_mid_run_done_log_does_not_mask_current_run_failure
 test_pre_run_done_log_does_not_mask_failed_run
 test_pre_run_done_log_publishes_the_ordering_fact
 test_failure_without_ordering_evidence_claims_no_ordering
+test_failed_run_without_a_declaration_claims_no_ordering
+test_blocked_only_log_claims_no_ordering
 test_same_minute_done_log_does_not_mask_failed_run
 test_same_minute_line_is_not_newer_than_an_unbindable_run
 test_prose_after_done_line_does_not_order_it_against_the_run

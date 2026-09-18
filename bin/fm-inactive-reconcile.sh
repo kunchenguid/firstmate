@@ -61,10 +61,11 @@
 # self-declared word (done, failed, or the configured paused verb) does not
 # contradict it - and that word contradicts nothing once the reader's own
 # ordering evidence has already placed it BEFORE the run it reported on, which
-# the reader publishes as the FM_CREW_STATE_WORD_OLDER_DETAIL field, so the
-# routine ship shape (`done:` written mid-run, the run then fails, the crew goes
-# silent) still reaches the captain - and its PR identity comes from the same
-# record as its state -
+# the reader publishes as the FM_CREW_STATE_WORD_OLDER_DETAIL field of a
+# run-step line, so the routine ship shape (`done:` written before the run, the
+# run then fails, the crew goes silent) still reaches the captain, while a word
+# the reader could not order keeps the suppression - and its PR identity comes
+# from the same record as its state -
 # the run's own published PR for a run-step state, that line's own ready-signal
 # PR for a status-log state, and never a separately recorded task PR. Together they
 # prevent one captain-facing record from combining claims from different runs.
@@ -381,13 +382,18 @@ terminal_outcome_pr() { # <meta> <state-line>
 # Enforce the header's independent captain-facing corroboration contract. The
 # crew's own word disagrees only when the reader has not already ordered it
 # BEFORE the run it reported on: a declaration the reader proved older is the
-# routine ship shape (`done:` mid-run, then the run fails), not a contradiction,
-# and dropping it would hide a real failure from the captain entirely.
+# routine ship shape (`done:` before the run, then the run fails), not a
+# contradiction, and dropping it would hide a real failure from the captain
+# entirely. The field is honoured only on a run-step line, the one place the
+# reader publishes it, so crew-authored prose republished verbatim in a
+# status-log note can never switch this guard off.
 terminal_outcome_corroborated() { # <state> <last-status-line> <state-line>
   local state=$1 last=$2 line=${3:-} declared
-  case "$line" in
-    *"$STATE_LINE_SEP$FM_CREW_STATE_WORD_OLDER_DETAIL"*) return 0 ;;
-  esac
+  if [ "$(state_line_source "$line")" = run-step ]; then
+    case "$line" in
+      *"$STATE_LINE_SEP$FM_CREW_STATE_WORD_OLDER_DETAIL"*) return 0 ;;
+    esac
+  fi
   if status_is_paused "$last"; then
     declared=paused
   else

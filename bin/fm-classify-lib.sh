@@ -62,9 +62,10 @@ FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 
 # One detail field of that reader's canonical state line, owned here because two
 # scripts read the same token: bin/fm-crew-state.sh publishes it on a terminal
-# run-step state whose ordering evidence places the crew's own last self-declared
-# word BEFORE the run's record, and bin/fm-inactive-reconcile.sh reads it to tell
-# a stale declaration apart from a crew word that genuinely post-dates the run.
+# run-step state whose status-log ordering evidence places the crew's own last
+# self-declared word BEFORE the run's ledger row, and bin/fm-inactive-reconcile.sh
+# reads it off that run-step line to tell a declaration proven stale apart from a
+# crew word whose ordering against the run was never established.
 FM_CREW_STATE_WORD_OLDER_DETAIL='crew declaration precedes this run'
 
 # fm_run_timed, the shared hard bound the worktree write probe below puts around
