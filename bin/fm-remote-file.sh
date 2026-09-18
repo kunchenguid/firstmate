@@ -90,7 +90,7 @@ put_handoff_file() { # <home-real> <name> <max-bytes> <relative-path> <bytes> <s
   (
     CDPATH='' cd -- "$home_real" 2>/dev/null || exit 3
     [ "$(pwd -P)" = "$home_real" ] || exit 3
-    if ! mkdir state 2>/dev/null; then
+    if ! (umask 077; mkdir state 2>/dev/null); then
       [ -d state ] && [ ! -L state ] || exit 3
     fi
     [ -d state ] && [ ! -L state ] || exit 3

@@ -847,7 +847,7 @@ fm_config_reread_publish_stage() {
   local dest_home=$1 stage=$2 state final pending_pointer tmp
   [ -f "$stage" ] && [ ! -L "$stage" ] || return 1
   state="$dest_home/${FM_CONFIG_REREAD_INSTRUCTION_PREFIX_REL%/*}"
-  mkdir -p "$state" 2>/dev/null || return 1
+  (umask 077; mkdir -p "$state" 2>/dev/null) || return 1
   final="$state/${stage##*/}"
   if [ -f "$final.pending" ] && [ ! -L "$final.pending" ]; then
     pending_pointer=$(cat "$final.pending" 2>/dev/null || true)

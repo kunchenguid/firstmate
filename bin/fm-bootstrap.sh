@@ -531,7 +531,7 @@ secondmate_sync() {
       *" $home_real "*) continue ;;
     esac
     propagated_homes="$propagated_homes $home_real"
-    mkdir -p "$home_real/state" || {
+    (umask 077; mkdir -p "$home_real/state") || {
       echo "CONFIG_REREAD: secondmate $id: send failed: could not create state directory"
       continue
     }
@@ -1082,7 +1082,7 @@ x_mode_setup() {
     fi
   }
 
-  mkdir -p "$STATE" "$CONFIG" 2>/dev/null || { fmx_arm_failed; return 0; }
+  (umask 077; mkdir -p "$STATE" "$CONFIG" 2>/dev/null) || { fmx_arm_failed; return 0; }
 
   case "$FM_HOME" in
     /*) shim_home=$FM_HOME ;;

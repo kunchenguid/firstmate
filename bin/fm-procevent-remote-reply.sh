@@ -498,7 +498,7 @@ cmd_ingest() {
   normalized_payload="$tmp/normalized-payload"
   normalize_payload "$payload" "$normalized_payload" || die "cannot normalize remote reply payload"
   status_file="$STATE/$id.status"
-  mkdir -p "$STATE" || die "cannot create parent state directory"
+  (umask 077; mkdir -p "$STATE") || die "cannot create parent state directory"
   [ ! -L "$status_file" ] || die "parent status log is a symlink"
   lock="$STATE/.remote-reply-ingest-$id.lock"
   fm_lock_acquire_wait "$lock" || die "cannot lock remote reply ingest for $id"

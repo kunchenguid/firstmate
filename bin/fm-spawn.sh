@@ -755,7 +755,7 @@ spawn_remote_secondmate() {
     echo "error: invalid task id" >&2
     return 2
   }
-  mkdir -p "$STATE" || {
+  (umask 077; mkdir -p "$STATE") || {
     echo "error: could not create parent state directory" >&2
     return 1
   }
@@ -1147,7 +1147,7 @@ spawn_abort_cleanup() {
           fi
           SPAWN_FRESH_COMMIT_PENDING=0
         fi
-        mkdir -p "$STATE" 2>/dev/null || true
+        (umask 077; mkdir -p "$STATE" 2>/dev/null) || true
         if [ -d "$STATE" ]; then
           SPAWN_META_TMP="$STATE/.$ID.meta.orca-recovery.${BASHPID:-$$}"
           {
@@ -1374,7 +1374,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ]; then
-  mkdir -p "$STATE" || {
+  (umask 077; mkdir -p "$STATE") || {
     echo "error: could not create parent state directory" >&2
     exit 1
   }
@@ -2511,7 +2511,7 @@ if [ "$KIND" = secondmate ]; then
   else
     echo "warning: secondmate $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
   fi
-  mkdir -p "$PROJ_ABS/state" || {
+  (umask 077; mkdir -p "$PROJ_ABS/state") || {
     echo "error: could not create secondmate state directory for $PROJ_ABS" >&2
     exit 1
   }
@@ -3739,7 +3739,7 @@ mkdir -p "$TASK_TMP/gotmp"
 # state/<id>.turn-ended when the agent finishes a turn. Worktree-resident hooks
 # and token pointers stay out of git's view so they never block teardown's dirty
 # check or leak into a commit.
-mkdir -p "$STATE"
+(umask 077; mkdir -p "$STATE")
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
 exclude_path() {

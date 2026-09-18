@@ -138,7 +138,7 @@ fm_afk_launch_lock_owned() {
 
 fm_afk_launch_lock_acquire() {
   local attempt=0 incomplete=0 identity
-  mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
+  (umask 077; mkdir -p "$FM_AFK_LAUNCH_STATE") || return 1
   while [ "$attempt" -lt 200 ]; do
     attempt=$((attempt + 1))
     if mkdir "$FM_AFK_LAUNCH_LOCK" 2>/dev/null; then
@@ -243,7 +243,7 @@ fm_afk_launch_entry_cmd() {
 
 fm_afk_launch_record_write() {  # <backend> <target> <extra>
   local pending
-  mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
+  (umask 077; mkdir -p "$FM_AFK_LAUNCH_STATE") || return 1
   pending=$(mktemp "$FM_AFK_LAUNCH_STATE/.afk-daemon-terminal.pending.XXXXXX") || return 1
   printf '%s\t%s\t%s\n' "$1" "$2" "$3" > "$pending" || { rm -f "$pending"; return 1; }
   mv "$pending" "$FM_AFK_LAUNCH_RECORD" || { rm -f "$pending"; return 1; }
@@ -561,7 +561,7 @@ fm_afk_launch_start() {
     fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"
     return 1; }
 
-  mkdir -p "$FM_AFK_LAUNCH_STATE"
+  (umask 077; mkdir -p "$FM_AFK_LAUNCH_STATE")
 
   if daemon_lock_held_by_live_daemon; then
     fm_afk_launch_record_validate_if_present || return 1
@@ -620,7 +620,7 @@ fm_afk_launch_start() {
 
 fm_afk_launch_start_native() {
   local backup artifact had_afk=0 result=0
-  mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
+  (umask 077; mkdir -p "$FM_AFK_LAUNCH_STATE") || return 1
   fm_afk_launch_catchup_pending && return 1
   fm_afk_launch_daemon_allowed || return 1
   fm_afk_launch_record_require || return 1

@@ -472,7 +472,7 @@ fm_pr_poll_prepare() {
   [ -f "$template" ] || return 1
 
   [ ! -L "$state" ] || return 1
-  mkdir -p "$state" || return 1
+  (umask 077; mkdir -p "$state") || return 1
   [ -d "$state" ] && [ ! -L "$state" ] || return 1
   umask 077
   FM_PR_POLL_DATA_DEST="$state/$id.pr-poll"

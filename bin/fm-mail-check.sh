@@ -195,7 +195,7 @@ poll_has_publication_evidence() {
 
 action_check() {
   local out rc line woken_before queued=0
-  mkdir -p "$STATE" || return 1
+  (umask 077; mkdir -p "$STATE") || return 1
   woken_before=$(mktemp) || woken_before=
   if [ -n "$woken_before" ]; then
     if [ -f "$STATE/.mail-woken" ]; then
@@ -341,7 +341,7 @@ action_arm() {
     printf 'fm-mail-check: the mail plane is missing at %s; cannot arm\n' "$MAIL_BIN" >&2
     return 1
   fi
-  mkdir -p "$STATE" || return 1
+  (umask 077; mkdir -p "$STATE") || return 1
   case "$FM_HOME" in
     /*) home=$FM_HOME ;;
     *)

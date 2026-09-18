@@ -1536,7 +1536,7 @@ trim_log() {
 fm_super_main() {
   local STATE
   STATE="$(_state_root)"
-  mkdir -p "$STATE"
+  (umask 077; mkdir -p "$STATE")
 
   # Source the portable lock helpers (works on macOS where flock is absent).
   # Export FM_STATE_OVERRIDE so the lib resolves the same state dir.

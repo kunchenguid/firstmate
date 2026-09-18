@@ -272,7 +272,7 @@ secondmate_update_reconcile_record() { # <state> <id> <local-commit> <target-com
   if [ -e "$state" ] || [ -L "$state" ]; then
     state=$(resolved_existing_dir "$state") || return 1
   else
-    mkdir -p "$state" || return 1
+    (umask 077; mkdir -p "$state") || return 1
     state=$(resolved_existing_dir "$state") || return 1
   fi
   marker=$(secondmate_update_reconcile_marker_path "$state" "$id") || return 1

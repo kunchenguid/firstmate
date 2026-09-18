@@ -189,7 +189,7 @@ while IFS='|' read -r id home _window meta; do
     echo "  home: dirty working tree - local-material push continuing"
   fi
 
-  mkdir -p "$home_real/state" || {
+  (umask 077; mkdir -p "$home_real/state") || {
     echo "  config-reread: error - could not create state directory"
     errors=1
     continue
