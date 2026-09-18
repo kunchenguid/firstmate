@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 # Per-PR supersession: a new push to the same PR replaces that PR's in-flight
-# CI instead of letting superseded heads keep 13 jobs of hosted-runner work.
+# CI instead of letting superseded heads keep the full hosted-runner fan-out.
 # The group uses the PR number for pull_request events, so every run of one PR
 # shares a group, and falls back to the unique run id for push events, so each
 # main push gets its own group and is never cancelled. Cancellation is likewise
@@ -24,11 +24,14 @@ concurrency:
 
 jobs:
   lint:
-    name: Lint
+    name: Lint ${{ matrix.partition }}
     runs-on: ubuntu-latest
-    # Hang tripwire only: lint executions measured at 14-16 minutes in the
-    # September 12 starvation report, so this leaves deliberate margin.
+    # Keep the hang tripwire separate from the measured performance target.
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2]
     steps:
       - uses: actions/checkout@v6
       - name: Install pinned ShellCheck
@@ -45,7 +48,19 @@ jobs:
       # and GitHub workflow lint). Do not re-spell the checks here; keep CI
       # and the pre-push gate on this script so a self-broken ci.yml still
       # fails locally before merge.
-      - run: bin/fm-lint.sh
+      - name: Lint canonical partition
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/fm-lint"
+          bin/fm-lint.sh --partition "${{ matrix.partition }}of${{ strategy.job-total }}" \
+            --telemetry "$RUNNER_TEMP/fm-lint/partition-${{ matrix.partition }}.tsv"
+      - name: Upload lint telemetry
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fm-lint-telemetry-${{ matrix.partition }}
+          path: ${{ runner.temp }}/fm-lint/partition-${{ matrix.partition }}.tsv
+          if-no-files-found: warn
 
   # Deterministic proof that portable parallel shards + portable serial + Herdr
   # equal the complete tests/*.test.sh inventory with no missing or duplicates,
@@ -159,15 +174,15 @@ jobs:
   tests-portable-serial:
     name: Behavior portable serial ${{ matrix.shard }}
     runs-on: ubuntu-latest
-    # Current runners can take ~20 min for a balanced shard. This 30-minute cap
-    # preserves the timeout as a hang tripwire while allowing runner-speed and
-    # job-setup margin; it is not the expected healthy end of the lane.
+    # Refreshed weights put the longest modeled shard near 12 minutes across
+    # nine runners. Preserve the existing hang tripwire until complete Linux
+    # measurements establish the new healthy envelope; a model is not a timer.
     timeout-minutes: 30
     strategy:
       # Every shard reports so one failure never hides another shard's result.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9]
     steps:
       - uses: actions/checkout@v6
         with:
