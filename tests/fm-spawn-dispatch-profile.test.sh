@@ -1018,6 +1018,96 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_project_memory_claude_settings_and_codex_brief() {
+  local rec id out status launch settings memory_home memory_dir memory_rel brief argv_file
+  id=project-memory-claude-r1
+  rec=$(make_spawn_case project-memory-claude claude "$id")
+  read_case_record "$rec"
+  memory_home="$HOME_DIR/user's home"
+  memory_dir="$memory_home/memory folder & 'quoted' \\ backslash \"double\" \$cash café"
+  mkdir -p "$memory_dir"
+  memory_rel=${memory_dir#"$memory_home"/}
+  printf 'project ~/%s\n' "$memory_rel" > "$HOME_DIR/config/project-memory"
+  out=$(FM_TEST_HOME_OVERRIDE="$memory_home" run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Claude spawn with mapped project memory should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  [ "$(printf '%s\n' "$launch" | grep -o -- '--settings' | wc -l | tr -d ' ')" = 1 ] || fail "mapped Claude launch added a second --settings flag"
+  argv_file="$CASE_DIR/claude-argv"
+  cat > "$FAKEBIN_DIR/claude" <<'SH'
+#!/bin/sh
+printf '%s\0' "$@" > "$FM_TEST_ARGV_FILE"
+SH
+  chmod +x "$FAKEBIN_DIR/claude"
+  env -i HOME="$memory_home" PATH="$FAKEBIN_DIR:/usr/bin:/bin" TERM=xterm FM_TEST_ARGV_FILE="$argv_file" \
+    /bin/bash -c "$launch" || fail "mapped Claude launch command failed with shell-special path characters"
+  settings=$(jq -Rs 'split("\u0000") | .[index("--settings") + 1] | fromjson' "$argv_file")
+  printf '%s\n' "$settings" | jq -e --arg expected "$memory_dir" '.autoMemoryDirectory == $expected' >/dev/null \
+    || fail "executed Claude --settings argument was invalid or had the wrong autoMemoryDirectory: $settings"
+  brief="$HOME_DIR/data/$id/launch-brief.md"
+  assert_no_grep 'append-only for workers' "$brief" "Claude brief imposed the non-Claude append-only rule"
+  assert_grep "Claude Code's native auto-memory rules" "$brief" "Claude brief omitted its native memory behavior"
+  assert_contains "$(cat "$HOME_DIR/state/$id.meta")" "project_memory=$memory_dir" "task metadata omitted its mapped project memory folder"
+
+  id=project-memory-codex-r1
+  rec=$(make_spawn_case project-memory-codex codex "$id")
+  read_case_record "$rec"
+  printf '%s\n' 'project ~/memory folder' > "$HOME_DIR/config/project-memory"
+  rm -f "$HOME_DIR/data/$id/brief.md"
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" project --mode direct-PR >/dev/null || fail "mapped Codex brief scaffold failed"
+  brief="$HOME_DIR/data/$id/brief.md"
+  sed 's/{TASK}/Exercise the mapped project memory brief./; s/{FIRSTMATE_SPEC}/Check the generated worker guidance./' \
+    "$brief" > "$brief.filled"
+  mv "$brief.filled" "$brief"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR/./" --harness codex)
+  status=$?
+  expect_code 0 "$status" "mapped Codex spawn should succeed"
+  assert_grep 'append-only for workers' "$HOME_DIR/data/$id/launch-brief.md" "Codex launch brief omitted project-memory instructions"
+  assert_no_grep "Claude Code's native auto-memory rules" "$HOME_DIR/data/$id/launch-brief.md" \
+    "Codex brief received Claude-specific memory guidance"
+  assert_grep '2. Stay inside this worktree; modify nothing outside it except the status file' \
+    "$HOME_DIR/data/$id/launch-brief.md" "mapped ship brief did not narrow its filesystem exception"
+  assert_grep 'only permitted writes outside the worktree' "$HOME_DIR/data/$id/launch-brief.md" \
+    "mapped ship brief omitted the explicit memory write scope"
+
+  id=project-memory-scout-r1
+  rec=$(make_spawn_case project-memory-scout codex "$id")
+  read_case_record "$rec"
+  printf '%s\n' 'project /tmp/project memory folder' > "$HOME_DIR/config/project-memory"
+  rm -f "$HOME_DIR/data/$id/brief.md"
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" "$PROJ_DIR" --scout >/dev/null \
+    || fail "mapped scout brief scaffold failed"
+  sed 's/{TASK}/Inspect the mapped project memory./; s/{FIRSTMATE_SPEC}/Keep the report scoped./' \
+    "$HOME_DIR/data/$id/brief.md" > "$HOME_DIR/data/$id/brief.filled"
+  mv "$HOME_DIR/data/$id/brief.filled" "$HOME_DIR/data/$id/brief.md"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout --harness codex)
+  status=$?
+  expect_code 0 "$status" "mapped Codex scout spawn should succeed: $out"
+  assert_grep '2. Stay inside this worktree; the only files you may write outside it are the report file' \
+    "$HOME_DIR/data/$id/launch-brief.md" \
+    "mapped scout rule did not carry its exact outside-write exception"
+  assert_grep "$HOME_DIR/data/$id/report.md" "$HOME_DIR/data/$id/launch-brief.md" \
+    "mapped scout exception omitted the report path"
+  assert_grep '/tmp/project memory folder' "$HOME_DIR/data/$id/launch-brief.md" \
+    "mapped scout rule omitted the exact memory directory"
+  pass "project memory: Claude gets valid inline settings and metadata; Codex brief gets the shared pointer and append-only guidance"
+}
+
+test_malformed_project_memory_registry_refuses_spawn() {
+  local rec id out status
+  id=project-memory-malformed-r1
+  rec=$(make_spawn_case project-memory-malformed codex "$id")
+  read_case_record "$rec"
+  printf '%s\n' 'project relative/path' > "$HOME_DIR/config/project-memory"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "relative project-memory path must refuse spawn"
+  assert_contains "$out" 'config/project-memory:1' "malformed project-memory error omitted its line number"
+  [ ! -s "$LAUNCH_LOG" ] || fail "malformed project-memory registry delivered a launch"
+  [ ! -f "$HOME_DIR/state/$id.meta" ] || fail "malformed project-memory registry published task metadata"
+  pass "malformed project-memory registry is reported before launch or task publication"
+}
+
 # Execute the actual emitted command in a synthetic pane environment: the
 # fake backend records delivery, while real shells exercise the env boundary.
 # No developer environment or credential values are inspected by these probes.
@@ -1458,5 +1548,7 @@ test_claude_secondmate_launch_omits_task_control_channel_authority
 test_claude_crewmate_launch_carries_the_attribution_policy
 test_claude_secondmate_launch_carries_the_attribution_policy
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_project_memory_claude_settings_and_codex_brief
+test_malformed_project_memory_registry_refuses_spawn
 
 echo "# all fm-spawn-dispatch-profile tests passed"

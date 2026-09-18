@@ -811,7 +811,24 @@ test_worker_role_scope() {
   pass "fm-brief: scaffolds leave the worker role scope to the launch boundary and keep the secondmate contract"
 }
 
+test_project_memory_registry_is_rendered_only_at_launch() {
+  local home brief
+  home="$TMP_ROOT/project-memory"
+  mkdir -p "$home/config"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" no-memory sample-project --mode local-only >/dev/null || fail "unmapped brief failed"
+  brief="$home/data/no-memory/brief.md"
+  assert_no_grep '^# Project memory$' "$brief" "missing registry changed the brief"
+  printf '%s\n' 'sample-project /tmp/project memory folder' > "$home/config/project-memory"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" with-memory sample-project --mode local-only >/dev/null || fail "mapped brief scaffold failed"
+  brief="$home/data/with-memory/brief.md"
+  assert_no_grep '^# Project memory$' "$brief" "scaffold-time rendering left a stale memory pointer"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" path-form sample-project/ --mode local-only >/dev/null || fail "path-form brief failed"
+  assert_no_grep '^# Project memory$' "$home/data/path-form/brief.md" "launch-only memory pointer leaked into scaffold"
+  pass "fm-brief: mapped memory remains launch-time data rather than stale scaffold content"
+}
+
 test_worker_role_scope
+test_project_memory_registry_is_rendered_only_at_launch
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header

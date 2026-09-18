@@ -456,6 +456,23 @@ Regression coverage executes emitted launch commands with synthetic nonsecret va
 
 Every claude launch's inline `--settings` JSON also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, so a spawned worker never writes a Co-Authored-By trailer, Claude-Session link, or generated-with line into a commit or PR body regardless of which settings scopes end up loaded.
 
+## Project memory folders (config/project-memory)
+
+`config/project-memory` is an optional local, gitignored registry mapping project names to existing memory directories without moving or copying the memories.
+Each nonblank, non-comment line has the form `<project-name> <directory>`, where the directory is absolute or starts with `~/`; paths may contain spaces.
+Project names use the same identity as worker spawn, the project directory's basename.
+Malformed lines, duplicate project entries, and unreadable or non-regular registry files are reported as errors.
+An absent registry or project entry leaves existing brief and launch behavior unchanged.
+
+The launch-time renderer in `bin/fm-project-memory-lib.sh` adds the worker memory instructions and exact write exception to ship and scout launch briefs, so relaunches use the current mapping.
+Claude workers receive the mapped directory through `autoMemoryDirectory` in Firstmate's existing inline `--settings` object and follow Claude Code's native auto-memory behavior, which may edit or delete entries in the folder.
+Operators who want recovery should keep their own backup of mapped folders; this configuration does not prescribe a backup method.
+Rovo receives the mapped directory through its existing `allowedExternalPaths` grant.
+Codex receives the brief pointer; other harnesses are omitted because their adapter contracts do not establish access to an arbitrary external directory.
+Non-Claude workers add new lesson files and append one line per file to `MEMORY.md` without rewriting or deleting existing memory; firstmates curate the folder.
+The resolved directory is recorded as `project_memory=` in task metadata only when the selected harness is covered.
+The registry is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.

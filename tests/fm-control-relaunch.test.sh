@@ -308,9 +308,14 @@ SH
 # --- 1. same-harness relaunch -----------------------------------------------
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
-  local dir out rc gen_before gen_after
+  local dir out rc gen_before gen_after memory_dir old_memory_dir
   dir=$(new_case same rl1)
   add_ship_task "$dir" rl1 claude
+  memory_dir="$dir/existing project memory"
+  old_memory_dir="$dir/previous project memory"
+  mkdir -p "$memory_dir" "$dir/home/config"
+  printf 'proj %s\n' "$memory_dir" > "$dir/home/config/project-memory"
+  printf 'project_memory=%s\n' "$old_memory_dir" >> "$dir/home/state/rl1.meta"
   gen_before=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" rl1)
   printf 'busy_gen=%s\n' "$gen_before" >> "$dir/home/state/rl1.meta"
   out=$(run_control "$dir" rl1 relaunch --note "stopped mid-refactor"); rc=$?
@@ -322,6 +327,12 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
     || fail "the worktree must be reused, not reallocated"
   [ "$(meta_field "$dir" rl1 kind)" = ship ] || fail "kind must survive the relaunch"
   [ "$(meta_field "$dir" rl1 project)" = "$dir/proj" ] || fail "project must survive the relaunch"
+  [ "$(meta_field "$dir" rl1 project_memory)" = "$memory_dir" ] \
+    || fail "relaunch did not resolve and record the current project-memory mapping"
+  assert_grep "$memory_dir" "$dir/home/data/rl1/launch-brief.md" \
+    "relaunch brief did not render the current project-memory mapping"
+  assert_no_grep "$old_memory_dir" "$dir/home/data/rl1/launch-brief.md" \
+    "relaunch brief retained a stale project-memory mapping"
   gen_after=$(meta_field "$dir" rl1 busy_gen)
   [ -n "$gen_after" ] && [ "$gen_after" != "$gen_before" ] \
     || fail "a relaunch must arm a fresh busy generation, got '$gen_after'"
