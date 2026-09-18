@@ -26,8 +26,9 @@
 #
 # Public helpers:
 #   fm_jev_decide <state> <questions-json>
-#     POST {model, state, questions}. <state> is a string; <questions-json>
-#     is a JSON object. Prints the full JSON response on stdout. Non-zero on
+#     POST {model, state, questions}. <state> is a JSON object or array when
+#     the argument parses as one, otherwise a string; <questions-json> is a
+#     JSON object. Prints the full JSON response on stdout. Non-zero on
 #     hard failure: 2 for usage/config (missing args, missing key, missing
 #     jq/curl, questions not a JSON object), 1 for transport or a non-JSON /
 #     non-200 response. Sets FM_JEV_LAST_ROUTE, FM_JEV_LAST_URL,
@@ -53,8 +54,7 @@
 #   (positive integer seconds, default 5), JEV_CONFIDENCE_FLOOR,
 #   JEV_STATE_MAX_BYTES, FM_HOME.
 #
-# bin/fm-dispatch-resolve.sh keeps its own TypeSafe-only process and is not
-# rewired through this library.
+# bin/fm-dispatch-resolve.sh uses this library for the HTTP call.
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   printf 'fm-jev-lib.sh is a sourceable library. Usage: . bin/fm-jev-lib.sh\n' >&2
@@ -206,11 +206,19 @@ fm_jev_decide() {
   FM_JEV_LAST_URL=$_fm_jev_url
   # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
   FM_JEV_LAST_MODEL=$_fm_jev_model
-  request=$(jq -n --arg model "$_fm_jev_model" --arg state "$state" --argjson questions "$questions" \
-    '{model: $model, state: $state, questions: $questions}') || {
-    _fm_jev_err "could not build request"
-    return 2
-  }
+  if printf '%s' "$state" | jq -e 'type == "object" or type == "array"' >/dev/null 2>&1; then
+    request=$(jq -n --arg model "$_fm_jev_model" --argjson state "$state" --argjson questions "$questions" \
+      '{model: $model, state: $state, questions: $questions}') || {
+      _fm_jev_err "could not build request"
+      return 2
+    }
+  else
+    request=$(jq -n --arg model "$_fm_jev_model" --arg state "$state" --argjson questions "$questions" \
+      '{model: $model, state: $state, questions: $questions}') || {
+      _fm_jev_err "could not build request"
+      return 2
+    }
+  fi
   resp_file=$(mktemp) || { _fm_jev_err "mktemp failed"; return 2; }
   timeout=$(_fm_jev_timeout)
   t0=$(_fm_jev_now_ms)

@@ -5,25 +5,29 @@
 # Usage:
 #   fm-dispatch-resolve.sh <brief-file> [--project <name>]
 #
-# Opt-in gate: TYPESAFE_API_KEY non-empty in this process environment, else a
-#   TYPESAFE_API_KEY= line in $FM_HOME/.env read with fmx_env_get, the same
-#   accessor as FMX_PAIRING_TOKEN (bin/fm-env-lib.sh). The environment wins.
-#   Absent in both: one "dispatch-resolve: off" line on stderr, nothing on
-#   stdout, exit 0, no network call, so firstmate dispatches exactly as today.
-#   The key lives in one shell variable and reaches curl as a header read from
-#   a file descriptor, never on argv; nothing logs or writes it.
+# Opt-in gate: TYPESAFE_API_KEY or OPENROUTER_API_KEY non-empty in this
+#   process environment, else the same names in $FM_HOME/.env read with
+#   fmx_env_get, the same accessor as FMX_PAIRING_TOKEN (bin/fm-env-lib.sh).
+#   The environment wins. Absent in both: one "dispatch-resolve: off" line on
+#   stderr, nothing on stdout, exit 0, no network call, so firstmate
+#   dispatches exactly as today. Keys reach curl only through bin/fm-jev-lib.sh
+#   as an Authorization header read from a file descriptor, never on argv;
+#   nothing logs or writes them.
 #
-# What it does when on with at least one rule: one POST to
-#   https://api.typesafe.ai/v1/systemone with the project name and the whole brief as
-#   state and ONE Choice question whose
-#   options are every rule's `when` from config/crew-dispatch.json plus one
-#   fixed generic none option. Jev returns the matched rule, a probability per
-#   option, and a confidence. Everything after that is jq: the confidence
-#   floor, the rule's declared `approval` and `floor`, each profile's declared
-#   `provider` and `floor`, the quota rows from ONE quota-axi --json snapshot,
-#   and the spendPriority argmax over the eligible candidates. The model never
-#   sees quota, catalogs, approvals, `why`, or `use`. With no rules, it returns
-#   a non-clear result so firstmate keeps using the existing intake.
+# What it does when on with at least one rule: one POST through
+#   bin/fm-jev-lib.sh (TypeSafe /v1/systemone, or OpenRouter
+#   /api/alpha/decisions when OPENROUTER_API_KEY is set and TYPESAFE_API_KEY
+#   is not, or when JEV_ROUTE=openrouter) with the project name plus either
+#   the whole brief or a compact intent summary as state, and a Choice
+#   question whose options are every rule's `when` from
+#   config/crew-dispatch.json plus one fixed generic none option. Jev returns
+#   the matched rule, a probability per option, and a confidence. Everything
+#   after that is jq: the confidence floor, the rule's declared `approval`
+#   and `floor`, each profile's declared `provider` and `floor`, the quota
+#   rows from ONE quota-axi --json snapshot, and the spendPriority argmax over
+#   the eligible candidates. The model never sees quota, catalogs, approvals,
+#   `why`, or `use`. With no rules, it returns a non-clear result so
+#   firstmate keeps using the existing intake.
 #   docs/configuration.md "Crew dispatch profiles" owns the declared fields and
 #   "Typed dispatch resolution" owns this tool's operator contract.
 #
@@ -44,7 +48,14 @@
 #   actionable, never selected around.
 #
 # Environment:
-#   TYPESAFE_API_KEY is the only resolver-specific environment setting.
+#   TYPESAFE_API_KEY and/or OPENROUTER_API_KEY opt the resolver in.
+#   JEV_ROUTE=openrouter selects OpenRouter even when a TypeSafe key is also
+#   present. FM_JEV_DISPATCH_SHADOW=1 or config/jev-dispatch-shadow logs the
+#   Jev pick to state/jev-dispatch-shadow.jsonl and does not add spawn
+#   authority beyond today's optional clear-profile use.
+#   FM_JEV_DISPATCH_EXTRA=1 adds log-only home and deliverable questions.
+#   FM_JEV_DISPATCH_COMPACT=1 sends a 400-800 character intent summary
+#   instead of the whole brief (default on for the OpenRouter route).
 #
 # Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
 #   the captain-approval gate, or fm-spawn.sh validation; it publishes one
@@ -52,8 +63,9 @@
 set -u
 
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
-export -n TYPESAFE_API_KEY_PRIVATE 2>/dev/null || true
-unset TYPESAFE_API_KEY
+OPENROUTER_API_KEY_PRIVATE=${OPENROUTER_API_KEY:-}
+export -n TYPESAFE_API_KEY_PRIVATE OPENROUTER_API_KEY_PRIVATE 2>/dev/null || true
+unset TYPESAFE_API_KEY OPENROUTER_API_KEY
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -66,14 +78,12 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-env-lib.sh
 . "$SCRIPT_DIR/fm-env-lib.sh"
-# shellcheck source=bin/fm-timing-lib.sh
-. "$SCRIPT_DIR/fm-timing-lib.sh"
+# shellcheck source=bin/fm-jev-lib.sh
+. "$SCRIPT_DIR/fm-jev-lib.sh"
 
 CONFIDENCE_FLOOR=0.6
-TS_MODEL=jev-latest
-TS_BASE=https://api.typesafe.ai
-TS_TIMEOUT=5
 DEFAULT_WHEN="No listed rule applies to this task."
+DISPATCH_HOMES="main agency lay frontend zimmer"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
 no_rules() {
@@ -86,6 +96,95 @@ usage() {
     /^#/ { sub(/^# ?/, ""); print; next }
     { exit }
   ' "$0"
+}
+
+fm_dispatch_truthy() {
+  case "$1" in 1|on|true|yes) return 0 ;; *) return 1 ;; esac
+}
+
+fm_dispatch_shadow_on() {
+  local v=${FM_JEV_DISPATCH_SHADOW:-}
+  if [ -n "$v" ]; then
+    fm_dispatch_truthy "$v"
+    return
+  fi
+  [ -e "$CONFIG/jev-dispatch-shadow" ]
+}
+
+fm_dispatch_route() {
+  case "${JEV_ROUTE:-}" in
+    openrouter) printf 'openrouter' ;;
+    typesafe) printf 'typesafe' ;;
+    '')
+      if [ -n "$TYPESAFE_API_KEY_PRIVATE" ]; then
+        printf 'typesafe'
+      else
+        printf 'openrouter'
+      fi
+      ;;
+    *) printf '%s' "${JEV_ROUTE}" ;;
+  esac
+}
+
+fm_dispatch_compact_on() {
+  local v=${FM_JEV_DISPATCH_COMPACT:-}
+  if [ -n "$v" ]; then
+    fm_dispatch_truthy "$v"
+    return
+  fi
+  [ "$(fm_dispatch_route)" = openrouter ]
+}
+
+fm_dispatch_flatten_truncate() {
+  local n=${2:-800}
+  printf '%s' "$1" | awk -v n="$n" '
+    {
+      if (NR > 1) buf = buf " "
+      buf = buf $0
+    }
+    END {
+      gsub(/[ \t\r\n]+/, " ", buf)
+      sub(/^ /, "", buf)
+      sub(/ $/, "", buf)
+      if (n > 0 && length(buf) > n) buf = substr(buf, 1, n)
+      printf "%s", buf
+    }'
+}
+
+fm_dispatch_intent_summary() {
+  local brief=$1 text
+  text=$(awk '
+    /^## Captain'\''s intent([[:space:]]|$)/ { grab=1; next }
+    /^## / { if (grab) exit }
+    grab { print }
+  ' "$brief")
+  if [ -z "$text" ]; then
+    text=$(cat "$brief")
+  fi
+  fm_dispatch_flatten_truncate "$text" 800
+}
+
+fm_dispatch_home_criteria() {
+  local reg="$FM_HOME/data/secondmates.md" id scope fallback json='{}'
+  # shellcheck source=bin/fm-secondmate-registry-lib.sh
+  . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+  for id in $DISPATCH_HOMES; do
+    if [ "$id" = main ]; then
+      fallback='The main firstmate home; work that no registered secondmate scope covers.'
+    else
+      fallback="The ${id} secondmate home."
+    fi
+    scope=''
+    if [ -f "$reg" ] && [ ! -L "$reg" ]; then
+      scope=$(secondmate_registry_field "$reg" "$id" scope 2>/dev/null) || scope=''
+    fi
+    if [ -z "$scope" ]; then
+      scope=$fallback
+    fi
+    scope=$(fm_dispatch_flatten_truncate "$scope" 200)
+    json=$(jq -c --arg id "$id" --arg scope "$scope" '. + {($id): $scope}' <<<"$json")
+  done
+  printf '%s' "$json"
 }
 
 BRIEF='' PROJECT='' RULES_PATH="$CONFIG/crew-dispatch.json" RULES=''
@@ -102,8 +201,11 @@ done
 if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
   TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
 fi
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-  echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
+if [ -z "$OPENROUTER_API_KEY_PRIVATE" ]; then
+  OPENROUTER_API_KEY_PRIVATE=$(fmx_env_get OPENROUTER_API_KEY "$FM_HOME/.env")
+fi
+if [ -z "$TYPESAFE_API_KEY_PRIVATE" ] && [ -z "$OPENROUTER_API_KEY_PRIVATE" ]; then
+  echo "dispatch-resolve: off (TYPESAFE_API_KEY and OPENROUTER_API_KEY absent from the environment and $FM_HOME/.env)" >&2
   exit 0
 fi
 
@@ -220,30 +322,72 @@ RESP_FILE=$(mktemp) || die "mktemp failed"
 QUOTA=$(mktemp) || { rm -f "$RESP_FILE"; die "mktemp failed"; }
 trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA"' EXIT
 LAT_MS=null
+EXTRA_LOG=null
 command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
-  REQUEST=$(jq -n --rawfile brief "$BRIEF" --arg project "$PROJECT" --arg model "$TS_MODEL" \
-    --arg none_criterion "$DEFAULT_WHEN" --slurpfile rules "$RULES" '
-    ($rules[0]) as $cfg |
-    ($cfg.rules | to_entries | map({key: ("rule_" + ((.key + 1) | tostring)), value: .value.when}) | from_entries) as $criteria |
-    {
-      model: $model,
-      state: {task: {project: $project, brief: $brief}},
-      questions: {
-        rule: {
-          type: "choice",
-          instructions: "Which ONE dispatch rule best fits `task` (read `task.brief` and `task.project`)? Each option is the rule'"'"'s own matching condition; pick `default` when no rule'"'"'s condition is met, including when a rule'"'"'s own exemption text excludes this task.",
-          criteria: ($criteria + {default: $none_criterion})
-        }
+[ -n "$TYPESAFE_API_KEY_PRIVATE" ] && TYPESAFE_API_KEY=$TYPESAFE_API_KEY_PRIVATE
+[ -n "$OPENROUTER_API_KEY_PRIVATE" ] && OPENROUTER_API_KEY=$OPENROUTER_API_KEY_PRIVATE
+EXTRA=0
+if fm_dispatch_truthy "${FM_JEV_DISPATCH_EXTRA:-}"; then
+  EXTRA=1
+fi
+if [ "$EXTRA" -eq 1 ]; then
+  HOME_CRITERIA=$(fm_dispatch_home_criteria)
+else
+  HOME_CRITERIA='{}'
+fi
+if fm_dispatch_compact_on; then
+  BRIEF_TEXT=$(fm_dispatch_intent_summary "$BRIEF")
+else
+  BRIEF_TEXT=$(cat "$BRIEF")
+fi
+BRIEF_TEXT=$(fm_jev_compact_state "$BRIEF_TEXT") || emit_error "state exceeds size limit"
+STATE=$(jq -nc --arg project "$PROJECT" --arg brief "$BRIEF_TEXT" '{task:{project:$project, brief:$brief}}') \
+  || emit_error "could not build state"
+QUESTIONS=$(jq -nc --arg none_criterion "$DEFAULT_WHEN" --argjson extra "$EXTRA" --argjson homes "$HOME_CRITERIA" --slurpfile rules "$RULES" '
+  ($rules[0].rules | to_entries | map({key: ("rule_" + ((.key + 1) | tostring)), value: .value.when}) | from_entries) as $criteria |
+  {
+    rule: {
+      type: "choice",
+      instructions: "Which ONE dispatch rule best fits `task` (read `task.brief` and `task.project`)? Each option is the rule'"'"'s own matching condition; pick `default` when no rule'"'"'s condition is met, including when a rule'"'"'s own exemption text excludes this task.",
+      criteria: ($criteria + {default: $none_criterion})
+    }
+  } + (if $extra == 1 then {
+    home: {
+      type: "choice",
+      instructions: "Which Firstmate home should own this work? This answer is log-only and must not route the task.",
+      criteria: $homes
+    },
+    deliverable: {
+      type: "choice",
+      instructions: "Should this work ship a change, produce a scout report, or neither? This answer is log-only.",
+      criteria: {
+        ship: "A project change through the selected delivery path.",
+        scout: "A knowledge-only report, not a PR.",
+        neither: "Neither a ship nor a scout."
       }
-    }')
-  T0=$(fm_timing_now_ms)
-  HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
-    -X POST "$TS_BASE/v1/systemone" -H 'Content-Type: application/json' \
-    -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$TYPESAFE_API_KEY_PRIVATE") \
-    --data-binary @- 2>/dev/null) || HTTP=000
-  T1=$(fm_timing_now_ms)
-  LAT_MS=$(( T1 - T0 ))
-  [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
+    }
+  } else {} end)
+') || emit_error "could not build questions"
+DECIDE_ERR=0
+fm_jev_decide "$STATE" "$QUESTIONS" > "$RESP_FILE" || DECIDE_ERR=$?
+LAT_MS=${FM_JEV_LAST_LATENCY_MS:-0}
+HTTP=${FM_JEV_LAST_HTTP:-000}
+unset TYPESAFE_API_KEY OPENROUTER_API_KEY
+if [ "$DECIDE_ERR" -ne 0 ]; then
+  if [ -n "$HTTP" ] && [ "$HTTP" != 200 ]; then
+    emit_error "http $HTTP after ${LAT_MS} ms"
+  else
+    emit_error "jev caller failed"
+  fi
+fi
+if [ "$EXTRA" -eq 1 ]; then
+  EXTRA_LOG=$(jq -c '{
+    home: (.answers.home.choice // null),
+    deliverable: (.answers.deliverable.choice // null),
+    home_confidence: (.answers.home.confidence // null),
+    deliverable_confidence: (.answers.deliverable.confidence // null)
+  }' "$RESP_FILE") || EXTRA_LOG='{}'
+fi
 jq -e --slurpfile rules "$RULES" '
     (($rules[0].rules | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"] | sort) as $choices |
     (.answers.rule.choice | type) == "string" and
@@ -400,5 +544,28 @@ TEXT=$(jq -r '
   (if .chosen then "  profile: --harness \(.chosen.profile.harness | shell_arg)"
       + (if .chosen.profile.model then " --model \(.chosen.profile.model | shell_arg)" else "" end)
       + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
+if fm_dispatch_shadow_on; then
+  SHADOW_PATH="$FM_HOME/state/jev-dispatch-shadow.jsonl"
+  SHADOW=$(jq -nc --argjson result "$RESULT" --arg route "${FM_JEV_LAST_ROUTE:-}" \
+    --arg url "${FM_JEV_LAST_URL:-}" --arg model "${FM_JEV_LAST_MODEL:-}" \
+    --arg project "$PROJECT" --argjson extra "$EXTRA_LOG" \
+    --arg compact "$(if fm_dispatch_compact_on; then printf 1; else printf 0; fi)" '{
+      purpose: "dispatch-shadow",
+      route: $route,
+      url: $url,
+      model: $model,
+      project: $project,
+      compact: ($compact == "1"),
+      status: $result.status,
+      rule: $result.rule,
+      confidence: $result.confidence,
+      probabilities: $result.probabilities,
+      profile: (if $result.chosen then $result.chosen.profile else null end),
+      extra: $extra
+    }') || SHADOW=''
+  if [ -n "$SHADOW" ]; then
+    fm_jev_log_call "$SHADOW" "$SHADOW_PATH" || true
+  fi
+fi
 printf '%s\n' "$TEXT"
 exit 0

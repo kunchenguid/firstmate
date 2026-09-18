@@ -110,7 +110,8 @@ cat > "$FAKEBIN/curl" <<'SH'
 # Fake curl: records argv (minus the -o target), the stdin body, and the header
 # read from fd 3, then answers with FAKE_CURL_RESPONSE and FAKE_CURL_HTTP.
 set -u
-if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
+if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ] \
+  || [ -n "${OPENROUTER_API_KEY+x}" ] || [ -n "${OPENROUTER_API_KEY_PRIVATE+x}" ]; then
   printf 'curl:secret-present\n' >> "${CHILD_ENV_LOG:?}"
 else
   printf 'curl:clean\n' >> "${CHILD_ENV_LOG:?}"
@@ -138,7 +139,8 @@ chmod +x "$FAKEBIN/curl"
 cat > "$FAKEBIN/quota-axi" <<'SH'
 #!/usr/bin/env bash
 set -u
-if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
+if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ] \
+  || [ -n "${OPENROUTER_API_KEY+x}" ] || [ -n "${OPENROUTER_API_KEY_PRIVATE+x}" ]; then
   printf 'quota-axi:secret-present\n' >> "${CHILD_ENV_LOG:?}"
 else
   printf 'quota-axi:clean\n' >> "${CHILD_ENV_LOG:?}"
@@ -189,7 +191,7 @@ write_response "$RESPONSE" rule_4 0.9
 run code out err "$BRIEF" --project pager
 expect_code 0 "$code" "absent key exits 0"
 assert_equals '' "$out" "absent key prints nothing on stdout"
-assert_contains "$err" 'dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and' "absent key explains itself on stderr"
+assert_contains "$err" 'dispatch-resolve: off (TYPESAFE_API_KEY and OPENROUTER_API_KEY absent from the environment and' "absent key explains itself on stderr"
 assert_absent "$LOG/argv" "absent key never calls curl"
 assert_absent "$LOG/quota-axi.calls" "absent key never reads quota-axi"
 pass "absent key is off: one stderr line, exit 0, no network call"
@@ -634,5 +636,93 @@ run code out err --help
 expect_code 0 "$code" "--help exits 0"
 assert_contains "$out" 'Usage:' "--help prints usage"
 pass "configuration errors exit 2 before any network call"
+
+OR_KEY='sk-or-v1-test-key-never-on-argv'
+cp "$BASE_RULES" "$RULES"
+write_response "$RESPONSE" rule_4 0.9
+
+# --- OpenRouter route via fake curl --------------------------------------------
+reset_log
+OPENROUTER_API_KEY=$OR_KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "OpenRouter-only exits 0"
+assert_contains "$out" '  status: clear' "OpenRouter-only still resolves a profile"
+assert_contains "$(cat "$LOG/argv")" 'https://openrouter.ai/api/alpha/decisions' "OpenRouter-only uses the OpenRouter URL"
+assert_equals "Authorization: Bearer $OR_KEY" "$(cat "$LOG/header")" "OpenRouter-only uses the OpenRouter bearer"
+assert_equals 'typesafe/jev-1.13' "$(jq -r .model <"$LOG/body")" "OpenRouter default model is typesafe/jev-1.13"
+assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "the OpenRouter key is absent from every child environment"
+assert_not_contains "$(cat "$LOG/argv")" "$OR_KEY" "the OpenRouter key never appears on curl argv"
+reset_log
+TYPESAFE_API_KEY=$KEY OPENROUTER_API_KEY=$OR_KEY JEV_ROUTE=openrouter run code out err "$BRIEF" --project pager
+assert_contains "$(cat "$LOG/argv")" 'https://openrouter.ai/api/alpha/decisions' "JEV_ROUTE=openrouter wins over a TypeSafe key"
+assert_equals "Authorization: Bearer $OR_KEY" "$(cat "$LOG/header")" "JEV_ROUTE=openrouter uses the OpenRouter bearer"
+pass "OpenRouter path is covered by fake curl"
+
+# --- compact state default for OpenRouter; explicit compact drops later sections ---
+LONG_BRIEF="$TMP_ROOT/long-brief.md"
+cat > "$LONG_BRIEF" <<'MD'
+# Task
+## Captain's intent
+Fix the pager off-by-one so each call advances one page.
+## Firstmate spec
+TYPESAFE_API_KEY=should-never-leave-the-machine
+Do not send this section or the assigned key.
+MD
+reset_log
+OPENROUTER_API_KEY=$OR_KEY run code out err "$LONG_BRIEF" --project pager
+body=$(cat "$LOG/body")
+assert_contains "$(jq -r .state.task.brief <<<"$body")" 'Fix the pager off-by-one' "OpenRouter compact keeps the intent"
+assert_not_contains "$body" 'should-never-leave-the-machine' "compact state redacts assigned keys"
+assert_not_contains "$body" 'Do not send this section' "OpenRouter compact omits Firstmate spec"
+reset_log
+TYPESAFE_API_KEY=$KEY FM_JEV_DISPATCH_COMPACT=1 run code out err "$LONG_BRIEF" --project pager
+body=$(cat "$LOG/body")
+assert_not_contains "$body" 'should-never-leave-the-machine' "explicit compact redacts assigned keys"
+assert_not_contains "$body" 'Do not send this section' "explicit compact omits Firstmate spec"
+pass "compact state sends project plus intent, never credentials"
+
+# --- shadow logs the Jev pick and does not change the profile line --------------
+reset_log
+rm -f "$HOME_DIR/state/jev-dispatch-shadow.jsonl"
+TYPESAFE_API_KEY=$KEY FM_JEV_DISPATCH_SHADOW=1 run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "shadow run exits 0"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "shadow still emits today's profile line"
+line=$(cat "$HOME_DIR/state/jev-dispatch-shadow.jsonl")
+assert_contains "$line" '"purpose":"dispatch-shadow"' "shadow writes a dispatch-shadow log line"
+assert_contains "$line" '"status":"clear"' "shadow records the Jev status"
+assert_contains "$line" '"harness":"cursor"' "shadow records the spawn axes"
+assert_not_contains "$line" "$KEY" "shadow log does not leak the TypeSafe key"
+assert_not_contains "$out" "$KEY" "stdout does not leak the TypeSafe key"
+reset_log
+rm -f "$HOME_DIR/state/jev-dispatch-shadow.jsonl"
+touch "$HOME_DIR/config/jev-dispatch-shadow"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+assert_contains "$(cat "$HOME_DIR/state/jev-dispatch-shadow.jsonl")" '"purpose":"dispatch-shadow"' "config/jev-dispatch-shadow enables shadow logging"
+rm -f "$HOME_DIR/config/jev-dispatch-shadow" "$HOME_DIR/state/jev-dispatch-shadow.jsonl"
+reset_log
+TYPESAFE_API_KEY=$KEY FM_JEV_DISPATCH_SHADOW=0 run code out err "$BRIEF" --project pager
+assert_absent "$HOME_DIR/state/jev-dispatch-shadow.jsonl" "FM_JEV_DISPATCH_SHADOW=0 does not log"
+pass "shadow flag logs without changing spawn output"
+
+# --- extra home/deliverable questions are log-only ------------------------------
+mkdir -p "$HOME_DIR/data"
+cat > "$HOME_DIR/data/secondmates.md" <<'MD'
+- agency - Agency home (home: /tmp/agency; scope: Brand and agency work; projects: none; added 2026-01-01)
+MD
+jq '.answers.home = {"type":"choice","choice":"agency","confidence":0.8,"probabilities":{"main":0.1,"agency":0.8,"lay":0.04,"frontend":0.03,"zimmer":0.03}} | .answers.deliverable = {"type":"choice","choice":"scout","confidence":0.7,"probabilities":{"ship":0.2,"scout":0.7,"neither":0.1}}' "$RESPONSE" > "$TMP_ROOT/extra-response.json"
+mv "$TMP_ROOT/extra-response.json" "$RESPONSE"
+reset_log
+rm -f "$HOME_DIR/state/jev-dispatch-shadow.jsonl"
+TYPESAFE_API_KEY=$KEY FM_JEV_DISPATCH_EXTRA=1 FM_JEV_DISPATCH_SHADOW=1 run code out err "$BRIEF" --project pager
+body=$(cat "$LOG/body")
+assert_equals '["deliverable","home","rule"]' "$(jq -c '.questions | keys' <<<"$body")" "extra asks home and deliverable beside rule"
+assert_equals 'Brand and agency work' "$(jq -r '.questions.home.criteria.agency' <<<"$body")" "home criteria use secondmates.md scope when readable"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "extra questions do not change the profile line"
+assert_not_contains "$out" 'agency' "extra home pick is not auto-routed on stdout"
+line=$(cat "$HOME_DIR/state/jev-dispatch-shadow.jsonl")
+assert_contains "$line" '"home":"agency"' "shadow logs the extra home pick"
+assert_contains "$line" '"deliverable":"scout"' "shadow logs the extra deliverable pick"
+rm -f "$HOME_DIR/data/secondmates.md" "$HOME_DIR/state/jev-dispatch-shadow.jsonl"
+write_response "$RESPONSE" rule_4 0.9
+pass "extra questions are log-only"
 
 printf '# all fm-dispatch-resolve tests passed\n'
