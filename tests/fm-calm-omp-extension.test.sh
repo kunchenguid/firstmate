@@ -286,13 +286,22 @@ if ((assistant.rendered || []).some((line) => line.startsWith("thinking:"))) {
 if ((assistant.rendered || []).some((line) => line === "text:short note")) {
   throw new Error(`Calm-on must hide short mid-turn working notes, got ${JSON.stringify(assistant.rendered)}`);
 }
+assistant.updateContent({
+  content: [
+    { type: "text", text: "streaming short note" },
+    { type: "toolCall" },
+  ],
+}, { transient: true });
+if ((assistant.rendered || []).some((line) => line === "text:streaming short note")) {
+  throw new Error(`Calm-on must hide streaming mid-turn working notes, got ${JSON.stringify(assistant.rendered)}`);
+}
 
 assistant.invalidate();
 await calmCommand.handler("", { ui });
 if (opComponent.render(80).length === 0) {
   throw new Error("Calm-off must restore operational rows");
 }
-if (!(assistant.rendered || []).some((line) => line === "text:short note")) {
+if (!(assistant.rendered || []).some((line) => line === "text:streaming short note")) {
   throw new Error(`Calm-off must restore the hidden working note, got ${JSON.stringify(assistant.rendered)}`);
 }
 if (assistant.lastOptions?.transient !== true) {
