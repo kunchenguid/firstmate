@@ -456,6 +456,20 @@ Regression coverage executes emitted launch commands with synthetic nonsecret va
 
 Every claude launch's inline `--settings` JSON also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, so a spawned worker never writes a Co-Authored-By trailer, Claude-Session link, or generated-with line into a commit or PR body regardless of which settings scopes end up loaded.
 
+## Project memory folders (config/project-memory)
+
+`config/project-memory` is an optional local, gitignored registry mapping project names to existing memory directories without moving or copying the memories.
+Each nonblank, non-comment line has the form `<project-name> <directory>`, where the directory is absolute or starts with `~/`; paths may contain spaces.
+Project names use the same identity as worker spawn, the project directory's basename.
+Malformed lines, duplicate project entries, and unreadable or non-regular registry files are reported as errors.
+An absent registry or project entry leaves existing brief and launch behavior unchanged.
+
+`fm-brief.sh` adds read/write guidance for mapped folders to ship and scout briefs.
+Workers must read `MEMORY.md` first, add new lessons as new files, and append one index line per new file without rewriting existing memory; firstmates curate the folder.
+Claude workers also receive the mapped directory through `autoMemoryDirectory` in Firstmate's existing inline `--settings` object.
+The resolved directory is recorded as `project_memory=` in task metadata.
+The setting is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract.
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.

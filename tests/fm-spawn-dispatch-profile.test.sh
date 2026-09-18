@@ -1018,6 +1018,43 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_project_memory_claude_settings_and_codex_brief() {
+  local rec id out status launch settings memory_home memory_dir brief
+  id=project-memory-claude-r1
+  rec=$(make_spawn_case project-memory-claude claude "$id")
+  read_case_record "$rec"
+  memory_home="$HOME_DIR/user-home"
+  memory_dir="$memory_home/memory folder"
+  printf '%s\n' 'project ~/memory folder' > "$HOME_DIR/config/project-memory"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "Claude spawn with mapped project memory should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  settings=$(printf '%s\n' "$launch" | sed -n "s/.*--settings '\([^']*\)'.*/\1/p")
+  [ -n "$settings" ] || fail "mapped Claude launch did not retain its single --settings JSON"
+  [ "$(printf '%s\n' "$launch" | grep -o -- '--settings' | wc -l | tr -d ' ')" = 1 ] || fail "mapped Claude launch added a second --settings flag"
+  printf '%s\n' "$settings" | jq -e --arg expected "$memory_dir" '.autoMemoryDirectory == $expected' >/dev/null \
+    || fail "Claude --settings JSON was invalid or had the wrong autoMemoryDirectory: $settings"
+  assert_contains "$(cat "$HOME_DIR/state/$id.meta")" "project_memory=$memory_dir" "task metadata omitted its mapped project memory folder"
+
+  id=project-memory-codex-r1
+  rec=$(make_spawn_case project-memory-codex codex "$id")
+  read_case_record "$rec"
+  printf '%s\n' 'project ~/memory folder' > "$HOME_DIR/config/project-memory"
+  rm -f "$HOME_DIR/data/$id/brief.md"
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" project --mode direct-PR >/dev/null || fail "mapped Codex brief scaffold failed"
+  brief="$HOME_DIR/data/$id/brief.md"
+  assert_grep 'append-only for workers' "$brief" "Codex brief omitted the shared memory index safety rule"
+  sed 's/{TASK}/Exercise the mapped project memory brief./; s/{FIRSTMATE_SPEC}/Check the generated worker guidance./' \
+    "$brief" > "$brief.filled"
+  mv "$brief.filled" "$brief"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex)
+  status=$?
+  expect_code 0 "$status" "mapped Codex spawn should succeed"
+  assert_grep 'append-only for workers' "$HOME_DIR/data/$id/launch-brief.md" "Codex launch brief omitted project-memory instructions"
+  pass "project memory: Claude gets valid inline settings and metadata; Codex brief gets the shared pointer and append-only guidance"
+}
+
 # Execute the actual emitted command in a synthetic pane environment: the
 # fake backend records delivery, while real shells exercise the env boundary.
 # No developer environment or credential values are inspected by these probes.
@@ -1458,5 +1495,6 @@ test_claude_secondmate_launch_omits_task_control_channel_authority
 test_claude_crewmate_launch_carries_the_attribution_policy
 test_claude_secondmate_launch_carries_the_attribution_policy
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_project_memory_claude_settings_and_codex_brief
 
 echo "# all fm-spawn-dispatch-profile tests passed"
