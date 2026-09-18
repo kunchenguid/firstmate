@@ -52,6 +52,9 @@ A firing is attributed to one task by a private token: the spawn mints a random 
 Unlike grok and kimi there is deliberately no worktree pointer, because a hook runs with the config directory as its cwd and the environment carries the token instead, so nothing is written into the project under test.
 The hook is inert for every session that token does not name, drains stdin, prints the JSON object agy requires, and always exits 0; both handlers carry an explicit 5s timeout because hooks block agy's agent loop under a 30s vendor default.
 `fm_busy_agy_tail_busy` matches the pinned `esc to cancel` status row alone, hardcoded with no environment override, and is RETAINED as the no-record fallback rather than replaced: `fm_busy_classify` reaches a harness regex arm only when no record exists.
+That is not a window before the first hook fires, because a managed launch is seeded busy at spawn; the fallback carries the shapes in which no hook could write a record at all, namely a raw launch, a launch whose global hook install the installer refused, and a retired incarnation.
+A refused install is reported on the spawn path and drops that task to this weaker read with no busy arm and no token, rather than failing the spawn.
+The record is age-bounded by the generic watcher bound `BUSY_TURN_MAX_SECS` in `../../../../../bin/fm-watch.sh` (default 3600s, `FM_BUSY_TURN_MAX_SECS`), which ages any busy pane from its last completed turn; agy's `Stop` hook touches `state/<id>.turn-ended`, so that clock resets per turn and no agy-specific bound is needed.
 Teardown removes this task's registry entry and token sidecar but never the shared hook itself, because another live agy task may still depend on it.
 
 ## Primary integration

@@ -65,8 +65,8 @@
 # redesign, because neither grok's nor rovo's structured lifecycle was
 # credited-live-verified in the approved audit (Rovo's clean ACP stopReason lives
 # outside the TUI path firstmate drives, see references/harness/rovo.md), while
-# agy's hook IS armed and its regex arm is only the no-record fallback that
-# covers an interrupt and the window before the first hook fires, see
+# agy's hook IS armed and its regex arm is only the no-record fallback, which
+# a launch that armed its hook never reaches while its incarnation is live, see
 # references/harness/agy.md; each is scoped to
 # its own harness= and can never classify another adapter. The delivery
 # guards in bin/fm-composer-lib.sh match rendered footers for submit
@@ -868,9 +868,11 @@ fm_busy_rovo_tail_busy() {
 # line, so ordinary worker output echoing the word would classify an idle
 # worker as busy (agy 1.2.6 renders `Working...` there instead, which is why
 # neither word is load-bearing). This fallback is RETAINED alongside the armed
-# agy-hook writer rather than replaced by it: fm_busy_classify reaches this arm
-# only when no record exists, which is the window before the first hook fires
-# and after an incarnation is retired.
+# agy-hook writer rather than replaced by it, but it is NOT a pre-hook window:
+# fm_busy_classify reaches this arm only when no record exists, and a managed
+# launch has one from the spawn seed onwards. The reachable cases are a raw
+# launch, a launch whose global hook install was refused, and a retired
+# incarnation - every shape in which no hook could write a record at all.
 fm_busy_agy_tail_busy() {
   grep -v '^[[:space:]]*$' | tail -12 \
     | grep -qiE 'esc[[:space:]]+to[[:space:]]+cancel'

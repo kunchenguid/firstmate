@@ -202,6 +202,8 @@ Across one interrupted turn and one completed turn:
 ```
 
 The interrupt landed; the pane rendered `⎿  Interrupted · What should Antigravity CLI do instead?` and the status row returned to `? for shortcuts`. Because agy also has no session-end event, `bin/fm-control.sh` closes the record itself on interrupt and `fm_busy_agy_tail_busy` is retained as the no-record fallback.
+The busy record needs no agy-specific age bound: `BUSY_TURN_MAX_SECS` in `../../bin/fm-watch.sh` (default 3600s) already ages any busy pane from its last completed turn, and the `Stop` hook above touches `state/<id>.turn-ended`, so that clock resets on every turn agy finishes.
+Where the hook cannot be installed at all - a `hooks.json` firstmate does not own, which the installer refuses without a write - the spawn says so on its own path and runs that task unarmed on the rendered-tail read instead of failing.
 
 The `Stop` payload carries no re-entrancy flag; its output contract is what bounds re-entry:
 

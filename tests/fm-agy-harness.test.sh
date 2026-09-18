@@ -468,7 +468,9 @@ test_agy_trust_refuses_out_of_scope_paths() {
 # of where the turn runs);
 # FM_FAKE_AGY_RACE=1 models Herdr's native busy verdict rendering one capture
 # before the dialog paints; FM_FAKE_AGY_ANSWER=stuck models a dialog whose
-# answer never turns into a busy turn.
+# answer never turns into a busy turn; FM_FAKE_AGY_NEVER_BUSY=1 models a
+# pre-trusted pane that takes the launch line and then renders nothing, the
+# shape a launch that died on start leaves behind.
 make_agy_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -531,7 +533,9 @@ case "${1:-}" in
       *' Enter '*)
         case "$state" in
           launched)
-            if fake_path_trusted; then
+            if [ "${FM_FAKE_AGY_NEVER_BUSY:-0}" = 1 ]; then
+              :
+            elif fake_path_trusted; then
               printf 'busy\n' > "$FM_FAKE_AGY_STATE"
             elif [ "${FM_FAKE_AGY_RACE:-0}" = 1 ]; then
               printf 'racing\n' > "$FM_FAKE_AGY_STATE"
@@ -639,6 +643,7 @@ run_agy_spawn() {
     FM_FAKE_AGY_ASSUME_TRUSTED="${FM_FAKE_AGY_ASSUME_TRUSTED:-0}" \
     FM_FAKE_AGY_RACE="${FM_FAKE_AGY_RACE:-0}" \
     FM_FAKE_AGY_ANSWER="${FM_FAKE_AGY_ANSWER:-works}" \
+    FM_FAKE_AGY_NEVER_BUSY="${FM_FAKE_AGY_NEVER_BUSY:-0}" \
     FM_AGY_READY_POLLS=4 FM_AGY_POLL_INTERVAL=0 FM_AGY_MODELS_TIMEOUT=${FM_AGY_MODELS_TIMEOUT:-1} \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness agy --mode no-mistakes --yolo off "$@" 2>&1
@@ -927,7 +932,8 @@ test_agy_spawn_arms_the_turnend_wiring() {
     fail "agy spawn wrote a pointer into the worktree: $stray"
   done
   launch=$(cat "$CASE_DIR/launch.log")
-  assert_contains "$launch" "FM_TASK_ID='$id'" "agy launch did not export its task id to the hook"
+  assert_not_contains "$launch" "FM_TASK_ID=" \
+    "the inline launch prefix must carry only the token the allowlist cannot pass; FM_TASK_ID already reaches the pane through the launch environment"
   assert_contains "$launch" "FM_AGY_TURNEND_TOKEN='$token'" "agy launch did not export its turn-end token"
   assert_not_contains "$launch" "__AGYTOKEN__" "agy launch left its token placeholder unsubstituted"
   pass "fm-spawn: agy arms busy wiring and exports its token without touching the worktree"
@@ -941,28 +947,106 @@ agy_turnend_install() {  # <home>
   HOME="$1" "$ROOT/bin/fm-agy-turnend-hook.sh" install
 }
 
+# hooks.json is agy's own machine-read configuration, so these assertions parse
+# it and check the meaning agy acts on - which handler runs which command, under
+# which timeout - rather than matching text that could sit anywhere in the file.
+assert_agy_hooks_store() {  # <store> <expect: installed|removed> <detail>
+  node - "$1" "$2" <<'NODE' || fail "$3"
+const fs = require("node:fs");
+const [store, expect] = process.argv.slice(2);
+const root = JSON.parse(fs.readFileSync(store, "utf8"));
+const bad = (m) => { console.error(m); process.exit(1); };
+if (root === null || typeof root !== "object" || Array.isArray(root)) bad("root is not an object");
+const foreign = root["someone-elses-hook"];
+if (!foreign || foreign.Stop[0].command !== "echo hi") bad("the foreign hook key did not survive intact");
+const own = root["firstmate-turn-end"];
+if (expect === "removed") {
+  if (Object.prototype.hasOwnProperty.call(root, "firstmate-turn-end")) bad("the firstmate key is still present");
+  process.exit(0);
+}
+if (!own) bad("the firstmate key is absent");
+if (Object.keys(root).length !== 2) bad(`expected exactly 2 hook keys, found ${Object.keys(root).length}`);
+for (const [event, suffix] of [["PreInvocation", "fm-turn-end.sh pre-invocation"], ["Stop", "fm-turn-end.sh stop"]]) {
+  const handlers = own[event];
+  if (!Array.isArray(handlers) || handlers.length !== 1) bad(`${event} is not a single handler`);
+  const h = handlers[0];
+  if (h.type !== "command") bad(`${event} is not a command handler`);
+  if (!h.command.endsWith(suffix)) bad(`${event} runs '${h.command}', not the installed hook's ${suffix}`);
+  if (h.timeout !== 5) bad(`${event} carries timeout ${h.timeout}, not the bounded 5`);
+}
+NODE
+}
+
+# The spawn seeds this task's own busy record before the launch line is typed,
+# so the readiness gate must not answer from the semantic classifier: doing so
+# reports a launch that never started as ready. Here the pane is pre-trusted
+# (no dialog) and takes the launch line but never renders a turn, which is the
+# exact shape a dead launch leaves, and the gate must refuse it.
+test_agy_pre_trusted_pane_that_never_renders_a_turn_fails_the_spawn() {
+  local id rec out rc
+  id="agy-deadlaunch-z14-$$"
+  rec=$(make_agy_spawn_case deadlaunch "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_AGY_NEVER_BUSY=1 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a pre-trusted pane that never renders a turn must fail the readiness gate, not pass on the spawn's own seeded busy record"
+  assert_contains "$out" "did not start processing its brief in the pre-trusted worktree" \
+    "the failure did not name the unproven pre-trusted launch"
+  assert_not_contains "$out" "spawned $id" "a launch that never started still reported a successful spawn"
+  assert_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
+    "a failed agy readiness gate left its launched endpoint running"
+  pass "fm-spawn: a pre-trusted agy pane that never renders a turn fails the gate"
+}
+
+# A hooks.json firstmate does not own is the dotfiles-managed shape. The
+# installer refuses it without a write, and the spawn must degrade to the
+# unwired shape rather than die: no busy arm, no token, the rendered-tail read
+# alone - and it must say so, because the supervisor cannot see it otherwise.
+test_agy_refused_hook_install_degrades_the_spawn_visibly() {
+  local id rec out rc launch
+  id="agy-unwired-z15-$$"
+  rec=$(make_agy_spawn_case unwired "$id")
+  read_agy_spawn_record "$rec"
+  mkdir -p "$HOME_DIR/.gemini/config" "$HOME_DIR/elsewhere"
+  printf '%s\n' '{}' >"$HOME_DIR/elsewhere/hooks.json"
+  ln -s "$HOME_DIR/elsewhere/hooks.json" "$HOME_DIR/.gemini/config/hooks.json"
+  rc=0
+  out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model gemini-3.8-flash-low) || rc=$?
+  expect_code 0 "$rc" "a refused turn-end hook install must not kill the agy spawn"
+  assert_contains "$out" "spawned $id" "the degraded agy spawn did not report success"
+  assert_contains "$out" "is a symlink" "the degradation did not carry the installer's own refusal reason"
+  assert_contains "$out" "rendered-tail idle read" \
+    "the spawn did not tell the supervisor this worker runs on the weaker detection"
+  # The installer must not have written through the symlink.
+  assert_contains "$(cat "$HOME_DIR/elsewhere/hooks.json")" "{}" \
+    "the refused installer wrote through the symlink it refused"
+  [ -e "$HOME_DIR/state/$id.busy-gen" ] \
+    && fail "an unwired agy spawn armed a busy generation no hook could ever clear" || true
+  [ -e "$HOME_DIR/state/$id.agy-turnend-token" ] \
+    && fail "an unwired agy spawn minted a turn-end token no hook could ever read" || true
+  launch=$(cat "$CASE_DIR/launch.log")
+  assert_not_contains "$launch" "FM_AGY_TURNEND_TOKEN" "an unwired agy launch still exported a turn-end token"
+  assert_not_contains "$launch" "__AGYTOKEN__" "an unwired agy launch left its token placeholder unsubstituted"
+  pass "fm-spawn: a refused agy hook install degrades the spawn visibly instead of killing it"
+}
+
 test_agy_turnend_installer_owns_only_its_own_key() {
-  local home store rc out
+  local home store
   home="$TMP_ROOT/turnend-install"
   rm -rf "$home"
   mkdir -p "$home/.gemini/config"
   store="$home/.gemini/config/hooks.json"
   printf '%s\n' '{"someone-elses-hook":{"Stop":[{"type":"command","command":"echo hi"}]}}' >"$store"
   agy_turnend_install "$home" || fail "the agy turn-end installer refused a clean store"
-  assert_grep '"someone-elses-hook"' "$store" "the installer dropped a foreign hook key"
-  assert_grep '"firstmate-turn-end"' "$store" "the installer did not record its own hook key"
-  assert_grep '"timeout": 5' "$store" "the installer did not bound its handlers"
+  assert_agy_hooks_store "$store" installed "the installed hooks.json does not register the bounded firstmate handlers beside the foreign key"
   [ -x "$home/.gemini/antigravity-cli/fm-turn-end.sh" ] || fail "the installer did not install an executable hook script"
   # Installing twice must converge rather than duplicate.
   agy_turnend_install "$home" || fail "the agy turn-end installer is not idempotent"
-  out=$(grep -c '"firstmate-turn-end"' "$store")
-  expect_code 0 "$?" "counting the firstmate hook key should succeed"
-  [ "$out" -eq 1 ] || fail "installing twice left $out firstmate hook keys"
+  assert_agy_hooks_store "$store" installed "installing twice did not converge on one bounded firstmate entry"
   HOME="$home" "$ROOT/bin/fm-agy-turnend-hook.sh" remove || fail "the agy turn-end installer could not remove its key"
-  assert_grep '"someone-elses-hook"' "$store" "remove dropped a foreign hook key"
-  if grep -q '"firstmate-turn-end"' "$store"; then
-    fail "remove left the firstmate hook key behind"
-  fi
+  assert_agy_hooks_store "$store" removed "remove did not leave the store with the foreign key alone"
   pass "fm-agy-turnend-hook.sh: owns only its own key and installs idempotently"
 }
 
@@ -1093,6 +1177,8 @@ test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn
 test_agy_missing_binary_refuses_before_pane_creation
 test_agy_secondmate_is_refused
 test_agy_spawn_arms_the_turnend_wiring
+test_agy_pre_trusted_pane_that_never_renders_a_turn_fails_the_spawn
+test_agy_refused_hook_install_degrades_the_spawn_visibly
 test_agy_turnend_installer_owns_only_its_own_key
 test_agy_turnend_installer_refuses_a_store_it_does_not_own
 test_agy_turnend_hook_is_inert_without_a_registry_token

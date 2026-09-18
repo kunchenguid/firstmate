@@ -41,7 +41,7 @@ unset CDPATH
 case "${1:-}" in
 install | remove) ACTION=$1 ;;
 -h | --help)
-  sed -n '2,36{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,37{s/^# \{0,1\}//;p;}' "$0"
   exit 0
   ;;
 *)

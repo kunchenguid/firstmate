@@ -1947,8 +1947,9 @@ launch_template() {
   # root, whose PreInvocation opens a turn and whose Stop closes one (verified
   # live on agy 1.2.6, twice in a single conversation). It has no per-task
   # settings path, so the hook is global and attributes a firing through
-  # FM_AGY_TURNEND_TOKEN, exported below and inherited by the hook child.
-  # FM_TASK_ID rides along as the human-readable key for the same session.
+  # FM_AGY_TURNEND_TOKEN, exported below and inherited by the hook child. It is
+  # assigned inline rather than through the launch-env allowlist because the
+  # allowlist deliberately does not carry it past `env -i`.
   # Stop does NOT fire on a manual interrupt and agy has no session-end event,
   # so firstmate closes the record itself on both interrupt planes and the
   # rendered-tail fallback in bin/fm-busy-lib.sh is retained for every window
@@ -2146,6 +2147,9 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = rovo ]; then
   exit 1
 fi
 
+# Whether this agy launch got its global turn-end hook. Cleared below when the
+# installer refuses the store, which drops the launch to the unwired shape.
+AGY_TURNEND_WIRED=1
 case "$HARNESS" in
 pi | pi-signed)
   PI_BIN=$(resolve_pi_executable "$HARNESS") || {
@@ -2196,11 +2200,15 @@ agy)
   # edit and the hook stays inert without this task's token. Installed before
   # launch and deliberately never removed at teardown: another live agy task
   # may still depend on it.
-  if [ "$KIND" != secondmate ]; then
-    "$FM_ROOT/bin/fm-agy-turnend-hook.sh" install || {
-      echo "error: refusing agy spawn because the global turn-end hook could not be installed safely" >&2
-      exit 1
-    }
+  # A refused install is NOT fatal. The installer refuses a store firstmate does
+  # not own outright - a symlink, another uid's file, a non-object root - and a
+  # home whose hooks.json a dotfiles tool manages is exactly that shape. The
+  # spawn instead drops to the raw-launch shape it already supports: no busy
+  # arm, no token, and the retained rendered-tail fallback in bin/fm-busy-lib.sh
+  # carrying detection. The supervisor is told which shape this worker got.
+  if [ "$KIND" != secondmate ] && ! "$FM_ROOT/bin/fm-agy-turnend-hook.sh" install; then
+    AGY_TURNEND_WIRED=0
+    echo "warning: agy's global turn-end hook could not be installed safely (see the refusal above); task $ID will run WITHOUT semantic busy state and WITHOUT a turn-end signal, on the weaker rendered-tail idle read alone" >&2
   fi
   ;;
 esac
@@ -3782,9 +3790,9 @@ rovo_endpoint_cleanup() {
 # (bin/fm-agy-trust.sh, verified to remove the dialog), and this gate is the
 # backstop in the rovo/kimi launch-then-confirm shape: answer the dialog once
 # with the preselected safe default if it renders anyway, then require
-# positive proof that the brief is being processed - the same verdict the
-# supervisor reads (Herdr's native working state or the pinned `esc to cancel`
-# status row through fm_busy_classify) - before the spawn reports success.
+# positive proof that the brief is being processed - Herdr's native working
+# state or the pinned `esc to cancel` status row, read straight from the live
+# endpoint - before the spawn reports success.
 # The gate is strict about ordering because on Herdr the native working
 # verdict is known to coexist with an unanswered dialog: a busy verdict counts
 # only when the path was pre-registered or the dialog has been seen and
@@ -3800,11 +3808,16 @@ agy_pane_shows_trust_dialog() {  # <plain-pane-capture>
   printf '%s\n' "$1" | grep -Fq "$AGY_TRUST_DIALOG"
 }
 
+# Deliberately NOT routed through fm_busy_classify: this spawn seeds its own
+# busy record (state=busy source=fm-spawn) before the launch line is typed, and
+# the classifier answers from a record whenever one exists, so asking it here
+# would hand the gate back firstmate's own seed and report a dead launch as
+# ready. The gate reads the live sources the classifier's no-record path reads.
 agy_pane_is_working() {  # <plain-pane-capture>
-  case "$(fm_busy_classify "$BACKEND" "$T" agy "$ID" "$STATE" "$1")" in
-    busy*) return 0 ;;
-  esac
-  return 1
+  if [ "$BACKEND" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
+    [ "$(fm_backend_busy_state "$BACKEND" "$T" 2>/dev/null || true)" = busy ] && return 0
+  fi
+  printf '%s' "$1" | fm_busy_agy_tail_busy
 }
 
 agy_wait_for_working() {
@@ -4082,7 +4095,9 @@ if [ "$KIND" != secondmate ]; then
   agy)
     # Armed only for the managed launch shape, the gemini rule: a raw command
     # carries no token export, so its hook could never clear a seeded record.
-    if [ "$RAW_LAUNCH" -eq 0 ]; then
+    # An unwired launch is the same case: with no installed hook nothing could
+    # ever clear a seeded record, so it stays on the rendered-tail fallback.
+    if [ "$RAW_LAUNCH" -eq 0 ] && [ "$AGY_TURNEND_WIRED" -eq 1 ]; then
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
@@ -4434,8 +4449,9 @@ EOF
     # config directory as its cwd, and the launched process exports the token
     # directly, so nothing is written into the project under test.
     # Skipped for a raw launch, the gemini rule: that command carries no token
-    # placeholder to substitute, so a token minted here could never fire.
-    if [ "$RAW_LAUNCH" -eq 0 ]; then
+    # placeholder to substitute, so a token minted here could never fire, and
+    # skipped for an unwired launch, whose hook was never installed to read it.
+    if [ "$RAW_LAUNCH" -eq 0 ] && [ "$AGY_TURNEND_WIRED" -eq 1 ]; then
       AGY_AUTH_DIR="$HOME/.gemini/antigravity-cli/fm-turn-end.d"
       mkdir -p "$AGY_AUTH_DIR"
       old_umask=$(umask)
@@ -4450,7 +4466,7 @@ EOF
         printf 'gen=%s\n' "$BUSY_GEN"
       } >"$auth_file"
       printf '%s\n' "${auth_file##*/}" >"$STATE/$ID.agy-turnend-token"
-      AGY_TOKEN_ENV="FM_TASK_ID=$(shell_quote "$ID") FM_AGY_TURNEND_TOKEN=$(shell_quote "${auth_file##*/}") "
+      AGY_TOKEN_ENV="FM_AGY_TURNEND_TOKEN=$(shell_quote "${auth_file##*/}") "
     fi
     ;;
   esac
