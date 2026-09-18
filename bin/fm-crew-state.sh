@@ -26,6 +26,14 @@
 #
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
+# A run-step reading whose run came from inventory selection ends its detail
+# with a `run: <id>` field naming that run, and a terminal one appends
+# `pr=<url>` after it. The field is always the last clause of the detail so the
+# separator never splits a sentence. The supersession verdict labels the same id
+# `earlier run: <id>`, and a verdict taken from the ledger's own row carries no
+# run id at all, because there the id belongs to a run the verdict did not come
+# from (rule 2b).
+#
 # Logic, numbered for reference; rules 2b and 3 each record that rule 3's
 # status-log reconciliation is applied before rule 2b:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta

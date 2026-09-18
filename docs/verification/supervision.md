@@ -257,7 +257,7 @@ tests/fm-crew-state.test.sh
 
 ## No-mistakes run ledger and terminal run fields
 
-The terminal-failed precedence rules in `bin/fm-crew-state.sh` read the run ledger's rows and a terminal run's `pr` field, so both were confirmed against the installed CLI on 2026-09-04 with no-mistakes v1.60.2 (eb4e379).
+The terminal-reading precedence rules in `bin/fm-crew-state.sh`, which bound both failed and done readings, read the run ledger's rows and a terminal run's `pr` field, so both were confirmed against the installed CLI on 2026-09-04 with no-mistakes v1.60.2 (eb4e379).
 
 Column layout and newest-first ordering:
 
