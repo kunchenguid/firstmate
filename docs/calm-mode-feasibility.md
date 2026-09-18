@@ -1,6 +1,6 @@
 # Calm-mode harness feasibility
 
-This document owns the version-scoped feasibility evidence, Pi transcript taxonomy, and supported-API boundaries for Firstmate calm mode.
+This document owns the version-scoped feasibility evidence, Pi transcript taxonomy, OMP API evidence, and supported-API boundaries for Firstmate calm mode.
 [`calm.md`](calm.md) owns the current user-facing `/calm` usage and limitation contract.
 
 ## Required extension surface
