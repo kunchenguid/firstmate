@@ -359,17 +359,18 @@ state_line_note() { # <state-line>
   printf '%s' "$rest"
 }
 
-# Enforce the header's same-record pull-request contract. A status-log state
-# carries a PR only in a mode's ready-signal shape, the same rule pr_for_task
-# applies, so a PR a worker merely mentioned in prose is never the delivery,
-# and a scout never carries one.
-terminal_outcome_pr() { # <meta> <state-line>
-  local meta=$1 line=$2 value
+# Enforce the header's same-record pull-request contract. A scout never delivers
+# a PR, so it never carries one, exactly as pr_for_task rules for the
+# ledger-first path. Otherwise a status-log state carries a PR only in a mode's
+# ready-signal shape, the same rule pr_for_task applies, so a PR a worker merely
+# mentioned in prose is never the delivery.
+terminal_outcome_pr() { # <state-line> <kind>
+  local line=$1 kind=${2:-} value
+  [ "$kind" != scout ] || return 0
   if [ "$(state_line_source "$line")" = run-step ]; then
     clean_field "$(state_line_pr "$line")"
     return 0
   fi
-  [ "$(meta_field "$meta" kind)" != scout ] || return 0
   value=$(printf '%s\n' "$(state_line_note "$line")" \
     | sed -nE 's|^PR (https?://[^[:space:])"]+/pull/[0-9]+)( checks green)?$|\1|p' \
     | head -1 || true)
@@ -603,7 +604,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     *) return 0 ;;
   esac
   terminal_outcome_corroborated "$state" "$last" "$state_line" || return 0
-  pr=$(terminal_outcome_pr "$meta" "$state_line")
+  pr=$(terminal_outcome_pr "$state_line" "$(meta_field "$meta" kind)")
   incarnation=$(meta_incarnation "$meta")
   # The receipt identity binds structured fields only: a persistent child that
   # keeps appending routine prose after one terminal outcome must not mint a

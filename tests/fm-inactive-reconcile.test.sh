@@ -1172,6 +1172,27 @@ test_status_log_outcome_never_claims_a_mentioned_pr() {
   pass "a status-log outcome never claims a pull request mentioned in prose"
 }
 
+# A scout never delivers a pull request, so it never carries one - the same rule
+# the ledger-first path applies through pr_for_task. Its ready-signal-shaped
+# terminal line must therefore still produce an outcome that names no PR.
+test_scout_outcome_carries_no_pull_request() {
+  local payload
+  make_world outcome-scout-pr
+  write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/7 checks green'
+  awk '{ sub(/^kind=ship$/, "kind=scout"); print }' "$MAIN/state/child.meta" \
+    > "$MAIN/state/child.meta.tmp" && mv "$MAIN/state/child.meta.tmp" "$MAIN/state/child.meta"
+  age "$MAIN/state/child.meta"
+  FM_FAKE_CREW_STATE='done' FM_FAKE_CREW_SOURCE='status-log' \
+    FM_FAKE_CREW_DETAIL='PR https://example.test/owner/repo/pull/7 checks green' \
+    run_reconcile "$MAIN" --startup
+  payload=$(queued_payload "$MAIN" 'inactive-outcome:')
+  [ -n "$payload" ] || fail "no terminal outcome was queued for the scout"
+  case "$payload" in
+    *'pr='*) fail "a scout's terminal outcome claimed a pull request: $payload" ;;
+  esac
+  pass "a scout's terminal outcome carries no pull request"
+}
+
 # The independent captain protection, for the one source where the two records
 # are comparable: the reader read the crew's own STATUS LOG, and the crew's last
 # self-declared word disagrees with what that read reported, so nothing is
@@ -1315,6 +1336,7 @@ test_status_log_sourced_outcome_keeps_its_own_pr
 test_status_log_outcome_never_borrows_an_earlier_pr
 test_status_log_outcome_never_borrows_the_fresh_last_line_pr
 test_status_log_outcome_never_claims_a_mentioned_pr
+test_scout_outcome_carries_no_pull_request
 test_contradicted_failure_is_not_promoted_for_presentation
 test_contradicted_success_is_not_promoted_for_presentation
 test_run_step_failure_is_not_suppressed_by_the_crews_own_word

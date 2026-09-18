@@ -137,9 +137,11 @@
 #      a later run on this branch that cannot be bound here (reported as unknown
 #      - history, but no proof of the present). Because the ledger has no run ID,
 #      an equal head does not identify a rerun; a terminal row supplies newer
-#      truth when its observable status, head, or PR differs, or when the state
-#      came from the coarse fallback. Nothing else does, so a real failure is
-#      never hidden.
+#      truth when its observable status, head, or PR differs. Nothing else does,
+#      so a real failure is never hidden. The whole rule needs two records to
+#      compare, so it applies only to a run attributed from `axi status`: a
+#      coarse reading IS the ledger's own answer for this worktree, and a record
+#      cannot supersede itself.
 #      A self-declared pause or done in the status log is NOT one of those
 #      records. The reader once ordered such a declaration against the ledger's
 #      date column, let a later one supersede the failure, and published the
@@ -1462,7 +1464,7 @@ if [ "$HAVE_RUN" = 1 ]; then
   [ -z "$SELECTED_RUN_ID" ] || RUN_DETAIL="$RUN_DETAIL${SEP}run: $SELECTED_RUN_ID"
 
   # Apply the terminal-failure precedence contract owned by header rule 2b.
-  if [ "$RUN_STATE" = failed ]; then
+  if [ "$RUN_STATE" = failed ] && [ "$RUN_SOURCE" != coarse ]; then
     case "$LEDGER_STATUS" in
       completed)
         SUPERSEDED_DETAIL="run superseded by a newer completed run on this branch (earlier $RUN_DETAIL)"
