@@ -43,7 +43,7 @@
 // record, and a still-unconsumed doorbell rides the replacement handoff.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 // typebox resolves inside omp's extension loader (verified, omp 18.1.11); the
@@ -327,7 +327,6 @@ function persistReplacementHandoff(pending: PendingActionableClose[]): void {
   if (pending.length === 0) return;
   writeReplacementHandoff(pending);
 }
-
 function loadReplacementHandoff(): PendingActionableClose[] {
   try {
     const pending = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")));
@@ -340,6 +339,55 @@ function loadReplacementHandoff(): PendingActionableClose[] {
     }
     throw error;
   }
+}
+
+function loadAndFilterReplacementHandoff(): PendingActionableClose[] {
+  try {
+    const pending = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")));
+    const filtered = pending.filter((item) => isTaskAlive(item.message));
+    if (filtered.length !== pending.length) {
+      writeReplacementHandoff(filtered);
+    }
+    replacementHandoff = filtered;
+    return [...filtered];
+  } catch (error) {
+    if (nodeErrorCode(error) === "ENOENT") {
+      replacementHandoff = null;
+      return [];
+    }
+    throw error;
+  }
+}
+
+function isTaskAlive(message: string): boolean {
+  const taskId = extractTaskId(message);
+  if (!taskId) return true;
+  const stateDir = state;
+  const wakeQueue = `${stateDir}/.wake-queue`;
+  const candidates = [taskId];
+  if (taskId.startsWith("fm-")) candidates.push(taskId.slice(3));
+  const hasStateFile = candidates.some((id) =>
+    existsSync(`${stateDir}/${id}.meta`) ||
+    existsSync(`${stateDir}/${id}.status`) ||
+    existsSync(`${stateDir}/${id}.inbox`) ||
+    existsSync(`${stateDir}/${id}.progress`) ||
+    existsSync(`${stateDir}/${id}.turn-ended`),
+  );
+  if (hasStateFile) return true;
+  if (!existsSync(wakeQueue)) return false;
+  const queueContent = readFileSync(wakeQueue, "utf8");
+  const lines = queueContent.trim().split("\n").filter((l) => l.length > 0);
+  for (const line of lines) {
+    const parts = line.split("\t");
+    if (parts.length >= 4 && candidates.includes(parts[3])) return true;
+  }
+  return false;
+}
+
+function extractTaskId(message: string): string | null {
+  const match = message.match(/^(?:stale|signal|check|heartbeat):\s*([^\s:\.]+)/);
+  if (match) return match[1];
+  return null;
 }
 
 function mergeReplacementHandoff(pending: PendingActionableClose): void {
@@ -1030,7 +1078,7 @@ export default function (pi: ExtensionAPI) {
     let pending: PendingActionableClose[] = [];
     let loadFailure = "";
     try {
-      pending = loadReplacementHandoff();
+      pending = loadAndFilterReplacementHandoff();
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       loadFailure = `watcher: FAILED - omp extension could not load a replacement-session actionable wake\n${detail}`;
