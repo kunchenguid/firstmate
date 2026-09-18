@@ -503,6 +503,26 @@ test_secondmate_remote_route_ledger_delivery() {
   pass "the remote route carries a child's ledger line once"
 }
 
+# A ship done: the gate accepted stays owed while its parent write is pending.
+# Teardown removes the worktree before `report`, so the retry delivers that
+# line instead of re-testing a copy that no longer exists.
+test_pending_ledger_done_is_delivered_after_worktree_removal() {
+  local key
+  make_world pending-retry; bind_secondmate local
+  write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/2 checks green'
+  cp "$MATE/.fm-secondmate-parent" "$WORLD/parent-binding"
+  printf 'schema=fm-secondmate-parent.v1\nroute=invalid\n' > "$MATE/.fm-secondmate-parent"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  [ "$(outcome_count "$MATE" pending)" = 1 ] || fail "failed parent write did not leave a pending delivery"
+  rm -rf "$MATE/projects/child"
+  cp "$WORLD/parent-binding" "$MATE/.fm-secondmate-parent"
+  run_report "$MATE" child || fail "report refused the pending delivery"
+  key=$(reported_outcome_key "$MATE" child 'done') || fail "pending delivery was dropped instead of reported"
+  grep -Fq "done [key=$key]: child child done: PR https://example.test/owner/repo/pull/2 checks green" \
+    "$MAIN/state/mate.status" || fail "report did not deliver the pending done after the worktree was removed"
+  pass "a pending ship done: is delivered by report after teardown removed the worktree"
+}
+
 # `report <child>` is the teardown-side delivery: it delivers or says nothing
 # is owed with 0, and returns non-zero only when the channel cannot be written.
 test_report_subcommand_delivers_and_refuses() {
@@ -953,6 +973,7 @@ test_long_terminal_lines_have_distinct_receipts
 test_secondmate_partial_ledger_line_waits_for_newline
 test_secondmate_remote_route_ledger_delivery
 test_report_subcommand_delivers_and_refuses
+test_pending_ledger_done_is_delivered_after_worktree_removal
 test_report_avoids_scan_meta_lock_inversion
 test_local_secondmate_rejects_relative_parent_home
 test_invalid_secondmate_marker_blocks_routing
