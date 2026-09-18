@@ -206,11 +206,14 @@ fm_control_backend_supports_key() {  # <backend> <key>
   return 1
 }
 
-# Whether <backend> has a recovery-grade agent-state classifier. Only tmux and
-# herdr implement fm_backend_agent_state; zellij, orca, and cmux report
-# `unverified`, so no reading of theirs can prove an agent stopped. The control
-# plane refuses a stop-proving verb there instead of reporting an unprovable
-# transition as success.
+# Whether <backend>'s agent-state classifier is trusted here for a
+# stop-proving verb. tmux and herdr are trusted. zellij and cmux have no
+# classifier at all and report `unverified`. orca now implements
+# fm_backend_agent_state too (bin/backends/orca.sh's
+# fm_backend_orca_agent_state, docs/orca-backend.md "Recovery"), but this gate
+# does not yet extend exit/relaunch trust to it. The control plane refuses a
+# stop-proving verb wherever this returns false instead of reporting an
+# unprovable transition as success.
 fm_control_backend_state_verified() {  # <backend>
   case "${1-}" in
     tmux|herdr) return 0 ;;

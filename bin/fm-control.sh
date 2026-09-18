@@ -78,10 +78,11 @@
 #     is refused rather than guessed at.
 #   - A backend that cannot deliver the harness's interrupt key is refused
 #     (Orca's terminal API has no Escape).
-#   - `exit` and `relaunch` require a backend with a recovery-grade agent-state
-#     classifier (tmux, herdr), because without one the "the agent stopped"
-#     postcondition cannot be proven. zellij, orca, and cmux are refused rather
-#     than reported as successful blind.
+#   - `exit` and `relaunch` require a backend this plane trusts with a
+#     recovery-grade agent-state classifier (tmux, herdr) to prove "the agent
+#     stopped". zellij and cmux have no classifier at all; orca now implements
+#     one (docs/orca-backend.md "Recovery") but is not yet trusted here. All
+#     three are refused rather than reported as successful blind.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts.
 #   - A composer that visibly holds pending text refuses before an exit command
