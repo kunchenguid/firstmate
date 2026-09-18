@@ -542,6 +542,33 @@ test_send_key_passes_key_through_to_recorded_terminal() {
   pass "fm_backend_paseo_send_key: passes the key through unchanged to the recorded terminal id"
 }
 
+# Paseo 0.8.0 has no C-u token and types any unknown key name as literal text,
+# so C-u must arrive as the raw 0x15 byte and an unlisted key must be refused.
+test_send_key_delivers_cu_as_raw_byte_and_refuses_unknown_keys() {
+  local dir fb out status
+  dir="$TMP_ROOT/sendkey-cu"
+  mkdir -p "$dir/responses"
+  paseo_terminal_ls_response "$dir" 1 "aaaaaaaa-0000-0000-0000-000000000000" "wks_bbbbbbbbbbbbbbbb" "some-name"
+  fb=$(make_paseo_fakebin "$dir")
+  PATH="$fb:$PATH" FM_PASEO_LOG="$dir/log" FM_PASEO_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/paseo.sh"; fm_backend_paseo_send_key "aaaaaaaa-0000-0000-0000-000000000000:wks_bbbbbbbbbbbbbbbb" C-u' "$ROOT"
+  expect_code 0 $? "send_key C-u should succeed"
+  assert_contains "$(cat "$dir/log")" $'\x1f''terminal'$'\x1f''send-keys'$'\x1f''aaaaaaaa-0000-0000-0000-000000000000'$'\x1f''-l'$'\x1f''--'$'\x1f'$'\x15' \
+    "send_key C-u did not send the raw 0x15 byte through send-keys -l"
+  case "$(cat "$dir/log")" in
+  *$'\x1f''C-u'*) fail "send_key C-u must never pass the literal 'C-u' name to paseo (it would be typed as text)" ;;
+  esac
+
+  : >"$dir/log"
+  out=$(PATH="$fb:$PATH" FM_PASEO_LOG="$dir/log" FM_PASEO_RESPONSES="$dir/responses" \
+    bash -c '. "$0/bin/backends/paseo.sh"; fm_backend_paseo_send_key "aaaaaaaa-0000-0000-0000-000000000000:wks_bbbbbbbbbbbbbbbb" C-k' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "send_key should refuse a key outside paseo's token set"
+  assert_contains "$out" "unsupported paseo key 'C-k'" "send_key refusal did not name the unsupported key"
+  [ -s "$dir/log" ] && fail "send_key must not call paseo for an unsupported key"$'\n'"$(cat "$dir/log")"
+  pass "fm_backend_paseo_send_key: C-u goes as the raw 0x15 byte via -l; keys outside paseo's token set are refused, never typed"
+}
+
 test_send_literal_uses_separator_for_option_shaped_text() {
   local dir fb
   dir="$TMP_ROOT/sendliteral"
@@ -809,6 +836,7 @@ test_target_ready_recovers_stale_id_by_name
 test_capture_trims_locally
 test_capture_fails_when_target_not_ready
 test_send_key_passes_key_through_to_recorded_terminal
+test_send_key_delivers_cu_as_raw_byte_and_refuses_unknown_keys
 test_send_literal_uses_separator_for_option_shaped_text
 test_send_text_line_composes_literal_and_enter
 test_current_path_probes_with_marker

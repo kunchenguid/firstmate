@@ -67,7 +67,8 @@ When the recorded id is gone, recovery re-resolves the terminal by its home-scop
 
 `terminal send-keys <id> -l -- <text>` sends literal, unsubmitted input.
 The caller sends Enter separately.
-Enter, Escape, and Ctrl-C are supported token sends.
+Paseo 0.8.0's send-keys token set is Enter, Tab, Escape, Space, BSpace, C-c, C-d, C-z, C-l, C-a, and C-e.
+Any other key name is typed as literal text, so the adapter sends Ctrl-U as the raw `0x15` byte through `-l` and refuses every other unlisted key.
 
 `terminal capture <id> -S --json` returns plain-text lines with ANSI stripped.
 There is no per-call line bound, so the adapter fetches the scrollback whole and trims the tail locally.
