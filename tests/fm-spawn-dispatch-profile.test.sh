@@ -23,29 +23,6 @@ declare_pi_provider() {  # <home> <provider>
   printf '%s\n' "$1/accounts/pi" "$2" > "$1/config/pi-account"
 }
 
-make_spawn_pi_probe() {
-  local fakebin=$1 tool=$2
-  cat > "$fakebin/$tool" <<'SH'
-#!/usr/bin/env bash
-set -u
-if [ "${1:-} ${2:-}" = "auth check" ]; then
-  exec fm-fake-pi-auth "$@"
-fi
-if [ "${1:-}" = "--list-models" ]; then
-  exec fm-fake-pi-list-models "${2:-}"
-fi
-if [ "${1:-}" = --help ]; then
-  if [ "${FM_FAKE_PI_VERSION:-0.84.0}" = 0.82.0 ]; then
-    printf '%s\n' 'Pi 0.82.0' 'Options: --help'
-  else
-    printf '%s\n' "Pi ${FM_FAKE_PI_VERSION:-0.84.0}" 'Options: --help --tui-mode <mode>'
-  fi
-fi
-exit 0
-SH
-  chmod +x "$fakebin/$tool"
-}
-
 make_spawn_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_test_make_spawn_fakebin "$dir")
@@ -71,8 +48,7 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
-  make_spawn_pi_probe "$fakebin" pi
-  make_spawn_pi_probe "$fakebin" pi-signed
+  fm_test_fake_pi_runner "$fakebin" pi pi-signed
   printf '%s\n' "$fakebin"
 }
 
@@ -116,7 +92,7 @@ run_spawn() {
   # which would make launch assertions depend on the developer's environment.
   # A test opts in to the set case via FM_TEST_CLAUDE_CONFIG_DIR.
   CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
-    FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
+    FM_FAKE_LAUNCH_LOG="$launchlog" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
     GROK_HOME="$home/grok-home" \
@@ -798,8 +774,11 @@ test_pi_tui_mode_probe_is_safe_for_old_and_new_pi() {
       rec=$(make_spawn_case "profile-__MODELFLAG__-${harness}-tui-${version//./}" "$harness" "$id")
       read_case_record "$rec"
 
-      out=$(FM_TEST_PI_VERSION="$version" \
-        run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+      # Neither release has `pi auth check`, so the account preflight must
+      # prove the root through the models it lists.
+      printf '%s\n' "$version" > "$FAKEBIN_DIR/.fake-pi-version"
+      printf 'fake test\n' > "$HOME_DIR/accounts/pi/.fake-models"
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
         "$id" "$PROJ_DIR" --model fake/test)
       status=$?
       expect_code 0 "$status" "$harness $version spawn should succeed"

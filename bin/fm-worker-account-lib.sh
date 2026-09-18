@@ -61,14 +61,15 @@
 # credentialPresent true, while a keychain-only /login still writes
 # oauthAccount to that file ($HOME/.claude.json for the ordinary account).
 # Pi: `pi auth check --provider <the launch model's provider> --json
-# --no-refresh`, and only status "ready" passes.
-# That command loads no extensions, so an extension-registered provider comes
-# back not_ready/provider_not_found; only that one answer falls through to
-# `pi --list-models <provider>`, which does load them, and the launch passes
-# only when a listed row's provider and model columns both match exactly.
-# Every other answer, including a logged-out built-in provider's
-# not_ready/credentials_not_configured and no answer within the bound,
-# refuses. --no-refresh keeps the check from rewriting a root's tokens while
+# --no-refresh`; status "ready" passes, and any other JSON answer, such as a
+# logged-out built-in provider's not_ready/credentials_not_configured, refuses.
+# Two answers instead fall through to `pi --list-models <provider>`, which
+# lists only the models a root can authenticate: not_ready/provider_not_found,
+# because that command loads no extensions and so cannot see an
+# extension-registered provider, and any non-JSON answer, which is what a Pi
+# without `auth check` (0.84.0 and earlier) prints. The launch then passes
+# only when a listed row's provider and model columns both match exactly; no
+# listing within the bound refuses. --no-refresh keeps the check from rewriting a root's tokens while
 # other workers use them. A codex-native/<id> model is not checked: that
 # provider comes from the pi-codex-native extension and signs in through
 # Codex's own login, which has no worker-account declaration.
@@ -321,21 +322,26 @@ fm_worker_account_preflight() {
     out=$(fm_run_timed "$FM_WORKER_ACCOUNT_PREFLIGHT_SECONDS" "${clean[@]}" "PI_CODING_AGENT_DIR=$root" \
       "$executable" auth check --provider "$provider" --json --no-refresh 2>/dev/null </dev/null)
     verdict=$(printf '%s\n' "$out" | jq -r '
-      if .status == "ready" then "ready"
-      elif .status == "not_ready" and .reason == "provider_not_found" then "unloaded"
-      else "\(.status // "unknown") \(.provider // "") \(.reason // "")"
+      if type != "object" or (has("status") | not) then "list"
+      elif .status == "ready" then "ready"
+      elif .status == "not_ready" and .reason == "provider_not_found" then "list"
+      else "\(.status) \(.provider // "") \(.reason // "")"
       end' 2>/dev/null)
-    [ "$verdict" != ready ] || return 0
-    if [ "$verdict" = unloaded ]; then
-      # pi auth check loads no extensions, so a provider an extension
-      # registers is indistinguishable to it from a typo. pi --list-models
-      # does load them, and it prints an extension provider's rows only when
-      # that provider can actually serve them.
+    case "${verdict:-list}" in
+    ready) return 0 ;;
+    list)
+      # A Pi without `auth check` (0.84.0 and earlier) answers with an error
+      # instead of JSON, and `auth check` loads no extensions, so an
+      # extension-registered provider is unknown to it. pi --list-models
+      # exists in every supported Pi, loads extensions, and lists only the
+      # models a root can authenticate, so a listed row answers the same
+      # question.
       fm_worker_account_pi_model_listed "$root" "$executable" "$provider" "$model" "${clean[@]}" && return 0
-      echo "error: the Pi account $root offers no model '$model' (pi auth check does not know provider '$provider', and pi --list-models does not list that provider and model under this root); log in under it with PI_CODING_AGENT_DIR=$root $harness, then /login, or pass a --model this root serves" >&2
+      echo "error: the Pi account $root does not list model '$model' (pi --list-models shows only the models a root can authenticate); log in under it with PI_CODING_AGENT_DIR=$root $harness, then /login, or pass a --model this root serves" >&2
       return 1
-    fi
-    echo "error: the Pi account $root cannot authenticate --provider $provider (pi auth check: ${verdict:-no answer}); log in under it with PI_CODING_AGENT_DIR=$root $harness, then /login, or pass --model as <provider>/<id>" >&2
+      ;;
+    esac
+    echo "error: the Pi account $root cannot authenticate --provider $provider (pi auth check: $verdict); log in under it with PI_CODING_AGENT_DIR=$root $harness, then /login, or pass --model as <provider>/<id>" >&2
     return 1
     ;;
   *) return 0 ;;

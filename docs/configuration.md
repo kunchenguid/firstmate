@@ -405,8 +405,11 @@ Before any endpoint exists, and before a relaunch stops the running agent, First
 Claude is asked through `quota-axi auth --json --provider claude`.
 A source that is available or expired passes.
 A source skipped with `credentialPresent` passes only when the root's `.claude.json` (`~/.claude.json` for `ordinary`) records a login (`oauthAccount`).
-Pi is asked `pi auth check --provider <the launch model's provider> --json --no-refresh`, and only status `ready` passes.
-`pi auth check` loads no extensions, so a provider an extension registers comes back `not_ready`/`provider_not_found`; only that one answer falls through to `pi --list-models <provider>`.
+Pi is asked `pi auth check --provider <the launch model's provider> --json --no-refresh`; status `ready` passes, and any other status it reports refuses.
+Two answers fall through to a second check, `pi --list-models <provider>`, which lists only the models the root can authenticate.
+One is `not_ready`/`provider_not_found`, because `pi auth check` loads no extensions and so cannot see a provider an extension registers.
+The other is an answer that is not JSON, which is what a Pi without `pi auth check` (0.84.0 and earlier) prints.
+The launch then passes only when that list includes the launch model under its provider.
 A `codex-native/<id>` model is not checked: that provider signs in through Codex's own login.
 The check runs with only `HOME`, `PATH`, `TMPDIR`, and the selected root in its environment, so a provider key left in the caller cannot answer for an empty root.
 [`bin/fm-worker-account-lib.sh`](../bin/fm-worker-account-lib.sh) owns resolution, validation, and the check.

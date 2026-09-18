@@ -307,7 +307,11 @@ SH
 # fm_test_fake_pi_runner <fakebin> [runner...]
 # Installs fm-fake-pi-auth and fm-fake-pi-list-models plus each named Pi runner
 # (pi, pi-signed) as a fake that answers `auth check` and `--list-models`
-# through them and exits 0 for anything else, including --help.
+# through them and exits 0 for anything else, including --help. The runner's
+# version is <fakebin>/.fake-pi-version (default 0.85.1), a file because the
+# preflight scrubs the environment. Like the real releases, 0.82.x answers
+# `auth check` with an unknown-options error, 0.84.0 with an unknown-command
+# error, and 0.82.x advertises no --tui-mode.
 fm_test_fake_pi_runner() {
   local fakebin=$1 runner
   shift
@@ -342,14 +346,26 @@ SH
   for runner in "$@"; do
     cat > "$fakebin/$runner" <<'SH'
 #!/bin/sh
-[ "${1:-} ${2:-}" != "auth check" ] || exec fm-fake-pi-auth "$@"
+version=$(cat "$(dirname "$0")/.fake-pi-version" 2>/dev/null) || version=0.85.1
+if [ "${1:-} ${2:-}" = "auth check" ]; then
+  case "$version" in
+  0.82.*)
+    echo 'Error: Unknown options: --json, --no-refresh' >&2
+    exit 1
+    ;;
+  0.84.0)
+    echo 'Error: Unknown auth command "check". Use "pi auth print-api-key" or "pi auth print-bearer-token".'
+    exit 1
+    ;;
+  esac
+  exec fm-fake-pi-auth "$@"
+fi
 [ "${1:-}" != "--list-models" ] || exec fm-fake-pi-list-models "${2:-}"
 if [ "${1:-}" = --help ]; then
-  if [ "${FM_FAKE_PI_VERSION:-0.84.0}" = 0.82.0 ]; then
-    printf '%s\n' 'Pi 0.82.0' 'Options: --help'
-  else
-    printf '%s\n' "Pi ${FM_FAKE_PI_VERSION:-0.84.0}" 'Options: --help --tui-mode <mode>'
-  fi
+  case "$version" in
+  0.82.*) printf '%s\n' "Pi $version" 'Options: --help' ;;
+  *) printf '%s\n' "Pi $version" 'Options: --help --tui-mode <mode>' ;;
+  esac
 fi
 exit 0
 SH

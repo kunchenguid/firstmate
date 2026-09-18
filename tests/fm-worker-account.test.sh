@@ -336,6 +336,32 @@ test_spawn_raw_pi_command_must_pass_the_declared_provider() {
   pass "a raw Pi command must pass the declared --provider itself"
 }
 
+test_spawn_pi_without_auth_check_is_proved_by_its_model_list() {
+  local rec world home fakebin wt launchlog out status id=pi-old
+  rec=$(make_world spawn-pi-old pi)
+  read_world "$rec"
+  world=$WORLD
+  home=$HOME_DIR
+  fakebin=$FAKEBIN_DIR
+  printf '0.84.0\n' > "$fakebin/.fake-pi-version"
+  wt="$world/wt"
+  fm_git_worktree "$world/proj" "$wt" wt-pi-old
+  fm_test_spawn_brief "$home" "$id"
+  launchlog="$world/launch.log"
+  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
+    "$id" "$world/proj" --mode no-mistakes --yolo off --harness pi --model fake/test 2>&1)
+  status=$?
+  expect_code 1 "$status" "a root that lists no model for the provider must refuse"$'\n'"$out"
+  assert_contains "$out" "does not list model 'fake/test'" "refusal must come from the model list"
+  assert_not_contains "$out" "cannot authenticate" \
+    "a Pi without auth check must not be reported as unable to authenticate"
+  printf 'fake test\n' > "$home/accounts/pi/.fake-models"
+  out=$(run_account_spawn "$home" "$wt" "$fakebin" "$launchlog" \
+    "$id" "$world/proj" --mode no-mistakes --yolo off --harness pi --model fake/test 2>&1)
+  expect_code 0 "$?" "a root whose model list serves the launch model should launch"$'\n'"$out"
+  pass "a Pi without auth check is proved ready by the models its root lists"
+}
+
 test_spawn_pi_refuses_an_unqualified_model() {
   local rec world home fakebin wt launchlog out status id=pi-no-provider
   rec=$(make_world spawn-pi-bare pi)
@@ -536,6 +562,7 @@ test_spawn_claude_ignores_ambient_config_dir
 test_spawn_pi_refuses_a_provider_the_home_did_not_declare
 test_spawn_pi_launch_pins_the_declared_provider
 test_spawn_raw_pi_command_must_pass_the_declared_provider
+test_spawn_pi_without_auth_check_is_proved_by_its_model_list
 test_spawn_pi_refuses_an_unqualified_model
 test_spawn_codex_does_not_require_an_account_declaration
 test_spawn_claude_ordinary_uses_the_default_login_under_throwaway_home
