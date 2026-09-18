@@ -72,6 +72,7 @@ run_bootstrap_under_claude() {  # <home> <claude-config-dir> [extra claude argv.
   local bin outfile
   bin=$(claude_bin "$dir")
   outfile="$dir/out"
+  # shellcheck disable=SC2016 # $1 and $2 expand in the child bash, not here.
   FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_BOOTSTRAP_NETWORK=skip \
     FM_BOOTSTRAP_DETECT_ONLY="${FM_TEST_DETECT_ONLY:-0}" \
     CLAUDE_CONFIG_DIR="$cfg" \
