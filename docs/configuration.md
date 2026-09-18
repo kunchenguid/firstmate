@@ -577,6 +577,15 @@ The helper never tears down a task, never writes `resolved` or `done` on the wor
 When the verdict is `not_evidenced` or `need_human` at confidence at or above the floor, firstmate still shows the done line and only annotates the risk.
 The script header owns flags, output lines, and exit codes.
 
+## Jev skill selector (FM_JEV_SKILL_SELECT)
+
+`bin/fm-jev-skill-select.sh` is a once-per-session skill suggestion, not a per-prompt router.
+Default `FM_JEV_SKILL_SELECT` is `shadow`: it writes `state/<id>.jev-skills.json` and prints that record, and it does not load skills.
+Firstmate may run it after writing a brief and before spawn, then keep the printed suggestion beside the task.
+Default spawn does not inject skills, and this tool never changes worker launch.
+Live load stays off and refuses unless `FM_JEV_SKILL_SELECT=live` and the presence file `config/jev-skill-select-live` both exist; even then this release only records the suggestion.
+The script header owns flags, the JSON file, the 0.7 confidence floor, and the live-load refusal.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
@@ -1167,6 +1176,7 @@ OPENROUTER_API_KEY=     # optional OpenRouter Jev route for bin/fm-jev-lib.sh; u
 JEV_ROUTE=              # optional; `openrouter` or `typesafe` selects the Jev route in bin/fm-jev-lib.sh
 JEV_MODEL=              # optional Jev model override for bin/fm-jev-lib.sh
 FM_JEV_TOOL_GATE=shadow # remainder Jev tool-gate after arm-command policy; live needs this plus two opt-in files; hard-ship is a do-not (docs/configuration.md "Jev remainder tool-gate")
+FM_JEV_SKILL_SELECT=shadow # once-per-session skill suggestion; live needs this plus config/jev-skill-select-live and still does not inject skills (docs/configuration.md "Jev skill selector")
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)
