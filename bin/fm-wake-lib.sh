@@ -9,6 +9,14 @@ STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
+# Caps how many nested ".steal" mutexes fm_lock_try_acquire will chase to
+# reclaim a dead owner. Each level only exists because the previous one was
+# itself abandoned mid-transaction (e.g. TERM during a relaunch/interrupt
+# cycle), so repeated real contention can otherwise grow the ".steal" suffix
+# without bound until the path exceeds the OS filename limit and the shell
+# segfaults. Beyond this depth the acquire fails closed instead of recursing
+# further; ordinary callers already retry through fm_lock_acquire_wait.
+FM_LOCK_STEAL_MAX_DEPTH="${FM_LOCK_STEAL_MAX_DEPTH:-2}"
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
@@ -913,7 +921,7 @@ fm_recovery_marker_reopen_announced() {
 }
 
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner current
+  local lockdir=$1 depth=${2:-0} pid steal cur rc steal_owner primary_owner current
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
@@ -949,8 +957,12 @@ fm_lock_try_acquire() {
     return 1
   fi
 
+  if [ "$depth" -ge "$FM_LOCK_STEAL_MAX_DEPTH" ]; then
+    FM_LOCK_HELD_PID=$pid
+    return 1
+  fi
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  if ! fm_lock_try_acquire "$steal" "$((depth + 1))"; then
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
     return 1
