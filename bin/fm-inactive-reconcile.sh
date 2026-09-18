@@ -416,6 +416,7 @@ report_child_ledger_locked() { # <id> <meta>
   incarnation=$(meta_incarnation "$meta")
   fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$last")
   if [ "$state" = "done" ] && [ ! -f "$(record_path "$fingerprint" reported)" ] \
+    && [ ! -f "$(record_path "$fingerprint" pending)" ] \
     && ! fm_dod_accept_ship_done "$(meta_field "$meta" kind)" "$(meta_field "$meta" mode)" \
       "$(meta_field "$meta" worktree)" "$(meta_field "$meta" project)" "$last" \
       "$STATE" "$id" "$meta" >/dev/null; then
@@ -455,8 +456,8 @@ report_child_ledger_locked() { # <id> <meta>
 }
 
 # Every direct child's ledger, under its meta lock. File reads, plus a local
-# git reachability check for a ship done: not yet delivered, so it runs on
-# every poll in a secondmate home; a delivery failure is already queued as a
+# git reachability check for a ship done: with no delivery record yet, so it
+# runs on every poll in a secondmate home; a delivery failure is already queued as a
 # notice and never fails the scan.
 ledger_pass() {
   local meta id lock

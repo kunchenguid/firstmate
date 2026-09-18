@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Record a PR-ready task: store one validated canonical pr=<url> and the forge's
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
-# Without a forge-reported head, refuses when bin/fm-dod-lib.sh will not accept
-# the named head as reachable outside the worker's disposable copy.
+# Refuses when bin/fm-dod-lib.sh will not accept the named head as reachable
+# outside the worker's disposable copy; in no-mistakes mode a forge-reported
+# head is that named head and is already stored on the forge.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
 # A GitHub pull request URL and a GitLab merge request URL are both accepted,
@@ -91,10 +92,7 @@ case "$MODE" in
   no-mistakes|'') DONE_LINE="done: PR $URL checks green" ;;
   *) DONE_LINE="done: PR $URL" ;;
 esac
-# A head the forge reported is stored on the forge, even when the pipeline
-# created it and the worker clone never fetched it, so only a head inferred
-# from the worker copy (GitLab, or gh unavailable) goes through the gate.
-if [ -z "$PR_HEAD" ] \
+if { [ -z "$PR_HEAD" ] || ! fm_dod_forge_head_is_named_head "$MODE"; } \
   && ! GATE_REASON=$(fm_dod_accept_ship_done "${KIND:-ship}" "$MODE" "$WT" "$PROJECT" "$DONE_LINE" "$STATE" "$ID" "$META"); then
   echo "error: $GATE_REASON" >&2
   exit 1

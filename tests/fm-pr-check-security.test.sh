@@ -541,6 +541,26 @@ test_unpushed_named_head_refuses_registration() {
   pass "fm-pr-check refuses to register a PR whose named head is only in the worker copy"
 }
 
+# A direct-PR worker pushes from its own copy: the forge still reports the
+# head pushed when the PR opened, but a later fix committed only in the copy
+# is the named head, so registration is refused.
+test_direct_pr_unpushed_commit_refuses_registration() {
+  local dir pushed later
+  dir=$(make_case direct-pr-unpushed)
+  fm_write_meta "$dir/home/state/task-a.meta" \
+    "window=firstmate:fm-task-a" "endpoint_task_id=task-a" "worktree=$dir/wt" \
+    "project=$dir/project" "kind=ship" "mode=direct-PR"
+  pushed=$(git -C "$dir/wt" rev-parse HEAD)
+  git -C "$dir/wt" commit -q --allow-empty -m 'fix only in the copy'
+  later=$(git -C "$dir/wt" rev-parse HEAD)
+  FM_TEST_GH_HEAD=$pushed run_check_entry "$dir" task-a https://github.com/o/r/pull/4 \
+    > "$dir/stdout" 2> "$dir/stderr" && fail "direct-PR head with an unpushed later commit was registered"
+  grep -Fq "named head $later is unreachable outside the worker copy" "$dir/stderr" \
+    || fail "direct-PR refusal did not name the unpushed commit: $(cat "$dir/stderr")"
+  [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "direct-PR unpushed commit still armed a poll"
+  pass "fm-pr-check refuses a direct-PR registration while a later commit is only in the copy"
+}
+
 test_valid_recording_and_merge_derivation() {
   local dir expected sidecar count rc
   dir=$(make_case valid-recording)
@@ -2798,6 +2818,7 @@ test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_unpushed_named_head_refuses_registration
+test_direct_pr_unpushed_commit_refuses_registration
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
