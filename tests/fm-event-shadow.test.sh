@@ -81,6 +81,11 @@ row | "$TOOL" > "$TMP_ROOT/duplicate"
 [ ! -s "$TMP_ROOT/duplicate" ] || fail 'ambiguous metadata classified'
 rm "$STATE_DIR/duplicate.meta"
 pass 'batch capped at eight and ambiguous local identity bypassed'
+printf '1\t20\tstale\tsample:p1\tstale: sample:p1 (idle 300s, possible wedge, escalation 1)\n' | "$TOOL" > "$TMP_ROOT/wedge"
+grep -q 'event=20' "$TMP_ROOT/wedge" || fail 'canonical possible wedge skipped'
+printf '1\t21\tstale\tsample:p1\tstale: sample:p1 (idle 300s, possible wedge, escalation 3, demand-deep-inspection)\n' | "$TOOL" > "$TMP_ROOT/deep"
+[ ! -s "$TMP_ROOT/deep" ] || fail 'deep inspection classified'
+pass 'root-surfaced possible wedge annotated but deep inspection remains deterministic'
 # Private aliases cannot redirect the optional journal into another record.
 mv "$STATE_DIR/event-shadow/calls.jsonl" "$TMP_ROOT/saved"
 ln -s "$TMP_ROOT/target" "$STATE_DIR/event-shadow/calls.jsonl"

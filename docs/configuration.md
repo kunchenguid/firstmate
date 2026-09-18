@@ -1212,7 +1212,7 @@ The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`]
 
 ## Event shadow pilot
 
-The optional bare-stale-event JEV pilot annotates the existing wake-drain presentation without consuming or suppressing any notification.
+The optional stale-worker-event JEV pilot annotates the existing wake-drain presentation without consuming or suppressing any notification.
 Enable it only for a home whose status text may be sent to TypeSafe, using `FM_EVENT_SHADOW=1` and a runtime-injected `TYPESAFE_API_KEY`; unlike dispatch resolution, this pilot never reads a key file.
 Keep normal supervision unchanged: shadow classifications describe historical declarations, not verified health, completion, approval, or authority to act.
 No low-risk behavior is approved for activation by a shadow result.
