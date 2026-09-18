@@ -220,10 +220,12 @@ Workspace and tab ids support verification and cleanup but are not inferred from
 The adapter starts and polls a named server before workspace, tab, pane, or agent calls.
 Every Herdr invocation goes through `fm_backend_herdr_cli`, which sets the environment and passes an explicit trailing `--session <name>`.
 An environment variable alone is not reliable when another Herdr server is running.
-When the selected named server is not running, the adapter launches it without inherited Firstmate home and directory overrides, harness identity markers, or the supervision-model override.
-Herdr passes its server startup environment to every later pane, so retaining those values could misroute panes for another Firstmate home or harness.
+When the selected named server is not running, the adapter births it without the calling script's Firstmate settings or the launching agent session's identity markers.
+Herdr passes its server startup environment to every later pane for the server's whole life, so whichever Firstmate call happens to start the server first would otherwise freeze its own per-call overrides, home selection, and agent-session markers into every later pane.
+For example, a one-task state-read override pointing at a since-deleted temporary folder would make every pane's `bin/fm-crew-state.sh` report no metadata, and an inherited Claude Code child-session marker would turn transcript saving off for every Claude session started in a pane.
+The scrub removes whole namespaces rather than a list of names seen so far, so a new override or marker cannot slip through; [`bin/fm-backend-server-env-lib.sh`](../bin/fm-backend-server-env-lib.sh) owns the namespaces and the operator account settings kept inside them, and the tmux and zellij adapters use the same owner.
 An already-running server is reused without restart or environment changes.
-Explicit named-session routing and unrelated launch environment remain intact.
+Explicit named-session routing and the operator's own launch environment remain intact.
 
 Literal text and Enter are separate operations on `fm-send.sh`'s typed plane; ordinary local text steers instead use the durable steering inbox and send only its best-effort constant doorbell through this adapter.
 Spawn-time fixed commands may use Herdr's atomic run primitive.
@@ -359,6 +361,7 @@ tests/fm-backend-herdr.test.sh
 tests/fm-composer-lib.test.sh
 tests/fm-herdr-submit-confirm-live-e2e.test.sh
 tests/fm-backend-herdr-smoke.test.sh
+tests/fm-backend-herdr-server-env-e2e.test.sh
 tests/fm-backend-herdr-prune-safety-e2e.test.sh
 tests/fm-backend-herdr-respawn-idem-e2e.test.sh
 tests/fm-backend-herdr-workspace-per-home-e2e.test.sh

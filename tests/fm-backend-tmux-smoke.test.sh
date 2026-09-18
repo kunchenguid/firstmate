@@ -169,5 +169,34 @@ state=$(fm_backend_agent_state tmux "$TARGET")
 fm_backend_tmux_kill "$TARGET" || fail "fm_backend_tmux_kill on an already-dead target must stay best-effort (never fail)"
 pass "real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing"
 
+# --- container_ensure's server-birth environment -----------------------------
+#
+# Outside tmux with no server running, container_ensure's `new-session` BIRTHS
+# the server, whose global environment every later window inherits. A per-call
+# Firstmate read inside an agent session must not freeze its own overrides or
+# session markers into it (bin/fm-backend-server-env-lib.sh).
+
+"$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
+BIRTH_DIR=$(mktemp -d "$SHIM_DIR/birth.XXXXXX")
+# shellcheck disable=SC2016 # $0 expands in the child shell, which receives $ROOT as $0.
+container=$(env -u TMUX FM_CREW_STATE_META_OVERRIDE="$BIRTH_DIR/gone.meta" FM_HOME=/tmp/wrong-home \
+  CLAUDECODE=1 CLAUDE_CODE_CHILD_SESSION=1 CLAUDE_CODE_SESSION_ID=launcher-session \
+  CLAUDE_CONFIG_DIR="$BIRTH_DIR/claude-config" SMOKE_OPERATOR_SETTING=kept \
+  bash -c '. "$0/bin/fm-backend.sh"; fm_backend_source tmux && fm_backend_tmux_container_ensure' "$ROOT") \
+  || fail "container_ensure could not birth a server"
+[ "$container" = firstmate ] || fail "container_ensure outside tmux should name the firstmate session, got '$container'"
+tmux new-window -d -t firstmate: "env > '$BIRTH_DIR/window.env'; : > '$BIRTH_DIR/done'" \
+  || fail "could not open a window in the newly born server"
+i=0
+while [ ! -e "$BIRTH_DIR/done" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+[ -e "$BIRTH_DIR/done" ] || fail "the window probe did not finish"
+for name in FM_CREW_STATE_META_OVERRIDE FM_HOME CLAUDECODE CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_SESSION_ID; do
+  ! grep -q "^$name=" "$BIRTH_DIR/window.env" || fail "a later window inherited the launcher's $name from the tmux server"
+done
+grep -qx 'SMOKE_OPERATOR_SETTING=kept' "$BIRTH_DIR/window.env" || fail "a later window lost the operator's unrelated environment"
+grep -qx "CLAUDE_CONFIG_DIR=$BIRTH_DIR/claude-config" "$BIRTH_DIR/window.env" \
+  || fail "a later window lost the operator's Claude account selection"
+pass "real tmux: a server born by container_ensure hands later windows the operator's environment without per-call Firstmate settings or agent-session markers"
+
 cleanup_all
 trap - EXIT

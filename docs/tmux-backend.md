@@ -44,6 +44,12 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 
 ## Current behavior and safety
 
+### Server launch environment
+
+When Firstmate runs outside tmux and no tmux server exists yet, creating the detached `firstmate` session births the server, whose environment every later window inherits.
+That birth runs without the calling script's Firstmate settings or the launching agent session's identity markers, as owned by [`bin/fm-backend-server-env-lib.sh`](../bin/fm-backend-server-env-lib.sh), so a per-call override or a Claude Code child-session marker cannot reach every later crew window.
+Reusing the current session or an already-running server changes no environment.
+
 ### Agent liveness probe
 
 A target-existence check proves only that the pane exists.
