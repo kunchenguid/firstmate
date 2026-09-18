@@ -57,6 +57,8 @@ meta_value() {  # <file> <key>
 
 # shellcheck source=bin/fm-dod-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-task-path-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-task-path-lib.sh"
 
 brief_text() {  # <brief-path> <heading>
   local brief=$1 heading=$2
@@ -164,9 +166,9 @@ current_model() {  # <compact-task-json>
       '{id:$id,title:$title,state:"done",structured:true,unresolved_blocker_ids:[]}')
   fi
   meta="$STATE/$id.meta"
-  brief="$DATA/$id/brief.md"
-  [ -f "$brief" ] && [ ! -L "$brief" ] || brief="$DATA/$id/launch-brief.md"
-  brief_label="data/$id/${brief##*/}"
+  brief=$(fm_task_read_path "$DATA" "$id" brief.md) || fail "could not resolve task artifacts for $id"
+  [ -f "$brief" ] && [ ! -L "$brief" ] || brief=$(fm_task_read_path "$DATA" "$id" launch-brief.md) || fail "could not resolve task artifacts for $id"
+  brief_label=$(fm_task_relpath "$id" "${brief##*/}") || fail "could not label task artifact for $id"
   intent=$(brief_text "$brief" "## Captain's intent")
   spec=$(brief_text "$brief" "## Firstmate spec")
   plan=$(review_plan "$brief" "$brief_label")
@@ -203,7 +205,7 @@ current_model() {  # <compact-task-json>
         $row.pr_url,
         $row.report_path,
         ($row.links[]?),
-        (if ($task.paths.report.present // false) then "data/" + $id + "/report.md" else null end)
+        (if ($task.paths.report.present // false) then "data/tasks/" + $id + "/report.md" else null end)
       ] | map(select(. != null and . != "")) | unique);
     def delivery($status):
       if $status == "accepted" and $route == "close" then "No delivery selected"

@@ -1461,8 +1461,8 @@ write_large_fixture() {  # <home> <count>
   i=1
   while [ "$i" -le "$count" ]; do
     id="dead-$i"
-    mkdir -p "$home/projects/$id" "$home/data/$id"
-    printf '# Report\n' > "$home/data/$id/report.md"
+    mkdir -p "$home/projects/$id" "$home/data/tasks/$id"
+    printf '# Report\n' > "$home/data/tasks/$id/report.md"
     printf -- '- [ ] gate-%s - Gate %s blocked-by: task-%s (repo: repo-%s) (kind: ship)\n' "$i" "$i" "$i" "$i" >> "$home/data/backlog.md"
     printf -- '- [ ] decision-%s - Decision %s (repo: repo-%s) (kind: captain) (hold: captain choice pending) (hold-kind: captain)\n' "$i" "$i" "$i" >> "$home/data/backlog.md"
     fm_write_meta "$home/state/$id.meta" \
@@ -1780,7 +1780,7 @@ test_kind_fallback_matches_tasks_axi_word_boundaries() {
   while IFS='|' read -r id title kind; do
     "$TASKS_AXI_BIN" add "$id" "$title" --start --file "$home/data/backlog.md" >/dev/null \
       || fail "could not create keyword fixture $id"
-    "$TASKS_AXI_BIN" 'done' "$id" --report "data/$id/report.md" \
+    "$TASKS_AXI_BIN" 'done' "$id" --report "data/tasks/$id/report.md" \
       --file "$home/data/backlog.md" >/dev/null || fail "could not complete keyword fixture $id"
     producer_kind=$("$TASKS_AXI_BIN" show "$id" --full --file "$home/data/backlog.md" \
       | sed -n 's/^  kind: *//p' | head -1)

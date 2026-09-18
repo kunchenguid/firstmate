@@ -83,8 +83,8 @@ make_settle_case() {
   printf 'codex\n' > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   fm_git_init_commit "$stale"
-  mkdir -p "$home/data/$id"
-  cat > "$home/data/$id/brief.md" <<EOF
+  mkdir -p "$home/data/tasks/$id"
+  cat > "$home/data/tasks/$id/brief.md" <<EOF
 # Task
 ## Captain's intent
 Exercise settled-worktree detection for $id.

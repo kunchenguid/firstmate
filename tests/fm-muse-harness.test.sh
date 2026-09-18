@@ -124,9 +124,9 @@ make_spawn_case() {
   wt="$case_dir/wt"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   id="muse-$name-x1"
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" \
+  mkdir -p "$home/data/tasks/$id" "$home/projects" "$home/state" "$home/config" \
     "$home/xdgconfig" "$home/xdgdata"
-  cat > "$home/data/$id/brief.md" <<'EOF'
+  cat > "$home/data/tasks/$id/brief.md" <<'EOF'
 # Task
 ## Captain's intent
 Exercise Muse dispatch.
@@ -388,8 +388,8 @@ test_spawn_refuses_secondmate() {
   home="$case_dir/home"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   id="muse-secondmate-x1"
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" "$case_dir/muse"
-  printf 'charter\n' > "$home/data/$id/brief.md"
+  mkdir -p "$home/data/tasks/$id" "$home/projects" "$home/state" "$home/config" "$case_dir/muse"
+  printf 'charter\n' > "$home/data/tasks/$id/brief.md"
   out=$(cd "$case_dir" && FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \

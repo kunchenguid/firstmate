@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bin/backends/cmux.sh - the cmux session-provider adapter (EXPERIMENTAL).
 #
-# Design: data/cmux-backend-feasibility-c7/report.md (adapter design sketch,
+# Design: data/tasks/cmux-backend-feasibility-c7/report.md (adapter design sketch,
 # section 4) plus the live-app verification pass recorded in
 # docs/cmux-backend.md (real cmux 0.64.17, macOS aarch64, 2026-07-03). cmux is
 # a session provider ONLY, exactly like herdr/zellij: the worktree provider

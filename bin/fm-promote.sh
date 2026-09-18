@@ -3,8 +3,8 @@
 # worktree, and loaded context; only the contract changes. Flips kind= to ship in
 # state/<task-id>.meta so fm-teardown.sh applies the full ship-task teardown protection
 # again. Promotion also writes the crewmate's ship instructions to
-# data/<task-id>/ship-instructions.md, appends that same superseding contract to
-# data/<task-id>/brief.md for future relaunches, and prints the fm-send.sh command
+# data/tasks/<task-id>/ship-instructions.md, appends that same superseding contract to
+# data/tasks/<task-id>/brief.md for future relaunches, and prints the fm-send.sh command
 # that delivers it to the current worker. Those instructions carry the
 # scratch-state inventory, the clean
 # default-branch base, the fm/<task-id> branch, and - rendered from
@@ -109,6 +109,7 @@ META_LOCK_HELD=0
 TMP=
 META=
 SCOUT_BRIEF=
+BRIEF_DESTINATION=
 BRIEF_ORIGINAL=
 BRIEF_REPLACEMENT=
 promote_cleanup() {
@@ -146,7 +147,8 @@ if ! fm_backlog_record_present "$META" "task record" "$STATE"; then
 fi
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
 
-SCOUT_BRIEF=$(fm_task_path "$DATA" "$ID" brief.md)
+SCOUT_BRIEF=$(fm_task_read_path "$DATA" "$ID" brief.md)
+BRIEF_DESTINATION=$(fm_task_path "$DATA" "$ID" brief.md) || { echo "error: invalid task brief path for $ID" >&2; exit 2; }
 if fm_brief_task_placeholders_present "$SCOUT_BRIEF"; then
   echo "error: $SCOUT_BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; preserve the original ask in ## Captain's intent and fill the scout-time ## Firstmate spec; promotion generates a separate ship-time spec" >&2
   exit 1
@@ -251,11 +253,11 @@ mv "$SCOUT_BRIEF" "$BRIEF_ORIGINAL" || {
   echo "error: could not stage the scout brief for promotion: $SCOUT_BRIEF" >&2
   exit 1
 }
-if ! mv "$BRIEF_REPLACEMENT" "$SCOUT_BRIEF"; then
+if ! mv "$BRIEF_REPLACEMENT" "$BRIEF_DESTINATION"; then
   if mv "$BRIEF_ORIGINAL" "$SCOUT_BRIEF" 2>/dev/null; then
     BRIEF_ORIGINAL=
   fi
-  echo "error: could not publish the promoted brief: $SCOUT_BRIEF" >&2
+  echo "error: could not publish the promoted brief: $BRIEF_DESTINATION" >&2
   exit 1
 fi
 BRIEF_REPLACEMENT=

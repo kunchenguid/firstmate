@@ -534,6 +534,7 @@ RELAUNCH_META_PUBLISHED=0
 RELAUNCH_AGENT_CONFIRMED=0
 RELAUNCH_TX=
 RELAUNCH_BRIEF=
+RELAUNCH_SOURCE_BRIEF=
 PRIOR_HARNESS=$HARNESS
 PRIOR_RECORDED_HARNESS=$RECORDED_HARNESS
 CONFIG_HARNESS=
@@ -816,9 +817,16 @@ do_relaunch() {
 
   case "$KIND" in
     ship|scout)
+      RELAUNCH_SOURCE_BRIEF=$(fm_task_read_path "$DATA" "$ID" brief.md)
+      [ -f "$RELAUNCH_SOURCE_BRIEF" ] \
+        || die "task $ID has no instructions at $RELAUNCH_SOURCE_BRIEF; refusing to relaunch a worker with nothing to work from"
       RELAUNCH_BRIEF=$(fm_task_path "$DATA" "$ID" brief.md)
-      [ -f "$RELAUNCH_BRIEF" ] \
-        || die "task $ID has no instructions at $RELAUNCH_BRIEF; refusing to relaunch a worker with nothing to work from"
+      if [ "$RELAUNCH_SOURCE_BRIEF" != "$RELAUNCH_BRIEF" ]; then
+        mkdir -p "${RELAUNCH_BRIEF%/*}" \
+          || die "could not create the canonical instructions directory for task $ID"
+        cp -p "$RELAUNCH_SOURCE_BRIEF" "$RELAUNCH_BRIEF" \
+          || die "could not preserve task $ID's legacy instructions in the canonical path"
+      fi
       [ "$NOTE_SET" = 1 ] && [ -n "$NOTE" ] \
         || die "relaunch of a $KIND task requires --note (or --note-file): the replacement worker inherits the local copy but none of the conversation, so it must be told what happened"
       ;;

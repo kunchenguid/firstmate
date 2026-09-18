@@ -67,7 +67,7 @@
 #     endpoint.agent_alive is populated for local secondmates only, where it is
 #     useful return-channel supervision data; remote secondmates use "unknown"
 #     without a probe, and other tasks use "not_checked".
-#   scout_reports[]: present data/<id>/report.md pointers.
+#   scout_reports[]: present data/tasks/<id>/report.md pointers.
 #   main_inventory: {valid,reason,orphan_in_flight[],unstructured_current_count} -
 #     main-home current-inventory checks shared with secondmate_home_summary_json
 #     (orphan structured in-flight ids with no state/<id>.meta, and unstructured
@@ -621,7 +621,7 @@ prefetch_task_observations() {  # <meta> <id>
   endpoint_file="$SNAPSHOT_TASK_DIR/$id.endpoint"
   status_log="$STATE/$id.status"
   status_capture="$SNAPSHOT_TASK_DIR/$id.status"
-  report_path=$(fm_task_path "$DATA" "$id" report.md)
+  report_path=$(fm_task_read_path "$DATA" "$id" report.md)
   report_capture="$SNAPSHOT_TASK_DIR/$id.report"
 
   snapshot_task_generation_is_current "$meta" "$id" || generation_current=0
@@ -827,7 +827,7 @@ task_json_lines() {
     [ -f "$report_path" ] && report_present=1 || report_present=0
     meta_json=$(path_present_json "$original_meta" "$meta")
     status_json=$event_json
-    report_json=$(path_present_json "$(fm_task_path "$DATA" "$id" report.md)" "$report_path")
+    report_json=$(path_present_json "$(fm_task_read_path "$DATA" "$id" report.md)" "$report_path")
     if [ -n "$worktree" ]; then worktree_json=$(path_present_json "$worktree"); else worktree_json=$(jq -n '{path:null,present:false}'); fi
     if [ -n "$home" ] && [ -n "$remote_host" ]; then
       home_json=$(jq -n --arg path "$home" '{path:$path,present:null}')

@@ -395,8 +395,8 @@ make_project() {  # <dir>
 
 write_ship_brief() {  # <home> <id> [description]
   local home=$1 id=$2 description=${3:-Herdr presentation fixture $2}
-  mkdir -p "$home/data/$id"
-  cat > "$home/data/$id/brief.md" <<EOF
+  mkdir -p "$home/data/tasks/$id"
+  cat > "$home/data/tasks/$id/brief.md" <<EOF
 # Task
 ## Captain's intent
 $description
@@ -1262,7 +1262,7 @@ pass "real Herdr lab: Hi Bit and Wheelhouse-style same-identity restarts reclaim
 
 # A secondmate child binds and reclaims only inside its own home and parent.
 CROSS_RESTART_ID=wheel-child-resume
-mkdir -p "$SECOND_HOME_A/data/$CROSS_RESTART_ID"
+mkdir -p "$SECOND_HOME_A/data/tasks/$CROSS_RESTART_ID"
 write_ship_brief "$SECOND_HOME_A" "$CROSS_RESTART_ID" 'Cross-home restart fixture.'
 spawn_task "$CROSS_RESTART_ID" "$SECOND_HOME_A" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/cross-restart-first.out" 2> "$TMP_ROOT/cross-restart-first.err" \
   || fail "cross-home restart fixture failed: $(cat "$TMP_ROOT/cross-restart-first.err")"
@@ -1299,7 +1299,7 @@ pass "real Herdr lab: secondmate restart binding and reclaim stay isolated to th
 # each replace only their own exact husk.
 PRIMARY_WAVE_ID=resume-wave-primary
 BRAVO_WAVE_ID=resume-wave-bravo
-mkdir -p "$HOME_DIR/data/$PRIMARY_WAVE_ID" "$SECOND_HOME_B/data/$BRAVO_WAVE_ID"
+mkdir -p "$HOME_DIR/data/tasks/$PRIMARY_WAVE_ID" "$SECOND_HOME_B/data/tasks/$BRAVO_WAVE_ID"
 write_ship_brief "$HOME_DIR" "$PRIMARY_WAVE_ID" 'Concurrent primary recovery fixture.'
 write_ship_brief "$SECOND_HOME_B" "$BRAVO_WAVE_ID" 'Concurrent secondmate recovery fixture.'
 spawn_task "$PRIMARY_WAVE_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/primary-wave-first.out" 2> "$TMP_ROOT/primary-wave-first.err" \

@@ -180,7 +180,7 @@ SH
   git -C "$home" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
 }
 
-# Scaffold a filled secondmate charter brief under <home>/data/<id>/brief.md.
+# Scaffold a filled secondmate charter brief under <home>/data/tasks/<id>/brief.md.
 # Args: home id charter [project...]
 scaffold_secondmate_charter() {
   local home=$1 id=$2 charter=$3

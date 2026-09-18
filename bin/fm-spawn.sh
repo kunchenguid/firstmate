@@ -263,7 +263,7 @@
 #   on every spawn and relaunch, so a change reaches the next launch without a
 #   restart, and it is inherited into secondmate homes (bin/fm-config-inherit-lib.sh).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
-#     __BRIEF__    absolute path to data/<task-id>/brief.md
+#     __BRIEF__    absolute path to data/tasks/<task-id>/brief.md
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
@@ -2500,12 +2500,12 @@ if [ "$KIND" = secondmate ]; then
   if [ -f "$PROJ_ABS/data/charter.md" ]; then
     BRIEF="$PROJ_ABS/data/charter.md"
   else
-    BRIEF=$(fm_task_path "$DATA" "$ID" brief.md)
+    BRIEF=$(fm_task_read_path "$DATA" "$ID" brief.md)
   fi
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
-  BRIEF=$(fm_task_path "$DATA" "$ID" brief.md)
+  BRIEF=$(fm_task_read_path "$DATA" "$ID" brief.md)
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {

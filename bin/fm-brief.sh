@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Scaffold a crewmate brief or persistent secondmate charter at
-# data/<task-id>/brief.md under the active firstmate home.
+# data/tasks/<task-id>/brief.md under the active firstmate home.
 # For ordinary tasks, the standard Setup/Rules/Definition-of-done contract is
 # filled in. Ship and scout `# Task` sections have two subsections Firstmate
 # fills before dispatch: `{TASK}` under `## Captain's intent` (the captain's
@@ -18,7 +18,7 @@
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
-#   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
+#   data/tasks/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   It offers the Lavish review loop only when `fm-bootstrap.sh lavish-compatible`
 #   confirms the supported lavish-axi floor; otherwise it asks for a text report.
 #   --secondmate writes a persistent secondmate charter. The project list
@@ -189,9 +189,10 @@ if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
 fi
 
 TASK_DIR=$(fm_task_dir "$DATA" "$ID") || { echo "error: invalid task id: $ID" >&2; exit 2; }
+EXISTING_BRIEF=$(fm_task_read_path "$DATA" "$ID" brief.md)
+[ -e "$EXISTING_BRIEF" ] && { echo "error: $EXISTING_BRIEF already exists" >&2; exit 1; }
 BRIEF=$(fm_task_path "$DATA" "$ID" brief.md)
 REPORT_PATH=$(fm_task_path "$DATA" "$ID" report.md)
-[ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
 mkdir -p "$TASK_DIR"
 
 ASK_USER_BLOCK=

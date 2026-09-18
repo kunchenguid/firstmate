@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bin/backends/zellij.sh - the zellij session-provider adapter (EXPERIMENTAL).
 #
-# Design: data/fm-backend-design-d7/report.md ("Zellij Backend" section - the
+# Design: data/tasks/fm-backend-design-d7/report.md ("Zellij Backend" section - the
 # interface mapping, implementation choices, and "Zellij gaps to verify" list)
 # and herdr-addendum.md D2/D3 (zellij is P3, after herdr; treehouse stays the
 # worktree provider). Zellij is a session provider ONLY: the worktree provider

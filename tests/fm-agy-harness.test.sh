@@ -555,8 +555,8 @@ make_agy_spawn_case() {
   proj="$case_dir/project"
   wt="$case_dir/wt"
   fakebin=$(make_agy_fakebin "$case_dir/fake")
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
-  cat > "$home/data/$id/brief.md" <<'EOF'
+  mkdir -p "$home/data/tasks/$id" "$home/projects" "$home/state" "$home/config"
+  cat > "$home/data/tasks/$id/brief.md" <<'EOF'
 # Task
 ## Captain's intent
 Exercise Antigravity dispatch.

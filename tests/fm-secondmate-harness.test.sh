@@ -981,8 +981,8 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   wt="$w/crew-wt"
   fakebin=$(make_launch_capturing_tmux "$w/tmux-crew")
   fm_git_worktree "$proj" "$wt" "wt-crew"
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state"
-  cat > "$home/data/$id/brief.md" <<'EOF'
+  mkdir -p "$home/data/tasks/$id" "$home/projects" "$home/state"
+  cat > "$home/data/tasks/$id/brief.md" <<'EOF'
 # Task
 ## Captain's intent
 Exercise an ordinary crew launch.

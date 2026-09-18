@@ -30,8 +30,8 @@ PF_TEST_LOCK_HOLDER=
 
 write_promotion_brief() {  # <home> <id>
   local home=$1 id=$2
-  mkdir -p "$home/data/$id"
-  cat > "$home/data/$id/brief.md" <<'EOF'
+  mkdir -p "$home/data/tasks/$id"
+  cat > "$home/data/tasks/$id/brief.md" <<'EOF'
 # Task
 ## Captain's intent
 Promote the selected scout.

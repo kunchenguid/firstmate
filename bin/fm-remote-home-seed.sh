@@ -125,7 +125,7 @@ if [ -e "$REG" ] || [ -L "$REG" ]; then
 fi
 
 mkdir -p "$DATA"
-BRIEF=$(fm_task_path "$DATA" "$ID" brief.md)
+BRIEF=$(fm_task_read_path "$DATA" "$ID" brief.md)
 BRIEF_CREATED=0
 if [ ! -f "$BRIEF" ]; then
   [ -n "${FM_SECONDMATE_CHARTER:-}" ] || die "no filled charter at $BRIEF; set FM_SECONDMATE_CHARTER or scaffold one first"
@@ -134,6 +134,7 @@ if [ ! -f "$BRIEF" ]; then
   else
     "$SCRIPT_DIR/fm-brief.sh" "$ID" --secondmate "${PROJECT_NAMES[@]}" >/dev/null
   fi
+  BRIEF=$(fm_task_path "$DATA" "$ID" brief.md) || die "cannot resolve the canonical charter brief"
   BRIEF_CREATED=1
 fi
 if grep -F '{TASK}' "$BRIEF" >/dev/null 2>&1; then

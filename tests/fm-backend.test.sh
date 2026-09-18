@@ -903,8 +903,8 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
   esac
   fb=$(make_spawn_symlink_fakebin "$TMP_ROOT/symlink-fake-$label" "$initial_path" "$wt")
   data="$TMP_ROOT/symlink-data-$label"
-  mkdir -p "$data/$id"
-  write_spawn_brief "$data/$id/brief.md" "$id"
+  mkdir -p "$data/tasks/$id"
+  write_spawn_brief "$data/tasks/$id/brief.md" "$id"
   state="$TMP_ROOT/symlink-state-$label"; config="$TMP_ROOT/symlink-config-$label"
   mkdir -p "$state" "$config"
   log="$TMP_ROOT/symlink-spawn-$label.log"
@@ -981,8 +981,8 @@ test_teardown_conformance_old_vs_new() {
   fb=$(make_teardown_fakebin "$TMP_ROOT/teardown-fake")
 
   data="$TMP_ROOT/teardown-data"
-  mkdir -p "$data/$id"
-  printf 'scout findings\n' > "$data/$id/report.md"
+  mkdir -p "$data/tasks/$id"
+  printf 'scout findings\n' > "$data/tasks/$id/report.md"
 
   state_old="$TMP_ROOT/teardown-state-old"; state_new="$TMP_ROOT/teardown-state-new"
   config_old="$TMP_ROOT/teardown-config-old"; config_new="$TMP_ROOT/teardown-config-new"
@@ -1065,7 +1065,7 @@ test_spawn_default_backend_writes_no_meta_field() {
   fm_git_worktree "$proj" "$wt" "fm/$id"
   local fb
   fb=$(make_spawn_fakebin "$TMP_ROOT/nobackend-fake" "$wt")
-  mkdir -p "$data/$id"; write_spawn_brief "$data/$id/brief.md" "$id"
+  mkdir -p "$data/tasks/$id"; write_spawn_brief "$data/tasks/$id/brief.md" "$id"
   state="$TMP_ROOT/nobackend-state"; config="$TMP_ROOT/nobackend-config"
   mkdir -p "$state" "$config"
 
@@ -1087,7 +1087,7 @@ test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
   id="explicitbackendz4"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   fb=$(make_spawn_fakebin "$TMP_ROOT/explicit-backend-fake" "$wt")
-  mkdir -p "$data/$id"; write_spawn_brief "$data/$id/brief.md" "$id"
+  mkdir -p "$data/tasks/$id"; write_spawn_brief "$data/tasks/$id/brief.md" "$id"
   state="$TMP_ROOT/explicit-backend-state"; config="$TMP_ROOT/explicit-backend-config"
   mkdir -p "$state" "$config"
 
@@ -1111,7 +1111,7 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   id="nestbackendz5"
   fm_git_worktree "$proj" "$wt" "fm/$id"
   fb=$(make_spawn_fakebin "$TMP_ROOT/nest-fake" "$wt")
-  mkdir -p "$data/$id"; write_spawn_brief "$data/$id/brief.md" "$id"
+  mkdir -p "$data/tasks/$id"; write_spawn_brief "$data/tasks/$id/brief.md" "$id"
   state="$TMP_ROOT/nest-state"; config="$TMP_ROOT/nest-config"
   mkdir -p "$state" "$config"
 

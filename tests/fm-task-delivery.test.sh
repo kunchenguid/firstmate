@@ -44,11 +44,11 @@ make_home() {  # <name> [<registry-line>...]
 
 write_brief() {  # <home> <id> [<recorded-mode>]
   local home=$1 id=$2 mode=${3:-}
-  mkdir -p "$home/data/$id"
+  mkdir -p "$home/data/tasks/$id"
   {
     printf 'You are a crewmate.\n\n# Task\n## Captain'\''s intent\nExercise the delivery contract.\n\n## Firstmate spec\nVerify the selected delivery behavior.\n\n# Definition of done\n'
     [ -z "$mode" ] || printf 'Delivery contract: mode=%s\n' "$mode"
-  } > "$home/data/$id/brief.md"
+  } > "$home/data/tasks/$id/brief.md"
 }
 
 fill_brief_subsections() {  # <file> <intent> <spec>
@@ -248,7 +248,7 @@ test_promote_requires_and_records_the_delivery_contract() {
   assert_no_grep '^mode=' "$meta" "failed instruction publication recorded a delivery mode"
   assert_no_grep '^yolo=' "$meta" "failed instruction publication recorded a merge posture"
 
-  instructions_path="$home/data/promote-d1/ship-instructions.md"
+  instructions_path="$home/data/tasks/promote-d1/ship-instructions.md"
   mkdir -p "$instructions_path"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     "$PROMOTE" promote-d1 --mode direct-PR --yolo on 2>&1)
@@ -293,7 +293,7 @@ test_promote_refuses_a_symlinked_task_record() {
   [ -L "$meta" ] || fail "promotion replaced or removed the symlink record"
   cmp -s "$target" "$original" \
     || fail "promotion rewrote the symlink target in place"
-  assert_absent "$home/data/promote-sym/ship-instructions.md" \
+  assert_absent "$home/data/tasks/promote-sym/ship-instructions.md" \
     "refused promotion published ship instructions"
   leftover=$(find "$home/state" -maxdepth 1 -name '.*.meta.promote.*' -print 2>/dev/null || true)
   [ -z "$leftover" ] || fail "promotion left a staging file after a refused publish: $leftover"
@@ -324,7 +324,7 @@ STUB
     printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
     FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null 2>&1 \
       || fail "$mode: scout brief generation should succeed"
-    fill_brief_subsections "$home/data/$id/brief.md" \
+    fill_brief_subsections "$home/data/tasks/$id/brief.md" \
       "Ship the delivery-contract change." "Preserve the selected delivery mode."
     out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1) \
       || fail "$mode: promotion should succeed"
@@ -358,12 +358,12 @@ STUB
     # Compare the public outputs of both real generation paths. The promoted
     # payload ends at its Definition of done, as does an ordinary generated
     # brief, so identical suffixes prove both workers receive the same contract.
-    rm "$home/data/$id/brief.md"
+    rm "$home/data/tasks/$id/brief.md"
     FM_HOME="$home" "$BRIEF" "$id" fixture-project --mode "$mode" >/dev/null 2>&1 \
       || fail "$mode: ordinary ship brief generation should succeed"
     brief_dod="$TMP_ROOT/promote-dod/brief-dod-$id"
     delivered_dod="$TMP_ROOT/promote-dod/delivered-dod-$id"
-    awk '/^# Definition of done$/ { emit=1 } emit' "$home/data/$id/brief.md" > "$brief_dod"
+    awk '/^# Definition of done$/ { emit=1 } emit' "$home/data/tasks/$id/brief.md" > "$brief_dod"
     awk '/^# Definition of done$/ { emit=1 } emit' "$payload" > "$delivered_dod"
     cmp -s "$brief_dod" "$delivered_dod" \
       || fail "$mode: promotion and ordinary brief generation delivered different Definitions of done"
@@ -374,7 +374,7 @@ STUB
     "promoted no-mistakes worker did not receive the ask-user escalation rule"
   assert_grep "write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority)" "$payload" \
     "promoted no-mistakes worker did not receive the ask-user-only snapshot contract"
-  assert_grep 'needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file='"$home/data/promote-dod-no-mistakes/nm-<run>-findings.txt" "$payload" \
+  assert_grep 'needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file='"$home/data/tasks/promote-dod-no-mistakes/nm-<run>-findings.txt" "$payload" \
     "promoted no-mistakes worker did not receive the structured escalation event"
   assert_grep "NEVER pass \`--yes\` (or \`-y\`)" "$payload" \
     "promoted no-mistakes worker did not receive the --yes prohibition"
@@ -456,7 +456,7 @@ EOF
   id=delivery-filled-ship
   FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
     || fail "filled-ship brief should scaffold"
-  fill_brief_subsections "$home/data/$id/brief.md" \
+  fill_brief_subsections "$home/data/tasks/$id/brief.md" \
     "Fix replacement of \`{TASK}\` in Herdr briefs." \
     "Keep literal \`{FIRSTMATE_SPEC}\` examples intact."
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
@@ -466,8 +466,8 @@ EOF
     "a filled ship brief mentioning placeholder tokens failed content validation"
 
   id=delivery-legacy-fenced-headings
-  mkdir -p "$home/data/$id"
-  cat > "$home/data/$id/brief.md" <<'EOF'
+  mkdir -p "$home/data/tasks/$id"
+  cat > "$home/data/tasks/$id/brief.md" <<'EOF'
 You are a crewmate.
 
 # Task
@@ -490,8 +490,8 @@ EOF
     "fenced example headings made a filled legacy Task look unfilled"
 
   id=delivery-legacy-no-mistakes
-  mkdir -p "$home/data/$id"
-  cat > "$home/data/$id/brief.md" <<'EOF'
+  mkdir -p "$home/data/tasks/$id"
+  cat > "$home/data/tasks/$id/brief.md" <<'EOF'
 # Task
 [captain] Fix the legacy dispatch boundary.
 Do not copy this Firstmate-authored constraint into intent.
@@ -503,23 +503,23 @@ EOF
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
   assert_not_contains "$out" "has no provenance-marked captain words" \
     "legacy no-mistakes spawn rejected explicitly marked captain words"
-  assert_present "$home/data/$id/launch-brief.md" \
+  assert_present "$home/data/tasks/$id/launch-brief.md" \
     "marked legacy spawn did not render a current launch contract"
   assert_grep "supersedes every earlier brief instruction about constructing \`--intent\`" \
-    "$home/data/$id/launch-brief.md" \
+    "$home/data/tasks/$id/launch-brief.md" \
     "marked legacy spawn did not override its stale intent instruction"
   assert_grep "plus any later words the captain actually supplied" \
-    "$home/data/$id/launch-brief.md" \
+    "$home/data/tasks/$id/launch-brief.md" \
     "marked legacy launch contract excluded later captain clarifications"
-  authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit && /^$/ { exit } emit { print }' "$home/data/$id/launch-brief.md")
+  authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit && /^$/ { exit } emit { print }' "$home/data/tasks/$id/launch-brief.md")
   assert_contains "$authorized" "Fix the legacy dispatch boundary." \
     "marked legacy launch contract omitted captain words"
   assert_not_contains "$authorized" "Firstmate-authored constraint" \
     "marked legacy launch contract included mixed Task specification"
 
   id=delivery-migrated-stale-no-mistakes
-  mkdir -p "$home/data/$id"
-  cat > "$home/data/$id/brief.md" <<'EOF'
+  mkdir -p "$home/data/tasks/$id"
+  cat > "$home/data/tasks/$id/brief.md" <<'EOF'
 # Task
 ## Captain's intent
 Fix the migrated dispatch boundary.
@@ -532,26 +532,26 @@ Delivery contract: mode=no-mistakes
 Pass the entire Task and every Firstmate requirement as --intent.
 EOF
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
-  assert_present "$home/data/$id/launch-brief.md" \
+  assert_present "$home/data/tasks/$id/launch-brief.md" \
     "migrated subsection brief did not receive the current launch contract"
-  authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit && /^$/ { exit } emit { print }' "$home/data/$id/launch-brief.md")
+  authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit && /^$/ { exit } emit { print }' "$home/data/tasks/$id/launch-brief.md")
   assert_contains "$authorized" "Fix the migrated dispatch boundary." \
     "migrated launch contract omitted Captain's intent"
   assert_not_contains "$authorized" "Preserve the existing compatibility path." \
     "migrated launch contract included Firstmate spec in intent"
   assert_grep "supersedes every earlier brief instruction about constructing \`--intent\`" \
-    "$home/data/$id/launch-brief.md" \
+    "$home/data/tasks/$id/launch-brief.md" \
     "migrated launch contract did not supersede its stale mixed-Task DoD"
   assert_grep "plus any later words the captain actually supplied" \
-    "$home/data/$id/launch-brief.md" \
+    "$home/data/tasks/$id/launch-brief.md" \
     "migrated launch contract excluded later captain clarifications"
   assert_grep "The Definition of done's rule that \`--intent\` must be self-sufficient still governs" \
-    "$home/data/$id/launch-brief.md" \
+    "$home/data/tasks/$id/launch-brief.md" \
     "migrated launch contract's overlay dropped the self-sufficiency pointer"
 
   id=delivery-legacy-unmarked-no-mistakes
-  mkdir -p "$home/data/$id"
-  cat > "$home/data/$id/brief.md" <<'EOF'
+  mkdir -p "$home/data/tasks/$id"
+  cat > "$home/data/tasks/$id/brief.md" <<'EOF'
 # Task
 Fix the legacy dispatch boundary.
 Do not copy this Firstmate-authored constraint into intent.
@@ -572,7 +572,7 @@ EOF
     "unmarked legacy no-mistakes spawn did not explain the missing intent provenance"
   assert_contains "$out" "[captain]" "missing-provenance refusal did not name the replacement marker"
   assert_not_contains "$out" "Captain:" "missing-provenance refusal still prescribes operator address"
-  assert_absent "$home/data/$id/launch-brief.md" "unmarked legacy no-mistakes spawn serialized unauthorized intent"
+  assert_absent "$home/data/tasks/$id/launch-brief.md" "unmarked legacy no-mistakes spawn serialized unauthorized intent"
   assert_absent "$home/state/$id.meta" "unmarked legacy no-mistakes spawn wrote task metadata"
 
   id=delivery-unfilled-scout
@@ -588,7 +588,7 @@ EOF
   id=delivery-empty-ship
   FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
     || fail "empty-ship brief should scaffold"
-  fill_brief_subsections "$home/data/$id/brief.md" "" ""
+  fill_brief_subsections "$home/data/tasks/$id/brief.md" "" ""
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn of empty Task subsections should exit non-zero"
@@ -619,15 +619,15 @@ EOF
   [ "$status" -ne 0 ] || fail "promotion without a scout brief should exit non-zero"
   assert_contains "$out" "must contain nonempty" \
     "promotion without a scout brief did not reject missing task content"
-  assert_absent "$home/data/$id/ship-instructions.md" \
+  assert_absent "$home/data/tasks/$id/ship-instructions.md" \
     "promotion without a scout brief fabricated ship instructions"
   assert_grep 'kind=scout' "$meta" "missing-brief promotion changed the task record"
 
   id=promote-unmarked-legacy
   meta="$home/state/$id.meta"
   printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
-  mkdir -p "$home/data/$id"
-  cat > "$home/data/$id/brief.md" <<'EOF'
+  mkdir -p "$home/data/tasks/$id"
+  cat > "$home/data/tasks/$id/brief.md" <<'EOF'
 # Task
 Investigate the unmarked legacy failure.
 Keep this Firstmate constraint out of captain intent.
@@ -643,7 +643,7 @@ EOF
   [ "$status" -ne 0 ] || fail "promotion without provenance-marked captain intent should fail"
   assert_contains "$out" "has no provenance-marked Captain's intent" \
     "unmarked legacy promotion did not explain the missing intent provenance"
-  assert_absent "$home/data/$id/ship-instructions.md" \
+  assert_absent "$home/data/tasks/$id/ship-instructions.md" \
     "unmarked legacy promotion published empty captain intent"
   assert_grep 'kind=scout' "$meta" "unmarked legacy promotion changed the task record"
 
@@ -652,14 +652,14 @@ EOF
   printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
   FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \
     || fail "filled promote scout brief should scaffold"
-  fill_brief_subsections "$home/data/$id/brief.md" \
+  fill_brief_subsections "$home/data/tasks/$id/brief.md" \
     "Investigate why the identity check is failing." \
     "Ship the identity-check fix without adding a classifier."
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1)
   status=$?
   expect_code 0 "$status" "promotion of a filled scout brief should succeed"
   assert_grep 'kind=ship' "$meta" "filled promotion did not restore ship teardown protection"
-  brief="$home/data/$id/ship-instructions.md"
+  brief="$home/data/tasks/$id/ship-instructions.md"
   assert_grep "Investigate why the identity check is failing." "$brief" \
     "promotion did not preserve the original Captain's intent"
   assert_no_grep "Ship the identity-check fix without adding a classifier." "$brief" \
@@ -675,8 +675,8 @@ EOF
   id=promote-nested-spec
   meta="$home/state/$id.meta"
   printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
-  mkdir -p "$home/data/$id"
-  cat > "$home/data/$id/brief.md" <<'EOF'
+  mkdir -p "$home/data/tasks/$id"
+  cat > "$home/data/tasks/$id/brief.md" <<'EOF'
 # Task
 ## Captain's intent
 Ship the parser without losing detailed requirements.
@@ -699,7 +699,7 @@ EOF
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo off 2>&1)
   status=$?
   expect_code 0 "$status" "promotion with nested and fenced spec content should succeed"
-  brief="$home/data/$id/ship-instructions.md"
+  brief="$home/data/tasks/$id/ship-instructions.md"
   assert_grep "Ship the parser without losing detailed requirements." "$brief" \
     "promotion discarded Captain's intent while replacing the scout spec"
   assert_no_grep "### Acceptance criteria" "$brief" \
@@ -714,8 +714,8 @@ EOF
   id=promote-legacy-e3
   meta="$home/state/$id.meta"
   printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
-  mkdir -p "$home/data/$id"
-  cat > "$home/data/$id/brief.md" <<'EOF'
+  mkdir -p "$home/data/tasks/$id"
+  cat > "$home/data/tasks/$id/brief.md" <<'EOF'
 You are a crewmate.
 
 # Task
@@ -731,7 +731,7 @@ EOF
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo on 2>&1)
   status=$?
   expect_code 0 "$status" "promotion of a pre-subsection scout brief should succeed"
-  brief="$home/data/$id/ship-instructions.md"
+  brief="$home/data/tasks/$id/ship-instructions.md"
   intent_body=$(awk '$0 == "## Captain'\''s intent" { emit=1; next } emit && /^## / { exit } emit { print }' "$brief")
   spec_body=$(awk '$0 == "## Firstmate spec" { emit=1; next } emit && /^# / { exit } emit { print }' "$brief")
   assert_contains "$intent_body" "Investigate the fold's session-floor refusal." \
@@ -765,10 +765,10 @@ EOF
   words=$(printf '%s\n' 'Keep the original request intact.' '' "Preserve its provenance, punctuation, and \`literal code\`.")
   FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes >/dev/null 2>&1 \
     || fail "intent brief should scaffold"
-  fill_brief_subsections "$home/data/$id/brief.md" "$words" 'This build constraint must not become intent.'
+  fill_brief_subsections "$home/data/tasks/$id/brief.md" "$words" 'This build constraint must not become intent.'
   out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
-  assert_present "$home/data/$id/launch-brief.md" "plain intent was not serialized"
-  authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit { print }' "$home/data/$id/launch-brief.md")
+  assert_present "$home/data/tasks/$id/launch-brief.md" "plain intent was not serialized"
+  authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit { print }' "$home/data/tasks/$id/launch-brief.md")
   [ "$authorized" = "$words" ] || fail "authorized --intent must contain exactly the request, without headings, address, or contract prose: $authorized"
 
   # The request itself may discuss an address spelling. It is data, not an
@@ -776,10 +776,10 @@ EOF
   words=$(printf '%s\n' "Keep the literal example \`Captain, hello\` in the documentation." \
     "Stop composing Captain:, Captain's words:, Captain's ask:, and Captain's intent: into PR bodies.")
   write_brief "$home" intent-literal no-mistakes
-  printf '# Task\n## Captain'"'"'s intent\n%s\n\n## Firstmate spec\nDo not paraphrase.\n\n# Definition of done\nDelivery contract: mode=no-mistakes\n' "$words" > "$home/data/intent-literal/brief.md"
+  printf '# Task\n## Captain'"'"'s intent\n%s\n\n## Firstmate spec\nDo not paraphrase.\n\n# Definition of done\nDelivery contract: mode=no-mistakes\n' "$words" > "$home/data/tasks/intent-literal/brief.md"
   out=$(run_spawn "$home" "$fakebin" intent-literal "$proj" claude --mode no-mistakes --yolo off)
   assert_not_contains "$out" "operator-address line" "labels mentioned mid-line were refused as address"
-  authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit { print }' "$home/data/intent-literal/launch-brief.md")
+  authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit { print }' "$home/data/tasks/intent-literal/launch-brief.md")
   [ "$authorized" = "$words" ] || fail "literal words in the request were scrubbed"
 
   # A body line that opens with operator address is refused, never rewritten.
@@ -788,7 +788,7 @@ EOF
     id="intent-addressed-$n"
     write_brief "$home" "$id" no-mistakes
     printf '# Task\n## Captain'"'"'s intent\nKeep the original request intact.\n  %s preserve its provenance.\n\n## Firstmate spec\nDo not paraphrase.\n\n# Definition of done\nDelivery contract: mode=no-mistakes\n' \
-      "$marker" > "$home/data/$id/brief.md"
+      "$marker" > "$home/data/tasks/$id/brief.md"
     out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
     status=$?
     [ "$status" -ne 0 ] || fail "$marker: addressed intent should be refused"
@@ -796,21 +796,21 @@ EOF
       "$marker: refusal did not name the offending line"
     assert_contains "$out" "write the captain's actual words without a Captain label or address" \
       "$marker: refusal did not say what to write instead"
-    assert_absent "$home/data/$id/launch-brief.md" "$marker: addressed intent was serialized"
+    assert_absent "$home/data/tasks/$id/launch-brief.md" "$marker: addressed intent was serialized"
     assert_absent "$home/state/$id.meta" "$marker: addressed intent spawn wrote task metadata"
-    assert_grep "  $marker preserve its provenance." "$home/data/$id/brief.md" "$marker: refusal rewrote the brief"
+    assert_grep "  $marker preserve its provenance." "$home/data/tasks/$id/brief.md" "$marker: refusal rewrote the brief"
   done
 
   id='intent-addressed-promote'
   printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
   write_brief "$home" "$id"
-  printf '# Task\n## Captain'"'"'s intent\nCaptain: investigate the refusal.\n\n## Firstmate spec\nReproduce it first.\n' > "$home/data/$id/brief.md"
+  printf '# Task\n## Captain'"'"'s intent\nCaptain: investigate the refusal.\n\n## Firstmate spec\nReproduce it first.\n' > "$home/data/tasks/$id/brief.md"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "promotion of addressed intent should be refused"
   assert_contains "$out" "operator-address line: Captain: investigate the refusal." \
     "promotion refusal did not name the offending line"
-  assert_absent "$home/data/$id/ship-instructions.md" "promotion published addressed intent"
+  assert_absent "$home/data/tasks/$id/ship-instructions.md" "promotion published addressed intent"
   assert_grep 'kind=scout' "$home/state/$id.meta" "refused promotion changed the task record"
 
   # New legacy briefs use neutral provenance. Previously stored labels remain
@@ -820,10 +820,10 @@ EOF
     id="intent-marked-$n"
     write_brief "$home" "$id" no-mistakes
     printf '# Task\n%s %s\nDo not include this build constraint.\n%s %s\n\n# Definition of done\nDelivery contract: mode=no-mistakes\n' \
-      "$marker" 'Keep the original request intact.' "$marker" 'Preserve its provenance.' > "$home/data/$id/brief.md"
+      "$marker" 'Keep the original request intact.' "$marker" 'Preserve its provenance.' > "$home/data/tasks/$id/brief.md"
     out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
-    assert_present "$home/data/$id/launch-brief.md" "$marker: provenance was not accepted"
-    authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit { print }' "$home/data/$id/launch-brief.md")
+    assert_present "$home/data/tasks/$id/launch-brief.md" "$marker: provenance was not accepted"
+    authorized=$(awk '$0 == "## Captain intent authorized for --intent" { emit=1; next } emit { print }' "$home/data/tasks/$id/launch-brief.md")
     words=$(printf '%s\n' 'Keep the original request intact.' 'Preserve its provenance.')
     [ "$authorized" = "$words" ] || fail "$marker: legacy intent changed words or included provenance/build prose"
   done
@@ -856,7 +856,7 @@ EOF
         out=$(run_spawn "$home" "$fakebin" "$id" "$proj" codex --mode "$kind" --yolo off)
       fi
       assert_not_contains "$out" 'could not render' "worker role rendering failed"
-      brief="$home/data/$id/launch-brief.md"
+      brief="$home/data/tasks/$id/launch-brief.md"
       assert_present "$brief" "$project_kind $kind did not refresh the legacy launch brief"
       first_line=$(sed -n '1p' "$brief")
       [ "$first_line" = '# Current worker role contract' ] ||
@@ -867,7 +867,7 @@ EOF
       assert_grep 'Project instructions still govern the work wherever they do not conflict with this worker identity' "$brief" "$project_kind $kind displaced project guidance"
       ! grep -q '^This section supersedes every earlier brief instruction about your role' "$brief" ||
         fail "$project_kind $kind revoked the brief's own role for a task that is not Firstmate"
-      assert_no_grep '# Current worker role contract' "$home/data/$id/brief.md" "spawn rewrote the source brief"
+      assert_no_grep '# Current worker role contract' "$home/data/tasks/$id/brief.md" "spawn rewrote the source brief"
       cmp -s "$proj/agents-before" "$proj/AGENTS.md" || fail "spawn changed project AGENTS.md"
       [ "$(cat "$proj/CLAUDE.md")" = '@AGENTS.md' ] || fail "spawn changed the project import"
     done

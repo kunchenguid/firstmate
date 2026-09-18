@@ -275,7 +275,7 @@ test_spawn_home_layout() {
   assert_present "$home/data" "spawn home missing data/"
   assert_present "$home/state/.last-watcher-beat" "spawn home missing watcher beat"
   assert_grep claude "$home/config/crew-harness" "crew-harness was not pinned"
-  assert_grep 'do the thing' "$home/data/t1/brief.md" "brief text was not written"
+  assert_grep 'do the thing' "$home/data/tasks/t1/brief.md" "brief text was not written"
   pass "spawn-home layout writes harness pin, beat, and brief"
 }
 

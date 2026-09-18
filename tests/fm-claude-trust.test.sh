@@ -648,7 +648,7 @@ test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief() {
   assert_present "$launch_log" "the claude spawn sent no launch command"
   assert_grep 'claude --dangerously-skip-permissions' "$launch_log" \
     "the launch command was not the claude worker launch"
-  assert_grep "$home/data/trustspawn/launch-brief.md" "$launch_log" \
+  assert_grep "$home/data/tasks/trustspawn/launch-brief.md" "$launch_log" \
     "the launch command did not carry the brief the worker must read"
   # The worker must read the SAME store the registration wrote, or the trust
   # would land somewhere the pane never looks.

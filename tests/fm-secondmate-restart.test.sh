@@ -147,10 +147,10 @@ add_local_mate() {
   local dir=$1 id=$2 harness=${3:-claude} backend=${4:-}
   local home="$dir/home" smhome="$dir/$id-home"
   fm_git_worktree "$dir/$id-repo" "$smhome" "sm-$id"
-  mkdir -p "$smhome/state" "$smhome/data" "$smhome/bin" "$home/data/$id"
+  mkdir -p "$smhome/state" "$smhome/data" "$smhome/bin" "$home/data/tasks/$id"
   printf '%s\n' "$id" > "$smhome/.fm-secondmate-home"
   printf '# agents\n' > "$smhome/AGENTS.md"
-  printf '# charter\n' > "$home/data/$id/brief.md"
+  printf '# charter\n' > "$home/data/tasks/$id/brief.md"
   {
     echo "window=fmses:fm-$id"
     echo "endpoint_task_id=$id"
@@ -197,9 +197,9 @@ add_repo_backed_mate() {  # <case-dir> <id> [harness] [backend]
     touch "$home/state/.last-watcher-beat"
   fi
   git -C "$repo" worktree add -q --detach "$smhome" main
-  mkdir -p "$smhome/state" "$smhome/data" "$home/data/$id"
+  mkdir -p "$smhome/state" "$smhome/data" "$home/data/tasks/$id"
   printf '%s\n' "$id" > "$smhome/.fm-secondmate-home"
-  printf '# charter\n' > "$home/data/$id/brief.md"
+  printf '# charter\n' > "$home/data/tasks/$id/brief.md"
   {
     echo "window=fmses:fm-$id"
     echo "endpoint_task_id=$id"

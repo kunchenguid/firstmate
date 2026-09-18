@@ -134,7 +134,7 @@ test_no_profile_keeps_claude_profile_defaults() {
     "$HOME_DIR/state/$id.meta" || fail "fresh spawn did not record its authoritative UTC start time"
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/tasks/$id/launch-brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
@@ -179,7 +179,7 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$home_real/state/$id.pi-ext.ts'" \
     "relative FM_STATE_OVERRIDE leaked into Pi's cross-process extension path"
-  assert_contains "$launch" "< '$home_real/data/$id/launch-brief.md'" \
+  assert_contains "$launch" "< '$home_real/data/tasks/$id/launch-brief.md'" \
     "relative FM_DATA_OVERRIDE leaked into the cross-process brief path"
   pass "relative home overrides ignore CDPATH and become absolute before spawn launch construction"
 }
@@ -208,7 +208,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$home_real/state/$relative_id.pi-ext.ts'" \
     "relative FM_HOME leaked into Pi's default cross-process extension path"
-  assert_contains "$launch" "< '$home_real/data/$relative_id/launch-brief.md'" \
+  assert_contains "$launch" "< '$home_real/data/tasks/$relative_id/launch-brief.md'" \
     "relative FM_HOME leaked into the default cross-process brief path"
 
   linked_home="$CASE_DIR/home-link"
@@ -228,7 +228,7 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$linked_home/state/$absolute_id.pi-ext.ts'" \
     "absolute FM_HOME spelling changed in Pi's default cross-process extension path"
-  assert_contains "$launch" "< '$linked_home/data/$absolute_id/launch-brief.md'" \
+  assert_contains "$launch" "< '$linked_home/data/tasks/$absolute_id/launch-brief.md'" \
     "absolute FM_HOME spelling changed in the default cross-process brief path"
   pass "FM_HOME defaults resolve relative paths and preserve absolute spellings"
 }
@@ -256,7 +256,7 @@ test_absolute_override_spelling_is_preserved_in_launch_paths() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "-e '$linked_home/state/$id.pi-ext.ts'" \
     "absolute FM_STATE_OVERRIDE spelling changed in Pi's cross-process extension path"
-  assert_contains "$launch" "< '$linked_home/data/$id/launch-brief.md'" \
+  assert_contains "$launch" "< '$linked_home/data/tasks/$id/launch-brief.md'" \
     "absolute FM_DATA_OVERRIDE spelling changed in the cross-process brief path"
   pass "absolute override spellings are preserved in spawn launch paths"
 }
@@ -791,7 +791,7 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed default default
   cmp -s "$ROOT/AGENTS.md" "$sm/AGENTS.md" || fail "secondmate launch rewrote the supervisor contract"
   cmp -s "$CASE_DIR/charter-before" "$sm/data/charter.md" || fail "secondmate launch rewrote the charter"
-  assert_absent "$HOME_DIR/data/$id/launch-brief.md" "secondmate launch received a worker overlay"
+  assert_absent "$HOME_DIR/data/tasks/$id/launch-brief.md" "secondmate launch received a worker overlay"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "< '$sm/data/charter.md'" "secondmate launch lost its original charter"
   assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
@@ -1212,7 +1212,7 @@ test_worker_launch_delivers_role_scope() {
     if [ "$brief_kind" != scaffold ]; then
       fm_test_spawn_brief "$HOME_DIR" "$id"
       if [ "$brief_kind" = heading ]; then
-        printf '\n# Worker role\nFollow the project instructions.\n' >> "$HOME_DIR/data/$id/brief.md"
+        printf '\n# Worker role\nFollow the project instructions.\n' >> "$HOME_DIR/data/tasks/$id/brief.md"
       fi
     else
       if [ "$kind" = scout ]; then
@@ -1220,13 +1220,13 @@ test_worker_launch_delivers_role_scope() {
       else
         FM_HOME="$HOME_DIR" "$ROOT/bin/fm-brief.sh" "$id" arbitrary-project-name --mode "$kind" >/dev/null || fail "$kind scaffold failed"
       fi
-      brief="$HOME_DIR/data/$id/brief.md"
+      brief="$HOME_DIR/data/tasks/$id/brief.md"
       content=$(cat "$brief")
       content=${content//'{TASK}'/brief for $id}
       content=${content//'{FIRSTMATE_SPEC}'/Exercise the spawn behavior under test.}
       printf '%s\n' "$content" > "$brief"
     fi
-    cp "$HOME_DIR/data/$id/brief.md" "$CASE_DIR/brief-before"
+    cp "$HOME_DIR/data/tasks/$id/brief.md" "$CASE_DIR/brief-before"
     cat > "$FAKEBIN_DIR/codex" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$FM_ROLE_PROMPT"
@@ -1267,7 +1267,7 @@ SH
     if [ "$brief_kind" = heading ]; then
       assert_grep 'Follow the project instructions' "$prompt" "$kind command dropped the authored role section"
     fi
-    cmp -s "$CASE_DIR/brief-before" "$HOME_DIR/data/$id/brief.md" || fail "spawn rewrote the authored brief"
+    cmp -s "$CASE_DIR/brief-before" "$HOME_DIR/data/tasks/$id/brief.md" || fail "spawn rewrote the authored brief"
     if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
       printf '# evidence begin: %s %s worker\n%s\n' "$brief_kind" "$kind" "$out"
       printf 'launch command executed with an argv-capture harness:\n%s\nreceived arguments and final prompt:\n' "$launch"
@@ -1284,7 +1284,7 @@ SH
 # permission flag, and any other token refuses before endpoint or metadata.
 claude_expected_launch() {  # <home> <id> <permission-flag>
   local home=$1 id=$2 flag=$3
-  printf '%s' "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $flag --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$home/data/$id/launch-brief.md')\""
+  printf '%s' "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude $flag --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$home/data/tasks/$id/launch-brief.md')\""
 }
 
 test_claude_permission_mode_bypass_matches_absent_launch() {

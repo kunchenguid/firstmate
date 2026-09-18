@@ -269,7 +269,7 @@ test_receipt_facts_are_complete_and_show_before_and_after() {
   [ -n "$(value_in "$s" transport)" ] || fail "receipt stanza lacks a transport"
   local file
   for file in captain.md captain-shared.md learnings.md; do
-    assert_contains "$s" "file=data/$file " "receipt stanza lacks a per-file action input for $file"
+    assert_contains "$s" "file=data/tasks/$file " "receipt stanza lacks a per-file action input for $file"
   done
   [ "$(value_in "$s" budget_status)" = over-budget ] \
     || fail "the over-budget home was not surfaced before curation"

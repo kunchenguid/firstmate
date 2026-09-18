@@ -149,8 +149,8 @@ add_ship_task() {
   local dir=$1 id=$2 harness=${3:-claude}
   local home="$dir/home" proj="$dir/proj" wt="$dir/wt"
   fm_git_worktree "$proj" "$wt" "task-$id"
-  mkdir -p "$home/data/$id"
-  cat > "$home/data/$id/brief.md" <<EOF
+  mkdir -p "$home/data/tasks/$id"
+  cat > "$home/data/tasks/$id/brief.md" <<EOF
 # Task
 ## Captain's intent
 Exercise relaunch behavior for $id.
@@ -533,13 +533,13 @@ test_relaunch_appends_the_progress_note_to_the_instructions() {
   cp "$ROOT/AGENTS.md" "$dir/wt/AGENTS.md"
   out=$(run_control "$dir" rl2 relaunch --note "reproduced the crash in parser.go"); rc=$?
   expect_code 0 "$rc" "relaunch should succeed"$'\n'"$out"
-  brief="$dir/home/data/rl2/brief.md"
+  brief="$dir/home/data/tasks/rl2/brief.md"
   assert_grep "Exercise relaunch behavior for rl2." "$brief" "the original instructions must survive"
   assert_grep "## Progress note" "$brief" "the note should be a dated section in the instructions"
   assert_grep "reproduced the crash in parser.go" "$brief" "the note text should reach the replacement"
   assert_grep "reproduced the crash in parser.go" "$dir/home/state/rl2.control-relaunch.note" \
     "the note should also be preserved beside the transaction record"
-  launch_brief="$dir/home/data/rl2/launch-brief.md"
+  launch_brief="$dir/home/data/tasks/rl2/launch-brief.md"
   first_line=$(sed -n '1p' "$launch_brief")
   [ "$first_line" = '# Current worker role contract' ] ||
     fail "a Firstmate-worktree relaunch did not establish the crewmate identity first"
@@ -557,11 +557,11 @@ test_relaunch_requires_a_note_for_a_ship_task() {
   local dir out rc before
   dir=$(new_case nonote rl3)
   add_ship_task "$dir" rl3 claude
-  before=$(cat "$dir/home/data/rl3/brief.md")
+  before=$(cat "$dir/home/data/tasks/rl3/brief.md")
   out=$(run_control "$dir" rl3 relaunch); rc=$?
   expect_code 1 "$rc" "a ship relaunch without a note should refuse"
   assert_contains "$out" "requires --note" "the refusal should name the missing note"
-  [ "$(cat "$dir/home/data/rl3/brief.md")" = "$before" ] \
+  [ "$(cat "$dir/home/data/tasks/rl3/brief.md")" = "$before" ] \
     || fail "a refused relaunch must not touch the instructions"
   [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must send nothing"
   [ "$(cat "$dir/fake/command")" = claude ] || fail "a refused relaunch must not stop the agent"
@@ -640,7 +640,7 @@ test_prefixed_recorded_harness_requires_explicit_replacement() {
   add_ship_task "$dir" rl34 grok-2
   printf 'grok-2' > "$dir/fake/command"
   meta="$dir/home/state/rl34.meta"
-  brief="$dir/home/data/rl34/brief.md"
+  brief="$dir/home/data/tasks/rl34/brief.md"
   cp "$meta" "$dir/meta.before"
   cp "$brief" "$dir/brief.before"
 
@@ -793,8 +793,8 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
   home="$dir/home"
   mkdir -p "$home/config"
   printf 'codex some-model high\n' > "$home/config/secondmate-harness"
-  mkdir -p "$home/data/sm3"
-  printf '# secondmate brief\n' > "$home/data/sm3/brief.md"
+  mkdir -p "$home/data/tasks/sm3"
+  printf '# secondmate brief\n' > "$home/data/tasks/sm3/brief.md"
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
   mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
   printf 'sm3\n' > "$dir/smhome/.fm-secondmate-home"
@@ -831,9 +831,9 @@ test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop() {
   local dir home out rc
   dir=$(new_case invalid-effort sm6)
   home="$dir/home"
-  mkdir -p "$home/config" "$home/data/sm6"
+  mkdir -p "$home/config" "$home/data/tasks/sm6"
   printf 'codex some-model impossible\n' > "$home/config/secondmate-harness"
-  printf '# secondmate brief\n' > "$home/data/sm6/brief.md"
+  printf '# secondmate brief\n' > "$home/data/tasks/sm6/brief.md"
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
   mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
   printf 'sm6\n' > "$dir/smhome/.fm-secondmate-home"
@@ -873,8 +873,8 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop() {
   local dir home out rc
   dir=$(new_case smkind sm7)
   home="$dir/home"
-  mkdir -p "$home/config" "$home/data/sm7"
-  printf '# secondmate brief\n' > "$home/data/sm7/brief.md"
+  mkdir -p "$home/config" "$home/data/tasks/sm7"
+  printf '# secondmate brief\n' > "$home/data/tasks/sm7/brief.md"
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
   mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
   printf 'sm7\n' > "$dir/smhome/.fm-secondmate-home"
@@ -911,8 +911,8 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes() {
   home="$dir/home"
   mkdir -p "$home/config"
   printf 'claude opus high\n' > "$home/config/secondmate-harness"
-  mkdir -p "$home/data/sm4"
-  printf '# secondmate brief\n' > "$home/data/sm4/brief.md"
+  mkdir -p "$home/data/tasks/sm4"
+  printf '# secondmate brief\n' > "$home/data/tasks/sm4/brief.md"
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
   mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
   printf 'sm4\n' > "$dir/smhome/.fm-secondmate-home"
@@ -982,7 +982,7 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
     fm_git_worktree "$dir/proj" "$dir/wt" "task-$id"
     FM_HOME="$home" "$BRIEF" "$id" firstmate --scout >/dev/null \
       || fail "$mode: could not scaffold the scout brief"
-    brief="$home/data/$id/brief.md"
+    brief="$home/data/tasks/$id/brief.md"
     sed 's/{TASK}/Fix the promotion relaunch contract./; s/{FIRSTMATE_SPEC}/Preserve the current delivery mode./' \
       "$brief" > "$brief.filled"
     mv "$brief.filled" "$brief"
@@ -1011,7 +1011,7 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
     printf 'zsh' > "$dir/fake/command"
     out=$(run_spawn "$dir" "$id" --relaunch) \
       || fail "$mode: promoted scout relaunch should succeed: $out"
-    launch="$home/data/$id/launch-brief.md"
+    launch="$home/data/tasks/$id/launch-brief.md"
     assert_grep "This task is now kind=ship with mode=$mode" "$launch" \
       "$mode: the replacement launch did not receive the promoted task identity"
     assert_grep 'Any earlier "Never push" or scout-only delivery language in this file is superseded' "$launch" \
@@ -1115,7 +1115,7 @@ test_missing_instructions_refuse_before_stopping_anything() {
   local dir out rc
   dir=$(new_case nobrief rl11)
   add_ship_task "$dir" rl11 claude
-  rm -f "$dir/home/data/rl11/brief.md"
+  rm -f "$dir/home/data/tasks/rl11/brief.md"
   out=$(run_control "$dir" rl11 relaunch --note "x"); rc=$?
   expect_code 1 "$rc" "missing instructions should refuse"
   assert_contains "$out" "no instructions" "the refusal should name the missing instructions"
@@ -1179,7 +1179,7 @@ test_launch_failure_keeps_the_prior_record_and_reports_it() {
     || fail "the journal should record the failed phase, got '$(journal_field "$dir" rl13 phase)'"
   [ "$(journal_field "$dir" rl13 rollback)" = "prior-record-kept" ] \
     || fail "the journal should record what the rollback did"
-  assert_grep "carry this forward" "$dir/home/data/rl13/brief.md" \
+  assert_grep "carry this forward" "$dir/home/data/tasks/rl13/brief.md" \
     "the progress note must survive so a later recovery still has it"
   pass "fm-control relaunch: a launch failure after the stop keeps the prior record and reports the real state"
 }
@@ -1247,7 +1247,7 @@ test_stop_transport_failure_reconciles_a_dead_agent() {
   [ "$(journal_field "$dir" rl25 rollback)" = prior-record-kept-agent-dead ] \
     || fail "rollback should reconcile the observed dead agent"
   assert_contains "$out" "no agent is running" "the failure should report the reconciled dead state"
-  assert_grep "preserve this after stop" "$dir/home/data/rl25/brief.md" \
+  assert_grep "preserve this after stop" "$dir/home/data/tasks/rl25/brief.md" \
     "the progress note should survive once the old agent has stopped"
   pass "fm-control relaunch: partial stop reconciles actual agent state"
 }

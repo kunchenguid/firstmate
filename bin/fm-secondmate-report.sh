@@ -20,7 +20,7 @@
 #
 # Examples:
 #   fm-secondmate-report.sh done abcdef0123456789 "audit clean"
-#   fm-secondmate-report.sh --doc done abcdef0123456789 data/x/report.md "see report"
+#   fm-secondmate-report.sh --doc done abcdef0123456789 data/tasks/x/report.md "see report"
 set -eu
 
 CALLER_FM_HOME=${FM_HOME:-}

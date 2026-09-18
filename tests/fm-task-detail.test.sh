@@ -45,7 +45,7 @@ cat > "$HOME_DIR/data/backlog.md" <<'EOF'
 EOF
 
 for id in active-task ready-task; do
-  mkdir -p "$HOME_DIR/projects/$id" "$HOME_DIR/data/$id"
+  mkdir -p "$HOME_DIR/projects/$id" "$HOME_DIR/data/tasks/$id"
   cat > "$HOME_DIR/state/$id.meta" <<EOF
 window=firstmate:fm-$id
 endpoint_task_id=$id
@@ -65,7 +65,7 @@ done
 cat >> "$HOME_DIR/state/active-task.meta" <<'EOF'
 pr=https://example.test/pull/44
 EOF
-cat > "$HOME_DIR/data/active-task/brief.md" <<'EOF'
+cat > "$HOME_DIR/data/tasks/active-task/brief.md" <<'EOF'
 # Task
 
 ## Captain's intent
@@ -108,7 +108,7 @@ printf '%s\n' "$active" | jq -e '
   and .outcome == "assembling the deterministic task card"
   and .requirements.captainIntent == "Show enough useful task detail to decide whether to close the work. Keep purpose concise."
   and .requirements.firstmateSpec == "This generated implementation section must not be copied into Purpose."
-  and .reviewPlan.source == "data/active-task/brief.md"
+  and .reviewPlan.source == "data/tasks/active-task/brief.md"
   and .reviewPlan.review.action == "Exercise the detailed task card"
   and .reviewPlan.review.checks == ["Open the task by its short reference.","Confirm the purpose excludes implementation-only instructions."]
   and .reviewPlan.review.success == "The task detail is useful and concise."

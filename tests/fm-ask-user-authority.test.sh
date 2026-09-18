@@ -15,7 +15,7 @@ test_primary_and_secondmate_instruction_generation() {
 
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$BRIEF" authority-worker sample --mode no-mistakes >/dev/null 2>&1
-  ship="$home/data/authority-worker/brief.md"
+  ship="$home/data/tasks/authority-worker/brief.md"
   assert_grep 'ask-user findings are never yours to answer' "$ship" \
     "generated implementation brief lets the worker own an ask-user decision"
   assert_grep "Firstmate applies \`ask-user-authority\` and obtains any required captain decision" "$ship" \
@@ -30,7 +30,7 @@ test_primary_and_secondmate_instruction_generation() {
 
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SECONDMATE_CHARTER='Handle sample work.' \
     "$BRIEF" authority-mate --secondmate --no-projects >/dev/null 2>&1
-  charter="$home/data/authority-mate/brief.md"
+  charter="$home/data/tasks/authority-mate/brief.md"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
   assert_grep 'The local `AGENTS.md` is your job description' "$charter" \
     "generated secondmate charter does not load the tracked authority boundary"

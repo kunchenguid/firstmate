@@ -169,8 +169,8 @@ add_task() {
   local window=${6:-fmses:fm-$id}
   local home="$dir/home" proj="$dir/proj-$id" wt="$dir/wt-$id"
   fm_git_worktree "$proj" "$wt" "task-$id"
-  mkdir -p "$home/data/$id"
-  printf '# brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  mkdir -p "$home/data/tasks/$id"
+  printf '# brief for %s\n' "$id" > "$home/data/tasks/$id/brief.md"
   {
     echo "window=$window"
     echo "endpoint_task_id=$id"

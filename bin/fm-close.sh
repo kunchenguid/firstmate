@@ -51,6 +51,8 @@ MAX_BATCH=25
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-task-path-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-task-path-lib.sh"
 
 usage() {
   sed -n '2,/^set -u$/p' "$0" | sed '$d; s/^# \{0,1\}//'
@@ -332,7 +334,7 @@ planned_retained() {  # <id>; one destination per line
   local id=$1 source name data_label
   data_label=$(fm_backlog_data_relative "$DATA" 2>/dev/null || printf 'data')
   for name in brief.md launch-brief.md report.md; do
-    source="$DATA/$id/$name"
+    source=$(fm_task_read_path "$DATA" "$id" "$name") || continue
     [ -f "$source" ] && [ ! -L "$source" ] || continue
     printf '%s/closed-tasks/%s/%s\n' "$data_label" "$id" "$name"
   done
@@ -403,7 +405,7 @@ prepare_archive() {  # <id> <row> <ref> <name> <result> <followups-newline> <sta
   [ ! -e "$stage" ] && [ ! -L "$stage" ] || { fail "archive staging path already exists for $id"; return 1; }
   (umask 077; mkdir "$stage") || return 1
   for file in brief.md launch-brief.md report.md; do
-    source="$DATA/$id/$file"
+    source=$(fm_task_read_path "$DATA" "$id" "$file") || continue
     [ -f "$source" ] && [ ! -L "$source" ] || continue
     cp "$source" "$stage/$file" || { rm -rf -- "$stage"; return 1; }
     chmod 0600 "$stage/$file"

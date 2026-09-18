@@ -60,17 +60,17 @@ test_fm_home_parameterization() {
   [ "$out" = "no-mistakes off" ] || fail "fm-project-mode did not isolate missing registry by home"
 
   FM_HOME="$home_one" "$ROOT/bin/fm-brief.sh" task-a app --mode no-mistakes >/dev/null || fail "brief scaffold failed under FM_HOME"
-  brief="$home_one/data/task-a/brief.md"
+  brief="$home_one/data/tasks/task-a/brief.md"
   [ -f "$brief" ] || fail "brief was not written under FM_HOME/data"
   grep -F ">> '$home_one/state/task-a.status'" "$brief" >/dev/null || fail "brief did not shell-quote FM_HOME state path"
 
   FM_HOME="$home_one" "$ROOT/bin/fm-brief.sh" task-b app --scout >/dev/null || fail "scout brief scaffold failed under FM_HOME"
-  brief="$home_one/data/task-b/brief.md"
+  brief="$home_one/data/tasks/task-b/brief.md"
   grep -F ">> '$home_one/state/task-b.status'" "$brief" >/dev/null || fail "scout brief did not shell-quote FM_HOME state path"
 
   FM_HOME="$home_one" FM_SECONDMATE_CHARTER='ops domain' "$ROOT/bin/fm-brief.sh" task-c --secondmate app >/dev/null \
     || fail "secondmate brief scaffold failed under FM_HOME"
-  brief="$home_one/data/task-c/brief.md"
+  brief="$home_one/data/tasks/task-c/brief.md"
   grep -F ">> '$home_one/state/task-c.status'" "$brief" >/dev/null || fail "secondmate brief did not shell-quote FM_HOME state path"
 
   printf 'project=x\n' > "$home_one/state/task-a.meta"
@@ -416,7 +416,7 @@ EOF
   [ ! -e "$subhome" ] || fail "failed seed left the newly created secondmate home behind"
   [ ! -e "$subhome/.fm-secondmate-home" ] || fail "failed seed left a subhome marker"
   [ ! -e "$subhome/projects/alpha" ] || fail "failed seed left a previously cloned project"
-  [ ! -e "$home/data/rollback/brief.md" ] || fail "failed seed left a generated charter brief"
+  [ ! -e "$home/data/tasks/rollback/brief.md" ] || fail "failed seed left a generated charter brief"
   if [ -f "$home/data/secondmates.md" ] && grep -F -- '- rollback ' "$home/data/secondmates.md" >/dev/null; then
     fail "failed seed left a registry route"
   fi
@@ -439,7 +439,7 @@ test_home_seed_refuses_missing_filled_charter() {
   grep -F 'no filled secondmate charter brief' "$err" >/dev/null \
     || fail "seed did not explain missing filled charter refusal"
   [ ! -e "$subhome" ] || fail "missing charter seed left a generated subhome"
-  [ ! -e "$home/data/design/brief.md" ] || fail "missing charter seed generated a placeholder charter"
+  [ ! -e "$home/data/tasks/design/brief.md" ] || fail "missing charter seed generated a placeholder charter"
   pass "home seeding refuses direct seed without filled charter text"
 }
 
@@ -629,7 +629,7 @@ test_home_seed_refuses_projectful_reused_charter_for_projectless_home() {
   home="$TMP_ROOT/no-projects-reused-charter-home"
   reusable_sub="$TMP_ROOT/no-projects-reused-charter-valid-subhome"
   stale_sub="$TMP_ROOT/no-projects-reused-charter-stale-subhome"
-  stale_brief="$home/data/stale/brief.md"
+  stale_brief="$home/data/tasks/stale/brief.md"
   stale_brief_before="$TMP_ROOT/no-projects-reused-charter.before"
   err="$TMP_ROOT/no-projects-reused-charter.err"
   mkdir -p "$home/data" "$home/state" "$reusable_sub/data" "$stale_sub/data"
@@ -638,7 +638,7 @@ test_home_seed_refuses_projectful_reused_charter_for_projectless_home() {
 
   scaffold_secondmate_charter "$home" reusable 'firstmate self-development' --no-projects \
     || fail "project-less charter scaffold failed"
-  printf '\n# Custom note\nThe projects above are local clones for work you supervise.\n' >> "$home/data/reusable/brief.md"
+  printf '\n# Custom note\nThe projects above are local clones for work you supervise.\n' >> "$home/data/tasks/reusable/brief.md"
   FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" reusable "$reusable_sub" --no-projects >/dev/null \
     || fail "project-less seed rejected a reused project-less charter"
   assert_grep 'None. This is a project-less domain' "$reusable_sub/data/charter.md" \
@@ -1340,7 +1340,7 @@ test_home_seed_preserves_existing_parent_binding() {
     cmp -s "$before/$leaf" "$child/$leaf" \
       || fail "mismatched-parent reseed changed $leaf"
   done
-  [ ! -e "$parent_b/data/mate/brief.md" ] \
+  [ ! -e "$parent_b/data/tasks/mate/brief.md" ] \
     || fail "mismatched-parent reseed created a replacement parent brief"
   [ ! -e "$parent_b/data/secondmates.md" ] \
     || fail "mismatched-parent reseed registered the child to the replacement parent"
@@ -2814,7 +2814,7 @@ test_secondmate_charter_brief_is_idle_by_default() {
   home="$TMP_ROOT/idle-charter-home"
   mkdir -p "$home/data" "$home/state"
   scaffold_secondmate_charter "$home" idle-sm 'feature work for alpha' alpha
-  brief="$home/data/idle-sm/brief.md"
+  brief="$home/data/tasks/idle-sm/brief.md"
   [ -f "$brief" ] || fail "secondmate charter brief was not scaffolded"
   # Idle contract: waits for routed work, never self-initiates.
   grep -F 'go idle and wait silently for the main firstmate' "$brief" >/dev/null \

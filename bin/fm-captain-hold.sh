@@ -423,7 +423,7 @@ show_field_value() {  # <show-output> <field>
 origin_exists_here() {  # <origin-id>
   [ -f "$STATE/$1.meta" ] && return 0
   local report_path
-  report_path=$(fm_task_path "$DATA" "$1" report.md) || return 1
+  report_path=$(fm_task_read_path "$DATA" "$1" report.md) || return 1
   [ -f "$report_path" ] && return 0
   task_show "$1"
 }

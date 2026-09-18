@@ -47,7 +47,7 @@
 # of the shapes in the catalogue below.
 #
 # THE SHAPE CATALOGUE (all verified against real harnesses; byte-level
-# captures in data/fm-composer-consolidation-audit-s1/report.md and
+# captures in data/tasks/fm-composer-consolidation-audit-s1/report.md and
 # docs/verification/runtime-backends.md):
 #   bordered   - a complete boxed composer: a top border, side-bordered content
 #                rows of the same family, and a bottom border (grok, kimi,

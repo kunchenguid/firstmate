@@ -70,7 +70,7 @@
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
-# declared scratch and the report at data/<task-id>/report.md is the work
+# declared scratch and the report at data/tasks/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
 # Before destructive cleanup, teardown validates task check artifacts as
@@ -3171,7 +3171,7 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
 fi
 
 if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then
-  REPORT=$(fm_task_path "$DATA" "$ID" report.md)
+  REPORT=$(fm_task_read_path "$DATA" "$ID" report.md)
   if [ ! -f "$REPORT" ]; then
     echo "REFUSED: scout task $ID has no report at $REPORT." >&2
     echo "The report is the work product. Have the crewmate write it, or use --force after explicit discard approval." >&2

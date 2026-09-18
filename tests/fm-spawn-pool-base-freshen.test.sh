@@ -23,7 +23,7 @@ make_case() {
   publisher="$case_dir/publisher"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
 
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  mkdir -p "$home/data/tasks/$id" "$home/projects" "$home/state" "$home/config"
   printf 'codex\n' > "$home/config/crew-harness"
   fm_test_spawn_brief "$home" "$id"
   touch "$home/state/.last-watcher-beat"
@@ -223,7 +223,7 @@ make_originless_case() {  # <name> <id>
   pool="$case_dir/pool"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
 
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  mkdir -p "$home/data/tasks/$id" "$home/projects" "$home/state" "$home/config"
   printf 'codex\n' > "$home/config/crew-harness"
   fm_test_spawn_brief "$home" "$id"
   touch "$home/state/.last-watcher-beat"
@@ -470,7 +470,7 @@ make_submodule_case() {  # <name> <id>
   sub="$case_dir/sub-origin"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
 
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  mkdir -p "$home/data/tasks/$id" "$home/projects" "$home/state" "$home/config"
   printf 'codex\n' > "$home/config/crew-harness"
   fm_test_spawn_brief "$home" "$id"
   touch "$home/state/.last-watcher-beat"

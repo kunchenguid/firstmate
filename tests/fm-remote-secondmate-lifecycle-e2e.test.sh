@@ -400,7 +400,7 @@ assert_grep 'remote readiness completion is unknown' "$TMP_ROOT/seed-unknown.out
   "unknown readiness did not report its distinct completion state"
 assert_grep '- seed-unknown ' "$TMP_ROOT/seed-parent/data/secondmates.md" \
   "unknown readiness removed the registered route"
-assert_present "$TMP_ROOT/seed-parent/data/seed-unknown/brief.md" \
+assert_present "$TMP_ROOT/seed-parent/data/tasks/seed-unknown/brief.md" \
   "unknown readiness removed the scaffolded brief"
 assert_absent "$TMP_ROOT/seed-unknown-home" \
   "unknown readiness proceeded into remote home provisioning"
@@ -427,7 +427,7 @@ assert_grep 'remote runtime preflight failed' "$TMP_ROOT/seed-toolless.out" \
 assert_absent "$TMP_ROOT/seed-toolless-home" "the seed provisioned a home despite a failing preflight"
 assert_no_grep '- seed-toolless ' "$TMP_ROOT/seed-parent/data/secondmates.md" \
   "the refused route survived the preflight rollback"
-assert_absent "$TMP_ROOT/seed-parent/data/seed-toolless/brief.md" \
+assert_absent "$TMP_ROOT/seed-parent/data/tasks/seed-toolless/brief.md" \
   "the refused route left its scaffolded charter behind"
 [ "$(cat "$DOCTOR_LOG")" = 'doctor-human -
 doctor-human --fix

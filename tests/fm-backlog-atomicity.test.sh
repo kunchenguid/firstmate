@@ -74,8 +74,8 @@ backend = "markdown"
 path = "data/backlog.md"
 EOF
   for id in "$@"; do
-    mkdir -p "$home/data/$id"
-    cat > "$home/data/$id/brief.md" <<EOF
+    mkdir -p "$home/data/tasks/$id"
+    cat > "$home/data/tasks/$id/brief.md" <<EOF
 # Task
 ## Captain's intent
 Exercise backlog dispatch for $id.
@@ -1579,8 +1579,8 @@ test_completion_closes_a_scout_with_its_report() {
   write_task_meta "$case_dir" "$id" scout '' "spawn_gen=spawn-close-scout"
   # A scout's deliverable is its report, and teardown also enforces the shared
   # captain-call completion gate; satisfy both the way a real scout does.
-  mkdir -p "$(home_of "$case_dir")/data/$id"
-  printf 'findings\n' > "$(home_of "$case_dir")/data/$id/report.md"
+  mkdir -p "$(home_of "$case_dir")/data/tasks/$id"
+  printf 'findings\n' > "$(home_of "$case_dir")/data/tasks/$id/report.md"
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" \
     PATH="$case_dir/fakebin:$PATH" \
     "$ROOT/bin/fm-captain-hold.sh" complete "$id" --none >/dev/null \
@@ -1589,7 +1589,7 @@ test_completion_closes_a_scout_with_its_report() {
   out=$(run_teardown "$case_dir" "$id") || fail "teardown failed: $out"
   [ "$(row_state "$case_dir" "$id")" = "done" ] \
     || fail "teardown reported success with the scout item still $(row_state "$case_dir" "$id")"
-  assert_grep "data/$id/report.md" "$(backlog_of "$case_dir")" \
+  assert_grep "data/tasks/$id/report.md" "$(backlog_of "$case_dir")" \
     "a closed scout item did not record its report"
   pass "completion closes a scout item against its report"
 }
@@ -1660,7 +1660,7 @@ test_completion_records_a_relative_report_for_relocated_data() {
     || fail "relocated scout teardown failed: $out"
   [ "$(tasks-axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = "done" ] \
     || fail "relocated scout backlog row was not closed"
-  assert_grep "data/$id/report.md" "$backlog" \
+  assert_grep "data/tasks/$id/report.md" "$backlog" \
     "relocated scout close did not record a relative report path"
   pass "completion records relocated scout reports relative to the backlog root"
 }
@@ -1677,8 +1677,8 @@ test_space_containing_scout_report_marker_replays() {
   tasks-axi add "$id" "item for $id" --kind scout --file "$backlog" >/dev/null
   tasks-axi start "$id" --file "$backlog" >/dev/null
   write_task_meta "$case_dir" "$id" scout '' "spawn_gen=spawn-space-report"
-  mkdir -p "$data/$id"
-  printf 'findings\n' > "$data/$id/report.md"
+  mkdir -p "$data/tasks/$id"
+  printf 'findings\n' > "$data/tasks/$id/report.md"
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" \
     FM_DATA_OVERRIDE="$data" PATH="$case_dir/fakebin:$PATH" \
     "$ROOT/bin/fm-captain-hold.sh" complete "$id" --none >/dev/null \
@@ -1696,7 +1696,7 @@ test_space_containing_scout_report_marker_replays() {
   out=$(FM_DATA_OVERRIDE="$data" run_bootstrap "$case_dir")
   [ "$(tasks-axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = "done" ] \
     || fail "space-containing report marker did not replay: $out"
-  assert_grep "data/$id/report.md" "$backlog" \
+  assert_grep "data/tasks/$id/report.md" "$backlog" \
     "report path from a space-containing data directory was lost during replay"
   assert_absent "$marker" "space-containing report marker remained after replay"
   pass "space-containing scout report paths round-trip through recovery"
@@ -1709,8 +1709,8 @@ test_trailing_newline_data_path_fails_closed() {
   home=$(home_of "$case_dir")
   data="$home/data"$'\n'
   mv "$home/data" "$data"
-  mkdir -p "$home/data/$id"
-  cp "$data/$id/brief.md" "$home/data/$id/brief.md"
+  mkdir -p "$home/data/tasks/$id"
+  cp "$data/tasks/$id/brief.md" "$home/data/tasks/$id/brief.md"
   ln -s "$data" "$case_dir/data-alias"
   backlog_alias="$case_dir/data-alias/backlog.md"
   tasks-axi add "$id" "item for $id" --kind ship --file "$backlog_alias" >/dev/null
@@ -2822,7 +2822,7 @@ test_spawn_refuses_a_data_directory_symlinked_outside_the_home() {
   home=$(home_of "$case_dir")
   add_item "$case_dir" "$id"
   mkdir -p "$case_dir/outside"
-  mv "$home/data/backlog.md" "$home/data/$id" "$case_dir/outside/"
+  mv "$home/data/backlog.md" "$home/data/tasks/$id" "$case_dir/outside/"
   rmdir "$home/data"
   ln -s "$case_dir/outside" "$home/data"
 
@@ -2843,7 +2843,7 @@ test_configured_adapter_refuses_a_data_directory_outside_the_home() {
   home=$(home_of "$case_dir")
   add_item "$case_dir" "$id"
   mkdir -p "$case_dir/outside"
-  mv "$home/data/backlog.md" "$home/data/$id" "$case_dir/outside/"
+  mv "$home/data/backlog.md" "$home/data/tasks/$id" "$case_dir/outside/"
   rmdir "$home/data"
   ln -s "$case_dir/outside" "$home/data"
 

@@ -2,8 +2,8 @@
 # fm-backend.sh - runtime-backend selection, meta helpers, selector resolution,
 # and dispatch for firstmate's session-provider abstraction.
 #
-# Design: data/fm-backend-design-d7/report.md ("Backend Interface") and
-# data/fm-backend-design-d7/herdr-addendum.md ("Events as the core
+# Design: data/tasks/fm-backend-design-d7/report.md ("Backend Interface") and
+# data/tasks/fm-backend-design-d7/herdr-addendum.md ("Events as the core
 # abstraction"). P1 extracted the tmux command sequences that fm-send.sh,
 # fm-peek.sh, fm-watch.sh, fm-spawn.sh, and fm-teardown.sh already ran inline
 # into bin/backends/tmux.sh, with those SAME command sequences, so the default
@@ -11,7 +11,7 @@
 # EXPERIMENTAL spawn-capable backend behind `--backend herdr`/`FM_BACKEND=herdr`/
 # `config/backend`, and behind runtime auto-detection when firstmate itself is
 # running inside herdr with no explicit backend setting; see herdr-addendum.md and
-# data/fm-backend-design-d7/herdr-verification-p2.md for its empirical basis.
+# data/tasks/fm-backend-design-d7/herdr-verification-p2.md for its empirical basis.
 # P3 adds bin/backends/zellij.sh, also EXPERIMENTAL and spawn-capable, behind
 # `--backend zellij`/`FM_BACKEND=zellij`/`config/backend` - NOT behind runtime
 # auto-detection (report.md's Open Question #2: start with a dedicated
@@ -57,10 +57,10 @@ FM_BACKEND_CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # Verified backend adapters. Extend only after a backend gets its own
 # bin/backends/<name>.sh and empirical verification, mirroring AGENTS.md
 # section 4's harness-verification discipline. herdr is EXPERIMENTAL (P2;
-# data/fm-backend-design-d7/herdr-addendum.md) - verified against the real
+# data/tasks/fm-backend-design-d7/herdr-addendum.md) - verified against the real
 # v0.7.1/protocol-14 binary (data/fm-backend-design-d7/herdr-verification-p2.md)
 # but newer than tmux's long-proven default path. zellij is EXPERIMENTAL (P3;
-# data/fm-backend-design-d7/report.md "Zellij Backend") - verified against the
+# data/tasks/fm-backend-design-d7/report.md "Zellij Backend") - verified against the
 # real 0.44.0 binary (docs/zellij-backend.md). orca is EXPERIMENTAL and
 # spawn-capable; unlike tmux/herdr/zellij it is also the worktree provider.
 # cmux is EXPERIMENTAL and spawn-capable, session-provider-only like

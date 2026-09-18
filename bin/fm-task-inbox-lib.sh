@@ -11,7 +11,7 @@
 # scaffold (bin/fm-brief.sh) tells the worker how to read and acknowledge;
 # none of them restates the format.
 #
-# Design (captain-adopted, data/fm-send-reliability-reframe-s1/report.md): the
+# Design (captain-adopted, data/tasks/fm-send-reliability-reframe-s1/report.md): the
 # payload moves to the filesystem, which is reliable; the terminal carries only
 # a short constant doorbell line. While the endpoint remains available, that
 # line does not need to be reliable because ringing it again is free. A

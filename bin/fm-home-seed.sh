@@ -847,7 +847,7 @@ seed_home() {
   SEED_CREATED_PROJECTS_FILE="$SEED_BACKUP_DIR/created-projects"
   : > "$SEED_CREATED_PROJECTS_FILE"
   SEED_PARENT_REG_EXISTED=0
-  SEED_PARENT_BRIEF=$(fm_task_path "$DATA" "$id" brief.md)
+  SEED_PARENT_BRIEF=$(fm_task_read_path "$DATA" "$id" brief.md)
   SEED_PARENT_BRIEF_CREATED=0
   SEED_PARENT_BRIEF_DIR_CREATED=0
   SEED_SUB_REG_EXISTED=0
@@ -914,6 +914,7 @@ seed_home() {
     else
       "$FM_ROOT/bin/fm-brief.sh" "$id" --secondmate "$@"
     fi
+    SEED_PARENT_BRIEF=$(fm_task_path "$DATA" "$id" brief.md) || return 1
     SEED_PARENT_BRIEF_CREATED=1
   fi
   if grep -F '{TASK}' "$SEED_PARENT_BRIEF" >/dev/null 2>&1; then

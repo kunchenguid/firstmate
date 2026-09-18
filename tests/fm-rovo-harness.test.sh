@@ -135,8 +135,8 @@ make_spawn_case() {
   proj="$case_dir/project"
   wt="$case_dir/wt"
   fakebin=$(make_rovo_fakebin "$case_dir/fake")
-  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
-  cat > "$home/data/$id/brief.md" <<'EOF'
+  mkdir -p "$home/data/tasks/$id" "$home/projects" "$home/state" "$home/config"
+  cat > "$home/data/tasks/$id/brief.md" <<'EOF'
 # Task
 ## Captain's intent
 Exercise Rovo dispatch.
@@ -173,7 +173,7 @@ run_spawn() {
     FM_FAKE_POINTER_LOG="$case_dir/pointer.log" \
     FM_FAKE_ROVO_STATE="$case_dir/rovo.state" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
-    FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/launch-brief.md" \
+    FM_FAKE_BRIEF_REAL="$(cd "$home/data/tasks/$id" && pwd -P)/launch-brief.md" \
     FM_FAKE_ROVO_READY="${FM_FAKE_ROVO_READY:-yes}" \
     FM_FAKE_ROVO_DELIVERY="${FM_FAKE_ROVO_DELIVERY:-yes}" \
     FM_ROVO_READY_POLLS=3 FM_ROVO_DELIVERY_POLLS=3 FM_ROVO_POLL_INTERVAL=0 \
@@ -206,7 +206,7 @@ test_rovo_launch_then_send_is_verified() {
     "rovo launch did not clear cursor's markers via the shared outer wrap"
   assert_not_contains "$launch" "turn-ended" "rovo launch embedded a turn-end path it does not own"
 
-  brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/launch-brief.md"
+  brief_real="$(cd "$HOME_DIR/data/tasks/$id" && pwd -P)/launch-brief.md"
   pointer=$(cat "$CASE_DIR/pointer.log")
   [ "$pointer" = "Read the brief at $brief_real and follow it exactly." ] \
     || fail "rovo pointer was not the exact absolute-path-only instruction: $pointer"
@@ -221,7 +221,7 @@ test_rovo_launch_then_send_is_verified() {
   # (confirmed live), so the launch must grant allowedExternalPaths covering
   # this task's brief directory, steering inbox, and status file - otherwise
   # the standard instructions/steering/status/report loop cannot work.
-  data_real=$(cd "$HOME_DIR/data/$id" && pwd -P)
+  data_real=$(cd "$HOME_DIR/data/tasks/$id" && pwd -P)
   state_real=$(cd "$HOME_DIR/state" && pwd -P)
   assert_contains "$launch" "allowedExternalPaths" \
     "rovo launch did not grant allowedExternalPaths for this task's home paths"

@@ -108,8 +108,8 @@ make_spawn_case() {
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
   id=$name-z1
-  mkdir -p "$home/data/$id"
-  write_ship_brief "$home/data/$id/brief.md" "$id"
+  mkdir -p "$home/data/tasks/$id"
+  write_ship_brief "$home/data/tasks/$id/brief.md" "$id"
   printf '%s\n' "$home|$proj|$wt|$fakebin|$launchlog|$id"
 }
 
@@ -209,8 +209,8 @@ run_two_level() {
 
   # Spawn 1: the primary launches the secondmate; capture what it injects.
   sm_id="sm-$name"
-  mkdir -p "$prim/data/$sm_id"
-  printf 'charter brief\n' > "$prim/data/$sm_id/brief.md"
+  mkdir -p "$prim/data/tasks/$sm_id"
+  printf 'charter brief\n' > "$prim/data/tasks/$sm_id/brief.md"
   smlog="$base/sm-launch.log"
   smfake=$(make_spawn_fakebin "$base/sm-fake")
   : > "$smlog"
@@ -237,8 +237,8 @@ run_two_level() {
   wproj="$base/wproj"
   wwt="$base/wwt"
   fm_git_worktree "$wproj" "$wwt" "wt-$name"
-  mkdir -p "$sm/state" "$sm/projects" "$sm/data/$worker_id"
-  write_ship_brief "$sm/data/$worker_id/brief.md" "$worker_id"
+  mkdir -p "$sm/state" "$sm/projects" "$sm/data/tasks/$worker_id"
+  write_ship_brief "$sm/data/tasks/$worker_id/brief.md" "$worker_id"
   touch "$sm/state/.last-watcher-beat"
   start_trace_session "$sm" "$TL_ENV_TC"
   wlog="$base/worker-launch.log"
@@ -380,9 +380,9 @@ test_duplicate_secondmate_spawn_does_not_converge_trace_context() {
   # shellcheck disable=SC2100 # Literal task id, not arithmetic.
   id=sm-duplicate
   log="$base/launch.log"
-  mkdir -p "$prim/config" "$prim/data/$id" "$prim/state" "$prim/projects"
+  mkdir -p "$prim/config" "$prim/data/tasks/$id" "$prim/state" "$prim/projects"
   : > "$prim/config/trace-context"
-  printf 'charter brief\n' > "$prim/data/$id/brief.md"
+  printf 'charter brief\n' > "$prim/data/tasks/$id/brief.md"
   touch "$prim/state/.last-watcher-beat"
   start_trace_session "$prim"
   mkdir -p "$sm/bin" "$sm/data"
@@ -531,9 +531,9 @@ test_two_routed_tasks_through_one_secondmate_root_distinct_traces() {
   proj_b="$base/proj-b"; wt_b="$base/wt-b"
   fm_git_worktree "$proj_a" "$wt_a" wt-routed-a
   fm_git_worktree "$proj_b" "$wt_b" wt-routed-b
-  mkdir -p "$sm/data/$id_a" "$sm/data/$id_b"
-  write_ship_brief "$sm/data/$id_a/brief.md" "$id_a"
-  write_ship_brief "$sm/data/$id_b/brief.md" "$id_b"
+  mkdir -p "$sm/data/tasks/$id_a" "$sm/data/tasks/$id_b"
+  write_ship_brief "$sm/data/tasks/$id_a/brief.md" "$id_a"
+  write_ship_brief "$sm/data/tasks/$id_b/brief.md" "$id_b"
   log_a="$base/launch-a.log"
   log_b="$base/launch-b.log"
 
