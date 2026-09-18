@@ -15,7 +15,7 @@ Hidden elapsed time does not advance the animation, and a resize while hidden cl
 A fresh Pi session or new Calm extension lifetime starts at the normal initial position.
 Very narrow terminals fall back to a smaller deterministic sprite.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
-Visible assistant responses receive a temporary high-contrast magenta background across their rendered text and internal blank lines, without added padding, borders, or rows.
+Visible assistant responses receive a temporary muted dark purple background across their rendered text and internal blank lines, without added padding, borders, or rows.
 Calm hides raw and collapsed assistant thinking, routine supervision notes, every Pi model-tool call, argument, result, image, timing, and collapsed shell, and canonically classified Firstmate operational user rows.
 Calm shows each distinct streamed thinking line as display-only content on the active assistant row after that response settles, prefixed with an increasing `Step N:` counter.
 The lines use Markdown hard breaks so each occupies its own physical line without blank rows, remain attached to the completed response, and never become planning transcript rows.

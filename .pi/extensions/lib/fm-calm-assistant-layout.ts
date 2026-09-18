@@ -5,7 +5,7 @@
 // interactive UI. Both consume the same visibility state and only render shallow
 // presentation copies; messages, model context, session storage, and exports are never
 // changed. Calm paints the visible assistant range with a temporary high-contrast
-// magenta background without changing its geometry.
+// muted dark purple background without changing its geometry.
 import type {
   AssistantMessageComponent as PiAssistantMessageComponent,
   ExtensionAPI,
@@ -21,7 +21,7 @@ import {
   currentCalmSteps,
 } from "./fm-calm-visibility.ts";
 
-const CALM_ASSISTANT_BACKGROUND = "\x1b[48;2;122;31;92m";
+const CALM_ASSISTANT_BACKGROUND = "\x1b[48;2;36;24;32m";
 const stripTerminalSequences = (text: string): string =>
   text
     .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")

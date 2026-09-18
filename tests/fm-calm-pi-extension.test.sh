@@ -1258,7 +1258,7 @@ if (
 }
 
 await calmCommand.handler("", commandContext);
-const assistantBackground = "\x1b[48;2;122;31;92m";
+const assistantBackground = "\x1b[48;2;36;24;32m";
 for (const [index, component] of assistantBackgroundCases.entries()) {
   const rendered = component.render(100);
   const stock = assistantStockRenders[index];
