@@ -549,6 +549,13 @@ The resolver sends the key to `curl` only as a header read from a file descripto
 The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
+## Jev caller library (.env TYPESAFE_API_KEY / OPENROUTER_API_KEY)
+
+Shadow features that ask TypeSafe Jev share [`bin/fm-jev-lib.sh`](../bin/fm-jev-lib.sh) instead of each rolling a client.
+It is a sourceable library, not a user CLI; the script header owns route selection, models, key handling, helpers, and exact failure codes.
+Set `TYPESAFE_API_KEY` for the TypeSafe route, or `OPENROUTER_API_KEY` for OpenRouter when that is the only key or when `JEV_ROUTE=openrouter`.
+Typed dispatch resolution above stays its own TypeSafe-only process and does not use this library.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
@@ -1134,7 +1141,10 @@ FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainl
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
 FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
-TYPESAFE_API_KEY=       # typed dispatch resolution opt-in, from the environment or .env; absent means bin/fm-dispatch-resolve.sh is off (docs/configuration.md "Typed dispatch resolution")
+TYPESAFE_API_KEY=       # typed dispatch resolution opt-in, from the environment or .env; absent means bin/fm-dispatch-resolve.sh is off (docs/configuration.md "Typed dispatch resolution"); also the TypeSafe route key for bin/fm-jev-lib.sh (docs/configuration.md "Jev caller library")
+OPENROUTER_API_KEY=     # optional OpenRouter Jev route for bin/fm-jev-lib.sh; used when it is the only key or when JEV_ROUTE=openrouter (docs/configuration.md "Jev caller library")
+JEV_ROUTE=              # optional; `openrouter` or `typesafe` selects the Jev route in bin/fm-jev-lib.sh
+JEV_MODEL=              # optional Jev model override for bin/fm-jev-lib.sh
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)
