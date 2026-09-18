@@ -240,7 +240,7 @@ cat > "$TMP_ROOT/pid-board-result" <<'EOF'
 prompts[1]{uid,prompt,selector,tag,text}:
   "1","Account recovery: confirm option B\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"alpha/pid-5\",\n  \"selection\": \"B\",\n  \"note\": \"Keep the support fallback visible\"\n}","section#call > form:nth-of-type(1)",choice,"Account recovery: confirm option B"
 EOF
-board_source=pid-product-answer
+board_source='pid-product-answer'
 FM_HOME="$ROOT_HOME" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-captain-hold.sh" bind "$board_source" >/dev/null \
   || fail 'could not bind the PID answer source'
 FM_HOME="$ROOT_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$ROOT_HOME/state" \
