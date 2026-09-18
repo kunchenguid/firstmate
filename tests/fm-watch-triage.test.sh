@@ -2246,7 +2246,7 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
 # non-no-mistakes crew, or any crew with no running pipeline) are never left hanging.
 
 test_quota_stale_surfaced() {
-  local dir state fakebin out capture_file window key pane_hash sig pid harness pane provider observed reset display recorded gen
+  local dir state fakebin out capture_file window key pane_hash sig pid harness pane observed reset recorded gen extra finished
   for harness in grok pi pi-trust; do
     dir=$(make_case "quota-$harness"); state="$dir/state"; fakebin="$dir/fakebin"
     out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-quota"
@@ -2271,6 +2271,7 @@ test_quota_stale_surfaced() {
       [ ! -e "$state/.pane-stop-$key" ] || { reap "$pid"; fail 'active validation wrote stop record'; }
       reap "$pid"
     fi
+    observed=$(date +%s)
     PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
       FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_WATCH_HANDLING_SUCCESSOR=1 \
       FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
@@ -2283,23 +2284,26 @@ test_quota_stale_surfaced() {
       grep -F "stale: $window (quota-exhausted:" "$out" >/dev/null || fail "missing quota reason: $(cat "$out")"
     fi
     grep -F "$(cat "$out")" "$state/.wake-queue" >/dev/null || fail 'stop reason not durable'
-    IFS=$'\t' read -r recorded provider observed reset display gen < "$state/.pane-stop-$key"
-    [ "$recorded" = "$pane_hash" ] || fail 'reset not bound to pane'
-    if [ "$harness" = pi-trust ]; then
-      [ "$reset" = - ] && [ "$display" = trust ] || fail 'incorrect trust record'
-    elif [ "$harness" = grok ]; then
-      [ "$reset" = - ] && [ "$provider" = grok ] || fail 'invented weekly reset'
-    else
-      [ "$((reset - observed))" = 8967 ] && [ "$display" = 2h29m27s ] || fail 'wrong reset epoch'
+    finished=$(date +%s)
+    IFS=$'\t' read -r recorded gen extra < "$state/.pane-stop-$key"
+    [ "$recorded" = "$pane_hash" ] && [ -n "$gen" ] && [ -z "$extra" ] || fail 'incorrect stop deduplication record'
+    if [ "$harness" = grok ]; then
+      grep -F 'quota-exhausted: grok, resets unknown)' "$out" >/dev/null || fail 'invented weekly reset'
+    elif [ "$harness" = pi ]; then
+      reset=$(sed -n 's/.*resets \([^ ]*\) (2h29m27s)).*/\1/p' "$out")
+      reset=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$reset" +%s 2>/dev/null || date -u -d "$reset" +%s) || fail 'missing UTC reset'
+      [ "$reset" -ge "$((observed + 8967))" ] && [ "$reset" -le "$((finished + 8967))" ] || fail 'wrong reset epoch'
     fi
     [ ! -e "$state/.wedge-escalations-$key" ] || fail 'quota entered wedge ladder'
     recorded=$(cat "$state/.pane-stop-$key")
     ack_stopped_cycle "$state" || fail 'could not acknowledge stop'
+    printf '#!/usr/bin/env bash\nprintf called > "%s"\n' "$dir/crew-probed" > "$fakebin/fm-crew-state.sh"
     watch_bg "$state" "$fakebin" "$out" env FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
       FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
     pid=$!
     if ! wait_poll_cycle "$state" "$pid"; then reap "$pid"; fail 'unchanged stop repeated'; fi
-    [ "$(cat "$state/.pane-stop-$key")" = "$recorded" ] || { reap "$pid"; fail 'relative reset drifted'; }
+    [ ! -e "$dir/crew-probed" ] || { reap "$pid"; fail 'unchanged stop repeated crew probe'; }
+    [ "$(cat "$state/.pane-stop-$key")" = "$recorded" ] || { reap "$pid"; fail 'stop record changed'; }
     printf 'normal idle prompt after recovery' > "$capture_file"
     wait_for_exit "$pid" 150 || { reap "$pid"; fail 'recovery did not restore ordinary stale triage'; }
     grep -Fx "stale: $window" "$out" >/dev/null || fail 'normal pane retained quota reason'
