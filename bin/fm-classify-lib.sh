@@ -205,8 +205,11 @@ status_is_terminal_verb() {
 # (working, resolved, captain-held) and paused never match from free-text prose;
 # only lines without those leading verbs may still match free-text tokens for
 # legacy bare lines such as "merged" or "PR ready".
+# Regex matching ignores a well-formed optional numeric emission-time tag before
+# the first colon, so existing FM_CAPTAIN_RE overrides keep matching; other
+# metadata and note text remain intact, as do the stored and surfaced event bytes.
 status_is_captain_relevant() {
-  local line=$1 verb
+  local line=$1 verb untimed
   [ -n "$line" ] || return 1
   status_line_verb "$line" verb
   case "$verb" in
@@ -219,7 +222,8 @@ status_is_captain_relevant() {
       done|needs-decision|blocked|failed) return 0 ;;
     esac
   fi
-  _fm_classify_matches "$line" "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
+  _fm_status_untimed "$line" untimed
+  _fm_classify_matches "$untimed" "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
 }
 
 # 0 if a status line's leading verb is the pause verb (paused: <reason>). A pure
@@ -273,6 +277,86 @@ status_paused_until() {  # <status-line> -> epoch on stdout
     | head -1)
   [ -n "$token" ] || return 1
   fm_utc_iso_to_epoch "$token"
+}
+
+# --- optional event emission time -------------------------------------------
+# New writers may append "[at=<epoch>]" before the first colon, alongside key
+# and corr tags in any order. Epoch is UTC Unix seconds: canonical unsigned
+# decimal, at most 12 digits (bounded for safe shell arithmetic). For example:
+#   resolved [key=api-shape] [at=1788576000]: answered: use REST
+# No colons appear inside this field, so existing verb/key/note readers retain
+# their grammar. Missing, malformed, or duplicate time fields mean UNKNOWN time;
+# never infer emission time from file mtime, a wake, or observation time. Relays
+# preserve source tags and leave legacy source events unstamped. Time describes
+# event history only and must never decide current state or decision closure.
+status_line_at_epoch() {  # <status-line> -> epoch; nonzero when unknown
+  local head epoch rest
+  case "$1" in *:*) head=${1%%:*} ;; *) return 1 ;; esac
+  case "$head" in *\[at=*\]*) ;; *) return 1 ;; esac
+  rest=${head#*\[at=}
+  epoch=${rest%%\]*}
+  case "${rest#*\]}" in *\[at=*) return 1 ;; esac
+  case "$epoch" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
+  [ "${#epoch}" -le 12 ] || return 1
+  printf '%s' "$epoch"
+}
+
+# Stamp only a newly emitted event. Preserve an existing tag, even malformed,
+# and preserve the event itself if the clock cannot be read. Never use this to
+# timestamp a copied historical line.
+status_stamp_line() {  # <new-status-line> -> line (without newline)
+  local head epoch
+  case "$1" in
+    *:*) head=${1%%:*} ;;
+    *) printf '%s' "$1"; return 0 ;;
+  esac
+  case "$head" in *\[at=*) printf '%s' "$1"; return 0 ;; esac
+  if epoch=$(date +%s); then
+    printf '%s [at=%s]:%s' "$head" "$epoch" "${1#*:}"
+  else
+    printf '%s' "$1"
+  fi
+}
+
+# Strip only a well-formed optional numeric time tag before the first colon.
+# A malformed value is ordinary line bytes, never a time tag, so relevance,
+# retry dedup, key, and note all read the same line. Relevance and retry
+# matching share this normalization: one in-shell definition for every reader,
+# so the rule cannot drift against a second spelling of itself, and a sweep that
+# normalizes a line at a time never pays a fork for the match it prepares.
+_fm_status_untimed() {  # <status-line> [<out-var>] -> line without a time tag
+  local head rest keep='' prefix tail digits
+  case "$1" in
+    *:*) head=${1%%:*}; rest=:${1#*:} ;;
+    # No colon means no header, so the line carries no time tag to strip.
+    *) head=''; rest=$1 ;;
+  esac
+  while :; do
+    case "$head" in *" [at="*\]*) ;; *) break ;; esac
+    prefix=${head%%" [at="*}
+    tail=${head#*" [at="}
+    digits=${tail%%\]*}
+    case "$digits" in
+      ''|*[!0-9]*) keep=$keep$prefix' [at='; head=$tail ;;
+      *) keep=$keep$prefix; head=${tail#*\]} ;;
+    esac
+  done
+  if [ "$#" -gt 1 ]; then printf -v "$2" '%s' "$keep$head$rest"; else printf '%s' "$keep$head$rest"; fi
+}
+
+# Retry deduplication ignores only a well-formed optional numeric time tag;
+# all other bytes, including correlation metadata, still identify the event.
+# Both sides normalize through the one helper above, so a stamped retry of an
+# already-recorded event can never read as a new one.
+status_event_recorded() {  # <status-file> <new-status-line>
+  local wanted line untimed
+  [ -f "$1" ] || return 1
+  _fm_status_untimed "$2" wanted
+  while IFS= read -r line || [ -n "$line" ]; do
+    _fm_status_untimed "$line" untimed
+    [ "$untimed" != "$wanted" ] || return 0
+  done < "$1"
+  return 1
 }
 
 # --- durable keyed decisions ------------------------------------------------

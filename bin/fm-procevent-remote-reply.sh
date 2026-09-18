@@ -407,8 +407,10 @@ normalize_payload() { # <source> <destination>
 }
 
 # Adapter-authored escalations and notes use exact-byte append suppression.
-# Mirrored payload lines use their pre-rewrite source identity in
-# stage_mirror_lines instead, because delivery state can change between replays.
+# Their callers first apply fm-classify-lib.sh's retry contract and stamp only
+# the line they append. Mirrored payload lines keep their source time (or its
+# absence) and use their pre-rewrite source identity in stage_mirror_lines
+# instead, because delivery state can change between replays.
 # Returns 0 appended, 1 already present, 2 the write itself failed.
 append_status_once() { # <status-file> <line>
   grep -Fqx -- "$2" "$1" 2>/dev/null && return 1
@@ -528,7 +530,11 @@ cmd_ingest() {
   if [ "$class" = continuity-broken ]; then
     line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason)"
     append_rc=0
-    append_status_once "$status_file" "$line" || append_rc=$?
+    if status_event_recorded "$status_file" "$line"; then
+      append_rc=1
+    else
+      append_status_once "$status_file" "$(status_stamp_line "$line")" || append_rc=$?
+    fi
     [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
     fm_lock_release "$lock"
     printf 'continuity-broken: %s (%s)\n' "$id" "$reason"
@@ -587,9 +593,13 @@ EOF
   # fold, so it cannot stand open the way a keyed block did.
   while IFS=$'\t' read -r doc reason || [ -n "$doc" ]; do
     [ -n "$doc" ] || continue
+    line="note: remote document did not transfer for $id: $doc - $reason"
     append_rc=0
-    append_status_once "$status_file" "note: remote document did not transfer for $id: $doc - $reason" \
-      || append_rc=$?
+    if status_event_recorded "$status_file" "$line"; then
+      append_rc=1
+    else
+      append_status_once "$status_file" "$(status_stamp_line "$line")" || append_rc=$?
+    fi
     [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append remote document note"; }
     [ "$append_rc" -ne 0 ] || appended=$((appended + 1))
   done <<EOF
