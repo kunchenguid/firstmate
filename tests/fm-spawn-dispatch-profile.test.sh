@@ -659,7 +659,7 @@ test_native_pi_ultra_is_explicit_and_model_scoped() {
       id="ultra-$harness-$mode"
       rec=$(make_spawn_case "$id" "$harness" "$id")
       read_case_record "$rec"
-      declare_pi_provider "$HOME_DIR" codex-native
+      declare_pi_provider "$HOME_DIR" "openai-codex codex-native"
       out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
         --harness "$harness" --model codex-native/gpt-6-astra --effort ultra --mode "$mode" --yolo off)
       expect_code 0 "$?" "native Ultra spawn failed: $out"
@@ -697,7 +697,7 @@ test_batch_preserves_native_ultra() {
   local rec id1=ultra-batch-a id2=ultra-batch-b out launch
   rec=$(make_spawn_case ultra-batch pi "$id1" "$id2")
   read_case_record "$rec"
-  declare_pi_provider "$HOME_DIR" codex-native
+  declare_pi_provider "$HOME_DIR" "openai-codex codex-native"
   enable_dispatch_profile "$HOME_DIR"
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness pi --model codex-native/gpt-6-astra --effort ultra)

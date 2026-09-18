@@ -273,13 +273,12 @@
 #   selection of that vendor default (for Claude, CLAUDE_CONFIG_DIR unset). Any
 #   other value is one absolute path to an existing account root. A Pi root can
 #   hold several provider identities, so config/pi-account also names the
-#   provider this home may spend; a launch whose --model names a different
+#   providers this home may spend; a launch whose --model names another
 #   provider, or names no provider, refuses. A canonical Pi launch also carries
-#   --provider <declared>, so Pi cannot resolve --model under another provider;
-#   a raw Pi command must pass that --provider itself or it refuses. A final
-#   `environment` line selects
-#   the runner's environment credentials as well. Declarations are home-local
-#   and never inherited. A ship or scout reads the active home; a local
+#   --provider <the model's provider>, so Pi cannot resolve --model under
+#   another provider; a raw Pi command must pass that --provider itself or it
+#   refuses. A final `environment` line selects the runner's environment
+#   credentials as well. Declarations are home-local and never inherited. A ship or scout reads the active home; a local
 #   secondmate is a supervisor and reads the launching home. Relaunch uses that
 #   same home. The selected root is exported onto the launch and, for Claude
 #   without `environment`, environment credentials ranked above its stored

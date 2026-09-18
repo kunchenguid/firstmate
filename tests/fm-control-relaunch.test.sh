@@ -685,7 +685,7 @@ test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
   local dir out rc id=rl-ultra
   dir=$(new_case native-ultra "$id")
   add_ship_task "$dir" "$id" pi
-  printf '%s\n' "$dir/home/accounts/pi" "codex-native" > "$dir/home/config/pi-account"
+  printf '%s\n' "$dir/home/accounts/pi" "openai-codex codex-native" > "$dir/home/config/pi-account"
   printf pi > "$dir/fake/command"
   printf pi > "$dir/fake/becomes"
   printf '#!/usr/bin/env bash\nprintf "Options: --tui-mode\\n"\n' > "$dir/fakebin/pi"

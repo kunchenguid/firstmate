@@ -24,15 +24,16 @@
 #
 # A Pi root can hold several provider identities at once, so selecting the
 # root alone is insufficient. config/pi-account names the root on line 1 and
-# the provider that home may spend on line 2. The launch model's provider
-# must match that declared provider; an unqualified model, or a provider the
-# file does not name, refuses before any endpoint exists. That is the
-# work/personal boundary: a home declares the provider it spends, so an
+# the providers that home may spend on line 2, separated by spaces. The launch
+# model's provider must be one of them; an unqualified model, or a provider
+# the file does not name, refuses before any endpoint exists. That is the
+# work/personal boundary: a home declares the providers it spends, so an
 # extra identity sitting in a shared root cannot be used by accident. The
 # prefix alone does not bind Pi: without --provider, Pi falls back to an
 # identical model id under another, authenticated provider. So every
-# canonical Pi launch also passes --provider <declared>, and a raw Pi command,
-# which Firstmate launches verbatim, must pass that same --provider itself.
+# canonical Pi launch also passes --provider <the model's provider>, and a raw
+# Pi command, which Firstmate launches verbatim, must pass that same
+# --provider itself.
 #
 # Environment credentials (Claude's API key, auth token, setup-token, cloud
 # provider switches, profiles; a Pi provider's API key variable) are ambient
@@ -87,8 +88,8 @@ FM_WORKER_ACCOUNT_PREFLIGHT_SECONDS=30
 FM_WORKER_ACCOUNT_CLAUDE_SHED="CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY CLAUDE_CODE_USE_ANTHROPIC_AWS CLAUDE_CODE_USE_MANTLE ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_PROFILE ANTHROPIC_FEDERATION_RULE_ID"
 
 # fm_worker_account_read <harness> <file>
-# Prints "root<TAB>provider<TAB>environment" for a valid declaration. Provider
-# is empty for Claude; the last field is `environment` or empty. The final
+# Prints "root<TAB>providers<TAB>environment" for a valid declaration. The
+# space-separated providers are empty for Claude; the last field is `environment` or empty. The final
 # newline is optional; any other control byte, including a CR, refuses. Parses
 # bytes before the shell can drop NULs or trailing newlines; paths are literal,
 # not shell expressions. Returns 0 on success, 3 when the
@@ -111,7 +112,7 @@ fm_worker_account_read() {
       $body =~ /\A(ordinary|\/[^\x00-\x1f\x7f]*)(?:\n(environment))?\n?\z/ or exit 6;
       ($root, $env) = ($1, $2 // "");
     } elsif ($harness eq "pi" || $harness eq "pi-signed") {
-      $body =~ /\A(ordinary|\/[^\x00-\x1f\x7f]*)\n([A-Za-z0-9][A-Za-z0-9._-]*)(?:\n(environment))?\n?\z/ or exit 6;
+      $body =~ /\A(ordinary|\/[^\x00-\x1f\x7f]*)\n([A-Za-z0-9][A-Za-z0-9._-]*(?: +[A-Za-z0-9][A-Za-z0-9._-]*)*)(?:\n(environment))?\n?\z/ or exit 6;
       ($root, $provider, $env) = ($1, $2, $3 // "");
     } else {
       exit 6;
@@ -165,7 +166,7 @@ fm_worker_account_raw_flag() {
 }
 
 # fm_worker_account_resolve <harness> <config-dir> <home>
-# Prints "root<TAB>provider<TAB>environment" for the validated declaration.
+# Prints "root<TAB>providers<TAB>environment" for the validated declaration.
 # Root is empty for ordinary Claude, meaning CLAUDE_CONFIG_DIR unset. On
 # refusal prints one error naming the runner, the home, and the file, and
 # returns 1.
@@ -201,7 +202,7 @@ fm_worker_account_resolve() {
     ;;
   *)
     if [ "$runner" = Pi ]; then
-      echo "error: config/$file must contain an ordinary-or-absolute root on line 1, the provider this home may spend on line 2, and optionally 'environment' on line 3, LF-separated with no other control characters: $cfg" >&2
+      echo "error: config/$file must contain an ordinary-or-absolute root on line 1, the providers this home may spend on line 2 separated by spaces, and optionally 'environment' on line 3, LF-separated with no other control characters: $cfg" >&2
     else
       echo "error: config/$file must contain 'ordinary' or one absolute path on line 1, and optionally 'environment' on line 2, LF-separated with no other control characters: $cfg" >&2
     fi
@@ -220,25 +221,27 @@ fm_worker_account_resolve() {
   printf '%s\t%s\n' "$root" "${token#*$'\t'}"
 }
 
-# fm_worker_account_pi_guard <declared-provider> <model>
-# Returns 0 only when <model> is <declared-provider>/<id>. Otherwise prints
-# one error and returns 1. Selecting a Pi root without naming the provider
-# would spend whichever identity the shared root's defaultProvider holds.
+# fm_worker_account_pi_guard <declared-providers> <model>
+# Returns 0 only when <model> is <provider>/<id> for one of the space-separated
+# <declared-providers>. Otherwise prints one error and returns 1. Selecting a
+# Pi root without naming the provider would spend whichever identity the
+# shared root's defaultProvider holds.
 fm_worker_account_pi_guard() {
   local declared=$1 model=$2 provider
   provider=$(fm_worker_account_pi_provider "$model") || {
-    echo "error: a Pi launch needs --model as $declared/<id>: '${model:-none}' names no provider, so the account inside a shared Pi root cannot be proved; the root's defaultProvider never decides this" >&2
+    echo "error: a Pi launch needs --model as <provider>/<id> for a provider config/pi-account declares ($declared): '${model:-none}' names no provider, so the account inside a shared Pi root cannot be proved; the root's defaultProvider never decides this" >&2
     return 1
   }
-  if [ "$provider" != "$declared" ]; then
-    echo "error: a Pi launch is declared for provider '$declared' (config/pi-account), but --model '$model' resolves to provider '$provider'" >&2
-    return 1
-  fi
-  return 0
+  case " $declared " in
+  *" $provider "*) return 0 ;;
+  esac
+  echo "error: a Pi launch may spend only the providers config/pi-account declares ($declared), but --model '$model' resolves to provider '$provider'" >&2
+  return 1
 }
 
-# fm_worker_account_pi_raw_provider <declared-provider> <raw launch command>
-# Returns 0 only when a raw Pi command passes --provider <declared-provider>.
+# fm_worker_account_pi_raw_provider <provider> <raw launch command>
+# Returns 0 only when a raw Pi command passes --provider <provider>, its
+# model's declared provider.
 # Otherwise prints one error and returns 1: Firstmate cannot add the flag to a
 # command it launches verbatim, and without it Pi may resolve --model to an
 # identical id under another provider.
@@ -246,7 +249,7 @@ fm_worker_account_pi_raw_provider() {
   local declared=$1 provider
   provider=$(fm_worker_account_raw_flag "$2" --provider)
   [ "$provider" != "$declared" ] || return 0
-  echo "error: a raw Pi launch command must pass --provider $declared (config/pi-account); it passes '${provider:-none}', and without the declared provider Pi may resolve --model to an identical id under another provider" >&2
+  echo "error: a raw Pi launch command must pass --provider $declared, the declared provider its --model names (config/pi-account); it passes '${provider:-none}', and without it Pi may resolve --model to an identical id under another provider" >&2
   return 1
 }
 
@@ -331,13 +334,14 @@ fm_worker_account_preflight() {
 
 # fm_worker_account_select <harness> <config-dir> <home> <model> <executable>
 # The whole launch-time decision: resolves the home's declaration, holds a Pi
-# launch to the declared provider, and runs the preflight unless the home
+# launch to a declared provider, and runs the preflight unless the home
 # declared environment credentials. Prints "root<TAB>provider<TAB>environment"
-# for a runner with a declaration and nothing for any other runner; on refusal
-# prints one error and returns 1. bin/fm-control.sh runs it before a relaunch stops the
+# for a runner with a declaration, where provider is the Pi launch model's own
+# (empty for Claude), and nothing for any other runner; on refusal prints one
+# error and returns 1. bin/fm-control.sh runs it before a relaunch stops the
 # live agent, and bin/fm-spawn.sh before any endpoint exists.
 fm_worker_account_select() {
-  local harness=$1 config=$2 home=$3 model=$4 executable=$5 selection root rest
+  local harness=$1 config=$2 home=$3 model=$4 executable=$5 selection root rest provider=
   case "$harness" in
   claude | pi | pi-signed) ;;
   *) return 0 ;;
@@ -347,11 +351,12 @@ fm_worker_account_select() {
   rest=${selection#*$'\t'}
   if [ "$harness" != claude ]; then
     fm_worker_account_pi_guard "${rest%%$'\t'*}" "$model" || return 1
+    provider=$(fm_worker_account_pi_provider "$model")
   fi
   if [ -z "${rest#*$'\t'}" ]; then
     fm_worker_account_preflight "$harness" "$root" "$executable" "$model" || return 1
   fi
-  printf '%s\t%s\n' "$root" "$rest"
+  printf '%s\t%s\t%s\n' "$root" "$provider" "${rest#*$'\t'}"
 }
 
 # fm_worker_account_claude_env <environment>

@@ -122,7 +122,7 @@ test_pi_declaration_requires_a_provider() {
   fm_worker_account_resolve pi "$dir/config" "$dir" >"$dir/out" 2>"$err"
   rc=$?
   expect_code 1 "$rc" "a Pi root without a provider must refuse"
-  assert_contains "$(cat "$err")" "provider this home may spend" \
+  assert_contains "$(cat "$err")" "providers this home may spend" \
     "refusal must say selecting the root alone is not enough"
   pass "selecting a Pi root without naming a provider refuses"
 }
@@ -153,7 +153,15 @@ test_pi_guard_requires_matching_provider_model() {
     fail "an unqualified model must refuse"
   assert_contains "$(cat "$err")" "names no provider" \
     "unqualified-model refusal must say the account cannot be proved"
-  pass "Pi launches must name the declared provider in --model"
+  fm_worker_account_pi_guard 'openai-codex codex-native' codex-native/gpt-6-astra || \
+    fail "any provider the home lists must pass"
+  fm_worker_account_pi_guard 'openai-codex codex-native' openai-codex/gpt-5.4 || \
+    fail "the first listed provider must pass too"
+  fm_worker_account_pi_guard 'openai-codex codex-native' openrouter/gpt-5.4 >"$TMP_ROOT/guard.out" 2>"$err" && \
+    fail "a provider missing from the list must refuse"
+  fm_worker_account_pi_guard 'openai-codex codex-native' codex/gpt-5.4 >"$TMP_ROOT/guard.out" 2>"$err" && \
+    fail "a prefix of a listed provider is not that provider"
+  pass "Pi launches must name a declared provider in --model"
 }
 
 test_raw_launch_flags_read_the_embedded_values() {
@@ -285,6 +293,33 @@ test_spawn_pi_refuses_a_provider_the_home_did_not_declare() {
   assert_contains "$out" "openai-codex-work" "refusal must name the undeclared provider"
   assert_absent "$home/state/$id.meta" "an undeclared Pi provider must not publish metadata"
   pass "an undeclared Pi provider in a shared root cannot be spent"
+}
+
+test_spawn_pi_home_may_declare_several_providers() {
+  local rec world home fakebin id out
+  rec=$(make_world spawn-pi-mixed pi)
+  read_world "$rec"
+  world=$WORLD
+  home=$HOME_DIR
+  fakebin=$FAKEBIN_DIR
+  printf '%s\nopenai-codex codex-native\n' "$home/accounts/pi" > "$home/config/pi-account"
+  for id in mixed-openai mixed-native; do
+    fm_git_worktree "$world/proj-$id" "$world/wt-$id" "wt-$id"
+    fm_test_spawn_brief "$home" "$id"
+  done
+  out=$(run_account_spawn "$home" "$world/wt-mixed-openai" "$fakebin" "$world/openai.log" \
+    mixed-openai "$world/proj-mixed-openai" --mode no-mistakes --yolo off --harness pi \
+    --model openai-codex/gpt-5.6-sol 2>&1)
+  expect_code 0 "$?" "a model under the first declared provider should launch"$'\n'"$out"
+  assert_contains "$(cat "$world/openai.log")" "--provider 'openai-codex' --model 'openai-codex/gpt-5.6-sol'" \
+    "the launch must pin its own model's provider"
+  out=$(run_account_spawn "$home" "$world/wt-mixed-native" "$fakebin" "$world/native.log" \
+    mixed-native "$world/proj-mixed-native" --mode no-mistakes --yolo off --harness pi \
+    --model codex-native/gpt-6-astra 2>&1)
+  expect_code 0 "$?" "a model under the second declared provider should launch from the same home"$'\n'"$out"
+  assert_contains "$(cat "$world/native.log")" "--provider 'codex-native' --model 'codex-native/gpt-6-astra'" \
+    "the launch must pin its own model's provider, not the whole declared list"
+  pass "one home may declare several Pi providers and each launch pins its own"
 }
 
 test_spawn_pi_launch_pins_the_declared_provider() {
@@ -571,6 +606,7 @@ test_spawn_refuses_claude_without_a_declaration_before_any_record
 test_spawn_refuses_pi_without_a_declaration
 test_spawn_claude_ignores_ambient_config_dir
 test_spawn_pi_refuses_a_provider_the_home_did_not_declare
+test_spawn_pi_home_may_declare_several_providers
 test_spawn_pi_launch_pins_the_declared_provider
 test_spawn_raw_pi_command_must_pass_the_declared_provider
 test_spawn_pi_without_auth_check_is_proved_by_its_model_list
