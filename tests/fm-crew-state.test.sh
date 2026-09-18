@@ -3973,6 +3973,32 @@ EOF
   pass "a same-head terminal rerun publishes the newest pull request"
 }
 
+# A verdict taken from the ledger row must not be labelled with the attributed
+# run's identity. This arm fires only when the newest row is NOT provably the
+# attributed run - here the row's status word contradicts the run's own outcome
+# at the same head - so the verdict word and the pull request both come from
+# that row, and the reading it superseded is named only inside its earlier
+# clause, exactly as the two sibling arms do.
+test_ledger_sourced_verdict_never_names_the_attributed_run_as_its_own() {
+  reset_fakes
+  local d short out; d=$(new_case ledger-verdict-attribution)
+  make_repo_on_branch "$d/wt" fm/feat-s2k
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2k.meta" "window=fm:fm-feat-s2k" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_with_pr fm/feat-s2k https://github.com/o/r/pull/1111)"
+  FM_FAKE_RUNS_LIST="  cancelled  fm/feat-s2k ${short}  $(ledger_stamp_minutes_ago 30)  https://github.com/o/r/pull/2222"
+  out=$(run_crew_state "$d" feat-s2k)
+  assert_contains "$out" "run cancelled" "the verdict word comes from the ledger row"
+  assert_contains "$out" "pr=https://github.com/o/r/pull/2222" "the pull request comes from that same row"
+  assert_not_contains "$out" "pull/1111" "the attributed run's pull request must not surface"
+  assert_contains "$out" "run cancelled (earlier " \
+    "the superseded reading appears only inside the earlier clause"
+  assert_not_contains "$out" "run cancelled · pr=" \
+    "a ledger-sourced verdict never stands bare beside another record's pull request"
+  pass "a ledger-sourced verdict never names the attributed run as its own"
+}
+
 # Both readers of the `no-mistakes runs` listing must agree on when the ledger is
 # unreadable: a row the strict reader rejects must not still supply newest-row
 # evidence that unbinds the attributed run.
@@ -6735,6 +6761,7 @@ test_later_completed_run_leaves_the_failure_unprovable
 test_unbindable_later_run_reports_unknown_not_failed
 test_unbindable_later_terminal_run_reports_unknown
 test_same_head_terminal_rerun_publishes_newest_pr
+test_ledger_sourced_verdict_never_names_the_attributed_run_as_its_own
 test_foreign_status_never_hides_coarse_terminal_pr
 test_stale_passed_run_publishes_no_pr_for_active_rerun
 test_cancelled_run_publishes_no_pr_for_active_rerun
