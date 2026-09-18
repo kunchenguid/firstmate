@@ -390,6 +390,58 @@ SH
   pass "fm-control relaunch: secondmate launcher values survive without admitting pane variables"
 }
 
+test_remote_secondmate_relaunch_keeps_destination_pane_allowlist() {
+  local dir home smhome out rc launch result expected
+  dir=$(new_case remote-allowlisted-env remote-sm-env)
+  home="$dir/home"
+  smhome="$dir/smhome"
+  mkdir -p "$home/config"
+  printf 'claude\n' > "$home/config/secondmate-harness"
+  printf '%s\n' FM_TEST_ALLOWED FM_TEST_EMPTY FM_TEST_UNSET > "$home/config/launch-env-allowlist"
+  fm_git_worktree "$dir/proj" "$smhome" remote-sm-env-branch
+  mkdir -p "$smhome/state" "$smhome/data" "$smhome/bin"
+  printf 'remote-sm-env\n' > "$smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$smhome/AGENTS.md"
+  printf '# charter\n' > "$smhome/data/charter.md"
+  {
+    echo "window=fmses:fm-remote-sm-env"
+    echo "endpoint_task_id=remote-sm-env"
+    echo "worktree=$smhome"
+    echo "project=$smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$smhome"
+    echo "projects="
+  } > "$home/state/remote-sm-env.meta"
+  printf '%s\n' "fm-remote-sm-env" > "$dir/fake/windows"
+  printf '%s' "$smhome" > "$dir/fake/cwd"
+  cat > "$dir/fakebin/claude" <<'SH'
+#!/bin/sh
+printf '%s\n' "${FM_TEST_ALLOWED-<unset>}" "${FM_TEST_EMPTY-<unset>}" \
+  "${FM_TEST_UNSET-<unset>}" "${FM_TEST_AMBIENT-<unset>}"
+SH
+  chmod +x "$dir/fakebin/claude"
+
+  out=$(FM_REMOTE_JOB_ACTIVE=1 FM_TEST_ALLOWED=launcher-value FM_TEST_EMPTY=launcher-value \
+    FM_TEST_AMBIENT=launcher-value run_control "$dir" remote-sm-env relaunch); rc=$?
+  expect_code 0 "$rc" "a remote secondmate relaunch should succeed"$'\n'"$out"
+  assert_absent "$home/state/remote-sm-env.launch-env" \
+    "a remote secondmate relaunch must not snapshot the stripped remote command environment"
+  launch=$(tail -n 1 "$dir/fake/literal")
+  result=$(env -i HOME="$dir/user-home" PATH="$dir/fakebin:/usr/bin:/bin" TERM=xterm \
+    TMUX=synthetic-pane GOTMPDIR=/synthetic/gotmp FM_TEST_ALLOWED=pane-value \
+    FM_TEST_EMPTY='' FM_TEST_AMBIENT=pane-value /bin/sh -c "$launch") \
+    || fail "the remote secondmate relaunch command did not execute"
+  expected=$(printf '%s\n' pane-value '' '<unset>' '<unset>')
+  [ "$result" = "$expected" ] \
+    || fail "the remote secondmate did not receive exactly the destination-pane allowlist: $result"
+  pass "fm-control relaunch: remote secondmates retain destination-pane allowlist values"
+}
+
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   local dir out rc
   dir=$(new_case pending-exit rl43)
@@ -1741,6 +1793,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_secondmate_relaunch_uses_allowlisted_launcher_environment_not_the_reused_pane
+test_remote_secondmate_relaunch_keeps_destination_pane_allowlist
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree

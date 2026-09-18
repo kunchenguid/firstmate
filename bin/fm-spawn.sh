@@ -236,11 +236,11 @@
 #   blank lines and lines beginning with # are ignored. Invalid input refuses
 #   before launch, as do path inspection errors such as inaccessible config
 #   directories. An empty file retains only the operational floor below.
-#   Names are read once per spawn. For ordinary launches, values expand in the
-#   destination pane. For a secondmate spawn or relaunch, additional configured
-#   names except TRACEPARENT are captured from this launcher into a mode-0600
-#   one-launch state file. Values never enter the launch text; unset names stay
-#   unset and empty values stay empty.
+#   Names are read once per spawn. For ordinary and remote secondmate launches,
+#   values expand in the destination pane. For a local secondmate spawn or
+#   relaunch, additional configured names except TRACEPARENT are captured from
+#   this launcher into a mode-0600 one-launch state file. Values never enter the
+#   launch text; unset names stay unset and empty values stay empty.
 #   The fixed operational floor is HOME PATH USER LOGNAME SHELL TERM COLORTERM
 #   LANG LC_ALL LC_CTYPE TMPDIR TMP TEMP GOTMPDIR, plus backend identity/routing:
 #   TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH HERDR_PANE_ID
@@ -4554,7 +4554,7 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
 fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH_ENV_PREFIX='/usr/bin/env -i'
-  if [ "$KIND" = secondmate ]; then
+  if [ "$KIND" = secondmate ] && [ "${FM_REMOTE_JOB_ACTIVE:-0}" != 1 ]; then
     launch_env_snapshot_create || exit 1
     launch_env_names=$(launch_env_operational_names)
   else

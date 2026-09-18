@@ -379,7 +379,7 @@ An empty file enables filtering with only Firstmate's operational floor.
 For example, a provider using `OPENAI_API_KEY` and Git using an SSH agent could use:
 
 ```text
-# Provider credential available in the pane, or launcher for a secondmate
+# Provider credential available in the pane, or launcher for a local secondmate
 OPENAI_API_KEY
 # SSH agent socket available from the same launch source
 SSH_AUTH_SOCK
@@ -390,11 +390,11 @@ Firstmate retains basic home, executable search, terminal, locale, temporary-dir
 Other ambient names must be listed explicitly, including custom credential-store locations, proxy settings, and certificate overrides when required by the selected tools.
 The command shell and worker may still create their own variables.
 Allowed values come from the destination pane at execution time; they are neither copied from the invoking Firstmate process nor written into the launch command.
-The exception is a secondmate spawn or relaunch: additional allowlisted values are captured from the process running `fm-spawn.sh` into a private one-launch file that the secondmate removes before starting.
-For a secondmate, an allowlisted `TRACEPARENT` is not captured as an ambient grant; the dedicated [trace-context contract](trace-context.md) remains authoritative.
-This lets a persistent secondmate recover with credentials available to its launching process instead of depending on stale pane state.
+The exception is a local secondmate spawn or relaunch: additional allowlisted values are captured from the process running `fm-spawn.sh` into a private one-launch file that the secondmate removes before starting.
+For a local secondmate, an allowlisted `TRACEPARENT` is not captured as an ambient grant; the dedicated [trace-context contract](trace-context.md) remains authoritative.
+This lets a persistent local secondmate recover with credentials available to its launching process instead of depending on stale pane state.
 Listing a name does not provision it in a daemon's environment or transfer credentials to another machine.
-A remote host runs its own `fm-spawn.sh`, so a remote secondmate captures only its remote launching process environment.
+Remote secondmates keep the destination-pane behavior because the remote command boundary intentionally starts with an empty environment and does not transfer credentials between machines.
 
 Choose the minimum additions for the authentication method actually in use:
 
