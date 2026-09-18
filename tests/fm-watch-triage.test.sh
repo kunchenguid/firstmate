@@ -2247,6 +2247,69 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
 # It must surface at once, never wait out the wedge timer, so these users (a
 # non-no-mistakes crew, or any crew with no running pipeline) are never left hanging.
 
+test_quota_stale_surfaced() {
+  local dir state fakebin out capture_file window key pane_hash sig pid harness pane provider observed reset display recorded gen
+  for harness in grok pi pi-trust; do
+    dir=$(make_case "quota-$harness"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-quota"
+    case "$harness" in
+      grok) pane='You hit your weekly limit' ;;
+      pi) pane='Error: Quota reached. Please wait 2h29m27s' ;;
+      pi-trust) pane='Trust project folder' ;;
+    esac
+    printf '%s' "$pane" > "$capture_file"
+    printf 'window=%s\nkind=ship\nharness=%s\n' "$window" "${harness%-trust}" > "$state/quota.meta"
+    if [ "$harness" != pi-trust ]; then
+      printf 'working: implementing\n' > "$state/quota.status"
+      sig=$(seen_sig "$state/quota.status"); printf '%s' "$sig" > "$state/.seen-quota_status"
+    fi
+    key=$(printf '%s' "$window" | tr ':/.' '___'); pane_hash=$(hash_text "$pane")
+    printf '%s' "$pane_hash" > "$state/.hash-$key"; printf '1\n' > "$state/.count-$key"
+    if [ "$harness" = grok ]; then
+      watch_bg "$state" "$fakebin" "$out" env FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+        FM_FAKE_CREW_STATE='state: working · source: run-step · ci running' FM_STALE_ESCALATE_SECS=999
+      pid=$!
+      if ! wait_poll_cycle "$state" "$pid"; then reap "$pid"; fail 'active validation mislabeled a quota stop'; fi
+      [ ! -e "$state/.pane-stop-$key" ] || { reap "$pid"; fail 'active validation wrote stop record'; }
+      reap "$pid"
+    fi
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_WATCH_HANDLING_SUCCESSOR=1 \
+      FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
+      FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 100 || fail 'quota stop did not wake promptly'
+    if [ "$harness" = pi-trust ]; then
+      grep -F "stale: $window (blocked-at-prompt: pi trust)" "$out" >/dev/null || fail 'missing trust reason without status file'
+    else
+      grep -F "stale: $window (quota-exhausted:" "$out" >/dev/null || fail "missing quota reason: $(cat "$out")"
+    fi
+    grep -F "$(cat "$out")" "$state/.wake-queue" >/dev/null || fail 'stop reason not durable'
+    IFS=$'\t' read -r recorded provider observed reset display gen < "$state/.pane-stop-$key"
+    [ "$recorded" = "$pane_hash" ] || fail 'reset not bound to pane'
+    if [ "$harness" = pi-trust ]; then
+      [ "$reset" = - ] && [ "$display" = trust ] || fail 'incorrect trust record'
+    elif [ "$harness" = grok ]; then
+      [ "$reset" = - ] && [ "$provider" = grok ] || fail 'invented weekly reset'
+    else
+      [ "$((reset - observed))" = 8967 ] && [ "$display" = 2h29m27s ] || fail 'wrong reset epoch'
+    fi
+    [ ! -e "$state/.wedge-escalations-$key" ] || fail 'quota entered wedge ladder'
+    recorded=$(cat "$state/.pane-stop-$key")
+    ack_stopped_cycle "$state" || fail 'could not acknowledge stop'
+    watch_bg "$state" "$fakebin" "$out" env FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+    pid=$!
+    if ! wait_poll_cycle "$state" "$pid"; then reap "$pid"; fail 'unchanged stop repeated'; fi
+    [ "$(cat "$state/.pane-stop-$key")" = "$recorded" ] || { reap "$pid"; fail 'relative reset drifted'; }
+    printf 'normal idle prompt after recovery' > "$capture_file"
+    wait_for_exit "$pid" 150 || { reap "$pid"; fail 'recovery did not restore ordinary stale triage'; }
+    grep -Fx "stale: $window" "$out" >/dev/null || fail 'normal pane retained quota reason'
+    [ ! -e "$state/.pane-stop-$key" ] || fail 'recovery retained obsolete stop record'
+  done
+  pass 'idle stops (including before status exists) surface once, preserve reset epochs, and clear on recovery'
+}
+
 test_nonterminal_stale_not_working_surfaced() {
   local dir state fakebin out drain_out capture_file window key pane_hash sig pid
   dir=$(make_case nonterminal-stale-stopped); state="$dir/state"; fakebin="$dir/fakebin"
@@ -6310,6 +6373,7 @@ test_busy_pane_default_turn_age_bound_is_3600s
 test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
+test_quota_stale_surfaced
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
