@@ -140,8 +140,33 @@ test_claude_escape_records_interrupt_idle() {
   pass "fm-send: a successful Claude Escape records the interrupt lifecycle edge"
 }
 
+# agy fires no Stop hook for an interrupted turn and has no session-end event,
+# so this legacy key plane must close the record for the same reason fm-control
+# does. bin/fm-control-lib.sh's fm_control_interrupt_clears_busy owns the list.
+test_agy_escape_records_interrupt_idle() {
+  local dir fb log rc home gen out
+  dir="$TMP_ROOT/agy-interrupt"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/sleep.log"
+  home="$dir/home"; mkdir -p "$home/state"
+  fm_write_meta "$home/state/task.meta" \
+    "window=sess:win" "worktree=$home/wt" "project=$home/project" \
+    "harness=agy" "kind=scout" "mode=no-mistakes" "yolo=off"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" task)
+  printf 'busy_gen=%s\n' "$gen" >> "$home/state/task.meta"
+  : > "$log"
+
+  env PATH="$fb:$PATH" FM_HOME="$home" FM_SLEEP_LOG="$log" \
+    "$SEND" task --key Escape 2>/dev/null; rc=$?
+  expect_code 0 "$rc" "agy Escape send should succeed"
+  out=$(fm_busy_classify tmux sess:win agy task "$home/state")
+  [ "$out" = "idle fm-interrupt" ] \
+    || fail "agy Escape must classify idle/fm-interrupt, got '$out'"
+  pass "fm-send: a successful agy Escape records the interrupt lifecycle edge"
+}
+
 test_default_send_pauses_one_second
 test_zero_disables_pause
 test_pause_is_tunable
 test_key_path_never_pauses
 test_claude_escape_records_interrupt_idle
+test_agy_escape_records_interrupt_idle
