@@ -161,6 +161,16 @@ fi
 USE_LOCAL_BASE=0
 if [ "$MODE" = local-only ] && [ -n "$RECORDED_BASE" ]; then
   USE_LOCAL_BASE=1
+elif [ "$MODE" = local-only ] && [ -z "$RECORDED_BASE" ] \
+  && git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
+  REMOTE_BASE_STATUS=0
+  git -C "$PROJ" ls-remote --exit-code --heads origin "refs/heads/$COMPARE_BASE" >/dev/null 2>&1 \
+    || REMOTE_BASE_STATUS=$?
+  case "$REMOTE_BASE_STATUS" in
+    0) ;;
+    2) USE_LOCAL_BASE=1 ;;
+    *) echo "error: could not determine whether origin/$COMPARE_BASE exists for local-only review" >&2; exit 1 ;;
+  esac
 elif [ "$KIND" = scout ] && [ -n "$RECORDED_BASE" ] \
   && git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   REMOTE_BASE_STATUS=0
