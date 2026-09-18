@@ -262,11 +262,12 @@ test_enabled_records_and_injects_identical_carrier_before_launch() {
   local rec out status meta mtp itp gl tl ll
   rec=$(make_spawn_case tc-on)
   read_case_record "$rec"
-  : > "$HOME_DIR/config/launch-env-allowlist"
+  printf '%s\n' TRACEPARENT > "$HOME_DIR/config/launch-env-allowlist"
   : > "$HOME_DIR/config/trace-context"   # enable via the real config path
   start_trace_session "$HOME_DIR"
 
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
+  out=$(TRACEPARENT='00-11111111111111111111111111111111-2222222222222222-01' \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR")
   status=$?
   expect_code 0 "$status" "enabled trace-context spawn should succeed"
   assert_contains "$out" "spawned $CASE_ID" "enabled spawn should report success"

@@ -24,7 +24,8 @@ The router owns Muse's task-kind boundary.
 ## Credential preflight
 
 Muse reads winning `META_API_KEY` or `${XDG_CONFIG_HOME:-$HOME/.config}/muse/auth.json` written by OIDC device-code `muse login` or `muse auth set --api-key-stdin`.
-The spawn accepts the environment key only if the backend worker already has it: caller-only variables do not cross a long-lived daemon, and secrets never enter argv.
+With an enabled allowlist that names `META_API_KEY`, spawn accepts a nonempty value from the process that runs `fm-spawn.sh` and delivers it through the private launch-environment path.
+Without that grant, spawn accepts an environment key only when the tmux worker session already has it.
 Stored credentials are the supported fleet path.
 It resolves non-secret `XDG_CONFIG_HOME` and `XDG_DATA_HOME` absolutely before preflight and forwarding, keeping auth and logs aligned.
 
