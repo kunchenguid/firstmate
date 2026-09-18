@@ -93,6 +93,12 @@ export interface UnreadWakeScope {
    * task, so a prompt that claims one is not scoped by task.
    */
   checkSeqs: string[];
+  /**
+   * The heartbeat rows included in eligibleSeqs. A heartbeat names no task,
+   * so a prompt that claims one is not scoped by task, including when a
+   * non-heartbeat wake claims it in the away posture.
+   */
+  heartbeatSeqs: string[];
   taskByWakeKey: Record<string, string>;
 }
 
@@ -105,6 +111,7 @@ const EMPTY_SCOPE: UnreadWakeScope = {
   corrupted: false,
   needsDecisionKeys: [],
   checkSeqs: [],
+  heartbeatSeqs: [],
   taskByWakeKey: {},
 };
 const UNSAFE_SCOPE: UnreadWakeScope = {
@@ -116,6 +123,7 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
   corrupted: true,
   needsDecisionKeys: [],
   checkSeqs: [],
+  heartbeatSeqs: [],
   taskByWakeKey: {},
 };
 
@@ -268,6 +276,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
   const eligibleTasks = new Set<string>();
   const needsDecisionKeys: string[] = [];
   const checkSeqs: string[] = [];
+  const heartbeatSeqs: string[] = [];
   const staleDecisionOwnership = new Map<string, boolean>();
   const resolveVerb = process.env.FM_CLASSIFY_RESOLVE_VERB || "resolved";
   const heldVerb = process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB || "captain-held";
@@ -284,7 +293,10 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
     if (kind === "heartbeat") {
       // Attended, a heartbeat row is claimed only by a heartbeat review; away,
       // no main drain will ever take it, so any wake claims it.
-      if (heartbeat || afk) eligibleSeqs.push(seq);
+      if (heartbeat || afk) {
+        eligibleSeqs.push(seq);
+        heartbeatSeqs.push(seq);
+      }
       continue;
     }
     if (kind === "check") {
@@ -383,6 +395,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
     corrupted: false,
     needsDecisionKeys,
     checkSeqs,
+    heartbeatSeqs,
     taskByWakeKey: Object.fromEntries(taskByKey),
   };
 }

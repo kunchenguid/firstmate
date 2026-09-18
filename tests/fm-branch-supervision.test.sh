@@ -883,8 +883,9 @@ test_away_record_relocates_main_owned_actions_to_the_branch() {
   assert_contains "$out" "local-only landing (fm-merge-local) refused" "merge-local refusal lost its wording under the record"
 
   # A fresh spawn passes the partition and meets the spend cap: one ordinary
-  # task record against a cap of 2 proceeds to ordinary validation, a
-  # secondmate record never counts, and a second ordinary record refuses.
+  # task record against a cap of 2, then a second ordinary record refuses.
+  # An arbitrary id is not already-queued work, so the branch is refused at
+  # that gate rather than proceeding to ordinary validation.
   fm_write_meta "$home/state/task-a.meta" "window=fm-task-a" "kind=ship"
   fm_write_meta "$home/state/mate-1.meta" "window=remote:mate-1" "kind=secondmate"
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
@@ -892,6 +893,7 @@ test_away_record_relocates_main_owned_actions_to_the_branch() {
   status=$?
   [ "$status" -ne 6 ] || fail "branch fm-spawn still hit the partition under the record: $out"
   assert_contains "$out" "main is parked" "the spawn relocation did not announce itself"
+  assert_contains "$out" "already-queued unblocked work" "an arbitrary branch spawn was not held to queued work"
   assert_not_contains "$out" "caps concurrent workers" "one ordinary task under a cap of 2 was refused"
   fm_write_meta "$home/state/task-b.meta" "window=fm-task-b" "kind=ship"
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
@@ -923,6 +925,79 @@ test_away_record_relocates_main_owned_actions_to_the_branch() {
   pass "the away-posture record relocates the PR merge and a spawn under the spend cap to the branch, never local landing, and only while confirmed and valid"
 }
 
+test_away_branch_spawn_requires_queued_dispatchable_work() {
+  local home root out status
+  home="$TMP_ROOT/away-queued-home"
+  root="$TMP_ROOT/away-queued-root"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$root"
+  git init -q -b main "$root"
+  git -C "$root" commit -q --allow-empty -m init
+  ln -s "$ROOT/bin" "$root/bin"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  printf 'manual\n' > "$home/config/backlog-backend"
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [ ] task-queued - already queued work
+
+## Done
+EOF
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" propose --spend 2 >/dev/null || fail "away propose failed"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null || fail "away confirm failed"
+
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-spawn.sh" task-arbitrary --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -eq 1 ] || fail "an arbitrary branch spawn exited $status, not 1: $out"
+  assert_contains "$out" "already-queued unblocked work" "an arbitrary id was dispatched under the record"
+
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-spawn.sh" task-queued --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  assert_not_contains "$out" "already-queued unblocked work" "a queued item was refused as if it were arbitrary: $out"
+  [ "$status" -ne 6 ] || fail "a queued branch spawn hit the partition: $out"
+  assert_contains "$out" "main is parked" "the queued spawn lost its relocation note"
+
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    "$ROOT/bin/fm-spawn.sh" task-arbitrary --mode no-mistakes --yolo off 2>&1)
+  assert_not_contains "$out" "already-queued unblocked work" "main's attended spawn was held to the branch queued-work gate"
+  pass "relocated branch spawn admits only already-queued dispatchable work, including on a manual-backend home"
+}
+
+test_away_spend_cap_is_rechecked_under_the_task_set_lock() {
+  local home root out_a out_b status_a status_b metas
+  home="$TMP_ROOT/away-cap-lock-home"
+  root="$TMP_ROOT/away-cap-lock-root"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$root"
+  git init -q -b main "$root"
+  git -C "$root" commit -q --allow-empty -m init
+  ln -s "$ROOT/bin" "$root/bin"
+  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+- [ ] task-q1 - first queued spawn
+- [ ] task-q2 - second queued spawn
+
+## Done
+EOF
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" propose --spend 1 >/dev/null || fail "away propose failed"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null || fail "away confirm failed"
+
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    "$ROOT/bin/fm-spawn.sh" task-q1 --mode no-mistakes --yolo off \
+    > "$home/q1.out" 2>&1 &
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    "$ROOT/bin/fm-spawn.sh" task-q2 --mode no-mistakes --yolo off \
+    > "$home/q2.out" 2>&1 &
+  wait || true
+  out_a=$(cat "$home/q1.out" 2>/dev/null || true)
+  out_b=$(cat "$home/q2.out" 2>/dev/null || true)
+  metas=0
+  [ -f "$home/state/task-q1.meta" ] && metas=$((metas + 1))
+  [ -f "$home/state/task-q2.meta" ] && metas=$((metas + 1))
+  [ "$metas" -le 1 ] || fail "two concurrent spawns both published under spend cap 1: q1=$out_a q2=$out_b"
+  pass "the away spend cap is rechecked under the task-set lock so concurrent spawns cannot both publish"
+}
+
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_startup_replay_preserves_silence
@@ -944,3 +1019,5 @@ test_claim_refuses_the_other_actors_name_loudly
 test_release_actor_drops_only_that_actors_leases
 test_branch_cannot_force_teardown_or_directly_relaunch
 test_away_record_relocates_main_owned_actions_to_the_branch
+test_away_branch_spawn_requires_queued_dispatchable_work
+test_away_spend_cap_is_rechecked_under_the_task_set_lock

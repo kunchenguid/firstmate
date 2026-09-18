@@ -1693,15 +1693,28 @@ await attendedOffer.settlement;
 globalThis.__fmOnBranchPrompt = undefined;
 
 // 2. A captain outcome reported while attended opens its processing request;
-// the record appearing before the next run boundary cancels the volatile
-// request instead of re-presenting it to a main that has just been parked.
+// the record appearing before that request is consumed suppresses the first
+// queued delivery rather than letting it open a parked-main turn.
 const first = await report.execute("c1", { task: "task-d", verdict: "captain", summary: "PR https://example.com/pr/1 is ready for review" }, undefined, undefined, {});
 if (first.isError) throw new Error(`attended captain report failed: ${JSON.stringify(first)}`);
 const seq1 = JSON.parse(outcomeScript(["list", "--recent", "1"])).seq;
 if (requests().length !== 1) throw new Error(`the attended captain outcome opened ${requests().length} requests, not 1`);
+const pending = requests()[0];
+if (pending.message.customType !== "fm-branch-process") {
+  throw new Error(`the first queued request was not a processing delivery: ${JSON.stringify(pending.message)}`);
+}
+if (!pending.message.content.includes(`[seq ${seq1}]`)) {
+  throw new Error(`the first queued request lost seq ${seq1}: ${pending.message.content}`);
+}
 contract(["propose", "--grant", "task-d"]);
 contract(["confirm"]);
-await runOf(() => mainEntries.push({ type: "message", message: { role: "assistant", content: [] } }));
+let aborted = false;
+const abortCtx = { ...defaultSessionCtx, abort() { aborted = true; } };
+await fire("before_agent_start", { prompt: pending.message.content }, abortCtx);
+await fire("agent_start", {}, abortCtx);
+if (!aborted) throw new Error("the first queued processing request was not suppressed under the record");
+await fire("agent_end", {});
+await fire("agent_settled", {});
 if (requests().length !== 1) throw new Error("a request pending when the record appeared was re-presented to the parked main");
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq1])) throw new Error(`the record moved the processed marker: ${unprocessedSeqs()}`);
 
@@ -1777,6 +1790,107 @@ EOF
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "the away posture must park main and present after archive: $out"
   pass "under the away-posture record the wake carries the verbatim read-back tail, claims every row, opens no processing turn, cancels a pending request, and presents the accumulated rows after archive"
+}
+
+test_away_only_wake_rejects_when_record_is_archived_before_drain() {
+  local repo home out status
+  repo="$TMP_ROOT/away-only-recheck-root"
+  home="$TMP_ROOT/away-only-recheck-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, home, realRoot, bus, makeOffer, mainUserMessages }; })()`);
+const { fire, home, realRoot, bus, makeOffer, mainUserMessages } = globalThis.__t;
+import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+
+const contract = (args) => {
+  const result = spawnSync("bash", [`${realRoot}/bin/fm-afk-contract.sh`, ...args], {
+    encoding: "utf8",
+    env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state` },
+  });
+  if (result.status !== 0) throw new Error(`fm-afk-contract.sh ${args.join(" ")} failed: ${result.stderr}`);
+  return (result.stdout || "").trim();
+};
+
+await fire("session_start", {});
+contract(["propose"]);
+contract(["confirm"]);
+writeFileSync(`${home}/state/.wake-queue`, "1\t1\tcheck\tmain-only\tcheck: task-d.check.sh: PR merged\n");
+const offer = makeOffer("check: task-d.check.sh: PR merged", [], false, true);
+bus.emit("fm-branch-supervision:dispatch", offer);
+if (!offer.accepted) throw new Error("the away check-only wake was refused at accept");
+contract(["archive"]);
+const failure = await offer.settlement.then(() => null, (error) => error);
+if (!(failure instanceof Error) || !failure.message.includes("no longer branch-eligible")) {
+  throw new Error(`an accepted away-only wake quiet-no-op'd after archive: ${String(failure)}`);
+}
+if ((globalThis.__fmPrompts ?? []).length !== 0) {
+  throw new Error(`the archived away-only wake still prompted the branch: ${JSON.stringify(globalThis.__fmPrompts)}`);
+}
+if (mainUserMessages.length !== 0) {
+  throw new Error("the rejected settlement leaked a main user message from the branch");
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "an accepted away-only wake must reject after archive: $out"
+  pass "an accepted away-only wake rejects settlement when the record is archived before drain"
+}
+
+test_away_claimed_heartbeat_on_a_task_wake_lifts_task_scoping() {
+  local repo home out status
+  repo="$TMP_ROOT/away-heartbeat-scope-root"
+  home="$TMP_ROOT/away-heartbeat-scope-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, settle, home, realRoot, bus, makeOffer, approvedProject, defaultSessionCtx }; })()`);
+const { fire, settle, home, realRoot, bus, makeOffer, approvedProject, defaultSessionCtx } = globalThis.__t;
+import { spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+
+const contract = (args) => {
+  const result = spawnSync("bash", [`${realRoot}/bin/fm-afk-contract.sh`, ...args], {
+    encoding: "utf8",
+    env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state` },
+  });
+  if (result.status !== 0) throw new Error(`fm-afk-contract.sh ${args.join(" ")} failed: ${result.stderr}`);
+  return (result.stdout || "").trim();
+};
+
+await fire("session_start", {}, defaultSessionCtx);
+contract(["propose"]);
+contract(["confirm"]);
+writeFileSync(
+  `${home}/state/.wake-queue`,
+  "1\t1\tsignal\tbranch-driver.status\tsignal: branch-driver.status\n2\t2\theartbeat\theartbeat\theartbeat\n",
+);
+let finishPrompt;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishPrompt = resolve; });
+const offer = makeOffer("signal: branch-driver.status", [approvedProject], false, true);
+bus.emit("fm-branch-supervision:dispatch", offer);
+if (!offer.accepted) throw new Error("the mixed away wake was refused");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "mixed away branch prompt");
+const snapshot = readFileSync(`${home}/state/.branch-eligible-rows`, "utf8").trim().split("\n").join(",");
+if (snapshot !== "1,2") throw new Error(`the mixed away wake claimed rows ${snapshot}, not signal+heartbeat`);
+const session = globalThis.__fmSessions[0];
+const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+const fleet = await report.execute("fleet", { task: "fleet", verdict: "routine", summary: "fleet heartbeat under a task wake" }, undefined, undefined, {});
+if (fleet.isError) throw new Error(`a claimed heartbeat on a task wake still scoped the report: ${JSON.stringify(fleet)}`);
+finishPrompt();
+await offer.settlement;
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "a claimed heartbeat on a non-heartbeat wake must lift task scoping: $out"
+  pass "a claimed heartbeat row on a non-heartbeat away wake lifts task scoping for the fleet report"
 }
 
 test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under() {
@@ -5088,6 +5202,8 @@ test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback
 test_away_record_parks_main_and_presents_after_archive
+test_away_only_wake_rejects_when_record_is_archived_before_drain
+test_away_claimed_heartbeat_on_a_task_wake_lifts_task_scoping
 test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under
 test_branch_report_refuses_a_task_the_wake_did_not_name
 test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligible_work

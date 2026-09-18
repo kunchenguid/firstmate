@@ -126,6 +126,7 @@ import {
   type BranchPickerItem,
 } from "./lib/fm-branch-model-picker.ts";
 import {
+  classifyFirstmateCurrentOperationalText,
   classifyFirstmateOperationalText,
   encodeFirstmateOperationalInputWith,
 } from "./lib/fm-operational-input.ts";
@@ -652,6 +653,7 @@ export default function (pi: ExtensionAPI) {
   // session generation.
   type ProcessingState = { sequences: string; through: number; triggered: number; pending: boolean; nextTurnQueued: boolean };
   let processing: ProcessingState | null = null;
+  let queuedProcessingDelivery = false;
   let processedInitializedGeneration = -1;
   // One revision for BOTH selections: a model or effort change invalidates an
   // in-flight branch build exactly the same way.
@@ -1086,6 +1088,7 @@ export default function (pi: ExtensionAPI) {
     if (processing.triggered < PROCESSING_TRIGGERED_ATTEMPTS) {
       processing.triggered += 1;
       processing.pending = true;
+      queuedProcessingDelivery = true;
       pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
     } else if (!processing.nextTurnQueued) {
       processing.nextTurnQueued = true;
@@ -1445,7 +1448,7 @@ ${context.command}
     return `\n\n${AWAY_POSTURE_TAIL}\n${readback || "(the record's read-back could not be rendered; treat every grant and clause as unavailable and hold on doubt)"}`;
   }
 
-  function enqueueWake(message: string, acceptedGeneration: number, recoveryProbe = false): Promise<void> {
+  function enqueueWake(message: string, acceptedGeneration: number, recoveryProbe = false, acceptedAway = false): Promise<void> {
     const acceptedSelectionRevision = branchSelectionRevision;
     const delivery = branchChain
       .then(async () => {
@@ -1485,7 +1488,12 @@ ${context.command}
         // scopeForUnreadWake itself marks corrupted (the queue or its
         // metadata could not be read safely, or an unresolvable task-local
         // row) still falls back to main.
-        if (scope.status === "empty" || (!scope.corrupted && scope.eligibleSeqs.length === 0)) return;
+        if (scope.status === "empty" || (!scope.corrupted && scope.eligibleSeqs.length === 0)) {
+          if (acceptedAway) {
+            throw new Error("accepted away-only wake is no longer branch-eligible");
+          }
+          return;
+        }
         if (scope.corrupted) {
           throw new Error("the unread wake queue could not be read safely");
         }
@@ -1503,7 +1511,7 @@ ${context.command}
         const entryOffset = sessionManager.getEntries().length;
         // A claimed check row names no task, so a prompt carrying one is not
         // scoped by task (only possible in the away posture).
-        wakeTaskScope = heartbeat || scope.checkSeqs.length > 0
+        wakeTaskScope = heartbeat || scope.checkSeqs.length > 0 || scope.heartbeatSeqs.length > 0
           ? null
           : { rows: [...scope.eligibleSeqs], tasks: new Set(scope.eligibleTasks) };
         const postureTail = afk ? await awayPostureTail() : "";
@@ -1618,7 +1626,7 @@ ${context.command}
     if (branchBroken && !recoveryProbe) return; // main owns every wake inside the cooldown window
     if (!collectCurrentMainDialog()) return;
     if (recoveryProbe && providerRecovery) providerRecovery.probeInFlight = true;
-    offer.accept(enqueueWake(offer.message, generation, recoveryProbe));
+    offer.accept(enqueueWake(offer.message, generation, recoveryProbe, afkPostureRecordPresent(state)));
   });
 
   // Pi awaits every extension event handler, so an awaited ownership read
@@ -1638,6 +1646,14 @@ ${context.command}
     // Stage it verbatim and remember the future persisted index for turn_end's
     // duplicate suppression. Operational extension injections are not dialog.
     const prompt = event.prompt.trim();
+    if (
+      classifyFirstmateCurrentOperationalText(prompt)?.trim() === "branch-outcome" &&
+      afkPostureRecordPresent(state)
+    ) {
+      processing = null;
+      ctx?.abort?.();
+      return;
+    }
     if (!prompt || isOperationalUserText(prompt)) return;
     const file = currentMainSession.getSessionFile() ?? "";
     const index = mirrorCollection.collectAnchor?.index ?? currentMainSession.getEntries().length;
@@ -1645,11 +1661,18 @@ ${context.command}
     mirrorCollection.stagedCaptain = { file, index, text: prompt };
   });
 
-  pi.on?.("agent_start", () => {
+  pi.on?.("agent_start", (_event, ctx) => {
     mainStreaming = true;
     // Pi delivers a queued nextTurn copy with the prompt that starts this run,
     // so a fresh copy may be queued again once this run settles unacknowledged.
     if (processing) processing.nextTurnQueued = false;
+    if (queuedProcessingDelivery && afkPostureRecordPresent(state)) {
+      queuedProcessingDelivery = false;
+      processing = null;
+      ctx?.abort?.();
+      return;
+    }
+    queuedProcessingDelivery = false;
   });
   pi.on?.("agent_end", () => {
     mainStreaming = false;
@@ -1662,6 +1685,7 @@ ${context.command}
   // reply that only paraphrased it - and is presented again.
   pi.on?.("agent_settled", async () => {
     mainStreaming = false;
+    queuedProcessingDelivery = false;
     if (processing) processing.pending = false;
     const settledGeneration = generation;
     await enqueueDelivery(async () => {
