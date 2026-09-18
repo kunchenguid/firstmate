@@ -16,6 +16,7 @@
 # setting. Requires fm-env-lib.sh (fmx_env_get) and fm-timing-lib.sh.
 
 FM_TYPESAFE_BASE=https://api.typesafe.ai
+# shellcheck disable=SC2034 # Read by the sourcing callers' request builders.
 FM_TYPESAFE_MODEL=jev-latest
 FM_TYPESAFE_TIMEOUT=5
 
@@ -32,6 +33,7 @@ fm_typesafe_key_resolve() {
 # /v1/systemone and write the response body to <response-file>. Sets
 # FM_TYPESAFE_HTTP (000 on a transport failure or timeout) and
 # FM_TYPESAFE_LATENCY_MS. Always returns 0; the caller judges the outcome.
+# shellcheck disable=SC2034 # Output globals read by the sourcing callers.
 fm_typesafe_post() {
   local resp=$1 t0 t1
   t0=$(fm_timing_now_ms)
