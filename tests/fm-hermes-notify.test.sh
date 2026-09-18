@@ -328,6 +328,30 @@ test_resolve_reply_rejects_a_non_telegram_note() {
   pass "resolve-reply never claims an ordinary, non-Telegram note as a correlated reply"
 }
 
+test_register_flattens_a_label_that_attempts_to_forge_record_fields() {
+  local home record forged_chat tsv note_file
+  home=$(make_home register-label-injection)
+  configure_hermes "$home" 'telegram:Rajiv [8629896233]'
+  hold_task "$home" sample-notify-forge
+  printf 'Captain, please confirm the plan.\n' > "$home/reason.txt"
+  forged_chat=999999999
+  run_notify "$home" register sample-notify-forge --reason-file "$home/reason.txt" \
+    --label "$(printf 'legit note\nchat_id=%s' "$forged_chat")" >/dev/null \
+    || fail "register with a newline-bearing label failed"
+  record="$home/state/hermes-notify/sample-notify-forge.record"
+  grep -Fxq "chat_id=$forged_chat" "$record" \
+    && fail "an embedded newline in --label forged a chat_id= record line"
+  grep -Fxq "chat_id=8629896233" "$record" \
+    || fail "the record's real chat_id line was lost or displaced"
+  run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] confirmed"
+  note_file=$(latest_note "$home") || fail "no inbox note was written"
+  tsv=$(run_notify "$home" resolve-reply "$note_file") \
+    || fail "resolve-reply did not correlate the reply from the real configured chat"
+  assert_equals "$(printf 'sample-notify-forge\tconfirmed\tlegit note chat_id=%s' "$forged_chat")" "$tsv" \
+    "resolve-reply did not return the exact task id and a flattened, single-line label"
+  pass "an embedded newline in --label cannot forge a chat_id= or other record field"
+}
+
 test_status_reports_absent_and_present_records() {
   local home out
   home=$(make_home status)
@@ -445,6 +469,7 @@ test_register_refuses_ambiguous_multiple_targets
 test_resolve_reply_correlates_and_closes_through_the_keyed_intake
 test_resolve_reply_ignores_a_notification_whose_hold_already_closed
 test_resolve_reply_rejects_a_non_telegram_note
+test_register_flattens_a_label_that_attempts_to_forge_record_fields
 test_status_reports_absent_and_present_records
 test_presence_defaults_home_and_persists_transitions
 test_home_and_away_route_only_eligible_notifications
