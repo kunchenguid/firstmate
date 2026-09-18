@@ -20,16 +20,19 @@
 #      project's .claude/settings.json or .claude/settings.local.json, which
 #      the docs say those two specific values are silently ignored from.
 #   3. Every other permission mode value (acceptEdits, manual, dontAsk, plan)
-#      still applies from any settings file, so a project-level acceptEdits is
-#      irrelevant to this detector regardless - it only ever prints "auto" or
-#      "bypass" (see the bootstrap diagnostic; nothing else is actionable).
+#      still applies from any settings file, and a project or local settings
+#      file outranks the user file - so a project-level defaultMode such as
+#      plan overrides a user-level auto, and the user-settings fallback must
+#      then stay silent rather than report auto.
 #   4. The detector must never guess: with no claude ancestor found, no flag,
 #      and no matching user setting, it prints NOTHING, not a "default" token -
 #      the caller (bin/fm-bootstrap.sh) fails quiet on that silence rather than
 #      acting on an unconfirmed mode.
 #   5. A launcher's own free-form text (a crewmate's brief, appended via
 #      --append-system-prompt) must never be misread as a flag: the search is
-#      bounded to the command-line prefix before that argument.
+#      bounded to the command-line prefix before that argument. A secondmate
+#      launch has no --append-system-prompt and ends in a positional brief, so
+#      the EARLIEST permission flag is the one that counts.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -186,6 +189,43 @@ test_brief_only_text_with_no_real_flag_is_silent() {
   pass "brief text alone, with no real flag before it, reports nothing"
 }
 
+test_secondmate_positional_brief_never_outranks_leading_flag() {
+  # fm-spawn.sh's secondmate launch omits --append-system-prompt and passes the
+  # launch brief as a trailing positional argument, so brief prose naming
+  # --permission-mode must lose to Claude's own leading flag.
+  local bin pid got
+  bin=$(claude_bin "$TMP_ROOT/secondmate")
+  launch "$bin" --dangerously-skip-permissions --settings '{"feedbackDrafts":"off"}' --model opus \
+    'a secondmate brief explaining that config/claude-permission-mode may select --permission-mode auto'
+  pid=$LAUNCHED_PID
+  sleep 0.3
+  got=$(CLAUDE_CONFIG_DIR="$TMP_ROOT/no-such-config" "$HARNESS" claude-permission-mode "$pid")
+  reap "$pid"
+  assert_equals bypass "$got" \
+    "a leading --dangerously-skip-permissions must win over --permission-mode text in a trailing positional brief"
+  pass "a trailing positional brief mentioning --permission-mode never outranks the leading flag"
+}
+
+test_project_default_mode_overrides_user_auto() {
+  local bin pid got cfg home
+  bin=$(claude_bin "$TMP_ROOT/project-override")
+  cfg="$TMP_ROOT/project-override-cfg"
+  home="$TMP_ROOT/project-override-root"
+  mkdir -p "$cfg" "$home/.claude"
+  printf '%s' '{"permissions":{"defaultMode":"auto"}}' > "$cfg/settings.json"
+  printf '%s' '{"permissions":{"defaultMode":"plan"}}' > "$home/.claude/settings.local.json"
+  launch "$bin"
+  pid=$LAUNCHED_PID
+  sleep 0.3
+  got=$(CLAUDE_CONFIG_DIR="$cfg" FM_ROOT_OVERRIDE="$home" "$HARNESS" claude-permission-mode "$pid")
+  assert_equals '' "$got" "a project-local defaultMode of plan outranks a user-level auto, so nothing may be reported"
+  printf '%s' '{"permissions":{"defaultMode":"auto"}}' > "$home/.claude/settings.local.json"
+  got=$(CLAUDE_CONFIG_DIR="$cfg" FM_ROOT_OVERRIDE="$home" "$HARNESS" claude-permission-mode "$pid")
+  reap "$pid"
+  assert_equals auto "$got" "a project-level auto is ignored by Claude Code, so the user-level auto still applies"
+  pass "a project or local non-auto defaultMode suppresses the user-settings auto fallback"
+}
+
 test_space_form_permission_mode
 test_equals_form_permission_mode
 test_dangerously_skip_permissions_is_bypass
@@ -194,3 +234,5 @@ test_user_settings_auto_fallback
 test_user_settings_accept_edits_is_not_actionable_but_still_silent_correctly
 test_brief_text_after_append_system_prompt_is_never_matched
 test_brief_only_text_with_no_real_flag_is_silent
+test_secondmate_positional_brief_never_outranks_leading_flag
+test_project_default_mode_overrides_user_auto
