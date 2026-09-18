@@ -755,9 +755,10 @@ SH
 
 # One ShellCheck process per root. Passing the whole canonical set in a
 # single invocation still follows in-set sources and is not the no-x posture.
+# Each process runs under the machine-wide slot bound, not just this batch of 4.
 fm_lint_nox_one_root() {
   local index=$1 path=$2 outdir=$3
-  shellcheck --norc --format gcc -- "$path" > "$outdir/$index" || true
+  "$ROOT/bin/fm-lint-slot.sh" shellcheck --norc --format gcc -- "$path" > "$outdir/$index" || true
 }
 
 test_local_exclusion_list_covers_every_no_external_sources_code() {
@@ -1404,6 +1405,139 @@ SH
   pass "seeded dispatcher, adapter, production-owner, and test-local diagnostics preserve parity"
 }
 
+# --- whole-machine ShellCheck slot bound (bin/fm-lint-slot.sh) --------------
+
+SLOT="$ROOT/bin/fm-lint-slot.sh"
+
+# A slot-held probe: records how many probes are inside a slot at once.
+fm_lint_slot_write_probe() {
+  local probe=$1
+  cat > "$probe" <<'SH'
+#!/usr/bin/env bash
+dir=$1
+: > "$dir/in.$$"
+printf '%s\n' "$(find "$dir" -name 'in.*' | wc -l | tr -d '[:space:]')" > "$dir/seen.$$"
+sleep 0.4
+rm -f "$dir/in.$$"
+SH
+  chmod +x "$probe"
+}
+
+test_slot_bound_holds_across_independent_processes() {
+  local tmp i peak count
+  tmp=$(fm_test_tmproot fm-lint-slot-bound)
+  mkdir -p "$tmp/probe"
+  fm_lint_slot_write_probe "$tmp/probe.sh"
+  i=0
+  while [ "$i" -lt 6 ]; do
+    FM_LINT_SLOT_DIR="$tmp/slots" FM_LINT_SLOTS=2 "$SLOT" "$tmp/probe.sh" "$tmp/probe" &
+    i=$((i + 1))
+  done
+  wait
+  count=$(find "$tmp/probe" -name 'seen.*' | wc -l | tr -d '[:space:]')
+  [ "$count" -eq 6 ] || fail "slot bound ran $count of 6 commands"
+  peak=$(cat "$tmp/probe"/seen.* | sort -n | tail -1)
+  [ "$peak" -le 2 ] || fail "2 slots admitted $peak concurrent commands"
+  [ "$peak" -eq 2 ] || fail "2 free slots admitted only $peak concurrent command"
+  pass "fm-lint-slot.sh bounds the total across independently started processes"
+}
+
+test_slot_preserves_command_status_and_output() {
+  local tmp rc=0 out
+  tmp=$(fm_test_tmproot fm-lint-slot-identity)
+  FM_LINT_SLOT_DIR="$tmp/slots" FM_LINT_SLOTS=2 "$SLOT" sh -c 'exit 7' || rc=$?
+  [ "$rc" -eq 7 ] || fail "slot helper returned $rc, expected the command's 7"
+  out=$(FM_LINT_SLOT_DIR="$tmp/slots" FM_LINT_SLOTS=2 "$SLOT" sh -c 'echo out; echo err >&2' 2>&1)
+  [ "$out" = "out
+err" ] || fail "slot helper altered the command's output: $out"
+  [ "$(FM_LINT_SLOTS=2 "$SLOT" --slots)" = 2 ] || fail "--slots ignored FM_LINT_SLOTS"
+  pass "fm-lint-slot.sh preserves the command's status and output"
+}
+
+test_slot_is_released_when_the_holder_is_killed() {
+  local tmp holder start elapsed out
+  tmp=$(fm_test_tmproot fm-lint-slot-kill)
+  FM_LINT_SLOT_DIR="$tmp/slots" FM_LINT_SLOTS=1 "$SLOT" sleep 60 &
+  holder=$!
+  sleep 0.5
+  kill -KILL "$holder"
+  wait "$holder" 2>/dev/null || true
+  start=$(date +%s)
+  out=$(FM_LINT_SLOT_DIR="$tmp/slots" FM_LINT_SLOTS=1 FM_LINT_SLOT_WAIT_SECS=30 "$SLOT" echo ran 2>&1)
+  elapsed=$(( $(date +%s) - start ))
+  [ "$out" = ran ] || fail "a SIGKILLed holder left the slot unusable: $out"
+  [ "$elapsed" -lt 10 ] || fail "a SIGKILLed holder kept its slot for ${elapsed}s"
+  pass "fm-lint-slot.sh frees a slot the instant its holder is killed"
+}
+
+test_slot_wait_is_bounded_and_runs_loudly() {
+  local tmp holder out
+  tmp=$(fm_test_tmproot fm-lint-slot-wait)
+  FM_LINT_SLOT_DIR="$tmp/slots" FM_LINT_SLOTS=1 "$SLOT" sleep 60 &
+  holder=$!
+  sleep 0.5
+  out=$(FM_LINT_SLOT_DIR="$tmp/slots" FM_LINT_SLOTS=1 FM_LINT_SLOT_WAIT_SECS=1 "$SLOT" echo ran 2>&1)
+  kill -KILL "$holder"
+  wait "$holder" 2>/dev/null || true
+  assert_contains "$out" "ran" "a full slot set stalled the command instead of running it"
+  assert_contains "$out" "no slot freed within 1s; running without the machine-wide bound" \
+    "the bounded wait expired silently"
+  pass "fm-lint-slot.sh runs loudly instead of hanging when no slot frees"
+}
+
+test_slot_unavailable_coordination_runs_loudly() {
+  local tmp out diag
+  tmp=$(fm_test_tmproot fm-lint-slot-unavailable)
+  : > "$tmp/not-a-dir"
+  out=$(FM_LINT_SLOT_DIR="$tmp/not-a-dir" FM_LINT_SLOTS=1 FM_LINT_SLOT_DIAG_FD=3 \
+    "$SLOT" sh -c 'echo ran; echo err >&2' 2>&1 3> "$tmp/diag")
+  diag=$(cat "$tmp/diag")
+  [ "$out" = "ran
+err" ] || fail "unavailable coordination altered or blocked the command: $out"
+  assert_contains "$diag" "running without the machine-wide bound" \
+    "unavailable coordination stopped bounding silently"
+  mkdir "$tmp/real"
+  ln -s "$tmp/real" "$tmp/link"
+  diag=$(FM_LINT_SLOT_DIR="$tmp/link" FM_LINT_SLOTS=1 "$SLOT" true 2>&1)
+  assert_contains "$diag" "running without the machine-wide bound" \
+    "a symlinked slot directory was trusted"
+  pass "fm-lint-slot.sh runs loudly when its coordination is unavailable"
+}
+
+test_slot_holder_never_waits_for_a_second_slot() {
+  local tmp start elapsed out
+  tmp=$(fm_test_tmproot fm-lint-slot-nested)
+  start=$(date +%s)
+  out=$(FM_LINT_SLOT_DIR="$tmp/slots" FM_LINT_SLOTS=1 FM_LINT_SLOT_WAIT_SECS=30 \
+    "$SLOT" "$SLOT" echo ran 2>&1)
+  elapsed=$(( $(date +%s) - start ))
+  [ "$out" = ran ] || fail "a nested slot call did not run cleanly: $out"
+  [ "$elapsed" -lt 10 ] || fail "a slot holder waited ${elapsed}s for a second slot"
+  pass "fm-lint-slot.sh never makes a slot holder wait for another slot"
+}
+
+test_lint_shellcheck_runs_inside_a_slot() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): lint runs inside a slot"
+    return
+  fi
+  local tmp fixture holder out rc=0
+  tmp=$(fm_test_tmproot fm-lint-slot-lint)
+  fixture="$tmp/clean.sh"
+  printf '#!/usr/bin/env bash\nprintf ok\n' > "$fixture"
+  FM_LINT_SLOT_DIR="$tmp/slots" FM_LINT_SLOTS=1 "$SLOT" sleep 60 &
+  holder=$!
+  sleep 0.5
+  out=$(FM_LINT_SLOT_DIR="$tmp/slots" FM_LINT_SLOTS=1 FM_LINT_SLOT_WAIT_SECS=1 \
+    "$LINT" "$fixture" 2>&1 >/dev/null) || rc=$?
+  kill -KILL "$holder"
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "lint failed while its slot was contended: $out"
+  assert_contains "$out" "no slot freed within 1s" \
+    "fm-lint.sh launched ShellCheck outside the machine-wide slot bound"
+  pass "fm-lint.sh launches ShellCheck through the machine-wide slot bound"
+}
+
 test_help_reports_the_complete_interface
 test_list_files_reports_the_shell_inventory
 test_canonical_partitions_preserve_full_lint
@@ -1427,6 +1561,13 @@ test_ignores_ambient_shellcheck_opts
 test_clean_fixture_passes
 test_jobs_are_deterministic_and_complete
 test_worker_trees_stop_on_signal
+test_slot_bound_holds_across_independent_processes
+test_slot_preserves_command_status_and_output
+test_slot_is_released_when_the_holder_is_killed
+test_slot_wait_is_bounded_and_runs_loudly
+test_slot_unavailable_coordination_runs_loudly
+test_slot_holder_never_waits_for_a_second_slot
+test_lint_shellcheck_runs_inside_a_slot
 test_seeded_module_boundary_parity
 test_changed_mode_lints_only_the_changed_file
 test_ci_forces_full_lint_even_with_empty_diff

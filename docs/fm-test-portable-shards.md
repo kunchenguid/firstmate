@@ -108,6 +108,7 @@ Portable shards, each portable serial shard, and the Herdr lane upload runner-ge
 
 `bin/fm-lint.sh` owns two canonical CI partitions, each running the same full source-aware ShellCheck analysis with two bounded workers, pinned versions, workflow validation, and backend-purity checks.
 Its `--list-files` interface exposes partition membership; `tests/fm-lint.test.sh` verifies complete/disjoint executed roots and unchanged analysis flags.
+Those workers are a per-invocation limit; `bin/fm-lint-slot.sh` owns the separate whole-machine bound on concurrent ShellCheck processes across every checkout on a host, and its header owns the mechanism and its safe-degradation rules.
 The workflow uploads each partition's quiet telemetry to distinguish analysis cost, memory use, and host contention.
 No fast mode, path skips, reduced checks, or paid runner provisioning is part of this layout.
 
