@@ -1,7 +1,23 @@
 #!/usr/bin/env bash
-# Durable, idempotent Hermes/Telegram notification for a task held for the
-# captain, plus deterministic correlation of an inbound Telegram reply back to
-# the exact hold it answers.
+# Durable HOME/AWAY Captain-presence routing for Hermes/Telegram, idempotent
+# proactive notifications, and deterministic correlation of an inbound
+# Telegram reply back to the exact captain hold it answers.
+#
+# state/captain-presence is the single routing-state record. Its absence or
+# invalid content means HOME. HOME suppresses every proactive send while
+# keeping `inbound` available. AWAY permits only the explicit `route` classes
+# below and active captain holds registered through `register`. This record is
+# intentionally unrelated to state/.afk-contract and state/.afk: changing it
+# does not change supervision, authority, permissions, SecondMate ownership,
+# approvals, logging, or durable queues.
+#
+# `inbound` accepts the Hermes plugin's existing Telegram note convention.
+# It recognizes explicit HOME/AWAY commands and the documented natural-language
+# equivalents, persists and acknowledges each mode command over Telegram,
+# classifies status requests in either mode, correlates replies to open holds,
+# and returns all other text as an ordinary command. It never answers a hold or
+# grants authority; its `answer:` TSV still goes through the existing
+# fm-captain-hold keyed-answer judgment and intake.
 #
 # Hermes is an external, VPS-local agent tool (not part of this repo) whose
 # already-approved plugin forwards an authorized chat's inbound text into
@@ -16,8 +32,11 @@
 # identifies the task and hands back the reply text unmodified.
 #
 # Usage:
+#   fm-hermes-notify.sh presence [status|home|away]
+#   fm-hermes-notify.sh route <class> --message-file <path> --key <key>
 #   fm-hermes-notify.sh register <task-id> --reason-file <path> [--label <text>]
 #   fm-hermes-notify.sh resolve-reply <note-file>
+#   fm-hermes-notify.sh inbound <note-file>
 #   fm-hermes-notify.sh status <task-id>
 #
 # `register` requires <task-id> to be a currently active captain hold
@@ -85,15 +104,149 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 
 NOTIFY_DIR="$STATE/hermes-notify"
+PRESENCE_RECORD="$STATE/captain-presence"
 CAPTAIN_HOLD="$SCRIPT_DIR/fm-captain-hold.sh"
 MAX_TEXT_BYTES=4000
 
 usage() {
   cat >&2 <<'EOF'
-usage: fm-hermes-notify.sh register <task-id> --reason-file <path> [--label <text>]
+usage: fm-hermes-notify.sh presence [status|home|away]
+       fm-hermes-notify.sh route <class> --message-file <path> --key <key>
+       fm-hermes-notify.sh register <task-id> --reason-file <path> [--label <text>]
        fm-hermes-notify.sh resolve-reply <note-file>
+       fm-hermes-notify.sh inbound <note-file>
        fm-hermes-notify.sh status <task-id>
+
+route classes: approval permission blocker completion failure report status
 EOF
+}
+
+# Captain presence is notification routing only. It is deliberately separate
+# from state/.afk-contract and state/.afk, which change supervision posture.
+# Missing, unreadable, malformed, and future-version records all read HOME.
+presence_mode() {
+  local schema='' mode=''
+  [ -f "$PRESENCE_RECORD" ] && [ ! -L "$PRESENCE_RECORD" ] || {
+    printf 'HOME\n'
+    return 0
+  }
+  schema=$(sed -n 's/^schema=//p' "$PRESENCE_RECORD" 2>/dev/null | tail -n1)
+  mode=$(sed -n 's/^mode=//p' "$PRESENCE_RECORD" 2>/dev/null | tail -n1)
+  if [ "$schema" = fm-captain-presence.v1 ] && [ "$mode" = AWAY ]; then
+    printf 'AWAY\n'
+  else
+    printf 'HOME\n'
+  fi
+}
+
+write_presence() {  # HOME|AWAY
+  local mode=$1 tmp
+  mkdir -p "$STATE"
+  tmp=$(mktemp "$STATE/.captain-presence.staging-XXXXXX") || return 1
+  {
+    printf 'schema=fm-captain-presence.v1\n'
+    printf 'mode=%s\n' "$mode"
+    printf 'changed_at=%s\n' "$(date +%s)"
+  } >"$tmp"
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv "$tmp" "$PRESENCE_RECORD"
+}
+
+send_telegram_text() {  # <text>
+  local text=$1 chat_id
+  chat_id=$(resolve_telegram_chat_id) || return 1
+  [ -n "$chat_id" ] || return 2
+  hermes send --to "telegram:$chat_id" "$text" >/dev/null 2>&1
+}
+
+cmd_presence() {
+  local action=${1:-status} prior mode acknowledgement rc=0
+  case "$action" in
+    status)
+      presence_mode
+      return 0
+      ;;
+    home) mode=HOME ;;
+    away) mode=AWAY ;;
+    *) usage; exit 2 ;;
+  esac
+  prior=$(presence_mode)
+  write_presence "$mode" || {
+    printf 'fm-hermes-notify: cannot persist Captain presence mode\n' >&2
+    exit 1
+  }
+  if [ "$prior" = "$mode" ]; then
+    acknowledgement="Captain presence is already $mode."
+  else
+    acknowledgement="Captain presence is now $mode."
+  fi
+  printf '%s\n' "$acknowledgement"
+  # A mode command received locally is still acknowledged locally. The
+  # inbound command path additionally transports this exact acknowledgement.
+  return "$rc"
+}
+
+route_record_path() {  # <class> <key>
+  printf '%s/routes/%s--%s.record\n' "$NOTIFY_DIR" "$1" "$2"
+}
+
+cmd_route() {
+  local class=${1:-} message_file='' key='' message digest record tmp chat_id
+  [ -n "$class" ] || { usage; exit 2; }
+  shift
+  case "$class" in
+    approval|permission|blocker|completion|failure|report|status) ;;
+    *) printf 'fm-hermes-notify: unsupported route class: %s\n' "$class" >&2; exit 2 ;;
+  esac
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --message-file) shift; message_file=${1:-} ;;
+      --key) shift; key=${1:-} ;;
+      *) usage; exit 2 ;;
+    esac
+    shift
+  done
+  [ -f "$message_file" ] || { printf 'fm-hermes-notify: --message-file must exist\n' >&2; exit 2; }
+  fm_task_id_path_safe "$key" || { printf 'fm-hermes-notify: --key must be a privacy-safe slug\n' >&2; exit 2; }
+  if [ "$(presence_mode)" != AWAY ]; then
+    printf 'skipped: Captain presence is HOME\n'
+    exit 0
+  fi
+  message=$(cat "$message_file")
+  [ -n "${message//[[:space:]]/}" ] || { printf 'fm-hermes-notify: refusing an empty message\n' >&2; exit 2; }
+  message=$(printf '%s' "$message" | cut -c1-"$MAX_TEXT_BYTES")
+  digest=$(sha256_text "$message")
+  record=$(route_record_path "$class" "$key")
+  if [ -f "$record" ] && [ "$(record_field "$record" digest)" = "$digest" ] \
+      && [ "$(record_field "$record" status)" = sent ]; then
+    printf 'duplicate: %s/%s already sent\n' "$class" "$key"
+    exit 0
+  fi
+  chat_id=$(resolve_telegram_chat_id) || exit 1
+  if [ -z "$chat_id" ]; then
+    printf 'skipped: hermes/telegram not configured on this home\n'
+    exit 0
+  fi
+  mkdir -p "$NOTIFY_DIR/routes"
+  tmp=$(mktemp "$NOTIFY_DIR/routes/.staging-XXXXXX") || exit 1
+  {
+    printf 'class=%s\nkey=%s\ndigest=%s\nstatus=pending\nchat_id=%s\n' "$class" "$key" "$digest" "$chat_id"
+  } >"$tmp"
+  mv "$tmp" "$record"
+  if hermes send --to "telegram:$chat_id" "$message" >/dev/null 2>&1; then
+    tmp=$(mktemp "$NOTIFY_DIR/routes/.staging-XXXXXX") || exit 1
+    {
+      printf 'class=%s\nkey=%s\ndigest=%s\nstatus=sent\nchat_id=%s\nsent_at=%s\n' \
+        "$class" "$key" "$digest" "$chat_id" "$(date +%s)"
+    } >"$tmp"
+    mv "$tmp" "$record"
+    printf 'sent: %s/%s -> telegram:%s\n' "$class" "$key" "$chat_id"
+  else
+    sed 's/^status=pending$/status=failed/' "$record" >"$tmp" 2>/dev/null || true
+    [ -n "${tmp:-}" ] && [ -f "$tmp" ] && mv "$tmp" "$record"
+    printf 'fm-hermes-notify: hermes send failed for %s/%s\n' "$class" "$key" >&2
+    exit 1
+  fi
 }
 
 sha256_text() {  # <text>
@@ -220,6 +373,10 @@ cmd_register() {
     printf 'fm-hermes-notify: %s is not an active captain hold (open check exit %s)\n' "$task" "$rc" >&2
     exit 1
   fi
+  if [ "$(presence_mode)" != AWAY ]; then
+    printf 'skipped: Captain presence is HOME\n'
+    exit 0
+  fi
 
   local chat_id
   chat_id=$(resolve_telegram_chat_id) || exit 1
@@ -331,6 +488,50 @@ cmd_resolve_reply() {
   printf '%s\t%s\t%s\n' "$best" "$reply" "$label"
 }
 
+cmd_inbound() {
+  local note=${1:-} parsed chat_id text normalized acknowledgement correlated rc=0
+  [ -n "$note" ] && [ -f "$note" ] || { usage; exit 2; }
+  parsed=$(parse_telegram_note "$note") || {
+    printf 'fm-hermes-notify: %s does not match the Hermes/Telegram inbound convention\n' "$note" >&2
+    exit 1
+  }
+  chat_id=$(printf '%s\n' "$parsed" | sed -n '1p')
+  text=$(printf '%s\n' "$parsed" | sed -n '2,$p')
+  text=$(flatten "$text")
+  normalized=$(printf '%s' "$text" | tr '[:upper:]' '[:lower:]' \
+    | sed "s/’/'/g; s/^[[:space:]]*//; s/[.!][[:space:]]*$//")
+
+  case "$normalized" in
+    'captain away'|'i am heading out, use telegram'|'i am heading out use telegram'|"i'm heading out, use telegram"|"i'm heading out use telegram"|'heading out, use telegram'|'use telegram while i am away')
+      cmd_presence away >/dev/null || exit 1
+      acknowledgement='Captain presence is now AWAY. Proactive Telegram routing is enabled.'
+      send_telegram_text "$acknowledgement" || rc=$?
+      [ "$rc" -eq 0 ] || { printf 'fm-hermes-notify: cannot acknowledge AWAY on Telegram\n' >&2; exit 1; }
+      printf 'mode:AWAY\n'
+      return 0
+      ;;
+    'captain home'|'i am back home, stop proactive telegram notifications'|'i am back home stop proactive telegram notifications'|"i'm back home, stop proactive telegram notifications"|"i'm back home stop proactive telegram notifications"|'back home, stop proactive telegram notifications'|'stop proactive telegram notifications')
+      cmd_presence home >/dev/null || exit 1
+      acknowledgement='Captain presence is now HOME. Proactive Telegram routing is disabled.'
+      send_telegram_text "$acknowledgement" || rc=$?
+      [ "$rc" -eq 0 ] || { printf 'fm-hermes-notify: cannot acknowledge HOME on Telegram\n' >&2; exit 1; }
+      printf 'mode:HOME\n'
+      return 0
+      ;;
+    'status'|'status report'|'send status'|'send me a status report'|'what is the status')
+      printf 'request:status\t%s\n' "$text"
+      return 0
+      ;;
+  esac
+
+  correlated=$("$0" resolve-reply "$note" 2>/dev/null) || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf 'answer:%s\n' "$correlated"
+  else
+    printf 'command:%s\n' "$text"
+  fi
+}
+
 cmd_status() {
   local task=${1:-}
   [ -n "$task" ] || { usage; exit 2; }
@@ -346,8 +547,11 @@ CMD=${1:-}
 [ -n "$CMD" ] || { usage; exit 2; }
 shift
 case "$CMD" in
+  presence) cmd_presence "$@" ;;
+  route) cmd_route "$@" ;;
   register) cmd_register "$@" ;;
   resolve-reply) cmd_resolve_reply "$@" ;;
+  inbound) cmd_inbound "$@" ;;
   status) cmd_status "$@" ;;
   --help|-h) usage; exit 0 ;;
   *) usage; exit 2 ;;
