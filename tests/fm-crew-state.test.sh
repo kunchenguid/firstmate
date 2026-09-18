@@ -4008,9 +4008,8 @@ test_cancelled_run_publishes_no_pr_for_active_rerun() {
 
 test_status_append_during_ordering_snapshot_keeps_failure() {
   reset_fakes
-  local d short reader out; d=$(new_case status-ordering-snapshot-race)
+  local d reader out; d=$(new_case status-ordering-snapshot-race)
   make_repo_on_branch "$d/wt" fm/feat-s2h
-  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-s2h.meta" "window=fm:fm-feat-s2h" "worktree=$d/wt" "kind=ship"
   printf 'done: old completion\n' > "$d/state/feat-s2h.status"
@@ -4028,7 +4027,7 @@ printf '%s\n' "$size"
 SH
   chmod +x "$reader"
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s2h)"
-  FM_FAKE_RUNS_LIST="  failed     fm/feat-s2h ${short}  $(ledger_stamp_minutes_ago 60)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s2h f0f0f0f0  $(ledger_stamp_minutes_ago 60)"
   FM_FAKE_STATUS_APPEND_FILE="$d/state/feat-s2h.status"
   FM_FAKE_STATUS_APPEND_MARKER="$d/query-append.marker"
   FM_FAKE_STATUS_APPEND_LINE='working: resumed during pipeline query'
@@ -4036,10 +4035,10 @@ SH
     FM_STATUS_MUTATE_MARKER="$d/snapshot-append.marker" \
     FM_STATUS_MUTATE_LINE='paused: appended during snapshot' \
     run_crew_state "$d" feat-s2h)
-  assert_contains "$out" "state: failed" "a changing status snapshot cannot override the failure"
   assert_not_contains "$out" "state: done" "the old done line cannot borrow the new file mtime"
   assert_not_contains "$out" "state: paused" "a partial snapshot cannot override the failure"
-  pass "a status append during snapshot leaves the failure authoritative"
+  assert_contains "$out" "current state not provable here" "a rejected snapshot leaves the reading unprovable"
+  pass "a status append during snapshot never supersedes the run"
 }
 
 # The original title case: the crew declared a bounded external wait after a
@@ -4122,33 +4121,52 @@ test_mid_run_pause_does_not_mask_current_run_failure() {
   pass "a mid-run pause does not mask the current run's failure"
 }
 
-# Opposite direction 1: a done line the crew appended BEFORE its validation run
-# even started is older, not newer, and must never convert a real failure into a
-# false success. This is the routine ship shape - the crew reports its
-# implementation done, firstmate starts the run, the run fails.
+# The routine ship shape in the same AGREES=1 shape: the crew reports its
+# implementation done while the run is still going, the run then fails, and the
+# captain must still be told the run failed.
+test_mid_run_done_log_does_not_mask_current_run_failure() {
+  reset_fakes
+  local d; d=$(new_case mid-run-done-current-failure)
+  make_repo_on_branch "$d/wt" fm/feat-s5c
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s5c.meta" "window=fm:fm-feat-s5c" "worktree=$d/wt" "kind=ship"
+  printf 'done: implementation complete\n' > "$d/state/feat-s5c.status"
+  backdate_status_minutes_ago "$d/state/feat-s5c.status" 40
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s5c)"
+  local short; short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s5c ${short}  $(ledger_stamp_minutes_ago 60)"
+  local out; out=$(run_crew_state "$d" feat-s5c)
+  assert_contains "$out" "state: failed" "a mid-run done line cannot mask the current run's failure"
+  assert_contains "$out" "source: run-step" "the failure stays run-step sourced"
+  assert_not_contains "$out" "state: done" "the declaration never becomes the reported state"
+  pass "a mid-run done line does not mask the current run's failure"
+}
+
+# Opposite direction 1: a done line the crew appended BEFORE the ledger's run
+# started is older, not newer, so it can never supply the current state. The
+# ledger row here is not the attributed run, so the ordering comparison - not
+# the current-run gate - is what declines the declaration.
 test_pre_run_done_log_does_not_mask_failed_run() {
   reset_fakes
-  local d short; d=$(new_case pre-run-done-log)
+  local d; d=$(new_case pre-run-done-log)
   make_repo_on_branch "$d/wt" fm/feat-s6
-  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-s6.meta" "window=fm:fm-feat-s6" "worktree=$d/wt" "kind=ship"
   printf 'done: implementation complete\n' > "$d/state/feat-s6.status"
   backdate_status_minutes_ago "$d/state/feat-s6.status" 120
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s6)"
-  FM_FAKE_RUNS_LIST="  failed     fm/feat-s6 ${short}  $(ledger_stamp_minutes_ago 60)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s6 f0f0f0f0  $(ledger_stamp_minutes_ago 60)"
   local out; out=$(run_crew_state "$d" feat-s6)
-  assert_contains "$out" "state: failed" "a done line older than the run never masks the failure"
-  assert_contains "$out" "source: run-step" "the failure stays run-step sourced"
+  assert_not_contains "$out" "state: done" "a done line older than the run never masks the failure"
+  assert_contains "$out" "current state not provable here" "an older declaration cannot supply current truth"
   pass "a pre-run done line does not mask a failed run"
 }
 
 test_same_minute_done_log_does_not_mask_failed_run() {
   reset_fakes
-  local d short minute_epoch ledger_stamp status_stamp
+  local d minute_epoch ledger_stamp status_stamp
   d=$(new_case same-minute-done-log)
   make_repo_on_branch "$d/wt" fm/feat-s6b
-  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-s6b.meta" "window=fm:fm-feat-s6b" "worktree=$d/wt" "kind=ship"
   printf 'done: implementation complete\n' > "$d/state/feat-s6b.status"
@@ -4159,11 +4177,10 @@ test_same_minute_done_log_does_not_mask_failed_run() {
     || date -d "@$((minute_epoch + 20))" '+%Y%m%d%H%M.%S')
   touch -t "$status_stamp" "$d/state/feat-s6b.status"
   FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s6b)"
-  FM_FAKE_RUNS_LIST="  failed     fm/feat-s6b ${short}  ${ledger_stamp}"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s6b f0f0f0f0  ${ledger_stamp}"
   local out; out=$(run_crew_state "$d" feat-s6b)
-  assert_contains "$out" "state: failed" "a done line inside the ledger minute cannot mask the failure"
-  assert_contains "$out" "source: run-step" "same-minute ordering leaves the failure authoritative"
   assert_not_contains "$out" "state: done" "minute truncation cannot convert the failure into success"
+  assert_contains "$out" "current state not provable here" "a same-minute line proves nothing about order"
   pass "a same-minute done line does not mask a failed run"
 }
 
@@ -6695,6 +6712,7 @@ test_later_declared_pause_supersedes_failed_reading
 test_later_declared_pause_supersedes_cancelled_reading
 test_later_declared_done_supersedes_failed_reading
 test_mid_run_pause_does_not_mask_current_run_failure
+test_mid_run_done_log_does_not_mask_current_run_failure
 test_pre_run_done_log_does_not_mask_failed_run
 test_same_minute_done_log_does_not_mask_failed_run
 test_failed_run_without_ordering_evidence_still_surfaces
