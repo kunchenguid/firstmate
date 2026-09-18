@@ -8,6 +8,8 @@ set -u
 # shellcheck source=tests/lib.sh
 # shellcheck disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
 BEARINGS="$ROOT/bin/fm-bearings-snapshot.sh"
@@ -45,10 +47,24 @@ run_lavish() {  # <home> <command args...>
     "$ROOT/bin/fm-procevent-lavish.sh" "$@"
 }
 
-run_bearings() {  # <home>
+# The generic process-event runner, run against this suite's isolated home and
+# its own claim root, so a review armed here can never contend with a real one.
+run_procevent() {  # <home> <command args...>
   local home=$1
+  shift
+  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" \
+    FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
+    "$ROOT/bin/fm-procevent.sh" "$@"
+}
+
+run_bearings() {  # <home> [extra args]
+  local home=$1
+  shift
   PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_BEARINGS_NOW=2026-07-14T12:00:00Z \
-    "$BEARINGS" --json
+    "$BEARINGS" --json "$@"
 }
 
 run_teardown() {  # <home> <id>
@@ -72,6 +88,96 @@ run_captain() {  # <home> <command args...>
     FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" "$@"
 }
 
+request_reconciles() {  # <home> <source-id> <task-id>...
+  local home=$1 source_id=$2 id
+  shift 2
+  run_captain "$home" bind "$source_id" >/dev/null || return 1
+  for id in "$@"; do printf '%s\n' "$id"; done \
+    | run_captain "$home" reconcile-requests --source-id "$source_id" \
+        --source "captured board result" >/dev/null
+}
+
+configure_merged_github() {  # <home>
+  local home=$1
+  cat > "$home/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+case "${1:-} ${2:-}" in
+  "pr view")
+    case " $* " in
+      *statusCheckRollup*)
+        printf '%s\n' '{"state":"OPEN","isDraft":false,"mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","headRefOid":"1111111111111111111111111111111111111111","baseRefName":"main","statusCheckRollup":[{"__typename":"CheckRun","name":"ci","status":"COMPLETED","conclusion":"SUCCESS"}]}'
+        ;;
+      *headRefOid*) printf '%s\n' 1111111111111111111111111111111111111111 ;;
+    esac
+    ;;
+  "pr merge") printf 'merged:\n  number: %s\n  status: ok\n' "${3:-}" ;;
+  "api graphql")
+    printf '%s\n' 'state=MERGED' 'merged=true' 'queued=false' 'base=main'
+    ;;
+esac
+SH
+  cat > "$home/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GH_AXI_LOG"
+case "${1:-} ${2:-}" in
+  "pr view") printf 'pull_request:\n  number: %s\n  state: merged\n' "${3:-}" ;;
+esac
+SH
+  chmod +x "$home/fakebin/gh" "$home/fakebin/gh-axi"
+  : > "$home/gh.log"
+  : > "$home/gh-axi.log"
+}
+
+run_pr_merge() {  # <home> <id> <url>
+  local home=$1
+  shift
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_TEST_GH_LOG="$home/gh.log" \
+    FM_TEST_GH_AXI_LOG="$home/gh-axi.log" "$ROOT/bin/fm-pr-merge.sh" "$@"
+}
+
+wait_for_test_file() {  # <path> <pid>
+  local path=$1 pid=$2 i=0
+  while [ "$i" -lt 500 ]; do
+    [ -e "$path" ] && return 0
+    kill -0 "$pid" 2>/dev/null || return 1
+    sleep 0.01
+    i=$((i + 1))
+  done
+  return 1
+}
+
+install_reused_task_barriers() {  # <home>
+  local home=$1
+  cat > "$home/fakebin/perl" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_TEST_REUSE_TEARDOWN:-}" = 1 ] \
+    && [ ! -e "${FM_TEST_REUSE_TEARDOWN_ONCE:-}" ]; then
+  : > "$FM_TEST_REUSE_TEARDOWN_ONCE"
+  : > "$FM_TEST_REUSE_TEARDOWN_READY"
+  while [ ! -e "$FM_TEST_REUSE_TEARDOWN_RELEASE" ]; do
+    "$FM_TEST_REAL_SLEEP" 0.01
+  done
+fi
+exec "$FM_TEST_REAL_PERL" "$@"
+SH
+  cat > "$home/fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ "${FM_TEST_REUSE_MERGE:-}" = 1 ] && [ "${1:-}" = 0.1 ] \
+    && [ ! -e "${FM_TEST_REUSE_MERGE_ONCE:-}" ]; then
+  : > "$FM_TEST_REUSE_MERGE_ONCE"
+  : > "$FM_TEST_REUSE_MERGE_READY"
+  while [ ! -e "$FM_TEST_REUSE_MERGE_RELEASE" ]; do
+    "$FM_TEST_REAL_SLEEP" 0.01
+  done
+fi
+exec "$FM_TEST_REAL_SLEEP" "$@"
+SH
+  chmod +x "$home/fakebin/perl" "$home/fakebin/sleep"
+}
+
 # The retired command surface, kept for one release as a shim; in-flight
 # pre-collapse work still drives the lifecycle through these spellings.
 run_shim() {  # <home> <command args...>
@@ -90,7 +196,434 @@ write_origin_meta() {  # <home> <id> [kind]
     "project=$home/projects/sample" \
     "harness=codex" \
     "kind=$kind" \
-    "mode=$kind"
+    "mode=$kind" \
+    "spawn_gen=fixture-$id"
+}
+
+# --- markdown-to-beads migration resolution ----------------------------------
+#
+# A home on the Beads backend no longer carries the legacy markdown ids a scout
+# report attested: fm-hold-migration rehomed each held row under a prefixed fm-
+# id and recorded its markdown identity in the row's notes as the exact line
+# "migrated from data/backlog.md id <legacy id>". The fixture graph is driven
+# through bd directly where possible because the npm-published tasks-axi ships
+# the markdown backend only; the hold itself needs a beads-capable tasks-axi,
+# so that family probes once and skips itself with an explicit reason on
+# markdown-only installs, mirroring tests/fm-control-relaunch.test.sh.
+
+# Build a fixture home whose configured backend is a scratch Beads graph.
+# Echoes "<home>|<graph-beads-dir>". The graph repo dir is named "fm" because
+# bd derives the row-id prefix from the repo directory name.
+make_beads_home() {  # <name>
+  local name=$1 case_dir home graph fb
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  graph="$case_dir/fm"
+  mkdir -p "$home/data" "$home/config" "$home/projects" "$graph"
+  (umask 077; mkdir -p "$home/state")
+  git -C "$graph" init -q
+  if ! (cd "$graph" && bd init >"$case_dir/bd-init.log" 2>&1); then
+    cat "$case_dir/bd-init.log" >&2
+    fail "fixture bd init failed on $graph"
+  fi
+  cat > "$home/.tasks.toml" <<EOF
+backend = "beads"
+
+[beads]
+path = "$graph/.beads"
+binary = "bd"
+prefix = "fm"
+
+[markdown]
+path = "data/backlog.md"
+archive = "data/done-archive.md"
+done_keep = 10
+EOF
+  fb=$(fm_fakebin "$home")
+  fm_fake_exit0 "$fb" tmux treehouse no-mistakes gh gh-axi
+  printf '%s\n' "$home|$graph/.beads"
+}
+
+bdrow() {  # <beads-dir> <args...>
+  BEADS_DIR="$1" bd "${@:2}"
+}
+
+# One capability probe for the migration family: can the installed tasks-axi
+# operate on a beads-backed home? The npm-published tasks-axi cannot, and the
+# hold fixture needs its beads backend; those installs skip with this reason.
+probe_tasks_axi_beads() {
+  local probe_home="$TMP_ROOT/.probe" probe_graph="$TMP_ROOT/.probe-fm"
+  rm -rf "$probe_home" "$probe_graph"
+  mkdir -p "$probe_home/data" "$probe_graph"
+  git -C "$probe_graph" init -q
+  (cd "$probe_graph" && bd init >/dev/null 2>&1) || return 1
+  cat > "$probe_home/.tasks.toml" <<PROBEEOF
+backend = "beads"
+
+[beads]
+path = "$probe_graph/.beads"
+binary = "bd"
+prefix = "fm"
+PROBEEOF
+  (cd "$probe_home" && tasks-axi list) >/dev/null 2>&1
+}
+TASKS_AXI_BEADS_OK=0
+if bd --version >/dev/null 2>&1 && jq --version >/dev/null 2>&1 \
+   && probe_tasks_axi_beads; then
+  TASKS_AXI_BEADS_OK=1
+fi
+
+require_tasks_axi_beads() {  # <what>
+  [ "$TASKS_AXI_BEADS_OK" = 1 ] && return 0
+  pass "skipped on markdown-only tasks-axi: $1"
+  return 1
+}
+
+write_scout_with_attested_inventory() {  # <home> <scout-id> <keys>
+  local home=$1 scout=$2 keys=$3
+  mkdir -p "$home/data/$scout"
+  fm_write_meta "$home/state/$scout.meta" \
+    "window=firstmate:fm-$scout" \
+    "worktree=$home/projects/missing-$scout" \
+    "project=$home/projects/sample" \
+    "harness=codex" \
+    "kind=scout" \
+    "spawn_gen=fixture-$scout" \
+    "decisions_reviewed=1" \
+    "decision_keys=$keys"
+  printf 'done: report complete\n' > "$home/state/$scout.status"
+  printf '# Report\n\nThe investigation finished.\n' > "$home/data/$scout/report.md"
+}
+
+test_verify_resolves_a_hold_migrated_to_beads_notes() {
+  local fixture home beads scout
+  require_tasks_axi_beads "verify against a beads-migrated hold" || return 0
+  fixture=$(make_beads_home migrated-notes)
+  home=${fixture%%|*}
+  beads=${fixture##*|}
+  scout=sample-beads-scout
+  (cd "$home" && BEADS_ACTOR=fixture tasks-axi add fm-herald-github-delete \
+    "Delete the herald repo" --repo herald) >/dev/null 2>&1 \
+    || fail "could not create the migrated hold fixture"
+  (cd "$home" && BEADS_ACTOR=fixture tasks-axi hold fm-herald-github-delete \
+    --kind captain --reason "captain must confirm the delete") >/dev/null 2>&1 \
+    || fail "could not hold the migrated fixture row"
+  bdrow "$beads" note fm-herald-github-delete \
+    "Origin: herald-retire
+Decision key: github-delete
+State: awaiting captain decision.
+
+migrated from data/backlog.md id herald-retire-decision-github-delete on 2026-09-04" \
+    >/dev/null 2>&1 || fail "could not record the migration marker note"
+  write_scout_with_attested_inventory "$home" "$scout" \
+    herald-retire-decision-github-delete
+
+  run_captain "$home" verify "$scout" >/dev/null \
+    || fail "verify did not resolve the attested legacy id through its migrated beads row"
+  pass "verify resolves a captain hold migrated to a beads row with a marker note"
+}
+
+# A tasks-axi stub that knows ONLY the row ids it is given. The real
+# beads-capable tasks-axi resolves a bare legacy id onto its prefixed row
+# itself, answering before any migration lookup runs; against this stub the
+# migrated-hold resolution order is what has to answer.
+write_known_rows_stub() {  # <fakebin> <row-id...>
+  local fb=$1 known
+  shift
+  known=$(printf '%s|' "$@")
+  cat > "$fb/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf '%s\n' '0.2.5' ;;
+  update)
+    [ "${2:-}" = --help ] || exit 1
+    printf '%s\n' '--archive-body'
+    ;;
+  mv)
+    [ "${2:-}" = --help ] || exit 1
+    printf '%s\n' 'usage: tasks-axi mv [<id>...]'
+    ;;
+  hold)
+    [ "${2:-}" = --help ] || exit 1
+    printf '%s\n' '  --kind captain'
+    ;;
+  show)
+    case "${2:-}" in
+      @KNOWN@) ;;
+      *) printf 'error: no task %s in this backlog\n' "${2:-}" >&2; exit 1 ;;
+    esac
+    printf '%s\n' 'task:'
+    printf '  id: %s\n' "$2"
+    printf '%s\n' '  state: queued' '  held: yes' '  blocked: no' \
+      '  hold_kind: captain' '  body: ""'
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  sed -i.bak "s%@KNOWN@%${known%|}%" "$fb/tasks-axi"
+  rm -f "$fb/tasks-axi.bak"
+  chmod +x "$fb/tasks-axi"
+}
+
+test_verify_resolves_a_hold_migrated_under_the_configured_prefix() {
+  local fixture home scout out
+  require_tasks_axi_beads "verify against a prefix-migrated hold" || return 0
+  fixture=$(make_beads_home migrated-prefix)
+  home=${fixture%%|*}
+  scout=sample-prefix-scout
+  (cd "$home" && BEADS_ACTOR=fixture tasks-axi add fm-other-legacy-row \
+    "Second migrated hold" --repo sample) >/dev/null 2>&1 \
+    || fail "could not create the prefix-migrated fixture row"
+  (cd "$home" && BEADS_ACTOR=fixture tasks-axi hold fm-other-legacy-row \
+    --kind captain --reason "captain must decide") >/dev/null 2>&1 \
+    || fail "could not hold the prefix-migrated fixture row"
+  # No row in this graph carries a marker note, so the narrowed prefix guess is
+  # the only resolution left for the attested legacy id.
+  write_known_rows_stub "$(fm_fakebin "$home")" fm-other-legacy-row
+  write_scout_with_attested_inventory "$home" "$scout" other-legacy-row
+
+  run_captain "$home" verify "$scout" >/dev/null \
+    || fail "verify did not resolve the legacy id under the configured prefix"
+  out=$(run_captain "$home" complete "$scout" other-legacy-row) \
+    || fail "the completion gate refused the prefix-resolved hold"
+  assert_contains "$out" "other-legacy-row=fm-other-legacy-row" \
+    "completion did not name the row the prefix guess attested against"
+  pass "verify resolves a captain hold whose id is the legacy id under the configured prefix"
+}
+
+# The prefix guess is a name, not evidence: when a row actually carries the
+# migration marker, that row is the one attested even though an unrelated
+# captain-held task occupies the <prefix>-<legacy id> name.
+test_marker_noted_row_wins_over_a_prefix_namesake() {
+  local fixture home beads scout row out
+  require_tasks_axi_beads "prefer a marker-noted row over a prefix namesake" || return 0
+  fixture=$(make_beads_home migrated-marker-wins)
+  home=${fixture%%|*}
+  beads=${fixture##*|}
+  scout=sample-marker-wins-scout
+  for row in fm-dual-row fm-marked-dual-row fm-solo-row; do
+    (cd "$home" && BEADS_ACTOR=fixture tasks-axi add "$row" "Captain call $row" \
+      --repo sample) >/dev/null 2>&1 || fail "could not create the fixture row $row"
+    (cd "$home" && BEADS_ACTOR=fixture tasks-axi hold "$row" --kind captain \
+      --reason "captain must decide") >/dev/null 2>&1 \
+      || fail "could not hold the fixture row $row"
+  done
+  bdrow "$beads" note fm-marked-dual-row \
+    "migrated from data/backlog.md id dual-row on 2026-09-04" \
+    >/dev/null 2>&1 || fail "could not record the migration marker note"
+  write_known_rows_stub "$(fm_fakebin "$home")" \
+    fm-dual-row fm-marked-dual-row fm-solo-row
+  write_scout_with_attested_inventory "$home" "$scout" "dual-row,solo-row"
+
+  out=$(run_captain "$home" complete "$scout" dual-row solo-row) \
+    || fail "the completion gate refused an inventory carrying both migrated shapes"
+  assert_not_contains "$out" "dual-row=fm-dual-row" \
+    "the bare prefix namesake shadowed the row carrying the migration marker"
+  assert_contains "$out" "solo-row=fm-solo-row" \
+    "completion did not name the row the prefix guess attested against"
+  run_captain "$home" verify "$scout" >/dev/null \
+    || fail "verify did not re-resolve both migrated shapes after completion"
+  pass "the marker-noted row wins over an unrelated row holding the prefix namesake"
+}
+
+test_complete_accepts_a_migrated_inventory_on_beads() {
+  local fixture home scout
+  require_tasks_axi_beads "complete against a beads-migrated hold" || return 0
+  fixture=$(make_beads_home migrated-complete)
+  home=${fixture%%|*}
+  beads=${fixture##*|}
+  scout=sample-complete-scout
+  (cd "$home" && BEADS_ACTOR=fixture tasks-axi add fm-herald-github-delete \
+    "Delete the herald repo" --repo herald) >/dev/null 2>&1 \
+    || fail "could not create the migrated hold fixture"
+  (cd "$home" && BEADS_ACTOR=fixture tasks-axi hold fm-herald-github-delete \
+    --kind captain --reason "captain must confirm the delete") >/dev/null 2>&1 \
+    || fail "could not hold the migrated fixture row"
+  bdrow "$beads" note fm-herald-github-delete \
+    "migrated from data/backlog.md id herald-retire-decision-github-delete on 2026-09-04" \
+    >/dev/null 2>&1 || fail "could not record the migration marker note"
+  fm_write_meta "$home/state/$scout.meta" \
+    "window=firstmate:fm-$scout" \
+    "worktree=$home/projects/missing-$scout" \
+    "project=$home/projects/sample" \
+    "harness=codex" \
+    "kind=scout" \
+    "spawn_gen=fixture-$scout"
+  printf 'done: report complete\n' > "$home/state/$scout.status"
+  mkdir -p "$home/data/$scout"
+  printf '# Report\n\nThe investigation finished.\n' > "$home/data/$scout/report.md"
+
+  run_captain "$home" complete "$scout" herald-retire-decision-github-delete >/dev/null \
+    || fail "the completion gate refused an inventory resolved through a migrated beads row"
+  assert_grep "decision_keys=herald-retire-decision-github-delete" \
+    "$home/state/$scout.meta" \
+    "the attestation did not record the attested legacy id"
+  run_captain "$home" verify "$scout" >/dev/null \
+    || fail "verify did not re-resolve the attested legacy id after completion"
+  pass "the completion gate attests an inventory resolved through a migrated beads row"
+}
+
+test_verify_names_the_unresolvable_legacy_id_once() {
+  local fixture home scout err rc
+  require_tasks_axi_beads "verify an unresolvable beads legacy id" || return 0
+  fixture=$(make_beads_home migrated-absent)
+  home=${fixture%%|*}
+  scout=sample-absent-scout
+  write_scout_with_attested_inventory "$home" "$scout" ghost-legacy-id
+
+  rc=0
+  err=$(run_captain "$home" verify "$scout" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "verify accepted an attested id that resolves to nothing"
+  assert_contains "$err" "ghost-legacy-id" \
+    "the refusal did not name the id it could not resolve"
+  [ "$(printf '%s\n' "$err" | grep -c '^fm-captain-hold:')" = 1 ] \
+    || fail "the refusal emitted more than one line: $err"
+  pass "an unresolvable legacy id is refused once, naming the id"
+}
+
+test_verify_resolves_a_pre_collapse_key_through_its_derived_marker() {
+  local fixture home beads scout
+  require_tasks_axi_beads "verify a derived pre-collapse key" || return 0
+  fixture=$(make_beads_home migrated-derived)
+  home=${fixture%%|*}
+  beads=${fixture##*|}
+  scout=sample-derived-scout
+  # The row was migrated under the DERIVED pre-collapse identity, keyed by a
+  # bare decision key the origin's old metadata attests.
+  (cd "$home" && BEADS_ACTOR=fixture tasks-axi add fm-dec-call \
+    "Migrated pre-collapse call" --repo sample) >/dev/null 2>&1 \
+    || fail "could not create the derived-marker fixture row"
+  (cd "$home" && BEADS_ACTOR=fixture tasks-axi hold fm-dec-call \
+    --kind captain --reason "captain must decide") >/dev/null 2>&1 \
+    || fail "could not hold the derived-marker fixture row"
+  bdrow "$beads" note fm-dec-call \
+    "migrated from data/backlog.md id $scout-decision-github-delete on 2026-09-04" \
+    >/dev/null 2>&1 || fail "could not record the derived-id marker note"
+  write_scout_with_attested_inventory "$home" "$scout" github-delete
+
+  run_captain "$home" verify "$scout" >/dev/null \
+    || fail "verify did not probe the derived pre-collapse identity for its migrated row"
+  pass "a pre-collapse key resolves through its derived identity's migration marker"
+}
+
+# The captain-hold mutation wrapper must address the configured backend like
+# the transition library does: on a beads-configured home its hold/answer/done
+# calls reach tasks-axi with no markdown file override. Fully portable - the
+# stubbed tasks-axi fakes the beads backend, so no bd or beads-capable install
+# is needed.
+test_captain_hold_mutations_address_the_beads_backend() {
+  local home id fb log
+  home="$TMP_ROOT/captain-stub-beads/home"
+  mkdir -p "$home/data" "$home/config" "$home/projects" "$home/state"
+  cat > "$home/.tasks.toml" <<'EOF'
+backend = "beads"
+
+[beads]
+path = "graph/.beads"
+binary = "bd"
+prefix = "fm"
+EOF
+  id=fm-stub-held-row
+  fb=$(fm_fakebin "$home")
+  log="$home/tasks-axi-calls"
+  cat > "$fb/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "@LOG@"
+case "${1:-}" in
+  --version) printf '%s\n' '0.2.5' ;;
+  update)
+    if [ "${2:-}" = --help ]; then
+      printf '%s\n' '--archive-body'
+      exit 0
+    fi
+    case " $* " in
+      *" --file "*)
+        printf '%s\n' 'error: beads update received a markdown file override' >&2
+        exit 1
+        ;;
+    esac
+    stub_prev=
+    stub_path=
+    for stub_arg in "$@"; do
+      if [ "$stub_prev" = --body-file ]; then stub_path=$stub_arg; fi
+      stub_prev=$stub_arg
+    done
+    [ -n "$stub_path" ] && cp -- "$stub_path" "@HOME@/last-body"
+    printf 'ok: update %s\n' "${2:-}"
+    ;;
+  mv)
+    [ "${2:-}" = --help ] || exit 1
+    printf '%s\n' 'usage: tasks-axi mv [<id>...]'
+    ;;
+  hold)
+    case " $* " in
+      *" --help "*) printf '%s\n' '  --kind captain' ; exit 0 ;;
+      *" --file "*)
+        printf '%s\n' 'error: beads hold received a markdown file override' >&2
+        exit 1
+        ;;
+    esac
+    printf 'ok: hold %s\n' "${2:-}"
+    ;;
+  done)
+    [ "${2:-}" = "@ID@" ] || exit 1
+    case " $* " in
+      *" --file "*)
+        printf '%s\n' 'error: beads done received a markdown file override' >&2
+        exit 1
+        ;;
+    esac
+    printf 'ok: done %s\n' "${2:-}"
+    ;;
+  show)
+    [ "${2:-}" = "@ID@" ] || exit 1
+    case " $* " in
+      *" --file "*)
+        printf '%s\n' 'error: beads show received a markdown file override' >&2
+        exit 1
+        ;;
+    esac
+    printf '%s\n' 'task:'
+    printf '  id: %s\n' "@ID@"
+    printf '%s\n' '  state: queued' '  held: yes' '  blocked: no' \
+      '  hold_kind: captain'
+    if [ -f "@HOME@/last-body" ]; then
+      printf '%s' '  body: '
+      perl -MJSON::PP -e 'local $/; print encode_json(<STDIN>)' < "@HOME@/last-body"
+      printf '\n'
+    else
+      printf '%s\n' '  body: ""'
+    fi
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  sed -i.bak "s|@HOME@|$home|g; s|@ID@|$id|g; s|@LOG@|$log|g" "$fb/tasks-axi"
+  rm -f "$fb/tasks-axi.bak"
+  chmod +x "$fb/tasks-axi"
+
+  PATH="$fb:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" hold "$id" --reason "captain must decide" >/dev/null \
+    || fail "holding on a beads-configured home failed without a markdown backlog"
+  assert_grep "hold $id" "$log" \
+    "the captain-hold mutation never reached the configured backend"
+
+  decision="$home/captain-decision.txt"
+  printf 'Ship the gold-only plan.\n' > "$decision"
+  PATH="$fb:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" answer "$id" --decision-file "$decision" >/dev/null \
+    || fail "answering on a beads-configured home failed without a markdown backlog"
+  assert_grep "update $id --body-file" "$log" \
+    "the captain answer never reached the configured backend"
+  assert_grep "done $id" "$log" \
+    "the captain answer close never reached the configured backend"
+  assert_no_grep " --file " "$log" \
+    "a captain-hold mutation passed a markdown file override to a beads home"
+  pass "captain-hold mutations address the beads backend without a markdown override"
 }
 
 # Reproduces the loss exactly with privacy-safe synthetic names: the investigation
@@ -187,8 +720,7 @@ EOF
 
   FM_STATE_OVERRIDE="$home/state" bash -c '
     . "$1"
-    sig=$(fm_wake_signal_sig "$3") || exit 1
-    printf "%s" "$sig" > "$(fm_wake_signal_seen_path "$2" "$3")"
+    fm_wake_status_mark_current "$2" "$3"
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/$id.status" \
     || fail "could not prime the announced decision baseline"
   run_captain "$home" complete "$id" sample-route-call >/dev/null \
@@ -304,24 +836,31 @@ test_answer_records_and_closes() {
 # --release lifts the hold instead of closing, preserving the work item's own
 # body under the record; a re-held task later accepts a new answer.
 test_release_frees_held_work() {
-  local home show out
+  local home show out snap
   home=$(make_home release-work)
+  cat > "$home/widget-body.txt" <<'EOF'
+The widget plan body. Literal escape: \n. Unicode: café.
+Captain hold set: 2025-01-02T03:04:05Z
+EOF
   tasks_in "$home" add sample-widget "Ship the sample widget" --kind ship --repo sample \
-    --body 'The widget plan body. Literal escape: \n. Unicode: café.' >/dev/null \
+    --body-file "$home/widget-body.txt" >/dev/null \
     || fail "could not create the held work item"
-  run_captain "$home" hold sample-widget --reason "captain go needed before shipping" >/dev/null \
+  FM_CAPTAIN_HOLD_NOW=2026-06-01T12:00:00Z run_captain "$home" hold sample-widget \
+    --reason "captain go needed before shipping" >/dev/null \
     || fail "could not hold the work item for the captain"
-  printf 'Go: ship it as planned.\n' > "$home/go.txt"
+  printf 'Not urgent; ship it as planned.\n' > "$home/go.txt"
   run_captain "$home" answer sample-widget --decision-file "$home/go.txt" --release >/dev/null \
     || fail "answer --release failed on the held work item"
   show=$(tasks_in "$home" show sample-widget --full)
   assert_contains "$show" "state: queued" "a released work item did not stay queued"
   assert_contains "$show" "held: no" "a released work item kept its hold"
   assert_contains "$show" "Resolution mode: released" "the release did not record its close path"
-  assert_contains "$show" "Go: ship it as planned." "the release lost the captain's words"
+  assert_contains "$show" "Not urgent; ship it as planned." "the release lost the captain's words"
   assert_contains "$show" "The widget plan body." "the release destroyed the work item body"
   assert_contains "$show" 'Literal escape: \\n. Unicode: café.' \
     "the release corrupted escaped or Unicode body text"
+  assert_contains "$show" "Captain hold set: 2025-01-02T03:04:05Z" \
+    "hold stamping deleted matching user content outside the leading stamp"
   run_captain "$home" answer sample-widget --decision-file "$home/go.txt" --release >/dev/null \
     || fail "identical release retry was not idempotent"
   if run_captain "$home" answer sample-widget --decision-file "$home/go.txt" \
@@ -349,14 +888,25 @@ test_release_frees_held_work() {
     "an empty-label release recorded the wrong close mode"
 
   # A NEW captain gate on the same task later takes a NEW answer.
-  run_captain "$home" hold sample-widget --reason "captain pricing call needed" >/dev/null \
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold sample-widget \
+    --reason "captain pricing call needed" >/dev/null \
     || fail "could not re-hold the released work item"
+  snap=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_SNAPSHOT_NOW=2026-07-14T12:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "fleet snapshot failed after re-hold"
+  printf '%s' "$snap" | jq -e '
+    .backlog.records[] | select(.id == "sample-widget")
+    | .hold_set == "2026-07-14T12:00:00Z"
+      and .hold_age_days == 0
+      and .hold_bucket == "live"
+  ' >/dev/null || fail "a new hold lifecycle reused historical timestamp or answer text: $snap"
   printf 'Price it at nine dollars.\n' > "$home/price.txt"
   run_captain "$home" answer sample-widget --decision-file "$home/price.txt" --release >/dev/null \
     || fail "a re-held task refused a new answer"
   show=$(tasks_in "$home" show sample-widget --full)
   assert_contains "$show" "Price it at nine dollars." "the new answer was not recorded"
-  assert_contains "$show" "Go: ship it as planned." "the new answer erased the earlier record"
+  assert_contains "$show" "Not urgent; ship it as planned." "the new answer erased the earlier record"
 
   tasks_in "$home" "done" sample-widget >/dev/null \
     || fail "could not complete the released work item normally"
@@ -371,12 +921,147 @@ test_release_frees_held_work() {
   pass "release frees held work with the captain's words recorded and the body preserved"
 }
 
+# The hold-set stamp must be durable before the captain hold becomes visible.
+# A wrapper observes the real tasks-axi hold boundary, and a forced stamp-write
+# failure proves the command never publishes the hold without its timestamp.
+test_hold_stamp_precedes_hold_visibility() {
+  local home show
+  home=$(make_home hold-stamp-order)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] sample-old-call - Existing old task (repo: sample) (kind: ship) (since 2026-01-01)
+- [ ] sample-stamp-failure - Existing task whose stamp fails (repo: sample) (kind: ship) (since 2026-01-01)
+
+## Done
+EOF
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = update ] && [ "${2:-}" = sample-stamp-failure ]; then
+  exit 92
+fi
+if [ "${1:-}" = hold ] && [ "${2:-}" = sample-old-call ]; then
+  show=$("$REAL_TASKS_AXI" show "$2" --full) || exit 93
+  printf '%s\n' "$show" | grep -F 'Captain hold set: 2026-07-14T12:00:00Z' >/dev/null || exit 94
+  : > "$FM_HOME/hold-observed-after-stamp"
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold sample-old-call \
+    --reason "captain route choice pending" >/dev/null \
+    || fail "hold was published before its hold-set stamp"
+  assert_present "$home/hold-observed-after-stamp" \
+    "the tasks-axi hold boundary was not observed"
+  show=$(tasks_in "$home" show sample-old-call --full)
+  assert_contains "$show" "hold_kind: captain" "the stamped task was not captain-held"
+  assert_contains "$show" "Captain hold set: 2026-07-14T12:00:00Z" \
+    "the visible captain hold lost its timestamp"
+
+  if FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold sample-stamp-failure \
+    --reason "captain route choice pending" > "$home/stamp-failure.out" 2> "$home/stamp-failure.err"; then
+    fail "hold succeeded after its timestamp update failed"
+  fi
+  show=$(tasks_in "$home" show sample-stamp-failure --full)
+  assert_contains "$show" "held: no" "a failed timestamp update still published the hold"
+  assert_contains "$show" 'hold_kind: "-"' "a failed timestamp update retained captain-hold provenance"
+  pass "captain holds become visible only after their hold-set timestamp is durable"
+}
+
+test_interrupted_answer_preserves_hold_age() {
+  local home snap show
+  home=$(make_home interrupted-answer-age)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] sample-interrupted-call - Existing old task (repo: sample) (kind: ship) (since 2026-01-01)
+
+## Done
+EOF
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold sample-interrupted-call \
+    --reason "captain route choice pending" >/dev/null \
+    || fail "could not hold the interrupted-answer fixture"
+  printf 'Not urgent in the historical answer.\n' > "$home/interrupted-answer.txt"
+  mkdir -p "$home/at-close"
+  cat > "$home/fakebin/tasks-axi" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ "${2:-}" = sample-interrupted-call ] \
+  && [ ! -e "$FM_HOME/close-failed-once" ]; then
+  cp "$FM_HOME/data/backlog.md" "$FM_HOME/at-close/backlog.md" || exit 93
+  : > "$FM_HOME/close-failed-once"
+  exit 92
+fi
+if [ "${1:-}" = update ] && [ "${2:-}" = sample-interrupted-call ] \
+  && [ ! -e "$FM_HOME/normalize-failed-once" ]; then
+  state=$("$REAL_TASKS_AXI" show "$2" --full | sed -n 's/^  state: //p' | head -1)
+  if [ "$state" = done ]; then
+    : > "$FM_HOME/normalize-failed-once"
+    exit 94
+  fi
+fi
+exec "$REAL_TASKS_AXI" "$@"
+EOF
+  chmod +x "$home/fakebin/tasks-axi"
+
+  if run_captain "$home" answer sample-interrupted-call \
+    --decision-file "$home/interrupted-answer.txt" > "$home/answer.out" 2> "$home/answer.err"; then
+    fail "the forced answer close failure reported success"
+  fi
+  snap=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/at-close" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_SNAPSHOT_NOW=2026-07-14T12:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "fleet snapshot failed at interrupted close boundary"
+  printf '%s' "$snap" | jq -e '
+    .backlog.records[] | select(.id == "sample-interrupted-call")
+    | .captain_actionable == true
+      and .hold_set == "2026-07-14T12:00:00Z"
+      and .hold_age_days == 0
+      and .hold_bucket == "live"
+  ' >/dev/null || fail "an interrupted answer lost the fresh hold age basis: $snap"
+
+  if run_captain "$home" answer sample-interrupted-call \
+    --decision-file "$home/interrupted-answer.txt" > "$home/normalize.out" 2> "$home/normalize.err"; then
+    fail "the forced post-close normalization failure reported success"
+  fi
+  show=$(tasks_in "$home" show sample-interrupted-call --full)
+  assert_contains "$show" "state: done" "the normalization failure undid the successful close"
+  run_captain "$home" answer sample-interrupted-call \
+    --decision-file "$home/interrupted-answer.txt" >/dev/null \
+    || fail "the closed answer could not normalize on retry"
+  show=$(tasks_in "$home" show sample-interrupted-call --full)
+  assert_contains "$show" 'body: "Resolution recorded by fm-captain-hold.' \
+    "the matching done retry did not restore resolution-first body ordering"
+  pass "an interrupted answer preserves its hold age until close retry"
+}
+
 # Deferral is a date, not a live card: hold --until keeps the task out of
 # captain_actionable until due, tasks-axi's own date-gate expiry keeps the task
 # answerable, and Bearings renders the wait as a dated gate.
 test_deferral_leaves_captains_call_until_due() {
   local home json snap show
   home=$(make_home deferral)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+- [ ] sample-existing-call - Decide an existing sample task (repo: sample) (kind: captain) (since 2026-06-01)
+- [ ] sample-near-marker - Decide a deferred sample route (repo: sample) (kind: captain) (since 2026-07-14) (hold: choose the sample route) (hold-kind: captain)
+  Captain hold set: 2026-07-14T12:00:00Z
+  abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij abcdefghij DEFERRED
+- [ ] sample-late-marker - Decide a documented sample route (repo: sample) (kind: captain) (since 2026-07-14) (hold: choose the sample route) (hold-kind: captain)
+  This deliberately long decision context fills the bounded display excerpt without changing the durable classification contract. Additional synthetic context keeps extending the body beyond that display boundary while remaining ordinary task prose. More synthetic context places the presentation marker after the excerpt cutoff. DEFERRED
+
+## Done
+EOF
+  FM_CAPTAIN_HOLD_NOW=2026-07-14T12:00:00Z run_captain "$home" hold sample-existing-call \
+    --reason "captain choice on existing work" >/dev/null \
+    || fail "could not hold the existing task"
+  FM_CAPTAIN_HOLD_NOW=2026-07-20T12:00:00Z run_captain "$home" hold sample-existing-call \
+    --reason "captain choice on existing work" >/dev/null \
+    || fail "could not repeat the existing task hold"
   run_captain "$home" hold sample-later-call --title "Revisit the sample plan" \
     --reason "captain deferred revisit later" --repo sample --until 2026-08-01 >/dev/null \
     || fail "could not register the deferred captain call"
@@ -395,14 +1080,20 @@ test_deferral_leaves_captains_call_until_due() {
   printf '%s' "$snap" | jq -e '
     ([.backlog.records[] | select(.id == "sample-later-call")][0]) as $later
     | ([.backlog.records[] | select(.id == "sample-now-call")][0]) as $now
+    | ([.backlog.records[] | select(.id == "sample-existing-call")][0]) as $existing
     | $later.captain_actionable == false and $later.hold_until == "2026-08-01"
       and $now.captain_actionable == true and $now.hold_until == null
+      and $existing.since == "2026-06-01" and $existing.hold_set == "2026-07-14T12:00:00Z"
+      and $existing.hold_age_days == 0 and $existing.hold_bucket == "live"
+      and ([.backlog.records[] | select(.id == "sample-near-marker")][0].hold_bucket == "live")
+      and ([.backlog.records[] | select(.id == "sample-late-marker")][0].hold_bucket == "live")
       and ($later.title | contains("hold-until") | not)
-  ' >/dev/null || fail "the due gate or hold-until parsing is wrong: $snap"
+  ' >/dev/null || fail "the due gate, hold-set age, or hold-until parsing is wrong: $snap"
 
   json=$(run_bearings "$home") || fail "Bearings failed with a deferred call"
   printf '%s' "$json" | jq -e '
     (.decisions_open | any(.id == "sample-now-call"))
+      and (.decisions_open | any(.id == "sample-existing-call"))
       and (.decisions_open | any(.id == "sample-later-call") | not)
       and (.gates | any(.id == "sample-later-call" and (.reason | startswith("until 2026-08-01"))))
   ' >/dev/null || fail "the deferred call did not render as a dated gate: $json"
@@ -414,8 +1105,11 @@ test_deferral_leaves_captains_call_until_due() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_SNAPSHOT_NOW=2026-08-01T12:00:00Z \
     "$ROOT/bin/fm-fleet-snapshot.sh" --json) || fail "fleet snapshot failed at the due date"
   printf '%s' "$snap" | jq -e '
-    [.backlog.records[] | select(.id == "sample-later-call")][0].captain_actionable == true
-  ' >/dev/null || fail "a due deferral did not resurface as captain-actionable"
+    ([.backlog.records[] | select(.id == "sample-later-call")][0]) as $later
+    | ([.backlog.records[] | select(.id == "sample-existing-call")][0]) as $existing
+    | $later.captain_actionable == true
+      and $existing.hold_age_days == 18 and $existing.hold_bucket == "aged"
+  ' >/dev/null || fail "a due deferral did not resurface or a stamped hold did not age from its hold date"
   show=$(tasks_in "$home" show sample-later-call --full)
   assert_contains "$show" "hold_kind: captain" "the expired deferral lost its captain-hold annotations"
   printf 'Answered on the due date.\n' > "$home/due.txt"
@@ -551,22 +1245,32 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
   mkdir -p "$home/data/$id"
   tasks_in "$home" add "$id" "Review a terminal sample finding" --kind scout --repo sample --start >/dev/null
   write_origin_meta "$home" "$id"
-  printf 'needs-decision [key=default]: choose route A or route B\ndone: report complete\n' \
+  printf 'blocked [key=access]: waiting\ndone: report complete\nnote: cleanup complete\n' \
     > "$home/state/$id.status"
   printf '# Terminal sample review\n\nNo unresolved captain choice remains.\n' > "$home/data/$id/report.md"
   open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
     "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
-  assert_contains "$open" "default" "fixture must retain the raw stale status decision"
+  [ -z "$open" ] || fail "the shared fold retained a pre-terminal blocker"
   run_captain "$home" complete "$id" --none >/dev/null \
     || fail "terminal single-owner stale status decision blocked empty inventory completion"
   run_captain "$home" verify "$id" >/dev/null \
     || fail "terminal single-owner stale status decision blocked inventory verification"
+  printf 'blocked [key=access]: reopened\nnote: more cleanup\n' >> "$home/state/$id.status"
+  if run_captain "$home" complete "$id" --none > "$home/reopened.out" 2> "$home/reopened.err"; then
+    fail "completion accepted a genuinely reopened post-terminal decision"
+  fi
+  if run_captain "$home" verify "$id" > "$home/reopened-verify.out" 2> "$home/reopened-verify.err"; then
+    fail "verification accepted a genuinely reopened post-terminal decision"
+  fi
+  printf 'resolved [key=access]: answered\nfailed: investigation ended\nnote: final cleanup\n' >> "$home/state/$id.status"
+  run_captain "$home" complete "$id" --none >/dev/null || fail "resolved reopening blocked completion"
+  run_captain "$home" verify "$id" >/dev/null || fail "resolved reopening blocked verification"
   run_teardown "$home" "$id" >/dev/null 2> "$home/terminal-teardown.err" \
     || fail "terminal single-owner stale status decision blocked teardown: $(cat "$home/terminal-teardown.err")"
 
   secondmate=sample-secondmate
   write_origin_meta "$home" "$secondmate" secondmate
-  printf 'needs-decision [key=route]: choose route A or route B\ndone: heartbeat complete\n' \
+  printf 'blocked [key=route]: waiting\ndone: heartbeat complete\nnote: cleanup complete\n' \
     > "$home/state/$secondmate.status"
   if run_captain "$home" complete "$secondmate" --none \
     > "$home/secondmate-terminal.out" 2> "$home/secondmate-terminal.err"; then
@@ -583,6 +1287,10 @@ test_secondmate_hold_stays_in_authoritative_home() {
   cp "$ROOT/.tasks.toml" "$mate/.tasks.toml"
   printf '# Synthetic secondmate home\n' > "$mate/AGENTS.md"
   printf 'sample-mate\n' > "$mate/.fm-secondmate-home"
+  # A seeded home always carries its parent binding; teardown delivers the
+  # scout's final line through it before removing the record.
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$mate/.fm-secondmate-parent"
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
 
@@ -603,14 +1311,19 @@ EOF
     || fail "secondmate-owned hold creation failed"
   run_captain "$mate" complete "$origin" sample-release-call >/dev/null \
     || fail "secondmate-owned completion failed"
-  run_teardown "$mate" "$origin" >/dev/null 2> "$mate/teardown.err" \
-    || fail "secondmate investigation teardown failed: $(cat "$mate/teardown.err")"
-  tasks_in "$mate" "done" "$origin" --report "data/$origin/report.md" --keep 0 >/dev/null
-
+  # The parent registers the mate before its children are ever torn down;
+  # teardown resolves that registration to deliver the scout's final line.
   printf -- '- sample-mate - synthetic scope (home: %s; scope: sample reviews; projects: sample; added 2026-07-14)\n' \
     "$mate" > "$parent/data/secondmates.md"
   fm_write_secondmate_meta "$parent/state/sample-mate.meta" "$mate" \
     "firstmate:fm-sample-mate" sample
+  run_teardown "$mate" "$origin" >/dev/null 2> "$mate/teardown.err" \
+    || fail "secondmate investigation teardown failed: $(cat "$mate/teardown.err")"
+  tasks_in "$mate" "done" "$origin" --report "data/$origin/report.md" --keep 0 >/dev/null
+  grep -Eq "^done \\[key=child-outcome-$origin-done-[0-9a-f]{8}\\]: child $origin done: report and visual review complete mode=scout report=data/$origin/report.md$" \
+    "$parent/state/sample-mate.status" \
+    || fail "the scout's final line did not reach the parent at teardown"
+
   json=$(run_bearings "$parent") || fail "parent Bearings could not read the secondmate captain call"
   printf '%s' "$json" | jq -e '
     .decisions_open | any(.owner == "sample-mate" and .verb == "captain-hold"
@@ -619,6 +1332,167 @@ EOF
   assert_no_grep "sample-release-call" "$parent/data/backlog.md" "secondmate call leaked into the main backlog"
   assert_grep "sample-release-call" "$mate/data/backlog.md" "secondmate call left its authoritative backlog"
   pass "main-home and secondmate-home captain calls remain correctly routed"
+}
+
+# Inside a secondmate home a hold and its answer reach the parent channel from
+# the script itself, keyed per hold occurrence, so a re-held task opens and
+# closes a distinct parent decision and a retry never duplicates a line. A main
+# home publishes nothing anywhere.
+test_secondmate_home_publishes_holds_and_answers() {
+  local parent mate fakebin channel decision out
+  parent=$(make_home parent-channel)
+  mate="$TMP_ROOT/channel-mate-home"
+  mkdir -p "$mate/data" "$mate/state" "$mate/config" "$mate/projects"
+  cp "$ROOT/.tasks.toml" "$mate/.tasks.toml"
+  printf '# Synthetic secondmate home\n' > "$mate/AGENTS.md"
+  printf 'channel-mate\n' > "$mate/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$mate/.fm-secondmate-parent"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  fakebin=$(fm_fakebin "$mate")
+  fm_fake_exit0 "$fakebin" tmux treehouse no-mistakes gh gh-axi
+  channel="$parent/state/channel-mate.status"
+  decision="$mate/decision.txt"
+
+  tasks_in "$mate" add quoted-record-call "Choose quoted record handling" --kind ship --repo sample \
+    --body 'Documentation quote: Resolution recorded by fm-captain-hold.' >/dev/null \
+    || fail "could not create quoted-record captain call"
+  run_captain "$mate" hold quoted-record-call --reason "quoted record choice pending" \
+    --origin quoted-origin >/dev/null || fail "quoted-record hold failed"
+  assert_grep 'needs-decision [key=captain-hold-quoted-record-call-1]: captain hold quoted-record-call: quoted record choice pending' \
+    "$channel" "body prose was incorrectly counted as a resolution record"
+
+  run_captain "$mate" hold mate-call --title "Choose the mate release" \
+    --reason "release choice pending" --repo sample >/dev/null \
+    || fail "mate hold failed"
+  assert_grep 'needs-decision [key=captain-hold-mate-call-1]: captain hold mate-call: release choice pending' \
+    "$channel" "the mate's hold did not reach the parent channel"
+  run_captain "$mate" hold mate-call --reason "release choice pending" >/dev/null \
+    || fail "repeated mate hold failed"
+  [ "$(grep -c 'captain-hold-mate-call-1' "$channel")" = 1 ] \
+    || fail "a repeated hold duplicated the parent decision: $(cat "$channel")"
+
+  printf 'ship it later\n' > "$decision"
+  run_captain "$mate" answer mate-call --decision-file "$decision" --release >/dev/null \
+    || fail "mate release answer failed"
+  assert_grep 'resolved [key=captain-hold-mate-call-1]: captain hold mate-call: released' \
+    "$channel" "the released answer did not close the parent decision"
+
+  run_captain "$mate" hold mate-call --reason "second release choice" >/dev/null \
+    || fail "re-hold after release failed"
+  assert_grep 'needs-decision [key=captain-hold-mate-call-2]: captain hold mate-call: second release choice' \
+    "$channel" "a re-held task did not open a distinct parent decision"
+  printf 'ship it\n' > "$decision"
+  run_captain "$mate" answer mate-call --decision-file "$decision" >/dev/null \
+    || fail "mate close answer failed"
+  assert_grep 'resolved [key=captain-hold-mate-call-2]: captain hold mate-call: answered' \
+    "$channel" "the closing answer did not close the second parent decision"
+  run_captain "$mate" answer mate-call --decision-file "$decision" >/dev/null \
+    || fail "idempotent answer retry failed"
+  [ "$(grep -c 'captain-hold-mate-call-2' "$channel")" = 2 ] \
+    || fail "an answer retry duplicated a parent line: $(cat "$channel")"
+  [ "$(grep -c 'captain-hold-mate-call' "$channel")" = 4 ] \
+    || fail "unexpected parent channel contents: $(cat "$channel")"
+
+  run_captain "$mate" hold batch-call --title "Choose the batch release" \
+    --reason "batch choice pending" --repo sample >/dev/null \
+    || fail "batch hold failed"
+  mv "$channel" "$channel.saved"
+  mkdir "$channel"
+  out=$(printf 'batch-call\tship now\t\n' \
+    | run_captain "$mate" answers --source "batch retry fixture" 2>&1) \
+    || fail "batch answer did not preserve its durable close: $out"
+  printf '%s\n' "$out" | grep -Fq 'actionable:' \
+    || fail "failed batch parent delivery was not actionable: $out"
+  rmdir "$channel"
+  mv "$channel.saved" "$channel"
+  printf 'batch-call\tship now\t\n' \
+    | run_captain "$mate" answers --source "batch retry fixture" >/dev/null \
+    || fail "idempotent batch answer retry failed"
+  [ "$(grep -c 'resolved \[key=captain-hold-batch-call-1\]' "$channel")" = 1 ] \
+    || fail "batch retry did not restore exactly one parent resolution: $(cat "$channel")"
+
+  run_captain "$parent" hold main-call --title "Choose the main release" \
+    --reason "main choice pending" --repo sample >/dev/null || fail "main hold failed"
+  [ ! -e "$parent/state/parent-replies.status" ] || fail "a main home wrote a parent reply"
+  assert_no_grep 'captain-hold-main-call' "$channel" "a main home's hold leaked onto a mate channel"
+  pass "a secondmate home publishes each hold occurrence and its answer on the parent channel"
+}
+
+test_secondmate_reconcile_publishes_before_request_retirement() {
+  local parent mate channel evidence out show rc request
+  parent=$(make_home reconcile-parent-channel)
+  mate=$(make_home reconcile-channel-mate)
+  printf 'reconcile-channel-mate\n' > "$mate/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$mate/.fm-secondmate-parent"
+  channel="$parent/state/reconcile-channel-mate.status"
+  evidence="$mate/reconcile-evidence.txt"
+
+  tasks_in "$mate" add reconcile-channel-call "Verify the mate call" --kind ship --repo sample >/dev/null \
+    || fail "could not create the reconcile channel call"
+  run_captain "$mate" hold reconcile-channel-call --reason "verify current release state" >/dev/null \
+    || fail "could not hold the reconcile channel call"
+  request_reconciles "$mate" reconcile-board reconcile-channel-call \
+    || fail "could not request the channel reconciliation"
+  printf 'The release has already landed.\n' > "$evidence"
+  request="$mate/state/reconcile-requests/reconcile-channel-call.request"
+
+  chmod 0500 "$mate/state/reconcile-requests"
+  set +e
+  out=$(run_captain "$mate" reconcile close reconcile-channel-call \
+    --evidence-file "$evidence" 2>&1)
+  rc=$?
+  set -e
+  chmod 0700 "$mate/state/reconcile-requests"
+  [ "$rc" -ne 0 ] || fail "failed reconcile request retirement reported success"
+  assert_contains "$out" "reconcile-channel-call" \
+    "the reconcile retirement failure did not name its task: $out"
+  show=$(tasks_in "$mate" show reconcile-channel-call --full)
+  assert_contains "$show" "state: done" "request retirement failure reversed the reconciled close"
+  assert_contains "$show" "Resolution mode: reconciled" \
+    "request retirement failure lost the reconciled resolution mode"
+  [ -f "$request" ] || fail "the request retired despite its forced retirement failure"
+  [ "$(grep -c 'resolved \[key=captain-hold-reconcile-channel-call-1\]: captain hold reconcile-channel-call: reconciled' "$channel")" -eq 1 ] \
+    || fail "the parent resolution was not published before retirement failed: $(cat "$channel")"
+
+  run_captain "$mate" reconcile close reconcile-channel-call --evidence-file "$evidence" >/dev/null \
+    || fail "the closed reconciliation could not finish publication and retirement"
+  [ ! -e "$request" ] || fail "the retry did not retire the published reconcile request"
+  [ "$(grep -c 'resolved \[key=captain-hold-reconcile-channel-call-1\]: captain hold reconcile-channel-call: reconciled' "$channel")" -eq 1 ] \
+    || fail "the reconciliation retry duplicated or changed its parent resolution: $(cat "$channel")"
+  tasks_in "$mate" add answer-channel-call "Answer the mate call" --kind ship --repo sample >/dev/null \
+    || fail "could not create the normal-answer channel call"
+  run_captain "$mate" hold answer-channel-call --reason "captain answer needed" >/dev/null \
+    || fail "could not hold the normal-answer channel call"
+  request_reconciles "$mate" reconcile-board answer-channel-call \
+    || fail "could not create the normal-answer retry trigger"
+  printf 'Proceed with the release.\n' > "$mate/answer.txt"
+  request="$mate/state/reconcile-requests/answer-channel-call.request"
+  chmod 0500 "$mate/state/reconcile-requests"
+  set +e
+  out=$(run_captain "$mate" answer answer-channel-call --decision-file "$mate/answer.txt" 2>&1)
+  rc=$?
+  set -e
+  chmod 0700 "$mate/state/reconcile-requests"
+  [ "$rc" -ne 0 ] || fail "failed normal-answer request retirement reported success"
+  show=$(tasks_in "$mate" show answer-channel-call --full)
+  assert_contains "$show" "state: done" "request retirement failure reversed the captain answer"
+  [ -f "$request" ] || fail "the normal-answer retry trigger retired after its forced failure"
+  [ "$(grep -c 'resolved \[key=captain-hold-answer-channel-call-1\]: captain hold answer-channel-call: answered' "$channel")" -eq 1 ] \
+    || fail "the normal answer did not publish before retirement failed: $(cat "$channel")"
+  run_captain "$mate" answer answer-channel-call --decision-file "$mate/answer.txt" >/dev/null \
+    || fail "the normal-answer retry could not finish request retirement"
+  [ ! -e "$request" ] || fail "the normal-answer retry left its request pending"
+  [ "$(grep -c 'resolved \[key=captain-hold-answer-channel-call-1\]: captain hold answer-channel-call: answered' "$channel")" -eq 1 ] \
+    || fail "the normal-answer retry duplicated its parent resolution: $(cat "$channel")"
+  pass "secondmate resolutions publish before retiring durable retry triggers"
 }
 
 # The one keyed-answer intake, fed through the real process-event runner by a
@@ -643,12 +1517,23 @@ test_bound_channel_answers_close_at_answer_time() {
     --reason "captain forged choice pending" --repo sample --origin "$id" >/dev/null
   run_captain "$home" hold sample-invalid-close-call --title "Captain call: invalid close" \
     --reason "captain close mode validation pending" --repo sample --origin "$id" >/dev/null
+  run_captain "$home" hold sample-source-reconcile --title "Captain call: reconcile" \
+    --reason "captain re-check pending" --repo sample --origin "$id" >/dev/null
+  run_captain "$home" hold sample-bare-reconcile --title "Captain call: bare reconcile" \
+    --reason "captain bare re-check pending" --repo sample --origin "$id" >/dev/null
+  run_captain "$home" hold sample-old-shape --title "Captain call: old board shape" \
+    --reason "captain old board pending" --repo sample --origin "$id" >/dev/null
+  run_captain "$home" hold sample-old-reconcile --title "Captain call: old bare reconcile" \
+    --reason "captain old bare reconcile pending" --repo sample --origin "$id" >/dev/null
+  run_captain "$home" hold sample-old-reconcile-note --title "Captain call: old annotated reconcile" \
+    --reason "captain old annotated reconcile pending" --repo sample --origin "$id" >/dev/null
   tasks_in "$home" add sample-gated-work "Gated sample work" --kind ship --repo sample \
     --body 'Gated work plan.' >/dev/null
   run_captain "$home" hold sample-gated-work --reason "captain go needed" >/dev/null
   run_captain "$home" complete "$id" \
     sample-membership-call sample-headline-call sample-forged-call sample-invalid-close-call \
-    sample-gated-work >/dev/null \
+    sample-source-reconcile sample-bare-reconcile sample-old-shape sample-old-reconcile \
+    sample-old-reconcile-note sample-gated-work >/dev/null \
     || fail "completion failed for the deck's inventoried calls"
 
   artifact="$home/data/$id/review.html"
@@ -669,25 +1554,44 @@ session:
   status: feedback
   session_ended: true
   ended_by: user
-prompts[6]{uid,prompt,selector,tag,text}:
-  "2","Membership: gold-only\n\nContext data:\n{\n  \"question\": \"sample-membership-call\",\n  \"answer\": \"gold-only\"\n}","section#call > form:nth-of-type(1)",choice,"Membership: gold-only"
-  "3","Headline: f1-when-fp-gold\n\nContext data:\n{\n  \"question\": \"sample-headline-call\",\n  \"answer\": \"f1-when-fp-gold\"\n}","section#call > form:nth-of-type(2)",choice,"Headline: f1-when-fp-gold"
-  "4","Gated work: go\n\nContext data:\n{\n  \"question\": \"sample-gated-work\",\n  \"answer\": \"go\",\n  \"close\": \"release\"\n}","section#call > form:nth-of-type(3)",choice,"Gated work: go"
-  "5","Absent call: yes\n\nContext data:\n{\n  \"question\": \"sample-nonexistent-call\",\n  \"answer\": \"yes\"\n}","section#call > form:nth-of-type(4)",choice,"Absent call: yes"
+prompts[13]{uid,prompt,selector,tag,text}:
+  "1","Reconcile first\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-source-reconcile\",\n  \"selection\": \"reconcile\",\n  \"note\": \"\"\n}","section#call > form:nth-of-type(6)",choice,"Reconcile"
+  "2","Membership: gold-only - captain detail\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-membership-call\",\n  \"selection\": \"gold-only\",\n  \"note\": \"captain detail\"\n}","section#call > form:nth-of-type(1)",choice,"Membership: gold-only - captain detail"
+  "3","Headline: f1-when-fp-gold\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-headline-call\",\n  \"selection\": \"f1-when-fp-gold\",\n  \"note\": \"\"\n}","section#call > form:nth-of-type(2)",choice,"Headline: f1-when-fp-gold"
+  "4","Gated work: go\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-gated-work\",\n  \"selection\": \"go\",\n  \"note\": \"\",\n  \"close\": \"release\"\n}","section#call > form:nth-of-type(3)",choice,"Gated work: go"
+  "5","Absent call: yes\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-nonexistent-call\",\n  \"selection\": \"yes\",\n  \"note\": \"\"\n}","section#call > form:nth-of-type(4)",choice,"Absent call: yes"
   "6","Invalid close: yes\n\nContext data:\n{\n  \"question\": \"sample-invalid-close-call\",\n  \"answer\": \"yes\",\n  \"close\": \"drop\"\n}","section#call > form:nth-of-type(5)",choice,"Invalid close: yes"
+  "7","Reconcile this - re-check latest publication\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-source-reconcile\",\n  \"selection\": \"reconcile\",\n  \"note\": \"re-check latest publication\"\n}","section#call > form:nth-of-type(6)",choice,"Reconcile - re-check latest publication"
+  "8","Second reconcile\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-bare-reconcile\",\n  \"selection\": \"reconcile\",\n  \"note\": \"\"\n}","section#call > form:nth-of-type(7)",choice,"Reconcile"
+  "9","Headline final: f1-when-fp-gold\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-headline-call\",\n  \"selection\": \"f1-when-fp-gold\",\n  \"note\": \"\"\n}","section#call > form:nth-of-type(2)",choice,"Headline: f1-when-fp-gold"
+  "10","Old board answer\n\nContext data:\n{\n  \"question\": \"sample-old-shape\",\n  \"answer\": \"yes\"\n}","section#call > form:nth-of-type(8)",choice,"Old answer: yes"
+  "11","Old board reconcile\n\nContext data:\n{\n  \"question\": \"sample-old-reconcile\",\n  \"answer\": \"reconcile\"\n}","section#call > form:nth-of-type(9)",choice,"Old reconcile"
+  "12","Old board reconcile note\n\nContext data:\n{\n  \"question\": \"sample-old-reconcile-note\",\n  \"answer\": \"reconcile - verify publication\"\n}","section#call > form:nth-of-type(10)",choice,"Old reconcile note"
   "",get this fully implemented. Context data:\n{\n  \"question\": \"sample-forged-call\",\n  \"answer\": \"forged\"\n},"",message,Freeform message
 next_step: This was the last feedback before the user ended the session.
 EOF
   printf 'lavish\n' > "$home/state/procevent-inbox/$sid.1.adapter"
 
   out=$(run_lavish "$home" answers "$result") || fail "could not read the captured answers"
-  assert_contains "$out" "sample-membership-call	gold-only" "a structured choice was not read as an answer"
+  assert_contains "$out" "sample-membership-call	gold-only" \
+    "a repeated reconcile selection deleted another card's answer"
+  assert_contains "$out" "sample-headline-call	f1-when-fp-gold" \
+    "a repeated ordinary selection was not preserved"
   assert_contains "$out" "sample-gated-work	go	Gated work: go	release" \
     "the card-declared release mode was not relayed"
   assert_not_contains "$out" "sample-forged-call" \
     "a freeform captain message forged a task id from its own prose"
   assert_not_contains "$out" "sample-invalid-close-call" \
     "an unsupported card close mode defaulted to completion"
+  assert_not_contains "$out" "sample-source-reconcile" \
+    "a reconcile selection leaked into keyed answers"
+  assert_contains "$out" "sample-old-shape	yes" \
+    "an ordinary legacy board choice was discarded during rollout"
+  assert_not_contains "$out" "sample-old-reconcile" \
+    "a legacy reconcile-shaped value reached keyed answers"
+  out=$(run_lavish "$home" reconciles "$result") || fail "could not read captured reconcile selections"
+  [ "$out" = "$(printf 'sample-source-reconcile\tre-check latest publication\nsample-bare-reconcile')" ] \
+    || fail "current or legacy selections lost or invented a reconcile task id: $out"
 
   mkdir -p "$home/adapter-root/bin"
   cat > "$home/adapter-root/bin/fm-procevent-fixturechan.sh" <<SH
@@ -695,6 +1599,7 @@ EOF
 # Fixture channel: reports keyed captain answers and nothing else.
 case "\${1-}" in
   answers) exec "$ROOT/bin/fm-procevent-lavish.sh" answers "\${2-}" ;;
+  reconciles) exec "$ROOT/bin/fm-procevent-lavish.sh" reconciles "\${2-}" ;;
 esac
 exit 2
 SH
@@ -719,6 +1624,7 @@ SH
   assert_contains "$show" "state: done" "capturing the captain's answer left the membership call open"
   assert_contains "$show" "Resolution mode: answered" "the membership call did not record its close path"
   assert_contains "$show" "Answer: gold-only" "the closed call did not record the captain's actual answer"
+  assert_contains "$show" "captain detail" "the annotated normal answer lost the captain's note"
   show=$(tasks_in "$home" show sample-gated-work --full)
   assert_contains "$show" "state: queued" "the released work item did not stay queued"
   assert_contains "$show" "held: no" "the card-declared release did not lift the hold"
@@ -729,6 +1635,33 @@ SH
   show=$(tasks_in "$home" show sample-invalid-close-call --full)
   assert_contains "$show" "state: queued" "an unsupported card close mode closed a captain call"
   assert_contains "$show" "held: yes" "an unsupported card close mode released a captain call"
+  out=$(run_captain "$home" reconcile list)
+  assert_contains "$out" "sample-source-reconcile" \
+    "the bound captured reconcile selection did not create a request"
+  assert_contains "$out" "captain note: re-check latest publication" \
+    "the annotated reconcile selection lost its note provenance"
+  show=$(tasks_in "$home" show sample-old-shape --full)
+  assert_contains "$show" "state: done" "an ordinary legacy board choice did not close its task"
+  assert_contains "$show" "Resolution mode: answered" \
+    "an ordinary legacy board choice did not use the keyed-answer intake"
+  show=$(tasks_in "$home" show sample-old-reconcile --full)
+  assert_contains "$show" "state: queued" "a bare legacy reconcile value closed its task"
+  assert_contains "$show" "held: yes" "a bare legacy reconcile value released its task"
+  show=$(tasks_in "$home" show sample-old-reconcile-note --full)
+  assert_contains "$show" "state: queued" "an annotated legacy reconcile value closed its task"
+  assert_contains "$show" "held: yes" "an annotated legacy reconcile value released its task"
+  assert_not_contains "$out" "sample-old-reconcile" \
+    "a legacy reconcile value created a generationless request"
+  show=$(tasks_in "$home" show sample-bare-reconcile --full)
+  assert_contains "$show" "state: queued" "a bare captured reconcile selection closed its task"
+  assert_contains "$show" "held: yes" "a bare captured reconcile selection released its task"
+  printf 'The captured call is moot.\n' > "$home/source-reconcile-evidence.txt"
+  run_captain "$home" reconcile close sample-source-reconcile \
+    --evidence-file "$home/source-reconcile-evidence.txt" >/dev/null \
+    || fail "the annotated captured request did not authorize evidence-backed closure"
+  run_captain "$home" reconcile close sample-bare-reconcile \
+    --evidence-file "$home/source-reconcile-evidence.txt" >/dev/null \
+    || fail "the bare captured request did not authorize evidence-backed closure"
 
   # Replaying the same capture is a no-op, not a rejected different decision. A
   # run that could not close every answered key still reports nonzero.
@@ -751,6 +1684,10 @@ SH
   printf 'Captain answered the invalid-close call directly.\n' > "$home/invalid-close.txt"
   run_captain "$home" answer sample-invalid-close-call --decision-file "$home/invalid-close.txt" >/dev/null \
     || fail "could not close the invalid-close call through the answer path"
+  run_captain "$home" answer sample-old-reconcile --decision-file "$home/invalid-close.txt" >/dev/null \
+    || fail "could not deliberately close the bare legacy reconcile call"
+  run_captain "$home" answer sample-old-reconcile-note --decision-file "$home/invalid-close.txt" >/dev/null \
+    || fail "could not deliberately close the annotated legacy reconcile call"
   run_captain "$home" verify "$id" >/dev/null \
     || fail "answered calls did not satisfy the completion gate"
   pass "a bound channel's captured answers close their captain-held tasks at answer time"
@@ -758,6 +1695,331 @@ SH
 
 # Answer-time closure is opt-in per source. A channel with no binding must behave
 # exactly as it always did: capture, announce, close nothing.
+# A reconcile is "go re-check reality", never the captain's answer. The value is
+# reserved at the one keyed-answer intake, so no channel and no card-declared
+# close mode can turn it into a close or a release, and the obligation to verify
+# survives as a durable request instead of evaporating with the wake.
+test_reconcile_never_closes_through_the_keyed_answer_intake() {
+  local home out rc show list
+  home=$(make_home reconcile-intake)
+  tasks_in "$home" add sample-reconcile-call "Captain call: still current?" --repo sample >/dev/null \
+    || fail "could not create the reconcile call"
+  tasks_in "$home" add sample-reconcile-gated "Gated work" --repo sample >/dev/null \
+    || fail "could not create the gated work item"
+  run_captain "$home" hold sample-reconcile-call --reason "is this still current?" >/dev/null \
+    || fail "could not hold the reconcile call"
+  run_captain "$home" hold sample-reconcile-gated --reason "waiting on the captain" >/dev/null \
+    || fail "could not hold the gated work item"
+
+  set +e
+  out=$(printf 'sample-reconcile-call\treconcile\tReconcile\n%s\n' \
+    "$(printf 'sample-reconcile-gated\treconcile\tReconcile\trelease')" \
+    | run_captain "$home" answers --source "captain chat" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the shared answer intake accepted reconcile as an answer"
+  assert_contains "$out" "refused: sample-reconcile-call" \
+    "the shared intake did not visibly refuse reconcile: $out"
+  case "$out" in
+    *"closed: sample-reconcile"*) fail "a reconcile row closed a captain call: $out" ;;
+  esac
+
+  show=$(tasks_in "$home" show sample-reconcile-call --full)
+  assert_contains "$show" "state: queued" "a reconcile row completed a captain call"
+  assert_contains "$show" "held: yes" "a reconcile row released a captain call"
+  case "$show" in
+    *"Resolution recorded by"*) fail "a reconcile row wrote a resolution record" ;;
+  esac
+  show=$(tasks_in "$home" show sample-reconcile-gated --full)
+  assert_contains "$show" "held: yes" "a release-mode reconcile row lifted a captain hold"
+
+  list=$(run_captain "$home" reconcile list) || fail "could not list the reconcile requests"
+  assert_contains "$list" "reconcile-requests: 0" \
+    "the shared answer intake created a reconcile request: $list"
+  set +e
+  out=$(printf 'sample-reconcile-call\n' \
+    | run_captain "$home" reconcile-requests --source-id unbound-src --source "captured board" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an unbound captured source created a reconcile request"
+  request_reconciles "$home" board-src sample-reconcile-call sample-reconcile-gated \
+    || fail "the bound captured source did not create reconcile requests"
+  list=$(run_captain "$home" reconcile list)
+  assert_contains "$list" "sample-reconcile-call" "the reconcile obligation was not recorded durably: $list"
+  assert_contains "$list" "reconcile-requests: 2" "the reconcile requests were not both recorded: $list"
+
+  request_reconciles "$home" board-src sample-reconcile-call \
+    || fail "replaying a captured reconcile selection failed"
+  list=$(run_captain "$home" reconcile list)
+  assert_contains "$list" "reconcile-requests: 2" "a replayed reconcile selection duplicated the obligation: $list"
+  pass "only a bound captured source creates reconcile requests"
+}
+
+test_normal_answers_retire_pending_reconcile_requests() {
+  local home list id
+  home=$(make_home reconcile-normal-answer)
+  for id in sample-direct-close sample-direct-release sample-keyed-close; do
+    tasks_in "$home" add "$id" "Captain call $id" --repo sample >/dev/null
+    run_captain "$home" hold "$id" --reason "waiting for the captain" >/dev/null
+  done
+  request_reconciles "$home" board-src sample-direct-close sample-direct-release sample-keyed-close \
+    || fail "could not create reconcile requests before normal answers"
+
+  printf 'Captain said close.\n' > "$home/close.txt"
+  printf 'Captain said release.\n' > "$home/release.txt"
+  run_captain "$home" answer sample-direct-close --decision-file "$home/close.txt" >/dev/null \
+    || fail "a direct close answer failed"
+  run_captain "$home" answer sample-direct-release --decision-file "$home/release.txt" --release >/dev/null \
+    || fail "a direct release answer failed"
+  printf 'sample-keyed-close\tyes\tYes\n' \
+    | run_captain "$home" answers --source "board sequence 2" >/dev/null \
+    || fail "a keyed normal answer failed"
+  list=$(run_captain "$home" reconcile list)
+  assert_contains "$list" "reconcile-requests: 0" \
+    "normal answers left stranded reconcile requests: $list"
+
+  run_captain "$home" answer sample-direct-close --decision-file "$home/close.txt" >/dev/null \
+    || fail "a direct close replay failed"
+  run_captain "$home" answer sample-direct-release --decision-file "$home/release.txt" --release >/dev/null \
+    || fail "a direct release replay failed"
+  printf 'sample-keyed-close\tyes\tYes\n' \
+    | run_captain "$home" answers --source "board sequence 2" >/dev/null \
+    || fail "a keyed answer replay failed"
+  list=$(run_captain "$home" reconcile list)
+  assert_contains "$list" "reconcile-requests: 0" \
+    "an idempotent normal-answer replay restored a reconcile request: $list"
+  pass "normal answers and their replays retire reconcile requests"
+}
+
+# The two verification outcomes, and the honesty of the record each writes.
+test_reconcile_closes_with_evidence_or_keeps_the_call_open() {
+  local home show list rc out
+  home=$(make_home reconcile-outcomes)
+  tasks_in "$home" add sample-moot-call "Captain call: ship 0.1.37?" --repo sample >/dev/null
+  tasks_in "$home" add sample-active-call "Captain call: which admission order?" --repo sample >/dev/null
+  tasks_in "$home" add sample-mode-call "Captain call: verify replay mode?" --repo sample >/dev/null
+  run_captain "$home" hold sample-moot-call --reason "ship 0.1.37?" >/dev/null
+  run_captain "$home" hold sample-active-call --reason "which admission order?" >/dev/null
+  run_captain "$home" hold sample-mode-call --reason "verify replay mode?" >/dev/null
+  printf '0.1.38 was published on 2026-09-05, so the 0.1.37 question is moot.\n' > "$home/evidence.txt"
+  printf 'Still open: nothing has shipped and the choice is unchanged.\n' > "$home/note.txt"
+
+  set +e
+  out=$(run_captain "$home" reconcile close sample-moot-call --evidence-file "$home/evidence.txt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "reconcile closed a call without a pending board request"
+  assert_contains "$out" "no pending board-created reconcile request" \
+    "the ungated close refusal did not name the missing board request: $out"
+  set +e
+  out=$(run_captain "$home" reconcile note sample-active-call --note-file "$home/note.txt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "reconcile annotated a call without a pending board request"
+  assert_contains "$out" "no pending board-created reconcile request" \
+    "the ungated note refusal did not name the missing board request: $out"
+
+  request_reconciles "$home" board-src sample-moot-call sample-active-call sample-mode-call \
+    || fail "could not file the reconcile requests"
+
+  set +e
+  out=$(run_captain "$home" reconcile close sample-moot-call 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a reconcile close was accepted with no evidence"
+  assert_contains "$out" "evidence" "the refusal did not name the missing evidence: $out"
+
+  cp "$home/state/reconcile-requests/sample-mode-call.request" "$home/mode-request.backup"
+  run_captain "$home" answer sample-mode-call --decision-file "$home/evidence.txt" >/dev/null \
+    || fail "could not record the normal answer for the mode fixture"
+  cp "$home/mode-request.backup" "$home/state/reconcile-requests/sample-mode-call.request"
+  set +e
+  out=$(run_captain "$home" reconcile close sample-mode-call --evidence-file "$home/evidence.txt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a normal captain answer replayed as a reconciliation"
+  assert_contains "$out" "was not closed by reconciliation" \
+    "the reconcile replay refusal did not identify the incompatible resolution mode: $out"
+  run_captain "$home" answer sample-mode-call --decision-file "$home/evidence.txt" >/dev/null \
+    || fail "the normal answer replay did not retire its restored pending request"
+
+  run_captain "$home" reconcile close sample-moot-call --evidence-file "$home/evidence.txt" >/dev/null \
+    || fail "could not close the moot call with evidence"
+  show=$(tasks_in "$home" show sample-moot-call --full)
+  assert_contains "$show" "state: done" "the moot call did not close"
+  assert_contains "$show" "Resolution mode: reconciled" "the moot call did not record how it closed"
+  assert_contains "$show" "Reconciliation evidence:" "the moot call did not record the evidence"
+  assert_contains "$show" "0.1.38 was published" "the recorded evidence was lost"
+  case "$show" in
+    *"Captain decision:"*) fail "a reconciled close was recorded as the captain's own words" ;;
+  esac
+  set +e
+  out=$(run_captain "$home" answer sample-moot-call --decision-file "$home/evidence.txt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a reconciled resolution replayed as a captain answer"
+  assert_contains "$out" "not a captain-answer replay" \
+    "the answer replay refusal did not identify the incompatible resolution mode: $out"
+
+  run_captain "$home" reconcile note sample-active-call --note-file "$home/note.txt" >/dev/null \
+    || fail "could not annotate the still-active call"
+  show=$(tasks_in "$home" show sample-active-call --full)
+  assert_contains "$show" "state: queued" "annotating a still-active call closed it"
+  assert_contains "$show" "held: yes" "annotating a still-active call released it"
+  assert_contains "$show" "Captain hold reconciled:" "the re-check left no dated note"
+  assert_contains "$show" "Still open: nothing has shipped" "the note body was lost"
+  case "$show" in
+    *"Resolution recorded by"*) fail "annotating a still-active call wrote a resolution record" ;;
+  esac
+  set +e
+  out=$(run_captain "$home" reconcile note sample-active-call --note-file "$home/note.txt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a retired reconcile request appended a duplicate note"
+  assert_contains "$out" "no pending board-created reconcile request" \
+    "the duplicate-note refusal did not name the retired request: $out"
+
+  printf 'sample-active-call\n' \
+    | FM_CAPTAIN_HOLD_NOW=2026-09-07T06:00:00Z run_captain "$home" reconcile-requests \
+        --source-id board-src --source "captured board result sequence 2" >/dev/null \
+    || fail "could not create the second reconcile request"
+  FM_CAPTAIN_HOLD_NOW=2026-09-07T06:01:00Z run_captain "$home" reconcile note sample-active-call \
+    --note-file "$home/note.txt" >/dev/null \
+    || fail "the second request with the same finding was not recorded"
+  show=$(tasks_in "$home" show sample-active-call --full)
+  [ "$(printf '%s\n' "$show" | grep -o 'Captain hold reconciled:' | wc -l | tr -d ' ')" -eq 2 ] \
+    || fail "a later reconcile request with the same note did not append its own record"
+  assert_contains "$show" "Captain hold reconciled: 2026-09-07T06:01:00Z" \
+    "the second reconcile request lost its own dated note"
+
+  list=$(run_captain "$home" reconcile list)
+  assert_contains "$list" "reconcile-requests: 0" "the verified requests were not retired: $list"
+  pass "reconcile closes a moot call with evidence and keeps an active one open with a note"
+}
+
+test_reconcile_outcomes_retry_partial_failures_once() {
+  local home out show list rc
+  home=$(make_home reconcile-partial-retry)
+  tasks_in "$home" add sample-reconcile-close-retry "Close retry" --repo sample >/dev/null
+  tasks_in "$home" add sample-reconcile-note-retry "Note retry" --repo sample >/dev/null
+  tasks_in "$home" add sample-reconcile-retire-retry "Retire retry" --repo sample >/dev/null
+  tasks_in "$home" add sample-reconcile-close-retire "Close retire" --repo sample >/dev/null
+  tasks_in "$home" add sample-answer-retire "Answer retire" --repo sample >/dev/null
+  run_captain "$home" hold sample-reconcile-close-retry --reason "verify close" >/dev/null
+  run_captain "$home" hold sample-reconcile-note-retry --reason "verify note" >/dev/null
+  run_captain "$home" hold sample-reconcile-retire-retry --reason "verify retire" >/dev/null
+  run_captain "$home" hold sample-reconcile-close-retire --reason "verify close retirement" >/dev/null
+  run_captain "$home" hold sample-answer-retire --reason "verify answer retirement" >/dev/null
+  request_reconciles "$home" board-src sample-reconcile-close-retry sample-reconcile-note-retry \
+    sample-reconcile-retire-retry sample-reconcile-close-retire sample-answer-retire \
+    || fail "could not create partial-retry requests"
+  printf 'Verified moot.\n' > "$home/retry-evidence.txt"
+  printf 'Verified active.\n' > "$home/retry-note.txt"
+  printf 'Verified retirement retry.\n' > "$home/retry-retire-note.txt"
+  printf 'Verified close retirement.\n' > "$home/close-retire-evidence.txt"
+  printf 'Captain answered despite retirement failure.\n' > "$home/answer-retire.txt"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ "${2:-}" = sample-reconcile-close-retry ] \
+  && [ ! -e "$FM_HOME/reconcile-close-failed" ]; then
+  : > "$FM_HOME/reconcile-close-failed"
+  exit 92
+fi
+if [ "${1:-}" = update ] && [ "${2:-}" = sample-reconcile-note-retry ]; then
+  "$REAL_TASKS_AXI" "$@" || exit $?
+  : > "$FM_HOME/reconcile-note-updated"
+  exit 0
+fi
+if [ "${1:-}" = show ] && [ "${2:-}" = sample-reconcile-note-retry ] \
+  && [ -e "$FM_HOME/reconcile-note-updated" ] && [ ! -e "$FM_HOME/reconcile-note-show-failed" ]; then
+  : > "$FM_HOME/reconcile-note-show-failed"
+  exit 93
+fi
+exec "$REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+
+  set +e
+  out=$(run_captain "$home" reconcile close sample-reconcile-close-retry \
+    --evidence-file "$home/retry-evidence.txt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the forced reconcile close failure reported success"
+  run_captain "$home" reconcile close sample-reconcile-close-retry \
+    --evidence-file "$home/retry-evidence.txt" >/dev/null \
+    || fail "reconcile close did not recover from its partial failure"
+  show=$(tasks_in "$home" show sample-reconcile-close-retry --full)
+  [ "$(printf '%s\n' "$show" | grep -c 'Resolution mode: reconciled')" -eq 1 ] \
+    || fail "reconcile close duplicated its resolution record on retry"
+
+  set +e
+  out=$(run_captain "$home" reconcile note sample-reconcile-note-retry \
+    --note-file "$home/retry-note.txt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the forced post-note probe failure reported success"
+  set +e
+  out=$(run_captain "$home" reconcile note sample-reconcile-note-retry \
+    --note-file "$home/retry-note.txt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a note retry succeeded after the request was retired"
+  show=$(tasks_in "$home" show sample-reconcile-note-retry --full)
+  [ "$(printf '%s\n' "$show" | grep -c 'Captain hold reconciled:')" -eq 1 ] \
+    || fail "reconcile note duplicated its durable annotation"
+
+  chmod 0500 "$home/state/reconcile-requests"
+  set +e
+  out=$(run_captain "$home" reconcile close sample-reconcile-close-retire \
+    --evidence-file "$home/close-retire-evidence.txt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a failed close request retirement reported success"
+  assert_contains "$out" "sample-reconcile-close-retire" \
+    "the close retirement failure did not name its task: $out"
+  list=$(run_captain "$home" reconcile list)
+  assert_contains "$list" "sample-reconcile-close-retire" \
+    "the failed close retirement hid its pending request"
+  chmod 0700 "$home/state/reconcile-requests"
+  run_captain "$home" reconcile close sample-reconcile-close-retire \
+    --evidence-file "$home/close-retire-evidence.txt" >/dev/null \
+    || fail "the closed reconciliation could not finish request retirement"
+
+  chmod 0500 "$home/state/reconcile-requests"
+  set +e
+  out=$(run_captain "$home" answer sample-answer-retire \
+    --decision-file "$home/answer-retire.txt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a failed answer-boundary retirement reported success"
+  show=$(tasks_in "$home" show sample-answer-retire --full)
+  assert_contains "$show" "state: done" "retirement failure reversed the durable captain answer"
+  assert_contains "$show" "Captain answered despite retirement failure" \
+    "retirement failure lost the durable captain answer"
+  chmod 0700 "$home/state/reconcile-requests"
+  run_captain "$home" answer sample-answer-retire --decision-file "$home/answer-retire.txt" >/dev/null \
+    || fail "the answer replay could not finish request retirement"
+
+  chmod 0500 "$home/state/reconcile-requests"
+  set +e
+  out=$(run_captain "$home" reconcile note sample-reconcile-retire-retry \
+    --note-file "$home/retry-retire-note.txt" 2>&1)
+  rc=$?
+  set -e
+  chmod 0700 "$home/state/reconcile-requests"
+  [ "$rc" -ne 0 ] || fail "a failed request retirement reported note success"
+  assert_not_contains "$out" "still-open:" "failed retirement reported a successful outcome"
+  run_captain "$home" reconcile note sample-reconcile-retire-retry \
+    --note-file "$home/retry-retire-note.txt" >/dev/null \
+    || fail "the applied note could not finish request retirement on retry"
+  show=$(tasks_in "$home" show sample-reconcile-retire-retry --full)
+  [ "$(printf '%s\n' "$show" | grep -c 'Captain hold reconciled:')" -eq 1 ] \
+    || fail "failed request retirement duplicated the reconcile note"
+  list=$(run_captain "$home" reconcile list)
+  assert_contains "$list" "reconcile-requests: 0" "partial retries left a reconcile request pending"
+  pass "reconcile outcomes apply durable mutations once across partial failures"
+}
+
 test_unbound_source_closes_no_hold() {
   local home id sid artifact result out show rc
   home=$(make_home lavish-unbound)
@@ -926,10 +2188,67 @@ test_legacy_identities_keep_working() {
   pass "legacy identities, metadata, bindings, and the shim keep working"
 }
 
+# A board answer must reach the keyed-answer intake through the RUNNER, not just
+# through a hand-fed `answers` call. The captain answered ten calls on a bearings
+# board, the board accepted them, and nothing collected them: the source that
+# collects a board is a supervised process, and while it was not running the
+# board went on presenting as armed. Everything between the captured result and
+# the closed task is asserted here end to end - capture, the wake that tells
+# firstmate to look, and the recorded answer - because each of those was intact
+# on its own while the chain as a whole delivered nothing.
+test_board_answer_reaches_the_keyed_answer_intake() {
+  local home sid stub out queue show
+  home=$(make_home board-channel)
+  sid=lavish-b0a4d0000000f1e2
+  fm_test_track_procevent_home "$home" "$home/procevent-claims"
+
+  run_captain "$home" hold sample-board-call --title "Choose the sample board route" \
+    --reason "captain board route choice pending" --repo sample >/dev/null \
+    || fail "could not register the board call"
+
+  # One published Lavish poll response carrying the captain's structured answer,
+  # in the shape the adapter's own reader parses: a declared field order, an
+  # indented CSV row, and the versioned answer context inside its prompt.
+  stub="$home/board-source.sh"
+  cat > "$stub" <<'SH'
+#!/usr/bin/env bash
+cat <<'OUT'
+session:
+  status: feedback
+  session_ended: false
+prompts[1]{tag,text,prompt}:
+  "choice","Take the north route","Context data: {\"schema\":\"fm-bearings-answer.v1\",\"question\":\"sample-board-call\",\"selection\":\"north\",\"note\":\"\"}"
+OUT
+SH
+  chmod +x "$stub"
+
+  run_procevent "$home" register lavish "$sid" -- "$stub" >/dev/null \
+    || fail "could not register the board source"
+  run_captain "$home" bind "$sid" >/dev/null \
+    || fail "could not bind the board source to the keyed-answer intake"
+
+  out=$(run_procevent "$home" start "$sid" 2>&1) \
+    || fail "the board source runner did not complete: $out"
+  assert_contains "$out" "$sid.1.result" "the board answer was never durably captured: $out"
+  assert_contains "$out" "answers-fed: $sid" \
+    "the captured board answer never reached the keyed-answer intake: $out"
+
+  queue=$(cat "$home/state/.wake-queue" 2>/dev/null || true)
+  assert_contains "$queue" "check: procevent lavish $sid 1" \
+    "the captured board answer produced no wake: $queue"
+
+  show=$(tasks_in "$home" show sample-board-call --full)
+  assert_contains "$show" "state: done" "the board answer did not close the captain call"
+  assert_contains "$show" "north" "the board answer lost the captain's selection"
+  assert_contains "$show" "the captured result $sid sequence 1" \
+    "the recorded answer did not name the board result that carried it"
+  pass "a board answer reaches the keyed-answer intake and wakes firstmate"
+}
+
 # The intake is channel-agnostic, so chat must reach it the same way a captured
 # review does - for a task-id key, and for a legacy composed identity.
 test_chat_channel_feeds_the_same_keyed_answer_intake() {
-  local home id fb show
+  local home id fb show list
   home=$(make_home chat-channel)
   id=sample-chat-review
   mkdir -p "$home/data/$id"
@@ -944,7 +2263,11 @@ test_chat_channel_feeds_the_same_keyed_answer_intake() {
   run_captain "$home" hold sample-chat-followup --title "Choose the chat follow-up" \
     --reason "captain follow-up choice pending" --repo sample >/dev/null \
     || fail "could not register the task-id chat call"
-  run_captain "$home" complete "$id" "$id-decision-chat-choice" sample-chat-followup >/dev/null \
+  run_captain "$home" hold sample-chat-reconcile --title "Reconcile from chat" \
+    --reason "captain chat reconcile pending" --repo sample >/dev/null \
+    || fail "could not register the chat reconcile call"
+  run_captain "$home" complete "$id" "$id-decision-chat-choice" sample-chat-followup \
+    sample-chat-reconcile >/dev/null \
     || fail "completion failed for the chat calls"
   grep -F 'captain-held [key=chat-choice]' "$home/state/$id.status" >/dev/null \
     || fail "precondition: completion did not transfer the decision to its durable owner"
@@ -984,7 +2307,10 @@ SH
     FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-send.sh" "$id" --resolve-key chat-choice "go with option A" >/dev/null 2>&1 \
     || fail "an answer to a transferred legacy decision was refused by the chat channel"
-  assert_contains "$(cat "$home/send.log")" "go with option A" "the answer text never reached the worker"
+  # The answer rides fm-send's durable inbox plane: the record carries the
+  # text while the typed channel carries only the doorbell.
+  grep -qF "go with option A" "$home/state/$id.inbox/001.msg" \
+    || fail "the answer text never reached the worker's durable inbox record"
   show=$(tasks_in "$home" show "$id-decision-chat-choice" --full)
   assert_contains "$show" "state: done" "a chat answer left the legacy row open"
   assert_contains "$show" "Answer: go with option A" "the chat-answered row lost the captain answer"
@@ -1000,6 +2326,25 @@ SH
   assert_contains "$show" "Resolution mode: answered" "the chat-answered call did not record its close path"
   assert_contains "$show" "Answer: take the second option" "the chat-answered call lost the captain answer"
   assert_contains "$show" "answer sent to $id" "the chat-answered call lost its channel provenance"
+
+  : > "$home/send.log"
+  set +e
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_SEND_LOG="$home/send.log" FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-send.sh" "$id" --resolve-key sample-chat-reconcile reconcile >/dev/null 2>&1
+  set -e
+  show=$(tasks_in "$home" show sample-chat-reconcile --full)
+  assert_contains "$show" "state: queued" "a chat reconcile answer closed the call"
+  list=$(run_captain "$home" reconcile list)
+  assert_contains "$list" "reconcile-requests: 0" "a chat reconcile answer created a board request"
+  printf 'Chat cannot authorize this closure.\n' > "$home/chat-reconcile.txt"
+  if run_captain "$home" reconcile close sample-chat-reconcile \
+    --evidence-file "$home/chat-reconcile.txt" >/dev/null 2>&1; then
+    fail "a chat reconcile answer authorized evidence-backed closure"
+  fi
+  run_captain "$home" answer sample-chat-reconcile --decision-file "$home/chat-reconcile.txt" >/dev/null \
+    || fail "could not close the chat reconcile fixture normally"
 
   if env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -1165,20 +2510,1535 @@ EOF
   pass "a captain call with no routed work, a verified transfer, an open decision, and an answered call all stay silent"
 }
 
+# The originating work item is itself the captain call, which is what the policy
+# prefers ("hold the work item the question gates"). Cleanup of that finished
+# work must never be the act that closes the captain's own row: the deliverable
+# is recorded on the still-held row, the call keeps reading as open on the
+# board, and only a recorded answer closes it. An ordinary finished task in the
+# same home must still close exactly as before, and discard authority covers
+# unlanded work, never the captain's question.
+test_teardown_never_closes_a_captain_held_task() {
+  local home id plain forced json show
+  home=$(make_home teardown-held)
+  id=sample-attach-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate sample attachment evidence" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the investigation fixture"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample attachment evidence\n\nThe captain must choose inline or by-reference attachments.\n' \
+    > "$home/data/$id/report.md"
+  run_captain "$home" hold "$id" \
+    --reason "captain must choose inline or by-reference attachments" >/dev/null \
+    || fail "could not hold the originating work item for the captain"
+  run_captain "$home" complete "$id" "$id" >/dev/null \
+    || fail "completion gate failed with the origin as its own captain call"
+
+  run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
+    || fail "cleanup of a captain-held investigation failed: $(cat "$home/teardown.err")"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the captain-held row is gone after cleanup"
+  assert_not_contains "$show" "state: done" \
+    "cleanup closed the captain call with no recorded answer"
+  assert_contains "$show" "state: queued" "the finished work's row still reads as worked on"
+  assert_contains "$show" "held: yes" "cleanup lifted the captain hold"
+  assert_contains "$show" "hold_kind: captain" "cleanup dropped the captain hold"
+  assert_contains "$show" "Deliverable of the finished work: report data/$id/report.md" \
+    "the deliverable was not recorded on the still-open row"
+  assert_absent "$home/state/$id.meta" "cleanup did not release the finished worker record"
+  assert_absent "$home/state/$id.backlog-close" \
+    "successful cleanup left its pending transition record behind"
+  assert_grep "still held for the captain" "$home/teardown.out" \
+    "cleanup did not say the row stays open for the captain"
+  json=$(run_bearings "$home") || fail "Bearings failed after cleanup of a captain-held task"
+  printf '%s' "$json" | jq -e --arg id "$id" '
+    (.decisions_open | any(.id == $id and .verb == "captain-hold"))
+  ' >/dev/null || fail "the board no longer surfaces the captain call: $json"
+
+  # The ordinary path is untouched: a finished task with no captain call closes.
+  plain=sample-plain-review
+  mkdir -p "$home/data/$plain"
+  tasks_in "$home" add "$plain" "Investigate the sample cache" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the ordinary fixture"
+  write_origin_meta "$home" "$plain"
+  printf 'done: report complete\n' > "$home/state/$plain.status"
+  printf '# Sample cache\n\nNothing waits on the captain.\n' > "$home/data/$plain/report.md"
+  run_captain "$home" complete "$plain" --none >/dev/null \
+    || fail "completion gate failed for the ordinary investigation"
+  run_teardown "$home" "$plain" > "$home/plain.out" 2> "$home/plain.err" \
+    || fail "ordinary cleanup failed: $(cat "$home/plain.err")"
+  show=$(tasks_in "$home" show "$plain" --full) || fail "the ordinary row vanished"
+  assert_contains "$show" "state: done" "ordinary cleanup no longer closes its backlog item"
+  assert_contains "$show" "data/$plain/report.md" "ordinary cleanup lost the report link"
+  assert_absent "$home/state/$plain.backlog-close" "ordinary cleanup left its pending close behind"
+
+  # Discard authority covers unlanded work, never the captain's question.
+  forced=sample-forced-review
+  mkdir -p "$home/data/$forced"
+  tasks_in "$home" add "$forced" "Investigate the sample forced path" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the forced fixture"
+  write_origin_meta "$home" "$forced"
+  printf 'done: report complete\n' > "$home/state/$forced.status"
+  printf '# Sample forced path\n\nOne captain choice remains.\n' > "$home/data/$forced/report.md"
+  run_captain "$home" hold "$forced" --reason "captain must choose the sample forced path" >/dev/null \
+    || fail "could not hold the forced fixture for the captain"
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$forced" --force \
+    > "$home/forced.out" 2> "$home/forced.err" \
+    || fail "forced cleanup failed: $(cat "$home/forced.err")"
+  show=$(tasks_in "$home" show "$forced" --full) || fail "forced cleanup erased the captain-held row"
+  assert_not_contains "$show" "state: done" \
+    "discard authority closed a captain call with no recorded answer"
+  assert_contains "$show" "state: queued" "forced cleanup left the captain call reading as worked on"
+  assert_contains "$show" "hold_kind: captain" "forced cleanup dropped the captain hold"
+
+  # Only a recorded answer closes the captain call, and the deliverable survives it.
+  printf 'Ship attachments by reference.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "the surviving captain call could not be answered"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the answered row is gone"
+  assert_contains "$show" "state: done" "the recorded answer did not close the captain call"
+  assert_contains "$show" "Ship attachments by reference." "the captain's words were not recorded"
+  assert_contains "$show" "Deliverable of the finished work: report data/$id/report.md" \
+    "the answer lost the recorded deliverable"
+  pass "cleanup leaves a captain-held work item open with its deliverable, and only an answer closes it"
+}
+
+test_retained_row_artifacts_survive_captain_answers() {
+  local home retained_id precedence_id rejected_id rejected_local_id report_question_id
+  local approved_id released_id local_id answered_id reportless_scout_id legacy_id
+  local repo wt
+  local local_repo local_wt
+  local precedence_pr rejected_pr approved_pr released_pr json show
+  home=$(make_home retained-row-artifacts)
+  perl -0pi -e 's/done_keep = 10/done_keep = 20/' "$home/.tasks.toml"
+  retained_id=sample-retained-report
+  mkdir -p "$home/data/$retained_id"
+  tasks_in "$home" add "$retained_id" "Investigate retained report evidence" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the retained report fixture"
+  write_origin_meta "$home" "$retained_id"
+  printf 'done: report complete\n' > "$home/state/$retained_id.status"
+  printf '# Retained report\n\nThe captain must choose the follow-up.\n' \
+    > "$home/data/$retained_id/report.md"
+  run_captain "$home" hold "$retained_id" --reason "captain must choose the report follow-up" \
+    >/dev/null || fail "could not hold the retained report"
+  run_captain "$home" complete "$retained_id" "$retained_id" >/dev/null \
+    || fail "completion gate failed for the retained report"
+  run_teardown "$home" "$retained_id" > "$home/retained-teardown.out" \
+    2> "$home/report-teardown.err" \
+    || fail "retained report cleanup failed: $(cat "$home/report-teardown.err")"
+  printf 'Proceed with the report follow-up.\n' > "$home/report-answer.txt"
+  run_captain "$home" answer "$retained_id" --decision-file "$home/report-answer.txt" >/dev/null \
+    || fail "could not answer the retained report call"
+
+  precedence_id=sample-retained-report-pr-title
+  precedence_pr=https://github.com/sample/sample/pull/21
+  mkdir -p "$home/data/$precedence_id"
+  tasks_in "$home" add "$precedence_id" "Investigate $precedence_pr regression" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the report precedence fixture"
+  write_origin_meta "$home" "$precedence_id"
+  printf 'done: report complete\n' > "$home/state/$precedence_id.status"
+  printf '# Retained report with pull request context\n' \
+    > "$home/data/$precedence_id/report.md"
+  run_captain "$home" hold "$precedence_id" \
+    --reason "captain must choose the report follow-up" >/dev/null \
+    || fail "could not hold the report precedence fixture"
+  run_captain "$home" complete "$precedence_id" "$precedence_id" >/dev/null \
+    || fail "completion gate failed for the report precedence fixture"
+  run_teardown "$home" "$precedence_id" > "$home/precedence-teardown.out" \
+    2> "$home/precedence-teardown.err" \
+    || fail "report precedence cleanup failed: $(cat "$home/precedence-teardown.err")"
+  printf 'Proceed with the pull-request regression report.\n' \
+    > "$home/precedence-answer.txt"
+  run_captain "$home" answer "$precedence_id" \
+    --decision-file "$home/precedence-answer.txt" >/dev/null \
+    || fail "could not answer the report precedence call"
+  show=$(tasks_in "$home" show "$precedence_id" --full) \
+    || fail "the report precedence row disappeared"
+  assert_contains "$show" "state: done" "the report precedence answer did not close its call"
+  assert_contains "$show" "hold_kind: captain" \
+    "the report precedence row lost its retained-scout evidence"
+
+  rejected_id=sample-rejected-merge
+  rejected_pr="https://github.com/sample/sample/pull/22"
+  tasks_in "$home" add "$rejected_id" "Decide whether $rejected_pr may merge" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the rejected merge fixture"
+  run_captain "$home" hold "$rejected_id" --reason "captain merge approval pending" \
+    >/dev/null || fail "could not hold the rejected merge"
+  printf 'Do not merge this pull request.\n' > "$home/rejected-answer.txt"
+  run_captain "$home" answer "$rejected_id" --decision-file "$home/rejected-answer.txt" \
+    >/dev/null || fail "could not record the rejected merge"
+  show=$(tasks_in "$home" show "$rejected_id" --full) || fail "the rejected merge disappeared"
+  assert_contains "$show" "state: done" "the rejected merge answer did not close its call"
+  assert_contains "$show" "hold_kind: captain" "the rejected merge lost its non-release evidence"
+
+  rejected_local_id=sample-rejected-local
+  tasks_in "$home" add "$rejected_local_id" "Decide whether to land local main" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the rejected local fixture"
+  run_captain "$home" hold "$rejected_local_id" --reason "captain local merge approval pending" \
+    >/dev/null || fail "could not hold the rejected local merge"
+  printf 'Do not land this change locally.\n' > "$home/rejected-local-answer.txt"
+  run_captain "$home" answer "$rejected_local_id" \
+    --decision-file "$home/rejected-local-answer.txt" >/dev/null \
+    || fail "could not record the rejected local merge"
+  show=$(tasks_in "$home" show "$rejected_local_id" --full) \
+    || fail "the rejected local merge disappeared"
+  assert_contains "$show" "state: done" "the rejected local answer did not close its call"
+  assert_contains "$show" "hold_kind: captain" \
+    "the rejected local merge lost its non-release evidence"
+
+  report_question_id=sample-report-path-question
+  tasks_in "$home" add "$report_question_id" \
+    "Decide whether data/$report_question_id/report.md should be published" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the report-path question fixture"
+  run_captain "$home" hold "$report_question_id" \
+    --reason "captain report publication decision pending" >/dev/null \
+    || fail "could not hold the report-path question"
+  printf 'Do not publish this report.\n' > "$home/report-question-answer.txt"
+  run_captain "$home" answer "$report_question_id" \
+    --decision-file "$home/report-question-answer.txt" >/dev/null \
+    || fail "could not record the report-path answer"
+  show=$(tasks_in "$home" show "$report_question_id" --full) \
+    || fail "the report-path question disappeared"
+  assert_contains "$show" "state: done" "the report-path answer did not close its call"
+  assert_contains "$show" "hold_kind: captain" \
+    "the report-path question lost its non-release evidence"
+
+  approved_id=sample-approved-merge
+  approved_pr="https://github.com/sample/sample/pull/23"
+  repo="$home/projects/sample-approved"
+  wt="$home/projects/$approved_id"
+  fm_git_worktree "$repo" "$wt" fm/approved-merge
+  tasks_in "$home" add "$approved_id" "Ship the approved pull request $approved_pr" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the approved merge fixture"
+  fm_write_meta "$home/state/$approved_id.meta" \
+    "window=firstmate:fm-$approved_id" "endpoint_task_id=$approved_id" "worktree=$wt" \
+    "project=$repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "pr=$approved_pr" "spawn_gen=fixture-$approved_id"
+  printf 'done: PR %s merged\n' "$approved_pr" > "$home/state/$approved_id.status"
+  run_captain "$home" hold "$approved_id" --reason "captain merge approval pending" \
+    >/dev/null || fail "could not hold the approved merge"
+  printf 'Merge the approved pull request.\n' > "$home/approved-answer.txt"
+  run_captain "$home" answer "$approved_id" --release \
+    --decision-file "$home/approved-answer.txt" >/dev/null \
+    || fail "could not release the approved merge"
+  show=$(tasks_in "$home" show "$approved_id" --full) || fail "the approved merge disappeared"
+  assert_not_contains "$show" "hold_kind: captain" "merge approval retained its captain hold kind"
+  run_teardown "$home" "$approved_id" > "$home/approved-teardown.out" \
+    2> "$home/approved-teardown.err" \
+    || fail "approved merge cleanup failed: $(cat "$home/approved-teardown.err")"
+
+  local_id=sample-released-local
+  local_repo="$home/projects/sample-local"
+  local_wt="$home/projects/$local_id"
+  fm_git_worktree "$local_repo" "$local_wt" "fm/$local_id"
+  printf 'landed locally\n' > "$local_wt/local.txt"
+  git -C "$local_wt" add local.txt
+  git -C "$local_wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'local delivery'
+  tasks_in "$home" add "$local_id" "Land the approved local-only change" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the released local fixture"
+  fm_write_meta "$home/state/$local_id.meta" \
+    "window=firstmate:fm-$local_id" "endpoint_task_id=$local_id" "worktree=$local_wt" \
+    "project=$local_repo" "harness=codex" "kind=ship" "mode=local-only" \
+    "spawn_gen=fixture-$local_id"
+  printf 'done: local merge ready\n' > "$home/state/$local_id.status"
+  run_captain "$home" hold "$local_id" --reason "captain local merge approval pending" \
+    >/dev/null || fail "could not hold the released local merge"
+  printf 'Land the approved change locally.\n' > "$home/local-answer.txt"
+  run_captain "$home" answer "$local_id" --release \
+    --decision-file "$home/local-answer.txt" >/dev/null \
+    || fail "could not release the local merge"
+  show=$(tasks_in "$home" show "$local_id" --full) || fail "the released local merge disappeared"
+  assert_not_contains "$show" "hold_kind: captain" \
+    "local merge approval retained its captain hold kind"
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-merge-local.sh" "$local_id" \
+    > "$home/local-merge.out" 2> "$home/local-merge.err" \
+    || fail "approved local merge failed: $(cat "$home/local-merge.err")"
+  run_teardown "$home" "$local_id" > "$home/local-teardown.out" \
+    2> "$home/local-teardown.err" \
+    || fail "released local cleanup failed: $(cat "$home/local-teardown.err")"
+
+  released_id=sample-released-report
+  released_pr=https://github.com/sample/sample/pull/24
+  mkdir -p "$home/data/$released_id"
+  tasks_in "$home" add "$released_id" "Investigate $released_pr report evidence" \
+    --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the released report fixture"
+  write_origin_meta "$home" "$released_id"
+  printf 'done: report complete\n' > "$home/state/$released_id.status"
+  printf '# Released report\n' > "$home/data/$released_id/report.md"
+  run_captain "$home" hold "$released_id" --reason "captain report release pending" \
+    >/dev/null || fail "could not hold the released report"
+  run_captain "$home" complete "$released_id" "$released_id" >/dev/null \
+    || fail "completion gate failed for the released report"
+  printf 'Release the completed report.\n' > "$home/released-answer.txt"
+  run_captain "$home" answer "$released_id" --release \
+    --decision-file "$home/released-answer.txt" >/dev/null \
+    || fail "could not release the completed report"
+  run_teardown "$home" "$released_id" > "$home/released-teardown.out" \
+    2> "$home/released-teardown.err" \
+    || fail "released report cleanup failed: $(cat "$home/released-teardown.err")"
+
+  answered_id=sample-artifactless-captain-answer
+  tasks_in "$home" add "$answered_id" "Choose the artifactless route" --kind captain \
+    --repo sample --start >/dev/null || fail "could not create the artifactless captain call"
+  run_captain "$home" hold "$answered_id" --reason "captain route choice pending" \
+    >/dev/null || fail "could not hold the artifactless captain call"
+  printf 'Continue without a delivery artifact.\n' > "$home/artifactless-answer.txt"
+  run_captain "$home" answer "$answered_id" --release \
+    --decision-file "$home/artifactless-answer.txt" >/dev/null \
+    || fail "could not release the artifactless captain call"
+  tasks_in "$home" 'done' "$answered_id" >/dev/null \
+    || fail "could not complete the released artifactless captain call"
+
+  decision_local_id=sample-released-local-worded-decision
+  tasks_in "$home" add "$decision_local_id" "Land the reviewed change" --kind ship \
+    --repo sample --start >/dev/null \
+    || fail "could not create the local-worded decision fixture"
+  run_captain "$home" hold "$decision_local_id" --reason "captain landing route pending" \
+    >/dev/null || fail "could not hold the local-worded decision fixture"
+  printf 'local main\n' > "$home/local-worded-answer.txt"
+  run_captain "$home" answer "$decision_local_id" --release \
+    --decision-file "$home/local-worded-answer.txt" >/dev/null \
+    || fail "could not release the local-worded decision fixture"
+  tasks_in "$home" 'done' "$decision_local_id" >/dev/null \
+    || fail "could not complete the local-worded decision fixture"
+
+  reportless_scout_id=sample-reportless-scout
+  tasks_in "$home" add "$reportless_scout_id" "Investigate without a report" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the reportless scout"
+  tasks_in "$home" 'done' "$reportless_scout_id" >/dev/null \
+    || fail "could not complete the reportless scout"
+
+  legacy_id=sample-kindless-legacy-delivery
+  tasks_in "$home" add "$legacy_id" "Complete the legacy work" --repo sample --start \
+    >/dev/null || fail "could not create the kindless legacy delivery"
+  tasks_in "$home" 'done' "$legacy_id" >/dev/null \
+    || fail "could not complete the kindless legacy delivery"
+
+  json=$(run_bearings "$home" --all-landed) \
+    || fail "Bearings failed after retained delivery answers"
+  printf '%s' "$json" | jq -e \
+    --arg retained_id "$retained_id" --arg retained "data/$retained_id/report.md" \
+    --arg precedence_id "$precedence_id" \
+    --arg precedence "data/$precedence_id/report.md" \
+    --arg rejected_id "$rejected_id" --arg rejected_local_id "$rejected_local_id" \
+    --arg report_question_id "$report_question_id" \
+    --arg approved_id "$approved_id" --arg local_id "$local_id" \
+    --arg approved_pr "$approved_pr" --arg released_id "$released_id" \
+    --arg answered_id "$answered_id" --arg reportless_scout_id "$reportless_scout_id" \
+    --arg legacy_id "$legacy_id" --arg decision_local_id "$decision_local_id" \
+    --arg released "data/$released_id/report.md" '
+      (.landed | any(.id == $retained_id and .artifact == $retained))
+        and (.landed | any(.id == $precedence_id and .artifact == $precedence))
+        and (.landed | any(.id == $rejected_id) | not)
+        and (.landed | any(.id == $rejected_local_id) | not)
+        and (.landed | any(.id == $report_question_id) | not)
+        and (.landed | any(.id == $approved_id and .artifact == $approved_pr))
+        and (.landed | any(.id == $local_id))
+        and (.landed | any(.id == $released_id and .artifact == $released))
+        # Without the explicit captain-kind boundary, the artifactless answered
+        # call falls through the compatibility path and this assertion fails.
+        and (.landed | any(.id == $answered_id) | not)
+        # Without the explicit scout-kind boundary, this row is rendered with
+        # an empty artifact even though a scout has no delivery without a report.
+        and (.landed | any(.id == $reportless_scout_id) | not)
+        # Requiring a present non-captain kind would also remove this older
+        # artifactless delivery, so the compatibility boundary stays observable.
+        and (.landed | any(.id == $legacy_id))
+        # The captain worded this decision "local main" and the work closed
+        # with no artifact, so reading that prose as a recorded note would
+        # publish a local-only landing that never happened.
+        and (.landed | any(.id == $decision_local_id and .artifact == "-"))
+    ' >/dev/null || fail "released, retained, or rejected deliveries were misclassified: $json"
+  pass "release and scout report retention distinguish deliveries from rejected merge answers"
+}
+
+# Retention happens after destructive cleanup, through the same pending record
+# an ordinary close stages first. A cleanup that fails part-way therefore leaves
+# the row exactly as it was, and the next session start finishes the retention
+# instead of closing the captain's question.
+test_interrupted_cleanup_keeps_the_captain_call_recoverable() {
+  local home id wt show rc bootstrap
+  home=$(make_home teardown-held-interrupted)
+  id=sample-held-cleanup-failure
+  wt="$home/projects/$id"
+  mkdir -p "$home/data/$id" "$wt" "$home/projects/sample"
+  git -C "$home/projects/sample" init -q || fail "could not initialize cleanup-failure project fixture"
+  tasks_in "$home" add "$id" "Investigate failed sample cleanup" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the cleanup-failure fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$home/projects/sample" \
+    "harness=codex" "kind=scout" "mode=scout" "spawn_gen=fixture-$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Failed cleanup\n\nThe captain call remains open.\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold "$id" --reason "captain must choose after cleanup retry" >/dev/null \
+    || fail "could not hold the cleanup-failure fixture"
+  run_captain "$home" complete "$id" "$id" >/dev/null \
+    || fail "completion gate failed for the cleanup-failure fixture"
+  cat > "$home/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$home/fakebin/treehouse"
+
+  set +e
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force \
+    > "$home/teardown.out" 2> "$home/teardown.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "cleanup succeeded despite the failed worktree return"
+  assert_present "$home/state/$id.meta" "a failed cleanup removed the task record"
+  assert_present "$home/state/$id.backlog-close" \
+    "a failed cleanup lost the pending record that replays the retention"
+  show=$(tasks_in "$home" show "$id" --full) || fail "a failed cleanup erased the captain call"
+  assert_contains "$show" "state: in_flight" "a failed cleanup changed the row before cleanup succeeded"
+  assert_contains "$show" "hold_kind: captain" "a failed cleanup dropped the captain hold"
+  assert_not_contains "$show" "Deliverable of the finished work" \
+    "the deliverable was recorded before destructive cleanup succeeded"
+
+  fm_fake_exit0 "$home/fakebin" treehouse
+  bootstrap=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_BOOTSTRAP_NETWORK=skip \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1) \
+    || fail "session start could not replay the interrupted retention: $bootstrap"
+  assert_contains "$bootstrap" "kept the captain call for $id open" \
+    "session start did not report the retained captain call"
+  assert_absent "$home/state/$id.meta" "session start left the interrupted task record behind"
+  assert_absent "$home/state/$id.backlog-close" "session start left the pending record behind"
+  show=$(tasks_in "$home" show "$id" --full) || fail "session start erased the captain call"
+  assert_not_contains "$show" "state: done" "session start closed the captain call with no recorded answer"
+  assert_contains "$show" "state: queued" "session start did not return the captain call to the queue"
+  assert_contains "$show" "hold_kind: captain" "session start dropped the captain hold"
+  assert_contains "$show" "Deliverable of the finished work: report data/$id/report.md" \
+    "session start did not record the finished work's deliverable"
+  pass "an interrupted cleanup keeps the captain call recoverable and session start retains it"
+}
+
+test_answer_before_cleanup_replay_preserves_the_retained_report() {
+  local home id wt rc bootstrap json
+  home=$(make_home answer-before-cleanup-replay)
+  id=sample-answer-before-cleanup-replay
+  wt="$home/projects/$id"
+  mkdir -p "$home/data/$id" "$wt" "$home/projects/sample"
+  tasks_in "$home" add "$id" "Investigate answer before cleanup replay" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the answer-before-replay fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$home/projects/sample" \
+    "harness=codex" "kind=scout" "mode=scout" "spawn_gen=fixture-$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Interrupted cleanup\n\nThe captain call remains open.\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold "$id" --reason "captain must choose after interrupted cleanup" \
+    >/dev/null || fail "could not hold the answer-before-replay fixture"
+  run_captain "$home" complete "$id" "$id" >/dev/null \
+    || fail "completion gate failed for the answer-before-replay fixture"
+  cat > "$home/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$home/fakebin/treehouse"
+
+  set +e
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force \
+    > "$home/teardown.out" 2> "$home/teardown.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "cleanup succeeded despite the failed worktree return"
+  assert_present "$home/state/$id.backlog-close" \
+    "the interrupted cleanup lost its retained-artifact record"
+
+  printf 'Proceed with the reported result.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "the captain could not answer before cleanup replay"
+  fm_fake_exit0 "$home/fakebin" treehouse
+  bootstrap=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_BOOTSTRAP_NETWORK=skip \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1) \
+    || fail "session start could not replay cleanup after the answer: $bootstrap"
+  assert_absent "$home/state/$id.meta" "session start left the interrupted task record behind"
+  assert_absent "$home/state/$id.backlog-close" "session start left the pending record behind"
+  json=$(run_bearings "$home") || fail "Bearings failed after the answer-before-replay lifecycle"
+  printf '%s' "$json" | jq -e \
+    --arg id "$id" --arg report "data/$id/report.md" \
+    '.landed | any(.id == $id and .artifact == $report)' >/dev/null \
+    || fail "the retained report disappeared when the captain answered before replay: $json"
+  pass "an answer before cleanup replay preserves the retained report"
+}
+
+test_unusable_pending_close_record_names_its_reason() {
+  local home id wt rc err marker
+  home=$(make_home unusable-pending-close-reason)
+  id=sample-unusable-pending-close
+  wt="$home/projects/$id"
+  marker="$home/state/$id.backlog-close"
+  mkdir -p "$home/data/$id" "$wt" "$home/projects/sample" "$home/elsewhere"
+  tasks_in "$home" add "$id" "Investigate the unusable pending close" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the unusable pending-close fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$home/projects/sample" \
+    "harness=codex" "kind=scout" "mode=scout" "spawn_gen=fixture-$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Unusable pending close\n\nThe captain call remains open.\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold "$id" --reason "captain must choose after interrupted cleanup" \
+    >/dev/null || fail "could not hold the unusable pending-close fixture"
+  run_captain "$home" complete "$id" "$id" >/dev/null \
+    || fail "completion gate failed for the unusable pending-close fixture"
+  cat > "$home/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$home/fakebin/treehouse"
+
+  set +e
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force \
+    > "$home/teardown.out" 2> "$home/teardown.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "cleanup succeeded despite the failed worktree return"
+  assert_present "$marker" "the interrupted cleanup lost its retained-artifact record"
+  sed "s|^data=.*$|data=$home/elsewhere|" "$marker" > "$marker.rewritten" \
+    || fail "could not rewrite the pending-close record"
+  mv "$marker.rewritten" "$marker"
+
+  printf 'Proceed with the reported result.\n' > "$home/answer.txt"
+  set +e
+  err=$(run_captain "$home" answer "$id" --decision-file "$home/answer.txt" 2>&1 >/dev/null)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the unusable pending-close record was answered as if it were valid"
+  assert_contains "$err" "$marker" \
+    "the refusal did not name the pending-close record the captain must repair"
+  assert_contains "$err" "foreign data directory" \
+    "the refusal did not name why the pending-close record could not be used"
+  pass "an unusable pending-close record names its reason instead of a bare refusal"
+}
+
+test_relocated_report_does_not_wedge_an_answer_before_replay() {
+  local home data id wt rc show bootstrap json
+  home=$(make_home relocated-answer-before-replay)
+  data="$home/données"
+  mv "$home/data" "$data"
+  id=sample-relocated-answer-before-replay
+  wt="$home/projects/$id"
+  mkdir -p "$home/data" "$data/$id" "$wt" "$home/projects/sample"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  (cd "$home" && tasks-axi add "$id" "Investigate relocated answer replay" --kind scout \
+    --repo sample --start --file "$data/backlog.md" >/dev/null) \
+    || fail "could not create the relocated answer-before-replay fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$home/projects/sample" \
+    "harness=codex" "kind=scout" "mode=scout" "spawn_gen=fixture-$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Relocated interrupted cleanup\n\nThe captain call remains open.\n' > "$data/$id/report.md"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" hold "$id" \
+    --reason "captain must choose after relocated interrupted cleanup" >/dev/null \
+    || fail "could not hold the relocated answer-before-replay fixture"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" complete "$id" "$id" >/dev/null \
+    || fail "completion gate failed for the relocated answer-before-replay fixture"
+  cat > "$home/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$home/fakebin/treehouse"
+
+  set +e
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force \
+    > "$home/teardown.out" 2> "$home/teardown.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "relocated cleanup succeeded despite the failed worktree return"
+  assert_present "$home/state/$id.backlog-close" \
+    "the interrupted relocated cleanup lost its pending record"
+
+  printf 'Proceed despite the reporting limitation.\n' > "$home/answer.txt"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" answer "$id" --decision-file "$home/answer.txt" \
+    >/dev/null || fail "the unsupported relocated report wedged the captain's answer"
+  show=$(cd "$home" && tasks-axi show "$id" --full --file "$data/backlog.md") \
+    || fail "the answered relocated row disappeared"
+  assert_contains "$show" "state: done" "the relocated report kept the answered call open"
+  assert_contains "$show" "held: no" "the relocated report kept the answered call held"
+
+  fm_fake_exit0 "$home/fakebin" treehouse
+  bootstrap=$(PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_BOOTSTRAP_NETWORK=skip \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1) \
+    || fail "session start could not replay relocated cleanup after the answer: $bootstrap"
+  assert_absent "$home/state/$id.meta" "session start left the relocated task record behind"
+  assert_absent "$home/state/$id.backlog-close" "session start left the relocated pending record behind"
+  json=$(PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_DATA_OVERRIDE="$data" \
+    FM_BEARINGS_NOW=2026-07-14T12:00:00Z "$BEARINGS" --json) \
+    || fail "Bearings failed after the relocated answer-before-replay lifecycle"
+  printf '%s' "$json" | jq -e --arg id "$id" \
+    '.landed | any(.id == $id) | not' >/dev/null \
+    || fail "the unsupported relocated report was published as a landed delivery: $json"
+  pass "an unsupported relocated report does not wedge the captain's answer"
+}
+
+# A home whose data directory is relocated keeps one backlog; the predicate and
+# the retention must address it the way teardown does, not FM_HOME/data.
+test_teardown_retains_captain_calls_in_a_relocated_backlog() {
+  local home data id show
+  home=$(make_home teardown-relocated-hold)
+  data="$home/records"
+  mv "$home/data" "$data"
+  id=sample-relocated-hold
+  mkdir -p "$home/data" "$data/$id"
+  # A backlog at the default location stays empty, so a wrongly addressed read
+  # would find no row at all.
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+
+## Queued
+
+## Done
+EOF
+  (cd "$home" && tasks-axi add "$id" "Investigate relocated sample hold" --kind scout \
+    --repo sample --start --file "$data/backlog.md" >/dev/null) \
+    || fail "could not create the relocated captain-hold fixture"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Relocated hold\n\nThe captain call remains open.\n' > "$data/$id/report.md"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" hold "$id" \
+    --reason "captain must choose the relocated sample outcome" >/dev/null \
+    || fail "could not hold the relocated work item"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-captain-hold.sh" complete "$id" "$id" >/dev/null \
+    || fail "completion gate failed for the relocated captain hold"
+
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" \
+    > "$home/teardown.out" 2> "$home/teardown.err" \
+    || fail "cleanup of the relocated captain hold failed: $(cat "$home/teardown.err")"
+  show=$(cd "$home" && tasks-axi show "$id" --full --file "$data/backlog.md") \
+    || fail "the relocated captain-held row disappeared"
+  assert_not_contains "$show" "state: done" "cleanup closed the relocated captain call"
+  assert_contains "$show" "state: queued" "cleanup left the relocated captain call reading as worked on"
+  assert_contains "$show" "hold_kind: captain" "cleanup dropped the relocated captain hold"
+  assert_contains "$show" "Deliverable of the finished work: report records/$id/report.md" \
+    "cleanup did not record the deliverable in the relocated backlog"
+  assert_absent "$home/state/$id.meta" "cleanup left the relocated task record behind"
+  assert_absent "$home/state/$id.backlog-close" "cleanup left its pending record behind"
+  assert_no_grep "$id" "$home/data/backlog.md" "cleanup wrote to the empty default-location backlog"
+  pass "cleanup retains captain calls in the configured backlog"
+}
+
+test_merge_approval_releases_before_zero_done_retention() {
+  local home id archive repo wt pr show
+  home=$(make_home zero-done-retention)
+  id=sample-zero-retention-merge
+  archive="$home/data/done-archive.md"
+  repo="$home/projects/sample"
+  wt="$home/projects/$id"
+  pr="https://github.com/sample/sample/pull/19"
+  printf '%s\n' 'backend = "markdown"' '' '[markdown]' \
+    'path = "data/backlog.md"' 'archive = "data/done-archive.md"' \
+    'done_keep = 0' > "$home/.tasks.toml"
+  fm_git_worktree "$repo" "$wt" fm/zero-retention-merge
+  tasks_in "$home" add "$id" "Ship zero-retention merge $pr" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the zero-retention fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$wt" \
+    "project=$repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "pr=$pr" "spawn_gen=fixture-$id"
+  printf 'done: merge ready\n' > "$home/state/$id.status"
+  run_captain "$home" hold "$id" --reason "captain merge approval pending" >/dev/null \
+    || fail "could not hold the zero-retention merge"
+  printf 'Merge the approved change.\n' > "$home/merge-answer.txt"
+  run_captain "$home" answer "$id" --release \
+    --decision-file "$home/merge-answer.txt" >/dev/null \
+    || fail "could not release the approved zero-retention merge"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the released merge row disappeared"
+  assert_contains "$show" "state: in_flight" \
+    "merge approval completed the zero-retention row before landing"
+  assert_contains "$show" "Resolution mode: released" \
+    "merge approval did not record the existing release mode"
+  run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
+    || fail "zero-retention cleanup failed: $(cat "$home/teardown.err")"
+  assert_no_grep "$id" "$home/data/backlog.md" \
+    "zero-retention cleanup kept the completed row in the active backlog"
+  assert_grep "$id" "$archive" "zero-retention cleanup did not archive the completed row"
+  assert_grep "$pr" "$archive" "zero-retention archival lost the merged pull request"
+  assert_grep "Merge the approved change." "$archive" \
+    "zero-retention archival lost the recorded merge approval"
+  assert_absent "$home/state/$id.meta" "zero-retention cleanup retained task metadata"
+  assert_absent "$home/state/$id.backlog-close" \
+    "zero-retention cleanup retained its pending close record"
+  pass "merge approval releases before zero-retention cleanup records completion"
+}
+
+test_pr_merge_entrypoint_refuses_a_captain_held_task() {
+  local home pr_id pr repo wt rc
+  home=$(make_home held-merge-entrypoints)
+  configure_merged_github "$home"
+
+  pr_id=sample-held-pr-entrypoint
+  pr=https://github.com/sample/sample/pull/31
+  repo="$home/projects/sample-pr"
+  wt="$home/projects/$pr_id"
+  fm_git_worktree "$repo" "$wt" "fm/$pr_id"
+  tasks_in "$home" add "$pr_id" "Ship the held pull request" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the held PR fixture"
+  fm_write_meta "$home/state/$pr_id.meta" \
+    "window=firstmate:fm-$pr_id" "endpoint_task_id=$pr_id" "worktree=$wt" \
+    "project=$repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "pr=$pr" "spawn_gen=fixture-$pr_id"
+  run_captain "$home" hold "$pr_id" --reason "captain merge approval pending" >/dev/null \
+    || fail "could not hold the PR entrypoint fixture"
+
+  # Without the entrypoint guard, this run reaches gh and returns success even
+  # though the task is still held for the captain.
+  set +e
+  run_pr_merge "$home" "$pr_id" "$pr" > "$home/pr.out" 2> "$home/pr.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the PR merge entrypoint accepted a still-held task"
+  assert_no_grep 'pr merge 31 ' "$home/gh.log" \
+    "the PR merge entrypoint reached the irreversible forge call for a held task"
+  assert_grep "$pr_id is still held for the captain" "$home/pr.err" \
+    "the PR merge refusal did not name the held task"
+  assert_absent "$home/state/.control-$pr_id.lock" \
+    "the refused PR merge left its task control lock held"
+  pass "the PR merge entrypoint refuses a captain-held task before merging"
+}
+
+test_local_merge_entrypoint_refuses_a_captain_held_task() {
+  local home local_id local_repo local_wt before after rc
+  home=$(make_home held-local-merge-entrypoint)
+  local_id=sample-held-local-entrypoint
+  local_repo="$home/projects/sample-local"
+  local_wt="$home/projects/$local_id"
+  fm_git_worktree "$local_repo" "$local_wt" "fm/$local_id"
+  printf 'held local delivery\n' > "$local_wt/local.txt"
+  git -C "$local_wt" add local.txt
+  git -C "$local_wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'held local delivery'
+  tasks_in "$home" add "$local_id" "Ship the held local change" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the held local fixture"
+  fm_write_meta "$home/state/$local_id.meta" \
+    "window=firstmate:fm-$local_id" "endpoint_task_id=$local_id" "worktree=$local_wt" \
+    "project=$local_repo" "harness=codex" "kind=ship" "mode=local-only" \
+    "spawn_gen=fixture-$local_id"
+  run_captain "$home" hold "$local_id" --reason "captain local merge approval pending" \
+    >/dev/null || fail "could not hold the local entrypoint fixture"
+  before=$(git -C "$local_repo" rev-parse main)
+
+  # Without the entrypoint guard, this run fast-forwards main while the task
+  # still carries the captain hold.
+  set +e
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-merge-local.sh" "$local_id" \
+    > "$home/local.out" 2> "$home/local.err"
+  rc=$?
+  set -e
+  after=$(git -C "$local_repo" rev-parse main)
+  [ "$rc" -ne 0 ] || fail "the local merge entrypoint accepted a still-held task"
+  [ "$after" = "$before" ] || fail "the local merge entrypoint moved main for a held task"
+  assert_grep "$local_id is still held for the captain" "$home/local.err" \
+    "the local merge refusal did not name the held task"
+  assert_absent "$home/state/.control-$local_id.lock" \
+    "the refused local merge left its task control lock held"
+  pass "the local merge entrypoint refuses a captain-held task before merging"
+}
+
+test_pr_merge_entrypoint_separates_an_unreadable_record_from_an_absent_one() {
+  local home id pr rc merge_count
+  home=$(make_home missing-pr-authority-record)
+  configure_merged_github "$home"
+  id=sample-missing-pr-authority
+  pr=https://github.com/sample/sample/pull/43
+  write_origin_meta "$home" "$id" ship
+
+  # A backlog that exists but cannot be read may hide a live captain hold, so
+  # the merge must refuse without reaching the forge.
+  chmod 000 "$home/data/backlog.md"
+  set +e
+  run_pr_merge "$home" "$id" "$pr" > "$home/missing-pr.out" 2> "$home/missing-pr.err"
+  rc=$?
+  set -e
+  chmod 644 "$home/data/backlog.md"
+  [ "$rc" -ne 0 ] || fail "the PR merge entrypoint accepted an unreadable captain-hold authority record"
+  assert_grep "could not determine whether task $id is still held for the captain" "$home/missing-pr.err" \
+    "the PR merge refusal did not name its unreadable authority record"
+  assert_no_grep 'pr merge 43 ' "$home/gh.log" \
+    "the PR merge entrypoint reached the forge without a readable authority record"
+
+  # A home with no backlog at all records no captain calls, so nothing can be
+  # held and the merge proceeds.
+  rm "$home/data/backlog.md"
+  run_pr_merge "$home" "$id" "$pr" > "$home/absent-pr.out" 2> "$home/absent-pr.err" \
+    || fail "the PR merge entrypoint refused a home carrying no backlog"
+  merge_count=$(grep -c 'pr merge 43 ' "$home/gh.log" || true)
+  [ "$merge_count" -eq 1 ] || fail "the absent backlog did not permit exactly one PR merge"
+  pass "the PR merge entrypoint separates an unreadable authority record from an absent one"
+}
+
+test_local_merge_entrypoint_separates_an_unreadable_record_from_an_absent_one() {
+  local home id repo wt before after rc
+  home=$(make_home missing-local-authority-record)
+  id=sample-missing-local-authority
+  repo="$home/projects/sample-local"
+  wt="$home/projects/$id"
+  fm_git_worktree "$repo" "$wt" "fm/$id"
+  printf 'untracked local delivery\n' > "$wt/local.txt"
+  git -C "$wt" add local.txt
+  git -C "$wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'untracked local delivery'
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$wt" \
+    "project=$repo" "harness=codex" "kind=ship" "mode=local-only" \
+    "spawn_gen=fixture-$id"
+  before=$(git -C "$repo" rev-parse main)
+
+  # Unreadable authority record: refuse, and leave the default branch where it was.
+  chmod 000 "$home/data/backlog.md"
+  set +e
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-merge-local.sh" "$id" \
+    > "$home/missing-local.out" 2> "$home/missing-local.err"
+  rc=$?
+  set -e
+  chmod 644 "$home/data/backlog.md"
+  after=$(git -C "$repo" rev-parse main)
+  [ "$rc" -ne 0 ] || fail "the local merge entrypoint accepted an unreadable captain-hold authority record"
+  [ "$after" = "$before" ] || fail "the local merge entrypoint moved main without a readable authority record"
+  assert_grep "could not determine whether task $id is still held for the captain" "$home/missing-local.err" \
+    "the local merge refusal did not name its unreadable authority record"
+
+  # No backlog at all: nothing can be held, so the landing proceeds.
+  rm "$home/data/backlog.md"
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-merge-local.sh" "$id" \
+    > "$home/absent-local.out" 2> "$home/absent-local.err" \
+    || fail "the local merge entrypoint refused a home carrying no backlog"
+  after=$(git -C "$repo" rev-parse main)
+  [ "$after" != "$before" ] || fail "the absent backlog did not permit the local merge"
+  pass "the local merge entrypoint separates an unreadable authority record from an absent one"
+}
+
+test_merge_entrypoints_validate_identity_and_state_before_locking() {
+  local home pr_state local_state bad_id rc
+  home=$(make_home invalid-merge-entrypoint-inputs)
+  configure_merged_github "$home"
+
+  pr_state="$home/missing-pr-state"
+  set +e
+  fm_run_timed 2 env PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$pr_state" \
+    "$ROOT/bin/fm-pr-merge.sh" sample-missing-pr-state \
+    https://github.com/sample/sample/pull/41 \
+    > "$home/missing-pr-state.out" 2> "$home/missing-pr-state.err"
+  rc=$?
+  set -e
+  # Without pre-lock state validation, the lock library creates the missing
+  # directory before the entrypoint discovers that no task record exists.
+  [ "$rc" -ne 124 ] || fail "the PR merge waited forever for a missing state directory"
+  [ "$rc" -ne 0 ] || fail "the PR merge accepted a missing state directory"
+  assert_absent "$pr_state" "the PR merge created a missing state directory while refusing"
+  assert_grep "state directory is not a real directory" "$home/missing-pr-state.err" \
+    "the PR merge did not identify its missing state directory"
+
+  local_state="$home/missing-local-state"
+  set +e
+  fm_run_timed 2 env PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$local_state" \
+    "$ROOT/bin/fm-merge-local.sh" sample-missing-local-state \
+    > "$home/missing-local-state.out" 2> "$home/missing-local-state.err"
+  rc=$?
+  set -e
+  # Without pre-lock state validation, the lock library creates the missing
+  # directory before the entrypoint discovers that no task record exists.
+  [ "$rc" -ne 124 ] || fail "the local merge waited forever for a missing state directory"
+  [ "$rc" -ne 0 ] || fail "the local merge accepted a missing state directory"
+  assert_absent "$local_state" "the local merge created a missing state directory while refusing"
+  assert_grep "state directory is not a real directory" "$home/missing-local-state.err" \
+    "the local merge did not identify its missing state directory"
+
+  bad_id=sample/bad-local-id
+  set +e
+  fm_run_timed 2 env PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$ROOT/bin/fm-merge-local.sh" "$bad_id" \
+    > "$home/bad-local-id.out" 2> "$home/bad-local-id.err"
+  rc=$?
+  set -e
+  # Without canonical ID validation, the slash creates a nested lock path whose
+  # absent parent makes the blocking acquisition retry until the bound expires.
+  [ "$rc" -ne 124 ] || fail "the local merge waited forever on a slash-containing task id"
+  [ "$rc" -eq 2 ] || fail "the local merge returned $rc instead of rejecting the unsafe task id"
+  assert_grep "invalid local merge request" "$home/bad-local-id.err" \
+    "the local merge did not identify the unsafe task id"
+  assert_absent "$home/state/.control-sample" \
+    "the unsafe task id constructed a nested task control path"
+  pass "merge entrypoints reject unsafe identities and absent state before locking"
+}
+
+test_merge_entrypoints_refuse_a_reused_task_incarnation() {
+  local home id pr old_repo old_wt new_repo new_wt teardown_pid merge_pid
+  local teardown_ready teardown_release merge_ready merge_release teardown_rc merge_rc
+  local local_home local_id local_old_repo local_old_wt local_new_repo local_new_wt
+  local local_teardown_pid local_merge_pid local_teardown_ready local_teardown_release
+  local local_merge_ready local_merge_release local_teardown_rc local_merge_rc before after
+  local real_perl real_sleep
+  real_perl=$(command -v perl)
+  real_sleep=$(command -v sleep)
+
+  home=$(make_home reused-pr-incarnation)
+  configure_merged_github "$home"
+  install_reused_task_barriers "$home"
+  id=sample-reused-pr-incarnation
+  pr=https://github.com/sample/sample/pull/42
+  old_repo="$home/projects/sample-reused-pr-old"
+  old_wt="$home/projects/$id"
+  fm_git_worktree "$old_repo" "$old_wt" "fm/$id"
+  tasks_in "$home" add "$id" "Ship the original pull request" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the original PR task"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$old_wt" \
+    "project=$old_repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "spawn_gen=original-$id"
+  printf 'done: merge ready\n' > "$home/state/$id.status"
+
+  teardown_ready="$home/reuse-teardown-ready"
+  teardown_release="$home/reuse-teardown-release"
+  merge_ready="$home/reuse-merge-ready"
+  merge_release="$home/reuse-merge-release"
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_TEST_REUSE_TEARDOWN=1 \
+    FM_TEST_REUSE_TEARDOWN_ONCE="$home/reuse-teardown-once" \
+    FM_TEST_REUSE_TEARDOWN_READY="$teardown_ready" \
+    FM_TEST_REUSE_TEARDOWN_RELEASE="$teardown_release" \
+    FM_TEST_REAL_PERL="$real_perl" FM_TEST_REAL_SLEEP="$real_sleep" \
+    "$TEARDOWN" "$id" --force > "$home/reuse-teardown.out" \
+    2> "$home/reuse-teardown.err" &
+  teardown_pid=$!
+  if ! wait_for_test_file "$teardown_ready" "$teardown_pid"; then
+    : > "$teardown_release"
+    wait "$teardown_pid" 2>/dev/null || true
+    fail "forced PR cleanup did not reach its task-locked synchronization point"
+  fi
+
+  FM_TEST_REUSE_MERGE=1 FM_TEST_REUSE_MERGE_ONCE="$home/reuse-merge-once" \
+    FM_TEST_REUSE_MERGE_READY="$merge_ready" FM_TEST_REUSE_MERGE_RELEASE="$merge_release" \
+    FM_TEST_REAL_PERL="$real_perl" FM_TEST_REAL_SLEEP="$real_sleep" \
+    run_pr_merge "$home" "$id" "$pr" > "$home/reuse-merge.out" \
+    2> "$home/reuse-merge.err" &
+  merge_pid=$!
+  if ! wait_for_test_file "$merge_ready" "$merge_pid"; then
+    : > "$teardown_release"
+    : > "$merge_release"
+    wait "$teardown_pid" 2>/dev/null || true
+    wait "$merge_pid" 2>/dev/null || true
+    fail "the PR merge did not wait behind forced cleanup"
+  fi
+
+  : > "$teardown_release"
+  set +e
+  wait "$teardown_pid"
+  teardown_rc=$?
+  set -e
+  if [ "$teardown_rc" -ne 0 ]; then
+    : > "$merge_release"
+    wait "$merge_pid" 2>/dev/null || true
+    fail "forced PR cleanup failed before the task could be reused: $(cat "$home/reuse-teardown.err")"
+  fi
+
+  new_repo="$home/projects/sample-reused-pr-new"
+  new_wt="$home/projects/reused-$id"
+  fm_git_worktree "$new_repo" "$new_wt" "fm/$id"
+  tasks_in "$home" reopen "$id" >/dev/null || fail "could not reopen the reused PR task"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$new_wt" \
+    "project=$new_repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "spawn_gen=replacement-$id"
+  tasks_in "$home" start "$id" >/dev/null || fail "could not start the reused PR task"
+  : > "$merge_release"
+  set +e
+  wait "$merge_pid"
+  merge_rc=$?
+  set -e
+
+  # Without the pre-wait generation capture and locked comparison, the waiter
+  # records and merges pull request 42 against the replacement task record.
+  [ "$merge_rc" -ne 0 ] || fail "the PR merge accepted a replacement task incarnation"
+  assert_no_grep 'pr merge 42 ' "$home/gh.log" \
+    "the PR merge reached the forge for a replacement task incarnation"
+  assert_grep "changed incarnation while waiting to merge" "$home/reuse-merge.err" \
+    "the PR merge did not identify the replacement task incarnation"
+  assert_grep "spawn_gen=replacement-$id" "$home/state/$id.meta" \
+    "the refused PR merge damaged the replacement task record"
+  assert_absent "$home/state/.control-$id.lock" \
+    "the reused-incarnation PR refusal left its task control lock held"
+
+  local_home=$(make_home reused-local-incarnation)
+  install_reused_task_barriers "$local_home"
+  local_id=sample-reused-local-incarnation
+  local_old_repo="$local_home/projects/sample-reused-local-old"
+  local_old_wt="$local_home/projects/$local_id"
+  fm_git_worktree "$local_old_repo" "$local_old_wt" "fm/$local_id"
+  printf 'original local delivery\n' > "$local_old_wt/original.txt"
+  git -C "$local_old_wt" add original.txt
+  git -C "$local_old_wt" -c user.name='Firstmate Tests' \
+    -c user.email='tests@example.invalid' commit -qm 'original local delivery'
+  tasks_in "$local_home" add "$local_id" "Ship the original local change" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the original local task"
+  fm_write_meta "$local_home/state/$local_id.meta" \
+    "window=firstmate:fm-$local_id" "endpoint_task_id=$local_id" \
+    "worktree=$local_old_wt" "project=$local_old_repo" "harness=codex" \
+    "kind=ship" "mode=local-only" "spawn_gen=original-$local_id"
+  printf 'done: local merge ready\n' > "$local_home/state/$local_id.status"
+
+  local_teardown_ready="$local_home/reuse-teardown-ready"
+  local_teardown_release="$local_home/reuse-teardown-release"
+  local_merge_ready="$local_home/reuse-merge-ready"
+  local_merge_release="$local_home/reuse-merge-release"
+  PATH="$local_home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$local_home" \
+    FM_STATE_OVERRIDE="$local_home/state" FM_DATA_OVERRIDE="$local_home/data" \
+    FM_CONFIG_OVERRIDE="$local_home/config" FM_TEST_REUSE_TEARDOWN=1 \
+    FM_TEST_REUSE_TEARDOWN_ONCE="$local_home/reuse-teardown-once" \
+    FM_TEST_REUSE_TEARDOWN_READY="$local_teardown_ready" \
+    FM_TEST_REUSE_TEARDOWN_RELEASE="$local_teardown_release" \
+    FM_TEST_REAL_PERL="$real_perl" FM_TEST_REAL_SLEEP="$real_sleep" \
+    "$TEARDOWN" "$local_id" --force > "$local_home/reuse-teardown.out" \
+    2> "$local_home/reuse-teardown.err" &
+  local_teardown_pid=$!
+  if ! wait_for_test_file "$local_teardown_ready" "$local_teardown_pid"; then
+    : > "$local_teardown_release"
+    wait "$local_teardown_pid" 2>/dev/null || true
+    fail "forced local cleanup did not reach its task-locked synchronization point"
+  fi
+
+  PATH="$local_home/fakebin:$PATH" FM_TEST_REUSE_MERGE=1 \
+    FM_TEST_REUSE_MERGE_ONCE="$local_home/reuse-merge-once" \
+    FM_TEST_REUSE_MERGE_READY="$local_merge_ready" \
+    FM_TEST_REUSE_MERGE_RELEASE="$local_merge_release" \
+    FM_TEST_REAL_PERL="$real_perl" FM_TEST_REAL_SLEEP="$real_sleep" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$local_home" \
+    FM_STATE_OVERRIDE="$local_home/state" FM_DATA_OVERRIDE="$local_home/data" \
+    FM_CONFIG_OVERRIDE="$local_home/config" \
+    "$ROOT/bin/fm-merge-local.sh" "$local_id" > "$local_home/reuse-merge.out" \
+    2> "$local_home/reuse-merge.err" &
+  local_merge_pid=$!
+  if ! wait_for_test_file "$local_merge_ready" "$local_merge_pid"; then
+    : > "$local_teardown_release"
+    : > "$local_merge_release"
+    wait "$local_teardown_pid" 2>/dev/null || true
+    wait "$local_merge_pid" 2>/dev/null || true
+    fail "the local merge did not wait behind forced cleanup"
+  fi
+
+  : > "$local_teardown_release"
+  set +e
+  wait "$local_teardown_pid"
+  local_teardown_rc=$?
+  set -e
+  if [ "$local_teardown_rc" -ne 0 ]; then
+    : > "$local_merge_release"
+    wait "$local_merge_pid" 2>/dev/null || true
+    fail "forced local cleanup failed before the task could be reused: $(cat "$local_home/reuse-teardown.err")"
+  fi
+
+  local_new_repo="$local_home/projects/sample-reused-local-new"
+  local_new_wt="$local_home/projects/reused-$local_id"
+  fm_git_worktree "$local_new_repo" "$local_new_wt" "fm/$local_id"
+  printf 'replacement local delivery\n' > "$local_new_wt/replacement.txt"
+  git -C "$local_new_wt" add replacement.txt
+  git -C "$local_new_wt" -c user.name='Firstmate Tests' \
+    -c user.email='tests@example.invalid' commit -qm 'replacement local delivery'
+  before=$(git -C "$local_new_repo" rev-parse main)
+  tasks_in "$local_home" reopen "$local_id" >/dev/null \
+    || fail "could not reopen the reused local task"
+  fm_write_meta "$local_home/state/$local_id.meta" \
+    "window=firstmate:fm-$local_id" "endpoint_task_id=$local_id" \
+    "worktree=$local_new_wt" "project=$local_new_repo" "harness=codex" \
+    "kind=ship" "mode=local-only" "spawn_gen=replacement-$local_id"
+  tasks_in "$local_home" start "$local_id" >/dev/null \
+    || fail "could not start the reused local task"
+  : > "$local_merge_release"
+  set +e
+  wait "$local_merge_pid"
+  local_merge_rc=$?
+  set -e
+  after=$(git -C "$local_new_repo" rev-parse main)
+
+  # Without the pre-wait generation capture and locked comparison, the waiter
+  # fast-forwards the replacement task's branch despite never approving it.
+  [ "$local_merge_rc" -ne 0 ] || fail "the local merge accepted a replacement task incarnation"
+  [ "$after" = "$before" ] || fail "the local merge moved main for a replacement task incarnation"
+  assert_grep "changed incarnation while waiting to merge" "$local_home/reuse-merge.err" \
+    "the local merge did not identify the replacement task incarnation"
+  assert_grep "spawn_gen=replacement-$local_id" "$local_home/state/$local_id.meta" \
+    "the refused local merge damaged the replacement task record"
+  assert_absent "$local_home/state/.control-$local_id.lock" \
+    "the reused-incarnation local refusal left its task control lock held"
+  pass "merge entrypoints refuse a replacement incarnation after waiting for cleanup"
+}
+
+test_merge_entrypoints_serialize_forced_teardown_before_task_reads() {
+  local home id pr repo wt ready release merge_pid teardown_rc merge_rc real_grep
+  local local_home local_id local_repo local_wt local_ready local_release local_pid
+  local local_teardown_rc local_merge_rc real_git before after i
+
+  home=$(make_home teardown-race-pr-entrypoint)
+  configure_merged_github "$home"
+  id=sample-teardown-race-pr
+  pr=https://github.com/sample/sample/pull/33
+  repo="$home/projects/sample-pr-race"
+  wt="$home/projects/$id"
+  fm_git_worktree "$repo" "$wt" "fm/$id"
+  tasks_in "$home" add "$id" "Ship the released pull request" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the PR teardown-race fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$wt" \
+    "project=$repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "spawn_gen=fixture-$id"
+  printf 'done: merge ready\n' > "$home/state/$id.status"
+  run_captain "$home" hold "$id" --reason "captain merge approval pending" >/dev/null \
+    || fail "could not hold the PR teardown-race fixture"
+  printf 'Merge the released pull request.\n' > "$home/race-answer.txt"
+  run_captain "$home" answer "$id" --release --decision-file "$home/race-answer.txt" \
+    >/dev/null || fail "could not release the PR teardown-race fixture"
+
+  real_grep=$(command -v grep)
+  ready="$home/pr-metadata-read-ready"
+  release="$home/pr-metadata-read-release"
+  cat > "$home/fakebin/grep" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = -qxF ] && [ "${2:-}" = "pr=${FM_TEST_RACE_PR_URL:-}" ] \
+    && [ "${3:-}" = "${FM_TEST_RACE_PR_META:-}" ]; then
+  "$FM_TEST_REAL_GREP" "$@" || exit $?
+  : > "$FM_TEST_RACE_READY"
+  while [ ! -e "$FM_TEST_RACE_RELEASE" ]; do sleep 0.01; done
+  exit 0
+fi
+exec "$FM_TEST_REAL_GREP" "$@"
+SH
+  chmod +x "$home/fakebin/grep"
+  FM_TEST_REAL_GREP="$real_grep" FM_TEST_RACE_PR_URL="$pr" \
+    FM_TEST_RACE_PR_META="$home/state/$id.meta" FM_TEST_RACE_READY="$ready" \
+    FM_TEST_RACE_RELEASE="$release" run_pr_merge "$home" "$id" "$pr" \
+    > "$home/race-pr.out" 2> "$home/race-pr.err" &
+  merge_pid=$!
+  i=0
+  while [ "$i" -lt 500 ]; do
+    [ -e "$ready" ] && break
+    kill -0 "$merge_pid" 2>/dev/null || break
+    sleep 0.01
+    i=$((i + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    : > "$release"
+    wait "$merge_pid" 2>/dev/null || true
+    fail "the PR merge did not reach the post-metadata synchronization point"
+  fi
+  set +e
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force \
+    > "$home/race-pr-teardown.out" 2> "$home/race-pr-teardown.err"
+  teardown_rc=$?
+  set -e
+  : > "$release"
+  wait "$merge_pid"
+  merge_rc=$?
+
+  # Without early lock ownership, forced cleanup succeeds after metadata is
+  # recorded, and the resumed forge call merges work whose task was retired.
+  [ "$teardown_rc" -ne 0 ] \
+    || fail "forced cleanup retired the task between PR metadata recording and merge"
+  assert_grep "another lifecycle action is already running for task $id" \
+    "$home/race-pr-teardown.err" \
+    "PR cleanup was not refused by the merge's task control lock"
+  [ "$merge_rc" -eq 0 ] || fail "the serialized PR merge failed after cleanup was refused"
+  assert_present "$home/state/$id.meta" "the refused PR cleanup removed task metadata"
+  assert_grep 'pr merge 33 ' "$home/gh.log" \
+    "the serialized PR merge did not reach the forge after cleanup was refused"
+
+  local_home=$(make_home teardown-race-local-entrypoint)
+  local_id=sample-teardown-race-local
+  local_repo="$local_home/projects/sample-local-race"
+  local_wt="$local_home/projects/$local_id"
+  fm_git_worktree "$local_repo" "$local_wt" "fm/$local_id"
+  printf 'serialized local delivery\n' > "$local_wt/local.txt"
+  git -C "$local_wt" add local.txt
+  git -C "$local_wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'serialized local delivery'
+  tasks_in "$local_home" add "$local_id" "Ship the released local change" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the local teardown-race fixture"
+  fm_write_meta "$local_home/state/$local_id.meta" \
+    "window=firstmate:fm-$local_id" "endpoint_task_id=$local_id" "worktree=$local_wt" \
+    "project=$local_repo" "harness=codex" "kind=ship" "mode=local-only" \
+    "spawn_gen=fixture-$local_id"
+  printf 'done: local merge ready\n' > "$local_home/state/$local_id.status"
+  run_captain "$local_home" hold "$local_id" \
+    --reason "captain local merge approval pending" >/dev/null \
+    || fail "could not hold the local teardown-race fixture"
+  printf 'Land the released local change.\n' > "$local_home/race-answer.txt"
+  run_captain "$local_home" answer "$local_id" --release \
+    --decision-file "$local_home/race-answer.txt" >/dev/null \
+    || fail "could not release the local teardown-race fixture"
+
+  real_git=$(command -v git)
+  local_ready="$local_home/local-validation-ready"
+  local_release="$local_home/local-validation-release"
+  cat > "$local_home/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+if [ "$*" = "-C ${FM_TEST_RACE_REPO:-} rev-parse --short main" ]; then
+  output=$("$FM_TEST_REAL_GIT" "$@") || exit $?
+  : > "$FM_TEST_RACE_READY"
+  while [ ! -e "$FM_TEST_RACE_RELEASE" ]; do sleep 0.01; done
+  printf '%s\n' "$output"
+  exit 0
+fi
+exec "$FM_TEST_REAL_GIT" "$@"
+SH
+  chmod +x "$local_home/fakebin/git"
+  before=$(git -C "$local_repo" rev-parse main)
+  PATH="$local_home/fakebin:$PATH" FM_TEST_REAL_GIT="$real_git" \
+    FM_TEST_RACE_REPO="$local_repo" FM_TEST_RACE_READY="$local_ready" \
+    FM_TEST_RACE_RELEASE="$local_release" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$local_home" FM_STATE_OVERRIDE="$local_home/state" \
+    FM_DATA_OVERRIDE="$local_home/data" FM_CONFIG_OVERRIDE="$local_home/config" \
+    "$ROOT/bin/fm-merge-local.sh" "$local_id" \
+    > "$local_home/race-local.out" 2> "$local_home/race-local.err" &
+  local_pid=$!
+  i=0
+  while [ "$i" -lt 500 ]; do
+    [ -e "$local_ready" ] && break
+    kill -0 "$local_pid" 2>/dev/null || break
+    sleep 0.01
+    i=$((i + 1))
+  done
+  if [ ! -e "$local_ready" ]; then
+    : > "$local_release"
+    wait "$local_pid" 2>/dev/null || true
+    fail "the local merge did not reach the post-validation synchronization point"
+  fi
+  set +e
+  PATH="$local_home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$local_home" \
+    FM_STATE_OVERRIDE="$local_home/state" FM_DATA_OVERRIDE="$local_home/data" \
+    FM_CONFIG_OVERRIDE="$local_home/config" "$TEARDOWN" "$local_id" --force \
+    > "$local_home/race-local-teardown.out" 2> "$local_home/race-local-teardown.err"
+  local_teardown_rc=$?
+  set -e
+  : > "$local_release"
+  wait "$local_pid"
+  local_merge_rc=$?
+  after=$(git -C "$local_repo" rev-parse main)
+
+  # Without early lock ownership, forced cleanup succeeds after validation and
+  # the resumed fast-forward lands work whose task was already retired.
+  [ "$local_teardown_rc" -ne 0 ] \
+    || fail "forced cleanup retired the task between local validation and merge"
+  assert_grep "another lifecycle action is already running for task $local_id" \
+    "$local_home/race-local-teardown.err" \
+    "local cleanup was not refused by the merge's task control lock"
+  [ "$local_merge_rc" -eq 0 ] || fail "the serialized local merge failed after cleanup was refused"
+  [ "$after" != "$before" ] || fail "the serialized local merge did not fast-forward main"
+  assert_present "$local_home/state/$local_id.meta" \
+    "the refused local cleanup removed task metadata"
+  pass "merge entrypoints own task state before forced cleanup can retire it"
+}
+
+# No regression covers a re-hold after a merge lands and before cleanup because
+# that accepted window spans two separate lifecycle owners.
+# Queued forge merges are also uncovered because they land asynchronously after
+# the local merge command and its task control lock have returned.
+test_released_merge_passes_the_entrypoint_and_lands() {
+  local home id pr repo wt show json
+  home=$(make_home released-merge-entrypoint)
+  configure_merged_github "$home"
+  id=sample-released-merge
+  pr=https://github.com/sample/sample/pull/32
+  repo="$home/projects/sample-released"
+  wt="$home/projects/$id"
+  fm_git_worktree "$repo" "$wt" "fm/$id"
+  tasks_in "$home" add "$id" "Ship the approved pull request" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the released merge fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" "worktree=$wt" \
+    "project=$repo" "harness=codex" "kind=ship" "mode=no-mistakes" \
+    "pr=$pr" "spawn_gen=fixture-$id"
+  printf 'done: merge ready\n' > "$home/state/$id.status"
+  run_captain "$home" hold "$id" --reason "captain merge approval pending" >/dev/null \
+    || fail "could not hold the released merge fixture"
+  printf 'Merge the approved pull request.\n' > "$home/merge-answer.txt"
+  run_captain "$home" answer "$id" --release \
+    --decision-file "$home/merge-answer.txt" >/dev/null \
+    || fail "could not release the approved merge"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the released merge task disappeared"
+  assert_not_contains "$show" "hold_kind: captain" \
+    "the approved merge remained captain-held after its release"
+  run_pr_merge "$home" "$id" "$pr" > "$home/merge.out" 2> "$home/merge.err" \
+    || fail "the released merge was refused: $(cat "$home/merge.err")"
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force \
+    > "$home/teardown.out" 2> "$home/teardown.err" \
+    || fail "the released merge cleanup failed: $(cat "$home/teardown.err")"
+  json=$(run_bearings "$home") || fail "Bearings failed after the released merge lifecycle"
+  printf '%s' "$json" | jq -e --arg id "$id" --arg pr "$pr" \
+    '.landed | any(.id == $id and .artifact == $pr)' >/dev/null \
+    || fail "the released merge was absent from Recently Landed: $json"
+  pass "a released merge passes the guarded entrypoint and remains recently landed"
+}
+
+# "Cannot tell" is not permission to close. A ship row has no separate
+# inventory gate ahead of the close, so the predicate itself must refuse before
+# any destructive step when the hold cannot be read.
+test_teardown_refuses_a_ship_when_the_captain_hold_cannot_be_read() {
+  local home id rc show
+  home=$(make_home teardown-ship-hold-read-error)
+  id=sample-unreadable-ship-hold
+  tasks_in "$home" add "$id" "Ship the sample change" --kind ship \
+    --repo sample --start >/dev/null || fail "could not create the unreadable-hold fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$home/projects/missing-$id" \
+    "project=$home/projects/sample" "harness=codex" "kind=ship" "mode=direct-PR" \
+    "spawn_gen=fixture-$id"
+  printf 'done: PR https://github.com/sample/sample/pull/7\n' > "$home/state/$id.status"
+  run_captain "$home" hold "$id" --reason "captain must approve the sample change" >/dev/null \
+    || fail "could not hold the ship fixture for the captain"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = show ] && [ "${2:-}" = "${TASKS_AXI_FAIL_SHOW_ID:-}" ]; then
+  printf 'error: temporary backlog read failure\n' >&2
+  exit 75
+fi
+exec "${REAL_TASKS_AXI:?}" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+
+  set +e
+  PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+    TASKS_AXI_FAIL_SHOW_ID="$id" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force \
+    > "$home/teardown.out" 2> "$home/teardown.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "cleanup treated an unreadable captain hold as permission to close"
+  assert_present "$home/state/$id.meta" "read uncertainty must refuse before removing the task record"
+  assert_absent "$home/state/$id.backlog-close" "read uncertainty staged a pending transition anyway"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the unreadable captain-held row disappeared"
+  assert_contains "$show" "state: in_flight" "read uncertainty allowed cleanup to move the row"
+  assert_contains "$show" "hold_kind: captain" "read uncertainty dropped the captain hold"
+  assert_grep "could not be read" "$home/teardown.err" "cleanup did not explain the refusal"
+  assert_grep "temporary backlog read failure" "$home/teardown.err" \
+    "the underlying captain-hold read failure was hidden"
+  pass "cleanup refuses a ship row when its captain hold cannot be read"
+}
+
+# A shown scalar field is a JSON-encoded bare string, and JSON::PP accepts one
+# only when allow_nonref is on. Recent releases default it on, so this case
+# forces the older default back off for every perl the command spawns - the same
+# rejection a host with JSON::PP 2.27202 produces - then drives both paths that
+# read a body back: holding a task for the captain, and the cleanup that retains
+# a captain-held row with its deliverable.
+test_hold_decodes_a_bare_scalar_body_without_the_nonref_default() {
+  local home shim id show probe scout
+  home=$(make_home nonref-default)
+  shim="$home/no-nonref-default"
+  mkdir -p "$shim"
+  cat > "$shim/FmNoNonrefDefault.pm" <<'PM'
+package FmNoNonrefDefault;
+require JSON::PP;
+my $new = \&JSON::PP::new;
+{
+  no warnings 'redefine';
+  *JSON::PP::new = sub { my $self = $new->(@_); $self->allow_nonref(0); $self };
+}
+1;
+PM
+
+  # Without this the case would pass on any decode path at all, including the
+  # one this regression exists to catch.
+  probe=$(printf '%s' '"probe"' | PERL5LIB="$shim" PERL5OPT=-MFmNoNonrefDefault \
+    perl -MJSON::PP -e 'local $/; eval { decode_json(<STDIN>) };
+      print $@ ? "rejects" : "accepts";')
+  [ "$probe" = rejects ] \
+    || fail "the simulated older default still accepted a bare scalar"
+
+  id=sample-nonref-body
+  tasks_in "$home" add "$id" "Work carrying a body" --kind ship --repo sample \
+    --body 'First line of the plan.' >/dev/null \
+    || fail "could not create the task carrying a body"
+  PERL5LIB="$shim" PERL5OPT=-MFmNoNonrefDefault \
+    run_captain "$home" hold "$id" --reason "captain go needed" >/dev/null \
+    || fail "a captain hold failed where allow_nonref is not on by default"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the held row disappeared"
+  assert_contains "$show" "hold_kind: captain" "the hold lost its captain kind"
+  assert_contains "$show" "Captain hold set:" "the hold lost its hold-set stamp"
+  assert_contains "$show" "First line of the plan." "the hold lost the original body"
+
+  # Cleanup reads the same body back to append the finished work's deliverable.
+  scout=sample-nonref-scout
+  mkdir -p "$home/data/$scout"
+  tasks_in "$home" add "$scout" "Investigate the sample body decode" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the investigation fixture"
+  write_origin_meta "$home" "$scout"
+  printf 'done: report complete\n' > "$home/state/$scout.status"
+  printf '# Sample body decode\n\nOne captain choice remains.\n' \
+    > "$home/data/$scout/report.md"
+  run_captain "$home" hold "$scout" --reason "captain must choose" >/dev/null \
+    || fail "could not hold the investigation for the captain"
+  run_captain "$home" complete "$scout" "$scout" >/dev/null \
+    || fail "the completion gate failed with the origin as its own captain call"
+  PERL5LIB="$shim" PERL5OPT=-MFmNoNonrefDefault \
+    run_teardown "$home" "$scout" > "$home/nonref.out" 2> "$home/nonref.err" \
+    || fail "cleanup of a captain-held row failed where allow_nonref is not on by default: $(cat "$home/nonref.err")"
+  show=$(tasks_in "$home" show "$scout" --full) || fail "the retained row disappeared"
+  assert_contains "$show" "hold_kind: captain" "cleanup dropped the captain hold"
+  assert_contains "$show" "Deliverable of the finished work: report data/$scout/report.md" \
+    "cleanup lost the deliverable it could not decode a body to append to"
+  assert_contains "$show" "Captain hold set:" "cleanup lost the hold-set stamp"
+  pass "both body-decoding paths work without the allow_nonref default"
+}
+
+# Cleanup rewrites a captain-held row's body to append the finished work's
+# deliverable, so every byte of that body has to survive the decode. The
+# assertions below are on bytes, not characters: a decoder that prints a
+# character string to a stream with no :raw layer emits a codepoint at or below
+# U+00FF as one latin-1 byte, which is not valid UTF-8, and the comparison of
+# decoded strings would not notice.
+#
+# The two characters go in separate rows on purpose. A string that holds any
+# character above U+00FF is printed as UTF-8 whatever the layer, so mixing them
+# in one body hides the latin-1 case entirely.
+
+# Take one captain-held row carrying <body> all the way through cleanup, which
+# is the path that reads the body back to append the deliverable.
+retain_row_with_body() {  # <home> <id> <body>
+  local home=$1 id=$2 body=$3
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the sample body bytes" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the fixture for $id"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample body bytes\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+  tasks_in "$home" update "$id" --body "$body" >/dev/null \
+    || fail "could not give $id a body carrying non-ASCII characters"
+  run_captain "$home" hold "$id" --reason "captain must choose" >/dev/null \
+    || fail "could not hold $id for the captain"
+  run_captain "$home" complete "$id" "$id" >/dev/null \
+    || fail "the completion gate failed for $id"
+  run_teardown "$home" "$id" > "$home/$id.out" 2> "$home/$id.err" \
+    || fail "cleanup of captain-held $id failed: $(cat "$home/$id.err")"
+}
+
+test_retained_body_keeps_its_utf8_bytes() {
+  local home accented wide narrow_id wide_id stored
+  home=$(make_home retain-utf8)
+  # Built from escapes so this file stays ASCII and the intended bytes are
+  # explicit: U+00E9 is the latin-1-representable case, U+2014 the wider one.
+  accented=$(printf 'caf\xc3\xa9')
+  wide=$(printf '\xe2\x80\x94')
+  stored="$home/data/backlog.md"
+
+  # A body whose characters are all at or below U+00FF.
+  narrow_id=sample-utf8-narrow
+  retain_row_with_body "$home" "$narrow_id" "Serve the $accented black, no sugar."
+  # data/backlog.md is the markdown backend's own persisted artifact, read here
+  # for its bytes because the shown field re-encodes them.
+  assert_grep "Deliverable of the finished work: report data/$narrow_id/report.md" "$stored" \
+    "cleanup did not rewrite the retained body, so nothing decoded it"
+  LC_ALL=C grep -qF "$accented" "$stored" \
+    || fail "the retained body lost the UTF-8 bytes of a character at or below U+00FF"
+  ! LC_ALL=C grep -q "$(printf '[\xe9]')" "$stored" \
+    || fail "the retained body holds a lone latin-1 byte, so it is no longer valid UTF-8"
+
+  # A body carrying a character above U+00FF keeps its bytes and stays quiet.
+  wide_id=sample-utf8-wide
+  retain_row_with_body "$home" "$wide_id" "Serve it $wide black, no sugar."
+  LC_ALL=C grep -qF "$wide" "$stored" \
+    || fail "the retained body lost the UTF-8 bytes of a character above U+00FF"
+  assert_no_grep "Wide character" "$home/$wide_id.err" \
+    "cleanup warned about a wide character instead of writing raw bytes"
+
+  pass "cleanup preserves every byte of a retained body's non-ASCII characters"
+}
+
 test_uninventoried_report_decision_refuses_completion
+test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
+test_retained_body_keeps_its_utf8_bytes
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work
+test_hold_stamp_precedes_hold_visibility
+test_interrupted_answer_preserves_hold_age
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
+test_secondmate_home_publishes_holds_and_answers
+test_secondmate_reconcile_publishes_before_request_retirement
 test_bound_channel_answers_close_at_answer_time
+test_reconcile_never_closes_through_the_keyed_answer_intake
+test_normal_answers_retire_pending_reconcile_requests
+test_reconcile_closes_with_evidence_or_keeps_the_call_open
+test_reconcile_outcomes_retry_partial_failures_once
 test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working
+test_board_answer_reaches_the_keyed_answer_intake
 test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled
 test_legitimate_holds_produce_no_divergence_signal
+test_teardown_never_closes_a_captain_held_task
+test_retained_row_artifacts_survive_captain_answers
+test_interrupted_cleanup_keeps_the_captain_call_recoverable
+test_answer_before_cleanup_replay_preserves_the_retained_report
+test_unusable_pending_close_record_names_its_reason
+test_relocated_report_does_not_wedge_an_answer_before_replay
+test_teardown_retains_captain_calls_in_a_relocated_backlog
+test_merge_approval_releases_before_zero_done_retention
+test_pr_merge_entrypoint_refuses_a_captain_held_task
+test_local_merge_entrypoint_refuses_a_captain_held_task
+test_pr_merge_entrypoint_separates_an_unreadable_record_from_an_absent_one
+test_local_merge_entrypoint_separates_an_unreadable_record_from_an_absent_one
+test_merge_entrypoints_validate_identity_and_state_before_locking
+test_merge_entrypoints_refuse_a_reused_task_incarnation
+test_merge_entrypoints_serialize_forced_teardown_before_task_reads
+test_released_merge_passes_the_entrypoint_and_lands
+test_teardown_refuses_a_ship_when_the_captain_hold_cannot_be_read
+test_verify_resolves_a_hold_migrated_to_beads_notes
+test_verify_resolves_a_hold_migrated_under_the_configured_prefix
+test_marker_noted_row_wins_over_a_prefix_namesake
+test_complete_accepts_a_migrated_inventory_on_beads
+test_verify_names_the_unresolvable_legacy_id_once
+test_verify_resolves_a_pre_collapse_key_through_its_derived_marker
+test_captain_hold_mutations_address_the_beads_backend

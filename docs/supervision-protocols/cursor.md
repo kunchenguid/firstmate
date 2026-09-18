@@ -27,5 +27,5 @@ Re-arm attaches to an existing healthy cycle when one is already present and fol
 See [`watcher-continuity.md`](../watcher-continuity.md) for the arm-layer successor and clean-close failure contract.
 
 Exit status 2 is a silent no-op on Cursor's `stop` step, so this adapter never blocks a turn end and instead forces one bounded follow-up, which [`turnend-guard.md`](../turnend-guard.md) accepts as an equal alternative.
-That document owns the double loop bound, the supersession contract, and the compatibility limits, including that a Cursor primary must be launched with `--trust` for its project hooks to load at all.
+That document owns the double loop bound, the supersession contract, the Pi-host stand-down, and the compatibility limits, including that a Cursor primary must be launched with `--trust` for its project hooks to load at all.
 Cursor's `beforeSubmitPrompt` step fires once for a real captain message and not for hook-driven follow-ups, so it could invalidate the baton at the start of this window, but that registration is deliberately deferred alongside the `preCompact` surface.

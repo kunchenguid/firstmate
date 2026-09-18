@@ -34,10 +34,12 @@
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME endpoint and SAME worktree, on the same or a newly chosen
 #              harness/model/effort - so switching harness is one ordinary use
-#              of this verb. With no explicit axis, a secondmate re-resolves its
-#              durable config/secondmate-harness pin (harness plus its optional
-#              model and effort tokens) exactly as any other respawn does, while
-#              a ship or scout keeps the exact adapter already recorded for it.
+#              of this verb. An explicit `default` model or effort clears that
+#              axis for the replacement. With no explicit axis, a secondmate
+#              re-resolves its durable config/secondmate-harness pin (harness
+#              plus its optional model and effort tokens) exactly as any other
+#              respawn does, while a ship or scout keeps the exact adapter
+#              already recorded for it.
 #              A prefixed raw-command basename cannot reconstruct its launch
 #              command, so relaunch requires an explicit --harness for it.
 #              --note is required for a ship or scout, whose replacement
@@ -82,6 +84,8 @@
 #     than reported as successful blind.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts.
+#   - A composer that visibly holds pending text refuses before an exit command
+#     is typed, so existing text is preserved instead of being concatenated.
 #
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
@@ -161,6 +165,9 @@ control_cleanup() {
     CONTROL_LOCK_HELD=0
     fm_lock_release "$CONTROL_LOCK" || true
   fi
+  if declare -F fm_lease_guard_release >/dev/null 2>&1; then
+    fm_lease_guard_release || true
+  fi
   return "$status"
 }
 
@@ -192,45 +199,48 @@ MODEL_SET=0
 EFFORT_SET=0
 NOTE=
 NOTE_SET=0
-want_value=
-for a in "$@"; do
-  if [ -n "$want_value" ]; then
-    case "$a" in
-      --*) die "--$want_value requires a value" ;;
+control_want_value=
+for control_arg in "$@"; do
+  if [ -n "$control_want_value" ]; then
+    case "$control_arg" in
+      --*) die "--$control_want_value requires a value" ;;
     esac
-    case "$want_value" in
-      harness) NEW_HARNESS=$a; HARNESS_SET=1 ;;
-      model) NEW_MODEL=$a; MODEL_SET=1 ;;
-      effort) NEW_EFFORT=$a; EFFORT_SET=1 ;;
-      note) NOTE=$a; NOTE_SET=1 ;;
-      note-file)
-        [ -f "$a" ] || die "--note-file '$a' is not a readable file"
-        NOTE=$(cat "$a")
+    case "$control_want_value" in
+      harness) NEW_HARNESS=$control_arg; HARNESS_SET=1 ;;
+      model) NEW_MODEL=$control_arg; MODEL_SET=1 ;;
+      effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
+      note) NOTE=$control_arg; NOTE_SET=1 ;;
+      note_file)
+        [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
+        NOTE=$(cat "$control_arg")
         NOTE_SET=1
         ;;
     esac
-    want_value=
+    control_want_value=
     continue
   fi
-  case "$a" in
-    --harness) want_value=harness ;;
-    --harness=*) NEW_HARNESS=${a#--harness=}; HARNESS_SET=1 ;;
-    --model) want_value=model ;;
-    --model=*) NEW_MODEL=${a#--model=}; MODEL_SET=1 ;;
-    --effort) want_value=effort ;;
-    --effort=*) NEW_EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
-    --note) want_value=note ;;
-    --note=*) NOTE=${a#--note=}; NOTE_SET=1 ;;
-    --note-file) want_value=note-file ;;
+  case "$control_arg" in
+    --harness) control_want_value=harness ;;
+    --harness=*) NEW_HARNESS=${control_arg#--harness=}; HARNESS_SET=1 ;;
+    --model) control_want_value=model ;;
+    --model=*) NEW_MODEL=${control_arg#--model=}; MODEL_SET=1 ;;
+    --effort) control_want_value=effort ;;
+    --effort=*) NEW_EFFORT=${control_arg#--effort=}; EFFORT_SET=1 ;;
+    --note) control_want_value=note ;;
+    --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
+    --note-file) control_want_value=note_file ;;
     --note-file=*)
-      [ -f "${a#--note-file=}" ] || die "--note-file '${a#--note-file=}' is not a readable file"
-      NOTE=$(cat "${a#--note-file=}")
+      [ -f "${control_arg#--note-file=}" ] || die "--note-file '${control_arg#--note-file=}' is not a readable file"
+      NOTE=$(cat "${control_arg#--note-file=}")
       NOTE_SET=1
       ;;
-    *) die "unexpected argument '$a'" ;;
+    *) die "unexpected argument '$control_arg'" ;;
   esac
 done
-[ -z "$want_value" ] || die "--$want_value requires a value"
+if [ -n "$control_want_value" ]; then
+  [ "$control_want_value" = note_file ] && die "--note-file requires a value"
+  die "--$control_want_value requires a value"
+fi
 
 if [ "$VERB" != relaunch ]; then
   [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
@@ -240,8 +250,8 @@ fi
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
 case "$NEW_EFFORT" in
-  ''|low|medium|high|xhigh|max) ;;
-  *) die "--effort must be one of low, medium, high, xhigh, max" ;;
+  ''|default|low|medium|high|xhigh|max|ultra) ;;
+  *) die "--effort must be one of default, low, medium, high, xhigh, max, ultra" ;;
 esac
 
 # --- exact task-id resolution ----------------------------------------------
@@ -253,6 +263,12 @@ if ! fm_task_id_creation_valid "$RAW_ID"; then
   die "'$RAW_ID' is not a valid task id"
 fi
 ID=$RAW_ID
+# Supervision lease guard: lifecycle control is overlap territory between the
+# two Pi supervision actors; refuse while the OTHER actor holds this task's
+# live lease (contract: bin/fm-lease-lib.sh; no-op in homes without leases).
+# shellcheck source=bin/fm-lease-lib.sh
+. "$SCRIPT_DIR/fm-lease-lib.sh"
+fm_lease_guard "$ID" "lifecycle control (fm-control)"
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 trap control_cleanup EXIT
 fm_lock_try_acquire "$CONTROL_LOCK" \
@@ -435,7 +451,7 @@ retire_busy_incarnation() {
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
 # `already-stopped` or `stopped`.
 do_exit() {
-  local state cmd verdict cancel interrupt_result=not-needed
+  local state cmd verdict composer_state cancel interrupt_result=not-needed
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
@@ -465,6 +481,17 @@ do_exit() {
       ;;
   esac
   cmd=$(fm_control_exit_command "$HARNESS")
+  composer_state=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
+    || composer_state=unknown
+  case "$composer_state" in
+    empty) ;;
+    pending)
+      die "task $ID's composer visibly holds pending text; refusing to type the $cmd exit command because it would concatenate onto that text. Clear or submit the pending text, then retry '$VERB'"
+      ;;
+    *)
+      die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'"
+      ;;
+  esac
   # The submit verdict is NOT the postcondition here: a successful exit command
   # destroys the composer the verdict is read from, so a post-exit read can
   # legitimately report anything. Only a hard transport failure aborts; the
@@ -625,9 +652,9 @@ resolve_relaunch_profile() {
     CONFIG_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model 2>/dev/null || true)
     CONFIG_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort 2>/dev/null || true)
     case "$CONFIG_EFFORT" in
-      ''|low|medium|high|xhigh|max) ;;
+      ''|low|medium|high|xhigh|max|ultra) ;;
       *)
-        echo "warning: config/secondmate-harness effort token '$CONFIG_EFFORT' is not one of low, medium, high, xhigh, max; ignoring" >&2
+        echo "warning: config/secondmate-harness effort token '$CONFIG_EFFORT' is not one of low, medium, high, xhigh, max, ultra; ignoring" >&2
         CONFIG_EFFORT=
         ;;
     esac
@@ -671,6 +698,9 @@ resolve_relaunch_profile() {
     TARGET_EFFORT=$PRIOR_EFFORT
   else
     TARGET_EFFORT=default
+  fi
+  if [ "$TARGET_EFFORT" = ultra ]; then
+    "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" || return 1
   fi
 }
 
@@ -761,6 +791,10 @@ record_note() {
         echo
         echo "This task was relaunched. Continue from here; the local copy and every"
         echo "uncommitted change are exactly as the previous worker left them."
+        echo
+        echo "First, check your instruction inbox: list $STATE/$ID.inbox/*.msg, act on"
+        echo "each message in numeric order, then mv each handled file into"
+        echo "$STATE/$ID.inbox/handled/. A steer sent before the relaunch survives there."
         echo
         printf '%s\n' "$NOTE"
       } >> "$RELAUNCH_BRIEF" \

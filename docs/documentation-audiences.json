@@ -169,6 +169,74 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/harness-adapters/references/common/control-and-recovery.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/common/dispatch.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/common/model-and-effort.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/common/primary-hooks.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/harness/agy.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/harness/claude.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/harness/codex.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/harness/cursor.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/harness/devin.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/harness/gemini.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/harness/grok.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/harness/kimi.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/harness/muse.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/harness/omp.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/harness/opencode.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/harness/pi.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/harness-adapters/references/harness/rovo.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/keyword-clustering/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -193,15 +261,11 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/orchestrated-delivery/agents/fm-orchestrated-integrator.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/orchestrated-delivery/agents/fm-orchestrated-researcher.md",
-      "audience": "agent-runtime"
-    },
-    {
-      "path": ".agents/skills/orchestrated-delivery/agents/fm-orchestrated-worker.md",
-      "audience": "agent-runtime"
-    },
-    {
-      "path": ".agents/skills/orchestrated-delivery/agents/fm-orchestrated-tester.md",
       "audience": "agent-runtime"
     },
     {
@@ -209,7 +273,11 @@
       "audience": "agent-runtime"
     },
     {
-      "path": ".agents/skills/orchestrated-delivery/agents/fm-orchestrated-integrator.md",
+      "path": ".agents/skills/orchestrated-delivery/agents/fm-orchestrated-tester.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/orchestrated-delivery/agents/fm-orchestrated-worker.md",
       "audience": "agent-runtime"
     },
     {
@@ -218,6 +286,10 @@
     },
     {
       "path": ".agents/skills/project-management/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/quiet/SKILL.md",
       "audience": "agent-runtime"
     },
     {
@@ -255,6 +327,10 @@
     {
       "path": ".agents/skills/updatefirstmate/SKILL.md",
       "audience": "agent-runtime"
+    },
+    {
+      "path": ".greptile/rules.md",
+      "audience": "maintainer-architecture"
     },
     {
       "path": "AGENTS.md",
@@ -325,7 +401,23 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/extension-bindings.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/examples/crew-dispatch.json",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/process-event-extension/file-signal.mjs",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/process-event-extension/firstmate-extension.json",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/watched-tools.json",
       "audience": "operator-example"
     },
     {
@@ -353,8 +445,16 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/pi-supervision-branch.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/remote-secondmates.md",
       "audience": "operator-current"
+    },
+    {
+      "path": "docs/secondmate-parent-channel.md",
+      "audience": "maintainer-architecture"
     },
     {
       "path": "docs/scripts.md",
@@ -385,6 +485,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "docs/supervision-protocols/omp.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "docs/supervision-protocols/opencode.md",
       "audience": "agent-runtime"
     },
@@ -409,7 +513,19 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/verification/agy.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/dispatch-auth.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/dispatch-resolve.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/lint-option-a.md",
       "audience": "maintainer-verification"
     },
     {
@@ -429,7 +545,15 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/rovo.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/runtime-backends.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/secondmate-parent-channel.md",
       "audience": "maintainer-verification"
     },
     {
@@ -443,6 +567,10 @@
     {
       "path": "docs/verification/trace-context.md",
       "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/voice-relay.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/watcher-continuity.md",
@@ -459,6 +587,10 @@
     {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
+    },
+    {
+      "path": "tests/captures/no-mistakes-v1.70.1/README.md",
+      "audience": "maintainer-verification"
     }
   ]
 }

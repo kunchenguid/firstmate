@@ -6,16 +6,22 @@
 #
 # Why running beats nudging: bin/fm-sessionstart-nudge.sh can only ASK the agent
 # to take the helm, and an agent can defer that, including when a first-command
-# skill has its own read-only path. When the harness injects hook stdout into
-# model context, running the digest here removes that discretion - the helm is
-# taken before the model's first turn, whatever the first turn is.
+# skill has its own read-only path. When the native adapter injects this
+# command's stdout into model context, running the digest here removes that
+# discretion - the helm is taken before the model's first turn, whatever the
+# first turn is.
 #
-# Usage: fm-sessionstart-run.sh [--source <source>]
+# Usage: fm-sessionstart-run.sh [--source <source>] [--pi-prerequisite]
 #   --source  The harness's own session-open source. When omitted, the source is
 #             read from a Claude/Codex-shaped JSON hook payload on stdin
 #             (the `source` field). An unreadable or unrecognized source is
 #             treated as `startup`, because taking the helm redundantly is
 #             cheap and idempotent while not taking it is the whole bug.
+#   --pi-prerequisite
+#             Internal Pi extension mode. An intentional gate/scope stand-down
+#             exits 3 so provider preflight can distinguish it from an eligible
+#             native attempt that settled without output. Every ordinary hook
+#             invocation retains the always-zero compatibility contract below.
 #
 # Source routing (see docs/sessionstart-nudge.md for the per-harness names):
 #   startup, new            full digest - this process has not taken the helm
@@ -28,12 +34,14 @@
 #                           silent) and a plain instruction is enough when a new
 #                           process resumed an old session (the nudge fires).
 #
-# Every path exits 0, exactly like the nudge wrapper: a Claude SessionStart
-# exit 2 blocks session initialization, so a failed session start must reach the
-# agent as digest text it can act on, never as a refusal to open the session.
-# A lock another live session holds and a truncated digest are reported inside
-# the digest, while broken GitHub auth arrives through the deferred network
-# result inline or as a wake, for exactly that reason.
+# Every ordinary transport path exits 0, exactly like the nudge wrapper: a
+# Claude SessionStart exit 2 blocks session initialization, so a failed session
+# start must reach the agent as digest text it can act on, never as a refusal to
+# open the session. The internal Pi prerequisite's silent exit 3 never reaches a
+# harness hook; it only distinguishes intentional ineligibility before provider
+# preflight. A lock another live session holds and a truncated digest are
+# reported inside the digest, while broken GitHub auth arrives through the
+# deferred network result inline or as a wake, for exactly that reason.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,6 +60,7 @@ COMPLETION_FILE="$STATE/.session-start-complete"
 . "$SCRIPT_DIR/fm-hook-host-lib.sh"
 
 SOURCE=
+PI_PREREQUISITE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --source)
@@ -61,15 +70,24 @@ while [ $# -gt 0 ]; do
       if [ $# -ge 2 ]; then shift 2; else shift; fi
       ;;
     --source=*) SOURCE=${1#--source=}; shift ;;
+    --pi-prerequisite) PI_PREREQUISITE=1; shift ;;
     *) shift ;;
   esac
 done
 
+stand_down() {
+  if [ "$PI_PREREQUISITE" = 1 ]; then
+    exit 3
+  fi
+  exit 0
+}
+
 # The same two eligibility owners the nudge wrapper uses, so a no-mistakes gate
 # agent and an unmarked task worktree can never run a session start for a home
-# they do not own.
-fm_is_gate_agent "$FM_ROOT" && exit 0
-fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+# they do not own. Pi's preflight-only status preserves that intentional silence
+# without mistaking it for a failed eligible attempt that needs the manual nudge.
+fm_is_gate_agent "$FM_ROOT" && stand_down
+fm_primary_scope_matches "$FM_ROOT" "$STATE" || stand_down
 
 session_start_completed() {
   local lock_pid completion_pid

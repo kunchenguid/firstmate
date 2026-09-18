@@ -59,7 +59,7 @@ compose() {  # <origin> <key>
 }
 
 task_show() {
-  (cd "$FM_HOME" && tasks-axi show "$1" --full) 2>/dev/null
+  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" show "$1" --full 2>/dev/null
 }
 
 show_field() {
@@ -169,7 +169,7 @@ command_resolve() {
   for dep in $routed; do
     show=$(task_show "$dep") || fail "routed task $dep disappeared before routing"
     if list_has_key "$(normalized_blocked_by "$show")" "$id"; then
-      (cd "$FM_HOME" && tasks-axi unblock "$dep" --by "$id" >/dev/null) \
+      FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" unblock "$dep" --by "$id" >/dev/null \
         || fail "could not route the recorded decision to $dep"
     fi
   done

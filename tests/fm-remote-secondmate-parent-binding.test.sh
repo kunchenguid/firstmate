@@ -175,6 +175,16 @@ if [ "$command_name" = fm-remote-doctor.sh ]; then
   printf 'ok: remote second-mate readiness confirmed on this host\n'
   exit 0
 fi
+if [ "$command_name" = fm-remote-secondmate-control.sh ] \
+   && [ "$_command_action" = launch ] \
+   && [ -n "${FM_TEST_PUBLICATION_TARGET:-}" ]; then
+  out=$("$FM_FAKE_REMOTE_ENTRYPOINT" "$@")
+  rc=$?
+  rm -f "$FM_TEST_PUBLICATION_TARGET"
+  ln -s "$FM_TEST_PUBLICATION_FOREIGN" "$FM_TEST_PUBLICATION_TARGET" || exit 94
+  printf '%s\n' "$out"
+  exit "$rc"
+fi
 exec "$FM_FAKE_REMOTE_ENTRYPOINT" "$@"
 SH
 chmod +x "$FAKEBIN/fake-ssh"
@@ -221,6 +231,10 @@ esac
 # --- a finished child worker inside the remote secondmate home --------------
 CHILD_WT="$REMOTE_HOME/projects/alpha"
 mkdir -p "$REMOTE_HOME/state"
+# This regression exercises remote-parent binding, not backlog mutation. Keep
+# its synthetic child home on the supported hand-edited backend so teardown's
+# fused automatic close is correctly exempt without requiring a tasks-axi mock.
+printf '%s\n' manual > "$REMOTE_HOME/config/backlog-backend"
 write_child_meta() {
   fm_write_meta "$REMOTE_HOME/state/work-child.meta" \
     "window=firstmate:fm-work-child" "endpoint_task_id=work-child" \
@@ -290,5 +304,23 @@ assert_contains "$CHILD_TEARDOWN_OUT" "cannot resolve the primary home" \
 assert_present "$REMOTE_HOME/state/work-child.meta" \
   "a genuine refusal must preserve the child work metadata"
 pass "a remote secondmate's own committed relay token still refuses cleanup"
+
+FOREIGN_META="$TMP_ROOT/foreign-ios.meta"
+LOCAL_META="$PARENT/state/ios.meta"
+printf 'foreign sentinel\n' > "$FOREIGN_META"
+rm -f "$LOCAL_META"
+PUBLICATION_RC=0
+PUBLICATION_OUT=$(FM_TEST_PUBLICATION_TARGET="$LOCAL_META" \
+  FM_TEST_PUBLICATION_FOREIGN="$FOREIGN_META" \
+  remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate 2>&1) || PUBLICATION_RC=$?
+[ "$PUBLICATION_RC" -ne 0 ] \
+  || fail "remote secondmate publication accepted a target resolving outside its home"
+assert_contains "$PUBLICATION_OUT" "task record could not be published" \
+  "remote secondmate publication did not report its record-boundary refusal"
+cmp -s "$FOREIGN_META" <(printf 'foreign sentinel\n') \
+  || fail "remote secondmate publication wrote through the foreign target"
+[ -L "$LOCAL_META" ] \
+  || fail "remote secondmate publication replaced the refused target boundary"
+pass "remote secondmate publication refuses targets outside its home"
 
 echo "ALL TESTS PASSED"

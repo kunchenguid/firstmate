@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/fm-startup-network.test.sh - behavior tests for bin/fm-startup-network.sh,
-# the deferred network stage a session start launches instead of running its
-# network work on the blocking path.
+# the deferred startup stage a session start launches instead of running its
+# network work or inactive-outcome scan on the blocking path.
 #
 # The session-start suite proves the digest no longer waits and that the deferred
 # sweeps still land. This suite pins the stage's own contract, whose whole job is
@@ -15,13 +15,15 @@
 #   - the aggregate bound turns a wedged sweep into an actionable line
 #   - an abandoned `running` record is reported as needing a rerun rather than
 #     staying "in progress" forever
-#   - single-flight: a second `start` never launches a competing worker
+#   - phase-aware single-flight: a covering worker is reused, while a later
+#     locked request supersedes an in-flight probe-only worker
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-startup-network-tests)
+DRAIN="$ROOT/bin/fm-wake-drain.sh"
 FM_TEST_CLEANUP_DIRS+=("$TMP_ROOT")
 trap fm_test_cleanup EXIT
 
@@ -136,7 +138,7 @@ wait_for_startup_network_wake() {  # <home> [tenths]
 # path, so this asserts both halves: start returns fast, AND the pipe closes
 # while the worker is still running.
 test_start_returns_without_holding_the_callers_stdout() {
-  local rec home root log started elapsed
+  local rec home root log started elapsed pending
   rec=$(new_world start-nonblocking)
   IFS='|' read -r home root log <<EOF
 $rec
@@ -151,8 +153,13 @@ EOF
 
   [ "$elapsed" -lt 4 ] || fail "start blocked for ${elapsed}s behind a 10s worker"
   await_worker_record "$home"
-  [ "$(run_stage "$home" "$root" report | head -1)" = "IN PROGRESS - the deferred network checks have not finished yet." ] \
-    || fail "the worker was not actually still running: $(run_stage "$home" "$root" report)"
+  pending=$(run_stage "$home" "$root" report)
+  [ "$(printf '%s\n' "$pending" | head -1)" = "IN PROGRESS - the deferred network checks have not finished yet." ] \
+    || fail "the worker was not actually still running: $pending"
+  assert_contains "$pending" "Only a FAILED or otherwise actionable result arrives as a \`check: startup-network\` wake; a clean success stays silent." \
+    "the pending guidance still promised a wake for clean success"
+  assert_contains "$pending" "$root/bin/fm-startup-network.sh report" \
+    "the pending guidance omitted the durable on-demand report path"
   run_stage "$home" "$root" wait 30 >/dev/null || fail "the worker never published"
   assert_grep 'network=only' "$log" "the worker did not run bootstrap's network-only phase"
   pass "fm-startup-network: start returns immediately and never holds the caller's stdout open"
@@ -189,20 +196,24 @@ EOF
     || fail "a result harvest acknowledged also queued a wake: $(cat "$home/state/.wake-queue")"
 
   # Harvest releases that claim, so the NEXT publication has nobody to print it.
+  # An actionable result (not a clean success) is used here so the assertion
+  # stays about the claim mechanism; test_a_successful_result_never_queues_a_wake
+  # below owns the separate "a clean success never wakes" contract.
   assert_absent "$home/state/.startup-network.claim" "harvest did not release its own claim"
-  FM_FAKE_BOOTSTRAP_LOG="$log" run_stage "$home" "$root" run --locked 0
+  FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_OUT='MISSING: some-tool (install: brew install some-tool)' \
+    run_stage "$home" "$root" run --locked 0
   assert_grep 'check	startup-network' "$home/state/.wake-queue" \
-    "an unclaimed result never reached the wake queue"
+    "an unclaimed actionable result never reached the wake queue"
 
   : > "$home/state/.wake-queue"
-  FM_FAKE_BOOTSTRAP_LOG="$log" \
+  FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_OUT='MISSING: some-tool (install: brew install some-tool)' \
     run_stage "$home" "$root" start --locked 0 --harvest-pid 999999999
   run_stage "$home" "$root" wait 30 >/dev/null || fail "the dead-claim worker never published"
   wait_for_startup_network_wake "$home" || fail "the dead-claim worker never settled delivery"
   assert_grep 'check	startup-network' "$home/state/.wake-queue" \
     "a dead session's stale claim swallowed the result"
   assert_absent "$home/state/.startup-network.claim" "a dead claim was not reaped"
-  pass "fm-startup-network: exactly one of the digest and the wake reports each result"
+  pass "fm-startup-network: exactly one of the digest and the wake reports each actionable result"
 }
 
 test_a_claimant_crash_after_publish_still_queues_the_wake() {
@@ -213,7 +224,10 @@ $rec
 EOF
   sleep 10 &
   claimant=$!
+  # Actionable output: a clean success in this same crash window must stay
+  # silent (test_a_successful_result_never_queues_a_wake owns that case).
   FM_SESSION_START_TIMEOUT=4 FM_FAKE_BOOTSTRAP_LOG="$log" \
+    FM_FAKE_BOOTSTRAP_OUT='MISSING: some-tool (install: brew install some-tool)' \
     run_stage "$home" "$root" start --locked 0 --harvest-pid "$claimant"
   run_stage "$home" "$root" wait 30 >/dev/null || fail "the crash-window worker never published"
   kill -0 "$claimant" 2>/dev/null \
@@ -261,6 +275,111 @@ EOF
   wait "$claimant" 2>/dev/null || true
   chmod 700 "$home/state/.startup-network.report"
   pass "fm-startup-network: a report-publication failure is failed, diagnosed, and still wakes"
+}
+
+# A clean success is not captain-facing progress (AGENTS.md section 8): it must
+# never become a main-blocking wake row, whether or not a session was there to
+# claim and harvest it inline. The result stays durable and readable through
+# `report` either way.
+test_a_successful_result_never_queues_a_wake() {
+  local rec home root log claimant report
+  rec=$(new_world successful-result-silent)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  sleep 10 &
+  claimant=$!
+  FM_SESSION_START_TIMEOUT=4 FM_FAKE_BOOTSTRAP_LOG="$log" \
+    run_stage "$home" "$root" start --locked 0 --harvest-pid "$claimant"
+  run_stage "$home" "$root" wait 30 >/dev/null || fail "the unclaimed successful worker never published"
+  kill "$claimant" 2>/dev/null || true
+  wait "$claimant" 2>/dev/null || true
+
+  # Give the same settling window the crash-window test uses, then confirm no
+  # wake ever lands - not a race that just hasn't finished yet.
+  sleep 1
+  [ ! -s "$home/state/.wake-queue" ] \
+    || fail "a clean successful network-checks result queued a main-blocking wake: $(cat "$home/state/.wake-queue")"
+  report=$(run_stage "$home" "$root" report)
+  assert_contains "$report" "(silent - no problems found)" \
+    "a successful result was not durably readable through report: $report"
+
+  # Bootstrap itself explicitly types completed benign work as BOOTSTRAP_INFO.
+  # That producer-owned no-action record is durable but must remain just as
+  # quiet as a fully silent success.
+  FM_FAKE_BOOTSTRAP_LOG="$log" \
+    FM_FAKE_BOOTSTRAP_OUT='BOOTSTRAP_INFO: fixture completed benign work' \
+    run_stage "$home" "$root" run --locked 0
+  [ ! -s "$home/state/.wake-queue" ] \
+    || fail "a BOOTSTRAP_INFO-only success queued a main-blocking wake: $(cat "$home/state/.wake-queue")"
+  report=$(run_stage "$home" "$root" report)
+  assert_contains "$report" "BOOTSTRAP_INFO: fixture completed benign work" \
+    "the completed no-action fact was not retained in the durable report"
+
+  pass "fm-startup-network: silent and explicitly informational successes never queue a main-blocking wake"
+}
+
+# The FAILED/actionable half of the same contract, paired with the success
+# test above: an actionable report (here, a MISSING: line bootstrap-diagnostics
+# would load a skill for) still reaches the wake queue even when unclaimed.
+test_an_actionable_successful_result_still_queues_a_wake() {
+  local rec home root log claimant
+  rec=$(new_world actionable-result-wakes)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  sleep 10 &
+  claimant=$!
+  FM_SESSION_START_TIMEOUT=4 FM_FAKE_BOOTSTRAP_LOG="$log" \
+    FM_FAKE_BOOTSTRAP_OUT='MISSING: some-tool (install: brew install some-tool)' \
+    run_stage "$home" "$root" start --locked 0 --harvest-pid "$claimant"
+  run_stage "$home" "$root" wait 30 >/dev/null || fail "the unclaimed actionable worker never published"
+  kill "$claimant" 2>/dev/null || true
+  wait "$claimant" 2>/dev/null || true
+
+  wait_for_startup_network_wake "$home" \
+    || fail "an actionable successful (state=done) result never queued a wake"
+  assert_grep 'check	startup-network' "$home/state/.wake-queue" \
+    "an actionable result did not reach the wake queue"
+
+  pass "fm-startup-network: an actionable state=done report still queues a wake"
+}
+
+test_deferred_invalid_secondmate_markers_queue_durable_findings() {
+  local kind rec home root log target report err seq generation
+  for kind in malformed symlink; do
+    rec=$(new_world "deferred-invalid-marker-$kind")
+    IFS='|' read -r home root log <<EOF
+$rec
+EOF
+    printf '%s\n' $$ > "$home/state/.lock"
+    if [ "$kind" = malformed ]; then
+      printf '../other-home\n' > "$home/.fm-secondmate-home"
+    else
+      target="$TMP_ROOT/deferred-invalid-marker-$kind/marker-target"
+      printf 'mate\n' > "$target"
+      ln -s "$target" "$home/.fm-secondmate-home"
+    fi
+
+    FM_FAKE_BOOTSTRAP_LOG="$log" run_stage "$home" "$root" run --locked 1
+    assert_grep $'check\tinactive-reconcile-diagnostic:invalid-secondmate-home\t' "$home/state/.wake-queue" \
+      "$kind marker finding was swallowed by the deferred startup stage"
+    report=$(run_stage "$home" "$root" report)
+    assert_contains "$report" "(silent - no problems found)" \
+      "$kind marker fixture unexpectedly depended on the network report"
+
+    err="$home/drain.err"
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$DRAIN" >/dev/null 2> "$err"
+    seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation .*/\1/p' "$err")
+    generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
+    [ -n "$seq" ] && [ -n "$generation" ] \
+      || fail "$kind marker wake did not issue a durable acknowledgement"
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$DRAIN" \
+      --ack-through "$seq" --recovery-generation "$generation" >/dev/null
+    assert_no_grep 'inactive-reconcile-diagnostic:invalid-secondmate-home' "$home/state/.wake-queue" \
+      "$kind marker wake could not be acknowledged"
+  done
+  pass "fm-startup-network: deferred invalid secondmate markers produce durable wakes"
 }
 
 # The worker outlives the command that launched it. If another session took the
@@ -352,6 +471,35 @@ EOF
     "NETWORK_CHECKS: the deferred check worker stopped before publishing" \
     "a record that outlived the stage bound still read as in progress"
   pass "fm-startup-network: an abandoned run reports as needing a rerun, never as in progress forever"
+}
+
+test_locked_start_is_not_satisfied_by_an_inflight_probe() {
+  local rec home root log waited=0
+  rec=$(new_world probe-then-locked)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  printf '%s\n' $$ > "$home/state/.lock"
+  printf '../other-home\n' > "$home/.fm-secondmate-home"
+
+  FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_SLEEP=6 \
+    run_stage "$home" "$root" start --locked 0 --harvest-pid $$
+  while ! grep -Fq 'detect_only=1' "$log" 2>/dev/null && [ "$waited" -lt 50 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  assert_grep 'network=only detect_only=1' "$log" \
+    "the probe-only worker was not in flight before the locked request"
+
+  FM_FAKE_BOOTSTRAP_LOG="$log" \
+    run_stage "$home" "$root" start --locked 1 --harvest-pid $$
+  run_stage "$home" "$root" wait 30 >/dev/null \
+    || fail "the locked request never published"
+  assert_grep 'network=only detect_only=0' "$log" \
+    "the in-flight probe-only worker suppressed the locked sweeps"
+  assert_grep $'check\tinactive-reconcile-diagnostic:invalid-secondmate-home\t' "$home/state/.wake-queue" \
+    "the in-flight probe-only worker suppressed the locked inactive scan"
+  pass "fm-startup-network: locked requests supersede in-flight probe-only workers"
 }
 
 # Two session opens in quick succession must not run the same mutating sweeps
@@ -616,9 +764,13 @@ test_start_returns_without_holding_the_callers_stdout
 test_harvest_acknowledgement_suppresses_the_wake_and_no_claim_produces_it
 test_a_claimant_crash_after_publish_still_queues_the_wake
 test_a_report_publication_failure_is_failed_and_still_wakes
+test_a_successful_result_never_queues_a_wake
+test_an_actionable_successful_result_still_queues_a_wake
+test_deferred_invalid_secondmate_markers_queue_durable_findings
 test_mutating_sweeps_are_refused_when_the_lock_changed_hands
 test_the_stage_bound_is_reported_not_swallowed
 test_an_abandoned_run_reads_as_needing_a_rerun
+test_locked_start_is_not_satisfied_by_an_inflight_probe
 test_start_is_single_flight
 test_start_reserves_its_generation_before_returning
 test_new_lock_owner_does_not_reuse_the_previous_owners_worker

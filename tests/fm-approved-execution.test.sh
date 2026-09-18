@@ -74,6 +74,15 @@ FM_FAKE_CREW_STATE='state: working · source: pane · harness busy (pi-ext)' "$E
 printf 'working: stale acknowledgement\n' >> "$home/state/approved-scout.status"
 "$EXEC" show approved-scout | grep -q 'implementation owner missing'
 ln -s "$ROOT/bin" "$home/bin"
+mkdir -p "$home/data/approved-scout"
+cat > "$home/data/approved-scout/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Implement the accepted feature after research.
+
+## Firstmate spec
+Promote this scout into a ship task under the recorded delivery contract.
+EOF
 FM_ROOT_OVERRIDE="$home" PATH="$home/fakebin:$PATH" "$ROOT/bin/fm-promote.sh" approved-scout --mode no-mistakes --yolo on > "$home/promotion"
 "$EXEC" show approved-scout | grep -q 'implementation owner unconfirmed'
 

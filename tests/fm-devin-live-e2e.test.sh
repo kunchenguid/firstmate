@@ -5,12 +5,9 @@
 # Every Herdr call (including those made inside Firstmate scripts) is routed
 # through the lab helper, and teardown verifies its default-session tripwire.
 set -eu
-if [ "${FM_DEVIN_LIVE:-0}" != 1 ]; then
-  echo 'skip - set FM_DEVIN_LIVE=1 for credentialed Devin/Herdr verification'
-  exit 0
-fi
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+fm_live_gate opt-in FM_DEVIN_LIVE herdr
 # shellcheck source=bin/fm-devin-lib.sh
 . "$ROOT/bin/fm-devin-lib.sh"
 

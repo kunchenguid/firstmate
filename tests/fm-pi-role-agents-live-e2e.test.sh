@@ -7,14 +7,9 @@
 # TMPDIR selects the fixture parent. Completion is an explicit tmux event, not a
 # loop reading sessions. Session evidence is read once after that event.
 set -eu
-# shellcheck source=tests/environment.sh
-. "$(dirname "${BASH_SOURCE[0]}")/environment.sh"
-fm_test_sanitize_environment
-if [ "${FM_PI_ROLE_AGENTS_LIVE:-0}" != 1 ]; then
-  echo 'skip: set FM_PI_ROLE_AGENTS_LIVE=1 for the credentialed six-role Pi proof'
-  exit 0
-fi
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=tests/lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+fm_live_gate opt-in FM_PI_ROLE_AGENTS_LIVE tmux pi python3
 python3 - "$ROOT" <<'PY'
 import json
 import os

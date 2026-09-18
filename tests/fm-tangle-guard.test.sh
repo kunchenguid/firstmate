@@ -15,8 +15,8 @@
 # abort - all hermetic over temp git repos and fakebins.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tangle-lib.sh"
@@ -150,40 +150,12 @@ test_brief_assertion_precedes_branch() {
 
 # --- GUARD 1b: fm-spawn isolation abort -------------------------------------
 
-# A fake tmux that reports FM_FAKE_PANE_PATH as the post-`treehouse get` pane cwd
-# (so the spawn's worktree-resolution loop resolves to a path we control), names
-# the session on '#S', and swallows window ops. Echoes the fakebin dir.
-make_spawn_fakebin() {
-  local dir=$1 fakebin
-  fakebin=$(fm_fakebin "$dir")
-  cat > "$fakebin/tmux" <<'SH'
-#!/usr/bin/env bash
-set -u
-case "$*" in
-  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
-esac
-case "${1:-}" in
-  display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
-  has-session|new-session|new-window|send-keys) exit 0 ;;
-esac
-exit 0
-SH
-  chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
-  printf '%s\n' "$fakebin"
-}
-
+# Spawn isolation uses the shared spawn fakebin (pane path + window ops).
 run_spawn() {
   local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5
-  mkdir -p "$home/data/$id"
-  printf 'brief\n' > "$home/data/$id/brief.md"
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
-    PATH="$fakebin:$PATH" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --mode no-mistakes --yolo off 2>&1
+  fm_test_spawn_brief "$home" "$id" brief
+  fm_test_run_spawn "$home" "$pane" "$fakebin" \
+    "$id" "$proj" codex --mode no-mistakes --yolo off
 }
 
 test_spawn_isolation_abort() {
@@ -192,26 +164,43 @@ test_spawn_isolation_abort() {
   mkdir -p "$home/data"
   proj=$(make_repo "$TMP_ROOT/spawn-proj")
   fakebin=$(make_spawn_fakebin "$TMP_ROOT/spawn-fake")
+  # The assertions concern identity, not how long an unchanged cwd is polled.
+  fm_test_fake_sleep_noop "$fakebin"
   # A genuine isolated linked worktree of the project, detached on the default.
   git -C "$proj" worktree add -q --detach "$TMP_ROOT/spawn-wt" >/dev/null 2>&1
-  mkdir -p "$TMP_ROOT/spawn-notgit" "$proj/sub"
+  # The non-git case must BE non-git wherever this suite runs. A directory under
+  # TMPDIR is not one when TMPDIR itself sits inside a git repository - git walks
+  # up and finds that repo, and the spawn reports the subdirectory cause instead.
+  # GIT_CEILING_DIRECTORIES stops that upward walk: git does not chdir up into a
+  # listed directory, though it never excludes the directory being searched, so
+  # the ceiling is the PARENT of the path handed to the spawn (git(1),
+  # "GIT_CEILING_DIRECTORIES").
+  mkdir -p "$TMP_ROOT/spawn-notgit-root/plain" "$proj/sub"
 
   # Abort: the pane resolves to a plain non-git directory (not a worktree at all).
-  out=$(run_spawn "$home" abort-notgit-dd4 "$proj" "$TMP_ROOT/spawn-notgit" "$fakebin"); status=$?
+  # The discovery poll screens every candidate with the isolation conditions, so
+  # a path like this is never adopted and the refusal comes from the poll's own
+  # deadline, naming the path and why it was rejected. The assertions pin which
+  # cause fired, not the operator wording that explains it.
+  out=$(GIT_CEILING_DIRECTORIES="$TMP_ROOT/spawn-notgit-root" \
+    run_spawn "$home" abort-notgit-dd4 "$proj" "$TMP_ROOT/spawn-notgit-root/plain" "$fakebin"); status=$?
   expect_code 1 "$status" "spawn into a non-worktree dir should abort"
-  assert_contains "$out" "did not yield an isolated worktree" "non-worktree spawn lacked the isolation error"
+  assert_contains "$out" "did not enter an isolated worktree" "non-worktree spawn lacked the isolation error"
+  assert_contains "$out" "not inside a git worktree" "non-worktree spawn did not say why the path was rejected"
   assert_absent "$home/state/abort-notgit-dd4.meta" "aborted spawn must not record meta"
 
   # Abort: the pane resolves INTO the primary checkout (a subdir of PROJ_ABS).
   out=$(run_spawn "$home" abort-primary-ee5 "$proj" "$proj/sub" "$fakebin"); status=$?
   expect_code 1 "$status" "spawn landing inside the primary checkout should abort"
-  assert_contains "$out" "did not yield an isolated worktree" "primary-checkout spawn lacked the isolation error"
+  assert_contains "$out" "did not enter an isolated worktree" "primary-checkout spawn lacked the isolation error"
+  assert_contains "$out" "not a worktree root" "primary-checkout spawn did not say why the path was rejected"
+  assert_absent "$home/state/abort-primary-ee5.meta" "aborted spawn must not record meta"
 
   # Proceed: the pane resolves to a genuine, isolated worktree.
   out=$(run_spawn "$home" ok-isolated-ff6 "$proj" "$TMP_ROOT/spawn-wt" "$fakebin"); status=$?
   expect_code 0 "$status" "spawn into a genuine isolated worktree should succeed"
   assert_contains "$out" "spawned ok-isolated-ff6" "isolated spawn did not report success"
-  assert_not_contains "$out" "did not yield an isolated worktree" "isolated spawn wrongly tripped the guard"
+  assert_not_contains "$out" "isolated worktree" "isolated spawn wrongly tripped the guard"
   pass "fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree"
 }
 
@@ -255,15 +244,10 @@ SH
 
 run_spawn_record() {
   local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5 rec=$6
-  mkdir -p "$home/data/$id"
-  printf 'brief\n' > "$home/data/$id/brief.md"
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
-    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
-    FM_TMUX_REC="$rec" \
-    PATH="$fakebin:$PATH" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --mode no-mistakes --yolo off 2>&1
+  fm_test_spawn_brief "$home" "$id" brief
+  FM_TMUX_REC="$rec" \
+    fm_test_run_spawn "$home" "$pane" "$fakebin" \
+    "$id" "$proj" codex --mode no-mistakes --yolo off
 }
 
 test_spawn_tmux_window_construction() {
