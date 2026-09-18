@@ -17,7 +17,8 @@
 #   `## Captain's intent` line opening with a Captain label or address.
 #   A no-mistakes ship spawn also runs the opt-in pre-publication voice check
 #   (bin/fm-voice-check.sh) on that intent, which the pipeline publishes as the
-#   PR intent, and refuses a flagged or unverified result;
+#   PR intent, and refuses a flagged or unverified result (a --relaunch skips it,
+#   since it publishes no new intent);
 #   --voice-accept-unverified <reason> accepts an unverified result for this one
 #   spawn only on an explicit instruction, and never a flagged one.
 #   Every ship or scout spawn renders `launch-brief.md`; for a no-mistakes ship
@@ -2590,10 +2591,12 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
         exit 1
       fi
     fi
-    fm_intent_voice_check "$CAPTAIN_INTENT" "$VOICE_ACCEPT_UNVERIFIED" || {
-      fm_intent_voice_refusal "$BRIEF" "$?" spawn --voice-accept-unverified
-      exit 1
-    }
+    if [ "$RELAUNCH" -eq 0 ]; then
+      fm_intent_voice_check "$CAPTAIN_INTENT" "$VOICE_ACCEPT_UNVERIFIED" || {
+        fm_intent_voice_refusal "$BRIEF" "$?" spawn --voice-accept-unverified
+        exit 1
+      }
+    fi
   fi
   # Use the existing launch-brief overlay for every worker kind, including
   # pre-scope briefs and relaunches. Charters never enter this worker path.

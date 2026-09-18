@@ -524,6 +524,7 @@ Publication points and how far each is enforced:
 
 - `bin/fm-spawn.sh` and `bin/fm-promote.sh` run the check in code on a no-mistakes ship's `## Captain's intent`, which the pipeline later publishes verbatim as the PR intent; a flagged or unverified intent refuses the spawn or promotion before anything is published or recorded, and that refusal is the escalation to the supervisor, who rewrites and retries.
   Their `--voice-accept-unverified <reason>` flag is the override for an unverified intent and never clears a flagged one.
+  `bin/fm-spawn.sh --relaunch` skips the check and never calls the service, because a relaunch replaces the agent of an already-dispatched task and publishes no new intent; the intent was checked or explicitly accepted when the task was first spawned or promoted.
 - The worker's final `--intent` string and a direct-PR worker's title and description are checked by instruction only: `bin/fm-dod-lib.sh` renders the check, the bounded correction, and the status escalation into the worker's definition of done.
   The no-mistakes pipeline creates the PR itself, so this repository cannot gate its publication in code.
 - Firstmate checks a PR or issue description it publishes itself before sending it.
