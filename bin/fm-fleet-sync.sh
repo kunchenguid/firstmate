@@ -115,7 +115,8 @@ resolve_project_arg() {
   printf '%s\n' "$arg"
 }
 
-default_branch() {
+# The repository's own default branch, with no project declaration considered.
+repo_default_branch() {
   local ref branch
   ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
   if [ -n "$ref" ]; then
@@ -129,6 +130,38 @@ default_branch() {
     fi
   done
   return 1
+}
+
+# The branch this clone must be kept current against. A project that develops off
+# its repository default - most of the captain's do - would otherwise be compared
+# against origin/main and report itself current while rotting: one clone sat 91
+# commits behind origin/develop under a "0 commits behind origin/main" verdict.
+# bin/fm-project-base.sh owns the declaration; an undeclared or unfetchable
+# branch falls back to the repository default, so nothing changes for a project
+# that develops on it. Sets $DEFAULT, and sets $MISSING_DECLARED to a declared
+# branch origin does not have so the fallback is never silent.
+default_branch() {
+  local declared
+  MISSING_DECLARED=""
+  declared=$("$FM_ROOT/bin/fm-project-base.sh" "$PROJ" "$label" 2>/dev/null || true)
+  if [ -n "$declared" ] \
+      && git -C "$PROJ" rev-parse --verify --quiet "refs/remotes/origin/$declared^{commit}" >/dev/null 2>&1; then
+    DEFAULT=$declared
+    return 0
+  fi
+  [ -z "$declared" ] || MISSING_DECLARED=$declared
+  DEFAULT=$(repo_default_branch) || return 1
+  return 0
+}
+
+# One outcome line for a clone we did sync, qualified when its declared branch is
+# missing so that clone can never read as plainly current.
+report_outcome() {
+  if [ -n "$MISSING_DECLARED" ]; then
+    echo "$label: $1 (declared branch $MISSING_DECLARED not on origin)"
+  else
+    echo "$label: $1"
+  fi
 }
 
 first_line() {
@@ -253,8 +286,9 @@ prune_gone_branches() {
 }
 
 # True when some worktree of $PROJ has $DEFAULT checked out (so we cannot attach
-# to it here). The current worktree is detached when this is consulted, so any
-# match is necessarily another worktree.
+# to it here). This is only ever consulted from inside [ "$cur" != "$DEFAULT" ],
+# so the current worktree cannot self-match on $DEFAULT and any match is
+# necessarily another worktree.
 default_checked_out_elsewhere() {
   git -C "$PROJ" worktree list --porcelain 2>/dev/null \
     | sed -n 's#^branch refs/heads/##p' \
@@ -346,10 +380,15 @@ sync_project() {
 
   prune_gone_branches || true
 
-  DEFAULT=$(default_branch) || {
+  default_branch || {
     echo "$label: skipped: cannot determine default branch"
     return 0
   }
+  if [ -n "$MISSING_DECLARED" ]; then
+    # Stdout, not stderr: a session-start refresh relays only stdout, and this is
+    # the one place a stale declaration has to be read.
+    echo "$label: declared branch $MISSING_DECLARED not on origin, falling back to $DEFAULT"
+  fi
   BASE="origin/$DEFAULT"
   if ! git -C "$PROJ" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null; then
     echo "$label: skipped: $BASE does not exist"
@@ -360,17 +399,35 @@ sync_project() {
   dirty=no
   [ -z "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
   recovered=no
+  recovery_verb="re-attached"
 
   if [ "$cur" != "$DEFAULT" ]; then
-    # Off the default branch. Auto-recover only the one unambiguously safe drift:
+    # Off the development branch. Auto-recover only unambiguously safe drift. The first:
     # a clean, detached HEAD that holds no unique commits (it is an ancestor of
     # origin/<default>) and whose <default> branch is free to check out here.
     # Re-attaching to an already-published commit strands nothing, and the
     # fast-forward path below then catches the clone up. Anything else - a
-    # non-default named branch, a detached HEAD with unique commits, a dirty tree,
-    # or <default> already checked out elsewhere - may hold real work, so it is
+    # detached HEAD with unique commits, a dirty tree, another named branch, or
+    # <default> already checked out elsewhere - may hold real work, so it is
     # reported loudly and left untouched.
-    if [ -z "$cur" ] && [ "$dirty" = no ] \
+    # The second safe drift is the repository's OWN default branch when the
+    # project declares a different development branch: every clone lands there,
+    # and it would otherwise be STUCK forever, loud but never self-healing.
+    # Moving it strands nothing while the tree is clean and the branch it leaves
+    # holds no commit that is not already published. Only that branch: any other
+    # named branch may be where the captain deliberately parked this clone.
+    if [ "$dirty" = no ] && [ -n "$cur" ] && [ "$cur" = "$(repo_default_branch || true)" ] \
+        && [ -z "$(git -C "$PROJ" rev-list --max-count=1 HEAD --not --remotes 2>/dev/null)" ] \
+        && ! default_checked_out_elsewhere \
+        && local_default_safe_for_recovery; then
+      if ! git -C "$PROJ" checkout --quiet "$DEFAULT" 2>/dev/null; then
+        report_stuck "$(stuck_state)"
+        return 0
+      fi
+      recovered=yes
+      recovery_verb="moved onto"
+      cur=$DEFAULT
+    elif [ -z "$cur" ] && [ "$dirty" = no ] \
         && git -C "$PROJ" merge-base --is-ancestor HEAD "$BASE" 2>/dev/null \
         && ! default_checked_out_elsewhere \
         && local_default_safe_for_recovery; then
@@ -405,9 +462,9 @@ sync_project() {
   }
   if [ "$local_rev" = "$remote_rev" ]; then
     if [ "$recovered" = yes ]; then
-      echo "$label: recovered: re-attached $DEFAULT (already current)"
+      report_outcome "recovered: $recovery_verb $DEFAULT (already current)"
     else
-      echo "$label: already current"
+      report_outcome "already current"
     fi
     return 0
   fi
@@ -433,9 +490,9 @@ sync_project() {
     return 0
   }
   if [ "$recovered" = yes ]; then
-    echo "$label: recovered: re-attached $DEFAULT, synced $before..$after"
+    report_outcome "recovered: $recovery_verb $DEFAULT, synced $before..$after"
   else
-    echo "$label: synced $before..$after"
+    report_outcome "synced $before..$after"
   fi
   return 0
 }

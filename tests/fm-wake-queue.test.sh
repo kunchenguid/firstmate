@@ -232,6 +232,31 @@ test_drain_dedupes_obvious_duplicates() {
 # plain drain-and-handle turn that runs no other supervision script. It must warn
 # when work is in flight with no live watcher, and stay silent right after a
 # normal fire from a live watcher with a fresh beacon, so it never false-alarms.
+# Wait for a stall checkpoint to PUBLISH its alert, rather than for a fixed slice
+# of wall clock to elapse. The idle ages these cases assert come from the faked
+# clock, but the watcher still has to finish startup and reach its stall
+# observation in real time, and a loaded runner can take longer than any window
+# chosen in advance - which is exactly the timing assumption that made these three
+# cases flaky. The watcher exits the moment it publishes, so the real condition is
+# the alert line appearing; the ceiling below is only a hang tripwire and never
+# decides a pass.
+FM_TEST_ALERT_CEILING=${FM_TEST_ALERT_CEILING:-300}
+
+wait_for_checkpoint_alert() {  # <pid> <out> <pattern>
+  local pid=$1 out=$2 pattern=$3 ticks=0 limit=$((FM_TEST_ALERT_CEILING * 10))
+  while :; do
+    grep -F "$pattern" "$out" >/dev/null 2>&1 && return 0
+    if ! kill -0 "$pid" 2>/dev/null; then
+      # The checkpoint exited: one last read settles whether it published first.
+      grep -F "$pattern" "$out" >/dev/null 2>&1
+      return $?
+    fi
+    [ "$ticks" -lt "$limit" ] || return 1
+    sleep 0.1
+    ticks=$((ticks + 1))
+  done
+}
+
 test_secondmate_foreign_queue_stall_tracks_progress_and_alerts_once() {
   local dir state sub fakebin out row_before row_after stall_count real_date
   dir=$(make_case secondmate-foreign-stall)
@@ -279,11 +304,9 @@ SH
     || fail "an advancing foreign queue produced a stall alert because its oldest row was old"
 
   # With no further sequence progress, the same queue must still expose the real
-  # failure after the configured interval. Every checkpoint that asserts an alert
-  # gets 4s rather than 1s: reaching the alert costs a pane capture in the
-  # active-turn gate, and a 1s bound sits under that cost on a loaded machine.
-  # The bound is only a ceiling - the checkpoint returns on the first actionable
-  # wake - so a healthy watcher still finishes in well under a second.
+  # failure after the configured interval. This waits on the published alert
+  # itself (see wait_for_checkpoint_alert). The no-alert checkpoints keep
+  # --seconds 1 because there the elapsed bound IS the assertion.
   printf '1004\n' > "$dir/now"
   row_before="$dir/foreign-before"
   row_after="$dir/foreign-after"
@@ -293,9 +316,11 @@ SH
     FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 4 > "$out" 2> "$dir/watch-stalled.err" || true
-  grep -F 'check: secondmate wake-loop stalled: mate=mate row=8 idle=2s' "$out" >/dev/null \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds "$FM_TEST_ALERT_CEILING" > "$out" 2> "$dir/watch-stalled.err" &
+  checkpoint_pid=$!
+  wait_for_checkpoint_alert "$checkpoint_pid" "$out" 'check: secondmate wake-loop stalled: mate=mate row=8 idle=2s' \
     || fail "a foreign queue with no progress did not alert: $(cat "$out")"
+  wait "$checkpoint_pid" 2>/dev/null || true
   stall_count=$(grep -c 'secondmate-wake-loop-mate-' "$state/.wake-queue" || true)
   [ "$stall_count" -eq 1 ] || fail "the stalled episode did not publish exactly one parent notification"
   cmp -s "$row_before" "$sub/state/.wake-queue" \
@@ -326,9 +351,11 @@ SH
     FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 4 > "$dir/watch-refrozen.out" 2> "$dir/watch-refrozen.err" || true
-  grep -F 'check: secondmate wake-loop stalled: mate=mate row=9 idle=2s' "$dir/watch-refrozen.out" >/dev/null \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds "$FM_TEST_ALERT_CEILING" > "$dir/watch-refrozen.out" 2> "$dir/watch-refrozen.err" &
+  checkpoint_pid=$!
+  wait_for_checkpoint_alert "$checkpoint_pid" "$dir/watch-refrozen.out" 'check: secondmate wake-loop stalled: mate=mate row=9 idle=2s' \
     || fail "a genuine later no-progress episode was hidden after earlier progress"
+  wait "$checkpoint_pid" 2>/dev/null || true
   stall_count=$(grep -c 'secondmate-wake-loop-mate-' "$state/.wake-queue" || true)
   [ "$stall_count" -eq 1 ] || fail "the later no-progress episode did not publish exactly one notification"
   pass "foreign secondmate queue alerts once per no-progress episode without age-only or cascade noise"
@@ -432,9 +459,11 @@ SH
     FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 4 > "$dir/watch-regen-frozen.out" 2> "$dir/watch-regen-frozen.err" || true
-  grep -F 'check: secondmate wake-loop stalled: mate=mate row=9 idle=2s' "$dir/watch-regen-frozen.out" >/dev/null \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds "$FM_TEST_ALERT_CEILING" > "$dir/watch-regen-frozen.out" 2> "$dir/watch-regen-frozen.err" &
+  checkpoint_pid=$!
+  wait_for_checkpoint_alert "$checkpoint_pid" "$dir/watch-regen-frozen.out" 'check: secondmate wake-loop stalled: mate=mate row=9 idle=2s' \
     || fail "a frozen reprovisioned queue generation was hidden: $(cat "$dir/watch-regen-frozen.out")"
+  wait "$checkpoint_pid" 2>/dev/null || true
   pass "a reprovisioned queue generation starts a fresh no-progress interval"
 }
 

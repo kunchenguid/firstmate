@@ -40,10 +40,11 @@
 #
 # An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns
 # to stderr, so a typo never silently drops the gate.
-# base = the branch a task worktree must start from. A freshly allocated pool
-#   worktree lands on the repo's DEFAULT branch, which is the wrong base for a
-#   project that develops elsewhere; bin/fm-spawn.sh checks this branch out and
-#   refuses to launch a worker it cannot confirm is on it.
+# base = the FALLBACK record of the project's development branch, for a project
+#   that has not yet adopted the committed .firstmate-base file. That file is
+#   where the branch belongs, because a registry value is private to this home;
+#   bin/fm-project-base.sh owns the resolution across both and is what callers
+#   ask, not this --base tier directly.
 #
 # Usage: fm-project-mode.sh [--raw|--base] <project-name>
 set -eu

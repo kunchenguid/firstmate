@@ -52,11 +52,29 @@ The optional `+yolo` posture changes merge authority only and does not change th
 Default it off for every project and every posture, and enable it only on the captain's explicit instruction.
 `AGENTS.md` section 7 owns the merge-authority contract.
 
-Record the project's base branch in the same registry entry whenever the project is developed off a branch other than its repository default, so a freshly allocated task worktree does not start a worker on a stale tree.
+## Development branch
+
+Ask the captain which branch the project is developed on at every add and every create, before the clone is registered.
+The remote's default branch is a proposal, not the answer: most of the captain's projects develop off it, and inferring silently is how a project ends up with no branch recorded at all.
+State the inferred default as the proposed answer and take his correction.
+
+Store the answer IN THE PROJECT REPOSITORY, in a `.firstmate-base` file at its root holding that one branch name:
+
+```sh
+echo develop > .firstmate-base
+```
+
+A value kept only in this home's `data/projects.md` tells no other home anything, which is exactly how a second mate that owns a project found its base unset.
+The committed file is read by every home that clones the project, including one with no registry entry for it yet.
+`bin/fm-project-base.sh` owns the resolution order and reads the file from whichever branch carries it.
+
+Firstmate never writes that file itself, because `AGENTS.md` hard rule 1 forbids writing to a project.
+For a project firstmate creates, write and commit it as part of that project's initial local content, which the captain's creation request authorizes.
+For a project firstmate clones, record the branch as `base=` in the registry entry so dispatch is correct immediately, and land `.firstmate-base` through the project's own delivery path as its own small task.
 
 ## Add or clone an existing project
 
-Confirm the source URL, local project name, delivery posture, and autonomy posture, stating the resolved default for each rather than asking the captain to invent one.
+Confirm the source URL, local project name, delivery posture, autonomy posture, and development branch, stating the resolved default for each rather than asking the captain to invent one.
 Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
 A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
@@ -67,7 +85,7 @@ A `local-only` project may have no remote and skips no-mistakes initialization.
 Creating a GitHub repository is outward-facing.
 Before making that remote change, propose the repository name, owner or organization, visibility, and delivery posture, defaulting visibility to private and the posture to `no-mistakes-prod-only`, then obtain the captain's explicit consent for those exact values; a stated default never replaces that consent.
 Use `gh-axi` for the approved GitHub operation and consult its current help rather than relying on remembered flags.
-After remote creation succeeds, clone it locally, add the registry entry, and initialize it according to its delivery posture.
+After remote creation succeeds, clone it locally, add the registry entry, settle the development branch, and initialize it according to its delivery posture.
 
 For a purely `local-only` project, create a local Git repository under its unused `projects/<name>` path, add the registry entry, and make no GitHub call.
 The captain's request to create that local project authorizes this local initialization, but it does not authorize an unmentioned remote repository.
