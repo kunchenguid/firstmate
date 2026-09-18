@@ -22,7 +22,7 @@ type AddMessageOptions = {
 };
 
 type InteractiveModePresentation = {
-  ctx: {
+  ctx?: {
     chatContainer: {
       addChild(component: unknown): void;
     };
@@ -31,6 +31,14 @@ type InteractiveModePresentation = {
       get(message: UserMessageLike): unknown;
       set(message: UserMessageLike, component: unknown): void;
     };
+  };
+  chatContainer?: {
+    addChild(component: unknown): void;
+  };
+  getUserMessageText?: (message: UserMessageLike) => string;
+  transcriptMessageComponents?: {
+    get(message: UserMessageLike): unknown;
+    set(message: UserMessageLike, component: unknown): void;
   };
 };
 
@@ -127,13 +135,28 @@ export function installOmpCalmOperationalUserLayout(): void {
       return originalAddMessageToChat.call(this, message, options);
     }
 
-    const text = this.ctx.getUserMessageText(message);
+    const receiver = this as InteractiveModePresentation;
+    const context = receiver.ctx ?? receiver;
+    const getUserMessageText =
+      context.getUserMessageText ?? receiver.getUserMessageText;
+    const chatContainer = context.chatContainer ?? receiver.chatContainer;
+    const transcriptMessageComponents =
+      context.transcriptMessageComponents ?? receiver.transcriptMessageComponents;
+    if (
+      typeof getUserMessageText !== "function" ||
+      !chatContainer ||
+      !transcriptMessageComponents
+    ) {
+      return originalAddMessageToChat.call(this, message, options);
+    }
+
+    const text = getUserMessageText.call(context, message);
     if (!text || !patch.isOperationalInput(text)) {
       return originalAddMessageToChat.call(this, message, options);
     }
 
     const reused = options?.reuseSettledComponent
-      ? this.ctx.transcriptMessageComponents.get(message)
+      ? transcriptMessageComponents.get(message)
       : undefined;
     const component =
       reused instanceof CalmOperationalUserMessageComponent
@@ -143,8 +166,8 @@ export function installOmpCalmOperationalUserLayout(): void {
             message.role === "developer" ? true : message.synthetic ?? false,
             options?.imageLinks,
           );
-    this.ctx.transcriptMessageComponents.set(message, component);
-    this.ctx.chatContainer.addChild(component);
+    transcriptMessageComponents.set(message, component);
+    chatContainer.addChild(component);
     return undefined;
   };
 
