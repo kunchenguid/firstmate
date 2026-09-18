@@ -19,8 +19,8 @@
 #      agent exited.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
@@ -129,12 +129,14 @@ SH
 exit 0
 SH
   chmod +x "$fb/sleep"
+  fm_test_fake_account_auth "$fb"
 }
 
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
 new_case() {
   local id=${2:-t1} dir="$TMP_ROOT/$1-$RANDOM"
-  mkdir -p "$dir/home/state" "$dir/home/data" "$dir/fake"
+  mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/fake"
+  fm_test_worker_accounts "$dir/home"
   : > "$dir/fake/literal"
   : > "$dir/fake/keys"
   printf 'claude' > "$dir/fake/command"
@@ -683,6 +685,7 @@ test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
   local dir out rc id=rl-ultra
   dir=$(new_case native-ultra "$id")
   add_ship_task "$dir" "$id" pi
+  printf '%s\n' "$dir/home/accounts/pi" "codex-native" > "$dir/home/config/pi-account"
   printf pi > "$dir/fake/command"
   printf pi > "$dir/fake/becomes"
   printf '#!/usr/bin/env bash\nprintf "Options: --tui-mode\\n"\n' > "$dir/fakebin/pi"

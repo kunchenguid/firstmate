@@ -247,7 +247,9 @@ SH
 
 # fm_test_spawn_home <home> [harness]
 # Minimal firstmate home layout plus watcher-liveness beat. Optional harness
-# pin is written to config/crew-harness.
+# pin is written to config/crew-harness. Claude and Pi launches require an
+# explicit account selection, so every spawn home also receives throwaway
+# account roots under it (fm_test_worker_accounts).
 fm_test_spawn_home() {
   local home=$1 harness=${2-}
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
@@ -255,6 +257,103 @@ fm_test_spawn_home() {
   if [ -n "$harness" ]; then
     printf '%s\n' "$harness" > "$home/config/crew-harness"
   fi
+  fm_test_worker_accounts "$home"
+}
+
+# fm_test_worker_accounts <home>
+# Declares Claude and Pi launches from <home> against throwaway account roots
+# under it, because bin/fm-spawn.sh refuses a claude, pi, or pi-signed launch
+# without config/claude-account or config/pi-account
+# (bin/fm-worker-account-lib.sh). A ship or scout reads its own home; a
+# secondmate launch reads the launching home. The Pi file names provider
+# `fake`, so a Pi spawn must pass --model fake/<id>. A test that exercises a
+# missing or invalid declaration removes or rewrites the file afterwards.
+fm_test_worker_accounts() {
+  local home=$1
+  mkdir -p "$home/config" "$home/accounts/claude" "$home/accounts/pi"
+  printf '%s\n' "$home/accounts/claude" > "$home/config/claude-account"
+  printf '%s\n' "$home/accounts/pi" "fake" > "$home/config/pi-account"
+}
+
+# fm_test_config_claude_account <config-dir>
+# Declares a throwaway Claude account for a spawn that uses FM_CONFIG_OVERRIDE
+# rather than a full home (backend suites). The root lives next to <config-dir>.
+fm_test_config_claude_account() {
+  local config=$1 root
+  mkdir -p "$config"
+  root=$(cd "$(dirname "$config")" && pwd)/accounts/claude
+  mkdir -p "$root"
+  printf '%s\n' "$root" > "$config/claude-account"
+}
+
+# fm_test_fake_account_auth <fakebin>
+# Installs the two authentication checks the spawn preflight runs under a
+# selected account: a quota-axi answering `auth --json --provider claude`, and
+# fm-fake-pi-auth for a fake pi to exec on `auth check`. The preflight scrubs
+# its environment, so each answers from a .fake-auth file inside the selected
+# root, holding the status to report; absent means authenticated.
+fm_test_fake_account_auth() {
+  local fakebin=$1
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/bin/sh
+status=$(cat "${CLAUDE_CONFIG_DIR:-/nonexistent}/.fake-auth" 2>/dev/null) || status=available
+printf '{"schemaVersion":1,"auth":[{"provider":"claude","sources":[{"source":"keychain","status":"%s"}]}]}\n' "$status"
+SH
+  chmod +x "$fakebin/quota-axi"
+  fm_test_fake_pi_runner "$fakebin"
+}
+
+# fm_test_fake_pi_runner <fakebin> [runner...]
+# Installs fm-fake-pi-auth and fm-fake-pi-list-models plus each named Pi runner
+# (pi, pi-signed) as a fake that answers `auth check` and `--list-models`
+# through them and exits 0 for anything else, including --help.
+fm_test_fake_pi_runner() {
+  local fakebin=$1 runner
+  shift
+  cat > "$fakebin/fm-fake-pi-auth" <<'SH'
+#!/bin/sh
+provider=
+while [ $# -gt 0 ]; do
+  case "$1" in --provider) provider=${2:-} ;; esac
+  shift
+done
+root=${PI_CODING_AGENT_DIR:-/nonexistent}
+if [ -n "$provider" ] && grep -qxF "$provider" "$root/.fake-auth-unloaded" 2>/dev/null; then
+  printf '{"status":"not_ready","provider":"%s","reason":"provider_not_found"}\n' "$provider"
+  exit 1
+fi
+status=$(cat "$root/.fake-auth" 2>/dev/null) || status=ready
+[ -z "${ANTHROPIC_API_KEY:-}" ] || status=ready
+printf '{"status":"%s","provider":"%s"}\n' "$status" "${provider:-fake}"
+[ "$status" = ready ]
+SH
+  chmod +x "$fakebin/fm-fake-pi-auth"
+  cat > "$fakebin/fm-fake-pi-list-models" <<'SH'
+#!/bin/sh
+printf 'provider  model  context  max-out  thinking  images\n'
+while read -r p m _rest; do
+  [ -n "$p" ] || continue
+  case "$p$m" in *"${1:-}"*) printf '%s  %s  1K  1K  yes  yes\n' "$p" "$m" ;; esac
+done < "${PI_CODING_AGENT_DIR:-/nonexistent}/.fake-models" 2>/dev/null
+exit 0
+SH
+  chmod +x "$fakebin/fm-fake-pi-list-models"
+  for runner in "$@"; do
+    cat > "$fakebin/$runner" <<'SH'
+#!/bin/sh
+[ "${1:-} ${2:-}" != "auth check" ] || exec fm-fake-pi-auth "$@"
+[ "${1:-}" != "--list-models" ] || exec fm-fake-pi-list-models "${2:-}"
+if [ "${1:-}" = --help ]; then
+  if [ "${FM_FAKE_PI_VERSION:-0.84.0}" = 0.82.0 ]; then
+    printf '%s\n' 'Pi 0.82.0' 'Options: --help'
+  else
+    printf '%s\n' "Pi ${FM_FAKE_PI_VERSION:-0.84.0}" 'Options: --help --tui-mode <mode>'
+  fi
+fi
+exit 0
+SH
+    chmod +x "$fakebin/$runner"
+  done
 }
 
 # fm_test_spawn_brief <home> <id> [captain-intent]
@@ -275,11 +374,17 @@ EOF
 # Creates <dir>/fakebin with the spawn tmux stub, a no-op treehouse, and any
 # extra exit-0 tools. Echoes the fakebin path.
 fm_test_make_spawn_fakebin() {
-  local dir=$1 fakebin
+  local dir=$1 fakebin tool
   shift
   fakebin=$(fm_fakebin "$dir")
   fm_test_fake_tmux_spawn "$fakebin"
+  fm_test_fake_account_auth "$fakebin"
   fm_fake_exit0 "$fakebin" treehouse "$@"
+  for tool in "$@"; do
+    case "$tool" in
+    pi | pi-signed) fm_test_fake_pi_runner "$fakebin" "$tool" ;;
+    esac
+  done
   printf '%s\n' "$fakebin"
 }
 
@@ -296,20 +401,18 @@ make_spawn_fakebin() {
 fm_test_run_spawn() {
   local home=$1 pane=$2 fakebin=$3
   shift 3
-  # A claude spawn pre-registers workspace trust in the launching user's own
-  # store (bin/fm-claude-trust.sh), so every spawn here runs against a throwaway
-  # HOME; without it the suite would write the developer's real ~/.claude.json.
-  # CLAUDE_CONFIG_DIR must be pinned too, and pinned EMPTY: the script resolves
-  # the store as ${CLAUDE_CONFIG_DIR:-${HOME:-}}, so a value inherited from the
-  # developer's shell would beat the throwaway HOME and the sandbox would not
-  # hold, while an empty value falls through to it. Empty rather than a path
-  # because bin/fm-spawn.sh prefixes the launch only when the value is non-empty,
-  # so every launch-shape assertion in the suite keeps reading the same command.
-  # A test that needs the set case opts in through FM_TEST_CLAUDE_CONFIG_DIR.
+  # A claude spawn pre-registers workspace trust in the selected account root
+  # (bin/fm-claude-trust.sh), so every spawn here runs against a throwaway HOME
+  # and an empty ambient CLAUDE_CONFIG_DIR: spawn reads config/claude-account
+  # instead of the invoking shell, and the throwaway HOME keeps an ordinary
+  # selection from touching the developer's real ~/.claude.json. A test that
+  # needs a non-empty ambient CLAUDE_CONFIG_DIR (it must not select the
+  # account) opts in through FM_TEST_CLAUDE_CONFIG_DIR.
   local spawn_home=$home/user-home
   mkdir -p "$spawn_home"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$spawn_home" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
+    PI_CODING_AGENT_DIR="${FM_TEST_PI_CODING_AGENT_DIR:-}" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="${TMUX:-fake,1,0}" \

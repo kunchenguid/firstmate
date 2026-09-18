@@ -147,15 +147,14 @@ run_home_trust() {
 }
 
 # spawn_secondmate_claude <case-dir> <home> <id>: run a real --secondmate claude
-# spawn against the isolated store at <case-dir>/claude-config, logging the
+# spawn against the launching home's declared Claude account, logging the
 # launch to <case-dir>/launch.log. Echoes the spawn output.
 spawn_secondmate_claude() {
   local case_dir=$1 home=$2 id=$3 primary fakebin
   primary="$case_dir/primary"
-  mkdir -p "$case_dir/claude-config"
   fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
   fm_test_spawn_home "$primary" claude
-  FM_TEST_CLAUDE_CONFIG_DIR="$case_dir/claude-config" FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
+  FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
     fm_test_run_spawn "$primary" "$home" "$fakebin" "$id" "$home" claude --secondmate
 }
 
@@ -377,9 +376,9 @@ test_home_directory_is_refused_even_when_it_is_a_worktree() {
   pass "fm-claude-trust.sh: refuses a home directory the git checks would accept"
 }
 
-# fm-spawn forwards CLAUDE_CONFIG_DIR onto the worker verbatim and the worker's
-# pane starts in the task worktree, so a relative value names one store here and
-# another there; registering into the first and reporting success would leave the
+# The trust helper refuses a relative CLAUDE_CONFIG_DIR: the worker pane starts
+# in the task worktree, so a relative value names one store here and another
+# there. Registering into the first and reporting success would leave the
 # worker meeting the dialog this control exists to remove.
 test_relative_config_dir_is_refused() {
   local rec out
@@ -590,12 +589,11 @@ test_corrupt_store_fails_closed() {
 # meta, which a refused spawn never publishes. The id carries this process's pid
 # so the temp-root assertion reads only this run's path.
 test_refused_spawn_leaves_no_task_state() {
-  local case_dir home proj wt config fakebin out id
+  local case_dir home proj wt fakebin out id
   case_dir="$TMP_ROOT/refused-spawn"
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  config="$case_dir/claude-config"
   id="refusedspawn$$"
   # Root owns /etc/passwd, so a store resolving to it is refused as another
   # user's file. Running as root would own it and make the refusal vacuous.
@@ -603,14 +601,12 @@ test_refused_spawn_leaves_no_task_state() {
     pass "fm-spawn.sh: a trust-refused claude spawn leaves no task state (skipped as root)"
     return 0
   fi
-  mkdir -p "$config"
-  ln -s /etc/passwd "$config/.claude.json"
   fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
   fm_test_spawn_home "$home" claude
+  ln -s /etc/passwd "$home/accounts/claude/.claude.json"
   fm_git_worktree "$proj" "$wt" wt-refused
   fm_test_spawn_brief "$home" "$id"
-  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$config" \
-    fm_test_run_spawn "$home" "$wt" "$fakebin" "$id" "$proj" claude \
+  out=$(fm_test_run_spawn "$home" "$wt" "$fakebin" "$id" "$proj" claude \
     --mode no-mistakes --yolo off)
   expect_code 1 $? "a spawn whose trust registration is refused must fail: $out"
   assert_contains "$out" "workspace trust" "the spawn did not report the trust refusal"
@@ -627,23 +623,21 @@ test_refused_spawn_leaves_no_task_state() {
 # worktree AND deliver the launch command carrying the brief, with no dialog to
 # answer and no human in the loop.
 test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief() {
-  local case_dir home proj wt config fakebin launch_log out
+  local case_dir home proj wt fakebin launch_log out
   case_dir="$TMP_ROOT/spawn"
   home="$case_dir/home"
   proj="$case_dir/project"
   wt="$case_dir/wt"
-  config="$case_dir/claude-config"
   launch_log="$case_dir/launch.log"
-  mkdir -p "$config"
   fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
   fm_test_spawn_home "$home" claude
   fm_git_worktree "$proj" "$wt" wt-spawn
   fm_test_spawn_brief "$home" trustspawn
-  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$config" FM_FAKE_LAUNCH_LOG="$launch_log" \
+  out=$(FM_FAKE_LAUNCH_LOG="$launch_log" \
     fm_test_run_spawn "$home" "$wt" "$fakebin" trustspawn "$proj" claude \
     --mode no-mistakes --yolo off)
   expect_code 0 $? "the claude spawn must succeed: $out"
-  assert_trusted "$config/.claude.json" "$wt" \
+  assert_trusted "$home/accounts/claude/.claude.json" "$wt" \
     "the claude spawn did not pre-register trust for its worktree"
   assert_present "$launch_log" "the claude spawn sent no launch command"
   assert_grep 'claude --dangerously-skip-permissions' "$launch_log" \
@@ -652,7 +646,7 @@ test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief() {
     "the launch command did not carry the brief the worker must read"
   # The worker must read the SAME store the registration wrote, or the trust
   # would land somewhere the pane never looks.
-  assert_grep "CLAUDE_CONFIG_DIR='$config'" "$launch_log" \
+  assert_grep "CLAUDE_CONFIG_DIR='$home/accounts/claude'" "$launch_log" \
     "the launch command did not point the worker at the store that was trusted"
   pass "fm-spawn.sh: a claude spawn pre-trusts its worktree and launches with the brief"
 }
@@ -669,7 +663,7 @@ test_secondmate_standalone_clone_home_is_trusted() {
   seed_secondmate_home "$home" nomistakes-n1 clone
   out=$(spawn_secondmate_claude "$case_dir" "$home" nomistakes-n1)
   expect_code 0 $? "a claude secondmate spawn into a standalone-clone home must succeed: $out"
-  assert_trusted "$case_dir/claude-config/.claude.json" "$home" \
+  assert_trusted "$case_dir/primary/accounts/claude/.claude.json" "$home" \
     "the claude secondmate spawn did not pre-register trust for its standalone-clone home"
   assert_present "$case_dir/launch.log" "the claude secondmate spawn sent no launch command"
   assert_grep 'claude --dangerously-skip-permissions' "$case_dir/launch.log" \
@@ -678,7 +672,7 @@ test_secondmate_standalone_clone_home_is_trusted() {
     "the launch command did not carry the charter the secondmate must read"
   # The pane must read the SAME store the registration wrote, or the trust would
   # land somewhere it never looks and the dialog would appear anyway.
-  assert_grep "CLAUDE_CONFIG_DIR='$case_dir/claude-config'" "$case_dir/launch.log" \
+  assert_grep "CLAUDE_CONFIG_DIR='$case_dir/primary/accounts/claude'" "$case_dir/launch.log" \
     "the launch command did not point the secondmate at the store that was trusted"
   pass "fm-spawn.sh: a claude secondmate spawn pre-trusts a standalone-clone home"
 }
@@ -694,7 +688,7 @@ test_secondmate_leased_worktree_home_is_trusted() {
   seed_secondmate_home "$home" leased-n1 worktree
   out=$(spawn_secondmate_claude "$case_dir" "$home" leased-n1)
   expect_code 0 $? "a claude secondmate spawn into a leased worktree home must succeed: $out"
-  assert_trusted "$case_dir/claude-config/.claude.json" "$home" \
+  assert_trusted "$case_dir/primary/accounts/claude/.claude.json" "$home" \
     "the claude secondmate spawn did not pre-register trust for its leased worktree home"
   pass "fm-spawn.sh: a claude secondmate spawn pre-trusts a leased worktree home"
 }
@@ -794,7 +788,7 @@ test_worktree_mode_still_refuses_a_secondmate_home() {
 # recorded, the spawn must refuse rather than launch a pane that would wedge on
 # the dialog. This is the guard that never fired while the step was skipped.
 test_secondmate_spawn_fails_closed_when_home_trust_cannot_be_recorded() {
-  local case_dir home out
+  local case_dir home out primary fakebin
   case_dir="$TMP_ROOT/sm-failclosed"
   home="$case_dir/fm-homes/failclosed-n1"
   # Root owns /etc/passwd, so a store resolving to it is refused as another
@@ -804,9 +798,11 @@ test_secondmate_spawn_fails_closed_when_home_trust_cannot_be_recorded() {
     return 0
   fi
   seed_secondmate_home "$home" failclosed-n1 clone
-  mkdir -p "$case_dir/claude-config"
-  ln -s /etc/passwd "$case_dir/claude-config/.claude.json"
-  out=$(spawn_secondmate_claude "$case_dir" "$home" failclosed-n1)
+  primary="$case_dir/primary"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
+  fm_test_spawn_home "$primary" claude
+  ln -s /etc/passwd "$primary/accounts/claude/.claude.json"
+  out=$(fm_test_run_spawn "$primary" "$home" "$fakebin" failclosed-n1 "$home" claude --secondmate)
   expect_code 1 $? "a secondmate spawn whose trust registration is refused must fail: $out"
   assert_contains "$out" "workspace trust" "the spawn did not report the trust refusal"
   assert_absent "$case_dir/launch.log" "a secondmate was launched into a home whose trust could not be recorded"

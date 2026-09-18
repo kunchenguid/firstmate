@@ -367,6 +367,44 @@ Any other value, or an unreadable file, refuses every spawn from that home, whic
 The file is a captain-wide safety preference, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract; a secondmate's own Claude crewmates then launch on the same posture.
 The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the verified shape of both launches and which once-per-machine dialog each one can meet.
 
+## Worker accounts (config/claude-account, config/pi-account)
+
+Claude, Pi, and Pi-signed managed launches require an explicit account selection in the launching home.
+A missing file refuses before any worker endpoint, worktree, or task record exists, and names the file to create.
+Firstmate never treats the supervising process's environment or the runtime's default login as consent to spend that account.
+`ordinary` is the explicit selection of the vendor default root (`~/.claude` or `~/.pi/agent`); any other value is one absolute path to an existing readable, searchable directory.
+An explicit path to the vendor default root is also valid: the request is to distinguish that choice from an absent file.
+
+| Runner | File | Variable the launch receives |
+| --- | --- | --- |
+| `claude` | `config/claude-account` | `CLAUDE_CONFIG_DIR` |
+| `pi`, `pi-signed` | `config/pi-account` | `PI_CODING_AGENT_DIR` |
+
+`config/claude-account` holds exactly `ordinary` or one absolute path, followed by one newline.
+`config/pi-account` holds that same root token on line 1 and the provider this home may spend on line 2.
+A Pi root can hold several provider identities at once, so selecting the root alone is insufficient.
+The launch `--model` must be `<that-provider>/<id>`; an unqualified model, or a provider the file does not name, refuses because the shared root's `defaultProvider` must never pick which identity a launch spends.
+That declared provider is the work/personal boundary: a home that has not named a provider cannot spend an extra identity merely because it is available in the shared root.
+
+Both files are local, gitignored, and deliberately not inherited.
+A ship or scout reads the active home.
+A secondmate is a supervisor and reads the launching home, never an ambient `CLAUDE_CONFIG_DIR` and never the secondmate home's own worker files.
+Relaunch and startup recovery use that same home.
+A remote secondmate resolves against the host's launching Firstmate home; account directories are never copied over SSH.
+
+Before any endpoint exists, the spawn asks the runner's own non-interactive check whether the selected root can authenticate the launch.
+Claude is asked through `quota-axi auth --json --provider claude`.
+A source that is available or expired passes.
+A source skipped with `credentialPresent` passes only when the root's `.claude.json` records a login (`oauthAccount`).
+Pi is asked `pi auth check --provider <the launch model's provider> --json --no-refresh`, and only status `ready` passes.
+`pi auth check` loads no extensions, so a provider an extension registers comes back `not_ready`/`provider_not_found`; only that one answer falls through to `pi --list-models <provider>`.
+A `codex-native/<id>` model is not checked: that provider signs in through Codex's own login.
+The check runs with only `HOME`, `PATH`, `TMPDIR`, and the selected root in its environment, so a provider key left in the caller cannot answer for an empty root.
+[`bin/fm-worker-account-lib.sh`](../bin/fm-worker-account-lib.sh) owns resolution, validation, and the check.
+
+A selected Claude launch also unsets the environment credentials Claude ranks above the `/login` stored in that root.
+Other runners carry no declaration, because the official controls cannot isolate them or Firstmate has not adopted one yet; they still launch on their ambient account.
+
 ## Worker launch environment (config/launch-env-allowlist)
 
 The optional local, gitignored `config/launch-env-allowlist` limits the ambient environment passed to newly launched workers, scouts, and secondmates, including relaunches.

@@ -29,19 +29,19 @@
 # kill) lives in tests/fm-backend-tmux-smoke.test.sh.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 fm_git_identity fmtest fmtest@example.invalid
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-backend-tests)
-# A claude spawn writes workspace trust into the launching user's own store,
-# and the script resolves it as ${CLAUDE_CONFIG_DIR:-${HOME:-}}, so the value
-# is pinned EMPTY beside the throwaway HOME: an inherited one would beat that
-# HOME and reach the developer's real store, while empty falls through to it
-# and adds no launch prefix, since fm-spawn only prefixes a non-empty value.
+# A claude spawn pre-registers workspace trust in the selected account root
+# (bin/fm-claude-trust.sh), so this suite pins a throwaway HOME and declares a
+# throwaway config/claude-account rather than forwarding an ambient
+# CLAUDE_CONFIG_DIR. An inherited CLAUDE_CONFIG_DIR would not select the
+# account, but it would still be a confusing extra store next to the test.
 SPAWN_HOME="$TMP_ROOT/user-home"
 mkdir -p "$SPAWN_HOME"
 
@@ -808,6 +808,7 @@ exit 0
 SH
   chmod +x "$fb/tmux"
   fm_fake_exit0 "$fb" treehouse
+  fm_test_fake_account_auth "$fb"
   printf '%s\n' "$fb"
 }
 
@@ -878,6 +879,7 @@ exit 0
 SH
   chmod +x "$fb/tmux"
   fm_fake_exit0 "$fb" treehouse
+  fm_test_fake_account_auth "$fb"
   printf '%s\n' "$fb"
 }
 
@@ -908,6 +910,7 @@ run_spawn_symlink_case() {  # <label> <physical|logical>
   state="$TMP_ROOT/symlink-state-$label"; config="$TMP_ROOT/symlink-config-$label"
   mkdir -p "$state" "$config"
   log="$TMP_ROOT/symlink-spawn-$label.log"
+  fm_test_config_claude_account "$config"
 
   out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude --mode no-mistakes --yolo off 2>&1)
   rc=$?
@@ -1068,6 +1071,7 @@ test_spawn_default_backend_writes_no_meta_field() {
   mkdir -p "$data/$id"; write_spawn_brief "$data/$id/brief.md" "$id"
   state="$TMP_ROOT/nobackend-state"; config="$TMP_ROOT/nobackend-config"
   mkdir -p "$state" "$config"
+  fm_test_config_claude_account "$config"
 
   out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
@@ -1090,6 +1094,7 @@ test_spawn_explicit_backend_flag_beats_autodetect_herdr_env() {
   mkdir -p "$data/$id"; write_spawn_brief "$data/$id/brief.md" "$id"
   state="$TMP_ROOT/explicit-backend-state"; config="$TMP_ROOT/explicit-backend-config"
   mkdir -p "$state" "$config"
+  fm_test_config_claude_account "$config"
 
   # HERDR_ENV=1 is present (as if firstmate itself were running under herdr),
   # but an explicit --backend tmux flag must still win outright.
@@ -1114,6 +1119,7 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   mkdir -p "$data/$id"; write_spawn_brief "$data/$id/brief.md" "$id"
   state="$TMP_ROOT/nest-state"; config="$TMP_ROOT/nest-config"
   mkdir -p "$state" "$config"
+  fm_test_config_claude_account "$config"
 
   # No --backend, no FM_BACKEND, no config/backend: nothing is explicitly
   # configured, so auto-detect runs. $TMUX and HERDR_ENV=1 are both present

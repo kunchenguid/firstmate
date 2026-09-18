@@ -37,6 +37,7 @@ LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-cmux-claude-composer.XXXXXX") || fail "could
 trap cleanup EXIT
 mkdir -p "$LAB/config" "$LAB/data/$TASK" "$LAB/projects/comms" "$LAB/state"
 printf 'cmux\n' > "$LAB/config/backend"
+printf 'ordinary\n' > "$LAB/config/claude-account"
 
 git -C "$LAB/projects/comms" init -q -b main || fail "could not initialize the isolated probe repository"
 git -C "$LAB/projects/comms" config user.email 'cmux-composer-test@example.invalid'
