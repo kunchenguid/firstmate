@@ -413,7 +413,7 @@ classify_stale() {  # <window> <state> [<span-record> <span-status>]
       "$(status_seen_offset "$state" "$task")")
     rc=$?
   fi
-  last=$(last_status_line "$state/$task.status")
+  last=$(status_wait_line "$state/$task.status")
   if [ "$rc" -eq 2 ]; then
     printf 'escalate|unreadable status span for %s' "$task"
     return
@@ -548,7 +548,7 @@ migrate_watcher_pause_markers() {  # <state>
     task=$(basename "$meta"); task=${task%.meta}
     key=$(_stale_key "$task")
     watcher_key=$(_stale_key "$win")
-    last=$(last_status_line "$state/$task.status")
+    last=$(status_wait_line "$state/$task.status")
     if status_is_paused_or_captain_held "$last" || [ -e "$state/.subsuper-paused-$key" ] || [ -e "$state/.paused-$watcher_key" ]; then
       reconcile_pause_tracking "$win" "$state" "$last"
     fi
@@ -562,7 +562,7 @@ sync_pause_markers_from_signal() {  # <state> <signal files>
   for f in "${files[@]}"; do
     case "$f" in *.status) ;; *) continue ;; esac
     [ -e "$f" ] || continue
-    last=$(last_status_line "$f")
+    last=$(status_wait_line "$f")
     task=$(basename "$f"); task=${task%.status}
     win=$(window_for_task "$task" "$state" 2>/dev/null || true)
     [ -n "$win" ] || continue
@@ -1066,7 +1066,7 @@ housekeeping() {  # <state>
       rm -f "$marker"; continue
     fi
     task=$(window_to_task "$win" "$state")
-    last=$(last_status_line "$state/$task.status")
+    last=$(status_wait_line "$state/$task.status")
     if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
@@ -1097,7 +1097,7 @@ housekeeping() {  # <state>
   # as the wait lasts - so reading busy as "the crew resumed" retires the window of
   # exactly the declaration that needs it. The crew's own latest status line is the
   # authority, and the loop head above already drops the marker the moment that line
-  # stops declaring the wait.
+  # stops declaring the wait (status_wait_line, so a note: under the wait keeps it).
   pause_secs=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
   for marker in "$state"/.subsuper-paused-*; do
     [ -e "$marker" ] || continue
@@ -1107,7 +1107,7 @@ housekeeping() {  # <state>
       rm -f "$marker"; continue
     fi
     task=$(window_to_task "$win" "$state")
-    last=$(last_status_line "$state/$task.status")
+    last=$(status_wait_line "$state/$task.status")
     if [ -z "$last" ] || ! status_is_paused_or_captain_held "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
@@ -1142,7 +1142,7 @@ housekeeping() {  # <state>
     case "$?" in
       2) rm -f "$marker" ;;
       *)
-        last=$(last_status_line "$state/$task.status")
+        last=$(status_wait_line "$state/$task.status")
         if [ -n "$last" ] && status_is_captain_held "$last"; then
           if escalate_add "$state" "captain-held ${age}s (awaiting the captain, answer the held decision or release the hold): $win"; then
             _now > "$marker"
@@ -1396,7 +1396,7 @@ handle_wake() {  # <reason> <state>
                 pause) : ;;
                 *) case "$stale_detail" in
                      idle\ *s,\ possible\ wedge,\ escalation\ *)
-                       last=$(last_status_line "$state/$task.status")
+                       last=$(status_wait_line "$state/$task.status")
                        status_is_paused_or_captain_held "$last" \
                          || decision="escalate|${reason#stale: }"
                        ;;
@@ -1411,7 +1411,7 @@ handle_wake() {  # <reason> <state>
   [ "$kind" = signal ] && sync_pause_markers_from_signal "$state" "$arg"
   if [ "$kind" = stale ] && [ "$action" = escalate ]; then
     task=$(window_to_task "$arg" "$state")
-    last=$(last_status_line "$state/$task.status")
+    last=$(status_wait_line "$state/$task.status")
     reconcile_pause_tracking "$arg" "$state" "$last"
   fi
   case "$action" in

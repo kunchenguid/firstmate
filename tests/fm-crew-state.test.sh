@@ -2006,6 +2006,16 @@ test_no_run_idle_pane_paused() {
   out=$(run_crew_state "$d" feat-pause)
   assert_contains "$out" "state: paused" "continuation prose and trailing blanks preserve the pause"
   assert_contains "$out" "holding for the upstream tool release" "multiline pause preserves its declared reason"
+  # A note: under the pause is informational (status_wait_line): the pause and
+  # its reason stand, while a note: after the worker left the pause does not
+  # revive it.
+  printf 'note [key=fyi]: the release slipped a day\n' >> "$d/state/feat-pause.status"
+  out=$(run_crew_state "$d" feat-pause)
+  assert_contains "$out" "state: paused" "a note: under the pause keeps it"
+  assert_contains "$out" "holding for the upstream tool release" "a note: under the pause keeps its reason"
+  printf 'working: release landed, resuming\nnote: starting on the rebase\n' >> "$d/state/feat-pause.status"
+  out=$(run_crew_state "$d" feat-pause)
+  case "$out" in *"state: paused"*) fail "a note: after leaving the pause revived it: $out" ;; esac
   pass "no run + idle pane on a paused: status reports state: paused with its reason"
 }
 
