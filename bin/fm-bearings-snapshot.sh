@@ -148,7 +148,7 @@ remote homes under one shared snapshot budget and may refresh the parent-side ca
 Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
-  decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
+  decisions_open{id,key,verb,summary,owner,product_decision}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner,filed}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 Default gates are selected newest filed first before their bound; undated gates
@@ -521,7 +521,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | ([ $m.decisions_open[]?
               | select(.source == "backlog" and .verb == "captain-hold")
               | select(($all_decisions == 1) or live_captain_call)
-              | {id:($m.id + "/" + .id),key,verb,
+              | {id:($m.id + "/" + .id),key:($m.id + "/" + (.key // .id)),verb,
                  summary:hold_summary((.summary // .id);
                                       (.reason // "captain decision pending")),owner:$m.id} ]
             + [ $m.queued[]?
@@ -531,9 +531,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                             | select(.source == "backlog" and .verb == "captain-hold")
                             | .id]
                          | index($id) | not)
-                | {id:($m.id + "/" + .id),key:.id,verb:"captain-hold",
+                | {id:($m.id + "/" + .id),key:($m.id + "/" + .id),verb:"captain-hold",
                    summary:hold_summary((.title // .id);
-                                        (.hold_reason // "captain decision pending")),owner:$m.id} ])[] ]) as $decisions_all
+                                        (.hold_reason // "captain decision pending")),owner:$m.id} ]
+            + [ $m.product_decisions[]?
+                | {id:($m.id + "/" + (.key | split("/") | last)),key,verb:"product-decision",
+                   summary:.question,owner:$m.id,product_decision:.} ])[] ]) as $decisions_all
   | ([ .backlog.records[]
          | . as $record
          | select(.structured and projected_deferred_hold) ]

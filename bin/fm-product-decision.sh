@@ -5,19 +5,22 @@
 #   fm-product-decision.sh create --input <json-file>
 #   fm-product-decision.sh list
 #   fm-product-decision.sh show <pid-n>
-#   fm-product-decision.sh answer <pid-n> --answer-file <file> [--release]
+#   fm-product-decision.sh answer <pid-n> --answer-file <file> [--release|--done]
 #   fm-product-decision.sh retry <pid-n>
-#   fm-product-decision.sh route-answer <owner/task|project/pid-n> --answer-file <file> [--release]
+#   fm-product-decision.sh route-answer <owner/task|project/pid-n> --answer-file <file> [--release|--done]
+#   fm-product-decision.sh route-reconcile <owner/task|project/pid-n> --source-id <id> --source <provenance>
 #   fm-product-decision.sh retry-routes
-#   fm-product-decision.sh accept-task-answer <task-id> [--release]  (stdin from fm-on)
-#   fm-product-decision.sh accept-pid-answer <pid-n> [--release]      (stdin from fm-on)
+#   fm-product-decision.sh accept-task-answer <task-id> [--release|--done] (stdin from fm-on)
+#   fm-product-decision.sh accept-pid-answer <pid-n> [--release|--done] (stdin from fm-on)
+#   fm-product-decision.sh accept-task-reconcile <task-id> --source-id <id> --source <provenance>
+#   fm-product-decision.sh accept-pid-reconcile <pid-n> --source-id <id> --source <provenance>
 #
 # A create input is an fm-product-decision-input.v1 object with project,
-# request_key, originating_task, question, context, user_impact, options,
+# decision_type="product", request_key, optional supersedes, originating_task, question, context, user_impact, options,
 # recommendation, rationale, consequences, and affected fields. Each option
 # has a sequential letter label, title, non-empty pros and cons arrays, and
 # neutral consequences. The script owns timestamps, repository identity,
-# owner identity, status, and resolution.
+# owner identity, status, supersession history, and resolution.
 #
 # Records live in the repository authority home, one JSON file per PID.
 # The authority lock protects only ID allocation and its tiny recovery journal.
@@ -40,7 +43,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 
 fail() { printf 'fm-product-decision: %s\n' "$*" >&2; exit 2; }
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 now_utc() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 sha256() {
   if command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{print $1}'
@@ -59,6 +62,7 @@ atomic_json() {  # <path> <json>
 }
 PID_LOCK=
 PID_LOCK_HELD=0
+CREATE_SUPERSEDE_LOCK=
 release_pid_lock() {
   [ "$PID_LOCK_HELD" = 1 ] || return 0
   fm_lock_release "$PID_LOCK" || return 1
@@ -69,6 +73,22 @@ acquire_pid_lock() {  # <pid-number>
   fm_lock_acquire_wait "$PID_LOCK" || fail "PID-$1 is being updated; retry after the current transition"
   PID_LOCK_HELD=1
   trap 'release_pid_lock || true' EXIT HUP INT TERM
+}
+release_create_locks() {
+  local rc=0
+  if [ -n "$CREATE_SUPERSEDE_LOCK" ]; then
+    fm_lock_release "$CREATE_SUPERSEDE_LOCK" || rc=1
+    CREATE_SUPERSEDE_LOCK=
+  fi
+  fm_repo_scope_lock_release || rc=1
+  return "$rc"
+}
+lock_superseded_pid() {  # <pid-key>
+  local key=$1 number
+  number=$(pid_number "$key") || fail "invalid superseded PID: $key"
+  CREATE_SUPERSEDE_LOCK="$RECORDS_DIR/.pid-$number.lock"
+  fm_lock_acquire_wait "$CREATE_SUPERSEDE_LOCK" \
+    || fail "cannot lock superseded PID $key for amendment"
 }
 record_path() { printf '%s/pid-%s.json\n' "$RECORDS_DIR" "$1"; }
 pid_number() {
@@ -99,8 +119,10 @@ validate_input() {  # <input-json>
   jq -e --arg project "$PROJECT_NAME" '
     . as $x
     | ($x.schema == "fm-product-decision-input.v1")
+    and ($x.decision_type == "product")
     and ($x.project == $project)
     and ($x.request_key | type == "string" and length > 0 and length <= 300)
+    and (($x.supersedes // null) == null or ($x.supersedes | type == "string" and test("^pid-[1-9][0-9]*$")))
     and ($x.originating_task | type == "string" and test("^[A-Za-z0-9._-]+$"))
     and ($x.question | type == "string" and length > 0 and length <= 1200)
     and ($x.context | type == "string" and length > 0 and length <= 3000)
@@ -112,6 +134,7 @@ validate_input() {  # <input-json>
       and (.cons | type == "array" and length > 0 and all(.[]; type == "string" and length > 0))
       and (.consequences | type == "string" and length > 0 and length <= 1200))
     and ($x.recommendation | type == "string" and length > 0 and length <= 1200)
+    and (($x.answer_mode // "release") == "release" or ($x.answer_mode // "release") == "done")
     and ($x.recommended_option | type == "string" and test("^[A-H]$"))
     and any($x.options[]; .label == $x.recommended_option)
     and ($x.rationale | type == "string" and length > 0 and length <= 2000)
@@ -120,6 +143,33 @@ validate_input() {  # <input-json>
     and all([$x.affected.requirements, $x.affected.docs, $x.affected.tasks][];
       type == "array" and all(.[]; type == "string" and length > 0 and length <= 500))
   ' "$input" >/dev/null 2>&1 || fail 'input does not meet the product-decision presentation contract'
+}
+
+finalize_supersession() {  # <new-record-file>
+  local new_file=$1 old_key old_number old_file new_key old_status old_record now
+  old_key=$(jq -r '.supersedes // empty' "$new_file")
+  [ -n "$old_key" ] || return 0
+  old_number=$(pid_number "$old_key") || fail "invalid superseded PID: $old_key"
+  old_file=$(record_path "$old_number")
+  [ -f "$old_file" ] && [ ! -L "$old_file" ] || fail "superseded PID does not exist: $old_key"
+  new_key=$(jq -r '.key' "$new_file")
+  old_status=$(jq -r '.status' "$old_file")
+  if [ "$old_status" = superseded ] \
+    && [ "$(jq -r '.superseded_by // empty' "$old_file")" = "$new_key" ]; then
+    return 0
+  fi
+  [ "$old_status" = open ] \
+    && [ "$(jq -r '.project' "$old_file")" = "$(jq -r '.project' "$new_file")" ] \
+    && [ "$(jq -r '.originating_task' "$old_file")" = "$(jq -r '.originating_task' "$new_file")" ] \
+    && [ "$(jq -r '.owner_id' "$old_file")" = "$(jq -r '.owner_id' "$new_file")" ] \
+    || fail "superseded PID must be open and owned by the same task: $old_key"
+  now=$(now_utc)
+  old_record=$(jq --arg successor "$new_key" --arg now "$now" '
+    .status="superseded" | .superseded_by=$successor
+    | .amendment_history=((.amendment_history // []) + [{kind:"superseded",successor:$successor,recorded_at:$now}])
+    | .updated_at=$now
+  ' "$old_file")
+  atomic_json "$old_file" "$old_record" || fail "cannot persist supersession history for $old_key"
 }
 
 owner_identity() {
@@ -153,7 +203,7 @@ max_allocated_id() {
 }
 
 command_create() {
-  local input='' request_key req_hash digest tx_file candidate existing existing_digest id n highwater tx_json record life
+  local input='' request_key req_hash digest tx_file candidate existing existing_digest id n highwater allocator_last tx_json record life supersedes old_file old_number old_status
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --input) [ "$#" -ge 2 ] || usage; input=$2; shift 2 ;;
@@ -170,7 +220,7 @@ command_create() {
   [ ! -L "$RECORDS_DIR" ] || fail 'repository decision directory is a symlink'
 
   fm_repo_scope_lock_acquire "$AUTHORITY_HOME" || fail "repository allocator lock unavailable: $FM_REPO_SCOPE_LAST_ERROR"
-  trap 'fm_repo_scope_lock_release || true' EXIT HUP INT TERM
+  trap 'release_create_locks || true' EXIT HUP INT TERM
 
   for existing in "$RECORDS_DIR"/pid-*.json; do
     [ -f "$existing" ] && [ ! -L "$existing" ] || continue
@@ -178,8 +228,11 @@ command_create() {
       existing_digest=$(jq -r '.request_digest // empty' "$existing")
       [ "$existing_digest" = "$digest" ] || fail 'request_key already exists with different decision content'
       id=$(jq -r '.id' "$existing")
+      supersedes=$(jq -r '.supersedes // empty' "$existing")
+      [ -z "$supersedes" ] || lock_superseded_pid "$supersedes"
+      finalize_supersession "$existing"
       rm -f "$tx_file"
-      fm_repo_scope_lock_release
+      release_create_locks
       trap - EXIT HUP INT TERM
       printf 'PID-%s\n' "$id"
       return 0
@@ -188,6 +241,19 @@ command_create() {
 
   life=$(held_lifecycle "$(jq -r '.originating_task' "$input")")
   owner_identity
+  supersedes=$(jq -r '.supersedes // empty' "$input")
+  if [ -n "$supersedes" ]; then
+    old_number=$(pid_number "$supersedes") || fail "invalid superseded PID: $supersedes"
+    lock_superseded_pid "$supersedes"
+    old_file=$(record_path "$old_number")
+    [ -f "$old_file" ] && [ ! -L "$old_file" ] || fail "superseded PID does not exist: $supersedes"
+    old_status=$(jq -r '.status' "$old_file")
+    [ "$old_status" = open ] \
+      && [ "$(jq -r '.project' "$old_file")" = "$PROJECT_NAME" ] \
+      && [ "$(jq -r '.originating_task' "$old_file")" = "$(jq -r '.originating_task' "$input")" ] \
+      && [ "$(jq -r '.owner_id' "$old_file")" = "$OWNER_ID" ] \
+      || fail "superseded PID must be open and owned by this task: $supersedes"
+  fi
 
   if [ -f "$tx_file" ]; then
     [ ! -L "$tx_file" ] || fail 'create recovery record is a symlink'
@@ -207,25 +273,39 @@ command_create() {
     n=$(max_allocated_id)
     [ "$highwater" -ge "$n" ] && n=$highwater
     id=$((n + 1))
+    tx_json=$(jq -n --arg request_key "$request_key" --arg request_digest "$digest" --argjson id "$id" --arg created "$(now_utc)" \
+      --arg supersedes "$supersedes" \
+      '{schema:"fm-product-decision-create-txn.v1",request_key:$request_key,request_digest:$request_digest,id:$id,created_at:$created,supersedes:(if $supersedes == "" then null else $supersedes end)}')
+    atomic_json "$tx_file" "$tx_json" || fail 'cannot persist decision create recovery record'
     atomic_json "$RECORDS_DIR/.allocator.json" "$(jq -n --argjson last_id "$id" --arg updated "$(now_utc)" '{schema:"fm-product-decision-allocator.v1",last_id:$last_id,updated_at:$updated}')" \
       || fail 'cannot persist allocated decision number'
-    tx_json=$(jq -n --arg request_key "$request_key" --arg request_digest "$digest" --argjson id "$id" --arg created "$(now_utc)" \
-      '{schema:"fm-product-decision-create-txn.v1",request_key:$request_key,request_digest:$request_digest,id:$id,created_at:$created}')
-    atomic_json "$tx_file" "$tx_json" || fail 'cannot persist decision create recovery record'
   fi
 
-  candidate=$(jq --argjson id "$id" --arg request_digest "$digest" --arg owner "$OWNER_ID" \
+  allocator_last=0
+  if [ -f "$RECORDS_DIR/.allocator.json" ]; then
+    [ ! -L "$RECORDS_DIR/.allocator.json" ] || fail 'allocator record is a symlink'
+    allocator_last=$(jq -r '.last_id // 0' "$RECORDS_DIR/.allocator.json")
+    case "$allocator_last" in ''|*[!0-9]*) fail 'allocator record is corrupt' ;; esac
+  fi
+  if [ "$id" -gt "$allocator_last" ]; then
+    atomic_json "$RECORDS_DIR/.allocator.json" "$(jq -n --argjson last_id "$id" --arg updated "$(now_utc)" '{schema:"fm-product-decision-allocator.v1",last_id:$last_id,updated_at:$updated}')" \
+      || fail 'cannot reconcile the reserved decision number with its allocator'
+  fi
+
+  candidate=$(jq --argjson id "$id" --arg request_digest "$digest" --arg owner "$OWNER_ID" --arg supersedes "$supersedes" \
     --arg origin_lifecycle "$life" --arg created "$(now_utc)" '
       . as $input | {
         schema:"fm-product-decision.v1", id:$id, key:("pid-" + ($id|tostring)),
-        project:$input.project, status:"open", request_key:$input.request_key,
+        project:$input.project, decision_type:$input.decision_type, status:"open", request_key:$input.request_key,
         request_digest:$request_digest, question:$input.question, context:$input.context,
         user_impact:$input.user_impact, options:$input.options,
         recommendation:$input.recommendation, recommended_option:$input.recommended_option,
         rationale:$input.rationale, consequences:$input.consequences,
         originating_task:$input.originating_task, originating_lifecycle:$origin_lifecycle,
-        owner_id:$owner, affected:$input.affected,
-        created_at:$created, updated_at:$created, amendment_history:[], supersedes:null,
+        owner_id:$owner, answer_mode:($input.answer_mode // "release"), affected:$input.affected,
+        created_at:$created, updated_at:$created,
+        amendment_history:(if $supersedes == "" then [] else [{kind:"supersedes",decision:$supersedes,recorded_at:$created}] end),
+        supersedes:(if $supersedes == "" then null else $supersedes end),
         resolution:null, docs_sync:{status:(if ($input.affected.docs|length)>0 then "pending" else "not-required" end),task_id:null},
         publication:{status:"pending"}
       }' "$input")
@@ -235,8 +315,9 @@ command_create() {
   else
     atomic_json "$record" "$candidate" || fail "cannot publish PID record pid-$id"
   fi
+  finalize_supersession "$record"
   rm -f "$tx_file"
-  fm_repo_scope_lock_release
+  release_create_locks
   trap - EXIT HUP INT TERM
   printf 'PID-%s\n' "$id"
 }
@@ -256,7 +337,6 @@ command_summary() {
   local limit=${FM_PRODUCT_DECISION_SUMMARY_LIMIT:-8} files=() file
   case "$limit" in ''|*[!0-9]*) fail 'summary limit must be a non-negative integer' ;; esac
   [ -d "$RECORDS_DIR" ] || { printf '{"open":[],"total":0,"omitted":0}\n'; return; }
-  [ ! -L "$RECORDS_DIR" ] || fail 'repository decision directory is a symlink'
   for file in "$RECORDS_DIR"/pid-*.json; do
     [ -f "$file" ] && [ ! -L "$file" ] || continue
     [ "$(jq -r '.status // "corrupt"' "$file" 2>/dev/null || true)" = open ] && files+=("$file")
@@ -291,7 +371,7 @@ command_show() {
 }
 
 apply_hold_answer() {  # <record-file>
-  local file=$1 n owner task answer_file mode current doc_id body line rc=0
+  local file=$1 n owner task answer_file mode doc_id body line rc=0 route route_id route_file routes_dir remote_delivered=0
   n=$(jq -r '.id' "$file")
   owner=$(jq -r '.owner_id' "$file")
   task=$(jq -r '.originating_task' "$file")
@@ -306,34 +386,49 @@ apply_hold_answer() {  # <record-file>
       case "$line" in "- $owner"|"- $owner "*) secondmate_registry_parse_line "$line" || continue; matches=$((matches + 1)); owner_home=$SECONDMATE_REGISTRY_HOME ;; esac
     done < "$reg"
     [ "$matches" -eq 1 ] || { rm -f "$answer_file"; fail "owner $owner is not uniquely registered in the repository authority"; }
-    [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || { rm -f "$answer_file"; fail 'remote answer delivery requires route retry'; }
-  fi
-  current=$(FM_HOME="$owner_home" "$SCRIPT_DIR/fm-captain-hold.sh" open "$task" --identity 2>/dev/null) || current=
-  if [ -n "$current" ]; then
-    if [ "$mode" = release ]; then
-      FM_HOME="$owner_home" "$SCRIPT_DIR/fm-captain-hold.sh" answer "$task" --decision-file "$answer_file" --release >/dev/null
-    else
-      FM_HOME="$owner_home" "$SCRIPT_DIR/fm-captain-hold.sh" answer "$task" --decision-file "$answer_file" >/dev/null
+    if [ "$SECONDMATE_REGISTRY_REMOTE" -eq 1 ]; then
+      route="$owner/$task"
+      routes_dir="$AUTHORITY_STATE/product-decision-routes"
+      mkdir -p "$routes_dir" || { rm -f "$answer_file"; fail 'cannot create durable remote-owner answer routes'; }
+      [ ! -L "$routes_dir" ] || { rm -f "$answer_file"; fail 'remote-owner answer route directory is a symlink'; }
+      route_id=$(printf '%s\n%s\n%s' "$route" "$(sha256 < "$answer_file")" "$mode" | sha256)
+      route_file="$routes_dir/$route_id.json"
+      route_request_record "$route_file" "$route" "$answer_file" "$mode"
+      if ! deliver_route_record "$route_file"; then
+        rm -f "$answer_file"
+        return 1
+      fi
+      rm -f "$answer_file"
+      if [ "$(jq -r '.status' "$route_file")" != delivered ]; then
+        printf 'Captain answer is durably recorded; delivery to %s remains queued for retry.\n' "$route"
+        return 0
+      fi
+      remote_delivered=1
     fi
-  else
+  fi
+  if [ "$remote_delivered" -eq 0 ]; then
     # Exact retries remain safe through the owner's guarded answer command.
     if [ "$mode" = release ]; then
-      FM_HOME="$owner_home" "$SCRIPT_DIR/fm-captain-hold.sh" answer "$task" --decision-file "$answer_file" --release >/dev/null
+      FM_HOME="$owner_home" FM_DATA_OVERRIDE="$owner_home/data" FM_STATE_OVERRIDE="$owner_home/state" \
+        "$SCRIPT_DIR/fm-captain-hold.sh" answer "$task" --decision-file "$answer_file" --release >/dev/null
     else
-      FM_HOME="$owner_home" "$SCRIPT_DIR/fm-captain-hold.sh" answer "$task" --decision-file "$answer_file" >/dev/null
+      FM_HOME="$owner_home" FM_DATA_OVERRIDE="$owner_home/data" FM_STATE_OVERRIDE="$owner_home/state" \
+        "$SCRIPT_DIR/fm-captain-hold.sh" answer "$task" --decision-file "$answer_file" >/dev/null
     fi
+    rm -f "$answer_file"
   fi
-  rm -f "$answer_file"
   doc_id=$(jq -r '.docs_sync.task_id // empty' "$file")
   if [ "$(jq -r '.docs_sync.status' "$file")" = pending ]; then
     if [ "$(jq -r '.affected.docs | length' "$file")" -gt 0 ]; then
       doc_id="pid-docs-$n"
-      if FM_HOME="$AUTHORITY_HOME" "$SCRIPT_DIR/fm-tasks-axi.sh" show "$doc_id" --json >/dev/null 2>&1; then
+      if FM_HOME="$AUTHORITY_HOME" FM_DATA_OVERRIDE="$AUTHORITY_DATA" FM_STATE_OVERRIDE="$AUTHORITY_STATE" \
+        "$SCRIPT_DIR/fm-tasks-axi.sh" show "$doc_id" --json >/dev/null 2>&1; then
         :
       else
         body=$(jq -r '"Decision: PID-\(.id)\n\n\(.question)\n\nCaptain answer: \(.resolution.answer_verbatim)\n\nImplementation consequences: \(.resolution.consequences)\n\nRequirements: \(.affected.requirements|join(", "))\n\nDocumentation to sync:\n" + (.affected.docs|map("- " + .)|join("\n")) + "\n\nRelated tasks: " + (.affected.tasks|join(", "))' "$file")
         printf '%s' "$body" > "$RECORDS_DIR/.docs-body-$n"
-        FM_HOME="$AUTHORITY_HOME" "$SCRIPT_DIR/fm-tasks-axi.sh" add "$doc_id" "Sync requirements documentation for PID-$n" \
+        FM_HOME="$AUTHORITY_HOME" FM_DATA_OVERRIDE="$AUTHORITY_DATA" FM_STATE_OVERRIDE="$AUTHORITY_STATE" \
+          "$SCRIPT_DIR/fm-tasks-axi.sh" add "$doc_id" "Sync requirements documentation for PID-$n" \
           --kind docs --repo "$(jq -r '.project' "$file")" --body-file "$RECORDS_DIR/.docs-body-$n" >/dev/null
         rm -f "$RECORDS_DIR/.docs-body-$n"
       fi
@@ -359,12 +454,13 @@ apply_hold_answer() {  # <record-file>
 }
 
 command_answer() {
-  local raw=$1 answer_file='' release_requested=0 n file existing digest mode reason record timestamp
+  local raw=$1 answer_file='' requested_mode=record n file existing digest mode reason record timestamp
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --answer-file) [ "$#" -ge 2 ] || usage; answer_file=$2; shift 2 ;;
-      --release) release_requested=1; shift ;;
+      --release) requested_mode=release; shift ;;
+      --done) requested_mode='done'; shift ;;
       *) usage ;;
     esac
   done
@@ -377,8 +473,8 @@ command_answer() {
   acquire_pid_lock "$n"
   reason=$(jq -r '.status' "$file")
   digest=$(sha256 < "$answer_file")
-  mode='done'
-  [ "$release_requested" -eq 1 ] && mode='release'
+  mode=$(jq -r '.answer_mode // "release"' "$file")
+  [ "$requested_mode" = record ] || mode=$requested_mode
   if [ "$reason" = resolved ]; then
     existing=$(jq -r '.resolution.answer_digest // empty' "$file")
     [ "$existing" = "$digest" ] || fail 'PID is already resolved with a different answer'
@@ -396,6 +492,12 @@ command_answer() {
     fail "cannot answer PID in status $reason"
   fi
   apply_hold_answer "$file"
+  if [ "$(jq -r '.status' "$file")" = answer-pending ]; then
+    release_pid_lock
+    trap - EXIT HUP INT TERM
+    printf 'PID-%s answer is recorded; delivery to its task owner remains durably queued.\n' "$n"
+    return 10
+  fi
   release_pid_lock
   trap - EXIT HUP INT TERM
 }
@@ -409,12 +511,18 @@ command_retry() {
   status=$(jq -r '.status' "$file")
   case "$status" in answer-pending|resolved) ;; *) fail "nothing recoverable is pending for PID-$n" ;; esac
   apply_hold_answer "$file"
+  if [ "$(jq -r '.status' "$file")" = answer-pending ]; then
+    release_pid_lock
+    trap - EXIT HUP INT TERM
+    printf 'PID-%s answer is recorded; delivery to its task owner remains durably queued.\n' "$n"
+    return 10
+  fi
   release_pid_lock
   trap - EXIT HUP INT TERM
 }
 
 resolve_owner_route() {  # <owner-id> <kind> <pid-or-task>
-  local owner=$1 kind=$2 target=$3 registry="$DATA/secondmates.md" line matches=0
+  local owner=$1 kind=$2 target=$3 registry=${4:-$DATA/secondmates.md} line matches=0
   ROUTE_HOME=$FM_HOME
   ROUTE_REMOTE=0
   if [ "$kind" = task ] && [ "$owner" = main ]; then return 0; fi
@@ -463,7 +571,7 @@ route_request_record() {  # <journal-path> <route-key> <answer-file> <mode>
   id=$(printf '%s\n%s\n%s' "$key" "$digest" "$mode" | sha256)
   record=$(jq -n --arg id "$id" --arg route "$key" --rawfile answer "$answer_file" \
     --arg digest "$digest" --arg mode "$mode" --arg created "$(now_utc)" \
-    '{schema:"fm-owner-answer-route.v1",id:$id,route:$route,answer_verbatim:$answer,
+    '{schema:"fm-owner-answer-route.v1",id:$id,action:"answer",route:$route,answer_verbatim:$answer,
       answer_digest:$digest,mode:$mode,status:"pending",created_at:$created,updated_at:$created,
       attempts:0,last_error:null}')
   if [ -f "$path" ]; then
@@ -477,14 +585,99 @@ route_request_record() {  # <journal-path> <route-key> <answer-file> <mode>
   fi
 }
 
+deliver_reconcile_to_task() {  # <owner-id> <owner-home> <remote-0-or-1> <task> <source-id> <provenance>
+  local owner=$1 owner_home=$2 remote=$3 task=$4 source_id=$5 provenance=$6 rc=0 output
+  if [ "$remote" -eq 1 ]; then
+    output=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" "$SCRIPT_DIR/fm-on.sh" --stdin "$owner" \
+      fm-product-decision.sh accept-task-reconcile "$task" --source-id "$source_id" --source "$provenance" \
+      < /dev/null 2>&1) || rc=$?
+  else
+    FM_HOME="$owner_home" FM_DATA_OVERRIDE="$owner_home/data" FM_STATE_OVERRIDE="$owner_home/state" \
+      "$SCRIPT_DIR/fm-captain-hold.sh" bind "$source_id" >/dev/null \
+      || return 1
+    output=$(printf '%s\n' "$task" \
+      | FM_HOME="$owner_home" FM_DATA_OVERRIDE="$owner_home/data" FM_STATE_OVERRIDE="$owner_home/state" \
+          "$SCRIPT_DIR/fm-captain-hold.sh" reconcile-requests \
+          --source-id "$source_id" --source "$provenance" 2>&1) || rc=$?
+  fi
+  [ "$rc" -eq 0 ] || { printf '%s\n' "$output" >&2; return "$rc"; }
+}
+
+deliver_reconcile_record() {  # <journal-file>
+  local path=$1 route source_id provenance target project owner owner_home remote rc=0 output pid_file
+  route=$(jq -r '.route' "$path")
+  source_id=$(jq -r '.source_id' "$path")
+  provenance=$(jq -r '.provenance' "$path")
+  if [[ "$route" =~ ^([A-Za-z0-9._-]+)/pid-([1-9][0-9]*)$ ]]; then
+    project=${BASH_REMATCH[1]}; target="pid-${BASH_REMATCH[2]}"
+    resolve_pid_route "$project" "$target"
+    owner=$ROUTE_OWNER
+    owner_home=$ROUTE_HOME
+    remote=$ROUTE_REMOTE
+    if [ "$remote" -eq 1 ]; then
+      output=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" "$SCRIPT_DIR/fm-on.sh" --stdin "$owner" \
+        fm-product-decision.sh accept-pid-reconcile "$target" --source-id "$source_id" --source "$provenance" \
+        < /dev/null 2>&1) || rc=$?
+    else
+      pid_file="$owner_home/data/product-decisions/$target.json"
+      [ -f "$pid_file" ] && [ ! -L "$pid_file" ] || return 1
+      owner=$(jq -r '.owner_id' "$pid_file")
+      target=$(jq -r '.originating_task' "$pid_file")
+      if [ "$owner" != project-firstmate ]; then
+        resolve_owner_route "$owner" task "$target" "$owner_home/data/secondmates.md"
+        owner_home=$ROUTE_HOME
+        remote=$ROUTE_REMOTE
+      fi
+      deliver_reconcile_to_task "$owner" "$owner_home" "$remote" "$target" "$source_id" "$provenance" || rc=$?
+    fi
+  elif [[ "$route" =~ ^([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)$ ]]; then
+    owner=${BASH_REMATCH[1]}; target=${BASH_REMATCH[2]}
+    resolve_owner_route "$owner" task "$target"
+    deliver_reconcile_to_task "$owner" "$ROUTE_HOME" "$ROUTE_REMOTE" "$target" "$source_id" "$provenance" || rc=$?
+  else
+    return 2
+  fi
+  return "$rc"
+}
+
 deliver_route_record() {  # <journal-file>
   local path=$1 route kind owner target mode answer_file rc=0 output record status note
+  local action
   local -a release_args=()
+  action=$(jq -r '.action // "answer"' "$path")
+  if [ "$action" = reconcile ]; then
+    if deliver_reconcile_record "$path"; then
+      record=$(jq --arg now "$(now_utc)" '.status="delivered" | .attempts=((.attempts // 0)+1) | .last_error=null | .updated_at=$now' "$path")
+      atomic_json "$path" "$record" || fail 'reconcile route outcome could not be persisted'
+      printf 'Reconcile request delivered to %s.\n' "$(jq -r '.route' "$path")"
+      return 0
+    else
+      rc=$?
+    fi
+    if [ "$rc" -eq 255 ]; then
+      note='remote delivery is unavailable or completion is unknown; identical retry is safe through the owner-held request intake'
+    else
+      note="owner reconcile intake refused or failed (rc=$rc)"
+    fi
+    record=$(jq --arg now "$(now_utc)" --arg error "$note" '.status="pending" | .attempts=((.attempts // 0)+1) | .last_error=$error | .updated_at=$now' "$path")
+    atomic_json "$path" "$record" || fail 'reconcile route failure could not be persisted'
+    if [ "$rc" -eq 255 ]; then
+      printf 'Reconcile request is durably queued for %s; retry with fm-product-decision.sh retry-routes.\n' "$(jq -r '.route' "$path")"
+      return 0
+    fi
+    printf 'actionable: reconcile request remains durably queued for %s\n' "$(jq -r '.route' "$path")" >&2
+    return 1
+  fi
   route=$(jq -r '.route' "$path")
   mode=$(jq -r '.mode' "$path")
   answer_file=$(mktemp "$(dirname "$path")/.route-answer.XXXXXX") || fail 'cannot stage durable answer'
   jq -j '.answer_verbatim' "$path" > "$answer_file"
-  [ "$mode" = release ] && release_args=(--release)
+  case "$mode" in
+    release) release_args=(--release) ;;
+    done) release_args=(--done) ;;
+    owner-default) ;;
+    *) rm -f "$answer_file"; fail "invalid owner answer close mode: $mode" ;;
+  esac
   if [[ "$route" =~ ^([A-Za-z0-9._-]+)/pid-([1-9][0-9]*)$ ]]; then
     kind=pid; owner=${BASH_REMATCH[1]}; target="pid-${BASH_REMATCH[2]}"
     resolve_pid_route "$owner" "$target"
@@ -492,7 +685,8 @@ deliver_route_record() {  # <journal-file>
       output=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" "$SCRIPT_DIR/fm-on.sh" --stdin "$ROUTE_OWNER" \
         fm-product-decision.sh accept-pid-answer "$target" ${release_args[@]+"${release_args[@]}"} < "$answer_file" 2>&1) || rc=$?
     else
-      output=$(FM_HOME="$ROUTE_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" "$SCRIPT_DIR/fm-product-decision.sh" answer "$target" \
+      output=$(FM_HOME="$ROUTE_HOME" FM_DATA_OVERRIDE="$ROUTE_HOME/data" FM_STATE_OVERRIDE="$ROUTE_HOME/state" \
+        FM_ROOT_OVERRIDE="$FM_ROOT" "$SCRIPT_DIR/fm-product-decision.sh" answer "$target" \
         --answer-file "$answer_file" ${release_args[@]+"${release_args[@]}"} 2>&1) || rc=$?
     fi
   elif [[ "$route" =~ ^([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)$ ]]; then
@@ -502,13 +696,15 @@ deliver_route_record() {  # <journal-file>
       output=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" "$SCRIPT_DIR/fm-on.sh" --stdin "$owner" \
         fm-product-decision.sh accept-task-answer "$target" ${release_args[@]+"${release_args[@]}"} < "$answer_file" 2>&1) || rc=$?
     else
-      output=$(FM_HOME="$ROUTE_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" "$SCRIPT_DIR/fm-captain-hold.sh" answer "$target" \
+      output=$(FM_HOME="$ROUTE_HOME" FM_DATA_OVERRIDE="$ROUTE_HOME/data" FM_STATE_OVERRIDE="$ROUTE_HOME/state" \
+        FM_ROOT_OVERRIDE="$FM_ROOT" "$SCRIPT_DIR/fm-captain-hold.sh" answer "$target" \
         --decision-file "$answer_file" ${release_args[@]+"${release_args[@]}"} 2>&1) || rc=$?
     fi
   elif [[ "$route" =~ ^[A-Za-z0-9._-]+$ ]]; then
     kind=task; owner=main; target=$route
     resolve_owner_route "$owner" task "$target"
-    output=$(FM_HOME="$ROUTE_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" "$SCRIPT_DIR/fm-captain-hold.sh" answer "$target" \
+    output=$(FM_HOME="$ROUTE_HOME" FM_DATA_OVERRIDE="$ROUTE_HOME/data" FM_STATE_OVERRIDE="$ROUTE_HOME/state" \
+      FM_ROOT_OVERRIDE="$FM_ROOT" "$SCRIPT_DIR/fm-captain-hold.sh" answer "$target" \
       --decision-file "$answer_file" ${release_args[@]+"${release_args[@]}"} 2>&1) || rc=$?
   else
     rm -f "$answer_file"
@@ -530,6 +726,13 @@ deliver_route_record() {  # <journal-file>
     printf 'Answer delivered to %s.\n' "$route"
     return 0
   fi
+  if [ "$rc" -eq 10 ]; then
+    record=$(jq --arg now "$(now_utc)" --arg error "$note" \
+      '.status="pending" | .attempts=((.attempts // 0)+1) | .last_error=$error | .updated_at=$now' "$path")
+    atomic_json "$path" "$record" || fail 'owner answer pending result could not be persisted'
+    printf 'Answer is durably queued for %s; retry with fm-product-decision.sh retry-routes.\n' "$route"
+    return 0
+  fi
   if [ "$rc" -eq 255 ]; then
     printf 'Answer is durably queued for %s; retry with fm-product-decision.sh retry-routes.\n' "$route"
     return 0
@@ -539,20 +742,25 @@ deliver_route_record() {  # <journal-file>
 }
 
 command_route_answer() {
-  local route=$1 answer_file='' release_requested=0 mode path digest id routes_dir
+  local route=$1 answer_file='' requested_mode=auto mode path digest id routes_dir
   shift
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --answer-file) [ "$#" -ge 2 ] || usage; answer_file=$2; shift 2 ;;
-      --release) release_requested=1; shift ;;
+      --release) requested_mode=release; shift ;;
+      --done) requested_mode='done'; shift ;;
       *) usage ;;
     esac
   done
   [ -n "$answer_file" ] && [ -f "$answer_file" ] && [ ! -L "$answer_file" ] || fail 'answer-file must name a regular file'
   [ -s "$answer_file" ] || fail 'captain answer must not be empty'
   [ "$(wc -c < "$answer_file" | tr -d ' ')" -le 8192 ] || fail 'captain answer exceeds 8192 bytes'
-  mode='done'
-  [ "$release_requested" -eq 1 ] && mode='release'
+  if [[ "$route" =~ ^[A-Za-z0-9._-]+/pid-[1-9][0-9]*$ ]]; then
+    mode='owner-default'
+  else
+    mode='done'
+  fi
+  [ "$requested_mode" = auto ] || mode=$requested_mode
   routes_dir="$STATE/product-decision-routes"
   mkdir -p "$routes_dir" || fail 'cannot create durable owner route directory'
   [ ! -L "$routes_dir" ] || fail 'durable owner route directory is a symlink'
@@ -563,8 +771,42 @@ command_route_answer() {
   deliver_route_record "$path"
 }
 
+command_route_reconcile() {
+  local route=$1 source_id='' provenance='' action_id path routes_dir record
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --source-id) [ "$#" -ge 2 ] || usage; source_id=$2; shift 2 ;;
+      --source) [ "$#" -ge 2 ] || usage; provenance=$2; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  [[ "$route" =~ ^[A-Za-z0-9._-]+/([A-Za-z0-9._-]+|pid-[1-9][0-9]*)$ ]] \
+    || fail "reconcile route must be owner/task or repo/pid-n: $route"
+  [ -n "$source_id" ] && [ -n "$provenance" ] || fail 'reconcile route needs source-id and provenance'
+  routes_dir="$STATE/product-decision-routes"
+  mkdir -p "$routes_dir" || fail 'cannot create durable owner route directory'
+  [ ! -L "$routes_dir" ] || fail 'durable owner route directory is a symlink'
+  action_id=$(printf '%s\n%s\n%s' reconcile "$route" "$source_id" | sha256)
+  path="$routes_dir/$action_id.json"
+  if [ -f "$path" ]; then
+    [ ! -L "$path" ] || fail 'owner reconcile route journal is a symlink'
+    [ "$(jq -r '.route' "$path")" = "$route" ] \
+      && [ "$(jq -r '.source_id' "$path")" = "$source_id" ] \
+      || fail 'reconcile route identity collides with a different durable request'
+  else
+    record=$(jq -n --arg id "$action_id" --arg route "$route" --arg source_id "$source_id" \
+      --arg provenance "$provenance" --arg now "$(now_utc)" \
+      '{schema:"fm-owner-answer-route.v1",id:$id,action:"reconcile",route:$route,
+        source_id:$source_id,provenance:$provenance,status:"pending",created_at:$now,
+        updated_at:$now,attempts:0,last_error:null}')
+    atomic_json "$path" "$record" || fail 'cannot persist durable owner reconcile route'
+  fi
+  deliver_route_record "$path"
+}
+
 command_retry_routes() {
-  local dir="$STATE/product-decision-routes" file status pending=0 failed=0
+  local dir="$STATE/product-decision-routes" file status pending=0 failed=0 pid_file pid_status pid pid_rc
   [ -d "$dir" ] && [ ! -L "$dir" ] || { printf 'No queued owner answers.\n'; return 0; }
   for file in "$dir"/*.json; do
     [ -f "$file" ] && [ ! -L "$file" ] || continue
@@ -573,6 +815,25 @@ command_retry_routes() {
     pending=$((pending + 1))
     if ! deliver_route_record "$file"; then failed=$((failed + 1)); fi
   done
+  if fm_repo_scope_authority_for_home "$FM_HOME" && [ -d "$FM_REPO_SCOPE_HOME/data/product-decisions" ]; then
+    AUTHORITY_HOME=$FM_REPO_SCOPE_HOME
+    PROJECT_NAME=$FM_REPO_SCOPE_PROJECT
+    AUTHORITY_DATA="$AUTHORITY_HOME/data"
+    AUTHORITY_STATE="$AUTHORITY_HOME/state"
+    RECORDS_DIR="$FM_REPO_SCOPE_HOME/data/product-decisions"
+    for pid_file in "$RECORDS_DIR"/pid-*.json; do
+      [ -f "$pid_file" ] && [ ! -L "$pid_file" ] || continue
+      pid_status=$(jq -r '.status // "invalid"' "$pid_file" 2>/dev/null || true)
+      [ "$pid_status" = answer-pending ] || continue
+      pid=$(jq -r '.key' "$pid_file")
+      if command_retry "$pid"; then
+        :
+      else
+        pid_rc=$?
+        [ "$pid_rc" -eq 10 ] || failed=$((failed + 1))
+      fi
+    done
+  fi
   [ "$pending" -gt 0 ] || printf 'No queued owner answers.\n'
   [ "$failed" -eq 0 ]
 }
@@ -581,7 +842,7 @@ command_accept_task_answer() {  # <task-id> [--release], stdin is exact captain 
   local task=$1 answer_file
   local -a release_args=()
   shift
-  while [ "$#" -gt 0 ]; do case "$1" in --release) release_args=(--release); shift ;; *) usage ;; esac; done
+  while [ "$#" -gt 0 ]; do case "$1" in --release|--done) release_args=("$1"); shift ;; *) usage ;; esac; done
   answer_file=$(mktemp "$STATE/.owner-answer.XXXXXX") || fail 'cannot stage remotely routed answer'
   cat > "$answer_file"
   FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-captain-hold.sh" answer "$task" --decision-file "$answer_file" ${release_args[@]+"${release_args[@]}"}
@@ -592,18 +853,62 @@ command_accept_pid_answer() {  # <pid-n> [--release], stdin is exact captain ans
   local pid=$1 answer_file
   local -a release_args=()
   shift
-  while [ "$#" -gt 0 ]; do case "$1" in --release) release_args=(--release); shift ;; *) usage ;; esac; done
+  while [ "$#" -gt 0 ]; do case "$1" in --release|--done) release_args=("$1"); shift ;; *) usage ;; esac; done
   answer_file=$(mktemp "$STATE/.owner-answer.XXXXXX") || fail 'cannot stage remotely routed answer'
   cat > "$answer_file"
   command_answer "$pid" --answer-file "$answer_file" ${release_args[@]+"${release_args[@]}"}
   rm -f "$answer_file"
 }
 
+command_accept_task_reconcile() {  # <task-id> --source-id <id> --source <provenance>
+  local task=$1 source_id='' provenance=''
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --source-id) [ "$#" -ge 2 ] || usage; source_id=$2; shift 2 ;;
+      --source) [ "$#" -ge 2 ] || usage; provenance=$2; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  [ -n "$source_id" ] && [ -n "$provenance" ] || fail 'owner reconcile intake needs source-id and provenance'
+  "$SCRIPT_DIR/fm-captain-hold.sh" bind "$source_id" >/dev/null
+  printf '%s\n' "$task" | "$SCRIPT_DIR/fm-captain-hold.sh" reconcile-requests \
+    --source-id "$source_id" --source "$provenance"
+}
+
+command_accept_pid_reconcile() {  # <pid-n> --source-id <id> --source <provenance>
+  local raw=$1 source_id='' provenance='' n file owner task owner_home remote=0
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --source-id) [ "$#" -ge 2 ] || usage; source_id=$2; shift 2 ;;
+      --source) [ "$#" -ge 2 ] || usage; provenance=$2; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  [ -n "$source_id" ] && [ -n "$provenance" ] || fail 'owner reconcile intake needs source-id and provenance'
+  n=$(pid_number "$raw") || fail 'decision id must look like pid-1'
+  file=$(record_path "$n")
+  [ -f "$file" ] && [ ! -L "$file" ] || fail "decision does not exist: pid-$n"
+  owner=$(jq -r '.owner_id' "$file")
+  task=$(jq -r '.originating_task' "$file")
+  owner_home=$AUTHORITY_HOME
+  if [ "$owner" != project-firstmate ]; then
+    resolve_owner_route "$owner" task "$task"
+    owner_home=$ROUTE_HOME
+    remote=$ROUTE_REMOTE
+  fi
+  deliver_reconcile_to_task "$owner" "$owner_home" "$remote" "$task" "$source_id" "$provenance"
+}
+
 case "${1:-}" in
   route-answer) shift; [ "$#" -ge 1 ] || usage; command_route_answer "$@"; exit $? ;;
+  route-reconcile) shift; [ "$#" -ge 1 ] || usage; command_route_reconcile "$@"; exit $? ;;
   retry-routes) shift; [ "$#" -eq 0 ] || usage; command_retry_routes; exit $? ;;
   accept-task-answer) shift; [ "$#" -ge 1 ] || usage; command_accept_task_answer "$@"; exit $? ;;
   accept-pid-answer) shift; [ "$#" -ge 1 ] || usage; resolve_authority; command_accept_pid_answer "$@"; exit $? ;;
+  accept-task-reconcile) shift; [ "$#" -ge 1 ] || usage; command_accept_task_reconcile "$@"; exit $? ;;
+  accept-pid-reconcile) shift; [ "$#" -ge 1 ] || usage; resolve_authority; command_accept_pid_reconcile "$@"; exit $? ;;
   create|list|summary|show|answer|retry) resolve_authority ;;
   *) usage ;;
 esac
