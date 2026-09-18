@@ -320,15 +320,16 @@ Record the resulting mode, `yolo` merge posture, and the one-line reason for any
 
 Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
 Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
-Write the task-specific brief under section 11 before spawning.
-Fill the task subsections according to section 11.
+For substantive ship or scout intake, resolve the complete task specification and use `bin/fm-intake-dispatch.sh` once; its header and [`docs/configuration.md`](docs/configuration.md) own the exact flags, transaction, retry, and bounded legacy-path contract.
+Do not manually sequence task creation, brief authoring, dependency setup, and initial launch when this command applies.
+Persistent secondmate setup remains under `secondmate-provisioning` and its own charter path.
 
 ### Dispatch and supervision handoff
 
-Spawn only through `bin/fm-spawn.sh` after the profile and backend checks in section 4.
+New ship and scout work uses `bin/fm-intake-dispatch.sh` after the profile and backend checks in section 4; direct `bin/fm-spawn.sh` remains the authoritative path for recovery, relaunch, and persistent secondmate work.
 The spawn must resolve a genuine isolated task worktree distinct from the primary checkout; a failed isolation assertion stops the task.
-When the configured tasks-axi backlog gate applies, the spawn itself moves the work item to In flight and refuses rather than dispatching work this home has no item for, so recording the dispatch is never a separate step to remember; a manual-backend home retains the hand-editing contract in `docs/configuration.md`.
-After spawning, confirm the worker is processing the brief and handle any trust dialog through `harness-adapters`.
+When the configured tasks-axi backlog gate applies, the intake command creates the queued item and the spawn itself moves it to In flight, refusing rather than dispatching work this home has no item for, so recording the dispatch is never a separate step to remember; a manual-backend home retains the hand-editing contract in `docs/configuration.md`.
+After an intake dispatch, confirm the worker is processing the instructions and handle any trust dialog through `harness-adapters`.
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
 
 Steer a worker with ordinary text through fail-closed `fm-send`: the message becomes a durable record in the task's steering inbox (multi-line text is legal, local and remote alike) and the worker's terminal receives only a constant doorbell line, with the watcher re-ringing an unacknowledged local message and escalating a stuck one (`bin/fm-task-inbox-lib.sh`; `bin/fm-send.sh` owns the typed-plane carve-outs).

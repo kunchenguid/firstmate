@@ -26,6 +26,27 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Per-task artifact layout
+
+`data/tasks/<id>/` is the canonical directory for one task's brief, generated launch instructions, scout report, contribution record, and other durable task artifacts.
+`bin/fm-task-path-lib.sh` is the single path owner: `fm_task_path` and `fm_task_relpath` always produce canonical write and link paths, while `fm_task_read_path` consults the matching legacy `data/<id>/` artifact only when the canonical artifact is absent.
+The fallback is bounded to that exact task id and artifact name; it does not scan arbitrary directories or create legacy symlinks.
+Existing homes can run `bin/fm-task-data-migrate.sh` while active ships and scouts remain present; the command serializes migration, inventories reserved and unknown directories without moving them, preserves active ship/scout directories, merges only identical or missing artifacts after interruption, and updates report links through the configured backlog owner.
+The migration is safe to repeat, and it refuses conflicting artifacts, unsafe symlinks, unsupported backlog mutations, or an active migration rather than overwriting data.
+New task directories are created at `data/tasks/<id>/` even when a legacy directory still exists, so migration and normal lifecycle writes converge on one layout.
+
+### Atomic intake and dispatch (`bin/fm-intake-dispatch.sh`)
+
+Substantive ship and scout intake uses `bin/fm-intake-dispatch.sh` once after Firstmate has resolved the project, kind, delivery authority, dispatch profile, and runtime backend.
+The command accepts the canonical id, title, project, kind, captain intent, Firstmate spec, ship mode and yolo posture, optional `--blocked-by` dependencies, concrete harness/model/effort/backend pins, and `--herdr-lab` when the instructions will drive Herdr lifecycle behavior.
+Use `--intent-file` and `--spec-file` for long or multiline text; direct text flags preserve their argument bytes without shell evaluation.
+The command validates the request and existing task identity before its first home mutation, then composes `fm-tasks-axi.sh`, `fm-brief.sh`, and `fm-spawn.sh` rather than reimplementing their contracts.
+A duplicate task id or either a canonical `data/tasks/<id>/` or legacy `data/<id>/` directory is refused without overwrite.
+A dependency or instruction-generation failure removes only the row and canonical task directory created by that invocation and preserves all helper diagnostics.
+A launch failure leaves the valid queued row and complete instructions in place, and a later `--retry` invocation may dispatch that existing intake without rewriting it.
+The command writes new artifacts canonically under `data/tasks/<id>/` and reads only the matching legacy artifact on retry, through `bin/fm-task-path-lib.sh`.
+The exact flags, accepted harnesses, and failure output are owned by the script header and its `--help` output.
+
 ## Calm preference (config/calm)
 
 The Pi Calm extension and the Claude Code Calm mod share the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, so one `/calm` choice applies on either harness.
@@ -521,7 +542,7 @@ Firstmate passes its profile line unless it states a reason to override, such as
 The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
 The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
 The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
-The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
+The resolver's header and help output own the exact rule-match behavior.
 
 ## Toolchain
 
