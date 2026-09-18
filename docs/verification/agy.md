@@ -171,6 +171,7 @@ Hooks load from a customization root - the global config directory, or `.agents/
     for the same event type are merged and executed sequentially.
 ```
 
+A hook `command` is run through a shell, `sh -c` on Unix and `cmd /c` on Windows, so a quoted path is honoured rather than taken literally (verified live on `agy 1.2.6`: an unquoted hook path containing a space silently failed to fire `Stop`, and quoting the same path made it fire).
 A hook's working directory is the directory holding `hooks.json`, not the workspace, and hooks block the agent loop:
 
 ```
@@ -201,7 +202,7 @@ Across one interrupted turn and one completed turn:
 14:25:59 STOP     <- turn 2 closes
 ```
 
-The interrupt landed; the pane rendered `⎿  Interrupted · What should Antigravity CLI do instead?` and the status row returned to `? for shortcuts`. Because agy also has no session-end event, `bin/fm-control.sh` closes the record itself on interrupt and `fm_busy_agy_tail_busy` is retained as the no-record fallback.
+The interrupt landed; the pane rendered `⎿  Interrupted · What should Antigravity CLI do instead?` and the status row returned to `? for shortcuts`. Because agy also has no session-end event, firstmate closes the record itself on both interrupt planes, `bin/fm-control.sh` and the legacy `bin/fm-send.sh --key Escape`, and `fm_busy_agy_tail_busy` is retained as the no-record fallback.
 The busy record needs no agy-specific age bound: `BUSY_TURN_MAX_SECS` in `../../bin/fm-watch.sh` (default 3600s) already ages any busy pane from its last completed turn, and the `Stop` hook above touches `state/<id>.turn-ended`, so that clock resets on every turn agy finishes.
 Where the hook cannot be installed at all - a `hooks.json` firstmate does not own, which the installer refuses without a write - the spawn says so on its own path and runs that task unarmed on the rendered-tail read instead of failing.
 

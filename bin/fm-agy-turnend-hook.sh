@@ -66,6 +66,32 @@ HOOK_SCRIPT="$CLI_DIR/fm-turn-end.sh"
 
 shell_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
+if [ -L "$STORE" ]; then
+  refuse "'$STORE' is a symlink; firstmate edits only a regular file it owns."
+fi
+if [ -e "$STORE" ]; then
+  [ -f "$STORE" ] || refuse "'$STORE' is not a regular file."
+  [ -O "$STORE" ] || refuse "'$STORE' is not owned by this user."
+  [ -w "$STORE" ] || refuse "'$STORE' is not writable."
+fi
+if [ "$ACTION" = remove ] && [ ! -e "$STORE" ]; then
+  exit 0
+fi
+if [ -f "$STORE" ] && ! node - "$STORE" <<'NODE'; then
+const fs = require("node:fs");
+const raw = fs.readFileSync(process.argv[2], "utf8");
+if (raw.trim() === "") process.exit(0);
+let root;
+try {
+  root = JSON.parse(raw);
+} catch {
+  process.exit(1);
+}
+process.exit(root !== null && typeof root === "object" && !Array.isArray(root) ? 0 : 1);
+NODE
+  refuse "'$STORE' does not hold a JSON object; firstmate edits only a store it can read."
+fi
+
 if [ "$ACTION" = install ]; then
   mkdir -p "$CONFIG_DIR" "$REGISTRY" || refuse "could not create agy's config and registry directories."
   chmod 700 "$REGISTRY" 2>/dev/null || true
@@ -151,18 +177,6 @@ HOOKBODY
   mv -f "$HOOK_SCRIPT.tmp.$$" "$HOOK_SCRIPT" || refuse "could not install the agy turn-end hook script."
 fi
 
-if [ -L "$STORE" ]; then
-  refuse "'$STORE' is a symlink; firstmate edits only a regular file it owns."
-fi
-if [ -e "$STORE" ]; then
-  [ -f "$STORE" ] || refuse "'$STORE' is not a regular file."
-  [ -O "$STORE" ] || refuse "'$STORE' is not owned by this user."
-  [ -w "$STORE" ] || refuse "'$STORE' is not writable."
-fi
-if [ "$ACTION" = remove ] && [ ! -e "$STORE" ]; then
-  exit 0
-fi
-
 # Read-modify-write with a fingerprint check before the rename and a readback
 # after it, the bin/fm-agy-trust.sh shape: agy and the captain both write this
 # file, so a store that moved under us is retried once and then refused rather
@@ -173,9 +187,10 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const [store, action, hookScript] = process.argv.slice(2);
 const KEY = "firstmate-turn-end";
+const shQuote = (value) => `'${value.replace(/'/g, "'\\''")}'`;
 const desired = {
-  PreInvocation: [{ type: "command", command: `${hookScript} pre-invocation`, timeout: 5 }],
-  Stop: [{ type: "command", command: `${hookScript} stop`, timeout: 5 }],
+  PreInvocation: [{ type: "command", command: `${shQuote(hookScript)} pre-invocation`, timeout: 5 }],
+  Stop: [{ type: "command", command: `${shQuote(hookScript)} stop`, timeout: 5 }],
 };
 const readStore = () => {
   try {

@@ -903,6 +903,39 @@ test_agy_secondmate_is_refused() {
   pass "fm-spawn: agy cannot be launched as a secondmate"
 }
 
+# A raw launch mints no token, so its hook firing could never resolve one. The
+# global store is shared with the captain's own agy sessions and the Antigravity
+# IDE, so writing the key there would only add two synchronous subprocesses to
+# every one of their turns for a task that can never use them.
+test_agy_raw_launch_installs_no_global_hook() {
+  local id rec out rc
+  id="agy-rawlaunch-z16-$$"
+  rec=$(make_agy_spawn_case rawlaunch "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  out=$(HOME="$HOME_DIR" FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" \
+    FM_FAKE_TMUX_CALL_LOG="$CASE_DIR/tmux-calls.log" \
+    FM_FAKE_AGY_STATE="$CASE_DIR/agy.state" \
+    FM_FAKE_AGY_SETTINGS="$HOME_DIR/.gemini/antigravity-cli/settings.json" \
+    FM_AGY_READY_POLLS=4 FM_AGY_POLL_INTERVAL=0 \
+    PATH="$FAKEBIN_DIR:$BASE_PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" "agy --prompt-interactive hi" --mode no-mistakes --yolo off 2>&1) || rc=$?
+  expect_code 0 "$rc" "a raw agy launch should spawn"
+  assert_contains "$out" "spawned $id harness=agy" "the raw agy launch did not report its harness"
+  [ ! -e "$HOME_DIR/.gemini/config/hooks.json" ] \
+    || fail "a raw agy launch wrote firstmate's key into the shared global hooks store"
+  assert_agy_home_untouched "$HOME_DIR" "raw launch"
+  [ ! -e "$HOME_DIR/state/$id.busy-gen" ] \
+    || fail "a raw agy launch armed a busy generation no hook could ever clear"
+  [ ! -e "$HOME_DIR/state/$id.agy-turnend-token" ] \
+    || fail "a raw agy launch minted a turn-end token no hook could ever read"
+  pass "fm-spawn: a raw agy launch installs no global hook and arms no wiring"
+}
+
 test_agy_spawn_arms_the_turnend_wiring() {
   local id rec out rc statedir token auth launch
   id="agy-wiring-z7-$$"
@@ -950,12 +983,19 @@ agy_turnend_install() {  # <home>
 # hooks.json is agy's own machine-read configuration, so these assertions parse
 # it and check the meaning agy acts on - which handler runs which command, under
 # which timeout - rather than matching text that could sit anywhere in the file.
+agy_registered_command() {  # <store> <event>
+  node -e 'const fs=require("node:fs");const r=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const h=r["firstmate-turn-end"];if(!h||!h[process.argv[2]])process.exit(1);process.stdout.write(h[process.argv[2]][0].command);' \
+    "$1" "$2"
+}
+
 assert_agy_hooks_store() {  # <store> <expect: installed|removed> <detail>
   node - "$1" "$2" <<'NODE' || fail "$3"
 const fs = require("node:fs");
+const path = require("node:path");
 const [store, expect] = process.argv.slice(2);
 const root = JSON.parse(fs.readFileSync(store, "utf8"));
 const bad = (m) => { console.error(m); process.exit(1); };
+const hook = path.join(path.dirname(path.dirname(store)), "antigravity-cli", "fm-turn-end.sh");
 if (root === null || typeof root !== "object" || Array.isArray(root)) bad("root is not an object");
 const foreign = root["someone-elses-hook"];
 if (!foreign || foreign.Stop[0].command !== "echo hi") bad("the foreign hook key did not survive intact");
@@ -966,12 +1006,13 @@ if (expect === "removed") {
 }
 if (!own) bad("the firstmate key is absent");
 if (Object.keys(root).length !== 2) bad(`expected exactly 2 hook keys, found ${Object.keys(root).length}`);
-for (const [event, suffix] of [["PreInvocation", "fm-turn-end.sh pre-invocation"], ["Stop", "fm-turn-end.sh stop"]]) {
+for (const [event, arg] of [["PreInvocation", "pre-invocation"], ["Stop", "stop"]]) {
   const handlers = own[event];
   if (!Array.isArray(handlers) || handlers.length !== 1) bad(`${event} is not a single handler`);
   const h = handlers[0];
   if (h.type !== "command") bad(`${event} is not a command handler`);
-  if (!h.command.endsWith(suffix)) bad(`${event} runs '${h.command}', not the installed hook's ${suffix}`);
+  const want = `'${hook}' ${arg}`;
+  if (h.command !== want) bad(`${event} runs ${JSON.stringify(h.command)}, not ${JSON.stringify(want)}`);
   if (h.timeout !== 5) bad(`${event} carries timeout ${h.timeout}, not the bounded 5`);
 }
 NODE
@@ -1026,6 +1067,7 @@ test_agy_refused_hook_install_degrades_the_spawn_visibly() {
     && fail "an unwired agy spawn armed a busy generation no hook could ever clear" || true
   [ -e "$HOME_DIR/state/$id.agy-turnend-token" ] \
     && fail "an unwired agy spawn minted a turn-end token no hook could ever read" || true
+  assert_agy_home_untouched "$HOME_DIR" "refused install on the spawn path"
   launch=$(cat "$CASE_DIR/launch.log")
   assert_not_contains "$launch" "FM_AGY_TURNEND_TOKEN" "an unwired agy launch still exported a turn-end token"
   assert_not_contains "$launch" "__AGYTOKEN__" "an unwired agy launch left its token placeholder unsubstituted"
@@ -1050,24 +1092,80 @@ test_agy_turnend_installer_owns_only_its_own_key() {
   pass "fm-agy-turnend-hook.sh: owns only its own key and installs idempotently"
 }
 
+# The header's contract is that each refusal happens WITHOUT a write, so every
+# refusal below also asserts the home is exactly as the installer found it: no
+# hook script and no registry directory left for the next spawn to rewrite.
+assert_agy_home_untouched() {  # <home> <detail>
+  [ ! -e "$1/.gemini/antigravity-cli/fm-turn-end.sh" ] \
+    || fail "$2: a refused install left its hook script behind"
+  [ ! -e "$1/.gemini/antigravity-cli/fm-turn-end.d" ] \
+    || fail "$2: a refused install left its token registry behind"
+}
+
 test_agy_turnend_installer_refuses_a_store_it_does_not_own() {
-  local home store rc
+  local home store rc before after
   home="$TMP_ROOT/turnend-refuse"
   rm -rf "$home"
   mkdir -p "$home/.gemini/config"
   store="$home/.gemini/config/hooks.json"
   printf '%s\n' '["not","an","object"]' >"$store"
+  before=$(cat "$store")
   rc=0
   agy_turnend_install "$home" >/dev/null 2>&1 || rc=$?
   [ "$rc" -ne 0 ] || fail "the installer accepted a non-object hooks.json root"
-  assert_grep '["not","an","object"]' "$store" "the installer rewrote a store it should have refused"
+  after=$(cat "$store")
+  [ "$before" = "$after" ] || fail "the installer rewrote a store it should have refused"
+  assert_agy_home_untouched "$home" "non-object root"
   printf '%s\n' '{}' >"$TMP_ROOT/turnend-refuse-target.json"
   rm -f "$store"
   ln -s "$TMP_ROOT/turnend-refuse-target.json" "$store"
   rc=0
   agy_turnend_install "$home" >/dev/null 2>&1 || rc=$?
   [ "$rc" -ne 0 ] || fail "the installer followed a symlinked hooks.json"
-  pass "fm-agy-turnend-hook.sh: refuses a non-object root and a symlinked store"
+  assert_agy_home_untouched "$home" "symlinked store"
+  pass "fm-agy-turnend-hook.sh: refuses a non-object root and a symlinked store without writing"
+}
+
+# agy runs a hook `command` through `sh -c`, so the registered string is the
+# real interface, not the script path. This runs the string the installer wrote
+# exactly as agy would, from a home whose path contains a space: an unquoted
+# path resolves to a nonexistent binary and the record silently never moves.
+test_agy_turnend_command_fires_from_a_home_whose_path_has_a_space() {
+  local home store statedir gen token auth cmd record
+  home="$TMP_ROOT/turnend space home"
+  rm -rf "$home"
+  mkdir -p "$home/.gemini/config"
+  agy_turnend_install "$home" >/dev/null || fail "the installer refused a home whose path contains a space"
+  store="$home/.gemini/config/hooks.json"
+  statedir="$TMP_ROOT/turnend-space-state"
+  rm -rf "$statedir"
+  mkdir -p "$statedir"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$statedir" t1) || fail "could not arm a busy generation"
+  token="fm.bbbbbbbbbbbb"
+  auth="$home/.gemini/antigravity-cli/fm-turn-end.d/$token"
+  {
+    printf 'turnend=%s\n' "$statedir/t1.turn-ended"
+    printf 'busy_event=%s\n' "$ROOT/bin/fm-busy-event.sh"
+    printf 'state=%s\n' "$statedir"
+    printf 'id=%s\n' t1
+    printf 'gen=%s\n' "$gen"
+  } >"$auth"
+
+  cmd=$(agy_registered_command "$store" Stop) || fail "could not read the registered Stop command"
+  printf '{}' | FM_AGY_TURNEND_TOKEN="$token" sh -c "$cmd" >/dev/null \
+    || fail "agy's registered Stop command exited non-zero"
+  record=$(cat "$statedir/t1.busy-state")
+  assert_contains "$record" "state=idle" \
+    "the registered Stop command did not close the turn from a home whose path contains a space"
+  [ -f "$statedir/t1.turn-ended" ] \
+    || fail "the registered Stop command did not touch the watcher's turn-end marker"
+
+  cmd=$(agy_registered_command "$store" PreInvocation) || fail "could not read the registered PreInvocation command"
+  printf '{}' | FM_AGY_TURNEND_TOKEN="$token" sh -c "$cmd" >/dev/null \
+    || fail "agy's registered PreInvocation command exited non-zero"
+  assert_contains "$(cat "$statedir/t1.busy-state")" "state=busy" \
+    "the registered PreInvocation command did not open the turn"
+  pass "fm-agy-turnend-hook.sh: the registered command fires through sh -c from a spaced home"
 }
 
 test_agy_turnend_hook_is_inert_without_a_registry_token() {
@@ -1177,9 +1275,11 @@ test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn
 test_agy_missing_binary_refuses_before_pane_creation
 test_agy_secondmate_is_refused
 test_agy_spawn_arms_the_turnend_wiring
+test_agy_raw_launch_installs_no_global_hook
 test_agy_pre_trusted_pane_that_never_renders_a_turn_fails_the_spawn
 test_agy_refused_hook_install_degrades_the_spawn_visibly
 test_agy_turnend_installer_owns_only_its_own_key
 test_agy_turnend_installer_refuses_a_store_it_does_not_own
+test_agy_turnend_command_fires_from_a_home_whose_path_has_a_space
 test_agy_turnend_hook_is_inert_without_a_registry_token
 test_agy_turnend_hook_records_both_turn_boundaries

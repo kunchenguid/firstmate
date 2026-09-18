@@ -2197,16 +2197,20 @@ agy)
   }
   # agy's turn-end hook lives in its GLOBAL customization root, shared with the
   # captain's own sessions and the Antigravity IDE, so the installer owns the
-  # edit and the hook stays inert without this task's token. Installed before
-  # launch and deliberately never removed at teardown: another live agy task
-  # may still depend on it.
+  # edit and the hook stays inert without this task's token. Installed before a
+  # managed launch and deliberately never removed at teardown: another live agy
+  # task may still depend on it. A raw launch is skipped on the same predicate
+  # the busy arm and the token mint use: it mints no token, so its hook firing
+  # could never resolve one, and writing the key would only add two synchronous
+  # subprocesses to every turn of the captain's own sessions for no benefit.
   # A refused install is NOT fatal. The installer refuses a store firstmate does
   # not own outright - a symlink, another uid's file, a non-object root - and a
   # home whose hooks.json a dotfiles tool manages is exactly that shape. The
   # spawn instead drops to the raw-launch shape it already supports: no busy
   # arm, no token, and the retained rendered-tail fallback in bin/fm-busy-lib.sh
   # carrying detection. The supervisor is told which shape this worker got.
-  if [ "$KIND" != secondmate ] && ! "$FM_ROOT/bin/fm-agy-turnend-hook.sh" install; then
+  if [ "$KIND" != secondmate ] && [ "$RAW_LAUNCH" -eq 0 ] \
+    && ! "$FM_ROOT/bin/fm-agy-turnend-hook.sh" install; then
     AGY_TURNEND_WIRED=0
     echo "warning: agy's global turn-end hook could not be installed safely (see the refusal above); task $ID will run WITHOUT semantic busy state and WITHOUT a turn-end signal, on the weaker rendered-tail idle read alone" >&2
   fi
