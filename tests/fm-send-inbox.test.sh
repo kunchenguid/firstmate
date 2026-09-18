@@ -438,6 +438,12 @@ test_automatic_send_waits_for_an_open_decision() {
   expect_code 0 "$rc" "an automatic send resumes once the worker's own decision is closed"
   [ -f "$dir/home/state/t1.inbox/002.msg" ] || fail "the resumed automatic send was not recorded"
 
+  # A captain hold a secondmate relays for its child is not a wait of its own.
+  printf 'needs-decision [key=captain-hold-t42-1]: captain hold t42: ship alpha or beta?\n' >> "$status"
+  run_send "$dir" "$err" -- t1 --automatic "re-read your instructions"; rc=$?
+  expect_code 0 "$rc" "a relayed captain hold must not defer an automatic send"
+  [ -f "$dir/home/state/t1.inbox/003.msg" ] || fail "the automatic send beside a captain hold was not recorded"
+
   run_send "$dir" "$err" -- sess:fm-t1 --automatic "re-read your instructions"; rc=$?
   expect_code 1 "$rc" "--automatic needs a recorded task, not an explicit backend target"
   pass "fm-send inbox: an automatic send defers while the worker's own decision is open, and the answer still wakes it"

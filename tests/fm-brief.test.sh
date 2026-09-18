@@ -815,10 +815,14 @@ test_ship_and_scout_teach_validation_round_pause() {
       FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
     fi
     brief="$home/data/$id/brief.md"
-    assert_grep "your own validation round" "$brief" \
-      "$kind brief did not teach workers to declare their validation-round wait"
+    assert_grep "your own validation round, which you declare once just before its blocking hold" "$brief" \
+      "$kind brief did not teach workers to declare their validation-round wait before holding it"
+    assert_grep "append \`paused:\` once just before its first blocking command, then stay in the command" "$brief" \
+      "$kind brief's Waiting section does not declare the validation round once and then hold it"
+    assert_no_grep "is not a \`paused:\` wait" "$brief" \
+      "$kind brief still tells workers never to declare a wait they hold in a command"
   done
-  pass "fm-brief.sh: ship and scout scaffolds teach validation-round pauses"
+  pass "fm-brief.sh: ship and scout scaffolds declare a validation-round pause once, then hold it"
 }
 
 test_scout_and_secondmate_load_decision_hold_policy() {

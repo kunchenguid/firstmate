@@ -2010,6 +2010,35 @@ test_config_reread_isolation_and_absent_and_send_failure() {
   pass "B16 config reread isolation, ABSENT, generation safety, send failure, and retry"
 }
 
+# Contract: a local reread deferred because the mate waits on its own open
+# decision is not a failure: config-push exits 0, reports the deferral, keeps
+# the retry, and delivers the pointer once the decision closes.
+test_config_push_defers_reread_while_the_mate_waits_on_a_decision() {
+  local w head out status
+  w=$(new_world config-reread-deferred)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  mkdir -p "$w/sm/config" "$w/sm/state"
+  printf 'old-harness\n' > "$w/sm/config/crew-harness"
+  printf 'codex\n' > "$w/home/config/crew-harness"
+  printf 'needs-decision [key=pick]: alpha or beta?\n' > "$w/home/state/sm.status"
+
+  out=$(run_config_push "$w" "$w/config-reread-deferred.tmux.log" 2>/dev/null); status=$?
+  expect_code 0 "$status" "a reread deferred for the mate's open decision must not fail config-push"
+  assert_contains "$out" "CONFIG_REREAD: secondmate sm: deferred: sm is waiting on its open decision or blocker (pick)" \
+    "the deferred reread was not reported: $out"
+  assert_not_contains "$out" "send failed" "a deferred reread is not a failed send"
+  assert_not_contains "$out" "config-reread: sent" "a deferred reread must not claim delivery"
+  assert_present "$(reread_pending_path "$w/sm")" "the deferred reread did not keep its retry marker"
+
+  printf 'resolved [key=pick]: answered: alpha\n' >> "$w/home/state/sm.status"
+  out=$(run_config_push "$w" "$w/config-reread-deferred.tmux.log" 2>/dev/null); status=$?
+  expect_code 0 "$status" "the retried reread should be delivered once the decision closes"
+  assert_contains "$out" "config-reread: sent" "the retried reread was not sent: $out"
+  assert_no_reread_pending "$w/sm"
+  pass "config-push defers a local reread while the mate waits on its decision, then delivers it"
+}
+
 test_config_reread_publication_failure_retries_exact_generation() {
   local w head fakebin real_mv alpha_state out status stage log instr retry_out retry_status
   w=$(new_world config-reread-publication-retry)
@@ -2667,6 +2696,7 @@ test_config_push_exits_nonzero_on_copy_error
 test_config_push_rereads_after_partial_propagation
 test_config_reread_per_home_changed_sets_and_exact_bytes
 test_config_reread_isolation_and_absent_and_send_failure
+test_config_push_defers_reread_while_the_mate_waits_on_a_decision
 test_config_reread_publication_failure_retries_exact_generation
 test_config_reread_write_failure_retains_exact_retry_generation
 test_config_reread_exact_temp_survives_adoption_failure

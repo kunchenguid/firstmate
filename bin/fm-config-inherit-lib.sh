@@ -877,9 +877,9 @@ fm_config_reread_send_failure() {
   # own open decision. Anything it printed ahead of that line is not a failure.
   if [ "$rc" -eq 4 ]; then
     printf 'CONFIG_REREAD: secondmate %s: %s\n' "$id" "$detail"
-  else
-    printf 'CONFIG_REREAD: secondmate %s: send failed: %s\n' "$id" "$detail"
+    return 4
   fi
+  printf 'CONFIG_REREAD: secondmate %s: send failed: %s\n' "$id" "$detail"
   return 1
 }
 
@@ -923,7 +923,6 @@ fm_config_reread_send_pointer() {
   fi
   [ -n "$detail" ] || detail="fm-send exited $rc"
   fm_config_reread_send_failure "$id" "$instruction_path" "$pending_path" "$detail" "$rc"
-  return 1
 }
 
 # fm_config_reread_discard_pending <dest-home>
@@ -1076,11 +1075,12 @@ fm_config_reread_quarantine_pending() {
 # SHA values, selected profiles, or data/captain-shared.md. No-op (return 0) when
 # nothing changed and no pending delivery exists. On publication or send
 # failure, print a concrete CONFIG_REREAD retry diagnostic to stdout and return
-# non-zero - never claim the live agent reread the values.
+# non-zero - never claim the live agent reread the values. A send deferred
+# because the mate waits on its own open decision returns 4 with the retry kept.
 fm_config_send_reread_nudge() {
   local id=$1 dest_home=$2 report=$3
   local dest_home_abs state source_home_abs changed_items pending_paths stage_paths delivery_paths
-  local stage_path instruction_path current_stage_path exact_tmp
+  local stage_path instruction_path current_stage_path exact_tmp send_rc=0
   local send_failures retry_report_paths retry_report_path retry_stage_path retry_record_path
   [ -n "$id" ] || return 1
   [ -n "$dest_home" ] || return 1
@@ -1221,16 +1221,13 @@ EOF
 $stage_paths
 EOF
     else
-      send_failures=1
+      send_rc=$?
       break
     fi
   done <<EOF
 $delivery_paths
 EOF
-  if [ "$send_failures" -ne 0 ]; then
-    fm_config_reread_cleanup_sent "$dest_home_abs"
-    return 1
-  fi
   fm_config_reread_cleanup_sent "$dest_home_abs"
-  return 0
+  [ "$send_failures" -eq 0 ] || return 1
+  return "$send_rc"
 }

@@ -623,12 +623,14 @@ EOF
 
 # The subset of status_open_decisions the task raised about its own work: a
 # reserved-namespace key is raised by a supervisor library about the task (a
-# pending-reply escalation), so the task is not waiting on it. Automatic senders
-# consult this set and leave a task alone while it is non-empty.
+# pending-reply escalation), and a `captain-hold-` key relays a child decision a
+# secondmate escalated to the captain (bin/fm-captain-hold.sh) while it keeps
+# working, so the task is not waiting on either. Automatic senders consult this
+# set and leave a task alone while it is non-empty.
 status_own_open_decisions() {  # <status-file>
   local line prefix
   status_open_decisions "$1" | while IFS= read -r line || [ -n "$line" ]; do
-    for prefix in ${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-$FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT}; do
+    for prefix in ${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-$FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT} captain-hold-; do
       case "$line" in "$prefix"*) continue 2 ;; esac
     done
     printf '%s\n' "$line"

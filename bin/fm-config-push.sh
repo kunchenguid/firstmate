@@ -236,13 +236,17 @@ while IFS='|' read -r id home _window meta; do
   if fm_config_reread_has_pending "$home_real" || fm_config_reread_has_staged "$FM_HOME" "$id"; then
     reread_pending=1
   fi
-  if reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
+  reread_rc=0
+  reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$STATE" \
-    fm_config_send_reread_nudge "$id" "$home_real" "$report" 2>&1); then
+    fm_config_send_reread_nudge "$id" "$home_real" "$report" 2>&1) || reread_rc=$?
+  if [ "$reread_rc" -eq 0 ]; then
     if [ -n "$(fm_config_reread_changed_items "$report")" ] || [ "$reread_pending" -eq 1 ]; then
       printf '  config-reread: sent\n'
     fi
     [ -z "$reread_out" ] || printf '%s\n' "$reread_out"
+  elif [ "$reread_rc" -eq 4 ]; then
+    printf '%s\n' "$reread_out"
   else
     errors=1
     if [ -n "$reread_out" ]; then

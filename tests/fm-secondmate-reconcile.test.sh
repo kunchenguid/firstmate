@@ -338,8 +338,8 @@ test_each_home_carries_its_own_cooldown() {
 }
 
 # Contract: the automatic reconcile ask never wakes a mate waiting on its own
-# decision; the request stays queued without starting the cooldown, and is
-# delivered once the decision closes.
+# decision; the request stays queued without starting the cooldown or counting
+# as a failed pass, and is delivered once the decision closes.
 test_a_mate_waiting_on_its_decision_is_not_nudged() {
   local home mate fakebin snap out
   { read -r home; read -r mate; read -r fakebin; } < <(make_main_home waiting mate)
@@ -358,9 +358,8 @@ test_a_mate_waiting_on_its_decision_is_not_nudged() {
       "$RECONCILE" "$@"
   }
   process request --snapshot "$snap" >/dev/null 2>&1 || fail "the reconcile request could not be queued"
-  if out=$(process process-requests 2>&1); then
-    fail "a deferred request was retired: $out"
-  fi
+  out=$(process process-requests 2>&1) || fail "a request waiting on the mate's decision must not fail the pass: $out"
+  assert_contains "$out" "processed: 0 deferred: 0 waiting: 1" "the waiting request was not reported as waiting: $out"
   [ -n "$(find "$home/state/reconcile-notify" -maxdepth 1 -name 'request-*.json')" ] \
     || fail "the deferred request was not kept for a later pass"
   [ "$(inbox_records "$home/state" mate)" -eq 0 ] || fail "processing the request nudged the waiting mate"
