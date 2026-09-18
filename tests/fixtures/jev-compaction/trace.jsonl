@@ -1,0 +1,5 @@
+{"id":"s1","role":"user","content":"fix the pager off-by-one"}
+{"id":"s2","role":"tool","content":"debug dump line 1\ndebug dump line 2"}
+{"id":"s3","role":"assistant","content":"the bug is in wrap_offset"}
+{"id":"s4","role":"tool","content":"npm test noise"}
+{"id":"s5","role":"tool","content":"more npm test noise"}
