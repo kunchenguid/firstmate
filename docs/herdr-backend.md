@@ -265,7 +265,8 @@ The owning parent is the launcher's own exact workspace, resolved from the same 
 It falls back to a unique home-label lookup only for a Firstmate outside Herdr.
 Projected children are never collapsed back into that parent.
 The parent is the placement and ordering reference the projection is bound under.
-
+At projected creation Firstmate also declares the workspace's lineage to Herdr, reporting the display-only tokens `parent=<parent workspace id>` and `kind=task` through `herdr workspace report-metadata --source firstmate`, which is the declaration consumers such as the phone's Spaces list group by.
+The declaration is best-effort display metadata, verified on Herdr 0.9.1 to merge per token so pre-existing `task` tokens survive: a failed report prints one warning and leaves the workspace rendering top-level, exactly as an undeclared workspace always has, while the flat per-home layout declares nothing because its workspaces are durable places, not transient tasks.
 The normal `fm-<id>` task tab is created in the exact new workspace returned by Herdr.
 Only the exact seeded default tab returned by the same workspace-create response can be pruned.
 Before and after create, prune, order, abort cleanup, and normal cleanup, Firstmate verifies exact workspace, tab, pane, and active-focus ids.
