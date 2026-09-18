@@ -370,7 +370,7 @@ The [Claude adapter reference](../.agents/skills/harness-adapters/references/har
 ## Worker launch environment (config/launch-env-allowlist)
 
 The optional local, gitignored `config/launch-env-allowlist` limits the ambient environment passed to newly launched workers, scouts, and secondmates, including relaunches.
-With no file, launch behavior is unchanged: selected harness markers are cleared, while the provider, long-lived terminal daemon, and shell initialization determine which other variables reach the worker.
+With no file, ambient inheritance remains unfiltered: selected harness markers are cleared, while the provider, long-lived terminal daemon, and shell initialization determine which other variables reach the worker.
 Do not assume every worker inherits the invoking Firstmate process's current environment.
 The file is inherited into secondmate homes through the [primary-authoritative configuration contract](../.agents/skills/secondmate-provisioning/SKILL.md).
 Changes apply to subsequent launches; existing processes keep their environment.
@@ -413,11 +413,11 @@ The filter runs at the worker command boundary, after the terminal daemon and pa
 This is not a sandbox: it cannot revoke same-user access to credential files, prevent tools or later shells from loading credentials again, or isolate processes from the same user's other processes.
 Regression coverage executes emitted launch commands with synthetic nonsecret values in [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh).
 
-Every worker, scout, and secondmate Firstmate launches starts with `COMPACT_ADVISER_DISABLE=1` in its environment, on a fresh spawn and on a relaunch alike, so an unattended session never activates the compact adviser.
-The value is set to `1` unconditionally: no configuration file gates it, and there is no override or opt-out.
-It reaches the launched agent by three routes: an `export COMPACT_ADVISER_DISABLE=1` on the pane shell beside the temporary-directory export, so anything the agent later starts from that shell inherits it; an explicit assignment on the launch command itself; and a literal assignment in the filtered launch environment above, which is what keeps the switch set when `config/launch-env-allowlist` clears the ambient environment.
-None of the three depends on the value already being present on the machine, so a second mate launched on a remote host that never had it still starts with it set.
-This applies only to the agents Firstmate launches; the captain's own primary Firstmate session is never given the variable.
+Every crewmate, scout, and secondmate Firstmate launches starts with `COMPACT_ADVISER_DISABLE=1` in its environment, on a fresh spawn and on a relaunch alike, so an unattended session never activates the compact adviser.
+This guarantee also covers raw launch commands, remote secondmates, and launches filtered by `config/launch-env-allowlist`; it does not depend on the destination environment already containing the variable.
+Firstmate provides no configuration or flag to change this value.
+This applies only to agents Firstmate launches; the captain's own primary Firstmate session is never given the variable.
+[`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the delivery mechanics, with focused regression coverage in [`tests/fm-spawn-compact-adviser-disable.test.sh`](../tests/fm-spawn-compact-adviser-disable.test.sh) and [`tests/fm-spawn-compact-adviser-disable-remote.test.sh`](../tests/fm-spawn-compact-adviser-disable-remote.test.sh).
 
 Every claude launch's inline `--settings` JSON also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, so a spawned worker never writes a Co-Authored-By trailer, Claude-Session link, or generated-with line into a commit or PR body regardless of which settings scopes end up loaded.
 

@@ -4417,15 +4417,16 @@ if [ "$KIND" = secondmate ]; then
 fi
 # Every agent this fleet launches - crewmate, scout, and secondmate, on a fresh
 # spawn and on a relaunch alike - runs with the compact-adviser kill switch on.
-# This is an explicit launch assignment rather than a forwarded ambient name, so
-# it carries the value itself: a pane that never had it, and a remote host whose
-# transport never carried it, both still start the agent with it set. It is also
-# unconditional, with no config file or flag gating it, and it is prepended last
-# so it sits outermost and wins over any ambient value the pane shell holds. The
-# cleared-environment floor in the LAUNCH_ENV_PREFIX construction below sets it
-# again at the `env -i` boundary, so under an enabled allowlist the switch is
-# established before the wrapping `/bin/sh` starts rather than only inside the
-# command that shell runs.
+# This is an export statement rather than a forwarded ambient name or a
+# command-prefix assignment, so it carries the value across an entire compound
+# raw launch expression. A pane that never had it, and a remote host whose
+# transport never carried it, both still start the agent with it set. It is
+# unconditional, with no config file or flag gating it, and is inserted outside
+# every generated launch prefix; relaunch trace cleanup may execute first but
+# cannot change this value. The cleared-environment floor in the
+# LAUNCH_ENV_PREFIX construction below sets it again at the `env -i` boundary,
+# so under an enabled allowlist the switch is established before the wrapping
+# `/bin/sh` starts rather than only inside the command that shell runs.
 LAUNCH="export COMPACT_ADVISER_DISABLE=1; $LAUNCH"
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
@@ -4462,8 +4463,8 @@ spawn_record_traceparent() {
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 # Export the compact-adviser kill switch into the pane shell through the same
-# pre-launch channel, so the agent's own children and anything the agent later
-# starts from that shell inherit it too, not only the single launch command.
+# pre-launch channel, so later commands in that shell inherit it too. The launch
+# command independently establishes the value for the agent process itself.
 spawn_send_text_line "$T" "export COMPACT_ADVISER_DISABLE=1"
 # Mark the pane as a task worker so bin/fm-test-run.sh can refuse to run the
 # suite in the repository's primary checkout. Ship and scout workers are the
