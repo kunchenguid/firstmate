@@ -1910,6 +1910,7 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
   mkdir -p "$case_dir/tasktmp"
   printf '!\n' > "$case_dir/state/task-x1.grok-turnend-token"
   printf '!\n' > "$case_dir/state/task-x1.kimi-turnend-token"
+  printf '!\n' > "$case_dir/state/task-x1.agy-turnend-token"
   printf 'tasktmp=%s\n' "$case_dir/tasktmp" >> "$case_dir/state/task-x1.meta"
   wt_commit "$case_dir" "merged work"
   wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
@@ -1926,6 +1927,7 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
     || fail "mate-teardown-refuses: refusal did not retain the task records"
   [ -f "$case_dir/state/task-x1.grok-turnend-token" ] \
     && [ -f "$case_dir/state/task-x1.kimi-turnend-token" ] \
+    && [ -f "$case_dir/state/task-x1.agy-turnend-token" ] \
     && [ -d "$case_dir/tasktmp" ] \
     || fail "mate-teardown-refuses: refusal removed endpoint records before parent delivery"
   rmdir "$channel"
@@ -1943,6 +1945,10 @@ test_secondmate_home_teardown_delivers_final_line_or_refuses() {
   sed -E 's/ \[at=[0-9]+\]//' "$channel" | grep -Eq '^done \[key=child-outcome-task-x1-done-[0-9a-f]{8}\]: child task-x1 done: PR https://github.com/example/repo/pull/9 checks green' \
     || fail "mate-teardown-refuses: the rerun did not deliver the final line"
   [ ! -e "$case_dir/state/task-x1.meta" ] || fail "mate-teardown-refuses: rerun left the task record"
+  for leftover in grok kimi agy; do
+    [ ! -e "$case_dir/state/task-x1.$leftover-turnend-token" ] \
+      || fail "mate-teardown-refuses: rerun left the $leftover turn-end token behind"
+  done
   pass "a secondmate home's teardown delivers the child's final line or refuses until it can"
 }
 

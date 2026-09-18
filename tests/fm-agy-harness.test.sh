@@ -160,7 +160,26 @@ test_agy_control_mechanics_are_the_verified_ones() {
   [ -z "$(fm_control_interrupt_clear_key agy)" ] || fail "agy must need no clear key"
   [ "$(fm_control_interrupt_ack_source agy)" = none ] || fail "agy must have no ack source"
   [ "$(fm_control_exit_command agy)" = /quit ] || fail "agy must exit on /quit"
-  pass "fm-control-lib: agy mechanics are Escape once, no clear key, and /quit"
+  # agy's Stop hook does not fire on a manual interrupt and agy has no
+  # session-end event, so firstmate must close the record itself. The adapters
+  # that DO close their own must stay out, or firstmate would overwrite a
+  # verdict their own hook already recorded.
+  fm_control_interrupt_clears_busy agy     || fail "agy must have its busy record closed by firstmate on interrupt"
+  fm_control_interrupt_clears_busy claude     && fail "claude closes its own interrupt state and must not be overwritten here" || true
+  fm_control_interrupt_clears_busy gemini     && fail "gemini's AfterAgent fires on interrupt, so firstmate must not overwrite it" || true
+  pass "fm-control-lib: agy mechanics are Escape once, no clear key, /quit, and a firstmate-closed interrupt"
+}
+
+test_agy_turnend_registry_paths_are_scoped_to_agy() {
+  local token_path auth_path
+  token_path=$(fm_control_harness_turnend_token_path agy /st t9)
+  [ "$token_path" = "/st/t9.agy-turnend-token" ]     || fail "agy's turn-end token sidecar path is wrong: $token_path"
+  auth_path=$(fm_control_harness_turnend_auth_path agy fm.aaaaaaaaaaaa)
+  [ "$auth_path" = "$HOME/.gemini/antigravity-cli/fm-turn-end.d/fm.aaaaaaaaaaaa" ]     || fail "agy's turn-end registry path is wrong: $auth_path"
+  # A token carrying a separator must never resolve to a path at all.
+  [ -z "$(fm_control_harness_turnend_auth_path agy '../escape')" ]     || fail "a traversal token resolved to an agy registry path"
+  [ -z "$(fm_control_harness_turnend_auth_path agy '')" ]     || fail "an empty token resolved to an agy registry path"
+  pass "fm-control-lib: agy's turn-end token and registry paths are scoped and traversal-safe"
 }
 
 test_agy_busy_tail_needs_the_pinned_status_row() {
@@ -1038,6 +1057,7 @@ test_agy_ancestry_detects_the_native_command_name
 test_agy_ancestry_rejects_unrelated_mentions
 test_agy_claims_no_inherited_launcher_marker
 test_agy_control_mechanics_are_the_verified_ones
+test_agy_turnend_registry_paths_are_scoped_to_agy
 test_agy_busy_tail_needs_the_pinned_status_row
 test_agy_busy_signatures_are_harness_scoped
 test_agy_classify_reports_unknown_when_the_marker_scrolls_out
