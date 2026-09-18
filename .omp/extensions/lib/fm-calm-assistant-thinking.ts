@@ -44,11 +44,7 @@ const CALM_ASSISTANT_THINKING_PATCH = Symbol.for(
 );
 
 function isMidTurnAssistantMessage(message: AssistantMessage): boolean {
-  if (message.stopReason === "toolUse") return true;
-  return (
-    message.stopReason === "length" &&
-    message.content.some((block) => block.type === "toolCall")
-  );
+  return message.content.some((block) => block.type === "toolCall");
 }
 
 export function installOmpCalmAssistantThinking(): void {
