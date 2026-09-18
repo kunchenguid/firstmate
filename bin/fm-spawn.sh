@@ -52,7 +52,8 @@
 #   commit as executor_base=, so the executor never creates a branch and the
 #   poll can count its commits exactly; a relaunch reuses the worktree exactly
 #   as the previous executor left it and warns, never resets, when it is no
-#   longer on that branch. Only adapters with a verified headless one-shot form
+#   longer on that branch, and records executor_base= afresh at that worktree's
+#   HEAD so each incarnation's commits are counted as its own. Only adapters with a verified headless one-shot form
 #   (claude, codex, opencode; docs/verification/executor.md) are accepted for
 #   --executor, each threading --model and --effort under the same
 #   record-and-omit contract as its interactive form and passing its autonomy
@@ -1630,13 +1631,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
   if [ "$KIND" = executor ]; then
     ISSUE=$(fm_meta_get "$RELAUNCH_META" issue)
-    EXECUTOR_BASE=$(fm_meta_get "$RELAUNCH_META" executor_base)
     fm_executor_issue_valid "$ISSUE" || {
       echo "error: executor task $ID records no valid issue=; refusing to relaunch a worker with no issue to close" >&2
-      exit 1
-    }
-    fm_executor_commit_valid "$EXECUTOR_BASE" || {
-      echo "error: executor task $ID records no valid executor_base=; refusing to relaunch a worker whose commits could not be counted" >&2
       exit 1
     }
     [ -n "$MODE" ] || MODE=direct-PR
@@ -3911,22 +3907,25 @@ fi
 # freshened base, so the retry succeeds; git itself still refuses when another
 # worktree holds that branch, and its own message is what the error carries.
 # A relaunch reuses the worktree exactly as the previous executor left it, so
-# it warns rather than resets when the checkout has drifted off that branch.
+# it warns rather than resets when the checkout has drifted off that branch; it
+# records the base at the worktree's HEAD as it stands at relaunch time, so the
+# poll counts the commits of the incarnation it is describing and not a previous
+# one's.
 if [ "$KIND" = executor ]; then
   if [ "$RELAUNCH" -eq 0 ]; then
     if ! executor_git_err=$(git -C "$WT" checkout -q -B "fm/$ID" 2>&1 >/dev/null); then
       echo "error: could not create the executor branch fm/$ID in $WT${executor_git_err:+: $executor_git_err}; inspect window $T" >&2
       exit 1
     fi
-    EXECUTOR_BASE=$(git -C "$WT" rev-parse --verify --quiet HEAD 2>/dev/null) || EXECUTOR_BASE=
-    fm_executor_commit_valid "$EXECUTOR_BASE" || {
-      executor_git_err=$(git -C "$WT" rev-parse --verify HEAD 2>&1 >/dev/null || true)
-      echo "error: could not record the executor branch base for $ID in $WT${executor_git_err:+: $executor_git_err}; inspect window $T" >&2
-      exit 1
-    }
   elif [ "$(git -C "$WT" branch --show-current 2>/dev/null || true)" != "fm/$ID" ]; then
     echo "warning: executor task $ID's worktree is on '$(git -C "$WT" branch --show-current 2>/dev/null || echo detached)', not fm/$ID; relaunching without resetting it, and the poll still reads pull requests for fm/$ID" >&2
   fi
+  EXECUTOR_BASE=$(git -C "$WT" rev-parse --verify --quiet HEAD 2>/dev/null) || EXECUTOR_BASE=
+  fm_executor_commit_valid "$EXECUTOR_BASE" || {
+    executor_git_err=$(git -C "$WT" rev-parse --verify HEAD 2>&1 >/dev/null || true)
+    echo "error: could not record the executor branch base for $ID in $WT${executor_git_err:+: $executor_git_err}; inspect window $T" >&2
+    exit 1
+  }
   exclude_path_executor_pr_body=1
 fi
 
