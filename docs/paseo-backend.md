@@ -99,7 +99,7 @@ Durable history for a finished task therefore lives in the status log, the repor
 
 - Paseo is experimental, macOS-only, GUI-first, and requires the app running.
 - Secondmate spawns are unsupported until a per-home lifecycle design is verified.
-  An explicitly selected Paseo refuses `--secondmate`, while an auto-detected Paseo spawns the secondmate on tmux instead.
+  [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns the `--secondmate` refusal and its tmux fallback for an auto-detected Paseo.
 - There is no native busy or push-event signal, and `fm_backend_agent_state` reports `unverified` for Paseo.
 - A target can disappear after structural readiness and before the operation.
 - Workspace and terminal ids are not assumed stable across daemon restarts; recovery re-resolves by terminal NAME.

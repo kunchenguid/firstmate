@@ -115,12 +115,12 @@ fm_backend_is_known() {  # <name>
 # CMUX_SOCKET_PATH is independently documented as a user-settable override for
 # pointing the CLI at a non-default socket, so its mere presence would not
 # reliably mean "running inside a cmux-spawned terminal" the way
-# CMUX_WORKSPACE_ID does. cmux is checked LAST because it is a terminal
-# application (the outermost layer, like iTerm2/Terminal.app), not a session
-# multiplexer - both tmux and herdr can run nested inside a cmux-provided
-# shell, but cmux cannot run nested inside either of them, so a tmux or herdr
-# marker set alongside CMUX_WORKSPACE_ID always means that multiplexer is the
-# innermost, currently-executing layer and must win.
+# CMUX_WORKSPACE_ID does. cmux is checked after tmux and herdr because it is
+# a terminal application (the outermost layer, like iTerm2/Terminal.app), not
+# a session multiplexer - both tmux and herdr can run nested inside a
+# cmux-provided shell, but cmux cannot run nested inside either of them, so a
+# tmux or herdr marker set alongside CMUX_WORKSPACE_ID always means that
+# multiplexer is the innermost, currently-executing layer and must win.
 #
 # cmux FALLBACK signals (docs/cmux-backend.md "Runtime auto-detection" owns
 # the empirical record): cmux's bundled `claude` PATH shim routes through
@@ -261,12 +261,12 @@ fm_backend_detect_cmux_app_is_ancestor() {
 # per-task `--backend` flag is parsed by the caller (fm-spawn.sh) and takes
 # precedence over this resolution entirely; it is not read here. Auto-detect
 # fires only when nothing was explicitly configured, so an explicit setting
-# always wins. Selecting herdr or cmux via auto-detect prints one loud stderr
-# notice (both are experimental); auto-detecting tmux stays silent - it is
-# today's default-path behavior and callers must see zero change. The cmux
-# notice names the winning signal, so a fallback-detected cmux (bundle id or
-# ancestry, after the claude wrapper stripped CMUX_WORKSPACE_ID) is visibly
-# distinct from the primary-marker case. For a `secondmate` kind, an
+# always wins. Selecting herdr, cmux, or paseo via auto-detect prints one loud
+# stderr notice (all are experimental); auto-detecting tmux stays silent - it
+# is today's default-path behavior and callers must see zero change. The cmux
+# and paseo notices name the winning signal, so a fallback-detected one
+# (bundle id, or cmux ancestry, after a wrapper stripped the primary marker)
+# is visibly distinct from the primary-marker case. For a `secondmate` kind, an
 # auto-detected paseo (which refuses secondmates) resolves to tmux silently,
 # while an explicit paseo selection is returned as-is for the spawn to refuse.
 fm_backend_name() {  # [task-kind]
