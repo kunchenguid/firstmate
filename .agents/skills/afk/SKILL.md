@@ -154,7 +154,8 @@ The daemon wraps `fm-watch.sh`, runs the watcher as a child, presents every dura
 It self-handles the routine majority without consuming a firstmate turn.
 Captain-relevant events, plus a bounded recheck of a declared external wait that is still declared, escalate to firstmate's context as one pre-read, single-line, batched digest.
 The captain-relevant verb set, declared-wait vocabulary, status-span classifier, and presentation-marker contract live in shared `bin/fm-classify-lib.sh`, while each supervisor owns its routing and fleet scan as a consumer of that policy.
-While `state/.afk` exists the daemon owns the watcher, so the watcher reverts to one-shot and lets the daemon do the triage - the two never run their triage at the same time.
+While a live daemon owns supervision the watcher reverts to one-shot and lets the daemon do the triage - the two never run their triage at the same time.
+That hand-off is keyed on `fm_afk_daemon_owns_supervision` (`bin/fm-wake-lib.sh`), never on the bare `state/.afk` flag: the flag answers the posture question and outlives the daemon under every signal, so a standing flag with a dead daemon restores ordinary supervision and turn-end blocking instead of leaving the home unwatched.
 
 Classify each wake this way:
 

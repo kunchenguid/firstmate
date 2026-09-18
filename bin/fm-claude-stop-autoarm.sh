@@ -15,9 +15,12 @@
 #     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
 #     ownership. A live owner, missing lock, malformed lock, or unresolved
 #     ancestry remains inert, so a competing session never arms or rewakes.
-#   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
-#     this hook exits 0 and NEVER rewakes the primary (checked again at
-#     translation time so a mid-cycle AFK transition is honored).
+#   - AFK: while a LIVE away daemon owns the watcher and triage
+#     (fm_afk_daemon_owns_supervision, bin/fm-wake-lib.sh), this hook exits 0 and
+#     NEVER rewakes the primary (checked again at translation time so a mid-cycle
+#     AFK transition is honored). The test is ownership rather than the bare
+#     state/.afk flag, which outlives the daemon under every signal: a standing
+#     flag with no daemon behind it must read as unsupervised so this hook arms.
 #   - Need: arms only while the home needs supervision, as
 #     bin/fm-supervision-lib.sh defines it; an idle home exits 0.
 #   - Single-flight: Claude does not dedupe async hooks, so exactly one
@@ -135,8 +138,8 @@ if ! fm_session_lock_owned_by_self "$STATE"; then
   RECOVER_SESSION_LOCK=1
 fi
 
-# --- AFK: the away daemon owns the watcher and triage; never rewake ----------
-[ -e "$STATE/.afk" ] && exit 0
+# --- AFK: a live away daemon owns the watcher and triage; never rewake -------
+fm_afk_daemon_owns_supervision "$STATE" && exit 0
 
 # --- need: whatever bin/fm-supervision-lib.sh counts as supervision need ------
 need_supervision() {
@@ -272,9 +275,9 @@ while [ "$attempt" -lt "$AUTOARM_ATTEMPTS" ]; do
     FM_GUARD_GRACE="$GRACE" "$SCRIPT_DIR/fm-watch-arm.sh" >/dev/null 2>&1 || true
   fi
 
-  # AFK may have appeared mid-cycle: the daemon owns triage now, so suppress
+  # AFK may have appeared mid-cycle: a live daemon owns triage now, so suppress
   # every subsequent classification and handoff.
-  if [ -e "$STATE/.afk" ]; then
+  if fm_afk_daemon_owns_supervision "$STATE"; then
     autoarm_record afk
     [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
     exit 0

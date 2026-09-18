@@ -312,11 +312,22 @@ _event_cap_key=""
 _event_cap_ok=0
 _event_cap_fails=0
 
-# afk_present: 0 while the away-mode flag exists. When set, the daemon wraps this
-# watcher and owns triage, so the watcher must behave one-shot (enqueue + exit on
-# every wake) and let the daemon classify - never absorb here, or the daemon's
-# digest/injection layer would never see the wake.
-afk_present() { [ -e "$STATE/.afk" ]; }
+# afk_daemon_owns: 0 while the away-mode daemon PROVABLY owns supervision. When set,
+# the daemon wraps this watcher and owns triage, so the watcher must behave
+# one-shot (enqueue + exit on every wake) and let the daemon classify - never
+# absorb here, or the daemon's digest/injection layer would never see the wake.
+# The question is ownership, not posture, so it goes through
+# fm_afk_daemon_owns_supervision (bin/fm-wake-lib.sh) rather than the bare flag:
+# state/.afk outlives the daemon under every signal, and handing triage to a
+# daemon that is no longer there would drop every wake of the outage. The
+# verdict is cached per poll cycle because the predicate reads a process
+# identity while the per-task loops below consult it many times per cycle;
+# afk_ownership_refresh takes that read once at the top of each cycle.
+AFK_DAEMON_OWNS=0
+afk_ownership_refresh() {
+  if fm_afk_daemon_owns_supervision "$STATE"; then AFK_DAEMON_OWNS=1; else AFK_DAEMON_OWNS=0; fi
+}
+afk_daemon_owns() { [ "$AFK_DAEMON_OWNS" -eq 1 ]; }
 
 # afk_record_present: 0 while the away-posture record exists (the captain is
 # away, in either supervision shape). While it exists an item held for the
@@ -1247,7 +1258,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
   local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5 key statusf declared
   statusf="$STATE/$task.status"
   if status_is_paused_or_captain_held "$(last_status_line "$statusf")"; then
-    if afk_present; then
+    if afk_daemon_owns; then
       # Away mode is daemon-owned, so this bound hands off the PLAIN wake identity
       # and lets the daemon classify the declaration itself - the undecorated
       # identity the rest of this function's contract promises. Running the wedge
@@ -2169,6 +2180,9 @@ while :; do
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
 
+  # One ownership read per cycle, before any triage decision consults it.
+  afk_ownership_refresh
+
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached
   fi
@@ -2408,7 +2422,7 @@ EOF
     # passes it to handle_wake (see the comment above handle_wake in
     # bin/fm-supervise-daemon.sh).
     # shellcheck disable=SC2086  # same space-separated status-path list
-    if afk_present || [ "$signal_actionable" -eq 0 ] \
+    if afk_daemon_owns || [ "$signal_actionable" -eq 0 ] \
       || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
@@ -2523,7 +2537,7 @@ EOF
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$key" ;;
           esac
-        elif afk_present; then
+        elif afk_daemon_owns; then
           # Daemon owns triage: one-shot per distinct stale hash, as before,
           # except that a captain-held pane is never handed over while the
           # away-posture record exists (captain_held_silenced).
@@ -2671,7 +2685,7 @@ EOF
         clear_write_tracking "$key"
       fi
       task=$(window_to_task "$w" "$STATE")
-      if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
+      if ! afk_daemon_owns && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
         case "$(pause_state_class "$w" "$task")" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;
           # Inconclusive, but the declared wait itself still stands, so only the
@@ -2707,7 +2721,7 @@ EOF
     # no-change case (advance the schedule and back off exactly as wake() would,
     # without exiting); the away-mode daemon, when present, owns triage and wants
     # every heartbeat.
-    if afk_present; then
+    if afk_daemon_owns; then
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       wake "heartbeat"

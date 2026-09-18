@@ -1868,6 +1868,9 @@ test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open() {
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-alarm-afk")
   : > "$dir/state/task1.meta"
   : > "$dir/state/.afk"
+  # A LIVE daemon is what makes the auto-arm hook inert and its failure record
+  # meaningless; the beacon here is still stale, so the block itself stands.
+  record_live_afk_daemon "$dir"
   seed_claude_failure "$dir"
   seed_claude_budget "$dir" 3
   out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
@@ -1875,6 +1878,26 @@ test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open() {
   assert_contains "$out" 'Away mode owns watcher supervision' "away-mode block lost its daemon ownership guidance"
   assert_absent "$dir/state/.claude-autoarm-failure-alarmed" "away mode consumed the Stop-autoarm attended alarm"
   pass "fm-turnend-guard --claude: away ownership excludes the Stop-autoarm fail-open"
+}
+
+# The inverse, and the reason the ownership read replaced the bare flag: with the
+# daemon gone the auto-arm hook is active again, so its exhausted-failure record
+# is real evidence and the ordinary bounded attended escape applies. Nothing here
+# lets a standing flag freeze the session behind a supervisor that no longer runs.
+test_hook_claude_mode_dead_daemon_restores_the_stop_autoarm_fail_open() {
+  local dir dead out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-alarm-afk-dead")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  dead=$(nonexistent_pid)
+  record_daemon_lock "$dir" "$dead" "dead daemon identity"
+  seed_claude_failure "$dir"
+  seed_claude_budget "$dir" 3
+  out=$(FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 run_hook_claude "$dir" true); status=$?
+  expect_code 0 "$status" "a standing away flag with a dead daemon must not suppress the attended escape"
+  assert_present "$dir/state/.claude-autoarm-failure-alarmed" \
+    "the attended alarm was withheld behind a standing flag with no live daemon"
+  pass "fm-turnend-guard --claude: a dead away daemon restores the ordinary Stop-autoarm fail-open"
 }
 
 test_hook_claude_mode_allow_resets_budget() {
@@ -1947,6 +1970,28 @@ test_hook_claude_mode_secondmate_reblocks_like_primary() {
   pass "fm-turnend-guard --claude: secondmate home re-blocks unclaimed and allows auto-arm-claimed stops"
 }
 
+# A live stand-in away daemon held across a whole scenario, reaped at suite exit.
+# Cases that need one only for a single assertion still start and kill their own
+# sleeper inline.
+AFK_DAEMON_PIDS=
+record_live_afk_daemon() {  # <dir>
+  local dir=$1 pid
+  sleep 600 &
+  pid=$!
+  AFK_DAEMON_PIDS="$AFK_DAEMON_PIDS $pid"
+  record_daemon_lock "$dir" "$pid" || fail "could not record a live away daemon for $dir"
+}
+REAP_AFK_DAEMONS() {
+  local p
+  for p in $AFK_DAEMON_PIDS; do
+    kill -TERM "$p" 2>/dev/null || true
+  done
+  fm_test_cleanup
+}
+trap REAP_AFK_DAEMONS EXIT
+trap 'REAP_AFK_DAEMONS; exit 130' INT
+trap 'REAP_AFK_DAEMONS; exit 143' TERM
+
 # --- AWAY MODE: the daemon owns supervision ----------------------------------
 #
 # While state/.afk exists, bin/fm-supervise-daemon.sh owns supervision and runs
@@ -1957,13 +2002,15 @@ test_hook_claude_mode_secondmate_reblocks_like_primary() {
 # lapse - no daemon, a dead or pid-reused daemon, a stale beacon - and must not
 # accept a daemon at all when away mode is off.
 
-# Record a live away-mode daemon holding this home, the way the daemon does at
-# startup: its singleton lock names the daemon pid plus the process identity it
-# computed for itself (watcher_identity is that same fm_pid_identity read).
+# Record an away-mode daemon holding this home, the way the daemon does at
+# startup. With no explicit identity this is the shared live-daemon fixture
+# (tests/lib.sh owns that layout); an explicit identity is how a case records a
+# daemon that is DEAD or pid-reused and must therefore fail the predicate.
 record_daemon_lock() {  # <dir> <pid> [identity]
   local dir=$1 pid=$2 identity=${3:-} lockdir
   if [ -z "$identity" ]; then
-    identity=$(watcher_identity "$dir" "$pid") || return 1
+    fm_test_record_daemon_lock "$dir/state" "$pid"
+    return
   fi
   lockdir="$dir/state/.supervise-daemon.lock"
   mkdir -p "$lockdir"
@@ -2261,6 +2308,7 @@ test_hook_claude_mode_budget_without_verified_failure_keeps_blocking
 test_hook_claude_mode_verified_failure_alarm_is_loud_and_once
 test_hook_claude_mode_fail_open_requires_notice_and_failure_epoch
 test_hook_claude_mode_away_mode_never_uses_stop_autoarm_fail_open
+test_hook_claude_mode_dead_daemon_restores_the_stop_autoarm_fail_open
 test_hook_claude_mode_allow_resets_budget
 test_hook_claude_mode_waits_for_late_claim
 test_hook_claude_mode_secondmate_reblocks_like_primary

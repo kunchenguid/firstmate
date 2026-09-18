@@ -225,6 +225,10 @@ fi
 
 block_stop() {
   local afk x_mode reason rule
+  # Posture, not ownership: this picks WHICH supervisor the home should have, and
+  # a standing away flag wants the daemon restored. The daemon-ownership reads
+  # elsewhere decide whether supervision is covered; this only decides what to
+  # tell the session to repair.
   afk=0
   [ -e "$STATE/.afk" ] && afk=1
   x_mode=0
@@ -475,7 +479,10 @@ terminal_fail_open() {
 
 failure_episode_verified() {
   local outcome
-  [ ! -e "$STATE/.afk" ] || return 1
+  # The auto-arm hook is inert only while a live daemon owns supervision, so
+  # only then is its failure record meaningless. With a standing flag and no
+  # daemon the hook arms again and its record is real evidence.
+  ! fm_afk_daemon_owns_supervision "$STATE" || return 1
   [ -e "$FAILURE_NOTICE" ] || return 1
   outcome=$(sed -n '1s/^.*outcome=\([a-z][a-z-]*\) .*$/\1/p' "$STATE/.claude-autoarm-epoch" 2>/dev/null || true)
   case "$outcome" in

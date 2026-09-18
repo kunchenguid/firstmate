@@ -27,6 +27,32 @@ DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
 
+# Away mode with a LIVE daemon behind it. The watcher hands triage over on
+# proven daemon ownership, not on the bare state/.afk flag, because that flag
+# outlives the daemon under every signal - so a fixture that writes the flag
+# alone is a home whose daemon is dead, and the watcher would rightly keep
+# triaging. Each stand-in daemon is reaped at suite exit.
+AFK_DAEMON_PIDS=
+write_afk_with_live_daemon() {  # <state-dir>
+  local state=$1 pid
+  mkdir -p "$state"
+  printf '%s\n' "$(date '+%s')" > "$state/.afk"
+  sleep 600 &
+  pid=$!
+  AFK_DAEMON_PIDS="$AFK_DAEMON_PIDS $pid"
+  fm_test_record_daemon_lock "$state" "$pid" || fail "could not record a live away daemon for $state"
+}
+REAP_AFK_DAEMONS() {
+  local p
+  for p in $AFK_DAEMON_PIDS; do
+    kill -TERM "$p" 2>/dev/null || true
+  done
+  fm_test_cleanup
+}
+trap REAP_AFK_DAEMONS EXIT
+trap 'REAP_AFK_DAEMONS; exit 130' INT
+trap 'REAP_AFK_DAEMONS; exit 143' TERM
+
 ack_stopped_cycle() {  # <state>
   local state=$1 err sequence generation
   err="$state/.test-cycle-drain.err"
@@ -4015,7 +4041,7 @@ test_afk_busy_declared_pause_hands_off_plain_stale() {
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-afk-review-scout_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   touch -t 200001010000 "$state/afk-review-scout.meta"
-  date '+%s' > "$state/.afk"
+  write_afk_with_live_daemon "$state"
 
   # Phase A: past the bound, with the wedge threshold as low as it goes, the
   # declaration is handed to the daemon undecorated instead of being wedge-timed.
@@ -4120,7 +4146,7 @@ SH
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-afk-ticking-scout_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   touch -t 200001010000 "$state/afk-ticking-scout.meta"
-  date '+%s' > "$state/.afk"
+  write_afk_with_live_daemon "$state"
   # An undeclared busy phase already ran the wedge timer and escalated twice
   # before the crew declared the wait.
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
@@ -5127,7 +5153,7 @@ test_afk_signal_records_heartbeat_endpoint() {
   dir=$(make_case afk-heartbeat-endpoint); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; status_file="$state/task.status"
   printf 'needs-decision: choose release target\nworking: preparing both targets\n' > "$status_file"
-  date '+%s' > "$state/.afk"
+  write_afk_with_live_daemon "$state"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
@@ -5145,7 +5171,7 @@ test_afk_present_reverts_watcher_to_one_shot() {
   out="$dir/watch.out"; drain_out="$dir/drain.out"
   status_file="$state/task.status"
   printf 'working: routine note\n' > "$status_file"
-  date '+%s' > "$state/.afk"   # away mode: the supervise-daemon owns triage
+  write_afk_with_live_daemon "$state"   # away mode: a live supervise-daemon owns triage
   # Set a PROVABLY-WORKING verdict: if afk failed to bypass the provably-working
   # check, this no-verb signal would be absorbed (not surfaced). The test asserting
   # a surface therefore also proves afk reverts to one-shot and skips the costly read.
@@ -5158,6 +5184,34 @@ test_afk_present_reverts_watcher_to_one_shot() {
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null \
     || fail "afk-mode benign signal was not queued for the daemon to classify"
   pass "with .afk present the watcher reverts to one-shot so the daemon owns triage (no double-triage)"
+}
+
+# The inverse, and the whole point of gating the hand-off on ownership: the away
+# flag outlives the daemon under every signal, so a reaped daemon leaves the flag
+# standing with nothing behind it. The watcher must keep triaging then, because
+# going one-shot for a daemon that no longer exists queues every wake of the
+# outage for a classifier that will never run - which is how a home went eleven
+# hours with no supervision at all.
+test_afk_flag_without_a_live_daemon_keeps_the_watcher_triaging() {
+  local dir state fakebin out status_file pid
+  dir=$(make_case afk-dead-daemon); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  status_file="$state/task.status"
+  printf 'working: routine note\n' > "$status_file"
+  printf '%s\n' "$(date '+%s')" > "$state/.afk"
+  fm_test_record_dead_daemon_lock "$state" || fail "could not record a dead away daemon"
+  # The same provably-working verdict the covered case uses: with the daemon
+  # gone, this benign no-verb signal must be ABSORBED by ordinary triage rather
+  # than surfaced one-shot for a daemon that cannot classify it.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_absorbed "$state" "$pid" "absorbed benign signal:" \
+    || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "a standing away flag with no live daemon kept the watcher one-shot: $(cat "$out")"; }
+  [ ! -s "$out" ] || { reap "$pid"; unset FM_FAKE_CREW_STATE; fail "the watcher surfaced a wake for a daemon that is gone: $(cat "$out")"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a standing away flag with no live daemon keeps ordinary triage instead of queueing for a dead daemon"
 }
 
 # A paused pane can first appear as a changed hash. In AFK mode that initial path
@@ -5176,7 +5230,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-afk-held_status"
-  date '+%s' > "$state/.afk"
+  write_afk_with_live_daemon "$state"
   key=$(printf '%s' "$window" | tr '.:/' '___')
 
   # Deliberately do not seed .hash-*: this is the changed-pane path that used to
@@ -5325,7 +5379,7 @@ test_afk_one_shot_never_hands_off_captain_held_under_away_record() {
   printf 'captain-held [key=route]: tracked by task-decision-route\n' > "$statusf"
   sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held-afk_status"
   key=$(printf '%s' "$window" | tr '.:/' '___')
-  date '+%s' > "$state/.afk"
+  write_afk_with_live_daemon "$state"
   write_away_record "$state"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
@@ -5545,6 +5599,7 @@ test_heartbeat_backstop_surfaces_a_masked_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_signal_records_heartbeat_endpoint
 test_afk_present_reverts_watcher_to_one_shot
+test_afk_flag_without_a_live_daemon_keeps_the_watcher_triaging
 test_afk_paused_changed_pane_hands_off_plain_stale
 test_captain_held_never_rechecked_while_away_record_exists
 test_live_captain_held_first_sight_silenced_by_away_record

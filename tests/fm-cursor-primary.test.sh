@@ -27,6 +27,29 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-cursor-primary)
+
+# A live stand-in away daemon for this home. The park stands down only when a
+# daemon PROVABLY owns supervision; writing state/.afk alone leaves a home whose
+# daemon is dead, which is its own case below. Sleepers are reaped at suite exit.
+AFK_DAEMON_PIDS=
+record_live_afk_daemon() {  # <dir>
+  local dir=$1 pid
+  sleep 600 &
+  pid=$!
+  AFK_DAEMON_PIDS="$AFK_DAEMON_PIDS $pid"
+  fm_test_record_daemon_lock "$dir/state" "$pid" || fail "could not record a live away daemon for $dir"
+}
+REAP_AFK_DAEMONS() {
+  local p
+  for p in $AFK_DAEMON_PIDS; do
+    kill -TERM "$p" 2>/dev/null || true
+  done
+  fm_test_cleanup
+}
+trap REAP_AFK_DAEMONS EXIT
+trap 'REAP_AFK_DAEMONS; exit 130' INT
+trap 'REAP_AFK_DAEMONS; exit 143' TERM
+
 fm_git_identity fmtest fmtest@example.invalid
 
 FAKEBIN=$(fm_fakebin "$TMP_ROOT/fakebin")
@@ -464,11 +487,29 @@ test_park_inert_when_afk() {
   dir=$(make_primary_dir "$TMP_ROOT/park-afk")
   : > "$dir/state/task1.meta"
   : > "$dir/state/.afk"
+  record_live_afk_daemon "$dir"
   write_arm_fixture "$dir" actionable
   out=$(run_park "$dir")
   [ -z "$out" ] || fail "away mode owns supervision; the park must not wake the primary: $out"
   [ ! -e "$dir/state/arm-ran" ] || fail "the park armed while the away daemon owns the watcher"
   pass "cursor park: inert while away mode is active"
+}
+
+# state/.afk outlives the daemon under every signal, so the flag alone proves
+# nothing. Before the park was ownership-gated, a reaped daemon left the flag
+# standing and this hook stayed inert for as long as the captain was away.
+test_park_runs_when_the_away_flag_stands_with_no_live_daemon() {
+  local dir out
+  dir=$(make_primary_dir "$TMP_ROOT/park-afk-dead-daemon")
+  : > "$dir/state/task1.meta"
+  : > "$dir/state/.afk"
+  fm_test_record_dead_daemon_lock "$dir/state"
+  write_arm_fixture "$dir" actionable
+  out=$(run_park "$dir")
+  [ -e "$dir/state/arm-ran" ] || fail "the park stayed inert behind a standing away flag with no live daemon"
+  [ "$(kind_of_followup "$out")" = watcher ] \
+    || fail "a standing away flag with a dead daemon must still deliver the wake: $out"
+  pass "cursor park: a standing away flag with no live daemon parks and wakes as usual"
 }
 
 test_park_inert_under_pi_coding_agent() {
@@ -535,6 +576,7 @@ SH
     [ "$waited" -lt 200 ] || fail "the park never reached follow-up preparation"
   done
   : > "$dir/state/.afk"
+  record_live_afk_daemon "$dir"
   : > "$dir/state/afk-commit-release"
   wait "$park_pid" 2>/dev/null || true
   out=$(cat "$dir/state/afk-transition-out" 2>/dev/null || true)
@@ -695,6 +737,7 @@ test_park_stands_down_when_superseded
 test_park_serializes_supersession_with_followup_commit
 test_superseded_park_does_not_consume_nag_budget
 test_park_inert_when_afk
+test_park_runs_when_the_away_flag_stands_with_no_live_daemon
 test_park_inert_under_pi_coding_agent
 test_park_still_parks_with_pi_leak_and_cursor_identity
 test_park_stands_down_when_away_mode_activates_before_commit
