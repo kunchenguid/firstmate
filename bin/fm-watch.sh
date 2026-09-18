@@ -1441,6 +1441,11 @@ task_captain_call_open() {  # <task>
 # window instead of inheriting the silence of the one before it. A write that
 # leaves the wait as it was - a repeated identical declaration, continuation
 # prose, or a note: appended under it - does not, so it cannot cancel the cadence.
+# Leaving a wait resets its throttle and age only when a poll observes the
+# non-wait event (clear_pause_state): a word-for-word re-declaration written
+# within one poll of leaving it, or while the watcher is down, inherits the
+# previous wait's recheck timing and age, though the status write itself still
+# wakes firstmate at once through the status signal.
 # Every site in this watcher that decides whether a declared wait is still in
 # force reads status_wait_line (fm-classify-lib.sh owns that contract), never the
 # bare latest event. Pass <last-event> when the caller already read it.

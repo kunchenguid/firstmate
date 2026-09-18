@@ -2553,7 +2553,12 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
 # A wait declared again after the worker left it is a NEW declaration, even word
 # for word identical to the one before: the intervening non-wait event ended the
 # first wait, so the second one's first stale inspection must reach the captain
-# instead of inheriting the first wait's re-surface throttle.
+# instead of inheriting the first wait's re-surface throttle. This holds only
+# when a watcher poll observes the interlude, as the absorb round between the two
+# declarations does here: the identity is the declaration content, so a
+# re-declaration written within one poll of leaving the wait, or while the
+# watcher is down, inherits the previous wait's recheck timing and age (its
+# status write still wakes firstmate through the status signal).
 test_live_identical_wait_declared_again_after_leaving_it_surfaces() {
   local spec name status_line interlude dir state fakebin out capture_file statusf window key
   local sig wakes
@@ -2577,11 +2582,15 @@ test_live_identical_wait_declared_again_after_leaving_it_surfaces() {
     parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
       || fail "[$name] first sight of the declared wait did not surface"
     ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the first surface"
+    [ -e "$state/.paused-resurfaced-$key" ] \
+      || fail "[$name] the first surface recorded no re-surface throttle for the interlude to clear"
 
     printf '%s\n' "$interlude" >> "$statusf"
     sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
     parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb \
       || fail "[$name] watcher exited while the worker was off the wait"
+    [ ! -e "$state/.paused-resurfaced-$key" ] \
+      || fail "[$name] no poll observed the interlude, so this case would not prove the leave-and-return reset"
 
     printf '%s\n' "$status_line" >> "$statusf"
     sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
@@ -2592,7 +2601,7 @@ test_live_identical_wait_declared_again_after_leaving_it_surfaces() {
       "$state/.wake-queue" 2>/dev/null || echo 0)
     [ "$wakes" -eq 1 ] || fail "[$name] the identical wait declared again produced $wakes wakes instead of one"
   done
-  pass "a paused or captain-held wait declared again after leaving it surfaces on first inspection"
+  pass "a paused or captain-held wait declared again after a poll observed the worker leave it surfaces on first inspection"
 }
 
 # Run one watcher round over the REAL crew-state reader (bin/fm-crew-state.sh,
