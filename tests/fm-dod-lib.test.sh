@@ -141,30 +141,6 @@ test_standalone_local_only_needs_distinct_project_ref() {
   pass "standalone local-only done: requires the named head in a distinct project clone"
 }
 
-test_pr_pull_ref_is_tested_not_later_head() {
-  local repo wt named other reason rc
-  repo="$TMP_ROOT/named-repo"
-  wt="$TMP_ROOT/named-wt"
-  fm_git_worktree "$repo" "$wt" fm/named
-  git -C "$wt" commit -q --allow-empty -m 'named fix'
-  named=$(git -C "$wt" rev-parse HEAD)
-  git -C "$wt" update-ref refs/remotes/origin/fm/named "$named"
-  git -C "$wt" update-ref refs/pull/2/head "$named"
-  git -C "$wt" commit -q --allow-empty -m 'later unpushed commit'
-  other=$(git -C "$wt" rev-parse HEAD)
-  [ "$named" != "$other" ] || fail "fixture did not diverge HEAD from the PR head"
-  accept_done ship direct-PR "$wt" "$repo" "done: PR https://example.test/o/r/pull/2" \
-    || fail "PR pull-ref head on a remote was refused because HEAD moved"
-  reason=$(accept_done ship direct-PR "$wt" "$repo" "done: PR https://example.test/o/r/pull/9")
-  rc=$?
-  [ "$rc" -eq 1 ] || fail "PR form that falls back to unpushed HEAD was accepted"
-  case "$reason" in
-    *"named head $other is unreachable outside the worker copy") ;;
-    *) fail "fallback HEAD refusal did not name the unpushed commit: $reason" ;;
-  esac
-  pass "the check tests the PR pull-ref head, not merely later worktree HEAD"
-}
-
 test_free_text_sha_is_not_the_named_head() {
   local repo wt old new reason rc
   repo="$TMP_ROOT/hex-repo"
@@ -250,6 +226,33 @@ test_forge_recorded_head_is_accepted_without_local_object() {
   pass "a forge-recorded head for the named PR is accepted without a local object"
 }
 
+# A direct-PR worker pushes from its own copy: a commit made after the PR's
+# recorded head, never pushed, is the named head and is refused.
+test_direct_pr_recorded_head_does_not_cover_unpushed_commit() {
+  local repo wt meta state pushed later reason rc
+  repo="$TMP_ROOT/postopen-repo"
+  wt="$TMP_ROOT/postopen-wt"
+  state="$TMP_ROOT/postopen-state"
+  mkdir -p "$state"
+  fm_git_worktree "$repo" "$wt" fm/postopen
+  git -C "$wt" commit -q --allow-empty -m 'pushed when the PR opened'
+  pushed=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" update-ref refs/remotes/origin/fm/postopen "$pushed"
+  git -C "$wt" commit -q --allow-empty -m 'the fix, only in the worktree'
+  later=$(git -C "$wt" rev-parse HEAD)
+  meta="$state/postopen.meta"
+  printf 'kind=ship\nmode=direct-PR\nworktree=%s\nproject=%s\npr=https://github.com/o/r/pull/5\npr_head=%s\n' \
+    "$wt" "$repo" "$pushed" > "$meta"
+  reason=$(accept_done ship direct-PR "$wt" "$repo" "done: PR https://github.com/o/r/pull/5" "$state" postopen "$meta")
+  rc=$?
+  [ "$rc" -eq 1 ] || fail "direct-PR recorded pr_head accepted an unpushed later commit"
+  case "$reason" in
+    *"named head $later is unreachable outside the worker copy") ;;
+    *) fail "direct-PR refusal did not name the unpushed commit: $reason" ;;
+  esac
+  pass "a direct-PR recorded head does not cover a later unpushed commit"
+}
+
 test_ci_ready_variants_are_gated() {
   local repo wt line rc
   repo="$TMP_ROOT/variant-repo"
@@ -286,11 +289,11 @@ test_unpushed_ship_done_is_refused
 test_no_mistakes_prevalidation_done_is_not_gated
 test_remote_containing_named_head_is_accepted
 test_moved_branch_without_named_head_is_refused
-test_pr_pull_ref_is_tested_not_later_head
 test_free_text_sha_is_not_the_named_head
 test_recorded_merged_pr_is_landed_after_prune
 test_merge_marker_binds_to_the_named_pr
 test_forge_recorded_head_is_accepted_without_local_object
+test_direct_pr_recorded_head_does_not_cover_unpushed_commit
 test_ci_ready_variants_are_gated
 test_local_only_linked_branch_is_accepted
 test_local_only_detached_head_is_refused
