@@ -49,17 +49,24 @@ fm_project_memory_lookup() {  # <config-dir> <project-name>
   FM_PROJECT_MEMORY_DIR=${value:-}
 }
 
-fm_project_memory_render_section() {  # <directory> <kind> <status-file> <report-file>
-  local dir=$1 kind=$2 status_file=$3 report_file=${4:-}
+fm_project_memory_render_section() {  # <directory> <kind> <status-file> <report-file> <harness>
+  local dir=$1 kind=$2 status_file=$3 report_file=${4:-} harness=${5:-}
   [ -n "$dir" ] || return 0
   # shellcheck disable=SC2016 # These are literal instructions for the launched worker.
   printf '%s\n' \
     '# Project memory' \
     "This project has durable memory at: $dir" \
     'Read `MEMORY.md` first, then open linked files relevant to this task.' \
-    'Record new lasting lessons as new files using the same frontmatter format, and add one line for each new file to `MEMORY.md`.' \
-    'The index is append-only for workers: never rewrite, reorder, or delete existing lines or other memory files; firstmates curate memory.' \
     ''
+  if [ "$harness" = claude ]; then
+    printf '%s\n\n' "Follow Claude Code's native auto-memory rules for this directory; you may create, revise, or remove entries as appropriate."
+  else
+    # shellcheck disable=SC2016 # These are literal instructions for the launched worker.
+    printf '%s\n' \
+      'Record new lasting lessons as new files using the same frontmatter format, and add one line for each new file to `MEMORY.md`.' \
+      'The index is append-only for workers: never rewrite, reorder, or delete existing lines or other memory files; firstmates curate memory.' \
+      ''
+  fi
   case "$kind" in
     scout)
       printf 'This modifies Rule 2 for this task only: the only permitted writes outside the worktree are the report file %s, the status file %s, and this exact project-memory directory: %s. No other outside writes are permitted.\n\n' "$report_file" "$status_file" "$dir"

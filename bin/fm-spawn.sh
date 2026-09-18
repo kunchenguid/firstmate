@@ -3354,7 +3354,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       if [ -n "$PROJECT_MEMORY_DIR" ]; then
         # shellcheck source=bin/fm-project-memory-lib.sh
         . "$SCRIPT_DIR/fm-project-memory-lib.sh"
-        fm_project_memory_render_section "$PROJECT_MEMORY_DIR" "$KIND" "$STATE/$ID.status" "$DATA/$ID/report.md" &&
+        fm_project_memory_render_section "$PROJECT_MEMORY_DIR" "$KIND" "$STATE/$ID.status" "$DATA/$ID/report.md" "$HARNESS" &&
           fm_project_memory_render_brief "$SOURCE_BRIEF" "$PROJECT_MEMORY_DIR" "$KIND" "$STATE/$ID.status" "$DATA/$ID/report.md"
       else
         cat "$SOURCE_BRIEF"

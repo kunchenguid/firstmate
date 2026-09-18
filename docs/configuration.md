@@ -465,10 +465,13 @@ Malformed lines, duplicate project entries, and unreadable or non-regular regist
 An absent registry or project entry leaves existing brief and launch behavior unchanged.
 
 The launch-time renderer in `bin/fm-project-memory-lib.sh` adds the worker memory instructions and exact write exception to ship and scout launch briefs, so relaunches use the current mapping.
-Claude workers receive the mapped directory through `autoMemoryDirectory` in Firstmate's existing inline `--settings` object, and Rovo receives it through its existing `allowedExternalPaths` grant.
+Claude workers receive the mapped directory through `autoMemoryDirectory` in Firstmate's existing inline `--settings` object and follow Claude Code's native auto-memory behavior, which may edit or delete entries in the folder.
+Operators who want recovery should keep their own backup of mapped folders; this configuration does not prescribe a backup method.
+Rovo receives the mapped directory through its existing `allowedExternalPaths` grant.
 Codex receives the brief pointer; other harnesses are omitted because their adapter contracts do not establish access to an arbitrary external directory.
+Non-Claude workers add new lesson files and append one line per file to `MEMORY.md` without rewriting or deleting existing memory; firstmates curate the folder.
 The resolved directory is recorded as `project_memory=` in task metadata only when the selected harness is covered.
-The setting is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract.
+The registry is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
