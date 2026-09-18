@@ -23,10 +23,16 @@ PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
 BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
+ai_trailer_hooks_prefix() {  # <home> <id>
+  local state
+  state=$(CDPATH='' cd -- "$1/state" && pwd -P) || fail "cannot resolve state dir $1/state"
+  printf "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0='%s' " "$state/$2.git-hooks"
+}
+
 cleanup_kimi_harness() {
   [ -z "$KIMI_RUNTIME_TASK_TMP" ] || rm -rf "$KIMI_RUNTIME_TASK_TMP"
   [ -z "$KIMI_RUNTIME_LAUNCH_DIR" ] || rm -rf "$KIMI_RUNTIME_LAUNCH_DIR"
-  rm -rf "$TMP_ROOT"
+  fm_test_remove_tree "$TMP_ROOT"
 }
 trap cleanup_kimi_harness EXIT
 
@@ -295,7 +301,7 @@ test_kimi_launch_then_send_is_verified() {
   assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
 
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "export COMPACT_ADVISER_DISABLE=1; env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
+  [ "$launch" = "export COMPACT_ADVISER_DISABLE=1; $(ai_trailer_hooks_prefix "$HOME_DIR" "$id")env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
     || fail "kimi launch did not use the absolute binary, model, and --auto only: $launch"
   assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
@@ -671,7 +677,7 @@ test_kimi_falls_back_to_expanded_home_binary() {
   rc=$?
   expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "export COMPACT_ADVISER_DISABLE=1; env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI '$fallback' --auto" ] \
+  [ "$launch" = "export COMPACT_ADVISER_DISABLE=1; $(ai_trailer_hooks_prefix "$HOME_DIR" "$id")env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI '$fallback' --auto" ] \
     || fail "Kimi fallback did not expand HOME into an absolute executable: $launch"
   pass "fm-spawn: Kimi fallback expands the active HOME"
 }
@@ -707,6 +713,9 @@ test_kimi_unconfirmed_delivery_fails_loudly() {
     "unconfirmed kimi delivery lacked a loud diagnostic"
   assert_grep 'failed: kimi brief pointer delivery was not confirmed' <(sed -E 's/ \[at=[0-9]+\]//' "$HOME_DIR/state/$id.status") \
     "unconfirmed kimi delivery did not leave a supervisor-visible failure"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "an unconfirmed kimi delivery kept its task record"
+  [ ! -e "$HOME_DIR/state/$id.git-hooks" ] ||
+    fail "an unconfirmed kimi delivery leaked its read-only strip dir"
   pass "fm-spawn: kimi treats a silent pointer drop as a failed spawn"
 }
 
@@ -722,6 +731,9 @@ test_kimi_readiness_gate_precedes_pointer() {
   assert_contains "$out" "kimi did not show a verified ready signal" \
     "kimi readiness failure lacked a loud diagnostic"
   [ ! -s "$CASE_DIR/pointer.log" ] || fail "kimi pointer was sent before readiness"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a kimi spawn that never became ready kept its task record"
+  [ ! -e "$HOME_DIR/state/$id.git-hooks" ] ||
+    fail "a kimi spawn that never became ready leaked its read-only strip dir"
   jq -e --arg id "$id" 'any(.endpoints[]; .id == $id)' \
     "$HOME_DIR/state/home-summary.json" >/dev/null \
     || fail "kimi readiness failure omitted its durable endpoint from the home summary"
@@ -957,6 +969,40 @@ test_kimi_trust_detection_requires_the_complete_dialog() {
   pass "fm-spawn: Kimi trust detection requires every observed dialog signal"
 }
 
+test_kimi_failed_gate_with_open_endpoint_keeps_strip() {
+  local id rec sm out rc
+  id=kimi-sm-open-z4
+  rec=$(make_spawn_case sm-open "$id")
+  read_spawn_record "$rec"
+  sm="$CASE_DIR/sm"
+  mkdir -p "$sm/bin" "$sm/data" "$sm/state" "$sm/config" "$sm/projects"
+  printf '# Firstmate\n' > "$sm/AGENTS.md"
+  printf '%s\n' "$id" > "$sm/.fm-secondmate-home"
+  printf 'charter\n' > "$sm/data/charter.md"
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$sm/.gitignore"
+  git -C "$sm" init -q -b main
+  rc=0
+  out=$(HOME="$HOME_DIR" FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$sm" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" FM_FAKE_POINTER_LOG="$CASE_DIR/pointer.log" \
+    FM_FAKE_KIMI_STATE="$CASE_DIR/kimi.state" FM_FAKE_KIMI_SWALLOWED="$CASE_DIR/kimi.swallowed" \
+    FM_FAKE_KIMI_SWALLOW_FIRST=no FM_FAKE_TMUX_CALL_LOG="$CASE_DIR/tmux-calls.log" \
+    FM_FAKE_BRIEF_REAL="$(cd "$HOME_DIR/data/$id" && pwd -P)/launch-brief.md" \
+    FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 FM_FAKE_KIMI_DELIVERY=no \
+    PATH="$FAKEBIN_DIR:$BASE_PATH" \
+    "$SPAWN" "$id" "$sm" --secondmate --harness kimi 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unconfirmed kimi secondmate delivery should fail"
+  assert_contains "$out" "kimi brief pointer delivery was not confirmed" \
+    "the kimi secondmate failure lacked its delivery diagnostic"
+  ! grep -q 'kill' "$CASE_DIR/tmux-calls.log" ||
+    fail "fixture drift: the failed kimi secondmate endpoint was closed, so this no longer covers a still-open agent"
+  [ -x "$HOME_DIR/state/$id.git-hooks/commit-msg" ] ||
+    fail "a failed spawn removed the strip from a launched agent whose endpoint is still open"
+  pass "fm-spawn: a failed spawn keeps the AI-trailer strip for a launched agent it did not stop"
+}
+
 test_kimi_detection_uses_ancestry_after_markers() {
   local dir fakebin cfg out
   dir="$TMP_ROOT/detection"
@@ -1141,6 +1187,7 @@ test_kimi_failed_viewport_read_fails_readiness_at_once
 test_kimi_partial_trust_dialog_blocks_the_ready_verdict
 test_kimi_stuck_trust_dialog_fails_before_delivery
 test_kimi_trust_detection_requires_the_complete_dialog
+test_kimi_failed_gate_with_open_endpoint_keeps_strip
 test_kimi_detection_uses_ancestry_after_markers
 test_kimi_session_lock_identity
 test_kimi_busy_signature_is_scoped_to_spinner_lines

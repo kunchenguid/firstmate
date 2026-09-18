@@ -45,7 +45,7 @@ echo "BOOTSTRAP_INFO: live rovo version: $VERSION_OUT"
 . "$ROOT/bin/fm-busy-lib.sh"
 
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-rovo-signals.XXXXXX") || fail "could not create the isolated Rovo lab"
-cleanup() { rm -rf -- "$LAB"; }
+cleanup() { fm_test_remove_tree "$LAB"; }
 trap cleanup EXIT
 mkdir -p "$LAB/workspace"
 git -C "$LAB/workspace" init -q || fail "could not initialize the isolated Rovo workspace"

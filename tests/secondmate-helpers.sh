@@ -182,7 +182,8 @@ mark_firstmate_home() {
 }
 
 # A firstmate home that is also a real git repo (so it can host detached
-# worktrees for teardown/lease tests).
+# worktrees for teardown/lease tests, and so a --secondmate spawn can install
+# the AI-trailer strip).
 make_firstmate_git_root() {
   local home=$1
   mkdir -p "$home/bin"

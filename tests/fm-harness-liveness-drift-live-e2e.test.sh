@@ -49,7 +49,7 @@ SESSION=drift
 
 cleanup_all() {
   "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
-  [ -n "${LAB:-}" ] && rm -rf "$LAB"
+  [ -n "${LAB:-}" ] && fm_test_remove_tree "$LAB"
 }
 trap cleanup_all EXIT
 

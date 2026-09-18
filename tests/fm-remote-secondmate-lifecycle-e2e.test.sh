@@ -44,7 +44,7 @@ cleanup() {
       sleep 0.05
     done
   fi
-  rm -rf -- "$TMP_ROOT"
+  fm_test_remove_tree "$TMP_ROOT"
 }
 trap cleanup EXIT
 

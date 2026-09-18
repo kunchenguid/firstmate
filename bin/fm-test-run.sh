@@ -370,6 +370,7 @@ family_for_basename() {
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
     fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
     fm-spawn-dispatch-profile.test.sh|fm-claude-trust.test.sh|\
+    fm-git-strip-ai-trailers.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
     fm-spawn-compact-adviser-disable.test.sh|\
     fm-spawn-compact-adviser-disable-remote.test.sh|\
@@ -663,6 +664,8 @@ list_portable_serial() {
 # than only on the fastest one measured. These are balance hints only: the shard
 # partition stays complete and disjoint whatever they say, so a stale hint costs
 # balance rather than coverage. That doc owns the refresh procedure.
+# Exception: tests/fm-git-strip-ai-trailers.test.sh is a local Homebrew Bash 5
+# sample (16749 ms), pending the next refresh from CI timing artifacts.
 portable_serial_weight_hints() {
   cat <<'EOF'
 tests/fm-afk-contract.test.sh 15645
@@ -724,6 +727,7 @@ tests/fm-fleet-sync.test.sh 35983
 tests/fm-gate-refuse.test.sh 5328
 tests/fm-gemini-harness.test.sh 938
 tests/fm-gitignore-config.test.sh 58
+tests/fm-git-strip-ai-trailers.test.sh 16749
 tests/fm-gotmp.test.sh 1320
 tests/fm-grok-continuity-live-e2e.test.sh 45
 tests/fm-grok-stop-live-e2e.test.sh 46

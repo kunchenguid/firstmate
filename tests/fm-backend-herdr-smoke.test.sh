@@ -36,7 +36,7 @@ SESSION="fm-lab-backend-smoke-$$"
 export HERDR_SESSION="$SESSION"
 SM_SCRATCH=
 cleanup_all() {
-  [ -n "$SM_SCRATCH" ] && rm -rf "$SM_SCRATCH"
+  [ -n "$SM_SCRATCH" ] && { chmod -R u+w "$SM_SCRATCH" 2>/dev/null; rm -rf "$SM_SCRATCH"; }
   herdr_safe_stop_and_delete "$SESSION"
 }
 trap cleanup_all EXIT

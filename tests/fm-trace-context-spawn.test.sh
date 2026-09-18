@@ -210,6 +210,8 @@ run_two_level() {
   printf '# Firstmate\n' > "$sm/AGENTS.md"
   printf 'sm-%s\n' "$name" > "$sm/.fm-secondmate-home"
   printf 'charter\n' > "$sm/data/charter.md"
+  git -C "$sm" init -q -b main
+  printf '%s\n' 'projects/' 'state/' 'data/' 'config/' '.no-mistakes/' > "$sm/.gitignore"
 
   # Spawn 1: the primary launches the secondmate; capture what it injects.
   sm_id="sm-$name"

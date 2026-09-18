@@ -55,6 +55,7 @@ export HERDR_SESSION="$SESSION"
 SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-respawn-idem.XXXXXX")
 cleanup_all() {
   herdr_safe_stop_and_delete "$SESSION"
+  chmod -R u+w "$SCRATCH" 2>/dev/null || true
   rm -rf "$SCRATCH"
 }
 trap cleanup_all EXIT

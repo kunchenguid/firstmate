@@ -186,15 +186,25 @@ fm_test_reap() {  # <pid>
   wait "$pid" 2>/dev/null || true
 }
 
+# Remove a fixture tree even when it holds a read-only directory, such as the
+# spawn-owned state/<id>.git-hooks strip directory.
+fm_test_remove_tree() {
+  local dir=$1
+  if [ -d "$dir" ] && [ ! -L "$dir" ]; then
+    find "$dir" -type d -exec chmod u+rwx {} + 2>/dev/null || true
+  fi
+  rm -rf "$dir"
+}
+
 fm_test_cleanup() {
   local d
   fm_test_reap_procevent_homes
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
+    [ -n "$d" ] && fm_test_remove_tree "$d"
   done
   if [ -f "$FM_TEST_CLEANUP_REGISTRY" ]; then
     while IFS= read -r d; do
-      [ -n "$d" ] && rm -rf "$d"
+      [ -n "$d" ] && fm_test_remove_tree "$d"
     done < "$FM_TEST_CLEANUP_REGISTRY"
     rm -f "$FM_TEST_CLEANUP_REGISTRY"
   fi
@@ -248,10 +258,7 @@ fm_test_reap_orphans() {
     mtime=$(stat -c %Y "$marker" 2>/dev/null || stat -f %m "$marker" 2>/dev/null) || continue
     [ $((now - mtime)) -ge "$FM_TEST_ORPHAN_MAX_AGE_SECONDS" ] || continue
     dir=$(dirname "$marker")
-    if [ -d "$dir" ] && [ ! -L "$dir" ]; then
-      find "$dir" -type d -exec chmod u+rwx {} + 2>/dev/null || true
-    fi
-    rm -rf "$dir"
+    fm_test_remove_tree "$dir"
   done
 }
 

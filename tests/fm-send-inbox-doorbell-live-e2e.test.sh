@@ -50,7 +50,7 @@ note() { printf '# %s\n' "$1"; }
 
 cleanup() {
   tmux -L "$SOCKET" kill-server 2>/dev/null || true
-  rm -rf "$LAB"
+  fm_test_remove_tree "$LAB"
 }
 trap cleanup EXIT
 
