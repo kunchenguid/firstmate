@@ -9,6 +9,11 @@
 # and hypothetical avoidable frontier inspections (true/false positive counts).
 # Actual skipped decisions remain zero. No behavior is activated by this tool.
 # Uses FM_STATE_OVERRIDE or FM_HOME/state for the journal, like the adapter.
+# Offline reproduction of the recorded live response (no API request):
+# Create a private state directory, set FM_STATE_OVERRIDE to it, then run
+# bin/fm-event-shadow-replay.sh --response tests/fixtures/event-shadow/live-response.json
+# This recomputes policy results; live-evidence.json retains original call
+# provenance and costs, while replay output marks the source as replay.
 set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
