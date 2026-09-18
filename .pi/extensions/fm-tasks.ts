@@ -3,7 +3,7 @@
 // /tasks is an extension command rather than a skill invocation: it changes only
 // one keyed TUI widget, never sends a user message, invokes the model, notifies the
 // transcript, or persists display state. Every session_start (including reload)
-// starts hidden. Calm owns above-editor transient steps and its sailing animation;
+// starts hidden. Calm owns completed assistant-row step projections and its sailing animation;
 // this table deliberately lives below the editor, so neither extension removes,
 // reorders, or recreates the other's components during toggles.
 //

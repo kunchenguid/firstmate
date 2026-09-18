@@ -18,6 +18,7 @@ import {
   appendCalmStep,
   calmPresentationHides,
   calmStockExportRenderingIsActive,
+  currentCalmSteps,
 } from "./fm-calm-visibility.ts";
 
 const CALM_ASSISTANT_BACKGROUND = "\x1b[48;2;122;31;92m";
@@ -46,8 +47,11 @@ type CalmAssistantLayoutController = {
   ) => void;
   transform: MarkdownTransformer;
   originalUpdateContent: PiAssistantMessageComponent["updateContent"];
-  originalRender: PiAssistantMessageComponent["render"];
-  assistantRender: (component: PiAssistantMessageComponent, width: number) => string[];
+  originalRender?: PiAssistantMessageComponent["render"];
+  assistantRender?: (component: PiAssistantMessageComponent, width: number) => string[];
+  renderWrapper?: PiAssistantMessageComponent["render"];
+  activeComponent?: object;
+  runFinalized?: boolean;
   presentations: WeakMap<object, CalmAssistantPresentation>;
   ownedThinkingMessages: WeakSet<object>;
   ownedThinkingMarkdown: Set<string>;
@@ -84,6 +88,50 @@ function appendLatestCalmStep(message: AssistantMessage, isStreaming: boolean): 
   }
 }
 
+function installAssistantRenderBoundary(
+  AssistantMessageComponent: typeof PiCodingAgent.AssistantMessageComponent,
+  controller: CalmAssistantLayoutController,
+): void {
+  const prototypeRender = AssistantMessageComponent.prototype.render;
+  if (!controller.originalRender) {
+    if (typeof prototypeRender !== "function") {
+      throw new Error("Firstmate Calm requires Pi AssistantMessageComponent.render");
+    }
+    controller.originalRender = prototypeRender;
+  }
+  controller.assistantRender ??= (component, width) =>
+    controller.originalRender!.call(component, width);
+  controller.renderWrapper ??= function (width: number): string[] {
+    return controller.assistantRender!(this, width);
+  };
+  if (prototypeRender !== controller.renderWrapper) {
+    AssistantMessageComponent.prototype.render = controller.renderWrapper;
+  }
+}
+
+function calmStepsPresentation(
+  message: AssistantMessage,
+  component: object,
+  controller: CalmAssistantLayoutController,
+): AssistantMessage {
+  const completed = message.stopReason === "stop" || message.stopReason === "length";
+  if (
+    calmStockExportRenderingIsActive() ||
+    !completed ||
+    controller.activeComponent !== component
+  ) return message;
+  const steps = currentCalmSteps();
+  if (!calmPresentationHides("assistant-thinking") || steps.length === 0) return message;
+  const stepLines = steps.map((step, index) => `Step ${index + 1}: ${step}`).join("  \n");
+  return {
+    ...message,
+    content: [
+      { type: "text", text: `${stepLines}  \n` },
+      ...message.content,
+    ],
+  };
+}
+
 export function installCalmAssistantLayout(
   pi: Pick<ExtensionAPI, "registerMarkdownTransformer">,
 ): void {
@@ -105,16 +153,10 @@ export function installCalmAssistantLayout(
     if (typeof originalUpdateContent !== "function") {
       throw new Error("Firstmate Calm requires Pi AssistantMessageComponent.updateContent");
     }
-    const originalRender = AssistantMessageComponent.prototype.render;
-    if (typeof originalRender !== "function") {
-      throw new Error("Firstmate Calm requires Pi AssistantMessageComponent.render");
-    }
     const newController: CalmAssistantLayoutController = {
       render: () => {},
       transform: (markdown) => markdown,
       originalUpdateContent,
-      originalRender,
-      assistantRender: (component, width) => originalRender.call(component, width),
       presentations: new WeakMap(),
       ownedThinkingMessages: new WeakSet(),
       ownedThinkingMarkdown: new Set(),
@@ -127,15 +169,10 @@ export function installCalmAssistantLayout(
     ): void {
       newController.render(this, message, isStreaming);
     };
-    AssistantMessageComponent.prototype.render = function (width: number): string[] {
-      return newController.assistantRender(this, width);
-    };
   }
 
   const activeController = controller;
-  activeController.originalRender ??= AssistantMessageComponent.prototype.render;
-  activeController.assistantRender ??= (component, width) =>
-    activeController.originalRender.call(component, width);
+  installAssistantRenderBoundary(AssistantMessageComponent, activeController);
   // Controllers created by the prior source revision survive /reload and lack the two
   // Markdown fields. Upgrade them in place before replacing either delegate.
   activeController.ownedThinkingMessages ??= new WeakSet();
@@ -176,6 +213,17 @@ export function installCalmAssistantLayout(
   };
 
   activeController.render = (component, message, isStreaming): void => {
+    if (isStreaming) {
+      if (currentCalmSteps().length === 0) activeController.runFinalized = false;
+      activeController.activeComponent = component;
+    } else if (
+      !activeController.runFinalized &&
+      currentCalmSteps().length > 0 &&
+      (message.stopReason === "stop" || message.stopReason === "length")
+    ) {
+      activeController.activeComponent = component;
+      activeController.runFinalized = true;
+    }
     appendLatestCalmStep(message, isStreaming);
     const prior = activeController.presentations.get(component);
     const sourceMessage = message === prior?.rendered ? prior.source : message;
@@ -187,12 +235,13 @@ export function installCalmAssistantLayout(
       activeController.ownedThinkingMessages.has(sourceMessage);
     if (thinkingOwned) activeController.ownedThinkingMessages.add(sourceMessage);
     const hideThinking = thinkingOwned && !calmStockExportRenderingIsActive();
-    const renderedMessage = hideThinking
+    const presentationMessage = hideThinking
       ? {
           ...sourceMessage,
           content: sourceMessage.content.filter((block) => block.type !== "thinking"),
         }
       : sourceMessage;
+    const renderedMessage = calmStepsPresentation(presentationMessage, component, activeController);
 
     activeController.presentations.set(component, {
       source: sourceMessage,

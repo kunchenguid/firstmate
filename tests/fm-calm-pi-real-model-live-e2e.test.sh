@@ -55,7 +55,7 @@ PI_CMD=$(printf 'env FM_HOME=%q pi --approve --no-context-files --no-extensions 
 
 pane_text() {
   "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane read "$PANE" \
-    --source recent --lines 160 2>/dev/null || true
+    --source recent --lines 160 --format ansi 2>/dev/null || true
 }
 
 ready=0
@@ -74,11 +74,10 @@ PROMPT='Use exactly one read call per assistant turn. Before reading .calm-probe
 "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-keys "$PANE" enter >/dev/null
 
 seen_step_numbers=
-first_commentary_step=
-commentary_persisted_after_transition=0
 ordered_frame_count=0
 settled_polls=0
 final_text=
+MAGENTA_BACKGROUND=$'\033[48;2;122;31;92m'
 step_titles="$EVIDENCE/step-titles.txt"
 : >"$step_titles"
 frame=0
@@ -86,18 +85,19 @@ for _ in $(seq 1 1200); do
   text=$(pane_text)
   frame=$((frame + 1))
   printf '%s\n' "$text" >"$EVIDENCE/frame-$frame.txt"
-  step_count=$( (printf '%s\n' "$text" | grep -Eo 'Step [0-9]+:' || true) | wc -l | tr -d ' ')
+  step_count=$( (printf '%s\n' "$text" | grep -Eo 'Step [0-9]+:' || true) | sort -u | wc -l | tr -d ' ')
   printf '%s\n' "$text" | grep -Fq 'Thinking...' \
     && fail "external pane frame $frame showed Pi's thinking placeholder while Calm was on"
   printf '%s\n' "$text" | grep -Fq 'REAL_TOOL_OUTPUT_' \
     && fail "external pane frame $frame showed a tool result while Calm was on"
-  if [ "$step_count" -gt 1 ]; then
+  if [ "$step_count" -gt 20 ]; then
     printf '%s\n' "$text" >&2
-    fail "external pane frame $frame accumulated $step_count numbered step rows"
+    fail "external pane frame accumulated an unreasonable number of numbered steps"
   fi
-  step_line=$(printf '%s\n' "$text" | grep -E 'Step [0-9]+:' | tail -1 || true)
-  if [ -n "$step_line" ]; then
-    step_number=$(printf '%s\n' "$step_line" | sed -E 's/.*Step ([0-9]+):.*/\1/')
+  step_numbers=$(printf '%s\n' "$text" | grep -Eo 'Step [0-9]+:' | sed -E 's/Step ([0-9]+):/\1/' | sort -nu || true)
+  while IFS= read -r step_number; do
+    [ -n "$step_number" ] || continue
+    step_line=$(printf '%s\n' "$text" | grep -E "Step $step_number:" | tail -1)
     if ! printf '%s\n' "$seen_step_numbers" | grep -Fxq "$step_number"; then
       seen_step_numbers=$(printf '%s\n%s' "$seen_step_numbers" "$step_number")
       step_title=$(printf '%s\n' "$step_line" | sed -E 's/.*Step [0-9]+:[[:space:]]*//; s/[[:space:]]+$//')
@@ -106,33 +106,20 @@ for _ in $(seq 1 1200); do
     fi
     printf '%s\n' "$step_line" | grep -Fq 'REAL_COMMENTARY_' \
       && fail "real assistant commentary was promoted into the transient step title"
-
-    ship_line_number=$(printf '%s\n' "$text" | grep -Fn '╲▁▁▁╱' | tail -1 | cut -d: -f1)
-    step_line_number=$(printf '%s\n' "$text" | grep -En 'Step [0-9]+:' | tail -1 | cut -d: -f1)
-    [ -n "$ship_line_number" ] && [ "$step_line_number" -lt "$ship_line_number" ] \
-      || fail "external pane frame $frame did not place the current step above the sailing ship"
-
+  done <<EOF
+$step_numbers
+EOF
+  if printf '%s' "$text" | grep -Fq 'REAL_COMMENTARY_'; then
     for word in ONE TWO THREE; do
       marker="REAL_COMMENTARY_$word"
       if printf '%s' "$text" | grep -Fq "$marker"; then
         marker_count=$(printf '%s\n' "$text" | grep -Fc "$marker")
         [ "$marker_count" -eq 1 ] || fail "external pane frame $frame showed $marker $marker_count times"
-        marker_line_number=$(printf '%s\n' "$text" | grep -Fn "$marker" | tail -1 | cut -d: -f1)
-        [ "$marker_line_number" -lt "$step_line_number" ] \
-          || fail "external pane frame $frame placed $marker below the current step"
         ordered_frame_count=$((ordered_frame_count + 1))
       fi
     done
-    if printf '%s' "$text" | grep -Fq 'REAL_COMMENTARY_ONE'; then
-      if [ -z "$first_commentary_step" ]; then
-        first_commentary_step=$step_number
-      elif [ "$step_number" -gt "$first_commentary_step" ] && [ "$commentary_persisted_after_transition" -eq 0 ]; then
-        commentary_persisted_after_transition=1
-        printf 'proof - retained REAL_COMMENTARY_ONE once above later Step %s and above the ship\n' "$step_number"
-      fi
-    fi
   fi
-  if printf '%s' "$text" | grep -Fq 'REAL_MODEL_FINAL_RESPONSE' && [ "$step_count" -eq 0 ]; then
+  if printf '%s' "$text" | grep -Fq 'REAL_MODEL_FINAL_RESPONSE' && [ "$step_count" -ge 2 ]; then
     settled_polls=$((settled_polls + 1))
     final_text=$text
     [ "$settled_polls" -ge 3 ] && break
@@ -141,7 +128,7 @@ for _ in $(seq 1 1200); do
   fi
   sleep 0.1
 done
-[ "$settled_polls" -ge 3 ] || { printf '%s\n' "$text" >&2; fail "real model did not settle to a final response without a step row"; }
+[ "$settled_polls" -ge 3 ] || { printf '%s\n' "$text" >&2; fail "real model did not settle to a final response with its completed steps"; }
 unique_steps=$(printf '%s\n' "$seen_step_numbers" | grep -Ec '^[0-9]+$' || true)
 [ "$unique_steps" -ge 2 ] \
   || fail "external pane observed only $unique_steps distinct numbered steps"
@@ -154,6 +141,8 @@ for word in ONE TWO THREE; do
 done
 printf '%s' "$final_text" | grep -Fq '╲▁▁▁╱' \
   && fail "settled real-model transcript retained the sailing animation"
+printf '%s' "$final_text" | grep -Fq "$MAGENTA_BACKGROUND" \
+  || fail "settled real-model assistant rows did not carry Calm's magenta background ANSI"
 printf '%s' "$final_text" | grep -Fq 'REAL_TOOL_OUTPUT_' \
   && fail "settled real-model transcript retained a tool result while Calm was on"
 
@@ -197,7 +186,13 @@ assert_settled_history() { # <frame> <label> [require-tool-output]
 sleep 3
 reloaded_text=$(pane_text)
 assert_settled_history "$reloaded_text" "real-model reload"
-printf 'proof - reload retained commentary/final output once and no historical step title\n'
+printf 'proof - first reload retained commentary/final output once and no historical step title\n'
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-text "$PANE" /reload >/dev/null
+"$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane send-keys "$PANE" enter >/dev/null
+sleep 3
+reloaded_text=$(pane_text)
+assert_settled_history "$reloaded_text" "real-model second reload"
+printf 'proof - second reload retained commentary/final output once and no historical step title\n'
 
 expanded_fallback=0
 for expected in off on off on; do
@@ -240,5 +235,5 @@ done
 
 printf 'proof - final commentary: REAL_COMMENTARY_ONE, REAL_COMMENTARY_TWO, REAL_COMMENTARY_THREE (one each)\n'
 printf 'proof - final: %s\n' "$(printf '%s\n' "$final_text" | grep -F 'REAL_MODEL_FINAL_RESPONSE' | tail -1)"
-printf 'ok - real Pi %s with gpt-5.6-sol xhigh and the full Firstmate extension set externally showed one numbered step at a time across %s steps, retained commentary and the final answer once, suppressed thinking placeholders and tool results whenever Calm was on, restored tools off, and kept every superseded title hidden through reload plus two Calm cycles\n' \
+printf 'ok - real Pi %s with gpt-5.6-sol xhigh and the full Firstmate extension set externally rendered accumulated numbered steps in the completed assistant row across %s steps, retained commentary and the final answer once, showed Calm magenta ANSI, suppressed thinking placeholders and tool results whenever Calm was on, restored tools off, and kept every superseded title hidden through reload plus two Calm cycles\n' \
   "$(pi --version)" "$unique_steps"

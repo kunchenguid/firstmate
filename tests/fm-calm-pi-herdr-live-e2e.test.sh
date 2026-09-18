@@ -199,7 +199,7 @@ PI_CMD=$(printf 'cd %q && env FM_HOME=%q PI_CODING_AGENT_DIR=%q PI_OFFLINE=1 pi 
   || fail "could not launch the real Pi fixture in Herdr"
 
 pane_text() {
-  "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane read "$PANE" --source recent --lines 120 2>/dev/null || true
+  "$HERDR_LAB_HELPER" run "$HERDR_LAB_SESSION" pane read "$PANE" --source recent --lines 120 --format ansi 2>/dev/null || true
 }
 wait_for_text() {
   local expected=$1 i=0 text
@@ -238,28 +238,29 @@ seen_one=0
 seen_two=0
 seen_three=0
 final_text=
+MAGENTA_BACKGROUND=$'\033[48;2;122;31;92m'
 assert_current_layout() { # <frame> <exact step text>
-  local frame=$1 step=$2 step_line ship_line
+  local frame=$1 step=$2 step_line anchor_line
   step_line=$(printf '%s\n' "$frame" | grep -Fn "$step" | tail -1 | cut -d: -f1)
-  ship_line=$(printf '%s\n' "$frame" | grep -Fn '╲▁▁▁╱' | tail -1 | cut -d: -f1)
-  [ -n "$step_line" ] && [ -n "$ship_line" ] && [ "$step_line" -lt "$ship_line" ] \
-    || fail "$step was not above the sailing ship"
+  anchor_line=$(printf '%s\n' "$frame" | grep -Fn '╲▁▁▁╱' | tail -1 | cut -d: -f1)
+  [ -n "$anchor_line" ] || anchor_line=$(printf '%s\n' "$frame" | grep -Fn 'CALM_LIVE_HERDR_FINAL' | tail -1 | cut -d: -f1)
+  [ -n "$step_line" ] && [ -n "$anchor_line" ] && [ "$step_line" -lt "$anchor_line" ] \
+    || fail "$step was not kept in the main transcript before the final response"
 }
 assert_commentary_layout() { # <frame> <commentary number>
-  local frame=$1 number=$2 count commentary_line step_line ship_line
+  local frame=$1 number=$2 count commentary_line final_line
   count=$(printf '%s\n' "$frame" | grep -Fc "COMMENTARY_$number")
   [ "$count" -eq 1 ] || fail "COMMENTARY_$number appeared $count times"
-  step_line=$(printf '%s\n' "$frame" | grep -En 'Step [0-9]+:' | tail -1 | cut -d: -f1)
-  [ -n "$step_line" ] || return 0
+  final_line=$(printf '%s\n' "$frame" | grep -Fn 'CALM_LIVE_HERDR_FINAL' | tail -1 | cut -d: -f1)
+  [ -n "$final_line" ] || return 0
   commentary_line=$(printf '%s\n' "$frame" | grep -Fn "COMMENTARY_$number" | tail -1 | cut -d: -f1)
-  ship_line=$(printf '%s\n' "$frame" | grep -Fn '╲▁▁▁╱' | tail -1 | cut -d: -f1)
-  [ -n "$ship_line" ] && [ "$commentary_line" -lt "$step_line" ] && [ "$step_line" -lt "$ship_line" ] \
-    || fail "COMMENTARY_$number, the current step, and the ship were not ordered top to bottom"
+  [ -n "$commentary_line" ] && [ "$commentary_line" -lt "$final_line" ] \
+    || fail "COMMENTARY_$number was not kept in the main transcript before the final response"
 }
 for i in $(seq 1 200); do
   final_text=$(pane_text)
-  step_count=$( (printf '%s\n' "$final_text" | grep -Eo 'Step [0-9]+:' || true) | wc -l | tr -d ' ')
-  [ "$step_count" -le 1 ] || fail "live frame $i rendered $step_count numbered rows"
+  step_count=$( (printf '%s\n' "$final_text" | grep -Eo 'Step [0-9]+:' || true) | sort -u | wc -l | tr -d ' ')
+  [ "$step_count" -le 3 ] || fail "live frame $i rendered more than the three accumulated numbered steps"
   printf '%s\n' "$final_text" | grep -Fq 'Thinking...' \
     && fail "live frame $i rendered Pi's thinking placeholder"
   printf '%s\n' "$final_text" | grep -Fq 'calm live fixture' \
@@ -304,10 +305,12 @@ done
   || fail "Calm step numbers did not increase monotonically: $plan_step_one, $plan_step_two, $plan_step_three"
 printf '%s' "$final_text" | grep -Fq 'CALM_LIVE_HERDR_FINAL' \
   || fail "real Pi/Herdr fixture did not settle its final response"
-printf '%s' "$final_text" | grep -Fq 'Step ' \
-  && fail "final Pi response retained an intermediate-step row"
-printf '%s' "$final_text" | grep -Fq 'LIVE_PLAN_' \
-  && fail "final Pi response retained planning narration"
+printf '%s' "$final_text" | grep -Fq "$MAGENTA_BACKGROUND" \
+  || fail "real Pi/Herdr final assistant row did not carry Calm's magenta background ANSI"
+for number in 1 2 3; do
+  printf '%s' "$final_text" | grep -Fq "Step $number: LIVE_PLAN_" \
+    || fail "final Pi response did not retain Step $number in the completed assistant row"
+done
 printf '%s' "$final_text" | grep -Fq 'calm live fixture' \
   && fail "final Pi response retained the read tool result"
 for number in 1 2 3; do
@@ -323,4 +326,4 @@ grep -Fq 'LIVE_PLAN_THREE' "$session_file" || fail "third planning context was n
 grep -Fq 'COMMENTARY_1' "$session_file" || fail "first commentary context was not persisted"
 grep -Fq 'COMMENTARY_2' "$session_file" || fail "second commentary context was not persisted"
 grep -Fq 'COMMENTARY_3' "$session_file" || fail "third commentary context was not persisted"
-printf 'ok - real Pi %s in Herdr upgraded the retained prior Calm controller through /reload, kept each commentary row once across three replacing numbered steps, hid thinking placeholders and read rows, ordered commentary and the current step above the ship, and settled with only the final answer\n' "$(pi --version)"
+printf 'ok - real Pi %s in Herdr upgraded the retained prior Calm controller through /reload, kept each commentary row once beside its accumulated numbered transcript steps, hid thinking placeholders and read rows, ordered the steps and commentary above the ship, and settled with the completed steps attached to the final answer\n' "$(pi --version)"

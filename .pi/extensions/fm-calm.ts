@@ -26,13 +26,11 @@ import {
 } from "./lib/fm-calm-working-ship.ts";
 import {
   calmPresentationIsActive,
-  currentCalmSteps,
   clearCalmSteps,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
   registerFirstmateSyntheticPresentation,
   setCalmPresentation,
   setCalmStockExportRendering,
-  subscribeCalmSteps,
 } from "./lib/fm-calm-visibility.ts";
 
 const extensionDir = dirname(fileURLToPath(import.meta.url));
@@ -61,16 +59,6 @@ export default function (pi: ExtensionAPI) {
   // continuations, retries, or compaction that stay inside the same run.
   let agentRunActive = false;
   let workingShipShown = false;
-  let currentStepUi: ExtensionUIContext | undefined;
-  const updateCalmStepsPresentation = (): void => {
-    currentStepUi?.setStatus(
-      "firstmate-calm",
-      calmPresentationIsActive() && currentCalmSteps().length > 0
-        ? currentCalmSteps().map((step, index) => `Step ${index + 1}: ${step}`).join("\n")
-        : undefined,
-    );
-  };
-  subscribeCalmSteps(updateCalmStepsPresentation);
 
   // One animation instance per extension lifetime. Hiding the working widget freezes
   // this state; the next working period resumes it. session_start resets it so a fresh
@@ -138,7 +126,6 @@ export default function (pi: ExtensionAPI) {
   registerFirstmateSyntheticPresentation(pi);
 
   pi.on("session_start", (_event, ctx) => {
-    currentStepUi = ctx.ui;
     clearCalmSteps();
     exportRendering = false;
     setCalmPresentation(loadCalmPreference());
@@ -150,7 +137,6 @@ export default function (pi: ExtensionAPI) {
     workingShipAnimation.reset();
     applyWorkingPresentation(ctx.ui, true);
     ctx.ui.setHiddenThinkingLabel(calmPresentationIsActive() ? "" : undefined);
-    updateCalmStepsPresentation();
     removeTerminalInputHandler?.();
     removeTerminalInputHandler = ctx.ui.onTerminalInput((data) => {
       if (!getKeybindings().matches(data, "tui.input.submit")) return undefined;
@@ -171,34 +157,27 @@ export default function (pi: ExtensionAPI) {
         exportRendering = false;
         setCalmStockExportRendering(false);
         publishPresentationState();
-        // Redraw the Calm status without overwriting Pi's visible export confirmation.
-        updateCalmStepsPresentation();
       }, 0);
       return undefined;
     });
   });
 
   pi.on("agent_start", (_event, ctx) => {
-    currentStepUi = ctx.ui;
     clearCalmSteps();
     agentRunActive = true;
     applyWorkingPresentation(ctx.ui);
-    updateCalmStepsPresentation();
   });
 
   // agent_settled is emitted from a finally block, so it also covers abort and failure.
   pi.on("agent_settled", (_event, ctx) => {
     agentRunActive = false;
     applyWorkingPresentation(ctx.ui);
-    updateCalmStepsPresentation();
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
     agentRunActive = false;
     clearCalmSteps();
     applyWorkingPresentation(ctx.ui);
-    updateCalmStepsPresentation();
-    currentStepUi = undefined;
   });
 
   pi.registerCommand("calm", {
@@ -209,9 +188,7 @@ export default function (pi: ExtensionAPI) {
       setCalmPresentation(active);
       if (!active) clearCalmSteps();
       publishPresentationState();
-      currentStepUi = ctx.ui;
       applyWorkingPresentation(ctx.ui, true);
-      updateCalmStepsPresentation();
       // Pi re-runs every assistant row's layout from this call even when the label is
       // unchanged, which is what makes a toggle apply to rows already on screen.
       ctx.ui.setHiddenThinkingLabel(active ? "" : undefined);

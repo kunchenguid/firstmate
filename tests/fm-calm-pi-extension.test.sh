@@ -817,8 +817,30 @@ const pi = {
     }));
   },
 };
+// Recreate the pre-background Calm controller: its updateContent wrapper survives a
+// hot reload, but it never owned AssistantMessageComponent.prototype.render.
+const controllerKey = Symbol.for("firstmate:calm-assistant-layout-controller:pi-0.81.1");
+const priorController = {
+  render() {},
+  transform: (markdown) => markdown,
+  originalUpdateContent: AssistantMessageComponent.prototype.updateContent,
+  presentations: new WeakMap(),
+};
+const stockAssistantRender = AssistantMessageComponent.prototype.render;
+globalThis[controllerKey] = priorController;
+AssistantMessageComponent.prototype.updateContent = function (message, isStreaming = false) {
+  priorController.render(this, message, isStreaming);
+};
 const extension = await import(`${pathToFileURL(process.env.EXT).href}?test=${Date.now()}`);
 extension.default(pi);
+const upgradedAssistantRender = AssistantMessageComponent.prototype.render;
+if (upgradedAssistantRender === stockAssistantRender) {
+  throw new Error("Calm hot-upgrade did not install the assistant render boundary");
+}
+extension.default(pi);
+if (AssistantMessageComponent.prototype.render !== upgradedAssistantRender) {
+  throw new Error("reloading Calm replaced the assistant render boundary instead of reusing it");
+}
 const visibility = await import(`${pathToFileURL(`${process.cwd()}/lib/fm-calm-visibility.ts`).href}?policy=${Date.now()}`);
 const operationalInput = await import(`${pathToFileURL(`${process.cwd()}/lib/fm-operational-input.ts`).href}?input=${Date.now()}`);
 
@@ -1255,7 +1277,7 @@ for (const [index, component] of assistantBackgroundCases.entries()) {
     throw new Error(`Calm assistant background did not repaint case ${index} at narrow width`);
   }
 }
-if (expanded !== true || workingVisible !== true || hiddenThinkingLabel !== "" || statuses.get("firstmate-calm") !== undefined) {
+if (expanded !== true || workingVisible !== true || hiddenThinkingLabel !== "") {
   throw new Error("Calm did not preserve working visibility or apply its thinking and footer presentation controls");
 }
 if (readFileSync(`${process.env.FM_HOME}/config/calm`, "utf8") !== "on\n") {
@@ -1263,35 +1285,36 @@ if (readFileSync(`${process.env.FM_HOME}/config/calm`, "utf8") !== "on\n") {
 }
 await handlers.get("agent_start")[0]({}, commandContext);
 assistantProgress.updateContent(assistantProgressMessage, true);
-let progressText = statuses.get("firstmate-calm") ?? "";
-let commentaryText = assistantProgress.render(100).join("\n");
+let progressText = stripTerminalSequences(assistantProgress.render(100).join("\n"));
+let commentaryText = stripTerminalSequences(assistantProgress.render(100).join("\n"));
 if (assistantExpandedThinking.render(100).join("\n").includes("RAW_EXPANDED_THINKING")) {
   throw new Error("Calm's public Markdown transformer left expanded raw thinking visible");
 }
 if (
-  !progressText.includes("Step 1: CURRENT_STEP_FROM_ASSISTANT") ||
-  !commentaryText.includes("DURABLE_COMMENTARY_FROM_ASSISTANT") ||
-  commentaryText.includes("CURRENT_STEP_FROM_ASSISTANT")
+  progressText.includes("Step 1: CURRENT_STEP_FROM_ASSISTANT") ||
+  !commentaryText.includes("DURABLE_COMMENTARY_FROM_ASSISTANT")
 ) {
-  throw new Error(`Calm did not separate the current thinking title from durable commentary: ${progressText} / ${commentaryText}`);
+  throw new Error(`Calm put an intermediate step outside the completed assistant row: ${progressText} / ${commentaryText}`);
 }
 if (JSON.stringify([...widgets.keys()]) !== JSON.stringify(["firstmate-calm-working-ship"])) {
   throw new Error(`Calm did not retain only the working ship widget: ${[...widgets.keys()].join(",")}`);
 }
 assistantProgress.updateContent(nextAssistantProgressMessage, true);
-progressText = statuses.get("firstmate-calm") ?? "";
-commentaryText = assistantProgress.render(100).join("\n");
+progressText = stripTerminalSequences(assistantProgress.render(100).join("\n"));
+commentaryText = stripTerminalSequences(assistantProgress.render(100).join("\n"));
 if (
-  progressText !== "Step 1: CURRENT_STEP_FROM_ASSISTANT\nStep 2: NEXT_STEP_FROM_ASSISTANT" ||
+  progressText.includes("Step 1: CURRENT_STEP_FROM_ASSISTANT") ||
+  progressText.includes("Step 2: NEXT_STEP_FROM_ASSISTANT") ||
   (commentaryText.match(/DURABLE_COMMENTARY_FROM_ASSISTANT/g) || []).length !== 1
 ) {
-  throw new Error(`Calm did not accumulate compact steps while retaining commentary once: ${progressText} / ${commentaryText}`);
+  throw new Error(`Calm placed an accumulated step before completion: ${progressText} / ${commentaryText}`);
 }
-assistantProgress.updateContent(nextAssistantProgressMessage, false);
+assistantProgress.updateContent({ ...nextAssistantProgressMessage, stopReason: "stop" }, false);
 await handlers.get("agent_settled")[0]({}, commandContext);
-commentaryText = assistantProgress.render(100).join("\n");
+commentaryText = stripTerminalSequences(assistantProgress.render(100).join("\n"));
 if (
-  statuses.get("firstmate-calm") !== "Step 1: CURRENT_STEP_FROM_ASSISTANT\nStep 2: NEXT_STEP_FROM_ASSISTANT" ||
+  !commentaryText.includes("Step 1: CURRENT_STEP_FROM_ASSISTANT") ||
+  !commentaryText.includes("Step 2: NEXT_STEP_FROM_ASSISTANT") ||
   (commentaryText.match(/DURABLE_COMMENTARY_FROM_ASSISTANT/g) || []).length !== 1
 ) {
   throw new Error("Calm finalization did not retain the accumulated steps and commentary once");
@@ -1476,7 +1499,7 @@ if (JSON.stringify(imageRow.render(100)) !== JSON.stringify(imageVisibleBefore))
 if (JSON.stringify(watchActual.render(100)) !== JSON.stringify(watchBaseline.render(100))) {
   throw new Error("fm_watch_arm_pi did not restore its stock call/result shell");
 }
-if (workingVisible !== true || hiddenThinkingLabel !== undefined || statuses.get("firstmate-calm") !== undefined) {
+if (workingVisible !== true || hiddenThinkingLabel !== undefined) {
   throw new Error("turning Calm off did not restore stock presentation controls");
 }
 if (assistantThinkingTool.render(100).join("\n").includes("HIDDEN_TOOL_THINKING")) {
@@ -1505,7 +1528,7 @@ for (const reason of ["startup", "new", "resume", "fork", "reload"]) {
       throw new Error(`${reason} session did not retain the active Calm choice for ${name}`);
     }
   }
-  if (workingVisible !== true || hiddenThinkingLabel !== "" || statuses.get("firstmate-calm") !== undefined) {
+  if (workingVisible !== true || hiddenThinkingLabel !== "") {
     throw new Error(`${reason} session did not retain gapless Calm presentation with native working visibility`);
   }
 }
@@ -1519,7 +1542,7 @@ JS
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm renderer and lifecycle contract failed: $out"
   [ -z "$out" ] || fail "Pi calm renderer test printed output: $out"
-  pass "Pi Calm accumulates distinct thinking lines as compact status steps, keeps assistant commentary exactly once, never restores historical planning during Calm-off fallback, preserves execution/export data, leaves Pi's stock working row visible while idle, and persists its choice across session starts"
+  pass "Pi Calm renders distinct thinking lines as numbered display-only transcript content, keeps assistant commentary exactly once, never restores historical planning during Calm-off fallback, preserves execution/export data, leaves Pi's stock working row visible while idle, and persists its choice across session starts"
 }
 
 test_calm_mid_turn_working_notes() {
@@ -1701,7 +1724,7 @@ for (const [name, message] of Object.entries(messages)) {
   components.push(rows[name]);
 }
 const rendered = (name) => rows[name].render(100);
-const renderedText = (name) => rendered(name).join("\n");
+const renderedText = (name) => stripTerminalSequences(rendered(name).join("\n"));
 const snapshot = () => {
   const shot = {};
   for (const name of Object.keys(rows)) shot[name] = JSON.stringify(rendered(name));
@@ -1744,20 +1767,20 @@ const liveMessage = {
   content: [{ type: "thinking", thinking: "LIVE_STEP_ONE" }],
 };
 live.updateContent(liveMessage, true);
-if (statuses.get("firstmate-calm") !== "Step 1: LIVE_STEP_ONE") {
-  throw new Error(`Calm did not show the first streamed step: ${statuses.get("firstmate-calm")}`);
+if (stripTerminalSequences(live.render(100).join("\n")).includes("Step 1: LIVE_STEP_ONE")) {
+  throw new Error("Calm placed an intermediate step outside the completed assistant row");
 }
 live.updateContent(liveMessage, true);
-if (statuses.get("firstmate-calm") !== "Step 1: LIVE_STEP_ONE") {
+if (stripTerminalSequences(live.render(100).join("\n")).includes("Step 1: LIVE_STEP_ONE")) {
   throw new Error("Calm duplicated a repeated streaming update");
 }
 liveMessage.content[0].thinking = "LIVE_STEP_ONE\nLIVE_STEP_TWO";
 live.updateContent(liveMessage, true);
-if (statuses.get("firstmate-calm") !== "Step 1: LIVE_STEP_ONE\nStep 2: LIVE_STEP_TWO") {
-  throw new Error(`Calm did not accumulate compact numbered steps: ${statuses.get("firstmate-calm")}`);
-}
-if (statuses.get("firstmate-calm").includes("\n\n")) {
-  throw new Error("Calm inserted blank rows between accumulated steps");
+if (
+  stripTerminalSequences(live.render(100).join("\n")).includes("Step 1: LIVE_STEP_ONE") ||
+  stripTerminalSequences(live.render(100).join("\n")).includes("Step 2: LIVE_STEP_TWO")
+) {
+  throw new Error("Calm rendered accumulated steps before the assistant response completed");
 }
 const finalMessage = {
   ...assistantBase,
@@ -1765,30 +1788,33 @@ const finalMessage = {
   content: [{ type: "text", text: "LIVE_FINAL_REPLY" }],
 };
 live.updateContent(finalMessage, false);
-if (statuses.get("firstmate-calm") !== "Step 1: LIVE_STEP_ONE\nStep 2: LIVE_STEP_TWO") {
+if (
+  !stripTerminalSequences(live.render(100).join("\n")).includes("Step 1: LIVE_STEP_ONE") ||
+  !stripTerminalSequences(live.render(100).join("\n")).includes("Step 2: LIVE_STEP_TWO") ||
+  !stripTerminalSequences(live.render(100).join("\n")).includes("LIVE_FINAL_REPLY")
+) {
   throw new Error("Calm replaced the completed step list when the response ended");
 }
 await calm.agentSettled({}, context);
-if (statuses.get("firstmate-calm") !== "Step 1: LIVE_STEP_ONE\nStep 2: LIVE_STEP_TWO") {
+if (!stripTerminalSequences(live.render(100).join("\n")).includes("Step 2: LIVE_STEP_TWO")) {
   throw new Error("Calm cleared the completed step list at settlement");
 }
 await calm.agentStart({}, context);
-if (statuses.get("firstmate-calm") !== undefined) {
-  throw new Error("Calm restored steps from the previous run at the next agent start");
-}
 const nextLive = new AssistantMessageComponent(undefined, false);
 components.push(nextLive);
-nextLive.updateContent({
+const nextRunMessage = {
   ...assistantBase,
   stopReason: "toolUse",
   content: [{ type: "thinking", thinking: "NEXT_RUN_STEP" }],
-}, true);
-if (statuses.get("firstmate-calm") !== "Step 1: NEXT_RUN_STEP") {
+};
+nextLive.updateContent(nextRunMessage, true);
+nextLive.updateContent({ ...nextRunMessage, stopReason: "stop", content: [{ type: "text", text: "NEXT_RUN_FINAL" }] }, false);
+if (!stripTerminalSequences(nextLive.render(100).join("\n")).includes("Step 1: NEXT_RUN_STEP")) {
   throw new Error("Calm did not reset step numbering for the next run");
 }
 await calm.agentSettled({}, context);
 await calm.calmCommand.handler("", context);
-if (statuses.get("firstmate-calm") !== undefined) {
+if (stripTerminalSequences(nextLive.render(100).join("\n")).includes("Step 1: NEXT_RUN_STEP")) {
   throw new Error("turning Calm off did not clear its completed step list");
 }
 await calm.calmCommand.handler("", context);
@@ -1902,7 +1928,7 @@ JS
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm mid-turn contract failed: $out"
   [ -z "$out" ] || fail "Pi calm mid-turn test printed output: $out"
-  pass "Pi Calm keeps assistant commentary exactly once while steps accumulate and settle, suppresses persisted and expanded superseded titles across reload and repeated Calm toggles, preserves final replies and message data, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on"
+  pass "Pi Calm keeps assistant commentary exactly once while transcript steps accumulate and settle, suppresses persisted and expanded superseded titles across reload and repeated Calm toggles, preserves final replies and message data, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on"
 }
 
 test_operational_followup_turn_e2e() {
@@ -2417,8 +2443,8 @@ TS
     [ -n "$skill_line" ] && [ -n "$final_line" ] \
       || fail "$label did not render the collapsed skill row and final assistant response"
     gap=$((final_line - skill_line - 1))
-    [ "$gap" -eq 2 ] \
-      || fail "$label left $gap rows between the collapsed skill row and final response instead of the two standard visible-row separators"
+    [ "$gap" -ge 2 ] \
+      || fail "$label collapsed the final response into the skill row instead of leaving the standard visible-row separators"
   }
 
   start_geometry_pi "--session-dir '$sessions'"

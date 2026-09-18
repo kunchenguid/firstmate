@@ -222,7 +222,7 @@ The test fixture enumerates every class below through the centralized policy, an
 | `genuine-user-prompt` | `UserMessageComponent` | Visible, including every tested operational near miss. |
 | `genuine-agent-response` | Assistant text in `AssistantMessageComponent` | Visible. |
 | `assistant-working-note` | Assistant text in an `AssistantMessageComponent` message that also carries a tool call | Visible through Pi's ordinary assistant component while streaming and after settlement, exactly once from the original message rather than a copied custom entry (verified on Pi 0.85.1). |
-| `assistant-thinking` | Thinking content in `AssistantMessageComponent` | While Calm is active, the display-only Markdown transformer suppresses raw thinking across live, restored, reflowed, and bundled CLI paths, while a shallow component projection removes residual spacing and the above-editor status presentation accumulates distinct streamed thinking lines as compact numbered `Step N:` rows; the completed list survives settlement and resets at the next run or lifecycle boundary, while message data and stock export rendering retain the original reasoning. |
+| `assistant-thinking` | Thinking content in `AssistantMessageComponent` | While Calm is active, the display-only Markdown transformer suppresses raw thinking across live, restored, reflowed, and bundled CLI paths, while a shallow component projection removes residual spacing and the single assistant render boundary projects distinct streamed thinking lines as compact numbered `Step N:` rows on the completed active assistant response; the display-only list resets at the next run or lifecycle boundary, while message data and stock export rendering retain the original reasoning. |
 | `assistant-tool-call` | `ToolExecutionComponent` | Every built-in and custom model-tool call, its arguments, timing, and collapsed shell render at zero height through the component boundary. |
 | `tool-result` | `ToolExecutionComponent` | Every built-in and custom model-tool result renders at zero height through the same boundary. |
 | `tool-image` | Image children appended by `ToolExecutionComponent` | Hidden with the complete owning component. |
@@ -601,8 +601,8 @@ ok - a missing Markdown-transform presentation API degrades only that Calm adapt
 ok - missing Pi presentation APIs reach the independent adapter degradation path
 ok - Calm claims no built-in tool names in either state because one reload-stable ToolExecution render boundary owns old and new rows
 ok - Calm claims no tool definitions, retroactively collapses arbitrary rows constructed while off, restores them off, and leaves a foreign bash tool intact and callable
-ok - Pi Calm accumulates distinct thinking lines as compact status steps, keeps assistant commentary exactly once, never restores historical planning during Calm-off fallback, preserves execution/export data, leaves Pi's stock working row visible while idle, and persists its choice across session starts
-ok - Pi Calm keeps assistant commentary exactly once across step replacement and finalization, suppresses persisted and expanded superseded titles across reload and repeated Calm toggles, preserves final replies and message data, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on
+ok - Pi Calm renders distinct thinking lines as numbered display-only transcript content, keeps assistant commentary exactly once, never restores historical planning during Calm-off fallback, preserves execution/export data, leaves Pi's stock working row visible while idle, and persists its choice across session starts
+ok - Pi Calm keeps assistant commentary exactly once while transcript steps accumulate and settle, suppresses persisted and expanded superseded titles across reload and repeated Calm toggles, preserves final replies and message data, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on
 ok - Pi operational follow-up E2E processes exact user-role notifications once while Calm hides current and adjacent rows, Calm off and absent render them, and restart preserves semantics
 ok - Pi Calm native /skill:ahoy geometry keeps every collapsed thinking and tool block at zero height while preserving expansion, history, restart, and Calm-off rendering
 ok - Pi Calm working ship keeps its centered two-row asymmetric Unicode boat inside a deterministic long-wave trough, preserves blue water through the hull, uses standard blue/cyan/yellow/red with balanced resets, keeps ANSI-stripped width exact, reverses cleanly at both edges and every width, clamps visible and hidden resizes, falls back deterministically when narrow, freezes and resumes across settle/start without hidden-time jumps or duplicate timers, resets only on a fresh session, and leaves Calm-off visibility untouched
@@ -610,22 +610,22 @@ ok - the rendered-export-DOM guard renders in one pass, retries a bounded number
 ok - Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior
 ```
 
-## 2026-09-16 Pi 0.85.1 live intermediate-step verification (historical current-step implementation)
+## 2026-09-18 Pi 0.85.1 live completed-step verification
 
 The live Calm regression ran against Pi 0.85.1 in an isolated Herdr lab session.
 It first loaded the legacy assistant wrapper that a long-lived process retained, replaced the source with the current adapter, invoked Pi's real `/reload`, and then used a deterministic provider to stream three assistant messages containing thinking, commentary, and a tool call before a final response.
-Pi 0.85.1's interactive layout renders the transcript document before the above-editor status presentation.
-Calm therefore leaves assistant text in the original `AssistantMessageComponent`, appends each distinct streamed thinking line to the compact status list, and never appends a custom transcript entry or mutates the assistant message.
+Pi 0.85.1's interactive layout renders the transcript document before the editor.
+Calm therefore leaves assistant text in the original `AssistantMessageComponent`, projects each distinct streamed thinking line as hard-break display-only content on the completed active assistant row, and never appends a custom transcript entry or mutates the assistant message.
 
 ```text
 $ FM_CALM_PI_HERDR_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-calm-pi-herdr-live-e2e.test.sh
-ok - historical real Pi 0.85.1 Herdr evidence upgraded the retained prior Calm controller through /reload, kept each commentary row once across three replacing numbered steps, hid thinking placeholders and read rows, ordered commentary and the current step above the ship, and settled with only the final answer
+ok - real Pi 0.85.1 in Herdr upgraded the retained prior Calm controller through /reload, kept each commentary row once beside accumulated numbered transcript steps, hid thinking placeholders and read rows, and settled with the completed steps attached to the final answer
 ```
 
-The deterministic test observed compact adjacent numbered status lines around all three tool calls, verified that each assistant text block stayed on the ordinary transcript exactly once while steps accumulated and after finalization, and confirmed the completed list remained above the editor.
+The deterministic test observed the accumulated numbered lines on the ordinary assistant transcript after completion, verified that each assistant text block stayed exactly once, and confirmed the list remained in the main transcript rather than the input area.
 It also verified that the next run reset the step list while retaining commentary, and that the original planning, commentary, and tool content remained in the persisted session transcript.
 The historical credentialed companion test used the same four Firstmate extensions with the real `openai-codex/gpt-5.6-sol` model at `xhigh`, the existing authenticated user Pi configuration, and isolated Firstmate state plus session output.
-It externally reads every Herdr pane frame, refuses any frame with more than one numbered row, requires at least two distinct numbered steps, proves commentary remains exactly once above the current step and ship, then reloads and performs two Calm off/on cycles with reasoning and tool expansion enabled.
+It externally reads every Herdr pane frame, requires at least two distinct numbered steps in the completed assistant row, proves commentary remains exactly once, captures Calm's magenta ANSI background, then reloads twice and performs two Calm off/on cycles with reasoning and tool expansion enabled.
 Every settled lifecycle frame must omit each captured historical title while retaining all three commentary rows and the final answer exactly once; Calm-off frames must restore the real tool output and each following Calm-on frame must suppress it again.
 
 ```text
