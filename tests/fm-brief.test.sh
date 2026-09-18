@@ -438,6 +438,10 @@ test_ship_project_memory_wording() {
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "$home/data/agents/some-proj.md" "$brief" \
     "project-memory contract lost the active home's central agent-memory path"
+  assert_grep "2. Stay inside this worktree; the only files you may write outside it are the status file and inbox acknowledgements below, and the active home's central agent-memory file \`$home/data/agents/some-proj.md\`." "$brief" \
+    "ship rule 2 must itself name the home central agent-memory file as an out-of-worktree write"
+  assert_no_grep "2. Stay inside this worktree; modify nothing outside it." "$brief" \
+    "ship rule 2 still forbids every out-of-worktree write the same brief directs"
   assert_grep "Record only project knowledge useful to almost every future session." "$brief" \
     "project-memory contract lost the durable-knowledge bar"
   assert_grep "prefer a pointer to the authoritative file, command, or doc over copying the detail" "$brief" \

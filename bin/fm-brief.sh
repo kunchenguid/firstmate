@@ -68,7 +68,9 @@
 # (convention owned by that directory's README.md); it carries the authoring bar
 # (widely useful knowledge only, pointers over copied detail, proportionate skip)
 # and the standing ban on creating or editing agent memory files inside the
-# project repo.
+# project repo. Ship rule 2 grants that write itself: it names the status file,
+# the inbox acknowledgements, and the home central agent-memory file as the only
+# paths a ship worker may write outside its worktree, mirroring scout rule 2.
 # Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
 # fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
 # second owner of a contract that must stay current across relaunches.
@@ -467,7 +469,7 @@ If the top-level path is the primary checkout or not the worktree you were launc
 
 # Rules
 $RULE1
-2. Stay inside this worktree; modify nothing outside it.
+2. Stay inside this worktree; the only files you may write outside it are the status file and inbox acknowledgements below, and the active home's central agent-memory file \`$FM_HOME/data/agents/$REPO.md\`.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
