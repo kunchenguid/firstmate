@@ -37,9 +37,13 @@
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
+#   agy-hook         agy's global hooks.json (PreInvocation open, Stop close),
+#                    attributed to this task by its private turn-end token
 # Firstmate-owned sources accepted for every converted adapter:
 #   fm-spawn         the launch-brief turn seeded at spawn
-#   fm-interrupt     the legacy Claude fm-send --key Escape idle event
+#   fm-interrupt     the Claude fm-send --key Escape and fm-control interrupt
+#                    idle event, for adapters whose own hook cannot fire on a
+#                    manual interrupt
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
 #   endpoint-gone, herdr-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
@@ -54,14 +58,16 @@
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
 #      muse session-log and cursor transcript pull sources, then the
-#      Grok/Rovo/AGY temporary regex fallbacks classify a grok, rovo, or agy
+#      Grok/Rovo/AGY regex fallbacks classify a grok, rovo, or agy
 #      task from its rendered tail, then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
 # Grok, Rovo, and AGY are the ONLY rendered-text classifications that survive the
-# redesign, because none of their structured lifecycles was credited-live-verified
-# in the approved audit (Rovo's clean ACP stopReason lives outside the TUI
-# path firstmate drives, see references/harness/rovo.md; agy 1.2.0 exposes no
-# hook surface at all, see references/harness/agy.md); each is scoped to
+# redesign, because neither grok's nor rovo's structured lifecycle was
+# credited-live-verified in the approved audit (Rovo's clean ACP stopReason lives
+# outside the TUI path firstmate drives, see references/harness/rovo.md), while
+# agy's hook IS armed and its regex arm is only the no-record fallback that
+# covers an interrupt and the window before the first hook fires, see
+# references/harness/agy.md; each is scoped to
 # its own harness= and can never classify another adapter. The delivery
 # guards in bin/fm-composer-lib.sh match rendered footers for submit
 # acknowledgement and away-mode supervisor injection only; neither is a
@@ -204,6 +210,7 @@ fm_busy_sources_for_harness() {  # <harness>
       fm_busy_kimi_verified || { printf ''; return 0; }
       adapter='kimi-wire kimi-hook'
       ;;
+    agy) adapter=agy-hook ;;
     *) printf ''; return 0 ;;
   esac
   printf '%s fm-spawn fm-interrupt fm-recovery' "$adapter"
@@ -859,9 +866,11 @@ fm_busy_rovo_tail_busy() {
 # shows `? for shortcuts` instead). The `Generating...` spinner word that
 # renders beside it is deliberately NOT matched: it is a free-floating output
 # line, so ordinary worker output echoing the word would classify an idle
-# worker as busy. agy exposes no hook surface, so this fallback is the only
-# pane-side source; it is never armed as a semantic writer
-# (fm_busy_sources_for_harness trusts nothing for agy).
+# worker as busy (agy 1.2.6 renders `Working...` there instead, which is why
+# neither word is load-bearing). This fallback is RETAINED alongside the armed
+# agy-hook writer rather than replaced by it: fm_busy_classify reaches this arm
+# only when no record exists, which is the window before the first hook fires
+# and after an incarnation is retired.
 fm_busy_agy_tail_busy() {
   grep -v '^[[:space:]]*$' | tail -12 \
     | grep -qiE 'esc[[:space:]]+to[[:space:]]+cancel'
