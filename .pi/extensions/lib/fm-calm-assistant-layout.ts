@@ -21,10 +21,7 @@ import {
 } from "./fm-calm-visibility.ts";
 
 const CALM_ASSISTANT_BACKGROUND = "\x1b[48;2;36;24;32m";
-const stripTerminalSequences = (text: string): string =>
-  text
-    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
-    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+const CALM_ASSISTANT_BACKGROUND_RESET = "\x1b[49m";
 
 type AssistantMessage = Parameters<PiAssistantMessageComponent["updateContent"]>[0];
 
@@ -154,10 +151,9 @@ export function installCalmAssistantLayout(
   activeController.assistantRender = (_component, width): string[] => {
     const lines = activeController.originalRender.call(_component, width);
     if (!calmPresentationHides("assistant-thinking") || lines.length === 0) return lines;
-    return lines.map((line) =>
-      stripTerminalSequences(line).trim() === ""
-        ? line
-        : `${CALM_ASSISTANT_BACKGROUND}${line}\x1b[49m`,
+    return lines.map(
+      (line) =>
+        `${CALM_ASSISTANT_BACKGROUND}${line}${CALM_ASSISTANT_BACKGROUND}${CALM_ASSISTANT_BACKGROUND_RESET}`,
     );
   };
 

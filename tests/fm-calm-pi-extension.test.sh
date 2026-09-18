@@ -1194,6 +1194,10 @@ const assistantBackgroundCases = [
     ...assistantBase,
     content: [{ type: "text", text: "First paragraph.\n\nSecond paragraph.\n\n```ts\nconst background = true;\n```" }],
   }, true, undefined, "Thinking...", 1, markdownTransformers),
+  new AssistantMessageComponent({
+    ...assistantBase,
+    content: [{ type: "text", text: "trailing reset \x1b[0m" }],
+  }, true, undefined, "Thinking...", 1, markdownTransformers),
 ];
 const assistantStockRenders = assistantBackgroundCases.map((component) => component.render(100));
 let expanded = true;
@@ -1277,12 +1281,11 @@ for (const [index, component] of assistantBackgroundCases.entries()) {
   if (JSON.stringify(rendered.map(stripTerminalSequences)) !== JSON.stringify(stock.map(stripTerminalSequences))) {
     throw new Error(`Calm assistant background changed visible content for case ${index}`);
   }
-  const visibleLines = rendered.filter((line) => stripTerminalSequences(line).trim() !== "");
-  if (visibleLines.some((line) => !line.includes(assistantBackground) || !line.endsWith("\x1b[49m"))) {
+  if (rendered.some((line) => !line.includes(assistantBackground) || !line.endsWith("\x1b[49m"))) {
     throw new Error(`Calm assistant background missing or unclosed for case ${index}`);
   }
   const narrow = component.render(40);
-  if (narrow.some((line) => stripTerminalSequences(line).trim() !== "" && !line.includes(assistantBackground))) {
+  if (narrow.some((line) => !line.includes(assistantBackground) || !line.endsWith("\x1b[49m"))) {
     throw new Error(`Calm assistant background did not repaint case ${index} at narrow width`);
   }
 }

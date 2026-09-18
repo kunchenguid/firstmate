@@ -20,6 +20,7 @@ A fresh Pi session or new Calm extension lifetime starts at the normal initial p
 Very narrow terminals fall back to a smaller deterministic sprite.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
 Calm hides collapsed thinking labels, the mid-turn assistant working-note blocks governed by the shared preservation rule above, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` and `fm_branch_outcomes` tool shells, and canonically classified Firstmate operational user rows.
+Visible assistant messages receive a display-only muted-purple background across every rendered row, including blank Markdown separators and wrapped code rows, while preserving the stock message width and spacing.
 Pi applies that rule independently to each text block, so a short working note can hide beside preserved substantive content in the same message.
 A working note is briefly visible while it streams before its settled row collapses, except inside a typed Firstmate operational run, whose working ship, assistant reasoning, working text, tool residue, errors, and no-op acknowledgement remain at zero height for the whole run.
 A genuine intervention discovered by an operational run renders exactly one clean final human response, with no internal reasoning or envelope.

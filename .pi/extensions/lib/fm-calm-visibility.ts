@@ -87,6 +87,10 @@ export function calmPresentationIsActive(): boolean {
   return calm;
 }
 
+export function calmPresentationIsStockExportRendering(): boolean {
+  return stockExportRendering;
+}
+
 export function calmPresentationHides(itemClass: CalmTranscriptClass): boolean {
   return calm && !stockExportRendering && !calmTranscriptClassIsVisible(itemClass);
 }
