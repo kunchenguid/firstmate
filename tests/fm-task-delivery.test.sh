@@ -42,11 +42,11 @@ make_home() {  # <name> [<registry-line>...]
   printf '%s\n' "$home|$projects/proj|$fakebin"
 }
 
-write_brief() {  # <home> <id> [<recorded-mode>] [<recorded-base>]
-  local home=$1 id=$2 mode=${3:-} base=${4:-}
+write_brief() {  # <home> <id> [<recorded-mode>] [<recorded-base>] [<intent-prose>]
+  local home=$1 id=$2 mode=${3:-} base=${4:-} intent=${5:-Exercise the delivery contract.}
   mkdir -p "$home/data/$id"
   {
-    printf 'You are a crewmate.\n\n# Task\n## Captain'\''s intent\nExercise the delivery contract.\n\n## Firstmate spec\nVerify the selected delivery behavior.\n\n# Definition of done\n'
+    printf 'You are a crewmate.\n\n# Task\n## Captain'\''s intent\n%s\n\n## Firstmate spec\nVerify the selected delivery behavior.\n\n# Definition of done\n' "$intent"
     if [ -n "$mode" ]; then
       if [ -n "$base" ]; then
         printf 'Delivery contract: mode=%s base=%s\n' "$mode" "$base"
@@ -253,6 +253,54 @@ EOF
   assert_contains "$out" "records no delivery contract line" "a legacy brief did not warn about its missing contract"
   assert_not_contains "$out" "delivery mismatch" "a legacy brief was treated as a mismatch"
   pass "fm-spawn: the brief's recorded mode and the spawn's explicit mode must agree"
+}
+
+# A brief's Task and Firstmate spec prose is hand-adjustable and renders ABOVE the
+# generated contract line, which fm-brief.sh emits last. A task about delivery itself
+# legitimately quotes the words "Delivery contract: " there, so the guard must read
+# the line that actually records a mode. Reading the first line that merely shares the
+# prefix degrades both agreement checks to the scaffolded-before-contract warning and
+# launches a worker on any --mode/--base, which is the drift this guard exists to stop.
+test_brief_prose_cannot_shadow_the_generated_contract_line() {
+  local rec home proj fakebin out status shadow
+  rec=$(make_home contract-shadow)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  shadow='Delivery contract: land this on the release branch per the captain.'
+
+  # A mode disagreement must still refuse rather than degrade to the legacy warning.
+  write_brief "$home" delivery-shadow-f1 local-only rel/2026.9 "$shadow"
+  out=$(run_spawn "$home" "$fakebin" delivery-shadow-f1 "$proj" claude --mode direct-PR --yolo off --base rel/2026.9)
+  status=$?
+  [ "$status" -ne 0 ] || fail "prose sharing the contract prefix let a mode mismatch launch"
+  assert_contains "$out" "the brief says mode=local-only but this spawn passed --mode direct-PR" \
+    "the guard read the prose line instead of the generated contract line"
+  assert_not_contains "$out" "records no delivery contract line" \
+    "a brief that records a contract was reported as scaffolded before contracts existed"
+  assert_absent "$home/state/delivery-shadow-f1.meta" "a shadowed mode mismatch wrote task metadata"
+
+  # The base axis is read from that same line, so it must survive the prose too.
+  write_brief "$home" delivery-shadow-f2 local-only rel/2026.9 "$shadow"
+  out=$(run_spawn "$home" "$fakebin" delivery-shadow-f2 "$proj" claude --mode local-only --yolo off --base feat/other)
+  status=$?
+  [ "$status" -ne 0 ] || fail "prose sharing the contract prefix let a base mismatch launch"
+  assert_contains "$out" "the brief says base=rel/2026.9 but this spawn passed base=feat/other" \
+    "the guard did not read the generated contract line's recorded base"
+
+  # Agreement on both axes still clears the check and only fails later, at the refusing tmux.
+  write_brief "$home" delivery-shadow-f3 local-only rel/2026.9 "$shadow"
+  out=$(run_spawn "$home" "$fakebin" delivery-shadow-f3 "$proj" claude --mode local-only --yolo off --base rel/2026.9)
+  assert_not_contains "$out" "delivery mismatch" "an agreeing contract behind prose was reported as a mismatch"
+  assert_not_contains "$out" "records no delivery contract line" "an agreeing contract behind prose was read as absent"
+
+  # And a brief that genuinely records no contract still warns and launches, even
+  # when its prose carries the prefix.
+  write_brief "$home" delivery-shadow-f4 '' '' "$shadow"
+  out=$(run_spawn "$home" "$fakebin" delivery-shadow-f4 "$proj" claude --mode local-only --yolo off)
+  assert_contains "$out" "records no delivery contract line" "prose was accepted as a recorded contract line"
+  assert_not_contains "$out" "delivery mismatch" "a brief with no contract line was treated as a mismatch"
+  pass "fm-spawn: brief prose cannot shadow the generated delivery contract line"
 }
 
 # The recorded delivery target branch is only useful if it reaches the durable task
@@ -1054,6 +1102,7 @@ test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_refuses_a_brief_base_mismatch
+test_brief_prose_cannot_shadow_the_generated_contract_line
 test_relaunch_refuses_a_contradicting_delivery_target_branch
 test_spawn_records_the_delivery_target_branch_in_the_task_record
 test_spawn_notices_a_rigor_downgrade_against_the_registry

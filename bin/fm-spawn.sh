@@ -2668,7 +2668,7 @@ delivery_rigor_rank() { # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task 
 # disagreement, not a missing record.
 if [ "$KIND" = ship ]; then
   PROJ_NAME=$(basename "$PROJ_ABS")
-  BRIEF_CONTRACT=$(sed -n 's/^Delivery contract: //p' "$BRIEF" | head -n 1)
+  BRIEF_CONTRACT=$(sed -n 's/^Delivery contract: \(mode=.*\)$/\1/p' "$BRIEF" | head -n 1)
   BRIEF_MODE=$(printf '%s\n' "$BRIEF_CONTRACT" | sed -n 's/^mode=\([^ ]*\).*$/\1/p')
   BRIEF_BASE=$(printf '%s\n' "$BRIEF_CONTRACT" | sed -n 's/.*[[:space:]]base=\([^ ]*\).*$/\1/p')
   if [ -z "$BRIEF_MODE" ]; then
