@@ -11,12 +11,13 @@
 #
 # Container shape (Paseo's hierarchy is project > workspace > terminal tab):
 # ONE Paseo workspace PER PROJECT, labeled `firstmate` (or `2ndmate-<id>`),
-# adopted by (cwd, title) or created once, holding ONE terminal tab PER
-# TASK. The adapter never runs a `paseo project ...` command: Paseo
-# registers or reuses the project by path when the workspace is created, so
-# a fleet of tasks shows up as tabs under one sidebar entry instead of one
-# workspace (or project) per task. The daemon (127.0.0.1:6767 by default,
-# `paseo status`) is the shared container.
+# adopted (fm_backend_paseo_workspace_ensure owns the order) or created
+# once, holding ONE terminal tab PER TASK. The adapter never runs a
+# `paseo project ...` command: Paseo registers or reuses the project by
+# path when the workspace is created, so a fleet of tasks shows up as tabs
+# under one sidebar entry instead of one workspace (or project) per task.
+# The daemon (127.0.0.1:6767 by default, `paseo status`) is the shared
+# container.
 #
 # Target string shape: "<terminal_id>:<workspace_id>" - the terminal's UUID
 # plus the workspace's `wks_...` id, neither of which contains a colon, so

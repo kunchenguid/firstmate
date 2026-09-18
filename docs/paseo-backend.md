@@ -43,7 +43,7 @@ When Firstmate itself runs inside a Paseo tab, `PASEO_WORKSPACE_ID` names that t
 ## Task shape and metadata
 
 Paseo's sidebar is project > workspace > terminal tab, and Firstmate uses one shared workspace per project with one tab per task, the same container shape as Herdr.
-The shared workspace is titled `firstmate` (or `2ndmate-<id>` for a secondmate home), created once with `workspace create --path <project> --isolation local --title <label>` and adopted on later spawns by matching that cwd and title in `workspace ls`.
+The shared workspace is titled `firstmate` (or `2ndmate-<id>` for a secondmate home), created once with `workspace create --path <project> --isolation local --title <label>` and adopted on later spawns by matching that cwd and title in `workspace ls`, unless Firstmate's own Paseo tab workspace is adopted first (see "Selection is explicit").
 The adapter never runs a `paseo project` command: Paseo registers or reuses the project by path when the workspace is created, so a fleet of tasks appears as tabs under one sidebar entry rather than as one workspace or one project per task.
 Agents running inside a task tab may open further tabs or workspaces of their own; nothing in the adapter depends on them.
 
