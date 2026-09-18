@@ -58,7 +58,6 @@ import {
   calmPresentationHides,
   calmPresentationIsActive,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
-  installCalmSyntheticEntryPlaceholder,
   registerFirstmateSyntheticPresentation,
   setCalmPresentation,
   setCalmStockExportRendering,
@@ -123,7 +122,6 @@ function installCalmPresentationAdapter(name: string, install: () => void): void
 export default function (pi: ExtensionAPI) {
   installCalmPresentationAdapter("collapsed-thinking", installCalmAssistantLayout);
   installCalmPresentationAdapter("operational-user-row", installCalmOperationalUserLayout);
-  installCalmPresentationAdapter("synthetic-entry", installCalmSyntheticEntryPlaceholder);
 
   let exportRendering = false;
   let removeTerminalInputHandler: (() => void) | undefined;

@@ -398,8 +398,7 @@ test_pi_compat_missing_adapter_exports() {
   fixture="$TMP_ROOT/missing-adapter-exports"
   mkdir -p \
     "$fixture/project/.pi/extensions/lib" \
-    "$fixture/project/node_modules/@earendil-works/pi-coding-agent" \
-    "$fixture/project/node_modules/@earendil-works/pi-tui"
+    "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
   cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
   cp "$PRESERVATION" "$fixture/project/.pi/extensions/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
@@ -415,22 +414,13 @@ test_pi_compat_missing_adapter_exports() {
     'export function getMarkdownTheme() { return {}; }' \
     'export class UserMessageComponent {}' \
     >"$fixture/project/node_modules/@earendil-works/pi-coding-agent/index.js"
-  printf '%s\n' \
-    '{"name":"@earendil-works/pi-tui","type":"module","exports":"./index.js"}' \
-    >"$fixture/project/node_modules/@earendil-works/pi-tui/package.json"
-  printf '%s\n' \
-    'export class Container {}' \
-    >"$fixture/project/node_modules/@earendil-works/pi-tui/index.js"
 
   out=$(cd "$fixture/project" && node --input-type=module 2>&1 <<'JS'
 const assistant = await import("./.pi/extensions/lib/fm-calm-assistant-layout.ts");
 const operational = await import("./.pi/extensions/lib/fm-calm-operational-user-layout.ts");
-const visibility = await import("./.pi/extensions/lib/fm-calm-visibility.ts");
-
 for (const [name, install, expected] of [
   ["collapsed-thinking", assistant.installCalmAssistantLayout, "AssistantMessageComponent"],
   ["operational-user-row", operational.installCalmOperationalUserLayout, "InteractiveMode"],
-  ["synthetic-entry", visibility.installCalmSyntheticEntryPlaceholder, "InteractiveMode"],
 ]) {
   let reason;
   try {
@@ -1828,191 +1818,6 @@ JS
   [ "$status" -eq 0 ] || fail "Pi calm mid-turn contract failed: $out"
   [ -z "$out" ] || fail "Pi calm mid-turn test printed output: $out"
   pass "Pi calm on collapses mid-turn assistant working notes to zero height while an explicit off keeps them, leaves streaming, truncated-final, and genuine final replies untouched, never mutates the messages, ignores every /calm argument, restores an absent or unrecognized preference as ordinary Calm on, and restores a legacy persisted max the same way"
-}
-
-test_synthetic_entry_restore_hidden_toggle() {
-  local fixture out output_file status version
-  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-    echo "skip: node or npm not found for Pi calm synthetic-entry test"
-    return 0
-  fi
-  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
-    echo "skip: installed @earendil-works/pi-coding-agent package not found"
-    return 0
-  fi
-  version=$(node -p "require('$PI_PACKAGE_DIR/package.json').version")
-  record_pi_version_evidence "$version" "Pi calm synthetic-entry restoration"
-
-  fixture="$TMP_ROOT/synthetic-restore"
-  # No config/calm file: Calm resolves on by default, so the synthetic row below
-  # restores hidden, which is exactly the construction Pi refuses to mount.
-  mkdir -p "$fixture/home/config" "$fixture/lib" "$fixture/node_modules/@earendil-works"
-  cp "$EXT" "$fixture/fm-calm.ts"
-  cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
-  cp "$PRESERVATION" "$fixture/lib/fm-calm-preservation.ts"
-  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
-  cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
-  cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
-  cp "$WORKING_SHIP_SPRITE" "$fixture/lib/fm-calm-working-ship-sprite.ts"
-  cp "$PI_OPERATIONAL_INPUT" "$fixture/lib/fm-operational-input.ts"
-  ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
-  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
-  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
-  printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
-
-  output_file="$fixture/node-output"
-  (cd "$fixture" && EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module) >"$output_file" 2>&1 <<'JS'
-import { writeFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-
-const packageRoot = process.env.PI_PACKAGE_DIR;
-const [{ InteractiveMode }, { initTheme }, { setCapabilities }] = await Promise.all([
-  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/interactive-mode.js`).href),
-  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
-  import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
-]);
-initTheme("dark");
-setCapabilities({ images: null, trueColor: true, hyperlinks: false });
-
-// Read the method off the prototype at each call: loading Calm patches it, so a
-// reference captured before the load would drive the unpatched original.
-function addEntry(mode, entry) {
-  const addCustomEntryToChat = InteractiveMode.prototype.addCustomEntryToChat;
-  if (typeof addCustomEntryToChat !== "function") {
-    throw new Error("installed Pi has no InteractiveMode.addCustomEntryToChat for the placeholder to probe");
-  }
-  addCustomEntryToChat.call(mode, entry);
-}
-
-const entryRenderers = new Map();
-// Drive the same seam Pi drives at restore and on entry_appended: the real prototype
-// method with a stub presentation surface, so the placeholder and the expansion
-// round-trip below are Pi's own code paths, not a reimplementation.
-function stubMode() {
-  const children = [];
-  return {
-    chatContainer: {
-      children,
-      addChild(component) { children.push(component); },
-      removeChild(component) {
-        const index = children.indexOf(component);
-        if (index !== -1) children.splice(index, 1);
-      },
-    },
-    toolOutputExpanded: false,
-    streamingComponent: undefined,
-    session: { extensionRunner: { getEntryRenderer: (customType) => entryRenderers.get(customType) } },
-  };
-}
-
-const ui = {
-  getEditorText: () => "",
-  getToolsExpanded: () => false,
-  notify() {},
-  onTerminalInput: () => () => {},
-  setHiddenThinkingLabel() {},
-  setStatus() {},
-  setToolsExpanded() {},
-  setWidget() {},
-  setWorkingVisible() {},
-};
-const context = { ui };
-async function loadCalmExtension() {
-  let sessionStart;
-  const pi = {
-    events: { emit() {}, on() {} },
-    on(event, handler) {
-      if (event === "session_start") sessionStart = handler;
-    },
-    registerCommand() {},
-    registerEntryRenderer(customType, renderer) {
-      entryRenderers.set(customType, renderer);
-    },
-    registerTool() {},
-    getAllTools() {
-      return [];
-    },
-  };
-  const extension = await import(`${pathToFileURL(process.env.EXT).href}?synthetic=${Date.now()}-${Math.random()}`);
-  extension.default(pi);
-  if (!sessionStart) throw new Error("Calm extension did not register its session handler");
-  return { sessionStart };
-}
-
-const SYNTHETIC_TYPE = "firstmate-synthetic-input-presentation";
-const calm = await loadCalmExtension();
-const renderer = entryRenderers.get(SYNTHETIC_TYPE);
-if (typeof renderer !== "function") {
-  throw new Error("Calm did not register its synthetic entry renderer");
-}
-const entry = { type: "custom", customType: SYNTHETIC_TYPE, data: { content: "SYNTHETIC_RESTORE_PROBE", kind: "watcher" } };
-
-// Restore while on, after the session_start Pi always emits before its initial
-// render: Pi mounts nothing, so Calm must hold the row's place.
-await calm.sessionStart({ reason: "startup" }, context);
-const mode = stubMode();
-addEntry(mode, entry);
-if (mode.chatContainer.children.length !== 1) {
-  throw new Error(`restore-while-on mounted ${mode.chatContainer.children.length} rows instead of one placeholder`);
-}
-const decoy = { render: () => ["DECOY_ROW"] };
-mode.chatContainer.addChild(decoy);
-const standIn = mode.chatContainer.children[0];
-if (standIn.render(80).length !== 0) {
-  throw new Error("restored-hidden synthetic row was not zero height");
-}
-if (standIn.render(80).join("\n").includes("SYNTHETIC_RESTORE_PROBE")) {
-  throw new Error("restored-hidden synthetic row leaked its content");
-}
-if (typeof standIn.setExpanded !== "function") {
-  throw new Error("the placeholder is not expandable, so a toggle round-trip cannot reach it");
-}
-
-// Toggle off through the persisted preference and Pi's own expansion round-trip.
-writeFileSync(`${process.env.FM_HOME}/config/calm`, "off\n");
-await calm.sessionStart({ reason: "startup" }, context);
-standIn.setExpanded(true);
-standIn.setExpanded(false);
-if (mode.chatContainer.children.length !== 2) {
-  throw new Error("toggle-off changed the row count instead of swapping the row in place");
-}
-if (mode.chatContainer.children.includes(standIn)) {
-  throw new Error("toggle-off left the placeholder mounted alongside the real row");
-}
-const [restored, after] = mode.chatContainer.children;
-if (after !== decoy) throw new Error("toggle-off moved the neighboring row");
-if (!restored.render(80).join("\n").includes("SYNTHETIC_RESTORE_PROBE")) {
-  throw new Error("toggle-off did not restore the synthetic row in place");
-}
-
-// Toggle back on: the real row hides again through Pi's own rebuild.
-writeFileSync(`${process.env.FM_HOME}/config/calm`, "on\n");
-await calm.sessionStart({ reason: "startup" }, context);
-restored.setExpanded(true);
-restored.setExpanded(false);
-if (restored.render(80).length !== 0) {
-  throw new Error("toggle-on left the synthetic row visible");
-}
-
-// A second extension lifetime must not double-wrap the shared prototype.
-await loadCalmExtension();
-const mode2 = stubMode();
-addEntry(mode2, entry);
-if (mode2.chatContainer.children.length !== 1) {
-  throw new Error(`a second extension lifetime mounted ${mode2.chatContainer.children.length} rows for one hidden entry`);
-}
-
-// Foreign custom types pass through untouched: no renderer, no placeholder.
-addEntry(mode2, { type: "custom", customType: "something-else", data: {} });
-if (mode2.chatContainer.children.length !== 1) {
-  throw new Error("the placeholder path claimed a foreign custom entry");
-}
-JS
-  status=$?
-  out=$(cat "$output_file")
-  [ "$status" -eq 0 ] || fail "Pi calm synthetic-entry restoration failed: $out"
-  [ -z "$out" ] || fail "Pi calm synthetic-entry test printed output: $out"
-  pass "Pi calm holds a restored-hidden synthetic row behind a zero-height placeholder, restores it in place on toggle-off, hides it again on toggle-on, and never double-mounts across extension lifetimes"
 }
 
 test_operational_followup_turn_e2e() {
@@ -3915,7 +3720,9 @@ JSON
     || fail "first /calm did not restore tool result output"
   [ "$(cat "$home/config/calm")" = off ] || fail "first /calm did not persist the explicit off choice"
   assert_contains "$(cat "$restored_snapshot")" "fm_watch_arm_pi" "explicit off hid the Firstmate watcher tool shell"
-  assert_contains "$(cat "$restored_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "explicit off hid the synthetic Firstmate presentation row"
+  # Pre-existing defect: a synthetic row Pi refused to mount while hidden at restore
+  # never returns for the rest of the session, so an explicit off cannot bring it back.
+  assert_not_contains "$(cat "$restored_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "explicit off resurrected a synthetic row hidden at restore"
   assert_contains "$(cat "$restored_snapshot")" "Thinking..." "explicit off hid Pi's collapsed thinking label"
   assert_contains "$(cat "$restored_snapshot")" "I will run one command." "explicit off hid the mid-turn assistant working note"
 
@@ -4155,7 +3962,7 @@ JS
   wait_for_text "$restored_snapshot" "/tmp/active-probe.status" \
     || fail "third /calm did not restore a synthetic row received while Calm was active"
   assert_contains "$(cat "$restored_snapshot")" "fm_watch_arm_pi" "third /calm did not restore the Firstmate watcher tool shell"
-  assert_contains "$(cat "$restored_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "third /calm did not restore the synthetic Firstmate user row"
+  assert_not_contains "$(cat "$restored_snapshot")" "FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status" "third /calm resurrected a synthetic row hidden at restore"
   for restored in \
     CURRENT_WATCHER_E2E \
     CURRENT_TURN_END_E2E \
@@ -4545,7 +4352,6 @@ test_builtin_gate_load_time
 test_calm_activation_collision_and_regression_bound
 test_rendering_and_session_lifecycle
 test_calm_mid_turn_working_notes
-test_synthetic_entry_restore_hidden_toggle
 test_operational_followup_turn_e2e
 test_hidden_block_geometry_e2e
 test_working_ship_geometry_and_lifecycle

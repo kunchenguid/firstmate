@@ -32,6 +32,7 @@ Calm's built-in wrappers preserve Pi's execution behavior, and input delivery, o
 Every hidden Firstmate input remains available to the model and in serialized session data and exported artifacts.
 Legacy operational custom messages remain in session data and Pi's sidebar tree, although the main HTML transcript may omit them.
 Toggling Calm off restores ordinary rendering, and `Ctrl+O` expansion state is preserved.
+One known exception: a Firstmate synthetic presentation row that was already hidden when Pi restored the transcript is never mounted, so toggling Calm off does not bring that row back for the rest of the session; its content still reaches the model, session data, and exports.
 
 Pi's supported presentation API does not expose a global transcript filter.
 Expanded reasoning and its reserved spacing, built-in tool images, user-bash rows, skill and summary rows, generic status notices, and other arbitrary custom-tool or extension rows remain visible.
@@ -40,9 +41,8 @@ These are supported-API boundaries rather than hidden-content failures.
 ## Pi compatibility
 
 Calm has no numeric Pi version minimum or maximum and never refuses Pi solely because its version is newer than a previously verified version.
-The collapsed-thinking, operational-user-row, and synthetic-entry presentation adapters probe the exact Pi API seam they patch when Calm loads.
-The synthetic-entry adapter holds the place of a Firstmate row Pi refused to mount while hidden, so toggling Calm off restores it where it belongs.
-If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable adapter and skips only that adapter; `/calm`, the other adapters, and unrelated Pi extensions remain available.
+The collapsed-thinking and operational-user-row presentation adapters probe the exact Pi API seam they patch when Calm loads.
+If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable adapter and skips only that adapter; `/calm`, the other adapter, and unrelated Pi extensions remain available.
 
 Calm's built-in tool presentation (`bash`, `read`, `edit`, `write`, `grep`, `find`, `ls`) shares Pi's single, unmerged override slot per name with any other extension that overrides the same tool.
 While the home holds an explicit stored `off`, Calm registers none of those overrides and therefore contests no built-in tool name.
