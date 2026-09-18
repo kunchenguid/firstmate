@@ -1210,6 +1210,16 @@ Firstmate passes its profile line unless it states a reason to override, such as
 
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
+## Event shadow pilot
+
+The optional bare-stale-event JEV pilot annotates the existing wake-drain presentation without consuming or suppressing any notification.
+Enable it only for a home whose status text may be sent to TypeSafe, using `FM_EVENT_SHADOW=1` and a runtime-injected `TYPESAFE_API_KEY`; unlike dispatch resolution, this pilot never reads a key file.
+Keep normal supervision unchanged: shadow classifications describe historical declarations, not verified health, completion, approval, or authority to act.
+No low-risk behavior is approved for activation by a shadow result.
+[`bin/fm-event-shadow.sh`](../bin/fm-event-shadow.sh)'s header owns the bounded input, closed attention set, journal, metrics, and no-cache mechanics.
+[`bin/fm-event-shadow-replay.sh`](../bin/fm-event-shadow-replay.sh) provides sanitized offline confusion examples and an explicit live replay; missing returned cost fields remain unknown rather than estimates.
+[`tests/fm-event-shadow.test.sh`](../tests/fm-event-shadow.test.sh) verifies default-off behavior, error fallback, deterministic-reason bypass, and unchanged queue acknowledgement.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
