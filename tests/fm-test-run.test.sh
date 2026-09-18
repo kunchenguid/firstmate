@@ -191,6 +191,9 @@ init_primary_and_linked_worktree() {
     mkdir -p "$tree/bin" "$tree/tests"
     cp "$RUNNER" "$tree/bin/fm-test-run.sh"
     cp "$ROOT/tests/git-config-helpers.sh" "$tree/tests/"
+    # The runner isolates itself from the ambient fleet environment at startup,
+    # so the fixture repo must carry that owner as well as the runner itself.
+    cp "$ROOT/bin/fm-test-env-lib.sh" "$tree/bin/fm-test-env-lib.sh"
     chmod +x "$tree/bin/fm-test-run.sh"
     cat >"$tree/tests/probe.test.sh" <<PROBE
 #!/usr/bin/env bash
@@ -1039,6 +1042,9 @@ test_list_scheduled_non_lane_selections_use_serial_weights() {
   repo="$tmp/repo"
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  # The runner isolates itself from the ambient fleet environment at startup,
+  # so the fixture repo must carry that owner as well as the runner itself.
+  cp "$ROOT/bin/fm-test-env-lib.sh" "$repo/bin/fm-test-env-lib.sh"
   for script in "${scripts[@]}"; do
     printf '#!/usr/bin/env bash\nexit 0\n' >"$repo/$script"
     chmod +x "$repo/$script"
