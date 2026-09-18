@@ -115,6 +115,10 @@ validate_payload() {  # <data.json>
   jq -e --arg schema "$BOARD_SCHEMA" '
     def nonempty_string: type == "string" and length > 0;
     def slug($max): type == "string" and test("^[A-Za-z0-9._-]{1," + ($max | tostring) + "}$");
+    def routable_key:
+      slug(128)
+      or (type == "string" and length <= 128
+        and test("^[A-Za-z0-9._-]{1,63}/[A-Za-z0-9._-]{1,64}$"));
     def repo_marker: has("repo") and (.repo == null or (.repo | type == "string"));
     def name_marker: has("name") and (.name | nonempty_string);
     def valid_filed:
@@ -143,7 +147,7 @@ validate_payload() {  # <data.json>
           and (.version | version));
     def call_item:
       type == "object"
-      and (.key | slug(128))
+      and (.key | routable_key)
       and (.type == "decision" or .type == "merge" or .type == "credential")
       and repo_marker
       and (.title | nonempty_string)
@@ -277,6 +281,9 @@ decision_card_is_stale() {  # <task-id> <landed-0-or-1>
   if [ "$landed" = 1 ]; then
     printf 'structured subject already landed\n'
     return 0
+  fi
+  if [[ "$task" =~ ^[A-Za-z0-9._-]+/([A-Za-z0-9._-]+|pid-[1-9][0-9]*)$ ]]; then
+    return 1
   fi
   "$SCRIPT_DIR/fm-captain-hold.sh" open "$task" --distinguish-absent >/dev/null 2>&1 || rc=$?
   # 1 is a definite "no longer an open captain call". 2 is "cannot tell", 3 is

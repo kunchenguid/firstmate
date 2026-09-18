@@ -153,15 +153,17 @@
 # and this runner still decides nothing about them. Some sources carry the
 # captain's answer to a captain-held task. What such an answer MEANS is owned
 # once, by bin/fm-captain-hold.sh's keyed-answer intake, and reaching it must not
-# depend on an agent remembering. So after capture, a bound source
-# has its result passed to
-# `bin/fm-procevent-<adapter>.sh answers <result-file>`, and whatever that prints
-# is piped straight into that one intake. The adapter reports only what the
-# captain chose; the intake owns every rule about what happens next. This runner
-# names no adapter, parses no result, and knows no decision rule, so a future
-# built-in source needs nothing here beyond an `answers` command and a binding.
-# Reconcile selections use the parallel `reconciles` adapter command and the
-# binding-verified `reconcile-requests` intake, never the keyed-answer value.
+# depend on an agent remembering. So after capture, a bound source has its
+# result passed to `bin/fm-procevent-<adapter>.sh answers <result-file>`.
+# The generic runner relays simple task keys to `fm-captain-hold.sh answers` and
+# owner-qualified route keys to `fm-product-decision.sh`; the router only finds
+# the authoritative home and still invokes the same guarded captain-hold intake.
+# The adapter reports only what the captain chose, and neither the runner nor
+# the router decides what that answer means.
+# Reconcile selections use the parallel `reconciles` adapter command: local task
+# keys go to the binding-verified `reconcile-requests` intake, and owner-qualified
+# keys go through the durable product-decision router to that same intake in the
+# actual task home.
 # External binding responses never enter either authority-bearing intake.
 #
 # Feeding is deliberately independent of handling: it never acknowledges a result
@@ -399,28 +401,93 @@ adapter_autohandle() {  # <adapter> <source-id> <result-file>
 # leave the capture untouched and still announced, because this never
 # acknowledges anything (see the keyed-answer note in the header).
 feed_keyed_answers() {  # <adapter> <source-id> <result-file>
-  local adapter=$1 id=$2 result=$3 script origin seq
+  local adapter=$1 id=$2 result=$3 script origin seq answers_file local_rows key answer label mode answer_file local_rc feed_rc=0
+  local -a route_mode=()
   script=$(adapter_script "$adapter")
   [ -f "$script" ] && [ ! -L "$script" ] || return 1
   origin=$("$SCRIPT_DIR/fm-captain-hold.sh" binding "$id" 2>/dev/null) || return 1
   [ -n "$origin" ] || return 1
   seq=$(fm_procevent_result_sequence "$result") || return 1
-  "$script" answers "$result" 2>/dev/null \
-    | "$SCRIPT_DIR/fm-captain-hold.sh" answers "$origin" \
-        --source "the captured result $id sequence $seq" >/dev/null 2>&1
+  answers_file=$(mktemp "$STATE/.captured-answers.XXXXXX") || return 1
+  local_rows=$(mktemp "$STATE/.local-captured-answers.XXXXXX") || { rm -f "$answers_file"; return 1; }
+  if ! "$script" answers "$result" > "$answers_file" 2>/dev/null; then
+    rm -f "$answers_file" "$local_rows"
+    return 1
+  fi
+  : > "$local_rows"
+  while IFS=$'\t' read -r key answer label mode || [ -n "$key$answer$label$mode" ]; do
+    [ -n "$key" ] || continue
+    case "$key" in
+      */*)
+        answer_file=$(mktemp "$STATE/.owner-captured-answer.XXXXXX") || { feed_rc=1; break; }
+        printf '%s' "$answer" > "$answer_file"
+        route_mode=()
+        case "$mode" in done) route_mode=(--done) ;; release) route_mode=(--release) ;; '') ;; *) rm -f "$answer_file"; feed_rc=1; break ;; esac
+        if ! FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-product-decision.sh" route-answer "$key" \
+            --answer-file "$answer_file" ${route_mode[@]+"${route_mode[@]}"} >/dev/null 2>&1; then
+          feed_rc=1
+        fi
+        rm -f "$answer_file"
+        [ "$feed_rc" -eq 0 ] || break
+        ;;
+      *)
+        printf '%s\t%s\t%s\t%s\n' "$key" "$answer" "$label" "$mode" >> "$local_rows"
+        ;;
+    esac
+  done < "$answers_file"
+  rm -f "$answers_file"
+  if [ "$feed_rc" -ne 0 ]; then rm -f "$local_rows"; return 1; fi
+  if [ -s "$local_rows" ]; then
+    if "$SCRIPT_DIR/fm-captain-hold.sh" answers "$origin" \
+        --source "the captured result $id sequence $seq" < "$local_rows" >/dev/null 2>&1; then
+      local_rc=0
+    else
+      local_rc=$?
+    fi
+  else
+    local_rc=0
+  fi
+  rm -f "$local_rows"
+  return "$local_rc"
 }
 
 feed_reconcile_requests() {  # <adapter> <source-id> <result-file>
-  local adapter=$1 id=$2 result=$3 script origin seq rows
+  local adapter=$1 id=$2 result=$3 script origin seq rows local_rows key note provenance local_rc
   script=$(adapter_script "$adapter")
   [ -f "$script" ] && [ ! -L "$script" ] || return 1
   origin=$("$SCRIPT_DIR/fm-captain-hold.sh" binding "$id" 2>/dev/null) || return 1
   [ -n "$origin" ] || return 1
   seq=$(fm_procevent_result_sequence "$result") || return 1
   rows=$("$script" reconciles "$result" 2>/dev/null) || return 1
-  printf '%s\n' "$rows" \
-    | "$SCRIPT_DIR/fm-captain-hold.sh" reconcile-requests \
-        --source-id "$id" --source "the captured result $id sequence $seq" >/dev/null 2>&1
+  local_rows=$(mktemp "$STATE/.local-captured-reconciles.XXXXXX") || return 1
+  : > "$local_rows"
+  while IFS=$'\t' read -r key note || [ -n "$key$note" ]; do
+    [ -n "$key" ] || continue
+    provenance="the captured result $id sequence $seq"
+    [ -n "$note" ] && provenance="$provenance; captain note: $note"
+    case "$key" in
+      */*)
+        if ! FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-product-decision.sh" route-reconcile "$key" \
+            --source-id "$id" --source "$provenance" >/dev/null 2>&1; then
+          rm -f "$local_rows"
+          return 1
+        fi
+        ;;
+      *) printf '%s\t%s\n' "$key" "$note" >> "$local_rows" ;;
+    esac
+  done <<< "$rows"
+  if [ -s "$local_rows" ]; then
+    if "$SCRIPT_DIR/fm-captain-hold.sh" reconcile-requests --source-id "$id" \
+        --source "the captured result $id sequence $seq" < "$local_rows" >/dev/null 2>&1; then
+      local_rc=0
+    else
+      local_rc=$?
+    fi
+  else
+    local_rc=0
+  fi
+  rm -f "$local_rows"
+  return "$local_rc"
 }
 
 read_adapter() {  # <source-id>

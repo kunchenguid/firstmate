@@ -536,7 +536,7 @@ EOF
   printf '%s' "$json" | jq -e '
     (.secondmates | any(.[]; .id == "domain-alpha" and .state == "captain_decision"))
       and (.decisions_open | any(.[]; .id == "domain-alpha/phase8-decision-release"
-        and .key == "phase8-decision-release" and .verb == "captain-hold"))
+        and .key == "domain-alpha/phase8-decision-release" and .verb == "captain-hold"))
       and (.in_flight | any(.[]; .id == "domain-alpha") | not)
   ' >/dev/null || fail "structured child captain hold did not reach Captain Call: $json"
   pass "a structured child captain hold reaches Captain's Call"
@@ -1108,7 +1108,7 @@ test_open_decision_surfaces_end_to_end() {
   json=$(run "$home" "$fakebin" --json)
   printf '%s' "$json" | jq -e '
     .decisions_open | any(.[]; .id == "mate/mate-decision-race"
-      and .key == "mate-decision-race" and .verb == "captain-hold")
+      and .key == "mate/mate-decision-race" and .verb == "captain-hold")
   ' >/dev/null || fail "an authoritative captain hold must surface in decisions_open: $json"
   pass "an authoritative captain hold surfaces end-to-end"
 }

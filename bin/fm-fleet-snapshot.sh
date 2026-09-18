@@ -951,7 +951,7 @@ main_inventory_json() {  # <backlog-json-file> <tasks-json-file>
 # validated parent read needs.
 # This mode never reads parent events or terminal text and never aggregates
 # nested secondmates.
-secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
+secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file> <product-decisions-json-file>
   jq -n \
     --arg generated "$SNAPSHOT_NOW" \
     --argjson generated_epoch "$SNAPSHOT_EPOCH" \
@@ -961,9 +961,11 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
     --argjson decisions_n "$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
     --argjson landed_n "$FM_SNAPSHOT_SECONDMATE_LANDED_PER_HOME" \
     --slurpfile backlog "$1" \
-    --slurpfile tasks "$2" --slurpfile contributions "$CONTRIBUTIONS_JSON_FILE" "$FM_LANDED_JQ_DEFS"'
+    --slurpfile tasks "$2" --slurpfile product_decisions "$3" \
+    --slurpfile contributions "$CONTRIBUTIONS_JSON_FILE" "$FM_LANDED_JQ_DEFS"'
     ($backlog[0]) as $backlog
     | ($tasks[0]) as $tasks
+    | ($product_decisions[0] // {open:[],total:0,omitted:0}) as $product_decisions
     | def trunc($n):
       tostring | gsub("\\s+"; " ")
       | if length > $n then .[:$n] + "…" else . end;
@@ -1095,6 +1097,9 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         state:$state,
         active_children:$active_all[:$child_n],
         decisions_open:$decisions_all[:$decisions_n],
+        product_decisions:$product_decisions.open,
+        product_decision_count:$product_decisions.total,
+        product_decision_omitted:$product_decisions.omitted,
         holds:$holds_all[:$queued_n],
         queued:([$queued_all[] | {id:(.id | trunc(120)),title:(.title | trunc(120)),
           blocked_by:((.blocked_by // null) | if . == null then null else trunc(120) end),
@@ -1129,7 +1134,8 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
           (if ($decisions_all | length) > $decisions_n then {surface:"decisions_open",count:(($decisions_all | length) - $decisions_n)} else empty end),
           (if ($queued_all | length) > $queued_n then {surface:"queued",count:(($queued_all | length) - $queued_n)} else empty end),
           (if ($tasks | length) > $child_n then {surface:"endpoints",count:(($tasks | length) - $child_n)} else empty end),
-          (if $landed_n > 0 and ($landed_all | length) > $landed_n then {surface:"landed",count:(($landed_all | length) - $landed_n)} else empty end)
+          (if $landed_n > 0 and ($landed_all | length) > $landed_n then {surface:"landed",count:(($landed_all | length) - $landed_n)} else empty end),
+          (if $product_decisions.omitted > 0 then {surface:"product_decisions",count:$product_decisions.omitted} else empty end)
         ]
       }'
 }
@@ -1367,6 +1373,9 @@ length == 1 and (.[0] |
   and (.valid | type) == "boolean" and (.state | type) == "string"
   and (.invalidity | type) == "object" and (.invalidity.ids | type) == "array"
   and (.active_children | type) == "array" and (.decisions_open | type) == "array"
+  and ((.product_decisions // []) | type) == "array"
+  and ((.product_decision_count // 0) | type) == "number"
+  and ((.product_decision_omitted // 0) | type) == "number"
   and (.holds | type) == "array" and (.queued | type) == "array"
   and (.landed | type) == "array" and (.endpoints | type) == "array"
   and (.counts | type) == "object" and (.omitted | type) == "array"
@@ -1870,7 +1879,11 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
            trust:(if $summary_valid then "complete" else "partial-structured" end),parent_event_role:"historical-only"},
          freshness:{status:$summary_freshness,observed_at:$observed,age_seconds:$summary_age},
          active_children:$summary.active_children,
-         decisions_open:$summary.decisions_open,holds:$summary.holds,queued:$summary.queued,
+         decisions_open:$summary.decisions_open,
+         product_decisions:($summary.product_decisions // []),
+         product_decision_count:($summary.product_decision_count // 0),
+         product_decision_omitted:($summary.product_decision_omitted // 0),
+         holds:$summary.holds,queued:$summary.queued,
          contributions:($summary.contributions // null),
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan,reconciliation:$reconciliation},
@@ -2006,7 +2019,16 @@ FM_CONTRIBUTIONS_NOW="$SNAPSHOT_NOW" "$SCRIPT_DIR/fm-contributions.sh" snapshot 
   || { echo "fm-fleet-snapshot: contribution coverage unavailable" >&2; exit 1; }
 
 if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
-  secondmate_home_summary_json "$BACKLOG_JSON_FILE" "$TASKS_JSON_FILE" \
+  PRODUCT_DECISIONS_JSON_FILE="$JSON_TRANSPORT_DIR/product-decisions.json"
+  if [ -f "$FM_HOME/.fm-project-firstmate" ] && [ ! -L "$FM_HOME/.fm-project-firstmate" ] \
+      && [ -x "$SCRIPT_DIR/fm-product-decision.sh" ]; then
+    FM_HOME="$FM_HOME" FM_PRODUCT_DECISION_SUMMARY_LIMIT="$FM_SNAPSHOT_SECONDMATE_DECISIONS" \
+      "$SCRIPT_DIR/fm-product-decision.sh" summary > "$PRODUCT_DECISIONS_JSON_FILE" \
+      || { echo "fm-fleet-snapshot: product decision summary failed" >&2; exit 1; }
+  else
+    printf '{"open":[],"total":0,"omitted":0}\n' > "$PRODUCT_DECISIONS_JSON_FILE"
+  fi
+  secondmate_home_summary_json "$BACKLOG_JSON_FILE" "$TASKS_JSON_FILE" "$PRODUCT_DECISIONS_JSON_FILE" \
     || { echo "fm-fleet-snapshot: secondmate home summary failed" >&2; exit 1; }
   exit 0
 fi

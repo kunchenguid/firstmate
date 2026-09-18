@@ -422,9 +422,8 @@ cmd_silent() {
 # is skipped. A time-limited rollout branch accepts the old question/answer
 # shape only for ordinary answers and rejects its bare or annotated reconcile
 # values because old rows do not separate the selected option from its note.
-# The question cap is 128 so any task id fits, including the long legacy
-# `<origin>-decision-<key>` identities pre-collapse decks still carry; the
-# security property is the slug SHAPE, which is unchanged.
+# The question cap is 128 so task ids and one owner-qualified route component fit;
+# accepted route keys are either slugs or exactly one slash between safe ids.
 cmd_choice_rows() {
   local selection=$1 file=${2-}
   [ -n "$file" ] || usage
@@ -481,7 +480,8 @@ cmd_choice_rows() {
         next unless $selected eq "" || $selected =~ /\A[A-Za-z0-9._-]{1,128}\z/;
         next unless length($note) <= 512;
         next unless length($selected) || length($note);
-        $answer = length($selected) ? $selected : $note;
+        $answer = $key =~ m{/pid-[1-9][0-9]*\z} && length($selected) && length($note)
+          ? "$selected: $note" : (length($selected) ? $selected : $note);
         $legacy = 0;
       # Time-limited compatibility for captures from pre-change boards; remove
       # once no board carrying the old question/answer context can remain armed.
@@ -498,7 +498,7 @@ cmd_choice_rows() {
       } else {
         next;
       }
-      next unless $key =~ /\A[A-Za-z0-9._-]{1,128}\z/;
+      next unless $key =~ /\A(?:[A-Za-z0-9._-]{1,128}|[A-Za-z0-9._-]{1,63}\/[A-Za-z0-9._-]{1,64})\z/;
       my $mode = "";
       if (exists $data->{close}) {
         next if !defined($data->{close}) || ref($data->{close})

@@ -127,9 +127,8 @@ run_decisions() {  # <home> <command args...>
     "$ROOT/bin/fm-decision-hold.sh" "$@"
 }
 
-# A realistic payload: a cross-origin full-identity decision key past the old
-# 64-char cap, a merge card, a dispatchable charted row, and a string that
-# tries to terminate the data block early.
+# A realistic payload: an owner-qualified PID key, a merge card, a
+# dispatchable charted row, and a string that tries to terminate the data block early.
 write_valid_payload() {  # <path>
   cat > "$1" <<'EOF'
 {
@@ -139,7 +138,7 @@ write_valid_payload() {  # <path>
   "prs_live": false,
   "captains_call": [
     {
-      "key": "sample-instruction-layer-refinement-review-decision-perishable-first-admission-choice",
+      "key": "sample/pid-7",
       "type": "decision",
       "repo": "sample",
       "title": "Perishable-first admission",
