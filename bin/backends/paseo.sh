@@ -2,15 +2,21 @@
 # bin/backends/paseo.sh - the Paseo session-provider adapter (EXPERIMENTAL).
 #
 # Design: modeled on bin/backends/cmux.sh (the closest shared-namespace,
-# session-provider-only GUI adapter), with the same UX as Herdr (one visible
-# workspace per task, plain send-keys literal-then-Enter delivery, JSON
-# capture). Paseo is a session provider ONLY: the worktree provider stays
-# treehouse. Sourced only through bin/fm-backend.sh's fm_backend_source in
-# normal operation; the unit tests source it directly.
+# session-provider-only GUI adapter) for CLI mechanics, with Herdr's
+# container UX (ONE shared firstmate workspace per project, one tab per
+# task, plain send-keys literal-then-Enter delivery, JSON capture). Paseo is
+# a session provider ONLY: the worktree provider stays treehouse. Sourced
+# only through bin/fm-backend.sh's fm_backend_source in normal operation;
+# the unit tests source it directly.
 #
-# Container shape: ONE Paseo workspace PER TASK (mirrors cmux's
-# one-workspace-per-task), holding exactly one terminal. The daemon
-# (127.0.0.1:6767 by default, `paseo status`) is the shared container.
+# Container shape (Paseo's hierarchy is project > workspace > terminal tab):
+# ONE Paseo workspace PER PROJECT, labeled `firstmate` (or `2ndmate-<id>`),
+# adopted by (cwd, title) or created once, holding ONE terminal tab PER
+# TASK. The adapter never runs a `paseo project ...` command: Paseo
+# registers or reuses the project by path when the workspace is created, so
+# a fleet of tasks shows up as tabs under one sidebar entry instead of one
+# workspace (or project) per task. The daemon (127.0.0.1:6767 by default,
+# `paseo status`) is the shared container.
 #
 # Target string shape: "<terminal_id>:<workspace_id>" - the terminal's UUID
 # plus the workspace's `wks_...` id, neither of which contains a colon, so
@@ -20,11 +26,11 @@
 #
 # ROUTING AUTHORITY (the load-bearing rule from the live verification pass,
 # docs/paseo-backend.md): the terminal's NAME (`terminal create --name`) is
-# the firstmate-facing authority and the workspace's user-visible TITLE is
-# decoration only. Titles are human slugs (`fm-<id> · <project-slug>` via
-# `workspace rename`), never parsed, never trusted for routing; recovery and
-# list_live match the recorded home-scoped terminal NAME, and the recorded
-# terminal id is validated against the live inventory before every send.
+# the firstmate-facing authority. The workspace TITLE is only used to adopt
+# the shared per-project workspace (herdr's label lookup); it is never used
+# to route a task. Recovery and list_live match the recorded home-scoped
+# terminal NAME, and the recorded terminal id is validated against the live
+# inventory before every send.
 #
 # GUI-first, macOS-only: explicit selection (`--backend paseo`,
 # `FM_BACKEND=paseo`, config/backend) or runtime auto-detection when
@@ -49,15 +55,17 @@
 #      (zellij/cmux shape): it never follows a foreground subshell such as
 #      `treehouse get`, so current_path uses the same active pwd-marker probe
 #      as cmux/zellij (send a marked pwd block, then read only that marker).
-#   4. `workspace rename <id> <title>` sets a free-form user-visible title
-#      (verified live with ` · ` and Unicode), and `workspace ls` reports it
-#      back in `name` - but that field is exactly the decoration this adapter
-#      never routes on; duplicate titles are freely allowed by Paseo, so the
-#      pre-create duplicate check below is ours, on terminal NAMES.
-#   5. Workspace teardown is `workspace archive` (soft-archive of the
-#      workspace and everything it owns); terminal teardown is
-#      `terminal kill`. Both verified live. `workspace archive` on an
-#      already-archived workspace is best-effort like every backend's kill.
+#   4. `workspace create --path <dir> --isolation local --title <t>` reuses
+#      the project registered for <dir> (no duplicate project) and reports
+#      the title back as `name` in `workspace ls`. Duplicate titles and
+#      duplicate terminal names are freely allowed by Paseo, so the adopt-
+#      first workspace lookup and the pre-create terminal duplicate check
+#      below are ours.
+#   5. One workspace holds many terminals; `terminal kill <id>` closes one
+#      tab and leaves its siblings and the workspace alive (verified live).
+#      The shared workspace is never archived by this adapter: it outlives
+#      every task, and an operator archiving it by hand simply makes the next
+#      spawn create a fresh one.
 #
 # Requires: paseo (CLI, bundled inside Paseo.app - not guaranteed to be on
 # PATH; see fm_backend_paseo_bin), jq (JSON parsing). Bootstrap detects these
@@ -122,6 +130,21 @@ fm_backend_paseo_cli() { # <paseo-subcommand-and-args...>
   local bin
   bin=$(fm_backend_paseo_bin) || return 1
   "$bin" "$@"
+}
+
+# fm_backend_paseo_cli_json: a mutating `--json` call whose stdout must stay
+# parseable. Verified live: when firstmate itself runs inside a Paseo agent
+# the CLI prints an Electron warning on STDERR before its JSON, so stderr is
+# never merged into the parsed output; it is relayed to our stderr only when
+# the call fails, so the failure reason still reaches the spawn log.
+fm_backend_paseo_cli_json() { # <paseo-subcommand-and-args...>
+  local err status
+  err=$(mktemp "${TMPDIR:-/tmp}/fm-paseo-err.XXXXXX") || return 1
+  fm_backend_paseo_cli "$@" 2>"$err"
+  status=$?
+  [ "$status" -eq 0 ] || cat "$err" >&2
+  rm -f "$err"
+  return "$status"
 }
 
 # fm_backend_paseo_version_check: refuse loudly on a missing/incompatible
@@ -234,22 +257,40 @@ fm_backend_paseo_terminal_id_for_name() { # <name>
     jq -r --arg want "$name" '.[]? | select(.name == $want) | .id' 2>/dev/null | head -1
 }
 
-# fm_backend_paseo_create_task: create the task's workspace plus its one
-# terminal, refusing an existing live terminal NAME (ours; Paseo itself does
-# not enforce uniqueness). The terminal name is the routing authority; the
-# workspace title is renamed to the human slug `fm-<id> · <project-slug>`
-# for the Paseo UI (decoration only, never parsed - see the header's routing
-# rule). Echoes "<terminal_id> <workspace_id>" on success.
-fm_backend_paseo_create_task() { # <label> <cwd>
-  local label=$1 cwd=$2 name dup out wsid tid slug title
-  name=$(fm_backend_paseo_scoped_name "$label")
-  dup=$(fm_backend_paseo_terminal_id_for_name "$name")
-  if [ -n "$dup" ]; then
-    echo "error: paseo terminal '$name' already exists" >&2
-    return 1
+# fm_backend_paseo_workspace_label: the shared per-project workspace's title,
+# `firstmate` or `2ndmate-<id>` (the hometag's readable prefix, without the
+# path hash: the project path already scopes the workspace, and the title is
+# what the captain reads in the sidebar).
+fm_backend_paseo_workspace_label() {
+  local tag
+  tag=$(fm_backend_paseo_home_label)
+  printf '%s' "${tag%-*}"
+}
+
+# fm_backend_paseo_workspace_ensure: the ONE shared workspace for <cwd>,
+# adopted when a live workspace already has this cwd and label (first match
+# wins, like herdr's label lookup; Paseo allows duplicates), created once
+# otherwise. Never creates or deletes a project: `workspace create --path`
+# reuses the project registered for <cwd> (finding #4). Echoes the
+# workspace id.
+fm_backend_paseo_workspace_ensure() { # <cwd>
+  local cwd=$1 logical real label out wsid
+  # Paseo reports the workspace cwd normalized (no doubled slashes) but NOT
+  # symlink-resolved (verified live: a $TMPDIR/ path came back without the
+  # doubled slash and without the /private prefix), so match the raw path,
+  # the logical normalization, and the physical one.
+  logical=$(cd "$cwd" 2>/dev/null && pwd) || logical=$cwd
+  real=$(cd "$cwd" 2>/dev/null && pwd -P) || real=$cwd
+  label=$(fm_backend_paseo_workspace_label)
+  wsid=$(fm_backend_paseo_cli workspace ls --json 2>/dev/null |
+    jq -r --arg want "$label" --arg cwd "$cwd" --arg logical "$logical" --arg real "$real" \
+      '.[]? | select(.name == $want and (.cwd == $cwd or .cwd == $logical or .cwd == $real)) | .workspaceId' 2>/dev/null | head -1)
+  if [ -n "$wsid" ]; then
+    printf '%s' "$wsid"
+    return 0
   fi
-  out=$(fm_backend_paseo_cli workspace create --path "$cwd" --isolation local --json 2>&1) || {
-    echo "error: paseo workspace create failed for '$label': $out" >&2
+  out=$(fm_backend_paseo_cli_json workspace create --path "$cwd" --isolation local --title "$label" --json) || {
+    echo "error: paseo workspace create failed for '$cwd'" >&2
     return 1
   }
   wsid=$(printf '%s' "$out" | jq -r '.workspaceId // empty' 2>/dev/null)
@@ -257,9 +298,25 @@ fm_backend_paseo_create_task() { # <label> <cwd>
     echo "error: could not parse a workspaceId from paseo workspace create output: $out" >&2
     return 1
   }
-  out=$(fm_backend_paseo_cli terminal create --workspace "$wsid" --cwd "$cwd" --name "$name" --json 2>&1) || {
-    fm_backend_paseo_cli workspace archive "$wsid" >/dev/null 2>&1 || true
-    echo "error: paseo terminal create failed for '$name': $out" >&2
+  printf '%s' "$wsid"
+}
+
+# fm_backend_paseo_create_task: open the task's terminal TAB inside the
+# project's shared workspace, refusing an existing live terminal NAME (ours;
+# Paseo itself does not enforce uniqueness). The terminal name is the
+# routing authority (see the header's routing rule). Echoes
+# "<terminal_id> <workspace_id>" on success.
+fm_backend_paseo_create_task() { # <label> <cwd>
+  local label=$1 cwd=$2 name dup out wsid tid
+  name=$(fm_backend_paseo_scoped_name "$label")
+  dup=$(fm_backend_paseo_terminal_id_for_name "$name")
+  if [ -n "$dup" ]; then
+    echo "error: paseo terminal '$name' already exists" >&2
+    return 1
+  fi
+  wsid=$(fm_backend_paseo_workspace_ensure "$cwd") || return 1
+  out=$(fm_backend_paseo_cli_json terminal create --workspace "$wsid" --cwd "$cwd" --name "$name" --json) || {
+    echo "error: paseo terminal create failed for '$name'" >&2
     return 1
   }
   tid=$(printf '%s' "$out" | jq -r '.id // empty' 2>/dev/null)
@@ -267,10 +324,6 @@ fm_backend_paseo_create_task() { # <label> <cwd>
     echo "error: could not parse a terminal id from paseo terminal create output: $out" >&2
     return 1
   }
-  slug=$(printf '%s' "$cwd" | awk -F/ '{print $NF}')
-  title="fm-${label#fm-}"
-  [ -n "$slug" ] && title="$title · $slug"
-  fm_backend_paseo_cli workspace rename "$wsid" "$title" >/dev/null 2>&1 || true
   printf '%s %s' "$tid" "$wsid"
 }
 
@@ -457,10 +510,10 @@ fm_backend_paseo_send_text_submit() { # <target> <text> <retries> <enter-sleep> 
     "$target" "$retries" "$sleep_s" "$expected_label"
 }
 
-# fm_backend_paseo_kill: reclaim the task's whole endpoint, best-effort
-# (mirrors every other backend's `kill` `|| true` contract): the terminal via
-# `terminal kill`, the workspace (and everything it owns) via
-# `workspace archive` (finding #5). An already-gone target stays quiet.
+# fm_backend_paseo_kill: close the task's terminal TAB, best-effort (mirrors
+# every other backend's `kill` `|| true` contract). The shared per-project
+# workspace is never archived here: sibling task tabs live in it (finding
+# #5). An already-gone target stays quiet.
 fm_backend_paseo_kill() { # <target> [unused] [expected-label]
   local expected_label=${3:-}
   if [ -n "$expected_label" ]; then
@@ -469,7 +522,6 @@ fm_backend_paseo_kill() { # <target> [unused] [expected-label]
     fm_backend_paseo_parse_target "$1" || return 0
   fi
   fm_backend_paseo_cli terminal kill "$FM_BACKEND_PASEO_TERMINAL" >/dev/null 2>&1 || true
-  fm_backend_paseo_cli workspace archive "$FM_BACKEND_PASEO_WORKSPACE" >/dev/null 2>&1 || true
 }
 
 # fm_backend_paseo_list_live: recovery/orphan discovery. Lists every terminal

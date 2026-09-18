@@ -6,7 +6,7 @@ It provides task workspaces and terminals while Treehouse continues to provide g
 
 ## Setup
 
-Pick Paseo when you already use the app as your terminal and want task workspaces in its sidebar, with the same UX as Herdr.
+Pick Paseo when you already use the app as your terminal and want each project's tasks as tabs of one `firstmate` workspace in its sidebar, with the same UX as Herdr.
 Paseo is macOS-only, GUI-first, and unsuitable for a headless or SSH-only Firstmate session.
 
 Prerequisites:
@@ -42,10 +42,14 @@ The spawn notice names the winning signal, and the spawn refusal explains how to
 
 ## Task shape and metadata
 
-Each task owns one Paseo workspace with exactly one terminal.
+Paseo's sidebar is project > workspace > terminal tab, and Firstmate uses one shared workspace per project with one tab per task, the same container shape as Herdr.
+The shared workspace is titled `firstmate` (or `2ndmate-<id>` for a secondmate home), created once with `workspace create --path <project> --isolation local --title <label>` and adopted on later spawns by matching that cwd and title in `workspace ls`.
+The adapter never runs a `paseo project` command: Paseo registers or reuses the project by path when the workspace is created, so a fleet of tasks appears as tabs under one sidebar entry rather than as one workspace or one project per task.
+Agents running inside a task tab may open further tabs or workspaces of their own; nothing in the adapter depends on them.
+
+Each task owns one terminal tab in that workspace.
 The terminal's NAME (`terminal create --name fm-<home-label>-<id>`) is the firstmate-facing routing authority, home-scoped so two Firstmate homes sharing one daemon can never cross-match each other's terminals.
-The workspace's user-visible TITLE is decoration only, never parsed and never trusted for routing.
-After creation the workspace is renamed to the human slug `fm-<id> · <project-slug>` for the Paseo UI.
+The workspace title only identifies the shared workspace to adopt; it is never used to route a task.
 
 The recorded target is the pair `<terminal_id>:<workspace_id>`:
 
@@ -72,20 +76,22 @@ Because capture strips styling, the capability descriptor declares `styled=0`, a
 A terminal's `cwd` field in `terminal ls` is creation-time-frozen and never follows the foreground subshell opened by `treehouse get`.
 Spawn-time worktree discovery therefore sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines, exactly like cmux and zellij.
 
-Cleanup owns the whole endpoint: `terminal kill` for the terminal and `workspace archive` for the workspace and everything it owns.
-Both are best-effort like every backend's kill, so an already-gone target stays quiet.
+Cleanup closes only the task's tab with `terminal kill`; sibling task tabs and the shared workspace stay alive.
+It is best-effort like every backend's kill, so an already-gone target stays quiet.
+The adapter never archives the shared workspace; an operator who archives it by hand simply makes the next spawn create a fresh one.
+Mutating `--json` calls keep stderr out of the parsed output, because the CLI prints an Electron warning on stderr when Firstmate itself runs inside a Paseo agent.
 Paseo exposes no native generic agent busy signal, so supervision uses capture/hash polling for screen changes and each harness adapter's semantic lifecycle for worker state.
 
 ## Visible tabs versus nested agent views
 
 Paseo can show sub-agents nested inside the current tab, clickable to open as their own view, without opening a separate top-level tab.
-Firstmate's design keeps the terminal-per-task model as the authority: every task gets exactly one top-level visible workspace tab, opened at spawn and archived at cleanup.
+Firstmate's design keeps the terminal-per-task model as the authority: every task gets exactly one terminal tab in the project's shared workspace, opened at spawn and closed at cleanup.
 A nested sub-agent view therefore never becomes routing or lifecycle authority for Firstmate - it is an extra view the captain may click into while the task's single terminal remains the endpoint.
 
-The practical tradeoff: a task terminal running a harness that itself spawns sub-agents will show those agents nested inside the task's tab, not as new top-level tabs, so the sidebar count matches Firstmate tasks exactly.
+The practical tradeoff: a task terminal running a harness that itself spawns sub-agents will show those agents nested inside the task's tab, not as new top-level tabs, so the tab count under the shared workspace matches Firstmate tasks exactly.
 The tradeoff surfaced is agent surface versus terminal surface - a nested agent view is visible and clickable but not separately addressable by `fm-send`/`fm-peek`, which always target the task's one recorded terminal.
 
-A closed tab does not preserve its visible scrollback history: `terminal kill` and `workspace archive` reclaim the endpoint with no transcript left behind for later reading.
+A closed tab does not preserve its visible scrollback history: `terminal kill` reclaims the endpoint with no transcript left behind for later reading.
 Durable history for a finished task therefore lives in the status log, the report, and the PR, never in tab scrollback - the same reason firstmate never treats a status line as more than a wake event.
 
 ## Active limits
