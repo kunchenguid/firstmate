@@ -55,6 +55,11 @@
 # detect_own is the single owner of how the two combine; harness_marker and
 # harness_ancestry only report evidence. Record each newly verified env marker
 # in harness_marker, and each newly verified command name in harness_ancestry.
+# The upward walks read process identity through "${FM_HARNESS_PS_BIN:-ps}", the
+# same overridable-binary seam bin/backends/herdr.sh spells FM_HERDR_PS_BIN.
+# Production leaves it unset; tests/fm-omp-harness.test.sh owns why a fixture
+# points it at a stand-in ps, so route a new upward-walk ps call through it.
+# process_descent_path searches downward and stays outside the seam.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -151,9 +156,9 @@ harness_marker() {
 ancestry_names_omp() {
   local pid=$$ comm
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+    comm=$("${FM_HARNESS_PS_BIN:-ps}" -o comm= -p "$pid" 2>/dev/null) || return 1
     [ "$(basename -- "$comm")" = omp ] && return 0
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    pid=$("${FM_HARNESS_PS_BIN:-ps}" -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
   return 1
@@ -169,7 +174,7 @@ ancestry_names_omp() {
 #          used only when no marker is present.
 harness_process_verdict() {  # <pid>
   local pid=$1 comm args argv0
-  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 0
+  comm=$("${FM_HARNESS_PS_BIN:-ps}" -o comm= -p "$pid" 2>/dev/null) || return 0
   argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
   if fm_cursor_process_matches "$comm" '' "$argv0"; then
     echo "comm cursor"
@@ -230,7 +235,7 @@ harness_process_verdict() {  # <pid>
     agy) echo "comm agy"; return ;;
     node*|python*)
       # Bare interpreter: match the harness name in its script path.
-      args=$(ps -o args= -p "$pid" 2>/dev/null)
+      args=$("${FM_HARNESS_PS_BIN:-ps}" -o args= -p "$pid" 2>/dev/null)
       if fm_gemini_args_are_gemini "$args"; then
         echo "args gemini"
         return
@@ -255,7 +260,7 @@ harness_ancestry() {  # [<pid>]
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     verdict=$(harness_process_verdict "$pid")
     [ -z "$verdict" ] || { echo "$verdict"; return; }
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    pid=$("${FM_HARNESS_PS_BIN:-ps}" -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     # Stop only once the walk has EXAMINED the top of the chain. Inside a PID
     # namespace the harness itself is pid 1 - a container, or the `codex sandbox`
     # this boundary was proven in - so breaking as soon as the next pid is 1
