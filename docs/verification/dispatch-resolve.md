@@ -53,6 +53,15 @@ The maximum latency was one outlier; the next slowest request was 309 ms.
 The differing clear result was a synthetic small tweak that matched the simple-bug-fix rule at 0.90 and selected `cursor-grok-4.6-medium` instead of the hand-labeled `cursor-grok-4.6-high`: the tweak exemption removed from the none-option text belongs in that rule's own `when` text.
 Two default-labeled briefs became ambiguous.
 
+## The OpenRouter Jev decisions API
+
+Verified 2026-09-18 against `https://openrouter.ai`.
+Jev is absent from `GET /api/v1/models` (OpenRouter's ordinary chat-model catalog) and `POST /api/v1/chat/completions` never accepts it; the dedicated route is `POST /api/alpha/decisions`, confirmed present (401 `Missing Authentication header` with no `Authorization` header, distinct from a bogus-token 401 `User not found.`, rather than any 404) and documented at OpenRouter's own API reference page for `alpha.decisions` (`Submit a Decisions (questions and answers) request`).
+That reference page (rendered; its raw HTML ships no static schema) gives the request body as `{model, questions, state, provider?, session_id?, trace?, user?}`, with `questions.{key}` a discriminated union on `type`: `noul` (boolean, `criteria: {true, false}`), `choice` (`criteria` an arbitrary string-keyed object exactly like this repo's own rule Choice request), or `score` (`criteria` a minimum-one-element array).
+The response is `{answers, model, usage: {input_tokens, output_tokens, cost?}, id?, provider?}`, with `answers.{key}` a matching union: `choice` answers carry `{choice, type, confidence, probabilities}`, the same shape this tool already sends and parses for the native API.
+OpenRouter's model catalog lists TypeSafe as a provider slug (`provider.order`/`provider.only`/`provider.ignore` enums) but carries no separate Jev listing, consistent with Jev being reachable only through the decisions route, never through a model id in the ordinary chat catalog.
+The live rule-match table above was not rerun against OpenRouter because it needs a real OpenRouter key; `tests/fm-dispatch-resolve.test.sh` proves the request/response shape and secret handling offline instead, and a captain running with a real `OPENROUTER_API_KEY` is the way to add a live OpenRouter row to this file.
+
 ## Offline behavior
 
 `tests/fm-dispatch-resolve.test.sh` drives the public interface with a fake `curl` that records argv, the request body, the header read from file descriptor 3, and whether the secret reached its environment, plus a fake `quota-axi` that performs the same environment check.
@@ -61,9 +70,10 @@ It proves the absent key (environment and `.env`) prints one stderr line, nothin
 It proves absent, default-only, and empty-rules files return `no rules to match` without a model or quota request, while a broken rules-file symlink exits 2 as unreadable.
 It proves the documented starter configuration resolves its Pi default through the declared Claude provider, a `.env` key turns the tool on, and the environment wins over it.
 It proves the key is absent from child environments, never appears on `curl` argv, and arrives only as the bearer header on the descriptor.
-It proves the request uses the fixed endpoint and model, carries only the project, brief, and rule Choice with one option per rule plus the fixed neutral none option, and never carries `why`, `use`, or quota.
+It proves the request uses the provider-selected endpoint and model, carries only the project, brief, and rule Choice with one option per rule plus the fixed neutral none option, and never carries `why`, `use`, or quota.
+It proves `config/jev-provider` absent or `typesafe` preserves the exact native default, `openrouter` gates on `OPENROUTER_API_KEY` alone (never on a concurrently set `TYPESAFE_API_KEY`) and targets OpenRouter's distinct decisions endpoint and model id rather than the native path, an unrecognized value is a configuration error before any network call, and the OpenRouter key is equally absent from `curl` argv and every child environment.
 It proves the clear, fixed-floor ambiguous with candidate evidence, escalate (approval with candidate evidence, unverifiable rule floor, tie, nothing rankable), known rule-floor fall-through, known and unverifiable profile-floor evidence, explicit-provider and provider-ID enforcement, authoritative Agy and explicit-provider Gemini routing, partial providers, eligible unranked candidates and their clear-result note, concrete quota vetoes and profile-floor shortfalls taking precedence over uncertainty, account-wide quota veto, limiting-bound ranking, missing-curl and quota-axi failures, HTTP 429 and 500, transport failure, malformed usage, zero-mass or malformed probabilities or confidence, malformed or duplicate profile, invalid selector, removed-option rejection, and out-of-range rule ID paths behave as the contract states, with configuration errors exiting 2 before any network call.
-`tests/fm-bootstrap.test.sh` proves bootstrap ignores resolver-only fields without the typed key, validates each malformed shape when the environment or home `.env` activates typed resolution, and prevents an environment-provided key from reaching child processes.
+`tests/fm-bootstrap.test.sh` proves bootstrap ignores resolver-only fields without either typed credential, validates each malformed shape when the environment or home `.env` activates typed resolution through `TYPESAFE_API_KEY` or `OPENROUTER_API_KEY` alone, and prevents an environment-provided key from reaching child processes.
 
 ```console
 $ bash tests/fm-dispatch-resolve.test.sh | tail -1

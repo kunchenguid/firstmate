@@ -110,7 +110,8 @@ cat > "$FAKEBIN/curl" <<'SH'
 # Fake curl: records argv (minus the -o target), the stdin body, and the header
 # read from fd 3, then answers with FAKE_CURL_RESPONSE and FAKE_CURL_HTTP.
 set -u
-if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
+if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ] \
+  || [ -n "${OPENROUTER_API_KEY+x}" ] || [ -n "${OPENROUTER_API_KEY_PRIVATE+x}" ]; then
   printf 'curl:secret-present\n' >> "${CHILD_ENV_LOG:?}"
 else
   printf 'curl:clean\n' >> "${CHILD_ENV_LOG:?}"
@@ -138,7 +139,8 @@ chmod +x "$FAKEBIN/curl"
 cat > "$FAKEBIN/quota-axi" <<'SH'
 #!/usr/bin/env bash
 set -u
-if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
+if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ] \
+  || [ -n "${OPENROUTER_API_KEY+x}" ] || [ -n "${OPENROUTER_API_KEY_PRIVATE+x}" ]; then
   printf 'quota-axi:secret-present\n' >> "${CHILD_ENV_LOG:?}"
 else
   printf 'quota-axi:clean\n' >> "${CHILD_ENV_LOG:?}"
@@ -634,5 +636,93 @@ run code out err --help
 expect_code 0 "$code" "--help exits 0"
 assert_contains "$out" 'Usage:' "--help prints usage"
 pass "configuration errors exit 2 before any network call"
+
+# --- provider selection: config/jev-provider (native default, OpenRouter opt-in) --
+JEV_PROVIDER_FILE="$HOME_DIR/config/jev-provider"
+OR_KEY='test-or-key-7c3e1a-never-on-argv'
+
+# Absent config/jev-provider (already exercised above) and an explicit
+# "typesafe" line both preserve today's exact native default: OPENROUTER_API_KEY
+# alone never activates the tool, and the request still targets typesafe.ai.
+rm -f "$JEV_PROVIDER_FILE"
+reset_log
+OPENROUTER_API_KEY=$OR_KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "OpenRouter key alone, no provider selection, exits 0"
+assert_equals '' "$out" "OpenRouter key alone never activates the native default"
+assert_contains "$err" 'dispatch-resolve: off (TYPESAFE_API_KEY absent' "absent selection still gates on TYPESAFE_API_KEY"
+assert_absent "$LOG/argv" "OpenRouter key alone never calls curl"
+
+printf '%s\n' typesafe > "$JEV_PROVIDER_FILE"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "explicit typesafe selection exits 0"
+assert_contains "$out" '  status: clear' "explicit typesafe selection resolves exactly as the default"
+argv=$(cat "$LOG/argv")
+assert_contains "$argv" 'https://api.typesafe.ai/v1/systemone' "explicit typesafe selection still targets the native endpoint"
+body=$(cat "$LOG/body")
+assert_equals 'jev-latest' "$(jq -r .model <<<"$body")" "explicit typesafe selection still uses the native model id"
+
+# An unrecognized provider value is a configuration error, never selected around.
+printf '%s\n' bogus-provider > "$JEV_PROVIDER_FILE"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 2 "$code" "unrecognized config/jev-provider value exits 2"
+assert_contains "$err" 'config/jev-provider must be typesafe or openrouter, not: bogus-provider' "unrecognized provider value is named"
+assert_absent "$LOG/argv" "an unrecognized provider selection never reaches the network"
+
+# openrouter selection: gated on OPENROUTER_API_KEY, never on TYPESAFE_API_KEY,
+# and the request shape/endpoint reflect OpenRouter's dedicated decisions API
+# rather than the native /v1/systemone contract.
+printf '%s\n' openrouter > "$JEV_PROVIDER_FILE"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "openrouter selection without OPENROUTER_API_KEY exits 0"
+assert_equals '' "$out" "a native key never substitutes for the OpenRouter credential"
+assert_contains "$err" 'dispatch-resolve: off (OPENROUTER_API_KEY absent' "openrouter selection names its own credential when off"
+assert_absent "$LOG/argv" "openrouter selection without its credential never calls curl"
+
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+OPENROUTER_API_KEY=$OR_KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "openrouter selection with its credential exits 0"
+assert_contains "$out" '  status: clear' "openrouter selection resolves"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "openrouter selection still runs the same code-side argmax"
+argv=$(cat "$LOG/argv")
+assert_not_contains "$argv" "$OR_KEY" "the OpenRouter key never appears on curl argv"
+assert_contains "$argv" 'https://openrouter.ai/api/alpha/decisions' "openrouter selection uses OpenRouter's dedicated decisions endpoint"
+assert_not_contains "$argv" 'api.typesafe.ai' "openrouter selection never targets the native endpoint"
+assert_not_contains "$argv" '/v1/systemone' "openrouter selection never sends OpenRouter a native-shaped request path"
+assert_equals "Authorization: Bearer $OR_KEY" "$(cat "$LOG/header")" "curl receives the OpenRouter bearer header on fd 3"
+body=$(cat "$LOG/body")
+assert_equals 'typesafe/jev-latest' "$(jq -r .model <<<"$body")" "openrouter selection uses OpenRouter's Jev model id, not the native bare id"
+assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "the OpenRouter key is absent from every child environment"
+
+# TYPESAFE_API_KEY being simultaneously present never leaks into the OpenRouter
+# request: only the selected provider's own credential is ever read or sent.
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY OPENROUTER_API_KEY=$OR_KEY run code out err "$BRIEF"
+assert_equals "Authorization: Bearer $OR_KEY" "$(cat "$LOG/header")" "a concurrently set native key never overrides the selected OpenRouter credential"
+argv=$(cat "$LOG/argv")
+assert_not_contains "$argv" "$KEY" "the unselected native key never appears on curl argv either"
+
+# .env resolution and the environment-wins precedence apply identically to the
+# OpenRouter credential.
+printf '%s\n' "OPENROUTER_API_KEY=$OR_KEY" > "$HOME_DIR/.env"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+run code out err "$BRIEF" --project pager
+expect_code 0 "$code" ".env OpenRouter key resolves"
+assert_contains "$out" '  status: clear' ".env OpenRouter key produces a clear result"
+assert_equals "Authorization: Bearer $OR_KEY" "$(cat "$LOG/header")" ".env OpenRouter key reaches curl on the fd header"
+reset_log
+OPENROUTER_API_KEY=env-wins-or run code out err "$BRIEF" --project pager
+assert_equals 'Authorization: Bearer env-wins-or' "$(cat "$LOG/header")" "the environment OpenRouter key wins over .env"
+rm -f "$HOME_DIR/.env"
+
+rm -f "$JEV_PROVIDER_FILE"
+cp "$BASE_RULES" "$RULES"
+pass "config/jev-provider selects the native default or OpenRouter's distinct decisions endpoint, each gated on its own credential"
 
 printf '# all fm-dispatch-resolve tests passed\n'
