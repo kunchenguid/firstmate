@@ -44,14 +44,15 @@ A constraint keep survives only with proof the constraint is real and outside th
 
 ## Adjudicate
 
-Inspect each flag against the code before accepting it.
+The implementation worker that invoked the audit adjudicates: inspect each flag against the code before accepting it.
 Reject flags that treat keep-listed comments as guilty, misstate why a suppression exists, or propose restoring prose where structure belongs.
 A stale-claim flag stays actionable even when the fix is deleting the comment; a suppression flag stays actionable when it hides a correctness or safety concern.
 If a flag is ambiguous, resolve it from the code, not from the comment's self-description.
 
 ## Fix at root cause
 
-Fix every accepted finding inside task scope, in this order of preference:
+The invoking implementation worker fixes every accepted finding inside its own task scope - never a firstmate supervisor and never the auditor subagent, which stays read-only throughout.
+Fix in this order of preference:
 
 1. Delete: dead paths, dead parameters, comments whose content is already in the code.
 2. Encode: replace a prose constraint with structure - a type, an assertion, a test, a lint rule - so the code enforces what the comment claimed.
