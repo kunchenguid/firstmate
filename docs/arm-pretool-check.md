@@ -231,6 +231,18 @@ Native supervision paths were also validated in the same scratch project:
 
 Every native-path automatic marker was present and every deny sentinel remained absent.
 
+## Remainder Jev tool-gate
+
+After this seatbelt allows a command, `bin/fm-jev-tool-gate.sh` is the documented remainder hook for a Jev Choice `{allow, deny, need_human}`.
+It always runs `bin/fm-arm-command-policy.mjs` first.
+A deterministic deny never reaches Jev, even in shadow.
+Default `FM_JEV_TOOL_GATE` is `shadow`: log `$FM_HOME/state/jev-tool-gate.jsonl` and still allow.
+Do not wire live Jev deny/allow into watcher-arm or PreToolUse paths.
+Hard-shipping that live remainder as a hard deny is a do-not.
+Live mode requires `FM_JEV_TOOL_GATE=live` plus both presence files `config/jev-tool-gate-live` and `config/jev-tool-gate-live-ack`, and still cannot override a deterministic deny.
+The script header owns flags, log schema, and mode resolution.
+[`docs/configuration.md`](configuration.md) "Jev remainder tool-gate" owns the operator knobs.
+
 ## Automated validation
 
 `tests/fm-arm-pretool-check.test.sh` owns the adversarial acceptance matrix.

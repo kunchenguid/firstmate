@@ -40,6 +40,9 @@
 # Grok consumes the stdout decision object.
 # OpenCode and Pi consume exit 2 plus stderr.
 # Cursor consumes the stdout decision object.
+# Remainder shadow judgment after a deterministic allow is
+# bin/fm-jev-tool-gate.sh; this transport does not invoke it.
+# Hard-shipping live Jev deny/allow here is a do-not.
 set -u
 
 CMD=""

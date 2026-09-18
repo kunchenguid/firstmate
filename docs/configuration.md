@@ -556,6 +556,17 @@ It is a sourceable library, not a user CLI; the script header owns route selecti
 Set `TYPESAFE_API_KEY` for the TypeSafe route, or `OPENROUTER_API_KEY` for OpenRouter when that is the only key or when `JEV_ROUTE=openrouter`.
 Typed dispatch resolution above stays its own TypeSafe-only process and does not use this library.
 
+## Jev remainder tool-gate (FM_JEV_TOOL_GATE)
+
+`bin/fm-jev-tool-gate.sh` may shadow-log a Jev Choice `{allow, deny, need_human}` only after `bin/fm-arm-command-policy.mjs` allows a command.
+A deterministic deny never reaches Jev.
+Default `FM_JEV_TOOL_GATE` is `shadow`: append `$FM_HOME/state/jev-tool-gate.jsonl` and still allow.
+Live Jev deny/allow stays off.
+Do not hard-ship live remainder deny into watcher-arm or PreToolUse paths; that is a do-not.
+Live mode requires `FM_JEV_TOOL_GATE=live` plus both local gitignored presence files `config/jev-tool-gate-live` and `config/jev-tool-gate-live-ack`, and still cannot override a deterministic deny.
+The script header owns flags, log schema, and mode resolution.
+The thin hook point is documented in [`docs/arm-pretool-check.md`](arm-pretool-check.md).
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
@@ -1145,6 +1156,7 @@ TYPESAFE_API_KEY=       # typed dispatch resolution opt-in, from the environment
 OPENROUTER_API_KEY=     # optional OpenRouter Jev route for bin/fm-jev-lib.sh; used when it is the only key or when JEV_ROUTE=openrouter (docs/configuration.md "Jev caller library")
 JEV_ROUTE=              # optional; `openrouter` or `typesafe` selects the Jev route in bin/fm-jev-lib.sh
 JEV_MODEL=              # optional Jev model override for bin/fm-jev-lib.sh
+FM_JEV_TOOL_GATE=shadow # remainder Jev tool-gate after arm-command policy; live needs this plus two opt-in files; hard-ship is a do-not (docs/configuration.md "Jev remainder tool-gate")
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)
