@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2031,SC2100 # Parser globals are same-shell outputs; role labels are strings.
 # Enumerate this home's registered secondmates for an internal /stow cascade.
 # Usage: fm-stow-cascade.sh [--help]
 #

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2031 # Fixture helpers intentionally return values through same-shell globals.
 # Parent-owned secondmate pending-reply guards (bin/fm-pending-reply-lib.sh).
 #
 # Reproduces the missed-report experience: a marked request is delivered, the

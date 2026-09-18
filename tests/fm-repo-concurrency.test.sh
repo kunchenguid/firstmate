@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2031,SC2100 # Sourced output globals and hyphenated fixture IDs are intentional.
 # Exercise shared repository-subtree admission, recovery, relaunch, and release.
 set -u
 

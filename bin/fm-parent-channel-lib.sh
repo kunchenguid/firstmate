@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2031 # The parent parser returns output globals to same-shell callers.
 # fm-parent-channel-lib.sh - the one owner of a secondmate home's parent channel.
 #
 # WHY THIS EXISTS. A secondmate is a firstmate in its own home, and nobody reads

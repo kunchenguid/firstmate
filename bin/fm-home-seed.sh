@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2031 # Registry and parent parsers return output globals to same-shell callers.
 # Provision and route persistent secondmate homes.
 #
 # Usage:

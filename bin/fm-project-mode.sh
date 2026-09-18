@@ -34,9 +34,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REG="$DATA/projects.md"
-RAW=0
 if [ "${1:-}" = "--raw" ]; then
-  RAW=1
   shift
 fi
 NAME=${1:?usage: fm-project-mode.sh [--raw] <project-name>}

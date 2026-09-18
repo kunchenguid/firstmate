@@ -1081,6 +1081,7 @@ fm_repo_scope_acquire_task_locked() {  # <authority-home> <task-home> <task-id> 
 
 fm_repo_scope_acquire_task() {  # <task-home> <task-id> <project-path> <relaunch:0|1>
   local task_home=$1 task_id=$2 project_path=$3 relaunch=$4 authority_status authority_home acquire_status=0 release_status=0
+  # shellcheck disable=SC2034 # Public result consumed by fm-spawn.sh after this function returns.
   FM_REPO_SCOPE_LEASE_CREATED=0
   FM_REPO_SCOPE_LEASE_KEY=
   if fm_repo_scope_validate_project "$task_home" "$project_path"; then

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2031,SC2100 # Fixture globals and hyphenated task IDs are intentional.
 # tests/fm-secondmate-safety.test.sh - secondmate home safety invariants:
 # the path-boundary matrices (seed/spawn/teardown), registry/charter/origin
 # validation, treehouse lease handling,
@@ -376,10 +377,11 @@ test_project_firstmate_seed_has_one_repository_authority() {
 
   fakebin=$(fm_test_make_spawn_fakebin "$TMP_ROOT/project-firstmate-child-spawn")
   launch_log="$TMP_ROOT/project-firstmate-child-spawn.launch"
-  FM_BACKEND=tmux FM_SKIP_SECONDMATE_SYNC=1 FM_SKIP_SECONDMATE_INHERIT=1 \
+  if ! output=$(FM_BACKEND=tmux FM_SKIP_SECONDMATE_SYNC=1 FM_SKIP_SECONDMATE_INHERIT=1 \
     FM_FAKE_LAUNCH_LOG="$launch_log" \
-    fm_test_run_spawn "$first" "$first/projects/alpha" "$fakebin" alpha-child "$child" --secondmate >/dev/null \
-    || fail "project Firstmate could not spawn its registered local child secondmate"
+    fm_test_run_spawn "$first" "$first/projects/alpha" "$fakebin" alpha-child "$child" --secondmate --harness codex 2>&1); then
+    fail "project Firstmate could not spawn its registered local child secondmate: $output"
+  fi
   [ -f "$first/state/alpha-child.meta" ] || fail "project Firstmate child spawn did not publish its direct-report record"
 
   fm_test_spawn_home "$ordinary" codex

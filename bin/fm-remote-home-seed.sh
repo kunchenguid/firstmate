@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2031 # Registry parsers return output globals to same-shell callers.
 # Register and provision a whole secondmate home on an SSH-reachable host.
 #
 # Usage:
