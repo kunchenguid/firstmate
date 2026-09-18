@@ -1587,17 +1587,19 @@ if (dispatch("check: unresolved fleet event", []).accepted) {
   throw new Error("branch accepted an unscoped, non-heartbeat fleet wake");
 }
 
-// Away mode still owns supervision regardless of default-on eligibility.
+// The legacy away daemon flag means nothing on Pi, where the daemon is never
+// launched: the branch keeps accepting (docs/pi-supervision-branch.md
+// "Postures"; the away-posture record itself is covered by
+// test_away_record_parks_main_and_presents_after_archive).
 writeFileSync(`${home}/state/.afk`, "");
-if (dispatch("signal: while afk").accepted) throw new Error("branch accepted a wake during away mode");
+if (!dispatch("signal: legacy flag present").accepted) throw new Error("branch declined a wake over the legacy daemon flag");
 rmSync(`${home}/state/.afk`);
-if (!dispatch("signal: gates cleared").accepted) throw new Error("branch refused a wake with gates cleared");
 await settle(() => (globalThis.__fmPrompts ?? []).length === 3, "branch wake prompts");
 process.exit(0);
 EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
-  expect_code 0 "$status" "default-on eligibility, heartbeat routing, and afk gating must bind: $out"
+  expect_code 0 "$status" "default-on eligibility, heartbeat routing, and legacy-flag indifference must bind: $out"
 
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$TMP_ROOT/gating-home-2" FM_ROOT_OVERRIDE="$broken" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
@@ -1625,7 +1627,156 @@ EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "broken-branch settlement must return delivery ownership to the watcher: $out"
-  pass "branch default-on eligibility (task-scoped, heartbeat, afk) binds and a broken branch rejects to watcher fallback"
+  pass "branch default-on eligibility (task-scoped, heartbeat, legacy flag ignored) binds and a broken branch rejects to watcher fallback"
+}
+
+# The away posture on the branch side (docs/pi-supervision-branch.md
+# "Postures"): with the record present the wake carries the POSTURE: AWAY tail
+# ending in the record's read-back verbatim while the branch session and its
+# prefix are untouched; check and heartbeat rows are claimed and lift task
+# scoping; a captain outcome persists its visible entry but opens NO processing
+# turn on the parked main, at report time, at every run boundary, and at
+# session start; a request already pending when the record appears is
+# cancelled rather than re-presented; and the first run boundary after the
+# record is archived presents the accumulated rows with a fresh triggered
+# budget. Every record read goes through the real bin/fm-afk-contract.sh.
+test_away_record_parks_main_and_presents_after_archive() {
+  local repo home out status
+  repo="$TMP_ROOT/away-root"
+  home="$TMP_ROOT/away-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, mainEntries, outcomeScript, defaultSessionCtx, home, realRoot, bus, approvedProject }; })()`);
+const { fire, dispatch, settle, sentToMain, mainEntries, outcomeScript, defaultSessionCtx, home, realRoot, bus, approvedProject } = globalThis.__t;
+import { spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+
+const contract = (args) => {
+  const result = spawnSync("bash", [`${realRoot}/bin/fm-afk-contract.sh`, ...args], {
+    encoding: "utf8",
+    env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state` },
+  });
+  if (result.status !== 0) throw new Error(`fm-afk-contract.sh ${args.join(" ")} failed: ${result.stderr}`);
+  return (result.stdout || "").trim();
+};
+const requests = () => sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
+const unprocessedSeqs = () => outcomeScript(["unprocessed"]).split("\n").filter(Boolean).map((line) => JSON.parse(line).seq);
+const runOf = async (fn) => { await fire("agent_start", {}); await fn?.(); await fire("agent_end", {}); await fire("agent_settled", {}); };
+
+await fire("session_start", {}, defaultSessionCtx);
+
+// 1. Attended: no tail, and the branch session is built from the generator.
+let finishPrompt;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishPrompt = resolve; });
+const attendedOffer = dispatch("signal: attended wake");
+if (!attendedOffer.accepted) throw new Error("the attended wake was refused");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "attended branch prompt");
+const session = globalThis.__fmSessions[0];
+const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+if (globalThis.__fmPrompts[0].includes("POSTURE: AWAY")) throw new Error("an attended wake carried the away tail");
+// The prefix is the generator's output handed to the branch's resource
+// loader; the per-wake tail must never appear there.
+const systemPrompt = (globalThis.__fmLoaders ?? []).at(-1)?.options?.systemPrompt;
+if (typeof systemPrompt !== "string" || !systemPrompt.startsWith("You are the SUPERVISION BRANCH")) {
+  throw new Error("the branch session was not built from the byte-stable generator");
+}
+if (systemPrompt.includes("POSTURE: AWAY.")) throw new Error("the per-wake tail leaked into the prefix");
+if (!systemPrompt.includes("# Postures") || !systemPrompt.includes("# Ask-user authority policy")) {
+  throw new Error("the prefix lost its fixed Postures section or the ask-user-authority policy");
+}
+await report.execute("r1", { task: "branch-driver", verdict: "routine", summary: "worker healthy" }, undefined, undefined, {});
+finishPrompt();
+await attendedOffer.settlement;
+globalThis.__fmOnBranchPrompt = undefined;
+
+// 2. A captain outcome reported while attended opens its processing request;
+// the record appearing before the next run boundary cancels the volatile
+// request instead of re-presenting it to a main that has just been parked.
+const first = await report.execute("c1", { task: "task-d", verdict: "captain", summary: "PR https://example.com/pr/1 is ready for review" }, undefined, undefined, {});
+if (first.isError) throw new Error(`attended captain report failed: ${JSON.stringify(first)}`);
+const seq1 = JSON.parse(outcomeScript(["list", "--recent", "1"])).seq;
+if (requests().length !== 1) throw new Error(`the attended captain outcome opened ${requests().length} requests, not 1`);
+contract(["propose", "--grant", "task-d"]);
+contract(["confirm"]);
+await runOf(() => mainEntries.push({ type: "message", message: { role: "assistant", content: [] } }));
+if (requests().length !== 1) throw new Error("a request pending when the record appeared was re-presented to the parked main");
+if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq1])) throw new Error(`the record moved the processed marker: ${unprocessedSeqs()}`);
+
+// 3. Under the record: the tail ends with the read-back verbatim, the branch
+// session is the same one (no rebuild, so the prefix is untouched), the
+// check and heartbeat rows are claimed, and a claimed check row lifts task
+// scoping so the branch may report fleet.
+writeFileSync(
+  `${home}/state/.wake-queue`,
+  "1\t1\tsignal\tbranch-driver.status\tsignal: away wake\n2\t2\tcheck\tmain-only\tcheck: task-d.check.sh: PR merged\n3\t3\theartbeat\theartbeat\theartbeat\n",
+);
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishPrompt = resolve; });
+const awayOffer = {
+  message: "signal: away wake",
+  projects: [approvedProject],
+  heartbeat: false,
+  eligible: true,
+  accepted: false,
+  settlement: Promise.resolve(),
+  accept(settlement = Promise.resolve()) {
+    awayOffer.accepted = true;
+    awayOffer.settlement = settlement;
+  },
+};
+bus.emit("fm-branch-supervision:dispatch", awayOffer);
+if (!awayOffer.accepted) throw new Error("the away wake was refused");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 2, "away branch prompt");
+if (globalThis.__fmSessions.length !== 1) throw new Error("the away posture rebuilt the branch session");
+const awayPrompt = globalThis.__fmPrompts[1];
+const head = "FIRSTMATE SUPERVISION WAKE: signal: away wake\n\nHandle this per your operating procedure and finish with fm_branch_report.\n\nPOSTURE: AWAY. ";
+if (!awayPrompt.startsWith(head)) throw new Error(`the away wake lost its shape or its tail: ${awayPrompt}`);
+const readback = contract(["readback"]);
+if (!readback.includes("merge when green (task ids): task-d")) throw new Error(`the read-back lost the grant: ${readback}`);
+if (!awayPrompt.endsWith(`The record, verbatim:\n${readback}`)) throw new Error(`the tail does not end with the record's read-back verbatim: ${awayPrompt}`);
+const snapshot = readFileSync(`${home}/state/.branch-eligible-rows`, "utf8").trim().split("\n").join(",");
+if (snapshot !== "1,2,3") throw new Error(`the away wake claimed rows ${snapshot}, not every row`);
+const fleet = await report.execute("c2", { task: "fleet", verdict: "captain", summary: "merged task-d's PR under its grant" }, undefined, undefined, {});
+if (fleet.isError) throw new Error(`a fleet report under a claimed check row was refused: ${JSON.stringify(fleet)}`);
+finishPrompt();
+await awayOffer.settlement;
+globalThis.__fmOnBranchPrompt = undefined;
+const seq2 = JSON.parse(outcomeScript(["list", "--recent", "1"])).seq;
+
+// 4. No processing turn under the record: not at report time, not at a run
+// boundary, not at session start. The visible entry still persists.
+if (requests().length !== 1) throw new Error("a captain outcome under the record opened a processing turn on the parked main");
+if (!mainEntries.some((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === seq2)) {
+  throw new Error("the captain row's visible entry was not persisted under the record");
+}
+if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq1, seq2])) throw new Error(`the rows did not accumulate unprocessed: ${unprocessedSeqs()}`);
+await runOf();
+if (requests().length !== 1) throw new Error("a run boundary under the record opened a processing turn");
+await fire("session_shutdown", {});
+await fire("session_start", {}, defaultSessionCtx);
+if (requests().length !== 1) throw new Error("session start under the record opened a processing turn");
+if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq1, seq2])) throw new Error("the record moved the processed marker across a session start");
+
+// 5. The return archives the record; the first run boundary presents the
+// accumulated set as one request with a fresh triggered budget.
+contract(["archive"]);
+await runOf();
+if (requests().length !== 2) throw new Error(`the run boundary after archive presented ${requests().length - 1} requests, not 1`);
+const presented = requests()[1];
+if (presented.options.triggerTurn !== true || presented.options.deliverAs !== "followUp") {
+  throw new Error(`the post-archive presentation did not open its own turn: ${JSON.stringify(presented.options)}`);
+}
+for (const needle of [`[seq ${seq1}] task-d:`, `[seq ${seq2}] fleet:`, `through=${seq2}`]) {
+  if (!presented.message.content.includes(needle)) throw new Error(`the post-archive request lost ${needle}: ${presented.message.content}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "the away posture must park main and present after archive: $out"
+  pass "under the away-posture record the wake carries the verbatim read-back tail, claims every row, opens no processing turn, cancels a pending request, and presents the accumulated rows after archive"
 }
 
 test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under() {
@@ -4936,6 +5087,7 @@ test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback
+test_away_record_parks_main_and_presents_after_archive
 test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under
 test_branch_report_refuses_a_task_the_wake_did_not_name
 test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligible_work

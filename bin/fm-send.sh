@@ -176,6 +176,14 @@
 # (a remote mate's escalations reach it through the parent-replies ingest);
 # only the answer message crosses the backend or remote transport.
 #
+# Answering a decision is the gate-answer path and is main-owned while
+# attended: when any named key is an open needs-decision or a captain-held task
+# (a blocked: key is ordinary steering and stays lease-guarded only), the Pi
+# supervision branch is refused outright, exactly as its prompt promises. While
+# the away-posture record exists main is parked and that one refusal relocates
+# to the branch (contract: bin/fm-lease-lib.sh); which findings firstmate may
+# decide at all remains ask-user-authority's judgment for either actor.
+#
 # Chat is also a channel that carries keyed captain answers, so the same flag
 # feeds bin/fm-captain-hold.sh's one keyed-answer intake for any key that names
 # a captain-held task in this home - the key as a task id itself, or through
@@ -636,6 +644,21 @@ if [ -n "$RESOLVE_KEYS" ]; then
     echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE, and no captain-held task '$k' or '$RESOLVE_TASK_ID-decision-$k' still open (already closed or mistyped). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
     exit 1
   done
+  # The decision-answer partition (the header's "Answering a decision"
+  # contract): a key that is an open needs-decision, or already a captain-held
+  # task, is a decision, and answering one is main-owned while attended. A
+  # blocked: key is ordinary steering and takes no partition guard. Under the
+  # away-posture record the guard passes the branch instead (relocation:
+  # bin/fm-lease-lib.sh); which findings firstmate may decide at all stays
+  # ask-user-authority's judgment, for either actor.
+  RESOLVE_IS_DECISION=0
+  [ -z "$RESOLVE_HOLD_KEYS" ] || RESOLVE_IS_DECISION=1
+  for k in $RESOLVE_STATUS_KEYS; do
+    [ "$(_fm_open_set_verb "$resolve_open_set" "$k")" = needs-decision ] && RESOLVE_IS_DECISION=1
+  done
+  if [ "$RESOLVE_IS_DECISION" -eq 1 ]; then
+    fm_lease_forbid_branch "decision answer (fm-send --resolve-key)" --away-relocated
+  fi
   # Refuse before send when a named status-log key cannot actually close: a
   # reserved key with an answered: note is a silent no-op in the fold.
   resolve_excerpt=$(printf '%s' "$*" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')

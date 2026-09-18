@@ -311,13 +311,17 @@ META="$STATE/$ID.meta"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
-# Role partition: merging is MAIN-owned; the Pi supervision branch reports the
-# green PR and never merges (contract: bin/fm-lease-lib.sh; no-op in homes
-# without a branch actor). This precedes reading the task record, because the
-# wrong actor is refused for its role whatever that record says.
+# Role partition: merging is MAIN-owned while attended; the Pi supervision
+# branch reports the green PR and never merges (contract: bin/fm-lease-lib.sh;
+# no-op in homes without a branch actor). While the away-posture record exists
+# main is parked and this one action relocates to the branch, which then meets
+# exactly the same gates below as main would: a granted or yolo=on task only,
+# green at its live head, synchronous, under the record lock. This precedes
+# reading the task record, because the wrong actor is refused for its role
+# whatever that record says.
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
-fm_lease_forbid_branch "PR merge (fm-pr-merge)"
+fm_lease_forbid_branch "PR merge (fm-pr-merge)" --away-relocated
 
 if [ ! -f "$META" ] || [ -L "$META" ]; then
   echo "error: task metadata is unavailable" >&2

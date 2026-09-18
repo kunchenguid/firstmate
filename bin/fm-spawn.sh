@@ -1349,14 +1349,45 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   echo "error: spawn refused: state directory does not exist at $STATE" >&2
   exit 1
 fi
-# Role partition: spawning NEW work is MAIN-owned. A relaunch of an existing
-# task is legitimate branch recovery (fm-control drives it through this same
-# entrypoint), so only a fresh spawn refuses the branch actor (contract:
-# bin/fm-lease-lib.sh; no-op in homes without a branch actor).
+# Role partition: spawning NEW work is MAIN-owned while attended. A relaunch of
+# an existing task is legitimate branch recovery (fm-control drives it through
+# this same entrypoint), so only a fresh spawn refuses the branch actor
+# (contract: bin/fm-lease-lib.sh; no-op in homes without a branch actor). While
+# the away-posture record exists main is parked and a fresh spawn of
+# already-queued work relocates to the branch, under the record's spend cap
+# below - the same cap main meets in that posture.
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 if [ "$RELAUNCH" -ne 1 ]; then
-  fm_lease_forbid_branch "new-task spawn (fm-spawn)"
+  fm_lease_forbid_branch "new-task spawn (fm-spawn)" --away-relocated
+fi
+# Spend cap (bin/fm-afk-contract.sh's spend_max_concurrent_workers): while the
+# away-posture record exists, a fresh ordinary spawn refuses for BOTH actors
+# once this home already holds that many ordinary task records, counted the
+# same way the return brief counts tasks live at return (every state/*.meta
+# whose kind is not secondmate). A relaunch replaces a worker that already
+# counts, and a secondmate is a persistent home rather than spend, so both are
+# exempt. Checked before any endpoint, worktree, or record exists, so a refusal
+# costs nothing to unwind; the record is read here and not locked across the
+# spawn (contract: bin/fm-lease-lib.sh's role-partition paragraph).
+if [ "$RELAUNCH" -ne 1 ] && [ "$KIND" != secondmate ] && [ -f "$STATE/.afk-contract" ]; then
+  SPAWN_AWAY_CAP=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" field spend_max_concurrent_workers 2>/dev/null || true)
+  case "$SPAWN_AWAY_CAP" in
+  '' | *[!0-9]* | 0)
+    echo "error: spawn refused - the away-posture record at $STATE/.afk-contract has no readable spend cap; nothing was dispatched" >&2
+    exit 1
+    ;;
+  esac
+  SPAWN_AWAY_LIVE=0
+  for spawn_cap_meta in "$STATE"/*.meta; do
+    [ -f "$spawn_cap_meta" ] || continue
+    [ "$(grep '^kind=' "$spawn_cap_meta" 2>/dev/null | tail -1 | cut -d= -f2-)" != secondmate ] || continue
+    SPAWN_AWAY_LIVE=$((SPAWN_AWAY_LIVE + 1))
+  done
+  if [ "$SPAWN_AWAY_LIVE" -ge "$SPAWN_AWAY_CAP" ]; then
+    echo "error: spawn refused - the away-posture record caps concurrent workers at $SPAWN_AWAY_CAP and $SPAWN_AWAY_LIVE ordinary task(s) are live in this home; task $ID stays queued for the captain's return or for a worker to finish (spend cap: bin/fm-afk-contract.sh)" >&2
+    exit 1
+  fi
 fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"

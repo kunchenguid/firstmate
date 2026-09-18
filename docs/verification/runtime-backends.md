@@ -2003,6 +2003,32 @@ The same guard against the pre-change extension in the same lab measured a 676.9
 Measured through the same real `fm_branch_report` tool and real `bin/` scripts with a 1 ms interval timer, the largest single block of the JavaScript thread fell from 273 ms to 2.0 ms for a routine outcome, from 286 ms to 2.0 ms for a captain outcome, and from 134 ms to 1.9 ms for main's acknowledgement, against a 1.3-2.2 ms idle-loop floor.
 Those absolute figures are specific to this host and Pi version; the guards assert the relationship (delivery must stay in the class of the same machine's own floor) rather than a remembered millisecond number.
 
+### 2026-09-18 away posture parks main
+
+The watcher and branch extension suites, the fleet-record, decision-answer, return, and merge suites, the credential-free live guard, and the strict typecheck were run on macOS 26.5 arm64 (Darwin 25.5.0), Node v24.13.1, against the globally installed npm `@earendil-works/pi-coding-agent` 0.81.1 package for the live guard and the npx-cached 0.85.1 package for the typecheck.
+No model was selected or prompted, no provider call was made, and the captain's own Pi session was not changed.
+
+```sh
+bin/fm-test-run.sh tests/fm-pi-watch-extension.test.sh tests/fm-pi-branch-extension.test.sh
+bin/fm-test-run.sh tests/fm-branch-supervision.test.sh tests/fm-send-resolve-key.test.sh tests/fm-afk-return.test.sh tests/fm-pr-merge.test.sh
+FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh
+FM_PI_PACKAGE_DIR=<pi-0.85.1 package> npm exec --yes --package=typescript@5.9.3 -- bash tests/fm-pi-primary-types.test.sh
+```
+
+```text
+ok - under the away-posture record every actionable row is offered to the branch while broken-queue wakes and watcher-failure alarms still reach main
+ok - under the away-posture record the wake carries the verbatim read-back tail, claims every row, opens no processing turn, cancels a pending request, and presents the accumulated rows after archive
+ok - the away-posture record relocates the PR merge and a spawn under the spend cap to the branch, never local landing, and only while confirmed and valid
+ok - fm-send --resolve-key: a decision answer refuses the attended branch before sending, a blocked: key stays steering, and the away-posture record relocates the answer
+ok - under the away-posture record the branch merges a granted green task, is held without a grant, cannot waive a red check, and is refused at the partition while attended
+ok - real Pi SDK 0.81.1 accepts the branch session construction and preserves an unpromptable wake
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.85.1
+```
+
+Every record read in those regressions goes through the real `bin/fm-afk-contract.sh`, so a proposal, an archived record, and an invalid record are proven to restore the attended shape rather than being assumed to.
+Against the installed 0.81.1 package the typecheck reports a pre-existing `ModelsRefreshOptions.providers` mismatch in the branch's provider-registration path that this change does not touch; the option exists from the 0.84 line on, which is why the typecheck evidence uses the newer package as the earlier entries do.
+The real Pi/Herdr return guard (`FM_AFK_PI_HERDR_E2E=1 tests/fm-afk-pi-herdr-return-e2e.test.sh`) remains the owner of the live return-brief proof; it loads no supervision extension into its synthetic primary and does not yet exercise the parked-main scenario, which is a follow-up for a Herdr-lab-guarded task.
+
 ## Native Codex through Pi
 
 Verified on 2026-09-08 with Pi 0.85.1 and the installed `pi-codex-native` 0.2.1 adapter.

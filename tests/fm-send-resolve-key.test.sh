@@ -722,6 +722,69 @@ test_remote_reserved_pending_reply_key_closes_locally() {
   pass "fm-send --resolve-key: a remote secondmate reserved-key close is the same local ledger append"
 }
 
+# The decision-answer partition (bin/fm-send.sh header "Answering a decision"):
+# a --resolve-key naming an open needs-decision or a captain-held task is a
+# decision answer, main-owned while attended and refused for the supervision
+# branch before anything is sent; a blocked: key is ordinary steering for
+# either actor; and while the away-posture record exists the same branch
+# answer is sent and closes the key, because main is parked. Main itself never
+# meets the partition.
+test_decision_answer_partition_relocates_under_the_record() {
+  local dir fb log home rc out
+  dir="$TMP_ROOT/partition"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home partition)
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$home/state/t1.status"
+  printf 'blocked [key=token]: firstmate can refresh the token\n' >> "$home/state/t1.status"
+
+  # Attended branch: the decision is refused at the partition, nothing sent.
+  : > "$log"
+  out=$(env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_SUPERVISION_ACTOR=branch "$SEND" t1 --resolve-key api-shape "go with REST" 2>&1); rc=$?
+  expect_code 6 "$rc" "an attended branch answering a decision must be refused at the partition"
+  assert_contains "$out" "decision answer (fm-send --resolve-key) refused" "the partition refusal lost its action label"
+  [ ! -e "$home/state/t1.inbox" ] || fail "a refused decision answer still reached the worker's inbox"
+  [ ! -s "$log" ] || fail "a refused decision answer still rang the doorbell"
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F '[key=api-shape]' >/dev/null \
+    || fail "the refused answer closed the decision anyway: $out"
+
+  # Attended branch: a blocked: key is steering, sent and closed under the
+  # ordinary lease guard alone.
+  FM_SUPERVISION_ACTOR=branch run_send "$fb" "$home" "$log" t1 --resolve-key token "refreshed the token; resume"; rc=$?
+  expect_code 0 "$rc" "an attended branch resolving a blocker is ordinary steering"
+  grep -qF 'resolved [key=token]: answered: refreshed the token; resume' "$home/state/t1.status" \
+    || fail "the branch's blocker answer did not close the key:"$'\n'"$(cat "$home/state/t1.status")"
+  grep -qF "refreshed the token; resume" "$home/state/t1.inbox/001.msg" \
+    || fail "the branch's blocker answer did not reach the worker's inbox"
+
+  # Under the record: the same decision answer is sent and closes the key.
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" propose >/dev/null || fail "away propose failed"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null || fail "away confirm failed"
+  out=$(env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_SUPERVISION_ACTOR=branch "$SEND" t1 --resolve-key api-shape "go with REST" 2>&1); rc=$?
+  expect_code 0 "$rc" "under the away-posture record the branch's decision answer must be sent: $out"
+  assert_contains "$out" "main is parked" "the relocation did not announce itself"
+  grep -qF 'resolved [key=api-shape]: answered: go with REST' "$home/state/t1.status" \
+    || fail "the relocated answer did not close the decision:"$'\n'"$(cat "$home/state/t1.status")"
+  grep -qF "go with REST" "$home/state/t1.inbox/002.msg" \
+    || fail "the relocated answer did not reach the worker's inbox"
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F '[key=api-shape]' >/dev/null; then
+    fail "the relocated answer left the decision open: $out"
+  fi
+
+  # Main never meets the partition, attended or not.
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null || fail "away archive failed"
+  printf 'needs-decision [key=db]: postgres or sqlite\n' >> "$home/state/t1.status"
+  run_send "$fb" "$home" "$log" t1 --resolve-key db "postgres"; rc=$?
+  expect_code 0 "$rc" "main answering a decision attended is unaffected by the partition"
+  grep -qF 'resolved [key=db]: answered: postgres' "$home/state/t1.status" \
+    || fail "main's attended decision answer did not close the key"
+  pass "fm-send --resolve-key: a decision answer refuses the attended branch before sending, a blocked: key stays steering, and the away-posture record relocates the answer"
+}
+
 test_answer_send_closes_open_decision
 test_answer_close_is_self_announced
 test_colon_first_key_position_is_answerable
@@ -742,3 +805,4 @@ test_unclosable_reserved_key_refuses_before_send
 test_long_decision_key_refuses_before_send
 test_failed_close_recovery_command_is_shell_safe
 test_remote_reserved_pending_reply_key_closes_locally
+test_decision_answer_partition_relocates_under_the_record

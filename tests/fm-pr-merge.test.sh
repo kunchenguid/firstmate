@@ -2768,6 +2768,79 @@ test_away_grant_and_yolo_and_hold_for_return() {
   pass "away merges require yolo or a grant, and --attended-override does not skip that"
 }
 
+# While the away-posture record exists main is parked, so the supervision
+# branch actor may reach the merge gate - and meets exactly the gate main
+# would: a granted task merges green at its live head under away-grant
+# authority, an ungranted one is held for the return, and without the record
+# the branch is refused at the role partition before any forge call
+# (docs/pi-supervision-branch.md "Postures").
+test_away_branch_actor_merges_only_with_a_grant() {
+  local case_dir rc url head
+  head=dadadadadadadadadadadadadadadadadadadada
+  url=https://github.com/example/repo/pull/93
+
+  case_dir=$(make_case away-branch-attended)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  set +e
+  FM_SUPERVISION_ACTOR=branch run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 6 "$rc" "away-branch-attended: an attended branch must be refused at the partition"
+  assert_grep 'the supervision branch never performs this action' "$case_dir/stderr" \
+    "away-branch-attended: refusal lost the partition wording"
+  [ ! -e "$case_dir/gh.log" ] || assert_no_grep 'pr ' "$case_dir/gh.log" \
+    "away-branch-attended: gh ran for an attended branch merge"
+
+  case_dir=$(make_case away-branch-held)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_away_record "$case_dir"
+  set +e
+  FM_SUPERVISION_ACTOR=branch run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "away-branch-held: an ungranted task must be held for the return"
+  assert_grep 'main is parked' "$case_dir/stderr" \
+    "away-branch-held: the relocation note was not printed"
+  assert_grep 'task task-x1 is held for the captain return' "$case_dir/stderr" \
+    "away-branch-held: refusal did not name hold-for-return"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "away-branch-held: gh pr merge ran for an ungranted branch merge"
+
+  case_dir=$(make_case away-branch-grant)
+  mkdir -p "$case_dir/wt" "$case_dir/home"
+  add_gh_mocks "$case_dir" "$head"
+  write_away_record "$case_dir" --grant task-x1
+  FM_SUPERVISION_ACTOR=branch FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "away-branch-grant: a granted green merge must succeed for the branch: $(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 93 example/repo --squash
+  assert_grep "merge landed: task-x1 $url away-grant" "$case_dir/state/.wake-queue" \
+    "away-branch-grant: the durable outcome did not tag away-grant"
+
+  # The green gate is absolute in this posture for the branch as for main.
+  case_dir=$(make_case away-branch-red)
+  mkdir -p "$case_dir/wt" "$case_dir/home"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    '{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-09-01T00:00:00Z"}'
+  write_away_record "$case_dir" --grant task-x1
+  set +e
+  FM_SUPERVISION_ACTOR=branch FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" --allow-red lint \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "away-branch-red: --allow-red must stay attended-only for the branch"
+  assert_grep 'allow-red is attended-only' "$case_dir/stderr" \
+    "away-branch-red: refusal did not name the attended-only waiver"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "away-branch-red: gh pr merge ran for a red branch merge while away"
+  pass "under the away-posture record the branch merges a granted green task, is held without a grant, cannot waive a red check, and is refused at the partition while attended"
+}
+
 test_away_posture_refuses_asynchronous_merge_paths() {
   local case_dir rc url head merge_line
   head=abababababababababababababababababababab
@@ -3099,6 +3172,7 @@ test_allow_red_still_waives_only_the_current_failure
 test_allow_red_is_refused_while_away
 test_allow_red_requires_one_separate_name
 test_away_grant_and_yolo_and_hold_for_return
+test_away_branch_actor_merges_only_with_a_grant
 test_away_posture_refuses_asynchronous_merge_paths
 test_away_plan_gated_403_does_not_block_the_merge
 test_away_grant_does_not_bypass_red_or_identity

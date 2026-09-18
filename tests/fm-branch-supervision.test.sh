@@ -837,6 +837,92 @@ test_branch_cannot_force_teardown_or_directly_relaunch() {
   pass "the branch cannot force a teardown or bypass fm-control for a relaunch"
 }
 
+# --- away posture: main parked, standing authority relocated -----------------
+
+# The relocation is exactly bin/fm-lease-lib.sh's role-partition paragraph:
+# the branch passes the main-only partition for the PR merge and a fresh spawn
+# ONLY while a confirmed, live away-posture record exists; local-only landing
+# is never relocated; the record's spend cap binds a fresh ordinary spawn for
+# either actor; and an unconfirmed, archived, or invalid record is absence,
+# restoring the attended refusal byte for byte.
+test_away_record_relocates_main_owned_actions_to_the_branch() {
+  local home root out status refusal
+  home="$TMP_ROOT/away-home"
+  root="$TMP_ROOT/away-root"
+  mkdir -p "$home/state" "$root"
+  git init -q -b main "$root"
+  git -C "$root" commit -q --allow-empty -m init
+  ln -s "$ROOT/bin" "$root/bin"
+  refusal="error: PR merge (fm-pr-merge) refused - the supervision branch never performs this action; report the outcome and leave it to main (role partition: docs/pi-supervision-branch.md)"
+
+  # Attended: the refusal wording every caller already pins.
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "attended branch fm-pr-merge exited $status, not 6: $out"
+  assert_contains "$out" "$refusal" "attended refusal lost its wording"
+
+  # A proposal alone is not the posture: only a CONFIRMED record relocates.
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" propose --spend 2 >/dev/null || fail "away propose failed"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "an unconfirmed proposal relocated the merge (exit $status): $out"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null || fail "away confirm failed"
+
+  # Under the record the partition passes and the merge script reaches its
+  # OWN gate (no task record here), never the partition refusal.
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 2>&1)
+  status=$?
+  [ "$status" -ne 6 ] || fail "branch fm-pr-merge still hit the partition under the record: $out"
+  assert_contains "$out" "main is parked" "the relocation did not announce itself"
+  assert_contains "$out" "task metadata is unavailable" "the merge did not reach its own gate under the record"
+
+  # Local-only landing is never relocated: it has no record-side gate.
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-merge-local.sh" task-x 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "branch fm-merge-local was relocated under the record (exit $status): $out"
+  assert_contains "$out" "local-only landing (fm-merge-local) refused" "merge-local refusal lost its wording under the record"
+
+  # A fresh spawn passes the partition and meets the spend cap: one ordinary
+  # task record against a cap of 2 proceeds to ordinary validation, a
+  # secondmate record never counts, and a second ordinary record refuses.
+  fm_write_meta "$home/state/task-a.meta" "window=fm-task-a" "kind=ship"
+  fm_write_meta "$home/state/mate-1.meta" "window=remote:mate-1" "kind=secondmate"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 6 ] || fail "branch fm-spawn still hit the partition under the record: $out"
+  assert_contains "$out" "main is parked" "the spawn relocation did not announce itself"
+  assert_not_contains "$out" "caps concurrent workers" "one ordinary task under a cap of 2 was refused"
+  fm_write_meta "$home/state/task-b.meta" "window=fm-task-b" "kind=ship"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -eq 1 ] || fail "spend-cap refusal exited $status, not 1: $out"
+  assert_contains "$out" "caps concurrent workers at 2 and 2 ordinary task(s) are live" "spend-cap refusal lost its count"
+  # The cap binds main too: the posture, not the actor, is what caps spend.
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -eq 1 ] || fail "main spawn past the cap exited $status, not 1: $out"
+  assert_contains "$out" "caps concurrent workers" "main was not held to the spend cap"
+
+  # Archive is absence: the attended refusal returns, byte for byte.
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null || fail "away archive failed"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "an archived record still relocated the merge (exit $status): $out"
+  assert_contains "$out" "$refusal" "the attended refusal changed after archive"
+  assert_not_contains "$out" "main is parked" "an archived record still announced a relocation"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1)
+  assert_not_contains "$out" "caps concurrent workers" "the spend cap outlived the record"
+  # A record that no longer validates is absence too.
+  printf 'version: 99\n' > "$home/state/.afk-contract"
+  out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "an invalid record relocated the merge (exit $status): $out"
+  assert_contains "$out" "$refusal" "the attended refusal changed under an invalid record"
+  pass "the away-posture record relocates the PR merge and a spawn under the spend cap to the branch, never local landing, and only while confirmed and valid"
+}
+
 test_branch_prompt_is_byte_stable_and_above_cache_floor
 test_outcome_store_is_append_only_with_cursor_reads
 test_outcome_startup_replay_preserves_silence
@@ -857,3 +943,4 @@ test_guard_holds_exclusivity_through_mutation
 test_claim_refuses_the_other_actors_name_loudly
 test_release_actor_drops_only_that_actors_leases
 test_branch_cannot_force_teardown_or_directly_relaunch
+test_away_record_relocates_main_owned_actions_to_the_branch
