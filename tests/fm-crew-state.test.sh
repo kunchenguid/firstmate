@@ -3835,6 +3835,10 @@ backdate_status_minutes_ago() {  # <status-file> <minutes>
 # exactly the worktree head, while the branch's ledger shows a newer run still in
 # flight. The failed row is history; reporting it told the captain that healthy,
 # progressing work had failed.
+# Since f5d7f5f2 (#4476) this is rule 2b's case (c), not case (a): the ledger
+# carries no run id, so a LIVE replacement cannot be proven current here and the
+# honest answer is unknown. The safety properties this case exists to pin are
+# unchanged - the stale failure must not surface, and neither must its PR.
 test_later_active_run_supersedes_failed_reading() {
   reset_fakes
   local d short; d=$(new_case stale-failed-later-active)
@@ -3849,10 +3853,10 @@ test_later_active_run_supersedes_failed_reading() {
 EOF
 )"
   local out; out=$(run_crew_state "$d" feat-s1)
-  assert_contains "$out" "state: working" "a live run on this branch outranks the failed reading"
+  assert_contains "$out" "state: unknown" "an unprovable live replacement outranks the failed reading as unknown"
   assert_not_contains "$out" "state: failed" "the superseded failed run must not surface"
   assert_not_contains "$out" "pull/1" "the stale failed run's pull request must not surface"
-  assert_contains "$out" "superseded" "the detail names the supersession"
+  assert_contains "$out" "replacement run identity unavailable" "the detail names the unprovable replacement"
   pass "a later active run supersedes a stale failed reading"
 }
 
@@ -3978,7 +3982,8 @@ test_stale_passed_run_publishes_no_pr_for_active_rerun() {
   FM_FAKE_AXI_STATUS="$(run_passed fm/feat-s2f)"
   FM_FAKE_RUNS_LIST="  running    fm/feat-s2f ${short}  2026-08-27 15:20"
   local out; out=$(run_crew_state "$d" feat-s2f)
-  assert_contains "$out" "state: done" "successful-state precedence remains unchanged"
+  # Since f5d7f5f2 (#4476) the unprovable live rerun reads unknown (case (c)).
+  assert_contains "$out" "state: unknown" "an unprovable live rerun outranks the passed reading as unknown"
   assert_not_contains "$out" "pr=" "a stale passed reading publishes no pull request for an active rerun"
   assert_not_contains "$out" "pull/1" "the stale passed run's pull request must not surface"
   pass "a stale passed run publishes no pull request for an active rerun"
@@ -3994,7 +3999,8 @@ test_cancelled_run_publishes_no_pr_for_active_rerun() {
   FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-s2g https://github.com/o/r/pull/1)"
   FM_FAKE_RUNS_LIST="  running    fm/feat-s2g ${short}  2026-08-27 15:20"
   local out; out=$(run_crew_state "$d" feat-s2g)
-  assert_contains "$out" "state: working" "the active rerun supersedes the cancelled reading"
+  # Since f5d7f5f2 (#4476) the unprovable live rerun reads unknown (case (c)).
+  assert_contains "$out" "state: unknown" "an unprovable live rerun outranks the cancelled reading as unknown"
   assert_not_contains "$out" "pr=" "a stale cancelled reading publishes no pull request for an active rerun"
   assert_not_contains "$out" "pull/1" "the stale cancelled run's pull request must not surface"
   pass "a stale cancelled run publishes no pull request for an active rerun"
