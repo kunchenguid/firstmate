@@ -318,8 +318,10 @@ observe_gitlab() { # canonical GitLab MR URL -> normalized JSON
                  | {user:{login:.user.username},state:"APPROVED",submitted_at:(.created_at // ""),
                     commit_id:null,id:null,source:$c.web_url,body:""}]),
        checks:([$jobs[] | .[]? | {name,id,
-         status:(if (.status | IN("success","failed","canceled","skipped")) then "completed" else "in_progress" end),
-         conclusion:(if (.status | IN("success","failed","canceled","skipped")) then .status else null end),
+         status:(if (.status | IN("manual","scheduled","success","failed","canceled","skipped")) then "completed" else "in_progress" end),
+         conclusion:(if (.status | IN("manual","scheduled")) then "skipped"
+                     elif (.status | IN("success","failed","canceled","skipped")) then .status
+                     else null end),
          started_at:(.started_at // .created_at // "")}]),
        events:(([$discussions[0] | add // [] | .[] | .notes[]]
                  | map(select((.system // false) != true and .author.username != $c.author.username)
@@ -423,7 +425,7 @@ poll() {
         .error == null)' "${row[@]:1}" >/dev/null; then
       printf 'contributions: observation unavailable for %s\n' "$url"
     fi
-    case "$url" in https://github.com/*/issues/*) kind=issue ;; *) kind="pr" ;; esac
+    case "$url" in https://github.com/*/*/issues/*) kind=issue ;; *) kind="pr" ;; esac
     for task in "${row[@]:1}"; do
       fm_pr_task_id_valid "$task" || { printf 'contributions: invalid durable task id\n'; continue; }
       old="$TMP/old.json"

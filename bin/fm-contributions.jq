@@ -89,7 +89,7 @@ def projected($input; $saved; $now; $max_age):
          {actor:"fleet",reason:"checks green; merge is authorized by delivery posture"}
        elif $o.can_merge == true then {actor:"captain",reason:"checks green; merge approval needed"}
        else {actor:"maintainer",reason:"delivery awaits the maintainer"} end) as $action
-    | $k + {kind:($record.kind // (if ($k.url | startswith("https://github.com/") and (contains("/issues/"))) then "issue" else "pr" end)),
+    | $k + {kind:($record.kind // (if ($k.url | test("^https://github.com/[^/]+/[^/]+/issues/[1-9][0-9]*$")) then "issue" else "pr" end)),
          checked_at:$record.checked_at,checked:$fresh,final:$final,head:($observed_head // $recorded_head // $o.head),verdict:$verdict,reviews:$reviews,
          distinct_checks:($checks | length),missing_verdicts:(($no_verdict | length) + (($o.absent_checks // []) | length)),
          pending_checks:($pending | length),failed_checks:($failed | length),
