@@ -46,7 +46,10 @@
 #      input; special tokens are sent without -l (`Enter`, `Escape`, `C-c`
 #      all verified live: Enter submits, C-c interrupts with ^C on screen,
 #      Escape is accepted) - exactly the literal-then-separate-Enter contract
-#      every other backend uses. `--` guards option-shaped payloads.
+#      every other backend uses. `--` guards option-shaped payloads. The
+#      0.8.0 token set is Enter, Tab, Escape, Space, BSpace, C-c, C-d, C-z,
+#      C-l, C-a, and C-e; any other name is written as literal text, so C-u
+#      is delivered as its raw 0x15 byte through -l instead.
 #   2. `terminal capture <id> -S --json` returns
 #      {terminalId, lines[], totalLines} as PLAIN text (ANSI stripped unless
 #      --ansi). There is no per-call line bound; the adapter fetches the
@@ -418,12 +421,24 @@ fm_backend_paseo_send_literal() { # <target> <text> [expected-label]
   fm_backend_paseo_cli terminal send-keys "$FM_BACKEND_PASEO_TERMINAL" -l -- "$2" >/dev/null 2>&1
 }
 
-# fm_backend_paseo_send_key: one named special key, as a token send (no -l).
-# Paseo's send-keys token names are firstmate's own Enter/Escape/C-c/C-u
-# vocabulary (finding #1), so the key passes through unchanged.
+# fm_backend_paseo_send_key: one named special key. Paseo's token set
+# (finding #1) goes as a token send (no -l); C-u has no token, so it goes as
+# the raw 0x15 byte through -l. Any other name is refused, because Paseo
+# would type an unknown token as literal text.
 fm_backend_paseo_send_key() { # <target> <key> [expected-label]
+  case "$2" in
+  Enter | Tab | Escape | Space | BSpace | C-c | C-d | C-z | C-l | C-a | C-e | C-u) ;;
+  *)
+    echo "error: unsupported paseo key '$2' (paseo would type it as literal text)" >&2
+    return 1
+    ;;
+  esac
   fm_backend_paseo_target_ready "$1" "${3:-}" || return 1
-  fm_backend_paseo_cli terminal send-keys "$FM_BACKEND_PASEO_TERMINAL" "$2" >/dev/null 2>&1
+  if [ "$2" = C-u ]; then
+    fm_backend_paseo_cli terminal send-keys "$FM_BACKEND_PASEO_TERMINAL" -l -- $'\025' >/dev/null 2>&1
+  else
+    fm_backend_paseo_cli terminal send-keys "$FM_BACKEND_PASEO_TERMINAL" "$2" >/dev/null 2>&1
+  fi
 }
 
 # fm_backend_paseo_send_text_line: send one line of TEXT then submit.
