@@ -40,7 +40,8 @@
 # bin/fm-backend.sh's fm_backend_detect.
 #
 # Empirical findings from the live verification pass against the real Paseo
-# 0.8.0 CLI/daemon (docs/paseo-backend.md owns the full evidence log):
+# 0.8.0 CLI/daemon (docs/verification/runtime-backends.md#paseo owns the
+# evidence log):
 #
 #   1. `terminal send-keys <id> -l -- <text>` sends literal, UNSUBMITTED
 #      input; special tokens are sent without -l (`Enter`, `Escape`, `C-c`
