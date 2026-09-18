@@ -3666,6 +3666,61 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+
+# --- kind=executor: the ship landed-work proofs unchanged, plus its artifacts ---
+# An executor's pushed fm/<id> branch is reachable from a remote-tracking ref
+# whether its pull request merged or was bounced with the branch kept, so it
+# lands; its poll check, exit marker, notified marker, and the pull-request body
+# file its brief writes inside the worktree are all cleaned up. Unpushed work
+# refuses exactly as for a ship task.
+test_executor_pushed_unmerged_branch_allows_and_cleans_artifacts() {
+  local case_dir rc base
+  case_dir=$(make_case exec-pushed)
+  write_meta "$case_dir" direct-PR executor
+  base=$(git -C "$case_dir/wt" rev-parse HEAD)
+  printf 'issue=7\nexecutor_base=%s\nexecutor_launched=1000\n' "$base" >> "$case_dir/state/task-x1.meta"
+  wt_commit "$case_dir" "executor work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  cp "$ROOT/bin/fm-executor-poll.sh" "$case_dir/state/task-x1.check.sh"
+  chmod 0600 "$case_dir/state/task-x1.check.sh"
+  printf '0\n' > "$case_dir/state/task-x1.executor-exit"
+  printf 'fm-executor-notified-v1\nteardown-test-task-x1\nfailed-no-pr\n' > "$case_dir/state/task-x1.executor-notified"
+  chmod 0600 "$case_dir/state/task-x1.executor-notified"
+  printf '## What changed\n' > "$case_dir/wt/.fm-pr-body.md"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "exec-pushed: teardown should succeed when fm/<id> is on origin: $(cat "$case_dir/stderr")"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "exec-pushed: teardown printed a REFUSED line"
+  assert_absent "$case_dir/state/task-x1.check.sh" "exec-pushed: the executor poll check was left behind"
+  assert_absent "$case_dir/state/task-x1.executor-exit" "exec-pushed: the exit marker was left behind"
+  assert_absent "$case_dir/state/task-x1.executor-notified" "exec-pushed: the notified marker was left behind"
+  assert_absent "$case_dir/state/task-x1.meta" "exec-pushed: the task record was left behind"
+  pass "an executor whose branch is pushed but unmerged is torn down and every executor artifact is removed"
+}
+
+test_executor_unpushed_work_refuses() {
+  local case_dir rc
+  case_dir=$(make_case exec-unpushed)
+  write_meta "$case_dir" direct-PR executor
+  printf 'issue=7\n' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "unpushed executor work"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "exec-unpushed: teardown should refuse unlanded executor work"
+  grep -q REFUSED "$case_dir/stderr" || fail "exec-unpushed: no REFUSED line in stderr"
+  assert_present "$case_dir/state/task-x1.meta" "exec-unpushed: a refusal must keep the task record"
+  pass "an executor with genuinely unlanded work is refused by the unchanged ship landed-work proof"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
@@ -3750,3 +3805,5 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_executor_pushed_unmerged_branch_allows_and_cleans_artifacts
+test_executor_unpushed_work_refuses

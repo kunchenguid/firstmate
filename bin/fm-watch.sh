@@ -81,6 +81,18 @@
 #                          successful attempts never wake firstmate
 #                          (bin/fm-task-inbox-lib.sh owns the ladder policy)
 #   check: <script>: <out> authenticated check output, always actionable
+#   check: <state>/<id>.check.sh: executor-ready: PR <url> <draft|ready>
+#   check: <state>/<id>.check.sh: executor-failed: <no commits and no PR ...|committed but no PR>
+#   check: <state>/<id>.check.sh: executor-stale: running <N>m past the bound
+#                          the structural outcomes of a kind=executor task's
+#                          poll (bin/fm-executor-poll.sh over the validated
+#                          record, bin/fm-executor-lib.sh), delivered once per
+#                          incarnation and outcome through the executor-notified
+#                          marker written after the durable wake is appended;
+#                          an executor's dead or missing agent is its expected
+#                          terminal shape, so executor_kind_skips_pane_supervision
+#                          below keeps it out of every stale, wedge, inbox, and
+#                          dead-agent path
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
 #                          and has not been surfaced yet; reported once per
@@ -167,6 +179,9 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# Executor poll dispatch and once-per-outcome delivery for kind=executor tasks.
+# shellcheck source=bin/fm-executor-lib.sh
+. "$SCRIPT_DIR/fm-executor-lib.sh"
 # Parent-owned secondmate missed-report guards: durable pending-reply
 # expectations created by fm-send on marked secondmate requests. The tick is
 # cheap when no records exist and never scrapes secondmate conversation.
@@ -2235,6 +2250,9 @@ while :; do
     for c in "$STATE"/*.check.sh; do
       [ -e "$c" ] || continue
       is_pr_poll=0
+      is_executor_poll=0
+      executor_outcome_key=
+      executor_gen=
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
           && [ -f "$FM_ROOT/bin/fm-x-poll.sh" ] && [ ! -L "$FM_ROOT/bin/fm-x-poll.sh" ]; then
@@ -2265,6 +2283,35 @@ while :; do
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
+        elif fm_executor_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-executor-poll.sh"; then
+          # The executor poll: the check is a byte copy of the tracked program
+          # and the task's own validated record supplies its arguments, read
+          # again under the task's control lock so a relaunch in flight cannot
+          # hand the poll a superseded incarnation.
+          is_executor_poll=1
+          executor_gen=$FM_EXECUTOR_GEN
+          PR_POLL_CONTROL_LOCK="$STATE/.control-$id.lock"
+          fm_lock_acquire_wait "$PR_POLL_CONTROL_LOCK" || exit 1
+          if ! fm_executor_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-executor-poll.sh" \
+            || [ "$FM_EXECUTOR_GEN" != "$executor_gen" ]; then
+            pr_poll_control_release || exit 1
+            triage_log "executor poll for $id changed before its validated check; skipping the stale snapshot"
+            continue
+          fi
+          run_check_capture "$SCRIPT_DIR/fm-executor-poll.sh" --validated \
+            "$STATE" "$id" "$FM_EXECUTOR_GEN" "$FM_EXECUTOR_WORKTREE" "$FM_EXECUTOR_BACKEND" \
+            "$FM_EXECUTOR_TARGET" "$FM_EXECUTOR_BASE" "$FM_EXECUTOR_LAUNCHED" || exit 1
+          out=$FM_CHECK_RESULT
+          # Each distinct outcome wakes firstmate once per incarnation; the
+          # marker is written below only after the durable wake is appended.
+          if [ -n "$out" ] && executor_outcome_key=$(fm_executor_outcome_key "$out"); then
+            if fm_executor_outcome_already_notified "$STATE" "$id" "$executor_gen" "$executor_outcome_key"; then
+              triage_log "absorbed duplicate executor outcome for $id ($executor_outcome_key)"
+              out=
+            fi
+          else
+            executor_outcome_key=
+          fi
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
           run_check_capture "$custom_snapshot" || exit 1
@@ -2329,6 +2376,10 @@ EOF
         fi
         pr_poll_control_release || exit 1
         fm_wake_append check "$c" "$reason" || exit 1
+        if [ "$is_executor_poll" -eq 1 ] && [ -n "$executor_outcome_key" ]; then
+          fm_executor_outcome_mark_notified "$STATE" "$id" "$executor_gen" "$executor_outcome_key" \
+            || triage_log "executor outcome for $id was queued but its notified marker could not be written"
+        fi
         touch "$STATE/.last-check"
         wake "$reason"
       fi
@@ -2479,6 +2530,16 @@ EOF
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
+    # executor_kind_skips_pane_supervision: a kind=executor task is a one-shot
+    # process with no busy hook, no status line, and no steering inbox
+    # (bin/fm-executor-lib.sh). Its agent exiting is the EXPECTED terminal
+    # shape and a quiet pane is not staleness, so it never enters the
+    # stale-pane, wedge, inbox-ladder, or dead-agent paths below; its poll in
+    # the slow-check sweep above owns every wake for it, including the
+    # runtime bound that replaces output-churn staleness.
+    if [ "$kind" = executor ]; then
+      continue
+    fi
     # Steering-inbox loss detection runs before the secondmate stale
     # exemption below, because a mate's steers land in an inbox too.
     [ -z "$task" ] || inbox_steer_check "$w" "$task"

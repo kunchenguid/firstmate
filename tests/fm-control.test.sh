@@ -879,6 +879,136 @@ test_fm_send_still_marks_the_same_secondmate_task() {
   pass "fm-control's arrival leaves fm-send's from-firstmate marking untouched"
 }
 
+
+# --- kind=executor: a one-shot process, not an interactive agent ----------------
+# An executor (bin/fm-executor-lib.sh) has no turn to cancel and no composer to
+# type an exit command into: interrupt is refused, exit sends Ctrl-C and reads
+# the pane shell's exit marker or the dead verdict, and only headless adapters
+# may run one.
+test_executor_kind_capability() {
+  local harness
+  for harness in claude codex opencode; do
+    fm_control_harness_supports_kind "$harness" executor \
+      || fail "$harness has a verified headless form and should run an executor"
+  done
+  for harness in pi pi-signed grok kimi cursor muse omp; do
+    fm_control_harness_supports_kind "$harness" executor \
+      && fail "$harness has no verified headless form and must not claim an executor"
+  done
+  pass "fm-control-lib: executor capability is exactly the verified headless adapter set"
+}
+
+test_executor_interrupt_is_refused() {
+  local dir out rc
+  dir=$(new_case exec-int)
+  add_task "$dir" t1 opencode executor
+  alive_as "$dir" opencode
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 1 "$rc" "interrupting an executor should refuse"
+  assert_contains "$out" "one-shot executor with no turn to cancel" "the refusal should explain the kind"
+  assert_contains "$out" "exit" "the refusal should point at the verb that stops it"
+  [ -z "$(keys_sent "$dir")" ] || fail "no key should reach an executor on a refused interrupt"
+  pass "fm-control interrupt: refused for an executor, which has no turn to cancel"
+}
+
+test_executor_exit_sends_ctrl_c_and_reads_the_exit_marker() {
+  local dir out rc
+  dir=$(new_case exec-exit)
+  add_task "$dir" t1 opencode executor
+  alive_as "$dir" opencode
+  out=$(FM_FAKE_INTERRUPT_STOPS_AGENT=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit on a running executor should succeed"$'\n'"$out"
+  assert_contains "$out" "stopped t1 harness=opencode" "exit should report the stop"
+  [ "$(keys_sent "$dir")" = C-c ] || fail "an executor is stopped with Ctrl-C, got: $(keys_sent "$dir")"
+  [ -z "$(literals "$dir")" ] || fail "no exit command may be typed at a headless process, got: $(literals "$dir")"
+
+  dir=$(new_case exec-exit-marker)
+  add_task "$dir" t1 opencode executor
+  alive_as "$dir" opencode
+  printf '0\n' > "$dir/home/state/t1.executor-exit"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit after the process already exited should be idempotent"$'\n'"$out"
+  assert_contains "$out" "already-stopped t1" "the exit marker proves the process already exited"
+  [ -z "$(keys_sent "$dir")" ] || fail "an already-exited executor must not be keyed"
+
+  dir=$(new_case exec-exit-stubborn)
+  add_task "$dir" t1 opencode executor
+  alive_as "$dir" opencode
+  out=$(FM_FAKE_NEVER_DIES=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "an executor that ignores Ctrl-C must fail closed"
+  assert_contains "$out" "exit=unconfirmed" "the failure must say the stop is unconfirmed"
+  pass "fm-control exit: an executor is stopped with Ctrl-C, read through its exit marker, and never claimed stopped blind"
+}
+
+
+# The reviewer's live sequence: a long-running executor is stopped from the
+# control plane, and the supervisor's own state read must then agree that the
+# incarnation ended - without waiting out FM_EXECUTOR_MAX_RUNTIME. Ctrl-C kills
+# the one-shot before the pane shell reaches its half of the launch line, so
+# control's proved stop is the only thing that can leave the terminal record.
+test_executor_exit_leaves_the_task_reading_ended() {
+  local dir out rc base marker
+  dir=$(new_case exec-exit-state)
+  add_task "$dir" t1 opencode executor
+  base=$(git -C "$dir/wt-t1" rev-parse HEAD)
+  {
+    echo "issue=4"
+    echo "spawn_gen=s1000.1.1"
+    echo "executor_base=$base"
+    echo "executor_launched=$(( $(date +%s) - 120 ))"
+  } >> "$dir/home/state/t1.meta"
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$dir/fakebin/gh"
+  alive_as "$dir" opencode
+  out=$(FM_FAKE_INTERRUPT_STOPS_AGENT=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit on a long-running executor should stop it"$'\n'"$out"
+  assert_contains "$out" "stopped t1 harness=opencode" "exit should report the stop"
+  marker="$dir/home/state/t1.executor-exit"
+  [ -f "$marker" ] || fail "a proved stop must leave the incarnation's exit marker behind"
+  [ "$(cat "$marker")" = operator-exit ] \
+    || fail "the marker must say the operator ended it, got: $(cat "$marker")"
+  out=$(env PATH="$dir/fakebin:$PATH" FM_FAKE_DIR="$dir/fake" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_HOME="$dir/home" \
+    "$ROOT/bin/fm-crew-state.sh" t1 2>&1); rc=$?
+  expect_code 0 "$rc" "crew-state should read the stopped executor"$'\n'"$out"
+  assert_not_contains "$out" "state: working" "a stopped executor must not still read as working"
+  assert_contains "$out" "source: executor" "the read stays the executor's own"
+  pass "fm-control exit: a stopped executor reads as ended by the supervisor's own state read"
+}
+
+# A failed stop must leave the task honestly running: no marker is written
+# speculatively, so nothing claims a terminal outcome the process never had.
+test_executor_exit_that_fails_writes_no_marker() {
+  local dir out rc
+  dir=$(new_case exec-exit-nomarker)
+  add_task "$dir" t1 opencode executor
+  alive_as "$dir" opencode
+  out=$(FM_FAKE_NEVER_DIES=1 run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "an executor that ignores the stop must fail closed"
+  [ ! -e "$dir/home/state/t1.executor-exit" ] \
+    || fail "an unconfirmed stop must not record an exit marker"
+  pass "fm-control exit: an unconfirmed stop records no exit marker, so the task still reads as running"
+}
+
+test_fm_send_refuses_an_executor_target() {
+  local dir out rc
+  dir=$(new_case exec-send)
+  add_task "$dir" t1 opencode executor
+  alive_as "$dir" opencode
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    FM_SEND_SETTLE=0 FM_ROOT_OVERRIDE="$dir/home" \
+    "$SEND" t1 "please also update the docs" 2>&1); rc=$?
+  expect_code 1 "$rc" "steering an executor must refuse"
+  assert_contains "$out" "reads no steering inbox" "the refusal explains that an executor has no inbox"
+  assert_contains "$out" "relaunch" "the refusal points at re-scoping and relaunching"
+  [ ! -d "$dir/home/state/t1.inbox" ] || fail "a refused steer must write no inbox record"
+  [ -z "$(literals "$dir")" ] || fail "a refused steer must type nothing, got: $(literals "$dir")"
+  pass "fm-send: an executor target is refused rather than steered into a record nothing reads"
+}
+
 test_exit_types_each_harness_verified_command
 test_interrupt_sends_each_harness_verified_key
 test_opencode_interrupts_twice_and_others_once
@@ -914,3 +1044,9 @@ test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
 test_secondmate_control_command_carries_no_marker
 test_fm_send_still_marks_the_same_secondmate_task
+test_executor_kind_capability
+test_executor_interrupt_is_refused
+test_executor_exit_sends_ctrl_c_and_reads_the_exit_marker
+test_executor_exit_leaves_the_task_reading_ended
+test_executor_exit_that_fails_writes_no_marker
+test_fm_send_refuses_an_executor_target

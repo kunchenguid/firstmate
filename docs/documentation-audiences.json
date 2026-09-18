@@ -141,6 +141,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/executor-dispatch/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/firstmate-codexapp/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -450,6 +454,10 @@
     },
     {
       "path": "docs/verification/dispatch-resolve.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/executor.md",
       "audience": "maintainer-verification"
     },
     {

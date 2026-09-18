@@ -91,6 +91,18 @@
 #      backend's pane busy state, then the resolved status declaration
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
+#   4b. kind=executor (bin/fm-executor-lib.sh) never reaches steps 2-4: a
+#      one-shot executor writes no status line and arms no busy hook, so its
+#      state is derived from two structural facts, process exit (the pane
+#      shell's exit marker, or an authoritatively missing endpoint) and a live
+#      pull-request read on fm/<id>:
+#        state: working · source: executor · running <N>m [past the bound]
+#        state: done · source: executor · PR <url> <draft|ready|merged>
+#        state: failed · source: executor · <no commits and no PR (verify likely failed before commit)|committed but no PR>
+#        state: unknown · source: executor · <why: gh unavailable, record incomplete, liveness unreadable>
+#      A no-mistakes run is never attributed to an executor, and
+#      FM_CREW_STATE_NO_FORGE=1 reports an exited executor as unknown rather than
+#      guessing without the pull-request read.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux and herdr, which own a
@@ -124,6 +136,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-executor-lib.sh
+. "$SCRIPT_DIR/fm-executor-lib.sh"
 
 ID=${1:-}
 [ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
@@ -234,6 +248,42 @@ if [ -n "$REMOTE_HOST" ]; then
     *)
       emit unknown remote-endpoint "unknown-remote: endpoint state '$REMOTE_STATE' on $REMOTE_HOST (not proof of death)"
       ;;
+  esac
+fi
+
+# --- executor: structural state, never a status line or a busy hook ---------
+# The two facts and their combination are owned by fm_executor_classify in
+# bin/fm-executor-lib.sh, the same reader the watcher's executor poll runs, so
+# a supervisor reading this line and the poll's wake can never disagree.
+if [ "$KIND" = executor ]; then
+  EXEC_GEN=$(meta_value spawn_gen)
+  EXEC_BASE=$(meta_value executor_base)
+  EXEC_LAUNCHED=$(meta_value executor_launched)
+  EXEC_BACKEND=$(fm_backend_of_meta "$META")
+  EXEC_TARGET=$(fm_backend_target_of_meta "$META")
+  [ -n "$EXEC_TARGET" ] || emit unknown executor "no backend target recorded"
+  if [ "${FM_CREW_STATE_NO_FORGE:-0}" = 1 ] \
+    && { [ -f "$(fm_executor_exit_marker_path "$STATE" "$ID")" ] \
+      || [ "$(fm_backend_agent_state "$EXEC_BACKEND" "$EXEC_TARGET" 2>/dev/null)" = missing ]; }; then
+    emit unknown executor "exited; pull-request read skipped (FM_CREW_STATE_NO_FORGE=1)"
+  fi
+  EXEC_VERDICT=$(fm_executor_classify "$STATE" "$ID" "$EXEC_GEN" "$WT" "$EXEC_BACKEND" "$EXEC_TARGET" "$EXEC_BASE" "$EXEC_LAUNCHED")
+  EXEC_RC=$?
+  case "$EXEC_RC" in
+    0) ;;
+    2) emit unknown executor "exited; pull-request read failed (gh unavailable or errored)" ;;
+    3) emit unknown executor "liveness unreadable ($EXEC_BACKEND endpoint $EXEC_TARGET did not answer)" ;;
+    *) emit unknown executor "executor record incomplete or worktree unreadable" ;;
+  esac
+  EXEC_WORD=${EXEC_VERDICT%% *}
+  EXEC_REST=${EXEC_VERDICT#* }
+  case "$EXEC_WORD" in
+    working) emit working executor "running ${EXEC_REST}m" ;;
+    stale) emit working executor "running ${EXEC_REST}m past the FM_EXECUTOR_MAX_RUNTIME bound" ;;
+    ready) emit "done" executor "PR ${EXEC_REST% *} ${EXEC_REST##* }" ;;
+    failed-no-commits) emit failed executor "no commits and no PR (verify likely failed before commit)" ;;
+    failed-no-pr) emit failed executor "committed but no PR" ;;
+    *) emit unknown executor "unrecognized executor verdict" ;;
   esac
 fi
 

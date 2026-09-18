@@ -38,6 +38,12 @@
 # conflicting role is superseded rather than duplicated.
 # fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
 # ordinary ship brief and the durable contract written during scout promotion.
+# fm_brief_executor_issue reads the fixed "Delivery contract: kind=executor
+# issue=<N>" line bin/fm-brief.sh --executor writes, so bin/fm-spawn.sh can
+# refuse a brief whose kind or issue disagrees with the spawn. An executor brief
+# has no Task subsections, no intent contract, and no worker role scope: its
+# issue is the specification and its state is derived structurally
+# (bin/fm-executor-lib.sh), so none of the helpers above apply to it.
 
 fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
@@ -72,6 +78,17 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id>
       return 1
       ;;
   esac
+}
+
+# Print the issue number from an executor brief's delivery-contract line; fail
+# when the file is not an executor brief. The line is matched exactly so a
+# mention of the contract in prose can never stand in for it.
+fm_brief_executor_issue() {  # <file>
+  local file=$1 issue
+  [ -f "$file" ] || return 1
+  issue=$(sed -n 's/^Delivery contract: kind=executor issue=\([1-9][0-9]*\)$/\1/p' "$file" | head -n 1)
+  [ -n "$issue" ] || return 1
+  printf '%s\n' "$issue"
 }
 
 # Return 0 when a Task subsection still consists only of its scaffold

@@ -25,6 +25,12 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-backend.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-executor-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -174,6 +180,75 @@ EOF
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
   TASK_TMPS+=("/tmp/fm-$id")
+}
+
+# add_executor_task <case-dir> <id> [harness]
+# A kind=executor task: a worktree already on fm/<id> at a recorded base, the
+# executor brief, a meta carrying the executor fields, a finished previous run
+# (exit marker present, pane shell foreground), and a replacement that comes up
+# as opencode.
+add_executor_task() {
+  local dir=$1 id=$2 harness=${3:-opencode}
+  local home="$dir/home" proj="$dir/proj" wt="$dir/wt" base
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  base=$(git -C "$wt" rev-parse HEAD)
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
+    "$BRIEF" "$id" proj --executor --issue 5 --verify 'make ci' >/dev/null
+  {
+    echo "window=fmses:fm-$id"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$wt"
+    echo "project=$proj"
+    echo "harness=$harness"
+    echo "kind=executor"
+    echo "mode=direct-PR"
+    echo "yolo=off"
+    echo "issue=5"
+    echo "executor_base=$base"
+    echo "executor_launched=1000"
+    echo "tasktmp=/tmp/fm-$id"
+    echo "model=default"
+    echo "effort=default"
+    echo "spawn_gen=s1000.1.1"
+  } > "$home/state/$id.meta"
+  printf '0\n' > "$home/state/$id.executor-exit"
+  printf '%s\n' "fm-$id" > "$dir/fake/windows"
+  printf '%s' "$wt" > "$dir/fake/cwd"
+  printf 'zsh' > "$dir/fake/command"
+  printf 'opencode' > "$dir/fake/becomes"
+  TASK_TMPS+=("/tmp/fm-$id")
+}
+
+# A fake gh whose `pr list` answers from the given rows ("url<TAB>isDraft<TAB>state"),
+# honoring the --jq the executor poll passes: a CLOSED pull request never counts.
+make_executor_gh_stub() {  # <case-dir> [rows]
+  cat > "$1/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-} ${2:-}" in
+  "pr list")
+    printf '%s\n' "${FM_FAKE_GH_PRS:-}" | while IFS=$'\t' read -r url draft state; do
+      [ -n "$url" ] || continue
+      [ "$state" != CLOSED ] || continue
+      printf '%s\t%s\t%s\n' "$url" "$draft" "$state"
+    done
+    exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$1/fakebin/gh"
+  printf '%s' "${2:-}" > "$1/fake/prs"
+}
+
+# Run the executor poll exactly as the watcher does, over the task's own record.
+run_executor_poll() {  # <case-dir> <id>
+  local dir=$1 id=$2
+  fm_executor_poll_snapshot_capture "$dir/home/state" "$id" "$ROOT/bin/fm-executor-poll.sh" \
+    || fail "the executor poll record for $id did not validate"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_GH_PRS="$(cat "$dir/fake/prs")" \
+    "$ROOT/bin/fm-executor-poll.sh" --validated "$dir/home/state" "$id" \
+    "$FM_EXECUTOR_GEN" "$FM_EXECUTOR_WORKTREE" "$FM_EXECUTOR_BACKEND" \
+    "$FM_EXECUTOR_TARGET" "$FM_EXECUTOR_BASE" "$FM_EXECUTOR_LAUNCHED"
 }
 
 run_control() {  # <case-dir> <args...>
@@ -1681,6 +1756,106 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+
+# --- kind=executor: relaunch re-runs the one-shot in the same worktree ----------
+test_executor_relaunch_reruns_in_place_and_rearms_the_poll() {
+  local dir out rc head_before brief_before
+  dir=$(new_case executor ex1)
+  add_executor_task "$dir" ex1
+  git -C "$dir/wt" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "first attempt's work"
+  head_before=$(git -C "$dir/wt" rev-parse HEAD)
+  brief_before=$(cat "$dir/home/data/ex1/brief.md")
+  # A previous attempt's merge poll for a bounced pull request still owns the
+  # check name and its sidecar; the relaunched executor's poll replaces both.
+  cp "$ROOT/bin/fm-pr-poll.sh" "$dir/home/state/ex1.check.sh"; chmod 0600 "$dir/home/state/ex1.check.sh"
+  # The previous incarnation was stopped from the control plane, so its marker
+  # is the operator record; the new incarnation must inherit neither marker.
+  printf 'operator-exit\n' > "$dir/home/state/ex1.executor-exit"
+  printf 'github\nhttps://github.com/o/r/pull/1\ngithub.com\no/r\n1\n' > "$dir/home/state/ex1.pr-poll"
+
+  out=$(run_control "$dir" ex1 relaunch); rc=$?
+  expect_code 0 "$rc" "an executor relaunch without a note should succeed"$'\n'"$out"
+  assert_contains "$out" "relaunched ex1 harness=opencode from=opencode" "the outcome names the transition"
+  [ "$(meta_field "$dir" ex1 kind)" = executor ] || fail "kind must survive the relaunch"
+  [ "$(meta_field "$dir" ex1 issue)" = 5 ] || fail "the issue must survive the relaunch"
+  [ "$(meta_field "$dir" ex1 mode)" = direct-PR ] || fail "the implied delivery mode must survive"
+  [ "$(meta_field "$dir" ex1 executor_base)" = "$head_before" ] \
+    || fail "the relaunch must record the branch base at the worktree's HEAD, so the poll counts only the new incarnation's commits"
+  [ "$(meta_field "$dir" ex1 executor_launched)" != 1000 ] || fail "a relaunch must mint a fresh launch epoch"
+  [ "$(meta_field "$dir" ex1 spawn_gen)" != s1000.1.1 ] || fail "a relaunch must mint a fresh incarnation"
+  [ ! -e "$dir/home/state/ex1.executor-exit" ] \
+    || fail "the previous run's exit marker, operator-written or not, must be cleared with the freshly minted base"
+  cmp -s "$ROOT/bin/fm-executor-poll.sh" "$dir/home/state/ex1.check.sh" \
+    || fail "the relaunch must re-arm the executor poll over the stale merge poll"
+  [ ! -e "$dir/home/state/ex1.pr-poll" ] || fail "the stale merge poll's sidecar must be retired"
+  [ "$(git -C "$dir/wt" rev-parse HEAD)" = "$head_before" ] || fail "a relaunch must never reset the worktree"
+  [ "$(git -C "$dir/wt" branch --show-current)" = fm/ex1 ] || fail "the worktree must stay on fm/<id>"
+  [ "$(cat "$dir/home/data/ex1/brief.md")" = "$brief_before" ] || fail "without a note the brief is untouched"
+  assert_grep "opencode run" "$dir/fake/literal" "the replacement should be launched in the headless form"
+  assert_grep "executor-exit" "$dir/fake/literal" "the replacement launch carries the exit marker"
+  assert_no_grep "/exit" "$dir/fake/literal" "no exit command is typed at an already-exited executor"
+  [ "$(journal_field "$dir" ex1 phase)" = complete ] || fail "the transaction journal should end complete"
+  pass "fm-control relaunch: an executor is re-run in place on its branch with a fresh incarnation and poll"
+}
+
+test_executor_relaunch_escalates_profile_and_appends_the_note() {
+  local dir out rc
+  dir=$(new_case executor-escalate ex2)
+  add_executor_task "$dir" ex2
+  printf 'claude' > "$dir/fake/becomes"
+  out=$(run_control "$dir" ex2 relaunch --harness claude --model sonnet --effort high --note "first attempt weakened a test; issue re-scoped"); rc=$?
+  expect_code 0 "$rc" "an executor relaunch onto a stronger profile should succeed"$'\n'"$out"
+  assert_contains "$out" "relaunched ex2 harness=claude from=opencode model=sonnet effort=high" "the outcome names the new profile"
+  [ "$(meta_field "$dir" ex2 harness)" = claude ] || fail "the record must follow the harness switch"
+  assert_grep "claude -p" "$dir/fake/literal" "the replacement uses claude's headless form"
+  assert_grep "# Note from Firstmate" "$dir/home/data/ex2/brief.md" "the note is appended as a dated Firstmate note"
+  assert_grep "issue re-scoped" "$dir/home/data/ex2/brief.md" "the note text reaches the brief"
+  assert_grep "Delivery contract: kind=executor issue=5" "$dir/home/data/ex2/brief.md" "the contract line survives the note"
+  out=$(run_control "$dir" ex2 relaunch --harness pi); rc=$?
+  expect_code 1 "$rc" "relaunching an executor onto an adapter without a headless form must refuse before stopping anything"
+  assert_contains "$out" "not verified to run a executor task" "the refusal names the kind"
+  pass "fm-control relaunch: an executor escalates to a stronger headless profile and refuses a non-headless one"
+}
+
+
+# A relaunched executor is a NEW incarnation: the poll must describe its work,
+# not the commits the bounced first incarnation left on the shared branch.
+test_executor_relaunch_counts_only_the_new_incarnations_commits() {
+  local dir out rc n
+  dir=$(new_case executor-base ex4)
+  add_executor_task "$dir" ex4
+  # First incarnation: three commits on fm/ex4 and a pull request firstmate bounced.
+  for n in 1 2 3; do
+    git -C "$dir/wt" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "first attempt $n"
+  done
+  make_executor_gh_stub "$dir" $'https://github.com/o/r/pull/44\tfalse\tCLOSED'
+
+  out=$(run_control "$dir" ex4 relaunch); rc=$?
+  expect_code 0 "$rc" "the relaunch should succeed"$'\n'"$out"
+  # The second incarnation dies at launch before committing anything; the pane
+  # shell writes the exit marker the poll reads.
+  printf '1\n' > "$dir/home/state/ex4.executor-exit"
+
+  out=$(run_executor_poll "$dir" ex4)
+  [ "$out" = "executor-failed: no commits and no PR (verify likely failed before commit)" ] \
+    || fail "the poll must describe the relaunched incarnation, which committed nothing, got: $out"
+  pass "fm-control relaunch: the poll counts the relaunched incarnation's own commits, not the bounced attempt's"
+}
+
+test_executor_promotion_is_refused() {
+  local dir out rc
+  dir=$(new_case executor-promote ex3)
+  add_executor_task "$dir" ex3
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
+    "$PROMOTE" ex3 --mode direct-PR --yolo off 2>&1); rc=$?
+  expect_code 1 "$rc" "promoting an executor must refuse"
+  assert_contains "$out" "is not a scout task" "the refusal names the gate it failed"
+  assert_contains "$out" "executor task already ships its own pull request" "the refusal explains why an executor is never promoted"
+  assert_contains "$out" "relaunch" "the refusal points at the executor's own escalation path"
+  [ "$(meta_field "$dir" ex3 kind)" = executor ] || fail "a refused promotion must leave the record untouched"
+  pass "fm-promote: an executor cannot be promoted; re-scope and relaunch it instead"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
@@ -1737,3 +1912,7 @@ test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_executor_relaunch_reruns_in_place_and_rearms_the_poll
+test_executor_relaunch_escalates_profile_and_appends_the_note
+test_executor_relaunch_counts_only_the_new_incarnations_commits
+test_executor_promotion_is_refused

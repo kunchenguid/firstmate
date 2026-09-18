@@ -142,7 +142,7 @@ if ! fm_backlog_record_present "$META" "task record" "$STATE"; then
   echo "error: task record for $ID is unsafe or missing ($FM_BACKLOG_TRANSITION_ERROR)" >&2
   exit 1
 fi
-grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
+grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta); only a scout is promoted, and an executor task already ships its own pull request, so re-scope its GitHub issue and relaunch it (bin/fm-control.sh $ID relaunch) or dispatch a separate ship task" >&2; exit 1; }
 
 SCOUT_BRIEF="$DATA/$ID/brief.md"
 if fm_brief_task_placeholders_present "$SCOUT_BRIEF"; then

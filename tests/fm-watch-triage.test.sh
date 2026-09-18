@@ -5431,6 +5431,120 @@ if [ -n "${FM_TEST_ONLY:-}" ]; then
   exit 0
 fi
 
+
+# --- kind=executor: a quiet or dead pane is not staleness, and the executor
+#     poll owns every wake -------------------------------------------------------
+# An executor (bin/fm-executor-lib.sh) is a one-shot process with no busy hook,
+# no status line, and no steering inbox, so the stale-pane path must never touch
+# it (executor_kind_skips_pane_supervision in fm-watch.sh). The divergence is
+# asserted in the same fixture: the identical idle pane surfaces at once as a
+# ship task and stays silent as an executor.
+test_executor_quiet_pane_is_not_stale() {
+  local dir state fakebin out capture_file window key pane_hash pid
+  dir=$(make_case executor-quiet); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-exq"
+  printf 'idle prompt, finished' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle prompt, finished")
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+
+  # Control arm: the same idle pane as a ship task surfaces immediately.
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/exq.meta"
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "the ship control arm did not surface the idle pane as stale"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "the ship control arm did not print the stale wake"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the control arm's wake"
+
+  # Executor arm: the identical pane, the identical primed hash, kind=executor.
+  printf 'window=%s\nkind=executor\n' "$window" > "$state/exq.meta"
+  rm -f "$state/.stale-$key" "$state/.stale-since-$key"
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { kill "$pid" 2>/dev/null; fail "the watcher exited on a quiet executor pane:"$'\n'"$(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" || { kill "$pid" 2>/dev/null; fail "the watcher exited on a quiet executor pane in its second cycle:"$'\n'"$(cat "$out")"; }
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  grep -F "stale:" "$out" >/dev/null && fail "a quiet executor pane was surfaced as stale:"$'\n'"$(cat "$out")"
+  [ ! -e "$state/.stale-$key" ] || fail "the stale suppressor was written for an executor pane"
+  [ ! -s "$state/.wake-queue" ] || fail "a quiet executor pane queued a wake:"$'\n'"$(cat "$state/.wake-queue")"
+  unset FM_FAKE_CREW_STATE
+  pass "executor_kind_skips_pane_supervision: the pane that surfaces as a ship stays silent as an executor"
+}
+
+# The executor poll runs in the slow-check sweep: a byte copy of the tracked
+# program over the task's validated record, delivered once per incarnation and
+# outcome. A second cycle over the same outcome is absorbed, and a new
+# incarnation (a fresh spawn_gen) wakes again.
+test_executor_poll_delivers_each_outcome_once() {
+  local dir state fakebin out window base pid check
+  dir=$(make_case executor-poll); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-exp"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list") exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/gh"
+  fm_git_init_commit "$dir/wt"
+  git -C "$dir/wt" checkout -q -b fm/exp
+  base=$(git -C "$dir/wt" rev-parse HEAD)
+  git -C "$dir/wt" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "executor work"
+  fm_write_meta "$state/exp.meta" "window=$window" "endpoint_task_id=exp" "worktree=$dir/wt" \
+    "project=$dir/wt" "harness=opencode" "kind=executor" "mode=direct-PR" "yolo=off" "issue=3" \
+    "spawn_gen=s1000.1.1" "executor_base=$base" "executor_launched=$(date +%s)"
+  check="$state/exp.check.sh"
+  cp "$ROOT/bin/fm-executor-poll.sh" "$check"; chmod 0600 "$check"
+  printf '0\n' > "$state/exp.executor-exit"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "the executor poll's outcome did not wake the watcher"
+  grep -F "check: $check: executor-failed: committed but no PR" "$out" >/dev/null \
+    || fail "the check wake did not carry the executor outcome:"$'\n'"$(cat "$out")"
+  grep -F "executor-failed: committed but no PR" "$state/.wake-queue" >/dev/null \
+    || fail "the executor outcome was not queued durably"
+  [ -f "$state/exp.executor-notified" ] || fail "the delivered outcome must be marked as notified"
+  grep -Fx s1000.1.1 "$state/exp.executor-notified" >/dev/null || fail "the marker must name the incarnation"
+  grep -Fx failed-no-pr "$state/exp.executor-notified" >/dev/null || fail "the marker must name the outcome"
+  cmp -s "$ROOT/bin/fm-executor-poll.sh" "$check" || fail "the published check must stay byte-identical"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the executor wake"
+
+  # Same incarnation, same outcome: absorbed across two whole cycles.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_STATE_OVERRIDE="$state" \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { kill "$pid" 2>/dev/null; fail "a repeated executor outcome woke the watcher again:"$'\n'"$(cat "$out")"; }
+  wait_poll_cycle "$state" "$pid" || { kill "$pid" 2>/dev/null; fail "a repeated executor outcome woke the watcher in its second cycle:"$'\n'"$(cat "$out")"; }
+  grep -F "executor-failed" "$out" >/dev/null && { kill "$pid" 2>/dev/null; fail "the duplicate outcome was printed again:"$'\n'"$(cat "$out")"; }
+  grep -F "absorbed duplicate executor outcome for exp" "$state/.watch-triage.log" >/dev/null \
+    || { kill "$pid" 2>/dev/null; fail "the absorbed duplicate was not logged"; }
+
+  # A relaunch mints a new incarnation while the same watcher keeps polling:
+  # the same outcome wakes again on its next cycle.
+  sed -i.bak 's/^spawn_gen=.*/spawn_gen=s2000.2.2/' "$state/exp.meta" && rm -f "$state/exp.meta.bak"
+  wait_for_exit "$pid" 100 || fail "a new incarnation's outcome did not wake the watcher"
+  grep -F "executor-failed: committed but no PR" "$out" >/dev/null || fail "the new incarnation's outcome was not printed:"$'\n'"$(cat "$out")"$'\n'"--- queue ---"$'\n'"$(cat "$state/.wake-queue" 2>/dev/null)"
+  grep -Fx s2000.2.2 "$state/exp.executor-notified" >/dev/null || fail "the marker must follow the incarnation"
+  pass "the executor poll wakes once per incarnation and outcome, absorbing exact repeats"
+}
+
 test_status_span_actionable_classifier
 test_status_span_survives_a_later_routine_append
 test_status_span_respects_decision_closure
@@ -5506,6 +5620,8 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
+test_executor_quiet_pane_is_not_stale
+test_executor_poll_delivers_each_outcome_once
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle

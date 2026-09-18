@@ -276,11 +276,11 @@ family_for_basename() {
   case "$1" in
     fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
     fm-bearings-board.test.sh|\
-    fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
+    fm-brief.test.sh|fm-brief-executor.test.sh|fm-vendor-auth-probe.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-classify-decision-key.test.sh|\
     fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
-    fm-crew-state.test.sh|fm-captain-hold-lifecycle.test.sh|\
+    fm-crew-state.test.sh|fm-crew-state-executor.test.sh|fm-captain-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-harness-precedence.test.sh|\
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-rovo-harness.test.sh|fm-agy-harness.test.sh|fm-omp-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
@@ -350,6 +350,7 @@ family_for_basename() {
     fm-cursor-primary-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-harness-adapter-instructions-live-e2e.test.sh|\
     fm-harness-liveness-drift-live-e2e.test.sh|\
+    fm-executor-headless-flags-live-e2e.test.sh|\
     fm-muse-signals-live-e2e.test.sh|fm-rovo-signals-live-e2e.test.sh|fm-agy-signals-live-e2e.test.sh|\
     fm-herdr-version-floor-live-e2e.test.sh|\
     fm-herdr-pi-stale-registration-live-e2e.test.sh|\
@@ -369,12 +370,12 @@ family_for_basename() {
     fm-control.test.sh|fm-control-relaunch.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
     fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
-    fm-spawn-dispatch-profile.test.sh|fm-claude-trust.test.sh|\
+    fm-spawn-dispatch-profile.test.sh|fm-spawn-executor.test.sh|fm-claude-trust.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
       ;;
-    fm-check-unregister.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|\
+    fm-check-unregister.test.sh|fm-executor-poll.test.sh|fm-pr-check-security.test.sh|fm-pr-merge.test.sh|\
     fm-pr-reviewers.test.sh|fm-pr-state.test.sh|\
     fm-review-diff.test.sh|fm-teardown.test.sh|fm-x-mode.test.sh)
       printf '%s\n' pr-forge
@@ -687,6 +688,7 @@ tests/fm-bearings-snapshot.test.sh 171176
 tests/fm-bootstrap-network-parallel.test.sh 9539
 tests/fm-bootstrap.test.sh 46634
 tests/fm-branch-supervision.test.sh 8915
+tests/fm-brief-executor.test.sh 600
 tests/fm-busy-adapter-wiring.test.sh 27817
 tests/fm-busy-state.test.sh 2990
 tests/fm-calm-claude-mod-live-e2e.test.sh 46
@@ -708,12 +710,15 @@ tests/fm-composer-matrix-live-e2e.test.sh 47
 tests/fm-contributions.test.sh 35676
 tests/fm-control-relaunch.test.sh 137013
 tests/fm-control.test.sh 39524
+tests/fm-crew-state-executor.test.sh 1000
 tests/fm-cursor-harness.test.sh 30212
 tests/fm-cursor-primary-live-e2e.test.sh 72
 tests/fm-cursor-primary.test.sh 52269
 tests/fm-daemon.test.sh 27262
 tests/fm-dispatch-resolve.test.sh 4397
 tests/fm-documentation-audiences.test.sh 847
+tests/fm-executor-headless-flags-live-e2e.test.sh 1500
+tests/fm-executor-poll.test.sh 1700
 tests/fm-extension-binding.test.sh 9053
 tests/fm-fleet-snapshot-view.test.sh 17465
 tests/fm-fleet-sync.test.sh 35983
@@ -802,6 +807,7 @@ tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh 46
 tests/fm-sessionstart-nudge.test.sh 66247
 tests/fm-shared-captain-inheritance.test.sh 5687
 tests/fm-spawn-dispatch-profile.test.sh 138433
+tests/fm-spawn-executor.test.sh 27000
 tests/fm-spawn-pool-base-freshen.test.sh 62249
 tests/fm-spawn-worktree-settle.test.sh 8482
 tests/fm-startup-memory-budget.test.sh 7392
@@ -1526,6 +1532,17 @@ families_for_changed_path() {
     bin/fm-pr-*|bin/fm-merge-local.sh|bin/fm-teardown.sh|bin/fm-review-diff.sh|\
     bin/fm-x-*|bin/fm-check*)
       printf '%s\n' pr-forge
+      ;;
+    bin/fm-executor-poll.sh|bin/fm-executor-lib.sh)
+      # The executor kind's shared classifier and static poll are read by the
+      # spawn (backend-dispatch), the watcher (watcher-wake-lock), crew-state
+      # and the brief (pure-contract-unit), teardown and the poll suite
+      # (pr-forge), and the headless-flag live guard.
+      printf '%s\n' pr-forge
+      printf '%s\n' backend-dispatch
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' live-harness-optin
       ;;
     bin/fm-nm-run-lib.sh)
       # Shared no-mistakes run-attribution primitives, sourced by both

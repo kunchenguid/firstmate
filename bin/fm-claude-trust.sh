@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pre-register Claude Code's workspace trust for the directory a claude spawn is
-# about to launch into - the isolated task worktree of a ship or scout crewmate,
+# about to launch into - the isolated task worktree of a ship, scout, or executor task,
 # or the seeded home of a secondmate - so the agent reaches its brief or charter
 # instead of wedging on the trust dialog. In worktree mode it also carries
 # forward the external-CLAUDE.md-import approval, but only when the primary

@@ -531,7 +531,7 @@ _fm_status_kind() {
     done < "$meta"
     kind=${kind:-ship}
   fi
-  case "$kind" in ship|scout|secondmate) printf '%s' "$kind" ;; *) printf unknown ;; esac
+  case "$kind" in ship|scout|secondmate|executor) printf '%s' "$kind" ;; *) printf unknown ;; esac
 }
 
 _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb> <kind>

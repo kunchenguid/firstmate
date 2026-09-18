@@ -16,6 +16,7 @@
 # PR instead of shipping a new one).
 # Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --executor --issue <N> --verify "<command>"
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -32,6 +33,27 @@
 #   omitting both still fails loudly so an accidental omission is never silent.
 #   Set FM_SECONDMATE_CHARTER='<charter>' to fill the charter text.
 #   Set FM_SECONDMATE_SCOPE='<scope>' to write a routing scope distinct from the charter text.
+#   --executor writes the SHORT one-shot executor brief (AGENTS.md section 7;
+#   the executor-dispatch skill owns when to choose it): the worker reads one
+#   GitHub issue, implements only its acceptance criteria, runs the issue's own
+#   verify command and then the project's full gate, commits, pushes fm/<id>,
+#   and opens a pull request whose body says `Closes #<N>`, as a draft when the
+#   gate cannot be made green or a Danger-zone item is in doubt; then it exits.
+#   The issue is the whole specification, so this brief carries no {TASK} or
+#   {FIRSTMATE_SPEC} placeholders, no status-file protocol, no steering-inbox
+#   section, no no-mistakes definition of done, and no project-memory section:
+#   a cheap one-shot model is never asked to operate firstmate's interactive
+#   contracts, and firstmate derives its state structurally (bin/fm-executor-lib.sh).
+#   It keeps the worktree-isolation assertion in one actionable line. --issue
+#   is REQUIRED and must be a positive integer. --verify is REQUIRED and
+#   non-empty: firstmate resolves the project's CI-equivalent gate at intake
+#   and passes it explicitly, exactly as it passes --mode to a ship brief; this
+#   script never guesses it. The brief records a fixed machine-readable
+#   "Delivery contract: kind=executor issue=<N>" line that bin/fm-spawn.sh
+#   --executor checks against its own --issue, so brief and spawn cannot drift,
+#   and a ship or scout spawn refuses an executor brief through the same line.
+#   --mode, --scout, --secondmate, and --herdr-lab are refused with --executor,
+#   and --issue/--verify are refused without it.
 #   --herdr-lab is mandatory when the task will issue Herdr lifecycle commands.
 #   It adds the hard isolation contract backed by bin/fm-herdr-lab.sh.
 #   The flag must be explicit because {TASK} and {FIRSTMATE_SPEC} are filled
@@ -94,6 +116,10 @@ esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-executor-lib.sh
+. "$SCRIPT_DIR/fm-executor-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 CREWMATE_PAUSE_WAIT_EXAMPLES='an upstream release, a rate-limit reset, a scheduled window, or your own validation round'
 
@@ -122,31 +148,43 @@ else
   STATE="$FM_HOME/state"
 fi
 KIND=ship
+KIND_FLAGS=0
 HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+ISSUE=
+ISSUE_SET=0
+VERIFY=
+VERIFY_SET=0
 POS=()
 want_value=
 for a in "$@"; do
   if [ -n "$want_value" ]; then
-    case "$a" in
-      --*) echo "error: --$want_value requires a value" >&2; exit 1 ;;
+    case "$want_value:$a" in
+      mode:--*|issue:--*) echo "error: --$want_value requires a value" >&2; exit 1 ;;
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      issue) ISSUE=$a; ISSUE_SET=1 ;;
+      verify) VERIFY=$a; VERIFY_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
     continue
   fi
   case "$a" in
-    --scout) KIND=scout ;;
-    --secondmate) KIND=secondmate ;;
+    --scout) KIND=scout; KIND_FLAGS=$((KIND_FLAGS + 1)) ;;
+    --secondmate) KIND=secondmate; KIND_FLAGS=$((KIND_FLAGS + 1)) ;;
+    --executor) KIND=executor; KIND_FLAGS=$((KIND_FLAGS + 1)) ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --issue) want_value=issue ;;
+    --issue=*) ISSUE=${a#--issue=}; ISSUE_SET=1 ;;
+    --verify) want_value=verify ;;
+    --verify=*) VERIFY=${a#--verify=}; VERIFY_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -155,6 +193,26 @@ for a in "$@"; do
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+[ "$KIND_FLAGS" -le 1 ] || { echo "error: --scout, --secondmate, and --executor select one brief kind each; pass exactly one" >&2; exit 1; }
+
+# An executor brief is shaped by its issue and the project's gate, both explicit
+# firstmate decisions at intake; neither is guessed here.
+if [ "$KIND" = executor ]; then
+  [ "$ISSUE_SET" -eq 1 ] || { echo "error: --executor requires --issue <N>, the GitHub issue the executor closes" >&2; exit 1; }
+  fm_executor_issue_valid "$ISSUE" || { echo "error: --issue must be a positive integer (got '$ISSUE')" >&2; exit 1; }
+  [ "$VERIFY_SET" -eq 1 ] && [ -n "$(printf '%s' "$VERIFY" | tr -d '[:space:]')" ] || {
+    echo "error: --executor requires --verify \"<command>\", the project's CI-equivalent gate resolved at intake; an empty or omitted gate would leave the executor without a definition of green" >&2
+    exit 1
+  }
+  case "$VERIFY" in
+    *'<VERIFY>'*) echo "error: --verify still carries the literal <VERIFY> placeholder; pass the project's real gate command" >&2; exit 1 ;;
+  esac
+  [ "$HERDR_LAB" -eq 0 ] || { echo "error: --herdr-lab applies only to crewmate ship or scout briefs; an executor is a one-shot worker with no lifecycle contract" >&2; exit 1; }
+  [ "$MODE_SET" -eq 0 ] || { echo "error: --mode is refused with --executor: an executor's delivery is inherently direct-PR (push fm/<id>, open a pull request); firstmate reviews the real diff before merge" >&2; exit 1; }
+elif [ "$ISSUE_SET" -eq 1 ] || [ "$VERIFY_SET" -eq 1 ]; then
+  echo "error: --issue and --verify apply only to --executor briefs" >&2
+  exit 1
+fi
 
 # Ship delivery mode is an explicit per-task decision (AGENTS.md section 7). A
 # missing or invalid value stops the scaffold rather than silently defaulting.
@@ -315,6 +373,40 @@ exit 0
 fi
 
 REPO=${POS[1]}
+
+if [ "$KIND" = executor ]; then
+# The executor brief: short, numbered, and self-contained, written for a cheap
+# one-shot model. The issue is the specification, so nothing here restates it;
+# the branch, the issue number, and the gate are the only task-specific facts.
+# Its structure is the single owner of what an executor is asked to do; the
+# executor-dispatch skill owns firstmate's judgment around it. No status file,
+# no inbox, no {TASK} placeholders: bin/fm-spawn.sh --executor checks only the
+# fixed delivery-contract line at the end.
+cat > "$BRIEF" <<EOF
+You are a one-shot executor launched by Firstmate. Work autonomously to completion, then exit: nobody is watching this session and nobody will answer a question.
+Your whole job is to close GitHub issue #$ISSUE of $REPO with one pull request.
+
+# Standing rule
+Stay inside this worktree and act only on what your own commands print here; read and write no other path.
+Before anything else confirm the worktree: \`git rev-parse --show-toplevel\` must equal \`pwd -P\`, and \`git branch --show-current\` must print \`fm/$ID\`. If either differs, stop and exit non-zero without changing anything.
+
+# Steps
+1. Read the issue: \`gh issue view $ISSUE\`. The issue is the whole specification; do not infer requirements it does not state.
+2. Implement only its acceptance criteria. Honor every Constraints and Do-not-touch item. Do not refactor, rename, reformat, or improve anything the issue does not ask for.
+3. Run the issue's "How to verify" command, then the project's full gate: \`$VERIFY\`. Make both pass by fixing your change; never weaken, skip, delete, or loosen a test.
+4. Commit on \`fm/$ID\` with a message whose first line is \`Close #$ISSUE: <summary>\`.
+5. Push the branch: \`git push -u origin fm/$ID\`.
+6. Write the pull request body to \`.fm-pr-body.md\` in the worktree (it is excluded from git; do not commit it) with these headings: What changed, Files, Assumptions made, Uncertainties, Test (the exact commands you ran and their result), and a final line \`Closes #$ISSUE\`.
+7. Open the pull request: \`gh pr create --title "Close #$ISSUE: <summary>" --body-file .fm-pr-body.md --head fm/$ID\`. Add \`--draft\` when the gate could not be made green or any Danger-zone item in the issue is in doubt, and say why under Uncertainties.
+8. Print the pull request URL as the last line of your output and exit.
+
+Never merge. Never push to any branch other than \`fm/$ID\`. Never force-push. If the issue cannot be implemented as written, open the pull request as a draft with what you have and explain the gap under Uncertainties.
+
+Delivery contract: kind=executor issue=$ISSUE
+EOF
+echo "scaffolded: $BRIEF (executor, issue=$ISSUE)"
+exit 0
+fi
 
 if [ "$HERDR_LAB" -eq 1 ]; then
 HERDR_LAB_HELPER=$(shell_quote "$FM_ROOT/bin/fm-herdr-lab.sh")
