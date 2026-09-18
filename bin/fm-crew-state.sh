@@ -142,7 +142,9 @@
 #      moment the run finished, and only while that declaration is the log's
 #      last non-blank line, since the log's mtime stamps its last append and so
 #      orders nothing when later continuation prose sits behind the selected
-#      declaration - and finally
+#      declaration, and only while that ledger row is TERMINAL, since a crew's
+#      own word must never be published as a terminal verdict over a
+#      replacement run that is still validating - and finally
 #      a later run on this branch that cannot be bound here (reported as unknown
 #      - history, but no proof of the present). Because the ledger has no run ID,
 #      an equal head does not identify a rerun; a terminal row supplies newer
@@ -1449,7 +1451,9 @@ if [ "$HAVE_RUN" = 1 ]; then
     # map_log_state owns the verb->state mapping, including the configurable
     # paused verb; snapshot_ordered_log uses fm-classify-lib.sh's portable file
     # readers to keep the line and its ordering evidence consistent.
-    if [ -n "$NEWEST_EPOCH" ] && [ "$NEWEST_ROW_AGREES" != 1 ] && snapshot_ordered_log; then
+    if [ -n "$NEWEST_EPOCH" ] && [ "$NEWEST_ROW_AGREES" != 1 ] \
+      && [ "$(fm_nm_run_status_class "$NEWEST_STATUS")" = terminal ] \
+      && snapshot_ordered_log; then
       if [ "$ORDERED_LOG_MTIME" -ge "$((NEWEST_EPOCH + 60))" ]; then
         LOG_STATE=$(map_log_state "$ORDERED_LOG_LINE")
         case "$LOG_STATE" in

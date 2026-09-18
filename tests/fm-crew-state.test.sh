@@ -4140,6 +4140,27 @@ test_later_declared_done_supersedes_failed_reading() {
   pass "a later declared done supersedes a stale failed reading"
 }
 
+# The same declaration must NOT be published while the branch's newest ledger
+# row is still LIVE: the ledger carries no run id, so a replacement that is
+# still validating can never be proven current, and a crew's own word must not
+# be minted as a terminal success over it.
+test_live_replacement_run_outranks_a_status_log_done() {
+  reset_fakes
+  local d; d=$(new_case live-replacement-done-log)
+  make_repo_on_branch "$d/wt" fm/feat-s5d
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s5d.meta" "window=fm:fm-feat-s5d" "worktree=$d/wt" "kind=ship"
+  printf 'done: implementation complete\n' > "$d/state/feat-s5d.status"
+  backdate_status_minutes_ago "$d/state/feat-s5d.status" 30
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s5d)"
+  FM_FAKE_RUNS_LIST="  running    fm/feat-s5d f0f0f0f0  $(ledger_stamp_minutes_ago 60)"
+  local out; out=$(run_crew_state "$d" feat-s5d)
+  assert_not_contains "$out" "state: done" "a crew's word never outranks a live replacement run"
+  assert_not_contains "$out" "source: status-log" "no status-log verdict is published against a live row"
+  assert_contains "$out" "current state not provable here" "an unbindable live replacement reads unknown"
+  pass "a live replacement run outranks a status-log done"
+}
+
 # The ledger date column stamps a run's START, so a declaration written after
 # that stamp can still predate the moment the run finished. When the ledger row
 # IS the attributed run, no mid-run declaration may outrank its failure.
@@ -6805,6 +6826,7 @@ test_status_append_during_ordering_snapshot_keeps_failure
 test_later_declared_pause_supersedes_failed_reading
 test_later_declared_pause_supersedes_cancelled_reading
 test_later_declared_done_supersedes_failed_reading
+test_live_replacement_run_outranks_a_status_log_done
 test_mid_run_pause_does_not_mask_current_run_failure
 test_mid_run_done_log_does_not_mask_current_run_failure
 test_pre_run_done_log_does_not_mask_failed_run
