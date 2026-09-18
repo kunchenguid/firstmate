@@ -256,6 +256,56 @@ test_repeated_failure_that_queued_new_mail_still_wakes() {
   pass "fm-mail-check: a repeated failure that queued new mail still wakes"
 }
 
+test_large_poll_output_is_drained() {
+  # A pipe reader that exits at the first match closes before the producer has
+  # written this poll's output. Ignored SIGPIPE makes that race observable as
+  # stderr noise instead of silently terminating a pipeline subprocess.
+  # Exercise both summary selectors and both wake predicates via the real check.
+  local tmpbin home shape attempt out expected
+  tmpbin="$TMP_ROOT/large-poll/bin"
+  mkdir -p "$tmpbin"
+  cp "$CHECK" "$tmpbin/"
+  for lib in fm-timeout-lib.sh fm-pr-lib.sh fm-line-cap-lib.sh fm-check-lib.sh; do
+    ln -s "$ROOT/bin/$lib" "$tmpbin/$lib"
+  done
+  cat > "$tmpbin/fm-mail.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'fm-mail: woke for 42\n'
+case "$FM_TEST_POLL_SHAPE" in
+  success)
+    awk 'BEGIN { for (i=0; i<20000; i++) print "poll diagnostic padding padding padding" }'
+    printf 'fm-mail: woke for 43\n'
+    ;;
+  preferred)
+    printf 'fm-mail: connection refused\n' >&2
+    awk 'BEGIN { for (i=0; i<20000; i++) print "fm-mail: later diagnostic padding padding" }' >&2
+    exit 1
+    ;;
+  fallback)
+    printf 'raw connection failure\n' >&2
+    awk 'BEGIN { for (i=0; i<20000; i++) print "raw later diagnostic padding padding" }' >&2
+    exit 1
+    ;;
+esac
+SH
+  chmod +x "$tmpbin/fm-mail.sh"
+  for shape in success preferred fallback; do
+    home=$(make_home "large-$shape")
+    case "$shape" in
+      success) expected='mail: new mail: woke for 43' ;;
+      preferred) expected='mail: connection refused' ;;
+      fallback) expected='mail: raw connection failure' ;;
+    esac
+    for attempt in 1 2; do
+      out="$home/out-$attempt.txt"
+      (trap '' PIPE; run_check "$home" "$out" "$tmpbin/fm-mail-check.sh" FM_TEST_POLL_SHAPE="$shape")
+      [ "$(cat "$out")" = "$expected" ] || fail "large $shape poll $attempt must emit only its summary: $(cat "$out")"
+      [ "$(wc -l < "$out" | tr -d '[:space:]')" = 1 ] || fail "large $shape poll must be exactly one line"
+    done
+  done
+  pass "fm-mail-check: large repeated polls drain every reader without output noise"
+}
+
 test_repeated_timeout_still_wakes() {
   # A timeout can kill the poll after wake_for queued mail and before the
   # woke-for line is printed. Difference-record silence would then leave that
@@ -418,6 +468,7 @@ test_fail_closed_poll_after_wake_reports_the_failure
 test_repeated_status4_fail_closed_still_wakes
 test_repeated_status2_stays_queued_still_wakes
 test_repeated_failure_that_queued_new_mail_still_wakes
+test_large_poll_output_is_drained
 test_repeated_timeout_still_wakes
 test_repeated_heal_failure_stays_silent
 test_missing_mail_plane_is_reported

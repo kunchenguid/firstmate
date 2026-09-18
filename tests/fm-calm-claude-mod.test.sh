@@ -234,6 +234,7 @@ test_presentation_policy() {
   cat >"$TMP_ROOT/policy.mjs" <<JS
 import { pathToFileURL } from "node:url";
 const policy = await import(pathToFileURL(${MOD@Q} + "/lib/fm-calm-presentation.ts").href);
+const piPreservation = await import(pathToFileURL(${ROOT@Q} + "/.pi/extensions/lib/fm-calm-preservation.ts").href);
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 const plugin = "/repo/.claude/mods/firstmate-calm";
 check(policy.calmPreferencePath({}, plugin) === "/repo/config/calm", "plugin-root fallback");
@@ -248,13 +249,32 @@ for (const [stored, expected] of [["on\\n", true], ["on", true], [" on \\n", tru
   check(policy.parseCalmPreference(stored) === expected, \`preference \${JSON.stringify(stored)}\`);
 }
 check(policy.serializeCalmPreference(true) === "on\\n" && policy.serializeCalmPreference(false) === "off\\n", "serialized values");
-check(policy.stepTextIsWorkingNote({ stopReason: "tool_use", toolUses: [] }) === true, "tool_use");
-check(policy.stepTextIsWorkingNote({ stopReason: "max_tokens", toolUses: [{}] }) === true, "max_tokens with tools");
-check(policy.stepTextIsWorkingNote({ stopReason: "max_tokens", toolUses: [] }) === false, "max_tokens without tools");
-check(policy.stepTextIsWorkingNote({ stopReason: "end_turn", toolUses: [{}] }) === false, "end_turn");
-check(policy.stepTextIsWorkingNote({ stopReason: null, toolUses: [] }) === false, "no response");
-check(policy.workingNoteKey("  note \\n") === "note" && policy.workingNoteKey("   ") === "", "note key");
-const restored = policy.restoredAssistantText([
+const shortNote = "Checking briefly.";
+const multiLineReply = "The result is substantive.\\nHere is the context needed to continue.";
+const atThresholdReply = "x".repeat(240);
+const belowThresholdNote = "x".repeat(239);
+check(policy.CALM_PRESERVE_MIN_CHARS === 240, "Claude preservation threshold");
+check(piPreservation.CALM_PRESERVE_MIN_CHARS === policy.CALM_PRESERVE_MIN_CHARS, "Pi and Claude preservation thresholds");
+for (const [text, expectedPreserved, label] of [
+  [belowThresholdNote, false, "239-character single line"],
+  [atThresholdReply, true, "240-character single line"],
+  [multiLineReply, true, "multi-line text"],
+]) {
+  const claudePreserved = !policy.stepTextIsWorkingNote({ stopReason: "tool_use", toolUses: [] }, text);
+  const piPreserved = piPreservation.calmTextIsSubstantive(text);
+  check(claudePreserved === expectedPreserved, "Claude did not classify " + label + " as expected");
+  check(piPreserved === expectedPreserved, "Pi did not classify " + label + " as expected");
+}
+check(policy.stepTextIsWorkingNote({ stopReason: "tool_use", toolUses: [] }, shortNote) === true, "short single-line tool_use note");
+check(policy.stepTextIsWorkingNote({ stopReason: "tool_use", toolUses: [] }, multiLineReply) === false, "multi-line tool_use reply");
+check(policy.stepTextIsWorkingNote({ stopReason: "tool_use", toolUses: [] }, atThresholdReply) === false, "threshold-length tool_use reply");
+check(policy.stepTextIsWorkingNote({ stopReason: "tool_use", toolUses: [] }, belowThresholdNote) === true, "just-under-threshold tool_use note");
+check(policy.stepTextIsWorkingNote({ stopReason: "max_tokens", toolUses: [{}] }, shortNote) === true, "max_tokens with tools");
+check(policy.stepTextIsWorkingNote({ stopReason: "max_tokens", toolUses: [] }, shortNote) === false, "max_tokens without tools");
+check(policy.stepTextIsWorkingNote({ stopReason: "end_turn", toolUses: [{}] }, shortNote) === false, "end_turn");
+check(policy.stepTextIsWorkingNote({ stopReason: null, toolUses: [] }, shortNote) === false, "no response");
+check(policy.workingNoteKey("  note \\n") === "note\\n" && policy.workingNoteKey(" note ") === "note" && policy.workingNoteKey("   ") === "", "note key");
+const restored = policy.classifyRestoredTranscript([
   { role: "user", text: "go", toolUses: [] },
   { role: "assistant", text: " own call ", toolUses: [{}] },
   { role: "assistant", text: "before a tool row", toolUses: [] },
@@ -265,15 +285,30 @@ const restored = policy.restoredAssistantText([
   { role: "assistant", text: "collision", toolUses: [] },
   { role: "user", text: "last", toolUses: [] },
   { role: "assistant", text: "plain reply", toolUses: [] },
+  { role: "user", text: "multi-line case", toolUses: [] },
+  { role: "assistant", text: multiLineReply, toolUses: [] },
+  { role: "assistant", text: "", toolUses: [{}] },
+  { role: "user", text: "threshold case", toolUses: [] },
+  { role: "assistant", text: atThresholdReply, toolUses: [] },
+  { role: "assistant", text: "", toolUses: [{}] },
+  { role: "user", text: "below-threshold case", toolUses: [] },
+  { role: "assistant", text: belowThresholdNote, toolUses: [] },
+  { role: "assistant", text: "", toolUses: [{}] },
+  { role: "user", text: "newline collision", toolUses: [] },
+  { role: "assistant", text: "Checking.\\n", toolUses: [] },
+  { role: "assistant", text: "", toolUses: [{}] },
+  { role: "user", text: "single-line collision", toolUses: [] },
+  { role: "assistant", text: "Checking.", toolUses: [] },
+  { role: "assistant", text: "", toolUses: [{}] },
 ]);
-check(JSON.stringify(restored.workingNotes) === JSON.stringify(["own call", "before a tool row"]), \`restored notes \${JSON.stringify(restored.workingNotes)}\`);
-check(JSON.stringify(restored.finalReplies) === JSON.stringify(["final", "collision", "plain reply"]), \`restored final replies \${JSON.stringify(restored.finalReplies)}\`);
+check(JSON.stringify(restored.workingNotes) === JSON.stringify(["own call", "before a tool row", belowThresholdNote, "Checking."]), \`restored notes \${JSON.stringify(restored.workingNotes)}\`);
+check(JSON.stringify(restored.finalReplies) === JSON.stringify(["final", "collision", "plain reply", multiLineReply + "\\n", atThresholdReply, "Checking.\\n"]), \`restored final replies \${JSON.stringify(restored.finalReplies)}\`);
 check(policy.userTextIsOperational("\\u2063FIRSTMATE_OP: v1 watcher: x") && !policy.userTextIsOperational("hello"), "operational recognition");
 console.log("policy-ok");
 JS
   out=$(run_node "$TMP_ROOT/policy.mjs" 2>&1) || fail "presentation policy: $out"
   assert_contains "$out" "policy-ok" "the policy check did not complete"
-  pass "the Calm policy resolves the shared preference exactly as Pi does, reads on, max, and off as Pi does, and classifies working notes by stop reason, tool use, and restored transcript shape"
+  pass "the Calm policy resolves the shared preference exactly as Pi does, reads on, max, and off as Pi does, and shares Pi's 240-character-or-newline preservation behavior while classifying working notes by stop reason, tool use, and restored transcript shape"
 }
 
 # The classifier parity corpus: envelopes the shell owner encodes itself, its legacy

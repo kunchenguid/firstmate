@@ -83,9 +83,15 @@ fi
 META_TMP=
 META_LOCK=
 META_LOCK_HELD=0
+PR_POLL_PUBLISH_LOCK=
+PR_POLL_PUBLISH_LOCK_HELD=0
 pr_check_cleanup() {
   fm_pr_poll_cleanup
   [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
+  if [ "$PR_POLL_PUBLISH_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$PR_POLL_PUBLISH_LOCK" || true
+    PR_POLL_PUBLISH_LOCK_HELD=0
+  fi
   if [ "$META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$META_LOCK" || true
     META_LOCK_HELD=0
@@ -130,10 +136,27 @@ fm_pr_metadata_identity_parse "$META" || exit 1
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 
-fm_pr_poll_publish_prepared || {
+PR_POLL_PUBLISH_LOCK="$STATE/.pr-poll-publish-$ID.lock"
+fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK"
+PR_POLL_PUBLISH_LOCK_HELD=1
+if fm_pr_poll_publish_prepared; then
+  fm_lock_release "$PR_POLL_PUBLISH_LOCK" || exit 1
+  PR_POLL_PUBLISH_LOCK_HELD=0
+else
+  fm_lock_release "$PR_POLL_PUBLISH_LOCK" || exit 1
+  PR_POLL_PUBLISH_LOCK_HELD=0
   echo "error: could not publish PR poll" >&2
   exit 1
-}
+fi
+# The contribution observer uses the same authenticated check mechanism and
+# owns verdict freshness, required actors and external feedback separately from
+# the exact merged-state poll. Registration is local and performs no forge read.
+if command -v jq >/dev/null 2>&1; then
+  "$SCRIPT_DIR/fm-contributions.sh" arm >/dev/null \
+    || printf 'contributions: observation not armed; coverage is unconfirmed\n' >&2
+else
+  printf 'contributions: jq unavailable; coverage is unconfirmed\n' >&2
+fi
 # In a secondmate home the registration itself is a captain-facing fact:
 # publish the child's PR-ready line with the canonical URL just recorded, so it
 # reaches the parent whether or not the mate model appends anything
