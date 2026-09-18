@@ -2222,11 +2222,20 @@ SH
       "$ROOT/bin/fm-config-push.sh" > "$first_out" 2>&1
   ) &
   first_pid=$!
-  for _ in $(seq 1 100); do
+  # The wait is for a real event - the background push reaching send-keys - so
+  # the bound only has to exceed the slowest honest case. At 2s it did not:
+  # instrumenting this loop on an IDLE machine measured 4257 ms, 4920 ms and
+  # 6651 ms across three runs, because a whole config push does git reads,
+  # config copies and generation publication before it ever reaches send-keys.
+  # The bound was therefore below every observed honest case rather than merely
+  # tight under load. 30s keeps roughly four times the slowest measurement as
+  # headroom for a loaded or slower host. The marker is polled just as often, so
+  # a genuine hang still fails, just later.
+  for _ in $(seq 1 1500); do
     [ -e "$entered" ] && break
     sleep 0.02
   done
-  [ -e "$entered" ] || fail "first config push did not reach pointer delivery"
+  [ -e "$entered" ] || fail "first config push did not reach pointer delivery within 30s"
   first_instr=$(reread_instruction_path "$w/sm") \
     || fail "first concurrent push did not publish its generation"
   printf 'two\n' > "$w/home/config/crew-harness"
