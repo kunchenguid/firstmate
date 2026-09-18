@@ -499,7 +499,7 @@ This section is the single owner of the tool's operator contract; the script hea
 Rules come only from the effective home's `config/crew-dispatch.json`; `FM_CONFIG_OVERRIDE` selects the config directory for tests and specialized setup like the other scripts.
 
 ```sh
-bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name>        # TOON block on stdout
+bin/fm-dispatch-resolve.sh data/tasks/<id>/brief.md --project <name>  # TOON block on stdout
 ```
 
 Firstmate invokes the resolve path directly after writing the brief, without a preflight; the absent-key off line is handled exactly like every other non-clear outcome.

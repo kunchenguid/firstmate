@@ -83,6 +83,7 @@ TS
 cp "$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts" "$PROJECT/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$PROJECT/.pi/extensions/lib/fm-calm-visibility.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts" "$PROJECT/.pi/extensions/lib/fm-calm-working-ship.ts"
+cp "$ROOT/.pi/extensions/lib/fm-calm-working-ship-sprite.ts" "$PROJECT/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
 cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$PROJECT/.pi/extensions/lib/fm-operational-input.ts"
 printf 'on\n' >"$HOME_DIR/config/calm"
 printf '%s\n' '{"terminal":{"clearOnShrink":false}}' >"$PI_CONFIG/settings.json"
@@ -266,39 +267,14 @@ assert_commentary_layout() { # <frame> <commentary number>
 }
 for i in $(seq 1 200); do
   final_text=$(pane_text)
-  step_count=$( (printf '%s\n' "$final_text" | grep -Eo 'Step [0-9]+:' || true) | sort -u | wc -l | tr -d ' ')
-  [ "$step_count" -le 3 ] || fail "live frame $i rendered more than the three accumulated numbered steps"
+  printf '%s\n' "$final_text" | grep -Eq 'Step [0-9]+:' \
+    && fail "live frame $i rendered a numbered thinking replacement"
+  printf '%s\n' "$final_text" | grep -Fq "$ACTIVITY_PREFIX" \
+    && fail "live frame $i rendered a tool activity ticker"
   printf '%s\n' "$final_text" | grep -Fq 'Thinking...' \
     && fail "live frame $i rendered Pi's thinking placeholder"
   printf '%s\n' "$final_text" | grep -Fq 'calm live fixture' \
     && fail "live frame $i rendered the read tool result"
-  if printf '%s' "$final_text" | grep -Eq 'Step [0-9]+: LIVE_PLAN_ONE'; then
-    seen_plan_one=1
-    plan_step_one=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+: LIVE_PLAN_ONE' | sed -E 's/Step ([0-9]+).*/\1/' | tail -1)
-    assert_current_layout "$final_text" "Step $plan_step_one: LIVE_PLAN_ONE"
-    activity_line=$(printf '%s\n' "$final_text" | grep -F "Step $plan_step_one: LIVE_PLAN_ONE" | tail -1)
-    if [ -n "$activity_line" ]; then
-      case "$activity_line" in
-        *"$ACTIVITY_PREFIX"*)
-          if [ -z "$first_activity_line" ]; then first_activity_line=$activity_line; fi
-          ;;
-      esac
-      if [ -n "$first_activity_line" ] && [ -z "$second_activity_line" ] && [ "$activity_line" != "$first_activity_line" ]; then
-        second_activity_line=$activity_line
-        activity_moves=1
-      fi
-    fi
-  fi
-  if printf '%s' "$final_text" | grep -Eq 'Step [0-9]+: LIVE_PLAN_TWO'; then
-    seen_plan_two=1
-    plan_step_two=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+: LIVE_PLAN_TWO' | sed -E 's/Step ([0-9]+).*/\1/' | tail -1)
-    assert_current_layout "$final_text" "Step $plan_step_two: LIVE_PLAN_TWO"
-  fi
-  if printf '%s' "$final_text" | grep -Eq 'Step [0-9]+: LIVE_PLAN_THREE'; then
-    seen_plan_three=1
-    plan_step_three=$(printf '%s' "$final_text" | grep -Eo 'Step [0-9]+: LIVE_PLAN_THREE' | sed -E 's/Step ([0-9]+).*/\1/' | tail -1)
-    assert_current_layout "$final_text" "Step $plan_step_three: LIVE_PLAN_THREE"
-  fi
   if printf '%s' "$final_text" | grep -Fq 'COMMENTARY_1'; then
     seen_one=1
     assert_commentary_layout "$final_text" 1
@@ -314,30 +290,17 @@ for i in $(seq 1 200); do
   printf '%s' "$final_text" | grep -Fq 'CALM_LIVE_HERDR_FINAL' && break
   sleep 0.1
 done
-[ "$seen_plan_one" -eq 1 ] || { printf '%s\n' "$final_text" >&2; fail "real Pi/Herdr never displayed the first planning step"; }
-[ "$seen_plan_two" -eq 1 ] || { printf '%s\n' "$final_text" >&2; fail "real Pi/Herdr never displayed the second planning step"; }
-[ "$seen_plan_three" -eq 1 ] || { printf '%s\n' "$final_text" >&2; fail "real Pi/Herdr never displayed the third planning step"; }
 [ "$seen_one" -eq 1 ] || { printf '%s\n' "$final_text" >&2; fail "real Pi/Herdr never displayed the first durable commentary row"; }
 [ "$seen_two" -eq 1 ] || { printf '%s\n' "$final_text" >&2; fail "real Pi/Herdr never displayed the second durable commentary row"; }
 [ "$seen_three" -eq 1 ] || { printf '%s\n' "$final_text" >&2; fail "real Pi/Herdr never displayed the third durable commentary row"; }
-[ "$plan_step_one" -lt "$plan_step_two" ] && [ "$plan_step_two" -lt "$plan_step_three" ] \
-  || fail "Calm step numbers did not increase monotonically: $plan_step_one, $plan_step_two, $plan_step_three"
+printf '%s' "$final_text" | grep -Eq 'Step [0-9]+:' \
+  && fail "real Pi/Herdr rendered a numbered thinking replacement"
+printf '%s' "$final_text" | grep -Fq "$ACTIVITY_PREFIX" \
+  && fail "real Pi/Herdr rendered a tool activity ticker"
 printf '%s' "$final_text" | grep -Fq 'CALM_LIVE_HERDR_FINAL' \
   || fail "real Pi/Herdr fixture did not settle its final response"
 printf '%s' "$final_text" | grep -Fq "$MUTED_PURPLE_BACKGROUND" \
   || fail "real Pi/Herdr final assistant row did not carry Calm's muted purple background ANSI"
-[ "$activity_moves" -eq 1 ] \
-  || fail "real Pi/Herdr did not move the right-side activity ticker while keeping the step prefix fixed"
-for number in 1 2 3; do
-  printf '%s' "$final_text" | grep -Fq "Step $number: LIVE_PLAN_" \
-    || fail "final Pi response did not retain Step $number in the completed assistant row"
-done
-final_step_line=$(printf '%s\n' "$final_text" | grep -Fn 'Step 3: LIVE_PLAN_THREE' | tail -1 | cut -d: -f1)
-final_response_line=$(printf '%s\n' "$final_text" | grep -Fn 'CALM_LIVE_HERDR_FINAL' | tail -1 | cut -d: -f1)
-[ -n "$final_step_line" ] && [ -n "$final_response_line" ] && [ "$final_response_line" -eq $((final_step_line + 2)) ] \
-  || fail "final Pi response did not place exactly one blank row between the last step and final response"
-[ "$(printf '%s\n' "$final_text" | sed -n "$((final_step_line + 1))p" | tr -d '[:space:]')" = "" ] \
-  || fail "final Pi response did not contain a blank row after the last step"
 printf '%s' "$final_text" | grep -Fq 'calm live fixture' \
   && fail "final Pi response retained the read tool result"
 for number in 1 2 3; do
@@ -353,4 +316,4 @@ grep -Fq 'LIVE_PLAN_THREE' "$session_file" || fail "third planning context was n
 grep -Fq 'COMMENTARY_1' "$session_file" || fail "first commentary context was not persisted"
 grep -Fq 'COMMENTARY_2' "$session_file" || fail "second commentary context was not persisted"
 grep -Fq 'COMMENTARY_3' "$session_file" || fail "third commentary context was not persisted"
-printf 'ok - real Pi %s in Herdr upgraded the retained prior Calm controller through /reload, kept each commentary row once beside fixed numbered steps, moved the safe right-side activity ticker, hid thinking placeholders and read rows, and settled with one blank row before the final answer\n' "$(pi --version)"
+printf 'ok - real Pi %s in Herdr upgraded the retained prior Calm controller through /reload, kept each commentary row once without numbered replacements or tool tickers, hid thinking placeholders and read rows, and preserved the final answer\n' "$(pi --version)"

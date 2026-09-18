@@ -26,7 +26,7 @@ bearings() {
 
 record() { # home id number forge-state mergeability [hold]
   local home=$1 id=$2 number=$3 state=$4 mergeable=$5 hold=${6:-}
-  mkdir -p "$home/data/$id"
+  mkdir -p "$home/data/tasks/$id"
   printf -- '- [ ] %s - Contribution %s https://github.com/o/r/pull/%s (repo: sample) (kind: ship) %s\n' \
     "$id" "$id" "$number" "$hold" >> "$home/data/backlog.md"
   jq -n --arg task "$id" --arg url "https://github.com/o/r/pull/$number" \
@@ -36,12 +36,12 @@ record() { # home id number forge-state mergeability [hold]
       observation:{head:$head,state:$state,draft:false,mergeable:$mergeable,
         review_decision:"APPROVED",can_merge:false,
         checks:[{name:"test",id:1,status:"completed",conclusion:"success",started_at:$at}],
-        reviews:[],events:[]}}]}' > "$home/data/$id/contributions.json"
+        reviews:[],events:[]}}]}' > "$home/data/tasks/$id/contributions.json"
 }
 
 mutate_record() {
-  jq "$3" "$1/data/$2/contributions.json" > "$1/update.json" || fail 'fixture mutation failed'
-  mv "$1/update.json" "$1/data/$2/contributions.json"
+  jq "$3" "$1/data/tasks/$2/contributions.json" > "$1/update.json" || fail 'fixture mutation failed'
+  mv "$1/update.json" "$1/data/tasks/$2/contributions.json"
 }
 
 test_actor_coverage() {
@@ -174,7 +174,7 @@ test_incoming_signal() { # comment|review|inline
     + (if $type == "comment" then {} else {commit_id:$head,state:"CHANGES_REQUESTED"} end)]' \
     > "$home/forge/$fixture.json"
   registered_checks "$home" >/dev/null
-  jq -e '.records[0].pending | length == 1' "$home/data/delivery/contributions.json" >/dev/null \
+  jq -e '.records[0].pending | length == 1' "$home/data/tasks/delivery/contributions.json" >/dev/null \
     || fail "new maintainer $type must survive as a pending outward signal"
   [ -s "$home/state/.wake-queue" ] || fail "new maintainer $type must enqueue an ordinary durable wake"
   count=$(wc -l < "$home/state/.wake-queue")
@@ -199,8 +199,8 @@ test_ready_issue_wake() {
   registered_checks "$home" >/dev/null
   printf '[{"name":"ready-for-pr"}]\n' > "$home/forge/labels.json"
   registered_checks "$home" >/dev/null
-  if [ ! -f "$home/data/filed/contributions.json" ] \
-    || ! jq -e 'any(.records[].pending[]; .type == "ready-for-pr")' "$home/data/filed/contributions.json" >/dev/null; then
+  if [ ! -f "$home/data/tasks/filed/contributions.json" ] \
+    || ! jq -e 'any(.records[].pending[]; .type == "ready-for-pr")' "$home/data/tasks/filed/contributions.json" >/dev/null; then
     fail 'ready-for-pr on an explicitly filed issue must become a planning wake'
   fi
   [ -s "$home/state/.wake-queue" ] || fail 'ready-for-pr signal never reached the durable wake path'
@@ -294,7 +294,7 @@ test_verdict_retains_judged_head() {
   mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
   bearings "$home" | jq -e '.contributions.stale_verdicts == 1 and .contributions.checked == 0' >/dev/null \
     || fail 'changed published head reused a current verdict'
-  jq -e --arg head "$HEAD_A" '.records[0].verdict.head==$head' "$home/data/delivery/contributions.json" >/dev/null \
+  jq -e --arg head "$HEAD_A" '.records[0].verdict.head==$head' "$home/data/tasks/delivery/contributions.json" >/dev/null \
     || fail 'projection rewrote the judged head'
   pass 'recorded judgment keeps its exact head and is stale immediately on a published replacement'
 }
@@ -450,8 +450,8 @@ test_watcher_keeps_diagnostics_separate_from_contribution_wakes() {
   with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
     || fail 'could not register delivery for diagnostic watcher wake'
   registered_checks "$home" >/dev/null
-  mkdir -p "$home/data/unreadable"
-  printf 'incomplete JSON\n' > "$home/data/unreadable/contributions.json"
+  mkdir -p "$home/data/tasks/unreadable"
+  printf 'incomplete JSON\n' > "$home/data/tasks/unreadable/contributions.json"
   jq -n --arg head "$HEAD_A" '[{id:12,user:{login:"maintainer"},author_association:"OWNER",
     body:"Please clarify the contract",html_url:"https://github.com/o/r/pull/8#issuecomment-12",
     updated_at:"2026-09-16T08:01:00Z",submitted_at:"2026-09-16T08:01:00Z"}]' > "$home/forge/comments.json"
@@ -541,7 +541,7 @@ test_unreadable_pending_is_not_empty() {
   local home
   home=$(new_home unreadable-pending)
   record "$home" invalid 16 open mergeable
-  printf 'incomplete JSON\n' > "$home/data/invalid/contributions.json"
+  printf 'incomplete JSON\n' > "$home/data/tasks/invalid/contributions.json"
   if with_home "$home" "$ROOT/bin/fm-contributions.sh" pending > "$home/pending.json" 2> "$home/pending.err"; then
     fail 'an unreadable signal record was presented as an empty inbox'
   fi
@@ -583,7 +583,7 @@ test_budget_exhaustion_keeps_prior_record() { # exhaust|hang
   forge_home "$home"
   wrap_forge "$home"
   mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
-  cp "$home/data/delivery/contributions.json" "$home/prior.json"
+  cp "$home/data/tasks/delivery/contributions.json" "$home/prior.json"
   if [ "$mode" = exhaust ]; then /bin/date +%s > "$home/forge/clock"; fi
   printf '%s\n' "$mode" > "$home/forge/fault"
   out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=1 "$ROOT/bin/fm-contributions.sh" poll) \
@@ -591,8 +591,8 @@ test_budget_exhaustion_keeps_prior_record() { # exhaust|hang
   [ -z "$out" ] || fail "budget exhaustion ($mode) printed a wake line: $out"
   grep -F 'api repos/o/r/pulls/8' "$home/forge/calls" >/dev/null \
     || fail "budget exhaustion ($mode) never started the observation"
-  cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
-    || fail "budget exhaustion ($mode) rewrote the prior record: $(cat "$home/data/delivery/contributions.json")"
+  cmp -s "$home/prior.json" "$home/data/tasks/delivery/contributions.json" \
+    || fail "budget exhaustion ($mode) rewrote the prior record: $(cat "$home/data/tasks/delivery/contributions.json")"
   [ ! -s "$home/state/.wake-queue" ] || fail "budget exhaustion ($mode) enqueued a wake"
   pass "budget exhausted mid-observation ($mode) keeps the prior record and stays silent"
 }
@@ -613,7 +613,7 @@ test_genuine_failure_near_deadline_is_unavailable() {
     || fail "a genuine forge failure past the deadline was swallowed: $out"
   jq -e --arg now "$NOW" '.records[0].checked_at == $now
     and .records[0].error == "forge observation unavailable or changed during read"' \
-    "$home/data/delivery/contributions.json" >/dev/null || fail 'a genuine forge failure left no error evidence'
+    "$home/data/tasks/delivery/contributions.json" >/dev/null || fail 'a genuine forge failure left no error evidence'
   pass 'a genuine forge failure inside the budget still records the error and wakes'
 }
 
@@ -638,7 +638,7 @@ test_shared_url_observed_once() {
     fi
     for task in delivery duplicate; do
       jq -e --arg now "$NOW" --argjson error "$expected" '.records[0].checked_at == $now and .records[0].error == $error' \
-        "$home/data/$task/contributions.json" >/dev/null || fail "owner $task did not receive the shared result ($mode)"
+        "$home/data/tasks/$task/contributions.json" >/dev/null || fail "owner $task did not receive the shared result ($mode)"
     done
   done
   pass 'a URL owned by two tasks is observed once and every owner receives the result'
@@ -655,16 +655,16 @@ test_terminal_contribution_settles() {
     out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail "terminal observation poll failed ($mode)"
     [ -z "$out" ] || fail "a $mode observation printed: $out"
     jq -e --arg now "$NOW" --arg mode "$mode" '.records[0] | .checked_at == $now and .error == null and .observation.state == $mode' \
-      "$home/data/delivery/contributions.json" >/dev/null || fail "a $mode observation was not recorded once without error"
-    cp "$home/data/delivery/contributions.json" "$home/prior.json"
+      "$home/data/tasks/delivery/contributions.json" >/dev/null || fail "a $mode observation was not recorded once without error"
+    cp "$home/data/tasks/delivery/contributions.json" "$home/prior.json"
     : > "$home/forge/calls"
     printf 'down\n' > "$home/forge/fault"
     out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW="$later" "$ROOT/bin/fm-contributions.sh" poll) \
       || fail "poll after a $mode observation failed"
     [ -z "$out" ] || fail "a $mode contribution woke again when a later read would fail: $out"
     [ ! -s "$home/forge/calls" ] || fail "a $mode contribution was re-read: $(cat "$home/forge/calls")"
-    cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
-      || fail "a $mode contribution record changed after it settled: $(cat "$home/data/delivery/contributions.json")"
+    cmp -s "$home/prior.json" "$home/data/tasks/delivery/contributions.json" \
+      || fail "a $mode contribution record changed after it settled: $(cat "$home/data/tasks/delivery/contributions.json")"
     [ ! -s "$home/state/.wake-queue" ] || fail "a $mode contribution enqueued a wake"
     NOW=$later bearings "$home" | jq -e '.contributions.checked == 1 and .contributions.counts.nobody == 1
       and .contributions.complete == true' >/dev/null \
@@ -680,7 +680,7 @@ test_terminal_contribution_settles() {
   [ -z "$out" ] || fail "an error-stamped merged record woke again: $out"
   [ ! -s "$home/forge/calls" ] || fail 'an error-stamped merged record was re-read'
   jq -e --arg at "$NOW" '.records[0] | .error == null and .checked_at == $at and .observation.state == "merged"' \
-    "$home/data/delivery/contributions.json" >/dev/null || fail 'an error-stamped merged record did not settle'
+    "$home/data/tasks/delivery/contributions.json" >/dev/null || fail 'an error-stamped merged record did not settle'
   pass 'a merged or closed contribution settles once, is not re-read, and never wakes again'
 }
 
@@ -691,7 +691,7 @@ test_late_owner_inherits_terminal_observation() {
   wrap_forge "$home"
   printf 'merged\n' > "$home/forge/state"
   with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'initial terminal observation poll failed'
-  cp "$home/data/delivery/contributions.json" "$home/final.json"
+  cp "$home/data/tasks/delivery/contributions.json" "$home/final.json"
   printf -- '- [ ] duplicate - Filed https://github.com/o/r/pull/8 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
   : > "$home/forge/calls"
   printf 'down\n' > "$home/forge/fault"
@@ -703,7 +703,7 @@ test_late_owner_inherits_terminal_observation() {
     .records[0] as $late | $final[0].records[0] as $terminal
     | $late.error == null and $late.pending == [] and $late.notified == []
     and $late.checked_at == $terminal.checked_at and $late.observation == $terminal.observation' \
-    "$home/data/duplicate/contributions.json" >/dev/null \
+    "$home/data/tasks/duplicate/contributions.json" >/dev/null \
     || fail 'a late owner did not inherit the settled terminal observation'
   [ ! -s "$home/state/.wake-queue" ] || fail 'a late owner terminal record enqueued a wake'
   pass 'a late owner inherits a terminal observation without a forge read or wake'
@@ -714,7 +714,7 @@ test_done_task_open_pr_still_observed() {
   home=$(new_home done-open)
   forge_home "$home"
   wrap_forge "$home"
-  rm "$home/data/delivery/contributions.json"
+  rm "$home/data/tasks/delivery/contributions.json"
   printf '# Backlog\n\n## Queued\n\n## Done\n- [x] delivery - Shipped https://github.com/o/r/pull/8 (repo: sample) (kind: ship)\n' \
     > "$home/data/backlog.md"
   with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null || fail 'poll of a done task failed'
@@ -725,7 +725,7 @@ test_done_task_open_pr_still_observed() {
     || fail 'an open PR linked from a done task was not observed on every poll'
   jq -e --arg head "$HEAD_B" --arg at "$later" '.records[0] | .checked_at == $at and .error == null
     and .observation.state == "open" and .observation.head == $head' \
-    "$home/data/delivery/contributions.json" >/dev/null || fail 'an open PR on a done task did not track its current head'
+    "$home/data/tasks/delivery/contributions.json" >/dev/null || fail 'an open PR on a done task did not track its current head'
   pass 'an open PR linked from a done task keeps being observed'
 }
 
@@ -742,12 +742,12 @@ test_failure_wakes_once_per_episode() {
   out=$(poll_at 2026-09-16T10:00:00Z)
   [ -z "$out" ] || fail "an unchanged read failure woke again on the next cycle: $out"
   jq -e --argjson error "$error" '.records[0] | .checked_at == "2026-09-16T10:00:00Z" and .error == $error' \
-    "$home/data/delivery/contributions.json" >/dev/null || fail 'a repeated read failure stopped recording its error'
+    "$home/data/tasks/delivery/contributions.json" >/dev/null || fail 'a repeated read failure stopped recording its error'
   [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = 2 ] || fail 'a failing open PR stopped being observed'
   : > "$home/forge/fault"
   out=$(poll_at 2026-09-16T11:00:00Z)
   [ -z "$out" ] || fail "a successful read printed: $out"
-  jq -e '.records[0].error == null' "$home/data/delivery/contributions.json" >/dev/null \
+  jq -e '.records[0].error == null' "$home/data/tasks/delivery/contributions.json" >/dev/null \
     || fail 'a successful read did not end the failure episode'
   printf 'down\n' > "$home/forge/fault"
   out=$(poll_at 2026-09-16T12:00:00Z)
@@ -770,7 +770,7 @@ test_late_owner_keeps_failure_episode_suppressed() {
     || fail 'late-owner failing poll failed'
   [ -z "$out" ] || fail "a late owner restarted an unchanged failure episode: $out"
   for task in delivery duplicate; do
-    jq -e --arg error "$error" '.records[0].error == $error' "$home/data/$task/contributions.json" >/dev/null \
+    jq -e --arg error "$error" '.records[0].error == $error' "$home/data/tasks/$task/contributions.json" >/dev/null \
       || fail "owner $task did not retain the shared failure evidence"
   done
   : > "$home/forge/fault"
@@ -778,7 +778,7 @@ test_late_owner_keeps_failure_episode_suppressed() {
     || fail 'successful shared poll failed'
   [ -z "$out" ] || fail "a successful shared poll printed: $out"
   for task in delivery duplicate; do
-    jq -e '.records[0].error == null' "$home/data/$task/contributions.json" >/dev/null \
+    jq -e '.records[0].error == null' "$home/data/tasks/$task/contributions.json" >/dev/null \
       || fail "owner $task did not end the shared failure episode"
   done
   printf 'down\n' > "$home/forge/fault"

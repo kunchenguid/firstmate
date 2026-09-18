@@ -12,8 +12,8 @@
 # snapshot is read-only and never contacts a forge. Its input is the canonical
 # fleet snapshot's backlog/tasks pair; --all adds rows for supervisor inspection.
 # Every URL explicitly linked by a structured backlog row or a task's pr= is
-# owned. Previously observed URLs remain in data/<task>/contributions.json after
-# endpoint teardown. Repository-wide PR discovery never establishes ownership.
+# owned. Previously observed URLs remain in data/tasks/<task>/contributions.json
+# after endpoint teardown. Repository-wide PR discovery never establishes ownership.
 # GitHub PRs and issues are supported; other forges remain visibly unmeasured.
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
@@ -71,6 +71,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 export FM_HOME FM_STATE_OVERRIDE="$STATE"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-task-path-lib.sh
+. "$SCRIPT_DIR/fm-task-path-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
@@ -107,7 +109,7 @@ read_saved() {
   if [ -L "$DATA" ]; then
     ERRORS=1; printf '[]\n' > "$TMP/saved.json"; return 0
   fi
-  for file in "$DATA"/*/contributions.json; do
+  while IFS= read -r file; do
     [ -e "$file" ] || [ -L "$file" ] || continue
     if [ -L "$file" ] || [ -L "$(dirname "$file")" ] || [ ! -f "$file" ] \
       || [ "$(wc -c < "$file")" -gt 1048576 ] \
@@ -120,7 +122,7 @@ read_saved() {
       ERRORS=$((ERRORS + 1)); continue
     fi
     jq -c . "$file" >> "$TMP/saved.jsonl"
-  done
+  done < <(fm_task_artifact_paths "$DATA" contributions.json)
   jq -s . "$TMP/saved.jsonl" > "$TMP/saved.json"
 }
 
@@ -156,7 +158,7 @@ acquire() {
 write_record() { # task record-json-file
   local task=$1 file dir device staged
   fm_pr_task_id_valid "$task" || fail 'invalid contribution task'
-  dir="$DATA/$task"
+  dir=$(fm_task_dir "$DATA" "$task") || fail 'invalid contribution task path'
   [ ! -L "$dir" ] || fail 'contribution directory is a symlink'
   mkdir -p "$dir"
   file="$dir/contributions.json"

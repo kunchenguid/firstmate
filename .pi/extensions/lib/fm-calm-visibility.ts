@@ -30,9 +30,8 @@ export const CALM_TRANSCRIPT_CLASSES = [
 
 export type CalmTranscriptClass = (typeof CALM_TRANSCRIPT_CLASSES)[number];
 
-// Calm is on or off. Distinct streamed thinking lines are kept as display-only content
-// on the active assistant row; the assistant layout separately retains ownership of
-// thinking Calm has suppressed so toggling off cannot reveal superseded planning history.
+// Calm is on or off. Thinking, tools, and operational bookkeeping are presentation-only
+// and remain hidden without adding replacement rows or activity indicators.
 const CALM_VISIBLE_CLASSES = new Set<CalmTranscriptClass>([
   "genuine-user-prompt",
   "genuine-agent-response",
@@ -68,10 +67,8 @@ type FirstmateSyntheticPresentation = {
 
 let calm = false;
 let stockExportRendering = false;
-// The current transcript row may belong to an operational agent run. This is
-// separate from Calm's preference so operational bookkeeping stays private in
-// every presentation mode, while genuine captain-authored turns keep Calm's
-// ordinary step display.
+// Operational runs keep their reasoning, working presentation, and no-op
+// acknowledgement private independently of Calm's user preference.
 let operationalRun = false;
 
 export function calmTranscriptClassIsVisible(itemClass: CalmTranscriptClass): boolean {
@@ -80,11 +77,6 @@ export function calmTranscriptClassIsVisible(itemClass: CalmTranscriptClass): bo
 
 export function setCalmPresentation(active: boolean): void {
   calm = active;
-  if (!active) {
-    calmActivity = [];
-    stopCalmTicker();
-    calmRenderRequester = undefined;
-  }
 }
 
 export function setCalmStockExportRendering(active: boolean): void {
@@ -97,6 +89,10 @@ export function calmPresentationIsActive(): boolean {
 
 export function calmPresentationHides(itemClass: CalmTranscriptClass): boolean {
   return calm && !stockExportRendering && !calmTranscriptClassIsVisible(itemClass);
+}
+
+export function calmStockExportRenderingIsActive(): boolean {
+  return stockExportRendering;
 }
 
 export function setCalmOperationalRun(active: boolean): void {

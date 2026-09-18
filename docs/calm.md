@@ -31,7 +31,7 @@ Calm changes presentation only.
 It does not register or replace any tool definition, and input delivery, tool execution, ordering, model context, session storage, diagnostics, and `/export` and `/share` operation remain unchanged.
 Every hidden Firstmate input remains available to the model and in serialized session data and exported artifacts.
 Legacy operational custom messages remain in session data and Pi's sidebar tree, although the main HTML transcript may omit them.
-Toggling Calm off restores ordinary rendering except for historical planning Calm has already owned as step input, which remains presentation-hidden, and `Ctrl+O` expansion state is preserved.
+Toggling Calm off restores ordinary rendering, and `Ctrl+O` expansion state is preserved; Calm never adds replacement rows or mutates the underlying thinking history.
 
 Pi's supported presentation API does not expose a global transcript filter.
 Calm owns Pi's one interactive `ToolExecutionComponent` boundary, so built-in and custom model-tool calls, arguments, results, images, timing, and collapsed shells all render at zero height while active.
@@ -40,7 +40,7 @@ User-bash rows, skill and summary rows, generic status notices, and non-tool ext
 ## Pi compatibility
 
 Calm has no numeric Pi version minimum or maximum and never refuses Pi solely because its version is newer than a previously verified version.
-The assistant presentation adapter requires Pi's display-only Markdown transformer and also probes the exported assistant component used to remove empty thinking geometry; the tool-row and operational-user-row adapters probe their exported component seams.
+The assistant presentation adapter requires Pi's display-only Markdown transformer and probes the exported assistant component used to preserve ordinary row geometry; the tool-row and operational-user-row adapters probe their exported component seams.
 If Pi removes one of those seams, Calm logs a diagnostic naming the unavailable adapter and skips only that adapter; `/calm`, the other adapter, and unrelated Pi extensions remain available.
 
 Calm patches only the reload-stable interactive tool component's display method and consults the central visibility state on every render.

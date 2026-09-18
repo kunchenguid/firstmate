@@ -224,6 +224,8 @@ esac
 . "$SCRIPT_DIR/fm-landed-lib.sh"  # FM_LANDED_JQ_DEFS: the shared landed selector
 # shellcheck source=bin/fm-merge-authority-lib.sh
 . "$SCRIPT_DIR/fm-merge-authority-lib.sh"
+# shellcheck source=bin/fm-task-path-lib.sh
+. "$SCRIPT_DIR/fm-task-path-lib.sh"
 
 usage() {
   cat <<'EOF'

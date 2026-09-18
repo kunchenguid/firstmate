@@ -1295,99 +1295,48 @@ if (readFileSync(`${process.env.FM_HOME}/config/calm`, "utf8") !== "on\n") {
 await handlers.get("agent_start")[0]({}, commandContext);
 assistantProgress.updateContent(assistantProgressMessage, true);
 let progressText = stripTerminalSequences(assistantProgress.render(100).join("\n"));
-let commentaryText = stripTerminalSequences(assistantProgress.render(100).join("\n"));
+let commentaryText = progressText;
 if (assistantExpandedThinking.render(100).join("\n").includes("RAW_EXPANDED_THINKING")) {
   throw new Error("Calm's public Markdown transformer left expanded raw thinking visible");
 }
 if (
-  !progressText.includes("Step 1: CURRENT_STEP_FROM_ASSISTANT") ||
+  progressText.includes("Step ") ||
+  progressText.includes("read ·") ||
   !commentaryText.includes("DURABLE_COMMENTARY_FROM_ASSISTANT")
 ) {
-  throw new Error(`Calm did not keep the active step beside its commentary: ${progressText} / ${commentaryText}`);
-}
-const assertStepLayout = (text, expectedSteps) => {
-  const lines = text.split("\n");
-  const stepIndexes = expectedSteps.map((step) => lines.findIndex((line) => line.trim().startsWith(step)));
-  if (stepIndexes.some((index) => index < 0)) throw new Error(`missing step in ${text}`);
-  for (let index = 1; index < stepIndexes.length; index += 1) {
-    if (stepIndexes[index] !== stepIndexes[index - 1] + 1) throw new Error(`Calm inserted a blank row between steps: ${text}`);
-  }
-  const last = stepIndexes.at(-1);
-  if (last === undefined || lines[last + 1] !== "") throw new Error(`Calm did not insert one blank row before the response: ${text}`);
-  if (lines[last + 2]?.trim() !== "DURABLE_COMMENTARY_FROM_ASSISTANT") {
-    throw new Error(`Calm's blank row was not between the final step and response: ${text}`);
-  }
-};
-assertStepLayout(progressText, ["Step 1: CURRENT_STEP_FROM_ASSISTANT"]);
-const styledProgress = assistantProgress.render(100).join("\n");
-if (!styledProgress.includes("\x1b[38;2;166;112;145m")) {
-  throw new Error("Calm steps did not use the muted mauve foreground");
+  throw new Error(`Calm exposed a numbered step or tool ticker: ${progressText}`);
 }
 const activityRows = rows.map(({ actual }) => actual.render(100));
-if (activityRows.some((row) => row.length !== 0)) throw new Error("Calm exposed a hidden tool row while collecting activity");
-assistantProgress.updateContent(assistantProgressMessage, true);
-const activityText = stripTerminalSequences(assistantProgress.render(100).join("\n"));
-if (!activityText.includes("read · sample.txt")) throw new Error(`Calm did not show safe tool activity: ${activityText}`);
-const styledActivity = assistantProgress.render(100).join("\n");
-if (!styledActivity.includes("\x1b[2m\x1b[38;2;198;163;188m")) {
-  throw new Error("Calm activity did not use dim muted detail styling");
+if (activityRows.some((row) => row.length !== 0)) throw new Error("Calm exposed a hidden tool row");
+const styledProgress = assistantProgress.render(100).join("\n");
+if (!styledProgress.includes("\x1b[48;2;36;24;32m")) {
+  throw new Error("Calm did not use the muted dark-purple background");
 }
-if (activityText.includes("CALM_RENDER_OUTPUT") || activityText.includes("Successfully replaced")) {
-  throw new Error(`Calm leaked tool output into its activity ticker: ${activityText}`);
+if (JSON.stringify(assistantProgress.render(100)) !== JSON.stringify(assistantProgress.render(100))) {
+  throw new Error("Calm assistant rendering was not stable");
 }
-await new Promise((resolve) => setTimeout(resolve, 500));
-const movedActivityText = stripTerminalSequences(assistantProgress.render(100).join("\n"));
-if (movedActivityText === activityText) throw new Error("Calm activity ticker did not move while overflowing");
-const narrowActivityText = stripTerminalSequences(assistantProgress.render(40).join("\n"));
-if (narrowActivityText.includes("read ·") || narrowActivityText.split("\n").some((line) => line.length > 40)) {
-  throw new Error(`Calm narrow layout wrapped or retained the activity ticker: ${narrowActivityText}`);
-}
-const safeActivities = [
-  ["read", { path: "/tmp/proof-secret/token.txt" }, "read · <temp>/token.txt"],
-  ["edit", { path: "/work/src/tokenizer.ts" }, "edit · src/tokenizer.ts"],
-  ["bash", { command: "API_TOKEN=hidden printf 'secret'" }, "bash · printf"],
-  ["write", { path: "credentials.txt", content: "PRIVATE_CONTENT" }, "write · <redacted>"],
-];
-for (const [tool, args, expected] of safeActivities) {
-  const actual = visibility.calmActivityForTool(tool, args, "/work");
-  if (actual !== expected || actual.includes("hidden") || actual.includes("PRIVATE_CONTENT") || actual.includes("proof-secret")) {
-    throw new Error(`Calm activity redaction changed: ${actual}`);
-  }
-}
-const activityCount = visibility.currentCalmActivity().length;
-visibility.appendCalmActivity("read · sample.txt");
-if (visibility.currentCalmActivity().length !== activityCount) throw new Error("Calm did not deduplicate repeated activity");
-for (let index = 0; index < 20; index += 1) visibility.appendCalmActivity(`tool-${index}`);
-if (visibility.currentCalmActivity().length > 12) throw new Error("Calm retained more activity than its bounded ticker cap");
 if (JSON.stringify([...widgets.keys()]) !== JSON.stringify(["firstmate-calm-working-ship"])) {
   throw new Error(`Calm did not retain only the working ship widget: ${[...widgets.keys()].join(",")}`);
 }
 assistantProgress.updateContent(nextAssistantProgressMessage, true);
 progressText = stripTerminalSequences(assistantProgress.render(100).join("\n"));
-commentaryText = stripTerminalSequences(assistantProgress.render(100).join("\n"));
+commentaryText = progressText;
 if (
-  !progressText.includes("Step 1: CURRENT_STEP_FROM_ASSISTANT") ||
-  !progressText.includes("Step 2: NEXT_STEP_FROM_ASSISTANT") ||
+  progressText.includes("Step ") ||
+  progressText.includes("read ·") ||
   (commentaryText.match(/DURABLE_COMMENTARY_FROM_ASSISTANT/g) || []).length !== 1
 ) {
-  throw new Error(`Calm did not keep accumulated active steps beside commentary: ${progressText} / ${commentaryText}`);
+  throw new Error(`Calm exposed transient step or ticker content: ${progressText}`);
 }
-assertStepLayout(progressText, ["Step 1: CURRENT_STEP_FROM_ASSISTANT", "Step 2: NEXT_STEP_FROM_ASSISTANT"]);
 assistantProgress.updateContent({ ...nextAssistantProgressMessage, stopReason: "stop" }, false);
 await handlers.get("agent_settled")[0]({}, commandContext);
 commentaryText = stripTerminalSequences(assistantProgress.render(100).join("\n"));
 if (
-  !commentaryText.includes("Step 1: CURRENT_STEP_FROM_ASSISTANT") ||
-  !commentaryText.includes("Step 2: NEXT_STEP_FROM_ASSISTANT") ||
+  commentaryText.includes("Step ") ||
+  commentaryText.includes("read ·") ||
   (commentaryText.match(/DURABLE_COMMENTARY_FROM_ASSISTANT/g) || []).length !== 1
 ) {
-  throw new Error("Calm finalization did not retain the accumulated steps and commentary once");
-}
-assertStepLayout(commentaryText, ["Step 1: CURRENT_STEP_FROM_ASSISTANT", "Step 2: NEXT_STEP_FROM_ASSISTANT"]);
-await new Promise((resolve) => setTimeout(resolve, 500));
-const settledAgain = stripTerminalSequences(assistantProgress.render(100).join("\n"));
-if (settledAgain !== commentaryText || settledAgain.includes("read · sample.txt")) {
-  throw new Error("Calm completed steps kept animating or retained transient tool activity");
+  throw new Error("Calm finalization exposed transient steps or tool activity");
 }
 presentationComponent.setExpanded(!expanded);
 if (presentationComponent.hasContent() || presentationComponent.render(100).length !== 0) {
@@ -1573,7 +1522,7 @@ if (workingVisible !== true || hiddenThinkingLabel !== undefined) {
   throw new Error("turning Calm off did not restore stock presentation controls");
 }
 if (assistantThinkingTool.render(100).join("\n").includes("HIDDEN_TOOL_THINKING")) {
-  throw new Error("turning Calm off resurrected a superseded step title");
+  throw new Error("turning Calm off resurrected hidden thinking");
 }
 if (assistantExpandedThinking.render(100).join("\n").includes("RAW_EXPANDED_THINKING")) {
   throw new Error("turning Calm off resurrected raw thinking already owned by Calm");
@@ -1612,7 +1561,7 @@ JS
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm renderer and lifecycle contract failed: $out"
   [ -z "$out" ] || fail "Pi calm renderer test printed output: $out"
-  pass "Pi Calm renders distinct thinking lines as active numbered display-only content with muted styling, a right-side activity ticker, one final-response blank row, and preserved assistant commentary, history, exports, stock working row, and preference"
+  pass "Pi Calm hides thinking, tools, and operational bookkeeping without replacement rows, tickers, or geometry changes, while preserving commentary, history, exports, stock working row, and preference"
 }
 
 test_calm_mid_turn_working_notes() {
@@ -1899,7 +1848,11 @@ if (!interventionText.includes("The watcher found a blocker that needs your deci
 visibility.setCalmOperationalRun(false);
 const stockRows = snapshot();
 for (const name of Object.keys(rows)) {
+  if (name === "operationalNoop") continue;
   if (rendered(name).length === 0) throw new Error(`Calm-off rendering hid ${name}`);
+}
+if (rendered("operationalNoop").length !== 0) {
+  throw new Error("Calm-off rendering exposed an operational no-op acknowledgement");
 }
 requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm off");
 requireVisible("expandedHistory", "PREEXISTING_DURABLE_COMMENTARY", "initial Calm off");
@@ -1909,16 +1862,31 @@ await calm.calmCommand.handler("", context);
 if (readFileSync(calmPreferencePath, "utf8") !== "on\n") {
   throw new Error("plain /calm from off did not persist on");
 }
-if (rendered("midTurn").length !== 0) {
-  throw new Error(`Calm on left short mid-turn working-note rows: ${JSON.stringify(rendered("midTurn"))}`);
-}
+requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm on");
 requireVisible("substantiveLong", "SUBSTANTIVE_LONG_MIDTURN_REPORT", "Calm on");
 requireVisible("substantiveMultiline", "SUBSTANTIVE_MIDTURN_REPORT", "Calm on");
-requireHidden("belowThreshold", belowThresholdText.slice(0, 32), "Calm on");
+requireVisible("belowThreshold", belowThresholdText.slice(0, 32), "Calm on");
 requireVisible("atThreshold", atThresholdText.slice(0, 32), "Calm on");
-requireHidden("mixedBlocks", "MIXED_SHORT_WORKING_NOTE", "Calm on");
+requireVisible("mixedBlocks", "MIXED_SHORT_WORKING_NOTE", "Calm on");
 requireVisible("mixedBlocks", "SUBSTANTIVE_LONG_MIDTURN_REPORT", "Calm on");
-requireHidden("truncatedMidTurn", "TRUNCATED_MIDTURN_NOTE", "Calm on");
+requireVisible("truncatedMidTurn", "TRUNCATED_MIDTURN_NOTE", "Calm on");
+await calm.agentStart({}, context);
+const live = new AssistantMessageComponent(undefined, false);
+components.push(live);
+const liveMessage = {
+  ...assistantBase,
+  stopReason: "pending",
+  content: [{ type: "thinking", thinking: "LIVE_STEP_ONE" }],
+};
+live.updateContent(liveMessage, true);
+let liveText = stripTerminalSequences(live.render(100).join("\n"));
+if (liveText.includes("Step ") || liveText.includes("LIVE_STEP_ONE")) {
+  throw new Error(`Calm exposed a numbered live thinking row: ${liveText}`);
+}
+live.updateContent(liveMessage, true);
+if (stripTerminalSequences(live.render(100).join("\n")) !== liveText) {
+  throw new Error("Calm changed a repeated streaming update");
+}
 // Pi owns the wording of its truncation notice; Calm must leave that row's own notice
 // standing rather than collapsing an incomplete response to nothing.
 if (rendered("truncatedMidTurn").length === 0) {
@@ -1927,12 +1895,8 @@ if (rendered("truncatedMidTurn").length === 0) {
 liveMessage.content[0].thinking = "LIVE_STEP_ONE\nLIVE_STEP_TWO";
 live.updateContent(liveMessage, true);
 liveText = stripTerminalSequences(live.render(100).join("\n"));
-if (
-  !liveText.includes("Step 1: LIVE_STEP_ONE") ||
-  !liveText.includes("Step 2: LIVE_STEP_TWO") ||
-  liveText.split("\n").some((line, index, lines) => line === "" && lines[index - 1]?.includes("Step 1:"))
-) {
-  throw new Error(`Calm inserted an unexpected gap while steps were still active: ${liveText}`);
+if (liveText.includes("Step ") || liveText.includes("LIVE_STEP_TWO")) {
+  throw new Error(`Calm exposed changed live thinking content: ${liveText}`);
 }
 const finalMessage = {
   ...assistantBase,
@@ -1941,22 +1905,12 @@ const finalMessage = {
 };
 live.updateContent(finalMessage, false);
 liveText = stripTerminalSequences(live.render(100).join("\n"));
-if (
-  !liveText.includes("Step 1: LIVE_STEP_ONE") ||
-  !liveText.includes("Step 2: LIVE_STEP_TWO") ||
-  !liveText.includes("LIVE_FINAL_REPLY")
-) {
-  throw new Error("Calm replaced the completed step list when the response ended");
-}
-const liveLines = liveText.split("\n");
-const finalStepIndex = liveLines.findIndex((line) => line.trim().startsWith("Step 2:"));
-const finalReplyIndex = liveLines.findIndex((line) => line.trim() === "LIVE_FINAL_REPLY");
-if (finalReplyIndex !== finalStepIndex + 2 || liveLines[finalStepIndex + 1] !== "") {
-  throw new Error(`Calm did not separate the final step and final response with one blank row: ${liveText}`);
+if (liveText.includes("Step ") || !liveText.includes("LIVE_FINAL_REPLY")) {
+  throw new Error("Calm did not preserve the final response without step rows");
 }
 await calm.agentSettled({}, context);
-if (!stripTerminalSequences(live.render(100).join("\n")).includes("Step 2: LIVE_STEP_TWO")) {
-  throw new Error("Calm cleared the completed step list at settlement");
+if (stripTerminalSequences(live.render(100).join("\n")) !== liveText) {
+  throw new Error("Calm left repaint residue after settlement");
 }
 await calm.agentStart({}, context);
 const nextLive = new AssistantMessageComponent(undefined, false);
@@ -1968,13 +1922,14 @@ const nextRunMessage = {
 };
 nextLive.updateContent(nextRunMessage, true);
 nextLive.updateContent({ ...nextRunMessage, stopReason: "stop", content: [{ type: "text", text: "NEXT_RUN_FINAL" }] }, false);
-if (!stripTerminalSequences(nextLive.render(100).join("\n")).includes("Step 1: NEXT_RUN_STEP")) {
-  throw new Error("Calm did not reset step numbering for the next run");
+const nextLiveText = stripTerminalSequences(nextLive.render(100).join("\n"));
+if (nextLiveText.includes("Step ") || !nextLiveText.includes("NEXT_RUN_FINAL")) {
+  throw new Error("Calm exposed step rows in the next run");
 }
 await calm.agentSettled({}, context);
 await calm.calmCommand.handler("", context);
-if (stripTerminalSequences(nextLive.render(100).join("\n")).includes("Step 1: NEXT_RUN_STEP")) {
-  throw new Error("turning Calm off did not clear its completed step list");
+if (stripTerminalSequences(nextLive.render(100).join("\n")).includes("Step ")) {
+  throw new Error("turning Calm off left a numbered step row");
 }
 await calm.calmCommand.handler("", context);
 requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm on");
@@ -2009,9 +1964,13 @@ requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm off after /calm max");
 requireVisible("expandedHistory", "PREEXISTING_DURABLE_COMMENTARY", "Calm off after /calm max");
 requireHidden("expandedHistory", "PREEXISTING_STEP_TITLE", "Calm off after /calm max");
 for (const [name, message] of Object.entries(messages)) {
+  if (name === "operationalNoop") {
+    if (rendered(name).length !== 0) throw new Error("Calm-off rendering exposed an operational no-op acknowledgement");
+    continue;
+  }
   for (const block of message.content) {
     if (block.type === "thinking") requireHidden(name, block.thinking, "Calm off after ownership");
-    if (block.type === "text") requireVisible(name, block.text, "Calm off after ownership");
+    if (block.type === "text") requireVisible(name, block.text.trim().split(/\s+/)[0].slice(0, 32), "Calm off after ownership");
   }
 }
 if (JSON.stringify(rendered("finalReply")) !== stockRows.finalReply) {
@@ -2087,7 +2046,7 @@ JS
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm mid-turn contract failed: $out"
   [ -z "$out" ] || fail "Pi calm mid-turn test printed output: $out"
-  pass "Pi Calm keeps assistant commentary exactly once beside live and settled steps, freezes completed steps, suppresses persisted and expanded superseded titles across reload and repeated Calm toggles, preserves final replies and message data, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on"
+  pass "Pi Calm keeps assistant commentary exactly once, hides thinking without numbered replacements or blank geometry, suppresses persisted thinking across reload and repeated Calm toggles, preserves final replies and message data, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on"
 }
 
 test_operational_followup_turn_e2e() {
