@@ -423,7 +423,7 @@ poll() {
         .error == null)' "${row[@]:1}" >/dev/null; then
       printf 'contributions: observation unavailable for %s\n' "$url"
     fi
-    case "$url" in */issues/*) kind=issue ;; *) kind="pr" ;; esac
+    case "$url" in https://github.com/*/issues/*) kind=issue ;; *) kind="pr" ;; esac
     for task in "${row[@]:1}"; do
       fm_pr_task_id_valid "$task" || { printf 'contributions: invalid durable task id\n'; continue; }
       old="$TMP/old.json"

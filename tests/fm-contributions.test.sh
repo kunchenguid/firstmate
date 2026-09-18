@@ -144,12 +144,12 @@ SH
   chmod +x "$home/fakebin/gh"
 }
 
-gitlab_record() { # home id number forge-state mergeability [hold]
-  local home=$1 id=$2 number=$3 state=$4 mergeable=$5 hold=${6:-}
+gitlab_record() { # home project id number forge-state mergeability [hold]
+  local home=$1 project=$2 id=$3 number=$4 state=$5 mergeable=$6 hold=${7:-}
   mkdir -p "$home/data/$id"
-  printf -- '- [ ] %s - Contribution %s https://gitlab.com/o/r/-/merge_requests/%s (repo: sample) (kind: ship) %s\n' \
-    "$id" "$id" "$number" "$hold" >> "$home/data/backlog.md"
-  jq -n --arg task "$id" --arg url "https://gitlab.com/o/r/-/merge_requests/$number" \
+  printf -- '- [ ] %s - Contribution %s https://gitlab.com/%s/-/merge_requests/%s (repo: sample) (kind: ship) %s\n' \
+    "$id" "$id" "$project" "$number" "$hold" >> "$home/data/backlog.md"
+  jq -n --arg task "$id" --arg url "https://gitlab.com/$project/-/merge_requests/$number" \
     --arg head "$HEAD_A" --arg at "$NOW" --arg state "$state" --arg mergeable "$mergeable" '
     {schema:"fm-contributions.v1",task:$task,records:[{
       url:$url,kind:"pr",checked_at:$at,error:null,pending:[],seen:[],verdict:null,
@@ -159,14 +159,17 @@ gitlab_record() { # home id number forge-state mergeability [hold]
         reviews:[],events:[]}}]}' > "$home/data/$id/contributions.json"
 }
 
-gitlab_forge_home() { # home: GitLab forge fixtures served by a fakebin glab
-  local home=$1
+gitlab_forge_home() { # home [project]
+  local home=$1 project=${2:-o/r} encoded
   mkdir -p "$home/forge" "$home/root/bin" "$home/wt"
   printf '#!/bin/sh\nexit 0\n' > "$home/root/bin/fm-guard.sh"
   chmod +x "$home/root/bin/fm-guard.sh"
   printf 'worktree=%s/wt\nkind=ship\n' "$home" > "$home/state/delivery.meta"
   chmod 600 "$home/state/delivery.meta"
-  gitlab_record "$home" delivery 2 open mergeable
+  gitlab_record "$home" "$project" delivery 2 open mergeable
+  encoded=${project//\//%2F}
+  printf '%s\n' "$encoded" > "$home/forge/project"
+  printf '%s\n' "$project" > "$home/forge/raw-project"
   printf '%s\n' "$HEAD_A" > "$home/forge/head"
   printf 'opened\n' > "$home/forge/state"
   printf 'can_be_merged\n' > "$home/forge/merge_status"
@@ -178,8 +181,10 @@ gitlab_forge_home() { # home: GitLab forge fixtures served by a fakebin glab
   cat > "$home/fakebin/glab" <<'SH'
 #!/usr/bin/env bash
 set -eu
+proj=$(cat "$FORGE/project")
+rawproj=$(cat "$FORGE/raw-project")
 case "$*" in
-  'api --hostname gitlab.com projects/o%2Fr/merge_requests/2')
+  "api --hostname gitlab.com projects/$proj/merge_requests/2")
     calls="$FORGE/core-calls"
     if [ -f "$calls" ]; then printf '%s' "$(( $(cat "$calls") + 1 ))" > "$calls"; else printf '1' > "$calls"; fi
     head=$(cat "$FORGE/head")
@@ -188,16 +193,17 @@ case "$*" in
       --arg ms "$(cat "$FORGE/merge_status" 2>/dev/null || printf can_be_merged)" \
       --argjson draft "$(cat "$FORGE/draft" 2>/dev/null || printf false)" \
       --argjson can_merge "$(cat "$FORGE/can_merge" 2>/dev/null || printf false)" \
+      --arg web "https://gitlab.com/$rawproj/-/merge_requests/2" \
       '{state:$state,draft:$draft,sha:$head,merge_status:$ms,
         author:{username:"author"},user:{can_merge:$can_merge},
-        web_url:"https://gitlab.com/o/r/-/merge_requests/2"}' ;;
-  'api --hostname gitlab.com projects/o%2Fr/merge_requests/2/discussions?per_page=100 --paginate')
+        web_url:$web}' ;;
+  "api --hostname gitlab.com projects/$proj/merge_requests/2/discussions?per_page=100 --paginate")
     cat "$FORGE/discussions.raw" ;;
-  'api --hostname gitlab.com projects/o%2Fr/merge_requests/2/approvals')
+  "api --hostname gitlab.com projects/$proj/merge_requests/2/approvals")
     cat "$FORGE/approvals.json" ;;
-  'api --hostname gitlab.com projects/o%2Fr/merge_requests/2/pipelines?per_page=100 --paginate')
+  "api --hostname gitlab.com projects/$proj/merge_requests/2/pipelines?per_page=100 --paginate")
     cat "$FORGE/pipelines.raw" ;;
-  'api --hostname gitlab.com projects/o%2Fr/pipelines/'*'/jobs?per_page=100 --paginate')
+  "api --hostname gitlab.com projects/$proj/pipelines/"*"/jobs?per_page=100 --paginate")
     pipeline=${4##*/pipelines/}; pipeline=${pipeline%%/*}
     cat "$FORGE/jobs-$pipeline.raw" ;;
   *) printf 'unexpected glab fixture call: %s\n' "$*" >&2; exit 1 ;;
@@ -542,6 +548,24 @@ test_gitlab_mr_head_change_aborts() {
     "$home/data/delivery/contributions.json" >/dev/null \
     || fail 'a moved GitLab head left no error evidence'
   pass 'a GitLab head that moves mid-observation records the read as unavailable'
+}
+
+test_gitlab_mr_issues_path_stays_pr() {
+  local home
+  home=$(new_home gitlab-issues-path)
+  gitlab_forge_home "$home" o/issues
+  rm -f "$home/data/delivery/contributions.json"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'issues-path GitLab MR poll failed'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'issues-path GitLab MR poll failed on its stored record'
+  jq -e '.records[0].kind == "pr" and .records[0].error == null
+    and .records[0].observation.state == "open"' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'an issues-path GitLab MR was not stored as pr-kind measured coverage'
+  bearings "$home" | jq -e '.contributions.known == 1 and .contributions.checked == 1
+    and .contributions.unmeasured == 0 and .contributions.complete == true' >/dev/null \
+    || fail 'an issues-path GitLab MR did not stay measured coverage'
+  pass 'GitLab MR project paths containing issues stay pr-kind measured coverage'
 }
 
 test_shared_contribution_signal_wakes_once() {
@@ -917,7 +941,7 @@ test_late_owner_keeps_failure_episode_suppressed() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unobserved_coverage test_unobserved_gitlab_mr_is_fleet_work test_held_gitlab_mr_is_captain_work test_gitlab_mr_observation test_gitlab_mr_terminal_settles test_gitlab_mr_head_change_aborts test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_gitlab_stays_unobserved test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_failure_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unobserved_coverage test_unobserved_gitlab_mr_is_fleet_work test_held_gitlab_mr_is_captain_work test_gitlab_mr_observation test_gitlab_mr_terminal_settles test_gitlab_mr_head_change_aborts test_gitlab_mr_issues_path_stays_pr test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_gitlab_stays_unobserved test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_failure_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
