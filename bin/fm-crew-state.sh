@@ -1401,32 +1401,6 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
-  # Apply the terminal-failure precedence contract owned by header rule 2b.
-  if [ "$RUN_STATE" = failed ]; then
-    case "$LEDGER_STATUS" in
-      completed)
-        SUPERSEDED_DETAIL="run superseded by a newer completed run on this branch (earlier $RUN_DETAIL)"
-        TERMINAL_PR=$NEWEST_PR
-        emit_run "done" "$SUPERSEDED_DETAIL" "$TERMINAL_PR"
-        ;;
-      failed|cancelled)
-        if [ "$NEWEST_ROW_AGREES" != 1 ]; then
-          LEDGER_DETAIL="run $LEDGER_STATUS"
-          [ "$LEDGER_STATUS" = failed ] || LEDGER_DETAIL="run cancelled"
-          TERMINAL_PR=$NEWEST_PR
-          emit_run failed "$LEDGER_DETAIL" "$TERMINAL_PR"
-        fi
-        ;;
-    esac
-    case "$NEWEST_STATUS" in
-      '') ;;
-      *)
-        [ "$NEWEST_ROW_AGREES" = 1 ] || emit unknown run-step \
-          "a newer $NEWEST_STATUS run on this branch supersedes the earlier $RUN_DETAIL; current state not provable here"
-        ;;
-    esac
-  fi
-
   # Reconcile the status log. A needs-decision/blocked log line that the run-step
   # has moved past (anything but a genuinely parked run) is deterministically
   # stale: the gate resolved and the run resumed or finished.
@@ -1476,6 +1450,34 @@ if [ "$HAVE_RUN" = 1 ]; then
   esac
 
   [ -z "$SELECTED_RUN_ID" ] || RUN_DETAIL="$RUN_DETAIL${SEP}run: $SELECTED_RUN_ID"
+
+  # Apply the terminal-failure precedence contract owned by header rule 2b.
+  if [ "$RUN_STATE" = failed ]; then
+    case "$LEDGER_STATUS" in
+      completed)
+        SUPERSEDED_DETAIL="run superseded by a newer completed run on this branch (earlier $RUN_DETAIL)"
+        TERMINAL_PR=$NEWEST_PR
+        emit_run "done" "$SUPERSEDED_DETAIL" "$TERMINAL_PR"
+        ;;
+      failed|cancelled)
+        if [ "$NEWEST_ROW_AGREES" != 1 ]; then
+          LEDGER_DETAIL="run $LEDGER_STATUS"
+          [ "$LEDGER_STATUS" = failed ] || LEDGER_DETAIL="run cancelled"
+          [ -z "$SELECTED_RUN_ID" ] || LEDGER_DETAIL="$LEDGER_DETAIL${SEP}run: $SELECTED_RUN_ID"
+          TERMINAL_PR=$NEWEST_PR
+          emit_run failed "$LEDGER_DETAIL" "$TERMINAL_PR"
+        fi
+        ;;
+    esac
+    case "$NEWEST_STATUS" in
+      '') ;;
+      *)
+        [ "$NEWEST_ROW_AGREES" = 1 ] || emit unknown run-step \
+          "a newer $NEWEST_STATUS run on this branch supersedes the earlier $RUN_DETAIL; current state not provable here"
+        ;;
+    esac
+  fi
+
   emit_run "$RUN_STATE" "$RUN_DETAIL" "$TERMINAL_PR"
 fi
 

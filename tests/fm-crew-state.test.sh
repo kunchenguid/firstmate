@@ -984,6 +984,31 @@ test_socket_refusal_over_terminal_run_reports_blocked() {
   pass "socket refusal over a terminal attributed run reports blocked"
 }
 
+# The same override against a POPULATED ledger, the shape rule 2b's precedence
+# block reads. The daemon answers another crew's run, so this crew resolves
+# coarsely from its own newest ledger row at the worktree head - a terminal
+# failed row - while its socket-down blocker is still the log's latest event.
+# An instrument failure must not read as work failure, so the blocker wins.
+test_socket_refusal_outranks_a_ledger_resolved_terminal_run() {
+  reset_fakes
+  local d short out
+  d=$(new_case daemon-socket-refused-ledger)
+  make_repo_on_branch "$d/wt" fm/feat-dql
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dql.meta" "window=fm:fm-feat-dql" "worktree=$d/wt" "kind=ship"
+  printf 'blocked: no-mistakes daemon socket refused connections\n' \
+    > "$d/state/feat-dql.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-dql ${short}  $(ledger_stamp_minutes_ago 60)"
+  out=$(run_crew_state "$d" feat-dql)
+  assert_contains "$out" "state: blocked" "socket refusal outranks a ledger-resolved terminal run"
+  assert_contains "$out" "source: status-log" "the override remains status-log evidence"
+  assert_contains "$out" "daemon socket down despite attributed run record" "the override names its reason"
+  assert_not_contains "$out" "state: failed" "a dead instrument must not be published as a work failure"
+  pass "socket refusal outranks a ledger-resolved terminal run"
+}
+
 # The socket-down override is evidence about the log's CURRENT tip, not a latch:
 # once the crew appends any later event the attributed run is the better witness.
 test_socket_refusal_override_expires_when_the_crew_moves_on() {
@@ -6599,6 +6624,7 @@ test_stale_blocked_superseded
 test_daemon_claim_over_live_run_reads_run_alive
 test_socket_refusal_over_stale_fixing_run_reports_blocked
 test_socket_refusal_over_terminal_run_reports_blocked
+test_socket_refusal_outranks_a_ledger_resolved_terminal_run
 test_socket_refusal_override_expires_when_the_crew_moves_on
 test_ordinary_blocked_over_live_run_keeps_plain_superseded
 test_genuine_daemon_down_reports_blocked
