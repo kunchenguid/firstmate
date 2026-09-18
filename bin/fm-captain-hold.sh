@@ -39,6 +39,8 @@
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
 #   fm-captain-hold.sh reconcile note <task-id> --note-file <path>
+#   fm-captain-hold.sh retire-escalation <task-id>
+#   fm-captain-hold.sh retire-escalations
 #
 # `hold` places an existing task under an active captain hold, or creates the
 # task first when no work item exists to hold (--title required to create; the
@@ -52,6 +54,23 @@
 # production shell does not invoke a model-only ask tool. The firstmate runtime
 # presents `prompt` through its own ask capability, then feeds the selected
 # answer to `answers` or `fm-send --resolve-key`.
+#
+# The record lives exactly as long as the call it describes is still the
+# captain's to answer, so it is retired on every path that settles the call and
+# on no path that leaves it open. Retirement belongs to this script because it
+# owns the record's format: `answer` (and the `answers` intake that routes
+# through it) retires after the durable answer lands, and the evidence-backed
+# `reconcile close` retires on the same terms, while `reconcile note` leaves the
+# record in place because that outcome keeps the call active and still
+# presenting its question. A retirement failure is reported on stderr and never
+# reverses the answer, the close, or the parent publication it follows.
+# Cleanup retires it too, but only when cleanup actually closes the owning row:
+# a retained captain call is still answerable, so its prompt is still owed.
+# `retire-escalations` is the bounded sweep for records whose call can no longer
+# be answered - a task this home no longer carries, or one whose row is closed
+# or no longer held for the captain. It never removes a record for a call that is
+# still answerable and never for one whose state cannot be established, because
+# both outcomes reuse the one `captain_call_state` classification behind `open`.
 #
 # `answer` records the captain's exact words and resolves the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -852,6 +871,216 @@ print_escalation_prompt() {  # <task-id>
   jq -cS . "$path"
 }
 
+# Retire one task's durable structured escalation, if it has one. Idempotent by
+# construction - an absent record is already retired - and one rm on one regular
+# file, so a killed run leaves either the whole record or none of it and no
+# reader ever observes a partial one. A path this script would not have written
+# (a symlink, or a directory where the record belongs) is left exactly as it is
+# and reported as not retired, so retirement never deletes what it does not own.
+retire_escalation() {  # <task-id>
+  local path
+  path=$(escalation_path "$1")
+  [ -e "$path" ] || [ -L "$path" ] || return 0
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  rm -f -- "$path"
+}
+
+# Retire a settled call's escalation without ever reversing the settlement. A
+# failure is reported and the caller carries on, because the recorded answer,
+# close, or release is already durable and authoritative; the surviving record
+# is visible to `retire-escalations` and to a retry.
+retire_settled_escalation() {  # <task-id>
+  retire_escalation "$1" && return 0
+  printf 'actionable: task %s is settled but its structured escalation could not be retired (%s); remove that record before escalating a new question for this task\n' \
+    "$1" "$(escalation_path "$1")" >&2
+}
+
+ESCALATION_RETIRE_REASON=
+# Apply the one retirement rule to an already-established call state. Every
+# caller shares this mapping, so no site decides for itself what counts as
+# settled: exit 0 means the record is gone (retired now, or never existed), 1
+# means it was KEPT and ESCALATION_RETIRE_REASON says why.
+retire_escalation_by_state() {  # <task-id> <open|repairable|settled|absent|unknown>
+  local id=$1 call_state=$2 path
+  ESCALATION_RETIRE_REASON=
+  path=$(escalation_path "$id")
+  [ -e "$path" ] || [ -L "$path" ] || return 0
+  case "$call_state" in
+    open)
+      ESCALATION_RETIRE_REASON='still an open captain call'
+      return 1
+      ;;
+    repairable)
+      # Closed outside this script, but `answer` can still record the captain's
+      # words on it, so the prompt is still owed and must survive.
+      ESCALATION_RETIRE_REASON='its task is closed but its captain answer can still be recorded'
+      return 1
+      ;;
+    settled)
+      # Present, but no longer an answerable call: a row whose captain hold is
+      # gone, or one closed with its answer already recorded.
+      ESCALATION_RETIRE_REASON='its backlog row is closed or no longer held for the captain'
+      ;;
+    absent)
+      ESCALATION_RETIRE_REASON='its task is absent from this home'
+      ;;
+    *)
+      ESCALATION_RETIRE_REASON='whether its call is still open could not be established'
+      return 1
+      ;;
+  esac
+  if [ ! -f "$path" ] || [ -L "$path" ]; then
+    ESCALATION_RETIRE_REASON='its record is not a regular file this script wrote'
+    return 1
+  fi
+  retire_escalation "$id" && return 0
+  ESCALATION_RETIRE_REASON='its record could not be removed'
+  return 1
+}
+
+# The same rule, reading the call state for one task as it goes.
+retire_escalation_if_unanswerable() {  # <task-id>
+  local id=$1 call_state
+  call_state=$(captain_call_state "$id") || call_state=unknown
+  retire_escalation_by_state "$id" "$call_state"
+}
+
+# Retire one task's escalation when its call is over. Exit 0 means the record is
+# gone; exit 1 means it was kept. A call that is still answerable - a live hold,
+# or a closed row whose captain answer can still be recorded - is the expected
+# keep and stays silent, because keeping a prompt the captain still owes is the
+# normal outcome rather than a problem; every other keep names its reason on
+# stderr so a caller can report it.
+command_retire_escalation() {
+  local id=${1:-}
+  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  validate_slug task-id "$id"
+  if retire_escalation_if_unanswerable "$id"; then
+    return 0
+  fi
+  case "$ESCALATION_RETIRE_REASON" in
+    'still an open captain call') return 1 ;;
+    'its task is closed but its captain answer can still be recorded') return 1 ;;
+  esac
+  printf 'fm-captain-hold: kept the structured escalation for %s: %s\n' \
+    "$id" "$ESCALATION_RETIRE_REASON" >&2
+  return 1
+}
+
+# One listing, in the same shape `bin/fm-afk-return.sh` reads held work with,
+# mapping every row this home carries to the call state the rule consumes.
+# Printing nothing means the listing could not be trusted, which retires
+# nothing: this sweep exists on the session-start path, where a slow per-record
+# read would be paid on every startup, and paying it once here is what keeps a
+# home with many records cheap. The row layout is id,state,kind,repo,title,
+# hold_kind, so the id and state are the first two fields and hold_kind is the
+# last - the title is the only field that can carry a comma, and it is always
+# between them.
+escalation_call_states() {
+  local data root rows line id state hold_kind count listed=0
+  data=$(fm_backlog_data_absolute "$DATA") || return 1
+  root=$(fm_backlog_root "$data") || return 1
+  fm_tasks_axi_compatible || return 1
+  rows=$(fm_backlog_row_list "$data" --fields hold_kind 2>/dev/null) || return 1
+  count=$(printf '%s\n' "$rows" | sed -n 's/^count: //p' | head -1)
+  case "$count" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  while IFS= read -r line; do
+    case "$line" in
+      '  '*) ;;
+      *) continue ;;
+    esac
+    id=${line#'  '}; id=${id%%,*}
+    case "$id" in
+      ''|*[!A-Za-z0-9._-]*) continue ;;
+    esac
+    state=${line#*,}; state=${state%%,*}
+    hold_kind=${line##*,}
+    case "$hold_kind" in
+      '"-'|-) hold_kind='' ;;
+      '"'*'"') hold_kind=${hold_kind#\"}; hold_kind=${hold_kind%\"} ;;
+    esac
+    listed=$((listed + 1))
+    if [ "$state" = "done" ]; then
+      # A closed row is `repairable` only when it still carries the captain hold;
+      # the caller settles which of the two it is by reading that row's body.
+      if [ "$hold_kind" = captain ]; then
+        printf '%s\trepairable\n' "$id"
+      else
+        printf '%s\tsettled\n' "$id"
+      fi
+    elif [ "$hold_kind" = captain ]; then
+      printf '%s\topen\n' "$id"
+    else
+      printf '%s\tsettled\n' "$id"
+    fi
+  done <<EOF
+$rows
+EOF
+  # A listing whose reported total does not match what was parsed is not a
+  # complete picture of this home, and a task missing from it would otherwise
+  # read as absent and lose a live prompt. The non-numeric `count:` form a
+  # limited listing prints is refused above for the same reason rather than
+  # parsed down to its leading integer.
+  [ "$listed" -eq "$count" ]
+}
+
+# The bounded sweep for records whose call can no longer be answered - the drift
+# a home accumulated before retirement existed, and any record a failed
+# retirement left behind. Every candidate goes through the one rule above, so the
+# sweep can never remove a prompt for a call that is still open and never removes
+# one whose state it cannot read. Idempotent: a second run finds nothing to do.
+# Silent when it retires nothing, so a session start with nothing to reap says
+# nothing.
+command_retire_escalations() {
+  local path id retired=0 kept=0 call_states state has_record=0
+  [ "$#" -eq 0 ] || { usage >&2; exit 2; }
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 0
+  # The overwhelmingly common case is a home with nothing to reap, and it must
+  # not pay for a backlog read to learn that.
+  for path in "$STATE"/*.escalation.json; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    has_record=1
+    break
+  done
+  [ "$has_record" = 1 ] || return 0
+  call_states=$(escalation_call_states) \
+    || { printf "fm-captain-hold: kept every structured escalation: this home's backlog rows could not be read\n" >&2
+         return 0; }
+  for path in "$STATE"/*.escalation.json; do
+    [ -e "$path" ] || [ -L "$path" ] || continue
+    id=$(basename "$path"); id=${id%.escalation.json}
+    case "$id" in
+      ''|*[!A-Za-z0-9._-]*) continue ;;
+    esac
+    state=$(printf '%s\n' "$call_states" | awk -F'\t' -v want="$id" '$1 == want { print $2; exit }')
+    case "$state" in
+      repairable)
+        # The one case the listing cannot settle: the body decides whether the
+        # captain's words can still be recorded on a closed row.
+        state=$(captain_call_state "$id") || state=unknown
+        ;;
+      '')
+        state=absent
+        ;;
+    esac
+    if retire_escalation_by_state "$id" "$state"; then
+      printf 'retired: %s (%s)\n' "$id" "${ESCALATION_RETIRE_REASON:-unknown}"
+      retired=$((retired + 1))
+    else
+      kept=$((kept + 1))
+      case "$ESCALATION_RETIRE_REASON" in
+        'still an open captain call') ;;
+        'its task is closed but its captain answer can still be recorded') ;;
+        *) printf 'kept: %s (%s)\n' "$id" "$ESCALATION_RETIRE_REASON" >&2 ;;
+      esac
+    fi
+  done
+  [ "$retired" -gt 0 ] || return 0
+  printf 'retire-escalations: retired=%s kept=%s\n' "$retired" "$kept"
+}
+
 command_escalate() {
   local id=${1:-} escalation_file='' reason='' title='' repo='' origin='' until='' key
   local -a hold_args
@@ -1501,6 +1730,11 @@ publish_parent_resolution_then_retire() {  # <task-id> <occurrence> <note>
   local id=$1 occurrence=$2 note=$3 request
   request=$(reconcile_request_path "$id")
   publish_parent_hold "$id" "$occurrence" resolved "$note"
+  # The call is settled here, so its structured prompt is spent. This runs
+  # before the parent-channel refusal below on purpose: retirement answers to
+  # the durable record, not to a secondmate home's channel, and a broken channel
+  # must not leave a spent prompt behind to block the task's next question.
+  retire_settled_escalation "$id"
   if [ -e "$request" ] && [ "$PARENT_HOLD_PUBLISHED" != 1 ]; then
     fail "could not publish the answered captain-held task $id to its parent"
   fi
@@ -1633,6 +1867,7 @@ reconcile_close() {
     publish_parent_hold "$id" "$occurrence" resolved reconciled
     [ "$PARENT_HOLD_PUBLISHED" = 1 ] \
       || fail "could not publish the reconciled captain-held task $id to its parent"
+    retire_settled_escalation "$id"
     reconcile_request_retire "$id"
     printf 'reconciled: %s\n' "$id"
     return 0
@@ -1656,6 +1891,7 @@ reconcile_close() {
   publish_parent_hold "$id" "$occurrence" resolved reconciled
   [ "$PARENT_HOLD_PUBLISHED" = 1 ] \
     || fail "could not publish the reconciled captain-held task $id to its parent"
+  retire_settled_escalation "$id"
   reconcile_request_retire "$id"
   printf 'reconciled: %s\n' "$id"
 }
@@ -1947,6 +2183,91 @@ EOF
   done
 }
 
+# The one classification of a task's captain call, printed as a single word.
+# `open` is a live call the captain still owes an answer to, `repairable` is a
+# row closed outside this script that still carries the captain hold with no
+# resolution record - the case `answer` supports by design, so the call is still
+# answerable, `settled` is a call that can no longer be answered, `absent` is a
+# task this home does not carry (including a home with no backlog file at all,
+# which records no captain calls), and `unknown` is every read failure over a
+# record that may exist - never spent as absence, because a caller that may
+# delete must not read "cannot tell" as permission. Setup failures print their
+# own diagnostic to stderr and classify `unknown`.
+#
+# `open` and `repairable` are deliberately distinct rather than one answerable
+# class: `open` is `command_open`'s existing verdict, whose consumers - cleanup's
+# retain-or-close decision and the merge entrypoints - must keep reading exactly
+# what they read before this predicate existed. A caller that may DELETE instead
+# asks the stricter question "can `answer` still record this call", so it keeps
+# the prompt for both words.
+captain_call_state() {  # <task-id>; prints open|repairable|settled|absent|unknown
+  local id=$1 data root file backend state show
+  data=$(fm_backlog_data_absolute "$DATA") || {
+    printf 'fm-captain-hold: data directory cannot be resolved: %s\n' "$DATA" >&2
+    printf 'unknown\n'
+    return 0
+  }
+  root=$(fm_backlog_root "$data") || {
+    printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2
+    printf 'unknown\n'
+    return 0
+  }
+  if ! backend=$(fm_tasks_axi_backend_resolve "$root"); then
+    printf 'unknown\n'
+    return 0
+  fi
+  if [ "$backend" = markdown ]; then
+    file=$(fm_backlog_file "$data") || {
+      printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2
+      printf 'unknown\n'
+      return 0
+    }
+    if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+      printf 'absent\n'
+      return 0
+    fi
+  fi
+  if ! fm_tasks_axi_compatible; then
+    printf 'fm-captain-hold: compatible tasks-axi is required\n' >&2
+    printf 'unknown\n'
+    return 0
+  fi
+  if fm_backlog_row_probe "$data" "$id"; then
+    state=${FM_BACKLOG_ROW_STATE%% *}
+    if [ "$state" = "done" ]; then
+      # Closed. `answer` can still record the missing resolution block when the
+      # captain hold survived the close and no record exists yet, which makes
+      # the prompt still owed; otherwise the call is over.
+      if [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
+        if ! task_show "$id"; then
+          printf 'fm-captain-hold: closed captain call %s could not be read\n' "$id" >&2
+          printf 'unknown\n'
+          return 0
+        fi
+        show=$TASK_SHOW_OUTPUT
+        if ! body_has_resolution_record "$(show_field "$show" body)"; then
+          printf 'repairable\n'
+          return 0
+        fi
+      fi
+      printf 'settled\n'
+      return 0
+    fi
+    if [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
+      printf 'open\n'
+    else
+      printf 'settled\n'
+    fi
+    return 0
+  fi
+  if [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
+    printf 'absent\n'
+    return 0
+  fi
+  printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_ROW_ERROR" >&2
+  printf 'unknown\n'
+}
+
 # Still an open captain call? Exit 0 yes, 1 no, 2 cannot tell (see the header).
 # A row this home does not carry is 3 when the caller requests the distinction,
 # and so is a home with no backlog file at all, because a backlog that does not
@@ -1954,7 +2275,7 @@ EOF
 # printed to stderr, because a mechanical closer must never read "cannot tell"
 # as permission to close.
 command_open() {  # <task-id> [--identity] [--distinguish-absent]
-  local id='' identity=0 distinguish_absent=0 data state root file backend show shown_body
+  local id='' identity=0 distinguish_absent=0 show shown_body call_state
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --identity) identity=1 ;;
@@ -1973,29 +2294,9 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
       exit 2
       ;;
   esac
-  data=$(fm_backlog_data_absolute "$DATA") \
-    || { printf 'fm-captain-hold: data directory cannot be resolved: %s\n' "$DATA" >&2; exit 2; }
-  root=$(fm_backlog_root "$data") \
-    || { printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2; exit 2; }
-  if ! backend=$(fm_tasks_axi_backend_resolve "$root"); then
-    exit 2
-  fi
-  if [ "$backend" = markdown ]; then
-    file=$(fm_backlog_file "$data") \
-      || { printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_TRANSITION_ERROR" >&2; exit 2; }
-    if [ ! -e "$file" ] && [ ! -L "$file" ]; then
-      # No backlog file at all: this home records no captain calls, so the task
-      # is absent from it rather than held. A record that EXISTS but cannot be
-      # read is a different state and still leaves by the exit 2 paths below,
-      # because that one may hide a live hold.
-      [ "$distinguish_absent" = 0 ] || return 3
-      return 1
-    fi
-  fi
-  fm_tasks_axi_compatible || { printf 'fm-captain-hold: compatible tasks-axi is required\n' >&2; exit 2; }
-  if fm_backlog_row_probe "$data" "$id"; then
-    state=${FM_BACKLOG_ROW_STATE%% *}
-    if [ "$state" != "done" ] && [ "$FM_BACKLOG_ROW_HOLD_KIND" = captain ]; then
+  call_state=$(captain_call_state "$id")
+  case "$call_state" in
+    open)
       if [ "$identity" -eq 1 ]; then
         task_show "$id" || {
           printf 'fm-captain-hold: captain call %s is open but its record could not be read\n' "$id" >&2
@@ -2008,14 +2309,19 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
           "$(resolution_record_count "$shown_body")"
       fi
       return 0
-    fi
-    return 1
-  fi
-  if [ "$FM_BACKLOG_ROW_RESULT" = not_found ]; then
-    [ "$distinguish_absent" = 0 ] || return 3
-    return 1
-  fi
-  printf 'fm-captain-hold: %s\n' "$FM_BACKLOG_ROW_ERROR" >&2
+      ;;
+    repairable|settled)
+      # A closed row is not an open captain call for this predicate's consumers,
+      # whatever `answer` may still be able to record on it: cleanup must close
+      # rather than retain such a row, and the merge entrypoints must let it
+      # through.
+      return 1
+      ;;
+    absent)
+      [ "$distinguish_absent" = 0 ] || return 3
+      return 1
+      ;;
+  esac
   exit 2
 }
 
@@ -2032,6 +2338,8 @@ case "${1:-}" in
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
   open) shift; command_open "$@" ;;
+  retire-escalation) shift; command_retire_escalation "$@" ;;
+  retire-escalations) shift; command_retire_escalations "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   reconcile) shift; command_reconcile "$@" ;;
   -h|--help) usage ;;

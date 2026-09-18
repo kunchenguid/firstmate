@@ -3596,6 +3596,17 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.
 rm -rf "$STATE/$ID.inbox"
+# The structured escalation record lives exactly as long as the call it
+# describes is still the captain's to answer (bin/fm-captain-hold.sh owns that
+# lifecycle). A retained captain call is still answerable, so its prompt is
+# still owed and stays; a row this cleanup actually closes can never be answered
+# again, so its spent record goes with the rest of the task's per-task state.
+# The owner decides which case this is, and a keep is never a cleanup failure.
+if [ "$BACKLOG_CLOSED" = 1 ] && [ "$BACKLOG_TRANSITION" != retain ]; then
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    FM_CONFIG_OVERRIDE="$CONFIG" \
+    "$SCRIPT_DIR/fm-captain-hold.sh" retire-escalation "$ID" || true
+fi
 # The record is gone, so the backlog must not still show this task in flight
 # when teardown reports success. Still under this task's meta lock, so a steer
 # racing the same id stays serialized exactly as it was before. A captain-held

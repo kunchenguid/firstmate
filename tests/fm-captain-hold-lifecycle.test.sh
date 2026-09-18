@@ -2510,6 +2510,183 @@ EOF
   pass "a captain call with no routed work, a verified transfer, an open decision, and an answered call all stay silent"
 }
 
+# A structured escalation record is durable context for exactly one question, so
+# it must not outlive the call it describes. Before this coverage the record was
+# only ever created: answering the call, reconciling it moot, and tearing its
+# task down all left it behind, and a leftover record made `escalate` refuse the
+# task's NEXT question with "already has a different structured escalation" -
+# leaving that new call with no options for the interactive ask surface. This
+# exercises the whole lifecycle through the command surface: escalate, settle,
+# escalate again on the same id, and the negative case that an unanswered call
+# keeps the prompt the captain still owes.
+sample_escalation_file() {  # <path> <task-id> <question>
+  cat > "$1" <<EOF
+{"schema":"fm-captain-escalation.v1","task":"$2","question":"$3","evidence":"Measured evidence for $3","context":"Context for $3.","options":[{"value":"alpha","label":"Alpha"},{"value":"beta","label":"Beta"}],"recommendation":"alpha","recommendation_reason":"Alpha preserves the accepted contract."}
+EOF
+}
+
+test_escalation_record_lives_exactly_as_long_as_its_call() {
+  local home id question_one question_two answer out
+  home=$(make_home escalation-lifecycle)
+  id=sample-escalation-call
+  question_one="$home/prompt-one.json"
+  question_two="$home/prompt-two.json"
+  sample_escalation_file "$question_one" "$id" "First question for the sample?"
+  sample_escalation_file "$question_two" "$id" "Second question for the sample?"
+  answer="$home/answer.txt"
+
+  # The first call is presented and durable.
+  out=$(run_captain "$home" escalate "$id" --title "Sample escalated call" --repo sample \
+    --reason "the sample needs the captain's choice" --escalation-file "$question_one") \
+    || fail "structured escalation failed: $out"
+  [ "$out" = "$id" ] || fail "escalation returned the wrong task id: $out"
+  assert_present "$home/state/$id.escalation.json" "the escalation record was not durable"
+  run_captain "$home" prompt "$id" >/dev/null \
+    || fail "the durable escalation prompt could not be read"
+  assert_equals "$(run_captain "$home" prompt "$id" | jq -r .question)" \
+    "First question for the sample?" "the presented prompt lost the first question"
+
+  # THE DEFECT: while a record exists for a settled call, a new question for the
+  # same task is refused outright and the operator keeps reading the spent one.
+  printf 'Alpha, and proceed.\n' > "$answer"
+  run_captain "$home" answer "$id" --decision-file "$answer" --release >/dev/null \
+    || fail "the captain's answer was not recorded"
+  assert_absent "$home/state/$id.escalation.json" \
+    "answering the call did not retire its structured escalation"
+  if run_captain "$home" prompt "$id" > "$home/spent.out" 2> "$home/spent.err"; then
+    fail "a settled call still returned its spent prompt"
+  fi
+
+  # A NEW question on the SAME task id now gets its own prompt, which is the
+  # regression: this is exactly what the leftover record used to block.
+  out=$(run_captain "$home" escalate "$id" --reason "the sample needs a second choice" \
+    --escalation-file "$question_two") \
+    || fail "a new escalation for a settled call was refused: $out"
+  [ "$out" = "$id" ] || fail "the second escalation returned the wrong task id: $out"
+  assert_equals "$(run_captain "$home" prompt "$id" | jq -r .question)" \
+    "Second question for the sample?" "the task kept presenting its previous question"
+
+  # The negative case that matters more than the bug: a call still waiting on the
+  # captain keeps its prompt, because that is the captain's own open question.
+  run_captain "$home" retire-escalation "$id" >/dev/null 2>&1 \
+    && fail "an unanswered captain call had its prompt retired"
+  assert_present "$home/state/$id.escalation.json" \
+    "an unanswered captain call lost the prompt it still owes"
+  assert_equals "$(run_captain "$home" prompt "$id" | jq -r .question)" \
+    "Second question for the sample?" "the surviving prompt was damaged"
+
+  # Answering the second call retires that one too, and the prompt is gone.
+  printf 'Beta this time.\n' > "$answer"
+  run_captain "$home" answer "$id" --decision-file "$answer" >/dev/null \
+    || fail "the second answer was not recorded"
+  assert_absent "$home/state/$id.escalation.json" \
+    "the second answer did not retire its structured escalation"
+  pass "an escalation record is retired exactly when its call settles, never while the captain still owes an answer"
+}
+
+# The two reconcile outcomes settle very different things, so they must differ
+# here too. A moot call closed on evidence is over and its prompt is spent; a
+# call that a re-check found genuinely active is still the captain's, so it goes
+# on presenting its question. Both are driven through the board-request seam the
+# reconcile path requires.
+test_reconcile_retires_a_moot_calls_prompt_and_keeps_an_active_one() {
+  local home show
+  home=$(make_home reconcile-escalation-retirement)
+  tasks_in "$home" add sample-moot-escalated "Captain call: ship the sample?" --repo sample >/dev/null
+  tasks_in "$home" add sample-active-escalated "Captain call: which sample order?" --repo sample >/dev/null
+  sample_escalation_file "$home/moot.json" sample-moot-escalated "Ship the sample release?"
+  sample_escalation_file "$home/active.json" sample-active-escalated "Which sample admission order?"
+  run_captain "$home" escalate sample-moot-escalated --repo sample \
+    --reason "ship the sample release" --escalation-file "$home/moot.json" >/dev/null \
+    || fail "could not escalate the moot fixture"
+  run_captain "$home" escalate sample-active-escalated --repo sample \
+    --reason "which sample admission order" --escalation-file "$home/active.json" >/dev/null \
+    || fail "could not escalate the active fixture"
+  request_reconciles "$home" board-src sample-moot-escalated sample-active-escalated \
+    || fail "could not file the reconcile requests"
+
+  printf 'The sample shipped on 2026-09-17, so the release question is moot.\n' \
+    > "$home/evidence.txt"
+  run_captain "$home" reconcile close sample-moot-escalated --evidence-file "$home/evidence.txt" \
+    >/dev/null || fail "could not close the moot escalated call"
+  assert_absent "$home/state/sample-moot-escalated.escalation.json" \
+    "a moot call closed on evidence kept the prompt it no longer needs"
+
+  printf 'Still open: nothing shipped and the order choice is unchanged.\n' > "$home/note.txt"
+  run_captain "$home" reconcile note sample-active-escalated --note-file "$home/note.txt" >/dev/null \
+    || fail "could not annotate the active escalated call"
+  assert_present "$home/state/sample-active-escalated.escalation.json" \
+    "a re-check that found the call active retired the prompt it still owes"
+  assert_equals "$(run_captain "$home" prompt sample-active-escalated | jq -r .question)" \
+    "Which sample admission order?" "the still-active call lost its question"
+  show=$(tasks_in "$home" show sample-active-escalated --full)
+  assert_contains "$show" "held: yes" "the still-active call was released by its re-check note"
+  pass "a moot call's prompt is retired on the evidence, and an active call keeps the question it still owes"
+}
+
+# The other half of the same lifecycle: cleanup and the bounded sweep. Cleanup
+# must retire a spent record with the row it closes, and must NOT retire one
+# whose call is still the captain's - a retained captain call is still
+# answerable, so its prompt is still owed. The sweep exists for the drift a home
+# accumulated before any of this existed: records whose task this home no longer
+# carries. Both halves are exercised through the commands callers actually use.
+test_escalation_retirement_survives_cleanup_and_the_sweep() {
+  local home id orphan show json
+  home=$(make_home escalation-teardown)
+  id=sample-escalation-teardown
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the sample escalation teardown" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the cleanup fixture"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample escalation teardown\n\nThe captain must choose the rollout shape.\n' \
+    > "$home/data/$id/report.md"
+  sample_escalation_file "$home/prompt.json" "$id" "Which rollout shape for the sample?"
+  run_captain "$home" escalate "$id" --reason "the captain must choose the rollout shape" \
+    --escalation-file "$home/prompt.json" >/dev/null \
+    || fail "could not escalate the cleanup fixture"
+  run_captain "$home" complete "$id" "$id" >/dev/null \
+    || fail "completion gate failed for the cleanup fixture"
+
+  # Cleanup of a finished investigation whose own row is the captain call retains
+  # that row, so the prompt the captain still owes must survive it.
+  run_teardown "$home" "$id" > "$home/teardown.out" 2> "$home/teardown.err" \
+    || fail "cleanup of the escalated investigation failed: $(cat "$home/teardown.err")"
+  assert_present "$home/state/$id.escalation.json" \
+    "cleanup of a still-open captain call retired the prompt it still owes"
+  assert_equals "$(run_captain "$home" prompt "$id" | jq -r .question)" \
+    "Which rollout shape for the sample?" "the retained prompt lost its question"
+
+  # A record whose task this home no longer carries is the drift the sweep
+  # reaps. It is written the way the escalating path writes it.
+  orphan=sample-escalation-orphan
+  sample_escalation_file "$home/orphan.json" "$orphan" "A question for a departed task?"
+  jq -cS . "$home/orphan.json" > "$home/state/$orphan.escalation.json"
+  run_captain "$home" retire-escalations > "$home/sweep.out" \
+    || fail "the sweep failed on a home with an absent-task record"
+  assert_absent "$home/state/$orphan.escalation.json" \
+    "the sweep left a record whose task this home no longer carries"
+  assert_grep "retired: $orphan" "$home/sweep.out" "the sweep did not report the record it retired"
+  assert_present "$home/state/$id.escalation.json" \
+    "the sweep removed a record for a live captain call"
+
+  # Idempotent, and silent when there is nothing left to reap.
+  run_captain "$home" retire-escalations > "$home/sweep2.out" \
+    || fail "the sweep failed on a second run"
+  [ ! -s "$home/sweep2.out" ] \
+    || fail "a second sweep was not silent with nothing to reap: $(cat "$home/sweep2.out")"
+
+  # Only a recorded answer settles the retained call, and it retires the prompt.
+  printf 'Ship the staged rollout.\n' > "$home/answer.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/answer.txt" >/dev/null \
+    || fail "the retained captain call could not be answered"
+  assert_absent "$home/state/$id.escalation.json" \
+    "the recorded answer did not retire the retained call's prompt"
+  show=$(tasks_in "$home" show "$id" --full) || fail "the answered row is gone"
+  assert_contains "$show" "state: done" "the recorded answer did not close the captain call"
+  pass "cleanup keeps a live call's prompt and drops a settled one, and the sweep reaps only departed records"
+}
+
 # The originating work item is itself the captain call, which is what the policy
 # prefers ("hold the work item the question gates"). Cleanup of that finished
 # work must never be the act that closes the captain's own row: the deliverable
@@ -4018,6 +4195,9 @@ test_chat_channel_feeds_the_same_keyed_answer_intake
 test_origin_slug_validation_precedes_path_construction
 test_status_resolution_over_an_open_hold_is_signalled
 test_legitimate_holds_produce_no_divergence_signal
+test_escalation_record_lives_exactly_as_long_as_its_call
+test_reconcile_retires_a_moot_calls_prompt_and_keeps_an_active_one
+test_escalation_retirement_survives_cleanup_and_the_sweep
 test_teardown_never_closes_a_captain_held_task
 test_retained_row_artifacts_survive_captain_answers
 test_interrupted_cleanup_keeps_the_captain_call_recoverable

@@ -1406,6 +1406,31 @@ fi
 # sessions never touch state, and the deferred network pass never repeats it:
 # the local pass that ran first already closed that window.
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
+  # Reap structured escalation records whose call can no longer be answered - the
+  # drift a home accumulated before retirement existed, and any record a failed
+  # retirement left behind. bin/fm-captain-hold.sh owns the record and its rule;
+  # it never removes one for a still-answerable call nor one whose state cannot
+  # be read. This is home-local state reaping rather than a backlog transition,
+  # so it deliberately sits outside the backlog gate below: the records it
+  # targets mostly belong to tasks this home no longer carries, and a home with
+  # no backlog to transition is exactly where they collect. Every retirement is a
+  # completed no-action fact; an unexpected keep carries its own diagnostic and
+  # path and is reported as printed, because it leaves a stale record able to
+  # block that task's next question.
+  BOOTSTRAP_ESCALATION_REAP_ERR=$(mktemp "${TMPDIR:-/tmp}/fm-bootstrap-reap.XXXXXX") || BOOTSTRAP_ESCALATION_REAP_ERR=
+  if [ -n "$BOOTSTRAP_ESCALATION_REAP_ERR" ]; then
+    BOOTSTRAP_ESCALATION_REAP_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      FM_DATA_OVERRIDE="$DATA" FM_CONFIG_OVERRIDE="$CONFIG" \
+      "$SCRIPT_DIR/fm-captain-hold.sh" retire-escalations 2>"$BOOTSTRAP_ESCALATION_REAP_ERR") || true
+    while IFS= read -r BOOTSTRAP_ESCALATION_REAP_LINE; do
+      [ -n "$BOOTSTRAP_ESCALATION_REAP_LINE" ] || continue
+      echo "BOOTSTRAP_INFO: stale structured captain escalation: $BOOTSTRAP_ESCALATION_REAP_LINE"
+    done <<EOF
+$BOOTSTRAP_ESCALATION_REAP_OUT
+EOF
+    cat "$BOOTSTRAP_ESCALATION_REAP_ERR" >&2
+    rm -f -- "$BOOTSTRAP_ESCALATION_REAP_ERR"
+  fi
   BOOTSTRAP_BACKLOG_GATE_KIND=secondmate
   if [ -e "$STATE" ] || [ -L "$STATE" ]; then
     if ! fm_backlog_directory_present "$STATE" "state directory"; then

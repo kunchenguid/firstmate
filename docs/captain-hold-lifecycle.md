@@ -45,6 +45,27 @@ A pending-close record that fails validation outright is a different case and st
 `--force` does not lift the deferral, because it authorizes discarding unlanded work, never the captain's question; only `answer` with the captain's words or evidence-backed `reconcile close` resolves the call, by either closing the question or releasing the gated work.
 `bin/fm-backlog-transition-lib.sh` owns the transition and its record, and `bin/fm-captain-hold.sh --help` owns the predicate's contract.
 
+## The structured escalation lives as long as its call
+
+A structured escalation is durable context for exactly one question, and `bin/fm-captain-hold.sh` owns both its format and its lifecycle.
+The record previously survived every settling path, so a task id reused for a new question could not publish a second prompt: `escalate` refused with `already has a different structured escalation` and `prompt` kept returning the spent question, leaving the new call with no options for the interactive ask surface.
+
+Retirement now fires where the call it describes is settled and only there.
+`answer` (and the `answers` intake that routes through it) retires after the durable answer lands, on both the close and the `--release` outcomes, and the evidence-backed `reconcile close` retires on the same terms.
+`reconcile note` deliberately does not: that outcome keeps the call active and still presenting its question.
+Cleanup retires the record with a row it actually closes and keeps it with a row it retains, because a retained captain call is still answerable and still owes its prompt.
+The retirement itself is one `rm` on one regular file, so it is idempotent and a killed run leaves either the whole record or none of it.
+A retirement failure never reverses the answer, the close, or the parent publication that precedes it; it is reported on stderr and the settlement stands, because the durable answer is authoritative.
+
+Settlement is decided once, by the `captain_call_state` classification behind the `open` predicate, so no retirement site decides for itself what counts as over: `open` and a row closed outside this script that still carries the captain hold with no resolution record both keep the prompt, because `answer` can still record the captain's words on the latter.
+Only a row whose captain hold is gone, a row closed with its answer already recorded, and a task this home no longer carries lose theirs.
+A state that cannot be read never retires anything, because a deleted prompt cannot be recovered while a surviving one can.
+
+`retire-escalations` is the bounded sweep for the drift a home accumulated before retirement existed.
+It reuses that same per-record rule, so it can never remove a prompt for a call that is still open and never removes one whose state it cannot read; it is silent when it retires nothing and idempotent on a second run.
+`bin/fm-bootstrap.sh` runs it in its first mutating local pass, outside the backlog gate, because the records it targets belong to tasks the home no longer carries and a home with no backlog to transition is exactly where they collect; a read-only session runs nothing.
+`bin/fm-captain-hold.sh --help` owns the exact command syntax.
+
 ## Answer-time resolution
 
 "A keyed answer resolves its matching captain-held task" is one capability with one owner.
@@ -210,6 +231,8 @@ The captured-source coverage proves Lavish deduplicates each card before separat
 The board's half is pinned in `tests/fm-bearings-board.test.sh`: every published decision card carries exactly one reconcile option, authored options reserve that value across every card type, recommendations name authored options, a decision card whose structured subject appears in the payload's landed rows is dropped while a genuinely open one is kept even when an unrelated landed id contains its key after a newline, a build requires a fresh authoritative listed-open result before binding or arming, a reopen retires the pre-reopen source generation and waits for a fresh live listener, and a rebuild of an already-armed board with no live listener starts one.
 That suite drives its Lavish session through a protocol-shaped stub, and `tests/fm-bearings-board-lavish-live-e2e.test.sh` is the default-on capability guard for the installed provider; [`verification/process-event-sources.md`](verification/process-event-sources.md) owns the version-scoped evidence.
 [`verification/process-event-sources.md`](verification/process-event-sources.md) owns the process-event ownership and reclamation evidence exercised by `tests/fm-procevent.test.sh`.
+
+The structured-escalation lifecycle is pinned in the same suite: answering a call - by close and by `--release` - retires its record so the same task id can publish a fresh prompt, an unanswered call keeps the prompt it still owes, cleanup keeps a live call's prompt and drops a settled one, the sweep reaps a departed task's record while leaving an open call's alone and stays silent and idempotent on a second run, and a moot call closed on evidence is retired while a call a re-check found active keeps its question.
 
 `tests/fm-classify-decision-key.test.sh` pins `status_key_closing_verb` itself: it separates a resolution from the durable-transfer close and from a still-open key, reports the last real transition across re-openings and both key positions, and treats a prose mention as no transition.
 
