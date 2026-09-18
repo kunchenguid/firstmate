@@ -467,6 +467,12 @@ test_herdr_lab_contract_is_explicit_and_complete() {
     "Herdr lab brief missing the per-call trailing session contract"
   assert_grep "direct \`herdr server stop\`" "$brief" \
     "Herdr lab brief missing the forbidden server-global command list"
+  assert_grep "\"\$HERDR_LAB_HELPER\" handoff \"\$HERDR_LAB_SESSION\" <staged-executable> <sha256> <version> <protocol>" "$brief" \
+    "Herdr lab brief missing the helper-owned guarded handoff"
+  assert_grep "HERDR_LAB_SESSION=\$(\"\$HERDR_LAB_HELPER\" name ho)" "$brief" \
+    "Herdr lab brief must name a handoff lab from a short label"
+  assert_grep "direct \`herdr server live-handoff\`" "$brief" \
+    "Herdr lab brief must keep forbidding a direct live handoff"
   assert_grep "records the live default session before provisioning" "$brief" \
     "Herdr lab brief missing the before tripwire"
   assert_grep "verifies the identical fleet state after teardown" "$brief" \

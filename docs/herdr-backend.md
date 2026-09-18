@@ -336,9 +336,16 @@ Never use ambient `herdr server stop` for Firstmate verification.
 An environment-only session selection can silently reach a different running server, and the ambient stop command has no explicit target.
 
 `bin/fm-herdr-lab.sh` is the sole supported lifecycle helper for isolated verification.
-It provisions only non-default names beginning with `fm-lab-`, appends an explicit `--session` to allowed task commands, refuses caller-supplied session flags and server/session lifecycle subcommands, and performs destructive stop/delete only through its guarded lifecycle actions.
+It provisions only non-default names beginning with `fm-lab-`, appends an explicit `--session` to allowed task commands, refuses caller-supplied session flags and server/session lifecycle subcommands through `run`, and performs destructive stop/delete only through its guarded lifecycle actions.
 Immediately before every destructive call it re-queries the named session and refuses empty, missing, literal `default`, or `default:true` identities.
 Its before/after tripwire requires the live default-session snapshot to remain byte-identical.
+The separate `handoff` action rehearses a live handoff on an owned, running non-default lab with a separately staged, digest-pinned executable; the helper's header owns its admission rules.
+It installs nothing, and it does not authorize replacing or restarting the live default server.
+A successful handoff command proves neither phone connectivity nor terminal preservation, and a failed one is not a rollback guarantee, so measure child-process, terminal-history, and client-reconnect behavior in the lab before a candidate leaves it.
+The helper does not intercept Herdr updates or certify downstream client compatibility; retaining the known-working executable and running that rehearsal remain explicit operator steps.
+Name a lab that will be handed off from a short label such as `ho`, which the generated `--herdr-lab` brief prescribes.
+Herdr binds the handoff socket at `herdr-handoff-<pid>.sock` inside the session directory, up to 14 bytes longer than `herdr.sock`, so on macOS, where a Unix socket path holds at most 103 bytes, a task-derived name can provision and still fail the handoff.
+[Runtime backend verification](verification/runtime-backends.md#lab-live-handoff) records the measured handoff behavior and that path budget.
 
 The helper's header and `--help` own exact commands.
 Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never duplicate the destructive policy.

@@ -33,20 +33,51 @@ lab_state=absent
 
 case "$1 ${2:-}" in
   "session list")
-    if [ "$lab_state" = absent ] || [ "$lab_state" = deleted ]; then
-      jq -nc --arg socket "$default_socket" '{sessions:[{default:true,name:"default",running:true,socket_path:$socket}]}'
-    else
-      running=false
-      [ "$lab_state" = running ] && running=true
-      jq -nc --arg socket "$default_socket" --arg name "$session" --argjson running "$running" \
-        '{sessions:[{default:true,name:"default",running:true,socket_path:$socket},{default:false,name:$name,running:$running,socket_path:("/tmp/" + $name + ".sock")}]}'
+    if [ -f "$state/$session.before-list-default" ]; then
+      default_socket=$(cat "$state/$session.before-list-default")
+      printf '%s\n' "$default_socket" > "$state/default-socket"
+      rm "$state/$session.before-list-default"
     fi
+    identity=normal
+    [ ! -f "$state/$session.identity" ] || identity=$(cat "$state/$session.identity")
+    running=false
+    [ "$lab_state" = running ] && running=true
+    jq -nc --arg socket "$default_socket" --arg name "$session" \
+      --arg state "$lab_state" --arg identity "$identity" --argjson running "$running" '
+      {default:true,name:"default",running:true,socket_path:$socket} as $default |
+      {default:($identity == "default-marked"),name:$name,running:$running,
+       socket_path:("/tmp/" + $name + ".sock")} as $lab |
+      {sessions: (if $state == "absent" or $state == "deleted" then [$default]
+        elif $identity == "ambiguous" then [$default,$lab,$lab]
+        elif $identity == "wrong-name" then [$default,($lab | .name = "fm-lab-other")]
+        else [$default,$lab] end)}'
     ;;
   "server --session")
     if [ "${FM_FAKE_HERDR_SERVER_DELAY:-0}" != 0 ]; then
       "$FM_FAKE_HERDR_REAL_SLEEP" "$FM_FAKE_HERDR_SERVER_DELAY"
     fi
     printf '%s\n' running > "$state/$session"
+    ;;
+  "server live-handoff")
+    [ "$#" -eq 10 ] && [ "$3" = --import-exe ] && [ "$5" = --expected-version ] \
+      && [ "$7" = --expected-protocol ] && [ "${HERDR_SESSION:-}" = "$session" ] || exit 95
+    [ "$lab_state" = running ] || exit 96
+    # A receipt records that the mutation was attempted even if import fails.
+    printf '%s\n' "$session" >> "$state/handoff-receipts"
+    if [ -f "$state/$session.handoff-default" ]; then
+      cat "$state/$session.handoff-default" > "$state/default-socket"
+    fi
+    if [ -f "$state/$session.handoff-identity" ]; then
+      cat "$state/$session.handoff-identity" > "$state/$session.identity"
+    fi
+    if [ -f "$state/$session.handoff-state" ]; then
+      cat "$state/$session.handoff-state" > "$state/$session"
+    fi
+    result=0
+    [ ! -f "$state/$session.handoff-result" ] || result=$(cat "$state/$session.handoff-result")
+    [ "$result" -eq 0 ] || exit "$result"
+    jq -nc --arg executable "$4" --arg version "$6" --argjson protocol "$8" \
+      '{executable:$executable,version:$version,protocol:$protocol}' > "$state/$session.runtime"
     ;;
   "status --json")
     if [ "$lab_state" = running ]; then
@@ -91,6 +122,240 @@ run_with_fake() {
     FM_FAKE_HERDR_TITLE_FAIL="${FM_FAKE_HERDR_TITLE_FAIL:-}" \
     FM_HERDR_LAB_STATE_DIR="$TRIPWIRES" \
     "$@"
+}
+
+handoff_digest() {
+  python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$1"
+}
+
+prepare_handoff_fixture() {
+  local name=$1
+  HANDOFF_TARGET="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$TMP_ROOT")/staged handoff"
+  printf '#!/usr/bin/env bash\nprintf executed > "%s"\n' "$FAKE_STATE/target-executed" > "$HANDOFF_TARGET"
+  chmod 700 "$HANDOFF_TARGET"
+  HANDOFF_DIGEST=$(handoff_digest "$HANDOFF_TARGET")
+  HANDOFF_VERSION=0.9.0-preview.2026-09-09-5a244caa60b0
+  run_with_fake fm_herdr_lab_provision "$name" || fail "handoff fixture provision failed"
+  rm -f "$FAKE_STATE/handoff-receipts" "$FAKE_STATE/target-executed"
+}
+
+expect_handoff_refused() {
+  local reason=$1 status=0
+  shift
+  HANDOFF_REFUSAL=$("$@" 2>&1 >/dev/null) || status=$?
+  [ "$status" -ne 0 ] || fail "$reason"
+  assert_absent "$FAKE_STATE/handoff-receipts" "refused handoff still attempted a server mutation"
+  assert_absent "$FAKE_STATE/target-executed" "validation executed the staged target"
+}
+
+test_handoff_owned_running_lab() {
+  local name="fm-lab-handoff-ok-$$" before default_before
+  prepare_handoff_fixture "$name"
+  before=$(cat "$TRIPWIRES/$name.fleet-state.json")
+  default_before=$(cat "$FAKE_STATE/default-socket")
+  run_with_fake "$ROOT/bin/fm-herdr-lab.sh" handoff "$name" "${HANDOFF_TARGET%/*}/./${HANDOFF_TARGET##*/}" \
+    "$HANDOFF_DIGEST" "$HANDOFF_VERSION" 22 >/dev/null || fail "owned running lab handoff failed"
+  [ "$(cat "$FAKE_STATE/handoff-receipts")" = "$name" ] || fail "handoff did not mutate exactly the owned lab"
+  jq -e --arg executable "$HANDOFF_TARGET" --arg version "$HANDOFF_VERSION" \
+    '.executable == $executable and .version == $version and .protocol == 22' \
+    "$FAKE_STATE/$name.runtime" >/dev/null || fail "lab did not adopt the verified runtime"
+  [ "$(cat "$FAKE_STATE/$name")" = running ] || fail "handoff stopped the owned lab"
+  [ "$(cat "$FAKE_STATE/default-socket")" = "$default_before" ] || fail "handoff changed the default session"
+  [ "$(cat "$TRIPWIRES/$name.fleet-state.json")" = "$before" ] || fail "handoff discarded or rewrote ownership evidence"
+  [ "$(handoff_digest "$HANDOFF_TARGET")" = "$HANDOFF_DIGEST" ] || fail "handoff modified the staged executable"
+  assert_absent "$FAKE_STATE/target-executed" "the helper executed the target before guarded handoff"
+  pass "fm-herdr-lab: owned running lab handoff preserves default and ownership evidence"
+}
+
+test_handoff_owned_lab_under_permissive_umask() {
+  local name="fm-lab-handoff-umask-$$" record status=0
+  record="$TRIPWIRES/$name.fleet-state.json"
+  (
+    umask 0002
+    prepare_handoff_fixture "$name"
+    run_with_fake "$ROOT/bin/fm-herdr-lab.sh" handoff "$name" "$HANDOFF_TARGET" \
+      "$HANDOFF_DIGEST" "$HANDOFF_VERSION" 22 >/dev/null
+  ) || status=$?
+  expect_code 0 "$status" "handoff of a lab provisioned under umask 0002"
+  python3 -c 'import os,sys; sys.exit(1 if os.stat(sys.argv[1]).st_mode & 0o077 else 0)' "$record" \
+    || fail "ownership record created under umask 0002 is accessible beyond its owner"
+  [ "$(cat "$FAKE_STATE/handoff-receipts")" = "$name" ] || fail "umask 0002 handoff did not reach the owned lab"
+  pass "fm-herdr-lab: the ownership record is owner-only under a permissive umask and still admits handoff"
+}
+
+test_handoff_requires_owned_running_identity() {
+  local name="fm-lab-handoff-identity-$$" other="fm-lab-unowned-$$" value
+  prepare_handoff_fixture "$name"
+  for value in default arbitrary-session; do
+    expect_handoff_refused "unsafe session accepted" run_with_fake fm_herdr_lab_handoff \
+      "$value" "$HANDOFF_TARGET" "$HANDOFF_DIGEST" "$HANDOFF_VERSION" 22
+  done
+  printf '%s\n' running > "$FAKE_STATE/$other"
+  expect_handoff_refused "unowned running lab accepted" run_with_fake fm_herdr_lab_handoff \
+    "$other" "$HANDOFF_TARGET" "$HANDOFF_DIGEST" "$HANDOFF_VERSION" 22
+  for value in stopped absent; do
+    printf '%s\n' "$value" > "$FAKE_STATE/$name"
+    expect_handoff_refused "nonrunning lab accepted" run_with_fake fm_herdr_lab_handoff \
+      "$name" "$HANDOFF_TARGET" "$HANDOFF_DIGEST" "$HANDOFF_VERSION" 22
+  done
+  printf '%s\n' running > "$FAKE_STATE/$name"
+  for value in default-marked ambiguous wrong-name; do
+    printf '%s\n' "$value" > "$FAKE_STATE/$name.identity"
+    expect_handoff_refused "unsafe scoped lab identity accepted" run_with_fake fm_herdr_lab_handoff \
+      "$name" "$HANDOFF_TARGET" "$HANDOFF_DIGEST" "$HANDOFF_VERSION" 22
+  done
+  rm "$FAKE_STATE/$name.identity"
+  assert_present "$TRIPWIRES/$name.fleet-state.json" "identity refusal discarded ownership evidence"
+  pass "fm-herdr-lab: handoff requires one owned running nondefault lab"
+}
+
+test_handoff_rejects_unsafe_ownership_record() {
+  local name="fm-lab-handoff-record-$$" record saved
+  prepare_handoff_fixture "$name"
+  record="$TRIPWIRES/$name.fleet-state.json"
+  saved="$TMP_ROOT/handoff-record"
+  mv "$record" "$saved"
+  ln -s "$saved" "$record"
+  expect_handoff_refused "symlink ownership accepted" run_with_fake fm_herdr_lab_handoff \
+    "$name" "$HANDOFF_TARGET" "$HANDOFF_DIGEST" "$HANDOFF_VERSION" 22
+  rm "$record"
+  ln "$saved" "$record"
+  expect_handoff_refused "multiply-linked ownership accepted" run_with_fake fm_herdr_lab_handoff \
+    "$name" "$HANDOFF_TARGET" "$HANDOFF_DIGEST" "$HANDOFF_VERSION" 22
+  rm "$record"
+  mv "$saved" "$record"
+  chmod 660 "$record"
+  expect_handoff_refused "group-writable ownership accepted" run_with_fake fm_herdr_lab_handoff \
+    "$name" "$HANDOFF_TARGET" "$HANDOFF_DIGEST" "$HANDOFF_VERSION" 22
+  assert_contains "$HANDOFF_REFUSAL" "$record" "unsafe ownership record refusal did not name the record"
+  chmod 606 "$record"
+  expect_handoff_refused "world-writable ownership accepted" run_with_fake fm_herdr_lab_handoff \
+    "$name" "$HANDOFF_TARGET" "$HANDOFF_DIGEST" "$HANDOFF_VERSION" 22
+  chmod 600 "$record"
+  mv "$record" "$saved"
+  mkdir "$record"
+  expect_handoff_refused "nonregular ownership accepted" run_with_fake fm_herdr_lab_handoff \
+    "$name" "$HANDOFF_TARGET" "$HANDOFF_DIGEST" "$HANDOFF_VERSION" 22
+  rmdir "$record"
+  mv "$saved" "$record"
+  pass "fm-herdr-lab: handoff refuses unsafe ownership records"
+}
+
+test_handoff_rejects_unsafe_executable_and_digest() {
+  local name="fm-lab-handoff-target-$$" target digest
+  prepare_handoff_fixture "$name"
+  ln -s "$HANDOFF_TARGET" "$TMP_ROOT/handoff-link"
+  mkdir "$TMP_ROOT/handoff-directory"
+  for target in "relative-executable" "$TMP_ROOT/handoff-link" "$TMP_ROOT/handoff-missing" "$TMP_ROOT/handoff-directory"; do
+    expect_handoff_refused "unsafe executable accepted" run_with_fake fm_herdr_lab_handoff \
+      "$name" "$target" "$HANDOFF_DIGEST" "$HANDOFF_VERSION" 22
+  done
+  for target in 600 720 702; do
+    chmod "$target" "$HANDOFF_TARGET"
+    expect_handoff_refused "nonexecutable or writable target accepted" run_with_fake fm_herdr_lab_handoff \
+      "$name" "$HANDOFF_TARGET" "$HANDOFF_DIGEST" "$HANDOFF_VERSION" 22
+    assert_contains "$HANDOFF_REFUSAL" "$HANDOFF_TARGET" "unsafe executable refusal did not name the executable"
+  done
+  chmod 700 "$HANDOFF_TARGET"
+  digest=$(handoff_digest "$FAKEBIN/herdr")
+  expect_handoff_refused "selected Herdr executable accepted as its own replacement" run_with_fake fm_herdr_lab_handoff \
+    "$name" "$FAKEBIN/herdr" "$digest" "$HANDOFF_VERSION" 22
+  for digest in invalid 0000000000000000000000000000000000000000000000000000000000000000; do
+    expect_handoff_refused "unverified digest accepted" run_with_fake fm_herdr_lab_handoff \
+      "$name" "$HANDOFF_TARGET" "$digest" "$HANDOFF_VERSION" 22
+  done
+  printf '%s\n' '# changed after digest was recorded' >> "$HANDOFF_TARGET"
+  expect_handoff_refused "changed executable accepted against stale digest" run_with_fake fm_herdr_lab_handoff \
+    "$name" "$HANDOFF_TARGET" "$HANDOFF_DIGEST" "$HANDOFF_VERSION" 22
+  pass "fm-herdr-lab: executable identity, permissions, and content are verified before mutation"
+}
+
+test_handoff_rejects_argument_injection_and_generic_server() {
+  local name="fm-lab-handoff-args-$$" value
+  prepare_handoff_fixture "$name"
+  for value in --session=default --force; do
+    expect_handoff_refused "extra handoff argument accepted" run_with_fake "$ROOT/bin/fm-herdr-lab.sh" \
+      handoff "$name" "$HANDOFF_TARGET" "$HANDOFF_DIGEST" "$HANDOFF_VERSION" 22 "$value"
+  done
+  expect_handoff_refused "session override accepted" run_with_fake fm_herdr_lab_handoff \
+    "$name" "$HANDOFF_TARGET" "$HANDOFF_DIGEST" "$HANDOFF_VERSION" 22 --session default
+  expect_handoff_refused "option-like version accepted" run_with_fake fm_herdr_lab_handoff \
+    "$name" "$HANDOFF_TARGET" "$HANDOFF_DIGEST" --session=default 22
+  expect_handoff_refused "nonnumeric protocol accepted" run_with_fake fm_herdr_lab_handoff \
+    "$name" "$HANDOFF_TARGET" "$HANDOFF_DIGEST" "$HANDOFF_VERSION" --session=default
+  expect_handoff_refused "missing protocol accepted" run_with_fake "$ROOT/bin/fm-herdr-lab.sh" \
+    handoff "$name" "$HANDOFF_TARGET" "$HANDOFF_DIGEST" "$HANDOFF_VERSION"
+  expect_handoff_refused "generic run gained server passthrough" run_with_fake fm_herdr_lab_cli \
+    "$name" server live-handoff --import-exe "$HANDOFF_TARGET" --expected-version "$HANDOFF_VERSION" --expected-protocol 22
+  pass "fm-herdr-lab: handoff has fixed positional arguments and no generic server escape"
+}
+
+test_handoff_refreshes_default_tripwire_before_mutation() {
+  local name="fm-lab-handoff-pre-$$" before default_before
+  prepare_handoff_fixture "$name"
+  before=$(cat "$TRIPWIRES/$name.fleet-state.json")
+  default_before=$(cat "$FAKE_STATE/default-socket")
+  printf '%s\n' /changed/before-handoff.sock > "$FAKE_STATE/$name.before-list-default"
+  expect_handoff_refused "fresh default drift accepted" run_with_fake fm_herdr_lab_handoff \
+    "$name" "$HANDOFF_TARGET" "$HANDOFF_DIGEST" "$HANDOFF_VERSION" 22
+  [ "$(cat "$FAKE_STATE/default-socket")" = /changed/before-handoff.sock ] || fail "pre-handoff drift fixture was not exercised"
+  [ "$(cat "$TRIPWIRES/$name.fleet-state.json")" = "$before" ] || fail "pre-handoff failure lost the original tripwire"
+  printf '%s\n' "$default_before" > "$FAKE_STATE/default-socket"
+  pass "fm-herdr-lab: a fresh pre-handoff default tripwire blocks mutation"
+}
+
+test_handoff_preserves_failure_and_rechecks_default() {
+  local name="fm-lab-handoff-result-$$" before default_before result status
+  prepare_handoff_fixture "$name"
+  before=$(cat "$TRIPWIRES/$name.fleet-state.json")
+  default_before=$(cat "$FAKE_STATE/default-socket")
+  printf '%s\n' 37 > "$FAKE_STATE/$name.handoff-result"
+  status=0
+  run_with_fake fm_herdr_lab_handoff "$name" "$HANDOFF_TARGET" "$HANDOFF_DIGEST" \
+    "$HANDOFF_VERSION" 22 >/dev/null 2>&1 || status=$?
+  expect_code 37 "$status" "safe post-checks must preserve the actual handoff failure"
+  [ "$(cat "$FAKE_STATE/handoff-receipts")" = "$name" ] || fail "failure fixture never attempted handoff"
+  assert_absent "$FAKE_STATE/$name.runtime" "failed import unexpectedly changed the runtime"
+  [ "$(cat "$TRIPWIRES/$name.fleet-state.json")" = "$before" ] || fail "failed handoff discarded ownership evidence"
+  for result in 0 37; do
+    printf '%s\n' "$result" > "$FAKE_STATE/$name.handoff-result"
+    printf '%s\n' /changed/during-handoff.sock > "$FAKE_STATE/$name.handoff-default"
+    rm "$FAKE_STATE/handoff-receipts"
+    status=0
+    run_with_fake fm_herdr_lab_handoff "$name" "$HANDOFF_TARGET" "$HANDOFF_DIGEST" \
+      "$HANDOFF_VERSION" 22 >/dev/null 2>&1 || status=$?
+    expect_code 1 "$status" "post-handoff default drift must override both success and import failure"
+    [ "$(cat "$FAKE_STATE/handoff-receipts")" = "$name" ] || fail "post-check fixture never attempted handoff"
+    [ "$(cat "$FAKE_STATE/default-socket")" = /changed/during-handoff.sock ] || fail "default drift was silently rolled back"
+    [ "$(cat "$TRIPWIRES/$name.fleet-state.json")" = "$before" ] || fail "post-handoff failure lost original evidence"
+    printf '%s\n' "$default_before" > "$FAKE_STATE/default-socket"
+  done
+  pass "fm-herdr-lab: handoff failures survive unless a fresh default safety check fails"
+}
+
+test_handoff_rechecks_running_scoped_identity_afterward() {
+  local name="fm-lab-handoff-post-$$" value result status before
+  prepare_handoff_fixture "$name"
+  before=$(cat "$TRIPWIRES/$name.fleet-state.json")
+  for result in 0 37; do
+    printf '%s\n' "$result" > "$FAKE_STATE/$name.handoff-result"
+    for value in stopped absent default-marked ambiguous wrong-name; do
+      printf '%s\n' running > "$FAKE_STATE/$name"
+      rm -f "$FAKE_STATE/$name.identity" "$FAKE_STATE/$name.handoff-state" \
+        "$FAKE_STATE/$name.handoff-identity" "$FAKE_STATE/handoff-receipts"
+      case "$value" in
+        stopped|absent) printf '%s\n' "$value" > "$FAKE_STATE/$name.handoff-state" ;;
+        *) printf '%s\n' "$value" > "$FAKE_STATE/$name.handoff-identity" ;;
+      esac
+      status=0
+      run_with_fake fm_herdr_lab_handoff "$name" "$HANDOFF_TARGET" "$HANDOFF_DIGEST" \
+        "$HANDOFF_VERSION" 22 >/dev/null 2>&1 || status=$?
+      expect_code 1 "$status" "post-handoff unsafe lab identity must fail closed"
+      [ "$(cat "$FAKE_STATE/handoff-receipts")" = "$name" ] || fail "post-handoff identity fixture never attempted mutation"
+      [ "$(cat "$TRIPWIRES/$name.fleet-state.json")" = "$before" ] || fail "post-handoff identity failure discarded ownership"
+    done
+  done
+  pass "fm-herdr-lab: both successful and failed imports recheck running nondefault lab identity"
 }
 
 test_refuses_unsafe_names() {
@@ -504,6 +769,15 @@ test_missing_tripwire_blocks_destruction
 test_changed_default_trips_after_teardown
 test_stopped_owned_lab_can_reprovision
 test_failed_delete_retains_tripwire
+test_handoff_owned_running_lab
+test_handoff_owned_lab_under_permissive_umask
+test_handoff_requires_owned_running_identity
+test_handoff_rejects_unsafe_ownership_record
+test_handoff_rejects_unsafe_executable_and_digest
+test_handoff_rejects_argument_injection_and_generic_server
+test_handoff_refreshes_default_tripwire_before_mutation
+test_handoff_preserves_failure_and_rechecks_default
+test_handoff_rechecks_running_scoped_identity_afterward
 test_timed_out_provision_cancels_late_launch
 test_viewer_refuses_unowned_sessions
 test_viewer_start_cancels_an_unrecorded_launcher

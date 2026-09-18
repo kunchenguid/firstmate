@@ -332,8 +332,12 @@ HERDR_SECTION=$(printf '%s\n' \
 '3. Teardown only through `"$HERDR_LAB_HELPER" teardown "$HERDR_LAB_SESSION"`.' \
 '   It re-checks refuse-default immediately before stop and again immediately before delete, and fails closed on ambiguity.' \
 '4. If an experiment requires a deliberate mid-run session stop, use only `"$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION"`; it performs the same immediate refuse-default check.' \
-'5. Forbidden commands: direct `herdr server stop`, every other server-global operation such as `herdr server live-handoff` or reload/update operations, direct `herdr session stop`, direct `herdr session delete`, and any Herdr call scoped only by ambient or inline `HERDR_SESSION`.' \
-'6. The helper records the live default session before provisioning and verifies the identical fleet state after teardown.' \
+'5. If the task must rehearse a live handoff, use only `"$HERDR_LAB_HELPER" handoff "$HERDR_LAB_SESSION" <staged-executable> <sha256> <version> <protocol>`.' \
+'   It admits only a separately staged, digest-pinned executable on this owned running lab, installs nothing, and promises no rollback.' \
+'   Name a lab that will be handed off with `HERDR_LAB_SESSION=$("$HERDR_LAB_HELPER" name ho)` in step 1 instead of the task-derived label.' \
+'   Herdr binds a longer handoff socket path inside the session directory, so a long name can provision and still fail the handoff at the Unix socket path limit.' \
+'6. Forbidden commands: direct `herdr server stop`, direct `herdr server live-handoff`, every other server-global operation such as reload/update operations, direct `herdr session stop`, direct `herdr session delete`, and any Herdr call scoped only by ambient or inline `HERDR_SESSION`.' \
+'7. The helper records the live default session before provisioning and verifies the identical fleet state after teardown.' \
 '   A missing, stopped, or changed default session is a hard tripwire failure, never a cleanup warning to ignore.' \
 '' \
 'Never bypass the helper, even for a read-only lifecycle probe or cleanup after failure.' \

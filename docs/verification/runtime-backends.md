@@ -1219,6 +1219,77 @@ not ok - could not attach a real foreground Herdr viewer over a sized pty
 Re-run this guard after every Herdr upgrade.
 A release that changed the foreground-client contract, the window-grid requirement, or the nested-viewer refusal would fail here first, and the detached regressions would keep passing while saying nothing about it.
 
+### Lab live handoff
+
+The guarded `handoff` action of `bin/fm-herdr-lab.sh` was rehearsed only on generated non-default `fm-lab-` sessions.
+Every lab was removed through guarded teardown with an unchanged default-session tripwire, and no default-session operation was run.
+
+Measured on 2026-09-17 on macOS 26.3 aarch64, each run starting from a lab server on stock Herdr 0.8.2 protocol 20.
+The stock executable was byte-identical to the upstream `herdrdev/herdr` v0.8.2 macOS arm64 release asset, SHA256 `a5d4f4d504d8b309c91f811050559300faba31258425f53c50852fc96f6ae574`, and the stock-to-stock control staged a separate copy of that asset.
+The protocol-22 target is not an upstream release.
+It is the macOS arm64 preview build that the third-party fork `jerryfane/herdr` publishes from commit `5a244caa60b0c3a5742315c59d20ed81c05bc23e`; it reports `0.9.0-preview.2026-09-09-5a244caa60b0`, and its SHA256 `5a4629256918cabaab98e604af5d1205b20e7d42af2a37c62a3fa49c0ab9bd2b` matched that fork's `distribution/preview.json` manifest.
+
+Provisioning, the baseline reads, and the handoff itself ran with the stock 0.8.2 executable as the `herdr` client on `PATH`:
+
+```sh
+HERDR_LAB_SESSION=$(bin/fm-herdr-lab.sh name <label>)
+bin/fm-herdr-lab.sh provision "$HERDR_LAB_SESSION"
+bin/fm-herdr-lab.sh run "$HERDR_LAB_SESSION" status --json
+bin/fm-herdr-lab.sh run "$HERDR_LAB_SESSION" pane process-info --pane <pane>
+bin/fm-herdr-lab.sh run "$HERDR_LAB_SESSION" pane read <pane> --source recent --lines 500 --format text
+bin/fm-herdr-lab.sh handoff "$HERDR_LAB_SESSION" <staged-executable> <sha256> <version> <protocol>
+```
+
+After a successful handoff to the protocol-22 target, and only then, the retained harness made every later helper call with a directory holding the staged fork build as `herdr` first on `PATH`, so the staged build was also the client:
+
+```sh
+PATH="<staged-client-dir>:$PATH" bin/fm-herdr-lab.sh run "$HERDR_LAB_SESSION" status --json
+PATH="<staged-client-dir>:$PATH" bin/fm-herdr-lab.sh run "$HERDR_LAB_SESSION" pane process-info --pane <pane>
+PATH="<staged-client-dir>:$PATH" bin/fm-herdr-lab.sh run "$HERDR_LAB_SESSION" pane send-text <pane> AFTER_HANDOFF
+PATH="<staged-client-dir>:$PATH" bin/fm-herdr-lab.sh run "$HERDR_LAB_SESSION" pane send-keys <pane> enter
+PATH="<staged-client-dir>:$PATH" bin/fm-herdr-lab.sh run "$HERDR_LAB_SESSION" pane read <pane> --source recent --lines 500 --format text
+PATH="<staged-client-dir>:$PATH" bin/fm-herdr-lab.sh teardown "$HERDR_LAB_SESSION"
+```
+
+The stock-to-stock control kept the stock client throughout.
+The retained results for the refused import record the stock client before it and do not record which client made the reads that followed it.
+Whether the stock 0.8.2 client can drive a lab server that has moved to protocol 22 was not measured.
+
+| Staged target | Expected version passed | Exit | Observed |
+| --- | --- | --- | --- |
+| 0.9.0-preview.2026-09-09-5a244caa60b0 protocol 22 | deliberately wrong | 1 | The lab server stayed on 0.8.2 protocol 20; the pane's shell and foreground child kept their process identity and tty, and new input was still echoed. |
+| 0.9.0-preview.2026-09-09-5a244caa60b0 protocol 22 | matching | 0 | `status --json`, read through the staged client, reported the server on the staged version and protocol 22; a connection held on the old API socket saw EOF and a fresh scoped client connected; shell and child process identity were unchanged and new input was echoed. |
+| 0.8.2 protocol 20 (stock-to-stock control) | matching | 0 | Same process continuity and reconnect as above. |
+
+The refused and the successful import printed, respectively:
+
+```text
+{"error":{"code":"handoff_failed","message":"handoff stream closed while reading line"},"id":"cli:server:live-handoff"}
+live handoff complete; server log: .../sessions/<lab>/herdr-server.log
+```
+
+Process continuity did not imply rendered-history continuity.
+In the stock-to-stock control a quiescent fixture had printed `FIXTURE_END` and a line break before the handoff, and its independent `script` capture retained that `CRLF`.
+`pane read` returned the same tail immediately before and immediately after the handoff, then joined the first later output onto the old final line:
+
+```text
+CRLF_THREE
+FIXTURE_ENDAFTER_HANDOFF
+ACK AFTER_HANDOFF
+```
+
+The staged preview target and a fixture writing concurrent output reproduced the same join, for example `TICK 1TICK 2`, and `--source visible` agreed with `--source recent`.
+A before/after text comparison alone therefore passes while the defect is present; a handoff rehearsal must also read the first output produced after the handoff.
+The cause was bounded to handoff replay and cursor-state reconstruction but not reduced to one code line, and no Herdr behavior was patched.
+
+One lab with a longer generated name failed the native handoff with a Unix socket path-length error naming `SUN_LEN` although provisioning had succeeded, while the two-character labels `ph` and `rd` succeeded.
+The exact output of that failure was not retained.
+Both the upstream v0.8.2 source and the fork commit build the handoff socket as `herdr-handoff-<pid>.sock` inside the session directory, up to 24 bytes against 10 for `herdr.sock`, and macOS limits a Unix socket path to 103 bytes.
+On the measured host the path through `sessions/` was 47 bytes and a generated name is up to 19 bytes plus its label, so the budget is 47 + 19 + label + 1 + 24, which admits a label of at most 12 characters while `name` allows 16.
+That budget is arithmetic from the source and the limit, not a measured boundary.
+
+Not verified: any phone client, the live default server, a stock client against a protocol-22 lab server, a maximum interruption bound, a downgrade, or a rollback after the handoff commits.
+
 ### Presentation version floor
 
 Default-on presentation projection is floored at Herdr 0.8.0.

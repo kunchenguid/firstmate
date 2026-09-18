@@ -7,6 +7,7 @@
 #   fm-herdr-lab.sh prepare <session>
 #   fm-herdr-lab.sh provision <session>
 #   fm-herdr-lab.sh run <session> <herdr arguments...>
+#   fm-herdr-lab.sh handoff <session> <staged-executable> <sha256> <version> <protocol>
 #   fm-herdr-lab.sh viewer start <session>
 #   fm-herdr-lab.sh viewer stop <session>
 #   fm-herdr-lab.sh stop <session>
@@ -25,6 +26,7 @@
 # destructive call.
 # Provision records the running default session as a fleet-state tripwire and
 # teardown requires that record to be identical afterward.
+# The record is created owner-only whatever the caller's umask.
 # The viewer command attaches or detaches one real foreground Herdr client on
 # an owned lab session over a fixed 40-row by 120-column pty;
 # bin/fm-herdr-lab-viewer.py owns the pty mechanics.
@@ -33,6 +35,16 @@
 # Stop signals only identity-matched recorded processes and retains its
 # ownership record until detach is confirmed or the session is stopped or
 # absent; teardown refuses when that stop cannot be confirmed.
+# Handoff is a separate, explicitly scoped lab operation; run still forbids all
+# server operations. It requires an owned running lab and a digest-pinned,
+# absolute, current-user-owned regular executable distinct from the selected
+# client. Neither the executable nor the ownership record may be symlinked,
+# multiply linked, or writable by another user. Python 3 verifies that identity
+# as an admission check before the call, not as a guarantee that the file is
+# unchanged when Herdr spawns it; a refusal names the offending path.
+# The default tripwire and running non-default lab are checked before and after
+# handoff, including failure. No executable is installed and no rollback is
+# implied; the caller must measure process preservation and client interruption.
 set -u
 
 fm_herdr_lab_error() {
@@ -110,7 +122,7 @@ fm_herdr_lab_prepare() { # <session>
     fm_herdr_lab_error "tripwire already exists for '$name'; refusing ambiguous ownership"
     return 1
   }
-  fm_herdr_lab_fleet_state "$name" > "$tripwire" || {
+  (umask 077 && fm_herdr_lab_fleet_state "$name" > "$tripwire") || {
     rm -f "$tripwire"
     return 1
   }
@@ -452,7 +464,7 @@ fm_herdr_lab_check_tripwire() { # <session>
   local name=$1 tripwire before after
   tripwire=$(fm_herdr_lab_tripwire_path "$name")
   [ -f "$tripwire" ] || {
-    fm_herdr_lab_error "missing fleet-state tripwire for '$name'; refusing unverified teardown"
+    fm_herdr_lab_error "missing fleet-state tripwire for '$name'; refusing unverified lifecycle operation"
     return 1
   }
   before=$(cat "$tripwire")
@@ -482,6 +494,98 @@ fm_herdr_lab_stop() { # <session>
   }
   fm_herdr_lab_refuse_if_default "$name" || return 1
   fm_herdr_lab_raw "$name" session stop "$name" --json
+}
+
+# Validate without executing the replacement, returning its physical path.
+fm_herdr_lab_handoff_identity() { # <executable> <sha256> <tripwire> <client>
+  command -v python3 >/dev/null 2>&1 || {
+    fm_herdr_lab_error "python3 is required to verify a staged handoff executable"
+    return 1
+  }
+  python3 - "$@" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+executable, expected_digest, tripwire, client = sys.argv[1:]
+
+def owned_file(path, executable=False):
+    info = os.lstat(path)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+            or info.st_nlink != 1 or info.st_mode & 0o022):
+        raise ValueError(path + ": requires an owned, single-link regular file without group/world write access")
+    if executable and not os.access(path, os.X_OK):
+        raise ValueError(path + ": staged executable is not executable")
+    return info
+
+def identity(info):
+    # Reading may change access time; content and ownership metadata must not change.
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+            info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+try:
+    owned_file(tripwire)
+    if not os.path.isabs(executable) or "\n" in executable or "\r" in executable:
+        raise ValueError("staged executable must have an absolute single-line path")
+    before = owned_file(executable, executable=True)
+    if os.path.samefile(executable, client):
+        raise ValueError("staged executable must differ from the selected Herdr client")
+    digest = hashlib.sha256()
+    with open(executable, "rb") as source:
+        if identity(os.fstat(source.fileno())) != identity(before):
+            raise ValueError("staged executable identity changed before hashing")
+        for chunk in iter(lambda: source.read(65536), b""):
+            digest.update(chunk)
+        after = os.fstat(source.fileno())
+    if identity(after) != identity(before) or identity(os.lstat(executable)) != identity(before):
+        raise ValueError("staged executable changed while hashing")
+    if digest.hexdigest() != expected_digest:
+        raise ValueError("staged executable SHA256 does not match")
+    print(os.path.realpath(executable))
+except (OSError, ValueError) as error:
+    print("fm-herdr-lab: refusing handoff: " + str(error), file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+fm_herdr_lab_handoff_ready() { # <session>
+  local name=$1 tripwire sessions
+  fm_herdr_lab_validate_name "$name" || return 1
+  tripwire=$(fm_herdr_lab_tripwire_path "$name")
+  [ -f "$tripwire" ] && [ ! -L "$tripwire" ] && [ -O "$tripwire" ] || {
+    fm_herdr_lab_error "missing or unsafe ownership tripwire for '$name' at $tripwire; refusing handoff"
+    return 1
+  }
+  fm_herdr_lab_check_tripwire "$name" || return 1
+  sessions=$(fm_herdr_lab_session_list "$name") || return 1
+  printf '%s' "$sessions" | jq -e --arg name "$name" '
+    [.sessions[]? | select(.name == $name)]
+    | length == 1 and .[0].default == false and .[0].running == true
+  ' >/dev/null 2>&1 || {
+    fm_herdr_lab_error "handoff requires exactly one running non-default lab '$name'"
+    return 1
+  }
+}
+
+fm_herdr_lab_handoff() { # <session> <executable> <sha256> <version> <protocol>
+  [ "$#" -eq 5 ] || { fm_herdr_lab_usage >&2; return 2; }
+  local name=$1 executable=$2 digest=$3 version=$4 protocol=$5 tripwire client result=0
+  fm_herdr_lab_validate_name "$name" || return 1
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] &&
+    [[ "$version" =~ ^[0-9][0-9A-Za-z.+_-]*$ ]] &&
+    [[ "$protocol" =~ ^[1-9][0-9]*$ ]] || {
+      fm_herdr_lab_error "handoff requires a SHA256, explicit version and positive protocol number"
+      return 1
+    }
+  tripwire=$(fm_herdr_lab_tripwire_path "$name")
+  client=$(command -v herdr) || { fm_herdr_lab_error "herdr is required"; return 1; }
+  executable=$(fm_herdr_lab_handoff_identity "$executable" "$digest" "$tripwire" "$client") || return 1
+  fm_herdr_lab_handoff_ready "$name" || return 1
+  fm_herdr_lab_raw "$name" server live-handoff --import-exe "$executable" \
+    --expected-version "$version" --expected-protocol "$protocol" || result=$?
+  fm_herdr_lab_handoff_ready "$name" || return 1
+  return "$result"
 }
 
 fm_herdr_lab_teardown() { # <session>
@@ -534,7 +638,7 @@ fm_herdr_lab_name() { # <label>
 }
 
 fm_herdr_lab_usage() {
-  sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 fm_herdr_lab_main() {
@@ -556,6 +660,11 @@ fm_herdr_lab_main() {
       [ "$#" -ge 3 ] || { fm_herdr_lab_usage >&2; return 2; }
       shift
       fm_herdr_lab_cli "$@"
+      ;;
+    handoff)
+      [ "$#" -eq 6 ] || { fm_herdr_lab_usage >&2; return 2; }
+      shift
+      fm_herdr_lab_handoff "$@"
       ;;
     viewer)
       [ "$#" -eq 3 ] || { fm_herdr_lab_usage >&2; return 2; }
