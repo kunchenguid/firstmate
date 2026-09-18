@@ -1332,22 +1332,27 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 # re-ring ladder, and /exit typing for every such worker. The recognition is
 # structural, never a match on one machine's paths, and position-gated, so a
 # wrong call can only defer, never inject (_fm_composer_leftbar_cwd_start).
-FM_COMPOSER_LEFTBAR_CWD_TAIL_GAP_MIN=${FM_COMPOSER_LEFTBAR_CWD_TAIL_GAP_MIN:-8}
 
 # _fm_composer_leftbar_cwd_start: the first row of that furniture run inside
 # a leftbar composer region (<first-row>..<last-row>), or -1 when the region
 # carries none. Recognition is structural and position-gated:
 #   - the run is the contiguous rows immediately above the footer row (the
-#     region's LAST row when it matches the footer, else the last row);
+#     region's LAST row when it matches the footer, else the last row); the
+#     string wraps BOTTOM-aligned, so a cwd:branch shorter than the rail
+#     leaves blank rail rows ABOVE its fragments and never between them and
+#     the footer (verified live on 1.18.31, 2026-09-18: the one-fragment
+#     "~/.treehouse/anvil-99d6f9/2/anvil:fm/" sat directly above the footer
+#     under two blank rail rows, tests/fixtures/opencode-1.18.31-cwd/
+#     opencode-1.18.31-idle-short-cwd.ansi), so the walk tolerates no gap;
 #   - every run row's content is a single whitespace-free token that does
 #     NOT start at the composer's left edge: its gap after the bar exceeds
 #     half the row, so real typed text - which starts at the left edge - is
 #     still typed text, and a path-shaped string a user typed there is
 #     typed text too (position, not shape alone, decides);
-#   - the fragments, plus the footer row's right-hand tail when one follows
-#     a gap of at least FM_COMPOSER_LEFTBAR_CWD_TAIL_GAP_MIN columns,
-#     concatenate to a path, optionally followed by ":<branch>": beginning
-#     with "~/" or "/" and carrying no whitespace at all.
+#   - the fragments concatenate to a path, optionally followed by
+#     ":<branch>": beginning with "~/" or "/" and carrying no whitespace at
+#     all. The string's final fragment at the right end of the footer row
+#     is not read: that row is already furniture by the footer regex.
 # Anything else - a left-edge token, a multi-word row, a fragment that is
 # not part of such a path - ends the walk and leaves the rows to the
 # ordinary verdict, so a wrong call can only ever defer (pending), never
@@ -1360,14 +1365,12 @@ FM_COMPOSER_LEFTBAR_CWD_TAIL_GAP_MIN=${FM_COMPOSER_LEFTBAR_CWD_TAIL_GAP_MIN:-8}
 _fm_composer_leftbar_cwd_start() {  # <screen> <first-row> <last-row>
   local screen=$1 first=$2 last=$3
   local plain row raw rest frag indent len joined='' start=-1
-  local footer_row=-1 footer_rest tok head pre_trim gap
-  local tail_gap_min=${FM_COMPOSER_LEFTBAR_CWD_TAIL_GAP_MIN:-8}
+  local footer_row=-1
   local footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   # The footer row is the region's LAST row when it matches the footer (the
   # same rule the classification loop applies); the furniture run ends on the
-  # row above it, and its final fragment may continue onto the footer row's
-  # right-hand tail.
+  # row above it.
   raw=$(_fm_composer_screen_row "$last" "$plain")
   rest=$(_fm_composer_row_content "$raw" 0)
   case "$rest" in '┃'*) rest=${rest#┃} ;; *) rest= ;; esac
@@ -1403,25 +1406,6 @@ _fm_composer_leftbar_cwd_start() {  # <screen> <first-row> <last-row>
     row=$((row - 1))
   done
   [ -n "$joined" ] || return 1
-  # The footer row's right-hand tail: the wrapped string's final fragment,
-  # drawn after a wide gap on the footer row itself. Its absence never
-  # blocks recognition of the wrapped rows.
-  if [ "$footer_row" -ge 0 ]; then
-    raw=$(_fm_composer_screen_row "$footer_row" "$plain")
-    footer_rest=$raw
-    fm_composer_normalize_trim_var footer_rest
-    case "$footer_rest" in '┃'*) footer_rest=${footer_rest#┃} ;; *) footer_rest= ;; esac
-    fm_composer_normalize_spaces_var footer_rest
-    tok=${footer_rest##*[[:space:]]}
-    if [ -n "$tok" ]; then
-      head=${footer_rest%"$tok"}
-      pre_trim=${head%"${head##*[![:space:]]}"}
-      gap=$(( ${#head} - ${#pre_trim} ))
-      if [ "$gap" -ge "$tail_gap_min" ]; then
-        joined="$joined$tok"
-      fi
-    fi
-  fi
   # A shell case pattern cannot spell a literal "~/" without shellcheck
   # SC2088 (tilde does not expand in quotes), so the prefix is built once.
   local tilde tilde_slash

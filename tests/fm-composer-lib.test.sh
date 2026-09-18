@@ -720,7 +720,7 @@ test_matrix_opencode_leftbar_cwd_furniture() {
   # classifier used to read them as unsent typed text: every idle 1.18.31 pane
   # answered `pending`, which skipped the steering doorbell, the watcher's
   # re-ring ladder, and fm-control.sh's typed /exit.
-  local screen composer fixture typed typed_row strip start expected_fragment
+  local screen composer fixture typed typed_row strip start expected_fragment diverge
   fixture="$ROOT/tests/fixtures/opencode-1.18.31-cwd/opencode-1.18.31-idle-cwd.ansi"
   screen=$(<"$fixture")
   # Cursor 14 = the real #{cursor_y} (64) minus the 50 rows above the tail:
@@ -760,16 +760,42 @@ test_matrix_opencode_leftbar_cwd_furniture() {
   typed="  ${ESC}[38;2;92;156;245m┃${ESC}[38;2;255;255;255m${ESC}[48;2;30;30;30m  ${ESC}[38;2;238;238;238m/usr/local/bin/some/tool${ESC}[0m"$'\n'"$(tail -n 4 <<< "$composer")"
   assert_screen "opencode left-edge typed path above cwd furniture on tmux" pending "$CAPS_TMUX" "$typed" 0
 
-  # The concatenation is load-bearing: a right-aligned single token that is
-  # not part of such a path, and a fragment run whose start is not a path
+  # The path-prefix check is load-bearing: a right-aligned single token that
+  # is not part of such a path, and a fragment run whose start is not a path
   # prefix, stay typed content.
   diverge=$'transcript line\n  ┃                                                              50.8K\n  ┃  Build · gpt-oss-120b Internal OVHcloud'
   assert_screen "opencode right-aligned non-path token stays typed on tmux" pending "$CAPS_TMUX" "$diverge" 1
   diverge=$'transcript line\n  ┃                                                                                                                     deck-07-\n  ┃  Build · gpt-oss-120b Internal OVHcloud                                                                          failure-modes'
   assert_screen "opencode bare branch fragment without a path start stays typed" pending "$CAPS_TMUX" "$diverge" 1
-  # And a DIFFERENT machine's path:branch shape must classify by structure too.
-  assert_screen "opencode foreign-path cwd furniture on tmux" empty "$CAPS_TMUX" \
-    $'transcript line\n  ┃                                                             ~/other-projects/tools:fm/main\n  ┃  Build · gpt-oss-120b Internal OVHcloud' 1
+
+  # A second live pane, same day and version, whose cwd:branch is SHORTER than
+  # the rail (fixtures/opencode-1.18.31-cwd/opencode-1.18.31-idle-short-cwd.ansi,
+  # tmux window 0:fm-anvil-backlog-docs-hygiene, 272x70, captured read-only with
+  # the adapter's own capture-pane call; real #{cursor_y} 64 = 14 in the 20-row
+  # tail). The string wraps BOTTOM-aligned: the two upper composer rows are
+  # blank rail and the single fragment "~/.treehouse/anvil-99d6f9/2/anvil:fm/"
+  # sits directly above the footer row, whose right end carries
+  # "anvil-backlog-docs-hygiene". A different path shape classifies by
+  # structure, and the contiguous-above-footer walk needs no blank-row
+  # tolerance.
+  fixture="$ROOT/tests/fixtures/opencode-1.18.31-cwd/opencode-1.18.31-idle-short-cwd.ansi"
+  screen=$(<"$fixture")
+  assert_screen "opencode 1.18.31 idle short cwd:branch furniture on tmux" empty "$CAPS_TMUX" "$screen" 14
+  composer=$(printf '%s\n' "$screen" | tail -n 9 | head -n 6)
+  assert_screen "opencode 1.18.31 short cwd furniture on herdr" empty "$CAPS_STYLED" "$composer"
+  assert_screen "opencode 1.18.31 short cwd furniture on zellij" empty "$CAPS_STYLED_NOID" "$composer"
+  assert_screen "opencode 1.18.31 short cwd furniture on cmux/orca" empty "$CAPS_PLAIN" "$composer"
+  expected_fragment="$(printf '~')/.treehouse/anvil-99d6f9/2/anvil:fm/"
+  strip=$(printf '%s\n' "$(_fm_composer_screen_row 4 "$composer")" | fm_composer_strip_ghost)
+  fm_composer_normalize_trim_var strip
+  case "$strip" in
+    '┃'*) strip=${strip#┃} ;;
+  esac
+  fm_composer_normalize_trim_var strip
+  [ "$strip" = "$expected_fragment" ] \
+    || fail "the short fixture's one fragment must survive ghost stripping intact, got '$strip'"
+  start=$(_fm_composer_leftbar_cwd_start "$composer" 0 5)
+  [ "$start" = 4 ] || fail "the short fixture's run must start on the row directly above the footer, got '$start'"
   pass "matrix: opencode 1.18.31's right-aligned cwd:branch furniture reads empty; left-edge text stays pending"
 }
 
