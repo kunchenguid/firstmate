@@ -205,6 +205,12 @@ run_two_level() {
   mkdir -p "$sm/bin" "$sm/data"
   printf '# Firstmate\n' > "$sm/AGENTS.md"
   printf 'sm-%s\n' "$name" > "$sm/.fm-secondmate-home"
+  cat > "$sm/.fm-secondmate-parent" <<EOF
+schema=fm-secondmate-parent.v1
+route=local
+parent_home=$prim
+parent_role=root
+EOF
   printf 'charter\n' > "$sm/data/charter.md"
 
   # Spawn 1: the primary launches the secondmate; capture what it injects.

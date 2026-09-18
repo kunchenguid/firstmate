@@ -1036,7 +1036,7 @@ fm_repo_scope_reconcile_task_home() {  # <project-firstmate-or-local-child-home>
 }
 
 fm_repo_scope_acquire_task_locked() {  # <authority-home> <task-home> <task-id> <relaunch:0|1>
-  local authority_home=$1 task_home=$2 task_id=$3 relaunch=$4 lease limit count task_home_real tmp claim_current='' claim_hash=''
+  local authority_home=$1 task_home=$2 task_id=$3 relaunch=$4 lease limit count task_home_real tmp claim_pid claim_current='' claim_hash=''
   fm_repo_scope_reconcile_home_locked "$authority_home" 0 || return 1
   limit=$(fm_repo_scope_limit "$authority_home") || { echo "error: $FM_REPO_SCOPE_LAST_ERROR" >&2; return 1; }
   task_home_real=$(cd "$task_home" && pwd -P) || return 1
@@ -1058,7 +1058,10 @@ fm_repo_scope_acquire_task_locked() {  # <authority-home> <task-home> <task-id> 
   umask 077
   mkdir -p "$(dirname "$lease")" || return 1
   tmp="$lease.tmp.${BASHPID:-$$}"
-  claim_current=$(fm_pid_identity "${BASHPID:-$$}" 2>/dev/null) || {
+  # Capture once outside command substitution: Bash 4+ gives the substitution
+  # its own BASHPID, which must not be paired with the caller's PID below.
+  claim_pid=${BASHPID:-$$}
+  claim_current=$(fm_pid_identity "$claim_pid" 2>/dev/null) || {
     FM_REPO_SCOPE_LAST_ERROR="cannot capture provisional repository claim process identity"
     return 1
   }
@@ -1069,7 +1072,7 @@ fm_repo_scope_acquire_task_locked() {  # <authority-home> <task-home> <task-id> 
     printf 'repo_identity=%s\n' "$FM_REPO_SCOPE_REPO_ID"
     printf 'task_home=%s\n' "$task_home_real"
     printf 'task_id=%s\n' "$task_id"
-    printf 'claim_pid=%s\n' "${BASHPID:-$$}"
+    printf 'claim_pid=%s\n' "$claim_pid"
     printf 'claim_identity=sha256:%s\n' "$claim_hash"
   } > "$tmp" || return 1
   mv -f -- "$tmp" "$lease" || return 1

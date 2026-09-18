@@ -23,6 +23,8 @@
 # conflicting role is superseded rather than duplicated.
 # fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
 # ordinary ship brief and the durable contract written during scout promotion.
+# fm_ask_user_authority_rule owns the delivery-mode-independent ask-user boundary
+# rendered into every ship and scout brief.
 
 fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
@@ -54,6 +56,13 @@ fm_ship_rule_one() {  # <direct-PR|local-only> <task-id>
       return 1
       ;;
   esac
+}
+
+fm_ask_user_authority_rule() {
+  cat <<'EOF'
+   Tool and review ask-user findings are never yours to answer: report them through the same needs-decision path and stop.
+   Firstmate applies `ask-user-authority` and obtains any required captain decision before returning instructions.
+EOF
 }
 
 # Return 0 when a Task subsection still consists only of its scaffold
