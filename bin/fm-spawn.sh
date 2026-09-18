@@ -246,7 +246,10 @@
 #   ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION, plus the task
 #   marker FM_TASK_ID that ship and scout panes receive above.
 #   An enabled task trace also retains TRACEPARENT. Explicit Firstmate launch
-#   assignments still apply inside the filtered environment. Raw commands must
+#   assignments still apply inside the filtered environment, including the
+#   provider-store forwarding below: a claude launch carries firstmate's own
+#   CLAUDE_CONFIG_DIR and a codex launch carries its own CODEX_HOME when that
+#   variable is set, so neither name needs an allowlist line. Raw commands must
 #   be POSIX sh compatible under this opt-in; the absent-file path is unchanged.
 #   This is an exec environment boundary, not a sandbox for the pane's startup
 #   shell, credential files, same-user processes, or later shell initialization.
@@ -4380,14 +4383,22 @@ claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo 
   ;;
 esac
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
-# inherit firstmate's current environment, so a bare `claude` in the pane falls
-# back to the default ~/.claude store even when firstmate itself runs under a
-# different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
-# Forward firstmate's own resolved store onto the claude launch so the crewmate
-# uses the same credential/config firstmate is authenticated with. Only when set;
-# an unset value is the single-store default and needs no prefix.
+# inherit firstmate's current environment, so a bare `claude` or `codex` in the
+# pane falls back to the default ~/.claude or ~/.codex store even when firstmate
+# itself runs under a different one - a work-vs-personal subscription split, or a
+# second login whose weekly window is still open while the first is exhausted.
+# Forward firstmate's own resolved store onto the launch so the worker uses the
+# same credential/config firstmate is authenticated with. Only when set; an unset
+# value is that harness's single-store default and needs no prefix. These are
+# explicit launch assignments, so they survive the config/launch-env-allowlist
+# filter and neither name has to be listed there. A relaunch re-enters this same
+# composition, so it picks up firstmate's store as it stands at relaunch time
+# rather than the one the original launch used.
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
+if [ "$HARNESS" = codex ] && [ -n "${CODEX_HOME:-}" ]; then
+  LAUNCH="CODEX_HOME=$(shell_quote "$CODEX_HOME") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")

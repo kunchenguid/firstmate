@@ -184,6 +184,7 @@ run_control() {  # <case-dir> <args...>
   mkdir -p "$dir/user-home"
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
+    CODEX_HOME="${FM_TEST_CODEX_HOME:-}" \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
@@ -201,9 +202,13 @@ run_spawn() {  # <case-dir> <args...>
   # A claude spawn pre-registers workspace trust in the launching user's own
   # store (bin/fm-claude-trust.sh), so it runs against a throwaway HOME;
   # without it this suite would write the developer's real ~/.claude.json.
+  # CLAUDE_CONFIG_DIR and CODEX_HOME are pinned because fm-spawn forwards each
+  # onto its own harness's launch; a case that wants the set path opts in
+  # through FM_TEST_CODEX_HOME.
   mkdir -p "$dir/user-home"
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
+    CODEX_HOME="${FM_TEST_CODEX_HOME:-}" \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     "$SPAWN" "$@" 2>&1
 }
@@ -970,6 +975,41 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
 }
 
+# A relaunch replaces the agent inside the SAME task, so it must reach the same
+# provider-store forwarding a fresh spawn gets (bin/fm-spawn.sh, beside the
+# CLAUDE_CONFIG_DIR assignment). Without that parity, replacing a worker would
+# silently drop it back to the default ~/.codex login - the exhausted one, in
+# the case this forwarding exists for - while the record still reads healthy.
+test_spawn_relaunch_forwards_firstmate_codex_home() {
+  local dir literal
+  dir=$(new_case codexhome rl40)
+  add_ship_task "$dir" rl40 codex
+  printf 'codex' > "$dir/fake/becomes"
+  printf 'zsh' > "$dir/fake/command"
+  FM_TEST_CODEX_HOME="$dir/codex second login" \
+    run_spawn "$dir" rl40 --relaunch >/dev/null \
+    || fail "a codex relaunch with CODEX_HOME set should succeed"
+  literal=$(cat "$dir/fake/literal")
+  assert_contains "$literal" "CODEX_HOME='$dir/codex second login' env -u CURSOR_AGENT" \
+    "a codex relaunch did not forward firstmate's CODEX_HOME onto the replacement launch"
+  pass "fm-spawn --relaunch: a codex relaunch carries firstmate's own CODEX_HOME, shell-quoted"
+}
+
+test_spawn_relaunch_omits_codex_home_when_unset() {
+  local dir literal
+  dir=$(new_case codexhomeunset rl41)
+  add_ship_task "$dir" rl41 codex
+  printf 'codex' > "$dir/fake/becomes"
+  printf 'zsh' > "$dir/fake/command"
+  # run_spawn pins CODEX_HOME empty, which is the single-store default.
+  run_spawn "$dir" rl41 --relaunch >/dev/null \
+    || fail "a codex relaunch without CODEX_HOME should succeed"
+  literal=$(cat "$dir/fake/literal")
+  assert_not_contains "$literal" "CODEX_HOME=" \
+    "a codex relaunch must add no store prefix when firstmate has no CODEX_HOME set"
+  pass "fm-spawn --relaunch: no CODEX_HOME set means no store prefix, exactly as a fresh spawn"
+}
+
 test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
   local dir home id brief launch out mode rule
   for mode in no-mistakes direct-PR local-only; do
@@ -1707,6 +1747,8 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_spawn_relaunch_forwards_firstmate_codex_home
+test_spawn_relaunch_omits_codex_home_when_unset
 test_promoted_scout_relaunch_receives_the_current_delivery_contract
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch

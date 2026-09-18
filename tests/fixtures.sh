@@ -270,8 +270,8 @@ make_spawn_fakebin() {
 
 # fm_test_run_spawn <home> <pane-path> <fakebin> [fm-spawn args...]
 # Common spawn env. Extra variables in the caller (GROK_HOME, FM_FAKE_LAUNCH_LOG,
-# CLAUDE_CONFIG_DIR, ...) are inherited. Does not add --mode/--yolo; ship tests
-# that need a delivery contract pass those flags themselves.
+# CLAUDE_CONFIG_DIR, CODEX_HOME, ...) are inherited. Does not add --mode/--yolo;
+# ship tests that need a delivery contract pass those flags themselves.
 fm_test_run_spawn() {
   local home=$1 pane=$2 fakebin=$3
   shift 3
@@ -285,10 +285,15 @@ fm_test_run_spawn() {
   # because bin/fm-spawn.sh prefixes the launch only when the value is non-empty,
   # so every launch-shape assertion in the suite keeps reading the same command.
   # A test that needs the set case opts in through FM_TEST_CLAUDE_CONFIG_DIR.
+  # CODEX_HOME is pinned empty for the same reason: bin/fm-spawn.sh forwards it
+  # onto a codex launch exactly as it forwards CLAUDE_CONFIG_DIR onto a claude
+  # one, so a developer's own value would otherwise change the asserted command.
+  # A test that needs the set case opts in through FM_TEST_CODEX_HOME.
   local spawn_home=$home/user-home
   mkdir -p "$spawn_home"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$spawn_home" \
     CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
+    CODEX_HOME="${FM_TEST_CODEX_HOME:-}" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="${TMUX:-fake,1,0}" \

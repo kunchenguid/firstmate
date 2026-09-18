@@ -88,11 +88,13 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
-  # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, so pin it
-  # explicitly (empty by default) instead of leaking the invoking shell's value,
-  # which would make launch assertions depend on the developer's environment.
-  # A test opts in to the set case via FM_TEST_CLAUDE_CONFIG_DIR.
+  # CLAUDE_CONFIG_DIR is forwarded onto claude launches by fm-spawn, and
+  # CODEX_HOME onto codex launches, so pin both explicitly (empty by default)
+  # instead of leaking the invoking shell's values, which would make launch
+  # assertions depend on the developer's environment. A test opts in to either
+  # set case via FM_TEST_CLAUDE_CONFIG_DIR or FM_TEST_CODEX_HOME.
   CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
+    CODEX_HOME="${FM_TEST_CODEX_HOME:-}" \
     FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PI_VERSION="${FM_TEST_PI_VERSION:-0.84.0}" \
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
@@ -918,6 +920,94 @@ test_non_claude_harness_ignores_config_dir() {
   pass "non-claude harnesses do not receive the claude CLAUDE_CONFIG_DIR prefix"
 }
 
+# The same forwarding for codex. It exists so a captain holding two Codex logins
+# - one exhausted, one with window left - can put a worker on the seat firstmate
+# chose, rather than having every codex pane fall back to ~/.codex. The store
+# path is captain-chosen and may contain a space, so the assertion pins the
+# quoted form: an unquoted value would split and the launch would name a
+# different store, or fail outright.
+test_codex_forwards_firstmate_codex_home_when_set() {
+  local rec id out status launch store
+  id=profile-codex-home-z27
+  rec=$(make_spawn_case profile-codex-home codex "$id")
+  read_case_record "$rec"
+  store="$CASE_DIR/codex second login"
+  mkdir -p "$store"
+
+  out=$(FM_TEST_CODEX_HOME="$store" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex spawn with CODEX_HOME set should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CODEX_HOME='$store' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI codex --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not forward firstmate's CODEX_HOME, shell-quoted, to the crewmate pane"
+  pass "codex forwards firstmate's CODEX_HOME so the crewmate uses the same subscription seat"
+}
+
+test_codex_omits_codex_home_prefix_when_unset() {
+  local rec id out status launch
+  id=profile-codex-nohome-z28
+  rec=$(make_spawn_case profile-codex-nohome codex "$id")
+  read_case_record "$rec"
+
+  # run_spawn pins CODEX_HOME empty by default, exercising the single-store
+  # default path where fm-spawn adds no prefix.
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex spawn without CODEX_HOME should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CODEX_HOME=" \
+    "codex launch must not add a store prefix when firstmate has no CODEX_HOME set"
+  pass "codex omits the store prefix when firstmate runs with the single-store default"
+}
+
+test_non_codex_harness_ignores_codex_home() {
+  local rec id out status launch
+  id=profile-claude-codexhome-z29
+  rec=$(make_spawn_case profile-claude-codexhome claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_CODEX_HOME="/opt/test/codex-work" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with CODEX_HOME set should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CODEX_HOME=" \
+    "non-codex harness launch must not receive the codex-specific store prefix"
+  pass "non-codex harnesses do not receive the codex CODEX_HOME prefix"
+}
+
+# The store assignment is part of the launch command, not ambient environment,
+# so config/launch-env-allowlist must not be able to strip it: a captain who
+# opts in to the filter would otherwise lose the chosen seat silently. Execute
+# the emitted command in a synthetic filtered pane and read back what codex got.
+test_codex_home_forwarding_survives_the_launch_environment_filter() {
+  local rec id out status launch store result
+  id=profile-codex-home-filtered-z30
+  rec=$(make_spawn_case profile-codex-home-filtered codex "$id")
+  read_case_record "$rec"
+  : > "$HOME_DIR/config/launch-env-allowlist"
+  store="$CASE_DIR/codex filtered login"
+  mkdir -p "$store"
+  cat > "$FAKEBIN_DIR/codex" <<'SH'
+#!/bin/sh
+printf '%s\n' "${CODEX_HOME-unset}"
+SH
+  chmod +x "$FAKEBIN_DIR/codex"
+
+  out=$(FM_TEST_CODEX_HOME="$store" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "codex spawn under an enabled allowlist should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  result=$(env -i HOME="$HOME_DIR/user-home" PATH="$FAKEBIN_DIR:/usr/bin:/bin" TERM=xterm \
+    TMUX=synthetic-pane /bin/sh -c "$launch") \
+    || fail "the emitted codex launch failed under the filtered environment: $launch"
+  [ "$result" = "$store" ] \
+    || fail "the filtered codex worker read CODEX_HOME as '$result', not the store firstmate chose"
+  pass "the codex store assignment survives config/launch-env-allowlist without an allowlist line"
+}
+
 # The captain's attribution policy lives in the `user` settings scope, which a
 # spawned worker's settings sources are not guaranteed to load. Every claude
 # launch must therefore carry the policy itself, or a spawned worker writes
@@ -1456,6 +1546,10 @@ test_claude_permission_mode_auto_reaches_scout_launch
 test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata
 test_non_claude_harness_ignores_claude_permission_mode
 test_non_claude_harness_ignores_config_dir
+test_codex_forwards_firstmate_codex_home_when_set
+test_codex_omits_codex_home_prefix_when_unset
+test_non_codex_harness_ignores_codex_home
+test_codex_home_forwarding_survives_the_launch_environment_filter
 test_claude_task_launch_carries_control_channel_authority
 test_claude_secondmate_launch_omits_task_control_channel_authority
 test_claude_crewmate_launch_carries_the_attribution_policy
