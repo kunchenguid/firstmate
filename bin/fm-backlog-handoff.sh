@@ -804,7 +804,7 @@ remote_handoff() { # <secondmate-id> <keys...>
     echo "       nothing new was staged." >&2
     return 1
   fi
-  for key in "${to_move[@]}"; do
+  for key in "${to_move[@]+"${to_move[@]}"}"; do
     while IFS= read -r line; do
       printf 'error: refusing to hand off %s: non-2-space continuation line: %s\n' "$key" "$line" >&2
       return 1

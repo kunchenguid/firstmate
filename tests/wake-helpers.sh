@@ -296,6 +296,9 @@ SH
   printf '%s\n' "$dir"
 }
 
+# Only pass a process owned by this test. A deadline must also bound cleanup:
+# TERM can be ignored or remain pending on a stopped child, so never follow it
+# with an unbounded wait. Keep process evidence before the final owned-PID kill.
 wait_for_exit() {
   local pid=$1 limit=${2:-50} i=0
   while [ "$i" -lt "$limit" ]; do
@@ -306,7 +309,18 @@ wait_for_exit() {
     sleep 0.1
     i=$((i + 1))
   done
-  kill "$pid" 2>/dev/null || true
+  printf 'wait_for_exit: owned pid %s exceeded %s polls; sending TERM\n' "$pid" "$limit" >&2
+  ps -p "$pid" -o pid= -o ppid= -o stat= -o command= >&2 2>/dev/null || true
+  kill -TERM "$pid" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 20 ] && is_live_non_zombie "$pid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if is_live_non_zombie "$pid"; then
+    printf 'wait_for_exit: owned pid %s survived TERM; sending KILL\n' "$pid" >&2
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
   wait "$pid" 2>/dev/null || true
   return 124
 }

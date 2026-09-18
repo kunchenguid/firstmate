@@ -42,6 +42,14 @@ fm_backend_tmux_capture() {  # <target> <lines>
   tmux capture-pane -p -t "$1" -S -"$2"
 }
 
+# fm_backend_tmux_visible_capture: the visible viewport only. `-S -0` starts at
+# the first line of the pane rather than in its history, so nothing scrolled out
+# of view can appear in the result - the guarantee a trust-dialog predicate
+# needs, which the scrollback-bounded capture above cannot give.
+fm_backend_tmux_visible_capture() {  # <target>
+  tmux capture-pane -p -t "$1" -S -0
+}
+
 # fm_backend_tmux_send_key: one named key. Mirrors fm-send.sh's --key path:
 # `tmux display-message -p -t "$T" '#{pane_id}' >/dev/null`, then
 # `tmux send-keys -t "$T" "$2"`.
