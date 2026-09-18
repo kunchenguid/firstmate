@@ -521,7 +521,8 @@ clear_pause_tracking() {  # <window> <state>
   rm -f "$state/.subsuper-paused-$key" "$state/.subsuper-pause-until-due-$key" "$state/.subsuper-stale-$key" \
     "$state/.paused-$watcher_key" "$state/.paused-rechecked-$watcher_key" "$state/.paused-resurfaced-$watcher_key" \
     "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key" \
-    "$state/.writing-since-$watcher_key" "$state/.writing-resurfaced-$watcher_key"
+    "$state/.writing-since-$watcher_key" "$state/.writing-resurfaced-$watcher_key" \
+    "$state/.waiting-resurfaced-$watcher_key"
 }
 
 reconcile_pause_tracking() {  # <window> <state> <last-status-line>
@@ -1329,6 +1330,10 @@ is_wake_reason() {  # <reason>
 
 # --- dispatch one wake reason to self-handle or escalate --------------------
 # Side effects: logging, marker records, escalation buffer appends.
+# A decision-owned queued row arrives as needs-decision:<files> rather than
+# signal:<files> (bin/fm-watch.sh). Classify it as a signal so the capture file
+# is populated, suppression markers commit, and the digest names the decision
+# instead of "unknown wake:".
 handle_wake() {  # <reason> <state>
   local reason=$1 state=$2 decision action distilled task last stale_detail
   local capture="$state/.subsuper-classified-end.$$" span_record='' span_rc='' endpoint ident rest sig marker
@@ -1340,7 +1345,12 @@ handle_wake() {  # <reason> <state>
     return
   fi
   case "$reason" in
-    signal:*) kind=signal; arg="${reason#signal: }"
+    signal:*|needs-decision:*)
+              kind=signal
+              case "$reason" in
+                needs-decision:*) arg="${reason#needs-decision: }" ;;
+                *) arg="${reason#signal: }" ;;
+              esac
               decision=$(FM_STATUS_SPAN_ENDPOINT_FILE="$capture" classify_signal "$arg" "$state") ;;
     stale:*)  kind=stale; arg="${reason#stale: }"; stale_detail="${arg#"$arg"}"
               case "$arg" in *" ("*) stale_detail="${arg#*" ("}"; arg="${arg%% \(*}" ;; esac
