@@ -1172,13 +1172,16 @@ test_status_log_outcome_never_claims_a_mentioned_pr() {
   pass "a status-log outcome never claims a pull request mentioned in prose"
 }
 
-# The independent captain protection: when the reader reports a failure the
-# crew's own last self-declared word contradicts, the two records disagree and
-# nothing is manufactured for presentation. Ordinary supervision still owns it.
+# The independent captain protection, for the one source where the two records
+# are comparable: the reader read the crew's own STATUS LOG, and the crew's last
+# self-declared word disagrees with what that read reported, so nothing is
+# manufactured for presentation. Ordinary supervision still owns it. Re-pointed
+# from a run-step state: a run-step state is the pipeline's own record and no
+# longer answers to the crew's prose.
 test_contradicted_failure_is_not_promoted_for_presentation() {
   make_world outcome-contradicted
   write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
-  FM_FAKE_CREW_STATE='failed' FM_FAKE_CREW_SOURCE='run-step' FM_FAKE_CREW_DETAIL='run failed' \
+  FM_FAKE_CREW_STATE='failed' FM_FAKE_CREW_SOURCE='status-log' FM_FAKE_CREW_DETAIL='the build broke' \
     run_reconcile "$MAIN" --startup
   assert_nothing_queued "$MAIN" 'inactive-outcome:' "a contradicted failure was queued for the captain"
   [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail "a contradicted failure minted a durable record"
@@ -1186,68 +1189,49 @@ test_contradicted_failure_is_not_promoted_for_presentation() {
 }
 
 # The mirror direction: a success the crew's own last word calls a failure is
-# equally unsafe to present.
+# equally unsafe to present. Re-pointed to a status-log state for the same
+# reason as its sibling above. This also subsumes the removed
+# test_crew_prose_cannot_forge_the_ordering_field: the ordering field it forged
+# no longer exists, so a status-log note carrying any prose at all now reaches
+# this same guard and cannot switch it off.
 test_contradicted_success_is_not_promoted_for_presentation() {
   make_world outcome-contradicted-done
   write_child "$MAIN" child 'failed: the build broke'
-  FM_FAKE_CREW_STATE='done' FM_FAKE_CREW_SOURCE='run-step' FM_FAKE_CREW_DETAIL='run passed: PR merged/closed' \
+  FM_FAKE_CREW_STATE='done' FM_FAKE_CREW_SOURCE='status-log' FM_FAKE_CREW_DETAIL='implementation complete' \
     run_reconcile "$MAIN" --startup
   assert_nothing_queued "$MAIN" 'inactive-outcome:' "a contradicted success was queued for the captain"
   pass "a success the crew's own last word contradicts is never presented"
 }
 
-# The routine ship shape: the crew declares implementation done, firstmate then
-# starts the validation run, the run fails, and the crew goes silent without
-# appending `failed:`. bin/fm-crew-state.sh's log ordering evidence places that
-# declaration before the run and says so on its own run-step line, so the
-# failure is not contradicted and must still reach the captain - a failure
-# reaching nobody is the harm this path exists to remove.
-test_pre_run_declaration_does_not_suppress_the_failure() {
-  local word_older payload
-  word_older=$(bash -c '. "$1"; printf %s "$FM_CREW_STATE_WORD_OLDER_DETAIL"' _ "$ROOT/bin/fm-classify-lib.sh")
-  [ -n "$word_older" ] || fail "the reader's ordering detail token is undefined"
+# The routine ship shape, and the reason this whole path exists: the crew
+# declares implementation done, firstmate then starts the validation run, the
+# run FAILS, and the crew goes silent without appending `failed:`. The reader
+# reports that failure from the pipeline's own run step, which outranks the
+# crew's earlier word, so the captain must still be told - a failure reaching
+# nobody is the harm this path exists to remove.
+test_run_step_failure_is_not_suppressed_by_the_crews_own_word() {
+  local payload
   make_world outcome-mid-run-done
   write_child "$MAIN" child 'done: implementation complete'
-  FM_FAKE_CREW_STATE='failed' FM_FAKE_CREW_SOURCE='run-step' \
-    FM_FAKE_CREW_DETAIL="run failed · $word_older" run_reconcile "$MAIN" --startup
+  FM_FAKE_CREW_STATE='failed' FM_FAKE_CREW_SOURCE='run-step' FM_FAKE_CREW_DETAIL='run failed' \
+    run_reconcile "$MAIN" --startup
   payload=$(queued_payload "$MAIN" 'inactive-outcome:')
-  [ -n "$payload" ] || fail "a failure the reader proved newer than the crew's word was dropped"
+  [ -n "$payload" ] || fail "a run-step failure behind the crew's own done line was dropped"
   [ "$(outcome_count "$MAIN" pending)" = 1 ] \
     || fail "no durable terminal outcome was minted for the failure"
-  pass "a failure the reader ordered after the crew's own word still reaches the captain"
+  pass "a run-step failure is not suppressed by the crew's own earlier word"
 }
 
 # The mirror shape the branch is named for: a stale `paused:` line and a real
-# run failure the reader ordered after it.
+# run failure reported from the run step.
 test_stale_pause_does_not_suppress_the_failure() {
-  local word_older
-  word_older=$(bash -c '. "$1"; printf %s "$FM_CREW_STATE_WORD_OLDER_DETAIL"' _ "$ROOT/bin/fm-classify-lib.sh")
   make_world outcome-stale-pause
   write_child "$MAIN" child 'paused: waiting on the pipeline'
-  FM_FAKE_CREW_STATE='failed' FM_FAKE_CREW_SOURCE='run-step' \
-    FM_FAKE_CREW_DETAIL="run failed · $word_older" run_reconcile "$MAIN" --startup
+  FM_FAKE_CREW_STATE='failed' FM_FAKE_CREW_SOURCE='run-step' FM_FAKE_CREW_DETAIL='run failed' \
+    run_reconcile "$MAIN" --startup
   [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
     || fail "a failure behind a stale pause line was dropped"
   pass "a stale pause line does not suppress the failure that followed it"
-}
-
-# The ordering field is the reader's own word about a run-step reading. A
-# status-log state republishes the crew's prose verbatim, so a crew that writes
-# the field's text into its own note must not thereby switch off the guard: the
-# declaration here is a later `failed:`, and a durable captain-facing `done`
-# built over it would be the false success this whole path exists to prevent.
-test_crew_prose_cannot_forge_the_ordering_field() {
-  local word_older
-  word_older=$(bash -c '. "$1"; printf %s "$FM_CREW_STATE_WORD_OLDER_DETAIL"' _ "$ROOT/bin/fm-classify-lib.sh")
-  make_world outcome-forged-ordering
-  write_child "$MAIN" child "done: implementation complete · $word_older"
-  printf 'failed: the build broke\n' >> "$MAIN/state/child.status"
-  age "$MAIN/state/child.status"
-  FM_FAKE_CREW_STATE='done' FM_FAKE_CREW_SOURCE='status-log' \
-    FM_FAKE_CREW_DETAIL="implementation complete · $word_older" run_reconcile "$MAIN" --startup
-  assert_nothing_queued "$MAIN" 'inactive-outcome:' "crew prose disabled the contradiction guard"
-  [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail "crew prose minted a contradicted record"
-  pass "crew-authored prose cannot forge the reader's ordering field"
 }
 
 # Direction guard: a crew that simply stopped mid-work has no self-declared
@@ -1333,9 +1317,8 @@ test_status_log_outcome_never_borrows_the_fresh_last_line_pr
 test_status_log_outcome_never_claims_a_mentioned_pr
 test_contradicted_failure_is_not_promoted_for_presentation
 test_contradicted_success_is_not_promoted_for_presentation
-test_pre_run_declaration_does_not_suppress_the_failure
+test_run_step_failure_is_not_suppressed_by_the_crews_own_word
 test_stale_pause_does_not_suppress_the_failure
-test_crew_prose_cannot_forge_the_ordering_field
 test_uncontradicted_failure_is_still_presented
 
 echo "all inactive reconciliation tests passed"

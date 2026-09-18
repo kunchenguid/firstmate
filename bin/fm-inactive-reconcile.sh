@@ -57,15 +57,12 @@
 # outcome record or wake the supervisor.
 # A terminal outcome is a CAPTAIN-FACING claim, so two rules bound what may be
 # built from that read, owned by terminal_outcome_corroborated and
-# terminal_outcome_pr below. It is manufactured only when the crew's own last
-# self-declared word (done, failed, or the configured paused verb) does not
-# contradict it - and that word contradicts nothing once the reader's own
-# ordering evidence has already placed it BEFORE the run it reported on, which
-# the reader publishes as the FM_CREW_STATE_WORD_OLDER_DETAIL field of a
-# run-step line, so the routine ship shape (`done:` written before the run, the
-# run then fails, the crew goes silent) still reaches the captain, while a word
-# the reader could not order keeps the suppression - and its PR identity comes
-# from the same record as its state -
+# terminal_outcome_pr below. A state the reader sourced from the STATUS LOG is
+# manufactured only when the crew's own last self-declared word (done, failed,
+# or the configured paused verb) does not contradict it; a state sourced from
+# the pipeline's own RUN STEP outranks that word outright, so the routine ship
+# shape (`done:` written, the run then fails, the crew goes silent) still
+# reaches the captain. Its PR identity comes from the same record as its state -
 # the run's own published PR for a run-step state, that line's own ready-signal
 # PR for a status-log state, and never a separately recorded task PR. Together they
 # prevent one captain-facing record from combining claims from different runs.
@@ -379,21 +376,17 @@ terminal_outcome_pr() { # <meta> <state-line>
   clean_field "$value"
 }
 
-# Enforce the header's independent captain-facing corroboration contract. The
-# crew's own word disagrees only when the reader has not already ordered it
-# BEFORE the run it reported on: a declaration the reader proved older is the
-# routine ship shape (`done:` before the run, then the run fails), not a
-# contradiction, and dropping it would hide a real failure from the captain
-# entirely. The field is honoured only on a run-step line, the one place the
-# reader publishes it, so crew-authored prose republished verbatim in a
-# status-log note can never switch this guard off.
+# Enforce the header's independent captain-facing corroboration contract. A
+# RUN-STEP state is the pipeline's own record of the run that just ended, and
+# rule 2b in bin/fm-crew-state.sh guarantees such a terminal reading is either
+# the attributed current run or an honest unknown, so a crew's own earlier prose
+# is the weaker witness and never vetoes it - otherwise the routine ship shape
+# (`done:` written, the run then fails, the crew goes silent) would reach nobody.
+# The two sources are genuinely comparable only when the state itself came from
+# the status log, and there the crew's latest word still decides.
 terminal_outcome_corroborated() { # <state> <last-status-line> <state-line>
   local state=$1 last=$2 line=${3:-} declared
-  if [ "$(state_line_source "$line")" = run-step ]; then
-    case "$line" in
-      *"$STATE_LINE_SEP$FM_CREW_STATE_WORD_OLDER_DETAIL"*) return 0 ;;
-    esac
-  fi
+  [ "$(state_line_source "$line")" != run-step ] || return 0
   if status_is_paused "$last"; then
     declared=paused
   else
