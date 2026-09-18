@@ -244,7 +244,10 @@
 #   TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH HERDR_PANE_ID
 #   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID CMUX_SOCKET_PATH
 #   ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION, plus the task
-#   marker FM_TASK_ID that ship and scout panes receive above.
+#   marker FM_TASK_ID that ship and scout panes receive above, plus the
+#   compact-adviser kill switch COMPACT_ADVISER_DISABLE, which the floor also
+#   pins to 1 with a literal assignment so it survives the cleared environment
+#   even on a host that never had it set.
 #   An enabled task trace also retains TRACEPARENT. Explicit Firstmate launch
 #   assignments still apply inside the filtered environment. Raw commands must
 #   be POSIX sh compatible under this opt-in; the absent-file path is unchanged.
@@ -4412,6 +4415,18 @@ if [ "$KIND" = secondmate ]; then
   # injected carrier and this on/off snapshot are guaranteed to agree.
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
+# Every agent this fleet launches - crewmate, scout, and secondmate, on a fresh
+# spawn and on a relaunch alike - runs with the compact-adviser kill switch on.
+# This is an explicit launch assignment rather than a forwarded ambient name, so
+# it carries the value itself: a pane that never had it, and a remote host whose
+# transport never carried it, both still start the agent with it set. It is also
+# unconditional, with no config file or flag gating it, and it is prepended last
+# so it sits outermost and wins over any ambient value the pane shell holds. The
+# cleared-environment floor in the LAUNCH_ENV_PREFIX construction below sets it
+# again at the `env -i` boundary, so under an enabled allowlist the switch is
+# established before the wrapping `/bin/sh` starts rather than only inside the
+# command that shell runs.
+LAUNCH="COMPACT_ADVISER_DISABLE=1 $LAUNCH"
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
@@ -4446,6 +4461,10 @@ spawn_record_traceparent() {
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# Export the compact-adviser kill switch into the pane shell through the same
+# pre-launch channel, so the agent's own children and anything the agent later
+# starts from that shell inherit it too, not only the single launch command.
+spawn_send_text_line "$T" "export COMPACT_ADVISER_DISABLE=1"
 # Mark the pane as a task worker so bin/fm-test-run.sh can refuse to run the
 # suite in the repository's primary checkout. Ship and scout workers are the
 # ones assigned an isolated worktree; a secondmate runs its own home instead.
@@ -4477,7 +4496,7 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     TMPDIR TMP TEMP GOTMPDIR TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH \
     HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID \
     CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION \
-    FM_TASK_ID \
+    FM_TASK_ID COMPACT_ADVISER_DISABLE \
     $LAUNCH_ENV_NAMES; do
     # Only validated names enter shell syntax. Values expand once, quoted, in
     # the pane shell and never become source text or spawn-process snapshots.
@@ -4485,6 +4504,16 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     printf -v env_arg '${%s+"%s=$%s"}' "$env_name" "$env_name" "$env_name"
     LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX $env_arg"
   done
+  # COMPACT_ADVISER_DISABLE is retained by the floor loop above, which forwards
+  # whatever the pane export set, and then pinned here to the one value Firstmate
+  # launches on. The literal assignment comes last deliberately: `env` applies
+  # assignments left to right, so this one wins over a forwarded pane value, and
+  # it still delivers the switch on a pane whose export never landed. Unlike the
+  # trace carrier below it carries no gate, so it is appended unconditionally.
+  # Setting it here rather than relying on the assignment already carried by
+  # $LAUNCH is what gives the wrapping `/bin/sh` itself the switch, not only the
+  # agent command it runs.
+  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX COMPACT_ADVISER_DISABLE=1"
   if [ -n "$SPAWN_TRACEPARENT" ]; then
     # shellcheck disable=SC2016
     LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX "'${TRACEPARENT+"TRACEPARENT=$TRACEPARENT"}'
