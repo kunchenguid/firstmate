@@ -101,6 +101,24 @@ pass 'journal rejects symlink and hardlink destinations'
 "$ROOT/bin/fm-event-shadow-replay.sh" > "$TMP_ROOT/replay"
 jq -e '.call.source=="replay" and .call.input_tokens==null and (.errors|length)==1 and .frontier_false_positives==1 and .frontier_true_positives==2' "$TMP_ROOT/replay" >/dev/null || fail replay
 pass 'sanitized synthetic replay exposes intentional high-confidence confusion without invented cost'
+"$ROOT/bin/fm-event-shadow-replay.sh" --response "$ROOT/tests/fixtures/event-shadow/live-response.json" > "$TMP_ROOT/rescore"
+jq -e --slurpfile recorded "$ROOT/tests/fixtures/event-shadow/live-evidence.json" '
+  .call.source=="replay" and .call.results==$recorded[0].call.results and
+  .confusion==$recorded[0].confusion and .errors==[] and (.abstentions|length)==5 and
+  .call.input_tokens==2012 and .call.output_tokens==319 and
+  any(.call.results[]; .id=="contradictory" and .choice=="unknown" and .raw_choice=="inspect")
+' "$TMP_ROOT/rescore" >/dev/null || fail rescore
+jq '.answers.event_0.confidence=0.59 | .answers.event_1.confidence=0.6' "$ROOT/tests/fixtures/event-shadow/live-response.json" > "$TMP_ROOT/floor-response"
+"$TOOL" --samples "$ROOT/tests/fixtures/event-shadow/samples.json" --response "$TMP_ROOT/floor-response" > "$TMP_ROOT/floor"
+grep -q 'event=retained-wait attention=unknown; event=merge-wait attention=declared_wait' "$TMP_ROOT/floor" || fail 'confidence boundary'
+pass 'confidence floor abstains below but not at boundary and preserves live evidence'
+mkdir "$STATE_DIR/event-shadow/lock"
+cp "$STATE_DIR/event-shadow/calls.jsonl" "$TMP_ROOT/locked-before"
+row | "$TOOL" > "$TMP_ROOT/locked"
+grep -q 'attention=unknown skipped=locked' "$TMP_ROOT/locked" || fail 'silent lock skip'
+cmp "$STATE_DIR/event-shadow/calls.jsonl" "$TMP_ROOT/locked-before" || fail 'lock skip changed journal'
+rmdir "$STATE_DIR/event-shadow/lock"
+pass 'abandoned lock produces visible unknown annotation without journal contention'
 # The real drain must retain raw actionable wakes and acknowledgement semantics.
 case_dir=$(make_case drain-case)
 state="$case_dir/state"

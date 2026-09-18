@@ -30,6 +30,7 @@ unset TYPESAFE_API_KEY
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-timing-lib.sh
 . "$SCRIPT_DIR/fm-timing-lib.sh"
+. "$SCRIPT_DIR/fm-choice-policy-lib.sh"
 STATE=${FM_STATE_OVERRIDE:-${FM_HOME:-$(cd "$SCRIPT_DIR/.." && pwd)}/state}
 SAMPLES='' RESPONSE=''
 while [ $# -gt 0 ]; do
@@ -51,8 +52,10 @@ DIR="$STATE/event-shadow"
 mkdir -p "$DIR" || exit 0
 chmod 700 "$DIR" || exit 0
 [ ! -L "$DIR/calls.jsonl" ] || exit 0
-# A bounded directory lock skips overlapping annotation work, never the drain.
-mkdir "$DIR/lock" 2>/dev/null || exit 0
+mkdir "$DIR/lock" 2>/dev/null || {
+  printf 'SHADOW ONLY (no authority; handle every wake normally): attention=unknown skipped=locked\n'
+  exit 0
+}
 TMP=$(mktemp -d "$DIR/request.XXXXXX") || { rmdir "$DIR/lock"; exit 0; }
 trap 'rm -rf -- "$TMP"; rmdir "$DIR/lock" 2>/dev/null || true' EXIT
 if [ -n "$SAMPLES" ]; then
@@ -131,14 +134,16 @@ jq -sc 'def metric: if type=="number" and .>=0 then . else null end;
   || printf '{}\n' > "$TMP/metrics"
 if [ -n "$error" ]; then printf '{}\n' > "$TMP/response"; fi
 jq -cn --slurpfile events "$TMP/events" --slurpfile resp "$TMP/response" --slurpfile metrics "$TMP/metrics" \
-  --arg source "$source" --arg error "$error" --argjson wall "$wall" \
+  --arg source "$source" --arg error "$error" --argjson wall "$wall" --argjson floor "$CONFIDENCE_FLOOR" \
   --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-  {schema:1,model:"jev-latest",source:$source,at:$at,shadow:true,error:(if $error=="" then null else $error end),
+  {schema:2,confidence_floor:$floor,model:"jev-latest",source:$source,at:$at,shadow:true,error:(if $error=="" then null else $error end),
    wall_latency_ms:$wall,api_latency_ms:($metrics[0].api_latency_ms // null),
    input_tokens:($metrics[0].input_tokens // null),output_tokens:($metrics[0].output_tokens // null),
    actual_decisions_avoided:0,results:($events[0]|to_entries|map(. as $event |
      ($resp[0].answers["event_"+(.key|tostring)] // {choice:"unknown",confidence:0}) as $a |
-     {id:$event.value.id,choice:$a.choice,confidence:$a.confidence,
+     {id:$event.value.id,raw_choice:$a.choice,
+      choice:(if $a.confidence < $floor then "unknown" else $a.choice end),
+      abstained:($a.confidence < $floor or $a.choice=="unknown"),confidence:$a.confidence,
       probabilities:($a.probabilities // null),frontier_candidate:($error=="" and $a.choice=="declared_wait" and $a.confidence>=0.9)}))}
 ' > "$TMP/result" || exit 0
 # Refuse hardlinks and special files, too: this optional journal never writes

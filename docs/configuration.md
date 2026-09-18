@@ -619,6 +619,9 @@ Keep normal supervision unchanged: shadow classifications describe historical de
 No low-risk behavior is approved for activation by a shadow result.
 [`bin/fm-event-shadow.sh`](../bin/fm-event-shadow.sh)'s header owns the bounded input, closed attention set, journal, metrics, and no-cache mechanics.
 [`bin/fm-event-shadow-replay.sh`](../bin/fm-event-shadow-replay.sh) provides sanitized offline confusion examples and an explicit live replay; missing returned cost fields remain unknown rather than estimates.
+The shared dispatch confidence floor (0.6) maps lower-confidence choices to `unknown`, preserving raw choices and probabilities; abstentions are reported separately from errors.
+Replay the recorded live response locally with `bin/fm-event-shadow-replay.sh --response tests/fixtures/event-shadow/live-response.json` and a private `FM_STATE_OVERRIDE` directory. The committed live evidence is a local policy rescore of the original call, retaining its timestamp and 2012 input/319 output tokens; no additional API requests were made. Five events abstain (including the actionable contradictory example), with zero non-abstaining errors; this does not justify activation.
+Lock contention, including an abandoned lock, emits `attention=unknown skipped=locked` rather than silently omitting the annotation; it never suppresses a wake.
 [`tests/fm-event-shadow.test.sh`](../tests/fm-event-shadow.test.sh) verifies default-off behavior, error fallback, deterministic-reason bypass, and unchanged queue acknowledgement.
 
 ## Toolchain
