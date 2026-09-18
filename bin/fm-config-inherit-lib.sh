@@ -551,6 +551,13 @@ propagate_inheritable_env() {
       rc=1
       continue
     fi
+    if [ -f "$src" ] && [ ! -r "$src" ]; then
+      reason="cannot inspect primary $FM_INHERITABLE_ENV_FILE"
+      warn_inheritable_config_error "$item" "$src" "$reason"
+      record_inheritable_config_result "$item" error "$reason"
+      rc=1
+      continue
+    fi
     if { [ -e "$dest" ] || [ -L "$dest" ]; } && ! inheritable_env_file_safe_existing "$dest"; then
       reason="unsafe destination"
       warn_inheritable_config_error "$item" "$dest" "$reason"

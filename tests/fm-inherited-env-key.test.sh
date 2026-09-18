@@ -111,6 +111,39 @@ TYPESAFE_API_KEY=$PRIMARY_KEY_VALUE" ] || fail "identical destination bytes must
   pass "identical destination line at mode 644 converges to 600 and reports unchanged"
 }
 
+test_unreadable_primary_env_is_an_error_and_keeps_destination() {
+  local rec primary second report err
+  if [ "$(id -u)" = 0 ]; then
+    pass "unreadable primary .env case skipped: running as root"
+    return 0
+  fi
+  rec=$(new_home_pair unreadable)
+  primary=${rec%%|*}
+  second=${rec#*|}
+  printf 'TYPESAFE_API_KEY=%s\n' "$PRIMARY_KEY_VALUE" > "$primary/.env"
+  printf 'FMX_PAIRING_TOKEN=second-relay\nTYPESAFE_API_KEY=%s\n' "$PRIMARY_KEY_VALUE" > "$second/.env"
+  chmod 600 "$second/.env"
+  chmod 000 "$primary/.env"
+  report="$TMP_ROOT/unreadable.report"
+  err="$TMP_ROOT/unreadable.err"
+
+  if FM_CONFIG_INHERIT_REPORT="$report" propagate_secondmate_inheritance "$primary" "$second" >/dev/null 2>"$err"; then
+    chmod 600 "$primary/.env"
+    fail "an unreadable primary .env must make convergence fail"
+  fi
+  chmod 600 "$primary/.env"
+
+  assert_grep $'.env:TYPESAFE_API_KEY\terror\tcannot inspect primary .env' "$report" \
+    "unreadable primary .env should report an inspection error for the key"
+  assert_no_grep $'.env:TYPESAFE_API_KEY\tpushed' "$report" "unreadable primary .env must not be mirrored as absence"
+  [ "$(cat "$second/.env")" = "FMX_PAIRING_TOKEN=second-relay
+TYPESAFE_API_KEY=$PRIMARY_KEY_VALUE" ] || fail "destination key line must survive an unreadable primary .env"
+  [ "$(file_mode "$second/.env")" = 600 ] || fail "destination .env should stay mode 600"
+  assert_value_absent "$report" "propagation report"
+  assert_value_absent "$err" "stderr"
+  pass "unreadable primary .env reports an error and leaves the destination key line in place"
+}
+
 test_absent_primary_key_removes_line_and_missing_files_are_quiet() {
   local rec primary second report
   rec=$(new_home_pair absence)
@@ -315,6 +348,7 @@ test_remote_route_reports_key_skipped_and_never_sends_it() {
 
 test_key_line_converges_and_other_env_lines_stay_per_home
 test_identical_destination_line_restores_mode_and_reports_unchanged
+test_unreadable_primary_env_is_an_error_and_keeps_destination
 test_absent_primary_key_removes_line_and_missing_files_are_quiet
 test_unsafe_env_artifacts_are_rejected_without_leaking
 test_tracked_env_destination_is_skipped
