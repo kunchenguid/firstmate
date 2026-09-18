@@ -5131,11 +5131,16 @@ preserve_relaunch_meta() {
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-  if [ "$RELAUNCH" -eq 1 ]; then
-    preserve_relaunch_meta
-  fi
+  # The control line lands before the preserved lines so an armed poll's
+  # identity lines (pr=, pr_head=, x_*) stay last, in the order
+  # fm_pr_metadata_identity_parse in bin/fm-pr-lib.sh requires; a control line
+  # after pr= would make the watcher refuse the armed merge poll on every
+  # sweep until the next re-arm.
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
+  fi
+  if [ "$RELAUNCH" -eq 1 ]; then
+    preserve_relaunch_meta
   fi
 } >"$SPAWN_META_PATH" || {
   echo "error: task record for $ID could not be prepared at $SPAWN_META_PATH" >&2
@@ -5201,6 +5206,15 @@ if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
     echo "error: replacement task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+    exit 1
+  fi
+  # A silently broken poll identity would make the watcher refuse the armed
+  # merge poll on every sweep, so fail the relaunch loudly when the published
+  # record still carries a pr= line but no longer satisfies the identity
+  # contract the watcher's trusted path validates.
+  if grep -q '^pr=' "$STATE/$ID.meta" \
+    && ! fm_pr_metadata_identity_parse "$STATE/$ID.meta"; then
+    echo "error: replacement task record for $ID breaks the PR poll metadata identity contract after publication; the armed merge poll would be refused by the watcher" >&2
     exit 1
   fi
   RELAUNCH_REPLACEMENT_PENDING=0

@@ -24,6 +24,8 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-tasks-axi-lib.sh"
@@ -471,23 +473,51 @@ test_relaunch_preserves_durable_task_metadata() {
   dir=$(new_case durable-meta rl19)
   add_ship_task "$dir" rl19 claude
   {
-    printf '%s\n' 'pr=https://github.com/example/repo/pull/19'
-    printf '%s\n' 'pr_head=feature/relaunch'
-    printf '%s\n' 'x_request=request-19'
+    # The attestation and relay lines predate the poll arming, so the poll's
+    # identity lines end the record, the order the identity contract requires.
     printf '%s\n' 'decisions_reviewed=1'
+    printf '%s\n' 'x_request=request-19'
+    printf '%s\n' 'pr=https://github.com/example/repo/pull/19'
+    printf '%s\n' 'pr_head=0123456789abcdef0123456789abcdef01234567'
   } >> "$dir/home/state/rl19.meta"
 
   out=$(run_control "$dir" rl19 relaunch --note "continuing review work"); rc=$?
   expect_code 0 "$rc" "relaunch should preserve durable metadata"$'\n'"$out"
   [ "$(meta_field "$dir" rl19 pr)" = "https://github.com/example/repo/pull/19" ] \
     || fail "the task PR must survive relaunch"
-  [ "$(meta_field "$dir" rl19 pr_head)" = "feature/relaunch" ] \
+  [ "$(meta_field "$dir" rl19 pr_head)" = "0123456789abcdef0123456789abcdef01234567" ] \
     || fail "the task PR head must survive relaunch"
   [ "$(meta_field "$dir" rl19 x_request)" = "request-19" ] \
     || fail "the task X request must survive relaunch"
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+test_relaunch_keeps_pr_poll_meta_identity_order() {
+  local dir out rc
+  dir=$(new_case pr-poll-meta-order rl45)
+  add_ship_task "$dir" rl45 claude
+  # An armed merge poll ends the task record with its identity lines, and the
+  # watcher's trusted path refuses a record whose pr= line is followed by any
+  # other line; the relaunch must keep the record parseable or the armed poll
+  # would be refused on every sweep until the next re-arm.
+  {
+    printf '%s\n' 'pr=https://github.com/example/repo/pull/45'
+    printf '%s\n' 'pr_head=0123456789abcdef0123456789abcdef01234567'
+  } >> "$dir/home/state/rl45.meta"
+  fm_pr_metadata_identity_parse "$dir/home/state/rl45.meta" \
+    || fail "the armed poll fixture record was not identity-valid before the relaunch"
+
+  out=$(run_control "$dir" rl45 relaunch --note "continuing the merge watch"); rc=$?
+  expect_code 0 "$rc" "relaunch of an armed poll task should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl45 pr)" = "https://github.com/example/repo/pull/45" ] \
+    || fail "the task PR must survive relaunch"
+  [ "$(meta_field "$dir" rl45 pr_head)" = "0123456789abcdef0123456789abcdef01234567" ] \
+    || fail "the task PR head must survive relaunch"
+  fm_pr_metadata_identity_parse "$dir/home/state/rl45.meta" \
+    || fail "the relaunched task record lost the PR poll identity order the watcher's trusted path requires"
+  pass "fm-control relaunch: an armed merge poll keeps its task record parseable by the PR poll identity contract"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -2493,6 +2523,7 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_pr_poll_meta_identity_order
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions

@@ -2832,6 +2832,7 @@ while :; do
           fm_custom_check_snapshot_cleanup
         else
           fm_custom_check_snapshot_cleanup
+          triage_log "PR poll for $id refused: trusted-path validation failed (artifacts, hashes, or meta identity), and no custom check trust exists"
           rejected_checks="$rejected_checks $c"
           continue
         fi

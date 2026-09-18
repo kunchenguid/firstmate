@@ -3318,6 +3318,36 @@ SH
   pass "a renumbered registration is never re-recorded around a tampered artifact:$exercised, or a pending retirement"
 }
 
+test_refused_poll_names_the_task_in_the_triage_log() {
+  local dir state out rc
+  dir=$(make_case refused-poll-triage)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  # Reproduce the task record the relaunch used to publish: a control line
+  # after the pr= line breaks the identity contract the trusted path
+  # validates, and the refusal must stay diagnosable without a full audit.
+  printf '%s\n' 'control_relaunch_tx=1.20260917T203300Z.1' >> "$state/task-a.meta"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "the broken-meta fixture was still authenticated"
+  set +e
+  run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "watcher failed on the refused poll: $(cat "$dir/watch.err")"
+  out=$(cat "$dir/watch.out")
+  case "$out" in
+    "check: rejected unauthenticated state checks:"*"task-a.check.sh"*) ;;
+    *) fail "the broken-meta poll was not refused: $out" ;;
+  esac
+  [ ! -s "$dir/gh.log" ] || fail "the refused poll reached the forge CLI"
+  grep -F "PR poll for task-a refused" "$state/.watch-triage.log" \
+    || fail "the refused poll left no triage record naming the task"
+  grep -F "trusted-path validation failed" "$state/.watch-triage.log" \
+    || fail "the triage record did not name the trusted-path validation failure"
+  pass "a refused PR poll names its task and failure mode in the triage log"
+}
+
 start_poll_publish_holder() {  # <dir> <state> <id>
   local dir=$1 state=$2 id=$3 i
   PR_POLL_HOLDER_ACQUIRED="$dir/poll-publish-holder-acquired"
@@ -3477,6 +3507,7 @@ test_poll_publication_refuses_unsafe_destinations
 test_live_artifact_single_link_and_privacy_validation
 test_device_renumbered_poll_stays_armed
 test_device_rerecord_refuses_tampered_artifacts
+test_refused_poll_names_the_task_in_the_triage_log
 test_device_rerecord_serializes_direct_rearm
 test_device_rerecord_serializes_rerecord
 test_postrename_poll_validation_revokes_and_retries
