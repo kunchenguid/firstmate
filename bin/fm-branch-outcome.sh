@@ -18,10 +18,8 @@
 #   - Cursor: $STATE/.branch-outcomes-cursor holds the highest seq handed to
 #     Pi as a routine merge note, persisted as a sequence-keyed visible captain
 #     entry, emitted by the locked session-start replay, or silently consumed
-#     there because `silent` is true. `silent` is allowed on any routine
-#     outcome: an unchanged still-working update is recorded durably with no
-#     rendered note, and progress resurfaces at most periodically through the
-#     next worth-reporting routine note or heartbeat summary.
+#     there because `silent` is true. `silent` is allowed only on routine
+#     outcomes; docs/pi-supervision-branch.md owns their visibility contract.
 #     Records above the cursor are unread.
 #     A captain row advances only after its matching visible entry exists in
 #     Pi's session, so reload recovery is idempotent across that crash window.
@@ -88,7 +86,8 @@
 #   fm-branch-outcome.sh pending-progress
 #     Print the latest silent task outcomes not superseded by a visible outcome
 #     for that task or a visible routine fleet summary, independently of the read cursor.
-#     Silent fleet reviews neither add nor consume pending progress.
+#     Silent fleet reviews and fleet captain outcomes neither add nor consume
+#     pending progress.
 #   fm-branch-outcome.sh startup-replay
 #     Session-start recovery: print the leading routine unread records under a
 #     labeled header into the locked startup digest, skip rows whose `silent`

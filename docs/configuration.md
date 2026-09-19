@@ -50,8 +50,7 @@ Homes on any other primary harness never load this feature and are entirely unaf
 While attended, a captain-facing (verdict `captain`) branch outcome persists as one exact, sequence-keyed visible transcript entry and then opens one sequence-keyed processing turn on main, which stays open until main acknowledges that sequence through its `fm_branch_processed` tool; while away, the entry persists but processing waits until the record is archived.
 The branch prompt's "Verdict: routine or captain" section owns the distinction between captain-facing, unsolicited routine, and unchanged-review outcomes.
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns main's event ownership, acknowledgement duty, and conversational treatment for merged outcomes, while the persisted entry itself owns captain visibility.
-A `routine` outcome explicitly reported with `silent=true` - an unchanged still-working update or a no-change heartbeat review - is recorded durably but delivered silently with no rendered note, with progress resurfacing at most periodically through the next worth-reporting routine note or heartbeat summary, while every other routine outcome still appends a rendered, sailboat-prefixed note.
-[docs/pi-supervision-branch.md](pi-supervision-branch.md#two-stage-noise-filter) owns the routine-throttle contract.
+See [Pi supervision branch](pi-supervision-branch.md#two-stage-noise-filter) for routine-note visibility and periodic progress summaries.
 
 ## Pi supervision branch model and effort (config/supervision-branch-model, config/supervision-branch-effort)
 
