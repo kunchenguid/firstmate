@@ -238,7 +238,7 @@ EOF
           "direct-PR/on: existing pull-request work was told to create a duplicate"
         assert_grep "ensure the task's resulting or existing pull request is ready for review" "$brief" \
           "direct-PR/on: resulting or existing pull request was not required to be ready"
-        assert_no_grep '^Create the pull request without `--draft`' "$brief" \
+        assert_no_grep "^Create the pull request without \`--draft\`" "$brief" \
           "direct-PR/on: existing pull-request work retained an unconditional creation instruction"
         assert_grep 'gh-axi pr ready <number>' "$brief" \
           "direct-PR/on: worker was not told to confirm ready-for-review state" ;;
