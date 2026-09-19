@@ -18,9 +18,9 @@ The failure repeated across harnesses and homes, and the workaround (remember to
 - The **verb allowlist**: `interrupt`, `exit`, `relaunch`.
   There is no arbitrary-text and no generic raw-key entry point.
   A caller either names an allowlisted verb or is refused.
-- **Per-harness mechanics**: the key that cancels a running turn, how many times it must be delivered, whether the composer needs clearing afterwards, the command that exits the agent, and which task kinds the adapter is verified to run.
+- **Per-harness mechanics**: the key that cancels a running turn, how many times it must be delivered, whether the composer needs clearing afterwards, whether firstmate must close the busy record itself on a delivered interrupt, the command that exits the agent, and which task kinds the adapter is verified to run.
   These were previously carried only in the [`harness-adapters`](../.agents/skills/harness-adapters/SKILL.md) skill's tool references, which now point here.
-  `bin/fm-send.sh`'s `--key` path reads the composer-clear table from this owner too, rather than keeping a second copy of it.
+  `bin/fm-send.sh`'s `--key` path reads the composer-clear and interrupt-close tables from this owner too, rather than keeping a second copy of either.
 - **Per-backend capability**: which named keys a runtime backend can deliver, and whether it has a recovery-grade agent-state classifier able to prove an agent stopped.
 
 A recorded `harness=` is not always an exact adapter name: a task launched from a raw command records that command's basename instead.
@@ -36,6 +36,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
 Interrupt never rewrites busy state as proof of its own success.
+The one state write it does make is a correction rather than evidence: after a delivered interrupt it closes the busy record for an adapter whose own turn-end hook cannot fire on one, best-effort so it can never fail the interrupt, with `fm_control_interrupt_clears_busy` in `bin/fm-control-lib.sh` owning that list - agy alone today.
 Claude exposes no lifecycle acknowledgement for a manual interrupt, so delivery succeeds with `cancel=unconfirmed` and its adapter-owned busy state remains as observed.
 muse's session log records `terminal=cancelled` for the interrupted run, so the control plane reports `cancel=confirmed` only after observing that exact acknowledgement.
 

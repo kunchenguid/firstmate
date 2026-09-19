@@ -7,8 +7,8 @@ The skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../../.age
 
 | Field | Value |
 |---|---|
-| Version | `agy 1.2.0`; the send-confirmation timing below was re-measured on `agy 1.2.1` (2026-09-12) |
-| Verified | 2026-09-10 |
+| Version | `agy 1.2.0`; the send-confirmation timing below was re-measured on `agy 1.2.1` (2026-09-12); the turn-end hook surface was established on `agy 1.2.6` (2026-09-18) |
+| Verified | 2026-09-10; hook surface 2026-09-18 |
 | Binary | `/home/andpod/.local/bin/agy`, an ELF 64-bit Go-compiled single executable |
 | Platform | Linux x64 (Arch, kernel 7.2.3) |
 | Backend | Herdr, in an isolated non-`default` lab session (`fm-lab-firstmate-agy-ad-*` via `bin/fm-herdr-lab.sh`); the live `default` session was unchanged throughout |
@@ -153,12 +153,117 @@ Same-copy relaunch held: `bin/fm-control.sh relaunch --note` replaced the worker
 Exit held: `bin/fm-control.sh exit` stopped the worker, the registry returned `agent_not_found`, and the pane remained a lone shell in the worktree with all work intact.
 No automatic quota failover was exercised or claimed; every handoff above was an explicit supervised relaunch.
 
+## Turn-end hooks: a global surface, attributed by a private token
+
+Established on `agy 1.2.6`, macOS 26.1 (Darwin 25.5.0), with the vendor hook guide the binary embeds.
+
+agy supports exactly five hook events and has NO session-start or session-end event:
+
+```
+*   **`PreToolUse`** / **`PostToolUse`** / **`PreInvocation`** / **`PostInvocation`**
+*   **`Stop`** (array, optional): Handlers running when the execution loop terminates.
+```
+
+Hooks load from a customization root - the global config directory, or `.agents/` relative to a workspace root - and named keys MERGE rather than override:
+
+```
+*   **Merging**: Multiple named hooks (e.g., from different plugins or configs)
+    for the same event type are merged and executed sequentially.
+```
+
+A hook `command` is run through a shell, `sh -c` on Unix and `cmd /c` on Windows, so a quoted path is honoured rather than taken literally (verified live on `agy 1.2.6`: an unquoted hook path containing a space silently failed to fire `Stop`, and quoting the same path made it fire).
+A hook's working directory is the directory holding `hooks.json`, not the workspace, and hooks block the agent loop:
+
+```
+*   **`command`** ... The working directory is set to the directory containing `hooks.json`.
+*   **`timeout`** (int, optional): Execution timeout in seconds. Defaults to `30`.
+## Current Limitations
+*   Hooks run synchronously and block the agent loop (no async execution).
+```
+
+`Stop` fires once per completed turn, proven across two turns of ONE conversation - an initial brief and one steer - with a timestamped writer registered in the global root:
+
+```
+#1 at 14:32:04: executionNum=0 terminationReason=NO_TOOL_CALL conversationId=ac1316c9...
+#2 at 14:33:06: executionNum=0 terminationReason=NO_TOOL_CALL conversationId=ac1316c9...
+TOTAL STOP FIRINGS: 2
+```
+
+`executionNum` stayed `0` across both, so it counts execution-loop iterations within a turn and must never be read as a turn index.
+
+`PreInvocation` opens and `Stop` closes, and `Stop` does NOT fire on a manual interrupt.
+Across one interrupted turn and one completed turn:
+
+```
+14:24:26 PRE      <- turn 1 opens
+                  <- Escape sent mid-turn; NO POST, NO STOP
+14:25:39 PRE      <- turn 2 opens
+14:25:59 POST     <- turn 2 model call finished
+14:25:59 STOP     <- turn 2 closes
+```
+
+The interrupt landed; the pane rendered `⎿  Interrupted · What should Antigravity CLI do instead?` and the status row returned to `? for shortcuts`. Because agy also has no session-end event, firstmate closes the record itself on both interrupt planes, `bin/fm-control.sh` and the legacy `bin/fm-send.sh --key Escape`, and `fm_busy_agy_tail_busy` is retained as the no-record fallback.
+The busy record needs no agy-specific age bound: `BUSY_TURN_MAX_SECS` in `../../bin/fm-watch.sh` (default 3600s) already ages any busy pane from its last completed turn, and the `Stop` hook above touches `state/<id>.turn-ended`, so that clock resets on every turn agy finishes.
+Where the hook cannot be installed at all - a `hooks.json` firstmate does not own, which the installer refuses without a write - the spawn says so on its own path and runs that task unarmed on the rendered-tail read instead of failing.
+
+The `Stop` payload carries no re-entrancy flag; its output contract is what bounds re-entry:
+
+```
+*   **`decision`** (string, required): Set to `"continue"` to block the stop
+    and re-enter the loop. Any other value allows the agent to stop.
+```
+
+A completed TUI turn's payload, which is what the token-carried parameters replace:
+
+```json
+{
+  "conversationId": "664c442e-cded-4b5e-a6db-19f02757a771",
+  "error": "",
+  "executionNum": 0,
+  "fullyIdle": true,
+  "modelName": "gemini-3.8-flash-low",
+  "terminationReason": "NO_TOOL_CALL",
+  "transcriptPath": "/Users/…/.gemini/antigravity-cli/brain/664c442e-…/.system_generated/logs/transcript_full.jsonl",
+  "workspacePaths": ["/Users/…/scratch-agy/proj2"]
+}
+```
+
+`workspacePaths` is populated in the TUI once the workspace is trusted and was EMPTY in `--print` mode, so it is not relied on for attribution.
+
+There is no per-task config path. `JETSKI_APP_DATA_DIR` does not relocate the customization root - the alternate-root hook never fired and the global one fired instead - and `agy --help` lists no config-directory or settings-path flag, so there is no `GEMINI_CLI_SYSTEM_SETTINGS_PATH` equivalent.
+
+Attribution therefore rides the environment, which hook children inherit.
+A hook launched with `FM_TASK_ID` and a probe variable saw both, plus agy's own injected conversation id, with the config directory as its cwd:
+
+```
+--- env ---
+/Users/…/.gemini/config
+ANTIGRAVITY_CONVERSATION_ID=<redacted uuid>
+CLAUDECODE=1
+FM_PROBE=marker42
+FM_TASK_ID=agy-scout-probe
+```
+
+`CLAUDECODE=1` is inherited and not cleared, consistent with the detection section above.
+No `ANTIGRAVITY_AGENT` or `AGY_*` variable is set on the agent process itself.
+
+Refresh these facts with the portable suite, which exercises the real installer and the real generated hook script:
+
+```
+bin/fm-test-run.sh tests/fm-agy-harness.test.sh
+```
+
 ## What is still unproven
 
 The unauthenticated failure mode was never observed; this host's agy runs signed in, so any auth prompt is a fail-loud credential blocker, not a handled dialog.
 No slash-skill invocation form was verified, so skill invocation stays natural language.
 `--continue` and `--conversation` resume were never exercised; recovery uses deterministic relaunch from the brief on disk.
 No primary or secondmate behavior was built or tested, and none is claimed.
+`terminationReason` was only ever observed as `NO_TOOL_CALL`; the vendor guide names `model_stop`, `max_steps_exceeded`, and `error` in a different casing, so those values are unconfirmed.
+Whether a firstmate hook in the shared global root also runs inside the Antigravity IDE or Antigravity 2.0 was not tested; the vendor guide describes one mechanism across all three, which is why the installed handlers are bounded and exit 0 on every path.
+Hook failure modes - a handler that times out, exits non-zero, or emits invalid JSON - were not exercised against live agy.
+Concurrent agy tasks in one home were never run, so token attribution is proven by construction and by the portable suite rather than under live parallelism.
+Why a workspace-root `.agents/hooks.json` did not load was reproduced twice but never diagnosed; only the global root is relied on.
 
 ## Refreshing this record
 

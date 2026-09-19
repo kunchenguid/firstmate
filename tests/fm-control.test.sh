@@ -25,6 +25,8 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-marker-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-busy-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SEND="$ROOT/bin/fm-send.sh"
@@ -720,6 +722,30 @@ test_interrupt_without_acknowledgement_preserves_busy_state() {
   pass "fm-control interrupt: unconfirmed delivery preserves observed busy state"
 }
 
+# agy's own Stop hook does NOT fire on a manual interrupt (verified on agy 1.2.6,
+# guarded by tests/fm-agy-signals-live-e2e.test.sh) and agy has no session-end
+# event, so this verb must close the record itself or the task would read busy
+# until the next turn opened. The close is scoped by
+# fm_control_interrupt_clears_busy: claude's case above pins that an adapter
+# which owns its own verdict is still preserved rather than overwritten here.
+test_agy_interrupt_closes_its_own_busy_record() {
+  local dir gen out rc
+  dir=$(new_case agy-interrupt)
+  add_task "$dir" t1 agy scout
+  alive_as "$dir" agy
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
+  [ "$(fm_busy_classify tmux fmses:fm-t1 agy t1 "$dir/home/state")" = "busy fm-spawn" ] \
+    || fail "the armed agy task should read busy before its interrupt"
+  out=$(run_control "$dir" t1 interrupt); rc=$?
+  expect_code 0 "$rc" "an agy interrupt should deliver"$'\n'"$out"
+  [ "$(keys_sent "$dir")" = "Escape" ] \
+    || fail "agy should receive a single Escape, got: $(keys_sent "$dir")"
+  [ "$(fm_busy_classify tmux fmses:fm-t1 agy t1 "$dir/home/state")" = "idle fm-interrupt" ] \
+    || fail "an agy interrupt must close the record firstmate armed, got: $(fm_busy_classify tmux fmses:fm-t1 agy t1 "$dir/home/state")"
+  pass "fm-control interrupt: agy's busy record is closed by firstmate, which fires no Stop for a cancel"
+}
+
 test_muse_interrupt_confirms_adapter_acknowledgement() {
   local dir root log out rc
   dir=$(new_case confirmed)
@@ -906,6 +932,7 @@ test_ambiguous_endpoint_refuses
 test_busy_agent_is_interrupted_before_the_exit_command
 test_idle_agent_is_not_interrupted
 test_interrupt_without_acknowledgement_preserves_busy_state
+test_agy_interrupt_closes_its_own_busy_record
 test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait
 test_exit_accepts_agent_stopped_by_busy_interrupt

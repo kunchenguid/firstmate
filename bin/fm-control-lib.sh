@@ -240,6 +240,10 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
       printf '%s\n' "$wt/.fm-kimi-turnend"
       printf '%s\n' "$state/$id.kimi-turnend-token"
       ;;
+    agy)
+      # No worktree pointer by design: the launch exports the token instead.
+      printf '%s\n' "$state/$id.agy-turnend-token"
+      ;;
     muse)
       # muse installs no hook: its busy source is its own session event log,
       # bound to the pane by these two firstmate-owned sidecars. A relaunch
@@ -259,8 +263,8 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
 }
 
 # The firstmate-owned global turn-end registry entry a harness mints per task.
-# grok and kimi are the two adapters whose turn-end hook is global and gated by
-# a private token file; every other adapter's wiring is fully covered by
+# grok, kimi and agy are the three adapters whose turn-end hook is global and
+# gated by a private token file; every other adapter's wiring is covered by
 # fm_control_harness_wiring_paths. Prints the registry path or nothing.
 fm_control_harness_turnend_token_path() {  # <harness> <state-dir> <id>
   local harness=${1-} state=${2-} id=${3-}
@@ -268,6 +272,7 @@ fm_control_harness_turnend_token_path() {  # <harness> <state-dir> <id>
   case "$harness" in
     grok) printf '%s\n' "$state/$id.grok-turnend-token" ;;
     kimi) printf '%s\n' "$state/$id.kimi-turnend-token" ;;
+    agy) printf '%s\n' "$state/$id.agy-turnend-token" ;;
   esac
 }
 
@@ -277,6 +282,22 @@ fm_control_harness_turnend_auth_path() {  # <harness> <token>
   case "$harness" in
     grok) printf '%s\n' "${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d/$token" ;;
     kimi) printf '%s\n' "$HOME/.kimi-code/fm-turn-end.d/$token" ;;
+    agy) printf '%s\n' "$HOME/.gemini/antigravity-cli/fm-turn-end.d/$token" ;;
     *) return 0 ;;
+  esac
+}
+
+# Whether firstmate must close this adapter's busy record itself when it
+# delivers an interrupt, because the adapter's own turn-end hook does not fire
+# on one and it has no session-end event to fall back on. agy is the only such
+# adapter: its Stop hook is verified NOT to fire on a manual Escape (agy 1.2.6),
+# so without this the record would stay busy until the next turn opened.
+# Claude is deliberately NOT listed: bin/fm-send.sh's --key Escape path already
+# records that transition and bin/fm-control.sh preserves adapter-owned state.
+# Gemini is not listed either, because its AfterAgent DOES fire on an interrupt.
+fm_control_interrupt_clears_busy() {  # <harness>
+  case "$(fm_control_harness_family "${1-}" 2>/dev/null)" in
+    agy) return 0 ;;
+    *) return 1 ;;
   esac
 }

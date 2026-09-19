@@ -311,14 +311,20 @@
 # only after a TUI readiness gate, then a delivery-confirmation gate - the same
 # launch-then-send shape as kimi. Its busy state is a screen-scrape fallback like
 # grok. rovo is crewmate/scout only and is refused for --secondmate, like muse.
-# agy installs no hook either - it exposes no hook surface at all - so it
-# carries no busy-source wiring and no turn-end hook. Its brief rides the launch
-# command, but a fresh worktree would park it on a folder-trust dialog, so the
-# spawn pre-registers the worktree in agy's own trust store through
-# bin/fm-agy-trust.sh (the claude shape, but non-fatal) and then waits for a
-# busy turn - answering the dialog first if it renders anyway - before
-# reporting success (the rovo/kimi launch-then-confirm shape). Its busy state
-# is a screen-scrape fallback like grok and rovo, and it is crewmate/scout only.
+# agy DOES carry a turn-end hook, but a GLOBAL one: its customization roots are
+# its global config directory and a workspace's own .agents/, with no per-task
+# settings path, so bin/fm-agy-turnend-hook.sh installs one guarded hook shared
+# with the captain's own sessions and the Antigravity IDE, and this spawn mints
+# a private token the launch exports so only a firstmate task is ever touched.
+# PreInvocation opens a turn and Stop closes it; Stop does NOT fire on a manual
+# interrupt and agy has no session-end event, so fm-control closes the record on
+# interrupt and the screen-scrape fallback stays as the no-record fallback.
+# Its brief rides the launch command, but a fresh worktree would park it on a
+# folder-trust dialog, so the spawn pre-registers the worktree in agy's own
+# trust store through bin/fm-agy-trust.sh (the claude shape, but non-fatal) and
+# then waits for a busy turn - answering the dialog first if it renders anyway -
+# before reporting success (the rovo/kimi launch-then-confirm shape).
+# agy is crewmate/scout only.
 # cursor installs no per-task hook either: it writes state/<id>.cursor-session to
 # bind the pane to cursor's own conversation transcript (projects root, the exact
 # workspace path cursor records in .workspace-trusted, and the conversations that
@@ -1826,9 +1832,18 @@ launch_template() {
   # reason cursor clears them: agy publishes no marker of its own and does not
   # clear an inherited CLAUDECODE (verified in the /proc environ of a live 1.2.0
   # TUI), so bin/fm-harness.sh must not read an agy worker as its launcher.
-  # agy exposes no hook surface, so busy state is a rendered-tail fallback
-  # (bin/fm-busy-lib.sh) and nothing is armed below.
-  agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __AGYBIN__ --prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)" __MODELFLAG____EFFORTFLAG__--dangerously-skip-permissions' ;;
+  # agy DOES expose a hook surface: a global hooks.json in its customization
+  # root, whose PreInvocation opens a turn and whose Stop closes one (verified
+  # live on agy 1.2.6, twice in a single conversation). It has no per-task
+  # settings path, so the hook is global and attributes a firing through
+  # FM_AGY_TURNEND_TOKEN, exported below and inherited by the hook child. It is
+  # assigned inline rather than through the launch-env allowlist because the
+  # allowlist deliberately does not carry it past `env -i`.
+  # Stop does NOT fire on a manual interrupt and agy has no session-end event,
+  # so firstmate closes the record itself on both interrupt planes and the
+  # rendered-tail fallback in bin/fm-busy-lib.sh is retained for every window
+  # in which no record exists.
+  agy) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __AGYTOKEN____AGYBIN__ --prompt-interactive "$(__OPINPUT__ encode launch-brief < __BRIEF__)" __MODELFLAG____EFFORTFLAG__--dangerously-skip-permissions' ;;
   # grok (Grok Build TUI): a positional prompt starts the supervised interactive
   # session. --always-approve auto-approves every tool execution (verified: the
   # crewmate runs fully autonomously, no permission gate), which an unattended
@@ -2005,8 +2020,8 @@ esac
 # asyncRewake handlers that firstmate's primary turn-end supervision is built on
 # (muse 0.1.0-R708.1). Refusing here keeps that gap loud instead of standing up a
 # secondmate whose supervision cycle could never be armed.
-# agy has none either: it exposes no hook surface for primary supervision and
-# docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
+# agy has none either: its crew turn-end hook says nothing about primary
+# supervision, and docs/supervision-protocols/ carries no agy wake protocol.
 if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
@@ -2021,6 +2036,9 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = rovo ]; then
   exit 1
 fi
 
+# Whether this agy launch got its global turn-end hook. Cleared below when the
+# installer refuses the store, which drops the launch to the unwired shape.
+AGY_TURNEND_WIRED=1
 case "$HARNESS" in
 pi | pi-signed)
   PI_BIN=$(resolve_pi_executable "$HARNESS") || {
@@ -2066,6 +2084,25 @@ agy)
     echo "error: agy executable not found on PATH; install Antigravity CLI or select a different verified harness" >&2
     exit 1
   }
+  # agy's turn-end hook lives in its GLOBAL customization root, shared with the
+  # captain's own sessions and the Antigravity IDE, so the installer owns the
+  # edit and the hook stays inert without this task's token. Installed before a
+  # managed launch and deliberately never removed at teardown: another live agy
+  # task may still depend on it. A raw launch is skipped on the same predicate
+  # the busy arm and the token mint use: it mints no token, so its hook firing
+  # could never resolve one, and writing the key would only add two synchronous
+  # subprocesses to every turn of the captain's own sessions for no benefit.
+  # A refused install is NOT fatal. The installer refuses a store firstmate does
+  # not own outright - a symlink, another uid's file, a non-object root - and a
+  # home whose hooks.json a dotfiles tool manages is exactly that shape. The
+  # spawn instead drops to the raw-launch shape it already supports: no busy
+  # arm, no token, and the retained rendered-tail fallback in bin/fm-busy-lib.sh
+  # carrying detection. The supervisor is told which shape this worker got.
+  if [ "$KIND" != secondmate ] && [ "$RAW_LAUNCH" -eq 0 ] \
+    && ! "$FM_ROOT/bin/fm-agy-turnend-hook.sh" install; then
+    AGY_TURNEND_WIRED=0
+    echo "warning: agy's global turn-end hook could not be installed safely (see the refusal above); task $ID will run WITHOUT semantic busy state and WITHOUT a turn-end signal, on the weaker rendered-tail idle read alone" >&2
+  fi
   ;;
 esac
 
@@ -3570,9 +3607,9 @@ rovo_endpoint_cleanup() {
 # (bin/fm-agy-trust.sh, verified to remove the dialog), and this gate is the
 # backstop in the rovo/kimi launch-then-confirm shape: answer the dialog once
 # with the preselected safe default if it renders anyway, then require
-# positive proof that the brief is being processed - the same verdict the
-# supervisor reads (Herdr's native working state or the pinned `esc to cancel`
-# status row through fm_busy_classify) - before the spawn reports success.
+# positive proof that the brief is being processed - Herdr's native working
+# state or the pinned `esc to cancel` status row, read straight from the live
+# endpoint - before the spawn reports success.
 # The gate is strict about ordering because on Herdr the native working
 # verdict is known to coexist with an unanswered dialog: a busy verdict counts
 # only when the path was pre-registered or the dialog has been seen and
@@ -3588,11 +3625,16 @@ agy_pane_shows_trust_dialog() {  # <plain-pane-capture>
   printf '%s\n' "$1" | grep -Fq "$AGY_TRUST_DIALOG"
 }
 
+# Deliberately NOT routed through fm_busy_classify: this spawn seeds its own
+# busy record (state=busy source=fm-spawn) before the launch line is typed, and
+# the classifier answers from a record whenever one exists, so asking it here
+# would hand the gate back firstmate's own seed and report a dead launch as
+# ready. The gate reads the live sources the classifier's no-record path reads.
 agy_pane_is_working() {  # <plain-pane-capture>
-  case "$(fm_busy_classify "$BACKEND" "$T" agy "$ID" "$STATE" "$1")" in
-    busy*) return 0 ;;
-  esac
-  return 1
+  if [ "$BACKEND" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
+    [ "$(fm_backend_busy_state "$BACKEND" "$T" 2>/dev/null || true)" = busy ] && return 0
+  fi
+  printf '%s' "$1" | fm_busy_agy_tail_busy
 }
 
 agy_wait_for_working() {
@@ -3801,6 +3843,10 @@ mkdir -p "$TASK_TMP/gotmp"
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+# Env prefix for an agy launch, minted with this task's turn-end token below and
+# substituted into the launch command. Empty for every other harness and for an
+# agy launch that armed no wiring, which leaves the command byte-identical.
+AGY_TOKEN_ENV=
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -3849,6 +3895,19 @@ if [ "$KIND" != secondmate ]; then
       exit 1
     }
     [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
+    ;;
+  agy)
+    # Armed only for the managed launch shape, the gemini rule: a raw command
+    # carries no token export, so its hook could never clear a seeded record.
+    # An unwired launch is the same case: with no installed hook nothing could
+    # ever clear a seeded record, so it stays on the rendered-tail fallback.
+    if [ "$RAW_LAUNCH" -eq 0 ] && [ "$AGY_TURNEND_WIRED" -eq 1 ]; then
+      BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
+        echo "error: failed to arm the busy-state contract for $ID" >&2
+        exit 1
+      }
+      [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
+    fi
     ;;
   gemini)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
@@ -4186,6 +4245,34 @@ EOF
     printf 'token=%s\n' "${auth_file##*/}" >"$WT/.fm-kimi-turnend"
     exclude_path '.fm-kimi-turnend'
     ;;
+  agy)
+    # agy's hooks are global and shared with the captain's own sessions and the
+    # Antigravity IDE, so the per-task parameters claude and gemini bake into a
+    # per-task hook file live in this private token instead. Unlike grok and
+    # kimi there is deliberately NO worktree pointer: agy's hook runs with the
+    # config directory as its cwd, and the launched process exports the token
+    # directly, so nothing is written into the project under test.
+    # Skipped for a raw launch, the gemini rule: that command carries no token
+    # placeholder to substitute, so a token minted here could never fire, and
+    # skipped for an unwired launch, whose hook was never installed to read it.
+    if [ "$RAW_LAUNCH" -eq 0 ] && [ "$AGY_TURNEND_WIRED" -eq 1 ]; then
+      AGY_AUTH_DIR="$HOME/.gemini/antigravity-cli/fm-turn-end.d"
+      mkdir -p "$AGY_AUTH_DIR"
+      old_umask=$(umask)
+      umask 077
+      auth_file=$(mktemp "$AGY_AUTH_DIR/fm.XXXXXXXXXXXX")
+      umask "$old_umask"
+      {
+        printf 'turnend=%s\n' "$TURNEND"
+        printf 'busy_event=%s\n' "$FM_ROOT/bin/fm-busy-event.sh"
+        printf 'state=%s\n' "$STATE_REAL"
+        printf 'id=%s\n' "$ID"
+        printf 'gen=%s\n' "$BUSY_GEN"
+      } >"$auth_file"
+      printf '%s\n' "${auth_file##*/}" >"$STATE/$ID.agy-turnend-token"
+      AGY_TOKEN_ENV="FM_AGY_TURNEND_TOKEN=$(shell_quote "${auth_file##*/}") "
+    fi
+    ;;
   esac
 fi
 
@@ -4430,7 +4517,10 @@ pi | pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
 cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
 omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
-agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
+agy)
+  LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"}
+  LAUNCH=${LAUNCH//__AGYTOKEN__/"$AGY_TOKEN_ENV"}
+  ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in

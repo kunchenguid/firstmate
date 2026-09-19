@@ -433,10 +433,24 @@ verify_interrupt_running() {
   printf '%s' "$proof"
 }
 
+# Close the busy record for an adapter whose own turn-end hook cannot fire on a
+# manual interrupt (bin/fm-control-lib.sh owns which those are). Without this the
+# record would read busy until the next turn opened, and fm_busy_classify never
+# falls back to a rendered-tail read while a record exists. Best-effort by
+# design: a refused event means a superseded incarnation, which is not this
+# command's problem, and must never fail a delivered interrupt.
+record_interrupt_idle() {
+  fm_control_interrupt_clears_busy "$RECORDED_HARNESS" || return 0
+  [ -f "$STATE/$ID.busy-gen" ] || return 0
+  "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$ID" idle \
+    --current-gen --source fm-interrupt --event interrupt >/dev/null 2>&1 || true
+}
+
 do_interrupt() {
   local proof cancel
   cancel=$(deliver_interrupt) || return $?
   proof=$(verify_interrupt_running) || return $?
+  record_interrupt_idle
   printf '%s cancel=%s' "$proof" "$cancel"
 }
 
