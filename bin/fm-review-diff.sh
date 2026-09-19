@@ -12,8 +12,10 @@
 # neither PR head can be resolved, fall back to the local branch with a warning.
 # A GitLab merge request and a Gerrit change expose no comparable ref and record
 # no pr_head, so a task recording one always takes that warning path;
-# docs/architecture.md owns that fallback. Without pr=, compare the local
-# branch.
+# docs/architecture.md owns that fallback. Without pr=, compare the task's
+# immutable ship branch recorded in state/<id>.meta ("fm/<id>" for records
+# created before that field existed), or the worktree's checked-out branch when
+# that branch does not exist in the worktree.
 # Usage: fm-review-diff.sh <task-id> [--stat]
 #   --stat prints only the stat summary; default prints stat summary plus full diff.
 set -eu
