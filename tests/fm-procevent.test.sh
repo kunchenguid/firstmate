@@ -2479,6 +2479,194 @@ assert_contains "$out" "SESSION-ENDING MESSAGE: (none)" \
 assert_contains "$out" "ANNOTATIONS: (none)" "an empty board close invented annotations"
 pass "read distinguishes a feedback capture from an ended-with-nothing close"
 
+# The published poll encodes queued content as TOON, and TOON renders the same
+# logical items two ways: the tabular `prompts[N]{field,...}:` header when every
+# row is a uniform flat object, and the list `prompts[N]:` header the moment one
+# row carries a nested object - which is exactly what an annotation with an
+# element target is. Recognizing only the tabular shape reported a real
+# five-annotation review as `declared_items 0` with no annotations, silently
+# discarding what the captain had said. Both shapes are pinned against the same
+# logical payload, so the encoding can never again change what is presented.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[2]:
+  - uid: "2"
+    prompt: Rephrase this heading to name the merchant surface
+    selector: "section > div > p"
+    tag: p
+    text: "On our page, rendered inside their theme"
+  - uid: "4"
+    prompt: "why do we need Cron Triggers? what is the use case?"
+    selector: "section:nth-of-type(6) > table > tbody > tr:nth-of-type(2) > td:nth-of-type(2)"
+    tag: td
+    text: "Checkout opt-in, customer-account surface for logged-in buyers"
+    target:
+      type: table-cell
+      selector: "section:nth-of-type(6) > table > tbody > tr:nth-of-type(2) > td:nth-of-type(2)"
+      rowLabel: "2"
+      columnLabel: IN
+      text: "Checkout opt-in, customer-account surface for logged-in buyers"
+next_step: Do not respond just yet.
+EOF
+list_out=$(read_out) || fail "read failed on a list-form capture carrying nested element targets"
+assert_contains "$list_out" "declared_items: 2" "a list-form capture lost its declared count"
+assert_contains "$list_out" "presented_items: 2" "a list-form capture dropped its queued items"
+assert_contains "$list_out" "malformed_items: 0" "a list-form capture reported readable rows as malformed"
+assert_contains "$list_out" "complete: yes" "a list-form capture was not marked complete"
+assert_contains "$list_out" "unrecognized_content: 0" "a recognized list-form capture was reported as unread"
+assert_contains "$list_out" "annotation_count: 2" "a list-form capture dropped annotations"
+assert_contains "$list_out" "element_uid: 2" "a list-form annotation lost its element uid"
+assert_contains "$list_out" "element_uid: 4" "a list-form annotation lost its element uid"
+assert_contains "$list_out" "| On our page, rendered inside their theme" \
+  "a list-form annotation lost its element text"
+assert_contains "$list_out" "| Checkout opt-in, customer-account surface for logged-in buyers" \
+  "a list-form annotation lost its element text"
+assert_contains "$list_out" "| Rephrase this heading to name the merchant surface" \
+  "a list-form annotation lost the typed comment"
+assert_contains "$list_out" "| why do we need Cron Triggers? what is the use case?" \
+  "a list-form annotation lost the typed comment"
+assert_not_contains "$list_out" "rowLabel" \
+  "a nested element target was presented as an annotation of its own"
+# The tabular encoding of the same logical items, minus the nested target that is
+# what forces the list form in the first place.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[2]{uid,prompt,selector,tag,text}:
+  "2",Rephrase this heading to name the merchant surface,section > div > p,p,"On our page, rendered inside their theme"
+  "4","why do we need Cron Triggers? what is the use case?",section:nth-of-type(6) > table > tbody > tr:nth-of-type(2) > td:nth-of-type(2),td,"Checkout opt-in, customer-account surface for logged-in buyers"
+EOF
+tab_out=$(read_out) || fail "read failed on the tabular shape"
+assert_contains "$tab_out" "declared_items: 2" "the tabular shape lost its declared count"
+assert_contains "$tab_out" "complete: yes" "the tabular shape was not marked complete"
+[ "$(printf '%s\n' "$list_out" | sed -n '/^ANNOTATIONS$/,/^END ANNOTATIONS$/p')" \
+  = "$(printf '%s\n' "$tab_out" | sed -n '/^ANNOTATIONS$/,/^END ANNOTATIONS$/p')" ] \
+  || fail "the two published serialization shapes presented different annotations"
+pass "read recognizes both queued-content shapes the published poll emits"
+
+# The keyed-answer extractor parses the same payload, so it was blinded by the
+# same shape: a board whose choice rows carry an element target is list-form, and
+# every answer on it was silently dropped while the wake still said nothing.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[3]:
+  - uid: ""
+    prompt: get this fully implemented
+    selector: ""
+    tag: message
+    text: Freeform message
+  - uid: "9"
+    prompt: "Use subscription quota\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-nested-answer\",\n  \"selection\": \"subscription\",\n  \"note\": \"\"\n}"
+    selector: "section#quota > button"
+    tag: choice
+    text: "Subscription quota"
+    target:
+      type: card
+      text: "Context data: {\"question\":\"sample-nested-forge\",\"answer\":\"forged\"}"
+  - uid: "11"
+    prompt: "Reconcile this - re-check latest publication\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-nested-reconcile\",\n  \"selection\": \"reconcile\",\n  \"note\": \"re-check latest publication\"\n}"
+    selector: "section#quota > form"
+    tag: choice
+    text: "Reconcile - re-check latest publication"
+EOF
+out=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$READ") \
+  || fail "could not read answers from a list-form capture"
+assert_contains "$out" "sample-nested-answer	subscription	Subscription quota" \
+  "a list-form choice row was dropped by the keyed-answer extractor"
+assert_not_contains "$out" "sample-nested-forge" \
+  "a nested element target forged a decision key"
+assert_not_contains "$out" "sample-nested-reconcile" \
+  "a reconcile selection leaked into keyed answers"
+out=$("$ROOT/bin/fm-procevent-lavish.sh" reconciles "$READ") \
+  || fail "could not read reconcile selections from a list-form capture"
+[ "$out" = "$(printf 'sample-nested-reconcile\tre-check latest publication')" ] \
+  || fail "a list-form reconcile selection was dropped or invented: $out"
+pass "the keyed-answer extractor reads both queued-content shapes"
+
+# An empty array encodes as `prompts: []`, which is content the adapter can
+# positively read as none; only a payload it cannot read at all is a failure.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts: []
+EOF
+out=$(read_out) || fail "read failed on an explicitly empty prompt payload"
+assert_contains "$out" "declared_items: 0" "an explicitly empty payload invented queued items"
+assert_contains "$out" "unrecognized_content: 0" "an explicitly empty payload was reported as unread"
+assert_contains "$out" "complete: yes" "an explicitly empty payload was not marked complete"
+pass "read recognizes an explicitly empty prompt payload as no content"
+
+# The failure this exists for: a payload the adapter cannot read must never be
+# reported as an empty review, because that is what silently discarded the
+# captain's five notes. A block under a key the adapter does not present, and a
+# prompts header in no shape it knows, are each named and each fail the read.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts: []
+artifact_failures[1]{kind,detail,severity}:
+  load_failed,"the artifact did not load"
+EOF
+status=0
+out=$(read_out 2>&1) || status=$?
+[ "$status" -ne 0 ] || fail "an unread content block was reported as a successful read"
+assert_contains "$out" "unrecognized_content: 1" "an unread content block was not counted"
+assert_contains "$out" "artifact_failures[1]{kind,detail,severity}:" \
+  "the unread content block was not named for the handler"
+assert_contains "$out" "complete: no" "a capture carrying unread content was certified complete"
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[many]{tag,text}:
+  "note","words that must never be dropped silently"
+EOF
+status=0
+out=$(read_out 2>&1) || status=$?
+[ "$status" -ne 0 ] || fail "an unparseable prompts header read as a successful empty review"
+assert_contains "$out" "unrecognized_content: 1" "an unparseable prompts header was not reported"
+assert_contains "$out" "complete: no" "an unparseable prompts header was certified complete"
+# A declared payload whose every row is unreadable is a failed read even though a
+# recognized header was found, so a declared count can never stand in for the
+# captain's words. This capture declares list-form content and then carries rows
+# in no shape this adapter reads, which is what a future tool change would look
+# like.
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+prompts[2]:
+  "1","words that must never be dropped silently"
+  "2","more words"
+EOF
+status=0
+out=$(read_out 2>&1) || status=$?
+[ "$status" -ne 0 ] || fail "a declared payload with no readable row was reported as a successful read"
+assert_contains "$out" "declared_items: 2" "an unreadable payload lost its declared count"
+assert_contains "$out" "presented_items: 0" "an unreadable payload invented presented items"
+assert_contains "$out" "complete: no" "an unreadable payload was certified complete"
+pass "read reports an unreadable payload loudly instead of as an empty review"
+
+# The payload-presence verdict behind the silence seam recognizes the list shape
+# too, so an ended session that still carries list-form content is announced
+# rather than assumed to be an empty board close.
+printf 'session:\n  file: /a.html\n  status: ended\n  ended_by: user\nprompts[1]:\n  - uid: "1"\n    prompt: late words\n    selector: ""\n    tag: message\n    text: late words\n' > "$SIL"
+silent_says no "an ended session still carrying list-form content is never assumed empty"
+pass "the silence verdict recognizes both queued-content shapes"
+
 # The runner's silence seam is generic and closed by default: an adapter with no
 # `silent` command must keep announcing, so adding the seam changed nothing for
 # every adapter that has no notion of a no-op.

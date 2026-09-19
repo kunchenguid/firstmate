@@ -1560,13 +1560,15 @@ test_bound_channel_answers_close_at_answer_time() {
     --reason "captain old bare reconcile pending" --repo sample --origin "$id" >/dev/null
   run_captain "$home" hold sample-old-reconcile-note --title "Captain call: old annotated reconcile" \
     --reason "captain old annotated reconcile pending" --repo sample --origin "$id" >/dev/null
+  run_captain "$home" hold sample-nested-target-call --title "Captain call: nested target" \
+    --reason "captain nested-shape choice pending" --repo sample --origin "$id" >/dev/null
   tasks_in "$home" add sample-gated-work "Gated sample work" --kind ship --repo sample \
     --body 'Gated work plan.' >/dev/null
   run_captain "$home" hold sample-gated-work --reason "captain go needed" >/dev/null
   run_captain "$home" complete "$id" \
     sample-membership-call sample-headline-call sample-forged-call sample-invalid-close-call \
     sample-source-reconcile sample-bare-reconcile sample-old-shape sample-old-reconcile \
-    sample-old-reconcile-note sample-gated-work >/dev/null \
+    sample-old-reconcile-note sample-nested-target-call sample-gated-work >/dev/null \
     || fail "completion failed for the deck's inventoried calls"
 
   artifact="$home/data/$id/review.html"
@@ -1625,6 +1627,40 @@ EOF
   out=$(run_lavish "$home" reconciles "$result") || fail "could not read captured reconcile selections"
   [ "$out" = "$(printf 'sample-source-reconcile\tre-check latest publication\nsample-bare-reconcile')" ] \
     || fail "current or legacy selections lost or invented a reconcile task id: $out"
+
+  # The published poll switches to its list encoding as soon as one queued row
+  # carries a nested object, which is exactly what a choice card's element target
+  # is. A capture in that shape must close its call like the tabular one above did;
+  # before both shapes were recognized, every answer on such a board was dropped
+  # and its call stayed open.
+  nested="$home/nested-target.result"
+  cat > "$nested" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[1]:
+  - uid: "7"
+    prompt: "Nested: gold-only\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"sample-nested-target-call\",\n  \"selection\": \"gold-only\",\n  \"note\": \"\"\n}"
+    selector: "section#call > form:nth-of-type(2)"
+    tag: choice
+    text: "Nested: gold-only"
+    target:
+      type: card
+      selector: "section#call > form:nth-of-type(2)"
+      text: "Nested: gold-only"
+EOF
+  out=$(run_lavish "$home" answers "$nested") \
+    || fail "could not read a capture in the list encoding"
+  assert_contains "$out" "sample-nested-target-call	gold-only" \
+    "a list-form choice row was dropped, so its call could never close"
+  printf '%s\n' "$out" \
+    | run_captain "$home" answers --source "the captured list-shape result" >/dev/null \
+    || fail "a list-form answer did not reach the keyed-answer intake"
+  show=$(tasks_in "$home" show sample-nested-target-call --full)
+  assert_contains "$show" "state: done" "a list-form answer left its captain call open"
+  assert_contains "$show" "Answer: gold-only" "a list-form answer lost the captain's choice"
 
   mkdir -p "$home/adapter-root/bin"
   cat > "$home/adapter-root/bin/fm-procevent-fixturechan.sh" <<SH
