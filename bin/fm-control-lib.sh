@@ -231,7 +231,13 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
     claude) printf '%s\n' "$wt/.claude/settings.local.json" ;;
     opencode) printf '%s\n' "$wt/.opencode/plugins/fm-busy-state.js" ;;
     pi|pi-signed) printf '%s\n' "$state/$id.pi-ext.ts" ;;
-    omp) printf '%s\n' "$state/$id.omp-ext.ts" ;;
+    omp)
+      printf '%s\n' "$state/$id.omp-ext.ts"
+      # The ship-only coordinator config is this task's harness wiring, so a
+      # relaunch retires it here and re-writes it only if the replacement is
+      # itself an omp ship task.
+      printf '%s\n' "$state/$id.omp-coordinator.yml"
+      ;;
     grok)
       printf '%s\n' "$wt/.fm-grok-turnend"
       printf '%s\n' "$state/$id.grok-turnend-token"

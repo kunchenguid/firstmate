@@ -157,6 +157,15 @@ It is an environment variable rather than a flag, a config file, or a state file
 The variable must be present when the harness process is launched, so no tool call the agent makes can enable it for the call that follows.
 A deliberate use therefore requires restarting the session with the variable set, which is a conscious act, while an accidental use is impossible.
 
+### The deliberate omp ship coordinator
+
+One standing deliberate use is wired at launch: `bin/fm-spawn.sh` sets `FM_ALLOW_SUBAGENT=1` on every omp SHIP launch and on nothing else - never a scout, secondmate, non-omp worker, or primary.
+The omp ship worker is a durable coordinator, not an untracked alternative to the fleet: `bin/fm-spawn.sh` keeps owning the worktree, steering inbox, metadata, and delivery, and the worker's per-task extension (`state/<id>.omp-ext.ts`) denies every omp `task` call that is not exactly one non-isolated item naming `omp_worker_agent=` from the task's metadata.
+That agent is resolved once at intake by `fm_omp_ship_worker_agent` in `bin/fm-dod-lib.sh` - `peak-hours-worker` from 09:00 inclusive to 13:00 exclusive in `Asia/Jerusalem`, otherwise `off-peak-hours-worker` - and a relaunch reuses the recorded name even when the clock is in the other window.
+The ship-only coordinator config `state/<id>.omp-coordinator.yml` pins `task.maxConcurrency: 1`, `task.maxRecursionDepth: 1`, and `task.isolation.enabled: false`, so the coordinator can create exactly one level of child and that child cannot fan out, and cannot write a second hidden worktree.
+It is a second `--config` written and passed only by an omp SHIP spawn, never a setting in the shared `.omp/fm-worker-overlay.yml`, so a scout or secondmate loads no task-tool limit the coordinator contract does not ask of it.
+`tests/fm-omp-harness.test.sh` owns the executable contracts for the launch shape, the metadata reuse, the gate, and the ship-only coordinator config.
+
 The escape hatch does not affect any local Claude deny list.
 A tool removed from the schema stays removed, so a genuinely intended use of a locally denied tool also requires narrowing or removing that local entry before launch.
 
@@ -183,7 +192,7 @@ Applicability turns on one question: does the harness expose built-in delegation
 | Claude | 16 known tools, listed above | Scoped guard wired and live-verified; untracked local deny list verified and recommended. |
 | Codex | none | Not applicable, verified empirically below. Codex 0.144.1 exposes no subagent, sub-task, or delegated-agent tool, so there is nothing to remove or intercept. `.codex/hooks.json` is unchanged. |
 | Grok | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
-| omp | present, per bundled material | Not wired and unverified. omp ships a built-in task delegation tool: its bundled docs list `tools/task.md` and the captain-level `task.maxConcurrency` setting governs it. No Firstmate delegation seatbelt is wired for it yet, and its status stays unverified until a live tool enumeration is recorded the way the Codex row was. |
+| omp | present, per bundled material | Primary: not wired and unverified, exactly as before. omp ships a built-in task delegation tool: its bundled docs list `tools/task.md` and the `task.maxConcurrency` setting governs it. What changed is the worker side: an omp SHIP worker is the deliberate coordinator and launches with `FM_ALLOW_SUBAGENT=1` (below), while its per-task extension gates every omp `task` call to exactly one non-isolated item for one metadata-selected agent, so the durability and fleet-record guarantees are preserved by `bin/fm-spawn.sh` and the gate rather than by this hook. |
 | OpenCode | present, exact tokens unconfirmed | Not wired pending live verification. See below. |
 | Pi | none reported | Not wired pending live verification. See below. |
 

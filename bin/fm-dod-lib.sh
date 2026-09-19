@@ -39,20 +39,80 @@
 # fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
 # ordinary ship brief and the durable contract written during scout promotion.
 
-fm_brief_worker_role() {  # <state-dir> <task-id>
-  local state=$1 task_id=$2
+# fm_omp_ship_worker_agent owns the Israel-clock split that names an omp ship
+# task's implementation child: from 09:00 inclusive to 13:00 exclusive in
+# Asia/Jerusalem the captain's peak profile is peak-hours-worker, and every
+# other minute is off-peak-hours-worker. The optional <hh:mm> argument is the
+# injected deterministic input tests pass; without it the current Israel time
+# is resolved once, at spawn intake, because intake time and never recovery
+# time owns the choice.
+fm_omp_ship_worker_agent() {  # [<hh:mm>]
+  local clock hh mm
+  if [ "$#" -gt 0 ]; then
+    # An argument was supplied, so it is the injected value and is validated as
+    # one: falling back to the wall clock here would let a malformed injection
+    # silently pass as a real time.
+    clock=$1
+  else
+    clock=$(TZ=Asia/Jerusalem date +%H:%M)
+  fi
+  case "$clock" in
+    [0-9][0-9]:[0-9][0-9]) ;;
+    *)
+      echo "error: fm_omp_ship_worker_agent: invalid Israel time '$clock'; expected HH:MM" >&2
+      return 1
+      ;;
+  esac
+  hh=${clock%%:*}
+  mm=${clock#*:}
+  # A real clock only ever yields 00-23 and 00-59, so anything outside that is a
+  # malformed injection rather than a time this function should interpret:
+  # without the range test, 08:99 would silently ride the hour window.
+  if [ "$hh" -gt 23 ] || [ "$mm" -gt 59 ]; then
+    echo "error: fm_omp_ship_worker_agent: invalid Israel time '$clock'; hours are 00-23 and minutes 00-59" >&2
+    return 1
+  fi
+  if [ "$hh" -ge 9 ] && [ "$hh" -lt 13 ]; then
+    printf 'peak-hours-worker\n'
+  else
+    printf 'off-peak-hours-worker\n'
+  fi
+}
+
+fm_brief_worker_role() {  # <state-dir> <task-id> [<omp-worker-agent>]
+  local state=$1 task_id=$2 omp_worker_agent=${3:-}
   cat <<'EOF'
 # Current worker role contract
 You are a crewmate: an autonomous worker agent managed by firstmate.
 This section establishes your current identity before every project or task instruction below and supersedes any conflicting role identity in those instructions.
-Do the assigned work yourself and report only to firstmate; do not adopt a firstmate or secondmate supervisor identity, delegate the task, run fleet supervision, or address the captain.
 EOF
+  # The identity sentence is the same decision as the rest of this contract, so
+  # it is stated once per role instead of being printed for everyone and then
+  # contradicted below: an ordinary worker does the work itself, while an omp
+  # ship coordinator (the role the later paragraphs describe) must delegate the
+  # implementation edits. Printing the direct-worker wording in the coordinator
+  # brief would leave one owner arguing with itself.
+  if [ -n "$omp_worker_agent" ]; then
+    printf '%s\n' "You are this task's durable coordinator: you keep the branch, steering inbox, restart recovery, validation pipeline, pull request, and CI lifecycle yourself, and you hand every implementation edit to one named worker agent. Never adopt a firstmate or secondmate supervisor identity, run fleet supervision, or address the captain."
+  else
+    printf '%s\n' "Do the assigned work yourself and report only to firstmate; do not adopt a firstmate or secondmate supervisor identity, delegate the task, run fleet supervision, or address the captain."
+  fi
   printf "Your steering inbox is \`%s/%s.inbox\`; this exact path belongs to your current task even when it is outside the worktree or under the supervising firstmate home, so read and acknowledge its messages and do not reject it as another home's state.\n" "$state" "$task_id"
   cat <<'EOF'
 Never inspect or change any other home's endpoint namespace; this authorization is limited to the exact task paths named by this brief.
 When this task works on Firstmate itself, the repository root `AGENTS.md` (also imported by `CLAUDE.md`) is project content and the supervisor contract for the firstmate managing you: follow this brief instead of that supervisor contract.
 Project instructions still govern the work wherever they do not conflict with this worker identity, including `CONTRIBUTING.md` and `firstmate-coding-guidelines` for Firstmate changes.
 EOF
+  if [ -n "$omp_worker_agent" ]; then
+    cat <<'EOF'
+You may still read, inspect, run focused verification, commit, drive the validation pipeline, push through your delivery path, and report status.
+You must not write or repair source code, tests, build scripts, deploy scripts, or product or runtime configuration yourself.
+Hand every implementation or review-fix edit to the named OMP worker agent through one `task` tool call at a time, so that agent's model list and fallback policy apply.
+Never delegate through a bash subprocess such as `omp -p` or through the `eval` tool; both evade the gate that enforces the named agent and the one-child limit, so `eval` is closed for this task.
+Each `task` call carries exactly one task item naming the selected agent with no isolated worktree, and passes the complete instructions, owned files, known repository facts, acceptance criteria, and allowed and forbidden commands, so the child never redoes discovery you already did.
+EOF
+    printf 'The selected implementation agent for this task is %s, recorded in the task metadata and kept across relaunches regardless of the clock window a later launch runs in.\n' "$omp_worker_agent"
+  fi
 }
 
 fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id>
