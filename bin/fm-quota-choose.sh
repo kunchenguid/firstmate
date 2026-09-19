@@ -5,14 +5,12 @@
 #   fm-quota-choose.sh [--snapshot <path>] [--candidate <harness:model>]...
 #
 # Reads one already-captured quota-axi default TOON or JSON snapshot from the
-# provided file, or from stdin when --snapshot is omitted. Schema 5 (one row per
-# provider) and schema 6 (rows keyed by provider + accountKey) are both accepted;
-# bin/fm-quota-axi-lib.sh owns the validator and the row join, so a schema 5
-# snapshot selects exactly as before and a schema 6 candidate binds to the row
-# its native Codex or Pi lane names, else the provider's `default` row, else no
-# row. For each --candidate in order, it maps <harness> to its primary provider family, then
-# applies the provider-wide scopes and exact model or product scopes for <model>. A candidate
-# is eligible only when no applicable runway is `exhausted_now` and its known
+# provided file, or from stdin when --snapshot is omitted.
+# bin/fm-quota-axi-lib.sh owns schema compatibility and the shared row join.
+# For each --candidate in order, it maps <harness> to its primary provider
+# family, then applies the matched row's provider-wide scopes and exact model
+# or product scopes for <model>. A candidate is eligible only when no
+# applicable runway is `exhausted_now` and its known
 # effective percent remaining is greater than zero. The first eligible
 # candidate is printed as "<harness> <model>" and the script exits 0.
 # If no candidate is quota-eligible, it prints "none" and exits 1.
