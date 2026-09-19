@@ -66,9 +66,12 @@ RAW=$(quota-axi --json 2>/dev/null) || fail_open "quota-axi --json exited non-ze
 
 MIN_REMAINING=$(printf '%s' "$RAW" | jq -r '
   [ .providers[]? | select(.provider == "claude") | .windows[]?
-    | select(.id == "five_hour" or .id == "seven_day")
-    | select(.percentRemaining != null) | .percentRemaining ]
-  | if length == 0 then "" else min | floor end
+    | select((.id == "five_hour" or .id == "seven_day") and (.percentRemaining | type) == "number") ] as $rows
+  | [$rows[] | select(.id == "five_hour") | .percentRemaining] as $five
+  | [$rows[] | select(.id == "seven_day") | .percentRemaining] as $seven
+  | if ($five | length) != 1 or ($seven | length) != 1 then ""
+    else [$five[0], $seven[0]] | min | floor
+    end
 ' 2>/dev/null) || fail_open "quota-axi --json output could not be parsed"
 
 case "$MIN_REMAINING" in

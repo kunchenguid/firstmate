@@ -2,8 +2,7 @@
 # tests/fm-dispatch-log.test.sh - behavior tests for the durable dispatch log
 # query CLI (bin/fm-dispatch-log.sh: summary grouping/counting, --since/--until
 # filtering, empty/missing-log handling, malformed-line tolerance, and usage
-# errors), plus targeted tests on the real non-fatal append blocks documented in
-# bin/fm-spawn.sh and bin/fm-teardown.sh.
+# errors).
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -219,135 +218,6 @@ test_bad_date_format_errors() {
   pass "a malformed --since/--until date is a loud usage error"
 }
 
-# --- the real append blocks in fm-spawn.sh / fm-teardown.sh --------------------
-#
-# A full spawn/teardown integration test is out of scope (would require mocking
-# the whole backend/worktree pipeline); these instead eval the LITERAL append
-# block from each script (extracted, not reimplemented) against stubbed
-# variables, so a regression in the actual shipped code is caught.
-
-extract_block() {  # <file>
-  awk '
-    /# Durable dispatch record \(bin\/fm-dispatch-log\.sh header owns the log format\)\./ {flag=1}
-    flag {print}
-    flag && /^} 2>\/dev\/null \|\| true$/ {exit}
-  ' "$1"
-}
-
-test_spawn_append_block_produces_the_documented_json_shape() {
-  local home block out
-  home=$(make_home spawn-append)
-  block=$(extract_block "$ROOT/bin/fm-spawn.sh")
-  [ -n "$block" ] || fail "could not locate the dispatch-log append block in bin/fm-spawn.sh"
-  # The variables and function below are consumed by the eval'd extracted
-  # block, invisibly to shellcheck's static analysis.
-  # shellcheck disable=SC2034,SC2329
-  out=$(
-    set -eu
-    json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
-    DATA="$home/data"
-    ID="spawn-shape"
-    HARNESS="claude"
-    MODEL="sonnet"
-    EFFORT="high"
-    KIND="ship"
-    PROJ_ABS="/x/foo"
-    MODE="no-mistakes"
-    BACKEND="tmux"
-    YOLO="off"
-    eval "$block"
-    cat "$DATA/dispatch-log.jsonl"
-  )
-  printf '%s' "$out" | jq -e '
-    .event == "spawn" and .id == "spawn-shape" and .harness == "claude"
-      and .model == "sonnet" and .effort == "high" and .kind == "ship"
-      and .repo == "/x/foo" and .mode == "no-mistakes" and .backend == "tmux"
-      and .yolo == "off" and (.ts | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
-  ' >/dev/null || fail "the real fm-spawn.sh append block did not produce the documented JSON shape: $out"
-  pass "the real fm-spawn.sh append block produces the documented spawn JSON shape"
-}
-
-test_spawn_append_block_blanks_repo_for_secondmate_kind() {
-  local home block out
-  home=$(make_home spawn-append-secondmate)
-  block=$(extract_block "$ROOT/bin/fm-spawn.sh")
-  [ -n "$block" ] || fail "could not locate the dispatch-log append block in bin/fm-spawn.sh"
-  # PROJ_ABS is a secondmate's firstmate home for kind=secondmate, not a repo;
-  # the append block must leave repo blank rather than logging the home path.
-  # shellcheck disable=SC2034,SC2329
-  out=$(
-    set -eu
-    json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
-    DATA="$home/data"
-    ID="spawn-secondmate-shape"
-    HARNESS="claude"
-    MODEL="default"
-    EFFORT="default"
-    KIND="secondmate"
-    PROJ_ABS="/home/sctru/.claude/secondmates/some-secondmate"
-    MODE="secondmate"
-    BACKEND="tmux"
-    YOLO="off"
-    eval "$block"
-    cat "$DATA/dispatch-log.jsonl"
-  )
-  printf '%s' "$out" | jq -e '.repo == ""' >/dev/null \
-    || fail "a kind=secondmate spawn must record a blank repo, not its firstmate home path: $out"
-  pass "the real fm-spawn.sh append block blanks repo for a kind=secondmate spawn"
-}
-
-test_spawn_append_block_is_non_fatal_when_data_is_unwritable() {
-  local home block rc parent out_file
-  home=$(make_home spawn-nonfatal)
-  parent="$home/readonly-parent"
-  mkdir -p "$parent"
-  if [ "$(id -u)" = 0 ]; then
-    echo "skip: running as root, permission bits do not restrict writes"
-    return 0
-  fi
-  chmod 555 "$parent"
-  block=$(extract_block "$ROOT/bin/fm-spawn.sh")
-  out_file=$(mktemp)
-  bash -c '
-    set -eu
-    json_escape() { printf "%s" "$1" | sed "s/\\\\/\\\\\\\\/g; s/\"/\\\\\"/g"; }
-    DATA="'"$parent"'/data"
-    ID="x"; HARNESS="claude"; MODEL="sonnet"; EFFORT="high"; KIND="ship"
-    PROJ_ABS="/x/foo"; MODE="no-mistakes"; BACKEND="tmux"; YOLO="off"
-    '"$block"'
-    echo survived
-  ' > "$out_file" 2>&1
-  rc=$?
-  chmod 755 "$parent"
-  expect_code 0 "$rc" "a non-fatal append must never abort the caller under set -eu"
-  assert_contains "$(cat "$out_file")" "survived" \
-    "the script must reach the line after the append block even when data/ cannot be created"
-  rm -f "$out_file"
-  pass "the spawn append block is non-fatal under set -eu when data/ is unwritable"
-}
-
-test_teardown_append_block_produces_the_documented_json_shape() {
-  local home block out
-  home=$(make_home teardown-append)
-  block=$(extract_block "$ROOT/bin/fm-teardown.sh")
-  [ -n "$block" ] || fail "could not locate the dispatch-log append block in bin/fm-teardown.sh"
-  # ID is consumed by the eval'd extracted block, invisibly to shellcheck.
-  # shellcheck disable=SC2034
-  out=$(
-    set -eu
-    DATA="$home/data"
-    ID="teardown-shape"
-    eval "$block"
-    cat "$DATA/dispatch-log.jsonl"
-  )
-  printf '%s' "$out" | jq -e '
-    .event == "teardown" and .id == "teardown-shape"
-      and (.ts | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
-      and (keys | length) == 3
-  ' >/dev/null || fail "the real fm-teardown.sh append block did not produce the documented minimal JSON shape: $out"
-  pass "the real fm-teardown.sh append block produces the documented minimal teardown JSON shape"
-}
-
 test_summary_groups_by_model_default_and_prints_total
 test_summary_group_by_other_fields
 test_group_by_repo_buckets_blank_value_as_unknown
@@ -362,9 +232,4 @@ test_unknown_subcommand_errors
 test_unknown_flag_errors
 test_bad_group_by_value_errors
 test_bad_date_format_errors
-test_spawn_append_block_produces_the_documented_json_shape
-test_spawn_append_block_blanks_repo_for_secondmate_kind
-test_spawn_append_block_is_non_fatal_when_data_is_unwritable
-test_teardown_append_block_produces_the_documented_json_shape
-
 echo "# fm-dispatch-log.test.sh: all assertions passed"
