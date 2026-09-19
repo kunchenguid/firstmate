@@ -3656,24 +3656,27 @@ EOF
   pass "a socket-refused blocker survives the dead-daemon verdict"
 }
 
-# The same anchored, genuinely-bound shape with an ORDINARY blocker: the header
-# rule says a blocked tip stays blocked with the unverified record named, and
-# nothing else reached that path with a `blocked:` tip.
+# The selected route's anchored shape with an ORDINARY blocker: the header rule
+# says a blocked tip stays blocked with the unverified record named, and nothing
+# else reaches that path with a `blocked:` tip.
 test_ordinary_blocked_tip_survives_the_dead_daemon_verdict() {
   reset_fakes
-  local d local_short out; d=$(new_case ordinary-blocked-anchored)
+  local d h2 short out; d=$(new_case ordinary-blocked-anchored)
   make_repo_on_branch "$d/wt" fm/feat-obanch
-  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  h2=$(mint_unfetched_fix_head "$d/wt")
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-obanch.meta" "window=fm:fm-feat-obanch" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'blocked: database upload failed with broken pipe\n' > "$d/state/feat-obanch.status"
-  FM_FAKE_RUN_HEAD=f0f0f0f0
-  FM_FAKE_AXI_STATUS="$(run_running fm/feat-obanch)
-branch_sync:
-  state: synced"
+  FM_FAKE_RUN_HEAD="$h2"
+  FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  \"01RUN\",fm/feat-obanch,running,$h2,\"\""
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-obanch)"
+  FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
   FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/feat-obanch f0f0f0f0  2026-08-27 13:53
-  completed  fm/feat-obanch ${local_short}  2026-08-27 12:09
+  running    fm/feat-obanch $(git -C "$d/wt.pipe" rev-parse --short=7 HEAD)  2026-07-30 22:05
+  failed     fm/feat-obanch ${short}  2026-07-29 20:00
 EOF
 )"
   FM_FAKE_DAEMON_DOWN=1
@@ -3687,35 +3690,6 @@ EOF
   pass "an ordinary blocked tip survives the dead-daemon verdict"
 }
 
-# An open gate is the crew's own first-hand evidence too: an unverified record
-# cannot close it, so needs-decision stays parked and names the reason.
-test_needs_decision_survives_the_dead_daemon_verdict() {
-  reset_fakes
-  local d local_short out; d=$(new_case needs-decision-anchored)
-  make_repo_on_branch "$d/wt" fm/feat-ndiv
-  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-ndiv.meta" "window=fm:fm-feat-ndiv" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'needs-decision: approve the schema change\n' > "$d/state/feat-ndiv.status"
-  FM_FAKE_RUN_HEAD=f0f0f0f0
-  FM_FAKE_AXI_STATUS="$(run_running fm/feat-ndiv)
-branch_sync:
-  state: synced"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/feat-ndiv f0f0f0f0  2026-08-27 13:53
-  completed  fm/feat-ndiv ${local_short}  2026-08-27 12:09
-EOF
-)"
-  FM_FAKE_DAEMON_DOWN=1
-  FM_FAKE_BUSY=0
-  arm_idle_record "$d/state" feat-ndiv
-  out=$(run_crew_state "$d" feat-ndiv)
-  assert_contains "$out" "state: parked" "an open decision is not hidden behind a generic unknown"
-  assert_contains "$out" "approve the schema change" "the crew's own decision note reaches the supervisor"
-  assert_contains "$out" "daemon unreachable" "the unverified record is named as the reason"
-  assert_not_contains "$out" "superseded" "an unverified record never supersedes an open decision"
-  pass "an open decision survives the dead-daemon verdict"
-}
 
 # A visibly working crew must never be overridden by a stale record that merely
 # names its branch. Identity is proven by neither head nor ledger anchor here,
@@ -3795,38 +3769,6 @@ branch_sync:
   pass "a live record at a diverged head binds while the daemon answers"
 }
 
-# The daemon rule must hold for the head shape the module calls ROUTINE: a run
-# head the pipeline committed in its own checkout, which this copy never
-# fetched. That binds through the ledger's anchored-continuation rule, which
-# proves IDENTITY (the previous row ended at exactly this worktree's head) but
-# not LIVENESS - the ledger is written by the same daemon, so its `running` row
-# goes stale exactly as the axi record does.
-test_anchored_continuation_still_needs_a_live_daemon() {
-  reset_fakes
-  local d local_short out; d=$(new_case anchored-daemon-down)
-  make_repo_on_branch "$d/wt" fm/feat-anchor
-  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-anchor.meta" "window=fm:fm-feat-anchor" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'working: validating\n' > "$d/state/feat-anchor.status"
-  FM_FAKE_RUN_HEAD=f0f0f0f0
-  FM_FAKE_AXI_STATUS="$(run_running fm/feat-anchor)
-branch_sync:
-  state: synced"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/feat-anchor f0f0f0f0  2026-08-27 13:53
-  completed  fm/feat-anchor ${local_short}  2026-08-27 12:09
-EOF
-)"
-  FM_FAKE_DAEMON_DOWN=1
-  FM_FAKE_BUSY=0
-  arm_idle_record "$d/state" feat-anchor
-  out=$(run_crew_state "$d" feat-anchor)
-  assert_contains "$out" "state: unknown" "an anchored live row must not read as work with the daemon answering down"
-  assert_contains "$out" "daemon unreachable" "the dead instrument is named rather than dropped silently"
-  assert_not_contains "$out" "state: working" "a dead instrument never reads as work in progress"
-  pass "the anchored continuation route obeys the daemon rule too"
-}
 
 # Same anchored shape with the daemon answering: the guard narrows the dead
 # instrument only, the unfetched-head fix round still binds.
@@ -3877,9 +3819,8 @@ EOF
   arm_idle_record "$d/state" feat-cus
   out=$(run_crew_state "$d" feat-cus)
   assert_contains "$out" "state: working" "a head-tied coarse row keeps its working reading whatever the daemon answers"
-  assert_not_contains "$out" "superseded by active run" "a coarse row makes no supersede claim about the open decision"
-  assert_contains "$out" "cannot tell working from parked" "the coarse limit is named in the detail"
-  pass "a head-tied coarse record never claims the status log superseded"
+  assert_contains "$out" "superseded by active run" "the coarse route keeps its original supersede note"
+  pass "a head-tied coarse record keeps its working reading and its original note"
 }
 
 # The modern selected-run route reaches the anchored-continuation rule through
@@ -4138,6 +4079,34 @@ EOF
   done
 }
 
+# The record's head and the ledger row's head are INDEPENDENT. A same-branch
+# record whose own head diverged still reaches the coarse fallback, where the
+# newest ledger row can sit at this worktree's own head - a head-tied row the
+# head rule exempts. The coarse route carries no dead-daemon verdict, so that
+# row keeps its working reading.
+test_coarse_head_tied_row_is_exempt_even_when_the_record_head_diverged() {
+  reset_fakes
+  local d local_short out; d=$(new_case coarse-head-tied-diverged-record)
+  make_repo_on_branch "$d/wt" fm/feat-chtd
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-chtd.meta" "window=fm:fm-feat-chtd" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/feat-chtd.status"
+  FM_FAKE_RUN_HEAD=f0f0f0f0
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-chtd)
+branch_sync:
+  state: synced"
+  FM_FAKE_RUNS_LIST="  running    fm/feat-chtd ${local_short}  2026-08-23 13:53"
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-chtd
+  out=$(run_crew_state "$d" feat-chtd)
+  assert_contains "$out" "state: working" "a head-tied ledger row keeps its working reading"
+  assert_not_contains "$out" "state: unknown" "the head rule exempts a head-tied row whatever the record head says"
+  assert_not_contains "$out" "daemon unreachable" "the coarse route carries no dead-instrument verdict"
+  pass "a head-tied coarse row is exempt even when the record head diverged"
+}
+
 # An unrecognised ledger word yields an unknown verdict from a LIVE daemon, so it
 # is not an unverified record: the ordinary supersede note applies, as it did
 # before the coarse-unknown special case existed.
@@ -4325,9 +4294,8 @@ EOF
   arm_idle_record "$d/state" feat-cg
   out=$(run_crew_state "$d" feat-cg)
   assert_contains "$out" "state: working" "a genuinely validating crew is not reported as awaiting a human"
-  assert_not_contains "$out" "superseded by active run" "a coarse row cannot prove the gate event resolved"
-  assert_contains "$out" "cannot tell working from parked" "the coarse limit is named in the detail"
-  pass "a coarse live row records the gate ambiguity without claiming supersession"
+  assert_contains "$out" "superseded by active run" "the coarse route keeps its original supersede note"
+  pass "a coarse live row over an open decision keeps the original supersede note"
 }
 
 # Coarse negative control (axi answers another branch): a live row on the task's
@@ -4700,11 +4668,9 @@ test_unproven_record_with_dead_daemon_does_not_override_a_busy_pane
 test_coarse_live_row_over_ordinary_blocked_keeps_superseded_reading
 test_socket_refused_log_survives_the_dead_daemon_verdict
 test_ordinary_blocked_tip_survives_the_dead_daemon_verdict
-test_needs_decision_survives_the_dead_daemon_verdict
 test_parked_gate_survives_a_dead_daemon
 test_selected_run_diverged_head_does_not_bind_an_unproven_record
 test_live_record_at_diverged_head_binds_while_daemon_answers
-test_anchored_continuation_still_needs_a_live_daemon
 test_anchored_continuation_binds_while_daemon_answers
 test_unverified_coarse_record_makes_no_supersede_claim
 test_unverified_coarse_failed_record_makes_no_supersede_claim
@@ -4718,6 +4684,7 @@ test_answered_down_failed_coarse_record_leaves_the_decision_open
 test_coarse_failed_path_probes_the_daemon_once
 test_selected_route_dead_daemon_names_the_run_once
 test_head_tied_row_reads_the_same_whichever_run_axi_names
+test_coarse_head_tied_row_is_exempt_even_when_the_record_head_diverged
 test_unrecognised_ledger_word_keeps_the_ordinary_supersede_note
 test_unanswered_daemon_probe_does_not_suppress_live_run
 test_coarse_live_row_with_daemon_down_is_unverified

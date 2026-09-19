@@ -8,7 +8,8 @@
 # regardless of head (fm_nm_run_is_executing); every other run still needs
 # strict branch-and-head identity. Both callers then recognize a provable
 # pipeline-owned continuation through fm_nm_runs_status_for_worktree below:
-# crew-state for an ACTIVE parked run, so a fix round never reads as an older
+# crew-state for an ACTIVE run - parked, or executing with the daemon answered
+# down - so a fix round never reads as an older
 # failed run, and teardown for a run PARKED at a gate, so cleanup concludes it
 # instead of orphaning it. Getting this wrong in either
 # direction is unsafe: a false negative hides a genuinely parked run, and a

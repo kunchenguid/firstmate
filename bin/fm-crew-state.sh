@@ -38,8 +38,9 @@
 #      fallback)? Branch name alone is not enough: a historical run on a reused
 #      branch whose head was rewritten or diverged must not be attributed.
 #      A run EXECUTING on this crew's branch (pending, running, fixing or ci -
-#      every route reads the id-addressed detail object, which carries all four,
-#      not the overview table's narrower status column)
+#      the detail-object vocabulary, which carries all four; the selected route
+#      re-reads it by id and the legacy route passes the same detail SHAPE, and
+#      neither is the overview table's narrower status column)
 #      is authoritative REGARDLESS of head (fm_nm_run_is_executing in
 #      bin/fm-nm-run-lib.sh) as long as an explicit probe has not ANSWERED that
 #      the daemon is down (nm_daemon_answered_down): the pipeline rebases the
@@ -71,15 +72,14 @@
 #      branch-name-only acceptance: an executing `axi status` record is the one
 #      live bind, so a ledger row that cannot be tied to this worktree's head
 #      never answers on branch name alone. A record whose daemon has ANSWERED
-#      down reads unknown and names the dead instrument only where the worktree
-#      has provably MOVED OFF the run: the ledger-anchored continuation, on
-#      either route. It is deliberately NOT extended to a head-tied record -
-#      while the run head still equals or precedes the worktree HEAD the record
-#      keeps its original working reading, as it always has. That is also why a
-#      FOREIGN-branch coarse answer carries no verdict: the ledger reports the
-#      same status word for a head-matching row and an anchored one, so a rule
-#      there could not tell the two apart and would catch the exempt case with
-#      them. A record whose
+#      down reads unknown and names the dead instrument on exactly ONE route:
+#      the id-addressed selected run whose head this copy cannot resolve and
+#      whose continuation the ledger anchor proves. The coarse ledger fallback
+#      carries NO such verdict - it reports the same status word for a
+#      head-matching row and an anchored one, so any rule there would also catch
+#      head-tied rows, and a record whose head still equals or precedes the
+#      worktree HEAD keeps its original working reading, as it always has.
+#      A record whose
 #      identity is proven by NEITHER head nor ledger anchor is not this
 #      worktree's run to report on: it leaves HAVE_RUN=0 so the pane and status
 #      log answer, because a stale record naming this branch must never override
@@ -880,23 +880,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
           # own current run once the ledger proves the pipeline-owned
           # continuation, so its axi TOON is the authoritative run detail
           # (RUN_SOURCE stays full); only a foreign-branch answer leaves
-          # coarse status-word detail. A live answer with the daemon answered
-          # down keeps the coarse status-word detail either way: the dead
-          # instrument has to be named, and the full TOON would print `working`.
           [ "$run_branch" = "$CREW_BRANCH" ] || RUN_SOURCE=coarse
-          # Only for a row this worktree has MOVED OFF. Reaching this branch at
-          # all proves the head rule rejected the record, so a SAME-branch
-          # answer is necessarily moved-off and carries the verdict. A
-          # foreign-branch answer cannot: the ledger reports the same status
-          # word for a head-matching row and an anchored one, so applying it
-          # there would catch head-tied rows the head rule exempts. A parked run
-          # keeps its gate and findings whatever the daemon answers.
-          if [ "$run_branch" = "$CREW_BRANCH" ] \
-            && [ "$(fm_nm_run_status_class "$COARSE_STATUS")" = live ] \
-            && ! fm_nm_run_is_parked "$RUN_OUT" \
-            && nm_daemon_answered_down; then
-            RUN_DEAD_DAEMON="no-mistakes daemon unreachable; last ledger record $COARSE_STATUS - unverified; run id: $(strip_quotes "$(nm_field id)")"
-          fi
         fi
       fi
     fi
@@ -1062,15 +1046,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       fi
       if [ "$RUN_STATE" != parked ]; then
         if [ "$RUN_STATE" = working ]; then
-          if [ "$RUN_SOURCE" = coarse ] && [ "$LOG_VERB" = needs-decision ]; then
-            # The runs ledger keeps a parked run's status word at `running`
-            # (tests/captures/no-mistakes-v1.70.1/parked.toon), so a coarse
-            # live row cannot establish that this decision resolved - but it
-            # cannot establish the gate is still open either, and a genuinely
-            # validating crew must not read as awaiting a human. The ambiguity
-            # is recorded in the detail; the state stays working.
-            RUN_DETAIL="$RUN_DETAIL${SEP}status-log not superseded: a coarse run record cannot tell working from parked"
-          elif [ "$LOG_VERB" = blocked ] \
+          if [ "$LOG_VERB" = blocked ] \
             && log_claims_pipeline_unreachable "$LOG_LINE" \
             && { [ "$RUN_STATUS" = running ] || [ "$RUN_STATUS" = fixing ]; } \
             && nm_run_activity_is_recent; then
