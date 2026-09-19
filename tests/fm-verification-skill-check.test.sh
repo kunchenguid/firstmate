@@ -212,6 +212,15 @@ test_rejects_duplicate_name() {
   assert_contains "$out" "multiple name: fields" "failure names duplicate names"
 }
 
+test_rejects_duplicate_name_with_spaced_colon() {
+  local dir out
+  dir="$TMP_ROOT/duplicate-name-spaced-colon/verify-timetracker"
+  make_good_skill "$dir"
+  sed -i '/^name: verify-timetracker$/a name : verify-other' "$dir/SKILL.md"
+  out=$(run_check "$dir") && fail "duplicate name key with a spaced colon must fail" || true
+  assert_contains "$out" "multiple name: fields" "failure names spaced-colon duplicate names"
+}
+
 test_rejects_whitespace_only_section() {
   local dir out
   dir="$TMP_ROOT/whitespace-section/verify-timetracker"
@@ -331,6 +340,7 @@ test_rejects_invalid_descriptions
 test_rejects_invalid_quoted_escape
 test_rejects_duplicate_description
 test_rejects_duplicate_name
+test_rejects_duplicate_name_with_spaced_colon
 test_rejects_whitespace_only_section
 test_rejects_removed_kill_rule
 test_rejects_process_name_kill_instruction
