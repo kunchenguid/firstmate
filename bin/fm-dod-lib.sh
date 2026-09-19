@@ -38,6 +38,39 @@
 # conflicting role is superseded rather than duplicated.
 # fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
 # ordinary ship brief and the durable contract written during scout promotion.
+# fm_brief_base_branch_overlay owns every sentence that depends on the branch a
+# task's worktree was actually placed on. Like the two sections above it is a
+# distinctly titled launch section that states its own precedence, because a
+# brief is written before any slot exists and asserts the default branch; only a
+# superseding section can correct that without a second resolver that can
+# disagree with the first. Its emitters render it once the placement is known
+# and only for a project whose registered working branch decided it:
+# bin/fm-spawn.sh from the branch it has just placed the slot on, and
+# bin/fm-promote.sh from what that spawn recorded (fm_recorded_working_branch).
+# A slot placed on origin's own default branch leaves every sentence unchanged.
+# It states the base as a fact rather than directing how to branch from it, and
+# every worker whose slot was placed there is told it, a scout included: a scout
+# carries no delivery mode, and its report is the only artifact that outlives the
+# task, so a report attributing branch-only state to the default branch is the
+# costliest reader this section has. local-only is the one exception and renders
+# nothing, because a directive naming another base would have had that worker
+# ship a branch descending from the registered branch while bin/fm-merge-local.sh
+# still fast-forwards the default branch, landing every unrelated commit into
+# local main: the foreign-commit symptom this section exists to prevent,
+# relocated into the one lane that has no PR and no forge file list to reveal
+# it. local-only with a registered working branch is filed separately.
+# Each delivery mode is then told how its own PR reaches that base, and a kind
+# that raises no PR is told nothing further. A direct-PR worker raises the PR
+# itself, so it is given the flag. The no-mistakes pipeline raises it instead,
+# and nothing here sets the base it opens against - plumbing one into that
+# external tool's configuration is filed as its own item - so that worker is told
+# to read the PR's base once it exists and to stop rather than let a PR against
+# another branch carry that branch's commits as this task's change.
+# FM_BRIEF_BASE_SECTION_HEADING names the section so an emitter can ask whether a
+# brief already carries it: bin/fm-promote.sh writes it into the durable brief so
+# a relaunch cannot revive superseded text, and bin/fm-spawn.sh therefore renders
+# it only into a brief that does not already have it, keeping the contract stated
+# in full exactly once in what the worker reads.
 
 fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
@@ -230,6 +263,49 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
    \`needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file=$data/$id/nm-<run>-findings.txt\`
    naming every ask-user finding id from that gate. The status line only points at the file; it never restates or summarizes a finding's content.
 EOF
+}
+
+# The registered working branch a task's slot was actually placed on, or nothing
+# when it was placed on origin's own default branch. bin/fm-spawn.sh writes both
+# base_branch= and base_registered= into state/<task-id>.meta once the slot is
+# placed, and its header owns the rules that decide the branch;
+# bin/fm-review-diff.sh reads base_branch= for the review base.
+fm_recorded_working_branch() {  # <state-dir> <task-id>
+  local state=$1 id=$2 meta
+  [ -n "$state" ] || return 0
+  meta="$state/$id.meta"
+  [ -f "$meta" ] || return 0
+  grep -q '^base_registered=1$' "$meta" || return 0
+  grep '^base_branch=' "$meta" | tail -1 | cut -d= -f2- || true
+}
+
+FM_BRIEF_BASE_SECTION_HEADING='# Current worktree base contract'
+
+fm_brief_base_branch_overlay() {  # <working-branch> [mode]
+  local base=$1 mode=${2:-}
+  [ -n "$base" ] || return 0
+  case "$mode" in
+    local-only) return 0 ;;
+  esac
+  printf '%s\n' "$FM_BRIEF_BASE_SECTION_HEADING"
+  cat <<EOF
+This worktree is based on \`$base\`, the working branch registered for this project.
+This section establishes that base after every Setup or promotion instruction above and supersedes any of them that names a different base, including any that calls this worktree's base the default branch.
+EOF
+  case "$mode" in
+    direct-PR)
+      cat <<EOF
+Open your PR against \`$base\` by passing \`--base $base\` to \`gh-axi\`, never the repository's default branch: a PR raised against any other branch would show that branch's own commits as this task's change.
+EOF
+      ;;
+    no-mistakes)
+      cat <<EOF
+The no-mistakes pipeline opens this task's PR, and nothing in this brief sets the base it opens against.
+Read that PR's own base branch as soon as the PR exists, before you report \`done: PR {url} checks green\`.
+If it is anything other than \`$base\`, append \`blocked: PR base is {branch}, not $base\` to the status file and stop, because a PR raised against another branch would show that branch's own commits as this task's change.
+EOF
+      ;;
+  esac
 }
 
 fm_dod_block() {  # <mode> <task-id>

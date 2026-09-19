@@ -30,6 +30,7 @@ Absence from the main `data/projects.md` registry is never evidence that no seco
 If the owning second mate cannot accept the route, report that concrete blocker or obtain an explicit captain redirection rather than silently duplicating the project in the main home.
 
 Resolve the project name, destination, delivery posture, and autonomy posture before changing local or remote state.
+Resolve the project's working branch in the same pass, and register it whenever that branch is not the remote's own default branch: a fresh ship or scout spawn places its pooled worktree on the registered branch and otherwise falls back to the remote default, so an unregistered deviation is what hands a worker somebody else's branch.
 Keep a newly added clone and its registry entry consistent, and roll back only artifacts created by the incomplete operation when a later initialization step fails and that rollback is safe.
 Do not overwrite or repurpose an existing path.
 
@@ -54,7 +55,8 @@ Default it off for every project and every posture, and enable it only on the ca
 
 ## Add or clone an existing project
 
-Confirm the source URL, local project name, delivery posture, and autonomy posture, stating the resolved default for each rather than asking the captain to invent one.
+Confirm the source URL, local project name, delivery posture, autonomy posture, and working branch, stating the resolved default for each rather than asking the captain to invent one.
+The working branch's default is the remote's own default branch unless the captain names another, and it is recorded only when it is not that default, resolved in the same pass as the rest under "Preconditions and registry" above.
 Clone into `projects/<name>` and add the registry entry only after the destination is known to be unused.
 A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.

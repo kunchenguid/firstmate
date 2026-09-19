@@ -203,12 +203,38 @@
 #   not marked.
 #   Only after this isolation check, every fresh ship or scout requires a clean
 #   task worktree. When an origin configuration is detected, spawn fetches it,
-#   resolves the current remote default branch, and resets to its tip. When none
-#   is detected, spawn skips that remote freshness check and launches from the
-#   clean worktree's current HEAD. Relaunch reuses the recorded worktree without
-#   fetching or resetting its base. An unreachable detected origin, unresolved
-#   default branch, or non-clean worktree refuses a fresh spawn rather than
-#   risking a PR based on stale history or discarding local work.
+#   resolves the project's WORKING BRANCH, and resets the slot to that branch's
+#   tip; a pool slot never keeps whichever branch it happened to arrive on. That
+#   branch comes from the captain's registered `branch=` token in
+#   data/projects.md when the project has one, and otherwise from origin's own
+#   default branch, re-resolved for this spawn; there is no third, guessed
+#   source. A registered token git itself rejects is a registry error and
+#   refuses the spawn rather than degrading to that default branch, and when no
+#   branch is registered and origin's default cannot be re-resolved, spawn
+#   refuses rather than reading the slot's previously recorded origin/HEAD.
+#   That branch is also what a task's own review diff is taken against, through
+#   the base_branch= record described below. When no origin
+#   configuration is detected, spawn skips that remote freshness check and
+#   launches from the clean worktree's current HEAD. Relaunch reuses the recorded
+#   worktree without fetching or resetting its base. An unreachable detected
+#   origin, an unresolvable working branch, a working branch origin does not
+#   carry, or a non-clean worktree refuses a fresh spawn rather than risking a PR
+#   based on stale history or another branch's commits, or discarding local work.
+#   Every fresh ship or scout records the branch it resolved as base_branch= in
+#   state/<id>.meta, so a wrong base is provable from the task record rather
+#   than only from a PR's file list. A slot the registered working branch
+#   decided also records base_registered=1 and carries bin/fm-dod-lib.sh's
+#   worktree base section in its launch brief. The brief is re-rendered once the
+#   slot is placed rather than written with that section from the start: a brief
+#   is authored before any slot exists and asserts the default branch, and
+#   resolving the branch a second time at brief time would let the two answers
+#   disagree. The re-render composes the whole file, so the section lands before
+#   the no-mistakes intent-capture region instead of inside the span that region
+#   hands to the pipeline as the captain's own words. A relaunch places no slot,
+#   so it renders the same section from the base_registered= record its own fresh
+#   spawn left behind, and only into a brief that does not already carry that
+#   section from bin/fm-promote.sh. A slot placed on origin's own default branch
+#   leaves every brief sentence unchanged.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -2609,6 +2635,34 @@ fi
   echo "error: task $ID has no brief at inaccessible data path $BRIEF" >&2
   exit 1
 }
+
+# Compose data/<id>/launch-brief.md from the current contracts plus the authored
+# brief. Called once before the endpoint exists and, for a slot on a registered
+# working branch, again once that placement is known; it rebuilds the whole file
+# both times so the no-mistakes intent-capture region stays the final block and
+# nothing this script renders lands inside the span the worker passes on as
+# `--intent`. Reads SOURCE_BRIEF, BRIEF, KIND, MODE and CAPTAIN_INTENT, which the
+# ship/scout block below has already resolved.
+render_launch_brief() { # [working-branch]
+  local base=${1:-} section tmp="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
+  section=$(fm_brief_base_branch_overlay "$base" "$MODE") || return 1
+  {
+    fm_brief_worker_role "$STATE" "$ID" &&
+      printf '\n' &&
+      cat "$SOURCE_BRIEF" &&
+      { [ -z "$section" ] || printf '\n%s\n' "$section"; } &&
+      if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+        fm_brief_intent_overlay "$CAPTAIN_INTENT"
+      fi
+  } >"$tmp" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  mv "$tmp" "$BRIEF" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+}
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   if fm_brief_task_placeholders_present "$BRIEF"; then
     echo "error: $BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; fill ## Captain's intent and ## Firstmate spec before spawn" >&2
@@ -2638,22 +2692,8 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   # pre-scope briefs and relaunches. Charters never enter this worker path.
   SOURCE_BRIEF=$BRIEF
   BRIEF="$DATA/$ID/launch-brief.md"
-  BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
-  {
-    fm_brief_worker_role "$STATE" "$ID" &&
-      printf '\n' &&
-      cat "$SOURCE_BRIEF" &&
-      if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
-        fm_brief_intent_overlay "$CAPTAIN_INTENT"
-      fi
-  } >"$BRIEF_TMP" || {
-    rm -f -- "$BRIEF_TMP"
+  if ! render_launch_brief; then
     echo "error: could not render current launch contract for $SOURCE_BRIEF" >&2
-    exit 1
-  }
-  if ! mv "$BRIEF_TMP" "$BRIEF"; then
-    rm -f -- "$BRIEF_TMP"
-    echo "error: could not publish current launch contract for $SOURCE_BRIEF" >&2
     exit 1
   fi
 fi
@@ -2667,12 +2707,15 @@ delivery_rigor_rank() { # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task 
   esac
 }
 
+# The registry key for this project: both registry reads below - a ship's standing
+# posture and any kind's registered working branch - look the project up by name.
+PROJ_NAME=$(basename "$PROJ_ABS")
+
 # Brief/spawn delivery agreement, checked before any endpoint exists.
 # fm-brief.sh records a ship brief's mode as a fixed "Delivery contract: mode=<mode>"
 # line. A spawn that disagrees would launch a worker whose instructions and whose
 # recorded task delivery differ, which is the exact drift this contract prevents.
 if [ "$KIND" = ship ]; then
-  PROJ_NAME=$(basename "$PROJ_ABS")
   BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   if [ -z "$BRIEF_MODE" ]; then
     echo "warning: $BRIEF records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2
@@ -2855,8 +2898,65 @@ spawn_worktree_has_origin_config() { # <worktree>
   return 1
 }
 
+# The branch a fresh ship or scout slot must start from. Published into
+# state/<id>.meta below so a wrong base is provable from the task record
+# afterwards, instead of only from a PR's own file list once foreign commits
+# have already ridden along.
+SPAWN_BASE_BRANCH=
+# Whether the captain's registry decided that branch. Only then does the slot sit
+# somewhere the brief's own Setup text does not already describe, so this is what
+# the launch-brief base section and every later reader of base_registered= gate on.
+SPAWN_BASE_REGISTERED=0
+
+# A pool hands back whatever branch its slot happens to hold, so the base is
+# decided here, never inherited. Two sources answer "which branch does this
+# project work on", in this order:
+#
+#   1. the captain's registered working branch (the data/projects.md `branch=`
+#      token, parsed by bin/fm-project-mode.sh, which owns that format). This is
+#      the only source that can be right for a project whose working branch is
+#      not the remote's own default branch.
+#   2. origin's current default branch, for the projects that never needed a
+#      registered one.
+#
+# There is deliberately no third source. The shared default_branch() helper
+# guesses local main/master when origin/HEAD cannot be read, which is exactly how
+# a lane lands on origin/main while believing it is on the project's branch, so
+# this path refuses instead of guessing. A registry that names a branch git
+# itself rejects is a registry error, never an absent branch: it returns 2 so the
+# caller refuses rather than falling through to origin's default branch.
+# Prints "<registry|origin> <branch>": the caller needs the source as well as the
+# branch, because a registry-decided branch is the one case where the slot sits
+# somewhere the brief it was already handed does not describe.
+resolve_spawn_base_branch() { # <worktree>
+  local worktree=$1 registered ref rc=0 sethead=0
+  # Refresh origin/HEAD first and unconditionally, exactly as this path always
+  # has: the slot's later tooling reads that ref for its own default-branch
+  # answers, so a registered branch must not quietly leave it stale. A registered
+  # branch does not depend on that refresh, but the second source below is that
+  # ref, and reading a refresh that just failed is reading a possibly renamed-away
+  # default branch, so only the second source treats the failure as fatal.
+  git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1 || sethead=1
+  # The child's own diagnostic is deliberately not suppressed: a malformed token
+  # is refused below, and the operator needs to be told which token it was.
+  registered=$("$FM_ROOT/bin/fm-project-mode.sh" --branch "$PROJ_NAME") || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+    return 2
+  fi
+  if [ -n "$registered" ]; then
+    printf 'registry %s\n' "$registered"
+    return 0
+  fi
+  [ "$sethead" -eq 0 ] || return 1
+  ref=$(git -C "$worktree" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || ref=
+  [ -n "$ref" ] || return 1
+  printf 'origin %s\n' "${ref#origin/}"
+}
+
 freshen_spawn_worktree_base() { # <worktree>
-  local worktree=$1 default target expected actual status
+  local worktree=$1 resolved branch target expected actual status rc=0
+  SPAWN_BASE_BRANCH=
+  SPAWN_BASE_REGISTERED=0
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -2870,23 +2970,27 @@ freshen_spawn_worktree_base() { # <worktree>
     return 1
   fi
   if ! spawn_worktree_has_origin_config "$worktree"; then
+    # No origin to resolve a working branch against, so there is nothing to
+    # place the slot on and nothing to compare it with.
     return 0
   fi
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
-  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
-    echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+  resolved=$(resolve_spawn_base_branch "$worktree") || rc=$?
+  branch=${resolved#* }
+  if [ "$rc" -eq 2 ]; then
+    echo "error: project '$PROJ_NAME' registers a working branch its own registry entry spells in a way git rejects (named above); refusing to launch pooled worktree '$worktree' on origin's default branch instead" >&2
     return 1
   fi
-  default=$(default_branch "$worktree") || {
-    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+  if [ "$rc" -ne 0 ]; then
+    echo "error: could not resolve the working branch for project '$PROJ_NAME': neither a data/projects.md branch= token nor origin's own default branch answered for pooled worktree '$worktree'; refusing to launch on whichever branch the pool happened to hand back" >&2
     return 1
-  }
-  target="origin/$default"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
-    echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+  fi
+  target="origin/$branch"
+  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$branch:refs/remotes/origin/$branch"; then
+    echo "error: could not fetch '$target' for pooled worktree '$worktree'; the working branch resolved for project '$PROJ_NAME' is '$branch'; refusing to launch from another branch" >&2
     return 1
   fi
   expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
@@ -2902,6 +3006,8 @@ freshen_spawn_worktree_base() { # <worktree>
     echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
     return 1
   fi
+  [ "${resolved%% *}" != registry ] || SPAWN_BASE_REGISTERED=1
+  SPAWN_BASE_BRANCH=$branch
 }
 
 herdr_projection_meta_field_exact() { # <meta> <key>
@@ -3737,6 +3843,26 @@ fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
+# The first point that knows where the slot actually ended up: the render above
+# runs before it is placed. A relaunch places nothing and reuses the recorded
+# worktree, so the record its own fresh spawn left is what still names the branch
+# that worktree is on. A promoted task's durable brief already carries the section
+# bin/fm-promote.sh wrote into it, and a worker cannot tell which of two copies is
+# authoritative, so a brief that already states this contract is left alone.
+if [ "$SPAWN_BASE_REGISTERED" = 1 ]; then
+  SPAWN_BRIEF_BASE=$SPAWN_BASE_BRANCH
+elif [ "$RELAUNCH" -eq 1 ]; then
+  SPAWN_BRIEF_BASE=$(fm_recorded_working_branch "$STATE" "$ID")
+else
+  SPAWN_BRIEF_BASE=
+fi
+if [ -n "$SPAWN_BRIEF_BASE" ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; } &&
+  ! fm_brief_heading_present "$SOURCE_BRIEF" "$FM_BRIEF_BASE_SECTION_HEADING"; then
+  if ! render_launch_brief "$SPAWN_BRIEF_BASE"; then
+    echo "error: could not render the working-branch contract for '$SPAWN_BRIEF_BASE' into $BRIEF; refusing to launch a worker whose brief names the wrong base" >&2
+    exit 1
+  fi
+fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,
 # at the first point that directory is known and before any per-task state is
@@ -4268,6 +4394,11 @@ preserve_relaunch_meta() {
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
+  # Resolved only on a fresh ship or scout spawn; a relaunch reuses the recorded
+  # worktree without re-resolving, so preserve_relaunch_meta carries the original
+  # base forward rather than restating a base this run never resolved.
+  [ -z "$SPAWN_BASE_BRANCH" ] || echo "base_branch=$SPAWN_BASE_BRANCH"
+  [ "$SPAWN_BASE_REGISTERED" != 1 ] || echo "base_registered=1"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"

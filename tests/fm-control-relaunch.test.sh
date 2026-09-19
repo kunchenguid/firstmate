@@ -970,6 +970,98 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
 }
 
+# A relaunch places no slot: the worktree is already on the registered working
+# branch its own fresh spawn put it there, and the record that spawn left is the
+# only thing that still says so. A replacement worker handed the unqualified
+# brief would open its PR against the default branch, carrying the working
+# branch's own commits as this task's change.
+test_spawn_relaunch_keeps_the_recorded_working_branch_contract() {
+  local dir launch out
+  dir=$(new_case relaunchbase rl40)
+  add_ship_task "$dir" rl40 claude
+  {
+    grep -v '^mode=' "$dir/home/state/rl40.meta"
+    echo "mode=direct-PR"
+    echo "base_branch=develop"
+    echo "base_registered=1"
+  } > "$dir/home/state/rl40.meta.next"
+  mv "$dir/home/state/rl40.meta.next" "$dir/home/state/rl40.meta"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl40 --relaunch) \
+    || fail "a relaunch of a task on a registered working branch should succeed: $out"
+  launch="$dir/home/data/rl40/launch-brief.md"
+  # shellcheck disable=SC2016 # Backticks are literal text in the brief being asserted.
+  assert_grep 'This worktree is based on `develop`' "$launch" \
+    "the replacement worker was not told which branch its worktree is on"
+  # shellcheck disable=SC2016 # Backticks are literal text in the brief being asserted.
+  assert_grep 'passing `--base develop`' "$launch" \
+    "the replacement direct-PR worker was not told to open its PR against that branch"
+
+  dir=$(new_case relaunchnobase rl41)
+  add_ship_task "$dir" rl41 claude
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl41 --relaunch) \
+    || fail "a relaunch of a task with no recorded working branch should succeed: $out"
+  launch="$dir/home/data/rl41/launch-brief.md"
+  assert_no_grep 'Current worktree base contract' "$launch" \
+    "a task whose record names no working branch was handed a base section"
+  pass "fm-spawn --relaunch: the recorded working branch still reaches the replacement worker"
+}
+
+# A promoted task already carries the worktree base contract in its durable
+# brief, written there by bin/fm-promote.sh so a relaunch cannot revive the
+# superseded default-branch text. A relaunch that rendered it again would hand
+# the worker two copies of one contract with nothing to say which is
+# authoritative.
+test_relaunched_promoted_ship_reads_the_base_contract_once() {
+  local dir home id brief launch out heads
+  id=rl42
+  dir=$(new_case promotedbase "$id")
+  home="$dir/home"
+  fm_git_worktree "$dir/proj" "$dir/wt" "task-$id"
+  FM_HOME="$home" "$BRIEF" "$id" firstmate --scout >/dev/null \
+    || fail "could not scaffold the scout brief"
+  brief="$home/data/$id/brief.md"
+  sed 's/{TASK}/Ship the working-branch change./; s/{FIRSTMATE_SPEC}/Preserve the recorded base./' \
+    "$brief" > "$brief.filled"
+  mv "$brief.filled" "$brief"
+  {
+    echo "window=fmses:fm-$id"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$dir/wt"
+    echo "project=$dir/proj"
+    echo "harness=claude"
+    echo "kind=scout"
+    echo "tasktmp=/tmp/fm-$id"
+    echo "model=default"
+    echo "effort=default"
+    echo "base_branch=develop"
+    echo "base_registered=1"
+  } > "$home/state/$id.meta"
+  printf '%s\n' "fm-$id" > "$dir/fake/windows"
+  printf '%s' "$dir/wt" > "$dir/fake/cwd"
+  TASK_TMPS+=("/tmp/fm-$id")
+
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$PROMOTE" "$id" --mode direct-PR --yolo off 2>&1) \
+    || fail "scout promotion should succeed: $out"
+  # shellcheck disable=SC2016 # Backticks are literal text in the brief being asserted.
+  assert_grep 'This worktree is based on `develop`' "$brief" \
+    "promotion did not write the base contract into the durable brief"
+
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" "$id" --relaunch) \
+    || fail "a promoted ship relaunch should succeed: $out"
+  launch="$home/data/$id/launch-brief.md"
+  heads=$(grep -c '^# Current worktree base contract$' "$launch")
+  [ "$heads" = 1 ] \
+    || fail "the replacement worker reads the worktree base contract $heads times, not once"
+  [ "$(grep -c -- '--base develop' "$launch")" = 1 ] \
+    || fail "the replacement worker reads more than one PR base instruction"
+  pass "fm-spawn --relaunch: a promoted ship reads the worktree base contract exactly once"
+}
+
 test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
   local dir home id brief launch out mode rule
   for mode in no-mistakes direct-PR local-only; do
@@ -1707,6 +1799,8 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_spawn_relaunch_keeps_the_recorded_working_branch_contract
+test_relaunched_promoted_ship_reads_the_base_contract_once
 test_promoted_scout_relaunch_receives_the_current_delivery_contract
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch

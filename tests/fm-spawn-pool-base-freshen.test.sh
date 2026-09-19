@@ -3,9 +3,11 @@
 #
 # A treehouse pool can return a clean detached worktree whose origin/main was
 # advanced after the worktree was allocated.
+# A pool can also hand back a slot sitting on some other branch entirely.
 # These tests drive the real spawn path with a fake terminal, then prove it
-# starts the worker from the fetched origin tip, launches a clean origin-less
-# pool as-is, or stops when a configured origin is unusable.
+# starts the worker from the tip of the project's resolved working branch,
+# records the branch it resolved, launches a clean origin-less pool as-is,
+# or stops when a configured origin or that working branch is unusable.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -197,6 +199,375 @@ test_stale_pool_base_refreshes_before_branching() {
   assert_grep 'must survive a newly spawned branch' "$POOL_DIR/advanced-main.txt" \
     "the branch created after spawn omitted advanced-main content"
   pass "a stale pooled worktree refreshes to current origin/main before a crew branch is created"
+}
+
+# The captain registers a project's working branch in data/projects.md when it is
+# not the remote's own default branch. These three tests pin what a slot arriving
+# on some other branch costs: the PR carries that branch's commits as if they were
+# the task's own, and only the forge's own file list shows it.
+register_project_branch() { # <branch>
+  printf -- '- %s [no-mistakes branch=%s] - registered working branch (added 2026-09-18)\n' \
+    "$(basename "$PROJECT_DIR")" "$1" > "$HOME_DIR/data/projects.md"
+}
+
+# Publish <branch> on origin with a commit of its own, so its tip is provably not
+# the default branch's tip.
+publish_origin_branch() { # <branch>
+  local branch=$1 publisher="$CASE_DIR/publisher"
+  git -C "$publisher" checkout --quiet -b "$branch"
+  printf 'only on %s\n' "$branch" > "$publisher/$branch-marker.txt"
+  git -C "$publisher" add "$branch-marker.txt"
+  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "advance $branch"
+  git -C "$publisher" push --quiet origin "$branch"
+  git -C "$publisher" checkout --quiet "$DEFAULT_BRANCH"
+}
+
+test_registered_working_branch_decides_the_pool_base() {
+  local rec id out status develop_tip main_tip head
+  id='pool-registered-branch-r1'
+  rec=$(make_case registered-branch "$id")
+  read_case_record "$rec"
+  publish_origin_branch develop
+  register_project_branch develop
+  # Hand the slot back holding somebody else's branch, exactly as the pool did.
+  git -C "$POOL_DIR" fetch --quiet origin
+  git -C "$POOL_DIR" reset --hard --quiet "origin/$DEFAULT_BRANCH"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should place the slot on the registered working branch"$'\n'"$out"
+  develop_tip=$(git -C "$POOL_DIR" rev-parse origin/develop)
+  main_tip=$(git -C "$POOL_DIR" rev-parse "origin/$DEFAULT_BRANCH")
+  head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$develop_tip" != "$main_tip" ] \
+    || fail "fixture did not prove the registered branch differs from the default branch"
+  [ "$head" = "$develop_tip" ] \
+    || fail "spawn launched from $head, not the registered working branch tip $develop_tip"
+  assert_present "$POOL_DIR/develop-marker.txt" \
+    "the launched slot does not hold the registered working branch's content"
+  assert_grep "base_branch=develop" "$HOME_DIR/state/$id.meta" \
+    "spawn did not record the working branch it resolved"
+  # The slot's own later tooling reads origin/HEAD for its default-branch
+  # answers, so a registered working branch must not leave that ref unrefreshed.
+  [ -n "$(git -C "$POOL_DIR" symbolic-ref --quiet --short refs/remotes/origin/HEAD)" ] \
+    || fail "a registered working branch left the slot's origin/HEAD unresolved"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# registered working branch: develop=%s default=%s HEAD=%s\n' \
+      "$develop_tip" "$main_tip" "$head"
+    printf 'recorded base:\n%s\n' "$(grep '^base_' "$HOME_DIR/state/$id.meta")"
+  fi
+  pass "a registered working branch decides the pooled slot's base over the remote default"
+}
+
+# "No branch is registered" and "the registered branch is one git rejects" are
+# different answers: the first falls back to origin's default branch, the second
+# is a registry error the operator has to see, because silently landing on the
+# default branch is the very failure the token exists to remove.
+test_malformed_branch_token_refuses_while_an_absent_one_falls_back() {
+  local rec id out status before default_tip
+  id='pool-malformed-branch-r1'
+  rec=$(make_case malformed-branch "$id")
+  read_case_record "$rec"
+  register_project_branch 'bad..name'
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "spawn launched on origin's default branch despite a malformed registered branch"
+  assert_contains "$out" 'not a valid branch name' \
+    "the registry parser's own diagnostic never reached the operator"
+  assert_contains "$out" 'bad..name' "the refusal did not name the offending token"
+  assert_not_contains "$out" "spawned $id" "a refused spawn reported success"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved the slot while refusing a malformed registered branch"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+
+  id='pool-absent-branch-token-r1'
+  rec=$(make_case absent-branch-token "$id")
+  read_case_record "$rec"
+  printf -- '- %s [no-mistakes] - no working branch registered (added 2026-09-18)\n' \
+    "$(basename "$PROJECT_DIR")" > "$HOME_DIR/data/projects.md"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" \
+    "a project registering no branch token should still fall back to origin's default branch"$'\n'"$out"
+  default_tip=$(git -C "$POOL_DIR" rev-parse "origin/$DEFAULT_BRANCH")
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$default_tip" ] \
+    || fail "an absent branch token did not fall back to origin's default branch"
+  assert_grep "base_branch=$DEFAULT_BRANCH" "$HOME_DIR/state/$id.meta" \
+    "an absent branch token did not record the default branch it fell back to"
+  pass "a malformed branch token refuses the spawn while an absent one falls back"
+}
+
+# Re-resolving origin's default branch is what makes it current. When that fails
+# and nothing is registered, the slot's previously recorded origin/HEAD is a
+# possibly renamed-away default branch, so it is refused rather than read.
+test_unrefreshable_origin_head_refuses_unless_a_branch_is_registered() {
+  local rec id out status before develop_tip
+  id='pool-stale-origin-head-r1'
+  rec=$(make_case stale-origin-head "$id")
+  read_case_record "$rec"
+  # Record origin/HEAD the way a clone does, then stop origin re-advertising it,
+  # so the stale recorded ref is the only remaining answer.
+  git -C "$POOL_DIR" fetch --quiet origin
+  git -C "$POOL_DIR" symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$DEFAULT_BRANCH"
+  git --git-dir="$CASE_DIR/origin.git" symbolic-ref HEAD refs/heads/missing-default
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "spawn accepted a stale recorded origin/HEAD as the project's working branch"
+  assert_contains "$out" "could not resolve the working branch" \
+    "the refusal did not say the working branch was unresolvable"
+  assert_not_contains "$out" "spawned $id" "a refused spawn reported success"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved the slot after failing to re-resolve origin's default branch"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+
+  id='pool-stale-origin-head-registered-r1'
+  rec=$(make_case stale-origin-head-registered "$id")
+  read_case_record "$rec"
+  publish_origin_branch develop
+  register_project_branch develop
+  git -C "$POOL_DIR" fetch --quiet origin
+  git -C "$POOL_DIR" symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$DEFAULT_BRANCH"
+  git --git-dir="$CASE_DIR/origin.git" symbolic-ref HEAD refs/heads/missing-default
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" \
+    "a registered working branch should not depend on re-resolving origin/HEAD"$'\n'"$out"
+  develop_tip=$(git -C "$POOL_DIR" rev-parse origin/develop)
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$develop_tip" ] \
+    || fail "a registered working branch was abandoned when origin/HEAD could not be refreshed"
+  pass "an unrefreshable origin/HEAD refuses the pool unless a working branch is registered"
+}
+
+test_registered_working_branch_missing_on_origin_refuses() {
+  local rec id out status before
+  id='pool-registered-branch-missing-r1'
+  rec=$(make_case registered-branch-missing "$id")
+  read_case_record "$rec"
+  register_project_branch develop
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "spawn launched although origin carries no branch named develop"
+  assert_contains "$out" "could not fetch 'origin/develop'" \
+    "the refusal did not name the working branch it could not reach"
+  assert_contains "$out" "refusing to launch from another branch" \
+    "the refusal did not say it declined to fall back to another branch"
+  assert_not_contains "$out" "spawned $id" "a refused spawn reported success"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved the slot while refusing an unreachable working branch"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "a registered working branch origin does not carry refuses instead of falling back"
+}
+
+test_recorded_base_branch_names_every_resolved_base() {
+  local rec id out status
+  id='pool-recorded-base-r1'
+  rec=$(make_case recorded-base "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "an unregistered project should still record its base"$'\n'"$out"
+  assert_grep "base_branch=$DEFAULT_BRANCH" "$HOME_DIR/state/$id.meta" \
+    "an unregistered project did not record the default branch it resolved"
+
+  id='pool-recorded-base-originless-r1'
+  rec=$(make_originless_case recorded-base-originless "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "an origin-less pool should still launch"$'\n'"$out"
+  assert_no_grep 'base_branch=' "$HOME_DIR/state/$id.meta" \
+    "an origin-less pool named a working branch it never resolved"
+  pass "every slot that resolves a working branch records it, and one that resolves none records nothing"
+}
+
+# A brief is scaffolded before any slot exists, so its Setup text asserts the
+# repository default branch while the slot is placed afterwards. These legs drive
+# the real intake order - bin/fm-brief.sh, then bin/fm-spawn.sh - and read the
+# launch brief the worker is actually handed, because a worker told it is on the
+# default branch is exactly the worker who stops noticing that it is not.
+fill_task_subsections() { # <brief>
+  local file=$1 content
+  content=$(cat "$file")
+  content=${content//'{TASK}'/Prove the worker is told which branch it is on.}
+  content=${content//'{FIRSTMATE_SPEC}'/Drive the real brief-then-spawn intake order.}
+  printf '%s\n' "$content" > "$file"
+}
+
+# Replace the fixture brief with one the real scaffold wrote, then fill the two
+# Task subsections exactly as firstmate does before dispatch.
+scaffold_real_brief() { # <id> <fm-brief.sh args...>
+  local id=$1
+  shift
+  rm -f "$HOME_DIR/data/$id/brief.md"
+  FM_HOME="$HOME_DIR" FM_DATA_OVERRIDE="$HOME_DIR/data" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    "$ROOT/bin/fm-brief.sh" "$id" "$(basename "$PROJECT_DIR")" "$@" >/dev/null \
+    || fail "the real brief scaffold should succeed for $id"
+  fill_task_subsections "$HOME_DIR/data/$id/brief.md"
+}
+
+test_launch_brief_names_the_branch_the_slot_is_on() {
+  local rec id out status launch captured source_bytes plain_pr
+  # shellcheck disable=SC2016 # Backticks are literal text in the brief being asserted.
+  plain_pr='push your branch and open a PR with `gh-axi`, then append'
+
+  id='pool-brief-registered-r1'
+  rec=$(make_case brief-registered "$id")
+  read_case_record "$rec"
+  publish_origin_branch develop
+  register_project_branch develop
+  scaffold_real_brief "$id" --mode direct-PR
+
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
+  status=$?
+  expect_code 0 "$status" \
+    "a direct-PR ship on a registered working branch should launch"$'\n'"$out"
+  launch="$HOME_DIR/data/$id/launch-brief.md"
+  assert_present "$launch" "the spawn handed the worker no launch brief"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/develop)" ] \
+    || fail "the slot this launch brief describes is not on the registered working branch"
+  # shellcheck disable=SC2016 # Backticks are literal text in the brief being asserted.
+  assert_grep 'This worktree is based on `develop`' "$launch" \
+    "the worker was never told which branch its worktree is actually on"
+  assert_grep 'supersedes any of them that names a different base' "$launch" \
+    "the brief's default-branch Setup text was left standing unsuperseded"
+  # shellcheck disable=SC2016 # Backticks are literal text in the brief being asserted.
+  assert_grep 'passing `--base develop`' "$launch" \
+    "a direct-PR worker on a registered working branch was not told to target it"
+
+  # A no-mistakes ship hands everything from the intent heading to the end of its
+  # brief to the pipeline as the captain's own words, so the base section has to
+  # sit above that region rather than inside it.
+  id='pool-brief-no-mistakes-r1'
+  rec=$(make_case brief-no-mistakes "$id")
+  read_case_record "$rec"
+  publish_origin_branch develop
+  register_project_branch develop
+  scaffold_real_brief "$id" --mode no-mistakes
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" \
+    "a no-mistakes ship on a registered working branch should launch"$'\n'"$out"
+  launch="$HOME_DIR/data/$id/launch-brief.md"
+  # shellcheck disable=SC2016 # Backticks are literal text in the brief being asserted.
+  assert_grep 'This worktree is based on `develop`' "$launch" \
+    "a no-mistakes worker was never told which branch its worktree is actually on"
+  assert_no_grep '--base' "$launch" \
+    "a no-mistakes worker was told to raise its own PR against a base"
+  captured="$TMP_ROOT/$id.intent"
+  awk '/^## Captain intent authorized for --intent$/ { emit=1; next } emit' "$launch" > "$captured"
+  [ -s "$captured" ] || fail "the no-mistakes intent-capture region is empty or absent"
+  assert_no_grep 'Current worktree base contract' "$captured" \
+    "the base section landed inside the span the worker passes on as --intent"
+  assert_no_grep 'This worktree is based on' "$captured" \
+    "base-section prose would reach the pipeline as the captain's own words"
+  # The pipeline, not this brief, opens the PR, and nothing here sets the base it
+  # opens against, so the worker is told to check it and stop rather than let the
+  # PR carry the working branch's own commits as this task's change.
+  assert_grep 'nothing in this brief sets the base it opens against' "$launch" \
+    "a no-mistakes worker was left to assume the pipeline targets its working branch"
+  assert_grep 'blocked: PR base is {branch}, not develop' "$launch" \
+    "a no-mistakes worker was not told how to stop on a PR opened against another branch"
+  # A no-mistakes worker has two `done:` gates and no PR exists at the first, so
+  # the check names the final one outright rather than a moment with two readings.
+  # shellcheck disable=SC2016 # Backticks are literal text in the brief being asserted.
+  assert_grep 'before you report `done: PR {url} checks green`' "$launch" \
+    "the PR-base check is anchored to a gate that can be read as the pre-PR one"
+
+  # Without a recorded working branch there is nothing to check the PR base
+  # against, so that warning must not appear at all.
+  id='pool-brief-no-mistakes-unregistered-r1'
+  rec=$(make_case brief-no-mistakes-unregistered "$id")
+  read_case_record "$rec"
+  scaffold_real_brief "$id" --mode no-mistakes
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" \
+    "a no-mistakes ship on a project registering no working branch should launch"$'\n'"$out"
+  launch="$HOME_DIR/data/$id/launch-brief.md"
+  assert_no_grep 'Current worktree base contract' "$launch" \
+    "a project registering no working branch was handed a base section"
+  assert_no_grep 'nothing in this brief sets the base it opens against' "$launch" \
+    "a project registering no working branch was warned about a base it never resolved"
+
+  # A scout's report is the only artifact that outlives the task, so it is told
+  # which branch it is on even though it carries no delivery mode and raises no PR.
+  id='pool-brief-registered-scout-r1'
+  rec=$(make_case brief-registered-scout "$id")
+  read_case_record "$rec"
+  publish_origin_branch develop
+  register_project_branch develop
+  scaffold_real_brief "$id" --scout
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" \
+    "a scout on a registered working branch should launch"$'\n'"$out"
+  launch="$HOME_DIR/data/$id/launch-brief.md"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/develop)" ] \
+    || fail "the slot this scout brief describes is not on the registered working branch"
+  # shellcheck disable=SC2016 # Backticks are literal text in the brief being asserted.
+  assert_grep 'This worktree is based on `develop`' "$launch" \
+    "a scout was left reading that its worktree is on the default branch"
+  assert_no_grep '--base' "$launch" "a scout was handed a PR base it will never use"
+  assert_no_grep 'nothing in this brief sets the base it opens against' "$launch" \
+    "a scout was handed the pipeline PR-base check for a PR it never raises"
+
+  # local-only lands through bin/fm-merge-local.sh, which still fast-forwards the
+  # default branch, so a section naming another base must not reach that worker.
+  id='pool-brief-local-only-r1'
+  rec=$(make_case brief-local-only "$id")
+  read_case_record "$rec"
+  publish_origin_branch develop
+  register_project_branch develop
+  scaffold_real_brief "$id" --mode local-only
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" \
+    "a local-only ship on a registered working branch should launch"$'\n'"$out"
+  launch="$HOME_DIR/data/$id/launch-brief.md"
+  assert_no_grep 'Current worktree base contract' "$launch" \
+    "a local-only worker was handed a base its landing path does not honour"
+  assert_grep 'rebase onto it so the eventual merge stays a fast-forward' "$launch" \
+    "the local-only rebase-onto-default rule no longer reaches the worker"
+
+  # A project that registers no working branch keeps the brief it was written.
+  id='pool-brief-unregistered-r1'
+  rec=$(make_case brief-unregistered "$id")
+  read_case_record "$rec"
+  scaffold_real_brief "$id" --mode direct-PR
+
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
+  status=$?
+  expect_code 0 "$status" \
+    "a direct-PR ship on a project registering no working branch should launch"$'\n'"$out"
+  launch="$HOME_DIR/data/$id/launch-brief.md"
+  assert_grep "$plain_pr" "$launch" \
+    "an unregistered project's direct-PR contract was rewritten"
+  assert_no_grep '--base' "$launch" \
+    "an unregistered project was handed a PR base nothing asked for"
+  assert_no_grep 'Current worktree base contract' "$launch" \
+    "an unregistered project was handed a working-branch section"
+  source_bytes=$(wc -c < "$HOME_DIR/data/$id/brief.md")
+  tail -c "$source_bytes" "$launch" | cmp -s - "$HOME_DIR/data/$id/brief.md" \
+    || fail "an unregistered project's launch brief no longer ends with the brief it was given"
+  pass "a launch brief names the working branch its slot was placed on, and is otherwise unchanged"
 }
 
 test_non_main_default_branch_refreshes_before_branching() {
@@ -443,8 +814,10 @@ test_unresolved_remote_default_refuses_pool() {
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded despite an unresolved remote default branch"
-  assert_contains "$out" "could not resolve origin's current default branch" \
+  assert_contains "$out" "could not resolve the working branch" \
     "spawn did not clearly refuse an unresolved remote default branch"
+  assert_contains "$out" "refusing to launch on whichever branch the pool happened to hand back" \
+    "the refusal did not say what it declined to do"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
     || fail "spawn moved HEAD after failing to resolve the remote default branch"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
@@ -748,6 +1121,12 @@ test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
+test_registered_working_branch_decides_the_pool_base
+test_malformed_branch_token_refuses_while_an_absent_one_falls_back
+test_unrefreshable_origin_head_refuses_unless_a_branch_is_registered
+test_registered_working_branch_missing_on_origin_refuses
+test_recorded_base_branch_names_every_resolved_base
+test_launch_brief_names_the_branch_the_slot_is_on
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool

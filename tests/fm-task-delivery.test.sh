@@ -7,7 +7,8 @@
 # validate them against a closed set, and the spawn additionally refuses to launch
 # when the brief it is about to hand the worker records a different mode. Scout
 # spawns carry no delivery posture at all. The registry keeps only the captain's
-# standing posture, for the mechanical consumers and for one advisory notice.
+# standing posture, for the mechanical consumers and for one advisory notice,
+# plus the optional working branch a pooled worktree must be placed on.
 #
 # Every spawn case here stops before any endpoint exists: the delivery checks run
 # ahead of backend creation, and a fake `tmux` that exits non-zero backstops the
@@ -306,6 +307,80 @@ test_promote_refuses_a_symlinked_task_record() {
 # no-mistakes worker gets. This drives the real promotion path, then runs the delivery command it
 # prints against a capturing fm-send.sh, and asserts on the message the worker would
 # actually receive - for every supported mode.
+# A direct-PR worker opens the PR itself, so the branch it targets is decided by
+# the contract it is handed. A promoted scout's slot was already placed by its own
+# spawn, so the record that spawn left is what decides the PR base here and what
+# corrects the promotion step that would otherwise send the worker back to the
+# repository's default branch.
+test_promotion_targets_the_recorded_working_branch() {
+  local home sendroot id meta mode out payload
+  home="$TMP_ROOT/promote-base/home"
+  sendroot="$TMP_ROOT/promote-base/sendroot"
+  mkdir -p "$home/state" "$sendroot/bin"
+  cat > "$sendroot/bin/fm-send.sh" <<'STUB'
+#!/usr/bin/env bash
+# Capture the message a promoted worker would receive, instead of steering one.
+printf '%s' "$2" > "$FM_TEST_CAPTURE"
+STUB
+  chmod +x "$sendroot/bin/fm-send.sh"
+
+  for id in promote-base-registered promote-base-default promote-base-local-only; do
+    meta="$home/state/$id.meta"
+    mode=direct-PR
+    case "$id" in
+      promote-base-default)
+        printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nbase_branch=main\n' "$id" > "$meta" ;;
+      promote-base-local-only)
+        mode=local-only
+        printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nbase_branch=develop\nbase_registered=1\n' \
+          "$id" > "$meta" ;;
+      *)
+        printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nbase_branch=develop\nbase_registered=1\n' \
+          "$id" > "$meta" ;;
+    esac
+    FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null 2>&1 \
+      || fail "$id: scout brief generation should succeed"
+    fill_brief_subsections "$home/data/$id/brief.md" \
+      "Ship the working-branch change." "Preserve the base the slot was placed on."
+    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1) \
+      || fail "$id: promotion should succeed"
+    payload="$TMP_ROOT/promote-base/payload-$id"
+    ( cd "$sendroot" \
+      && FM_TEST_CAPTURE="$payload" \
+         eval "$(printf '%s\n' "$out" | sed -n 's/^next: //p' | grep 'fm-send\.sh')" ) \
+      || fail "$id: promotion's delivery command did not run"
+    assert_present "$payload" "$id: promotion delivered no message to the worker"
+  done
+
+  payload="$TMP_ROOT/promote-base/payload-promote-base-registered"
+  assert_grep 'Return to a clean default-branch base' "$payload" \
+    "the promotion instructions no longer carry the default-branch step being superseded"
+  # shellcheck disable=SC2016 # Backticks are literal text in the brief being asserted.
+  assert_grep 'This worktree is based on `develop`' "$payload" \
+    "a promoted worker on a registered working branch was not told which branch it is on"
+  assert_grep 'supersedes any of them that names a different base' "$payload" \
+    "the recorded working branch did not supersede the default-branch promotion step"
+  # shellcheck disable=SC2016 # Backticks are literal text in the brief being asserted.
+  assert_grep 'passing `--base develop`' "$payload" \
+    "a promoted direct-PR worker was not told to open its PR against the recorded branch"
+
+  payload="$TMP_ROOT/promote-base/payload-promote-base-default"
+  assert_no_grep '--base' "$payload" \
+    "a slot placed on the remote default was handed a PR base nothing asked for"
+  assert_no_grep 'Current worktree base contract' "$payload" \
+    "a slot placed on the remote default was handed a working-branch section"
+
+  # local-only lands through bin/fm-merge-local.sh, which still fast-forwards the
+  # default branch, so naming another base here would land that branch's own
+  # commits in local main with no PR and no forge file list to reveal it.
+  payload="$TMP_ROOT/promote-base/payload-promote-base-local-only"
+  assert_no_grep 'Current worktree base contract' "$payload" \
+    "a local-only worker was handed a base its landing path does not honour"
+  assert_grep 'rebase onto it so the eventual merge stays a fast-forward' "$payload" \
+    "the local-only rebase-onto-default rule no longer reaches the promoted worker"
+  pass "fm-promote: a promoted worker targets the working branch its own slot was placed on"
+}
+
 test_promotion_delivers_the_real_definition_of_done() {
   local home meta out sendroot payload mode id brief_dod delivered_dod
   home="$TMP_ROOT/promote-dod/home"
@@ -429,6 +504,104 @@ EOF
   err=$(FM_HOME="$home" "$PROJECT_MODE" typoproj 2>&1 >/dev/null)
   assert_contains "$err" "unknown mode" "a typo'd registry mode stopped warning"
   pass "fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw"
+}
+
+# The registered working branch is what tells a pooled worktree which branch the
+# project is actually worked on, so --branch never invents one: only a token that
+# is not there at all leaves the caller to decide, a half-written or malformed one
+# is refused, and neither the posture nor the branch depends on where in the
+# annotation its token sits.
+test_project_mode_reads_the_registered_working_branch() {
+  local home out err status
+  home="$TMP_ROOT/project-branch/home"
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- devproj [no-mistakes branch=develop] - fixture (added 2026-09-18)
+- firstproj [no-mistakes branch=release/2026 +yolo] - fixture (added 2026-09-18)
+- plainproj [direct-PR] - fixture (added 2026-09-18)
+- legacyproj - fixture (added 2026-09-18)
+- emptyproj [no-mistakes branch=] - fixture (added 2026-09-18)
+- badproj [no-mistakes branch=bad..name] - fixture (added 2026-09-18)
+- dashproj [no-mistakes branch=-] - fixture (added 2026-09-18)
+- branchfirstproj [branch=develop local-only] - fixture (added 2026-09-18)
+- yolofirstproj [+yolo direct-PR] - fixture (added 2026-09-18)
+EOF
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch devproj 2>/dev/null)
+  [ "$out" = develop ] || fail "--branch did not read the registered working branch (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch firstproj 2>/dev/null)
+  [ "$out" = release/2026 ] \
+    || fail "--branch did not read a branch token written before +yolo (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" firstproj 2>/dev/null)
+  [ "$out" = "no-mistakes on" ] \
+    || fail "a branch token changed the posture read of the same line (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" devproj 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] \
+    || fail "a branch token was mistaken for a delivery mode (got '$out')"
+
+  # A token's position never decides the posture, so a registration that leads
+  # with branch= or +yolo still resolves to the mode the captain wrote.
+  out=$(FM_HOME="$home" "$PROJECT_MODE" branchfirstproj 2>/dev/null)
+  [ "$out" = "local-only off" ] \
+    || fail "a branch token before the mode discarded the registered posture (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch branchfirstproj 2>/dev/null)
+  [ "$out" = develop ] \
+    || fail "--branch did not read a branch token written before the mode (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" yolofirstproj 2>/dev/null)
+  [ "$out" = "direct-PR on" ] \
+    || fail "a +yolo token before the mode discarded the registered posture (got '$out')"
+
+  for project in plainproj legacyproj unregisteredproj; do
+    out=$(FM_HOME="$home" "$PROJECT_MODE" --branch "$project" 2>/dev/null)
+    status=$?
+    [ "$status" -eq 1 ] \
+      || fail "--branch answered $status for $project, which registers no working branch"
+    [ -z "$out" ] || fail "--branch printed '$out' for $project, which registers no working branch"
+    err=$(FM_HOME="$home" "$PROJECT_MODE" --branch "$project" 2>&1 >/dev/null)
+    [ -z "$err" ] || fail "--branch diagnosed $project, which simply registers no branch: $err"
+  done
+
+  # A registered branch git rejects is a different answer from an absent one, so
+  # it carries a different exit status and says which token it refused.
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch badproj 2>/dev/null)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--branch accepted a branch name git itself rejects"
+  [ "$status" -ne 1 ] \
+    || fail "--branch reported a branch name git rejects as an absent branch"
+  [ "$status" -eq 3 ] || fail "--branch answered $status for a malformed branch token, not 3"
+  [ -z "$out" ] || fail "--branch printed a branch name git itself rejects (got '$out')"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" --branch badproj 2>&1 >/dev/null)
+  assert_contains "$err" "not a valid branch name" \
+    "a malformed branch token was ignored without saying so"
+  assert_contains "$err" 'bad..name' "the diagnostic did not name the offending token"
+
+  # Somebody who typed `branch=` and stopped has stated an intention and left it
+  # unfinished, so it is refused exactly as a malformed value is; reading it as
+  # absent would turn a half-written line into a silent landing on the default
+  # branch, the failure this token exists to remove.
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch emptyproj 2>/dev/null)
+  status=$?
+  [ "$status" -eq 3 ] \
+    || fail "--branch answered $status for a valueless branch=, not the malformed-token status 3"
+  [ -z "$out" ] || fail "--branch printed something for a valueless branch= (got '$out')"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" --branch emptyproj 2>&1 >/dev/null)
+  assert_contains "$err" "not a valid branch name" \
+    "a half-written branch token was read as no branch at all"
+
+  # A lone dash is a branch name git's syntax check accepts, so nothing but an
+  # explicit refusal keeps it from being handed on and read as an option, and
+  # reporting it as an absent branch would send the caller silently down the
+  # origin-default path this token exists to close.
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch dashproj 2>/dev/null)
+  status=$?
+  [ "$status" -eq 3 ] \
+    || fail "--branch answered $status for branch=-, not the malformed-token status 3"
+  [ -z "$out" ] || fail "--branch printed the lone-dash branch name (got '$out')"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" --branch dashproj 2>&1 >/dev/null)
+  assert_contains "$err" "not a valid branch name" \
+    "a lone-dash branch token was ignored without saying so"
+  pass "fm-project-mode: --branch reads a registered working branch and never invents one"
 }
 
 # Spawn and promotion refuse leftover Task-subsection placeholders through the
@@ -889,7 +1062,9 @@ test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promote_refuses_a_symlinked_task_record
+test_promotion_targets_the_recorded_working_branch
 test_promotion_delivers_the_real_definition_of_done
 test_project_mode_maps_the_conditional_policy
+test_project_mode_reads_the_registered_working_branch
 test_spawn_and_promote_require_filled_task_subsections
 echo "# all fm-task-delivery tests passed"

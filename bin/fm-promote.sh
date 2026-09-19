@@ -11,7 +11,13 @@
 # bin/fm-dod-lib.sh, the single owner an ordinary ship brief also uses - the
 # mode-specific Definition of done, so a promoted worker receives exactly the same
 # delivery contract as a briefed one, including the no-mistakes mode's ask-user
-# escalation rule and --yes ban. The instructions also carry `# Task` with
+# escalation rule and --yes ban. When the scout's own spawn recorded a registered
+# working branch for this slot, fm-dod-lib.sh's worktree base section is rendered
+# after that contract and supersedes the clean default-branch base above: sending
+# a slot placed on the project's working branch back to the default branch is the
+# foreign-commit hazard that record exists to close. That owner renders nothing
+# for local-only, whose landing path still targets the default branch. The
+# instructions also carry `# Task` with
 # `## Captain's intent` preserved from the scout brief and promotion's ship-time
 # instructions under `## Firstmate spec`; the scout-time spec remains context but
 # is not relabeled as the ship spec. Promotion refuses leftover `{TASK}` /
@@ -178,6 +184,7 @@ PROMOTION_ASK_USER_BLOCK=
 if [ "$MODE" = no-mistakes ]; then
   PROMOTION_ASK_USER_BLOCK=$(fm_ask_user_escalation_block "$DATA" "$ID")
 fi
+PROMOTION_BASE_SECTION=$(fm_brief_base_branch_overlay "$(fm_recorded_working_branch "$STATE" "$ID")" "$MODE")
 IFS= read -r -d '' PROMOTION_SHIP_SPEC <<EOF || true
 If these promotion steps were already completed before a relaunch, preserve the existing \`fm/$ID\` branch and continue from its current state; do not repeat them destructively.
 1. **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from. If either does not resolve to the worktree you were launched in, stop and escalate to firstmate.
@@ -206,6 +213,7 @@ EOF
   fi
   printf '\n'
   fm_dod_block "$MODE" "$ID"
+  [ -z "$PROMOTION_BASE_SECTION" ] || printf '\n%s\n' "$PROMOTION_BASE_SECTION"
 }
 mkdir -p "$DATA/$ID"
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }
