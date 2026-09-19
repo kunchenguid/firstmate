@@ -1497,6 +1497,10 @@ ${context.command}
         const heartbeat = /^heartbeat($|:)/.test(message);
         // The posture is read here, at the tail of this wake, never earlier
         // and never into the prompt prefix.
+        // Accepted confused-agent-grade residual (bin/fm-lease-lib.sh role-
+        // partition paragraph): the record is validated then may be archived
+        // mid-operation; every relocated action revalidates at its own gate;
+        // rows are store-first and the durable queue keeps them.
         const afk = afkPostureRecordPresent(state);
         const scope = scopeForUnreadWake(state, heartbeat, afk);
         // A newly-arrived main-owned (check-kind) row never bounces this
@@ -1536,6 +1540,9 @@ ${context.command}
         wakeTaskScope = heartbeat || scope.checkSeqs.length > 0 || scope.heartbeatSeqs.length > 0
           ? null
           : { rows: [...scope.eligibleSeqs], tasks: new Set(scope.eligibleTasks) };
+        // Same residual: archive during snapshot publish or read-back still
+        // lets this prompt proceed; the guarded scripts revalidate, and the
+        // durable queue keeps every row (bin/fm-lease-lib.sh role-partition).
         const postureTail = afk ? await awayPostureTail() : "";
         try {
           await session.prompt(
@@ -1687,7 +1694,16 @@ ${context.command}
     const kept = messages.filter((message) => !isProcessingCustomMessage(message));
     if (kept.length === messages.length) return;
     processing = null;
-    if (!kept.some((message) => message.role === "user")) ctx?.abort?.();
+    let openedByUser = false;
+    for (let i = kept.length - 1; i >= 0; i -= 1) {
+      const role = kept[i].role;
+      if (role === "assistant") break;
+      if (role === "user") {
+        openedByUser = true;
+        break;
+      }
+    }
+    if (!openedByUser) ctx?.abort?.();
     return { messages: kept };
   });
   pi.on?.("agent_end", () => {

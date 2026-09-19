@@ -957,6 +957,26 @@ EOF
   [ "$status" -ne 6 ] || fail "a queued branch spawn hit the partition: $out"
   assert_contains "$out" "main is parked" "the queued spawn lost its relocation note"
 
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-spawn.sh" mate-new --secondmate 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "a branch secondmate spawn exited $status, not 6: $out"
+  assert_contains "$out" "the supervision branch never performs this action" "a branch secondmate spawn was not refused at the partition"
+
+  hook="$home/archive-after-early"
+  cat > "$hook" <<HOOK
+#!/usr/bin/env bash
+set -eu
+FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null
+HOOK
+  chmod +x "$hook"
+  out=$(FM_TEST_SPAWN_AFTER_EARLY_CAP="$hook" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-spawn.sh" task-queued --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -eq 6 ] || fail "an archived-after-early-guard spawn exited $status, not 6: $out"
+  assert_contains "$out" "the supervision branch never performs this action" \
+    "archiving between the early guard and the gate did not restore the attended refusal"
+
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
     "$ROOT/bin/fm-spawn.sh" task-arbitrary --mode no-mistakes --yolo off 2>&1)
   assert_not_contains "$out" "already-queued unblocked work" "main's attended spawn was held to the branch queued-work gate"

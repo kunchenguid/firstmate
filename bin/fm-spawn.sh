@@ -1397,15 +1397,20 @@ spawn_refuse_if_away_spend_cap
 if [ -x "${FM_TEST_SPAWN_AFTER_EARLY_CAP:-}" ]; then
   "$FM_TEST_SPAWN_AFTER_EARLY_CAP"
 fi
-if [ "$RELAUNCH" -ne 1 ] && [ "$KIND" != secondmate ]; then
-  spawn_actor=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
-  if [ "$spawn_actor" = branch ] && fm_lease_away_relocated; then
-    if ! fm_backlog_row_probe "$DATA" "$ID" || ! fm_backlog_row_dispatchable "$FM_BACKLOG_ROW_STATE"; then
-      echo "error: spawn refused - the supervision branch under the away-posture record may dispatch only already-queued unblocked work; task $ID has no dispatchable backlog item in this home" >&2
-      exit 1
-    fi
+spawn_require_relocated_queued_work() {
+  local actor
+  [ "$RELAUNCH" -ne 1 ] || return 0
+  actor=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
+  [ "$actor" = branch ] || return 0
+  if [ "$KIND" = secondmate ]; then
+    fm_lease_forbid_branch "new-task spawn (fm-spawn)"
   fi
-fi
+  fm_lease_forbid_branch "new-task spawn (fm-spawn)" --away-relocated
+  if ! fm_backlog_row_probe "$DATA" "$ID" || ! fm_backlog_row_dispatchable "$FM_BACKLOG_ROW_STATE"; then
+    echo "error: spawn refused - the supervision branch under the away-posture record may dispatch only already-queued unblocked work; task $ID has no dispatchable backlog item in this home" >&2
+    exit 1
+  fi
+}
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
   control_owner=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)
@@ -1458,6 +1463,7 @@ if [ "$RELAUNCH" -eq 0 ]; then
   fi
   SPAWN_TASK_SET_LOCK_HELD=1
   spawn_refuse_if_away_spend_cap
+  spawn_require_relocated_queued_work
 fi
 if [ "$KIND" = secondmate ]; then
   if spawn_remote_secondmate "$ID"; then
