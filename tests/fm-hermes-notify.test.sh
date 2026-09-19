@@ -57,6 +57,7 @@ run_notify() {  # <home> <command args...>
     FM_TEST_HERMES_TARGETS_FILE="$home/hermes-targets.txt" \
     FM_TEST_HERMES_SEND_LOG="$home/hermes-send.log" \
     FM_TEST_HERMES_FAIL_ONCE="$home/hermes-fail-once" \
+    FM_TEST_HERMES_DELAY_ONCE="$home/hermes-delay-once" \
     "$NOTIFY" "$@"
 }
 
@@ -92,6 +93,10 @@ latest_note() {  # <home>
 #   FM_TEST_HERMES_FAIL_ONCE     when this path exists, the NEXT send call
 #                                 fails (exit 1) and removes it, so a case can
 #                                 force exactly one interrupted/failed attempt.
+#   FM_TEST_HERMES_DELAY_ONCE    when this path exists, the NEXT send call
+#                                 sleeps briefly before succeeding and removes
+#                                 it, so a case can widen a real race window
+#                                 around one specific send.
 # configure_hermes <home> <target-line>... writes the targets file (or leaves
 # it empty for "not configured") and installs the fake.
 configure_hermes() {  # <home> <target-line>...
@@ -120,6 +125,10 @@ if [ "${1:-}" = send ] && [ "${2:-}" = --to ]; then
   if [ -n "${FM_TEST_HERMES_FAIL_ONCE:-}" ] && [ -e "$FM_TEST_HERMES_FAIL_ONCE" ]; then
     rm -f "$FM_TEST_HERMES_FAIL_ONCE"
     exit 1
+  fi
+  if [ -n "${FM_TEST_HERMES_DELAY_ONCE:-}" ] && [ -e "$FM_TEST_HERMES_DELAY_ONCE" ]; then
+    rm -f "$FM_TEST_HERMES_DELAY_ONCE"
+    sleep 1
   fi
   printf "to=%s text=%s\n" "$to" "$*" >> "$FM_TEST_HERMES_SEND_LOG"
   exit 0
@@ -618,6 +627,54 @@ test_confirm_retry_resends_a_failed_confirmation() {
   pass "confirm-retry resends a failed mode-change confirmation and clears once delivered"
 }
 
+# Before CONFIRM_LOCK, a slow confirm-retry (still delivering an old, failed
+# mode's acknowledgement) and a fresh, fast mode-change confirmation could
+# interleave: the fresh confirmation would finish and record its own sent
+# status first, then the slow retry would finish afterward and clobber it
+# with the stale mode's sent status. With the lock, the retry holds the whole
+# read-decide-send-write sequence, so the fresh mode change blocks until the
+# retry releases it and the newer mode's record always wins.
+test_confirm_retry_serializes_against_a_concurrent_mode_change() {
+  local home note out retry_pid
+  home=$(make_home confirm-retry-race)
+  configure_hermes "$home" 'telegram:Rajiv [8629896233]'
+  : > "$home/hermes-fail-once"
+  run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] Captain home"
+  note=$(latest_note "$home")
+  set +e
+  run_notify "$home" inbound "$note" >/dev/null
+  set -e
+  assert_grep "mode=HOME" "$home/state/hermes-notify/.presence-confirm.record" \
+    "the setup step did not leave a failed HOME confirmation to retry"
+  assert_grep "status=failed" "$home/state/hermes-notify/.presence-confirm.record" \
+    "the setup step did not leave a failed HOME confirmation to retry"
+
+  : > "$home/hermes-delay-once"
+  ( run_notify "$home" confirm-retry > "$home/retry-out" 2>&1 ) &
+  retry_pid=$!
+  sleep 0.3
+  rm -f "$home/state/inbox"/*.note
+  run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] Captain away"
+  note=$(latest_note "$home")
+  out=$(run_notify "$home" inbound "$note") \
+    || fail "a fresh mode change racing a slow confirm-retry was not reported as successful"
+  wait "$retry_pid" || fail "the concurrent confirm-retry call exited non-zero"
+
+  assert_contains "$out" "mode:AWAY" "the fresh AWAY mode change was not reported while a stale retry was in flight"
+  assert_contains "$out" "confirmation:sent" "the fresh AWAY confirmation did not report sent once it had the lock"
+  assert_contains "$(cat "$home/retry-out")" "confirmation:sent" \
+    "the delayed confirm-retry for the stale HOME acknowledgement did not itself report sent"
+  assert_grep "mode=AWAY" "$home/state/hermes-notify/.presence-confirm.record" \
+    "the slow retry's stale HOME write clobbered the newer AWAY confirmation record"
+  assert_grep "status=sent" "$home/state/hermes-notify/.presence-confirm.record" \
+    "the confirmation record was left in an inconsistent state after the race"
+  assert_equals 2 "$(wc -l < "$home/hermes-send.log" | tr -d '[:space:]')" \
+    "exactly one HOME retry send and one AWAY send should have reached hermes"
+  assert_grep 'Captain presence is now HOME' "$home/hermes-send.log" "the retried HOME acknowledgement was never actually delivered"
+  assert_grep 'Captain presence is now AWAY' "$home/hermes-send.log" "the fresh AWAY acknowledgement was never actually delivered"
+  pass "confirm-retry and a fresh mode-change confirmation are serialized so the newer mode always wins the record"
+}
+
 test_inbound_reports_confirmation_sent_on_the_ordinary_success_path() {
   local home note out
   home=$(make_home inbound-confirm-ok)
@@ -665,5 +722,6 @@ test_home_and_away_route_only_eligible_notifications
 test_inbound_mode_and_status_commands_work_in_both_modes
 test_inbound_reports_partial_success_when_confirmation_fails
 test_confirm_retry_resends_a_failed_confirmation
+test_confirm_retry_serializes_against_a_concurrent_mode_change
 test_inbound_reports_confirmation_sent_on_the_ordinary_success_path
 test_mode_commands_do_not_answer_or_release_holds
