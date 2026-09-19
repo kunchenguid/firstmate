@@ -2156,7 +2156,9 @@ FM_WATCH_DELIVERY_PID=$WATCHER_PID
 # never leave an empty or half-written identity file behind, and refuse to
 # supervise (typed failure line, EXIT trap releases the lock) when the
 # identity cannot be produced and confirmed by read-back. A watcher this
-# home cannot identify must not supervise it.
+# home cannot identify must not supervise it. Both legs retry on the same
+# bounded 5x0.1s budget: a transient read or publish failure must not
+# refuse supervision when the very next attempt would have succeeded.
 identity_attempts=0
 while :; do
   FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
@@ -2168,12 +2170,20 @@ while :; do
   sleep 0.1
   identity_attempts=$((identity_attempts + 1))
 done
-if ! printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null \
-   || [ "$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)" != "$FM_WATCH_DELIVERY_IDENTITY" ]; then
+identity_publish_attempts=0
+while :; do
+  if printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null \
+     && [ "$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)" = "$FM_WATCH_DELIVERY_IDENTITY" ]; then
+    break
+  fi
   rm -f "$WATCH_LOCK/pid-identity" 2>/dev/null || true
-  echo "watcher: FAILED - could not publish this watcher's pid identity into the lock; refusing to run unauditable"
-  exit 1
-fi
+  [ "$identity_publish_attempts" -lt 5 ] || {
+    echo "watcher: FAILED - could not publish this watcher's pid identity into the lock; refusing to run unauditable"
+    exit 1
+  }
+  sleep 0.1
+  identity_publish_attempts=$((identity_publish_attempts + 1))
+done
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
