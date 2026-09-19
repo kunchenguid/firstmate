@@ -1,5 +1,24 @@
 #!/usr/bin/env bash
 # Shared durable wake queue and portable lock helpers.
+#
+# RECOVERY COMPLETION HISTORY. Before a current `acked:handling:<generation>` or
+# `acked:downtime:<generation>` marker is replaced, this library retains that
+# generation in `${marker}.ack-completions`. The file is newline-delimited: its
+# first line is exactly `fm-wake-ack-completions-v1`, followed by at most 1,024
+# unique generation lines, each 1-128 ASCII characters from `[A-Za-z0-9._-]`.
+# The complete file is bounded at 262,144 bytes and is never pruned
+# automatically. fm_recovery_marker_completed accepts either the matching
+# current acknowledged marker or a matching history row. A symlink, non-regular,
+# unreadable, oversized, malformed, duplicate, or full history makes completion
+# unresolved and prevents acknowledgement or marker replacement from erasing
+# the current proof.
+#
+# NATIVE EMPTY-FLEET ADMISSION. fm_wake_native_empty_fleet_preflight validates
+# bounded queue, presentation, and recovery state, while the inbox and deferred
+# startup owners decide which of their rows are supported. It is read-only,
+# rejects branch grants and unknown or malformed rows, and reports refusals in
+# FM_WAKE_NATIVE_ADMISSION_ERROR. An acknowledged marker is accepted only with
+# matching evidence selected by the native receipt-journal owner.
 
 FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd)"
@@ -623,7 +642,61 @@ fm_recovery_marker_read() {
   case "${line##*:}" in
     ''|*[!A-Za-z0-9._-]*) return 1 ;;
   esac
+  [ "${#line}" -le 160 ] || return 1
   FM_RECOVERY_MARKER_TOKEN=$line
+}
+
+_fm_recovery_completion_has_locked() {
+  local marker=$1 generation=$2 file="${1}.ack-completions" size
+  [ "${#generation}" -le 128 ] || return 2
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    return 1
+  fi
+  [ -f "$file" ] && [ ! -L "$file" ] || return 2
+  size=$(wc -c < "$file" 2>/dev/null | tr -d '[:space:]') || return 2
+  case "$size" in ''|*[!0-9]*) return 2 ;; esac
+  [ "$size" -le 262144 ] || return 2
+  LC_ALL=C awk -v target="$generation" '
+    NR == 1 { if ($0 != "fm-wake-ack-completions-v1") bad=1; next }
+    length($0) > 128 || $0 !~ /^[A-Za-z0-9._-]+$/ || seen[$0]++ { bad=1 }
+    $0 == target { found=1 }
+    NR > 1025 { bad=1 }
+    END {
+      if (NR < 1 || bad) exit 2
+      if (found) exit 0
+      exit 1
+    }
+  ' "$file"
+}
+
+_fm_recovery_completion_preserve_locked() {
+  local marker=$1 generation=$2 file="${1}.ack-completions" status count tmp
+  [ "${#generation}" -le 128 ] || return 1
+  if _fm_recovery_completion_has_locked "$marker" "$generation"; then
+    return 0
+  else
+    status=$?
+  fi
+  case "$status" in
+    1) ;;
+    *) return 1 ;;
+  esac
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    count=$(awk 'END { print NR - 1 }' "$file") || return 1
+    [ "$count" -lt 1024 ] || return 1
+  fi
+  tmp=$(mktemp "${file}.tmp.XXXXXX") || return 1
+  if [ -e "$file" ]; then
+    cp "$file" "$tmp" || { rm -f -- "$tmp"; return 1; }
+  else
+    printf 'fm-wake-ack-completions-v1\n' > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  fi
+  if ! printf '%s\n' "$generation" >> "$tmp" \
+    || ! chmod 0600 "$tmp" \
+    || ! _fm_atomic_replace "$tmp" "$file"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
 }
 
 _fm_atomic_replace() {
@@ -672,6 +745,16 @@ _fm_recovery_marker_publish() {
         announced:handling:*|announced:downtime:*)
           generation=${FM_RECOVERY_MARKER_TOKEN##*:}
           status=announced
+          ;;
+        acked:handling:*|acked:downtime:*)
+          generation=${FM_RECOVERY_MARKER_TOKEN##*:}
+          if ! _fm_recovery_completion_preserve_locked "$marker" "$generation"; then
+            FM_RECOVERY_MARKER_TOKEN=$saved_token
+            fm_lock_release "$lock"
+            return 1
+          fi
+          generation=''
+          status=pending
           ;;
       esac
     fi
@@ -728,6 +811,34 @@ fm_recovery_marker_snapshot() {
   fm_lock_release "$lock"
 }
 
+FM_RECOVERY_COMPLETION_SOURCE=
+fm_recovery_marker_completed() {
+  local marker=$1 generation=$2 lock status
+  FM_RECOVERY_COMPLETION_SOURCE=
+  lock="${marker}.lock"
+  fm_lock_acquire_wait "$lock" || return 1
+  if ! fm_recovery_marker_read "$marker"; then
+    fm_lock_release "$lock"
+    return 1
+  fi
+  if [ "$FM_RECOVERY_MARKER_TOKEN" = "acked:handling:$generation" ] \
+    || [ "$FM_RECOVERY_MARKER_TOKEN" = "acked:downtime:$generation" ]; then
+    FM_RECOVERY_COMPLETION_SOURCE=current
+    fm_lock_release "$lock"
+    return 0
+  fi
+  if _fm_recovery_completion_has_locked "$marker" "$generation"; then
+    status=0
+  else
+    status=$?
+  fi
+  if [ "$status" -eq 0 ]; then
+    FM_RECOVERY_COMPLETION_SOURCE=history
+  fi
+  fm_lock_release "$lock"
+  return "$status"
+}
+
 _fm_recovery_marker_ack() {
   local marker=$1 expected_generation=$2 lock tmp line
   [ -n "$expected_generation" ] || return 2
@@ -749,6 +860,10 @@ _fm_recovery_marker_ack() {
     || ! chmod 0600 "$tmp" \
     || ! mv -f -- "$tmp" "$marker"; then
     rm -f -- "$tmp"
+    fm_lock_release "$lock"
+    return 1
+  fi
+  if ! _fm_recovery_completion_preserve_locked "$marker" "$expected_generation"; then
     fm_lock_release "$lock"
     return 1
   fi
@@ -1534,8 +1649,8 @@ fm_autoarm_claim_open() {  # <state-dir> [grace]
 # The watcher runs only between turns; turn-end re-arms.
 #
 # Healthy means outcome=rewake with no exhausted-failure marker, bound to the
-# current session-lock pid and current watcher recovery generation. The rewake
-# ledger must also be at least as new as the last watcher beacon: a later beacon
+# current session-lock owner identity and current watcher recovery generation.
+# The rewake ledger must also be at least as new as the last watcher beacon: a later beacon
 # proves another between-turns watcher cycle has begun, so the rewake belongs to
 # an earlier handling turn.
 #
@@ -1810,6 +1925,19 @@ fm_wake_append() {
   return "$status"
 }
 
+fm_wake_startup_network_payload() {  # <done|failed|timeout>
+  local state=$1
+  case "$state" in done|failed|timeout) ;; *) return 1 ;; esac
+  printf 'check: startup-network: deferred startup network checks finished (%s); read them with %s/bin/fm-startup-network.sh report\n' \
+    "$state" "$FM_ROOT"
+}
+
+fm_wake_append_startup_network() {  # <done|failed|timeout>
+  local payload
+  payload=$(fm_wake_startup_network_payload "$1") || return 1
+  fm_wake_append check startup-network "$payload"
+}
+
 # fm_wake_append_locked <kind> <key> <payload>
 # Locked core of fm_wake_append: appends the wake row under an already-held
 # FM_WAKE_QUEUE_LOCK. Callers that must commit another durable record atomically
@@ -1995,6 +2123,130 @@ fm_wake_grant_rows_valid() {  # <rows-file>
   [ -s "$1" ] && awk 'BEGIN { ok=1 } !/^[0-9]+$/ || seen[$0]++ { ok=0 } END { exit !ok }' "$1"
 }
 
+FM_WAKE_NATIVE_ADMISSION_ERROR=
+fm_wake_native_empty_fleet_preflight() {  # <state-dir> [<native-ack-evidence>]
+  local state=$1 native_evidence=${2:-} queue marker seq_file main_rows history record size counter
+  local row_count inbox_count startup_count status
+  FM_WAKE_NATIVE_ADMISSION_ERROR=
+  queue="$state/.wake-queue"
+  marker="$state/.watcher-down"
+  seq_file="$state/.wake-queue.seq"
+  main_rows="$state/.main-eligible-rows"
+  history="$marker.ack-completions"
+  if [ ! -d "$state" ] || [ -L "$state" ]; then
+    FM_WAKE_NATIVE_ADMISSION_ERROR="wake state directory is unavailable at $state"
+    return 1
+  fi
+  for record in "$state/.branch-eligible-rows" "$state/.branch-eligible-owner"; do
+    if [ -e "$record" ] || [ -L "$record" ]; then
+      FM_WAKE_NATIVE_ADMISSION_ERROR="unsupported branch wake state is present at $record"
+      return 1
+    fi
+  done
+  if [ -e "$seq_file" ] || [ -L "$seq_file" ]; then
+    if [ ! -f "$seq_file" ] || [ ! -r "$seq_file" ] || [ -L "$seq_file" ] \
+      || ! awk 'NR != 1 || !/^[0-9]+$/ { bad=1 } END { exit bad || NR != 1 }' "$seq_file"; then
+      FM_WAKE_NATIVE_ADMISSION_ERROR="wake sequence state is unrecognized at $seq_file"
+      return 1
+    fi
+    counter=$(cat "$seq_file")
+    if [ "${#counter}" -gt 16 ]; then
+      FM_WAKE_NATIVE_ADMISSION_ERROR="wake sequence state is out of bounds at $seq_file"
+      return 1
+    fi
+  else
+    counter=
+  fi
+  if [ -e "$main_rows" ] || [ -L "$main_rows" ]; then
+    if [ -L "$main_rows" ] || [ -z "$counter" ] || ! fm_wake_grant_rows_valid "$main_rows" \
+      || ! awk -v ceiling="$counter" 'length($0) > 16 || $0 > ceiling { bad=1 } END { exit bad }' "$main_rows"; then
+      FM_WAKE_NATIVE_ADMISSION_ERROR="native wake presentation state is unrecognized at $main_rows"
+      return 1
+    fi
+  fi
+  if [ -e "$queue" ] || [ -L "$queue" ]; then
+    if [ ! -f "$queue" ] || [ ! -r "$queue" ] || [ -L "$queue" ]; then
+      FM_WAKE_NATIVE_ADMISSION_ERROR="wake queue is not a readable regular file at $queue"
+      return 1
+    fi
+    size=$(wc -c < "$queue" 2>/dev/null | tr -d '[:space:]') || size=
+    case "$size" in ''|*[!0-9]*) size=8388609 ;; esac
+    if [ "$size" -gt 8388608 ] || ! LC_ALL=C awk -F '\t' -v ceiling="$counter" '
+      NF != 5 || $1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ || $2 == 0 || length($2) > 16 ||
+        $3 !~ /^(signal|stale|check|heartbeat)$/ || length($4) == 0 || length($5) == 0 ||
+        seen[$2]++ || (previous && $2 <= previous) || (ceiling != "" && $2 > ceiling) { bad=1 }
+      { previous=$2; count++ }
+      END { exit bad || count > 100000 }
+    ' "$queue"; then
+      FM_WAKE_NATIVE_ADMISSION_ERROR="wake queue contains malformed or oversized records at $queue"
+      return 1
+    fi
+  fi
+  if [ -s "$queue" ] && [ -z "$counter" ]; then
+    FM_WAKE_NATIVE_ADMISSION_ERROR="wake queue has no producer sequence state at $seq_file"
+    return 1
+  fi
+  if [ -e "$queue" ]; then
+    row_count=$(awk 'END { print NR + 0 }' "$queue" 2>/dev/null) || row_count=
+  else
+    row_count=0
+  fi
+  inbox_count=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$state" \
+    "$FM_WAKE_LIB_DIR/fm-inbox.sh" native-admission-predicate "$queue" 2>/dev/null) || {
+    FM_WAKE_NATIVE_ADMISSION_ERROR="inbox owner refused native admission state"
+    return 1
+  }
+  startup_count=$(FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$state" \
+    "$FM_WAKE_LIB_DIR/fm-startup-network.sh" native-admission-predicate "$queue" 2>/dev/null) || {
+    FM_WAKE_NATIVE_ADMISSION_ERROR="startup owner refused native admission state"
+    return 1
+  }
+  case "$row_count:$inbox_count:$startup_count" in
+    *[!0-9:]*)
+      FM_WAKE_NATIVE_ADMISSION_ERROR="wake producer admission evidence is unrecognized"
+      return 1
+      ;;
+  esac
+  if [ -z "$row_count" ] || [ -z "$inbox_count" ] || [ -z "$startup_count" ] \
+    || [ "$row_count" -ne $((inbox_count + startup_count)) ]; then
+    FM_WAKE_NATIVE_ADMISSION_ERROR="unsupported work-bearing wake is queued at $queue"
+    return 1
+  fi
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    if ! fm_recovery_marker_read "$marker"; then
+      FM_WAKE_NATIVE_ADMISSION_ERROR="wake recovery state is unrecognized at $marker"
+      return 1
+    fi
+    case "$FM_RECOVERY_MARKER_TOKEN" in
+      acked:*)
+        if [ -z "$native_evidence" ] || ! fm_wake_ack_evidence_native_recovery "$native_evidence" "$marker"; then
+          FM_WAKE_NATIVE_ADMISSION_ERROR="acknowledged wake recovery is not owned by the native receipt journal"
+          return 1
+        fi
+        ;;
+    esac
+  elif [ -s "$queue" ]; then
+    FM_WAKE_NATIVE_ADMISSION_ERROR="queued wakes have no recovery generation at $marker"
+    return 1
+  fi
+  if [ -e "$history" ] || [ -L "$history" ]; then
+    [ -e "$marker" ] && [ ! -L "$marker" ] || {
+      FM_WAKE_NATIVE_ADMISSION_ERROR="wake completion history has no current recovery marker"
+      return 1
+    }
+    if _fm_recovery_completion_has_locked "$marker" fm-native-admission-probe; then
+      :
+    else
+      status=$?
+      if [ "$status" -ne 1 ]; then
+        # shellcheck disable=SC2034 # Public result consumed by bin/native-owner/admit.sh.
+        FM_WAKE_NATIVE_ADMISSION_ERROR="wake completion history is unrecognized at $history"
+        return 1
+      fi
+    fi
+  fi
+}
+
 # 0 when <owner-file> holds the supported record, names a live process whose
 # identity still matches what was recorded, and matches any expected pid and
 # generation the caller pins. An unreadable, malformed, or superseded record is
@@ -2061,6 +2313,379 @@ fm_wake_actor_pending_count() {  # <actor> [<rows-file> <owner-file>]
   # reaches END after failing to open the queue would otherwise report 0 rows.
   case "$count" in ''|*[!0-9]*) count=1 ;; esac
   printf '%s\n' "$count"
+}
+
+FM_WAKE_ACK_EVIDENCE_TOKEN=
+FM_WAKE_ACK_EVIDENCE_CUTOFF=
+FM_WAKE_ACK_EVIDENCE_GENERATION=
+FM_WAKE_ACK_EVIDENCE_MARKER=
+FM_WAKE_ACK_EVIDENCE_ROWS=
+FM_WAKE_ACK_EVIDENCE_NOTES=
+FM_WAKE_ACK_EVIDENCE_LEGACY=0
+
+fm_wake_ack_hash() {  # <file>
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+fm_wake_ack_note_safe() {  # <path>
+  local path=$1
+  [ -d "$STATE/inbox" ] && [ ! -L "$STATE/inbox" ] || return 1
+  if [ -e "$STATE/inbox/handled" ] || [ -L "$STATE/inbox/handled" ]; then
+    [ -d "$STATE/inbox/handled" ] && [ ! -L "$STATE/inbox/handled" ] || return 1
+  fi
+  case "$path" in
+    "$STATE/inbox/handled"/*) [ -d "$STATE/inbox/handled" ] || return 1 ;;
+  esac
+  [ -f "$path" ] && [ ! -L "$path" ]
+}
+
+fm_wake_ack_evidence_clear() {
+  [ -z "$FM_WAKE_ACK_EVIDENCE_ROWS" ] || rm -f -- "$FM_WAKE_ACK_EVIDENCE_ROWS"
+  [ -z "$FM_WAKE_ACK_EVIDENCE_NOTES" ] || rm -f -- "$FM_WAKE_ACK_EVIDENCE_NOTES" \
+    "$FM_WAKE_ACK_EVIDENCE_NOTES.hashes"
+  FM_WAKE_ACK_EVIDENCE_TOKEN=
+  FM_WAKE_ACK_EVIDENCE_CUTOFF=
+  FM_WAKE_ACK_EVIDENCE_GENERATION=
+  FM_WAKE_ACK_EVIDENCE_MARKER=
+  FM_WAKE_ACK_EVIDENCE_ROWS=
+  FM_WAKE_ACK_EVIDENCE_NOTES=
+  FM_WAKE_ACK_EVIDENCE_LEGACY=0
+}
+
+fm_wake_ack_evidence_legacy_token() {
+  # shellcheck disable=SC2016  # Single quotes are deliberate: ${...} belongs to the Node snippet.
+  node -e '
+    let input="";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data",chunk=>input+=chunk);
+    process.stdin.on("end",()=>{
+      const value=JSON.parse(input);
+      if(!value||typeof value!=="object"||Array.isArray(value))throw Error("legacy evidence must be an object");
+      const version=Number(value.version);
+      if(![1,2,3].includes(version))throw Error("unsupported legacy evidence");
+      if(typeof value.cutoff!=="string")throw Error("invalid legacy cutoff");
+      const cutoff=String(value.cutoff);
+      const rows=value.rows;
+      if(!Array.isArray(rows)||rows.some(row=>typeof row!=="string"))throw Error("invalid legacy rows");
+      let notes=[];
+      if(version===1)notes=[value];
+      else notes=value.notes;
+      if(!Array.isArray(notes)||notes.some(note=>!note||typeof note!=="object"||Array.isArray(note)))throw Error("invalid legacy notes");
+      if(version===3&&(cutoff!=="0"||rows.length!==0||notes.length!==0))throw Error("invalid legacy recovery target");
+      const generation=version===3?value.recoveryGeneration:"legacy";
+      const marker=version===3?value.recoveryMarker:"";
+      if(typeof generation!=="string"||typeof marker!=="string")throw Error("invalid legacy recovery evidence");
+      const line=["fm-wake-ack-evidence-legacy-v1",`cutoff\t${cutoff}`,`generation\t${generation}`,`marker\t${Buffer.from(marker).toString("base64")}`,`rows\t${rows.length}`];
+      for(const row of rows)line.push(`row\t${Buffer.from(row).toString("base64")}`);
+      line.push(`notes\t${notes.length}`);
+      for(const note of notes){
+        if(typeof note.note!=="string"||typeof note.noteSha256!=="string")throw Error("invalid legacy note");
+        line.push(`note\t${note.note}\t${note.noteSha256}`);
+      }
+      process.stdout.write("legacy."+Buffer.from(line.join("\n")+"\n").toString("base64"));
+    });
+  '
+}
+
+fm_wake_ack_evidence_capture() {
+  local rows_file="$STATE/.main-eligible-rows" marker="$STATE/.watcher-down"
+  local payload seq_count note_count note id digest encoded
+  fm_wake_ack_evidence_clear
+  FM_WAKE_ACK_EVIDENCE_ROWS=$(mktemp "${TMPDIR:-/tmp}/fm-wake-ack-rows.XXXXXX") || return 1
+  FM_WAKE_ACK_EVIDENCE_NOTES=$(mktemp "${TMPDIR:-/tmp}/fm-wake-ack-notes.XXXXXX") || {
+    fm_wake_ack_evidence_clear
+    return 1
+  }
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || { fm_wake_ack_evidence_clear; return 1; }
+  if ! fm_recovery_marker_snapshot "$marker"; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    fm_wake_ack_evidence_clear
+    return 1
+  fi
+  FM_WAKE_ACK_EVIDENCE_MARKER=$FM_RECOVERY_MARKER_TOKEN
+  case "$FM_WAKE_ACK_EVIDENCE_MARKER" in
+    pending:handling:*|announced:handling:*|pending:downtime:*|announced:downtime:*) ;;
+    *)
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      fm_wake_ack_evidence_clear
+      return 1
+      ;;
+  esac
+  FM_WAKE_ACK_EVIDENCE_GENERATION=${FM_WAKE_ACK_EVIDENCE_MARKER##*:}
+  if fm_wake_grant_rows_valid "$rows_file" 2>/dev/null; then
+    if ! awk -F '\t' -v seqs="$rows_file" '
+      BEGIN { while ((getline seq < seqs) > 0) wanted[seq]=1 }
+      NF >= 5 && $2 ~ /^[0-9]+$/ && ($2 in wanted) {
+        if (seen[$2]++) bad=1
+        print
+      }
+      END {
+        for (seq in wanted) if (!seen[seq]) bad=1
+        exit bad
+      }
+    ' "$FM_WAKE_QUEUE" > "$FM_WAKE_ACK_EVIDENCE_ROWS"; then
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      fm_wake_ack_evidence_clear
+      return 1
+    fi
+    FM_WAKE_ACK_EVIDENCE_CUTOFF=$(awk -F '\t' '$2 > max { max=$2 } END { print max + 0 }' "$FM_WAKE_ACK_EVIDENCE_ROWS")
+  else
+    if { [ -e "$rows_file" ] || [ -L "$rows_file" ]; } || [ -s "$FM_WAKE_QUEUE" ]; then
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      fm_wake_ack_evidence_clear
+      return 1
+    fi
+    FM_WAKE_ACK_EVIDENCE_CUTOFF=0
+  fi
+  if ! awk -F '\t' '
+    $4 ~ /^inbox:/ {
+      id=substr($4,7)
+      if (id !~ /^[A-Za-z0-9_-]+$/) exit 1
+      if (!seen[id]++) print id
+    }
+  ' "$FM_WAKE_ACK_EVIDENCE_ROWS" > "$FM_WAKE_ACK_EVIDENCE_NOTES"; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    fm_wake_ack_evidence_clear
+    return 1
+  fi
+  : > "$FM_WAKE_ACK_EVIDENCE_NOTES.hashes" || {
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    fm_wake_ack_evidence_clear
+    return 1
+  }
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    note="$STATE/inbox/$id.note"
+    if [ -e "$STATE/inbox/handled/$id.note" ] || [ -L "$STATE/inbox/handled/$id.note" ] \
+      || ! fm_wake_ack_note_safe "$note" || ! digest=$(fm_wake_ack_hash "$note"); then
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      fm_wake_ack_evidence_clear
+      return 1
+    fi
+    printf '%s\t%s\n' "$id" "$digest" >> "$FM_WAKE_ACK_EVIDENCE_NOTES.hashes" || {
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      fm_wake_ack_evidence_clear
+      return 1
+    }
+  done < "$FM_WAKE_ACK_EVIDENCE_NOTES"
+  mv -f -- "$FM_WAKE_ACK_EVIDENCE_NOTES.hashes" "$FM_WAKE_ACK_EVIDENCE_NOTES" || {
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    fm_wake_ack_evidence_clear
+    return 1
+  }
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  payload=$(mktemp "${TMPDIR:-/tmp}/fm-wake-ack-payload.XXXXXX") || { fm_wake_ack_evidence_clear; return 1; }
+  seq_count=$(awk 'END { print NR + 0 }' "$FM_WAKE_ACK_EVIDENCE_ROWS")
+  note_count=$(awk 'END { print NR + 0 }' "$FM_WAKE_ACK_EVIDENCE_NOTES")
+  {
+    printf 'fm-wake-ack-evidence-v1\n'
+    printf 'cutoff\t%s\n' "$FM_WAKE_ACK_EVIDENCE_CUTOFF"
+    printf 'generation\t%s\n' "$FM_WAKE_ACK_EVIDENCE_GENERATION"
+    printf 'marker\t%s\n' "$(printf '%s' "$FM_WAKE_ACK_EVIDENCE_MARKER" | base64 | tr -d '\r\n')"
+    printf 'rows\t%s\n' "$seq_count"
+    while IFS= read -r seq; do
+      printf 'row\t%s\n' "$(printf '%s' "$seq" | base64 | tr -d '\r\n')"
+    done < "$FM_WAKE_ACK_EVIDENCE_ROWS"
+    printf 'notes\t%s\n' "$note_count"
+    while IFS=$'\t' read -r id digest; do
+      printf 'note\t%s\t%s\n' "$id" "$digest"
+    done < "$FM_WAKE_ACK_EVIDENCE_NOTES"
+  } > "$payload" || { rm -f -- "$payload"; fm_wake_ack_evidence_clear; return 1; }
+  encoded=$(base64 < "$payload" | tr -d '\r\n') || { rm -f -- "$payload"; fm_wake_ack_evidence_clear; return 1; }
+  rm -f -- "$payload"
+  # shellcheck disable=SC2034 # Public capture output consumed by native-owner/ack-evidence.sh.
+  FM_WAKE_ACK_EVIDENCE_TOKEN="v1.$encoded"
+}
+
+fm_wake_ack_evidence_load() {  # <opaque-token>
+  local token=$1 encoded payload header tag value extra count index row notes_derived expected_notes
+  fm_wake_ack_evidence_clear
+  [ "${#token}" -le 8388608 ] || return 1
+  case "$token" in
+    v1.*) encoded=${token#v1.}; header=fm-wake-ack-evidence-v1 ;;
+    legacy.*) encoded=${token#legacy.}; header=fm-wake-ack-evidence-legacy-v1; FM_WAKE_ACK_EVIDENCE_LEGACY=1 ;;
+    *) return 1 ;;
+  esac
+  payload=$(mktemp "${TMPDIR:-/tmp}/fm-wake-ack-payload.XXXXXX") || return 1
+  FM_WAKE_ACK_EVIDENCE_ROWS=$(mktemp "${TMPDIR:-/tmp}/fm-wake-ack-rows.XXXXXX") || { rm -f -- "$payload"; return 1; }
+  FM_WAKE_ACK_EVIDENCE_NOTES=$(mktemp "${TMPDIR:-/tmp}/fm-wake-ack-notes.XXXXXX") || {
+    rm -f -- "$payload"
+    fm_wake_ack_evidence_clear
+    return 1
+  }
+  if ! printf '%s' "$encoded" | base64 -d > "$payload" 2>/dev/null; then
+    rm -f -- "$payload"
+    fm_wake_ack_evidence_clear
+    return 1
+  fi
+  exec 7< "$payload"
+  IFS= read -r value <&7 || value=
+  if [ "$value" != "$header" ]; then exec 7<&-; rm -f -- "$payload"; fm_wake_ack_evidence_clear; return 1; fi
+  IFS=$'\t' read -r tag FM_WAKE_ACK_EVIDENCE_CUTOFF extra <&7 || true
+  [ "$tag" = cutoff ] && [ -z "$extra" ] || { exec 7<&-; rm -f -- "$payload"; fm_wake_ack_evidence_clear; return 1; }
+  case "$FM_WAKE_ACK_EVIDENCE_CUTOFF" in ''|*[!0-9]*) exec 7<&-; rm -f -- "$payload"; fm_wake_ack_evidence_clear; return 1 ;; esac
+  IFS=$'\t' read -r tag FM_WAKE_ACK_EVIDENCE_GENERATION extra <&7 || true
+  [ "$tag" = generation ] && [ -z "$extra" ] || { exec 7<&-; rm -f -- "$payload"; fm_wake_ack_evidence_clear; return 1; }
+  case "$FM_WAKE_ACK_EVIDENCE_GENERATION" in ''|*[!A-Za-z0-9._-]*) exec 7<&-; rm -f -- "$payload"; fm_wake_ack_evidence_clear; return 1 ;; esac
+  [ "${#FM_WAKE_ACK_EVIDENCE_GENERATION}" -le 128 ] || { exec 7<&-; rm -f -- "$payload"; fm_wake_ack_evidence_clear; return 1; }
+  IFS=$'\t' read -r tag value extra <&7 || true
+  if [ "$tag" != marker ] || [ -n "$extra" ] || ! FM_WAKE_ACK_EVIDENCE_MARKER=$(printf '%s' "$value" | base64 -d 2>/dev/null); then
+    exec 7<&-; rm -f -- "$payload"; fm_wake_ack_evidence_clear; return 1
+  fi
+  IFS=$'\t' read -r tag count extra <&7 || true
+  case "$count" in ''|*[!0-9]*) count=-1 ;; esac
+  if [ "$tag" != rows ] || [ -n "$extra" ] || [ "$count" -lt 0 ] || [ "$count" -gt 100000 ]; then
+    exec 7<&-; rm -f -- "$payload"; fm_wake_ack_evidence_clear; return 1
+  fi
+  for ((index=0; index<count; index++)); do
+    IFS=$'\t' read -r tag value extra <&7 || { exec 7<&-; rm -f -- "$payload"; fm_wake_ack_evidence_clear; return 1; }
+    if [ "$tag" != row ] || [ -n "$extra" ] || ! row=$(printf '%s' "$value" | base64 -d 2>/dev/null); then
+      exec 7<&-; rm -f -- "$payload"; fm_wake_ack_evidence_clear; return 1
+    fi
+    printf '%s\n' "$row" >> "$FM_WAKE_ACK_EVIDENCE_ROWS"
+  done
+  IFS=$'\t' read -r tag count extra <&7 || true
+  case "$count" in ''|*[!0-9]*) count=-1 ;; esac
+  if [ "$tag" != notes ] || [ -n "$extra" ] || [ "$count" -lt 0 ] || [ "$count" -gt 100000 ]; then
+    exec 7<&-; rm -f -- "$payload"; fm_wake_ack_evidence_clear; return 1
+  fi
+  for ((index=0; index<count; index++)); do
+    IFS=$'\t' read -r tag value extra <&7 || { exec 7<&-; rm -f -- "$payload"; fm_wake_ack_evidence_clear; return 1; }
+    case "$value" in ''|*[!A-Za-z0-9_-]*) exec 7<&-; rm -f -- "$payload"; fm_wake_ack_evidence_clear; return 1 ;; esac
+    if [ "$tag" != note ] || ! printf '%s' "$extra" | grep -Eq '^[0-9a-f]{64}$'; then
+      exec 7<&-; rm -f -- "$payload"; fm_wake_ack_evidence_clear; return 1
+    fi
+    printf '%s\t%s\n' "$value" "$extra" >> "$FM_WAKE_ACK_EVIDENCE_NOTES"
+  done
+  if IFS= read -r value <&7; then exec 7<&-; rm -f -- "$payload"; fm_wake_ack_evidence_clear; return 1; fi
+  exec 7<&-
+  rm -f -- "$payload"
+  if ! awk -F '\t' -v cutoff="$FM_WAKE_ACK_EVIDENCE_CUTOFF" '
+    NF < 5 || $2 !~ /^[0-9]+$/ || $2 == 0 || $2 > cutoff || seen[$2]++ { bad=1 }
+    $2 > max { max=$2 }
+    END { if ((NR == 0 && cutoff != 0) || (NR > 0 && max != cutoff) || bad) exit 1 }
+  ' "$FM_WAKE_ACK_EVIDENCE_ROWS"; then fm_wake_ack_evidence_clear; return 1; fi
+  case "$FM_WAKE_ACK_EVIDENCE_MARKER" in
+    pending:handling:"$FM_WAKE_ACK_EVIDENCE_GENERATION"|announced:handling:"$FM_WAKE_ACK_EVIDENCE_GENERATION"|pending:downtime:"$FM_WAKE_ACK_EVIDENCE_GENERATION"|announced:downtime:"$FM_WAKE_ACK_EVIDENCE_GENERATION"|acked:handling:"$FM_WAKE_ACK_EVIDENCE_GENERATION") ;;
+    '') [ "$FM_WAKE_ACK_EVIDENCE_LEGACY" = 1 ] && [ "$FM_WAKE_ACK_EVIDENCE_CUTOFF" -gt 0 ] || { fm_wake_ack_evidence_clear; return 1; } ;;
+    *) fm_wake_ack_evidence_clear; return 1 ;;
+  esac
+  notes_derived=$(mktemp "${TMPDIR:-/tmp}/fm-wake-ack-derived.XXXXXX") || { fm_wake_ack_evidence_clear; return 1; }
+  expected_notes=$(mktemp "${TMPDIR:-/tmp}/fm-wake-ack-expected.XXXXXX") || { rm -f -- "$notes_derived"; fm_wake_ack_evidence_clear; return 1; }
+  if ! awk -F '\t' '$4 ~ /^inbox:/ { id=substr($4,7); if (id !~ /^[A-Za-z0-9_-]+$/) exit 1; print id }' "$FM_WAKE_ACK_EVIDENCE_ROWS" | LC_ALL=C sort -u > "$notes_derived" \
+    || ! cut -f1 "$FM_WAKE_ACK_EVIDENCE_NOTES" | LC_ALL=C sort -u > "$expected_notes" \
+    || ! cmp -s "$notes_derived" "$expected_notes" \
+    || [ "$(wc -l < "$expected_notes" | tr -d '[:space:]')" != "$(wc -l < "$FM_WAKE_ACK_EVIDENCE_NOTES" | tr -d '[:space:]')" ]; then
+    rm -f -- "$notes_derived" "$expected_notes"
+    fm_wake_ack_evidence_clear
+    return 1
+  fi
+  rm -f -- "$notes_derived" "$expected_notes"
+  return 0
+}
+
+fm_wake_ack_evidence_native_recovery() {  # <opaque-token> <marker>
+  local token=$1 marker=$2 current expected
+  fm_wake_ack_evidence_load "$token" || return 1
+  fm_recovery_marker_read "$marker" || { fm_wake_ack_evidence_clear; return 1; }
+  current=$FM_RECOVERY_MARKER_TOKEN
+  if [ "$FM_WAKE_ACK_EVIDENCE_LEGACY" = 1 ] && [ -z "$FM_WAKE_ACK_EVIDENCE_MARKER" ]; then
+    case "$current" in acked:handling:*|acked:downtime:*) ;; *) fm_wake_ack_evidence_clear; return 1 ;; esac
+  else
+    expected="acked:${FM_WAKE_ACK_EVIDENCE_MARKER#*:}"
+    [ "$current" = "$expected" ] || { fm_wake_ack_evidence_clear; return 1; }
+  fi
+  fm_wake_ack_evidence_clear
+}
+
+fm_wake_ack_evidence_precondition() {  # <opaque-token>
+  local token=$1 marker="$STATE/.watcher-down" id digest note handled
+  fm_wake_ack_evidence_load "$token" || return 1
+  [ "$FM_WAKE_ACK_EVIDENCE_LEGACY" = 0 ] || { fm_wake_ack_evidence_clear; return 1; }
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || { fm_wake_ack_evidence_clear; return 1; }
+  fm_recovery_marker_snapshot "$marker" || true
+  case "$FM_RECOVERY_MARKER_TOKEN" in
+    pending:handling:"$FM_WAKE_ACK_EVIDENCE_GENERATION"|announced:handling:"$FM_WAKE_ACK_EVIDENCE_GENERATION"|pending:downtime:"$FM_WAKE_ACK_EVIDENCE_GENERATION"|announced:downtime:"$FM_WAKE_ACK_EVIDENCE_GENERATION") ;;
+    *) fm_lock_release "$FM_WAKE_QUEUE_LOCK"; fm_wake_ack_evidence_clear; return 1 ;;
+  esac
+  if [ "$FM_WAKE_ACK_EVIDENCE_CUTOFF" = 0 ] && [ -s "$FM_WAKE_QUEUE" ]; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    fm_wake_ack_evidence_clear
+    return 1
+  fi
+  if ! awk -F '\t' -v expected="$FM_WAKE_ACK_EVIDENCE_ROWS" '
+    BEGIN { while ((getline row < expected) > 0) { split(row,f,"\t"); saved[f[2]]=row; count++ } }
+    $2 in saved { if ($0 != saved[$2] || seen[$2]++) bad=1 }
+    END { for (seq in saved) if (!seen[seq]) bad=1; exit bad }
+  ' "$FM_WAKE_QUEUE"; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    fm_wake_ack_evidence_clear
+    return 1
+  fi
+  while IFS=$'\t' read -r id digest; do
+    [ -n "$id" ] || continue
+    note="$STATE/inbox/$id.note"; handled="$STATE/inbox/handled/$id.note"
+    if [ -e "$handled" ] || [ -L "$handled" ] || ! fm_wake_ack_note_safe "$note" || [ "$(fm_wake_ack_hash "$note" 2>/dev/null)" != "$digest" ]; then
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      fm_wake_ack_evidence_clear
+      return 1
+    fi
+  done < "$FM_WAKE_ACK_EVIDENCE_NOTES"
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+}
+
+fm_wake_ack_evidence_completed() {  # <opaque-token>
+  local token=$1 id digest note handled marker="$STATE/.watcher-down"
+  fm_wake_ack_evidence_load "$token" || return 1
+  if [ ! -f "$FM_WAKE_QUEUE" ] || [ -L "$FM_WAKE_QUEUE" ]; then
+    fm_wake_ack_evidence_clear
+    return 1
+  fi
+  if [ "$FM_WAKE_ACK_EVIDENCE_CUTOFF" = 0 ]; then
+    if ! fm_recovery_marker_completed "$marker" "$FM_WAKE_ACK_EVIDENCE_GENERATION" \
+      || { [ "$FM_RECOVERY_COMPLETION_SOURCE" = current ] && [ -s "$FM_WAKE_QUEUE" ]; }; then
+      fm_wake_ack_evidence_clear
+      return 1
+    fi
+  elif ! awk -F '\t' -v cutoff="$FM_WAKE_ACK_EVIDENCE_CUTOFF" '
+    NF < 5 || $2 !~ /^[0-9]+$/ { bad=1 }
+    $2 <= cutoff { old=1 }
+    END { exit bad || old }
+  ' "$FM_WAKE_QUEUE"; then
+    fm_wake_ack_evidence_clear
+    return 1
+  fi
+  while IFS=$'\t' read -r id digest; do
+    [ -n "$id" ] || continue
+    note="$STATE/inbox/$id.note"; handled="$STATE/inbox/handled/$id.note"
+    if [ -e "$note" ] || [ -L "$note" ] || ! fm_wake_ack_note_safe "$handled" || [ "$(fm_wake_ack_hash "$handled" 2>/dev/null)" != "$digest" ]; then
+      fm_wake_ack_evidence_clear
+      return 1
+    fi
+  done < "$FM_WAKE_ACK_EVIDENCE_NOTES"
+  fm_wake_ack_evidence_clear
+  return 0
+}
+
+fm_wake_ack_evidence_acknowledge() {  # <opaque-token>
+  local token=$1 id digest notes=()
+  fm_wake_ack_evidence_precondition "$token" || return 1
+  while IFS=$'\t' read -r id digest; do
+    [ -n "$id" ] && notes+=("$id")
+  done < "$FM_WAKE_ACK_EVIDENCE_NOTES"
+  if [ "${#notes[@]}" -gt 0 ]; then
+    "$FM_WAKE_LIB_DIR/fm-inbox.sh" drain --ack "${notes[@]}" >/dev/null || { fm_wake_ack_evidence_clear; return 1; }
+  fi
+  "$FM_WAKE_LIB_DIR/fm-wake-drain.sh" --ack-through "$FM_WAKE_ACK_EVIDENCE_CUTOFF" \
+    --recovery-generation "$FM_WAKE_ACK_EVIDENCE_GENERATION" || { fm_wake_ack_evidence_clear; return 1; }
+  fm_wake_ack_evidence_clear
+  fm_wake_ack_evidence_completed "$token"
 }
 
 # --- signal announcement signatures -----------------------------------------

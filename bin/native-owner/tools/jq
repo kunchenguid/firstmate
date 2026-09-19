@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Usage: FM_HOME=<home> FM_PROBE_JQ_IMAGE=<image> jq [arguments...]
+# Required environment: FM_HOME and FM_PROBE_JQ_IMAGE.
+set -euo pipefail
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+HOME_PATH=$(cygpath -u "${FM_HOME:?}")
+image=${FM_PROBE_JQ_IMAGE:?An explicit local jq image is required}
+export MSYS_NO_PATHCONV=1
+exec 'C:/Program Files/Docker/Docker/resources/bin/docker.exe' run --rm --pull never -i --network none \
+  --mount "type=bind,source=$(cygpath -w "$ROOT"),target=$ROOT,readonly" \
+  --mount "type=bind,source=$(cygpath -w "$HOME_PATH"),target=$HOME_PATH,readonly" \
+  --workdir "$ROOT" "$image" timeout --kill-after=3s 45s jq "$@"

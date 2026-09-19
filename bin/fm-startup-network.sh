@@ -73,9 +73,13 @@
 #        fm-startup-network.sh wait [<seconds>]
 #          Block until the report is published, up to <seconds> (default 120).
 #          For operators and tests only; a session start never waits.
+#        fm-startup-network.sh native-admission-predicate <wake-queue>
+#          Internal read-only mode: print the owned row count; exit 1 for
+#          unrecognized state and 2 for invalid usage.
 #
 # STATE, all under this home's state/ and gitignored with it:
-#   .startup-network.status   key=value record - generation, lock_pid, state,
+#   .startup-network.status   key=value record - generation, lock_pid (the
+#                             session-lock owner identity), state,
 #                             pid, started, finished, rc, locked, phases, and
 #                             whether the report was published. The single
 #                             source of truth for what ran and how it ended.
@@ -204,7 +208,7 @@ phase_label() {  # <phases>
 
 # --- start -------------------------------------------------------------------
 
-worker_covers_request() {  # <locked> <lock-pid>
+worker_covers_request() {  # <locked> <lock-owner>
   local locked=$1 lock_pid=$2
   [ "$locked" != 1 ] && return 0
   [ "$(status_get lock_pid)" = "$lock_pid" ] \
@@ -302,15 +306,15 @@ EOF
 # The question is deliberately "does the lock still name the session that asked
 # for this work?", not "is that session still alive". The hazard being closed is
 # a SECOND session sweeping concurrently. A different session can take the lock
-# only after the recorded holder is dead, when bin/fm-lock.sh rewrites that pid
-# with its own anchor. An unchanged value therefore proves no one else owns the sweeps, which is
+# only after the recorded holder is proven dead, when bin/fm-lock.sh rewrites
+# that identity with its own anchor. An unchanged value therefore proves no one else owns the sweeps, which is
 # the whole guarantee. Requiring liveness instead would refuse to finish work
 # nobody else has claimed, and the sweeps are idempotent, so finishing it is
 # strictly better than abandoning it. A missing, unreadable, or replaced lock all
 # fail closed to the read-only probe.
-lock_unchanged() {  # <expected-pid>
+lock_unchanged() {  # <expected-owner>
   local expected=$1 current
-  case "$expected" in ''|*[!0-9]*) return 1 ;; esac
+  fm_session_pid_valid "$expected" || return 1
   [ -f "$STATE/.lock" ] && [ ! -L "$STATE/.lock" ] || return 1
   current=$(cat "$STATE/.lock" 2>/dev/null) || return 1
   [ "$current" = "$expected" ]
@@ -327,6 +331,28 @@ report_requires_wake() {  # <state>
   [ -s "$REPORT_FILE" ] || return 1
   awk 'NF && $0 !~ /^BOOTSTRAP_INFO:/ { found=1; exit } END { exit !found }' \
     "$REPORT_FILE" 2>/dev/null
+}
+
+native_admission_predicate() {
+  local queue=${1:-} source count=0 epoch seq kind key payload extra state expected recognized
+  [ -n "$queue" ] || return 2
+  if [ ! -e "$queue" ] && [ ! -L "$queue" ]; then
+    source=/dev/null
+  else
+    source=$queue
+  fi
+  while IFS=$'\t' read -r epoch seq kind key payload extra || [ -n "$epoch$seq$kind$key$payload$extra" ]; do
+    [ "$key" = startup-network ] || continue
+    [ "$kind" = check ] || return 1
+    recognized=false
+    for state in 'done' failed timeout; do
+      expected=$(fm_wake_startup_network_payload "$state") || return 1
+      [ "$payload" != "$expected" ] || recognized=true
+    done
+    [ "$recognized" = true ] || return 1
+    count=$((count + 1))
+  done < "$source"
+  printf '%s\n' "$count"
 }
 
 await_delivery() {  # <generation> <state>
@@ -358,9 +384,7 @@ EOF
     fi
     if [ "$claim_live" -eq 0 ]; then
       if report_requires_wake "$state"; then
-        fm_wake_append check startup-network \
-          "check: startup-network: deferred startup network checks finished ($state); read them with $FM_ROOT/bin/fm-startup-network.sh report" \
-          || true
+        fm_wake_append_startup_network "$state" || true
       fi
       fm_lock_release "$PUBLISH_LOCK"
       return 0
@@ -375,9 +399,7 @@ EOF
     return 0
   fi
   if report_requires_wake "$state"; then
-    fm_wake_append check startup-network \
-      "check: startup-network: deferred startup network checks finished ($state); read them with $FM_ROOT/bin/fm-startup-network.sh report" \
-      || true
+    fm_wake_append_startup_network "$state" || true
   fi
   fm_lock_release "$PUBLISH_LOCK"
 }
@@ -419,7 +441,7 @@ EOF
   await_delivery "$generation" "$state"
 }
 
-cmd_run() {  # <locked> <lock-pid> <generation>
+cmd_run() {  # <locked> <lock-owner> <generation>
   local locked=$1 lock_pid=$2 generation=$3 phases started budget out rc sweep_locked=0 downgraded=0 internal=0 lease_held=0 timings stage_started
   mkdir -p "$STATE" 2>/dev/null || return 1
   started=$(now)
@@ -657,10 +679,14 @@ case "$MODE" in
   harvest) cmd_harvest "${HARVEST_PID:-}" ;;
   report) print_state; print_timings ;;
   wait) cmd_wait "${1:-120}" || exit $? ;;
+  native-admission-predicate)
+    [ "$#" -eq 1 ] || { printf 'usage: fm-startup-network.sh native-admission-predicate <wake-queue>\n' >&2; exit 2; }
+    native_admission_predicate "$1"
+    ;;
   -h|--help) usage ;;
   *)
     printf 'fm-startup-network: unknown mode: %s\n' "${MODE:-<none>}" >&2
-    printf 'usage: fm-startup-network.sh start|run|harvest|report|wait\n' >&2
+    printf 'usage: fm-startup-network.sh start|run|harvest|report|wait|native-admission-predicate\n' >&2
     exit 2
     ;;
 esac

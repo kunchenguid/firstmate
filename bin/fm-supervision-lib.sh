@@ -44,6 +44,24 @@ fm_sup_stat_mtime() {
 #   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
 # grace-seconds defaults to $FM_GUARD_GRACE, then 300, matching fm-guard.sh.
 # Always returns 0; callers read the vars, or use fm_supervision_unhealthy below.
+fm_sup_directory_entry_count() {
+  local directory=$1 entry count=0
+  if [ ! -e "$directory" ] && [ ! -L "$directory" ]; then
+    printf '0\n'
+    return 0
+  fi
+  if [ ! -d "$directory" ] || [ -L "$directory" ]; then
+    printf '1\n'
+    return 0
+  fi
+  for entry in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
+    if [ -e "$entry" ] || [ -L "$entry" ]; then
+      count=$((count + 1))
+    fi
+  done
+  printf '%s\n' "$count"
+}
+
 fm_supervision_status() {
   local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} meta source check id beat m age
   FM_SUP_IN_FLIGHT=0
@@ -95,6 +113,36 @@ fm_supervision_status() {
   # shellcheck disable=SC2034 # Read by callers (fm-guard.sh) after sourcing.
   [ -s "$state/.wake-queue" ] && FM_SUP_QUEUE_PENDING=true
   return 0
+}
+
+# shellcheck disable=SC2034 # Public result consumed by sourcing callers.
+FM_SUP_RESIDUAL_ERROR=
+fm_supervision_residual_inputs_absent() {  # <state-dir>
+  local state=$1 record count
+  FM_SUP_RESIDUAL_ERROR=
+  for record in "$state"/*.check.sh "$state"/*.check-trust "$state"/*.turn-ended \
+    "$state/.afk" "$state/.afk-contract"; do
+    if [ -e "$record" ] || [ -L "$record" ]; then
+      FM_SUP_RESIDUAL_ERROR="supervision input is present at $record"
+      return 1
+    fi
+  done
+  for record in "$state/pending-replies" "$state/reconcile-notify"; do
+    count=$(fm_sup_directory_entry_count "$record")
+    if [ "$count" -gt 0 ]; then
+      FM_SUP_RESIDUAL_ERROR="supervision input is present under $record"
+      return 1
+    fi
+  done
+  if ! fm_terminal_outcome_pending_absent "$state"; then
+    FM_SUP_RESIDUAL_ERROR=${FM_TERMINAL_OUTCOME_ERROR:-"terminal outcome state is unresolved under $state/terminal-outcomes"}
+    return 1
+  fi
+  if ! fm_procevent_inbox_has_only_handled_history "$state"; then
+    # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
+    FM_SUP_RESIDUAL_ERROR=${FM_PROCEVENT_INBOX_ERROR:-"process-event result state is unresolved under $state/procevent-inbox"}
+    return 1
+  fi
 }
 
 # fm_supervision_needed <state-dir> [grace-seconds]

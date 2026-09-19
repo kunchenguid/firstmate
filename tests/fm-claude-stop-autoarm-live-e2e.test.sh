@@ -65,6 +65,13 @@ cat > "$PROJECT/bin/tool-logger.sh" <<'SH'
 #!/usr/bin/env bash
 P=$(cat 2>/dev/null || true)
 printf '%s\n' "$P" | jq -r '.tool_input.command // "unknown"' >> "$FM_HOME/state/tool-calls.log" 2>/dev/null
+if . "$CLAUDE_PROJECT_DIR/bin/fm-session-lock-lib.sh" && fm_win_boundary_applies && [ ! -e "$FM_HOME/state/windows-harness-identity.log" ]; then
+  identity=$(fm_harness_ancestry_pid 2>/dev/null || printf unresolved)
+  command=$(fm_win_command "${CLAUDE_PID:-}" 2>/dev/null || printf unresolved)
+  alive=no
+  fm_harness_pid_alive "$identity" && alive=yes
+  printf 'claude_pid=%s\nidentity=%s\ncommand=%s\nalive=%s\n' "${CLAUDE_PID:-}" "$identity" "$command" "$alive" > "$FM_HOME/state/windows-harness-identity.log"
+fi
 exit 0
 SH
 chmod +x "$PROJECT/bin/tool-logger.sh"
@@ -126,6 +133,20 @@ grep -q 'stale: fixture-rapid-2' "$TRANSCRIPT" || fail "second rapid rewake reas
   || fail "fresh Claude session did not run session start first: $(cat "$HOME_DIR/state/tool-calls.log" 2>/dev/null)"
 [ "$(cat "$HOME_DIR/state/.lock" 2>/dev/null)" != 9999999 ] \
   || fail "session start did not reclaim the stale dead-owner lock"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    WINDOWS_IDENTITY_LOG="$HOME_DIR/state/windows-harness-identity.log"
+    [ -s "$WINDOWS_IDENTITY_LOG" ] || fail "Claude Code $CLAUDE_VERSION exposed no Windows harness identity evidence"
+    WINDOWS_CLAUDE_PID=$(sed -n 's/^claude_pid=//p' "$WINDOWS_IDENTITY_LOG")
+    case "$WINDOWS_CLAUDE_PID" in ''|*[!0-9]*) fail "Claude Code $CLAUDE_VERSION published malformed CLAUDE_PID '$WINDOWS_CLAUDE_PID'" ;; esac
+    [ "$(sed -n 's/^identity=//p' "$WINDOWS_IDENTITY_LOG")" = "win:$WINDOWS_CLAUDE_PID" ] \
+      || fail "Claude Code $CLAUDE_VERSION did not resolve its published Windows pid: $(cat "$WINDOWS_IDENTITY_LOG")"
+    [ "$(sed -n 's/^alive=//p' "$WINDOWS_IDENTITY_LOG")" = yes ] \
+      || fail "Claude Code $CLAUDE_VERSION published pid did not identify a live harness: $(cat "$WINDOWS_IDENTITY_LOG")"
+    [ "$(cat "$HOME_DIR/state/.lock")" = "win:$WINDOWS_CLAUDE_PID" ] \
+      || fail "session start did not bind the lock to Claude Code $CLAUDE_VERSION's published Windows pid"
+    ;;
+esac
 if [ -f "$HOME_DIR/state/tool-calls.log" ]; then
   ! grep -q 'fm-watch-arm.sh' "$HOME_DIR/state/tool-calls.log" \
     || fail "model issued an arm command despite Stop-owned continuity: $(cat "$HOME_DIR/state/tool-calls.log")"

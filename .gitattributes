@@ -1,2 +1,5 @@
 # Bash parses shell scripts with LF line endings on every supported platform.
 *.sh text eol=lf
+# Extensionless Bash helpers must survive Windows clones.
+tests/fixtures/native-owner/jq text eol=lf
+bin/native-owner/tools/jq text eol=lf

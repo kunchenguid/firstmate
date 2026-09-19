@@ -323,7 +323,7 @@ EOF
 # test above: an actionable report (here, a MISSING: line bootstrap-diagnostics
 # would load a skill for) still reaches the wake queue even when unclaimed.
 test_an_actionable_successful_result_still_queues_a_wake() {
-  local rec home root log claimant
+  local rec home root log claimant status_tmp
   rec=$(new_world actionable-result-wakes)
   IFS='|' read -r home root log <<EOF
 $rec
@@ -341,8 +341,26 @@ EOF
     || fail "an actionable successful (state=done) result never queued a wake"
   assert_grep 'check	startup-network' "$home/state/.wake-queue" \
     "an actionable result did not reach the wake queue"
+  (
+    local FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state"
+    export FM_ROOT_OVERRIDE FM_HOME FM_STATE_OVERRIDE
+    # shellcheck source=/dev/null
+    . "$root/bin/fm-wake-lib.sh"
+    fm_wake_native_empty_fleet_preflight "$home/state"
+  ) || fail "the native admission owner refused an actual startup completion wake"
 
-  pass "fm-startup-network: an actionable state=done report still queues a wake"
+  status_tmp="$home/state/.startup-network.status.mismatch"
+  sed 's/^state=done$/state=failed/' "$home/state/.startup-network.status" > "$status_tmp"
+  mv "$status_tmp" "$home/state/.startup-network.status"
+  (
+    local FM_ROOT_OVERRIDE="$root" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state"
+    export FM_ROOT_OVERRIDE FM_HOME FM_STATE_OVERRIDE
+    # shellcheck source=/dev/null
+    . "$root/bin/fm-wake-lib.sh"
+    fm_wake_native_empty_fleet_preflight "$home/state"
+  ) || fail "native admission tied a queued startup completion to mutable latest-run status"
+
+  pass "fm-startup-network: producer-owned completion wakes survive later status publication"
 }
 
 test_deferred_invalid_secondmate_markers_queue_durable_findings() {
