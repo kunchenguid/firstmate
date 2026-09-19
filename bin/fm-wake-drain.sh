@@ -24,6 +24,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
+# shellcheck source=bin/fm-env-lib.sh
+. "$SCRIPT_DIR/fm-env-lib.sh"
 
 DRAIN_TMP=
 DRAIN_VIEW_TMP=
@@ -305,6 +307,8 @@ EOF
 print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
   local snapshot=$1 task endpoint ident event event_endpoint line verb key receipt store lock ready
   local output='' used=0 shown=0 omitted=0 bytes item_bytes=220 global_bytes=4000 rc=0
+  local done_events=
+  STATUS_OUTCOME_BACKSTOP_DONE_EVENTS=
   [ "$ACTOR" = main ] || return 0
 
   store="$STATE/branch-outcomes.jsonl"
@@ -372,6 +376,10 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
     fi
     output="$output$line
 "
+    if [ "$verb" = 'done' ]; then
+      done_events="$done_events$task$(printf '\t')$event
+"
+    fi
     STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED="$STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED$task$(printf '\t')$event_endpoint
 "
     used=$((used + bytes))
@@ -393,6 +401,7 @@ EOF
   if [ "$omitted" -gt 0 ]; then
     printf 'STATUS OUTCOME BACKSTOP: %d more omitted (byte cap)\n' "$omitted" || return 1
   fi
+  STATUS_OUTCOME_BACKSTOP_DONE_EVENTS=$done_events
 }
 
 # Print still-unread informational status lines (note: answers and pending-reply
@@ -592,9 +601,49 @@ print_jev_queue_triage_line() {
   printf '%s\n' "$line" || return 1
 }
 
+# Shadow-score a newly presented worker `done:` line. Log-only: never closes,
+# never tears down, never delays the drain's already-printed presentation.
+# Absent keys skip the call so fixture drains without a Jev opt-in stay inert.
+jev_done_keys_present() {
+  local envf
+  if [ -n "${TYPESAFE_API_KEY:-}" ] || [ -n "${OPENROUTER_API_KEY:-}" ]; then
+    return 0
+  fi
+  envf="${FM_HOME:-}/.env"
+  [ -n "$(fmx_env_get TYPESAFE_API_KEY "$envf")" ] \
+    || [ -n "$(fmx_env_get OPENROUTER_API_KEY "$envf")" ]
+}
+
+shadow_jev_done_verify() {
+  local events=$1 record task line jsonl home lock
+  [ -n "$events" ] || return 0
+  jev_done_keys_present || return 0
+  home=${FM_HOME:-$(dirname "$STATE")}
+  while IFS= read -r record; do
+    task=${record%%$'\t'*}
+    line=${record#*$'\t'}
+    [ -n "$task" ] || continue
+    while [[ "$line" == *$'\r' ]]; do line=${line%$'\r'}; done
+    line=$(printf '%s' "$line" | LC_ALL=C tr '\t\r' '  ')
+    jsonl="$STATE/${task}.jev-done.jsonl"
+    lock="$STATE/.${task}.jev-done.lock"
+    (
+      trap 'fm_lock_release "$lock"' EXIT
+      trap 'exit 143' TERM INT
+      fm_lock_acquire_wait "$lock" || exit 0
+      if [ -f "$jsonl" ] && jq -ne --arg l "$line" 'any(inputs; .done_line == $l)' "$jsonl" >/dev/null 2>&1; then
+        exit 0
+      fi
+      FM_HOME="$home" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-jev-done-verify.sh" "$task" --done-line "$line" || true
+    ) >/dev/null 2>&1 &
+    disown $! 2>/dev/null || true
+  done <<< "$events"
+}
+
 print_status_presentation() {  # [<deduped-raw-rows>]
   local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
   local lock_rc holder_pid
+  local FM_WAKE_ANNOTATION_DONE_EVENTS='' STATUS_OUTCOME_BACKSTOP_DONE_EVENTS=''
   if fm_lock_acquire_wait_bounded "$lock" "$PRESENTATION_LOCK_TIMEOUT"; then
     :
   else
@@ -621,6 +670,7 @@ print_status_presentation() {  # [<deduped-raw-rows>]
   fi
   if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
   fm_lock_release "$lock"
+  if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then shadow_jev_done_verify "$FM_WAKE_ANNOTATION_DONE_EVENTS$STATUS_OUTCOME_BACKSTOP_DONE_EVENTS" || true; fi
   # Execution obligations outlive queue acknowledgement and status presentation.
   # Always reconcile them, including an empty queue and a missing task endpoint.
   local execution

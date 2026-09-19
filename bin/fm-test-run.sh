@@ -399,6 +399,7 @@ family_for_basename() {
     fm-busy-state.test.sh|fm-classify-corr-token.test.sh|\
     fm-claude-stop-autoarm.test.sh|fm-cursor-harness.test.sh|\
     fm-dispatch-resolve.test.sh|\
+    fm-jev-done-verify.test.sh|fm-jev-retrieval-miss.test.sh|fm-wiki-ask.test.sh|\
     fm-extension-binding.test.sh|fm-gitignore-config.test.sh|\
     fm-no-mistakes-required.test.sh|fm-peek-remote.test.sh|\
     fm-pending-reply.test.sh|fm-pi-branch-extension.test.sh|\
@@ -1407,6 +1408,7 @@ families_for_changed_path() {
     bin/fm-watch*|bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
     bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
       printf '%s\n' watcher-wake-lock
+      printf '%s\n' "__script__:fm-jev-done-verify.test.sh"
       ;;
     bin/fm-afk*)
       printf '%s\n' afk
@@ -1451,6 +1453,16 @@ families_for_changed_path() {
       ;;
     bin/fm-dispatch-resolve.sh)
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
+      ;;
+    bin/fm-jev-done-verify.sh)
+      printf '%s\n' "__script__:fm-jev-done-verify.test.sh"
+      ;;
+    bin/fm-jev-retrieval-miss.sh)
+      printf '%s\n' "__script__:fm-jev-retrieval-miss.test.sh"
+      printf '%s\n' "__script__:fm-wiki-ask.test.sh"
+      ;;
+    bin/fm-wiki-ask.sh)
+      printf '%s\n' "__script__:fm-wiki-ask.test.sh"
       ;;
     bin/fm-env-lib.sh)
       # The one .env accessor, sourced by bin/fm-x-lib.sh (Relay token) and

@@ -276,6 +276,7 @@ Route durable knowledge to its most specific owner:
 - Knowledge general to every firstmate user belongs in this repo's shared tracked surface.
 
 The knowledge wikis are projects too. Their vaults live in `~/Documents/Wikis` and are the truth; the clones under `projects/` are snapshots for crews and go stale, so `bin/fm-fleet-sync.sh` fast-forwards them instead of a crew editing one. Which vault answers which question is the map `~/Documents/Wikis/IchWiki/ROUTER.md`, compiled from `routing/cards/*.yaml` and checked by `scripts/ich_doctor.py`. A wiki brief names the vault path, the card and the entry layer, and its acceptance names that vault's own checks: `_meta/einstieg.sh` for the register, `_meta/pruefe.sh` for the scaffold.
+When this home has a wiki engine and private catalog configured, put a knowledge question through `bin/fm-wiki-ask.sh` rather than calling the engine directly; a miss records a metadata-only Jev classification and never sends page content (`docs/configuration.md` "Wiki engine ask").
 
 Firstmate never writes a project's `AGENTS.md` directly.
 A crewmate creates or updates it lazily through the project's selected delivery path, using `bin/fm-ensure-agents-md.sh` and preferring pointers to authoritative sources over copied detail.
@@ -437,6 +438,7 @@ A declared `paused:` event means a bounded external wait expected to clear on it
 Handle actionable wakes as follows:
 
 1. For `signal:`, read the listed event lines first, then reconcile current state only where action depends on it.
+   For optional background scoring of presented worker `done:` lines, follow `docs/configuration.md` "Shadow done verifier"; a score never authorizes closure or teardown.
 2. For `stale:`, inspect the recorded endpoint and load `stuck-crewmate-recovery` for a stopped, looping, confused, or unresponsive worker; a deep-inspection reason also requires current-state and validation-log inspection.
 3. For `check:`, act on the named poll result, including merges, contribution signals, Relay events, process-to-event source results, and captain inbox notes; a handled inbox note is also acknowledged with `bin/fm-inbox.sh drain --ack <id>`, or it stays counted as still waiting for firstmate.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.

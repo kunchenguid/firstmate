@@ -5,9 +5,9 @@
 #   fm-jev-done-verify.sh <task-id> --done-line <text> \
 #     [--acceptance <text>] [--report <path>] [--pr-url <url>]
 #
-# Firstmate may run this when it sees a worker `done:` line on a ship or
-# scout, before the captain-facing completion summary. It asks Jev whether
-# the claim is evidenced against acceptance, logs the score, and exits.
+# Invocation policy, including automatic wake-drain scoring, is owned by
+# docs/configuration.md "Shadow done verifier". This helper asks Jev whether
+# the claim is evidenced against supplied acceptance, logs the score, and exits.
 # Shadow only: it never tears down, never writes resolved/done for the
 # worker, and never reopens the task. A not_evidenced or need_human verdict
 # at confidence >= 0.7 is an annotation, not a close or reopen.
@@ -37,11 +37,11 @@
 #   Exit 2 only for usage (missing task id / done-line, bad task id, bad
 #   flags). Evaluation failures still exit 0 so a done line is never blocked.
 #
-# Log: one JSONL object appended to $FM_HOME/state/<id>.jev-done.jsonl.
+# Log: one JSONL object appended to ${FM_STATE_OVERRIDE:-$FM_HOME/state}/<id>.jev-done.jsonl.
 # The log repeats close=false and teardown=false. Secrets follow
 # fm_jev_log_call redaction.
 #
-# Environment: FM_HOME, plus the Jev library keys and JEV_* settings
+# Environment: FM_HOME, FM_STATE_OVERRIDE, plus the Jev library keys and JEV_* settings
 # documented in bin/fm-jev-lib.sh. This script does not roll its own HTTP.
 set -u
 
@@ -191,8 +191,9 @@ if [ "$decide_code" -eq 0 ] && [ -n "$response" ]; then
   fi
 fi
 
-log_path="$FM_HOME/state/${task_id}.jev-done.jsonl"
-mkdir -p "$FM_HOME/state"
+state_dir=${FM_STATE_OVERRIDE:-$FM_HOME/state}
+log_path="$state_dir/${task_id}.jev-done.jsonl"
+mkdir -p "$state_dir"
 log_payload=$(jq -nc \
   --arg task "$task_id" \
   --arg verdict "$verdict" \

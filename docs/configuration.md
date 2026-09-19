@@ -585,13 +585,19 @@ The thin hook point is documented in [`docs/arm-pretool-check.md`](arm-pretool-c
 
 ## Shadow done verifier
 
-[`bin/fm-jev-done-verify.sh`](../bin/fm-jev-done-verify.sh) is a log-only helper firstmate may run when it sees a worker `done:` line on a ship or scout, before the captain-facing completion summary.
+[`bin/fm-jev-done-verify.sh`](../bin/fm-jev-done-verify.sh) is a log-only helper the wake drain invokes after successfully presenting a worker `done:` line on a ship or scout.
 It asks Jev one Choice (`evidenced`, `not_evidenced`, `need_human`) plus a strength Score, using the 0.7 confidence floor from the Jev caller library.
 `need_human` is required because a currently healthy system is not evidence the claimed repair happened.
-Each call appends one JSONL record to `state/<id>.jev-done.jsonl`.
+Each call appends one JSONL record in the effective state directory, honoring `FM_STATE_OVERRIDE`.
 The helper never tears down a task, never writes `resolved` or `done` on the worker's behalf, and never reopens work from its score.
-When the verdict is `not_evidenced` or `need_human` at confidence at or above the floor, firstmate still shows the done line and only annotates the risk.
-The script header owns flags, output lines, and exit codes.
+The drain starts the helper in the background after presentation so the done line is never delayed, and skips the call without writing a deduplication record when neither `TYPESAFE_API_KEY` nor `OPENROUTER_API_KEY` resolves to a nonempty value in the environment or `$FM_HOME/.env`.
+Scoring uses only done events actually emitted by the annotation or outcome-backstop paths after successful presentation; an event merely present in the captured span is not sufficient.
+Before scoring and deduplication, the drain strips trailing carriage returns and replaces remaining tabs and carriage returns with spaces, preserving trailing spaces and leaving worker status bytes unchanged.
+It skips a completion whose normalized text already appears in that task's JSONL log; per-task serialization covers the duplicate check through log append in the same effective state directory, including overlapping drains.
+The background record may not exist yet when firstmate handles the wake; the drain discards the helper's stdout and does not display its risk annotation automatically.
+Automatic calls supply only the task ID and done line, without the optional acceptance, report, or PR inputs.
+The script header owns flags, output lines, exit codes, and the log path and schema.
+Behavioral regressions in [`tests/fm-jev-done-verify.test.sh`](../tests/fm-jev-done-verify.test.sh) use fake transport to exercise presentation selection, concurrent deduplication, whitespace normalization, state overrides, and empty credentials.
 
 ## Jev skill selector (FM_JEV_SKILL_SELECT)
 
@@ -633,6 +639,21 @@ Leftover placeholders, an empty Task, a half-filled intent/spec pair, and a Capt
 The HTTP call goes through [`bin/fm-jev-lib.sh`](../bin/fm-jev-lib.sh).
 This gate defaults `JEV_TIMEOUT` to 5 seconds when unset so an outage cannot stall launch; an explicit `JEV_TIMEOUT` still wins.
 The script header owns flags, the JSONL schema, and the 0.7 confidence floor (`JEV_CONFIDENCE_FLOOR`).
+
+## Wiki engine ask (config/wiki-engine, config/wiki-catalog)
+
+[`bin/fm-wiki-ask.sh`](../bin/fm-wiki-ask.sh) is the config-gated firstmate path that puts one knowledge question to a locally installed `wiki-tool` engine.
+This section is the single owner of that operator contract; the script header owns flags, unconfigured messages, and the miss-classifier call.
+It is not a second wiki engine and does not vendor wiki-tool.
+
+`FM_WIKI_ENGINE` or gitignored `config/wiki-engine` names the executable path or command, and `FM_WIKI_CATALOG` or gitignored `config/wiki-catalog` names the private catalog JSON; the environment wins, and each file is the first non-comment non-blank line.
+Those files are home-local and are not part of secondmate inherited configuration.
+If either setting is absent, the tool reports that it is unconfigured without querying the engine or Jev; a configured but unusable engine or catalog is an error (exact diagnostics and exit codes are owned by the script header).
+
+The engine's envelope is printed unchanged; eligible misses receive a shadow classification through [`bin/fm-jev-retrieval-miss.sh`](../bin/fm-jev-retrieval-miss.sh), whose header owns the metadata allowlist, content guard, verdicts, confidence handling, and log schema.
+Captain consent for this path: the query string may be sent to Jev; page bodies, excerpts, and conflict lines never may.
+The classifier never retries the engine, never enables embeddings or OpenViking, and never writes a wiki vault, catalog, or engine config.
+Classification results remain in the helper's local log rather than being added to the engine envelope.
 
 ## Toolchain
 
@@ -1226,6 +1247,9 @@ JEV_MODEL=              # optional Jev model override (same section)
 JEV_URL=                # optional complete Jev POST URL, used verbatim (same section)
 JEV_BASE=               # optional TypeSafe origin; `/v1/systemone` is appended when JEV_URL is unset (same section)
 JEV_TIMEOUT=25          # optional Jev HTTP timeout in seconds; default 25 (same section); brief preflight uses 5 when this is unset (docs/configuration.md "Jev brief preflight")
+FM_JEV_DISPATCH_SHADOW= # 1 logs the Jev dispatch pick to state/jev-dispatch-shadow.jsonl; 0 overrides config/jev-dispatch-shadow off (docs/configuration.md "Typed dispatch resolution")
+FM_WIKI_ENGINE=         # wiki-tool executable path or command; else config/wiki-engine (docs/configuration.md "Wiki engine ask")
+FM_WIKI_CATALOG=        # private wiki-tool catalog JSON path; else config/wiki-catalog (docs/configuration.md "Wiki engine ask")
 FM_JEV_TOOL_GATE=shadow # remainder Jev tool-gate after arm-command policy; live needs this plus two opt-in files; hard-ship is a do-not (docs/configuration.md "Jev remainder tool-gate")
 FM_JEV_SKILL_SELECT=shadow # once-per-session skill suggestion; live needs this plus config/jev-skill-select-live and still does not inject skills (docs/configuration.md "Jev skill selector")
 FM_JEV_BRIEF_PREFLIGHT=shadow # spawn-path Jev brief preflight; off skips; never blocks launch (docs/configuration.md "Jev brief preflight")

@@ -2328,8 +2328,9 @@ fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
 # raw queue consumption and released the append lock.
 fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
   local rows=$1 snapshot=${2:-} manifest status_key mode path prefix line task endpoint
-  local snapshot_task snapshot_endpoint _snapshot_ident offset last_event event_line
+  local snapshot_task snapshot_endpoint _snapshot_ident offset last_event event_line raw_event_line
   local LC_ALL=C
+  FM_WAKE_ANNOTATION_DONE_EVENTS=
 
   manifest=$(fm_wake_annotation_manifest "$rows" | awk -F '\t' '
     {
@@ -2393,6 +2394,7 @@ EOF
     last_event=$FM_WAKE_EVENT_LINE
     while IFS= read -r event_line || [ -n "$event_line" ]; do
       [ -n "$event_line" ] || continue
+      raw_event_line=$event_line
       event_line=$(printf '%s' "$event_line" | LC_ALL=C tr '\t\r' '  ')
       prefix="wake annotation: latest wake-EVENT observed at drain, not current state"
       if [ "$event_line" != "$last_event" ]; then
@@ -2403,6 +2405,10 @@ EOF
       fi
       line="$prefix: $status_key: $event_line"
       printf '%s\n' "$line" || return 1
+      if [ "$(status_line_verb "$event_line")" = 'done' ]; then
+        FM_WAKE_ANNOTATION_DONE_EVENTS="$FM_WAKE_ANNOTATION_DONE_EVENTS${status_key%.status}$(printf '\t')$raw_event_line
+"
+      fi
     done <<EOF
 $FM_WAKE_UNREAD_LINES
 EOF
