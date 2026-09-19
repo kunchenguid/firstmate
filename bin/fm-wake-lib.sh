@@ -2118,14 +2118,15 @@ fm_wake_signal_seen_size() {  # <state> <file>
 }
 
 # 0 when <file>'s current signature matches its recorded reported state, or
-# when every byte past the watcher's classified offset is in this home's
-# owned-append ledger. For a status file a reported match means the current
+# when the file is a readable regular file that grew past the watcher's
+# classified offset and every grown byte is in this home's owned-append ledger.
+# For a status file a reported match means the current
 # state was already reported, not that every byte was successfully classified;
 # the separate classified position owns that fact. Owned-only growth past the
 # classified offset is this home's own bookkeeping and is not a new signal.
-# A missing marker or unreadable signature is not a match unless the owned
-# ledger covers the unread suffix, so uncertainty still reads as an unreported
-# state.
+# A missing marker, an unreadable signature, or any other signature change
+# without owned growth is not a match, so uncertainty still reads as an
+# unreported state.
 fm_wake_signal_seen_current() {  # <state> <file>
   local sig marker classified size
   sig=$(fm_wake_signal_sig "$2") || return 1
@@ -2139,7 +2140,7 @@ fm_wake_signal_seen_current() {  # <state> <file>
       size=$(_fm_status_file_size "$2") || return 1
       size=${size//[[:space:]]/}
       case "$classified:$size" in *[!0-9:]*) return 1 ;; esac
-      [ "$classified" -le "$size" ] || return 1
+      [ "$classified" -lt "$size" ] && [ -f "$2" ] && [ -r "$2" ] && [ ! -L "$2" ] || return 1
       status_home_appends_covers "$2" "$classified" "$size"
       ;;
     *) [ "$(cat "$marker" 2>/dev/null)" = "$sig" ] ;;

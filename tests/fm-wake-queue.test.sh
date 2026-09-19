@@ -1684,6 +1684,55 @@ test_separate_self_announced_answers_after_fold_are_owned() {
   pass "separate self-announced answers after a fold stay owned; worker decisions and later lines still wake"
 }
 
+# The owned ledger only vouches for growth it recorded. A signature change
+# with no growth past the classified offset, such as the log turning
+# unreadable, must still read as unreported, before and after owned growth.
+test_unreadable_status_is_not_owned() {
+  local dir state status
+  dir=$(make_case owned-unreadable)
+  state="$dir/state"
+  status="$state/t.status"
+
+  run_wake_lib() {
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"; shift; "$@"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$@"
+  }
+
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "unreadable status check skipped: root reads mode-000 files"
+    return 0
+  fi
+  printf 'needs-decision [key=k1]: pick one\n' > "$status"
+  run_wake_lib fm_wake_status_mark_current "$state" "$status" \
+    || fail "could not prime the announced baseline"
+  chmod 000 "$status"
+  if run_wake_lib fm_wake_signal_seen_current "$state" "$status"; then
+    chmod 600 "$status"
+    fail "an unreadable fully classified status read as already seen"
+  fi
+  chmod 600 "$status"
+
+  run_wake_lib fm_wake_status_mark_current "$state" "$status" \
+    || fail "could not re-prime the announced baseline"
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k1]: answered: one' \
+    || fail "the owned close was not self-announced"
+  printf 'needs-decision [key=k2]: pick two\n' >> "$status"
+  run_wake_lib fm_wake_status_mark_current "$state" "$status" \
+    || fail "could not record the watcher classifying the worker line"
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k2]: answered: two' \
+    || fail "the second owned close was not self-announced"
+  chmod 000 "$status"
+  if run_wake_lib fm_wake_signal_seen_current "$state" "$status"; then
+    chmod 600 "$status"
+    fail "an unreadable status after owned growth read as already seen"
+  fi
+  chmod 600 "$status"
+  pass "an unreadable status still reads as unreported, with or without owned growth"
+}
+
 test_folded_worker_resolved_is_not_owned_lag() {
   local dir state status rc
   dir=$(make_case folded-worker-resolved)
@@ -2121,6 +2170,7 @@ test_acknowledged_stall_publication_survives_pre_marker_crash
 test_empty_prefix_mate_preserves_other_mate_receipt
 test_self_announced_append_guards
 test_separate_self_announced_answers_after_fold_are_owned
+test_unreadable_status_is_not_owned
 test_folded_worker_resolved_is_not_owned_lag
 test_owned_appends_are_not_replayed_as_unread
 test_historical_annotation_skips_announced_status
