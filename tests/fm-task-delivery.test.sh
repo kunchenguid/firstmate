@@ -307,6 +307,39 @@ test_promote_refuses_a_symlinked_task_record() {
 # no-mistakes worker gets. This drives the real promotion path, then runs the delivery command it
 # prints against a capturing fm-send.sh, and asserts on the message the worker would
 # actually receive - for every supported mode.
+# A direct-PR worker opens the PR itself, so the branch it targets is decided by
+# the contract it is handed. A slot placed on a registered working branch whose
+# PR still targets the remote default hands the forge every commit that branch
+# carries and the default does not, as the task's own change.
+# shellcheck disable=SC2016  # the backticks below are the contract's own literal text
+test_direct_pr_dod_targets_the_recorded_base_branch() {
+  local home id brief plain_sentence
+  home="$TMP_ROOT/direct-pr-base/home"
+  mkdir -p "$home/state"
+  plain_sentence='When it is implemented and committed, push your branch and open a PR with `gh-axi`, then append `done: PR {url}` to the status file and stop.'
+
+  id=direct-pr-recorded-base
+  printf 'window=fm-%s\nkind=ship\nworktree=/tmp/wt\nbase_branch=develop\n' "$id" > "$home/state/$id.meta"
+  FM_HOME="$home" "$BRIEF" "$id" fixture-project --mode direct-PR >/dev/null 2>&1 \
+    || fail "brief generation for a task with a recorded base branch should succeed"
+  brief="$home/data/$id/brief.md"
+  assert_grep 'open a PR with `gh-axi` against `develop` (pass `--base develop`)' "$brief" \
+    "a direct-PR task on a recorded working branch was not told to target that branch"
+  assert_no_grep "$plain_sentence" "$brief" \
+    "the direct-PR contract still told the worker to open a PR with no base"
+
+  id=direct-pr-no-recorded-base
+  printf 'window=fm-%s\nkind=ship\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
+  FM_HOME="$home" "$BRIEF" "$id" fixture-project --mode direct-PR >/dev/null 2>&1 \
+    || fail "brief generation for a task with no recorded base branch should succeed"
+  brief="$home/data/$id/brief.md"
+  assert_grep "$plain_sentence" "$brief" \
+    "a task with no recorded base branch did not keep the unchanged direct-PR contract"
+  assert_no_grep '--base' "$brief" \
+    "a task with no recorded base branch was handed a PR base it never resolved"
+  pass "fm-dod-lib: a direct-PR task targets its recorded base branch and is otherwise unchanged"
+}
+
 test_promotion_delivers_the_real_definition_of_done() {
   local home meta out sendroot payload mode id brief_dod delivered_dod
   home="$TMP_ROOT/promote-dod/home"
@@ -960,6 +993,7 @@ test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promote_refuses_a_symlinked_task_record
+test_direct_pr_dod_targets_the_recorded_base_branch
 test_promotion_delivers_the_real_definition_of_done
 test_project_mode_maps_the_conditional_policy
 test_project_mode_reads_the_registered_working_branch

@@ -6,7 +6,7 @@
 # A pool can also hand back a slot sitting on some other branch entirely.
 # These tests drive the real spawn path with a fake terminal, then prove it
 # starts the worker from the tip of the project's resolved working branch,
-# records the commit it started from, launches a clean origin-less pool as-is,
+# records the branch it resolved, launches a clean origin-less pool as-is,
 # or stops when a configured origin or that working branch is unusable.
 set -u
 
@@ -248,8 +248,6 @@ test_registered_working_branch_decides_the_pool_base() {
     "the launched slot does not hold the registered working branch's content"
   assert_grep "base_branch=develop" "$HOME_DIR/state/$id.meta" \
     "spawn did not record the working branch it resolved"
-  assert_grep "base_sha=$develop_tip" "$HOME_DIR/state/$id.meta" \
-    "spawn did not record the commit it actually started from"
   # The slot's own later tooling reads origin/HEAD for its default-branch
   # answers, so a registered working branch must not leave that ref unrefreshed.
   [ -n "$(git -C "$POOL_DIR" symbolic-ref --quiet --short refs/remotes/origin/HEAD)" ] \
@@ -372,8 +370,8 @@ test_registered_working_branch_missing_on_origin_refuses() {
   pass "a registered working branch origin does not carry refuses instead of falling back"
 }
 
-test_recorded_base_sha_proves_every_launch_base() {
-  local rec id out status tip head
+test_recorded_base_branch_names_every_resolved_base() {
+  local rec id out status
   id='pool-recorded-base-r1'
   rec=$(make_case recorded-base "$id")
   read_case_record "$rec"
@@ -381,25 +379,19 @@ test_recorded_base_sha_proves_every_launch_base() {
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   expect_code 0 "$status" "an unregistered project should still record its base"$'\n'"$out"
-  tip=$(git -C "$POOL_DIR" rev-parse "origin/$DEFAULT_BRANCH")
   assert_grep "base_branch=$DEFAULT_BRANCH" "$HOME_DIR/state/$id.meta" \
     "an unregistered project did not record the default branch it resolved"
-  assert_grep "base_sha=$tip" "$HOME_DIR/state/$id.meta" \
-    "an unregistered project did not record the commit it started from"
 
   id='pool-recorded-base-originless-r1'
   rec=$(make_originless_case recorded-base-originless "$id")
   read_case_record "$rec"
-  head=$(git -C "$POOL_DIR" rev-parse HEAD)
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
-  expect_code 0 "$status" "an origin-less pool should still record its base"$'\n'"$out"
-  assert_grep "base_sha=$head" "$HOME_DIR/state/$id.meta" \
-    "an origin-less pool did not record the commit it started from"
+  expect_code 0 "$status" "an origin-less pool should still launch"$'\n'"$out"
   assert_no_grep 'base_branch=' "$HOME_DIR/state/$id.meta" \
     "an origin-less pool named a working branch it never resolved"
-  pass "every launched slot records the commit it started from"
+  pass "every slot that resolves a working branch records it, and one that resolves none records nothing"
 }
 
 test_non_main_default_branch_refreshes_before_branching() {
@@ -957,7 +949,7 @@ test_registered_working_branch_decides_the_pool_base
 test_malformed_branch_token_refuses_while_an_absent_one_falls_back
 test_unrefreshable_origin_head_refuses_unless_a_branch_is_registered
 test_registered_working_branch_missing_on_origin_refuses
-test_recorded_base_sha_proves_every_launch_base
+test_recorded_base_branch_names_every_resolved_base
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool

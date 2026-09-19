@@ -19,6 +19,8 @@
 #   (g) base_branch= absent   -> unchanged default-branch resolution
 #   (h) base_branch= recorded but deleted from origin (the ordinary fate of a
 #       working branch once it merges) -> legible fallback to the default branch
+#   (i) base_branch= recorded and origin unreachable -> reported as the fetch
+#       failure it is, never as a deleted branch, and never as a raw git fatal
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -260,6 +262,36 @@ test_recorded_base_branch_deleted_on_origin_falls_back_legibly() {
   pass "fm-review-diff falls back legibly when the recorded base branch is gone from origin"
 }
 
+test_unreachable_origin_is_not_reported_as_a_deleted_base_branch() {
+  local case_dir out err status
+  case_dir=$(make_case unreachable-origin)
+  make_working_branch_case "$case_dir" develop
+  write_task_meta "$case_dir" "base_branch=develop"
+  # Origin is still configured and develop still exists on it; only the remote
+  # itself has become unreachable, which must not be read as a deleted branch.
+  git -C "$case_dir/project" remote set-url origin "$case_dir/vanished.git"
+
+  set +e
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  status=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+
+  [ "$status" -ne 0 ] \
+    || fail "unreachable-origin: review should stop rather than diff against an unverified base"
+  assert_not_contains "$err" 'no longer carries' \
+    "unreachable-origin: an unreachable remote was reported as a deleted branch"
+  assert_not_contains "$err" 'fatal:' \
+    "unreachable-origin: git's own fatal reached the operator"
+  assert_contains "$err" 'develop' \
+    "unreachable-origin: the diagnostic did not name the recorded base branch"
+  assert_contains "$err" 'could not reach origin' \
+    "unreachable-origin: the diagnostic did not say the remote could not be reached"
+  assert_not_contains "$out" 'diff base:' \
+    "unreachable-origin: a diff was produced against an unverified base"
+  pass "fm-review-diff reports an unreachable origin as a fetch failure, not a deleted base branch"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
@@ -268,3 +300,4 @@ test_unreachable_pr_head_falls_back_with_warning
 test_recorded_base_branch_decides_the_review_base
 test_absent_base_branch_keeps_the_default_branch_resolution
 test_recorded_base_branch_deleted_on_origin_falls_back_legibly
+test_unreachable_origin_is_not_reported_as_a_deleted_base_branch

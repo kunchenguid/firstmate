@@ -5,9 +5,17 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> prints the block on
-# stdout with no trailing blank line. The caller validates the mode; an unknown
-# mode is refused rather than silently rendered as the pipeline contract.
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [state-dir] prints
+# the block on stdout with no trailing blank line. The caller validates the
+# mode; an unknown mode is refused rather than silently rendered as the pipeline
+# contract.
+# With a state-dir whose <task-id>.meta records base_branch=, the direct-PR
+# contract names that branch as the PR base, because a worker who opens a PR
+# against the remote default instead would hand the forge every commit the
+# working branch carries that the default branch does not, as if they were this
+# task's change. bin/fm-spawn.sh resolves and records base_branch= and its
+# header owns the rules that decide it; bin/fm-review-diff.sh reads the same
+# record for the review base. Without that record the block is unchanged.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
@@ -232,10 +240,31 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id>
-  local mode=$1 id=$2
+fm_dod_recorded_base_branch() {  # <state-dir> <task-id>
+  local state=$1 id=$2 meta
+  [ -n "$state" ] || return 0
+  meta="$state/$id.meta"
+  [ -f "$meta" ] || return 0
+  grep '^base_branch=' "$meta" | tail -1 | cut -d= -f2- || true
+}
+
+fm_dod_block() {  # <mode> <task-id> [state-dir]
+  local mode=$1 id=$2 state=${3:-} base
+  base=$(fm_dod_recorded_base_branch "$state" "$id")
   case "$mode" in
     direct-PR)
+      if [ -n "$base" ]; then
+        cat <<EOF
+# Definition of done
+Delivery contract: mode=direct-PR
+This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
+The task is complete only when committed on your branch.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\` against \`$base\` (pass \`--base $base\`), then append \`done: PR {url}\` to the status file and stop.
+\`$base\` is the working branch this task was cut from, so a PR opened against any other branch would carry that branch's own commits as if they were your change.
+Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
+EOF
+        return 0
+      fi
       cat <<EOF
 # Definition of done
 Delivery contract: mode=direct-PR

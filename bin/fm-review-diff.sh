@@ -9,7 +9,11 @@
 # the project's default branch as it has always been. A recorded base branch
 # that origin no longer carries, which is the ordinary fate of a working branch
 # once it merges, falls back to that same default branch and says so, naming the
-# recorded branch and the task record it came from.
+# recorded branch and the task record it came from. A fetch that fails for any
+# other reason - an unreachable origin, expired auth, a forge outage - is
+# reported as the fetch failure it is and never as a deleted branch, because
+# abandoning a recorded base on a false claim is how a review silently moves off
+# the branch the task was cut from.
 #
 # Pooled project clones do not keep their local default branch current, so this
 # helper compares remote-backed projects against origin/<base> after fetching
@@ -155,10 +159,21 @@ if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
   # origin/<base> stale on some Git versions and only refresh FETCH_HEAD.
   if [ -n "$RECORDED_BASE_BRANCH" ] && ! fetch_base_branch "$BASE_BRANCH" 2>/dev/null; then
-    FALLBACK_BRANCH=$(default_branch) || { echo "error: task $ID records base_branch=$RECORDED_BASE_BRANCH, which origin no longer carries, and $PROJ has no default branch to fall back to; expected origin/HEAD, main, or master" >&2; exit 1; }
+    # A failed fetch is not evidence the branch is gone, so ask origin which it
+    # was before blaming either: --exit-code answers 2 for a ref origin does not
+    # have, 0 for one it still has, and anything else means origin itself could
+    # not be reached.
+    LS_STATUS=0
+    git -C "$WT" ls-remote --exit-code origin "refs/heads/$RECORDED_BASE_BRANCH" >/dev/null 2>&1 || LS_STATUS=$?
+    case "$LS_STATUS" in
+      0) echo "error: could not fetch '$RECORDED_BASE_BRANCH', the base branch recorded as base_branch= in $META when this task's worktree was placed; origin still carries that branch, so the fetch itself failed and the recorded base is not being abandoned" >&2; exit 1 ;;
+      2) ;;
+      *) echo "error: could not fetch '$RECORDED_BASE_BRANCH', the base branch recorded as base_branch= in $META when this task's worktree was placed, and could not reach origin to tell whether it still carries that branch" >&2; exit 1 ;;
+    esac
+    FALLBACK_BRANCH=$(default_branch) || { echo "error: origin no longer carries '$RECORDED_BASE_BRANCH', the base branch recorded as base_branch= in $META, and $PROJ has no default branch to fall back to; expected origin/HEAD, main, or master" >&2; exit 1; }
     echo "warning: origin no longer carries '$RECORDED_BASE_BRANCH', the base branch recorded as base_branch= in $META when this task's worktree was placed; falling back to the project's default branch '$FALLBACK_BRANCH'" >&2
     BASE_BRANCH=$FALLBACK_BRANCH
-    fetch_base_branch "$BASE_BRANCH"
+    fetch_base_branch "$BASE_BRANCH" 2>/dev/null || { echo "error: origin no longer carries '$RECORDED_BASE_BRANCH', the base branch recorded as base_branch= in $META, and the project's default branch '$BASE_BRANCH' could not be fetched from origin either" >&2; exit 1; }
   elif [ -z "$RECORDED_BASE_BRANCH" ]; then
     fetch_base_branch "$BASE_BRANCH"
   fi

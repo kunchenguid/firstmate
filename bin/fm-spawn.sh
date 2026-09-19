@@ -220,9 +220,9 @@
 #   origin, an unresolvable working branch, a working branch origin does not
 #   carry, or a non-clean worktree refuses a fresh spawn rather than risking a PR
 #   based on stale history or another branch's commits, or discarding local work.
-#   Every fresh ship or scout records the commit it started from as base_sha= in
-#   state/<id>.meta, with base_branch= naming the branch it resolved, so a wrong
-#   base is provable from the task record rather than only from a PR's file list.
+#   Every fresh ship or scout records the branch it resolved as base_branch= in
+#   state/<id>.meta, so a wrong base is provable from the task record rather
+#   than only from a PR's file list.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -2822,12 +2822,11 @@ spawn_worktree_has_origin_config() { # <worktree>
   return 1
 }
 
-# The branch a fresh ship or scout slot must start from, and the commit it
-# actually landed on. Published into state/<id>.meta below so a wrong base is
-# provable from the task record afterwards, instead of only from a PR's own file
-# list once foreign commits have already ridden along.
+# The branch a fresh ship or scout slot must start from. Published into
+# state/<id>.meta below so a wrong base is provable from the task record
+# afterwards, instead of only from a PR's own file list once foreign commits
+# have already ridden along.
 SPAWN_BASE_BRANCH=
-SPAWN_BASE_SHA=
 
 # A pool hands back whatever branch its slot happens to hold, so the base is
 # decided here, never inherited. Two sources answer "which branch does this
@@ -2874,7 +2873,6 @@ resolve_spawn_base_branch() { # <worktree>
 freshen_spawn_worktree_base() { # <worktree>
   local worktree=$1 branch target expected actual status rc=0
   SPAWN_BASE_BRANCH=
-  SPAWN_BASE_SHA=
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -2889,9 +2887,7 @@ freshen_spawn_worktree_base() { # <worktree>
   fi
   if ! spawn_worktree_has_origin_config "$worktree"; then
     # No origin to resolve a working branch against, so there is nothing to
-    # place the slot on and nothing to compare it with. The commit it launches
-    # from is still recorded, which is what makes a wrong base provable.
-    SPAWN_BASE_SHA=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+    # place the slot on and nothing to compare it with.
     return 0
   fi
   if ! git -C "$worktree" fetch --quiet origin; then
@@ -2926,7 +2922,6 @@ freshen_spawn_worktree_base() { # <worktree>
     return 1
   fi
   SPAWN_BASE_BRANCH=$branch
-  SPAWN_BASE_SHA=$expected
 }
 
 herdr_projection_meta_field_exact() { # <meta> <key>
@@ -4291,7 +4286,6 @@ preserve_relaunch_meta() {
   # worktree without re-resolving, so preserve_relaunch_meta carries the original
   # base forward rather than restating a base this run never resolved.
   [ -z "$SPAWN_BASE_BRANCH" ] || echo "base_branch=$SPAWN_BASE_BRANCH"
-  [ -z "$SPAWN_BASE_SHA" ] || echo "base_sha=$SPAWN_BASE_SHA"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
