@@ -1132,6 +1132,54 @@ SH
   pass "watcher signals promptly stop custom checks and clean private state"
 }
 
+test_fallback_custom_check_can_trap_watcher_stop_term() {
+  local dir state ready trapped pid i
+  dir=$(make_case fallback-custom-check-term-trap)
+  state="$dir/home/state"
+  ready="$dir/check-ready"
+  trapped="$dir/check-trapped"
+  cat > "$state/custom.check.sh" <<'SH'
+#!/usr/bin/env bash
+trap 'printf "trapped\n" > "$FM_TEST_CHECK_TRAPPED"; exit 0' TERM
+: > "$FM_TEST_CHECK_READY"
+while :; do sleep 0.02; done
+SH
+  chmod 0700 "$state/custom.check.sh"
+  rm -f "$dir/fakebin/timeout" "$dir/fakebin/gtimeout"
+  FM_HOME="$dir/home" "$REGISTER" custom >/dev/null \
+    || fail "could not register fallback TERM-trap custom check"
+
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_POLL=0 FM_CHECK_INTERVAL=0 \
+    FM_SIGNAL_GRACE=0 FM_CHECK_TIMEOUT=30 FM_CHECK_FORCE_FALLBACK=1 \
+    FM_TEST_CHECK_READY="$ready" FM_TEST_CHECK_TRAPPED="$trapped" \
+    PATH="$dir/fakebin:$BASE_PATH" "$WATCH" \
+    > "$dir/watch.out" 2> "$dir/watch.err" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 200 ]; do
+    [ -e "$ready" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.02
+    i=$((i + 1))
+  done
+  [ -e "$ready" ] || fail "fallback watcher did not start the custom check"
+  kill -TERM "$pid" 2>/dev/null || fail "could not signal fallback watcher during custom check"
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 150 ]; do
+    sleep 0.02
+    i=$((i + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "fallback watcher did not exit promptly after TERM"
+  fi
+  wait "$pid" 2>/dev/null || true
+  [ -s "$trapped" ] \
+    || fail "fallback custom check started with TERM ignored and could not run its TERM handler"
+  pass "fallback custom checks start with default TERM and can clean up when the watcher stops them"
+}
+
 test_returned_custom_check_descendants_are_drained() {
   local backend dir state fakebin ready direct_done child_pid_file sentinel watcher_pid child_pid i rc alive force_fallback
   for backend in installed-timeout fallback-timeout; do
@@ -2787,5 +2835,6 @@ test_device_rerecord_serializes_rerecord
 test_postrename_poll_validation_revokes_and_retries
 test_bootstrap_leaves_unauthenticated_checks
 test_custom_snapshot_cleanup_on_signal
+test_fallback_custom_check_can_trap_watcher_stop_term
 test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts

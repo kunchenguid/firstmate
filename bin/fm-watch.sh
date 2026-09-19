@@ -1723,7 +1723,7 @@ run_check_capture() {
   # command-string TERM trap that can fail to parse inside $(...).
   trap '' HUP INT TERM
   set -m
-  ( FM_CHECK_OWNED_GROUP=1 run_check_process "$@" ) > "$FM_CHECK_OUTPUT" 2>/dev/null &
+  ( trap - HUP INT TERM; FM_CHECK_OWNED_GROUP=1 run_check_process "$@" ) > "$FM_CHECK_OUTPUT" 2>/dev/null &
   FM_ACTIVE_CHECK_PID=$!
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
