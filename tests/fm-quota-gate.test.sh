@@ -171,6 +171,25 @@ SH
   pass "fm-quota-gate: fails open when claude's five_hour/seven_day windows are absent"
 }
 
+test_fail_open_partial_windows() {
+  local fb out rc payload
+  fb=$(fm_fakebin "$(fm_test_tmproot quota-partial-windows)")
+  cat > "$fb/quota-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${QUOTA_PAYLOAD:?}"
+SH
+  chmod +x "$fb/quota-axi"
+  for payload in \
+    '{"providers":[{"provider":"claude","windows":[{"id":"five_hour","percentRemaining":10}]}]}' \
+    '{"providers":[{"provider":"claude","windows":[{"id":"five_hour","percentRemaining":10},{"id":"seven_day","percentRemaining":null}]}]}' \
+    '{"providers":[{"provider":"claude","windows":[{"id":"five_hour","percentRemaining":10},{"id":"five_hour","percentRemaining":11},{"id":"seven_day","percentRemaining":90}]}]}'; do
+    out=$(QUOTA_PAYLOAD="$payload" run_gate "$fb"); rc=$?
+    expect_code 0 "$rc" "fail-open partial windows: exit code must be ok's 0"
+    assert_contains "$out" "ok remaining=unknown" "fail-open partial windows: status line"
+  done
+  pass "fm-quota-gate: requires exactly one numeric value for each general window"
+}
+
 test_fail_open_bad_threshold_env() {
   local fb out rc
   fb=$(make_quota_fakebin "$(fm_test_tmproot quota-badthresh)" 88 97)
@@ -379,6 +398,7 @@ test_fail_open_missing_quota_axi
 test_fail_open_quota_axi_errors
 test_fail_open_unparseable_output
 test_fail_open_missing_windows
+test_fail_open_partial_windows
 test_fail_open_bad_threshold_env
 test_ok_level_spawns_silently
 test_pause_level_refuses_crewmate_spawn
