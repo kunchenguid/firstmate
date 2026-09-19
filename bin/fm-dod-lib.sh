@@ -54,6 +54,8 @@
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-pr-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-classify-lib.sh"
 
 fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
@@ -318,26 +320,6 @@ EOF
   esac
 }
 
-# Absolute path for git-dir or git-common-dir of <worktree>.
-fm_dod_abs_git_path() {  # <worktree> <--git-dir|--git-common-dir>
-  local wt=$1 flag=$2 path
-  [ -n "$wt" ] && [ -d "$wt" ] || return 1
-  path=$(git -C "$wt" rev-parse "$flag" 2>/dev/null) || return 1
-  [ -n "$path" ] || return 1
-  case "$path" in
-    /*) printf '%s\n' "$path" ;;
-    *) ( cd "$wt" && cd "$path" && pwd -P ) ;;
-  esac
-}
-
-# 0 when <worktree> is a linked git worktree (git-dir != git-common-dir).
-fm_dod_is_linked_worktree() {  # <worktree>
-  local wt=$1 git_dir common
-  git_dir=$(fm_dod_abs_git_path "$wt" --git-dir) || return 1
-  common=$(fm_dod_abs_git_path "$wt" --git-common-dir) || return 1
-  [ "$git_dir" != "$common" ]
-}
-
 # 0 when <sha> is contained in a ref under <namespace> in <repo>.
 # --contains tests that exact commit, so a branch that moved to a different
 # tip does not count.
@@ -347,19 +329,6 @@ fm_dod_ref_contains() {  # <repo> <ref-namespace> <sha>
   [ -n "$sha" ] || return 1
   hit=$(git -C "$repo" for-each-ref --format='%(refname)' --contains="$sha" --count=1 "$ns" 2>/dev/null) || return 1
   [ -n "$hit" ]
-}
-
-# Strip a leading done: and its following spaces from a status line.
-fm_dod_done_note() {  # <line>
-  local note
-  case "$1" in
-    done:*) note=${1#done:} ;;
-    *) return 1 ;;
-  esac
-  while [ "${note# }" != "$note" ]; do
-    note=${note# }
-  done
-  printf '%s\n' "$note"
 }
 
 # 0 when a done: note reports the no-mistakes CI-ready PR (`PR <url> checks
@@ -378,7 +347,8 @@ fm_dod_note_reports_ci_ready() {  # <note>
 fm_dod_should_gate_ship_done() {  # <kind> <mode> <line>
   local note
   [ "$1" = ship ] || return 1
-  note=$(fm_dod_done_note "$3") || return 1
+  [ "$(status_line_verb "$3")" = "done" ] || return 1
+  note=$(status_line_note "$3")
   case "$2" in
     direct-PR|local-only) return 0 ;;
     no-mistakes|'') fm_dod_note_reports_ci_ready "$note" ;;
@@ -433,28 +403,12 @@ fm_dod_recorded_pr_on_forge() {  # <state> <id> <meta> <mode> <url>
 }
 
 # 0 when <sha> is reachable from a ref that survives the disposable worktree:
-# any remote-tracking ref, or - for local-only - heads in the project clone
-# (a linked worktree's shared refs/heads, or a distinct standalone clone).
+# any remote-tracking ref, or - for local-only - heads in the project clone.
 fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> <sha>
-  local wt=$1 project=$2 mode=$3 sha=$4 wt_common proj_common
-  [ -n "$wt" ] && [ -d "$wt" ] || return 1
-  [ -n "$sha" ] || return 1
+  local wt=$1 project=$2 mode=$3 sha=$4
   fm_dod_ref_contains "$wt" refs/remotes "$sha" && return 0
-  if [ -n "$project" ] && [ -d "$project" ] \
-    && git -C "$project" rev-parse --git-dir >/dev/null 2>&1; then
-    fm_dod_ref_contains "$project" refs/remotes "$sha" && return 0
-  fi
-  [ "$mode" = local-only ] || return 1
-  if fm_dod_is_linked_worktree "$wt"; then
-    fm_dod_ref_contains "$wt" refs/heads "$sha" && return 0
-    return 1
-  fi
-  [ -n "$project" ] && [ -d "$project" ] || return 1
-  git -C "$project" rev-parse --git-dir >/dev/null 2>&1 || return 1
-  wt_common=$(fm_dod_abs_git_path "$wt" --git-common-dir) || return 1
-  proj_common=$(fm_dod_abs_git_path "$project" --git-common-dir) || return 1
-  [ "$wt_common" != "$proj_common" ] || return 1
-  fm_dod_ref_contains "$project" refs/heads "$sha"
+  fm_dod_ref_contains "$project" refs/remotes "$sha" && return 0
+  [ "$mode" = local-only ] && fm_dod_ref_contains "$project" refs/heads "$sha"
 }
 
 # 0 when <line> is not a ship done: to gate, when it names the task's recorded
@@ -468,7 +422,7 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta>]
   local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
-  if url=$(fm_dod_pr_url_from_done_note "$(fm_dod_done_note "$line")") \
+  if url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") \
     && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then
     return 0
   fi
