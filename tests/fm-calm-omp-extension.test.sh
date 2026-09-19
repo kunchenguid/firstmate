@@ -345,6 +345,112 @@ JS
   pass "OMP Calm hides operational rows and thinking while on, and restores both when toggled off"
 }
 
+test_working_note_via_omp_events() {
+  local fixture home out status
+  fixture="$TMP_ROOT/working-note-events"
+  home="$fixture/home"
+  install_omp_calm_fixture "$fixture"
+  mkdir -p "$home/config"
+  printf 'on\n' >"$home/config/calm"
+  out=$(cd "$fixture" && FM_HOME="$home" EXT="$fixture/.omp/extensions/fm-calm.ts" node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+import * as Agent from "@oh-my-pi/pi-coding-agent";
+
+const handlers = new Map();
+let calmCommand;
+const pi = {
+  pi: { Container: class { render() { return []; } } },
+  events: { emit() {} },
+  on(event, handler) { handlers.set(event, handler); },
+  registerCommand(name, command) { if (name === "calm") calmCommand = command; },
+  registerMessageRenderer() {},
+  registerAssistantThinkingRenderer() {},
+};
+const mod = await import(`${pathToFileURL(process.env.EXT).href}?note=${Date.now()}`);
+mod.default(pi);
+for (const event of ["message_start", "message_update", "message_end"]) {
+  if (typeof handlers.get(event) !== "function") {
+    throw new Error(`Calm must observe OMP ${event} to know a message was mid-turn`);
+  }
+}
+const ui = {
+  notify() {},
+  getToolsExpanded() { return false; },
+  setToolsExpanded() {},
+  setStatus() {},
+};
+const ctx = { ui };
+handlers.get("session_start")({ type: "session_start" }, ctx);
+
+// OMP 18.1.17 hands AssistantMessageComponent the derived before-tools message
+// (no toolCall, stopReason forced to "stop"); the unfiltered message only
+// reaches the extension event stream. Both orders must hide the settled note.
+const FULL = {
+  role: "assistant",
+  stopReason: "toolUse",
+  timestamp: 1001,
+  content: [
+    { type: "thinking", thinking: "secret plan" },
+    { type: "text", text: "CALM_WORKING_NOTE" },
+    { type: "toolCall" },
+  ],
+};
+const BEFORE = {
+  role: "assistant",
+  stopReason: "stop",
+  timestamp: 1001,
+  content: [
+    { type: "thinking", thinking: "secret plan" },
+    { type: "text", text: "CALM_WORKING_NOTE" },
+  ],
+};
+const rendered = (component) => component.rendered || [];
+const hasNote = (component) => rendered(component).some((line) => line === "text:CALM_WORKING_NOTE");
+
+const settled = new Agent.AssistantMessageComponent();
+settled.updateContent(BEFORE, { transient: true });
+handlers.get("message_end")({ type: "message_end", message: FULL }, ctx);
+settled.updateContent(BEFORE, { transient: true });
+if (hasNote(settled)) {
+  throw new Error(`Calm-on must hide the derived before-tools working note, got ${JSON.stringify(rendered(settled))}`);
+}
+if (rendered(settled).some((line) => line.startsWith("thinking:"))) {
+  throw new Error(`Calm-on must not render thinking, got ${JSON.stringify(rendered(settled))}`);
+}
+
+const streaming = new Agent.AssistantMessageComponent();
+streaming.updateContent(BEFORE, { transient: true });
+handlers.get("message_update")({ type: "message_update", message: FULL }, ctx);
+if (hasNote(streaming)) {
+  throw new Error(`Calm-on must collapse an already-rendered working note on the OMP update, got ${JSON.stringify(rendered(streaming))}`);
+}
+
+const FINAL = {
+  role: "assistant",
+  stopReason: "stop",
+  timestamp: 2002,
+  content: [{ type: "text", text: "CALM_FINAL" }],
+};
+const final = new Agent.AssistantMessageComponent();
+final.updateContent(FINAL, { transient: true });
+handlers.get("message_end")({ type: "message_end", message: FINAL }, ctx);
+final.updateContent(FINAL, { transient: true });
+if (!rendered(final).some((line) => line === "text:CALM_FINAL")) {
+  throw new Error(`Calm-on must keep a genuine final reply visible, got ${JSON.stringify(rendered(final))}`);
+}
+
+await calmCommand.handler("", ctx);
+if (!hasNote(settled)) {
+  throw new Error(`Calm-off must restore the hidden working note, got ${JSON.stringify(rendered(settled))}`);
+}
+JS
+)
+  status=$?
+  expect_code 0 "$status" "working note via OMP events: $out"
+  [ -z "$out" ] || fail "working note via OMP events printed output: $out"
+  pass "OMP Calm hides the derived before-tools working note using OMP's own assistant message events"
+}
+
 test_double_install_keeps_shared_state() {
   local fixture home out status
   fixture="$TMP_ROOT/double-install"
@@ -702,6 +808,7 @@ JS
 test_preference_read_write_contract
 test_calm_command_persists_and_reloads
 test_operational_row_hide_show_and_thinking_collapse
+test_working_note_via_omp_events
 test_double_install_keeps_shared_state
 test_retry_recovery_keeps_original_note
 test_native_hide_thinking_is_additive
