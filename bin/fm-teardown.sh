@@ -3574,6 +3574,13 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
   "$STATE/.$ID.branch-outcome-index"
+if [ -n "${WT:-}" ]; then
+  sw_state="${SUPERWHISPER_AGENT_STATE_DIR:-/tmp/superwhisper-agent}"
+  if [ -d "$sw_state" ]; then
+    cwd_hash=$(if command -v md5 >/dev/null 2>&1; then printf %s "$WT" | md5 -q; else printf %s "$WT" | md5sum | awk '{print $1}'; fi)
+    rm -f "$sw_state/disabled-$cwd_hash"
+  fi
+fi
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.
