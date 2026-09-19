@@ -40,7 +40,8 @@ unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH CMUX_TAB_ID CMUX_PANEL_ID 2>/dev/null || true
 
 # A fake toolchain where every required tool is present and gh is authenticated.
-# treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1.
+# treehouse's `get --help` advertises --lease only when FM_FAKE_TREEHOUSE_LEASE_HELP=1,
+# and its top-level `--help` advertises the global --root unless FM_FAKE_TREEHOUSE_NO_ROOT=1.
 make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -63,6 +64,10 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/gh"
+  # Two capabilities are gated independently: the durable lease on `get --help`,
+  # and the global worktree root on the top-level `--help`. The root is advertised
+  # by default because every supported build carries it; FM_FAKE_TREEHOUSE_NO_ROOT
+  # models the older build that cannot separate homes.
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
@@ -70,6 +75,13 @@ if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
     printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]'
   else
     printf '%s\n' 'Usage: treehouse get'
+  fi
+  exit 0
+fi
+if [ "${1:-}" = --help ]; then
+  printf '%s\n' 'Usage: treehouse [command]'
+  if [ "${FM_FAKE_TREEHOUSE_NO_ROOT:-}" != 1 ]; then
+    printf '%s\n' '      --root string   Worktree root directory'
   fi
   exit 0
 fi
@@ -722,7 +734,26 @@ test_treehouse_lease_check_follows_resolved_backend() {
     "$ROOT/bin/fm-bootstrap.sh")
   assert_contains "$out" "MISSING: treehouse" "backend=herdr must still require treehouse with durable lease support"
   assert_not_contains "$out" "MISSING: tmux" "backend=herdr must not demand tmux even when treehouse is too old"
-  pass "bootstrap: the treehouse lease check follows the resolved backend's worktree provider"
+
+  # The worktree root is the second required capability, and it is gated
+  # independently: a build that has the durable lease but no global --root cannot
+  # give each home its own pool, so it reports the same upgrade line.
+  case_dir="$TMP_ROOT/herdr-rootless-treehouse"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' herdr > "$case_dir/home/config/backend"
+  fakebin=$(make_fake_toolchain_no_tmux "$case_dir" herdr)
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_TREEHOUSE_NO_ROOT=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING: treehouse" "a treehouse with the lease but no worktree root must still report an upgrade"
+
+  # And with both capabilities present the same home is silent, so neither probe
+  # can be passing for the other's reason.
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "MISSING: treehouse" "a treehouse with both the lease and the worktree root must be accepted"
+  pass "bootstrap: the treehouse lease and worktree-root checks follow the resolved backend's worktree provider"
 }
 
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {

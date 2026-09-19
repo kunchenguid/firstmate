@@ -9,8 +9,10 @@
 # isolation assertion then refused and the task stopped. These tests pin the
 # property that removes that shared namespace - two homes never pass the same
 # worktree root - through the public interfaces that carry it: the derivation
-# itself, the real fm-spawn.sh command sent to the worker's shell, the real
-# fm-home-seed.sh lease, and the bootstrap capability gate.
+# itself, the real fm-spawn.sh command sent to the worker's shell, and the real
+# fm-home-seed.sh lease. The bootstrap gate that requires the provider
+# capability underneath it belongs to tests/fm-bootstrap.test.sh, which owns
+# every tool gate.
 #
 # The complementary proof against the REAL provider - two clones of one origin
 # acquiring concurrently, and a worktree in a legacy shared root still returning
@@ -206,34 +208,8 @@ test_home_seed_return_resolves_from_the_path() {
   pass "a rollback return names the worktree path, so worktrees leased under any root stay returnable"
 }
 
-test_bootstrap_requires_the_worktree_root_flag() {
-  local base fakebin out
-  base="$TMP_ROOT/bootstrap"
-  fakebin=$(fm_fakebin "$base/fake")
-  mkdir -p "$base/home/state" "$base/home/data" "$base/home/config" "$base/home/projects"
-  cat > "$fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-set -u
-# A build carrying the durable lease but no global worktree root.
-case "$*" in
-  *--help*) printf 'Usage:\n  treehouse get [flags]\n\nFlags:\n      --lease\n      --lease-holder string\n'; exit 0 ;;
-esac
-exit 0
-SH
-  chmod +x "$fakebin/treehouse"
-
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$base/home" FM_STATE_OVERRIDE="$base/home/state" \
-    FM_DATA_OVERRIDE="$base/home/data" FM_CONFIG_OVERRIDE="$base/home/config" \
-    FM_PROJECTS_OVERRIDE="$base/home/projects" \
-    "$ROOT/bin/fm-bootstrap.sh" 2>&1 || true)
-  assert_contains "$out" "MISSING: treehouse" \
-    "bootstrap accepted a treehouse build that cannot give each home its own worktree root"
-  pass "bootstrap reports a treehouse build without the worktree-root flag as needing an upgrade"
-}
-
 test_root_is_per_home_and_spelling_independent
 test_root_falls_back_to_home_and_fails_closed
 test_spawn_allocates_from_its_own_home_root
 test_home_seed_leases_from_the_seeding_home_root
 test_home_seed_return_resolves_from_the_path
-test_bootstrap_requires_the_worktree_root_flag
