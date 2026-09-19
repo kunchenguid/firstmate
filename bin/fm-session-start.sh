@@ -696,6 +696,32 @@ else
       "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1
   )
 fi
+# A live worker running outside its recorded worktree - a restored terminal
+# resumed it in the primary checkout - is flagged here, before anything this
+# session does can steer it, and a locked full start relaunches it into its
+# worktree in the background (bin/fm-worktree-drift.sh owns detection, repair,
+# and the outcome's durable wake).
+DRIFT_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-worktree-drift.sh" scan 2>/dev/null || true)
+if [ -n "$DRIFT_OUT" ]; then
+  if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
+    DRIFT_ACTION='it is being relaunched into its worktree in the background; do not steer it until the worktree-drift check wake reports the outcome'
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-worktree-drift.sh" start || true
+  else
+    DRIFT_ACTION="this session does not relaunch it; stop it before it acts there with bin/fm-control.sh <task> exit, then relaunch it"
+  fi
+  DRIFT_BOOT=
+  while IFS=$'\t' read -r _ drift_id drift_cwd drift_wt drift_where; do
+    if [ "$drift_where" = primary ]; then
+      drift_where='the primary checkout'
+    else
+      drift_where='outside its worktree'
+    fi
+    DRIFT_BOOT="${DRIFT_BOOT}WORKTREE_DRIFT: task $drift_id's worker is running in $drift_where ($drift_cwd), not its worktree $drift_wt; ${DRIFT_ACTION//<task>/$drift_id}"$'\n'
+  done <<EOF
+$DRIFT_OUT
+EOF
+  BOOT_OUT="${DRIFT_BOOT}${BOOT_OUT}"
+fi
 if [ -n "$BOOT_OUT" ]; then
   printf '%s\n' "$BOOT_OUT"
 else

@@ -102,6 +102,11 @@
 #                          source owned closes that episode); the queued
 #                          payload names what to check. These three kinds are
 #                          joined with `;` when more than one surfaces in a cycle
+#   check: worktree-drift: <WORKTREE_DRIFT: lines>
+#                          a live ship or scout worker was running outside its
+#                          recorded worktree; each line names whether it was
+#                          relaunched into that worktree or why that failed
+#                          (bin/fm-worktree-drift.sh owns the contract)
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
@@ -229,6 +234,10 @@ HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-300}
+WORKTREE_DRIFT_INTERVAL=${FM_WORKTREE_DRIFT_INTERVAL:-60}  # seconds between worker-isolation scans
+case "$WORKTREE_DRIFT_INTERVAL" in
+  ''|*[!0-9]*) WORKTREE_DRIFT_INTERVAL=60 ;;
+esac
 case "$HOME_SUMMARY_INTERVAL" in
   ''|*[!0-9]*|0) HOME_SUMMARY_INTERVAL=300 ;;
 esac
@@ -2016,6 +2025,34 @@ home_summary_refresh_detached() {
   HOME_SUMMARY_PID=$!
 }
 
+# A live worker running outside its recorded worktree (a restored terminal
+# resumed it in the primary checkout) is relaunched into that worktree before
+# anything else this cycle can ring it; bin/fm-worktree-drift.sh owns detection
+# and repair. Each relaunch is bounded by fm-control's own waits, and the
+# beacon is refreshed between tasks so a multi-task repair never reads as a
+# dead watcher. A repair already under way elsewhere in this home is left to
+# finish; a failed relaunch is reported once by the owner, not every cycle.
+worktree_drift_tick() {
+  local ids id out lines=
+  [ "$(age_of "$STATE/.last-worktree-drift")" -ge "$WORKTREE_DRIFT_INTERVAL" ] || return 0
+  touch "$STATE/.last-worktree-drift"
+  ids=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-worktree-drift.sh" scan 2>/dev/null | cut -f2)
+  [ -n "$ids" ] || return 0
+  for id in $ids; do
+    touch "$STATE/.last-watcher-beat"
+    out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-worktree-drift.sh" repair "$id" 2>&1 </dev/null)
+    case "$out" in
+      '') ;;
+      'WORKTREE_DRIFT: repair already under way') triage_log "worktree drift repair for $id already under way" ;;
+      *) lines="${lines:+$lines; }${out//$'\n'/; }" ;;
+    esac
+  done
+  touch "$STATE/.last-watcher-beat"
+  [ -z "$lines" ] || wake "check: worktree-drift: $lines"
+}
+
 RECONCILE_REQUEST_PID=
 reconcile_requests_pending() {
   local request
@@ -2168,6 +2205,8 @@ while :; do
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
+
+  worktree_drift_tick
 
   if [ "$(age_of "$STATE/home-summary.json")" -ge "$HOME_SUMMARY_INTERVAL" ]; then
     home_summary_refresh_detached

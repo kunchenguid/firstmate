@@ -963,6 +963,20 @@ fm_backend_agent_state() {  # <backend> <target>
   esac
 }
 
+# fm_backend_current_path: the working directory of <target>'s live foreground
+# process, or nothing when it cannot be read. Only tmux and herdr expose it
+# against a bare target; every other backend prints nothing, which callers must
+# treat as unknown rather than as any particular directory.
+fm_backend_current_path() {  # <backend> <target>
+  local backend=$1 target=$2
+  fm_backend_source "$backend" || return 0
+  case "$backend" in
+    tmux) fm_backend_tmux_current_path "$target" ;;
+    herdr) fm_backend_herdr_current_path "$target" ;;
+  esac
+  return 0
+}
+
 # Backward-compatible three-state view for existing callers. An
 # authoritatively missing endpoint is confidently not a live agent, while every
 # ambiguous, unreadable, or unverified result stays unknown.

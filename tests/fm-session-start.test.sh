@@ -1367,6 +1367,90 @@ EOF
   pass "herdr endpoint liveness is reported per task: alive for a live pane, dead for a gone one"
 }
 
+# --- worktree drift: a resumed worker outside its worktree ------------------
+
+# make_fake_tmux_drifted <fakebin> <agent-cwd>: one live claude window, fm-t1,
+# whose running agent's directory is <agent-cwd> (a restored pane resumed in
+# the primary checkout). The agent never exits, so any relaunch refuses.
+make_fake_tmux_drifted() {
+  local fakebin=$1 cwd=$2
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  display-message)
+    for a in "\$@"; do
+      case "\$a" in
+        *cursor_y*) printf '1\n'; exit 0 ;;
+        *pane_current_command*) printf 'claude\n'; exit 0 ;;
+        *pane_current_path*) printf '%s\n' '$cwd'; exit 0 ;;
+      esac
+    done
+    printf 'fakepane\n'; exit 0 ;;
+  list-windows) printf 'fm-t1\n'; exit 0 ;;
+  capture-pane) printf '\n'; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+}
+
+# new_drift_world <name>: a world whose live ship task t1 runs in its project's
+# primary checkout instead of its worktree. Echoes root|home|fakebin|proj|wt.
+new_drift_world() {
+  local rec root home fakebin w
+  rec=$(new_world "$1")
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  w=${home%/home}
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  fm_git_worktree "$w/proj" "$w/wt" task-t1
+  make_fake_tmux_drifted "$fakebin" "$w/proj"
+  printf '%s\n' "window=fmses:fm-t1" "endpoint_task_id=t1" "worktree=$w/wt" "project=$w/proj" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" > "$home/state/t1.meta"
+  printf '%s|%s|%s|%s|%s\n' "$root" "$home" "$fakebin" "$w/proj" "$w/wt"
+}
+
+test_worktree_drift_is_flagged_and_relaunched_at_session_start() {
+  local rec root home fakebin proj wt out i=0
+  rec=$(new_drift_world drift-locked)
+  IFS='|' read -r root home fakebin proj wt <<EOF
+$rec
+EOF
+  out=$(FM_WORKTREE_DRIFT_CONFIRM_SECS=0 FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 \
+    FM_CONTROL_LAUNCH_WAIT=0.05 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "WORKTREE_DRIFT: task t1's worker is running in the primary checkout ($proj), not its worktree $wt; it is being relaunched into its worktree in the background" \
+    "a locked session start must flag the drifted worker and start its relaunch"
+  while ! grep -q $'\tcheck\tworktree-drift-t1\t' "$home/state/.wake-queue" 2>/dev/null && [ "$i" -lt 200 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  assert_grep $'\tcheck\tworktree-drift-t1\tWORKTREE_DRIFT: task t1' "$home/state/.wake-queue" \
+    "the background relaunch must report its outcome as a durable check wake"
+  pass "session start: a worker resumed in the primary checkout is flagged and its relaunch started"
+}
+
+test_worktree_drift_is_flagged_but_not_relaunched_read_only() {
+  local rec root home fakebin proj wt out holder_pid
+  rec=$(new_drift_world drift-read-only)
+  IFS='|' read -r root home fakebin proj wt <<EOF
+$rec
+EOF
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  out=$(FM_WORKTREE_DRIFT_CONFIRM_SECS=0 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+  assert_contains "$out" "READ-ONLY SESSION" "fixture: the session must be read-only"
+  assert_contains "$out" "WORKTREE_DRIFT: task t1's worker is running in the primary checkout ($proj), not its worktree $wt; this session does not relaunch it; stop it before it acts there with bin/fm-control.sh t1 exit" \
+    "a read-only session must still flag the drifted worker"
+  sleep 1
+  assert_absent "$home/state/t1.control-relaunch" "a read-only session must not relaunch the worker"
+  pass "session start: a read-only session flags a drifted worker without relaunching it"
+}
+
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
@@ -2694,6 +2778,8 @@ test_status_tail_line_cap
 test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
+test_worktree_drift_is_flagged_and_relaunched_at_session_start
+test_worktree_drift_is_flagged_but_not_relaunched_read_only
 test_composition_invokes_real_scripts
 test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep
 test_non_pi_session_start_leaves_branch_state_untouched
