@@ -131,9 +131,14 @@ test_failing_hook_refuses_the_spawn_and_keeps_its_log() {
   id='setup-fails-r1'
   rec=$(make_case fails "$id")
   read_case_record "$rec"
+  # A hook interrupted partway through is the likeliest to have already written
+  # an unignored path, and clearing that path is the first thing a retry of this
+  # task id needs: the next spawn handed this pool slot is refused by the base
+  # refresh until it is gone. So this refusal has to name it too.
   write_hook <<'HOOK'
 #!/usr/bin/env bash
 echo 'installing dependencies'
+printf '{}\n' > .lsp-mcp.json
 echo 'lockfile does not match the store' >&2
 exit 3
 HOOK
@@ -146,6 +151,10 @@ HOOK
     "the refusal did not explain why an unprovisioned worktree is not launched into"
   assert_contains "$out" "lockfile does not match the store" \
     "the refusal did not show what the project's own setup script reported"
+  assert_contains "$out" ".lsp-mcp.json" \
+    "the refusal did not name the unignored file the interrupted hook left to be cleared"
+  assert_present "$WT_DIR/.lsp-mcp.json" \
+    "the refusal deleted the file the failed hook left behind"
   assert_not_contains "$out" "spawned $id" "a refused spawn still reported success"
   assert_absent "$HOME_DIR/state/$id.meta" "a refused spawn published task metadata"
   assert_absent "$HOME_DIR/state/$id.status" "a refused spawn left a status record"
@@ -155,6 +164,32 @@ HOOK
   assert_present "$log" "the refusal named a hook log that was not kept"
   assert_grep 'installing dependencies' "$log" "the kept hook log lost the hook's own output"
   pass "a failing setup hook refuses the spawn, shows the project's error, and keeps the full log"
+}
+
+test_signal_killed_hook_refuses_the_spawn() {
+  local rec id out status
+  id='setup-signal-r1'
+  rec=$(make_case signal "$id")
+  read_case_record "$rec"
+  # A setup script killed by the OOM killer or a segfault leaves the worktree
+  # just as unprovisioned as one that exits nonzero, and leaves no trace git
+  # can see because everything half-written lives in ignored paths. The refusal
+  # therefore rests entirely on the status fm_run_timed reports for a signal
+  # death, which is the contract tests/fm-timeout-lib.test.sh pins.
+  write_hook <<'HOOK'
+#!/usr/bin/env bash
+echo 'installing dependencies'
+kill -9 $$
+HOOK
+
+  out=$(run_ship "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched a worker after its setup hook was killed by a signal"$'\n'"$out"
+  assert_contains "$out" "refusing to launch a worker into an unprovisioned worktree" \
+    "a hook killed by a signal did not refuse the way a hook that exits nonzero does"
+  assert_not_contains "$out" "spawned $id" "a refused spawn still reported success"
+  assert_absent "$HOME_DIR/state/$id.meta" "a refused spawn published task metadata"
+  pass "a setup hook killed by a signal refuses the spawn instead of launching into it"
 }
 
 test_hook_that_dirties_the_worktree_refuses() {
@@ -369,6 +404,7 @@ test_hooks_are_not_inherited_into_a_secondmate_home
 test_hook_provisions_the_worktree_before_the_worker_starts
 test_hook_writing_only_ignored_paths_launches
 test_failing_hook_refuses_the_spawn_and_keeps_its_log
+test_signal_killed_hook_refuses_the_spawn
 test_hook_that_dirties_the_worktree_refuses
 test_unusable_hook_refuses_rather_than_skipping
 test_hook_named_for_another_project_is_not_run

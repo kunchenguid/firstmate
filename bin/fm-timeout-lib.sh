@@ -8,12 +8,15 @@
 #   fm_timeout_mechanism
 #       Prints the mechanism fm_run_timed will use on this host: "timeout",
 #       "gtimeout", "perl", or "bash". Set FM_TIMEOUT_MECHANISM_OVERRIDE=bash
-#       to force the dependency-free fallback.
+#       to force the dependency-free fallback, or =perl to force the perl one
+#       on a host that also has timeout, so tests can reach either path.
 #
 #   fm_run_timed <seconds> <command> [args...]
 #       Runs the command with a hard bound. Exit status is the command's own,
 #       except 124, which means the bound was hit (GNU timeout's convention,
-#       reproduced by the perl and bash fallbacks).
+#       reproduced by the perl and bash fallbacks). A command killed by a signal
+#       reports 128 + the signal, so callers that refuse on failure cannot read
+#       a killed command as success.
 #
 # A non-positive bound is not a bound: `timeout 0` and the perl fallback's
 # `alarm 0` both disable the deadline, so callers must reject 0 before calling.
@@ -30,6 +33,8 @@ set -u
 fm_timeout_mechanism() {
   if [ "${FM_TIMEOUT_MECHANISM_OVERRIDE:-}" = bash ]; then
     printf 'bash\n'
+  elif [ "${FM_TIMEOUT_MECHANISM_OVERRIDE:-}" = perl ] && command -v perl >/dev/null 2>&1; then
+    printf 'perl\n'
   elif command -v timeout >/dev/null 2>&1; then
     printf 'timeout\n'
   elif command -v gtimeout >/dev/null 2>&1; then
@@ -132,7 +137,7 @@ fm_run_timed() {  # <seconds> <command...>
     timeout) fm_run_external_timeout timeout "$seconds" "$@" ;;
     gtimeout) fm_run_external_timeout gtimeout "$seconds" "$@" ;;
     perl)
-      perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' \
+      perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; my $st = $?; exit($st & 127 ? 128 + ($st & 127) : $st >> 8)' \
         "$seconds" "$@"
       ;;
     bash) fm_run_bash_timeout "$seconds" "$@" ;;

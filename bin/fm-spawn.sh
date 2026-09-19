@@ -3011,6 +3011,7 @@ run_spawn_setup_hook() { # <worktree>
     else
       echo "error: spawn-setup hook '$hook' failed (exit $rc) in '$worktree'; refusing to launch a worker into an unprovisioned worktree" >&2
     fi
+    spawn_setup_hook_leftovers "$worktree"
     spawn_setup_hook_log_tail "$log"
     return 1
   fi
@@ -3021,12 +3022,26 @@ run_spawn_setup_hook() { # <worktree>
   }
   if [ -n "$status" ]; then
     echo "error: spawn-setup hook '$hook' left files git does not ignore in '$worktree'; a hook may write only ignored paths, because anything else is later read as the worker's own unlanded work; refusing to launch" >&2
-    echo "--- first 10 entries of git status in $worktree ---" >&2
-    printf '%s\n' "$status" | head -10 >&2
+    spawn_setup_hook_leftovers "$worktree"
     spawn_setup_hook_log_tail "$log"
     return 1
   fi
   rm -f "$log" 2>/dev/null || true
+}
+
+# Every refusal names the unignored paths the hook left in the pooled worktree,
+# because clearing them is the first thing a retry of the same task id needs:
+# freshen_spawn_worktree_base refuses that slot until they are gone. A hook
+# interrupted partway through is the likeliest to have written one, so this
+# belongs to the failure and timeout refusals as much as to the dirty-tree one.
+# Silent when the tree is clean, or unreadable and some other refusal is already
+# being reported.
+spawn_setup_hook_leftovers() { # <worktree>
+  local worktree=$1 status
+  status=$(git -C "$worktree" -c core.quotePath=false status --porcelain 2>/dev/null) || return 0
+  [ -n "$status" ] || return 0
+  echo "--- first 10 entries of git status in $worktree ---" >&2
+  printf '%s\n' "$status" | head -10 >&2
 }
 
 # The tail is the actionable part of a failed hook: the error the project's own
