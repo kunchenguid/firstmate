@@ -18,6 +18,33 @@ Prerequisites:
 Select Orca with local `config/backend` containing `orca`, `FM_BACKEND=orca` for one launch, or an explicit request to Firstmate.
 It is never auto-detected.
 
+### Linux-compatible CLIs (FM_ORCA_BIN)
+
+Every command this adapter runs resolves the binary through `fm_backend_orca_bin`
+(`bin/backends/orca.sh`) instead of a literal `orca`, so this backend also
+covers a non-macOS build that speaks the identical command/flag/JSON-envelope
+contract, not only the real macOS app's CLI. Set `FM_ORCA_BIN` to that CLI's
+absolute path (or a name on `PATH`) before selecting `backend=orca`; unset,
+resolution is unchanged (`orca` on `PATH`), so this is purely additive and
+changes nothing for the macOS app.
+
+Verified empirically against a Linux Electron-based Orca-compatible build run
+headless (`orca serve --no-pairing`): `status --json` readiness fields
+(`runtime.reachable`, `runtime.state`), `repo add`/`repo show` (`repo.id`),
+`worktree create` (`worktree.id` as the same `<repo-id>::<absolute-path>`
+composite, `worktree.path`), `worktree show`, `worktree rm --force`,
+`terminal create` (`terminal.handle`), `terminal send --text --enter` and
+`--interrupt`, `terminal read` (`terminal.tail`), and `terminal close --json`
+all matched this adapter's existing `fm_backend_orca_json_get` field
+extraction and the `{ok:false, error:{code,message}}` failure envelope
+byte-for-byte, with no field-mapping changes required. The full
+worktree-create -> terminal-create -> send -> read -> close -> worktree-rm
+lifecycle was run end to end through this adapter's own functions (not a
+reimplementation) with `FM_ORCA_BIN` pointed at that CLI.
+Not verified: secondmate spawns (unsupported on Orca regardless of binary),
+and any Linux-only Orca-compatible build's own packaging/distribution story -
+this section only covers wire/CLI compatibility once such a binary runs.
+
 Before any spawn mutates repository state, Firstmate requires `orca status --json` to report `reachable=true` and `state="ready"`.
 The first task for a project registers that repository with `orca repo add --path` when needed.
 No manual repository registration is required.

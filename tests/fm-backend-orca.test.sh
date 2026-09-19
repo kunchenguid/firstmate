@@ -378,7 +378,7 @@ test_kill_refuses_when_the_orca_cli_is_absent() {
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_kill term-123' "$ROOT" 2>&1 )
   status=$?
   [ "$status" -ne 0 ] || fail "kill reported success for a close its missing CLI never attempted"
-  assert_contains "$out" "backend=orca selected but the 'orca' CLI is not installed" \
+  assert_contains "$out" "backend=orca selected but 'orca' is not installed" \
     "kill did not name the missing CLI as the reason the close never happened"
   [ ! -s "$LOG" ] || fail "kill invoked orca despite the CLI being absent"
   pass "fm_backend_orca_kill: a close its missing CLI never attempted reports the failure instead of a success"
