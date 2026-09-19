@@ -52,6 +52,7 @@ No manual repository registration is required.
 Open the Orca app to watch a task's terminal.
 Routine supervision uses the recorded endpoint through `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'`.
 Enter and Ctrl-C are supported; Escape is not.
+Send, capture, and kill refuse an empty terminal handle, because the Orca CLI resolves a missing `--terminal` to the terminal currently in focus.
 
 ## Task shape and metadata
 
