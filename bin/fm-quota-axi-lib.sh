@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # Shared quota-axi compatibility floor for the bootstrap diagnostic, the
-# --json snapshot validator, and the provider-row join every consumer uses.
+# --json snapshot validator, and the provider-row join dispatch consumers use.
 # Usage: . bin/fm-quota-axi-lib.sh
 #
 # FM_QUOTA_AXI_MIN follows the axi-family floor policy owned beside the floor
@@ -20,23 +20,14 @@
 FM_QUOTA_AXI_MIN=0.1.29
 FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
 
-# jq definitions prepended to a consumer's program:
-#   quota_lane($harness; $model)   the account lane a candidate names: a Pi
-#                                  model id's auth provider prefix
-#                                  (openai-codex-work/gpt-5.6-terra ->
-#                                  openai-codex-work), `codex-home` for native
-#                                  Codex including Pi's codex-native/ adapter,
-#                                  regardless of model, else "".
+# The eligibility section of .agents/skills/quota-array-dispatch/SKILL.md
+# owns the account-matching contract these jq definitions implement.
+# Prepend them to a consumer's program:
+#   quota_lane($harness; $model)   the candidate's account key, or "" when none
+#                                  is identified by the contract.
 #   quota_row($snapshot; $provider; $lane)
 #                                  the one provider row the candidate binds to,
-#                                  or null. Schema 5 joins on provider alone,
-#                                  ignoring $lane, so older snapshots behave as
-#                                  before. Schema 6 joins on provider +
-#                                  accountKey: the row keyed $lane, else the
-#                                  `default` row (an unexpanded provider's only
-#                                  row), else null. It never picks a row by
-#                                  position and never merges rows across
-#                                  accounts.
+#                                  or null; schema 5 ignores $lane.
 # shellcheck disable=SC2016  # jq program text, not shell expansion
 FM_QUOTA_ROW_JQ='
   def quota_lane($harness; $model):
