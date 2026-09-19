@@ -1167,6 +1167,76 @@ busy_turn_over_age() {  # <task>
   [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
 }
 
+# The recheck wording an alarm for a lane that DECLARED its own wait must carry,
+# and the single owner of that vocabulary. Three paths can alarm the same declared
+# wait - the bounded absorber (handle_paused_stale), the wedge threshold's
+# deferral (wedge_defer_wait), and the live first-sight surface
+# (surface_nonterminal_stale) - and a reader who gets a named recheck from one and
+# a bare `stale: <window>` from another cannot tell a recheck from a wedge without
+# opening the status log. A reader who has to do that a few times starts
+# discounting the alarm, which is exactly how the genuinely wedged lane gets
+# missed.
+#
+# WHICH verb declared it is named, not merely that one did, because the two block
+# on DIFFERENT humans: `paused:` on an external dependency the worker chose, and
+# `captain-held:` on the captain themself. An alarm that named the wrong one would
+# point the reader away from the only person who can clear the wait.
+#
+# The worker's own reason prose is deliberately NOT interpolated. A wake payload is
+# a field in the tab-separated durable queue that other readers pattern-match
+# (secondmate_oldest_queue_row above), so unbounded worker-authored text in it
+# would be neither safe to match nor bounded in length. The verb, the age and the
+# action are what separate a recheck from a wedge; the prose is one status-log read
+# away.
+declared_wait_recheck_reason() {  # <window> <wait-age> <declared|due|beyond|held> [live]
+  local win=$1 age=$2 variant=$3 live=${4-} verb human evidence action
+  case "$variant" in
+    held)
+      verb='captain-held'; human='awaiting the captain'
+      evidence='verified hold transfer, rechecked on a long cadence not a wedge'
+      action='answer the held decision or release the hold'
+      ;;
+    beyond)
+      verb='paused'; human='awaiting external'
+      evidence='the declared time is beyond the recheck cadence'
+      action='confirm the wait still holds'
+      ;;
+    due)
+      verb='paused'; human='awaiting external'
+      evidence='the declared clearing time has passed, rechecked on a long cadence not a wedge'
+      action='confirm the wait cleared'
+      ;;
+    *)
+      verb='paused'; human='awaiting external'
+      evidence='declared pause, rechecked on a long cadence not a wedge'
+      action='confirm the wait still holds'
+      ;;
+  esac
+  # The live half says so, for two reasons. It is the more useful message - there
+  # is still an agent there to answer, where the absorbed half speaks for a lane
+  # whose agent is confirmed gone - and it keeps this wording OUT of the
+  # declared-external-pause class that secondmate_oldest_queue_row above excludes
+  # from a mate's wake-loop stall evidence. That exclusion was written for the
+  # absorbed half, whose bounded cadence re-rings the row on its own; widening it
+  # to every live parked lane would quietly enlarge a stall detector's blind spot,
+  # which is a different change from this one.
+  [ -z "$live" ] || evidence="the agent is still live, $evidence"
+  printf 'stale: %s (%s %ss, %s - %s; %s)' "$win" "$verb" "$age" "$human" "$evidence" "$action"
+}
+
+# How long the declared wait has held: the age of the status file, which is when
+# the worker wrote the declaration down. Anchored there rather than on a per-window
+# marker for the reason handle_paused_stale and wedge_defer_wait both give - an
+# idle pane churns its display, and a marker an alarm kept touching would let that
+# churn reset the cadence. An unreadable status file reports 0 rather than a
+# negative or wildly wrong age.
+declared_wait_age() {  # <task>
+  local mtime
+  mtime=$(stat_mtime "$STATE/$1.status")
+  case "$mtime" in ''|*[!0-9]*) printf '0'; return ;; esac
+  printf '%s' "$(( $(date +%s) - mtime ))"
+}
+
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
 # dead-agent captain-held transfer, and re-surface it once every
 # PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
@@ -1178,23 +1248,20 @@ busy_turn_over_age() {  # <task>
 # above, throttled by this window's own .paused-resurfaced-<key> marker. Advances
 # the stale suppressor to <hash> and flags the key paused.
 #
-# The recheck names WHICH human the declared wait is on, because that is the whole
-# point of a recheck the captain reads: an external dependency for paused:, and the
-# captain themself for a verified hold. Only the captain-held verb takes the second
-# wording; a caller that reached the bounded cadence off pause tracking alone, with
-# no declaring verb left on the log, keeps the external-wait wording it always had.
+# declared_wait_recheck_reason above owns the wording, including which human each
+# declaring verb puts the wait on. A caller that reached the bounded cadence off
+# pause tracking alone, with no declaring verb left on the log, keeps the
+# external-wait wording it always had.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age
+  local win=$1 task=$2 h=$3 key statusf age detail reason declaration last until now min_age
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   clear_write_tracking "$key"
   statusf="$STATE/$task.status"
-  mtime=$(stat_mtime "$statusf")
-  case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   now=$(date +%s)
-  age=$(( now - mtime ))
+  age=$(declared_wait_age "$task")
   last=$(last_status_line "$statusf")
   min_age=$PAUSE_RESURFACE_SECS
   declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
@@ -1204,27 +1271,27 @@ handle_paused_stale() {  # <window> <task> <hash>
       return 0
     fi
     detail="captain-held, awaiting the captain"
-    reason="captain-held ${age}s, awaiting the captain - verified hold transfer, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
+    reason=$(declared_wait_recheck_reason "$win" "$age" held)
   elif until=$(status_paused_until "$last"); then
     if [ "$now" -lt "$until" ] && [ "$age" -lt "$PAUSE_RESURFACE_SECS" ]; then
       triage_log "absorbed stale (paused until $(( until - now ))s from now, declared time not reached): $win"
       return 0
     elif [ "$now" -lt "$until" ]; then
       detail="paused, declared time beyond recheck cadence"
-      reason="paused ${age}s, awaiting external - the declared time is beyond the recheck cadence; confirm the wait still holds"
+      reason=$(declared_wait_recheck_reason "$win" "$age" beyond)
     else
       # The declared time has passed: recheck now, once per declaration, then
       # hold the cadence.
       detail="paused, declared time reached"
-      reason="paused ${age}s, awaiting external - the declared clearing time has passed, rechecked on a long cadence not a wedge; confirm the wait cleared"
+      reason=$(declared_wait_recheck_reason "$win" "$age" due)
       declaration="$declaration:due"
       min_age=0
     fi
   else
     detail="paused, awaiting external"
-    reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
+    reason=$(declared_wait_recheck_reason "$win" "$age" declared)
   fi
-  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age"
+  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "$reason" "$declaration" "$min_age"
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
 
@@ -1490,20 +1557,23 @@ captain_call_stale_bound() {  # <window-key> <task>
 # above): the status line the worker declared, and the backlog hold firstmate
 # recorded once the captain took the work in hand.
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last declared=1 bounded=1 throttled=1 until now
+  local win=$1 h=$2 key task last declared=1 bounded=1 throttled=1 until now reason variant=
   key=$(window_key "$win")
   task=$(window_to_task "$win" "$STATE")
   last=$(last_status_line "$STATE/$task.status")
   STALE_WAIT_DECLARATION=
+  reason="stale: $win"
   if status_is_paused "$last"; then
     declared=0
     bounded=0
+    variant=declared
     STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")
     if until=$(status_paused_until "$last"); then
       now=$(date +%s)
       if [ "$now" -lt "$until" ]; then
         throttled=0
       else
+        variant=due
         STALE_WAIT_DECLARATION="$STALE_WAIT_DECLARATION:due"
         stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" && throttled=0
       fi
@@ -1513,6 +1583,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   elif status_is_captain_held "$last"; then
     declared=0
     bounded=0
+    variant=held
     STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")
     if captain_held_silenced "$last"; then
       throttled=0
@@ -1525,8 +1596,16 @@ surface_nonterminal_stale() {  # <window> <hash>
   elif [ -n "$STALE_WAIT_DECLARATION" ]; then
     bounded=0
   fi
+  # A lane that declared its own wait is alarmed with the same named recheck its
+  # sibling paths use, never the bare identity: this path is the one a LIVE parked
+  # lane always takes, so the bare form was what a supervisor actually saw for the
+  # whole population the declaration was written for. Only a lane whose quiet is
+  # explained by its OWN status line is named; a backlog-recorded captain call
+  # (bounded, not declared) keeps the bare identity, because the worker declared
+  # nothing and the alarm must not claim otherwise.
+  [ -z "$variant" ] || reason=$(declared_wait_recheck_reason "$win" "$(declared_wait_age "$task")" "$variant" live)
   if [ "$throttled" -ne 0 ]; then
-    fm_wake_append stale "$win" "stale: $win" || exit 1
+    fm_wake_append stale "$win" "$reason" || exit 1
     stale_wait_record "$key"
   fi
   printf '%s' "$h" > "$STATE/.stale-$key"
@@ -1550,7 +1629,7 @@ surface_nonterminal_stale() {  # <window> <hash>
     triage_log "absorbed non-terminal stale (declared wait or open captain call already re-surfaced this window): $win"
     return 0
   fi
-  wake "stale: $win"
+  wake "$reason"
 }
 
 # Check and heartbeat cadence must survive actionable exits and restarts: the
