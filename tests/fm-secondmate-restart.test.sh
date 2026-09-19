@@ -70,7 +70,7 @@ case "${1:-}" in
           fi
           printf 'zsh' > "$D/command.$target"
           ;;
-        *'encode launch-brief'*) cat "$D/becomes" > "$D/command.$target" ;;
+        '/bin/sh '*|*'encode launch-brief'*) cat "$D/becomes" > "$D/command.$target" ;;
         ': Firstmate instruction waiting: list '*)
           printf 'doorbell\n' >> "$D/rings"
           if [ -x "$D/on-doorbell" ]; then
@@ -138,6 +138,23 @@ new_case() {
   printf 'claude' > "$dir/fake/becomes"
   make_stub "$dir"
   printf '%s\n' "$dir"
+}
+
+typed_launch_body() {  # <literal-file>
+  local line script
+  line=$(grep '/bin/sh ' "$1" | tail -1) || true
+  if [ -z "$line" ]; then
+    cat "$1"
+    return 0
+  fi
+  script=${line#/bin/sh }
+  script=${script#\'}
+  script=${script%\'}
+  if [ -f "$script" ]; then
+    cat "$script"
+  else
+    cat "$1"
+  fi
 }
 
 # add_local_mate <case-dir> <id> [harness] [backend-line]
@@ -563,7 +580,7 @@ test_native_ultra_restart_keeps_local_and_remote_profiles() {
   expect_code 0 "$rc" "native local restart failed: $out"
   assert_contains "$out" "restarted: sm1 (pi)" "native local restart did not complete"
   assert_contains "$(cat "$dir/home/state/sm1.meta")" "effort=ultra" "local restart dropped native effort"
-  assert_contains "$(cat "$dir/fake/literal")" "--codex-effort 'ultra'" "local restart dropped native launch flag"
+  assert_contains "$(typed_launch_body "$dir/fake/literal")" "--codex-effort 'ultra'" "local restart dropped native launch flag"
 
   dir=$(new_case native-remote)
   setup_remote_case "$dir" sm2 ok

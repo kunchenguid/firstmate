@@ -120,6 +120,17 @@ remote_pane_payload() {  # <verb>
   sed -n "s/^pane $1 [^ ]* \\(.*\\) --session [^ ]*\$/\\1/p" "$HERDR_LOG"
 }
 remote_launch_command() {
+  local typed script
+  typed=$(remote_pane_payload send-text | grep '^/bin/sh ' | tail -1)
+  if [ -n "$typed" ]; then
+    script=${typed#/bin/sh }
+    script=${script#\'}
+    script=${script%\'}
+    if [ -f "$script" ]; then
+      cat "$script"
+      return 0
+    fi
+  fi
   remote_pane_payload send-text | grep 'encode launch-brief' | tail -1
 }
 remote_pane_exports() {
@@ -133,11 +144,12 @@ FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
   || fail "remote seed did not provision the route under test"
 
 run_remote_launch() {  # <label>
-  local label=$1
+  local label=$1 out
   reset_remote_herdr_fixture "$HERDR_STATE"
   : > "$HERDR_LOG"
-  remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate >/dev/null 2>&1 \
-    || fail "$label: the remote second-mate launch failed"
+  if ! out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate 2>&1); then
+    fail "$label: the remote second-mate launch failed"$'\n'"$out"
+  fi
 }
 
 # Replay what the remote pane received, in the order it received it, under a
