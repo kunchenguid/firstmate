@@ -535,6 +535,7 @@ MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
+RELAUNCH_PUSH_TARGET_MATCH=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -2559,6 +2560,19 @@ fi
   echo "error: task $ID has no brief at inaccessible data path $BRIEF" >&2
   exit 1
 }
+fm_brief_has_push_target_instruction() {
+  awk '
+    /^# Definition of done$/ { in_dod=1; next }
+    in_dod && /^# / { in_dod=0; no_mistakes=0 }
+    in_dod && /^Delivery contract: mode=no-mistakes$/ { no_mistakes=1; next }
+    no_mistakes && /`FM_HOME=[^`]+\/bin\/fm-fork-target\.sh init \.`/ { found=1; exit }
+    END { exit !found }
+  ' "$1"
+}
+if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+  "$FM_ROOT/bin/fm-fork-target.sh" matches "$PROJ_ABS" >/dev/null 2>&1 \
+    && RELAUNCH_PUSH_TARGET_MATCH=1
+fi
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   if fm_brief_task_placeholders_present "$BRIEF"; then
     echo "error: $BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; fill ## Captain's intent and ## Firstmate spec before spawn" >&2
@@ -2582,6 +2596,35 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
         echo "error: legacy mixed # Task brief has no provenance-marked captain words for no-mistakes --intent; add [captain] lines or migrate to ## Captain's intent and ## Firstmate spec" >&2
         exit 1
       fi
+    fi
+    # A relaunch puts a replacement agent into an EXISTING task's existing local
+    # copy, whose gate was already prepared when that task first spawned, so
+    # re-preparing it here is redundant work on the latency-sensitive path that
+    # recovers a stuck worker. The worker's own generated instructions run the
+    # resolver before starting the gate, which is where a declaration changed
+    # mid-task is picked up anyway.
+    if [ "$RELAUNCH" -eq 0 ] || [ "$RELAUNCH_PUSH_TARGET_MATCH" -ne 1 ]; then
+      # Discriminate the resolver's init status rather than treating every
+      # failure as fatal. A declared target we cannot use, or a resolution
+      # error, still stops the spawn. A home with no declaration pushes to
+      # origin, and failing to prepare that gate must not stop work from
+      # STARTING: the guard against pushing somewhere unwritable belongs at push
+      # time, hours later, where the generated worker instructions and
+      # no-mistakes' own init both still enforce it. Stopping here would also
+      # couple every launch to daemon liveness.
+      FORK_TARGET_INIT_STATUS=0
+      FM_CONFIG_OVERRIDE="$CONFIG" FM_HOME="$FM_HOME" \
+        "$FM_ROOT/bin/fm-fork-target.sh" init "$PROJ_ABS" || FORK_TARGET_INIT_STATUS=$?
+      case "$FORK_TARGET_INIT_STATUS" in
+        0) ;;
+        4)
+          echo "warning: could not prepare the no-mistakes push target for $PROJ_ABS; no fork url is declared in this home, so the worker starts and its own instructions still resolve and check the target before pushing" >&2
+          ;;
+        *)
+          echo "error: could not refresh no-mistakes push target for $PROJ_ABS" >&2
+          exit 1
+          ;;
+      esac
     fi
   fi
   # Use the existing launch-brief overlay for every worker kind, including
@@ -4196,7 +4239,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)

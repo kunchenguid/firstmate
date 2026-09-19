@@ -30,6 +30,11 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+FM_HOME_INPUT=$FM_HOME
+FM_HOME=$(CDPATH='' cd -- "$FM_HOME_INPUT" 2>/dev/null && pwd -P) || {
+  echo "error: FM_HOME directory cannot be resolved: $FM_HOME_INPUT" >&2
+  exit 1
+}
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
@@ -205,7 +210,7 @@ EOF
     printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
   fi
   printf '\n'
-  fm_dod_block "$MODE" "$ID"
+  fm_dod_block "$MODE" "$ID" "$FM_HOME"
 }
 mkdir -p "$DATA/$ID"
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }

@@ -216,6 +216,27 @@ journal_field() {  # <case-dir> <id> <key>
   grep "^$3=" "$1/home/state/$2.control-relaunch" | tail -1 | cut -d= -f2-
 }
 
+install_fork_target_stub() {
+  local dir=$1 url=${2:-ssh://github.example/contributor/widget.git} registered=${3:-} status_rc=${4:-0} status_output=${5:-}
+  mkdir -p "$dir/home/config"
+  printf '%s\n' "$url" > "$dir/home/config/fork-url"
+  cat > "$dir/fakebin/no-mistakes" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$dir/no-mistakes-calls"
+if [ "\${1:-}" = status ]; then
+  [ "$status_rc" -eq 0 ] || exit "$status_rc"
+  if [ -n "$status_output" ]; then
+    printf '%s\n' "$status_output"
+  else
+    printf '%s\n' 'repo: firstmate' 'remote: origin' 'gate: ready'
+    [ -z "$registered" ] || printf 'fork: %s\n' "$registered"
+  fi
+fi
+exit 0
+SH
+  chmod +x "$dir/fakebin/no-mistakes"
+}
+
 make_git_failure_stub() {  # <case-dir>
   cat > "$1/fakebin/git" <<'SH'
 #!/usr/bin/env bash
@@ -368,6 +389,122 @@ test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven() {
   assert_no_grep "/exit" "$dir/fake/literal" \
     "the exit command must not be typed when the composer state is not proven empty"
   pass "fm-control relaunch: an unreadable composer fails safe before the exit command is typed"
+}
+
+# A relaunch drops a replacement agent into an EXISTING task's existing local
+# copy, whose gate was prepared when that task first spawned. Re-preparing it
+# here is redundant work on the path that recovers a stuck worker, and it used
+# to run the real `no-mistakes init` and `doctor` before the replacement could
+# even be launched. A recording stub proves the calls are gone rather than
+# merely fast.
+test_relaunch_does_not_re_prepare_the_push_target() {
+  local dir out rc calls
+  dir=$(new_case no-gate-prep rl29)
+  add_ship_task "$dir" rl29 claude
+  install_fork_target_stub "$dir" ssh://github.example/contributor/widget.git ssh://github.example/contributor/widget.git
+  out=$(run_control "$dir" rl29 relaunch --note "recovering a stuck worker"); rc=$?
+  expect_code 0 "$rc" "the relaunch itself should still succeed"$'\n'"$out"
+  # Reading pipeline state is fine and expected; PREPARING the gate is not.
+  calls=$(cat "$dir/no-mistakes-calls" 2>/dev/null || true)
+  assert_contains "$calls" "status" \
+    "a relaunch should inspect the recorded push target"
+  assert_not_contains "$calls" "init" \
+    "a relaunch must not run no-mistakes init to re-prepare an already prepared gate"
+  assert_not_contains "$calls" "doctor" \
+    "a relaunch must not run no-mistakes doctor on the recovery path"
+  assert_not_contains "$out" "fork target:" \
+    "a relaunch must not report push-target resolution at all"
+  pass "fm-control relaunch: an already prepared push target is not re-prepared"
+}
+
+test_relaunch_origin_target_match_skips_preparation() {
+  local dir out rc calls
+  dir=$(new_case origin-gate-match rl29-origin)
+  add_ship_task "$dir" rl29-origin claude
+  install_fork_target_stub "$dir"
+  rm -f "$dir/home/config/fork-url"
+  out=$(run_control "$dir" rl29-origin relaunch --note "recover an origin-backed worker"); rc=$?
+  expect_code 0 "$rc" "an origin-backed relaunch should still succeed"$'\n'"$out"
+  calls=$(cat "$dir/no-mistakes-calls" 2>/dev/null || true)
+  assert_contains "$calls" "status" \
+    "an origin-backed relaunch should inspect the recorded push target"
+  assert_not_contains "$calls" "init" \
+    "a matching origin target must not re-run no-mistakes init"
+  assert_not_contains "$calls" "doctor" \
+    "a matching origin target must not re-run no-mistakes doctor"
+  pass "fm-control relaunch: matching origin target skips preparation"
+}
+
+test_relaunch_prepares_missing_push_target_registration() {
+  local dir out rc calls shape
+  for shape in absent undetermined; do
+    dir=$(new_case "missing-gate-prep-$shape" "rl29-$shape")
+    add_ship_task "$dir" "rl29-$shape" claude
+    if [ "$shape" = absent ]; then
+      install_fork_target_stub "$dir"
+    else
+      install_fork_target_stub "$dir" ssh://github.example/contributor/widget.git '' 7
+    fi
+    out=$(run_control "$dir" "rl29-$shape" relaunch --note "repair a legacy push target"); rc=$?
+    expect_code 0 "$rc" "a $shape relaunch should still succeed"$'\n'"$out"
+    calls=$(cat "$dir/no-mistakes-calls" 2>/dev/null || true)
+    assert_contains "$calls" "init --fork-url ssh://github.example/contributor/widget.git" \
+      "a $shape recorded target must prepare its push target"
+    assert_contains "$calls" "doctor" \
+      "a $shape brief without the generated instruction must run target doctor"
+  done
+  pass "fm-control relaunch: absent and undeterminable targets refresh the push target"
+}
+
+test_relaunch_prepares_unrecognizable_push_target_status() {
+  local dir out rc calls
+  dir=$(new_case unrecognizable-gate-status rl29-unrecognized)
+  add_ship_task "$dir" rl29-unrecognized claude
+  install_fork_target_stub "$dir" ssh://github.example/contributor/new.git '' 0 'not a status block'
+  out=$(run_control "$dir" rl29-unrecognized relaunch --note "repair from incomplete status"); rc=$?
+  expect_code 0 "$rc" "an unrecognizable status relaunch should still succeed"$'\n'"$out"
+  calls=$(cat "$dir/no-mistakes-calls" 2>/dev/null || true)
+  assert_contains "$calls" "init --fork-url ssh://github.example/contributor/new.git" \
+    "an unrecognizable recorded target must prepare its push target"
+  assert_contains "$calls" "doctor" \
+    "an unrecognizable recorded target must run target doctor"
+  pass "fm-control relaunch: unrecognizable status refreshes the push target"
+}
+
+test_relaunch_refreshes_changed_push_target() {
+  local dir out rc calls
+  dir=$(new_case changed-gate-prep rl29-changed)
+  add_ship_task "$dir" rl29-changed claude
+  install_fork_target_stub "$dir" ssh://github.example/contributor/new.git ssh://github.example/contributor/old.git
+  out=$(run_control "$dir" rl29-changed relaunch --note "refresh a changed push target"); rc=$?
+  expect_code 0 "$rc" "a changed push target relaunch should succeed"$'\n'"$out"
+  calls=$(cat "$dir/no-mistakes-calls" 2>/dev/null || true)
+  assert_contains "$calls" "init --fork-url ssh://github.example/contributor/new.git" \
+    "a changed recorded target must prepare the new push target"
+  assert_contains "$calls" "doctor" "a changed recorded target must run target doctor"
+  pass "fm-control relaunch: a changed push target is refreshed"
+}
+
+test_relaunch_advisory_no_declaration_still_launches() {
+  local dir out rc
+  dir=$(new_case advisory-no-declaration rl29-advisory)
+  add_ship_task "$dir" rl29-advisory claude
+  mkdir -p "$dir/home/config"
+  cat > "$dir/fakebin/no-mistakes" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$dir/no-mistakes-calls"
+case "\${1:-}" in
+  status|init) exit 1 ;;
+  doctor) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/no-mistakes"
+  out=$(run_control "$dir" rl29-advisory relaunch --note "recover without a declaration"); rc=$?
+  expect_code 0 "$rc" "an advisory no-declaration relaunch should still launch"$'\n'"$out"
+  assert_contains "$out" "no fork url is declared" \
+    "the advisory no-declaration relaunch should remain non-fatal"
+  pass "fm-control relaunch: advisory no-declaration preparation remains non-fatal"
 }
 
 test_relaunch_from_linked_home_preserves_recorded_worktree() {
@@ -1684,6 +1821,12 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
+test_relaunch_does_not_re_prepare_the_push_target
+test_relaunch_origin_target_match_skips_preparation
+test_relaunch_prepares_missing_push_target_registration
+test_relaunch_prepares_unrecognizable_push_target_status
+test_relaunch_refreshes_changed_push_target
+test_relaunch_advisory_no_declaration_still_launches
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication

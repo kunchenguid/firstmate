@@ -111,6 +111,10 @@ resolve_directory_input() {
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME=$(resolve_directory_input FM_HOME "${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}") || exit 1
+FM_HOME_Q=$(printf '%q' "$FM_HOME")
+# Quoted like FM_HOME_Q above, which shares the generated command below: a
+# firstmate root containing a space must not split the resolver path.
+FORK_TARGET_HELPER=$(printf '%q' "$FM_ROOT/bin/fm-fork-target.sh")
 if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
   DATA=$(resolve_directory_input FM_DATA_OVERRIDE "$FM_DATA_OVERRIDE") || exit 1
 else
@@ -441,12 +445,12 @@ case "$MODE" in
     SETUP2=""
     ;;
   *)  # no-mistakes
-    SETUP2="
-2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
+    SETUP2=$(fm_no_mistakes_target_instruction "starting no-mistakes" "$FM_HOME_Q" "$FORK_TARGET_HELPER")
+    SETUP2="2. $SETUP2"
     ;;
 esac
 RULE1=$(fm_ship_rule_one "$MODE" "$ID") || exit 1
-DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$FM_HOME") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.

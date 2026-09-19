@@ -19,6 +19,7 @@ GitHub Actions and Dependabot are exempt so their automation keeps working, but 
 1. Fork the repo, then clone the parent repo or set your local `origin` back to the parent (`git@github.com:kunchenguid/firstmate.git`).
 2. Create a branch and make your changes.
 3. Initialize the gate with your fork as the push target: `no-mistakes init --fork-url git@github.com:<you>/firstmate.git` (contributing to firstmate requires **no-mistakes v1.46.0+** for structured attestation; without a fork, plain `no-mistakes init` still works for maintainers with push access).
+   Inside a firstmate operational home, `bin/fm-fork-target.sh init <dir>` applies the local `config/fork-url` declaration for you and is the repair path for a clone already initialized against an unwritable target; [docs/configuration.md](docs/configuration.md) owns that setting.
 4. Commit your changes.
 5. Push through the gate instead of pushing to `origin`:
 

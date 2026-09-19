@@ -75,9 +75,10 @@ The captain's request to create that local project authorizes this local initial
 Run no-mistakes initialization only for `no-mistakes` and `no-mistakes-prod-only` projects:
 
 ```sh
-cd projects/<name> && no-mistakes init && no-mistakes doctor
+bin/fm-fork-target.sh init projects/<name>
 ```
 
+That script is the single owner of which push target the gate is initialized against, and it runs `no-mistakes init` and `no-mistakes doctor` for you; a bare `no-mistakes init` initializes the gate against `origin`, which fails at the push step in any home whose account cannot write `origin`.
 Initialization configures the local gate and does not vendor a no-mistakes skill into the project.
 Do not create a commit merely because initialization ran.
 If doctor reports an environment, authentication, or daemon problem, resolve that blocker before dispatching work and never restart the shared daemon from a project operation.

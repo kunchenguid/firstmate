@@ -58,7 +58,10 @@ fm_test_fake_no_mistakes_init_doctor() {
 #!/usr/bin/env bash
 set -eu
 case "${1:-}" in
-  init) touch .no-mistakes-init ;;
+  init)
+    [ "${FM_FAKE_NO_MISTAKES_INIT_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_NO_MISTAKES_INIT_STATUS}"
+    touch .no-mistakes-init
+    ;;
   doctor) touch .no-mistakes-doctor ;;
   *) exit 2 ;;
 esac

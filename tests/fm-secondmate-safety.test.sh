@@ -1142,22 +1142,24 @@ test_home_seed_resolves_relative_source_origins() {
   pass "home seeding resolves relative source origins against the source project"
 }
 
-test_home_seed_skips_initialized_existing_no_mistakes_projects() {
+test_home_seed_refreshes_initialized_existing_no_mistakes_projects() {
   local home subhome err fakebin log origin
   home="$TMP_ROOT/existing-initialized-home"
   subhome="$TMP_ROOT/existing-initialized-subhome"
   err="$TMP_ROOT/existing-initialized.err"
   log="$TMP_ROOT/existing-initialized-no-mistakes.log"
-  mkdir -p "$home/projects" "$home/data" "$home/state"
+  mkdir -p "$home/projects" "$home/data" "$home/state" "$home/config"
   fm_git_init_commit "$home/projects/alpha"
   fm_git_init_commit "$home/projects/beta"
   fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/existing-alpha.git"
   fm_git_add_origin "$home/projects/beta" "$TMP_ROOT/remotes/existing-beta.git"
   git clone --quiet "$ROOT" "$subhome"
-  mkdir -p "$subhome/projects"
+  mkdir -p "$subhome/projects" "$subhome/config"
+  printf '%s\n' 'https://github.example/contributor/old-widget.git' > "$subhome/config/fork-url"
   origin=$(git -C "$home/projects/alpha" remote get-url origin)
   git clone --quiet "$origin" "$subhome/projects/alpha"
   git -C "$subhome/projects/alpha" remote add no-mistakes "$TMP_ROOT/no-mistakes-alpha.git"
+  printf '%s\n' 'https://github.example/contributor/new-widget.git' > "$home/config/fork-url"
   printf '%s\n' '- alpha - alpha project (added 2026-06-22)' '- beta - beta project (added 2026-06-22)' > "$home/data/projects.md"
   fakebin=$(make_recording_no_mistakes "$TMP_ROOT/existing-initialized-fake")
   : > "$log"
@@ -1169,12 +1171,96 @@ test_home_seed_skips_initialized_existing_no_mistakes_projects() {
   fi
   grep -F 'failed to initialize no-mistakes for beta' "$err" >/dev/null \
     || fail "seed did not explain later no-mistakes initialization failure"
-  grep -F "$subhome/projects/alpha" "$log" >/dev/null \
-    && fail "seed ran no-mistakes against an initialized existing clone"
-  [ ! -f "$subhome/projects/alpha/.no-mistakes-init" ] || fail "seed mutated initialized existing clone with no-mistakes init"
-  [ ! -f "$subhome/projects/alpha/.no-mistakes-doctor" ] || fail "seed mutated initialized existing clone with no-mistakes doctor"
-  [ ! -e "$subhome/projects/beta" ] || fail "failed seed left a newly cloned project after no-mistakes failure"
-  pass "home seeding skips initialized existing no-mistakes clones"
+  grep -F "$subhome/projects/alpha$(printf '\t')init" "$log" >/dev/null \
+    || fail "seed did not refresh the initialized existing clone"
+  grep -F "$subhome/projects/alpha$(printf '\t')doctor" "$log" >/dev/null \
+    || fail "seed did not run the target doctor for the initialized existing clone"
+  [ -f "$subhome/projects/alpha/.no-mistakes-init" ] || fail "seed did not refresh the existing clone's gate"
+  [ -f "$subhome/projects/alpha/.no-mistakes-doctor" ] || fail "seed did not doctor the existing clone's gate"
+  [ "$(cat "$subhome/config/fork-url")" = 'https://github.example/contributor/new-widget.git' ] \
+    || fail "post-publication target refresh rolled back the committed fork-url"
+  [ -e "$subhome/projects/beta" ] || fail "post-publication target refresh rolled back a committed project clone"
+  [ "$(cat "$subhome/.fm-secondmate-pending-no-mistakes")" = beta ] \
+    || fail "failed post-publication initialization did not leave a retry marker"
+
+  PATH="$fakebin:$PATH" FM_FAKE_NO_MISTAKES_LOG="$log" \
+    FM_HOME="$home" FM_SECONDMATE_CHARTER='existing init rollback scope' FM_SECONDMATE_SCOPE='existing init rollback scope' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha beta >/dev/null \
+    || fail "retry did not repair the failed post-publication initialization"
+  [ -f "$subhome/projects/beta/.no-mistakes-init" ] \
+    || fail "retry did not initialize the previously failed project"
+  [ ! -e "$subhome/.fm-secondmate-pending-no-mistakes" ] \
+    || fail "successful retry left a stale post-publication initialization marker"
+  pass "home seeding retries failed post-publication initialization"
+}
+
+test_home_seed_inherits_fork_url_before_refreshing_initialized_existing_project() {
+  local home subhome fakebin log origin expected actual
+  home="$TMP_ROOT/existing-initialized-fork-url-home"
+  subhome="$TMP_ROOT/existing-initialized-fork-url-subhome"
+  log="$TMP_ROOT/existing-initialized-fork-url-no-mistakes.log"
+  mkdir -p "$home/projects" "$home/data" "$home/state" "$home/config"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/existing-fork-url-alpha.git"
+  printf '%s\n' 'ssh://github.example/contributor/widget.git' > "$home/config/fork-url"
+  git clone --quiet "$ROOT" "$subhome"
+  mkdir -p "$subhome/projects"
+  origin=$(git -C "$home/projects/alpha" remote get-url origin)
+  git clone --quiet "$origin" "$subhome/projects/alpha"
+  git -C "$subhome/projects/alpha" remote add no-mistakes "$TMP_ROOT/no-mistakes-existing-fork-url.git"
+  printf '%s\n' '- alpha - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  fakebin=$(fm_fakebin "$TMP_ROOT/existing-initialized-fork-url-fake")
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf '%s\t%s\t%s\n' "$PWD" "${1:-}" "${FM_CONFIG_OVERRIDE:-}" >> "$FM_FAKE_NO_MISTAKES_LOG"
+case "${1:-}" in
+  init) touch .no-mistakes-init ;;
+  doctor) touch .no-mistakes-doctor ;;
+  *) exit 2 ;;
+esac
+SH
+  chmod +x "$fakebin/no-mistakes"
+  : > "$log"
+
+  PATH="$fakebin:$PATH" FM_FAKE_NO_MISTAKES_LOG="$log" \
+    FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" FM_SECONDMATE_CHARTER='existing initialized fork target scope' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null \
+    || fail "seed failed while inheriting fork-url into an initialized existing clone"
+  expected=$(cat "$home/config/fork-url")
+  actual=$(cat "$subhome/config/fork-url")
+  [ "$actual" = "$expected" ] \
+    || fail "initialized existing clone did not receive the parent's fork-url"
+  grep -F "$subhome/projects/alpha$(printf '\t')init" "$log" >/dev/null \
+    || fail "seed did not refresh the initialized existing fork target"
+  grep -F "$subhome/projects/alpha$(printf '\t')doctor" "$log" >/dev/null \
+    || fail "seed did not doctor the initialized existing fork target"
+  grep -F "$subhome/projects/alpha$(printf '\t')init$(printf '\t')$subhome/config" "$log" >/dev/null \
+    || fail "seed initialized the existing fork target using the parent config override"
+  grep -F "$subhome/projects/alpha$(printf '\t')doctor$(printf '\t')$subhome/config" "$log" >/dev/null \
+    || fail "seed doctored the existing fork target using the parent config override"
+  pass "home seeding inherits fork-url before refreshing initialized existing clones"
+}
+
+test_home_seed_inherits_fork_url_for_direct_pr_project() {
+  local home subhome expected actual
+  home="$TMP_ROOT/direct-pr-fork-url-home"
+  subhome="$TMP_ROOT/direct-pr-fork-url-subhome"
+  mkdir -p "$home/projects" "$home/data" "$home/state" "$home/config"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/direct-pr-fork-url-alpha.git"
+  printf '%s\n' 'ssh://github.example/contributor/widget.git' > "$home/config/fork-url"
+  printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+  scaffold_secondmate_charter "$home" design 'direct PR fork target' alpha \
+    || fail "charter scaffold failed for direct-PR fork-url seed test"
+
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null \
+    || fail "direct-PR seed failed while inheriting fork-url"
+  expected=$(cat "$home/config/fork-url")
+  actual=$(cat "$subhome/config/fork-url")
+  [ "$actual" = "$expected" ] \
+    || fail "direct-PR project did not receive the parent's fork-url"
+  pass "home seeding inherits fork-url for direct-PR projects"
 }
 
 test_home_seed_refuses_uninitialized_existing_no_mistakes_project() {
@@ -1269,7 +1355,7 @@ test_home_seed_refuses_unsafe_leaf_files() {
   printf '%s\n' '- alpha [direct-PR] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
   scaffold_secondmate_charter "$home" design 'design domain' alpha || fail "charter scaffold failed for symlink leaf seed test"
 
-  for leaf in data/projects.md data/charter.md .fm-secondmate-home .fm-secondmate-parent; do
+  for leaf in data/projects.md data/charter.md config/fork-url .fm-secondmate-home .fm-secondmate-parent; do
     subhome="$TMP_ROOT/symlink-leaf-subhome-${leaf//\//-}"
     sink="$home/data/symlink-leaf-${leaf//\//-}"
     rm -rf "$subhome" "$sink"
@@ -2991,7 +3077,9 @@ test_home_seed_refuses_home_overlapping_registered_home
 test_home_seed_refuses_remote_backed_project_without_origin
 test_home_seed_refuses_existing_remote_backed_project_with_wrong_origin
 test_home_seed_resolves_relative_source_origins
-test_home_seed_skips_initialized_existing_no_mistakes_projects
+test_home_seed_refreshes_initialized_existing_no_mistakes_projects
+test_home_seed_inherits_fork_url_before_refreshing_initialized_existing_project
+test_home_seed_inherits_fork_url_for_direct_pr_project
 test_home_seed_refuses_uninitialized_existing_no_mistakes_project
 test_home_seed_refuses_project_destinations_outside_subhome
 test_home_seed_refuses_operational_dirs_outside_subhome

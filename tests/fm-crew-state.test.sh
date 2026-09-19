@@ -20,6 +20,9 @@
 #   (d) terminal run-step (passed/failed) is authoritative        -> run-step
 #   (d2) terminal failed run whose only failure is an orphaned ci monitor
 #       after checks read green                                   -> done
+#   (d3) terminal failed run that passed every validation step and failed only
+#       while delivering (push) stays failed but is labeled a delivery failure;
+#       a failed validation step, and a red ci verdict, keep the plain reading
 #   (e) cross-branch attribution: this branch's own run found via list lookup
 #   (e2) multiple runs: creation order preserves newer failures, replacement
 #        gates retain their run identity, and competing live runs read unknown
@@ -579,6 +582,157 @@ steps[9]{step,status,findings,duration_ms}:
   push,completed,0,0
   pr,completed,0,0
   ci,failed,0,76127890
+EOF
+}
+
+run_failed_ci_orphan_truncated() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: failed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/203"
+  findings: none
+outcome: failed
+steps[9]{step,status,findings,duration_ms}:
+  review,completed,0,0
+  test,completed,0,0
+  document,completed,0,0
+  lint,completed,0,0
+  push,completed,0,0
+  pr,completed,0,0
+  ci,failed,0,76127890
+EOF
+}
+
+run_failed_ci_orphan_duplicate_step() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: failed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/203"
+  findings: none
+outcome: failed
+steps[9]{step,status,findings,duration_ms}:
+  intent,completed,0,0
+  rebase,completed,0,0
+  review,completed,0,0
+  review,completed,0,0
+  test,completed,0,0
+  document,completed,0,0
+  lint,completed,0,0
+  push,completed,0,0
+  ci,failed,0,76127890
+EOF
+}
+
+# The 2026-09-13 delivery-failure shape: every validation step completed, the
+# push to the target remote was rejected, and the steps that would have
+# delivered the branch never started.
+run_failed_push_rejected() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: failed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  findings: none
+outcome: failed
+steps[9]{step,status,findings,duration_ms}:
+  intent,completed,0,0
+  rebase,completed,0,0
+  review,completed,0,0
+  test,completed,0,0
+  document,completed,0,0
+  lint,completed,0,0
+  push,failed,0,412
+  pr,pending,0,0
+  ci,pending,0,0
+EOF
+}
+
+run_failed_push_truncated() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: failed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  findings: none
+outcome: failed
+steps[9]{step,status,findings,duration_ms}:
+  intent,completed,0,0
+  rebase,completed,0,0
+  review,completed,0,0
+  test,completed,0,0
+  document,completed,0,0
+  lint,completed,0,0
+  push,failed,0,412
+EOF
+}
+
+run_failed_push_duplicate_step() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: failed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  findings: none
+outcome: failed
+steps[9]{step,status,findings,duration_ms}:
+  intent,completed,0,0
+  rebase,completed,0,0
+  review,completed,0,0
+  review,completed,0,0
+  test,completed,0,0
+  document,completed,0,0
+  lint,completed,0,0
+  push,failed,0,412
+  pr,pending,0,0
+EOF
+}
+
+# A validation step failed BEFORE delivery: the work itself is wrong, so this
+# must keep the plain failed reading.
+run_failed_lint() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: failed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  findings: none
+outcome: failed
+steps[9]{step,status,findings,duration_ms}:
+  intent,completed,0,0
+  rebase,completed,0,0
+  review,completed,0,0
+  test,completed,0,0
+  document,completed,0,0
+  lint,failed,3,900
+  push,pending,0,0
+  pr,pending,0,0
+  ci,pending,0,0
+EOF
+}
+
+run_failed_push_without_validation() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: failed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  findings: none
+outcome: failed
+steps[3]{step,status,findings,duration_ms}:
+  push,failed,0,412
+  pr,pending,0,0
+  ci,pending,0,0
 EOF
 }
 
@@ -1311,6 +1465,36 @@ daemon shutting down"
   pass "status-only failed orphaned ci monitor after green reads done"
 }
 
+test_terminal_failed_ci_orphan_truncated_stays_failed() {
+  reset_fakes
+  local d; d=$(new_case failed-ci-orphan-truncated)
+  make_repo_on_branch "$d/wt" fm/feat-ci-orphan-truncated
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ci-orphan-truncated.meta" "window=fm:fm-feat-ci-orphan-truncated" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan_truncated fm/feat-ci-orphan-truncated)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed
+daemon shutting down"
+  local out; out=$(run_crew_state "$d" feat-ci-orphan-truncated)
+  assert_contains "$out" "state: failed" "truncated orphaned ci evidence must stay failed"
+  assert_not_contains "$out" "state: done" "truncated orphaned ci evidence must not reclassify"
+  pass "truncated orphaned ci evidence stays failed"
+}
+
+test_terminal_failed_ci_orphan_duplicate_step_stays_failed() {
+  reset_fakes
+  local d; d=$(new_case failed-ci-orphan-duplicate)
+  make_repo_on_branch "$d/wt" fm/feat-ci-orphan-duplicate
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ci-orphan-duplicate.meta" "window=fm:fm-feat-ci-orphan-duplicate" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan_duplicate_step fm/feat-ci-orphan-duplicate)"
+  FM_FAKE_CI_LOGS="all CI checks passed - still monitoring until merged or closed
+daemon shutting down"
+  local out; out=$(run_crew_state "$d" feat-ci-orphan-duplicate)
+  assert_contains "$out" "state: failed" "duplicate-step orphaned ci evidence must stay failed"
+  assert_not_contains "$out" "state: done" "duplicate-step orphaned ci evidence must not reclassify"
+  pass "duplicate-step orphaned ci evidence stays failed"
+}
+
 test_terminal_failed_ci_genuine_red_stays_failed() {
   reset_fakes
   local d; d=$(new_case failed-ci-genuine-red)
@@ -1340,6 +1524,93 @@ daemon shutting down"
   assert_contains "$out" "state: failed" "a second failed step keeps the run failed"
   assert_not_contains "$out" "state: done" "a second failed step must not reclassify to done"
   pass "a second failed step disqualifies the orphaned-monitor reclassification"
+}
+
+test_terminal_failed_push_reads_delivery_failure() {
+  reset_fakes
+  local d; d=$(new_case failed-push)
+  make_repo_on_branch "$d/wt" fm/feat-push
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-push.meta" "window=fm:fm-feat-push" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_push_rejected fm/feat-push)"
+  local out; out=$(run_crew_state "$d" feat-push)
+  assert_contains "$out" "state: failed" "an undelivered branch stays a loud failure"
+  assert_contains "$out" "delivery failed at the push step" "the failed push must be labeled as delivery"
+  assert_contains "$out" "validation passed" "the label must say validation passed"
+  assert_not_contains "$out" "run failed" "a delivery failure must not reuse the validation-failure string"
+  pass "a run that only failed to push reads as a delivery failure, not a validation failure"
+}
+
+test_terminal_failed_push_without_validation_stays_plain_failed() {
+  reset_fakes
+  local d; d=$(new_case failed-push-no-validation)
+  make_repo_on_branch "$d/wt" fm/feat-push-no-validation
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-push-no-validation.meta" "window=fm:fm-feat-push-no-validation" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_push_without_validation fm/feat-push-no-validation)"
+  local out; out=$(run_crew_state "$d" feat-push-no-validation)
+  assert_contains "$out" "state: failed" "a push failure without validation evidence stays failed"
+  assert_contains "$out" "run failed" "missing validation evidence keeps the plain failure string"
+  assert_not_contains "$out" "delivery failed" "missing validation evidence must not be labeled delivery"
+  pass "a delivery-shaped failure without validation evidence stays unclassified"
+}
+
+test_terminal_failed_push_with_truncated_steps_stays_plain_failed() {
+  reset_fakes
+  local d; d=$(new_case failed-push-truncated)
+  make_repo_on_branch "$d/wt" fm/feat-push-truncated
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-push-truncated.meta" "window=fm:fm-feat-push-truncated" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_push_truncated fm/feat-push-truncated)"
+  local out; out=$(run_crew_state "$d" feat-push-truncated)
+  assert_contains "$out" "state: failed" "a truncated delivery ledger stays failed"
+  assert_contains "$out" "run failed" "an incomplete delivery ledger keeps the plain failure string"
+  assert_not_contains "$out" "delivery failed" "an incomplete delivery ledger must not be relabeled"
+  pass "a truncated delivery ledger stays unclassified"
+}
+
+test_terminal_failed_push_with_duplicate_step_stays_plain_failed() {
+  reset_fakes
+  local d; d=$(new_case failed-push-duplicate)
+  make_repo_on_branch "$d/wt" fm/feat-push-duplicate
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-push-duplicate.meta" "window=fm:fm-feat-push-duplicate" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_push_duplicate_step fm/feat-push-duplicate)"
+  local out; out=$(run_crew_state "$d" feat-push-duplicate)
+  assert_contains "$out" "state: failed" "a duplicate delivery step stays failed"
+  assert_contains "$out" "run failed" "a duplicate delivery step keeps the plain failure string"
+  assert_not_contains "$out" "delivery failed" "a duplicate delivery step must not be relabeled"
+  pass "a duplicate delivery step stays unclassified"
+}
+
+test_terminal_failed_validation_step_stays_plain_failed() {
+  reset_fakes
+  local d; d=$(new_case failed-lint)
+  make_repo_on_branch "$d/wt" fm/feat-lint
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-lint.meta" "window=fm:fm-feat-lint" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_lint fm/feat-lint)"
+  local out; out=$(run_crew_state "$d" feat-lint)
+  assert_contains "$out" "state: failed" "a failed validation step stays failed"
+  assert_contains "$out" "run failed" "a validation failure keeps the plain failure string"
+  assert_not_contains "$out" "delivery failed" "a validation failure must never be relabeled as delivery"
+  pass "a failed validation step keeps the plain run-failed reading"
+}
+
+test_terminal_failed_ci_after_push_is_not_a_delivery_failure() {
+  reset_fakes
+  local d; d=$(new_case failed-ci-not-delivery)
+  make_repo_on_branch "$d/wt" fm/feat-ci-verdict
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ci-verdict.meta" "window=fm:fm-feat-ci-verdict" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_ci_orphan fm/feat-ci-verdict)"
+  FM_FAKE_CI_LOGS="CI checks running
+checks failed: 1 of 2 checks red
+daemon shutting down"
+  local out; out=$(run_crew_state "$d" feat-ci-verdict)
+  assert_contains "$out" "state: failed" "a red check keeps the run failed"
+  assert_not_contains "$out" "delivery failed" "a red check is a verdict on the code, never a delivery failure"
+  pass "a failed ci step is a verdict, not a delivery failure"
 }
 
 # (e) cross-branch attribution: `axi status` returns ANOTHER branch's run (the
@@ -3572,8 +3843,16 @@ test_terminal_passed_with_failed_gitlab_read_reports_unknown
 test_terminal_failed
 test_terminal_failed_ci_orphan_after_green_reads_done
 test_terminal_failed_ci_orphan_status_only_reads_done
+test_terminal_failed_ci_orphan_truncated_stays_failed
+test_terminal_failed_ci_orphan_duplicate_step_stays_failed
 test_terminal_failed_ci_genuine_red_stays_failed
 test_terminal_failed_ci_orphan_second_failed_step_stays_failed
+test_terminal_failed_push_reads_delivery_failure
+test_terminal_failed_push_without_validation_stays_plain_failed
+test_terminal_failed_push_with_truncated_steps_stays_plain_failed
+test_terminal_failed_push_with_duplicate_step_stays_plain_failed
+test_terminal_failed_validation_step_stays_plain_failed
+test_terminal_failed_ci_after_push_is_not_a_delivery_failure
 test_cross_branch_attribution_via_runs_list
 test_coarse_socket_refusal_reports_blocked
 test_coarse_failed_ledger_with_daemon_down_reports_unknown

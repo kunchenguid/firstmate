@@ -421,6 +421,31 @@ test_propagate_lib() {
     "guard skip did not emit a stderr warning"
   [ ! -e "$guard_repo/config/crew-dispatch.json" ] || fail "guard skip still copied the unignored item"
 
+  printf 'ssh://github.example/contributor/widget.git\n' > "$d/fork-target"
+  ln -s "$d/fork-target" "$src/fork-url"
+  stdout="$d/fork-url-symlink.out"
+  stderr="$d/fork-url-symlink.err"
+  if FM_INHERITABLE_CONFIG=fork-url propagate_inheritable_config "$src" "$d/home2/config" >"$stdout" 2>"$stderr"; then
+    fail "a symlinked primary fork-url should fail inheritance"
+  fi
+  [ ! -e "$d/home2/config/fork-url" ] || fail "a symlinked primary fork-url was dereferenced"
+  err_text=$(cat "$stderr")
+  assert_contains "$err_text" "fork-url" "the symlinked fork-url setting must be named"
+  assert_contains "$err_text" "primary source is a symlink" \
+    "the symlinked fork-url reason must be concrete"
+
+  rm -f "$src/fork-url"
+  mv "$src" "$d/source-config-real"
+  ln -s "$d/source-config-real" "$src"
+  stderr="$d/config-dir-symlink.err"
+  if FM_INHERITABLE_CONFIG=fork-url propagate_inheritable_config "$src" "$d/home2/config" 2>"$stderr"; then
+    fail "a symlinked primary config directory should fail inheritance"
+  fi
+  err_text=$(cat "$stderr")
+  assert_contains "$err_text" "fork-url" "the config-directory rejection must name the setting"
+  assert_contains "$err_text" "primary config directory is a symlink" \
+    "the config-directory rejection must name the concrete reason"
+
   pass "B1 propagate_inheritable_config: copy, idempotence, convergence, absence-mirror, exclusion, no-op, skip diagnostics"
 }
 

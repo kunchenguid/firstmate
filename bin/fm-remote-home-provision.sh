@@ -5,8 +5,9 @@
 #   fm-remote-home-provision.sh < manifest
 #
 # Manifest schema fm-remote-home-provision.v1 carries a base64 charter, the
-# base64 parent SSH alias, and one base64 project record per line. Each project
-# record's origin is the URL the parent resolved and named, so this host clones
+# base64 parent SSH alias, an optional inherited fork-url setting, and one base64
+# project record per line. Each project record's origin is the URL the parent
+# resolved and named, so this host clones
 # from it and re-validates it through bin/fm-project-origin-lib.sh instead of
 # trusting the sender. The remote code root is cloned into an absent home,
 # project origins are cloned on this host, the project registry and charter are
@@ -23,6 +24,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME=${FM_HOME:?FM_HOME is required}
 MAX_MANIFEST_BYTES=1048576
+PENDING_NO_MISTAKES_MARKER=".fm-secondmate-pending-no-mistakes"
 
 # shellcheck source=bin/fm-project-origin-lib.sh
 . "$SCRIPT_DIR/fm-project-origin-lib.sh"
@@ -44,6 +46,42 @@ manifest_value() { # <file> <key>
 
 safe_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac; }
 
+pending_no_mistakes_contains() {
+  local project=$1 marker="$FM_HOME/$PENDING_NO_MISTAKES_MARKER"
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  grep -Fx -- "$project" "$marker" >/dev/null 2>&1
+}
+
+pending_no_mistakes_write() {
+  local marker="$FM_HOME/$PENDING_NO_MISTAKES_MARKER" tmp dedup
+  tmp="$marker.tmp.$$"
+  dedup="$marker.dedup.$$"
+  : > "$tmp"
+  if [ -f "$marker" ]; then
+    cat "$marker" >> "$tmp"
+  fi
+  cat "$NO_MISTAKES_PROJECTS" >> "$tmp"
+  awk 'NF && !seen[$0]++' "$tmp" > "$dedup"
+  if [ -s "$dedup" ]; then
+    mv -f -- "$dedup" "$marker"
+  else
+    rm -f -- "$marker" "$dedup"
+  fi
+  rm -f -- "$tmp"
+}
+
+pending_no_mistakes_remove() {
+  local project=$1 marker="$FM_HOME/$PENDING_NO_MISTAKES_MARKER" tmp
+  [ -f "$marker" ] || return 0
+  tmp="$marker.tmp.$$"
+  grep -Fvx -- "$project" "$marker" > "$tmp" || true
+  if [ -s "$tmp" ]; then
+    mv -f -- "$tmp" "$marker"
+  else
+    rm -f -- "$tmp" "$marker"
+  fi
+}
+
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-provision.XXXXXX") || die "cannot create provisioning state"
 CREATED_HOME=0
 CREATED_BACKLOG=0
@@ -53,6 +91,8 @@ PROVISION_LOCK=
 PROVISION_LOCK_HELD=0
 CREATED_PROJECTS="$TMP/created-projects"
 : > "$CREATED_PROJECTS"
+NO_MISTAKES_PROJECTS="$TMP/no-mistakes-projects"
+: > "$NO_MISTAKES_PROJECTS"
 release_provision_lock() {
   if [ "$PROVISION_LOCK_HELD" -eq 1 ]; then
     fm_lock_release "$PROVISION_LOCK"
@@ -80,8 +120,10 @@ rollback() {
       done < "$CREATED_PROJECTS"
       restore_owned_file data/charter.md || true
       restore_owned_file data/projects.md || true
+      restore_owned_file config/fork-url || true
       restore_owned_file .fm-secondmate-home || true
       restore_owned_file .fm-secondmate-parent || true
+      restore_owned_file "$PENDING_NO_MISTAKES_MARKER" || true
       [ "$CREATED_BACKLOG" -eq 0 ] || rm -f -- "$FM_HOME/data/backlog.md"
     fi
   fi
@@ -102,6 +144,24 @@ CHARTER_B64=$(manifest_value "$TMP/manifest" charter_b64 || true)
 # field) still provisions; the durable parent record below simply omits the
 # host in that case rather than refusing the whole seed.
 PARENT_HOST_B64=$(manifest_value "$TMP/manifest" parent_host_b64 || true)
+[ "$(grep -c '^fork_url_present=' "$TMP/manifest" 2>/dev/null || true)" -le 1 ] \
+  || die "provisioning manifest has duplicate fork-url presence fields"
+[ "$(grep -c '^fork_url_b64=' "$TMP/manifest" 2>/dev/null || true)" -le 1 ] \
+  || die "provisioning manifest has duplicate fork-url fields"
+FORK_URL_PRESENT_FIELD_COUNT=$(grep -c '^fork_url_present=' "$TMP/manifest" 2>/dev/null || true)
+FORK_URL_FIELD_COUNT=$(grep -c '^fork_url_b64=' "$TMP/manifest" 2>/dev/null || true)
+FORK_URL_PRESENT=
+FORK_URL_B64=$(manifest_value "$TMP/manifest" fork_url_b64 || true)
+if [ "$FORK_URL_PRESENT_FIELD_COUNT" -eq 1 ]; then
+  FORK_URL_PRESENT=$(manifest_value "$TMP/manifest" fork_url_present || true)
+  case "$FORK_URL_PRESENT" in
+    0) [ "$FORK_URL_FIELD_COUNT" -eq 0 ] || die "manifest fork-url payload must be absent" ;;
+    1) [ "$FORK_URL_FIELD_COUNT" -eq 1 ] || die "manifest fork-url payload is missing" ;;
+    *) die "manifest fork-url presence is invalid" ;;
+  esac
+elif [ "$FORK_URL_FIELD_COUNT" -ne 0 ]; then
+  die "manifest fork-url presence marker is missing"
+fi
 COUNT=$(manifest_value "$TMP/manifest" project_count || true)
 base64_decode_to "$ID_B64" "$TMP/id" || die "manifest id is not valid base64"
 base64_decode_to "$CHARTER_B64" "$TMP/charter" || die "manifest charter is not valid base64"
@@ -157,7 +217,7 @@ if [ -e "$FM_HOME" ] || [ -L "$FM_HOME" ]; then
     fi
   done
   mkdir -p "$TMP/before/data"
-  for rel in data/charter.md data/projects.md .fm-secondmate-home .fm-secondmate-parent; do
+  for rel in data/charter.md data/projects.md config/fork-url .fm-secondmate-home .fm-secondmate-parent "$PENDING_NO_MISTAKES_MARKER"; do
     existing="$FM_HOME/$rel"
     if [ -e "$existing" ] || [ -L "$existing" ]; then
       [ -f "$existing" ] && [ ! -L "$existing" ] || die "existing remote home has unsafe owned file: $rel"
@@ -193,6 +253,19 @@ else
   CREATED_BACKLOG=1
 fi
 
+if [ "$FORK_URL_PRESENT_FIELD_COUNT" -eq 1 ] && [ "$FORK_URL_PRESENT" = 1 ]; then
+  base64_decode_to "$FORK_URL_B64" "$TMP/fork-url" \
+    || die "manifest fork url is not valid base64"
+  [ -z "$(LC_ALL=C tr -cd '\000' < "$TMP/fork-url")" ] \
+    || die "manifest fork url contains NUL bytes"
+  cp "$TMP/fork-url" "$FM_HOME/config/fork-url.tmp.$$" \
+    || die "cannot stage remote fork url"
+  chmod 600 "$FM_HOME/config/fork-url.tmp.$$"
+  mv -f -- "$FM_HOME/config/fork-url.tmp.$$" "$FM_HOME/config/fork-url"
+elif [ "$FORK_URL_PRESENT_FIELD_COUNT" -eq 1 ]; then
+  rm -f -- "$FM_HOME/config/fork-url"
+fi
+
 PROJECT_REG="$TMP/projects.md"
 : > "$PROJECT_REG"
 while IFS= read -r record; do
@@ -222,19 +295,23 @@ EOF
   case "$MODE" in no-mistakes|direct-PR) ;; *) die "project $NAME has unsupported remote mode: $MODE" ;; esac
   case "$REGISTRY_LINE" in "- $NAME "*) ;; *) die "project $NAME registry line is malformed" ;; esac
   DEST="$FM_HOME/projects/$NAME"
+  PROJECT_CREATED=0
   if [ -e "$DEST" ] || [ -L "$DEST" ]; then
     [ -d "$DEST" ] && [ ! -L "$DEST" ] && [ -d "$DEST/.git" ] \
       || die "project destination exists but is not a safe clone: $DEST"
     EXISTING_ORIGIN=$(git -C "$DEST" remote get-url origin 2>/dev/null || true)
     [ "$EXISTING_ORIGIN" = "$ORIGIN" ] || die "project $NAME origin differs from the requested route"
   else
+    PROJECT_CREATED=1
     printf '%s\n' "$NAME" >> "$CREATED_PROJECTS"
     git clone --quiet -- "$ORIGIN" "$DEST" || die "could not clone project $NAME on the remote host"
-    if [ "$MODE" = no-mistakes ]; then
-      command -v no-mistakes >/dev/null 2>&1 || die "no-mistakes is unavailable for project $NAME"
-      (cd "$DEST" && no-mistakes init >/dev/null && no-mistakes doctor >/dev/null) \
-        || die "no-mistakes initialization failed for project $NAME"
+  fi
+  if [ "$MODE" = no-mistakes ]; then
+    if [ "$PROJECT_CREATED" -eq 0 ] && ! git -C "$DEST" remote get-url no-mistakes >/dev/null 2>&1 \
+      && ! pending_no_mistakes_contains "$NAME"; then
+      die "existing no-mistakes project $NAME is not initialized"
     fi
+    printf '%s\n' "$NAME" >> "$NO_MISTAKES_PROJECTS"
   fi
   printf '%s\n' "$REGISTRY_LINE" >> "$PROJECT_REG"
 done < <(grep '^project=' "$TMP/manifest")
@@ -252,7 +329,17 @@ mv -f -- "$FM_HOME/data/projects.md.tmp.$$" "$FM_HOME/data/projects.md"
 mv -f -- "$FM_HOME/.fm-secondmate-parent.tmp.$$" "$FM_HOME/.fm-secondmate-parent"
 printf '%s\n' "$ID" > "$FM_HOME/.fm-secondmate-home.tmp.$$"
 mv -f -- "$FM_HOME/.fm-secondmate-home.tmp.$$" "$FM_HOME/.fm-secondmate-home"
+pending_no_mistakes_write
 PUBLISHED=1
+while IFS= read -r NAME; do
+  [ -n "$NAME" ] || continue
+  DEST="$FM_HOME/projects/$NAME"
+  CHILD_CONFIG_OVERRIDE="$FM_HOME/config"
+  command -v no-mistakes >/dev/null 2>&1 || die "no-mistakes is unavailable for project $NAME"
+  FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CHILD_CONFIG_OVERRIDE" "$SCRIPT_DIR/fm-fork-target.sh" init "$DEST" >/dev/null \
+    || die "no-mistakes initialization failed for project $NAME"
+  pending_no_mistakes_remove "$NAME"
+done < "$NO_MISTAKES_PROJECTS"
 release_provision_lock
 trap - EXIT
 rm -rf -- "$TMP"

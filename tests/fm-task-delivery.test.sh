@@ -59,6 +59,18 @@ fill_brief_subsections() {  # <file> <intent> <spec>
   printf '%s\n' "$content" > "$file"
 }
 
+execute_generated_resolver_command() {  # <payload> <verb> <log>
+  local payload=$1 verb=$2 log=$3 command
+  # shellcheck disable=SC2016  # The sed expressions must remain literal.
+  case "$verb" in
+    init) command=$(sed -n 's/.*run `\([^`]* init \.\)`.*/\1/p' "$payload" | head -1) ;;
+    resolve) command=$(sed -n 's/.*run `\([^`]* resolve \.\)`.*/\1/p' "$payload" | head -1) ;;
+    *) fail "unsupported generated resolver verb: $verb" ;;
+  esac
+  [ -n "$command" ] || fail "$verb: generated contract did not expose an executable resolver command"
+  ( cd "$ROOT" && FM_TEST_RESOLVER_LOG="$log" bash -c "$command" )
+}
+
 run_spawn() {  # <home> <fakebin> <spawn-args...>
   local home=$1 fakebin=$2
   shift 2
@@ -307,10 +319,19 @@ test_promote_refuses_a_symlinked_task_record() {
 # prints against a capturing fm-send.sh, and asserts on the message the worker would
 # actually receive - for every supported mode.
 test_promotion_delivers_the_real_definition_of_done() {
-  local home meta out sendroot payload mode id brief_dod delivered_dod
+  local home meta out sendroot payload mode id brief_dod delivered_dod foreign_root resolver_bin resolver_log
   home="$TMP_ROOT/promote-dod/home"
   sendroot="$TMP_ROOT/promote-dod/sendroot"
+  foreign_root="$TMP_ROOT/promote-dod/firstmate helper's root"
+  resolver_bin="$foreign_root/bin/fm-fork-target.sh"
+  resolver_log="$TMP_ROOT/promote-dod/resolver.log"
   mkdir -p "$home/state" "$sendroot/bin"
+  mkdir -p "$(dirname "$resolver_bin")"
+  cat > "$resolver_bin" <<'EOF'
+#!/usr/bin/env bash
+printf '%s|%s|%s\n' "$FM_HOME" "${1:-}" "${2:-}" > "$FM_TEST_RESOLVER_LOG"
+EOF
+  chmod +x "$resolver_bin"
   cat > "$sendroot/bin/fm-send.sh" <<'STUB'
 #!/usr/bin/env bash
 # Capture the message a promoted worker would receive, instead of steering one.
@@ -322,11 +343,11 @@ STUB
     id="promote-dod-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
     meta="$home/state/$id.meta"
     printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
-    FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null 2>&1 \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$foreign_root" "$BRIEF" "$id" fixture-project --scout >/dev/null 2>&1 \
       || fail "$mode: scout brief generation should succeed"
     fill_brief_subsections "$home/data/$id/brief.md" \
       "Ship the delivery-contract change." "Preserve the selected delivery mode."
-    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1) \
+    out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$foreign_root" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1) \
       || fail "$mode: promotion should succeed"
 
     payload="$TMP_ROOT/promote-dod/payload-$id"
@@ -355,11 +376,24 @@ STUB
     assert_grep "## Firstmate spec" "$payload" \
       "$mode: promoted worker did not receive the Firstmate spec subsection"
 
+    : > "$resolver_log"
+    if [ "$mode" = no-mistakes ]; then
+      execute_generated_resolver_command "$payload" init "$resolver_log" \
+        || fail "$mode: promoted worker's target initialization command did not execute"
+      [ "$(cat "$resolver_log")" = "$home|init|." ] \
+        || fail "$mode: promoted worker's target initialization command split its arguments"
+    elif [ "$mode" = direct-PR ]; then
+      execute_generated_resolver_command "$payload" resolve "$resolver_log" \
+        || fail "$mode: promoted worker's target resolution command did not execute"
+      [ "$(cat "$resolver_log")" = "$home|resolve|." ] \
+        || fail "$mode: promoted worker's target resolution command split its arguments"
+    fi
+
     # Compare the public outputs of both real generation paths. The promoted
     # payload ends at its Definition of done, as does an ordinary generated
     # brief, so identical suffixes prove both workers receive the same contract.
     rm "$home/data/$id/brief.md"
-    FM_HOME="$home" "$BRIEF" "$id" fixture-project --mode "$mode" >/dev/null 2>&1 \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$foreign_root" "$BRIEF" "$id" fixture-project --mode "$mode" >/dev/null 2>&1 \
       || fail "$mode: ordinary ship brief generation should succeed"
     brief_dod="$TMP_ROOT/promote-dod/brief-dod-$id"
     delivered_dod="$TMP_ROOT/promote-dod/delivered-dod-$id"
@@ -881,7 +915,63 @@ EOF
 }
 
 test_authorized_intent_keeps_words_without_composed_address
+# Both sides of the push-target boundary at LAUNCH time. The guard against
+# pushing to a target this home cannot write belongs at push time, so failing
+# to prepare an ORIGIN-shape gate must not stop work from starting, while a
+# DECLARED fork url that cannot be initialized must still refuse: the operator
+# named that target and silently launching against another one is the failure
+# this whole path exists to prevent.
+fake_failing_no_mistakes() {  # <fakebin>
+  cat > "$1/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = init ]; then
+  echo "init: simulated gate failure" >&2
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$1/no-mistakes"
+}
+
+test_spawn_starts_when_an_origin_shape_gate_cannot_be_prepared() {
+  local rec home proj fakebin id out
+  rec=$(make_home push-target-advisory)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  fake_failing_no_mistakes "$fakebin"
+  [ ! -e "$home/config/fork-url" ] || fail "fixture must have no declaration"
+  id=advisory-no-declaration
+  write_brief "$home" "$id"
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" codex --mode no-mistakes --yolo off)
+  assert_present "$home/data/$id/launch-brief.md" \
+    "an undeclared origin-shape gate failure must not stop the worker from starting"
+  assert_contains "$out" "warning: could not prepare the no-mistakes push target" \
+    "the advisory path must stay loud rather than silent"
+  pass "fm-spawn: an origin-shape gate failure warns and still launches"
+}
+
+test_spawn_refuses_when_a_declared_fork_url_cannot_initialize() {
+  local rec home proj fakebin id out
+  rec=$(make_home push-target-declared)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  fake_failing_no_mistakes "$fakebin"
+  printf 'https://github.example/contributor/widget.git\n' > "$home/config/fork-url"
+  id=declared-cannot-initialize
+  write_brief "$home" "$id"
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" codex --mode no-mistakes --yolo off)
+  assert_absent "$home/data/$id/launch-brief.md" \
+    "a declared fork url that cannot initialize must stop the spawn"
+  assert_contains "$out" "error: could not refresh no-mistakes push target" \
+    "the refusal must name the push target as the reason"
+  pass "fm-spawn: a declared push target that cannot initialize still refuses"
+}
+
 test_spawn_refreshes_legacy_worker_roles
+test_spawn_starts_when_an_origin_shape_gate_cannot_be_prepared
+test_spawn_refuses_when_a_declared_fork_url_cannot_initialize
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch

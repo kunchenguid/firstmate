@@ -1536,6 +1536,15 @@ families_for_changed_path() {
       printf '%s\n' pure-contract-unit
       printf '%s\n' pr-forge
       ;;
+    bin/fm-fork-target.sh|bin/fm-dod-lib.sh)
+      # The push-target resolver and the delivery-mode Definition of done: the
+      # brief scaffold and promotion render the block (pure-contract-unit), and
+      # secondmate home seeding and remote provisioning initialize a clone's
+      # gate through the resolver (secondmate).
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' secondmate
+      printf '%s\n' "__script__:fm-fork-target.test.sh"
+      ;;
     bin/fm-control-lib.sh)
       printf '%s\n' backend-dispatch
       printf '%s\n' session-bootstrap
