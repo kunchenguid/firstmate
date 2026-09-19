@@ -70,6 +70,9 @@ case "${1:-}" in
     done
     payload=${1:-}
     if [ "$literal" = 1 ]; then
+      # A long launch command is staged and sourced rather than typed, so read
+      # the command behind the payload before deciding what it started.
+      payload=$("$FM_TEST_LAUNCH_PAYLOAD" "$payload")
       printf '%s\n' "$payload" >> "$D/literal"
       case "$payload" in
         /exit|/quit)
