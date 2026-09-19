@@ -7,13 +7,10 @@
 # window. Cleanup uses only creation-time pane/process identities.
 set -u
 
-if [ "${FM_GROK_STOP_LIVE_E2E:-0}" != 1 ]; then
-  echo "skip: set FM_GROK_STOP_LIVE_E2E=1 with FM_GROK_NATIVE_BIN and FM_GROK_LEGACY_BIN"
-  exit 0
-fi
-
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+fm_live_gate opt-in FM_GROK_STOP_LIVE_E2E tmux jq
 
 NATIVE_BIN=${FM_GROK_NATIVE_BIN:-}
 LEGACY_BIN=${FM_GROK_LEGACY_BIN:-}
@@ -25,7 +22,6 @@ ACTIVE_LAB=
 [ -x "$LEGACY_BIN" ] || fail "FM_GROK_LEGACY_BIN must be an exact executable path"
 [ -f "$AUTH" ] || fail "FM_GROK_AUTH_FILE must name the already-managed auth artifact"
 [ -n "$REAL_TMUX" ] || fail "tmux not found"
-command -v jq >/dev/null 2>&1 || fail "jq not found"
 
 NATIVE_VERSION=$($NATIVE_BIN --version)
 LEGACY_VERSION=$($LEGACY_BIN --version)

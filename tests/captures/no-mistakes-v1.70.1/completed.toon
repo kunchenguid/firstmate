@@ -1,0 +1,20 @@
+run:
+  id: "01M2FG7SEEP1VBZ3B5SX35BJ6Q"
+  branch: fm/fm-installed-timeout-watcher-will-not-stop
+  status: completed
+  head: 1129818e
+  head_sha: 1129818ef720b6827ae75eb690957c2c7393d82b
+  pr: "https://github.com/kunchenguid/firstmate/pull/4073"
+  findings: 1 awaiting
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,20
+    rebase,completed,0,1309
+    review,completed,0,159353
+    test,completed,0,2655669
+    document,completed,0,119685
+    lint,completed,0,6647
+    push,completed,0,5691
+    pr,completed,0,62239
+    ci,completed,1,1845554
+outcome: passed-with-override
+ci_override_reason: "live checks for https://github.com/kunchenguid/firstmate/pull/4073 not all passed: Lint (fail)"

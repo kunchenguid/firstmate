@@ -1,0 +1,24 @@
+{
+  "tools": [
+    {
+      "name": "firstmate",
+      "git": { "repo": "/absolute/path/to/firstmate", "remote": "origin" }
+    },
+    {
+      "name": "agents-on-the-go",
+      "git": { "repo": "/absolute/path/to/agents-on-the-go", "remote": "origin", "branch": "mainline" }
+    },
+    {
+      "name": "herdr",
+      "command": "herdr",
+      "version_args": ["--version"]
+    },
+    {
+      "name": "no-mistakes",
+      "command": "no-mistakes",
+      "version_args": ["--version"],
+      "announce_args": ["--help"],
+      "announce_pattern": "A new version of no-mistakes is available: [^ ]+ -> [^ ]+"
+    }
+  ]
+}

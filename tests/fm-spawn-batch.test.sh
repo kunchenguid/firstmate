@@ -84,19 +84,21 @@ test_projects_path_scoping() {
     home="$TMP_ROOT/$id home"
     projects="$TMP_ROOT/$id projects"
     mkdir -p "$home/data" "$projects/alpha"
+    git -C "$projects/alpha" init -q || fail "$label: could not initialize project fixture"
     if [ "$use_override" = yes ]; then
       out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
         FM_HOME="$home" FM_PROJECTS_OVERRIDE="$projects" FM_SPAWN_NO_GUARD=1 \
         "$SPAWN" "$id" projects/alpha codex --mode no-mistakes --yolo off 2>&1)
     else
       mkdir -p "$home/projects/alpha"
+      git -C "$home/projects/alpha" init -q || fail "$label: could not initialize home project fixture"
       out=$(FM_ROOT_OVERRIDE='' FM_STATE_OVERRIDE='' FM_DATA_OVERRIDE='' FM_PROJECTS_OVERRIDE='' FM_CONFIG_OVERRIDE='' \
         FM_HOME="$home" FM_SPAWN_NO_GUARD=1 \
         "$SPAWN" "$id" projects/alpha codex --mode no-mistakes --yolo off 2>&1)
     fi
     status=$?
     [ "$status" -ne 0 ] || fail "$label: spawn with missing brief should fail"
-    expected="error: no brief at $home/data/$id/brief.md"
+    expected="error: task $id has no brief at inaccessible data path $home/data/$id/brief.md"
     printf '%s\n' "$out" | grep -F "$expected" >/dev/null \
       || fail "$label: projects/alpha was not resolved through the home before the brief check"
     printf '%s\n' "$out" | grep -F 'cd: projects/alpha' >/dev/null \
@@ -125,7 +127,7 @@ test_batch_requires_the_shared_delivery_contract() {
   status=$?
   [ "$status" -ne 0 ] || fail "a ship batch without --yolo should exit non-zero"
   printf '%s\n' "$out" | grep -F 'ship spawns require --yolo' >/dev/null \
-    || fail "batch refusal did not name the missing approval posture"
+    || fail "batch refusal did not name the missing merge posture"
   pass "batch dispatch requires the shared ship delivery contract before any pair runs"
 }
 

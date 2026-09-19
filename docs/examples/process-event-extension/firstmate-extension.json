@@ -1,0 +1,15 @@
+{
+  "schema": "firstmate.extension-manifest.v1",
+  "id": "org.firstmate.example.file-signal",
+  "version": "1.0.0",
+  "host_protocols": [1],
+  "entrypoint": "file-signal.mjs",
+  "capabilities": [
+    {
+      "name": "process-event-adapter",
+      "versions": [1],
+      "adapter_names": ["file-signal"]
+    }
+  ],
+  "required_consents": ["artifact-references"]
+}

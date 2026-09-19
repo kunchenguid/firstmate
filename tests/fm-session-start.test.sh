@@ -6,7 +6,7 @@
 # Coverage:
 #   - absent-file markers vs empty-but-present files in the context digest
 #   - the lock-refusal read-only path: banner leads, every mutating step is
-#     skipped (including bootstrap's five mutating sweeps, verified by their
+#     skipped (including bootstrap's seven mutating sweeps, verified by their
 #     ABSENCE), the digest still completes
 #   - output section ordering: the safety preamble leads unchanged, live fleet
 #     state precedes the curated memory a truncated tail may take, and the
@@ -24,11 +24,11 @@
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
 #     fm-wake-drain.sh (their real, distinctive output appears verbatim), it
 #     does not reimplement their logic
-#   - the deferred network stage: an unreachable host delays a reported check
-#     rather than the digest, the sweeps it defers still run and land, a result
-#     surfaces exactly once (inline or as a wake, never both), a read-only
-#     session declares the checks it skipped, and the tasks-axi compatibility
-#     verdict is paid for once per session start
+#   - the deferred startup stage: slow network and inactive current-state reads
+#     do not delay the digest, the work still runs and lands durable findings, a
+#     network result surfaces exactly once (inline or as a wake, never both), a
+#     read-only session declares the checks it skipped, and the tasks-axi
+#     compatibility verdict is paid for once per session start
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -39,6 +39,7 @@ set -u
 SESSION_START="$ROOT/bin/fm-session-start.sh"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-session-start-tests)
+SESSION_START_TEST_HARNESS_PID=$$
 SESSION_START_SECOND_MATE_ID="fmtest-sm-${TMP_ROOT##*.}"
 SESSION_START_SECOND_MATE_TMP="/tmp/fm-$SESSION_START_SECOND_MATE_ID"
 SESSION_START_HERDR_SECOND_MATE_ID="fmtest-herdr-${TMP_ROOT##*.}"
@@ -98,7 +99,7 @@ SH
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
-  printf '%s\n' 'no-mistakes version v1.31.2 (fake) 2026-06-27T00:02:18Z'
+  printf '%s\n' 'no-mistakes version v1.46.0 (fake) 2026-06-27T00:02:18Z'
   exit 0
 fi
 exit 0
@@ -214,10 +215,15 @@ make_fake_ps_claude() {
 
 make_fake_ps_harness() {
   local fakebin=$1 harness=$2
-  cat > "$fakebin/ps" <<'SH'
+  cat > "$fakebin/ps" <<SH
 #!/usr/bin/env bash
 set -u
-harness=${FM_FAKE_HARNESS:-claude}
+# The ancestry this stub reports defaults to the harness the fixture was built
+# for, so a case that builds a pi (or codex) fixture gets pi (or codex) ancestry
+# without having to repeat it per run; FM_FAKE_HARNESS still overrides it.
+harness=\${FM_FAKE_HARNESS:-$harness}
+SH
+  cat >> "$fakebin/ps" <<'SH'
 pid=
 previous=
 for argument in "$@"; do
@@ -226,7 +232,8 @@ for argument in "$@"; do
 done
 case "$*" in
   *"comm="*)
-    if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ]; then
+    if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ] \
+      || [ "$pid" = "${FM_FAKE_LIVE_HOLDER_PID:-}" ]; then
       printf '/usr/local/bin/%s\n' "$harness"
     else
       printf '/bin/bash\n'
@@ -234,7 +241,8 @@ case "$*" in
     exit 0
     ;;
   *"args="*)
-    if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ]; then
+    if [ -z "${FM_FAKE_HARNESS_PID:-}" ] || [ "$pid" = "$FM_FAKE_HARNESS_PID" ] \
+      || [ "$pid" = "${FM_FAKE_LIVE_HOLDER_PID:-}" ]; then
       printf '%s\n' "$harness"
     else
       printf 'bash\n'
@@ -253,7 +261,7 @@ SH
 }
 
 make_fake_ps_pi_holder() {
-  local fakebin=$1 holder_pid=$2
+  local fakebin=$1 holder_pid=$2 harness=${3:-pi}
   cat > "$fakebin/ps" <<SH
 #!/usr/bin/env bash
 set -u
@@ -266,7 +274,7 @@ done
 case "\$*" in
   *"comm="*)
     if [ "\$pid" = "$holder_pid" ]; then
-      printf '/usr/local/bin/pi\n'
+      printf '/usr/local/bin/$harness\n'
     else
       printf '/bin/zsh\n'
     fi
@@ -274,7 +282,7 @@ case "\$*" in
     ;;
   *"args="*)
     if [ "\$pid" = "$holder_pid" ]; then
-      printf 'pi\n'
+      printf '$harness\n'
     else
       printf 'zsh\n'
     fi
@@ -519,6 +527,24 @@ run_session_start() {
   fi
 }
 
+run_pi_session_start() {  # <home> <root> <path> [fm-session-start args...]
+  local home=$1 root=$2 path=$3
+  shift 3
+  env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS=pi \
+    FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+    "$SESSION_START" "$@"
+}
+
+run_named_harness_session_start() {  # <harness> <home> <root> <path> [fm-session-start args...]
+  local harness=$1 home=$2 root=$3 path=$4
+  shift 4
+  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_FAKE_HARNESS="$harness" FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+    "$SESSION_START" "$@"
+}
+
 # prepare_session_start_secondmate <name>: a throwaway main home and Pi
 # secondmate home wired to the real spawn implementation through the fixture
 # root. Echoes root|home|fakebin|mate|log|spawned.
@@ -548,6 +574,7 @@ EOF
   ln -s "$ROOT/bin" "$root/bin"
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
+  fm_fake_exit0 "$fakebin" pi
   make_fake_tmux_secondmate_recovery "$fakebin"
   : > "$log"
   printf '%s|%s|%s|%s|%s|%s\n' "$root" "$home" "$fakebin" "$mate" "$log" "$spawned"
@@ -594,6 +621,7 @@ EOF
   ln -s "$ROOT/bin" "$root/bin"
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
+  fm_fake_exit0 "$fakebin" pi
   make_fake_herdr_secondmate_recovery "$fakebin"
   : > "$log"
   printf '%s|%s|%s|%s|%s|%s\n' "$root" "$home" "$fakebin" "$mate" "$log" "$state"
@@ -674,6 +702,21 @@ write_pi_loaded_markers() {
   write_pi_turnend_loaded_marker "$home" "$root" "$pid"
 }
 
+install_omp_extension_fixtures() {
+  local root=$1
+  mkdir -p "$root/.omp/extensions"
+  cp "$ROOT/.omp/extensions/fm-primary-omp-watch.ts" "$root/.omp/extensions/fm-primary-omp-watch.ts"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$root/.omp/extensions/fm-primary-turnend-guard.ts"
+}
+
+write_omp_loaded_markers() {
+  local home=$1 root=$2 pid=$3 version
+  version=$(hash_file_for_test "$root/.omp/extensions/fm-primary-omp-watch.ts")
+  printf '%s\n%s\n' "$version" "$pid" > "$home/state/.omp-watch-extension-loaded"
+  version=$(hash_file_for_test "$root/.omp/extensions/fm-primary-turnend-guard.ts")
+  printf '%s\n%s\n' "$version" "$pid" > "$home/state/.omp-turnend-extension-loaded"
+}
+
 # --- context digest: absent vs empty vs present -----------------------------
 
 test_context_digest_absent_empty_present() {
@@ -691,6 +734,12 @@ EOF
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
+  jq -e --arg home "$home" '
+    .schema == "fm-secondmate-home-summary.v1"
+    and .home == $home
+    and (.generated_epoch | type) == "number"
+  ' "$home/state/home-summary.json" >/dev/null \
+    || fail "a locked session start did not publish the home summary ledger"
   assert_contains "$out" "data/projects.md" "digest did not label the projects.md section"
   assert_contains "$out" "- demo [no-mistakes] - a demo project (added 2026-07-01)" "digest did not print projects.md content"
 
@@ -929,7 +978,7 @@ EOF
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
   printf 'Captain memory that may be truncated away safely.\n' > "$home/data/captain.md"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(run_session_start "$home" "$root" "$fakebin:$(fm_test_base_path_sans "$BASE_PATH" node)")
 
   lock_line=$(printf '%s\n' "$out" | grep -n '^LOCK$' | head -1 | cut -d: -f1)
   boot_line=$(printf '%s\n' "$out" | grep -n '^BOOTSTRAP$' | head -1 | cut -d: -f1)
@@ -1333,7 +1382,7 @@ EOF
   printf 'needs-decision: pick a library\n' > "$home/state/task-z.status"
   append_wake "$home/state" signal task-z.status "needs-decision: pick a library"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(run_session_start "$home" "$root" "$fakebin:$(fm_test_base_path_sans "$BASE_PATH" node)")
 
   # fm-lock.sh's own exact success text.
   assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"
@@ -1344,6 +1393,74 @@ EOF
   assert_contains "$out" "wake annotation: latest wake-EVENT observed at drain, not current state: task-z.status: needs-decision: pick a library" "fm-session-start.sh did not preserve the drain's separate annotation line"
 
   pass "fm-session-start.sh composes the real fm-lock.sh, fm-bootstrap.sh, and fm-wake-drain.sh output verbatim"
+}
+
+test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep() {
+  local rec root home fakebin out
+  rec=$(new_world branch-recovery)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" pi
+
+  # A crash window the locked start must preserve: the supervision branch
+  # stored a leading routine row and a captain row that never reached Pi, plus one lease whose
+  # supervising process died and one still held by a live process.
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-a --verdict routine --summary 'worker recovered automatically' >/dev/null \
+    || fail "could not seed the unread routine branch outcome"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-b --verdict captain --summary 'PR https://example.com/pr/b checks green' >/dev/null \
+    || fail "could not seed the unread branch outcome"
+  printf 'branch\t999999\t123\n' > "$home/state/.lease-task-dead"
+  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID=$$ "$ROOT/bin/fm-lease.sh" claim task-live --actor branch \
+    || fail "could not seed the live lease"
+
+  out=$(run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "BRANCH OUTCOMES (handled by the supervision branch, not yet seen by this session):" \
+    "locked start did not replay the leading routine branch outcome"
+  assert_contains "$out" "worker recovered automatically" "replayed routine outcome lost its content"
+  assert_not_contains "$out" "https://example.com/pr/b" "locked start crossed the captain delivery barrier"
+  assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" \
+    "https://example.com/pr/b" "locked start marked the unrendered captain outcome read"
+  [ "$(cat "$home/state/.branch-outcomes-cursor")" = 1 ] || fail "locked start advanced past the captain row"
+  [ ! -e "$home/state/.lease-task-dead" ] || fail "locked start left a provably dead lease in place"
+  [ -e "$home/state/.lease-task-live" ] || fail "locked start swept a live lease"
+
+  # Routine replay is one-shot, while the captain row remains held for Pi's
+  # sequence-keyed visible-entry reconciliation.
+  out=$(run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  case "$out" in
+    *"BRANCH OUTCOMES"*) fail "second start re-presented already-replayed branch outcomes" ;;
+  esac
+  assert_contains "$(FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" unread)" \
+    "https://example.com/pr/b" "second start consumed the captain row without a Pi entry"
+  pass "locked Pi session start replays leading routine outcomes, preserves the captain barrier, and sweeps only dead leases"
+}
+
+test_non_pi_session_start_leaves_branch_state_untouched() {
+  local rec root home fakebin out
+  rec=$(new_world non-pi-branch-recovery)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-b --verdict captain --summary 'unread Pi branch outcome' >/dev/null \
+    || fail "could not seed the non-Pi unread branch outcome"
+  rm -f "$home/state/.branch-outcomes-cursor"
+  printf 'branch\t999999\t123\n' > "$home/state/.lease-task-dead"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  case "$out" in
+    *"BRANCH OUTCOMES"*|*"unread Pi branch outcome"*) fail "non-Pi session replayed Pi branch outcomes" ;;
+  esac
+  [ -e "$home/state/.lease-task-dead" ] || fail "non-Pi session swept a Pi branch lease"
+  [ ! -e "$home/state/.branch-outcomes-cursor" ] || fail "non-Pi session marked a Pi branch outcome read"
+  pass "non-Pi session start neither sweeps nor replays Pi branch state"
 }
 
 # --- deferred network stage -------------------------------------------------
@@ -1364,6 +1481,98 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/gh"
+}
+
+# The locked startup scan may need the same expensive current-state read that a
+# busy validation makes slow. It belongs to the detached startup worker, so the
+# digest must finish while that read is still outstanding; the answer then has to
+# create the ordinary durable inactive-outcome wake rather than disappear
+# off-path. The slow read is held open by this case rather than by a fixed sleep,
+# so "the digest did not wait for it" is decided by what had happened when the
+# digest returned and not by how fast the host was.
+test_inactive_reconcile_never_blocks_the_digest() {
+  local rec root home fakebin world worktree crew_state calls out waited=0
+  local release_gate read_finished
+  rec=$(new_world inactive-reconcile-deferred)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  world=${root%/root}
+  worktree="$world/child-worktree"
+  crew_state="$world/slow-crew-state.sh"
+  calls="$world/no-mistakes-state.calls"
+  ln -s "$ROOT/bin" "$root/bin"
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  fm_git_init_commit "$worktree"
+
+  release_gate="$world/slow-state-read.release"
+  read_finished="$world/slow-state-read.finished"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'no-mistakes version v1.46.0 (fake) 2026-06-27T00:02:18Z'
+  exit 0
+fi
+if [ "${1:-} ${2:-}" = 'axi status' ]; then
+  if [ "${FM_BOOTSTRAP_NETWORK:-}" = only ]; then
+    printf '%s\n' 'deferred' >> "${FM_FAKE_NM_CALLS:?}"
+  else
+    printf '%s\n' 'blocking' >> "${FM_FAKE_NM_CALLS:?}"
+  fi
+  # Stay outstanding until the case releases this read. A caller that waits for
+  # it therefore waits indefinitely rather than for a fixed interval a loaded
+  # host could out-run. The tick bound only stops a broken case hanging forever.
+  ticks=0
+  while [ ! -e "${FM_FAKE_NM_RELEASE:?}" ] && [ "$ticks" -lt 300 ]; do
+    sleep 0.1
+    ticks=$((ticks + 1))
+  done
+  : > "${FM_FAKE_NM_READ_FINISHED:?}"
+  printf '%s\n' 'slow validation state answered'
+fi
+exit 0
+SH
+  cat > "$crew_state" <<'SH'
+#!/usr/bin/env bash
+set -u
+no-mistakes axi status >/dev/null
+printf '%s\n' 'state: done · source: run-step · passed'
+SH
+  chmod +x "$fakebin/no-mistakes" "$crew_state"
+
+  fm_write_meta "$home/state/slow-child.meta" \
+    'window=firstmate:fm-slow-child' "worktree=$worktree" 'project=firstmate' \
+    'harness=pi' 'kind=scout' 'mode=no-mistakes' 'yolo=off' 'spawn_gen=slow-child.1'
+  printf '%s\n' 'working: validating' > "$home/state/slow-child.status"
+  : > "$home/state/slow-child.turn-ended"
+  touch -t 202001010000 "$home/state/slow-child.meta" \
+    "$home/state/slow-child.status" "$home/state/slow-child.turn-ended"
+
+  out=$(FM_BACKEND=tmux FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
+    FM_FAKE_NM_CALLS="$calls" FM_FAKE_NM_RELEASE="$release_gate" \
+    FM_FAKE_NM_READ_FINISHED="$read_finished" FM_INACTIVE_RECONCILE_SECS=60 \
+    FM_INACTIVE_RECONCILE_BUDGET_SECS=30 FM_INACTIVE_CREW_STATE_BIN="$crew_state" \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "SESSION START" "the digest did not complete"
+  assert_absent "$read_finished" \
+    "the digest waited for inactive reconciliation's still-unreleased state read"
+  [ "$(grep -c '^blocking$' "$calls" 2>/dev/null || true)" -eq 0 ] \
+    || fail "the digest called the slow state reader on its blocking path"
+  : > "$release_gate"
+
+  while ! grep -Fq $'\tcheck\tinactive-outcome:' "$home/state/.wake-queue" 2>/dev/null \
+    && [ "$waited" -lt 150 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  assert_grep 'check	inactive-outcome:' "$home/state/.wake-queue" \
+    "the deferred scan's terminal finding never reached the durable wake queue (calls=$(cat "$calls" 2>/dev/null), report=$(network_stage_report "$home" "$root" 2>/dev/null), queue=$(cat "$home/state/.wake-queue" 2>/dev/null))"
+  [ "$(grep -c '^deferred$' "$calls" 2>/dev/null || true)" -eq 1 ] \
+    || fail "the deferred scan did not make exactly one slow state read"
+  pass "session start: inactive reconciliation runs after the digest and retains its durable wake"
 }
 
 # The headline guarantee: an unreachable host delays a reported CHECK, never the
@@ -1549,7 +1758,7 @@ EOF
   assert_not_contains "$out" "DONE-ROW-LINE" "tasks-axi compact digest listed a done row at startup"
   assert_contains "$out" "--- compact-startup ---" "in-flight meta identity disappeared from startup recovery digest"
   assert_contains "$out" "worktree=$home/projects/firstmate" "in-flight recovery worktree identity disappeared from startup digest"
-  assert_contains "$out" "Full task bodies remain available on demand: tasks-axi show <id> --full" \
+  assert_contains "$out" "Full task bodies remain available on demand: bin/fm-tasks-axi.sh show <id> --full" \
     "compact digest omitted the full-body lookup pointer"
   assert_contains "$out" "ready_public_followups: 0 delivery-ready obligations" \
     "the composed listing dropped a real signal from the dispatchable set"
@@ -1593,7 +1802,7 @@ EOF
   assert_not_contains "$out" "ready-4,queued" "the queued bound did not actually bound the ready listing"
   assert_contains "$out" "(shown 3 of 7 ready queued item(s))" \
     "the bounded queued listing did not report what it showed"
-  assert_contains "$out" "(4 more queued - tasks-axi ready --file $home/data/backlog.md)" \
+  assert_contains "$out" "(4 more queued - bin/fm-tasks-axi.sh ready)" \
     "the bounded queued listing did not disclose an exact remainder and how to see it"
 
   # The bound is for dispatchable work only: held and blocked rows stay whole.
@@ -1892,7 +2101,7 @@ SH
 # --- context re-emit (--reemit) ----------------------------------------------
 
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain() {
-  local rec root home fakebin network_report reemit
+  local rec root home fakebin network_report reemit sequence generation
   rec=$(new_world reemit)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1919,12 +2128,206 @@ EOF
   assert_contains "$reemit" "SESSION START (CONTEXT RE-EMIT) - $home" "--reemit did not label itself"
   assert_not_contains "$reemit" "SECONDMATE_LIVENESS" "--reemit repeated a mutating sweep startup already ran"
   assert_contains "$reemit" "done: queued after the re-emit too" "--reemit did not drain the wake queue"
-  [ ! -s "$home/state/.wake-queue" ] || fail "--reemit left queued wakes behind: $(cat "$home/state/.wake-queue")"
+  [ -s "$home/state/.wake-queue" ] || fail "--reemit removed the wake before its handling acknowledgement"
+  sequence=$(printf '%s\n' "$reemit" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' | tail -1)
+  generation=$(printf '%s\n' "$reemit" | sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' | tail -1)
+  [ -n "$sequence" ] && [ -n "$generation" ] \
+    || fail "--reemit omitted the generation-bound wake acknowledgement"
+  FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-wake-drain.sh" --ack-through "$sequence" \
+    --recovery-generation "$generation" || fail "--reemit wake acknowledgement failed"
+  [ ! -s "$home/state/.wake-queue" ] || fail "--reemit acknowledgement left queued wakes behind"
   assert_contains "$reemit" "CONTEXT" "--reemit dropped the context digest"
   assert_contains "$reemit" "FLEET STATE" "--reemit dropped the fleet-state digest"
   assert_contains "$reemit" "NEXT STEP" "--reemit dropped the closing reminder"
 
   pass "--reemit reprints the digest without repeating startup's mutating sweeps and still drains queued wakes"
+}
+
+test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact() {
+  local rec root home fakebin startup compact_equal compact_first compact_second clear_out resume_out reset_out baseline baseline_after expected_hash refresh_line bootstrap_line
+  rec=$(new_world agents-refresh)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" pi
+  cat > "$root/AGENTS.md" <<'EOF'
+FIRSTMATE_TEST_INSTRUCTION=original
+Keep this original instruction.
+EOF
+
+  startup=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source startup)
+  assert_contains "$startup" "SESSION START - $home" "true startup did not run the full digest"
+  assert_present "$home/state/.session-start-agents-baseline" "true startup did not record an AGENTS baseline"
+  baseline=$(cat "$home/state/.session-start-agents-baseline")
+  expected_hash=$(hash_file_for_test "$root/AGENTS.md")
+  [ "$(printf '%s\n' "$baseline" | sed -n '2p')" = "$expected_hash" ] \
+    || fail "true startup baseline did not record the original AGENTS hash: $baseline"
+
+  compact_equal=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  assert_not_contains "$compact_equal" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
+    "an unchanged AGENTS file was unnecessarily re-emitted"
+  [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline" ] \
+    || fail "a no-drift compact rewrote the true-start baseline"
+
+  cat > "$root/AGENTS.md" <<'EOF'
+FIRSTMATE_TEST_INSTRUCTION=updated
+The complete updated instruction must survive every stale rebuild.
+EOF
+  resume_out=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source resume)
+  assert_not_contains "$resume_out" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
+    "a context-preserving continuation emitted a replacement contract"
+  [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline" ] \
+    || fail "a context-preserving continuation rebased the true-start baseline"
+
+  compact_first=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  assert_contains "$compact_first" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
+    "a drifted Pi compact did not emit the replacement instructions"
+  assert_contains "$compact_first" "FIRSTMATE_TEST_INSTRUCTION=updated" \
+    "a drifted Pi compact did not emit the complete current AGENTS content"
+  refresh_line=$(printf '%s\n' "$compact_first" | grep -n '^CURRENT AGENTS.md - INSTRUCTION REFRESH$' | head -1 | cut -d: -f1)
+  bootstrap_line=$(printf '%s\n' "$compact_first" | grep -n '^BOOTSTRAP$' | head -1 | cut -d: -f1)
+  [ -n "$refresh_line" ] && [ -n "$bootstrap_line" ] && [ "$refresh_line" -lt "$bootstrap_line" ] \
+    || fail "replacement instructions were not emitted before the bulky digest"
+  [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline" ] \
+    || fail "a drifted compact rebased the original-session baseline"
+
+  compact_second=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  assert_contains "$compact_second" "FIRSTMATE_TEST_INSTRUCTION=updated" \
+    "a second drifted compact suppressed the required replacement instructions"
+  [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline" ] \
+    || fail "a repeated compact rebased the original-session baseline"
+
+  clear_out=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source clear)
+  assert_not_contains "$clear_out" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
+    "a Pi clear, which creates a fresh runtime, unnecessarily emitted a replacement contract"
+  [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline" ] \
+    || fail "a clear rebuild rebased the original-session baseline"
+
+  reset_out=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source reset)
+  assert_not_contains "$reset_out" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
+    "an unrecognized reset source emitted a replacement contract"
+  [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline" ] \
+    || fail "reset rebased the original-session baseline"
+
+  rm -f "$home/state/.session-start-agents-baseline"
+  compact_first=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  assert_contains "$compact_first" "FIRSTMATE_TEST_INSTRUCTION=updated" \
+    "a missing baseline did not trigger first-post-fix replacement instructions"
+  assert_absent "$home/state/.session-start-agents-baseline" \
+    "a rebuild fabricated a baseline instead of preserving true-start-only ownership"
+
+  printf 'wrong-session\n%s\n' "$(hash_file_for_test "$root/AGENTS.md")" > "$home/state/.session-start-agents-baseline"
+  compact_first=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  assert_contains "$compact_first" "FIRSTMATE_TEST_INSTRUCTION=updated" \
+    "a wrong-session baseline did not trigger replacement instructions"
+  baseline_after=$(cat "$home/state/.session-start-agents-baseline")
+  [ "$baseline_after" = "wrong-session
+$(hash_file_for_test "$root/AGENTS.md")" ] \
+    || fail "a wrong-session baseline was rewritten during a rebuild"
+
+  pass "true-start AGENTS baselines stay immutable while every drifted Pi compact re-emits the current contract"
+}
+
+test_read_only_pi_compact_refreshes_against_its_own_session_identity() {
+  local rec root home fakebin holder_pid out baseline_before completion_before
+  rec=$(new_world agents-refresh-read-only)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" pi
+  printf '%s\n' 'READ_ONLY_AGENTS=current' > "$root/AGENTS.md"
+  FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source startup >/dev/null
+
+  sleep 300 &
+  holder_pid=$!
+  printf '%s\n%s\n' "$holder_pid" "$(hash_file_for_test "$root/AGENTS.md")" \
+    > "$home/state/.session-start-agents-baseline"
+  printf '%s\n' "$holder_pid" > "$home/state/.lock"
+  baseline_before=$(cat "$home/state/.session-start-agents-baseline")
+  completion_before=$(cat "$home/state/.session-start-complete")
+
+  out=$(FM_FAKE_HARNESS=pi FM_FAKE_LIVE_HOLDER_PID="$holder_pid" \
+    run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  assert_contains "$out" "READ-ONLY SESSION" "competing live lock owner did not force read-only mode"
+  assert_contains "$out" "READ_ONLY_AGENTS=current" \
+    "read-only compact trusted another session's equal baseline"
+  [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline_before" ] \
+    || fail "read-only compact mutated the competing session's baseline"
+  [ "$(cat "$home/state/.session-start-complete")" = "$completion_before" ] \
+    || fail "read-only compact mutated startup completion state"
+
+  pass "read-only Pi compact refreshes against the rebuilding session identity without mutation"
+}
+
+test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh() {
+  local rec root home fakebin startup baseline clear_out compact_out
+  rec=$(new_world codex-instruction-refresh)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" codex
+  printf '%s\n' 'CODEX_TEST_INSTRUCTION=original' > "$root/AGENTS.md"
+
+  startup=$(run_named_harness_session_start codex "$home" "$root" "$fakebin:$BASE_PATH" --source startup)
+  assert_contains "$startup" "primary harness: codex" "codex fixture did not select the codex run tier"
+  baseline=$(cat "$home/state/.session-start-agents-baseline")
+  printf '%s\n' 'CODEX_TEST_INSTRUCTION=updated' > "$root/AGENTS.md"
+
+  clear_out=$(run_named_harness_session_start codex "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source clear)
+  compact_out=$(run_named_harness_session_start codex "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  assert_not_contains "$clear_out" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
+    "Codex clear claimed an instruction-refresh channel unavailable to the tracked transport"
+  assert_not_contains "$compact_out" "CURRENT AGENTS.md - INSTRUCTION REFRESH" \
+    "Codex compact claimed an instruction-refresh channel unavailable to the tracked transport"
+  [ "$(cat "$home/state/.session-start-agents-baseline")" = "$baseline" ] \
+    || fail "an unsupported Codex rebuild rewrote the true-start baseline"
+
+  pass "Codex reset sources do not claim an unavailable instruction-refresh channel"
+}
+
+test_agents_baseline_requires_sha256_and_successful_completion() {
+  local rec root home fakebin compact_out
+  rec=$(new_world agents-baseline-failures)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" pi
+  printf '%s\n' 'AGENTS_SHA_TEST=original' > "$root/AGENTS.md"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/shasum"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/sha256sum"
+  chmod +x "$fakebin/shasum" "$fakebin/sha256sum"
+
+  FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source startup >/dev/null
+  assert_absent "$home/state/.session-start-agents-baseline" \
+    "startup recorded a non-SHA-256 instruction baseline when both SHA-256 tools failed"
+  printf '%s\n' 'AGENTS_SHA_TEST=updated' > "$root/AGENTS.md"
+  compact_out=$(FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --reemit --source compact)
+  assert_contains "$compact_out" "AGENTS_SHA_TEST=updated" \
+    "a missing SHA-256 baseline did not conservatively refresh a supported rebuild"
+
+  rm -f "$fakebin/shasum" "$fakebin/sha256sum" "$home/state/.session-start-complete"
+  cat > "$fakebin/mv" <<SH
+#!/usr/bin/env bash
+case "\${*: -1}" in
+  "$home/state/.session-start-complete") exit 1 ;;
+esac
+exec /bin/mv "\$@"
+SH
+  chmod +x "$fakebin/mv"
+  FM_FAKE_HARNESS=pi run_pi_session_start "$home" "$root" "$fakebin:$BASE_PATH" --source startup >/dev/null
+  assert_absent "$home/state/.session-start-complete" \
+    "startup published completion despite the atomic completion write failure"
+  assert_absent "$home/state/.session-start-agents-baseline" \
+    "startup recorded an instruction baseline after completion publication failed"
+
+  pass "instruction baselines require SHA-256 and successful startup completion"
 }
 
 test_reemit_keeps_repair_ownership_with_the_lock_holder() {
@@ -2024,6 +2427,48 @@ EOF
   assert_not_contains "$out" "  bin/fm-watch-arm.sh" "AFK next step still told the agent to arm the watcher directly"
 
   pass "next step delegates watcher ownership to the AFK daemon"
+}
+
+test_next_step_quiet_mode_delegates_to_daemon() {
+  local rec root home fakebin out
+  rec=$(new_world next-step-quiet)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf 'quiet\n%s\n' "$(date '+%s')" > "$home/state/.afk"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "quiet-mode supervision is active" "AFK digest did not report quiet mode for a quiet-content flag"
+  assert_contains "$out" "only an explicit /quiet off exits it" "AFK digest lost the explicit-only exit rule"
+  assert_contains "$out" "Quiet mode is active" "next step did not switch to quiet-mode guidance"
+  assert_contains "$out" "load /quiet" "next step did not name the /quiet skill"
+  assert_contains "$out" "- Quiet mode: active" "supervision block did not include active quiet state"
+  assert_not_contains "$out" "Away mode is active" "quiet-mode flag was misreported as away mode"
+  assert_not_contains "$out" "  bin/fm-watch-arm.sh" "quiet next step still told the agent to arm the watcher directly"
+
+  pass "next step delegates watcher ownership to the daemon in quiet mode, distinctly from away mode"
+}
+
+test_next_step_afk_legacy_empty_flag_defaults_away() {
+  local rec root home fakebin out
+  rec=$(new_world next-step-afk-legacy)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  : > "$home/state/.afk"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "away-mode supervision is active" "a legacy empty .afk flag was not read as away mode"
+  assert_contains "$out" "Away mode is active" "a legacy empty .afk flag did not drive away-mode next-step guidance"
+  assert_not_contains "$out" "Quiet mode" "a legacy empty .afk flag leaked quiet-mode text"
+
+  pass "a legacy empty .afk flag (written before mode existed) still reads as away mode"
 }
 
 test_supervision_block_exactly_one_and_pi_diagnostic() {
@@ -2128,6 +2573,51 @@ EOF
   pass "session start accepts current Pi markers written before lock acquisition"
 }
 
+test_omp_supervision_block_and_diagnostic() {
+  local rec root home fakebin out block_count
+  rec=$(new_world omp-supervision-block)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_harness "$fakebin" omp
+
+  out=$(FM_FAKE_HARNESS=omp run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  block_count=$(printf '%s\n' "$out" | grep -c '^SUPERVISION OPERATING INSTRUCTIONS - primary harness:')
+  [ "$block_count" -eq 1 ] || fail "expected exactly one supervision block, got $block_count"
+  assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: omp" "omp supervision block missing"
+  assert_contains "$out" "Mode: omp (Oh My Pi) extension background wake." "omp snippet missing from session start"
+  assert_contains "$out" "OMP_WATCH_EXTENSION: not loaded" "omp extension load diagnostic missing"
+  assert_contains "$out" "so $root/.omp/extensions/fm-primary-turnend-guard.ts and $root/.omp/extensions/fm-primary-omp-watch.ts auto-load" "omp diagnostic omits the two tracked extension paths"
+  assert_not_contains "$out" "PI_WATCH_EXTENSION" "omp primary must not receive the Pi diagnostic"
+  assert_not_contains "$out" "project trust" "omp diagnostic must not carry Pi's trust prerequisite"
+  pass "session start emits the omp block and reports omp extension load state"
+}
+
+test_omp_diagnostic_accepts_prelock_loaded_marker() {
+  local rec root home fakebin out holder_pid
+  rec=$(new_world omp-prelock-loaded-marker)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+
+  sleep 300 &
+  holder_pid=$!
+  make_fake_ps_pi_holder "$fakebin" "$holder_pid" omp
+  install_omp_extension_fixtures "$root"
+  write_omp_loaded_markers "$home" "$root" "$holder_pid"
+
+  out=$(FM_FAKE_HARNESS=omp run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  assert_contains "$out" "primary harness: omp" "omp holder ancestry was not detected as omp"
+  assert_not_contains "$out" "OMP_WATCH_EXTENSION: not loaded" "omp diagnostic rejected a current pre-lock loaded marker"
+  pass "session start accepts current omp markers written before lock acquisition"
+}
+
 test_pi_diagnostic_rejects_missing_turnend_guard_marker() {
   local rec root home fakebin out holder_pid
   rec=$(new_world pi-missing-turnend-marker)
@@ -2190,6 +2680,7 @@ test_read_once_contract_is_stated_once_before_its_subject
 test_herdr_backend_diagnostics_follow_real_session_start
 test_session_start_relaunches_missing_pi_secondmate
 test_deferred_relaunch_is_always_reported
+test_inactive_reconcile_never_blocks_the_digest
 test_unreachable_network_never_blocks_the_digest
 test_deferred_result_reaches_the_agent_when_the_digest_cannot_print_it
 test_read_only_session_declares_skipped_network_checks
@@ -2204,6 +2695,8 @@ test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts
+test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep
+test_non_pi_session_start_leaves_branch_state_untouched
 test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata
 test_backlog_queued_bound_discloses_its_remainder
 test_backlog_compact_manual_backend_skips_indented_bodies
@@ -2211,10 +2704,14 @@ test_backlog_compact_tasks_axi_unavailable_uses_manual_fallback
 test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
+test_next_step_quiet_mode_delegates_to_daemon
+test_next_step_afk_legacy_empty_flag_defaults_away
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
 test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
+test_omp_supervision_block_and_diagnostic
+test_omp_diagnostic_accepts_prelock_loaded_marker
 test_pi_diagnostic_rejects_missing_turnend_guard_marker
 test_pi_diagnostic_rejects_previous_session_loaded_marker
 test_runtime_bound_truncates_loudly_and_exits_zero
@@ -2222,6 +2719,10 @@ test_portable_timeout_escalates_term_resistant_process
 test_runtime_bound_leaves_a_healthy_digest_untouched
 test_runtime_bound_leaves_harness_ancestry_headroom
 test_reemit_skips_startup_sweeps_but_keeps_the_wake_drain
+test_agents_baseline_stays_at_true_start_and_reemits_on_every_drifted_pi_compact
+test_read_only_pi_compact_refreshes_against_its_own_session_identity
+test_codex_unreachable_reset_sources_do_not_claim_instruction_refresh
+test_agents_baseline_requires_sha256_and_successful_completion
 test_reemit_keeps_repair_ownership_with_the_lock_holder
 
 echo "# fm-session-start.test.sh: all assertions passed"

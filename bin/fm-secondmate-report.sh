@@ -7,30 +7,34 @@
 # status line that includes the same corr token is equally valid
 # (bin/fm-pending-reply-lib.sh).
 #
+# The write destination is mechanical: this helper never takes a status path.
+# It resolves the parent channel through fm_parent_channel_destination
+# (bin/fm-parent-channel-lib.sh): a local mate writes the parent home's
+# state/<id>.status, and a remote mate writes this home's
+# state/parent-replies.status. Call it from the secondmate home with FM_HOME
+# set to that home.
+#
 # Usage:
-#   fm-secondmate-report.sh <status-file> <verb> <corr_id> <note...>
-#   fm-secondmate-report.sh --doc <status-file> <verb> <corr_id> <doc-path> <note...>
+#   fm-secondmate-report.sh <verb> <corr_id> <note...>
+#   fm-secondmate-report.sh --doc <verb> <corr_id> <doc-path> <note...>
 #
 # Examples:
-#   fm-secondmate-report.sh "$STATUS" done abcdef0123456789 "audit clean"
-#   fm-secondmate-report.sh --doc "$STATUS" done abcdef0123456789 data/x/report.md "see report"
-#
-# The status file must be the absolute parent route from the secondmate charter
-# (state/<id>.status under the PARENT home), never a path relative to this
-# secondmate home. Writing under the wrong home is detected as supporting
-# evidence by the parent pending-reply guard and does not acknowledge the
-# request.
+#   fm-secondmate-report.sh done abcdef0123456789 "audit clean"
+#   fm-secondmate-report.sh --doc done abcdef0123456789 data/x/report.md "see report"
 set -eu
 
+CALLER_FM_HOME=${FM_HOME:-}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# shellcheck source=bin/fm-parent-channel-lib.sh
+. "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 
 usage() {
   cat <<'EOF' >&2
 Usage:
-  fm-secondmate-report.sh <status-file> <verb> <corr_id> <note...>
-  fm-secondmate-report.sh --doc <status-file> <verb> <corr_id> <doc-path> <note...>
+  fm-secondmate-report.sh <verb> <corr_id> <note...>
+  fm-secondmate-report.sh --doc <verb> <corr_id> <doc-path> <note...>
 EOF
   exit 2
 }
@@ -41,11 +45,15 @@ if [ "${1:-}" = "--doc" ]; then
   shift
 fi
 
-[ $# -ge 4 ] || usage
-STATUS_FILE=$1
-VERB=$2
-CORR=$3
-shift 3
+[ $# -ge 2 ] || usage
+VERB=$1
+CORR=$2
+shift 2
+if [ "$DOC_MODE" = 1 ]; then
+  [ $# -ge 1 ] && [ -n "$1" ] || usage
+else
+  [ $# -ge 1 ] && [ -n "$*" ] || usage
+fi
 
 case "$CORR" in
   corr=*) CORR=${CORR#corr=} ;;
@@ -58,31 +66,39 @@ case "$CORR" in
     ;;
 esac
 
-case "$STATUS_FILE" in
-  '') usage ;;
+HOME_DIR=$CALLER_FM_HOME
+case "$HOME_DIR" in
+  '')
+    echo "error: FM_HOME is required so the helper can resolve the parent channel" >&2
+    exit 1
+    ;;
 esac
-mkdir -p "$(dirname "$STATUS_FILE")" 2>/dev/null || true
-if [ ! -d "$(dirname "$STATUS_FILE")" ]; then
-  echo "error: cannot create parent directory for status file '$STATUS_FILE'" >&2
+STATE_DIR="${FM_STATE_OVERRIDE:-$HOME_DIR/state}"
+
+DESTINATION=
+DEST_RC=0
+DESTINATION=$(fm_parent_channel_destination "$HOME_DIR" "$STATE_DIR") || DEST_RC=$?
+if [ "$DEST_RC" -ne 0 ] || [ -z "$DESTINATION" ]; then
+  echo "error: cannot resolve the parent channel from this home (not a seeded secondmate?)" >&2
+  exit 1
+fi
+mkdir -p "$(dirname "$DESTINATION")" 2>/dev/null || true
+if [ ! -d "$(dirname "$DESTINATION")" ]; then
+  echo "error: cannot create parent directory for status file '$DESTINATION'" >&2
   exit 1
 fi
 
 token=$(fm_pending_reply_corr_token "$CORR")
 if [ "$DOC_MODE" = 1 ]; then
-  [ $# -ge 1 ] || usage
   DOC_PATH=$1
   shift
   NOTE=$*
   if [ -n "$NOTE" ]; then
-    printf '%s [%s]: %s (%s via-helper)\n' "$VERB" "$token" "$NOTE" "$DOC_PATH" >> "$STATUS_FILE"
+    printf '%s [%s]: %s (%s via-helper)\n' "$VERB" "$token" "$NOTE" "$DOC_PATH" >> "$DESTINATION"
   else
-    printf '%s [%s]: %s (via-helper)\n' "$VERB" "$token" "$DOC_PATH" >> "$STATUS_FILE"
+    printf '%s [%s]: %s (via-helper)\n' "$VERB" "$token" "$DOC_PATH" >> "$DESTINATION"
   fi
 else
   NOTE=$*
-  if [ -n "$NOTE" ]; then
-    printf '%s [%s]: %s (via-helper)\n' "$VERB" "$token" "$NOTE" >> "$STATUS_FILE"
-  else
-    printf '%s [%s]: (via-helper)\n' "$VERB" "$token" >> "$STATUS_FILE"
-  fi
+  printf '%s [%s]: %s (via-helper)\n' "$VERB" "$token" "$NOTE" >> "$DESTINATION"
 fi

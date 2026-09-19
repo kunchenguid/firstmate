@@ -10,19 +10,32 @@
 #     on startup) follows the PRIMARY checkout's current default-branch commit:
 #     base_mode is that local commit, with NO fetch and no origin dependency.
 #
+# A REMOTE secondmate home follows that same primary commit. Its host cannot read
+# this object store, so bin/fm-spawn.sh and bin/fm-bootstrap.sh hand the commit to
+# bin/fm-remote-secondmate-control.sh, which imports it on that host and then runs
+# THIS ff_target with it as the base, so the guards below stay the only copy of the
+# ancestry rules.
+#
 # A linked-worktree secondmate home already holds the primary's commit in the
 # shared object store, so its local-HEAD sync is a purely local fast-forward that
-# never touches the network. A standalone clone moves through that path only when
-# it already has the target; otherwise it is skipped until the origin path updates it.
+# never touches the network. A local standalone clone moves through that path
+# only when it already has the target; otherwise it is skipped until the origin
+# path updates it.
 # A tracked-files fast-forward never touches the gitignored operational dirs
 # (data/, state/, config/, projects/, .no-mistakes/), so it cannot disturb a
 # secondmate's backlog, projects, or in-flight work.
 # The seeded .fm-secondmate-home identity marker is gitignored too; the local
 # sync tolerates only that marker during the one-time upgrade of pre-ignore
 # linked-worktree homes.
-# Homes are leased at a detached HEAD on the
-# default branch, so the fast-forward advances HEAD only and never moves the
-# shared default branch or any other worktree's checkout.
+# A clean secondmate divergence is reconciled only when a three-way tree proof
+# shows that its complete local result is already present in the target, as
+# happens after an upstream squash merge. Every other divergence stays put and
+# records an inspectable state/.secondmate-update-reconcile/<id>.pending marker
+# in the supervising home until a later successful convergence clears it.
+# Locally leased homes start at a detached HEAD on the default branch, so their
+# fast-forward advances HEAD only and never moves the shared default branch or
+# any other worktree's checkout. A standalone remote home may instead advance
+# its checked-out default branch under the same guard.
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
@@ -211,7 +224,7 @@ fetch_once() {
 
 # Which watched instruction paths changed between HEAD and BASE (comma list).
 # These are the files a running agent actually reads or runs: its instructions
-# (AGENTS.md, which CLAUDE.md symlinks), its agent-loaded skills
+# (AGENTS.md, which CLAUDE.md imports via @AGENTS.md), its agent-loaded skills
 # (.agents/skills/), and its tooling (bin/). Public skills/ is installer-facing
 # and intentionally not part of this watched instruction surface.
 changed_instr() {
@@ -224,6 +237,20 @@ changed_instr() {
   printf '%s' "$out"
 }
 
+# Translate one remote home sync leg's failure into an operator-actionable
+# reason. The remote leg refuses a command shape it does not recognize with this
+# status, which on this leg can only mean that host's Firstmate copy predates the
+# parent-targeted sync it was just asked for; every other failure already carries
+# its own diagnostic.
+REMOTE_SYNC_UNSUPPORTED_STATUS=2
+remote_sync_failure_reason() { # <exit-status> <output>
+  if [ "$1" = "$REMOTE_SYNC_UNSUPPORTED_STATUS" ]; then
+    printf '%s\n' "the Firstmate copy on that host is too old to sync to this primary's commit; run /updatefirstmate"
+    return 0
+  fi
+  first_line "$2"
+}
+
 dirty_status() {
   local dir=$1 ignore_seed_marker=${2:-no}
   if [ "$ignore_seed_marker" = yes ]; then
@@ -231,6 +258,72 @@ dirty_status() {
   else
     git -C "$dir" status --porcelain 2>/dev/null | head -1
   fi
+}
+
+secondmate_update_reconcile_marker_path() { # <state> <id>
+  local state=$1 id=$2
+  case "$id" in *[!A-Za-z0-9._-]*|'') return 1 ;; esac
+  printf '%s/.secondmate-update-reconcile/%s.pending\n' "$state" "$id"
+}
+
+secondmate_update_reconcile_record() { # <state> <id> <local-commit> <target-commit> <target>
+  local state=$1 id=$2 local_commit=$3 target_commit=$4 target=$5 marker parent tmp
+  case "$target" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  if [ -e "$state" ] || [ -L "$state" ]; then
+    state=$(resolved_existing_dir "$state") || return 1
+  else
+    mkdir -p "$state" || return 1
+    state=$(resolved_existing_dir "$state") || return 1
+  fi
+  marker=$(secondmate_update_reconcile_marker_path "$state" "$id") || return 1
+  parent=${marker%/*}
+  if [ -e "$parent" ] || [ -L "$parent" ]; then
+    [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  else
+    mkdir -p "$parent" || return 1
+  fi
+  [ ! -L "$marker" ] || return 1
+  tmp=$(umask 077; mktemp "$parent/.secondmate-update-reconcile.XXXXXX" 2>/dev/null) || return 1
+  {
+    printf 'schema=fm-secondmate-update-reconcile.v1\n'
+    printf 'id=%s\n' "$id"
+    printf 'status=diverged\n'
+    printf 'local_commit=%s\n' "$local_commit"
+    printf 'target_commit=%s\n' "$target_commit"
+    printf 'target=%s\n' "$target"
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$marker" || { rm -f -- "$tmp"; return 1; }
+  printf '%s\n' "$marker"
+}
+
+secondmate_update_reconcile_clear() { # <state> <id>
+  local state=$1 marker
+  [ -e "$state" ] || [ -L "$state" ] || return 0
+  state=$(resolved_existing_dir "$state") || return 1
+  marker=$(secondmate_update_reconcile_marker_path "$state" "$2") || return 1
+  [ -e "$marker" ] || [ -L "$marker" ] || return 0
+  [ ! -L "$marker" ] || return 1
+  rm -f -- "$marker"
+}
+
+# Prove that merging LOCAL into TARGET from their real merge base adds no tree
+# change to TARGET. A temporary index performs the three-way comparison without
+# touching the worktree or writing a merge commit. Conflicts or any remaining
+# content difference are not redundant and therefore stay diverged.
+divergence_is_redundant() { # <dir> <local-commit> <target-commit>
+  local dir=$1 local_commit=$2 target_commit=$3 ancestor scratch index result=1
+  ancestor=$(git -C "$dir" merge-base "$local_commit" "$target_commit" 2>/dev/null) || return 1
+  scratch=$(mktemp -d "${TMPDIR:-/tmp}/fm-ff-redundant.XXXXXX" 2>/dev/null) || return 1
+  index="$scratch/index"
+  if GIT_INDEX_FILE="$index" git -C "$dir" read-tree -m \
+      "$ancestor" "$target_commit" "$local_commit" 2>/dev/null \
+    && ! GIT_INDEX_FILE="$index" git -C "$dir" ls-files -u | grep -q . \
+    && GIT_INDEX_FILE="$index" git -C "$dir" diff --cached --quiet "$target_commit" --; then
+    result=0
+  fi
+  rm -rf -- "$scratch"
+  return "$result"
 }
 
 # List this home's LIVE secondmate direct reports from state/<id>.meta records.
@@ -266,12 +359,15 @@ live_secondmate_meta_records() {
 #                  already exist in the target's object store, which it always does
 #                  for a worktree of this same repo; a standalone clone that lacks
 #                  it is skipped rather than fetched.
-# Guards are identical in both modes: ff-only (never force/merge/stash); skip a
-# dirty, diverged, or wrong-branch target and leave its work untouched.
+# Guards are identical in both modes: never force/merge/stash; skip a dirty or
+# wrong-branch target and leave its work untouched. An optional secondmate id
+# enables the content-equivalent divergence proof and durable marker described
+# in this file's header.
 FF_STATUS=""
 FF_INSTR=""
 ff_target() {
   local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no} ignore_seed_marker=${5:-no}
+  local secondmate_id=${6:-} reconciliation_state=${7:-}
   FF_STATUS="skipped"
   FF_INSTR=""
 
@@ -335,11 +431,40 @@ ff_target() {
   }
   if [ "$local_rev" = "$base_rev" ]; then
     FF_STATUS="current"
+    [ -z "$reconciliation_state" ] || secondmate_update_reconcile_clear "$reconciliation_state" "$secondmate_id" || true
     echo "$label: already current"
     return 0
   fi
   if ! git -C "$dir" merge-base --is-ancestor HEAD "$base" 2>/dev/null; then
-    echo "$label: skipped: diverged from $base"
+    if [ -n "$secondmate_id" ] && [ -n "$reconciliation_state" ] \
+      && divergence_is_redundant "$dir" "$local_rev" "$base_rev"; then
+      instr=$(changed_instr "$dir" "$base")
+      before=$(git -C "$dir" rev-parse --short HEAD)
+      if git -C "$dir" reset --keep "$base" >/dev/null 2>&1; then
+        after=$(git -C "$dir" rev-parse --short HEAD)
+        FF_STATUS="updated"
+        FF_INSTR="$instr"
+        secondmate_update_reconcile_clear "$reconciliation_state" "$secondmate_id" || true
+        if [ -n "$instr" ]; then
+          echo "$label: reconciled redundant divergence $before..$after (instructions changed: $instr)"
+        else
+          echo "$label: reconciled redundant divergence $before..$after"
+        fi
+        return 0
+      fi
+      echo "$label: skipped: redundant divergence could not be reconciled with reset --keep"
+      return 0
+    fi
+    if [ -n "$secondmate_id" ] && [ -n "$reconciliation_state" ]; then
+      local marker
+      if marker=$(secondmate_update_reconcile_record "$reconciliation_state" "$secondmate_id" "$local_rev" "$base_rev" "$base"); then
+        echo "$label: skipped: diverged from $base; reconciliation required (record: $marker)"
+      else
+        echo "$label: skipped: diverged from $base; reconciliation required, but its durable record could not be written"
+      fi
+    else
+      echo "$label: skipped: diverged from $base"
+    fi
     return 0
   fi
 
@@ -352,6 +477,7 @@ ff_target() {
   after=$(git -C "$dir" rev-parse --short HEAD)
   FF_STATUS="updated"
   FF_INSTR="$instr"
+  [ -z "$reconciliation_state" ] || secondmate_update_reconcile_clear "$reconciliation_state" "$secondmate_id" || true
   if [ -n "$instr" ]; then
     echo "$label: updated $before..$after (instructions changed: $instr)"
   else
@@ -375,6 +501,20 @@ FF_SEEN_HOMES=""
 # whose only change was non-instruction tracked files, is left undisturbed. The
 # firstmate repo itself (FM_ROOT) is never processed as its own secondmate, and
 # each resolved home is processed at most once.
+#
+# Two optional caller hooks fire from here, each at most once per resolved home:
+#   fm_ff_after_instruction_update <id> <home> <window> <instr>
+#     the nudge-shaped hook: only for an advance that changed the instruction
+#     surface, and only under nudge_requires_instr=yes.
+#   fm_ff_after_secondmate_settled <id> <home> <window> <status> <instr>
+#     the settled-state hook: for every home this sweep left AT the base with a
+#     live window, whether it advanced (status=updated) or was already there
+#     (status=current). A home that was SKIPPED is never settled, so a dirty,
+#     diverged, offline, or unsafe home never reaches this hook and nothing here
+#     forces, stashes, or discards its work. /updatefirstmate uses this hook to
+#     reach every live mate that is genuinely on the new bytes, including the
+#     ones that needed no advance to get there.
+# An undefined hook is simply not called.
 process_secondmate() {
   local id=$1 home=$2 window=${3:-} base_mode=$4 nudge_requires_instr=${5:-no} home_real fm_root_real
   [ -n "$id" ] || return 0
@@ -392,7 +532,11 @@ process_secondmate() {
   esac
   FF_SEEN_HOMES="$FF_SEEN_HOMES $home_real"
 
-  ff_target "$home_real" "secondmate $id" "$base_mode" yes yes
+  ff_target "$home_real" "secondmate $id" "$base_mode" yes yes "$id" "${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+  if [ -n "$window" ] && { [ "$FF_STATUS" = "updated" ] || [ "$FF_STATUS" = "current" ]; } \
+    && type fm_ff_after_secondmate_settled >/dev/null 2>&1; then
+    fm_ff_after_secondmate_settled "$id" "$home_real" "$window" "$FF_STATUS" "$FF_INSTR"
+  fi
   if [ "$FF_STATUS" = "updated" ] && [ -n "$window" ]; then
     if [ "$nudge_requires_instr" = yes ] && [ -z "$FF_INSTR" ]; then
       return 0

@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Parity guard for firstmate's shell-lint definition.
 #
-# bin/fm-lint.sh must be the single owner that BOTH CI
-# (.github/workflows/ci.yml) and the pre-push gate (.no-mistakes.yaml
-# commands.lint) invoke, so the local lint can never diverge from CI again.
+# bin/fm-lint.sh is the single owner invoked by CI
+# (.github/workflows/ci.yml) and by the pre-push gate (.no-mistakes.yaml
+# commands.lint). CI runs its two full-rigor canonical partitions; the local
+# gate uses its context-selected default. Their selection differs deliberately,
+# while this owner keeps analysis flags, configuration, and tool versions from
+# drifting.
 # Regression origin: with no commands.lint configured, the local no-mistakes
-# lint step never ran the deterministic
-# `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh`, so PRs passed local
-# validation yet failed that exact check in CI on info/warning findings such as
-# SC2015, SC1007, and SC2034. A second axis was tool-version skew: CI's
-# ShellCheck floated with the runner image and still emitted SC2015, which
-# ShellCheck retired in 0.11.0. fm-lint.sh now pins one exact version and both
-# gates resolve it, so command, file set, config, AND version all match.
+# lint step never ran the deterministic shell lint, so PRs passed local
+# validation yet failed CI on info/warning findings such as SC2015, SC1007, and
+# SC2034. A second axis was tool-version skew: CI's ShellCheck floated with the
+# runner image and still emitted SC2015, which ShellCheck retired in 0.11.0.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -22,11 +22,148 @@ INSTALLER="$ROOT/bin/fm-install-shellcheck.sh"
 # The pinned version, read from the single source (the one owner itself).
 REQUIRED=$("$LINT" --required-version)
 
+# Official GitHub release asset sha256 values for shellcheck v0.11.0 .tar.xz
+# archives (https://github.com/koalaman/shellcheck/releases/tag/v0.11.0). Tests
+# compare installer behavior against these published digests, not script source.
+SHELLCHECK_SHA_LINUX_X86_64=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+SHELLCHECK_SHA_LINUX_AARCH64=12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588
+SHELLCHECK_SHA_DARWIN_X86_64=3c89db4edcab7cf1c27bff178882e0f6f27f7afdf54e859fa041fca10febe4c6
+SHELLCHECK_SHA_DARWIN_AARCH64=56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79
+
+# fm_install_stub_uname <fakebin>: uname -s / uname -m from FM_TEST_UNAME_S/M.
+fm_install_stub_uname() {
+  local fakebin=$1
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  -s) printf '%s\n' "${FM_TEST_UNAME_S:-Linux}" ;;
+  -m) printf '%s\n' "${FM_TEST_UNAME_M:-x86_64}" ;;
+  *) printf '%s\n' "${FM_TEST_UNAME_S:-Linux}" ;;
+esac
+SH
+  chmod +x "$fakebin/uname"
+}
+
+# fm_install_stub_curl <fakebin>: log the URL, fail CURL_FAIL_UNTIL times, then
+# write an empty file at -o. CURL_COUNT and CURL_URL_LOG are paths the stub
+# updates when invoked.
+fm_install_stub_curl() {
+  local fakebin=$1
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+count=0
+[ ! -f "${CURL_COUNT:-}" ] || count=$(cat "$CURL_COUNT")
+count=$((count + 1))
+[ -z "${CURL_COUNT:-}" ] || printf '%s\n' "$count" > "$CURL_COUNT"
+url=
+out=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o)
+      out=$2
+      shift 2
+      ;;
+    -*)
+      shift
+      ;;
+    *)
+      url=$1
+      shift
+      ;;
+  esac
+done
+[ -z "${CURL_URL_LOG:-}" ] || printf '%s\n' "$url" >> "$CURL_URL_LOG"
+fail_until=${CURL_FAIL_UNTIL:-0}
+[ "$count" -gt "$fail_until" ] || exit 22
+: > "$out"
+exit 0
+SH
+  chmod +x "$fakebin/curl"
+}
+
+# fm_install_stub_hasher <fakebin> <name>: sha256sum or shasum stub that prints
+# SHA256_STUB_HASH and records the invocation on HASHER_LOG. shasum requires -a 256.
+fm_install_stub_hasher() {
+  local fakebin=$1 name=$2
+  cat > "$fakebin/$name" <<'SH'
+#!/usr/bin/env bash
+self=${0##*/}
+if [ -n "${HASHER_LOG:-}" ]; then
+  printf '%s\n' "$self $*" >> "$HASHER_LOG"
+fi
+file=$1
+if [ "$self" = shasum ]; then
+  algo=
+  file=
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -a)
+        algo=$2
+        shift 2
+        ;;
+      *)
+        file=$1
+        shift
+        ;;
+    esac
+  done
+  [ "$algo" = 256 ] || exit 1
+fi
+printf '%s  %s\n' "${SHA256_STUB_HASH:?}" "$file"
+SH
+  chmod +x "$fakebin/$name"
+}
+
+fm_install_stub_tar_shellcheck() {
+  local fakebin=$1
+  cat > "$fakebin/tar" <<'SH'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-C" ]; then
+    mkdir -p "$2/shellcheck-v0.11.0"
+    cat > "$2/shellcheck-v0.11.0/shellcheck" <<'EOF'
+#!/usr/bin/env bash
+printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+EOF
+    chmod +x "$2/shellcheck-v0.11.0/shellcheck"
+    exit 0
+  fi
+  shift
+done
+exit 2
+SH
+  chmod +x "$fakebin/tar"
+}
+
+fm_install_stub_sleep() {
+  local fakebin=$1
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/sleep"
+}
+
 # True only when the resolved shellcheck is exactly the pinned version, so the
 # lint-running tests below match what CI enforces instead of a runner default.
 pinned_ready() {
   command -v shellcheck >/dev/null 2>&1 || return 1
   [ "$(shellcheck --version | awk '/^version:/ {print $2; exit}')" = "$REQUIRED" ]
+}
+
+test_help_reports_the_complete_interface() {
+  local help
+  help=$("$LINT" --help) || fail "fm-lint.sh --help failed"
+  assert_contains "$help" "--telemetry" "fm-lint.sh --help omitted --telemetry"
+  assert_contains "$help" "--required-version" "fm-lint.sh --help omitted --required-version"
+  assert_contains "$help" "--list-files" "fm-lint.sh --help omitted --list-files"
+  assert_contains "$help" "--help" "fm-lint.sh --help omitted --help"
+  assert_contains "$help" "--fast" "fm-lint.sh --help omitted --fast"
+  assert_contains "$help" "SC1091" "fm-lint.sh --help omitted the local SC1091 exclusion"
+  assert_contains "$help" "SC2034" "fm-lint.sh --help omitted the local SC2034 exclusion"
+  assert_contains "$help" "SC2153" "fm-lint.sh --help omitted the local SC2153 exclusion"
+  assert_contains "$help" "SC2329" "fm-lint.sh --help omitted the local SC2329 exclusion"
+  pass "fm-lint.sh --help reports the complete executable interface"
 }
 
 test_list_files_reports_the_shell_inventory() {
@@ -39,6 +176,48 @@ test_list_files_reports_the_shell_inventory() {
   [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
     || fail "fm-lint.sh --list-files did not return the complete shell inventory"
   pass "fm-lint.sh --list-files reports the complete shell inventory"
+}
+
+test_canonical_partitions_preserve_full_lint() {
+  local tmp fakebin all part selected log flags mode rc option
+  tmp=$(fm_test_tmproot fm-lint-partitions)
+  fakebin="$tmp/bin"
+  mkdir -p "$fakebin"
+  all=$(CI=true "$LINT" --list-files | LC_ALL=C sort)
+  : > "$tmp/union"
+  for part in 1of2 2of2; do
+    selected=$(CI=false GITHUB_ACTIONS=false "$LINT" --partition "$part" --list-files) \
+      || fail "partition $part must select full canonical roots even on a local branch"
+    [ -n "$selected" ] || fail "empty lint partition $part"
+    printf '%s\n' "$selected" >> "$tmp/union"
+    [ "$selected" = "$("$LINT" --partition "$part" --list-files)" ] \
+      || fail "partition $part is nondeterministic"
+    log="$tmp/$part.roots"
+    flags="$tmp/$part.flags"
+    mode="$tmp/$part.mode"
+    fm_lint_stub_shellcheck "$fakebin" "$log"
+    PATH="$fakebin:$PATH" FM_TEST_FLAG_LOG="$flags" FM_TEST_MODE_LOG="$mode" \
+      "$LINT" --partition "$part" > "$tmp/$part.out" 2>&1 \
+      || fail "canonical partition $part failed: $(cat "$tmp/$part.out")"
+    [ "$(LC_ALL=C sort "$log")" = "$(printf '%s\n' "$selected" | LC_ALL=C sort)" ] \
+      || fail "partition $part executed a different root set than it listed"
+    [ "$(LC_ALL=C sort -u "$flags")" = "$(printf 'exclude=none\nexternal-sources=yes')" ] \
+      || fail "partition $part weakened source-aware analysis"
+    [ "$(LC_ALL=C sort -u "$mode")" = on ] || fail "partition $part disabled full analysis"
+  done
+  [ "$(LC_ALL=C sort "$tmp/union")" = "$all" ] || fail "lint partitions lose or duplicate canonical roots"
+  for option in 0of2 3of2 1of3; do
+    rc=0
+    "$LINT" --partition "$option" --list-files > "$tmp/refused" 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "invalid partition $option was not refused"
+  done
+  rc=0
+  "$LINT" --partition 1of2 --fast > "$tmp/refused" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "partition accepted --fast"
+  rc=0
+  "$LINT" --partition 1of2 bin/fm-lint.sh > "$tmp/refused" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "partition accepted an explicit subset"
+  pass "two canonical lint partitions preserve complete source-aware coverage and reject weakened modes"
 }
 
 # fm_lint_stub_git <fakebin-dir>: install a git stub for the changed-file mode
@@ -105,7 +284,10 @@ fm_lint_write_diff_file() {
 # that answers --version with the pinned version and otherwise logs the file
 # roots it was asked to check (one per line) instead of actually analyzing
 # them, so changed-file mode tests can assert exactly which files fm-lint.sh
-# selected without depending on real ShellCheck findings.
+# selected without depending on real ShellCheck findings. When
+# FM_TEST_MODE_LOG is set, it records the effective analysis mode, treating
+# ShellCheck's default as full analysis. When FM_TEST_FLAG_LOG is set, it
+# records whether --external-sources was passed and the --exclude value.
 fm_lint_stub_shellcheck() {
   local fakebin=$1 log=$2
   : > "$log"
@@ -115,11 +297,127 @@ if [ "\${1:-}" = --version ]; then
   printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
   exit 0
 fi
-shift 3
+mode=on
+follow=no
+exclude=none
+while [ "\$#" -gt 0 ] && [ "\$1" != -- ]; do
+  case "\$1" in
+    --extended-analysis=false) mode=off ;;
+    --external-sources) follow=yes ;;
+    --exclude=*) exclude=\${1#--exclude=} ;;
+    --exclude)
+      shift
+      exclude=\${1:-none}
+      ;;
+  esac
+  shift
+done
+if [ -n "\${FM_TEST_MODE_LOG:-}" ]; then
+  printf '%s\n' "\$mode" >> "\$FM_TEST_MODE_LOG"
+fi
+if [ -n "\${FM_TEST_FLAG_LOG:-}" ]; then
+  printf 'external-sources=%s\nexclude=%s\n' "\$follow" "\$exclude" >> "\$FM_TEST_FLAG_LOG"
+fi
+[ "\$#" -eq 0 ] || shift
 printf '%s\n' "\$@" >> "$log"
 exit 0
 SH
   chmod +x "$fakebin/shellcheck"
+}
+
+test_fast_mode_disables_extended_analysis() {
+  local tmp fakebin log mode_log telemetry fixture out
+  tmp=$(fm_test_tmproot fm-lint-fast-mode)
+  fakebin=$(fm_fakebin "$tmp")
+  fixture="$tmp/fixture.sh"
+  log="$tmp/shellcheck.log"
+  mode_log="$tmp/mode.log"
+  telemetry="$tmp/telemetry.tsv"
+  cat > "$fixture" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-ok}"
+SH
+  chmod +x "$fixture"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    FM_TEST_MODE_LOG="$mode_log" "$LINT" --fast --telemetry "$telemetry" "$fixture" 2>&1) \
+    || fail "fast lint mode failed"$'\n'"$out"
+  [ "$(cat "$mode_log")" = off ] \
+    || fail "fast lint mode did not disable extended analysis"
+  [ "$(cat "$log")" = "$fixture" ] \
+    || fail "fast lint mode did not lint the requested root"
+  assert_grep $'analysis_mode\tfast' "$telemetry" "telemetry did not record fast analysis mode"
+  pass "fm-lint.sh --fast disables ShellCheck extended analysis"
+}
+
+test_ci_defaults_to_full_analysis() {
+  local tmp fakebin log mode_log fixture out
+  tmp=$(fm_test_tmproot fm-lint-ci-analysis)
+  fakebin=$(fm_fakebin "$tmp")
+  fixture="$tmp/fixture.sh"
+  log="$tmp/shellcheck.log"
+  mode_log="$tmp/mode.log"
+  cat > "$fixture" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-ok}"
+SH
+  chmod +x "$fixture"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+
+  out=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true FM_LINT_FAST=1 FM_LINT_JOBS=1 \
+    FM_TEST_MODE_LOG="$mode_log" "$LINT" "$fixture" 2>&1) \
+    || fail "CI full lint mode failed"$'\n'"$out"
+  [ "$(cat "$mode_log")" = on ] \
+    || fail "CI default did not keep full ShellCheck analysis"
+  pass "fm-lint.sh keeps full ShellCheck analysis by default in CI"
+}
+
+test_ci_rejects_explicit_fast_mode() {
+  local tmp fakebin log fixture out rc
+  tmp=$(fm_test_tmproot fm-lint-ci-reject-fast)
+  fakebin=$(fm_fakebin "$tmp")
+  fixture="$tmp/fixture.sh"
+  log="$tmp/shellcheck.log"
+  cat > "$fixture" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-ok}"
+SH
+  chmod +x "$fixture"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true FM_LINT_JOBS=1 \
+    "$LINT" --fast "$fixture" 2>&1) || rc=$?
+  [ "$rc" -eq 2 ] \
+    || fail "CI accepted explicit fast lint mode (exit $rc)"$'\n'"$out"
+  assert_contains "$out" "--fast is local-only" \
+    "CI fast-mode rejection did not explain the policy"
+  [ ! -s "$log" ] || fail "CI invoked ShellCheck after rejecting fast mode"
+  pass "fm-lint.sh rejects explicit --fast mode in CI"
+}
+
+test_fast_mode_catches_a_real_lint_defect() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): fast lint-defect regression check"
+    return
+  fi
+  local tmp bad out rc
+  tmp=$(fm_test_tmproot fm-lint-fast-bad)
+  bad="$tmp/bad.sh"
+  cat > "$bad" <<'SH'
+#!/usr/bin/env bash
+foo() {
+  local a= b=
+  echo "$a$b"
+}
+foo
+SH
+  rc=0
+  out=$(GITHUB_ACTIONS='' CI='' "$LINT" --fast "$bad" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "fast lint mode passed a known-bad fixture"$'\n'"$out"
+  assert_contains "$out" "SC1007" "fast lint mode did not report the expected ShellCheck finding"
+  pass "fm-lint.sh --fast catches an ordinary shell lint defect"
 }
 
 test_changed_mode_lints_only_the_changed_file() {
@@ -208,6 +506,8 @@ test_zero_changed_files_exits_clean() {
   [ "$rc" -eq 0 ] || fail "zero changed lint targets must exit 0, got $rc"$'\n'"$out"
   assert_contains "$out" "ShellCheck 0.11.0" "zero-changed run did not print the ShellCheck version line"
   assert_contains "$out" "no changed lint targets" "zero-changed run did not note the empty target set"
+  assert_contains "$out" "workflow files valid" \
+    "zero-changed run skipped workflow YAML validation"
   pass "fm-lint.sh exits 0 with a note when the local branch has no changed lint targets"
 }
 
@@ -231,6 +531,282 @@ test_list_files_respects_changed_mode() {
   pass "fm-lint.sh --list-files reports the would-be changed set in changed mode"
 }
 
+fm_lint_assert_flag_log() {
+  local flag_log=$1 expected_follow=$2 expected_exclude=$3
+  [ -s "$flag_log" ] || fail "ShellCheck was not invoked; flag log is empty"
+  awk -v follow="$expected_follow" -v exclude="$expected_exclude" '
+    BEGIN { bad=0; saw=0 }
+    /^external-sources=/ { saw=1; if ($0 != "external-sources=" follow) bad=1 }
+    /^exclude=/ { if ($0 != "exclude=" exclude) bad=1 }
+    END { exit (saw && !bad) ? 0 : 1 }
+  ' "$flag_log" \
+    || fail "ShellCheck flags were not external-sources=$expected_follow exclude=$expected_exclude"$'\n'"$(cat "$flag_log")"
+}
+
+test_changed_mode_drops_external_sources_and_excludes_cross_file_codes() {
+  local tmp fakebin log flag_log mode_log diff_file telemetry out target
+  tmp=$(fm_test_tmproot fm-lint-local-nox)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  log="$tmp/shellcheck.log"
+  flag_log="$tmp/flags.log"
+  mode_log="$tmp/mode.log"
+  telemetry="$tmp/telemetry.tsv"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+  diff_file="$tmp/diff.nul"
+  target="bin/fm-afk-launch.sh"
+  fm_lint_write_diff_file "$diff_file" "$target"
+
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    FM_TEST_GIT_BRANCH=feature \
+    FM_TEST_GIT_DIFF_FILE="$diff_file" \
+    FM_TEST_FLAG_LOG="$flag_log" FM_TEST_MODE_LOG="$mode_log" \
+    "$LINT" --telemetry "$telemetry" 2>&1) \
+    || fail "changed-mode local lint failed"$'\n'"$out"
+  [ "$(cat "$log")" = "$target" ] \
+    || fail "changed-mode lint did not run ShellCheck on exactly the changed file"$'\n'"logged: $(cat "$log")"
+  [ "$(cat "$mode_log")" = on ] \
+    || fail "changed-mode local lint disabled dataflow analysis"
+  fm_lint_assert_flag_log "$flag_log" no "SC1091,SC2034,SC2153,SC2329"
+  assert_contains "$out" "source following disabled" \
+    "changed-mode local lint did not disclose dropped source following"
+  assert_grep $'analysis_mode\tlocal' "$telemetry" \
+    "telemetry did not record local analysis mode"
+  assert_grep $'source_directives\t4' "$telemetry" \
+    "telemetry did not count the changed root's source directives"
+  assert_grep $'source_followed_directives\t0' "$telemetry" \
+    "telemetry reported followed sources in no-external-sources mode"
+  pass "fm-lint.sh changed mode drops source following and excludes cross-file codes"
+}
+
+test_changed_mode_invokes_shellcheck_once_per_root() {
+  local tmp fakebin log flag_log diff_file out first second invocation_count
+  tmp=$(fm_test_tmproot fm-lint-local-per-root)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  log="$tmp/shellcheck.log"
+  flag_log="$tmp/flags.log"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+  diff_file="$tmp/diff.nul"
+  first="bin/fm-install-shellcheck.sh"
+  second="bin/fm-lint-workflows.sh"
+  fm_lint_write_diff_file "$diff_file" "$first" "$second"
+
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    FM_TEST_GIT_BRANCH=feature FM_TEST_GIT_DIFF_FILE="$diff_file" \
+    FM_TEST_FLAG_LOG="$flag_log" "$LINT" 2>&1) \
+    || fail "changed-mode per-root lint failed"$'\n'"$out"
+  [ "$(LC_ALL=C sort "$log")" = "$first"$'\n'"$second" ] \
+    || fail "changed-mode lint did not analyze both changed roots"$'\n'"logged: $(cat "$log")"
+  invocation_count=$(grep -c '^external-sources=' "$flag_log" || true)
+  [ "$invocation_count" -eq 2 ] \
+    || fail "changed-mode lint used $invocation_count ShellCheck calls for two roots"
+  fm_lint_assert_flag_log "$flag_log" no "SC1091,SC2034,SC2153,SC2329"
+  pass "fm-lint.sh changed mode invokes ShellCheck once per root"
+}
+
+test_ci_keeps_external_sources_without_local_exclusions() {
+  local tmp fakebin log flag_log mode_log fixture out
+  tmp=$(fm_test_tmproot fm-lint-ci-follow)
+  fakebin=$(fm_fakebin "$tmp")
+  fixture="$tmp/fixture.sh"
+  log="$tmp/shellcheck.log"
+  flag_log="$tmp/flags.log"
+  mode_log="$tmp/mode.log"
+  cat > "$fixture" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${1:-ok}"
+SH
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+
+  out=$(PATH="$fakebin:$PATH" CI=true GITHUB_ACTIONS=true FM_LINT_JOBS=1 \
+    FM_TEST_FLAG_LOG="$flag_log" FM_TEST_MODE_LOG="$mode_log" \
+    "$LINT" "$fixture" 2>&1) \
+    || fail "CI lint with explicit path failed"$'\n'"$out"
+  [ "$(cat "$mode_log")" = on ] \
+    || fail "CI lint disabled dataflow analysis"
+  fm_lint_assert_flag_log "$flag_log" yes none
+  pass "fm-lint.sh CI keeps source following without the local exclusion list"
+}
+
+test_main_branch_keeps_external_sources() {
+  local tmp fakebin log flag_log out
+  tmp=$(fm_test_tmproot fm-lint-main-follow)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  log="$tmp/shellcheck.log"
+  flag_log="$tmp/flags.log"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    FM_TEST_GIT_BRANCH=main \
+    FM_TEST_FLAG_LOG="$flag_log" "$LINT" 2>&1) \
+    || fail "main-branch lint failed"$'\n'"$out"
+  fm_lint_assert_flag_log "$flag_log" yes none
+  pass "fm-lint.sh on main keeps source following without the local exclusion list"
+}
+
+test_merge_base_less_keeps_external_sources() {
+  local tmp fakebin log flag_log out
+  tmp=$(fm_test_tmproot fm-lint-nomergebase-follow)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  log="$tmp/shellcheck.log"
+  flag_log="$tmp/flags.log"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    FM_TEST_GIT_BRANCH=feature FM_TEST_GIT_MERGE_BASE_OK=0 \
+    FM_TEST_FLAG_LOG="$flag_log" "$LINT" 2>&1) \
+    || fail "merge-base-less lint failed"$'\n'"$out"
+  fm_lint_assert_flag_log "$flag_log" yes none
+  pass "fm-lint.sh without a merge-base keeps source following without the local exclusion list"
+}
+
+test_explicit_path_keeps_external_sources() {
+  local tmp fakebin log flag_log out target
+  tmp=$(fm_test_tmproot fm-lint-explicit-follow)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  log="$tmp/shellcheck.log"
+  flag_log="$tmp/flags.log"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+  target="bin/fm-install-shellcheck.sh"
+
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    FM_TEST_GIT_BRANCH=feature \
+    FM_TEST_FLAG_LOG="$flag_log" "$LINT" "$target" 2>&1) \
+    || fail "explicit-path lint failed"$'\n'"$out"
+  fm_lint_assert_flag_log "$flag_log" yes none
+  pass "fm-lint.sh explicit paths keep source following"
+}
+
+test_fast_mode_on_a_local_branch_keeps_source_following() {
+  local tmp fakebin log flag_log mode_log diff_file out target
+  tmp=$(fm_test_tmproot fm-lint-fast-follow)
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  log="$tmp/shellcheck.log"
+  flag_log="$tmp/flags.log"
+  mode_log="$tmp/mode.log"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+  diff_file="$tmp/diff.nul"
+  target="bin/fm-install-shellcheck.sh"
+  fm_lint_write_diff_file "$diff_file" "$target"
+
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    FM_TEST_GIT_BRANCH=feature \
+    FM_TEST_GIT_DIFF_FILE="$diff_file" \
+    FM_TEST_FLAG_LOG="$flag_log" FM_TEST_MODE_LOG="$mode_log" \
+    "$LINT" --fast 2>&1) \
+    || fail "fast local-branch lint failed"$'\n'"$out"
+  [ "$(cat "$mode_log")" = off ] \
+    || fail "fast local-branch lint did not disable extended analysis"
+  fm_lint_assert_flag_log "$flag_log" yes none
+  pass "fm-lint.sh --fast on a local branch keeps source following"
+}
+
+test_changed_mode_hides_cross_file_codes_that_ci_still_sees() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): changed-mode exclusion behavior"
+    return
+  fi
+  local tmp fakebin diff_file fixture out rc
+  tmp=$(fm_test_tmproot fm-lint-local-exclude-behavior)
+  fixture="$ROOT/tests/fm-lint-local-exclude-fixture.test.sh"
+  printf '%s\n' "$fixture" >> "$FM_TEST_CLEANUP_REGISTRY"
+  cat > "$fixture" <<'SH'
+#!/usr/bin/env bash
+# Assigned here and only consumed by a library the local gate does not follow.
+cross_file_only=1
+outer() {
+  (
+    # Defined here and only invoked by a library the local gate does not follow.
+    cross_file_helper() {
+      printf 'ok\n'
+    }
+    printf 'hi\n'
+  )
+}
+outer
+SH
+  fakebin=$(fm_fakebin "$tmp")
+  fm_lint_stub_git "$fakebin"
+  diff_file="$tmp/diff.nul"
+  fm_lint_write_diff_file "$diff_file" "tests/fm-lint-local-exclude-fixture.test.sh"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" GITHUB_ACTIONS='' CI='' FM_LINT_JOBS=1 \
+    FM_TEST_GIT_BRANCH=feature \
+    FM_TEST_GIT_DIFF_FILE="$diff_file" "$LINT" 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "changed-mode local lint failed a cross-file-only fixture"$'\n'"$out"
+  assert_not_contains "$out" "SC2034" "changed-mode local lint still reported SC2034"
+  assert_not_contains "$out" "SC2329" "changed-mode local lint still reported SC2329"
+
+  rc=0
+  out=$("$LINT" "$fixture" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "explicit-path lint passed a cross-file-only fixture"$'\n'"$out"
+  assert_contains "$out" "SC2034" "explicit-path lint did not keep SC2034"
+  assert_contains "$out" "SC2329" "explicit-path lint did not keep SC2329"
+  rm -f "$fixture"
+  pass "fm-lint.sh changed mode excludes cross-file codes that explicit paths still report"
+}
+
+# One ShellCheck process per root. Passing the whole canonical set in a
+# single invocation still follows in-set sources and is not the no-x posture.
+fm_lint_nox_one_root() {
+  local index=$1 path=$2 outdir=$3
+  shellcheck --norc --format gcc -- "$path" > "$outdir/$index" || true
+}
+
+test_local_exclusion_list_covers_every_no_external_sources_code() {
+  if ! pinned_ready; then
+    pass "SKIP (ShellCheck $REQUIRED not resolved): local exclusion completeness"
+    return
+  fi
+  local tmp files_file out unexpected code path found i batch
+  local -a files
+  tmp=$(fm_test_tmproot fm-lint-nox-complete)
+  files_file="$tmp/files"
+  CI=true "$LINT" --list-files > "$files_file"
+  [ -s "$files_file" ] || fail "CI --list-files returned no canonical lint roots"
+  files=()
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    files+=("$path")
+  done < "$files_file"
+  [ "${#files[@]}" -gt 0 ] || fail "CI --list-files returned no readable lint roots"
+  mkdir -p "$tmp/gcc"
+  i=0
+  batch=0
+  for path in "${files[@]}"; do
+    i=$((i + 1))
+    fm_lint_nox_one_root "$i" "$path" "$tmp/gcc" &
+    batch=$((batch + 1))
+    if [ "$batch" -eq 4 ]; then
+      wait
+      batch=0
+    fi
+  done
+  wait
+  found=$(find "$tmp/gcc" -type f | wc -l | tr -d '[:space:]')
+  [ "$found" = "${#files[@]}" ] \
+    || fail "completeness sweep linted $found roots, expected ${#files[@]}"
+  out=$(cat "$tmp/gcc"/* 2>/dev/null || true)
+  unexpected=
+  while IFS= read -r code; do
+    [ -n "$code" ] || continue
+    case "$code" in
+      SC1091|SC2034|SC2153|SC2329) ;;
+      *) unexpected="${unexpected}${unexpected:+ }$code" ;;
+    esac
+  done < <(printf '%s\n' "$out" | sed -n 's/.*\[\(SC[0-9][0-9]*\)\].*/\1/p' | LC_ALL=C sort -u)
+  [ -z "$unexpected" ] \
+    || fail "no-external-sources pass emitted codes outside the local exclusion list: $unexpected"
+  pass "local exclusion list covers every no-external-sources ShellCheck code"
+}
+
 test_pins_an_explicit_version() {
   [ -n "$REQUIRED" ] || fail "fm-lint.sh --required-version printed nothing"
   # The captain-agreed pin: adopt ShellCheck 0.11.0's rule set consistently,
@@ -245,54 +821,188 @@ test_installer_retries_transient_download_failure() {
   fakebin=$(fm_fakebin "$tmp")
   destination="$tmp/bin"
 
-  cat > "$fakebin/curl" <<'SH'
-#!/usr/bin/env bash
-count=0
-[ ! -f "$CURL_COUNT" ] || count=$(cat "$CURL_COUNT")
-count=$((count + 1))
-printf '%s\n' "$count" > "$CURL_COUNT"
-[ "$count" -gt 1 ] || exit 35
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = "-o" ]; then
-    : > "$2"
-    exit 0
-  fi
-  shift
-done
-exit 2
-SH
-  cat > "$fakebin/sha256sum" <<'SH'
-#!/usr/bin/env bash
-printf '8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  %s\n' "$1"
-SH
-  cat > "$fakebin/tar" <<'SH'
-#!/usr/bin/env bash
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = "-C" ]; then
-    mkdir -p "$2/shellcheck-v0.11.0"
-    cat > "$2/shellcheck-v0.11.0/shellcheck" <<'EOF'
-#!/usr/bin/env bash
-printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
-EOF
-    chmod +x "$2/shellcheck-v0.11.0/shellcheck"
-    exit 0
-  fi
-  shift
-done
-exit 2
-SH
-  cat > "$fakebin/sleep" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fakebin/curl" "$fakebin/sha256sum" "$fakebin/tar" "$fakebin/sleep"
+  fm_install_stub_uname "$fakebin"
+  fm_install_stub_curl "$fakebin"
+  fm_install_stub_hasher "$fakebin" sha256sum
+  fm_install_stub_tar_shellcheck "$fakebin"
+  fm_install_stub_sleep "$fakebin"
 
-  out=$(CURL_COUNT="$tmp/curl-count" PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) \
+  # Reproduce the CI incident: the release endpoint returned 503 for all three
+  # formerly configured attempts before recovering. Force linux/x86_64 so the
+  # retry path stays the CI archive even when this suite runs on macOS.
+  out=$(CURL_COUNT="$tmp/curl-count" CURL_FAIL_UNTIL=3 \
+    SHA256_STUB_HASH="$SHELLCHECK_SHA_LINUX_X86_64" \
+    FM_TEST_UNAME_S=Linux FM_TEST_UNAME_M=x86_64 \
+    PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) \
     || fail "installer did not recover from a transient download failure"$'\n'"$out"
-  [ "$(cat "$tmp/curl-count")" -eq 2 ] || fail "installer did not retry exactly once after recovery"
-  assert_contains "$out" "download attempt 1 failed; retrying" "installer did not disclose its retry"
+  [ "$(cat "$tmp/curl-count")" -eq 4 ] || fail "installer did not recover after three failed downloads"
+  assert_contains "$out" "download attempt 3 failed; retrying" "installer did not disclose its third retry"
   [ -x "$destination/shellcheck" ] || fail "installer did not install ShellCheck after retrying"
   pass "ShellCheck installer retries a transient download failure"
+}
+
+test_installer_selects_platform_archive_url_and_checksum() {
+  local tmp fakebin destination out url_log uname_s uname_m archive sha
+  tmp=$(fm_test_tmproot fm-shellcheck-platform)
+  fakebin=$(fm_fakebin "$tmp")
+  destination="$tmp/bin"
+  url_log="$tmp/curl-url.log"
+
+  fm_install_stub_uname "$fakebin"
+  fm_install_stub_curl "$fakebin"
+  fm_install_stub_hasher "$fakebin" sha256sum
+  fm_install_stub_tar_shellcheck "$fakebin"
+  fm_install_stub_sleep "$fakebin"
+
+  while IFS=$'\t' read -r uname_s uname_m archive sha; do
+    [ -n "$uname_s" ] || continue
+    rm -rf "$destination"
+    : > "$url_log"
+    out=$(CURL_URL_LOG="$url_log" SHA256_STUB_HASH="$sha" \
+      FM_TEST_UNAME_S="$uname_s" FM_TEST_UNAME_M="$uname_m" \
+      PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) \
+      || fail "installer failed for ${uname_s}/${uname_m}"$'\n'"$out"
+    assert_contains "$(cat "$url_log")" "$archive" \
+      "installer did not download $archive for ${uname_s}/${uname_m}"
+    assert_contains "$(cat "$url_log")" \
+      "https://github.com/koalaman/shellcheck/releases/download/v${REQUIRED}/${archive}" \
+      "installer used the wrong URL for ${uname_s}/${uname_m}"
+    [ -x "$destination/shellcheck" ] || fail "installer did not install ShellCheck for ${uname_s}/${uname_m}"
+  done <<EOF
+Linux	x86_64	shellcheck-v${REQUIRED}.linux.x86_64.tar.xz	$SHELLCHECK_SHA_LINUX_X86_64
+Linux	amd64	shellcheck-v${REQUIRED}.linux.x86_64.tar.xz	$SHELLCHECK_SHA_LINUX_X86_64
+Linux	aarch64	shellcheck-v${REQUIRED}.linux.aarch64.tar.xz	$SHELLCHECK_SHA_LINUX_AARCH64
+Linux	arm64	shellcheck-v${REQUIRED}.linux.aarch64.tar.xz	$SHELLCHECK_SHA_LINUX_AARCH64
+Darwin	x86_64	shellcheck-v${REQUIRED}.darwin.x86_64.tar.xz	$SHELLCHECK_SHA_DARWIN_X86_64
+Darwin	amd64	shellcheck-v${REQUIRED}.darwin.x86_64.tar.xz	$SHELLCHECK_SHA_DARWIN_X86_64
+Darwin	arm64	shellcheck-v${REQUIRED}.darwin.aarch64.tar.xz	$SHELLCHECK_SHA_DARWIN_AARCH64
+Darwin	aarch64	shellcheck-v${REQUIRED}.darwin.aarch64.tar.xz	$SHELLCHECK_SHA_DARWIN_AARCH64
+EOF
+  pass "ShellCheck installer selects the official archive, URL, and checksum per OS/arch"
+}
+
+test_installer_rejects_wrong_checksum() {
+  local tmp fakebin destination out rc
+  tmp=$(fm_test_tmproot fm-shellcheck-badsum)
+  fakebin=$(fm_fakebin "$tmp")
+  destination="$tmp/bin"
+
+  fm_install_stub_uname "$fakebin"
+  fm_install_stub_curl "$fakebin"
+  fm_install_stub_hasher "$fakebin" sha256sum
+  fm_install_stub_tar_shellcheck "$fakebin"
+  fm_install_stub_sleep "$fakebin"
+
+  rc=0
+  out=$(SHA256_STUB_HASH=0000000000000000000000000000000000000000000000000000000000000000 \
+    FM_TEST_UNAME_S=Linux FM_TEST_UNAME_M=x86_64 \
+    PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "installer accepted a wrong checksum"$'\n'"$out"
+  assert_contains "$out" "checksum mismatch" "installer did not report a checksum mismatch"
+  assert_contains "$out" "shellcheck-v${REQUIRED}.linux.x86_64.tar.xz" \
+    "mismatch did not name the selected archive"
+  assert_contains "$out" "$SHELLCHECK_SHA_LINUX_X86_64" \
+    "mismatch did not name the pinned linux/x86_64 checksum"
+  [ ! -e "$destination/shellcheck" ] || fail "installer installed ShellCheck after a checksum mismatch"
+  pass "ShellCheck installer rejects a wrong checksum"
+}
+
+test_installer_falls_back_to_shasum() {
+  local tmp fakebin destination out hasher_log tool
+  tmp=$(fm_test_tmproot fm-shellcheck-shasum)
+  fakebin=$(fm_fakebin "$tmp")
+  destination="$tmp/bin"
+  hasher_log="$tmp/hasher.log"
+
+  for tool in bash dirname mktemp rm awk mkdir install cat chmod; do
+    ln -s "$(command -v "$tool")" "$fakebin/$tool"
+  done
+  fm_install_stub_uname "$fakebin"
+  fm_install_stub_curl "$fakebin"
+  fm_install_stub_hasher "$fakebin" shasum
+  fm_install_stub_tar_shellcheck "$fakebin"
+  fm_install_stub_sleep "$fakebin"
+
+  # Restricted PATH: shasum is present, sha256sum is not.
+  : > "$hasher_log"
+  out=$(CURL_URL_LOG="$tmp/curl-url.log" HASHER_LOG="$hasher_log" \
+    SHA256_STUB_HASH="$SHELLCHECK_SHA_LINUX_X86_64" \
+    FM_TEST_UNAME_S=Linux FM_TEST_UNAME_M=x86_64 \
+    PATH="$fakebin" "$INSTALLER" "$destination" 2>&1) \
+    || fail "installer did not fall back to shasum -a 256"$'\n'"$out"
+  assert_grep 'shasum -a 256' "$hasher_log" "installer did not invoke shasum -a 256"
+  [ -x "$destination/shellcheck" ] || fail "installer did not install ShellCheck via shasum"
+  pass "ShellCheck installer falls back to shasum -a 256 when sha256sum is absent"
+}
+
+test_installer_prefers_sha256sum_over_shasum() {
+  local tmp fakebin destination hasher_log
+  tmp=$(fm_test_tmproot fm-shellcheck-sha256sum-pref)
+  fakebin=$(fm_fakebin "$tmp")
+  destination="$tmp/bin"
+  hasher_log="$tmp/hasher.log"
+
+  fm_install_stub_uname "$fakebin"
+  fm_install_stub_curl "$fakebin"
+  fm_install_stub_hasher "$fakebin" sha256sum
+  fm_install_stub_hasher "$fakebin" shasum
+  fm_install_stub_tar_shellcheck "$fakebin"
+  fm_install_stub_sleep "$fakebin"
+
+  : > "$hasher_log"
+  PATH="$fakebin:$PATH" HASHER_LOG="$hasher_log" \
+    SHA256_STUB_HASH="$SHELLCHECK_SHA_LINUX_X86_64" \
+    FM_TEST_UNAME_S=Linux FM_TEST_UNAME_M=x86_64 \
+    "$INSTALLER" "$destination" >/dev/null \
+    || fail "installer failed when both hashers were present"
+  assert_grep 'sha256sum' "$hasher_log" "installer did not prefer sha256sum"
+  if grep -q 'shasum' "$hasher_log"; then
+    fail "installer invoked shasum even though sha256sum was present"$'\n'"$(cat "$hasher_log")"
+  fi
+  pass "ShellCheck installer prefers sha256sum when both hashers are present"
+}
+
+test_installer_rejects_unsupported_platform() {
+  local tmp fakebin destination out rc
+  tmp=$(fm_test_tmproot fm-shellcheck-unsupported)
+  fakebin=$(fm_fakebin "$tmp")
+  destination="$tmp/bin"
+
+  fm_install_stub_uname "$fakebin"
+  fm_install_stub_curl "$fakebin"
+
+  rc=0
+  out=$(FM_TEST_UNAME_S=FreeBSD FM_TEST_UNAME_M=amd64 \
+    PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "installer accepted an unsupported OS"$'\n'"$out"
+  assert_contains "$out" "unsupported platform" "installer did not name the unsupported platform"
+  assert_contains "$out" "FreeBSD-amd64" "installer did not report the detected OS/arch"
+
+  rc=0
+  out=$(FM_TEST_UNAME_S=Linux FM_TEST_UNAME_M=ppc64le \
+    PATH="$fakebin:$PATH" "$INSTALLER" "$destination" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "installer accepted an unsupported architecture"$'\n'"$out"
+  assert_contains "$out" "unsupported platform" "installer did not reject linux/ppc64le"
+  pass "ShellCheck installer rejects an unsupported OS or architecture"
+}
+
+test_missing_shellcheck_fails_closed() {
+  local tmp fakebin out rc tool
+  tmp=$(fm_test_tmproot fm-lint-noshellcheck)
+  fakebin=$(fm_fakebin "$tmp")
+  for tool in bash dirname; do
+    ln -s "$(command -v "$tool")" "$fakebin/$tool"
+  done
+  rc=0
+  out=$(PATH="$fakebin" CI=true GITHUB_ACTIONS=true "$LINT" 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] || fail "missing ShellCheck expected exit 1, got $rc"$'\n'"$out"
+  assert_contains "$out" "ShellCheck not found" \
+    "missing ShellCheck did not name the required linter"
+  assert_contains "$out" "$REQUIRED" \
+    "missing ShellCheck did not name the pinned version"
+  assert_contains "$out" "fm-install-shellcheck.sh" \
+    "missing ShellCheck did not name the pinned installer"
+  pass "missing ShellCheck fails closed"
 }
 
 test_rejects_wrong_shellcheck_version() {
@@ -347,6 +1057,80 @@ SH
   [ "$rc" -ne 0 ] || fail "fm-lint.sh passed a known-bad fixture"$'\n'"$out"
   assert_contains "$out" "SC1007" "fm-lint.sh did not report the expected ShellCheck finding"
   pass "fm-lint.sh catches a real lint defect the old no-op gate passed"
+}
+
+test_rejects_direct_beads_cli_invocations() {
+  local tmp fakebin log lint_copy invocation out rc
+  tmp=$(fm_test_tmproot fm-lint-backend-purity)
+  fakebin=$(fm_fakebin "$tmp")
+  log="$tmp/shellcheck.log"
+  mkdir -p "$tmp/repo/bin/backends" "$tmp/repo/tests"
+  lint_copy="$tmp/repo/bin/fm-lint.sh"
+  cp "$LINT" "$lint_copy"
+  cat > "$tmp/repo/bin/fm-lint-workflows.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$tmp/repo/bin/backends/noop.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$tmp/repo/tests/noop.test.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$lint_copy" "$tmp/repo/bin/fm-lint-workflows.sh"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+
+  for invocation in \
+    'bd update fm-example --status in_progress' \
+    'BD_ACTOR=firstmate bd update fm-example --status closed' \
+    'env bd close fm-example' \
+    'env -i BD_ACTOR=firstmate bd close fm-example' \
+    'env -u BD_ACTOR bd close fm-example' \
+    'env -- bd close fm-example' \
+    '/usr/local/bin/bd close fm-example' \
+    '"/usr/local/bin/bd" close fm-example' \
+    "'/usr/local/bin/bd' close fm-example" \
+    "b'd' close fm-example" \
+    "/usr/local/bin/b'd' close fm-example" \
+    "\$'bd' close fm-example" \
+    '$"bd" close fm-example' \
+    "\$'\\x62\\x64' close fm-example" \
+    "\$'\\142\\144' close fm-example" \
+    "b\$'\\x64' close fm-example"
+  do
+    printf '#!/usr/bin/env bash\n%s\n' "$invocation" > "$tmp/repo/bin/direct-beads.sh"
+    rc=0
+    out=$(cd "$tmp/repo" && CI=true PATH="$fakebin:$PATH" "$lint_copy" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "lint accepted a direct Beads CLI invocation: $invocation"
+    assert_contains "$out" "direct Beads CLI invocation bypasses tasks-axi" \
+      "lint did not identify the backend-boundary violation: $invocation"
+  done
+  pass "fm-lint.sh rejects direct Beads CLI invocations in firstmate core"
+}
+
+test_rejects_direct_beads_cli_in_explicit_core_path() {
+  local tmp fakebin log lint_copy target spelling out rc
+  tmp=$(fm_test_tmproot fm-lint-explicit-backend-purity)
+  fakebin=$(fm_fakebin "$tmp")
+  log="$tmp/shellcheck.log"
+  mkdir -p "$tmp/repo/bin/backends"
+  lint_copy="$tmp/repo/bin/fm-lint.sh"
+  target="$tmp/repo/bin/direct-beads.sh"
+  cp "$LINT" "$lint_copy"
+  printf '#!/usr/bin/env bash\nbd close fm-example\n' > "$target"
+  chmod +x "$lint_copy"
+  fm_lint_stub_shellcheck "$fakebin" "$log"
+
+  for spelling in bin/direct-beads.sh bin/../bin/direct-beads.sh; do
+    rc=0
+    out=$(cd "$tmp/repo" && PATH="$fakebin:$PATH" "$lint_copy" "$spelling" 2>&1) || rc=$?
+    [ "$rc" -ne 0 ] || fail "explicit core path bypassed backend-purity lint: $spelling"
+    assert_contains "$out" "direct Beads CLI invocation bypasses tasks-axi" \
+      "explicit core path did not report the backend-boundary violation: $spelling"
+  done
+  pass "fm-lint.sh enforces backend purity for explicit core paths"
 }
 
 test_ignores_ambient_shellcheck_opts() {
@@ -453,6 +1237,7 @@ SH
     || fail "telemetry-enabled clean lint failed"
   [ "$telemetry_out" = "$out_clean_2" ] || fail "quiet telemetry changed routine lint output"
   assert_grep $'format\tfm-lint-telemetry-v1' "$telemetry" "telemetry format marker is missing"
+  assert_grep $'analysis_mode\tfull' "$telemetry" "telemetry did not record full analysis mode"
   assert_grep $'jobs\t2' "$telemetry" "telemetry did not record bounded jobs"
   assert_grep $'root_count\t1' "$telemetry" "telemetry did not record root count"
   assert_grep $'wall_seconds\t' "$telemetry" "telemetry did not record wall time"
@@ -619,11 +1404,25 @@ SH
   pass "seeded dispatcher, adapter, production-owner, and test-local diagnostics preserve parity"
 }
 
+test_help_reports_the_complete_interface
 test_list_files_reports_the_shell_inventory
+test_canonical_partitions_preserve_full_lint
+test_fast_mode_disables_extended_analysis
+test_ci_defaults_to_full_analysis
+test_ci_rejects_explicit_fast_mode
+test_fast_mode_catches_a_real_lint_defect
 test_pins_an_explicit_version
 test_installer_retries_transient_download_failure
+test_installer_selects_platform_archive_url_and_checksum
+test_installer_rejects_wrong_checksum
+test_installer_falls_back_to_shasum
+test_installer_prefers_sha256sum_over_shasum
+test_installer_rejects_unsupported_platform
+test_missing_shellcheck_fails_closed
 test_rejects_wrong_shellcheck_version
 test_catches_a_real_lint_defect
+test_rejects_direct_beads_cli_invocations
+test_rejects_direct_beads_cli_in_explicit_core_path
 test_ignores_ambient_shellcheck_opts
 test_clean_fixture_passes
 test_jobs_are_deterministic_and_complete
@@ -635,3 +1434,12 @@ test_main_branch_forces_full_lint
 test_explicit_path_bypasses_changed_logic
 test_zero_changed_files_exits_clean
 test_list_files_respects_changed_mode
+test_changed_mode_drops_external_sources_and_excludes_cross_file_codes
+test_changed_mode_invokes_shellcheck_once_per_root
+test_ci_keeps_external_sources_without_local_exclusions
+test_main_branch_keeps_external_sources
+test_merge_base_less_keeps_external_sources
+test_explicit_path_keeps_external_sources
+test_fast_mode_on_a_local_branch_keeps_source_following
+test_changed_mode_hides_cross_file_codes_that_ci_still_sees
+test_local_exclusion_list_covers_every_no_external_sources_code

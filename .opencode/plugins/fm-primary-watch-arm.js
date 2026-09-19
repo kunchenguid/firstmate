@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
@@ -22,6 +22,7 @@ let launchInFlight = null;
 let restorationInFlight = null;
 let armClose = new WeakMap();
 let armReadiness = new WeakMap();
+let armRecovery = new WeakMap();
 
 function positiveInteger(name, fallback) {
   const value = Number(process.env[name]);
@@ -193,12 +194,63 @@ async function sendPrompt(paths, client, sessionID, text) {
   });
 }
 
+function confirmHandlingDelivery(paths, recovery) {
+  try {
+    const result = spawnSync(
+      "bash",
+      [`${paths.root}/bin/fm-watch-arm.sh`, "--handling-delivered", recovery.generation, "--watcher-pid", recovery.watcherPid],
+      {
+        cwd: paths.root,
+        encoding: "utf8",
+        env: { ...process.env, FM_HOME: paths.home, FM_STATE_OVERRIDE: paths.state, FM_ROOT_OVERRIDE: paths.root },
+      },
+    );
+    if (result.status === 0) return { ok: true, detail: "" };
+    const stderr = String(result.stderr || "").trim();
+    return {
+      ok: false,
+      detail: `watcher: FAILED - handling delivery confirmation was rejected (status=${result.status ?? "none"} generation=${recovery.generation} watcherPid=${recovery.watcherPid})${stderr ? `\n${stderr}` : ""}`,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      detail: `watcher: FAILED - handling delivery confirmation could not be executed (generation=${recovery.generation} watcherPid=${recovery.watcherPid})\n${String(error?.message ?? error)}`,
+    };
+  }
+}
+
+function confirmHandlingDeliveryWithRetry(paths, recovery) {
+  const snapshot = () => armRecovery.get(child) ?? recovery;
+  const first = confirmHandlingDelivery(paths, snapshot());
+  if (first.ok) return first;
+  return confirmHandlingDelivery(paths, snapshot());
+}
+
+async function deliverActionableWake(paths, client, sessionID, message, recovery) {
+  if (recovery) {
+    const confirmed = confirmHandlingDeliveryWithRetry(paths, recovery);
+    if (!confirmed.ok) {
+      if (recovery.watcherPid) {
+        try {
+          process.kill(Number(recovery.watcherPid), 0);
+        } catch {
+          await retireArm(child);
+        }
+      }
+      await sendPrompt(paths, client, sessionID, wakePrompt(`${message}\n\n${confirmed.detail}`));
+      return;
+    }
+  }
+  await sendPrompt(paths, client, sessionID, wakePrompt(message));
+}
+
 function wakePrompt(reason) {
   return `WATCHER FIRED - drain queued wakes with bin/fm-wake-drain.sh and handle the reported wake. Watcher continuity is plugin-owned.\n\n${reason}`;
 }
 
 function surfaceFailure(paths, client, sessionID, reason) {
   void sendPrompt(paths, client, sessionID, wakePrompt(reason)).catch(() => {
+    // OpenCode owns delivery errors; continuity restoration never waits on prompting.
   });
 }
 
@@ -239,21 +291,21 @@ async function restoreAfterActionableClose(paths, sessionID, client, predecessor
   let failure = "";
   for (let attempt = 0; attempt <= REARM_RETRY_LIMIT; attempt += 1) {
     const { status, armChild } = await ensureArm(paths, sessionID, client, predecessorArmPid, true);
-    if (status === "armed") return "";
+    if (status === "armed") return { failure: "", recovery: armRecovery.get(armChild) };
     // An actionable line belongs to this arm's close handler.
     // Do not retire it before that handler can start the successor cycle.
-    if (status === "wake") return "";
+    if (status === "wake") return { failure: "", recovery: armRecovery.get(armChild) };
     failure = restorationFailure(status);
     if (!(await retireArm(armChild))) {
       setArmStatus("failed");
-      return `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity because the unready successor arm did not exit within ${ARM_RETIRE_TIMEOUT_MS}ms`;
+      return { failure: `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity because the unready successor arm did not exit within ${ARM_RETIRE_TIMEOUT_MS}ms` };
     }
     if (status === "read-only" || status === "not-primary" || status === "skipped") break;
     if (attempt === REARM_RETRY_LIMIT) break;
     await waitForRetry(attempt + 1);
   }
   setArmStatus("failed");
-  return `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity after ${REARM_RETRY_LIMIT} retries`;
+  return { failure: `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity after ${REARM_RETRY_LIMIT} retries` };
 }
 
 async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid) {
@@ -318,12 +370,18 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
   const releaseChild = () => {
     if (child === armChild) child = null;
   };
+  const observeRecovery = () => {
+    const recovery = `${stdout}\n${stderr}`.match(/^watcher: started pid=([0-9]+).* recovery-generation=([A-Za-z0-9._-]+)$/m);
+    if (recovery) armRecovery.set(armChild, { watcherPid: recovery[1], generation: recovery[2] });
+  };
   armChild.stdout.on("data", (chunk) => {
     stdout += chunk.toString();
+    observeRecovery();
     observeArmOutput(stdout, stderr, settleReadiness);
   });
   armChild.stderr.on("data", (chunk) => {
     stderr += chunk.toString();
+    observeRecovery();
     observeArmOutput(stdout, stderr, settleReadiness);
   });
   armChild.on("close", (code, signal) => {
@@ -335,18 +393,26 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     settleReadiness(classification.kind === "actionable" ? "wake" : "failed");
     const predecessor = String(armChild.pid ?? "");
     if (classification.kind === "actionable") {
+      if (restorationInFlight) return;
       retryFailures = 0;
       setArmStatus("wake");
-      const previousRestoration = restorationInFlight;
-      const restoration = previousRestoration
-        ? previousRestoration.catch(() => "").then(() => restoreAfterActionableClose(paths, sessionID, client, predecessor))
-        : restoreAfterActionableClose(paths, sessionID, client, predecessor);
+      const restoration = restoreAfterActionableClose(paths, sessionID, client, predecessor);
       restorationInFlight = restoration;
-      void restoration.then((failure) => {
+      void restoration.then(async (result) => {
+        try {
+          const message = result.failure ? `${classification.message}\n\n${result.failure}` : classification.message;
+          await deliverActionableWake(paths, client, sessionID, message, result.recovery);
+        } finally {
+          if (restorationInFlight === restoration) restorationInFlight = null;
+        }
+      }).catch((error) => {
         if (restorationInFlight === restoration) restorationInFlight = null;
-        const message = failure ? `${classification.message}\n\n${failure}` : classification.message;
-        return sendPrompt(paths, client, sessionID, wakePrompt(message));
-      }).catch(() => {
+        surfaceFailure(
+          paths,
+          client,
+          sessionID,
+          `watcher: FAILED - OpenCode could not deliver an actionable wake\n${String(error?.message ?? error)}`,
+        );
       });
       return;
     }
