@@ -142,6 +142,8 @@
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
+#   Every Pi-family launch appends -ne to disable package extension discovery while
+#   preserving explicit -e turn-end and supervision extensions.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
 #   never falls back to pi.
 #   For omp (Oh My Pi), fm-spawn resolves the `omp` executable from PATH once and
@@ -326,6 +328,10 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
+# codex crewmate and secondmate launches wrap the command with an EXIT trap that
+# creates and removes a cwd-scoped Superwhisper disabled marker under
+# ${SUPERWHISPER_AGENT_STATE_DIR:-/tmp/superwhisper-agent} to silence worker
+# notifications while leaving direct captain sessions enabled.
 # claude is the one harness whose pre-launch setup can REFUSE the spawn: before
 # any per-task state exists, and before its worktree .claude/settings.local.json
 # hooks are written, every claude launch pre-registers the directory the pane
@@ -1349,15 +1355,63 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   echo "error: spawn refused: state directory does not exist at $STATE" >&2
   exit 1
 fi
-# Role partition: spawning NEW work is MAIN-owned. A relaunch of an existing
-# task is legitimate branch recovery (fm-control drives it through this same
-# entrypoint), so only a fresh spawn refuses the branch actor (contract:
-# bin/fm-lease-lib.sh; no-op in homes without a branch actor).
+# Role partition: spawning NEW work is MAIN-owned while attended. A relaunch of
+# an existing task is legitimate branch recovery (fm-control drives it through
+# this same entrypoint), so only a fresh spawn refuses the branch actor
+# (contract: bin/fm-lease-lib.sh; no-op in homes without a branch actor). While
+# the away-posture record exists main is parked and a fresh spawn of
+# already-queued work relocates to the branch, under the record's spend cap
+# below - the same cap main meets in that posture.
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 if [ "$RELAUNCH" -ne 1 ]; then
-  fm_lease_forbid_branch "new-task spawn (fm-spawn)"
+  fm_lease_forbid_branch "new-task spawn (fm-spawn)" --away-relocated
 fi
+spawn_refuse_if_away_spend_cap() {
+  local cap live meta
+  [ "$RELAUNCH" -ne 1 ] || return 0
+  [ "$KIND" != secondmate ] || return 0
+  [ -f "$STATE/.afk-contract" ] || return 0
+  FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" validate >/dev/null 2>&1 || return 0
+  cap=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" field spend_max_concurrent_workers 2>/dev/null || true)
+  case "$cap" in
+  '' | *[!0-9]* | 0) return 0 ;;
+  esac
+  live=0
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    [ "$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-)" != secondmate ] || continue
+    live=$((live + 1))
+  done
+  if [ "$live" -ge "$cap" ]; then
+    echo "error: spawn refused - the away-posture record caps concurrent workers at $cap and $live ordinary task(s) are live in this home; task $ID stays queued for the captain's return or for a worker to finish (spend cap: bin/fm-afk-contract.sh)" >&2
+    exit 1
+  fi
+}
+# Spend cap (bin/fm-afk-contract.sh's spend_max_concurrent_workers): while the
+# away-posture record exists, a fresh ordinary spawn refuses for BOTH actors
+# once this home already holds that many ordinary task records, counted the
+# same way the return brief counts tasks live at return (every state/*.meta
+# whose kind is not secondmate). A relaunch replaces a worker that already
+# counts, and a secondmate is a persistent home rather than spend, so both are
+# exempt. Checked before any endpoint, worktree, or record exists, so a refusal
+# costs nothing to unwind; rechecked after the task-set lock so two fresh
+# spawns cannot both publish from a stale count.
+spawn_refuse_if_away_spend_cap
+spawn_require_relocated_queued_work() {
+  local actor
+  [ "$RELAUNCH" -ne 1 ] || return 0
+  actor=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
+  [ "$actor" = branch ] || return 0
+  if [ "$KIND" = secondmate ]; then
+    fm_lease_forbid_branch "new-task spawn (fm-spawn)"
+  fi
+  fm_lease_forbid_branch "new-task spawn (fm-spawn)" --away-relocated
+  if ! fm_backlog_row_probe "$DATA" "$ID" || [ "$FM_BACKLOG_ROW_STATE" != "queued no no" ]; then
+    echo "error: spawn refused - the supervision branch under the away-posture record may dispatch only already-queued unblocked work; task $ID has no dispatchable backlog item in this home" >&2
+    exit 1
+  fi
+}
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
   control_owner=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)
@@ -1409,6 +1463,8 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   SPAWN_TASK_SET_LOCK_HELD=1
+  spawn_refuse_if_away_spend_cap
+  spawn_require_relocated_queued_work
 fi
 if [ "$KIND" = secondmate ]; then
   if spawn_remote_secondmate "$ID"; then
@@ -2958,7 +3014,13 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
     echo "error: task $ID's backlog item could not be read before dispatch ($FM_BACKLOG_ROW_ERROR)" >&2
     exit 1
   fi
-  if ! fm_backlog_row_dispatchable "$BACKLOG_ROW_STATE"; then
+  spawn_preflight_actor=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
+  if [ "$spawn_preflight_actor" = branch ] && fm_lease_away_relocated; then
+    if [ "$BACKLOG_ROW_STATE" != "queued no no" ]; then
+      echo "error: spawn refused - the supervision branch under the away-posture record may dispatch only already-queued unblocked work; task $ID has no dispatchable backlog item in this home" >&2
+      exit 1
+    fi
+  elif ! fm_backlog_row_dispatchable "$BACKLOG_ROW_STATE"; then
     echo "error: this home's backlog item $ID is not dispatchable in state $BACKLOG_ROW_STATE; refusing before creating its endpoint or local copy" >&2
     exit 1
   fi

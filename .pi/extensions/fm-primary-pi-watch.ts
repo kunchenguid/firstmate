@@ -21,6 +21,16 @@
 // consumes at the user message_start carrying the exact wake text; either
 // event finishes the pending record, and a still-unconsumed record rides the
 // replacement handoff.
+//
+// Postures (stated once here; docs/pi-supervision-branch.md "Postures"):
+// the away-posture record state/.afk-contract is read as a file at every
+// routing decision, never inferred from chat. While it exists every
+// actionable row is offered to the branch as eligible and main is offered
+// nothing the branch can take; a wake the branch declines or cannot take
+// (a broken branch, an unresolvable or corrupt queue) and every
+// watcher-failure alarm still reach main exactly as attended, because only
+// main can repair supervision itself. Nothing else about delivery or
+// consumption changes.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -31,6 +41,7 @@ import { Box, Container, Text, type Component } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { registerFirstmateTool } from "./lib/fm-native-contract.ts";
 import {
+  afkPostureRecordPresent,
   createBranchDispatchOffer,
   FM_BRANCH_DISPATCH_EVENT,
   scopeForUnreadWake,
@@ -606,7 +617,11 @@ export default function (pi: ExtensionAPI) {
     // signal/stale row still reach the branch on this cycle; it must never
     // also let a check-kind trigger itself slip past main's delivery.
     const isCheckTrigger = /^check:/.test(message);
-    const scope = scopeForUnreadWake(state, heartbeat);
+    // The away posture collapses the partition below: every actionable row is
+    // branch-eligible and the trigger class no longer forces anything to main
+    // (lib/fm-branch-dispatch.ts owns the per-row rule).
+    const afk = afkPostureRecordPresent(state);
+    const scope = scopeForUnreadWake(state, heartbeat, afk);
     // A signal close containing a needs-decision status file, or a stale close
     // for a captain-held task, gets the identical main-only treatment as a
     // check-kind trigger. The cross-reference deliberately includes every
@@ -626,8 +641,12 @@ export default function (pi: ExtensionAPI) {
       scope.taskByWakeKey[key] ?? scope.taskByWakeKey[key.replace(/^fm-/, "")] ?? key;
     const needsDecisionTasks = new Set(scope.needsDecisionKeys.map(taskIdentity));
     const isNeedsDecisionTrigger = triggerKeys.some((key) => needsDecisionTasks.has(taskIdentity(key)));
-    const eligible = !isCheckTrigger && !isNeedsDecisionTrigger && scope.eligible;
-    const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, eligible);
+    const attendedEligible = !isCheckTrigger && !isNeedsDecisionTrigger && (
+      afk ? scopeForUnreadWake(state, heartbeat, false).eligible : scope.eligible
+    );
+    const eligible = afk ? scope.eligible : attendedEligible;
+    const awayOnly = Boolean(eligible && !attendedEligible);
+    const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, eligible, awayOnly);
     pi.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
     return offer.accepted ? offer.settlement : null;
   }

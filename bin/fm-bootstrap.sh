@@ -1539,7 +1539,7 @@ detect_local_config() {
 detect_superwhisper_drift() {
   local pi_settings="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/settings.json"
   [ -f "$pi_settings" ] && [ -r "$pi_settings" ] || return 0
-  grep -Eq '"(npm:)?@?superwhisper/pi"' "$pi_settings" 2>/dev/null || return 0
+  grep -Eq '"(npm:)?@?superwhisper/pi(@|")' "$pi_settings" 2>/dev/null || return 0
   if command -v jq >/dev/null 2>&1; then
     local matched
     matched=$(jq -r '.packages // [] | if any(. == "npm:@superwhisper/pi" or . == "@superwhisper/pi" or test("(^|:)@?superwhisper/pi($|@)")) then "DRIFT" else "" end' "$pi_settings" 2>/dev/null || true)

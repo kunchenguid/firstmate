@@ -1284,6 +1284,19 @@ JSON
   assert_contains "$out" "SUPERWHISPER_DRIFT: global Pi settings re-enabled Superwhisper in $pi_dir/settings.json (remediation: pi remove npm:@superwhisper/pi)" \
     "bootstrap did not report actionable drift diagnostic for bare @superwhisper/pi"
 
+  # Version-pinned package spelling: npm:@superwhisper/pi@1.2.3.
+  cat > "$pi_dir/settings.json" <<'JSON'
+{
+  "packages": [
+    "npm:@superwhisper/pi@1.2.3"
+  ]
+}
+JSON
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    PI_CODING_AGENT_DIR="$pi_dir" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "SUPERWHISPER_DRIFT: global Pi settings re-enabled Superwhisper in $pi_dir/settings.json (remediation: pi remove npm:@superwhisper/pi)" \
+    "bootstrap did not report actionable drift diagnostic for version-pinned npm:@superwhisper/pi"
+
   pass "bootstrap detects accidental global Pi Superwhisper re-enablement and leaves settings untouched"
 }
 
