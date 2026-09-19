@@ -52,7 +52,7 @@ If the other extension wins, a session-start console diagnostic names the tool a
 
 [`calm-mode-feasibility.md`](calm-mode-feasibility.md) owns the version-scoped renderer taxonomy, built-in override constraints, and empirical evidence.
 [`configuration.md`](configuration.md#calm-preference-configcalm) owns the persisted preference file and resolution rules.
-`.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy, `.claude/mods/firstmate-calm/lib/fm-calm-preservation.ts` owns the shared substantive mid-turn text rule that Pi imports through its tracked symlink, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, and `.pi/extensions/lib/fm-calm-working-ship.ts` owns Pi's animated working presentation over the sprite geometry both harnesses share in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`.
+`.pi/extensions/lib/fm-calm-visibility-core.ts` owns the visibility policy Pi and OMP share, `.claude/mods/firstmate-calm/lib/fm-calm-preservation.ts` owns the shared substantive mid-turn text rule that Pi imports through its tracked symlink, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, and `.pi/extensions/lib/fm-calm-working-ship.ts` owns Pi's animated working presentation over the sprite geometry both harnesses share in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`.
 
 Regression entry points:
 

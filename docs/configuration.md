@@ -34,7 +34,7 @@ The values they write are `on` and `off`, each followed by one newline; an absen
 `max` is the legacy value written by a removed third presentation level whose behavior is now ordinary Calm, and it is still read as `on`, so a home upgraded from it keeps Calm on rather than dropping to off.
 Each `/calm` command persists the new choice before changing live presentation, so a failed write leaves the current choice unchanged rather than claiming persistence; Pi and OMP replace the file atomically, while the Claude Code mod writes it through the plugin API's plain file write.
 The Pi extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
-The OMP extension likewise reloads it on every OMP `session_start`, including same-process session replacement.
+The OMP extension likewise reloads it on OMP `session_start` and on the in-process `session_switch`, `session_branch`, and `session_tree` events OMP raises for session replacement.
 The Claude Code mod likewise reloads it on every `session.start`, including same-process session replacement, and also loads it lazily before any row that can draw ahead of that event, including during `claude --continue` restoration.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
