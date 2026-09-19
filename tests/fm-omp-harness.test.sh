@@ -193,7 +193,7 @@ test_spawn_model_validation_scoped_to_listed_providers() {
   rec=$(make_spawn_case model-bridge omp omp-model-bridge-q3)
   read_case_record "$rec"
   id=omp-model-bridge-q3
-  out=$(run_scout_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness omp --model claude-bridge/claude-opus-4-8)
+  out=$(run_scout_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness omp --model claude-bridge/claude-opus-4-8 --captain-authorized)
   status=$?
   expect_code 0 "$status" "an extension-registered provider must pass through: $out"
   assert_contains "$out" "notice: omp provider 'claude-bridge' is not in 'omp models --json'" "pass-through did not state its reason"
