@@ -24,10 +24,11 @@ TMP_ROOT=$(fm_test_tmproot fm-timeout-lib)
 
 ALL_MECHANISMS='timeout gtimeout perl bash'
 
-# The mechanisms this host can actually run. bash is dependency-free and always
-# present; the other three need their tool installed. Asking the library rather
-# than probing PATH here keeps the list honest: a mechanism is only "available"
-# if forcing it actually makes fm_run_timed take that path.
+# The mechanisms this host can actually run, resolved once. bash is
+# dependency-free and always present; the other three need their tool
+# installed. Asking the library rather than probing PATH keeps the list honest:
+# a mechanism is only "available" if forcing it actually makes fm_run_timed
+# take that path.
 available_mechanisms() {
   local mechanism
   for mechanism in $ALL_MECHANISMS; do
@@ -37,17 +38,23 @@ available_mechanisms() {
   return 0
 }
 
+AVAILABLE_MECHANISMS=$(available_mechanisms)
+
+# Membership has to match a whole entry: "timeout" is a substring of "gtimeout",
+# so a host carrying only gtimeout would otherwise report the absent timeout
+# mechanism as present and skip the assertions that exist for exactly that case.
+mechanism_available() { # <mechanism>
+  printf '%s\n' "$AVAILABLE_MECHANISMS" | grep -qxF -- "$1"
+}
+
 # Naming what this host cannot reach keeps a partial run from reading as a full
 # one: on a stock Mac that is timeout and gtimeout, on CI it is usually neither.
 report_unavailable_mechanisms() {
-  local mechanism available
-  available=$(available_mechanisms)
+  local mechanism
   for mechanism in $ALL_MECHANISMS; do
-    case "$available" in
-      *"$mechanism"*) ;;
-      *) printf '# skip - the %s mechanism needs a %s binary this host does not have\n' \
-        "$mechanism" "$mechanism" ;;
-    esac
+    mechanism_available "$mechanism" ||
+      printf '# skip - the %s mechanism needs a %s binary this host does not have\n' \
+        "$mechanism" "$mechanism"
   done
 }
 
@@ -102,13 +109,11 @@ test_the_override_never_shifts_what_callers_get_by_default() {
 }
 
 test_an_override_for_a_missing_tool_falls_back_instead_of_breaking() {
-  local mechanism detected available
-  available=$(available_mechanisms)
-  assert_contains "$available" bash "the dependency-free bash mechanism should always be reachable"
+  local mechanism detected
+  mechanism_available bash ||
+    fail "the dependency-free bash mechanism should always be reachable"
   for mechanism in $ALL_MECHANISMS; do
-    case "$available" in
-      *"$mechanism"*) continue ;;
-    esac
+    mechanism_available "$mechanism" && continue
     detected=$(resolve_mechanism "$mechanism")
     assert_not_equals "$mechanism" "$detected" \
       "forcing the absent $mechanism mechanism claimed to select it"
@@ -123,7 +128,7 @@ test_signal_killed_command_is_not_reported_as_success() {
   # A hook killed by the OOM killer or a segfault must not read as success:
   # bin/fm-spawn.sh launches a worker into the worktree when this status is 0.
   child=$(write_child kill-self 'kill -9 $$')
-  for mechanism in $(available_mechanisms); do
+  for mechanism in $AVAILABLE_MECHANISMS; do
     status=$(run_timed_status "$mechanism" 10 "$child")
     assert_not_equals 0 "$status" \
       "the $mechanism mechanism reported a SIGKILLed command as success"
@@ -136,7 +141,7 @@ test_signal_killed_command_is_not_reported_as_success() {
 test_a_terminating_signal_other_than_kill_is_also_nonzero() {
   local mechanism child status
   child=$(write_child term-self 'kill -TERM $$')
-  for mechanism in $(available_mechanisms); do
+  for mechanism in $AVAILABLE_MECHANISMS; do
     status=$(run_timed_status "$mechanism" 10 "$child")
     assert_equals 143 "$status" \
       "the $mechanism mechanism did not report SIGTERM as 128 + 15"
@@ -147,13 +152,13 @@ test_a_terminating_signal_other_than_kill_is_also_nonzero() {
 test_ordinary_exit_statuses_survive_the_runner() {
   local mechanism child status
   child=$(write_child exit-zero 'exit 0')
-  for mechanism in $(available_mechanisms); do
+  for mechanism in $AVAILABLE_MECHANISMS; do
     status=$(run_timed_status "$mechanism" 10 "$child")
     expect_code 0 "$status" "the $mechanism mechanism lost a successful command's status"
   done
 
   child=$(write_child exit-seven 'exit 7')
-  for mechanism in $(available_mechanisms); do
+  for mechanism in $AVAILABLE_MECHANISMS; do
     status=$(run_timed_status "$mechanism" 10 "$child")
     expect_code 7 "$status" "the $mechanism mechanism lost a failing command's own exit status"
   done
@@ -166,7 +171,7 @@ test_the_bound_still_reports_124() {
   # hook's timeout refusal reads it, so it must not collide with the signal
   # statuses above even though the runner kills the child with TERM then KILL.
   child=$(write_child sleep-past-bound 'sleep 30')
-  for mechanism in $(available_mechanisms); do
+  for mechanism in $AVAILABLE_MECHANISMS; do
     status=$(run_timed_status "$mechanism" 1 "$child")
     expect_code 124 "$status" "the $mechanism mechanism did not report a hit bound as 124"
   done
