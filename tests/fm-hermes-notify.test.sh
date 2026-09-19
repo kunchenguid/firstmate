@@ -546,7 +546,7 @@ test_inbound_mode_and_status_commands_work_in_both_modes() {
   run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] I'm back home, stop proactive Telegram notifications"
   note=$(latest_note "$home")
   out=$(run_notify "$home" inbound "$note") || fail "natural-language HOME command failed"
-  assert_equals mode:HOME "$out" "natural-language HOME command was not classified"
+  assert_equals "$(printf 'mode:HOME\nconfirmation:sent')" "$out" "natural-language HOME command was not classified"
   assert_equals HOME "$(run_notify "$home" presence status)" "inbound HOME did not persist"
   rm -f "$home/state/inbox"/*.note
   run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] status report"
@@ -557,7 +557,7 @@ test_inbound_mode_and_status_commands_work_in_both_modes() {
   run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] I’m heading out, use Telegram"
   note=$(latest_note "$home")
   out=$(run_notify "$home" inbound "$note") || fail "natural-language AWAY command failed"
-  assert_equals mode:AWAY "$out" "natural-language AWAY command was not classified"
+  assert_equals "$(printf 'mode:AWAY\nconfirmation:sent')" "$out" "natural-language AWAY command was not classified"
   rm -f "$home/state/inbox"/*.note
   run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] status"
   note=$(latest_note "$home")
@@ -566,6 +566,68 @@ test_inbound_mode_and_status_commands_work_in_both_modes() {
   assert_grep 'Captain presence is now HOME' "$home/hermes-send.log" "HOME was not acknowledged on Telegram"
   assert_grep 'Captain presence is now AWAY' "$home/hermes-send.log" "AWAY was not acknowledged on Telegram"
   pass "Telegram mode commands and inbound status requests work in HOME and AWAY"
+}
+
+# The mode change itself (state/captain-presence) must never be rolled back
+# by a failed Telegram acknowledgement, and the caller must be able to tell
+# "mode changed, confirmation failed" apart from "mode change itself failed".
+# hermes-fail-once forces exactly the acknowledgement send to fail.
+test_inbound_reports_partial_success_when_confirmation_fails() {
+  local home note out rc
+  home=$(make_home inbound-confirm-fail)
+  configure_hermes "$home" 'telegram:Rajiv [8629896233]'
+  : > "$home/hermes-fail-once"
+  run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] Captain away"
+  note=$(latest_note "$home")
+  set +e
+  out=$(run_notify "$home" inbound "$note")
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] \
+    || fail "a failed confirmation send was not reported with the distinct partial-success exit code (got $rc)"
+  assert_contains "$out" "mode:AWAY" "a failed confirmation send must not omit the already-persisted mode change"
+  assert_contains "$out" "confirmation:failed" "a failed confirmation send was not distinguished from mode-change failure"
+  assert_equals AWAY "$(run_notify "$home" presence status)" "a failed Telegram confirmation rolled back the persisted mode change"
+  assert_grep "status=failed" "$home/state/hermes-notify/.presence-confirm.record" \
+    "the failed confirmation was not durably preserved for a later retry"
+  pass "inbound reports an explicit partial success (mode changed, confirmation failed) without rolling back the mode"
+}
+
+# confirm-retry is the supported mechanism for resending a confirmation that
+# failed on the original inbound call; it must deliver the exact original
+# text and clear the failed state once it succeeds.
+test_confirm_retry_resends_a_failed_confirmation() {
+  local home note out
+  home=$(make_home inbound-confirm-retry)
+  configure_hermes "$home" 'telegram:Rajiv [8629896233]'
+  : > "$home/hermes-fail-once"
+  run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] Captain away"
+  note=$(latest_note "$home")
+  set +e
+  run_notify "$home" inbound "$note" >/dev/null
+  set -e
+  [ -s "$home/hermes-send.log" ] && fail "the initial failed confirmation attempt should not have logged a send"
+  out=$(run_notify "$home" confirm-retry) || fail "confirm-retry did not succeed once hermes recovered: $out"
+  assert_contains "$out" "confirmation:sent" "confirm-retry did not report the resend as sent"
+  assert_grep "Captain presence is now AWAY" "$home/hermes-send.log" \
+    "confirm-retry did not resend the exact original acknowledgement text"
+  assert_grep "status=sent" "$home/state/hermes-notify/.presence-confirm.record" \
+    "the confirmation record was not updated to sent after a successful retry"
+  out=$(run_notify "$home" confirm-retry) || fail "a second confirm-retry with nothing pending failed"
+  assert_contains "$out" "confirmation:none" "confirm-retry did not report having nothing left to retry"
+  pass "confirm-retry resends a failed mode-change confirmation and clears once delivered"
+}
+
+test_inbound_reports_confirmation_sent_on_the_ordinary_success_path() {
+  local home note out
+  home=$(make_home inbound-confirm-ok)
+  configure_hermes "$home" 'telegram:Rajiv [8629896233]'
+  run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] Captain away"
+  note=$(latest_note "$home")
+  out=$(run_notify "$home" inbound "$note") || fail "inbound AWAY failed on the ordinary success path"
+  assert_equals "$(printf 'mode:AWAY\nconfirmation:sent')" "$out" \
+    "a successful confirmation did not report both the mode change and the confirmation delivery"
+  pass "inbound reports both the mode change and a successful confirmation delivery"
 }
 
 test_mode_commands_do_not_answer_or_release_holds() {
@@ -601,4 +663,7 @@ test_status_reports_absent_and_present_records
 test_presence_defaults_home_and_persists_transitions
 test_home_and_away_route_only_eligible_notifications
 test_inbound_mode_and_status_commands_work_in_both_modes
+test_inbound_reports_partial_success_when_confirmation_fails
+test_confirm_retry_resends_a_failed_confirmation
+test_inbound_reports_confirmation_sent_on_the_ordinary_success_path
 test_mode_commands_do_not_answer_or_release_holds

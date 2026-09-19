@@ -19,6 +19,15 @@
 # grants authority; its `answer:` TSV still goes through the existing
 # fm-captain-hold keyed-answer judgment and intake.
 #
+# The Telegram acknowledgement of a mode command is purely informational and
+# is never allowed to roll back the (already-persisted) mode change: a mode
+# command always prints `mode:AWAY`/`mode:HOME` once persistence succeeds.
+# When the acknowledgement itself fails to send, `inbound` prints
+# `confirmation:failed` and exits 3 - an explicit partial-success result,
+# distinct from persistence failure (which exits 1 before ever printing
+# `mode:...`) - and durably records the failed acknowledgement so a later
+# `confirm-retry` call can resend the exact same text.
+#
 # Hermes is an external, VPS-local agent tool (not part of this repo) whose
 # already-approved plugin forwards an authorized chat's inbound text into
 # `bin/fm-inbox.sh note` and skips its own agent turn - Hermes never infers or
@@ -109,6 +118,7 @@ NOTIFY_DIR="$STATE/hermes-notify"
 PRESENCE_RECORD="$STATE/captain-presence"
 NOTIFY_SEQ_FILE="$NOTIFY_DIR/.seq"
 NOTIFY_SEQ_LOCK="$NOTIFY_DIR/.seq.lock"
+CONFIRM_RECORD="$NOTIFY_DIR/.presence-confirm.record"
 CAPTAIN_HOLD="$SCRIPT_DIR/fm-captain-hold.sh"
 MAX_TEXT_BYTES=4000
 
@@ -119,6 +129,7 @@ usage: fm-hermes-notify.sh presence [status|home|away]
        fm-hermes-notify.sh register <task-id> --reason-file <path> [--label <text>]
        fm-hermes-notify.sh resolve-reply <note-file>
        fm-hermes-notify.sh inbound <note-file>
+       fm-hermes-notify.sh confirm-retry
        fm-hermes-notify.sh status <task-id>
 
 route classes: approval permission blocker completion failure report status
@@ -161,6 +172,37 @@ send_telegram_text() {  # <text>
   chat_id=$(resolve_telegram_chat_id) || return 1
   [ -n "$chat_id" ] || return 2
   hermes send --to "telegram:$chat_id" "$text" >/dev/null 2>&1
+}
+
+# Durably records the outcome of the one Telegram acknowledgement that a mode
+# command sends, so a delivery failure is never simply lost: cmd_inbound
+# reports it as an explicit partial success (the mode change itself is never
+# rolled back) and `confirm-retry` can resend the exact persisted text later.
+write_confirm_record() {  # <mode> <text> <status>
+  local mode=$1 text=$2 status=$3 tmp
+  mkdir -p "$NOTIFY_DIR"
+  tmp=$(mktemp "$NOTIFY_DIR/.confirm-staging-XXXXXX") || return 1
+  {
+    printf 'mode=%s\n' "$(flatten "$mode")"
+    printf 'status=%s\n' "$(flatten "$status")"
+    printf 'text=%s\n' "$(flatten "$text")"
+  } >"$tmp"
+  mv "$tmp" "$CONFIRM_RECORD"
+}
+
+# Sends and durably records one mode-change acknowledgement. Returns 0 and
+# leaves status=sent on success; returns 1 and leaves status=failed (with the
+# exact mode/text preserved for a later retry) on delivery failure.
+send_presence_confirmation() {  # <mode> <text>
+  local mode=$1 text=$2
+  write_confirm_record "$mode" "$text" pending || return 1
+  if send_telegram_text "$text"; then
+    write_confirm_record "$mode" "$text" sent
+    return 0
+  else
+    write_confirm_record "$mode" "$text" failed || true
+    return 1
+  fi
 }
 
 cmd_presence() {
@@ -569,18 +611,28 @@ cmd_inbound() {
     'captain away'|'i am heading out, use telegram'|'i am heading out use telegram'|"i'm heading out, use telegram"|"i'm heading out use telegram"|'heading out, use telegram'|'use telegram while i am away')
       cmd_presence away >/dev/null || exit 1
       acknowledgement='Captain presence is now AWAY. Proactive Telegram routing is enabled.'
-      send_telegram_text "$acknowledgement" || rc=$?
-      [ "$rc" -eq 0 ] || { printf 'fm-hermes-notify: cannot acknowledge AWAY on Telegram\n' >&2; exit 1; }
       printf 'mode:AWAY\n'
-      return 0
+      if send_presence_confirmation AWAY "$acknowledgement"; then
+        printf 'confirmation:sent\n'
+        return 0
+      else
+        printf 'fm-hermes-notify: mode changed to AWAY, but the Telegram acknowledgement failed; it will be retried via confirm-retry\n' >&2
+        printf 'confirmation:failed\n'
+        exit 3
+      fi
       ;;
     'captain home'|'i am back home, stop proactive telegram notifications'|'i am back home stop proactive telegram notifications'|"i'm back home, stop proactive telegram notifications"|"i'm back home stop proactive telegram notifications"|'back home, stop proactive telegram notifications'|'stop proactive telegram notifications')
       cmd_presence home >/dev/null || exit 1
       acknowledgement='Captain presence is now HOME. Proactive Telegram routing is disabled.'
-      send_telegram_text "$acknowledgement" || rc=$?
-      [ "$rc" -eq 0 ] || { printf 'fm-hermes-notify: cannot acknowledge HOME on Telegram\n' >&2; exit 1; }
       printf 'mode:HOME\n'
-      return 0
+      if send_presence_confirmation HOME "$acknowledgement"; then
+        printf 'confirmation:sent\n'
+        return 0
+      else
+        printf 'fm-hermes-notify: mode changed to HOME, but the Telegram acknowledgement failed; it will be retried via confirm-retry\n' >&2
+        printf 'confirmation:failed\n'
+        exit 3
+      fi
       ;;
     'status'|'status report'|'send status'|'send me a status report'|'what is the status')
       printf 'request:status\t%s\n' "$text"
@@ -593,6 +645,29 @@ cmd_inbound() {
     printf 'answer:%s\n' "$correlated"
   else
     printf 'command:%s\n' "$text"
+  fi
+}
+
+cmd_confirm_retry() {
+  local status mode text
+  if [ ! -f "$CONFIRM_RECORD" ]; then
+    printf 'confirmation:none\n'
+    return 0
+  fi
+  status=$(record_field "$CONFIRM_RECORD" status)
+  if [ "$status" != failed ]; then
+    printf 'confirmation:none\n'
+    return 0
+  fi
+  mode=$(record_field "$CONFIRM_RECORD" mode)
+  text=$(record_field "$CONFIRM_RECORD" text)
+  if send_presence_confirmation "$mode" "$text"; then
+    printf 'confirmation:sent\n'
+    return 0
+  else
+    printf 'fm-hermes-notify: retry failed to deliver the pending %s confirmation on Telegram\n' "$mode" >&2
+    printf 'confirmation:failed\n'
+    exit 3
   fi
 }
 
@@ -616,6 +691,7 @@ case "$CMD" in
   register) cmd_register "$@" ;;
   resolve-reply) cmd_resolve_reply "$@" ;;
   inbound) cmd_inbound "$@" ;;
+  confirm-retry) cmd_confirm_retry "$@" ;;
   status) cmd_status "$@" ;;
   --help|-h) usage; exit 0 ;;
   *) usage; exit 2 ;;
