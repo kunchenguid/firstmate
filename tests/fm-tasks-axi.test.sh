@@ -114,6 +114,28 @@ test_guard_silent_for_single_home() {
   pass "bootstrap stays silent when the code root is the home"
 }
 
+# The code root is sometimes itself an operating primary home (FM_HOME unset
+# there) while another home's FM_HOME points elsewhere on the same checkout.
+# That code root's own session lock (state/.lock, written as the first act of
+# every session there) marks a code-root backlog.md as that home's own queue,
+# not a fork this home should reconcile.
+test_guard_silent_for_code_root_primary_home() {
+  local dir out
+  dir=$(make_split guard-primary-home)
+  rm "$dir/code/data/backlog.md"
+  printf '## In flight\n\n## Queued\n\n- [ ] owned by the code-root home\n\n## Done\n' \
+    > "$dir/code/data/backlog.md"
+  out=$(bootstrap_backlog_lines "$dir/code" "$dir/home")
+  assert_contains "$out" "BACKLOG_RECONCILE: code-root $dir/code/data/backlog.md is not this home's $dir/home/data/backlog.md" \
+    "a loose code-root backlog with no home marker was not reported"
+
+  mkdir -p "$dir/code/state"
+  : > "$dir/code/state/.lock"
+  out=$(bootstrap_backlog_lines "$dir/code" "$dir/home")
+  assert_equals "" "$out" "a code-root backlog was reported as a fork despite the code root's own session lock"
+  pass "bootstrap treats a code root with its own session lock as a primary home, not a fork"
+}
+
 # The end-to-end fork: a bare tasks-axi write from the code root. Whatever the
 # installed tasks-axi does to the link, bootstrap must agree with the result:
 # a replaced link is reported, a written-through link is not.
@@ -219,6 +241,7 @@ test_wrapper_single_home() {
 test_guard_reports_regular_code_root_backlog
 test_guard_reports_foreign_link_and_archive
 test_guard_silent_for_single_home
+test_guard_silent_for_code_root_primary_home
 if [ "$HAVE_TASKS_AXI" = 1 ]; then
   test_bare_tasks_axi_fork_is_detected
   test_wrapper_writes_through_to_home
