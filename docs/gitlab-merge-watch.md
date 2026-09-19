@@ -31,7 +31,8 @@ That `glab` is a locally built 1.82.0; only its build tag and commit are elided,
 
 ## The evidence project
 
-All live evidence here reads <https://gitlab.com/KarotKris/gitlab-merge-watch-fixture>, a public project that exists only to be this evidence.
+All live evidence in the watch and merge sections reads <https://gitlab.com/KarotKris/gitlab-merge-watch-fixture>, a public project that exists only to be this evidence.
+The Contribution observation section below additionally reads merge request 3933 on the public gitlab-org/cli project, because the fixture runs no CI and only a project with pipelines can document the pipeline-job lane shapes.
 It holds one deliberately merged merge request and one deliberately open one, so both outcomes can be shown against real data.
 Every command against it reads a public merge request and needs no credential, so a reader can rerun each one and see the same output.
 Its README asks that the open merge request be left open.
@@ -181,7 +182,7 @@ armed: state/e6.check.sh
 ## Contribution observation
 
 `bin/fm-contributions.sh` observes a task's published merge request the same way it observes GitHub pull requests: state, draft, mergeability, approvals, pipeline checks, and maintainer comments all normalize into the `fm-contributions.v1` observation.
-That GitLab support was verified on 2026-09-18 with the glab 1.53.0 from the Versions section above, reading only public merge requests on <https://gitlab.com/KarotKris/gitlab-merge-watch-fixture>.
+That GitLab support was verified on 2026-09-18 with the glab 1.53.0 from the Versions section above, reading only public merge requests: the fixture merge requests and gitlab-org/cli merge request 3933 for the CI lane shapes.
 
 The observation reads the MR core, its discussions, its approvals, and every pipeline the MR endpoint reports, then re-reads the core to confirm the head did not move while those lanes were fetched.
 
