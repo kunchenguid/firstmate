@@ -178,10 +178,13 @@ fm_watcher_healthy() {
 # arm layer (bin/fm-watch-arm.sh, bin/fm-claude-stop-autoarm.sh) needs exactly
 # that - it decides whether to start, attach to, or replace a real watcher
 # process, so a leftover beacon must never satisfy it. bin/fm-turnend-guard.sh
-# also keeps this strict check because it fires at the turn boundary where the
-# auto-arm brings a fresh watcher up. The pull warning (bin/fm-guard.sh) fires
-# mid-turn, where the auto-arm model runs no watcher at all, so it wants a
-# different, model-aware question:
+# keeps this strict check as its PRIMARY proof, because under the auto-arm model
+# it fires at the turn boundary where the auto-arm brings a fresh watcher up;
+# that guard then accepts two narrower ownership proofs beside it
+# (fm_afk_daemon_owns_supervision and fm_extension_owns_supervision), each for a
+# supervisor that legitimately leaves the lock unheld between its own cycles.
+# The pull warning (bin/fm-guard.sh) fires mid-turn, where the auto-arm model
+# runs no watcher at all, so it wants a different, model-aware question:
 
 # fm_supervision_model
 # Print the supervision model of this home's PRIMARY harness:
