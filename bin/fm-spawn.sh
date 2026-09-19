@@ -4190,7 +4190,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_TMP="$STATE/.$ID.meta.relaunch.${BASHPID:-$$}"
 else
   SPAWN_META_TMP="$STATE/.$ID.meta.spawn.${BASHPID:-$$}"
-  SPAWN_FRESH_COMMIT_PENDING=1
+  if [ "${FM_SPAWN_RECOVERY:-0}" != 1 ] || [ "$KIND" != secondmate ]; then
+    SPAWN_FRESH_COMMIT_PENDING=1
+  fi
 fi
 SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
@@ -4530,6 +4532,9 @@ sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
+fi
+if [ "${FM_SPAWN_RECOVERY:-0}" = 1 ] && [ "$KIND" = secondmate ]; then
+  printf 'backend=%s\ntarget=%s\nstarted=%s\n' "$BACKEND" "$T" "$(date +%s)" > "$STATE/.secondmate-liveness-$ID.pending"
 fi
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
