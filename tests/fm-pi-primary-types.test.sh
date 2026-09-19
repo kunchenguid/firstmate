@@ -41,6 +41,7 @@ cp "$ROOT/.pi/extensions/lib/fm-calm-preservation.ts" "$TMP_ROOT/lib/fm-calm-pre
 # tracked symlink into the Claude plugin; cp dereferences it into a real file so
 # the isolated typecheck fixture does not need the plugin tree.
 cp "$ROOT/.pi/extensions/lib/fm-calm-preference.ts" "$TMP_ROOT/lib/fm-calm-preference.ts"
+cp "$ROOT/.pi/extensions/lib/fm-calm-persistence.ts" "$TMP_ROOT/lib/fm-calm-persistence.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts" "$TMP_ROOT/lib/fm-calm-operational-user-layout.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$TMP_ROOT/lib/fm-calm-visibility.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-visibility-core.ts" "$TMP_ROOT/lib/fm-calm-visibility-core.ts"

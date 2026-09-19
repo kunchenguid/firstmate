@@ -251,6 +251,7 @@ cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$PROJECT/.pi/extensions/fm-pri
 cp "$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts" "$PROJECT/.pi/extensions/lib/fm-calm-assistant-layout.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-preservation.ts" "$PROJECT/.pi/extensions/lib/fm-calm-preservation.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-preference.ts" "$PROJECT/.pi/extensions/lib/fm-calm-preference.ts"
+cp "$ROOT/.pi/extensions/lib/fm-calm-persistence.ts" "$PROJECT/.pi/extensions/lib/fm-calm-persistence.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts" "$PROJECT/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$PROJECT/.pi/extensions/lib/fm-calm-visibility.ts"
 cp "$ROOT/.pi/extensions/lib/fm-calm-visibility-core.ts" "$PROJECT/.pi/extensions/lib/fm-calm-visibility-core.ts"

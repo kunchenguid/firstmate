@@ -12,6 +12,7 @@ EXT="$ROOT/.omp/extensions/fm-calm.ts"
 OPERATIONAL_USER="$ROOT/.omp/extensions/lib/fm-calm-operational-user.ts"
 ASSISTANT_THINKING="$ROOT/.omp/extensions/lib/fm-calm-assistant-thinking.ts"
 PREFERENCE="$ROOT/.pi/extensions/lib/fm-calm-preference.ts"
+PERSISTENCE="$ROOT/.pi/extensions/lib/fm-calm-persistence.ts"
 VISIBILITY_CORE="$ROOT/.pi/extensions/lib/fm-calm-visibility-core.ts"
 PRESERVATION="$ROOT/.pi/extensions/lib/fm-calm-preservation.ts"
 OPERATIONAL_INPUT_TS="$ROOT/.pi/extensions/lib/fm-operational-input.ts"
@@ -33,6 +34,7 @@ install_omp_calm_fixture() {  # <repo>
   cp "$EXT" "$repo/.omp/extensions/fm-calm.ts"
   cp "$OPERATIONAL_USER" "$ASSISTANT_THINKING" "$repo/.omp/extensions/lib/"
   cp "$PREFERENCE" "$VISIBILITY_CORE" "$PRESERVATION" "$OPERATIONAL_INPUT_TS" "$repo/.pi/extensions/lib/"
+  cp "$PERSISTENCE" "$repo/.pi/extensions/lib/fm-calm-persistence.ts"
   # Preservation is a symlink in the real tree; copy the target bytes.
   cp "$ROOT/.claude/mods/firstmate-calm/lib/fm-calm-preservation.ts" "$repo/.pi/extensions/lib/fm-calm-preservation.ts"
   cp "$OPERATIONAL_INPUT_SH" "$repo/bin/"
@@ -121,26 +123,27 @@ test_preference_read_write_contract() {
   local fixture out status
   fixture="$TMP_ROOT/preference"
   install_omp_calm_fixture "$fixture"
-  out=$(cd "$fixture" && PREF="$fixture/.pi/extensions/lib/fm-calm-preference.ts" node --input-type=module 2>&1 <<'JS'
+  out=$(cd "$fixture" && PREF="$fixture/.pi/extensions/lib/fm-calm-preference.ts" PERSIST="$fixture/.pi/extensions/lib/fm-calm-persistence.ts" node --input-type=module 2>&1 <<'JS'
 import { pathToFileURL } from "node:url";
 import { readFileSync, mkdirSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 const pref = await import(pathToFileURL(process.env.PREF).href);
+const persistence = await import(pathToFileURL(process.env.PERSIST).href);
 const home = resolve("home");
 mkdirSync(`${home}/config`, { recursive: true });
 const path = pref.calmPreferencePath({ FM_HOME: home }, resolve("."));
-if (pref.loadCalmPreference(path) !== false) throw new Error("absent preference must read off");
+if (persistence.loadCalmPreference(path) !== false) throw new Error("absent preference must read off");
 if (pref.parseCalmPreference(undefined) !== false) throw new Error("undefined must read off");
 if (pref.parseCalmPreference("nope\n") !== false) throw new Error("unrecognized must read off");
 if (pref.parseCalmPreference("on\n") !== true) throw new Error("on must read on");
 if (pref.parseCalmPreference("max\n") !== true) throw new Error("legacy max must read on");
 if (pref.serializeCalmPreference(true) !== "on\n") throw new Error("serialize on");
 if (pref.serializeCalmPreference(false) !== "off\n") throw new Error("serialize off");
-pref.persistCalmPreference(path, true);
+persistence.persistCalmPreference(path, true);
 if (readFileSync(path, "utf8") !== "on\n") throw new Error("persist did not write on\\n");
 const mode = statSync(path).mode & 0o777;
 if (mode !== 0o600) throw new Error(`preference mode must be 0600, got ${mode.toString(8)}`);
-pref.persistCalmPreference(path, false);
+persistence.persistCalmPreference(path, false);
 if (readFileSync(path, "utf8") !== "off\n") throw new Error("persist did not write off\\n");
 JS
 )
@@ -348,6 +351,65 @@ JS
   pass "OMP Calm hides operational rows and thinking while on, and restores both when toggled off"
 }
 
+test_double_install_keeps_shared_state() {
+  local fixture home out status
+  fixture="$TMP_ROOT/double-install"
+  home="$fixture/home"
+  install_omp_calm_fixture "$fixture"
+  mkdir -p "$home/config"
+  printf 'on\n' >"$home/config/calm"
+  out=$(cd "$fixture" && FM_HOME="$home" node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+import * as Agent from "@oh-my-pi/pi-coding-agent";
+
+const thinking = await import(pathToFileURL(`${process.cwd()}/.omp/extensions/lib/fm-calm-assistant-thinking.ts`).href);
+const vis = await import(pathToFileURL(`${process.cwd()}/.pi/extensions/lib/fm-calm-visibility-core.ts`).href);
+// The same process can load the extension twice (`-e` plus the cwd auto-discovery).
+// Both installs must share one remembered component set so a later /calm toggle
+// refreshes rows the first install already saw, and a session swap clears them all.
+thinking.installOmpCalmAssistantThinking();
+thinking.installOmpCalmAssistantThinking();
+vis.setCalmPresentation(true);
+const component = new Agent.AssistantMessageComponent();
+component.updateContent({
+  stopReason: "toolUse",
+  content: [
+    { type: "thinking", thinking: "secret plan" },
+    { type: "text", text: "short note" },
+    { type: "toolCall" },
+  ],
+}, { transient: true });
+if ((component.rendered || []).some((line) => line === "text:short note")) {
+  throw new Error("Calm-on must hide the working note after a double install");
+}
+vis.setCalmPresentation(false);
+thinking.applyOmpCalmThinkingToRememberedRows();
+if (!(component.rendered || []).some((line) => line === "text:short note")) {
+  throw new Error("a second install lost the shared remembered component set");
+}
+vis.setCalmPresentation(true);
+const fresh = new Agent.AssistantMessageComponent();
+fresh.updateContent({
+  stopReason: "toolUse",
+  content: [{ type: "text", text: "fresh note" }, { type: "toolCall" }],
+}, { transient: true });
+if ((fresh.rendered || []).some((line) => line === "text:fresh note")) {
+  throw new Error("Calm-on must hide a fresh working note");
+}
+thinking.resetOmpCalmThinkingRememberedRows();
+vis.setCalmPresentation(false);
+thinking.applyOmpCalmThinkingToRememberedRows();
+if ((fresh.rendered || []).some((line) => line === "text:fresh note")) {
+  throw new Error("reset must clear the shared remembered component set before a session swap");
+}
+JS
+)
+  status=$?
+  expect_code 0 "$status" "double install contract: $out"
+  [ -z "$out" ] || fail "double install contract printed output: $out"
+  pass "a second OMP Calm install in one process keeps one shared remembered component set"
+}
+
 test_degraded_public_api_seam() {
   local fixture home out status
   fixture="$TMP_ROOT/degraded"
@@ -396,4 +458,5 @@ JS
 test_preference_read_write_contract
 test_calm_command_persists_and_reloads
 test_operational_row_hide_show_and_thinking_collapse
+test_double_install_keeps_shared_state
 test_degraded_public_api_seam
