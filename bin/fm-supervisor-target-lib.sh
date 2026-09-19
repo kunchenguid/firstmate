@@ -15,10 +15,14 @@
 # keep exercising the same names after the daemon sources this file.
 
 # Default supervisor pane target/backend when nothing is configured or detected.
-# "firstmate:0" is a tmux session:window name, so the bare fallback (nothing
-# configured, nothing detected) assumes tmux - matching the daemon's pre-herdr
-# behavior byte-for-byte when run outside both tmux and herdr.
-FM_SUPERVISOR_TARGET_DEFAULT="firstmate:0"
+# "firstmate" is a tmux SESSION name with no window spec, so tmux resolves it to
+# that session's active window and the fallback works under any window numbering:
+# this repo's own create path supports a non-default `base-index`
+# (bin/backends/tmux.sh), where a literal window index 0 does not exist and a
+# "firstmate:0" fallback would refuse to start the daemon. The bare fallback
+# (nothing configured, nothing detected) still assumes tmux, matching the
+# daemon's pre-herdr behavior when run outside both tmux and herdr.
+FM_SUPERVISOR_TARGET_DEFAULT="firstmate"
 FM_SUPERVISOR_BACKEND_DEFAULT="tmux"
 
 # discover_supervisor_target: resolve the pane running firstmate. Priority:
@@ -33,8 +37,10 @@ FM_SUPERVISOR_BACKEND_DEFAULT="tmux"
 #      fm_backend_herdr_session) and $HERDR_PANE_ID. Checked after $TMUX_PANE so a
 #      tmux pane nested inside herdr still resolves to tmux, matching
 #      fm_backend_detect's innermost-first rule.
-#   4. FM_SUPERVISOR_TARGET_DEFAULT - legacy tmux fallback (may not resolve if the
-#      session is named differently). Returns 1 so the caller can warn.
+#   4. FM_SUPERVISOR_TARGET_DEFAULT - legacy tmux fallback (the "firstmate"
+#      session, so tmux picks its active window rather than a fixed index; may
+#      not resolve if the session is named differently). Returns 1 so the caller
+#      can warn.
 discover_supervisor_target() {
   if [ -n "${FM_SUPERVISOR_TARGET:-}" ]; then
     printf '%s' "$FM_SUPERVISOR_TARGET"

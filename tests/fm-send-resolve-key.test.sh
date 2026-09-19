@@ -69,11 +69,28 @@ case "${1:-}" in
     fi
     exit 0 ;;
   display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
-    printf 'fakepane\n'; exit 0 ;;
+    target=""; fmt=""; prev=""
+    for a in "$@"; do
+      [ "$prev" = -t ] && target=$a
+      case "$a" in *'#{'*) fmt=$a ;; esac
+      prev=$a
+    done
+    case "$fmt" in
+      *cursor_y*) printf '1\n' ;;
+      *session_name*) s=${target%%:*}; printf '%s\n' "${s#=}" ;;
+      *window_name*) w=${target#*:}; w=${w#=}; printf '%s\n' "${w%%.*}" ;;
+      *window_index*) printf '0\n' ;;
+      *window_id*) printf '@0\n' ;;
+      *pane_id*) printf '%%0\n' ;;
+      *pane_index*) printf '0\n' ;;
+      *) printf 'fakepane\n' ;;
+    esac
+    exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
   list-windows)
-    printf '%s\n' fm-t1 fm-t2 fm-t3 fm-t4 fm-t5 fm-t6 fm-t7 fm-t8 fm-t9 fm-mate
+    # The session's real window inventory for callers that resolve a live
+    # window by name.
+    printf '%s\n' fm-t1 fm-t2 fm-t3 fm-t4 fm-t5 fm-t6 fm-t7 fm-t8 fm-t9 fm-mate elsewhere
     exit 0 ;;
 esac
 exit 0

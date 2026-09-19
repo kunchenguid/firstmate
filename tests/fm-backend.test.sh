@@ -654,8 +654,23 @@ set -u
 case "${1:-}" in
   send-keys) exit 0 ;;
   display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
-    printf 'fakepane\n'; exit 0 ;;
+    target=""; fmt=""; prev=""
+    for a in "$@"; do
+      [ "$prev" = -t ] && target=$a
+      case "$a" in *'#{'*) fmt=$a ;; esac
+      prev=$a
+    done
+    case "$fmt" in
+      *cursor_y*) printf '1\n' ;;
+      *session_name*) s=${target%%:*}; printf '%s\n' "${s#=}" ;;
+      *window_name*) w=${target#*:}; w=${w#=}; printf '%s\n' "${w%%.*}" ;;
+      *window_index*) printf '0\n' ;;
+      *window_id*) printf '@0\n' ;;
+      *pane_id*) printf '%%0\n' ;;
+      *pane_index*) printf '0\n' ;;
+      *) printf 'fakepane\n' ;;
+    esac
+    exit 0 ;;
   capture-pane)
     start= end=
     while [ $# -gt 0 ]; do
@@ -671,7 +686,11 @@ case "${1:-}" in
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
     exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    # The one real window of the "sess" session this fixture addresses: the
+    # presence probe proves a target by finding its exact name here, never by an
+    # addressed display-message call that tmux would silently redirect.
+    printf 'win\n'; exit 0 ;;
 esac
 exit 0
 SH
@@ -686,12 +705,6 @@ run_send_case() {  # <bin-root> <fakebin> <log> <home> -- <send args...>
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$bin" FM_HOME="$home" FM_TMUX_LOG="$log" \
     FM_SEND_SETTLE=0 FM_SEND_SLEEP=0 \
     "$bin/bin/fm-send.sh" "$@" >/dev/null 2>&1
-}
-
-strip_send_preflight() {  # <log>
-  local preflight
-  preflight=$'tmux\x1fdisplay-message\x1f-p\x1f-t\x1fsess:win\x1f#{pane_id}'
-  awk -v preflight="$preflight" '$0 != preflight { print }' "$1"
 }
 
 # The byte-identical old-vs-new tmux log comparison this test used to run
@@ -711,8 +724,13 @@ test_send_tmux_contract() {
   run_send_case "$ROOT" "$fb" "$log" "$home" -- "sess:win" --key Escape
   rc=$?
   expect_code 0 "$rc" "fm-send --key should succeed against a live fake pane"
-  assert_contains "$(cat "$log")" $'\x1f''display-message'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''#{pane_id}' \
-    "fm-send --key did not verify the explicit tmux target before sending"
+  # The explicit target is resolved through tmux before anything is typed:
+  # list-panes is the hard deliverability proof and the resolved session is read
+  # back so a unique-prefix session cannot stand in.
+  assert_contains "$(cat "$log")" $'\x1f''list-panes'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''-F'$'\x1f''#{pane_id}' \
+    "fm-send --key did not resolve the explicit tmux target before sending"
+  assert_contains "$(cat "$log")" $'\x1f''display-message'$'\x1f''-p'$'\x1f''-t'$'\x1f''sess:win'$'\x1f''#{session_name}' \
+    "fm-send --key did not compare the resolved session before sending"
   assert_contains "$(cat "$log")" $'\x1f''Escape' "fm-send --key did not send the named key"
   assert_not_contains "$(cat "$log")" $'\x1f''-l'$'\x1f' "fm-send --key must not type literal text"
 
@@ -1135,6 +1153,118 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   pass "fm-spawn.sh: auto-detect resolves nested tmux-in-herdr to tmux and stays silent end to end"
 }
 
+# --- fm_backend_target_exists: the tmux arm must not trust target resolution -
+#
+# Regression (2026-09-14 fleet-loss incident): tmux resolves an unknown window
+# name to the addressed session's active window and exits 0, so a bare
+# `display-message -t <session>:<window>` reported every vanished worker window
+# as a live endpoint - a whole fleet of dead workers read as alive and busy. The
+# probe must prove the endpoint from tmux's own answer instead: a window name,
+# index, or @id from the session inventory, and a pane id by the id coming back.
+test_target_exists_tmux_requires_recorded_window() {
+  local fb
+  fb="$TMP_ROOT/target-exists-fakebin"; mkdir -p "$fb"
+  # A fake tmux modelling the two real silent fallbacks: display-message exits 0
+  # for ANY window name on a session that exists (resolving it to that session's
+  # active window, index 0), and answers a missing pane id with an empty pane_id
+  # and exit 0. list-windows is the only answer that carries the true inventory.
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+target=""; fmt=""; prev=""
+for a in "$@"; do
+  [ "$prev" = -t ] && target=$a
+  [ "$prev" = -F ] && fmt=$a
+  prev=$a
+done
+case "${1:-}" in
+  display-message)
+    case "$target" in
+      %7) printf '%%7\n'; exit 0 ;;
+      %*) exit 0 ;;
+      live-sess|live-sess:*) printf '%%7|@7|0|0\n'; exit 0 ;;
+    esac
+    exit 1
+    ;;
+  list-windows)
+    # tmux's leading "=" is an exact-match modifier, not part of the name.
+    [ "${target#=}" = live-sess ] || exit 1
+    case "$fmt" in
+      *#{window_id}*) printf '@7\n@8\n@9\n@10\n'; exit 0 ;;
+      *#{window_index}*) printf '0\n1\n2\n3\n'; exit 0 ;;
+    esac
+    printf 'real-win\nfm-dotted.id\nfm-dotted\nfm-auth\n'
+    exit 0
+    ;;
+esac
+exit 1
+SH
+  chmod +x "$fb/tmux"
+
+  # Anti-vacuity: the fallback really is present, so the vanished window is only
+  # caught by the inventory requirement and not by an addressed call failing.
+  PATH="$fb:$PATH" tmux display-message -p -t live-sess:vanished-win '#{pane_id}' >/dev/null 2>&1 \
+    || fail "fixture drifted: display-message must still answer for an unknown window name on a live session"
+
+  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:real-win \
+    || fail "a recorded window present in the session inventory must read as a live endpoint"
+
+  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:vanished-win && \
+    fail "an unknown window name that tmux silently resolved to the active window must NOT read as a live endpoint"
+
+  PATH="$fb:$PATH" fm_backend_target_exists tmux gone-sess:real-win && \
+    fail "a session that answers no inventory must not read as a live endpoint"
+
+  # A window index or @id is proved from the inventory's own index/@id fields,
+  # never from tmux's resolution; an index or id the session does not hold is
+  # absent. A pane-qualified form is never accepted.
+  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:0 \
+    || fail "a window index the session inventory holds must read as a live endpoint"
+  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:9 && \
+    fail "a window index the session inventory does not hold must NOT read as a live endpoint"
+  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:@7 \
+    || fail "a window @id the session inventory holds must read as a live endpoint"
+  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:@99 && \
+    fail "a window @id the session inventory does not hold must NOT read as a live endpoint"
+  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:real-win.0 && \
+    fail "a pane-qualified form must not read as a live endpoint even when tmux resolves its pane"
+
+  # The away-mode daemon addresses the supervisor PANE (its own $TMUX_PANE), so
+  # a bare pane id must stay present while a missing one is not.
+  PATH="$fb:$PATH" fm_backend_target_exists tmux %7 \
+    || fail "the away-mode daemon's bare pane-id target must read as a live endpoint"
+  PATH="$fb:$PATH" fm_backend_target_exists tmux %99 && \
+    fail "a missing pane id, which tmux answers with an empty pane, must not read as live"
+
+  # A two-colon or malformed target never names a recorded window.
+  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:real-win:p1 && \
+    fail "a two-colon target does not name a tmux window endpoint"
+  PATH="$fb:$PATH" fm_backend_target_exists tmux real-win && \
+    fail "a bare window name with no session is not a recorded window endpoint"
+
+  # A window name may itself contain a dot (task ids allow one), so a live dotted
+  # name still reads present.
+  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:fm-dotted.id \
+    || fail "a live window name containing a dot must read as a live endpoint"
+
+  # Regression: a dotted recorded name whose window is ABSENT while its prefix
+  # window is live must read absent. tmux resolves "fm-auth.0" to the live
+  # prefix window's pane and exits 0; nothing but the exact inventory may prove
+  # the recorded window.
+  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:fm-auth \
+    || fail "the live prefix window itself must read as a live endpoint"
+  PATH="$fb:$PATH" tmux display-message -p -t live-sess:fm-auth.0 '#{pane_id}' >/dev/null 2>&1 \
+    || fail "fixture drifted: display-message must still resolve a dotted name to its live prefix window"
+  PATH="$fb:$PATH" fm_backend_target_exists tmux live-sess:fm-auth.0 && \
+    fail "an absent dotted window whose live prefix window tmux resolved must NOT read as a live endpoint"
+
+  pass "fm_backend_target_exists: the tmux arm proves the endpoint from tmux's own answer, never its silent fallback"
+}
+
+# The explicit-target pane proof is exercised against real tmux in
+# tests/fm-backend-tmux-smoke.test.sh, which pins tmux's own resolution
+# precedence instead of a stand-in that can encode it wrongly.
+
 test_backend_name_precedence
 test_backend_detect_precedence
 test_backend_detect_cmux_fallback_bundle_id
@@ -1152,6 +1282,7 @@ test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
 test_backend_of_selector_matches_explicit_target_meta
+test_target_exists_tmux_requires_recorded_window
 test_send_tmux_contract
 test_peek_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal

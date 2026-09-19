@@ -225,9 +225,11 @@ the operational prefix lets firstmate distinguish it from a real captain message
   `FM_SUPERVISOR_TARGET` override (a tmux target or a herdr
   `"<session>:<pane-id>"` target), then `$TMUX_PANE`, then
   `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then a
-  `firstmate:0` fallback with a warning. Both resolution sources are logged at
-  startup so a wrong-but-resolving fallback is detectable. Other runtime
-  backends, including zellij, orca, and cmux, are not yet supported as
+  `firstmate` session fallback with a warning. tmux resolves a session with no
+  window spec to that session's active window, so the fallback still works when
+  the operator's tmux sets a non-default `base-index`. Both resolution sources
+  are logged at startup so a wrong-but-resolving fallback is detectable. Other
+  runtime backends, including zellij, orca, and cmux, are not yet supported as
   supervisor backends; the daemon refuses loudly at startup instead of
   misapplying tmux primitives to a pane that isn't one
   (docs/herdr-backend.md "Away-mode supervisor support").

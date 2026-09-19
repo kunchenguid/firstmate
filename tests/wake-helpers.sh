@@ -53,21 +53,88 @@ append_wake() {
   ' _ "$lib" "$kind" "$key" "$payload"
 }
 
+# fm_fake_tmux_inventory_lib: write (once) and print the path to the single
+# fake-tmux window-inventory renderer every fake tmux surface here delegates to.
+# The session inventory is the sole proof the endpoint-presence probe trusts, so
+# one renderer keeps all three fakes honest about the requested session (-t) and
+# field (-F) instead of three hand-maintained copies drifting apart.
+# A fake supplies its world in FM_FAKE_TMUX_INVENTORY_WINDOWS: newline-separated
+# entries, each either "window" (a bare name, which stands in every session) or
+# "session:window". A leading "=" on the requested session is tmux's
+# exact-match modifier, not part of the name.
+fm_fake_tmux_inventory_lib() {
+  local lib="$TMP_ROOT/fake-tmux-inventory.sh"
+  [ -f "$lib" ] || cat > "$lib" <<'SH'
+#!/usr/bin/env bash
+set -u
+session= format= prev=
+for arg in "$@"; do
+  [ "$prev" = -t ] && session=$arg
+  [ "$prev" = -F ] && format=$arg
+  prev=$arg
+done
+session=${session#=}
+# tmux defaults an inventory read to the window name when no format is asked.
+[ -n "$format" ] || format='#{window_name}'
+idx=0
+while IFS= read -r win; do
+  [ -n "$win" ] || continue
+  wsession=${win%%:*}
+  wpart=${win#*:}
+  if [ "$win" = "$wpart" ]; then
+    # A bare window name names no session, so it stands in every session.
+    wsession=$session
+  elif [ -n "$session" ] && [ "$wsession" != "$session" ]; then
+    continue
+  fi
+  case "$wpart" in
+    @*) wid=$wpart; windex=$idx; wname=win$idx ;;
+    *[!0-9]*) wid=@$idx; windex=$idx; wname=$wpart ;;
+    *) wid=@$idx; windex=$wpart; wname=win$wpart ;;
+  esac
+  case "$format" in
+    *'#{session_name}:#{window_name}'*) printf '%s\n' "$wsession:$wname" ;;
+    *session_name*) printf '%s\n' "$wsession" ;;
+    *window_id*) printf '%s\n' "$wid" ;;
+    *window_index*) printf '%s\n' "$windex" ;;
+    *window_name*) printf '%s\n' "$wname" ;;
+  esac
+  idx=$((idx + 1))
+done <<EOF
+${FM_FAKE_TMUX_INVENTORY_WINDOWS:-}
+EOF
+exit 0
+SH
+  chmod +x "$lib"
+  printf '%s\n' "$lib"
+}
+
 make_case() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"
   fakebin="$dir/fakebin"
   mkdir -p "$dir/state" "$fakebin"
+  fm_fake_tmux_inventory_lib >/dev/null
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
 if [ "${1:-}" = "list-windows" ]; then
+  # This fake only declares its own window set; the shared renderer is the one
+  # inventory implementation. Its entries are bare window parts, which name no
+  # session in this fixture's world.
   if [ -n "${FM_FAKE_TMUX_WINDOWS:-}" ]; then
-    printf '%s\n' "$FM_FAKE_TMUX_WINDOWS"
+    FM_FAKE_TMUX_INVENTORY_WINDOWS=$FM_FAKE_TMUX_WINDOWS
   elif [ -n "${FM_FAKE_TMUX_WINDOW:-}" ]; then
-    printf '%s\n' "${FM_FAKE_TMUX_WINDOW#*:}"
+    FM_FAKE_TMUX_INVENTORY_WINDOWS=${FM_FAKE_TMUX_WINDOW#*:}
+  else
+    FM_FAKE_TMUX_INVENTORY_WINDOWS=
   fi
-  exit 0
+  export FM_FAKE_TMUX_INVENTORY_WINDOWS
+  # The shared renderer lives one level above this fakebin (in TMP_ROOT). Resolve
+  # it from this script's own location: these fakes are created inside a
+  # `$(make_...)` command substitution, so an exported path set there would be
+  # lost before the fake ever runs.
+  exec "$(cd "$(dirname "$0")/../.." && pwd -P)/fake-tmux-inventory.sh" "$@"
 fi
 if [ "${1:-}" = "capture-pane" ]; then
   if [ -n "${FM_FAKE_TMUX_CAPTURE_COUNT_FILE:-}" ]; then
@@ -160,6 +227,7 @@ make_supercase() {
   dir="$TMP_ROOT/$name"
   fakebin="$dir/fakebin"
   mkdir -p "$dir/state" "$fakebin"
+  fm_fake_tmux_inventory_lib >/dev/null
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -167,16 +235,45 @@ case "${1:-}" in
   display-message)
     [ "${FM_FAKE_TMUX_PANE_ALIVE:-1}" = "1" ] || exit 1
     _print=0
+    _target=""; _fmt=""; _prev=""
     # Return cursor_y when the format asks for it (pane_input_pending).
     for _a in "$@"; do
       case "$_a" in *cursor_y*) printf '%s\n' "${FM_FAKE_TMUX_CURSOR_Y:-0}"; exit 0 ;; esac
       [ "$_a" = "-p" ] && _print=1
+      [ "$_prev" = "-t" ] && _target=$_a
+      case "$_a" in *'#{'*) _fmt=$_a ;; esac
+      _prev=$_a
     done
+    # The explicit-target probe proves tmux's own resolved identity, so a
+    # "<session>:<window>" target answers its own session and window fields.
+    case "$_fmt" in
+      *session_name*) _s=${_target%%:*}; printf '%s\n' "${_s#=}"; exit 0 ;;
+      *window_name*) _w=${_target#*:}; _w=${_w#=}; printf '%s\n' "${_w%%.*}"; exit 0 ;;
+      *window_index*) printf '0\n'; exit 0 ;;
+      *window_id*) printf '@0\n'; exit 0 ;;
+      *pane_id*) printf '%%0\n'; exit 0 ;;
+      *pane_index*) printf '0\n'; exit 0 ;;
+    esac
     [ "$_print" = 1 ] && printf 'fakepane\n'
     exit 0 ;;
-  list-windows)
-    [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
+  list-panes)
+    # The explicit-target probe's deliverability check; real tmux answers for a
+    # target it can route.
+    case " $* " in *'#{pane_id}'*) printf '%%0\n' ;; esac
     exit 0 ;;
+  list-windows)
+    # Real tmux's session inventory, which is the only presence proof: an
+    # addressed display-message call silently resolves an unknown window name to
+    # the session's active pane and exits 0. This fixture models a live
+    # supervisor pane, addressed as FM_SUPERVISOR_TARGET (the production default
+    # otherwise), plus the crew pane under test in FM_FAKE_TMUX_WINDOW, whose
+    # value carries its "<session>:<window>" target. The shared renderer turns
+    # that window set into the requested -F field exactly as tmux would.
+    FM_FAKE_TMUX_INVENTORY_WINDOWS="${FM_FAKE_TMUX_WINDOW:-}
+${FM_SUPERVISOR_TARGET:-firstmate}"
+    export FM_FAKE_TMUX_INVENTORY_WINDOWS
+    exec "$(cd "$(dirname "$0")/../.." && pwd -P)/fake-tmux-inventory.sh" "$@"
+    ;;
   capture-pane)
     # Honor a single-line band capture (-S N -E M, both non-negative) for the
     # composer reader's non-bordered compatibility fallback; otherwise (e.g. its
@@ -240,6 +337,7 @@ make_bordered_case() {
   dir="$TMP_ROOT/$name"; fakebin="$dir/fakebin"
   mkdir -p "$dir/state" "$fakebin"
   printf '╭─────╮\n│ >   │\n╰─────╯\n' > "$dir/composer"
+  fm_fake_tmux_inventory_lib >/dev/null
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -258,12 +356,43 @@ write_composer() {
 case "${1:-}" in
   display-message)
     print=0
-    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
-    for a in "$@"; do [ "$a" = "-p" ] && print=1; done
+    target=""; fmt=""; prev=""
+    for a in "$@"; do
+      case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac
+      [ "$a" = "-p" ] && print=1
+      [ "$prev" = "-t" ] && target=$a
+      case "$a" in *'#{'*) fmt=$a ;; esac
+      prev=$a
+    done
+    # The explicit-target probe proves tmux's own resolved identity, so a
+    # "<session>:<window>" target answers its own session and window fields.
+    case "$fmt" in
+      *session_name*) s=${target%%:*}; printf '%s\n' "${s#=}"; exit 0 ;;
+      *window_name*) w=${target#*:}; w=${w#=}; printf '%s\n' "${w%%.*}"; exit 0 ;;
+      *window_index*) printf '0\n'; exit 0 ;;
+      *window_id*) printf '@0\n'; exit 0 ;;
+      *pane_id*) printf '%%0\n'; exit 0 ;;
+      *pane_index*) printf '0\n'; exit 0 ;;
+    esac
     [ "$print" = 1 ] && printf 'fakepane\n'
     exit 0 ;;
+  list-panes)
+    # The explicit-target probe's deliverability check; real tmux answers for a
+    # target it can route.
+    case " $* " in *'#{pane_id}'*) printf '%%0\n' ;; esac
+    exit 0 ;;
   capture-pane) cat "$COMPOSER" 2>/dev/null; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    # Same inventory contract as the shared fake above: the session inventory is
+    # the only presence proof, so the live supervisor pane must be listed here
+    # for an injection to reach it. The shared renderer renders the requested -F
+    # field. This fixture's world holds the supervisor pane plus the "sess:win"
+    # pane its fm-send cases address explicitly.
+    FM_FAKE_TMUX_INVENTORY_WINDOWS="${FM_FAKE_TMUX_WINDOW:-sess:win}
+${FM_SUPERVISOR_TARGET:-firstmate}"
+    export FM_FAKE_TMUX_INVENTORY_WINDOWS
+    exec "$(cd "$(dirname "$0")/../.." && pwd -P)/fake-tmux-inventory.sh" "$@"
+    ;;
   send-keys)
     shift
     text=""; is_enter=0; lit=0

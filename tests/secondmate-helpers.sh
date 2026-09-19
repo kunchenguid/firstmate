@@ -37,6 +37,8 @@ case "${1:-}" in
       if [ "$prev" = -t ]; then session=$arg; break; fi
       prev=$arg
     done
+    # tmux's leading "=" is an exact-match modifier, not part of the name.
+    session=${session#=}
     while IFS= read -r recorded; do
       [ -n "$recorded" ] || continue
       if [ -z "$session" ]; then

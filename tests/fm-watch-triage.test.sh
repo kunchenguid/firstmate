@@ -2038,6 +2038,60 @@ test_nonterminal_stale_not_working_surfaced() {
   pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
 }
 
+# --- removed worker window with a surviving busy record: never reads busy -----
+# Regression (2026-09-14 fleet-loss incident, the watcher half): the durable
+# semantic busy record outlived the window that wrote it, so a removed worker
+# still classified busy through window_is_busy and the busy suppression skipped
+# the whole pane-stale path - the loss went unnoticed until something else
+# exposed it. A busy record can only describe a window that still exists, so a
+# positively absent endpoint must surface as stale.
+test_removed_window_surviving_busy_record_surfaces_stale() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid absent_state busy_verdict
+  dir=$(make_case removed-window-busy-record); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-gone"
+  printf 'idle prompt, worker gone' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/gone.meta"
+  # Non-terminal status, .seen-* primed so the signal scan does not pre-empt the
+  # stale path.
+  printf 'working: mid turn\n' > "$state/gone.status"
+  sig=$(seen_sig "$state/gone.status"); printf '%s' "$sig" > "$state/.seen-gone_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle prompt, worker gone")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # The turn's durable busy record survives the window it described.
+  record_pi_busy "$state" gone
+
+  # Anti-vacuity: the endpoint is authoritatively absent (the session inventory
+  # answers successfully but omits it) while the record still classifies busy -
+  # the exact combination the live gate must resolve.
+  absent_state=$(PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW='' bash -c '
+    . "$1/bin/fm-backend.sh"
+    fm_backend_agent_state tmux "$2"
+  ' _ "$ROOT" "$window")
+  [ "$absent_state" = missing ] || fail "fixture drifted: the omitted window must classify missing, got '$absent_state'"
+  busy_verdict=$(PATH="$fakebin:$PATH" bash -c '
+    . "$1/bin/fm-backend.sh"
+    . "$1/bin/fm-busy-lib.sh"
+    fm_busy_classify_meta "$2/gone.meta" gone "$2"
+  ' _ "$ROOT" "$state")
+  [ "$busy_verdict" = 'busy pi-ext' ] || fail "fixture drifted: the surviving busy record must classify busy, got '$busy_verdict'"
+
+  # A busy record with no live window must not suppress the stale surface.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW='' FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a removed worker's surviving busy record suppressed its stale surface: $(cat "$out")"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print the removed worker's stale wake"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor was not advanced on surface"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the stale failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "the removed worker's stale wake was not queued"
+  pass "a removed worker whose busy record survives surfaces as stale instead of reading busy"
+}
+
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
 #     cadence, never wedge-escalated ------------------------------------------
 # The live 2026-07-09/10 case: a crew intentionally held awaiting an upstream tool
@@ -5506,6 +5560,7 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
+test_removed_window_surviving_busy_record_surfaces_stale
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle

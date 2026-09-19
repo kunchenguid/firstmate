@@ -66,8 +66,30 @@ case "${1:-}" in
     fi
     exit 0 ;;
   display-message)
-    for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
-    printf 'fakepane\n'; exit 0 ;;
+    target=""; fmt=""; prev=""
+    for a in "$@"; do
+      [ "$prev" = -t ] && target=$a
+      case "$a" in *'#{'*) fmt=$a ;; esac
+      prev=$a
+    done
+    case "$fmt" in
+      *cursor_y*) printf '1\n' ;;
+      # The explicit-target probe proves tmux's own resolved identity, so a
+      # "<session>:<window>" target answers its own session and window fields.
+      *session_name*) s=${target%%:*}; printf '%s\n' "${s#=}" ;;
+      *window_name*) w=${target#*:}; w=${w#=}; printf '%s\n' "${w%%.*}" ;;
+      *window_index*) printf '0\n' ;;
+      *window_id*) printf '@0\n' ;;
+      *pane_id*) printf '%%0\n' ;;
+      *pane_index*) printf '0\n' ;;
+      *) printf 'fakepane\n' ;;
+    esac
+    exit 0 ;;
+  list-panes)
+    # The explicit-target probe's deliverability check; real tmux answers for a
+    # target it can route.
+    case " $* " in *'#{pane_id}'*) printf '%%0\n' ;; esac
+    exit 0 ;;
   capture-pane)
     if [ "${FM_FAKE_TMUX_COMPOSER:-}" = pending ]; then
       printf '╭──────────────╮\n│ leftover txt │\n╰──────────────╯\n'
@@ -75,7 +97,7 @@ case "${1:-}" in
       printf '╭────╮\n│    │\n╰────╯\n'
     fi
     exit 0 ;;
-  list-windows) printf 'fm-t1\n'; exit 0 ;;
+  list-windows) printf 'fm-t1\nwin\n'; exit 0 ;;
 esac
 exit 0
 SH

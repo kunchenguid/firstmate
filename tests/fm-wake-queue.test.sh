@@ -459,7 +459,13 @@ test_secondmate_active_turn_defers_stall_until_the_turn_ends() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  list-windows) printf '%s\n' 'firstmate:fm-mate' ;;
+  list-windows)
+    # The session inventory is the only endpoint-presence proof; delegate to the
+    # shared renderer, which honors the requested -F field.
+    FM_FAKE_TMUX_INVENTORY_WINDOWS='firstmate:fm-mate'
+    export FM_FAKE_TMUX_INVENTORY_WINDOWS
+    exec "$(cd "$(dirname "$0")/../.." && pwd -P)/fake-tmux-inventory.sh" "$@"
+    ;;
   capture-pane) printf 'working\n' ;;
   display-message) printf '0\n' ;;
   *) exit 0 ;;
@@ -526,7 +532,13 @@ test_secondmate_long_lived_mate_mid_turn_is_not_a_stall() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  list-windows) printf '%s\n' 'firstmate:fm-mate' ;;
+  list-windows)
+    # The session inventory is the only endpoint-presence proof; delegate to the
+    # shared renderer, which honors the requested -F field.
+    FM_FAKE_TMUX_INVENTORY_WINDOWS='firstmate:fm-mate'
+    export FM_FAKE_TMUX_INVENTORY_WINDOWS
+    exec "$(cd "$(dirname "$0")/../.." && pwd -P)/fake-tmux-inventory.sh" "$@"
+    ;;
   capture-pane) printf 'working\n' ;;
   display-message) printf '0\n' ;;
   *) exit 0 ;;
@@ -583,7 +595,13 @@ test_secondmate_stall_marker_rejects_symlink() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
-  list-windows) printf '%s\n' 'firstmate:fm-mate' ;;
+  list-windows)
+    # The session inventory is the only endpoint-presence proof; delegate to the
+    # shared renderer, which honors the requested -F field.
+    FM_FAKE_TMUX_INVENTORY_WINDOWS='firstmate:fm-mate'
+    export FM_FAKE_TMUX_INVENTORY_WINDOWS
+    exec "$(cd "$(dirname "$0")/../.." && pwd -P)/fake-tmux-inventory.sh" "$@"
+    ;;
   capture-pane) : ;;
   display-message) printf '0\n' ;;
   *) exit 0 ;;

@@ -891,6 +891,11 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
 # probe). A gone tmux window or an unqueryable herdr pane (server down, pane
 # closed), missing zellij pane, or unreadable Orca terminal simply fails, which
 # IS "does not exist" for this purpose.
+# The tmux arm proves the endpoint by tmux's own answer
+# (fm_backend_tmux_target_present in bin/backends/tmux.sh) rather than trusting
+# `tmux display-message -t <target>`, which resolves an unknown window name to
+# the session's active window and exits 0 - the silent fallback that made
+# vanished worker windows read as live endpoints.
 # Mirrors fm-crew-state.sh's pane_readable check; exists here as one shared
 # primitive so callers that only need a fast alive/dead read (recovery
 # digests, the session-start fleet digest) do not re-derive it inline.
@@ -898,7 +903,8 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
   local backend=$1 target=$2 expected_label=${3:-} session pane
   case "$backend" in
     tmux)
-      tmux display-message -p -t "$target" '#{pane_id}' >/dev/null 2>&1
+      fm_backend_source tmux || return 1
+      fm_backend_tmux_target_present "$target"
       ;;
     herdr)
       fm_backend_source herdr || return 1
@@ -929,6 +935,34 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
       ;;
     *)
       return 1
+      ;;
+  esac
+}
+
+# fm_backend_explicit_target_exists: the presence probe for a target an
+# OPERATOR supplied - bin/fm-send.sh's explicit target and the away-mode
+# daemon's supervisor target - as opposed to a window name firstmate recorded
+# for a task. The two must differ, because on tmux a pane-qualified target and a
+# dotted recorded window name are the same string: `<sess>:fm-held.0` is the
+# recorded worker window `fm-held.0`, while `<sess>:mywin.0` is pane 0 of window
+# `mywin`. Only the recorded path may treat that string as one literal window
+# name, or a vanished dotted worker window would read as a live prefix window
+# again, which is exactly the fleet-loss incident this probe exists to fix.
+# For tmux the explicit arm resolves the raw target through tmux itself and
+# requires the identity tmux resolved - session, window name/index/@id, and,
+# when the target names one, pane id/index - to match the request, so `present`
+# means tmux can really deliver to that target (see
+# fm_backend_tmux_explicit_target_present in bin/backends/tmux.sh). Every other
+# backend keeps its recorded-target probe, whose adapter already addresses the
+# operator-supplied shape directly (a herdr target is a pane id, not a window).
+fm_backend_explicit_target_exists() {  # <backend> <target> [expected-label]
+  case "$1" in
+    tmux)
+      fm_backend_source tmux || return 1
+      fm_backend_tmux_explicit_target_present "$2"
+      ;;
+    *)
+      fm_backend_target_exists "$@"
       ;;
   esac
 }

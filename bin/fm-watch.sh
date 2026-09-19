@@ -342,18 +342,18 @@ hash_pane() {
 # verdict returns 0: idle, unknown, and dead all return 1, so a converted
 # adapter whose semantic state is missing, malformed, stale, or unverified is
 # treated as not-provably-working and surfaces rather than being absorbed.
+# A durable busy record can only describe a window that still exists, so a busy
+# verdict is additionally confirmed through the shared live-classification
+# boundary (fm_busy_classify_live): a positively missing, dead, or unverified
+# local endpoint returns 1, while a remote, unreadable, or ambiguous endpoint
+# keeps its record.
 # <tail40> is the same bounded capture already read for hashing and is
 # consumed only by the Grok-scoped fallback inside the contract.
 window_is_busy() {  # <window> <tail40>
-  local w=$1 tail40=$2 task meta verdict
+  local w=$1 tail40=$2 task verdict
   task=$(window_to_task "$w" "$STATE")
-  meta="$STATE/$task.meta"
-  if [ -n "$task" ] && [ -f "$meta" ]; then
-    verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40")
-  else
-    verdict=$(fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
-      "${task:-unknown}" "$STATE" "$tail40")
-  fi
+  verdict=$(fm_busy_classify_live "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
+    "${task:-unknown}" "$STATE" "$(window_label "$w")" "$tail40")
   [ "${verdict%% *}" = busy ]
 }
 

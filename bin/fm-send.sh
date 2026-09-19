@@ -417,7 +417,7 @@ fm_send_resolve_target() { # <raw-target>
     else
       assumed=tmux
     fi
-    if ! fm_backend_target_exists "$assumed" "$raw"; then
+    if ! fm_backend_explicit_target_exists "$assumed" "$raw"; then
       echo "error: explicit target '$raw' is not a live $assumed endpoint (tried meta=$STATE/$raw.meta; metadata window/terminal lookup; backend=$assumed). Use fm-<id> for a recorded task/lane, or pass a target whose backend endpoint can be verified." >&2
       return 1
     fi

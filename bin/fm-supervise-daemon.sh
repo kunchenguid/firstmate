@@ -73,8 +73,9 @@
 #          FM_SUPERVISOR_TARGET     supervisor pane target (override; otherwise
 #                                   auto-discovered per backend - $TMUX_PANE
 #                                   under tmux, "<session>:<pane-id>" from
-#                                   $HERDR_PANE_ID under herdr - then
-#                                   firstmate:0 fallback). Accepts either a
+#                                   $HERDR_PANE_ID under herdr - then the
+#                                   "firstmate" session fallback). Accepts
+#                                   either a
 #                                   tmux target or a herdr "<session>:<pane-id>"
 #                                   target; which one it's read as is decided by
 #                                   FM_SUPERVISOR_BACKEND (below), independently.
@@ -680,7 +681,11 @@ task_window_harness() {  # <window> <state>
 # semantic busy-state contract (bin/fm-busy-lib.sh), 1 when it is not, and 2
 # when the endpoint could not be read at all. Only an exact busy verdict is
 # working: unknown semantic state never becomes busy and never becomes a
-# silent idle, so a stale pane whose state cannot be proven surfaces.
+# silent idle, so a stale pane whose state cannot be proven surfaces. A busy
+# record can only describe an endpoint that still exists, so the classification
+# goes through fm_busy_classify_live: a positively absent local endpoint is
+# never busy, while a remote, unreadable, or ambiguous endpoint keeps its
+# record.
 stale_window_is_busy() {  # <window> <state>
   local win=$1 state=$2 backend harness label task tail40 verdict
   backend=$(task_window_backend "$win" "$state")
@@ -688,7 +693,7 @@ stale_window_is_busy() {  # <window> <state>
   task=$(window_to_task "$win" "$state")
   label="fm-$task"
   tail40=$(fm_backend_capture "$backend" "$win" 40 "$label" 2>/dev/null) || return 2
-  verdict=$(fm_busy_classify "$backend" "$win" "$harness" "$task" "$state" "$tail40")
+  verdict=$(fm_busy_classify_live "$backend" "$win" "$harness" "$task" "$state" "$label" "$tail40")
   [ "${verdict%% *}" = busy ]
 }
 
@@ -1263,7 +1268,7 @@ inject_msg() {  # <message> [state]
   # when unset (sourced/test contexts that never ran fm_super_main's startup
   # discovery), matching this function's pre-existing default assumption.
   backend="${FM_SUPERVISOR_BACKEND:-tmux}"
-  fm_backend_target_exists "$backend" "$target" || return 1
+  fm_backend_explicit_target_exists "$backend" "$target" || return 1
   # (3) Busy-guard: never inject into an in-use supervisor pane.
   if pane_is_busy "$target" "$backend"; then
     log "inject deferred: supervisor pane busy (agent mid-turn)"
@@ -1615,8 +1620,9 @@ fm_super_main() {
   # --- auto-discover the supervisor target (the pane running firstmate) -----
   # Priority: FM_SUPERVISOR_TARGET override > $TMUX_PANE (tmux; inherited from
   # the pane that launched the daemon, normally firstmate's own) >
-  # $HERDR_PANE_ID (herdr, composed into "<session>:<pane-id>") > firstmate:0
-  # fallback. Exporting the result into FM_SUPERVISOR_TARGET makes inject_msg
+  # $HERDR_PANE_ID (herdr, composed into "<session>:<pane-id>") > the
+  # "firstmate" session fallback. Exporting the result into FM_SUPERVISOR_TARGET
+  # makes inject_msg
   # (which reads that env var) use the discovered pane without an extra global.
   local discovered target_source
   target_source="FM_SUPERVISOR_TARGET"
@@ -1626,7 +1632,7 @@ fm_super_main() {
     elif [ "${HERDR_ENV:-}" = "1" ] && [ -n "${HERDR_PANE_ID:-}" ]; then
       target_source="HERDR_ENV(HERDR_PANE_ID)"
     else
-      target_source="FALLBACK(firstmate:0)"
+      target_source="FALLBACK(firstmate)"
     fi
   fi
   if discovered=$(discover_supervisor_target); then
@@ -1639,10 +1645,15 @@ fm_super_main() {
 
   # --- validate supervisor target at startup (a missing target is a typo) ---
   # Dispatches through bin/fm-backend.sh instead of a raw `tmux display-message`
-  # probe, so a herdr supervisor pane is checked via the herdr adapter; for
-  # backend=tmux this runs the exact same `tmux display-message -p -t "$TARGET"
-  # '#{pane_id}'` call as before.
-  if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
+  # probe, so a herdr supervisor pane is checked via the herdr adapter. The
+  # tmux arm is the EXPLICIT-target probe: an operator-supplied tmux target may
+  # be pane-qualified (`<session>:<window>.<pane>`) or a bare pane id, so it
+  # requires the identity tmux itself resolves - session, window name/index/@id,
+  # and, when the target names one, pane id/index - to match the request,
+  # instead of trusting `display-message` alone, which silently resolves a
+  # missing window to the session's active window and an out-of-range pane to
+  # the window's active pane.
+  if ! fm_backend_explicit_target_exists "$BACKEND" "$TARGET"; then
     echo "error: supervisor target '$TARGET' does not resolve to a $BACKEND pane; set FM_SUPERVISOR_TARGET" >&2
     log "startup failed: target '$TARGET' not found (backend=$BACKEND)"
     fm_lock_release "$LOCK" 2>/dev/null || true
@@ -1710,7 +1721,7 @@ fm_super_main() {
     # has nowhere to go, and firstmate itself is the consumer of escalations.
     # Catch-up signals persist in state/*.status and flow on the next run, so
     # this delays rather than loses work.
-    if ! fm_backend_target_exists "$BACKEND" "$TARGET"; then
+    if ! fm_backend_explicit_target_exists "$BACKEND" "$TARGET"; then
       log "warn: supervisor target '$TARGET' gone; backing off ${INJECT_FAIL_SLEEP}s, will retry"
       # Flush is pointless with no pane; preserve any buffered escalations.
       sleep "$INJECT_FAIL_SLEEP"
