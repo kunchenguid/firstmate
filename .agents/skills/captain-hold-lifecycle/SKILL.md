@@ -43,8 +43,11 @@ Both outcomes refuse unless that task still has the pending request created by t
 A normal captain answer also retires any pending request because the call is settled, including close, release, and idempotent replay paths.
 A retirement failure makes the command fail without reversing the already-durable answer, close, or note, and `reconcile list` keeps the surviving request visible for retry.
 `reconcile list` names every request still outstanding.
-Never use `answer` for an evidence-only moot call: `answer` records what the captain said, while `reconcile close` records verified evidence.
-A captain-held task closed outside this owner leaves no durable answer, so the completion gate keeps failing until `answer` records the decision the captain actually gave.
+Never use `answer` for an evidence-only moot call: `answer` records what the captain said, while `reconcile close` records verified evidence behind a board-created request.
+When you yourself settle a call on durable evidence outside that board flow - an OPEN DECISIONS reconciliation that turns up a call already moot, with no pending board request to close it through - use `bin/fm-captain-hold.sh rule <task-id> --evidence-file <path>` instead: it records the same kind of evidence under a `Firstmate ruling:` label, never a `Captain decision:`, and closes the call without needing a board request.
+`rule` also retroactively attaches that same truthful record to a captain-held task already closed out of band with no resolution record, so that closure never has to be dressed up as a captain answer just to satisfy the completion gate.
+Never use `rule` to talk yourself past a genuinely open captain call: it demands the same durable evidence `reconcile close` does, and a task never held for the captain has nothing to rule on and is refused.
+A captain-held task closed outside this owner leaves no durable answer, so the completion gate keeps failing until `answer` records the decision the captain actually gave, or `rule` records the evidence that made an answer unnecessary.
 Resolved findings, recommendations that need no captain choice, and prose that merely sounds decision-like do not create held tasks.
 Bearings reads the resulting structured state and must never compensate by scraping historical reports, visual-review artifacts, terminal output, chat, or other prose.
 
@@ -61,8 +64,8 @@ The absence of a routed work item is not a divergence and the guard never requir
 3. Hold that task - or create one captain-held task for the review's open questions - with a concise reason carrying the question and options.
 4. Run `complete` with the full captain-held inventory for that review pass.
 5. Relay the choices to the captain as decisions from Bearings' Captain's Call section under `AGENTS.md` section 9; do not use the word hold in captain chat.
-6. Close each call only through `answer` (or a channel that feeds `answers`), close a board-requested moot call through evidence-backed `reconcile close`, record a still-active reconciliation through `reconcile note`, use `--until` when the captain defers it, or confirm a channel already closed it.
-7. Confirm Bearings reflects the outcome: answered or reconciled-moot calls leave Captain's Call, released work resumes, active reconciliations remain held, and deferred calls sit in Charted Next with their date.
+6. Close each call only through `answer` (or a channel that feeds `answers`), close a board-requested moot call through evidence-backed `reconcile close`, close or annotate a moot call firstmate itself settled through evidence-backed `rule`, record a still-active reconciliation through `reconcile note`, use `--until` when the captain defers it, or confirm a channel already closed it.
+7. Confirm Bearings reflects the outcome: answered, reconciled-moot, or ruled-moot calls leave Captain's Call, released work resumes, active reconciliations remain held, and deferred calls sit in Charted Next with their date.
 
 `bin/fm-captain-hold.sh --help` owns command syntax, close modes, legacy-identity compatibility, completion attestation, retry behavior, and close ordering.
 `docs/captain-hold-lifecycle.md` records the mechanism and regression evidence without restating this policy.

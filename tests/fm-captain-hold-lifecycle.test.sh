@@ -1528,6 +1528,37 @@ test_secondmate_reconcile_publishes_before_request_retirement() {
   pass "secondmate resolutions publish before retiring durable retry triggers"
 }
 
+# A firstmate ruling is a captain-facing fact the moment it closes a live
+# hold, exactly like an answer or a board-requested reconciliation.
+test_secondmate_home_publishes_rulings() {
+  local parent mate channel evidence
+  parent=$(make_home rule-parent-channel)
+  mate=$(make_home rule-channel-mate)
+  printf 'rule-channel-mate\n' > "$mate/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$parent" \
+    > "$mate/.fm-secondmate-parent"
+  channel="$parent/state/rule-channel-mate.status"
+  evidence="$mate/rule-evidence.txt"
+
+  tasks_in "$mate" add rule-channel-call "Verify the mate ruling" --kind ship --repo sample >/dev/null \
+    || fail "could not create the rule channel call"
+  run_captain "$mate" hold rule-channel-call --reason "verify current release state" >/dev/null \
+    || fail "could not hold the rule channel call"
+  assert_grep 'needs-decision [key=captain-hold-rule-channel-call-1]: captain hold rule-channel-call: verify current release state' \
+    "$channel" "the mate's hold did not reach the parent channel"
+  printf 'The underlying release already shipped, with no board request filed.\n' > "$evidence"
+
+  run_captain "$mate" rule rule-channel-call --evidence-file "$evidence" >/dev/null \
+    || fail "could not rule the mate call without a board request"
+  assert_grep 'resolved [key=captain-hold-rule-channel-call-1]: captain hold rule-channel-call: ruled' \
+    "$channel" "the ruling did not close the parent decision"
+  run_captain "$mate" rule rule-channel-call --evidence-file "$evidence" >/dev/null \
+    || fail "an idempotent rule retry failed"
+  [ "$(grep -c 'captain-hold-rule-channel-call-1' "$channel")" = 2 ] \
+    || fail "the idempotent rule retry duplicated a parent line: $(cat "$channel")"
+  pass "a secondmate home publishes a firstmate ruling on the parent channel"
+}
+
 # The one keyed-answer intake, fed through the real process-event runner by a
 # fixture channel that knows nothing about captain holds: task-id keys close at
 # answer time, a card-declared release mode frees held work, freeform prose can
@@ -2051,6 +2082,156 @@ SH
   list=$(run_captain "$home" reconcile list)
   assert_contains "$list" "reconcile-requests: 0" "partial retries left a reconcile request pending"
   pass "reconcile outcomes apply durable mutations once across partial failures"
+}
+
+# `rule` closes an evidence-moot call firstmate itself settled - no board
+# request behind it - which is exactly the case `reconcile close` refuses.
+test_rule_closes_an_actively_held_call_without_a_board_request() {
+  local home id show rc out
+  home=$(make_home rule-no-board-request)
+  id=sample-rule-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the sample rule review" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the rule-review origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample rule review\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+  tasks_in "$home" add sample-ruled-live-call "Captain call: ship the sample fix?" --repo sample >/dev/null
+  tasks_in "$home" add sample-ruled-plain-work "Ordinary sample work" --kind ship --repo sample --start >/dev/null
+  run_captain "$home" hold sample-ruled-live-call --reason "ship the sample fix?" \
+    --origin "$id" >/dev/null || fail "could not hold the live call fixture"
+  printf 'PR #512 was superseded and closed on 2026-09-05, so the ship question is moot.\n' \
+    > "$home/evidence.txt"
+
+  set +e
+  out=$(run_captain "$home" reconcile close sample-ruled-live-call \
+    --evidence-file "$home/evidence.txt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "reconcile closed a call with no board request"
+  assert_contains "$out" "no pending board-created reconcile request" \
+    "reconcile close's refusal did not name the missing board request: $out"
+
+  set +e
+  out=$(run_captain "$home" rule sample-ruled-live-call 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "rule accepted a call with no evidence file"
+  assert_contains "$out" "evidence" "the missing-evidence refusal did not name it: $out"
+
+  set +e
+  out=$(run_captain "$home" rule sample-ruled-plain-work \
+    --evidence-file "$home/evidence.txt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "rule closed an ordinary unfinished task that was never held"
+  assert_contains "$out" "there is no ruling to record" \
+    "the refusal for an unheld, unfinished task did not explain itself: $out"
+
+  run_captain "$home" rule sample-ruled-live-call --evidence-file "$home/evidence.txt" >/dev/null \
+    || fail "could not rule the moot call with evidence"
+  show=$(tasks_in "$home" show sample-ruled-live-call --full)
+  assert_contains "$show" "state: done" "the ruled call did not close"
+  assert_contains "$show" "Resolution mode: ruled" "the ruled call did not record how it closed"
+  assert_contains "$show" "Firstmate ruling:" "the ruled call did not record its evidence label"
+  assert_contains "$show" "PR #512 was superseded" "the recorded evidence was lost"
+  case "$show" in
+    *"Captain decision:"*) fail "a firstmate ruling was recorded as the captain's own words" ;;
+    *"Reconciliation evidence:"*) fail "a direct firstmate ruling was recorded as a board reconciliation" ;;
+  esac
+
+  run_captain "$home" rule sample-ruled-live-call --evidence-file "$home/evidence.txt" >/dev/null \
+    || fail "an identical rule retry was not idempotent"
+  [ "$(printf '%s\n' "$(tasks_in "$home" show sample-ruled-live-call --full)" \
+    | grep -c 'Resolution recorded by fm-captain-hold\.')" -eq 1 ] \
+    || fail "the idempotent rule retry duplicated its resolution record"
+
+  printf 'A different evidence claim entirely.\n' > "$home/drifted-evidence.txt"
+  set +e
+  out=$(run_captain "$home" rule sample-ruled-live-call \
+    --evidence-file "$home/drifted-evidence.txt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a drifted rule retry overwrote the recorded evidence"
+  assert_contains "$out" "cannot be ruled again" "the drifted retry refusal did not name itself"
+
+  set +e
+  out=$(run_captain "$home" answer sample-ruled-live-call --decision-file "$home/evidence.txt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a firstmate ruling replayed as a captain answer"
+  assert_contains "$out" "not a captain-answer replay" \
+    "the answer replay refusal did not identify the incompatible resolution mode: $out"
+
+  run_captain "$home" complete "$id" sample-ruled-live-call >/dev/null \
+    || fail "completion refused a ruled entry in its inventory"
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "the ruled resolution did not satisfy the completion gate"
+
+  if run_captain "$home" open sample-ruled-live-call; then
+    fail "a ruled call still reads as an open captain call"
+  fi
+  pass "rule closes a moot call with evidence when reconcile close has no board request to close through"
+}
+
+# A captain-held call closed out of band leaves no resolution record; `rule`
+# lets that truthful closure satisfy `verify` without forcing a fabricated
+# captain answer onto the record.
+test_rule_records_an_out_of_band_closure_without_fabricating_captain_words() {
+  local home id show out rc
+  home=$(make_home rule-ordinary-closure)
+  id=sample-rule-repair-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate the sample rule repair" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create the rule-repair origin"
+  write_origin_meta "$home" "$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Sample rule repair review\n\nOne captain choice remains.\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold sample-rule-repair-call --title "Choose the sample repair path" \
+    --reason "captain repair choice pending" --repo sample --origin "$id" >/dev/null \
+    || fail "could not register the captain-held task"
+  run_captain "$home" complete "$id" sample-rule-repair-call >/dev/null \
+    || fail "completion failed before the out-of-band close"
+  tasks_in "$home" "done" sample-rule-repair-call >/dev/null \
+    || fail "could not reproduce the direct out-of-band close"
+  run_captain "$home" verify "$id" > /dev/null 2> "$home/broken-verify.err" \
+    && fail "verification passed a captain call closed with no recorded resolution"
+  printf 'The underlying repair shipped as part of sample release 0.4.2.\n' > "$home/repair-evidence.txt"
+  run_captain "$home" rule sample-rule-repair-call --evidence-file "$home/repair-evidence.txt" >/dev/null \
+    || fail "rule could not record the missing resolution on the out-of-band close"
+  show=$(tasks_in "$home" show sample-rule-repair-call --full)
+  assert_contains "$show" "state: done" "recording the ruling reopened the closed task"
+  assert_contains "$show" "Resolution mode: ruled" "the retroactive record did not name its path"
+  assert_contains "$show" "Firstmate ruling:" "the retroactive record lost its evidence label"
+  assert_contains "$show" "shipped as part of sample release 0.4.2" \
+    "the retroactive record lost the evidence text"
+  case "$show" in
+    *"Captain decision:"*) fail "an evidence-only ruling was recorded as the captain's own words" ;;
+  esac
+  run_captain "$home" verify "$id" >/dev/null \
+    || fail "the recorded ruling did not satisfy the completion gate"
+  run_captain "$home" rule sample-rule-repair-call --evidence-file "$home/repair-evidence.txt" >/dev/null \
+    || fail "an identical retroactive rule retry was not idempotent"
+  run_teardown "$home" "$id" >/dev/null 2> "$home/teardown.err" \
+    || fail "teardown still refused after the ruling was recorded: $(cat "$home/teardown.err")"
+
+  # An ordinary finished task was never the captain's item; `rule` refuses to
+  # attach a captain-call resolution to it, exactly as `answer` does.
+  tasks_in "$home" add sample-rule-ordinary-work "Ordinary finished sample work" \
+    --kind ship --repo sample >/dev/null
+  tasks_in "$home" "done" sample-rule-ordinary-work >/dev/null
+  set +e
+  out=$(run_captain "$home" rule sample-rule-ordinary-work \
+    --evidence-file "$home/repair-evidence.txt" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "rule attached a resolution to an ordinary task never held for the captain"
+  assert_contains "$out" "was never held for the captain" \
+    "the refusal for an ordinary finished task did not explain itself: $out"
+  case "$(tasks_in "$home" show sample-rule-ordinary-work --full)" in
+    *"Resolution recorded by fm-captain-hold."*) fail "the refused ruling still wrote a resolution record" ;;
+  esac
+  pass "rule records a truthful evidence-only closure without fabricating captain provenance"
 }
 
 test_unbound_source_closes_no_hold() {
@@ -4039,11 +4220,14 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory
 test_secondmate_hold_stays_in_authoritative_home
 test_secondmate_home_publishes_holds_and_answers
 test_secondmate_reconcile_publishes_before_request_retirement
+test_secondmate_home_publishes_rulings
 test_bound_channel_answers_close_at_answer_time
 test_reconcile_never_closes_through_the_keyed_answer_intake
 test_normal_answers_retire_pending_reconcile_requests
 test_reconcile_closes_with_evidence_or_keeps_the_call_open
 test_reconcile_outcomes_retry_partial_failures_once
+test_rule_closes_an_actively_held_call_without_a_board_request
+test_rule_records_an_out_of_band_closure_without_fabricating_captain_words
 test_unbound_source_closes_no_hold
 test_legacy_identities_keep_working
 test_board_answer_reaches_the_keyed_answer_intake

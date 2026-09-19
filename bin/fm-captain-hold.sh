@@ -35,6 +35,7 @@
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
 #   fm-captain-hold.sh reconcile note <task-id> --note-file <path>
+#   fm-captain-hold.sh rule <task-id> --evidence-file <path>
 #
 # `hold` places an existing task under an active captain hold, or creates the
 # task first when no work item exists to hold (--title required to create; the
@@ -115,6 +116,24 @@
 # and pipe them here. It must never map keys to tasks, build decision records,
 # choose a close mode beyond what its card declared, or close anything itself.
 #
+# `rule` RECORDS AN EVIDENCE-BACKED FIRSTMATE RULING, NEVER THE CAPTAIN'S WORDS.
+# It is the completion path for a call this session settled on its own
+# authority from durable evidence found outside the board's Reconcile flow -
+# an OPEN DECISIONS reconciliation that turns up a moot call with no pending
+# board request is the motivating case `reconcile close` cannot serve. It
+# requires the evidence that settled the call, writes a `ruled` resolution
+# record under a `Firstmate ruling:` label - never `Captain decision:` or
+# `Reconciliation evidence:` - and, when the task is still actively held for
+# the captain, closes it the same way `reconcile close` does but without that
+# pending-request precondition. It also accepts a captain-held task already
+# closed out of band with no resolution record of any kind, and retroactively
+# attaches the same truthful record so it can satisfy `verify` without being
+# forced through `answer`'s captain-provenance record. A task never held for
+# the captain has nothing to rule on and is refused, exactly like `answer`'s
+# retroactive path refuses one. An exact retry is idempotent; a
+# different evidence text, or a task already closed under a different
+# resolution mode, is refused rather than relabeled.
+#
 # `bind`, `unbind`, and `binding` record that a captured-answer SOURCE feeds
 # this intake, for any channel whose answers arrive detached from their origin
 # (a process-event source id, for example). The binding is a private record
@@ -186,8 +205,8 @@
 # one captain call. See "record divergence" beside command_diverged below.
 #
 # Resolution records: the block written into the body names this script, the
-# decision digest, and a `Resolution mode:` of answered, released, repaired, or
-# reconciled. Records written by the retired fm-decision-hold.sh (routed,
+# decision digest, and a `Resolution mode:` of answered, released, repaired,
+# reconciled, or ruled. Records written by the retired fm-decision-hold.sh (routed,
 # declined, answered, repaired) are recognized everywhere a record is read, so
 # nothing already closed needs rewriting.
 #
@@ -455,6 +474,7 @@ body_has_resolution_record() {  # <task-body>
     *"Resolution recorded by fm-captain-hold."*"Captain decision:"*) return 0 ;;
     *"Resolution recorded by fm-decision-hold."*"Captain decision:"*) return 0 ;;
     *"Resolution recorded by fm-captain-hold."*"Reconciliation evidence:"*) return 0 ;;
+    *"Resolution recorded by fm-captain-hold."*"Firstmate ruling:"*) return 0 ;;
   esac
   return 1
 }
@@ -500,12 +520,17 @@ closed_answer_replay_mode_compatible() {  # <mode> <task-body>
   return 1
 }
 
-# The record's label is what keeps an evidence-backed reconciliation from
-# reading as the captain's own words. `reconciled` closes a call that went moot
-# and carries verified evidence; every other mode carries what the captain said.
+# The record's label is what keeps an evidence-backed closure from reading as
+# the captain's own words. `reconciled` closes a board-requested call that
+# went moot; `ruled` closes or annotates one settled by firstmate's own
+# authority instead, board request or not; every other mode carries what the
+# captain actually said.
 resolution_block() {  # <mode>
   local label='Captain decision:'
-  [ "$1" != reconciled ] || label='Reconciliation evidence:'
+  case "$1" in
+    reconciled) label='Reconciliation evidence:' ;;
+    ruled) label='Firstmate ruling:' ;;
+  esac
   printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n\n%s\n%s\n' \
     "$DECISION_DIGEST" "$1" "$label" "$DECISION_TEXT"
 }
@@ -1620,6 +1645,90 @@ reconcile_note() {
   printf 'still-open: %s\n' "$id"
 }
 
+# --- rule: an evidence-backed firstmate ruling, never the captain's words ---
+#
+# Same evidentiary standard as reconcile_close - a non-empty evidence file
+# governs, never an assertion - but reached without a board-created request,
+# because the discovery here is firstmate's own (an OPEN DECISIONS
+# reconciliation, for one), not the captain's board selection. The `Firstmate
+# ruling:` label is what keeps the record from ever reading as the captain's
+# own word. See the header comment above and docs/captain-hold-lifecycle.md
+# for the full contract.
+command_rule() {
+  local id=${1:-} evidence_file='' show state hold_kind body occurrence recorded_mode
+  [ "$#" -ge 1 ] || { usage >&2; exit 2; }
+  shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --evidence-file) shift; evidence_file=${1:-} ;;
+      *) usage >&2; exit 2 ;;
+    esac
+    shift
+  done
+  validate_slug task-id "$id"
+  [ -n "$evidence_file" ] || fail "--evidence-file is required; a firstmate ruling closes on durable evidence, never on assertion"
+  load_decision "$evidence_file"
+  acquire_task_control_lock "$id"
+  require_tasks_axi
+  task_show "$id" || fail "task $id is absent from this home's configured backlog (data directory $DATA)"
+  show=$TASK_SHOW_OUTPUT
+  state=$(show_field "$show" state)
+  hold_kind=$(show_field_value "$show" hold_kind)
+  body=$(show_field "$show" body)
+  occurrence=$(( $(resolution_record_count "$body") + 1 ))
+  # tasks-axi keeps hold_kind through a close, so it is the surviving proof
+  # this really was the captain's call rather than ordinary finished work.
+  [ "$hold_kind" = captain ] \
+    || fail "task $id was never held for the captain; there is no ruling to record"
+
+  if [ "$state" = "done" ]; then
+    if body_has_resolution_record "$body"; then
+      # An exact retry is idempotent; a different evidence text, or a record
+      # already closed some other way, is refused rather than relabeled.
+      [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ] \
+        || fail "task $id records a different resolution; it cannot be ruled again"
+      [ "$(recorded_resolution_mode "$body" || true)" = ruled ] \
+        || fail "task $id was not closed by a firstmate ruling"
+      remove_interrupted_answer_stamp "$id"
+      occurrence=$(resolution_record_count "$body")
+      publish_parent_resolution_then_retire "$id" "$occurrence" ruled
+      printf 'ruled: %s\n' "$id"
+      return 0
+    fi
+    # A captain-held call closed out of band with no resolution record: the
+    # truthful attestation that firstmate settled it on evidence, attached
+    # retroactively instead of being dressed up as the captain's own word.
+    write_resolution_record "$id" ruled "$body"
+    remove_interrupted_answer_stamp "$id"
+    task_show "$id" || fail "task $id disappeared while recording the ruling"
+    show=$TASK_SHOW_OUTPUT
+    [ "$(show_field "$show" state)" = "done" ] || fail "recording the ruling reopened closed task $id"
+    body_has_resolution_record "$(show_field "$show" body)" \
+      || fail "captain-held task $id did not retain its durable ruling record"
+    publish_parent_resolution_then_retire "$id" "$occurrence" ruled
+    printf 'ruled: %s\n' "$id"
+    return 0
+  fi
+
+  if body_has_resolution_record "$body" \
+    && [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ]; then
+    recorded_mode=$(recorded_resolution_mode "$body" || true)
+    [ "$recorded_mode" = ruled ] \
+      || fail "task $id records this resolution with mode ${recorded_mode:-unknown}; it is not a ruling retry"
+    occurrence=$(resolution_record_count "$body")
+  else
+    write_resolution_record "$id" ruled "$body"
+  fi
+  close_answered "$id" 0 || fail "could not close ruled captain-held task $id"
+  remove_interrupted_answer_stamp "$id"
+  task_show "$id" || fail "task $id disappeared after closing"
+  show=$TASK_SHOW_OUTPUT
+  body_has_resolution_record "$(show_field "$show" body)" \
+    || fail "captain-held task $id did not retain its durable ruling record"
+  publish_parent_resolution_then_retire "$id" "$occurrence" ruled
+  printf 'ruled: %s\n' "$id"
+}
+
 command_complete() {
   local origin=${1:-} meta previous='' supplied='' keys='' entry key status_file open has_meta=0 transfer_rc resolved
   local resolved_how attested_by_prefix=''
@@ -1934,6 +2043,7 @@ case "${1:-}" in
   open) shift; command_open "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   reconcile) shift; command_reconcile "$@" ;;
+  rule) shift; command_rule "$@" ;;
   -h|--help) usage ;;
   *) usage >&2; exit 2 ;;
 esac
