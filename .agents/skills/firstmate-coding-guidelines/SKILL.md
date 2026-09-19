@@ -126,7 +126,7 @@ Firstmate PR #3644 demonstrated the cost: pinning a 75-162-script walk took 32.7
 - Never add an agent name as a commit co-author.
 - `bin/*.sh` and `bin/backends/*.sh` must pass `shellcheck`.
 - Never pass a value that grows with a home's data through argv, including as `jq --arg` or `--argjson`; stage it in a temporary transport file and read it back with `--slurpfile` or a file operand.
-Linux refuses to exec any single argument over 128 KiB whatever the total limit still allows, while macOS caps only the total, so an argv-sized read works on the primary home and silently stops working on a Linux one.
+  Linux refuses to exec any single argument over 128 KiB whatever the total limit still allows, while macOS caps only the total, so an argv-sized read works on the primary home and silently stops working on a Linux one.
 - Guard every command whose output the script then prints or stores, and never let an unguarded call sit ahead of an unconditional success; a read that fails must say so and exit non-zero rather than leave a caller reading emptiness as an answer.
 - Run `bin/fm-lint.sh` before treating a script change as done; it is the single owner of the lint definition that CI and the no-mistakes pre-push gate both invoke, its own header owns what that definition covers, and it refuses to run under any other version of either linter.
 - When a task names a specific tool, implement the work with that tool, or explicitly flag the substitution and its new dependency footprint for review before shipping.
