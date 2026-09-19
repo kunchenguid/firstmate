@@ -384,6 +384,100 @@ test_concurrent_writers_never_clobber() {
   pass "inbox: concurrent writers serialize on the sequence lock and lose nothing"
 }
 
+# The same six-writer contention as above, but starting from a stale sequence
+# lock whose steal mutexes have stacked up - one level per writer that crashed
+# holding the mutex, which nothing prunes. Recovery has to reclaim a stale mutex
+# in place. Descending onto "<lock>.steal.steal" instead keeps descending, and
+# past the pathname limit it stops terminating, so every writer here wedges.
+test_concurrent_writers_recover_a_stale_steal_mutex() {
+  local state inbox lock dead path levels i rec seq pids=() seqs=() count
+  state="$TMP_ROOT/stale-steal-race/state"
+  inbox="$state/t1.inbox"
+  mkdir -p "$inbox/handled"
+  lock="$inbox/.seq.lock"
+  dead=$(dead_pid)
+  mkdir "$lock"
+  printf '%s\n' "$dead" > "$lock/pid"
+
+  # An already-acknowledged record: sequence 001 is spent, so no writer may
+  # reissue it while recovery is racing. Single-threaded dedup coverage cannot
+  # show that, because reissue is a concurrency outcome.
+  printf 'schema=%s\nat=%s\n--\n%s' \
+    fm-task-inbox.v1 2020-01-01T00:00:00Z 'already acknowledged' \
+    > "$inbox/handled/001.msg"
+
+  # 40 levels take ".seq.lock" past the 255-byte component limit, which is where
+  # the descent stops being bounded at all.
+  path="$lock"
+  levels=0
+  while [ "$levels" -lt 40 ]; do
+    path="$path.steal"
+    mkdir "$path" 2>/dev/null || break
+    printf '%s\n' "$dead" > "$path/pid" 2>/dev/null || break
+    levels=$((levels + 1))
+  done
+  [ "$levels" -ge 20 ] || fail "could not stack enough stale steal mutexes (got $levels)"
+
+  # Six-way contention over a pile of stale mutexes outlasts the 5s production
+  # lock-wait budget, so give the writers room and let the outer bound below be
+  # what catches an unbounded descent.
+  for i in 1 2 3 4 5 6; do
+    FM_LOCK_STALE_AFTER=0 FM_TASK_INBOX_LOCK_WAIT_SECS=30 \
+      inbox_lib "$state" fm_task_inbox_write "$state" t1 "steer number $i" >/dev/null &
+    pids+=($!)
+  done
+  # Bound each writer separately: an unbounded steal descent runs for minutes, so
+  # a plain wait would hang instead of reporting the regression, and one shared
+  # budget would let a single momentarily-unreaped child spend it for all six.
+  for i in "${pids[@]}"; do
+    SECONDS=0
+    while [ "$SECONDS" -lt 60 ] && is_live_non_zombie "$i"; do
+      sleep 0.2
+    done
+    if is_live_non_zombie "$i"; then
+      kill -9 "${pids[@]}" 2>/dev/null || true
+      wait 2>/dev/null || true
+      fail "a concurrent inbox write did not finish within 60s over a stale steal mutex"
+    fi
+    wait "$i" || fail "a concurrent inbox write failed against a stale steal mutex"
+  done
+
+  count=$(find "$inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')
+  [ "$count" = 6 ] || fail "6 concurrent writes should yield 6 records, got $count:"$'\n'"$(ls "$inbox")"
+  for i in 1 2 3 4 5 6; do
+    grep -rqF "steer number $i" "$inbox" \
+      || fail "steer number $i was lost recovering a stale steal mutex"
+  done
+
+  # The acknowledged sequence is never reissued, and the handled record keeps its
+  # own body rather than being overwritten by a racing writer.
+  [ ! -e "$inbox/001.msg" ] \
+    || fail "a racing writer reissued acknowledged sequence 001: $(cat "$inbox/001.msg")"
+  grep -qF 'already acknowledged' "$inbox/handled/001.msg" \
+    || fail "the acknowledged record was overwritten during the race"
+
+  # Integrity on the header, not the body: a truncated record whose body survived
+  # would pass a body grep, so assert the schema and the at/-- header each writer
+  # must have written before its payload.
+  for rec in "$inbox"/*.msg; do
+    [ -e "$rec" ] || continue
+    seq=${rec##*/}; seq=${seq%.msg}
+    case "$seq" in 001) fail "acknowledged sequence 001 was reissued as $rec" ;; esac
+    seqs+=("$seq")
+    IFS= read -r i < "$rec" || fail "record $rec has no first line"
+    [ "$i" = "schema=fm-task-inbox.v1" ] \
+      || fail "record $rec has no schema header, first line was: $i"
+    grep -qE '^at=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "$rec" \
+      || fail "record $rec has no well-formed at header:"$'\n'"$(cat "$rec")"
+    grep -qx -- '--' "$rec" \
+      || fail "record $rec is partial: no -- separator before its body"
+  done
+  [ "$(printf '%s\n' "${seqs[@]}" | sort -u | wc -l | tr -d ' ')" = 6 ] \
+    || fail "6 writers did not take 6 distinct sequences, got: ${seqs[*]}"
+
+  pass "inbox: concurrent writers recover past $levels stacked stale steal mutexes"
+}
+
 test_writer_retries_after_a_vanished_lock_collision() {
   local state fakebin marker rec real_ln
   state="$TMP_ROOT/vanished-lock-race/state"
@@ -700,6 +794,7 @@ test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence
 test_concurrent_writers_never_clobber
+test_concurrent_writers_recover_a_stale_steal_mutex
 test_writer_retries_after_a_vanished_lock_collision
 test_ladder_writes_ignore_vanished_inbox
 test_fire_and_forget_records_never_enter_the_ladder

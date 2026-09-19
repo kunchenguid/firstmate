@@ -480,6 +480,261 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
   pass "paused mid-acquire claimant backs off to active stealer"
 }
 
+# A trap that abandons the frame holding a steal mutex leaves that mutex
+# recording THIS process's own live pid. The stale test can never free such a
+# hold, so every later fm_lock_try_acquire for the same lock fails and the
+# unbounded fm_lock_acquire_wait on the exit path - watcher_cleanup publishing
+# the watcher-down marker - spins at 0.1s forever while still holding
+# .watch.lock, blocking successor takeover. Reclaiming the primary lock must
+# therefore succeed in the very process that abandoned the mutex.
+test_lock_reclaims_a_self_held_steal_mutex() {
+  local dir state lockdir dead out rc=0
+  dir=$(make_case lock-self-held-steal)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  mkdir "$lockdir"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+
+  # Take the steal mutex and abandon it without releasing, exactly as an
+  # interrupting trap leaves it, then reclaim the stale primary lock from that
+  # same process. fm_lock_acquire_wait would loop on this call, so a single
+  # non-blocking attempt is the whole mechanism.
+  out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_steal_try_acquire "$2.steal" || exit 20
+    held=$(cat "$2.steal/pid" 2>/dev/null || true)
+    fm_current_pid mine || exit 21
+    [ "$held" = "$mine" ] || exit 22
+    if fm_lock_try_acquire "$2"; then
+      printf "reclaimed owner=%s\n" "$(cat "$2/pid" 2>/dev/null || true)"
+    else
+      printf "wedged held=%s\n" "${FM_LOCK_HELD_PID:-}"
+    fi
+  ' _ "$LIB" "$lockdir") || rc=$?
+  [ "$rc" -eq 0 ] || fail "self-held steal fixture failed to set up (rc=$rc): ${out:-no output}"
+  case "$out" in
+    reclaimed*) ;;
+    *) fail "a steal mutex this process abandoned wedged its own reclaim: ${out:-no output}" ;;
+  esac
+  case "$out" in
+    *"owner=$dead"*) fail "the stale primary lock was not actually replaced: $out" ;;
+  esac
+  pass "a steal mutex abandoned by this process is reclaimed instead of wedging"
+}
+
+# A crashed stealer leaves its steal mutex behind, and recovering that mutex with
+# the primary lock's own algorithm descends onto "<lock>.steal.steal" and keeps
+# descending. Every symlink creation goes through ln, so recording each link path
+# catches the nested mutex even on the attempt that the pathname limit rejects.
+test_lock_never_creates_a_nested_steal_mutex() {
+  local dir state lockdir fakebin lnlog dead real_ln rc
+  dir=$(make_case lock-nested-steal)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  fakebin="$dir/nested-fakebin"
+  lnlog="$dir/ln.log"
+  dead=$(dead_pid)
+  # Resolve the real ln before the fake is on PATH, or the fake execs itself.
+  real_ln=$(command -v ln)
+  mkdir -p "$fakebin"
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "$FM_TEST_LN_LOG"
+exec "$FM_TEST_REAL_LN" "$@"
+SH
+  chmod +x "$fakebin/ln"
+  : > "$lnlog"
+
+  # The primary lock and its steal mutex are both stale, so recovery must reclaim
+  # the mutex in place rather than reaching for a mutex of its own.
+  mkdir "$lockdir" "$lockdir.steal"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$lockdir.steal/pid"
+
+  rc=0
+  PATH="$fakebin:$PATH" FM_TEST_LN_LOG="$lnlog" FM_TEST_REAL_LN="$real_ln" \
+    FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      fm_lock_try_acquire "$2"
+    ' _ "$LIB" "$lockdir" || rc=$?
+
+  [ "$rc" -eq 0 ] \
+    || fail "recovery could not reclaim a stale steal mutex in place (rc=$rc)"
+  ! grep -q '\.steal\.steal' "$lnlog" \
+    || fail "recovery created a nested steal mutex:"$'\n'"$(grep '\.steal\.steal' "$lnlog" | head -3)"
+  assert_absent "$lockdir.steal.steal" "a nested steal mutex outlived recovery"
+  pass "steal-mutex recovery never creates a nested steal mutex"
+}
+
+# Stale steal mutexes stack one level per crashed stealer and are never pruned,
+# so a home accumulates them. Recovery must stay bounded no matter how many have
+# piled up: descending each level costs roughly 300ms of fork/exec, and past the
+# pathname limit the descent stops terminating at all (measured to depth 1046 and
+# a 6299-byte pathname, four minutes of CPU, then bash's stack).
+test_lock_stale_steal_recovery_stays_bounded() {
+  local dir state lockdir fakebin lnlog real_ln dead path i worker elapsed rc deepest
+  dir=$(make_case lock-steal-bounded)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  fakebin="$dir/bounded-fakebin"
+  lnlog="$dir/ln.log"
+  dead=$(dead_pid)
+  # Resolve the real ln before the fake is on PATH, or the fake execs itself.
+  real_ln=$(command -v ln)
+  mkdir -p "$fakebin"
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "$FM_TEST_LN_LOG"
+exec "$FM_TEST_REAL_LN" "$@"
+SH
+  chmod +x "$fakebin/ln"
+  : > "$lnlog"
+  mkdir "$lockdir"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+
+  # 40 levels take ".contend.lock" past 255 bytes, the limit that turns the
+  # descent unbounded on every filesystem this runs on.
+  path="$lockdir"
+  i=0
+  while [ "$i" -lt 40 ]; do
+    path="$path.steal"
+    mkdir "$path" 2>/dev/null || break
+    printf '%s\n' "$dead" > "$path/pid" 2>/dev/null || break
+    i=$((i + 1))
+  done
+  [ "$i" -ge 20 ] || fail "could not stack enough stale steal mutexes (got $i)"
+
+  PATH="$fakebin:$PATH" FM_TEST_LN_LOG="$lnlog" FM_TEST_REAL_LN="$real_ln" \
+    FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      fm_lock_try_acquire "$2"
+    ' _ "$LIB" "$lockdir" >/dev/null 2>&1 &
+  worker=$!
+  SECONDS=0
+  elapsed=0
+  while [ "$elapsed" -lt 30 ] && is_live_non_zombie "$worker"; do
+    sleep 0.2
+    elapsed=$SECONDS
+  done
+  if is_live_non_zombie "$worker"; then
+    kill -9 "$worker" 2>/dev/null || true
+    wait "$worker" 2>/dev/null || true
+    fail "recovery over $i stacked stale steal mutexes did not finish within 30s"
+  fi
+  rc=0
+  wait "$worker" || rc=$?
+  [ "$rc" -eq 0 ] \
+    || fail "recovery over $i stacked stale steal mutexes failed (rc=$rc)"
+
+  # Assert the DEPTH reached, not merely that the acquire finished. The defect
+  # made every level fail identically, so "it failed" cannot tell a bounded
+  # descent from a runaway; the depth can. Recovering one lock may create that
+  # lock and its own steal mutex, so one level is the whole budget no matter how
+  # many stale levels are stacked below. Every mutex is created with ln, so the
+  # logged link paths record how deep the descent actually went.
+  deepest=$(awk '{p=$NF; n=gsub(/\.steal/,"",p); if (n>m) m=n} END {print m+0}' "$lnlog")
+  [ "$deepest" -le 1 ] \
+    || fail "recovery descended to steal depth $deepest with $i stale levels stacked; deepest paths:"$'\n'"$(awk '{p=$NF; n=gsub(/\.steal/,"",p); print n, $NF}' "$lnlog" | sort -rn | head -3)"
+  pass "stale steal mutexes stay bounded at depth $deepest under $i stacked levels"
+}
+
+# A pre-generation legacy autoarm claim whose live owner is proven abandoned:
+# the shape fm_autoarm_release_abandoned retires with TERM before removing the
+# lock.
+autoarm_legacy_claim() {  # <state> <owner-pid> <owner-identity>
+  local state=$1 pid=$2 identity=$3 lock
+  lock="$state/.claude-autoarm.lock"
+  mkdir -p "$lock"
+  printf '%s\n' "$pid" > "$lock/pid"
+  printf '%s\n' "$identity" > "$lock/pid-identity"
+  printf 'autoarm\n' > "$lock/role"
+  printf 'epoch=1 owner_pid=%s outcome=armed\n' "$pid" \
+    > "$state/.claude-autoarm-epoch"
+}
+
+release_abandoned_under() {  # <state> <lib> [stub-body]
+  FM_STATE_OVERRIDE="$1" bash -c '
+    . "$2"
+    eval "${3:-}"
+    fm_autoarm_release_abandoned "$1"
+  ' _ "$1" "$2" "${3:-}"
+}
+
+# Reclaiming a STALE steal mutex is unserialized, so two reclaimers can each end
+# up believing they hold it - the loser's link no longer points at the owner
+# directory it created. fm_autoarm_release_abandoned acts destructively under
+# that belief, signalling the recorded legacy owner and deleting its lock, so it
+# must re-prove the mutex is still its own before it does either.
+test_autoarm_reclaim_refuses_when_the_steal_mutex_was_taken() {
+  local dir state lock victim identity rc i clobber
+  # shellcheck disable=SC2016 # This is a stub body; every expansion belongs to the child shell that evals it.
+  clobber='
+    fm_lock_steal_try_acquire() {
+      fm_lock_try_create "$1" || return 1
+      # A competitor reclaiming the same stale mutex removed ours, discarded our
+      # owner directory, and published its own.
+      rm -f "$1"
+      fm_lock_discard_owner "${FM_LOCK_OWNER_DIR:-}"
+      mkdir -p "$1.rival"
+      printf "%s\n" "$$" > "$1.rival/pid"
+      ln -s "$1.rival" "$1"
+    }
+  '
+
+  # Control first: the identical fixture with an uncontested mutex must reclaim,
+  # or the refusal below would prove nothing about the re-proof.
+  dir=$(make_case autoarm-steal-control)
+  state="$dir/state"
+  lock="$state/.claude-autoarm.lock"
+  sleep 30 &
+  victim=$!
+  identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$victim") \
+    || fail "could not record a pid identity for the legacy owner fixture"
+  [ -n "$identity" ] || fail "empty pid identity for the legacy owner fixture"
+  autoarm_legacy_claim "$state" "$victim" "$identity"
+  rc=0
+  release_abandoned_under "$state" "$LIB" || rc=$?
+  [ "$rc" -eq 0 ] || fail "an uncontested reclaim of a proven-abandoned legacy claim failed (rc=$rc)"
+  assert_absent "$lock" "the reclaimed legacy claim outlived its reclaim"
+  i=0
+  while [ "$i" -lt 50 ] && is_live_non_zombie "$victim"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  is_live_non_zombie "$victim" \
+    && fail "the retired legacy owner was never signalled, so the control proves nothing"
+  wait "$victim" 2>/dev/null || true
+
+  dir=$(make_case autoarm-steal-taken)
+  state="$dir/state"
+  lock="$state/.claude-autoarm.lock"
+  sleep 30 &
+  victim=$!
+  identity=$(bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$victim") \
+    || fail "could not record a pid identity for the contested fixture"
+  autoarm_legacy_claim "$state" "$victim" "$identity"
+  rc=0
+  release_abandoned_under "$state" "$LIB" "$clobber" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    kill -9 "$victim" 2>/dev/null || true
+    wait "$victim" 2>/dev/null || true
+    fail "the reclaim reported success after losing its steal mutex"
+  fi
+  assert_present "$lock" "a legacy claim was removed after the reclaim lost its steal mutex"
+  if ! is_live_non_zombie "$victim"; then
+    wait "$victim" 2>/dev/null || true
+    fail "the legacy owner was signalled after the reclaim lost its steal mutex"
+  fi
+  [ -z "$(sed -n '2p' "$state/.claude-autoarm-epoch" 2>/dev/null || true)" ] \
+    || fail "the ledger was grafted after the reclaim lost its steal mutex"
+  kill -9 "$victim" 2>/dev/null || true
+  wait "$victim" 2>/dev/null || true
+  pass "a reclaim that loses its steal mutex signals nothing and removes nothing"
+}
+
 test_watch_restart_rejects_reused_pid() {
   local dir state fakebin out live pid i
   dir=$(make_case restart-reused-pid)
@@ -1179,6 +1434,10 @@ test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
+test_lock_reclaims_a_self_held_steal_mutex
+test_lock_never_creates_a_nested_steal_mutex
+test_lock_stale_steal_recovery_stays_bounded
+test_autoarm_reclaim_refuses_when_the_steal_mutex_was_taken
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
