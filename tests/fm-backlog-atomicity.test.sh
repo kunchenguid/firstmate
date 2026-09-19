@@ -2107,7 +2107,7 @@ test_recovery_replays_the_incident_stuck_gitlab_close_records() {
 # into an existing note rather than emit a second --note tasks-axi would reject,
 # while a supported GitHub link beside a note passes both through unchanged.
 test_done_adapts_an_unrecordable_pr_link_beside_a_note() {
-  local case_dir id gitlab github run out rc
+  local case_dir id gitlab github out rc
   case_dir=$(make_home done-adapt-note)
   gitlab=https://git.nevint.com/pe/pe-algo-agent/-/merge_requests/13
   github=https://github.com/example/repo/pull/17
