@@ -376,6 +376,28 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
 }
 
+# A worker whose gate push is refused after a crash must reach the stranded-gate
+# helper from the brief alone, by an absolute path that resolves in any worktree.
+test_no_mistakes_dod_names_stranded_gate_helper() {
+  local home id brief helper
+  home="$TMP_ROOT/stranded-home"
+  mkdir -p "$home/data"
+  id="brief-stranded-b2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  helper=$(grep -o '`/[^`]*/bin/fm-nm-stranded-gate\.sh`' "$brief" | tr -d '`' | head -1)
+  [ -n "$helper" ] || fail "no-mistakes DOD must name the stranded-gate helper by absolute path"
+  [ -x "$helper" ] || fail "stranded-gate helper path in the brief is not executable: $helper"
+  assert_grep "Never force that mirror ref or touch the daemon" "$brief" \
+    "no-mistakes DOD must forbid forcing the mirror or touching the daemon"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-stranded-b3 some-proj --mode direct-PR >/dev/null 2>&1
+  assert_no_grep "fm-nm-stranded-gate" "$home/data/brief-stranded-b3/brief.md" \
+    "direct-PR brief must not carry no-mistakes gate recovery"
+  pass "fm-brief.sh: no-mistakes DOD routes a stranded gate ref to its helper"
+}
+
 test_ask_user_escalation_format() {
   local home id brief mode other_id other_brief
   home="$TMP_ROOT/ask-user-home"
@@ -934,6 +956,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_no_mistakes_dod_names_stranded_gate_helper
 test_ask_user_escalation_format
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete

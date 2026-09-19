@@ -39,6 +39,10 @@
 # fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
 # ordinary ship brief and the durable contract written during scout promotion.
 
+# The firstmate root this library lives in, so rendered briefs can name its
+# helpers by absolute path whatever worktree the worker runs in.
+FM_DOD_LIB_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+
 fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
   cat <<'EOF'
@@ -281,6 +285,9 @@ So background the drive call and poll \`no-mistakes axi status\` from a separate
 Where a harness's own command limit is not established, assume it bounds commands and use that same background-and-poll shape.
 A killed or timed-out call is never evidence the daemon died: the daemon accepts your response immediately and runs the round in the background, so the call was only ever waiting for a read while the run kept working.
 Reattach and keep going rather than reporting the pipeline blocked; rule 7 owns the checks that decide when a pipeline block is real.
+If a run stops before its first step with \`push to gate\` rejected as non-fast-forward while \`axi sync\` reports nothing to recover, a crash stranded this branch's pre-rebase tip in the gate mirror.
+Never force that mirror ref or touch the daemon; run \`$FM_DOD_LIB_ROOT/bin/fm-nm-stranded-gate.sh\` from your worktree, which owns the safety check.
+When it prints \`fresh_branch:\`, follow its \`next:\` lines; when it refuses, append \`blocked:\` naming its \`unlanded:\` commits and stop.
 
 Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate using rule 6's ask-user format and stop.
