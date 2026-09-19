@@ -30,8 +30,8 @@
 #                          absorbed instead with its own long re-surface cadence,
 #                          never as a wedge, and that recheck reason names which
 #                          human the wait is on. Work already in a human's hands -
-#                          an open captain call, or a delivery whose reconciled
-#                          state is terminal done and which waits only on the
+#                          an open captain call, or a terminal delivery whose
+#                          reconciled state is done and which waits only on the
 #                          merge word - alarms on first sight and is then bounded
 #                          to that same re-surface cadence. Only when neither
 #                          absorb class applies does the log's latest recognized
@@ -1949,10 +1949,9 @@ terminal_done_declaration() {  # <task>
 # and the throttle is read BEFORE anything is queued and advanced only by a wake
 # that really fires - a throttle written by the wake it should have prevented, or
 # read after that wake was already appended, bounds nothing.
-# All three records of an ordinary crew wait bound it (see task_captain_call_open
-# above): the status line the worker declared, the backlog hold firstmate
-# recorded once the captain took the work in hand, and the reconciled terminal
-# done state of work already delivered (terminal_done_stale_bound).
+# Both records of an ordinary crew wait bound it (see task_captain_call_open
+# above): the status line the worker declared, and the backlog hold firstmate
+# recorded once the captain took the work in hand.
 surface_nonterminal_stale() {  # <window> <hash>
   local win=$1 h=$2 key task last declared=1 bounded=1 throttled=1 until now
   key=$(window_key "$win")
@@ -1986,14 +1985,6 @@ surface_nonterminal_stale() {  # <window> <hash>
   elif captain_call_stale_bound "$key" "$task"; then
     bounded=0
     throttled=0
-  elif [ -z "$STALE_WAIT_DECLARATION" ] && terminal_done_stale_bound "$key" "$task"; then
-    # Reached when the reconciled state is terminal done but no record in hand
-    # says so - a pipeline that finished after the worker's last `working:` line.
-    # The same deliberate wait as a delivered `done:` pane, so it takes the same
-    # bound. Consulted only with no captain-call scope already in hand, so it can
-    # never overwrite the richer identity that bound carries.
-    bounded=0
-    throttled=0
   elif [ -n "$STALE_WAIT_DECLARATION" ]; then
     bounded=0
   fi
@@ -2019,7 +2010,7 @@ surface_nonterminal_stale() {  # <window> <hash>
     clear_pause_state "$key"
   fi
   if [ "$throttled" -eq 0 ]; then
-    triage_log "absorbed non-terminal stale (declared wait, open captain call, or delivered work already re-surfaced this window): $win"
+    triage_log "absorbed non-terminal stale (declared wait or open captain call already re-surfaced this window): $win"
     return 0
   fi
   wake "stale: $win"

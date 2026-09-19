@@ -4166,50 +4166,77 @@ test_stale_churn_without_a_captain_call_still_alarms() {
 # lands - so every new pane hash re-alarmed as a possible wedge for the captain's
 # whole deciding time (observed 2026-09-18 on three delivered tasks at once).
 # What marks it instead is the RECONCILED state: fm-crew-state.sh reads the crew
-# as done. Both branches a delivered task can take are driven - the
-# captain-relevant one its `done:` line routes through, and the inconclusive one a
-# task whose pipeline finished after its last `working:` line routes through.
+# as done. The bound rides the captain-relevant branch the worker's own `done:`
+# line routes through; a task whose last line is not captain-relevant keeps the
+# inconclusive-state alarm, which the test below pins.
 test_terminal_delivery_bounds_stale_churn() {
-  local spec name line dir state out capture throttle wakes
+  local dir state out capture throttle wakes
   command -v tasks-axi >/dev/null 2>&1 \
     || { echo "skip: tasks-axi not found (terminal delivery stale bound)"; return 0; }
   HOLD_CREW_STATE='state: done · source: run-step · checks green'
   export HOLD_CREW_STATE
-  for spec in \
-    'delivered-line|done: PR https://example.invalid/pull/1 checks green' \
-    'delivered-after-working-line|working: still tidying the branch'
-  do
-    name=${spec%%|*}; line=${spec#*|}
-    dir=$(make_hold_home "$name" "$line" nohold) \
-      || fail "[$name] could not build a delivered-work fixture"
-    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
-    throttle="$state/.paused-resurfaced-$(hold_key)"
+  dir=$(make_hold_home delivered-line 'done: PR https://example.invalid/pull/1 checks green' nohold) \
+    || fail "could not build a delivered-work fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  throttle="$state/.paused-resurfaced-$(hold_key)"
 
-    # The delivery itself must still reach the captain: only repetition is bounded.
-    hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
-      || fail "[$name] first sight of delivered work did not surface"
-    wakes=$(hold_stale_wakes "$state")
-    [ "$wakes" -eq 1 ] || fail "[$name] first sight produced $wakes wakes instead of one"
-    ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the first surface"
+  # The delivery itself must still reach the captain: only repetition is bounded.
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+    || fail "first sight of delivered work did not surface"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] || fail "first sight produced $wakes wakes instead of one"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first surface"
 
-    # The pane churns while the merge word is still owed. Every one of these alarmed.
-    hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 2 \
-      || fail "[$name] watcher exited during pane churn instead of supervising through it"
-    wakes=$(hold_stale_wakes "$state")
-    [ "$wakes" -eq 0 ] \
-      || fail "[$name] pane churn re-alarmed delivered work $wakes time(s) inside the re-surface window"
+  # The pane churns while the merge word is still owed. Every one of these alarmed.
+  hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 2 \
+    || fail "watcher exited during pane churn instead of supervising through it"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 0 ] \
+    || fail "pane churn re-alarmed delivered work $wakes time(s) inside the re-surface window"
 
-    # A delivery nobody merged must not rot: the window's end re-surfaces it once.
-    [ -e "$throttle" ] || fail "[$name] the absorbed churn recorded no re-surface cadence to elapse"
-    set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
-    hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 9s' \
-      || fail "[$name] delivered work did not re-surface once its re-surface window elapsed"
-    wakes=$(hold_stale_wakes "$state")
-    [ "$wakes" -eq 1 ] \
-      || fail "[$name] elapsed re-surface window produced $wakes wakes instead of one"
-  done
+  # A delivery nobody merged must not rot: the window's end re-surfaces it once.
+  [ -e "$throttle" ] || fail "the absorbed churn recorded no re-surface cadence to elapse"
+  set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 9s' \
+    || fail "delivered work did not re-surface once its re-surface window elapsed"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] \
+    || fail "elapsed re-surface window produced $wakes wakes instead of one"
   unset HOLD_CREW_STATE
   pass "delivered work awaiting the merge word surfaces once, absorbs pane churn, then re-surfaces when the window elapses"
+}
+
+
+# The boundary the bound deliberately stops at. A reconciled `done` describes the
+# RUN, not the worker: a task whose own last line is still `working:` while its
+# pipeline finished is an agent that may have died the moment the run completed,
+# which is exactly the inconclusive state the non-terminal stale path exists to
+# surface. So that pane keeps alarming on every new hash, and no re-surface
+# throttle is armed to swallow the next one.
+test_nonterminal_line_with_a_finished_run_still_alarms() {
+  local dir state out capture throttle round wakes
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (non-terminal line with finished run)"; return 0; }
+  HOLD_CREW_STATE='state: done · source: run-step · checks green'
+  export HOLD_CREW_STATE
+  dir=$(make_hold_home done-run-working-line 'working: still tidying the branch' nohold) \
+    || fail "could not build a finished-run fixture with a worker line"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  throttle="$state/.paused-resurfaced-$(hold_key)"
+  round=1
+  while [ "$round" -le 2 ]; do
+    hold_watch_surface "$dir" "$out" "$capture" "idle, elapsed ${round}s" \
+      || fail "an inconclusive stale window stopped alarming on round $round"
+    wakes=$(hold_stale_wakes "$state")
+    [ "$wakes" -eq 1 ] \
+      || fail "round $round produced $wakes wakes instead of one"
+    [ ! -e "$throttle" ] \
+      || fail "round $round armed a re-surface throttle on an inconclusive stale window"
+    ack_stopped_cycle "$state" || fail "could not acknowledge round $round"
+    round=$((round + 1))
+  done
+  unset HOLD_CREW_STATE
+  pass "a finished run behind a worker's own non-terminal line keeps alarming on every new hash"
 }
 
 
@@ -6889,6 +6916,7 @@ test_wedge_defer_refuses_a_half_filled_wait_record
 test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms
 test_terminal_delivery_bounds_stale_churn
+test_nonterminal_line_with_a_finished_run_still_alarms
 test_undelivered_crew_state_keeps_alarming_on_every_hash
 test_captain_call_scope_survives_a_terminal_delivery
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
