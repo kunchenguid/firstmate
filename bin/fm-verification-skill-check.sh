@@ -74,6 +74,8 @@ NAME=$(printf '%s\n' "$FRONTMATTER" | sed -n 's/^name:[[:space:]]*//p' | head -1
 [ -n "$NAME" ] || fail "SKILL.md frontmatter has no name: field"
 if ! printf '%s\n' "$FRONTMATTER" | awk '
   /^description:[[:space:]]*/ {
+    descriptions++
+    if (descriptions > 1) { next }
     value = $0
     sub(/^description:[[:space:]]*/, "", value)
     if (value ~ /^[>|][-+]?$/) { block = 1; next }
@@ -83,15 +85,19 @@ if ! printf '%s\n' "$FRONTMATTER" | awk '
       || value ~ /^[-+]?\.[0-9][0-9_]*([eE][-+]?[0-9][0-9_]*)?$/ \
       || value ~ /^0[xX][[:xdigit:]_]+$/ \
       || value ~ /^0[oO][0-7_]+$/
+    timestamp = value ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]?-[0-9][0-9]?$/ \
+      || value ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]?-[0-9][0-9]?[Tt][^[:space:]]+$/
     if (value ~ /^[[:alnum:]]/ \
         && lower !~ /^(null|~|true|false|yes|no|on|off)$/ \
         && !numeric \
+        && !timestamp \
         && value !~ /:[[:space:]]|:$/) valid = 1
-    exit
+    next
   }
-  block && /^[[:space:]]+/ && /[^[:space:]]/ { valid = 1; exit }
-  block && !/^[[:space:]]*$/ { exit }
-  END { exit valid ? 0 : 1 }
+  block && /^[[:space:]]+/ && /[^[:space:]]/ { valid = 1; next }
+  block && /^[[:space:]]*$/ { next }
+  block { block = 0 }
+  END { exit descriptions == 1 && valid ? 0 : 1 }
 '; then
   fail "SKILL.md frontmatter description is missing or invalid"
 fi

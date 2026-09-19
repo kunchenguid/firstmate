@@ -148,7 +148,7 @@ test_accepts_supported_description_forms() {
 test_rejects_invalid_descriptions() {
   local dir index out value
   index=0
-  for value in '' 'null' '""' '[unfinished' 'false' '123' '1.25' 'Drive app: now'; do
+  for value in '' 'null' '""' '[unfinished' 'false' '123' '1.25' '2026-09-19' 'Drive app: now'; do
     index=$((index + 1))
     dir="$TMP_ROOT/invalid-description-$index/verify-timetracker"
     make_good_skill "$dir"
@@ -156,6 +156,15 @@ test_rejects_invalid_descriptions() {
     out=$(run_check "$dir") && fail "invalid description '$value' must fail" || true
     assert_contains "$out" "description is missing or invalid" "failure names invalid description '$value'"
   done
+}
+
+test_rejects_duplicate_description() {
+  local dir out
+  dir="$TMP_ROOT/duplicate-description/verify-timetracker"
+  make_good_skill "$dir"
+  sed -i '/^  Use when a task changes/a description: false' "$dir/SKILL.md"
+  out=$(run_check "$dir") && fail "duplicate description keys must fail" || true
+  assert_contains "$out" "description is missing or invalid" "failure names duplicate descriptions"
 }
 
 test_rejects_whitespace_only_section() {
@@ -245,6 +254,7 @@ test_rejects_unclosed_frontmatter
 test_rejects_missing_description
 test_accepts_supported_description_forms
 test_rejects_invalid_descriptions
+test_rejects_duplicate_description
 test_rejects_whitespace_only_section
 test_rejects_removed_kill_rule
 test_rejects_missing_feature_map
