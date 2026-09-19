@@ -49,9 +49,11 @@ source or dependency change invalidates admission.
 Ledger: home/state/account-route/{lock,ledger.json}; private owner-only files.
 The ledger pins the ENTIRE installed binding. Once disabled/drifted it cannot be
 re-enabled over the wire, even if the old bytes return. Accepted operations and
-launches are fsynced BEFORE side effects. A crashed pending operation is unknown,
-not re-executed; work is retained for attended reconciliation. No journal entry
-is silently evicted: at 4096 operations or 128 tasks, new operations refuse,
+launches are fsynced BEFORE side effects. A crashed pending operation is unknown
+and not re-executed. A later lifecycle operation may commit a launching task only
+from its exact published binding; this neither replays submit nor claims liveness.
+No journal entry is silently evicted: at 4096 operations or 128 tasks, new
+operations refuse,
 except that the idempotent disable latch remains available without journal growth.
 Disable prevents new tasks and steers; observation, exact-task checkpoint and
 preserving stop remain available only if installed identity/guards still match.
@@ -515,6 +517,12 @@ class Route:
             require(binding == task["binding"], "task-binding-mismatch")
         return binding
 
+    def commit_binding(self, task):
+        binding = self.meta(task)
+        task["binding"] = binding
+        task["phase"] = "active"
+        self.save()
+
     def start(self, name, payload, request_digest):
         require(name not in self.ledger["tasks"], "task-already-used")
         require(len(self.ledger["tasks"]) < 128, "task-limit")
@@ -558,9 +566,7 @@ class Route:
         else:
             args.extend(["--mode", "no-mistakes", "--yolo", "off"])
         self.script("fm-spawn.sh", args)
-        task["binding"] = self.meta(task)
-        task["phase"] = "active"
-        self.save()
+        self.commit_binding(task)
         return dict(state="active", task=name, submit=request_digest)
 
     def task_operation(self, verb, payload):
@@ -569,8 +575,8 @@ class Route:
         require(type(task) is dict and payload["submit"] == task["submit"], "unknown-task")
         if verb == "result" and task.get("result") is not None:
             return task["result"]
-        if task["phase"] != "active":
-            return dict(state="unknown", task=name, submit=task["submit"])
+        if task["phase"] == "launching":
+            self.commit_binding(task)
         self.meta(task)
         if verb == "status":
             # Active means a committed launch binding, NOT proof of a live agent.

@@ -409,6 +409,50 @@ class RouteTest(unittest.TestCase):
         self.assertTrue(list((self.home / 'state').glob('acct-*.meta')))
         self.assertTrue(list((self.a / 'workspaces').iterdir()))
 
+        submit = hashlib.sha256(canon(req)).hexdigest()
+        status = self.call(self.follow('status', submit))[1]['outcome']
+        self.assertEqual(status, dict(state='accepted', task='sample', submit=submit))
+        self.assertEqual(self.task()['phase'], 'active')
+        self.assertEqual(self.task()['binding']['spawn_gen'], 'synthetic-generation-1')
+        folder = self.home / 'data' / self.task()['local']
+        report = 'Invented recovered task result.\n'
+        sha = hashlib.sha256(report.encode()).hexdigest()
+        write(folder / 'report.md', report)
+        write(folder / 'result.json', json.dumps(dict(schema='fm-account-result.v1', epoch='a'*32,
+              task='sample', submit=submit, uid=os.getuid(), report_sha256=sha)))
+        result = self.call(self.follow('result', submit))[1]['outcome']
+        self.assertEqual(result['state'], 'complete')
+        self.assertEqual(result['submit'], submit)
+        self.assertEqual(result['generation'], 'synthetic-generation-1')
+        self.assertEqual(result['report'], report)
+        self.assertEqual(self.call(self.follow('checkpoint', submit))[1]['outcome']['state'], 'recorded')
+        self.assertEqual(self.call(self.follow('stop', submit))[1]['outcome']['state'], 'stopped')
+        local = self.task()['local']
+        self.assertEqual(self.calls('fm-send.sh')[0]['args'][0], local)
+        self.assertEqual(self.calls('fm-control.sh')[0]['args'], [local, 'exit'])
+        self.assertEqual(len(self.calls('fm-spawn.sh')), 1)
+
+    def test_crash_after_mismatched_meta_refuses_adoption(self):
+        write(self.a / 'crash-after-meta', 'invented')
+        req = self.request()
+        self.assertLess(self.call(req)[0], 0)
+        submit = hashlib.sha256(canon(req)).hexdigest()
+        local = self.task()['local']
+        meta = self.home / 'state' / (local + '.meta')
+        write(meta, meta.read_text().replace('synthetic-generation-1', ''))
+
+        outcome = self.call(self.follow('status', submit))[1]['outcome']
+        self.assertEqual(outcome, dict(state='unknown'))
+        self.assertEqual(self.task()['phase'], 'launching')
+        self.assertIsNone(self.task()['binding'])
+        self.assertEqual(self.call(self.follow('checkpoint', submit))[1]['outcome'],
+                         dict(state='unknown'))
+        self.assertEqual(self.call(self.follow('stop', submit))[1]['outcome'],
+                         dict(state='unknown'))
+        self.assertEqual(self.calls('fm-send.sh'), [])
+        self.assertEqual(self.calls('fm-control.sh'), [])
+        self.assertEqual(len(self.calls('fm-spawn.sh')), 1)
+
     def test_incomplete_and_complete_results(self):
         _, submit = self.accepted()
         self.assertEqual(self.call(self.follow('result', submit))[1]['outcome']['state'], 'incomplete')
