@@ -106,6 +106,19 @@ test_codex_worker_and_secondmate_launches_set_cwd_disabled_marker() {
   wt="$case_dir/wt"
   launchlog="$case_dir/launch.log"
   fakebin=$(fm_test_make_spawn_fakebin "$case_dir/fake")
+  cat > "$fakebin/codex" <<'SH'
+#!/bin/sh
+set -eu
+sw_dir=${SUPERWHISPER_AGENT_STATE_DIR:-/tmp/superwhisper-agent}
+cwd_hash=$(if command -v md5 >/dev/null 2>&1; then printf %s "$PWD" | md5 -q; else printf %s "$PWD" | md5sum | awk '{print $1}'; fi)
+if [ -f "$sw_dir/disabled-$cwd_hash" ]; then
+  result=MARKER_EXISTS
+else
+  result=MARKER_MISSING
+fi
+printf '%s\n' "$result" > "$FM_SW_RESULT"
+SH
+  chmod +x "$fakebin/codex"
   fm_test_spawn_home "$home" codex
   fm_test_spawn_brief "$home" "$id"
   fm_git_worktree "$proj" "$wt" "wt-$id"
@@ -121,35 +134,42 @@ test_codex_worker_and_secondmate_launches_set_cwd_disabled_marker() {
   launch=$(cat "$launchlog")
   assert_contains "$launch" "disabled-" "codex launch must construct disabled cwd marker"
   assert_contains "$launch" "trap" "codex launch must register EXIT trap to remove disabled marker"
+  assert_contains "$launch" "SUPERWHISPER_AGENT_STATE_DIR=\"\${SUPERWHISPER_AGENT_STATE_DIR:-/tmp/superwhisper-agent}\" sh -c" \
+    "codex launch must pass a non-empty marker directory into the nested shell"
 
-  # Verify execution creates the marker during the command and removes it afterwards.
+  # Execute the exact launch payload captured from the fake tmux interface.
   local sw_test_dir="$case_dir/sw-state"
+  local result_file="$case_dir/codex-result"
   mkdir -p "$sw_test_dir"
-  local test_codex="$fakebin/test-marker-codex"
-  cat > "$test_codex" <<SH
-#!/bin/sh
-sw_dir="\${SUPERWHISPER_AGENT_STATE_DIR:-/tmp/superwhisper-agent}"
-cwd_hash=\$(if command -v md5 >/dev/null 2>&1; then printf %s "\$PWD" | md5 -q; else printf %s "\$PWD" | md5sum | awk '{print \$1}'; fi)
-if [ -f "\$sw_dir/disabled-\$cwd_hash" ]; then
-  printf 'MARKER_EXISTS\n'
-else
-  printf 'MARKER_MISSING\n'
-fi
-SH
-  chmod +x "$test_codex"
-
-  local test_cmd
-  test_cmd="sh -c 'sw_dir=\"\${SUPERWHISPER_AGENT_STATE_DIR:-/tmp/superwhisper-agent}\"; sw_marker=\"\$sw_dir/disabled-\$(if command -v md5 >/dev/null 2>&1; then printf %s \"\$PWD\" | md5 -q; else printf %s \"\$PWD\" | md5sum | awk \"{print \\\$1}\"; fi)\"; mkdir -p \"\$sw_dir\"; : > \"\$sw_marker\"; trap \"rm -f \\\"\$sw_marker\\\"\" EXIT; \"\$@\"' -- $test_codex"
   local run_out
-  run_out=$(SUPERWHISPER_AGENT_STATE_DIR="$sw_test_dir" /bin/sh -c "$test_cmd")
-  [ "$run_out" = "MARKER_EXISTS" ] || fail "cwd marker was not present during codex worker execution: $run_out"
+  run_out=$(cd "$wt" && SUPERWHISPER_AGENT_STATE_DIR="$sw_test_dir" FM_SW_RESULT="$result_file" \
+    PATH="$fakebin:$BASE_PATH" /bin/sh -c "$launch" 2>&1)
+  [ "$(cat "$result_file")" = "MARKER_EXISTS" ] \
+    || fail "captured codex launch did not create its cwd marker before Codex ran: $run_out"
 
-  # After execution, marker must be gone.
+  # The EXIT trap must remove the marker after the worker command exits.
   local remaining
   remaining=$(find "$sw_test_dir" -name "disabled-*" 2>/dev/null | wc -l | tr -d ' ')
   [ "$remaining" = "0" ] || fail "cwd marker was not removed on worker exit; $remaining marker(s) left"
 
-  pass "codex worker launch sets cwd disabled marker for its lifetime and cleans it up on exit"
+  # An explicitly empty ambient value exercises the live relaunch failure mode.
+  # The wrapper's own default must still reach the nested shell, never an empty
+  # mkdir target or a root-level /disabled-* redirection.
+  local fallback_state=/tmp/superwhisper-agent
+  local cwd_hash fallback_marker fallback_result
+  cwd_hash=$(printf %s "$wt" | md5 -q)
+  fallback_marker="$fallback_state/disabled-$cwd_hash"
+  fallback_result="$case_dir/codex-fallback-result"
+  rm -f "$fallback_marker"
+  run_out=$(cd "$wt" && SUPERWHISPER_AGENT_STATE_DIR='' FM_SW_RESULT="$fallback_result" \
+    PATH="$fakebin:$BASE_PATH" /bin/sh -c "$launch" 2>&1)
+  [ "$(cat "$fallback_result")" = "MARKER_EXISTS" ] \
+    || fail "empty ambient marker directory did not use the wrapper default: $run_out"
+  [ ! -e "$fallback_marker" ] \
+    || fail "fallback cwd marker survived the captured worker launch"
+  rm -f "$fallback_marker"
+
+  pass "captured codex launch creates and cleans its cwd marker, including an empty ambient state directory"
 }
 
 test_codex_agent_hook_respects_cwd_disabled_marker_when_present() {
