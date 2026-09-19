@@ -16,7 +16,7 @@ A scout uses the ordinary scout delivery contract.
 A ship always uses `no-mistakes` with autonomous merge disabled.
 
 The execution account owns the operational home, project clones, task copies, records, inboxes, runtime socket, and session.
-The sender can submit, observe status, request a bounded result, steer the exact task, request a preserving checkpoint, stop the exact task, or disable new mutation.
+The sender can submit, observe status, request a bounded result, steer the exact task, request a preserving checkpoint, stop the exact task, or disable new tasks and steering.
 It cannot provision or repair the route, relaunch work, read an arbitrary file, run a shell command, select a backend, stop a server, merge, clean up, delete, or discard work.
 A status response acknowledges a committed launch binding but is not a liveness claim.
 A complete result is the first valid task-bound `report.md` and `result.json` pair, sealed in the receiver ledger so a later file rewrite cannot replace it.
@@ -26,7 +26,7 @@ A complete result is the first valid task-bound `report.md` and `result.json` pa
 The receiver must run as the destination account through a dedicated SSH key whose forced command invokes `python3 -I` and the fixed binding path.
 Every request rechecks the effective account name and UID, owner-only binding and ledger, disjoint account-local roots, pinned source and mutable executables, exact repository configuration, absent personal material, existing unreadable denial canaries, the empty worker environment allowlist, and the prequalified tmux socket, server PID, session, and global-environment digest.
 A selected task worktree must resolve strictly beneath the qualified workspace root; the root itself and paths outside it are refused before task metadata is published or a worker launches.
-Any binding, guard, account, canary, runtime, or qualification drift disables new mutation.
+Any binding, guard, account, canary, runtime, or qualification drift latches the epoch disabled and refuses the current request.
 Restoring the old bytes does not re-enable that epoch.
 
 The route never uses secondmate provisioning or inherited-material propagation.
@@ -65,7 +65,7 @@ Unknown and duplicate fields, control characters, stale expiries, reused task na
 The receiver fsyncs an operation identity and request digest before a side effect.
 The same operation identity with the same bytes returns the recorded outcome, while the same identity with different bytes refuses.
 A crash while an operation is pending disables the route and returns unknown on replay instead of executing again.
-A new exact-task lifecycle operation may adopt a launching task only when the receiver can revalidate its complete published launch binding, generation-matched receipt, and final In-flight backlog transition; missing or mismatched evidence remains unknown, and adoption neither replays submit nor claims worker liveness.
+A new exact-task status, result, checkpoint, or stop operation may adopt a launching task only when the receiver can revalidate its complete published launch binding, generation-matched receipt, and final In-flight backlog transition; missing or mismatched evidence remains unknown, and adoption neither replays submit nor claims worker liveness.
 A task name is never reused within a route epoch.
 The bounded ledger refuses new operations rather than evicting replay evidence, while the idempotent disable latch remains available without further journal growth.
 
