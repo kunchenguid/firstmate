@@ -3666,6 +3666,323 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+# Scratch preservation tests use real assertions under errexit so a missing
+# assertion command cannot be hidden by the final success message.
+prepare_scratch_case() {
+  local case_dir=$1 kind=$2
+  write_meta "$case_dir" no-mistakes "$kind"
+  mkdir -p "$case_dir/data/task-x1"
+  printf 'Fixture report.\n' > "$case_dir/data/task-x1/report.md"
+  printf 'decisions_reviewed=1\ndecision_keys=\n' >> "$case_dir/state/task-x1.meta"
+}
+
+test_scratch_repository_data_refuses_return() (
+  set -eu
+  local case_dir kind form repo blob tree commit rc
+  for kind in scout ship; do
+    for form in bare nested linked; do
+      case_dir=$(make_case "scratch-$kind-$form")
+      prepare_scratch_case "$case_dir" "$kind"
+      printf '.scratch/\n' >> "$case_dir/project/.git/info/exclude"
+      mkdir -p "$case_dir/wt/.scratch"
+      repo="$case_dir/wt/.scratch/repository"
+      if [ "$form" = bare ]; then
+        git init -q --bare "$repo"
+        blob=$(printf 'unique committed evidence\n' | git --git-dir="$repo" hash-object -w --stdin)
+        tree=$(printf '100644 blob %s\timportant.txt\n' "$blob" | git --git-dir="$repo" mktree)
+        commit=$(printf 'only copy\n' | git --git-dir="$repo" commit-tree "$tree")
+        git --git-dir="$repo" update-ref refs/heads/main "$commit"
+      else
+        if [ "$form" = linked ]; then
+          fm_git_init_commit "$case_dir/nested-source"
+          git -C "$case_dir/nested-source" worktree add -q -b nested "$repo"
+        else
+          git init -q "$repo"
+        fi
+        printf 'unique committed evidence\n' > "$repo/important.txt"
+        git -C "$repo" add important.txt
+        git -C "$repo" commit -qm 'only copy'
+        commit=$(git -C "$repo" rev-parse HEAD)
+        printf 'uncommitted evidence\n' > "$repo/important.txt"
+        printf 'untracked evidence\n' > "$repo/untracked"
+      fi
+      printf '#!/usr/bin/env bash\ntouch "%s/returned"\n' "$case_dir" > "$case_dir/fakebin/treehouse"
+      rc=0
+      FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/out" 2>&1 || rc=$?
+      # Check survival BEFORE checking refusal: the rejected patch must fail
+      # these actual data assertions, not just an expected-exit assertion.
+      assert_present "$repo" "$kind $form repository deleted"
+      assert_equals 'unique committed evidence' "$(git -C "$repo" show "$commit:important.txt")" "$kind $form committed work changed"
+      if [ "$form" != bare ]; then
+        assert_equals 'uncommitted evidence' "$(cat "$repo/important.txt")" "$kind $form dirty work changed"
+        assert_equals 'untracked evidence' "$(cat "$repo/untracked")" "$kind $form untracked work changed"
+        assert_equals "$commit" "$(git -C "$repo" rev-parse HEAD)" "$kind $form HEAD changed"
+      fi
+      assert_not_equals 0 "$rc" "$kind $form teardown accepted repository data"
+      assert_grep 'repository data in' "$case_dir/out" 'repository refusal not actionable'
+      assert_present "$case_dir/state/task-x1.meta" 'refusal lost task record'
+      assert_absent "$case_dir/returned" 'refusal reached Treehouse return'
+      if [ "$form" = bare ]; then
+        rc=0
+        FM_HOME="$case_dir" run_teardown "$case_dir" --force > "$case_dir/forced-out" 2>&1 || rc=$?
+        assert_not_equals 0 "$rc" '--force bypassed repository preservation'
+        assert_equals 'unique committed evidence' "$(git -C "$repo" show "$commit:important.txt")" '--force lost committed work'
+      fi
+      pass "scratch: $kind $form committed and uncommitted work preserved in place, return refused"
+    done
+  done
+)
+
+test_scratch_retained_before_pool_return() (
+  set -eu
+  local case_dir archive head
+  case_dir=$(make_case scratch-retain)
+  prepare_scratch_case "$case_dir" scout
+  mkdir -p "$case_dir/wt/scratch" "$case_dir/wt/.scratch" "$case_dir/outside"
+  printf '.scratch/\n' >> "$case_dir/project/.git/info/exclude"
+  printf 'unknown ordinary work\n' > "$case_dir/wt/scratch/ordinary"
+  printf 'unknown ignored work\n' > "$case_dir/wt/.scratch/ignored"
+  printf 'outside work\n' > "$case_dir/outside/keep"
+  ln -s "$case_dir/outside" "$case_dir/wt/scratch/link"
+  printf 'unrelated\n' > "$case_dir/wt/other"
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+[ ! -e "$case_dir/wt/scratch" ] && [ ! -e "$case_dir/wt/.scratch" ] || exit 19
+SH
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/out" 2>&1 || fail "retention failed: $(cat "$case_dir/out")"
+  archive=$(find "$case_dir/data/task-x1" -type d -name 'scratch-recovery-*')
+  [ -n "$archive" ] || fail 'no durable scratch recovery directory'
+  assert_equals 'unknown ordinary work' "$(cat "$archive/scratch/ordinary")" 'ordinary scratch discarded'
+  assert_equals 'unknown ignored work' "$(cat "$archive/.scratch/ignored")" 'ignored scratch discarded'
+  assert_equals "$case_dir/outside" "$(readlink "$archive/scratch/link")" 'symlink changed'
+  assert_equals 'outside work' "$(cat "$case_dir/outside/keep")" 'symlink target changed'
+  assert_equals 'unrelated' "$(cat "$case_dir/wt/other")" 'unrelated file changed by retention'
+  assert_equals "$head" "$(git -C "$case_dir/wt" rev-parse HEAD)" 'outer HEAD changed'
+  assert_grep 'retaining scratch at' "$case_dir/out" 'recovery location not surfaced'
+  pass 'scratch: ordinary and ignored data retained before return, symlinks and unrelated work preserved'
+)
+
+test_scratch_tracked_and_recovery_boundaries() (
+  set -eu
+  local case_dir mode rc
+  for mode in dirty staged symlink-destination; do
+    case_dir=$(make_case "scratch-boundary-$mode")
+    prepare_scratch_case "$case_dir" scout
+    mkdir -p "$case_dir/wt/scratch"
+    if [ "$mode" = symlink-destination ]; then
+      mv "$case_dir/data/task-x1" "$case_dir/saved-task"
+      ln -s "$case_dir/saved-task" "$case_dir/data/task-x1"
+    else
+      printf 'tracked\n' > "$case_dir/wt/scratch/tracked"
+      git -C "$case_dir/wt" add scratch/tracked
+      git -C "$case_dir/wt" commit -qm tracked
+    fi
+    if [ "$mode" = dirty ] || [ "$mode" = staged ]; then
+      printf 'dirty work\n' > "$case_dir/wt/scratch/tracked"
+      [ "$mode" != staged ] || git -C "$case_dir/wt" add scratch/tracked
+    else
+      printf 'unique untracked work\n' > "$case_dir/wt/scratch/untracked"
+    fi
+    rc=0
+    FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/out" 2>&1 || rc=$?
+    assert_not_equals 0 "$rc" "$mode accepted unsafe scratch"
+    assert_present "$case_dir/state/task-x1.meta" "$mode lost task record"
+    if [ "$mode" = dirty ] || [ "$mode" = staged ]; then
+      assert_equals 'dirty work' "$(cat "$case_dir/wt/scratch/tracked")" 'tracked edit lost'
+    else
+      assert_equals 'unique untracked work' "$(cat "$case_dir/wt/scratch/untracked")" 'untracked work lost'
+    fi
+    assert_grep 'REFUSED: scratch preservation' "$case_dir/out" "$mode missing refusal"
+  done
+  pass 'scratch: tracked edits and symlink recovery destinations refuse without loss'
+)
+
+# Over-trigger polish (a): a slot whose scratch holds a committed placeholder plus
+# untracked worker output must relocate only the untracked subset and re-lease,
+# never refuse the whole slot. Fails before the polish (refuses as "mixed").
+test_scratch_mixed_tracked_relocates_untracked_subset() (
+  set -eu
+  local case_dir archive
+  case_dir=$(make_case scratch-mixed-tracked)
+  prepare_scratch_case "$case_dir" scout
+  mkdir -p "$case_dir/wt/scratch"
+  printf 'placeholder\n' > "$case_dir/wt/scratch/.gitkeep"
+  git -C "$case_dir/wt" add scratch/.gitkeep
+  git -C "$case_dir/wt" commit -qm 'scratch placeholder'
+  printf 'unique worker output\n' > "$case_dir/wt/scratch/output"
+  printf 'scratch/ignored\n' >> "$case_dir/project/.git/info/exclude"
+  printf 'ignored artifact\n' > "$case_dir/wt/scratch/ignored"
+  # The slot is unclogged only if the untracked subset is gone while the tracked
+  # placeholder stays for Treehouse to reset; the fake return proves both.
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+[ ! -e "$case_dir/wt/scratch/output" ] && [ ! -e "$case_dir/wt/scratch/ignored" ] \
+  && [ -f "$case_dir/wt/scratch/.gitkeep" ] || exit 19
+SH
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/out" 2>&1 \
+    || fail "mixed teardown refused instead of relocating the untracked subset: $(cat "$case_dir/out")"
+  assert_present "$case_dir/wt/scratch/.gitkeep" 'tracked placeholder removed from slot'
+  assert_equals 'placeholder' "$(cat "$case_dir/wt/scratch/.gitkeep")" 'tracked placeholder changed'
+  archive=$(find "$case_dir/data/task-x1" -type d -name 'scratch-recovery-*')
+  [ -n "$archive" ] || fail 'no durable scratch recovery directory'
+  assert_equals 'unique worker output' "$(cat "$archive/scratch/output")" 'untracked output not relocated'
+  assert_equals 'ignored artifact' "$(cat "$archive/scratch/ignored")" 'ignored artifact not relocated'
+  assert_absent "$archive/scratch/.gitkeep" 'tracked placeholder wrongly relocated'
+  pass 'scratch: mixed tracked placeholder relocates only the untracked subset and leaves tracked work'
+)
+
+# Over-trigger polish (b): an unborn HEAD (a repo with zero commits) plus only
+# untracked scratch must take the ordinary move path, not read the unborn-HEAD
+# `git diff HEAD` error as tracked changes. Fails before the polish (refuses).
+test_scratch_unborn_head_moves_untracked() (
+  set -eu
+  local case_dir archive
+  case_dir=$(make_case scratch-unborn-head)
+  prepare_scratch_case "$case_dir" scout
+  # Rebuild the slot as a git repository with no commits (unborn HEAD).
+  rm -rf "$case_dir/wt/.git"
+  git -C "$case_dir/wt" init -q
+  mkdir -p "$case_dir/wt/scratch" "$case_dir/wt/.scratch"
+  printf 'unborn ordinary\n' > "$case_dir/wt/scratch/file"
+  printf '.scratch/\n' >> "$case_dir/wt/.git/info/exclude"
+  printf 'unborn ignored\n' > "$case_dir/wt/.scratch/file"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+[ ! -e "$case_dir/wt/scratch" ] && [ ! -e "$case_dir/wt/.scratch" ] || exit 19
+SH
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/out" 2>&1 \
+    || fail "unborn-HEAD teardown refused instead of moving untracked scratch: $(cat "$case_dir/out")"
+  archive=$(find "$case_dir/data/task-x1" -type d -name 'scratch-recovery-*')
+  [ -n "$archive" ] || fail 'unborn-HEAD scratch was not retained'
+  assert_equals 'unborn ordinary' "$(cat "$archive/scratch/file")" 'unborn-HEAD ordinary scratch lost'
+  assert_equals 'unborn ignored' "$(cat "$archive/.scratch/file")" 'unborn-HEAD ignored scratch lost'
+  pass 'scratch: unborn-HEAD slot with only untracked scratch takes the ordinary move path'
+)
+
+test_scratch_broken_head_refuses_tracked_changes() (
+  set -eu
+  local case_dir branch ref_path rc
+  case_dir=$(make_case scratch-broken-head)
+  prepare_scratch_case "$case_dir" scout
+  mkdir -p "$case_dir/wt/scratch"
+  printf 'committed scratch\n' > "$case_dir/wt/scratch/tracked"
+  git -C "$case_dir/wt" add scratch/tracked
+  git -C "$case_dir/wt" commit -qm 'tracked scratch'
+  printf 'modified tracked scratch\n' > "$case_dir/wt/scratch/tracked"
+  branch=$(git -C "$case_dir/wt" symbolic-ref -q HEAD)
+  ref_path=$(git -C "$case_dir/wt" rev-parse --git-path "$branch")
+  printf '%s\n' deadbeefdeadbeefdeadbeefdeadbeefdeadbeef > "$ref_path"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+touch "$case_dir/returned"
+SH
+  rc=0
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/out" 2>&1 || rc=$?
+  assert_not_equals 0 "$rc" 'broken HEAD accepted tracked scratch'
+  assert_equals 'modified tracked scratch' "$(cat "$case_dir/wt/scratch/tracked")" 'broken HEAD lost tracked scratch'
+  assert_present "$case_dir/state/task-x1.meta" 'broken HEAD lost task record'
+  assert_absent "$case_dir/returned" 'broken HEAD reached Treehouse return'
+  assert_grep 'REFUSED: scratch preservation' "$case_dir/out" 'broken HEAD refusal missing'
+  pass 'scratch: broken HEAD with tracked changes refuses teardown and preserves the slot'
+)
+
+test_scratch_tracked_deletion_refuses_return() (
+  set -eu
+  local case_dir rc
+  case_dir=$(make_case scratch-tracked-deletion)
+  prepare_scratch_case "$case_dir" scout
+  mkdir -p "$case_dir/wt/scratch"
+  printf 'committed scratch\n' > "$case_dir/wt/scratch/tracked"
+  git -C "$case_dir/wt" add scratch/tracked
+  git -C "$case_dir/wt" commit -qm 'tracked scratch'
+  rm -f "$case_dir/wt/scratch/tracked"
+  cat > "$case_dir/fakebin/treehouse" <<SH
+#!/usr/bin/env bash
+touch "$case_dir/returned"
+SH
+  rc=0
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/out" 2>&1 || rc=$?
+  assert_not_equals 0 "$rc" 'tracked scratch deletion accepted'
+  assert_absent "$case_dir/wt/scratch/tracked" 'tracked scratch deletion was reverted'
+  assert_present "$case_dir/state/task-x1.meta" 'tracked scratch deletion lost task record'
+  assert_absent "$case_dir/returned" 'tracked scratch deletion reached Treehouse return'
+  assert_grep 'REFUSED: scratch preservation' "$case_dir/out" 'tracked scratch deletion refusal missing'
+  pass 'scratch: tracked deletion refuses teardown and preserves the task record'
+)
+
+test_scratch_real_pool_releases_retained_slot() (
+  set -eu
+  local real_treehouse case_dir wt again archive
+  real_treehouse=$(command -v treehouse) || { printf 'skip - treehouse not installed (scratch pool integration)\n'; exit 0; }
+  case_dir=$(make_case scratch-real-pool)
+  export TREEHOUSE_ROOT="$case_dir/pool"
+  git -C "$case_dir/project" worktree remove "$case_dir/wt"
+  printf 'max_trees = 1\n' > "$case_dir/project/treehouse.toml"
+  git -C "$case_dir/project" add treehouse.toml
+  git -C "$case_dir/project" commit -qm 'one-slot fixture'
+  git -C "$case_dir/project" push -q origin main
+  wt=$(cd "$case_dir/project" && "$real_treehouse" get --lease --no-fetch)
+  ln -s "$wt" "$case_dir/wt"
+  prepare_scratch_case "$case_dir" scout
+  # Record the actual pool slot; the test-only convenience link is not ownership.
+  python3 - "$case_dir/state/task-x1.meta" "$case_dir/wt" "$wt" <<'PYMETA'
+import sys
+from pathlib import Path
+p = Path(sys.argv[1])
+p.write_text(p.read_text().replace("worktree=" + sys.argv[2] + "\n", "worktree=" + sys.argv[3] + "\n"))
+PYMETA
+  mkdir -p "$wt/scratch" "$wt/.scratch"
+  printf '.scratch/\n' >> "$case_dir/project/.git/info/exclude"
+  printf 'ordinary scratch\n' > "$wt/scratch/file"
+  printf 'ignored scratch\n' > "$wt/.scratch/file"
+  printf '#!/usr/bin/env bash\nexec "%s" "$@"\n' "$real_treehouse" > "$case_dir/fakebin/treehouse"
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/out" 2>&1 || fail "real pool teardown failed: $(cat "$case_dir/out")"
+  assert_absent "$wt/scratch" 'real pool retained scratch in slot'
+  assert_absent "$wt/.scratch" 'real pool retained ignored scratch in slot'
+  archive=$(find "$case_dir/data/task-x1" -type d -name 'scratch-recovery-*')
+  [ -n "$archive" ] || fail 'real pool scratch was deleted instead of retained'
+  assert_equals 'ordinary scratch' "$(cat "$archive/scratch/file")" 'real pool ordinary data lost'
+  assert_equals 'ignored scratch' "$(cat "$archive/.scratch/file")" 'real pool ignored data lost'
+  again=$(cd "$case_dir/project" && "$real_treehouse" get --lease --no-fetch)
+  assert_equals "$wt" "$again" 'same one-slot pool cannot be leased again'
+  pass 'scratch: real Treehouse slot re-leases after ordinary and ignored scratch is retained outside it'
+)
+
+test_scratch_failed_return_keeps_recovery() (
+  set -eu
+  local case_dir archive rc
+  case_dir=$(make_case scratch-return-retry)
+  prepare_scratch_case "$case_dir" scout
+  mkdir -p "$case_dir/wt/scratch" "$case_dir/wt/.scratch"
+  printf 'retained through retry\n' > "$case_dir/wt/scratch/file"
+  printf '#!/usr/bin/env bash\nexit 17\n' > "$case_dir/fakebin/treehouse"
+  rc=0
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/out" 2>&1 || rc=$?
+  assert_not_equals 0 "$rc" 'failed return reported success'
+  assert_present "$case_dir/state/task-x1.meta" 'failed return lost task record'
+  assert_absent "$case_dir/wt/.scratch" 'empty disposable scratch survived'
+  archive=$(find "$case_dir/data/task-x1" -type d -name 'scratch-recovery-*')
+  [ -n "$archive" ] || fail 'failed return lost recovery directory'
+  assert_equals 'retained through retry' "$(cat "$archive/scratch/file")" 'failed return lost data'
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$case_dir/fakebin/treehouse"
+  FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/retry-out" 2>&1 || fail "retry refused: $(cat "$case_dir/retry-out")"
+  assert_equals 'retained through retry' "$(cat "$archive/scratch/file")" 'retry lost data'
+  assert_equals "$archive" "$(find "$case_dir/data/task-x1" -type d -name 'scratch-recovery-*')" 'retry duplicated or lost recovery'
+  pass 'scratch: empty directories reclaimed, failed return and retry preserve durable recovery'
+)
+
+set -e
+test_scratch_repository_data_refuses_return
+test_scratch_retained_before_pool_return
+test_scratch_tracked_and_recovery_boundaries
+test_scratch_mixed_tracked_relocates_untracked_subset
+test_scratch_unborn_head_moves_untracked
+test_scratch_broken_head_refuses_tracked_changes
+test_scratch_tracked_deletion_refuses_return
+test_scratch_real_pool_releases_retained_slot
+test_scratch_failed_return_keeps_recovery
+
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator

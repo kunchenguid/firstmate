@@ -73,6 +73,17 @@
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
+# Before ordinary Treehouse task return (not Orca or secondmate retirement),
+# scratch/ and .scratch/ are inspected before cleanup and again after reaping.
+# Repository data and tracked-scratch edits refuse return with the slot and
+# task record retained, including under --force. Empty untracked scratch
+# directories may be removed; all other untracked and ignored scratch is
+# renamed into data/<id>/scratch-recovery-*/ without deleting it, including the
+# untracked subset of a slot whose scratch also holds clean tracked content.
+# Recovery must be outside the slot on the same filesystem; failure refuses.
+# Recovery is durable and never automatically purged. Ship dirty-work gates
+# remain unchanged. Non-Git slots remain no-ops; Git worktrees inspect both
+# scratch paths even when absent so tracked deletions still refuse teardown.
 # Before destructive cleanup, teardown validates task check artifacts as
 # ordinary single-link files on the state device. It refuses and preserves
 # task state when that proof fails; otherwise it removes the task's check,
@@ -1711,6 +1722,150 @@ teardown_treehouse_return() {
   return 1
 }
 
+# Inspect before destructive cleanup, then inspect again after process reaping.
+# Nonempty untracked scratch is retained, never classified disposable by name.
+teardown_task_scratch() {  # <check|retain>
+  if [ ! -e "$WT/.git" ] && [ ! -L "$WT/.git" ]; then
+    return 0
+  fi
+  python3 - "$WT" "$DATA/$ID" "$1" <<'PY'
+import os
+import stat
+import subprocess
+import sys
+import tempfile
+
+wt, recovery, mode = sys.argv[1:]
+wt = os.path.realpath(wt)
+destination = None
+
+def refuse(message):
+    raise RuntimeError(message)
+
+def git(*args):
+    return subprocess.check_output(["git", "-C", wt, *args], stderr=subprocess.PIPE)
+
+def inspect(path):
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode):
+        return
+    with os.scandir(path) as scan:
+        entries = list(scan)
+    names = {entry.name for entry in entries}
+    # Do not rely on git clean's incomplete nested-repository protection.
+    # Include gitfiles, bare stores, and linked-worktree administrative dirs.
+    if ".git" in names or ("HEAD" in names and ("objects" in names or "commondir" in names)):
+        refuse("repository data in " + repr(path) + "; preserve it in place and reconcile it before returning this slot")
+    for entry in entries:
+        if entry.is_dir(follow_symlinks=False):
+            inspect(entry.path)
+
+def tracked_scratch_changes(name):
+    # A tracked scratch file differing from HEAD (staged or unstaged) is real
+    # work; preserve the whole slot rather than relocating it.
+    head = subprocess.call(["git", "-C", wt, "rev-parse", "--verify", "-q", "HEAD"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if head not in (0, 1):
+        raise RuntimeError("cannot resolve HEAD while inspecting tracked scratch")
+    if head == 0:
+        code = subprocess.call(["git", "-C", wt, "diff", "--quiet", "HEAD", "--", name],
+                               stderr=subprocess.DEVNULL)
+        if code in (0, 1):
+            return code == 1
+        raise RuntimeError("cannot inspect tracked scratch against HEAD")
+    symbolic = subprocess.run(["git", "-C", wt, "symbolic-ref", "-q", "HEAD"],
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              check=False)
+    if symbolic.returncode != 0:
+        raise RuntimeError("cannot resolve HEAD while inspecting tracked scratch")
+    ref = os.fsdecode(symbolic.stdout).rstrip("\n")
+    ref_exists = subprocess.call(["git", "-C", wt, "show-ref", "--verify", "--quiet", ref],
+                                 stderr=subprocess.DEVNULL)
+    if ref_exists == 1:
+        return subprocess.call(["git", "-C", wt, "diff", "--cached", "--quiet", "--", name],
+                               stderr=subprocess.DEVNULL) != 0
+    raise RuntimeError("cannot resolve HEAD while inspecting tracked scratch")
+
+def untracked_subset(name):
+    # Untracked and ignored files under a scratch path that also holds clean
+    # tracked content; moving only this subset unclogs the slot while leaving
+    # the tracked (committed) work in place for Treehouse to reset.
+    out = git("ls-files", "-z", "--others", "--exclude-standard", "--", name)
+    out += git("ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", name)
+    return [os.fsdecode(rel) for rel in out.split(b"\0") if rel]
+
+def ensure_destination():
+    global destination
+    if destination is None:
+        os.makedirs(recovery, exist_ok=True)
+        destination = tempfile.mkdtemp(prefix="scratch-recovery-", dir=recovery)
+        print("teardown: retaining scratch at " + repr(destination) + "; no automatic deletion", flush=True)
+    return destination
+
+try:
+    top = os.fsdecode(git("rev-parse", "--show-toplevel")).rstrip("\n")
+    if os.path.realpath(top) != wt:
+        refuse("scratch is not in the recorded Git worktree")
+    paths = ["scratch", ".scratch"]
+    candidates = []  # wholly untracked scratch paths: move the whole path
+    mixed = []       # tracked + untracked/ignored: move only the untracked subset
+    for name in paths:
+        path = os.path.join(wt, name)
+        if os.path.lexists(path):
+            inspect(path)
+        # Preserve staged and unstaged work, even in a completed scout.
+        if tracked_scratch_changes(name):
+            refuse("tracked scratch changes in " + repr(path))
+        if not os.path.lexists(path):
+            continue
+        tracked = git("ls-files", "-z", "--", name)
+        if tracked:
+            subset = untracked_subset(name)
+            if subset:
+                mixed.append((name, subset))
+            # Clean tracked scratch with no untracked subset is left in place.
+            continue
+        candidates.append((name, path))
+    if candidates or mixed:
+        # A recovery directory inside the returned slot would be cleaned too.
+        if os.path.commonpath([wt, os.path.realpath(recovery)]) == wt:
+            refuse("scratch recovery directory is inside the worktree")
+        if os.path.islink(recovery) or os.path.islink(os.path.dirname(recovery)):
+            refuse("scratch recovery directory must not be a symlink")
+    if mode == "retain":
+        for name, path in candidates:
+            # An empty directory is positively disposable. Everything else stays.
+            if os.path.isdir(path) and not os.path.islink(path) and not os.listdir(path):
+                os.rmdir(path)
+                continue
+            # Rename only: no cross-device copy/delete fallback and no overwrite.
+            # A failed return or interrupted retry leaves recovery data durable.
+            os.rename(path, os.path.join(ensure_destination(), name))
+        for name, subset in mixed:
+            top_path = os.path.join(wt, name)
+            for rel in subset:
+                source = os.path.join(wt, rel)
+                if not os.path.lexists(source):
+                    continue
+                target = os.path.join(ensure_destination(), rel)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                # Rename only, same durability contract as the wholesale path.
+                os.rename(source, target)
+            # Remove directories emptied by relocating the untracked subset; an
+            # empty directory holds no tracked work, so this loses nothing. The
+            # top scratch path itself is left in place for Treehouse to reset.
+            for root, dirs, files in os.walk(top_path, topdown=False):
+                if os.path.abspath(root) == os.path.abspath(top_path):
+                    continue
+                if not os.path.islink(root) and not os.listdir(root):
+                    os.rmdir(root)
+except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+    print("REFUSED: scratch preservation for " + repr(wt) + ": " + str(error)
+          + ". Slot and task record retained; manual reconciliation required.", file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
 validate_worktree_teardown_safety() {
   local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
   [ -d "$WT" ] || return 0
@@ -3288,6 +3443,11 @@ if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+if [ "$BACKEND" != orca ] && [ "$KIND" != secondmate ] \
+    && teardown_owns_worktree && [ -d "$WT" ]; then
+  teardown_task_scratch check || exit 1
+fi
+
 # A Herdr close may reposition shared workspace order, so the whole
 # destructive sequence below (worktree return, pane close, record removal)
 # runs under the named-session presentation lock, acquired BEFORE anything is
@@ -3425,6 +3585,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  teardown_task_scratch retain || exit 1
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
   if [ "$branch" != "HEAD" ]; then
     if git -C "$WT" checkout --detach -q 2>/dev/null; then
