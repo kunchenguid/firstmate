@@ -33,7 +33,9 @@ The result reaches `main` through that task's ordinary selected delivery path (n
 - Verification the objective must satisfy: the project's own test and lint gate, run after each meaningful slice, not a new bespoke check invented for the loop.
 - Mandatory runtime caps: `--max-iterations` and/or `--max-tokens` sized to the captain's ask (an unbounded overnight run is never authorized).
 - A concrete `--stop-when` condition the agent can report, never a subjective one like "looks good"; the crewmate must independently re-run its named verification before reporting done because gnhf does not observe the condition itself.
-- Before launching a long foreground run, append `paused: gnhf loop running until <UTC ISO 8601>` with an expected end derived from the runtime cap actually passed, then append the ordinary `working:` cap or stop-condition result when the loop exits.
+- Immediately before launching a long foreground run, append `paused: gnhf loop running until <YYYY-MM-DDTHH:MM[:SS]Z>` as the last status line, and write nothing else to the status file until the loop exits; then append the ordinary `working:` cap or stop-condition result.
+  The timestamp must be exactly that UTC shape (for example `2026-09-19T07:30Z`); offsets like `+00:00` or fractional seconds are not recognized and silently fall back to the flat recheck cadence.
+  `--max-iterations` and `--max-tokens` are not wall-clock caps, so the `until` time is an estimate of the bounded run (for example the iteration cap times an estimated per-iteration duration), not a duration those flags promise.
   This declaration is mandatory because without it the supervisor eventually treats a healthy long-running foreground call as a wedged pane; AGENTS.md section 8 owns the declared-external-wait contract.
 
 ## Hands-Off vs Companion
@@ -45,7 +47,7 @@ The result reaches `main` through that task's ordinary selected delivery path (n
 
 ## Status reporting
 
-Per the brief's ordinary sparse status contract: `working:` when the loop starts, one line per cap or stop-condition exit (which one, and the observed outcome), and `failed:`/`blocked:` on a real failure - never a line per iteration.
+Per the brief's ordinary sparse status contract: the `paused: gnhf loop running until <YYYY-MM-DDTHH:MM[:SS]Z>` declaration as the last line before the loop starts (never followed by a `working:` line while it runs, because the last status line wins), one `working:` line per cap or stop-condition exit (which one, and the observed outcome), and `failed:`/`blocked:` on a real failure - never a line per iteration.
 The loop's own commit history is the source of truth for what happened each round; the status file only needs the phase changes a supervisor would act on.
 
 ## Morning review
