@@ -25,6 +25,7 @@ import {
 import {
   applyOmpCalmThinkingToRememberedRows,
   installOmpCalmAssistantThinking,
+  rememberOmpCalmAssistantMessage,
   resetOmpCalmThinkingRememberedRows,
 } from "./lib/fm-calm-assistant-thinking.ts";
 import { installOmpCalmOperationalUserLayout } from "./lib/fm-calm-operational-user.ts";
@@ -156,6 +157,22 @@ export default function (pi: ExtensionAPI) {
 
   installCalmPresentationAdapter("operational-user-row", installOmpCalmOperationalUserLayout);
   installCalmPresentationAdapter("collapsed-thinking", installOmpCalmAssistantThinking);
+
+  // OMP splits every assistant message at its first tool call before feeding it
+  // to AssistantMessageComponent, so the component only ever receives a derived
+  // before-tools message. OMP's own assistant message events carry the
+  // unfiltered message; remember its tool-call state there so Calm can still
+  // collapse a short mid-turn working note.
+  for (const event of ["message_start", "message_update", "message_end"]) {
+    pi.on?.(event, (payload) => {
+      const message = (payload as { message?: unknown } | undefined)?.message;
+      if (message && typeof message === "object") {
+        rememberOmpCalmAssistantMessage(
+          message as Parameters<typeof rememberOmpCalmAssistantMessage>[0],
+        );
+      }
+    });
+  }
 
   if (typeof pi.registerCommand !== "function") {
     console.error(

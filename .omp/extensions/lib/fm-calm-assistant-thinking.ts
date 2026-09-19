@@ -19,7 +19,10 @@ type ContentBlock = {
 };
 
 type AssistantMessage = {
+  role?: string;
   stopReason?: string;
+  timestamp?: number;
+  responseId?: string;
   content: ContentBlock[];
 };
 
@@ -40,6 +43,7 @@ type CalmAssistantThinkingPatch = {
     AssistantMessageUpdateOptions | undefined
   >;
   presentationMessages: WeakMap<AssistantMessageComponentLike, AssistantMessage>;
+  midTurnKeys: Set<string>;
   originalUpdateContent: AssistantMessageComponentLike["updateContent"] | undefined;
   hidesThinking: () => boolean;
   hidesWorkingNote: () => boolean;
@@ -53,7 +57,21 @@ const CALM_ASSISTANT_THINKING_PATCH = Symbol.for(
 );
 
 function isMidTurnAssistantMessage(message: AssistantMessage): boolean {
+  if (message.stopReason === "toolUse") return true;
   return message.content.some((block) => block.type === "toolCall");
+}
+
+// OMP 18.1.17 splits every assistant message at its first tool call before
+// rendering and feeds the component a derived message with the tool call
+// stripped, so `isMidTurnAssistantMessage` cannot see the tool call on the
+// message the adapter receives. OMP still raises its own assistant message
+// events with the unfiltered message; remembering the timestamp of a mid-turn
+// assistant message lets the presentation filter recognise the derived
+// before-tools message as mid-turn.
+function assistantMessageKey(message: AssistantMessage): string | undefined {
+  if (typeof message.timestamp === "number") return `t:${message.timestamp}`;
+  if (typeof message.responseId === "string") return `r:${message.responseId}`;
+  return undefined;
 }
 
 function isPresentationDerived(
@@ -79,6 +97,7 @@ export function installOmpCalmAssistantThinking(): void {
     originalMessages: new WeakMap(),
     originalOptions: new WeakMap(),
     presentationMessages: new WeakMap(),
+    midTurnKeys: new Set(),
     originalUpdateContent: undefined,
     hidesThinking: () => calmPresentationHides("assistant-thinking"),
     hidesWorkingNote: () => calmPresentationHides("assistant-working-note"),
@@ -110,6 +129,7 @@ export function installOmpCalmAssistantThinking(): void {
     },
     reset() {
       patch.remembered.clear();
+      patch.midTurnKeys.clear();
     },
   };
 
@@ -147,9 +167,13 @@ export function installOmpCalmAssistantThinking(): void {
       patch.originalOptions.set(this, options);
     }
     const hidesThinking = patch.hidesThinking();
+    const key = assistantMessageKey(message);
+    const midTurn =
+      isMidTurnAssistantMessage(message) ||
+      (key !== undefined && patch.midTurnKeys.has(key));
     const hidesWorkingNote =
       patch.hidesWorkingNote() &&
-      isMidTurnAssistantMessage(message) &&
+      midTurn &&
       message.content.some(
         (block) => block.type === "text" && !calmTextIsSubstantive(block.text ?? ""),
       );
@@ -188,4 +212,30 @@ export function resetOmpCalmThinkingRememberedRows(): void {
     [key: symbol]: CalmAssistantThinkingPatch | undefined;
   };
   registry[CALM_ASSISTANT_THINKING_PATCH]?.reset();
+}
+
+/**
+ * Record whether an unfiltered assistant message from OMP's own event stream
+ * ended in tool calls, so the derived before-tools message handed to the stock
+ * component is still recognised as mid-turn while Calm hides working notes.
+ */
+export function rememberOmpCalmAssistantMessage(message: AssistantMessage): void {
+  const registry = globalThis as typeof globalThis & {
+    [key: symbol]: CalmAssistantThinkingPatch | undefined;
+  };
+  const patch = registry[CALM_ASSISTANT_THINKING_PATCH];
+  if (!patch) return;
+  if (message.role !== undefined && message.role !== "assistant") return;
+  const key = assistantMessageKey(message);
+  if (key === undefined) return;
+  const midTurn = isMidTurnAssistantMessage(message);
+  const wasMidTurn = patch.midTurnKeys.has(key);
+  if (midTurn) {
+    patch.midTurnKeys.add(key);
+  } else {
+    patch.midTurnKeys.delete(key);
+  }
+  if (midTurn && !wasMidTurn && patch.hidesWorkingNote()) {
+    patch.applyToRemembered();
+  }
 }
