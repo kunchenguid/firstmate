@@ -2166,33 +2166,39 @@ fm_wake_status_mark_current() {  # <state> <status-file>
 # nothing else. The advance is provenance-gated and fails toward waking:
 #   - the marker advances ONLY when the file's pre-append signature matched the
 #     recorded seen marker (every earlier byte was already announced or
-#     deliberately absorbed), AND the post-append size equals the pre-append
-#     size plus exactly the appended bytes (no foreign write interleaved);
-#   - on ANY other condition - missing marker, pending foreign bytes, an
-#     interleaved writer, an unreadable signature - the line is still appended
-#     but the marker is left alone, so the watcher surfaces the file normally.
+#     deliberately absorbed) or the file did not exist before the append (an
+#     empty baseline with nothing unseen), AND the post-append size equals the
+#     pre-append size plus exactly the appended bytes (no foreign write
+#     interleaved);
+#   - on ANY other condition - a missing marker over an existing file, pending
+#     foreign bytes, an interleaved writer, an unreadable signature - the line
+#     is still appended but the marker is left alone, so the watcher surfaces
+#     the file normally.
 # A later, different line from any other writer grows the size past the marker
 # and wakes as before: task identity alone can never suppress new content.
 # Returns 0 appended and self-announced, 1 appended but left for the watcher
 # (the safe direction), 2 the append itself failed.
 fm_wake_status_append_self_announced() {  # <state> <status-file> <line>
-  local state=$1 file=$2 line=$3 marker pre_sig='' pre_size='' pre_ident='' post_size post_ident
+  local state=$1 file=$2 line=$3 marker existed=0 pre_sig='' pre_size=0 pre_ident='' post_size post_ident
   local LC_ALL=C
   _fm_wake_require_classify || return 1
   marker=$(fm_wake_signal_seen_path "$state" "$file")
-  if [ -e "$file" ]; then
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    existed=1
     pre_sig=$(fm_wake_signal_sig "$file") || pre_sig=''
     pre_size=$(_fm_status_file_size "$file") || pre_size=''
     pre_ident=$(_fm_open_decisions_file_ident "$file") || pre_ident=''
   fi
   printf '%s\n' "$line" >> "$file" || return 2
-  [ -n "$pre_sig" ] || return 1
-  status_presentation_marker_reported_matches "$marker" "$pre_sig" || return 1
-  [ "$(status_presentation_marker_offset "$marker" "$file")" = "$pre_size" ] || return 1
+  if [ "$existed" = 1 ]; then
+    [ -n "$pre_sig" ] || return 1
+    status_presentation_marker_reported_matches "$marker" "$pre_sig" || return 1
+    [ "$(status_presentation_marker_offset "$marker" "$file")" = "$pre_size" ] || return 1
+  fi
   post_size=$(_fm_status_file_size "$file") || return 1
   post_ident=$(_fm_open_decisions_file_ident "$file") || return 1
   case "$pre_size$post_size" in ''|*[!0-9]*) return 1 ;; esac
-  [ -n "$pre_ident" ] && [ "$post_ident" = "$pre_ident" ] || return 1
+  [ "$existed" = 0 ] || { [ -n "$pre_ident" ] && [ "$post_ident" = "$pre_ident" ]; } || return 1
   [ "$post_size" -eq $((pre_size + ${#line} + 1)) ] || return 1
   fm_wake_status_seen_commit "$state" "$file" "$post_size" "$post_ident" || return 1
   return 0

@@ -1148,6 +1148,23 @@ EOF
   assert_absent "$home/state/sample-plain-call.status" \
     "a decision-only hold created a status log with no lane to own it"
 
+  # A lane that has written no status line yet still gets the declaration,
+  # and creating its log does not re-wake the home that recorded the hold.
+  lane=sample-silent-lane
+  tasks_in "$home" add "$lane" "Ship the silent sample" --kind ship --repo sample >/dev/null \
+    || fail "could not create the silent lane"
+  write_origin_meta "$home" "$lane" ship
+  assert_absent "$home/state/$lane.status" "the silent lane already had a status log"
+  run_captain "$home" hold "$lane" --reason "operator review pending" >/dev/null \
+    || fail "could not hold the silent lane"
+  grep -Fx "captain-held [key=captain-hold-$lane-1]: operator review pending" \
+    "$home/state/$lane.status" >/dev/null \
+    || fail "hold did not declare the hold on a lane with no status log"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_signal_seen_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/$lane.status" \
+    || fail "the hold declaration that created the status log re-woke the home that recorded it"
+
   # An evidence-backed reconcile close retracts a held lane's declaration.
   lane=sample-reconciled-lane
   tasks_in "$home" add "$lane" "Scout the reconciled sample" --kind scout --repo sample >/dev/null \
