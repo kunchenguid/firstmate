@@ -3568,7 +3568,6 @@ rovo_endpoint_cleanup() {
 # Pre-registration is best effort and the gate below answers the documented
 # default with Enter if the dialog renders anyway.
 PI_TRUST_DIALOG='Trust project folder?'
-PI_TRUST_ANSWERED=0
 
 pi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
@@ -3586,7 +3585,6 @@ pi_wait_for_trust() {
       return 0
     fi
     spawn_send_key "$T" Enter
-    PI_TRUST_ANSWERED=1
     i=$((i + 1))
     [ "$i" -ge "$max" ] || sleep "$interval"
   done

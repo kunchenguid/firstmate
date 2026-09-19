@@ -846,6 +846,8 @@ test_pi_spawn_falls_back_to_enter_when_registration_fails() {
     --mode no-mistakes --yolo off)
   expect_code 0 $? "a Pi spawn should recover from trust registration failure: $out"
   assert_contains "$out" "could not pre-register Pi workspace trust" "the Pi registration failure was hidden"
+  [ "$(cat "$fakebin/.fm-fake-trust-dialog-state" 2>/dev/null || true)" = cleared ] ||
+    fail "the trust dialog was never actually seen and cleared by the backstop"
   pass "fm-spawn.sh: a Pi registration failure falls back to the folder-trust Enter"
 }
 

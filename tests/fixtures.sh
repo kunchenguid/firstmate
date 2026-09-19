@@ -99,6 +99,15 @@ fm_test_fake_gh_axi() {
 # carry no -l) is appended there instead, one per line in send order. Optional
 # FM_FAKE_DUPLICATE_WINDOW is printed from list-windows.
 #
+# FM_FAKE_TRUST_DIALOG=1 models Pi's folder-trust dialog rendering after the
+# launch line is submitted: capture-pane shows it once the post-launch bare
+# Enter lands, and it swallows the trust-dialog backstop's first answering
+# Enter (the same swallowed-keypress hazard documented for Kimi) before a
+# second Enter clears it, so pi_wait_for_trust's resend-and-confirm-cleared
+# loop is actually exercised rather than seeing a dialog that vanishes on the
+# very first answer. State is kept in a marker file beside this fake tmux
+# binary, since each invocation is a new process.
+#
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
 # cleanup and option operations are no-ops. Launch logging is env-gated, so
 # suites that do not set FM_FAKE_LAUNCH_LOG keep a silent send-keys.
@@ -107,6 +116,7 @@ fm_test_fake_tmux_spawn() {
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 set -u
+trust_state="$(dirname "$0")/.fm-fake-trust-dialog-state"
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
@@ -147,6 +157,26 @@ case "${1:-}" in
           *) [ -n "$literal" ] || printf '%s\n' "$a" >> "$FM_FAKE_PANE_LOG" ;;
         esac
       done
+    fi
+    if [ "${FM_FAKE_TRUST_DIALOG:-0}" = 1 ]; then
+      case " $* " in
+        *' -l '*) printf 'launched\n' > "$trust_state" ;;
+        *' Enter '*)
+          case "$(cat "$trust_state" 2>/dev/null || true)" in
+            launched) printf 'dialog:0\n' > "$trust_state" ;;
+            dialog:0) printf 'dialog:1\n' > "$trust_state" ;;
+            dialog:1) printf 'cleared\n' > "$trust_state" ;;
+          esac
+          ;;
+      esac
+    fi
+    exit 0
+    ;;
+  capture-pane)
+    if [ "${FM_FAKE_TRUST_DIALOG:-0}" = 1 ]; then
+      case "$(cat "$trust_state" 2>/dev/null || true)" in
+        dialog:*) printf 'Trust project folder?\n' ;;
+      esac
     fi
     exit 0
     ;;
