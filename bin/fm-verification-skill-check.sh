@@ -41,6 +41,10 @@ fail() {
   failures=$((failures + 1))
 }
 
+has_content() {
+  printf '%s\n' "$1" | grep -q '[^[:space:]]'
+}
+
 # Section extractor: prints the body of one ## H2 section (up to the next ##),
 # empty when the section is absent.
 section_body() {
@@ -58,10 +62,29 @@ if [ ! -f "$SKILL" ]; then
   exit 1
 fi
 
-# Frontmatter name must exist, start with verify-, and match the directory.
-FRONTMATTER=$(sed -n '/^---$/,/^---$/p' "$SKILL" | sed '1d;$d')
+if ! FRONTMATTER=$(awk '
+  NR == 1 && $0 == "---" { opened = 1; next }
+  opened && $0 == "---" { closed = 1; exit }
+  opened { print }
+  END { if (!opened || !closed) exit 1 }
+' "$SKILL"); then
+  fail "SKILL.md must have opening and closing YAML frontmatter delimiters"
+  FRONTMATTER=
+fi
 NAME=$(printf '%s\n' "$FRONTMATTER" | sed -n 's/^name:[[:space:]]*//p' | head -1)
 [ -n "$NAME" ] || fail "SKILL.md frontmatter has no name: field"
+DESCRIPTION=$(printf '%s\n' "$FRONTMATTER" | awk '
+  /^description:[[:space:]]*/ {
+    value = $0
+    sub(/^description:[[:space:]]*/, "", value)
+    if (value !~ /^[>|][-+]?$/ && value ~ /[^[:space:]]/) { print value; exit }
+    reading = 1
+    next
+  }
+  reading && /^[[:space:]]+/ && /[^[:space:]]/ { print; exit }
+  reading && !/^[[:space:]]*$/ { exit }
+')
+has_content "$DESCRIPTION" || fail "SKILL.md frontmatter has no non-empty description: field"
 case "$NAME" in
   verify-*) ;;
   *) fail "skill name must start with verify- (got: ${NAME:-none})" ;;
@@ -70,10 +93,9 @@ if [ -n "$NAME" ] && [ "$NAME" != "$BASENAME" ]; then
   fail "skill name '$NAME' does not match directory name '$BASENAME'"
 fi
 
-# Required H2 sections.
 for heading in Launch Doctor Drive Evidence Cleanup Helpers; do
   body=$(section_body "$SKILL" "$heading")
-  [ -n "$body" ] || fail "SKILL.md is missing a non-empty '## $heading' section"
+  has_content "$body" || fail "SKILL.md is missing a non-empty '## $heading' section"
 done
 
 # The cleanup rule is the contract point most likely to be dropped: cleanup
@@ -81,15 +103,13 @@ done
 # match, so a future editor cannot silently delete it. Phrase matching is
 # whitespace-tolerant so prose line wrapping cannot hide the rule.
 CLEANUP_BODY=$(section_body "$SKILL" "Cleanup" | tr '\n' ' ')
-printf '%s\n' "$CLEANUP_BODY" | grep -qi "kill by process name" \
+printf '%s\n' "$CLEANUP_BODY" | grep -Eqi "kill[[:space:]]+by[[:space:]]+process[[:space:]]+name" \
   || fail "Cleanup section must state the rule: never kill by process name; kill what you started"
 
-# Evidence standards must demand the real user path, not internal shortcuts.
 EVIDENCE_BODY=$(section_body "$SKILL" "Evidence" | tr '\n' ' ')
-printf '%s\n' "$EVIDENCE_BODY" | grep -qi "user path" \
+printf '%s\n' "$EVIDENCE_BODY" | grep -Eqi "user[[:space:]]+path" \
   || fail "Evidence section must require exercising the real user path"
 
-# Feature map index must exist and reference every well-shaped feature file.
 FEATURES="$DIR/features/README.md"
 if [ ! -f "$FEATURES" ]; then
   fail "missing features/README.md feature-map index"
@@ -104,18 +124,17 @@ else
 
     for heading in "Sub-features" "How to get to it (user POV)" "Gotchas"; do
       body=$(section_body "$feature" "$heading")
-      [ -n "$body" ] || fail "$filename is missing a non-empty '## $heading' section"
+      has_content "$body" || fail "$filename is missing a non-empty '## $heading' section"
     done
     body=$(awk '
       /^## Driving it with .+[^[:space:]][[:space:]]*$/ { insec = 1; next }
       /^## / { insec = 0 }
       insec { print }
     ' "$feature")
-    [ -n "$body" ] || fail "$filename is missing a non-empty '## Driving it with <harness>' section"
+    has_content "$body" || fail "$filename is missing a non-empty '## Driving it with <harness>' section"
   done
 fi
 
-# No unfilled placeholders or template markers may survive generation.
 if grep -rnE '<app>|<harness>|TODO|TBD|PLACEHOLDER' "$DIR" --include='*.md' --include='*.sh' >/dev/null 2>&1; then
   fail "placeholder or template marker left behind:"
   grep -rnE '<app>|<harness>|TODO|TBD|PLACEHOLDER' "$DIR" --include='*.md' --include='*.sh' | sed 's/^/  /' >&2

@@ -9,7 +9,6 @@ set -u
 CHECK="$ROOT/bin/fm-verification-skill-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-verification-skill-check)
 
-# Build a minimal generated verification skill with the required shape.
 make_good_skill() {
   local dir=$1
   mkdir -p "$dir/features"
@@ -110,6 +109,33 @@ test_rejects_missing_sections() {
   assert_contains "$out" "'## Evidence'" "missing-section failure names the section"
 }
 
+test_rejects_unclosed_frontmatter() {
+  local dir out
+  dir="$TMP_ROOT/unclosed-frontmatter/verify-timetracker"
+  make_good_skill "$dir"
+  sed -i '/^description: >-$/,/^---$/ { /^---$/d; }' "$dir/SKILL.md"
+  out=$(run_check "$dir") && fail "unclosed frontmatter must fail" || true
+  assert_contains "$out" "opening and closing YAML frontmatter delimiters" "failure names malformed frontmatter"
+}
+
+test_rejects_missing_description() {
+  local dir out
+  dir="$TMP_ROOT/missing-description/verify-timetracker"
+  make_good_skill "$dir"
+  sed -i '/^description: >-$/,+2d' "$dir/SKILL.md"
+  out=$(run_check "$dir") && fail "missing frontmatter description must fail" || true
+  assert_contains "$out" "no non-empty description" "failure names the missing description"
+}
+
+test_rejects_whitespace_only_section() {
+  local dir out
+  dir="$TMP_ROOT/whitespace-section/verify-timetracker"
+  make_good_skill "$dir"
+  sed -i '/^## Launch$/,/^## Doctor$/ { /^## Launch$/b; /^## Doctor$/b; s/.*/   /; }' "$dir/SKILL.md"
+  out=$(run_check "$dir") && fail "whitespace-only required section must fail" || true
+  assert_contains "$out" "'## Launch'" "failure names the whitespace-only section"
+}
+
 test_rejects_removed_kill_rule() {
   local dir out
   dir="$TMP_ROOT/no-kill-rule/verify-timetracker"
@@ -184,6 +210,9 @@ test_rejects_missing_skill_file() {
 
 test_accepts_well_shaped_skill
 test_rejects_missing_sections
+test_rejects_unclosed_frontmatter
+test_rejects_missing_description
+test_rejects_whitespace_only_section
 test_rejects_removed_kill_rule
 test_rejects_missing_feature_map
 test_rejects_unreferenced_feature
