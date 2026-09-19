@@ -32,18 +32,20 @@
 #
 # poll consumes fm-fleet-snapshot.sh --contribution-input, a local-only read,
 # and spends at most FM_CONTRIBUTIONS_BUDGET seconds on forge reads (default 20,
-# 1..25). Every read is capped at five seconds. A pull observation has three
-# dependent waves: core, six independent reads, then the closing head read;
-# an issue has two waves. Parallelizing each independent wave bounds either
-# observation to 3 * 5 = 15 seconds. poll reserves min(the configured budget,
-# 15) before starting a URL, so an in-progress normal-budget observation gets
-# all three waves and a later URL waits for the next oldest-checked-first poll.
-# A deliberately smaller configured budget remains bounded and may be
-# unmeasured, rather than being mislabeled unavailable. Each distinct URL is
-# observed once per poll and applied to every owner. A final observation applies
-# to every owner without another forge read. When the budget runs out
-# mid-observation, the poll ends with that URL's records untouched; only a
-# genuine forge failure or head change records an error.
+# 1..25). Every read is capped at five seconds, and a failed call is retried
+# up to three attempts with backoff while the deadline allows. A pull
+# observation has three dependent waves: core, six independent reads, then the
+# closing head read; an issue has two waves. Parallelizing each independent
+# wave bounds either observation to 3 * 5 = 15 seconds. poll reserves min(the
+# configured budget, 15) before starting a URL, so an in-progress
+# normal-budget observation gets all three waves and a later URL waits for the
+# next oldest-checked-first poll. A deliberately smaller configured budget
+# remains bounded and may be unmeasured, rather than being mislabeled
+# unavailable. Each distinct URL is observed once per poll and applied to
+# every owner. A final observation applies to every owner without another
+# forge read. When the budget runs out mid-observation, the poll ends with
+# that URL's records untouched; only a genuine forge failure or head change
+# records an error.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # A URL whose last good observation is merged or closed is final: it is
@@ -183,20 +185,33 @@ write_record() { # task record-json-file
 }
 
 forge() {
-  local remaining bounded=0 rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
-  remaining=$((DEADLINE - $(date +%s)))
-  # The budget, not the forge, refused this read.
-  [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; return 1; }
-  if [ "$remaining" -le 5 ]; then bounded=1; else remaining=5; fi
-  fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
-    gh "$@" 2> "$forge_err" || rc=$?
-  # A read killed at the budget's own deadline is budget exhaustion too.
-  if [ "$rc" -eq 124 ] && [ "$bounded" -eq 1 ]; then
-    BUDGET_EXHAUSTED=1
-    : > "$TMP/budget-exhausted"
-  elif [ "$rc" -ne 0 ]; then
-    : > "$TMP/forge-unavailable"
-  fi
+  local remaining bounded rc=0 attempt delay forge_err=${FORGE_ERR:-$TMP/forge.err}
+  # One transient failure does not fail the whole observation: each call gets
+  # three attempts with 1s then 2s backoff, bounded by the same deadline.
+  for attempt in 1 2 3; do
+    bounded=0
+    remaining=$((DEADLINE - $(date +%s)))
+    # The budget, not the forge, refused this read.
+    [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; return 1; }
+    if [ "$remaining" -le 5 ]; then bounded=1; else remaining=5; fi
+    rc=0
+    fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+      gh "$@" 2> "$forge_err" || rc=$?
+    # A read killed at the budget's own deadline is budget exhaustion too.
+    if [ "$rc" -eq 124 ] && [ "$bounded" -eq 1 ]; then
+      BUDGET_EXHAUSTED=1
+      : > "$TMP/budget-exhausted"
+    fi
+    [ "$rc" -eq 0 ] && return 0
+    [ "$attempt" -lt 3 ] || break
+    delay=$attempt
+    # A retry that cannot fit its backoff plus one bounded call fails fast
+    # rather than sleeping past the deadline.
+    [ "$((DEADLINE - $(date +%s)))" -gt "$delay" ] || break
+    sleep "$delay"
+  done
+  # A failure that was not budget exhaustion is a genuine forge outage.
+  [ "$BUDGET_EXHAUSTED" -eq 1 ] || : > "$TMP/forge-unavailable"
   return "$rc"
 }
 
