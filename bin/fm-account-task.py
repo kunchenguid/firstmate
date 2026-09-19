@@ -51,7 +51,8 @@ The ledger pins the ENTIRE installed binding. Once disabled/drifted it cannot be
 re-enabled over the wire, even if the old bytes return. Accepted operations and
 launches are fsynced BEFORE side effects. A crashed pending operation is unknown
 and not re-executed. A later lifecycle operation may commit a launching task only
-from its exact published binding; this neither replays submit nor claims liveness.
+from its exact published binding and generation-matched final launch receipt;
+this neither replays submit nor claims liveness.
 No journal entry is silently evicted: at 4096 operations or 128 tasks, new
 operations refuse,
 except that the idempotent disable latch remains available without journal growth.
@@ -509,10 +510,13 @@ class Route:
         require(meta.get("spawn_gen") and meta.get("worktree") and
                 meta.get("project") == str(self.home / "projects" / task["repository"]),
                 "task-binding-mismatch")
+        require(meta.get("account_task_commit") == meta["spawn_gen"],
+                "task-binding-mismatch")
         worktree = absolute(meta["worktree"])
         require(within(worktree, Path(self.b["workspace_root"])), "foreign-workspace")
         safe_path(worktree, self.uid, owned=True, directory=True)
-        binding = {"backend": "tmux", **{k: meta[k] for k in (*required, "spawn_gen", "worktree", "project")}}
+        binding = {"backend": "tmux", **{k: meta[k] for k in
+                   (*required, "spawn_gen", "account_task_commit", "worktree", "project")}}
         if task.get("binding"):
             require(binding == task["binding"], "task-binding-mismatch")
         return binding

@@ -101,7 +101,13 @@ elif name == 'fm-spawn.sh':
             'window': f['session'] + ':fm-' + task, 'worktree':str(worktree),
             'spawn_gen':'synthetic-generation-1', 'project':project}
     (home / 'state' / (task + '.meta')).write_text(''.join(k+'='+v+'\n' for k,v in meta.items()))
-    if (a / 'crash-after-meta').exists():
+    (a / 'worker-launch-delivered').write_text(task)
+    if (a / 'crash-before-commit').exists():
+        os.kill(os.getppid(), signal.SIGKILL)
+        sys.exit(0)
+    meta['account_task_commit'] = meta['spawn_gen']
+    (home / 'state' / (task + '.meta')).write_text(''.join(k+'='+v+'\n' for k,v in meta.items()))
+    if (a / 'crash-after-commit').exists():
         os.kill(os.getppid(), signal.SIGKILL)
         sys.exit(0)
 '''.replace('PYTHON', PYTHON)
@@ -400,8 +406,23 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(self.call(self.request())[1]['refused'], 'route-disabled')
         self.assertEqual(len(self.calls('fm-spawn.sh')), 1)
 
-    def test_crash_after_meta_preserves_work(self):
-        write(self.a / 'crash-after-meta', 'invented')
+    def test_crash_before_commit_refuses_adoption(self):
+        write(self.a / 'crash-before-commit', 'invented')
+        req = self.request()
+        self.assertLess(self.call(req)[0], 0)
+        self.assertEqual(self.call(req)[1]['outcome']['state'], 'unknown')
+        submit = hashlib.sha256(canon(req)).hexdigest()
+        outcome = self.call(self.follow('status', submit))[1]['outcome']
+        self.assertEqual(outcome, dict(state='unknown'))
+        self.assertEqual(self.task()['phase'], 'launching')
+        self.assertIsNone(self.task()['binding'])
+        self.assertEqual((self.a / 'worker-launch-delivered').read_text(), self.task()['local'])
+        self.assertEqual(self.calls('fm-send.sh'), [])
+        self.assertEqual(self.calls('fm-control.sh'), [])
+        self.assertEqual(len(self.calls('fm-spawn.sh')), 1)
+
+    def test_crash_after_commit_preserves_work(self):
+        write(self.a / 'crash-after-commit', 'invented')
         req = self.request()
         self.assertLess(self.call(req)[0], 0)
         self.assertEqual(self.call(req)[1]['outcome']['state'], 'unknown')
@@ -433,13 +454,15 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(len(self.calls('fm-spawn.sh')), 1)
 
     def test_crash_after_mismatched_meta_refuses_adoption(self):
-        write(self.a / 'crash-after-meta', 'invented')
+        write(self.a / 'crash-after-commit', 'invented')
         req = self.request()
         self.assertLess(self.call(req)[0], 0)
         submit = hashlib.sha256(canon(req)).hexdigest()
         local = self.task()['local']
         meta = self.home / 'state' / (local + '.meta')
-        write(meta, meta.read_text().replace('synthetic-generation-1', ''))
+        write(meta, meta.read_text().replace(
+              'account_task_commit=synthetic-generation-1',
+              'account_task_commit=synthetic-generation-other'))
 
         outcome = self.call(self.follow('status', submit))[1]['outcome']
         self.assertEqual(outcome, dict(state='unknown'))

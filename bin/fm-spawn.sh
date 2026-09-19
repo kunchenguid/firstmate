@@ -282,8 +282,9 @@
 #   bin/fm-account-task.py. When present for a fresh ship/scout spawn, the
 #   isolated worktree resolved after `treehouse get` must be strictly beneath
 #   that already-qualified absolute root. A mismatch refuses before metadata or
-#   the harness launch and never falls back to another root. Ordinary spawns do
-#   not set it and remain unchanged.
+#   the harness launch and never falls back to another root. A successful fresh
+#   launch records `account_task_commit=<spawn_gen>` only after the final delivery
+#   commit. Ordinary spawns do not set it and remain unchanged.
 # Claude permission mode (config/claude-permission-mode):
 #   One token selecting the permission flag every claude launch (ship, scout,
 #   secondmate, and relaunch) carries. Absent or `bypass` keeps today's
@@ -4458,7 +4459,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen account_task_commit traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4720,6 +4721,21 @@ spawn_record_traceparent() {
   return "$status"
 }
 
+spawn_record_account_task_commit() {
+  [ -n "${FM_ACCOUNT_TASK_WORKSPACE_ROOT:-}" ] && [ "$RELAUNCH" -eq 0 ] || return 0
+  local meta="$STATE/$ID.meta" status=0
+  SPAWN_META_TMP="$STATE/.$ID.meta.account-task-commit.${BASHPID:-$$}"
+  if [ ! -f "$meta" ] || [ ! -w "$meta" ] ||
+    ! awk -F= '$1 != "account_task_commit"' "$meta" >"$SPAWN_META_TMP" ||
+    ! printf 'account_task_commit=%s\n' "$SPAWN_GEN" >>"$SPAWN_META_TMP" ||
+    ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; then
+    status=1
+    rm -f "$SPAWN_META_TMP" 2>/dev/null || true
+  fi
+  SPAWN_META_TMP=
+  return "$status"
+}
+
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
@@ -4957,6 +4973,10 @@ fi
 trap - HUP INT TERM
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   exit "$SPAWN_BACKLOG_COMMIT_STATUS"
+fi
+if ! spawn_record_account_task_commit; then
+  echo "error: committed account-task launch $ID could not publish its generation receipt" >&2
+  exit 1
 fi
 if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   case "$SPAWN_DEFERRED_SIGNAL" in

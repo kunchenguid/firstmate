@@ -266,11 +266,29 @@ test_restricted_account_workspace_root_must_be_ancestor() {
   pass "restricted account-task spawn requires a strict workspace-root descendant"
 }
 
+test_restricted_account_launch_publishes_commit_receipt() {
+  local rec id out status spawn_gen commit
+  id=settle-account-commit-z7
+  rec=$(make_settle_case settle-account-commit "$id" 0)
+  read_settle_record "$rec"
+
+  out=$(FM_ACCOUNT_TASK_WORKSPACE_ROOT="$TMP_ROOT/settle-account-commit" \
+    run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "restricted spawn should commit a qualified worktree launch"$'\n'"$out"
+  spawn_gen=$(sed -n 's/^spawn_gen=//p' "$HOME_DIR/state/$id.meta")
+  commit=$(sed -n 's/^account_task_commit=//p' "$HOME_DIR/state/$id.meta")
+  [ -n "$spawn_gen" ] || fail "restricted spawn omitted its generation"
+  [ "$commit" = "$spawn_gen" ] || fail "restricted spawn did not bind its final commit receipt to the generation"
+  pass "restricted account-task spawn publishes a generation-bound final commit receipt"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 test_restricted_account_workspace_root_is_enforced
 test_restricted_account_workspace_root_must_be_ancestor
+test_restricted_account_launch_publishes_commit_receipt
 
 echo "# all fm-spawn-worktree-settle tests passed"
