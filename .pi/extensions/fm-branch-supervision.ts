@@ -1184,7 +1184,7 @@ export default function (pi: ExtensionAPI) {
         }),
         summary: Type.String({
           description:
-            "One or two sentences in captain outcome language; include the full https:// PR URL when a PR is involved",
+            "One or two sentences in Simplified Chinese using captain outcome language, exactly as the \"Verdict: routine or captain\" section of your system prompt requires; that section is the one owner of the summary language rule. Include the full https:// PR URL when a PR is involved",
         }),
         wake: Type.Optional(Type.String({ description: "The wake reason line this outcome answers" })),
         silent: Type.Optional(Type.Boolean({
