@@ -151,6 +151,16 @@ run_traced() {
   printf -v "$__err" '%s' "$(cat "$TMP_ROOT/stderr")"
 }
 
+run_allexport() {
+  local __exit=$1 __out=$2 __err=$3 _out _code
+  shift 3
+  _out=$(PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" bash -a "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
+  _code=$?
+  printf -v "$__exit" '%s' "$_code"
+  printf -v "$__out" '%s' "$_out"
+  printf -v "$__err" '%s' "$(cat "$TMP_ROOT/stderr")"
+}
+
 run_without_curl() {
   local __exit=$1 __out=$2 __err=$3 _out _code
   shift 3
@@ -182,12 +192,20 @@ assert_contains "$out" '  status: escalate' ".env key yields a non-clear match"
 assert_contains "$(cat "$LOG/header")" "Authorization: Bearer $KEY" ".env key reaches curl on fd 3"
 assert_not_contains "$err" "$KEY" ".env key stays out of shell trace output"
 reset_log
+run_allexport code out err "$BRIEF" --project pager
+expect_code 0 "$code" ".env key works with allexport enabled"
+assert_equals 'clean' "$(cat "$LOG/child-env")" ".env key stays out of child environments with allexport enabled"
+reset_log
 TRACE_ENV_KEY='env-wins-trace-secret'
 TYPESAFE_API_KEY=$TRACE_ENV_KEY run_traced code out err "$BRIEF"
 assert_equals "Authorization: Bearer $TRACE_ENV_KEY" "$(cat "$LOG/header")" "process environment wins"
 assert_not_contains "$err" "$TRACE_ENV_KEY" "environment key stays out of shell trace output"
+reset_log
+TYPESAFE_API_KEY=$TRACE_ENV_KEY run_allexport code out err "$BRIEF"
+expect_code 0 "$code" "environment key works with allexport enabled"
+assert_equals 'clean' "$(cat "$LOG/child-env")" "environment key stays out of child environments with allexport enabled"
 rm -f "$HOME_DIR/.env"
-pass "environment activation works without exposing keys to shell tracing"
+pass "environment activation works without exposing keys through shell debug modes"
 
 CURL_HOME_DIR="$TMP_ROOT/curl-home"
 CURL_TRACE="$TMP_ROOT/curl-trace.log"
@@ -278,7 +296,7 @@ TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=429 run code out err "$BRIEF"
 assert_contains "$out" '  reason: http 429 after' "HTTP failure is safe"
 TYPESAFE_API_KEY=$KEY FAKE_CURL_FAIL=1 run code out err "$BRIEF"
 assert_contains "$out" '  reason: http 000 after' "transport failure is safe"
-for mutation in '.answers = {}' '.usage = "bad"' 'del(.answers.rule.probabilities.default)' '.answers.rule.confidence = 2'; do
+for mutation in '.answers = {}' '.answers.rule.type = "text"' '.usage = "bad"' 'del(.answers.rule.probabilities.default)' '.answers.rule.confidence = 2'; do
   write_response "$RESPONSE" rule_4 0.9
   jq "$mutation" "$RESPONSE" > "$TMP_ROOT/bad-response.json"
   mv "$TMP_ROOT/bad-response.json" "$RESPONSE"

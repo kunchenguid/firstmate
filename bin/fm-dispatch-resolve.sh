@@ -47,6 +47,7 @@
 #   the captain-approval gate, or fm-spawn.sh validation; it publishes one
 #   inspectable rule-match answer.
 set +x
+set +a
 set -u
 
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
@@ -211,6 +212,7 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
 jq -e --slurpfile rules "$RULES" '
     (($rules[0].rules | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"] | sort) as $choices |
+    .answers.rule.type == "choice" and
     (.answers.rule.choice | type) == "string" and
     (.answers.rule.confidence | type) == "number" and
     .answers.rule.confidence >= 0 and .answers.rule.confidence <= 1 and
