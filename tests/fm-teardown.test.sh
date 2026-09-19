@@ -246,6 +246,18 @@ land_on_origin_main() {
   rm -rf "$tmp"
 }
 
+land_on_origin_branch() {
+  local case_dir=$1 branch=$2 file=$3 content=$4 tmp
+  tmp="$case_dir/_land_$branch"
+  git clone -q "$case_dir/origin.git" "$tmp"
+  git -C "$tmp" checkout -q -B "$branch"
+  printf '%s\n' "$content" > "$tmp/$file"
+  git -C "$tmp" add -- "$file"
+  git -C "$tmp" -c user.email=t@t -c user.name=t commit -q -m "squash $file on $branch"
+  git -C "$tmp" push -q origin "HEAD:$branch"
+  rm -rf "$tmp"
+}
+
 # Override GitHub lookups to report PR 7 as merged with the supplied head.
 add_gh_pr_merged_for_head() {
   local case_dir=$1 head=$2
@@ -783,6 +795,48 @@ test_local_only_merged_to_local_main_allows() {
   pass "local-only worktree with work merged into local main is torn down (no regression)"
 }
 
+test_local_only_merged_to_recorded_base_allows() {
+  local case_dir rc wt_head
+  case_dir=$(make_case merged-recorded-base)
+  write_meta "$case_dir" local-only ship
+  git -C "$case_dir/project" branch develop main
+  wt_commit "$case_dir" "merged on recorded base"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" update-ref refs/heads/develop "$wt_head"
+  printf '%s\n' 'base_branch=develop' >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "recorded-base: teardown should accept work landed on develop"
+  ! grep -q REFUSED "$case_dir/stderr" \
+    || fail "recorded-base: teardown rejected work landed on the recorded base"
+  pass "local-only teardown accepts work landed on the recorded base"
+}
+
+test_local_only_tag_named_like_base_preserves_unlanded_work() {
+  local case_dir rc wt_head
+  case_dir=$(make_case tag-dwim-base)
+  write_meta "$case_dir" local-only ship
+  git -C "$case_dir/project" branch develop main
+  wt_commit "$case_dir" "unlanded on recorded base"
+  wt_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/project" tag develop "$wt_head"
+  printf '%s\n' 'base_branch=develop' >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "tag-dwim-base: teardown should refuse unlanded work when a tag shadows the base"
+  grep -q REFUSED "$case_dir/stderr" || fail "tag-dwim-base: no REFUSED line in stderr"
+  [ -d "$case_dir/wt" ] || fail "tag-dwim-base: teardown deleted the worktree carrying unlanded work"
+  pass "local-only teardown preserves work when a tag shares the recorded base name"
+}
+
 test_no_mistakes_origin_remote_allows() {
   local case_dir rc
   case_dir=$(make_case nm-origin)
@@ -1121,6 +1175,24 @@ SH
   assert_absent "$case_dir/state/task-x1.meta" \
     "content-landed: teardown left task metadata after destructive cleanup"
   pass "worktree whose content already landed in the default branch is torn down (content fallback)"
+}
+
+test_content_in_recorded_base_fallback_allows() {
+  local case_dir rc
+  case_dir=$(make_case content-landed-recorded)
+  write_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'base_branch=develop' >> "$case_dir/state/task-x1.meta"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_branch "$case_dir" develop feature.txt hello
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "content-landed-recorded: teardown should succeed when content landed on the recorded base"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "content-landed-recorded: teardown printed a REFUSED line"
+  pass "worktree whose content landed on the recorded named base is torn down"
 }
 
 test_content_fallback_refreshes_stale_origin_ref() {
@@ -3671,6 +3743,8 @@ test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
+test_local_only_merged_to_recorded_base_allows
+test_local_only_tag_named_like_base_preserves_unlanded_work
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
@@ -3700,6 +3774,7 @@ test_squash_merged_stale_local_refuses_when_forge_unreachable
 test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
+test_content_in_recorded_base_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses

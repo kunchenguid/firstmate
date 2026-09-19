@@ -7,7 +7,7 @@
 # data/<task-id>/brief.md for future relaunches, and prints the fm-send.sh command
 # that delivers it to the current worker. Those instructions carry the
 # scratch-state inventory, the clean
-# default-branch base, the fm/<task-id> branch, and - rendered from
+# recorded base (or default-branch when none is recorded), the fm/<task-id> branch, and - rendered from
 # bin/fm-dod-lib.sh, the single owner an ordinary ship brief also uses - the
 # mode-specific Definition of done, so a promoted worker receives exactly the same
 # delivery contract as a briefed one, including the no-mistakes mode's ask-user
@@ -20,7 +20,8 @@
 # brief contributes only Task lines explicitly marked as captain words to intent.
 # A scout records no delivery posture, so promotion is where this task's delivery
 # contract is decided: --mode and --yolo are REQUIRED and written into the meta
-# alongside the kind= flip. Firstmate resolves both at promotion time, having just
+# alongside the kind= flip. A recorded base_branch= must exist where that mode
+# lands: refs/heads/<base> for local-only, origin for no-mistakes and direct-PR. Firstmate resolves both at promotion time, having just
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks it up.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
@@ -173,6 +174,37 @@ fi
 # single owner (bin/fm-dod-lib.sh) rather than summarised into a hint line. A
 # promoted no-mistakes worker that never received the ask-user escalation rule or
 # the --yes ban is the delivery hole this file used to leave open.
+RECORDED_BASE=$(grep '^base_branch=' "$META" | tail -1 | cut -d= -f2- || true)
+PROMOTE_PROJ=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
+PROMOTE_WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
+[ -n "$PROMOTE_PROJ" ] || PROMOTE_PROJ=$PROMOTE_WT
+[ -n "$PROMOTE_WT" ] || PROMOTE_WT=$PROMOTE_PROJ
+PROMOTE_TARGET=$PROMOTE_PROJ
+[ "$MODE" = local-only ] || PROMOTE_TARGET=$PROMOTE_WT
+if [ -n "$RECORDED_BASE" ]; then
+  if [ -z "$PROMOTE_TARGET" ] || ! git -C "$PROMOTE_TARGET" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "error: promotion cannot verify recorded base '$RECORDED_BASE' because the task has no usable project or worktree git directory" >&2
+    exit 1
+  fi
+  if [ "$MODE" = local-only ]; then
+    if ! git -C "$PROMOTE_TARGET" show-ref --verify --quiet "refs/heads/$RECORDED_BASE"; then
+      echo "error: local-only promotion requires recorded base '$RECORDED_BASE' as a local branch (refs/heads/$RECORDED_BASE); a base that exists only on origin cannot be landed locally" >&2
+      exit 1
+    fi
+  elif ! git -C "$PROMOTE_TARGET" ls-remote --exit-code --heads origin "refs/heads/$RECORDED_BASE" >/dev/null 2>&1; then
+    echo "error: $MODE promotion requires recorded base '$RECORDED_BASE' on origin; a local-only base cannot be a pull-request target" >&2
+    exit 1
+  elif ! git -C "$PROMOTE_TARGET" fetch --quiet origin \
+    "+refs/heads/$RECORDED_BASE:refs/remotes/origin/$RECORDED_BASE"; then
+    echo "error: $MODE promotion could not refresh recorded base '$RECORDED_BASE' from origin; refusing to continue with a stale base" >&2
+    exit 1
+  fi
+  RETURN_BASE=$RECORDED_BASE
+  [ "$MODE" = local-only ] || RETURN_BASE="origin/$RECORDED_BASE"
+  RETURN_STEP="3. Return to a clean \`$RETURN_BASE\` base, then create your branch: \`git checkout -b fm/$ID\`."
+else
+  RETURN_STEP="3. Return to a clean default-branch base, then create your branch: \`git checkout -b fm/$ID\`."
+fi
 INSTRUCTIONS="$DATA/$ID/ship-instructions.md"
 PROMOTION_ASK_USER_BLOCK=
 if [ "$MODE" = no-mistakes ]; then
@@ -182,7 +214,7 @@ IFS= read -r -d '' PROMOTION_SHIP_SPEC <<EOF || true
 If these promotion steps were already completed before a relaunch, preserve the existing \`fm/$ID\` branch and continue from its current state; do not repeat them destructively.
 1. **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from. If either does not resolve to the worktree you were launched in, stop and escalate to firstmate.
 2. Inventory this worktree's scratch state with \`git status\` and \`git log\` before changing anything.
-3. Return to a clean default-branch base, then create your branch: \`git checkout -b fm/$ID\`.
+$RETURN_STEP
 4. Carry over only the intended fix changes. Leave scratch commits, debug edits, and experiment files behind.
 5. If you reproduced a bug, turn that reproduction into a regression test.
 6. Treat the scout-time Firstmate spec and any unmarked legacy \`# Task\` text as investigation context, not captain intent or current ship-time instructions.
@@ -199,13 +231,13 @@ The mode-specific Definition of done below is the current delivery contract.
 
 # Current ship safety rule
 EOF
-  fm_ship_rule_one "$MODE" "$ID"
+  fm_ship_rule_one "$MODE" "$ID" "fm/$ID" "${RECORDED_BASE:-}"
   if [ -n "$PROMOTION_ASK_USER_BLOCK" ]; then
     printf '\nThe no-mistakes ask-user escalation below supersedes the scout rule 6 escalation shape.\n'
     printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
   fi
   printf '\n'
-  fm_dod_block "$MODE" "$ID"
+  fm_dod_block "$MODE" "$ID" "fm/$ID" "${RECORDED_BASE:-}"
 }
 mkdir -p "$DATA/$ID"
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }
