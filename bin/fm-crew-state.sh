@@ -118,6 +118,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-worker-state-lib.sh
+. "$SCRIPT_DIR/fm-worker-state-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -246,6 +248,82 @@ fi
 TASK_BACKEND=$(fm_backend_of_meta "$META")
 BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
 EXPECTED_LABEL="fm-$ID"
+
+
+# A proven intentional stand-down outranks a HISTORICAL terminal validation
+# result: that run describes the last worker incarnation, while this record
+# describes the task's current deliberate absence of a worker. It never
+# outranks an ACTIVE run, which still owns the branch and still has a gate or a
+# step to report - that reporting is the authoritative current state, and
+# dropping it would hide actionable work. So the record is resolved here but
+# reported only at the two points below where nothing more current exists.
+WORKER_LIFECYCLE=$(fm_worker_state_status "$STATE" "$ID" "$BACKEND_TARGET")
+
+# Report the worker-state verdict, or return 1 to let the caller carry on.
+# Recheck the endpoint first so a stale record can never hide a live worker
+# that must remain eligible for wedge detection.
+#
+# Mode `proven-only` reports just the one verdict this record can prove - the
+# task really is worker-free - and stays silent otherwise, so a record that
+# does NOT describe reality never masks a source that does. Mode `full` also
+# surfaces the discrepancies, and is used only where the alternative is a
+# guess from a pane read or a stale status log.
+emit_worker_state_if_current() {  # <proven-only|full>
+  local mode=$1
+  case "$WORKER_LIFECYCLE" in
+    stood-down)
+      case "$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET" 2>/dev/null || true)" in
+        dead)
+          # A hold is only healthy while there is no work in flight. A worker-
+          # state record describes the absence of a worker, never the absence
+          # of work, so a live run on the preserved branch is reported with its
+          # details withheld rather than as a healthy park. The other arms below
+          # are not healthy holds and keep reporting on their own evidence.
+          if [ "$mode" = full ] && branch_run_verdict_is_active; then
+            emit working run-step "active run (details withheld)${FM_NM_BRANCH_RUN_ID:+${SEP}run: $FM_NM_BRANCH_RUN_ID}"
+          fi
+          emit parked worker-state "worker deliberately stood down"
+          ;;
+        # A VANISHED endpoint is not the hold the operator declared. `dead` is
+        # the declared state: the endpoint is still there, still holds the
+        # worktree and the uncommitted work, and a relaunch restores the worker
+        # in place. `missing` means that endpoint is gone, so the hold can no
+        # longer be resumed where it was declared and something must be done
+        # about it - reporting it as a healthy park would hide exactly that.
+        # Only a human declaration ever makes an absent worker healthy here;
+        # this branch is why no absence is ever inferred to be one.
+        missing)
+          [ "$mode" = full ] || return 1
+          emit unknown worker-state "stood down but its endpoint is gone: $BACKEND_TARGET (relaunch cannot restore it in place)"
+          ;;
+        alive)
+          [ "$mode" = full ] || return 1
+          emit unknown worker-state "record says stood down but endpoint has a live worker"
+          ;;
+        *)
+          [ "$mode" = full ] || return 1
+          emit unknown worker-state "stood-down record cannot prove the endpoint remains worker-free"
+          ;;
+      esac
+      ;;
+    invalid)
+      [ "$mode" = full ] || return 1
+      emit unknown worker-state "invalid worker-state record; reconcile it with 'fm-control $ID repair-worker-state'"
+      ;;
+  esac
+  return 1
+}
+
+# 0 when this branch provably owns a live no-mistakes run. Consulted only where
+# a proven hold would otherwise answer, so ordinary run attribution below
+# remains the single owner of run reporting.
+branch_run_verdict_is_active() {
+  FM_NM_BRANCH_RUN_ID=
+  [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] || return 1
+  fm_nm_branch_run_verdict "$WT" "$CREW_BRANCH" "$NM_TIMEOUT"
+  [ "$FM_NM_BRANCH_RUN_VERDICT" = active ]
+}
+
 pane_readable() {  # <target>
   case "$TASK_BACKEND" in
     tmux) tmux display-message -p -t "$1" '#{pane_id}' >/dev/null 2>&1 ;;
@@ -946,6 +1024,14 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
+  # A terminal run is history; an intentional stand-down published after it is
+  # the newer statement about this task, so it outranks the terminal outcome
+  # only. Anything the run still reports as live (working, parked at a gate)
+  # stays authoritative.
+  case "$RUN_STATE" in
+    done|failed) emit_worker_state_if_current proven-only || true ;;
+  esac
+
   [ -z "$SELECTED_RUN_ID" ] || RUN_DETAIL="$RUN_DETAIL${SEP}run: $SELECTED_RUN_ID"
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
@@ -958,6 +1044,11 @@ fi
 # both classifier-backed backends (tmux and herdr) - and every death-class
 # verdict reports unknown rather than trusting a possibly-stale status log as
 # the current state.
+# With no run to consult, a worker-state record is the most current statement
+# there is about this task - including the discrepancies, whose only remaining
+# alternative is a guess from the pane or a stale status log.
+emit_worker_state_if_current full || true
+
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
 if ! pane_readable "$BACKEND_TARGET"; then
   # A failed probe is not itself evidence the pane is gone: the herdr CLI can

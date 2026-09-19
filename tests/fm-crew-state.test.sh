@@ -171,13 +171,22 @@ set -u
 [ "${FM_FAKE_TMUX_UNREADABLE:-0}" = 1 ] && { printf 'no current client\n' >&2; exit 1; }
 case "${1:-}" in
   list-windows)
-    # A successful but empty inventory: it omits the crew's window, so absence
-    # is proved by the answer rather than by an addressed call failing. Only
-    # reached once display-message has already failed.
-    ;;
+    # The recovery-grade classifier reads the session inventory first. An
+    # inventory that omits the recorded window is `missing`, the default here,
+    # so absence is proved by the answer rather than by an addressed call
+    # failing. A test that needs the OTHER absent-agent verdict - the endpoint
+    # is still there and merely has no agent, `dead` - names its window in
+    # FM_FAKE_TMUX_WINDOWS.
+    printf '%s\n' "${FM_FAKE_TMUX_WINDOWS:-}" ;;
   display-message)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
-    printf '%%1\n' ;;
+    fmt=""
+    for a in "$@"; do case "$a" in '#{'*) fmt=$a ;; esac; done
+    case "$fmt" in
+      '#{pane_current_command}') printf '%s\n' "${FM_FAKE_TMUX_CURRENT_COMMAND:-zsh}" ;;
+      '#{pane_tty}') printf '%s\n' "${FM_FAKE_TMUX_TTY:-}" ;;
+      *) printf '%%1\n' ;;
+    esac ;;
   capture-pane)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\n%s\n' "${FM_FAKE_BUSY_TEXT:-esc to interrupt}"
@@ -289,6 +298,9 @@ reset_fakes() {
   FM_FAKE_BUSY_TEXT=
   FM_FAKE_TMUX_MISSING=0
   FM_FAKE_TMUX_UNREADABLE=0
+  FM_FAKE_TMUX_WINDOWS=""
+  FM_FAKE_TMUX_CURRENT_COMMAND=""
+  FM_FAKE_TMUX_TTY=""
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_READ_FAIL=0
@@ -308,6 +320,7 @@ reset_fakes() {
   FM_FAKE_GLAB_READ_LOG=
   unset FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
+  export FM_FAKE_TMUX_WINDOWS FM_FAKE_TMUX_CURRENT_COMMAND FM_FAKE_TMUX_TTY
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
   export FM_FAKE_DAEMON_DOWN FM_FAKE_AXI_HOME
   export FM_FAKE_AXI_HOME_ERROR FM_FAKE_AXI_STATUS_RUN_ERROR FM_FAKE_AXI_STATUS_ERROR
@@ -1264,6 +1277,214 @@ test_terminal_passed_with_failed_gitlab_read_reports_unknown() {
   assert_contains "$out" "run passed: PR state unknown (unreadable)" "failed GitLab read is honest unknown"
   assert_not_contains "$out" "PR merged" "failed GitLab read must not be reported merged"
   pass "terminal passed run handles failed GitLab read"
+}
+
+# A proven intentional stand-down outranks a HISTORICAL terminal validation
+# result: that run describes the last worker incarnation, the record describes
+# the task's current deliberate absence of a worker.
+test_stood_down_worker_outranks_a_historical_failed_run() {
+  reset_fakes
+  local d out
+  d=$(new_case stood-down-failed-run)
+  make_repo_on_branch "$d/wt" fm/feat-stood-down
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-stood-down.meta" "window=fm:fm-feat-stood-down" "worktree=$d/wt" "kind=ship"
+  cat > "$d/state/feat-stood-down.worker-state" <<'EOF'
+schema=1
+task_id=feat-stood-down
+endpoint=fm:fm-feat-stood-down
+state=stood-down
+EOF
+  printf 'paused: waiting for an upstream maintainer\n' > "$d/state/feat-stood-down.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-stood-down)"
+  # The declared hold: the endpoint is still there and merely has no agent, so
+  # the preserved worktree and work can be relaunched in place.
+  FM_FAKE_TMUX_WINDOWS="fm-feat-stood-down"
+  out=$(run_crew_state "$d" feat-stood-down)
+  assert_contains "$out" "state: parked" \
+    "a deliberately worker-free task must not render as its prior failed run"
+  assert_contains "$out" "source: worker-state" \
+    "the current intentional worker state must name its own authoritative source"
+  assert_contains "$out" "worker deliberately stood down" \
+    "the output must distinguish a healthy hold from a failed worker"
+  assert_not_contains "$out" "state: failed" \
+    "a historical failed run must not mask the current deliberate stand-down"
+  pass "a stood-down worker state outranks historical failed validation state"
+}
+
+# The endpoint half of the same rule. A stood-down record is a healthy park
+# only while the endpoint it names is still there: a VANISHED endpoint cannot
+# be relaunched in place, so it must be reported as an unknown that names the
+# lost endpoint. This is the counterfactual for treating absence as healthy -
+# if `missing` ever reads as a park again, this test sees "parked" instead.
+test_a_vanished_endpoint_is_never_a_healthy_stood_down_hold() {
+  reset_fakes
+  local d out
+  d=$(new_case stood-down-endpoint-gone)
+  make_repo_on_branch "$d/wt" fm/feat-gone
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-gone.meta" "window=fm:fm-feat-gone" "worktree=$d/wt" "kind=ship"
+  cat > "$d/state/feat-gone.worker-state" <<'EOF'
+schema=1
+task_id=feat-gone
+endpoint=fm:fm-feat-gone
+state=stood-down
+EOF
+  printf 'paused: waiting for an upstream maintainer\n' > "$d/state/feat-gone.status"
+  FM_FAKE_TMUX_MISSING=1
+  out=$(run_crew_state "$d" feat-gone)
+  assert_contains "$out" "state: unknown" \
+    "a hold whose endpoint has vanished cannot be reported as healthy"
+  assert_contains "$out" "fm:fm-feat-gone" \
+    "the report must name the endpoint that can no longer be relaunched"
+  assert_not_contains "$out" "state: parked" \
+    "a vanished endpoint must not be reported as a deliberate park"
+  pass "a stood-down record whose endpoint vanished is reported as unknown, not as a healthy hold"
+}
+
+# The base case the rule above protects: with no deliberate declaration at all,
+# an absent worker is still a problem the reader must see.
+test_an_absent_worker_without_a_declaration_is_still_reported() {
+  reset_fakes
+  local d out
+  d=$(new_case absent-undeclared)
+  make_repo_on_branch "$d/wt" fm/feat-absent
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-absent.meta" "window=fm:fm-feat-absent" "worktree=$d/wt" "kind=ship"
+  printf 'working: mid-task\n' > "$d/state/feat-absent.status"
+  FM_FAKE_TMUX_MISSING=1
+  out=$(run_crew_state "$d" feat-absent)
+  assert_contains "$out" "state: unknown" \
+    "an undeclared absent worker must be reported as unknown"
+  assert_contains "$out" "backend target gone: fm:fm-feat-absent" \
+    "the report must name the endpoint that is gone"
+  assert_not_contains "$out" "worker deliberately stood down" \
+    "an absent worker must never be described as a deliberate hold"
+  pass "an absent worker with no declaration is still reported as a problem"
+}
+
+# The counterfactual for the rule above: the record outranks HISTORY, never an
+# ACTIVE run. A run parked at a gate still owns the branch and still has work
+# only a supervisor can action, so it must survive the record untouched.
+test_active_run_outranks_a_stood_down_record() {
+  reset_fakes
+  local d out
+  d=$(new_case stood-down-active-run)
+  make_repo_on_branch "$d/wt" fm/feat-still-parked
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-still-parked.meta" "window=fm:fm-feat-still-parked" "worktree=$d/wt" "kind=ship"
+  cat > "$d/state/feat-still-parked.worker-state" <<'EOF'
+schema=1
+task_id=feat-still-parked
+endpoint=fm:fm-feat-still-parked
+state=stood-down
+EOF
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-still-parked)"
+  FM_FAKE_TMUX_MISSING=1
+  out=$(run_crew_state "$d" feat-still-parked)
+  assert_contains "$out" "source: run-step" \
+    "an active run must keep reporting authority over a worker-state record"
+  assert_contains "$out" "2 finding(s)" \
+    "the active run's own gate detail must survive the record"
+  assert_not_contains "$out" "worker deliberately stood down" \
+    "a stand-down record must not replace an active run's own current state"
+  pass "an active run outranks a worker-state record"
+}
+
+# A live run whose head this copy cannot resolve is still a live run on the
+# task's preserved branch. The record describes the absence of a worker, never
+# the absence of work, so the run must be reported with its details withheld
+# instead of the task rendering as a healthy hold.
+test_live_branch_run_outranks_a_stood_down_record_without_detail() {
+  reset_fakes
+  local d out
+  d=$(new_case stood-down-unplaceable-live-run)
+  make_repo_on_branch "$d/wt" fm/feat-unplaceable
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-unplaceable.meta" \
+    "window=fm:fm-feat-unplaceable" "worktree=$d/wt" "kind=ship"
+  cat > "$d/state/feat-unplaceable.worker-state" <<'EOF'
+schema=1
+task_id=feat-unplaceable
+endpoint=fm:fm-feat-unplaceable
+state=stood-down
+EOF
+  printf 'paused: waiting for an upstream maintainer\n' > "$d/state/feat-unplaceable.status"
+  # The declared hold: the endpoint is still there with no agent in it.
+  FM_FAKE_TMUX_WINDOWS="fm-feat-unplaceable"
+  # The overview names another branch's run, and this branch's own live row
+  # carries a head object this copy never fetched, so ordinary attribution can
+  # place no run detail at all.
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="  running    fm/feat-unplaceable f0f0f0f0  2026-08-29 13:00"
+  out=$(run_crew_state "$d" feat-unplaceable)
+  assert_contains "$out" "state: working" \
+    "a live run on the preserved branch must keep its own authority"
+  assert_contains "$out" "source: run-step" \
+    "the live run, not the record, is the current statement about the task"
+  assert_contains "$out" "active run (details withheld)" \
+    "an unplaceable live run must be reported without projecting details"
+  assert_not_contains "$out" "state: parked" \
+    "a live run must never render as a healthy hold"
+  assert_not_contains "$out" "worker deliberately stood down" \
+    "the stand-down record must not answer while a run is in flight"
+  pass "a live branch run outranks a stood-down record even without projectable detail"
+}
+
+# The counterfactual for the arm above: a live run outranks a healthy HOLD, and
+# nothing else. A vanished endpoint is not a hold - it is the one report that
+# tells the operator the declared hold can no longer be resumed in place - so it
+# keeps its own authority even while the branch owns a run.
+test_a_live_run_does_not_hide_a_vanished_stood_down_endpoint() {
+  reset_fakes
+  local d out
+  d=$(new_case stood-down-gone-with-live-run)
+  make_repo_on_branch "$d/wt" fm/feat-gone-live
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-gone-live.meta" \
+    "window=fm:fm-feat-gone-live" "worktree=$d/wt" "kind=ship"
+  cat > "$d/state/feat-gone-live.worker-state" <<'EOF'
+schema=1
+task_id=feat-gone-live
+endpoint=fm:fm-feat-gone-live
+state=stood-down
+EOF
+  printf 'paused: waiting for an upstream maintainer\n' > "$d/state/feat-gone-live.status"
+  FM_FAKE_TMUX_MISSING=1
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="  running    fm/feat-gone-live f0f0f0f0  2026-08-29 13:00"
+  out=$(run_crew_state "$d" feat-gone-live)
+  assert_contains "$out" "state: unknown" \
+    "a hold whose endpoint has vanished cannot be reported as healthy or as work"
+  assert_contains "$out" "fm:fm-feat-gone-live" \
+    "the report must still name the endpoint that can no longer be relaunched"
+  assert_not_contains "$out" "state: working" \
+    "a live run must not hide the lost endpoint"
+  pass "a live run does not suppress the vanished-endpoint report"
+}
+
+# An unprovable record is a repair prompt, not a mask: it must never hide a
+# real run outcome the reader can still act on.
+test_invalid_worker_state_record_does_not_mask_a_failed_run() {
+  reset_fakes
+  local d out
+  d=$(new_case invalid-worker-state)
+  make_repo_on_branch "$d/wt" fm/feat-invalid-record
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-invalid-record.meta" "window=fm:fm-feat-invalid-record" "worktree=$d/wt" "kind=ship"
+  cat > "$d/state/feat-invalid-record.worker-state" <<'EOF'
+schema=1
+task_id=feat-invalid-record
+endpoint=fm:fm-some-other-endpoint
+state=stood-down
+EOF
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-invalid-record)"
+  FM_FAKE_TMUX_MISSING=1
+  out=$(run_crew_state "$d" feat-invalid-record)
+  assert_contains "$out" "state: failed" \
+    "a record that proves nothing must not mask a genuine failed run"
+  assert_contains "$out" "source: run-step" "the run remains the authoritative source"
+  pass "an unprovable worker-state record never masks a real run outcome"
 }
 
 test_terminal_failed() {
@@ -3569,6 +3790,13 @@ test_terminal_passed_without_readable_pr_identity_reports_unknown
 test_terminal_passed_with_open_gitlab_mr_does_not_claim_merged
 test_terminal_passed_with_merged_gitlab_mr_reports_merged
 test_terminal_passed_with_failed_gitlab_read_reports_unknown
+test_stood_down_worker_outranks_a_historical_failed_run
+test_a_vanished_endpoint_is_never_a_healthy_stood_down_hold
+test_an_absent_worker_without_a_declaration_is_still_reported
+test_active_run_outranks_a_stood_down_record
+test_live_branch_run_outranks_a_stood_down_record_without_detail
+test_a_live_run_does_not_hide_a_vanished_stood_down_endpoint
+test_invalid_worker_state_record_does_not_mask_a_failed_run
 test_terminal_failed
 test_terminal_failed_ci_orphan_after_green_reads_done
 test_terminal_failed_ci_orphan_status_only_reads_done
