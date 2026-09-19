@@ -265,6 +265,27 @@
 #   worktree, or record exists and names the accepted values. The file is read
 #   on every spawn and relaunch, so a change reaches the next launch without a
 #   restart, and it is inherited into secondmate homes (bin/fm-config-inherit-lib.sh).
+# Worker accounts (config/claude-account, config/pi-account):
+#   Claude, Pi, and Pi-signed launches require an explicit, resolvable account
+#   selection (bin/fm-worker-account-lib.sh). A missing file refuses before any
+#   endpoint exists and names the file to create; Firstmate never treats an
+#   ambient or vendor-default login as consent. `ordinary` is the explicit
+#   selection of that vendor default (for Claude, CLAUDE_CONFIG_DIR unset). Any
+#   other value is one absolute path to an existing account root. A Pi root can
+#   hold several provider identities, so config/pi-account also names the
+#   providers this home may spend; a launch whose --model names another
+#   provider, or names no provider, refuses. A canonical Pi launch also carries
+#   --provider <the model's provider>, so Pi cannot resolve --model under
+#   another provider; a raw Pi command must pass that --provider itself or it
+#   refuses. A final `environment` line selects the runner's environment
+#   credentials as well. Declarations are home-local and never inherited. A
+#   ship or scout reads the active home; a local secondmate is a supervisor and
+#   reads the launching home. Relaunch uses that same home. The selected root
+#   is exported onto the launch and, for Claude without `environment`,
+#   environment credentials ranked above its stored login are shed. The
+#   selection follows the resolved harness, so a raw launch whose executable is
+#   claude, pi, or pi-signed receives it too. No credential files are copied or
+#   transferred.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
@@ -512,6 +533,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-worker-account-lib.sh
+. "$SCRIPT_DIR/fm-worker-account-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -2105,6 +2128,35 @@ fi
 if [ "$HARNESS" = agy ]; then
   agy_model_validate "$AGY_BIN" "$MODEL" || exit 1
 fi
+# Account selection is resolved before any endpoint, worktree, or record exists.
+# An absent or unresolvable declaration refuses rather than spending an ambient
+# account. A secondmate is a supervisor, so it reads this launching home's files
+# (CONFIG), never an ambient CLAUDE_CONFIG_DIR and never the secondmate home's
+# own worker declarations.
+ACCOUNT_MODEL=$MODEL
+if [ "${RAW_LAUNCH:-0}" = 1 ]; then
+  ACCOUNT_MODEL=$(fm_worker_account_raw_flag "$LAUNCH" --model)
+fi
+WORKER_ACCOUNT=$(fm_worker_account_select "$HARNESS" "$CONFIG" "$FM_HOME" "$ACCOUNT_MODEL" "${PI_BIN:-$HARNESS}") || exit 1
+WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT%%$'\t'*}
+WORKER_ACCOUNT_ENV=${WORKER_ACCOUNT##*$'\t'}
+WORKER_ACCOUNT_PROVIDER=${WORKER_ACCOUNT#*$'\t'}
+WORKER_ACCOUNT_PROVIDER=${WORKER_ACCOUNT_PROVIDER%%$'\t'*}
+case "$HARNESS" in
+claude)
+  if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
+    export CLAUDE_CONFIG_DIR=$WORKER_ACCOUNT_ROOT
+  else
+    unset CLAUDE_CONFIG_DIR
+  fi
+  ;;
+pi | pi-signed)
+  if [ "${RAW_LAUNCH:-0}" = 1 ]; then
+    fm_worker_account_pi_raw_provider "$WORKER_ACCOUNT_PROVIDER" "$LAUNCH" || exit 1
+  fi
+  export PI_CODING_AGENT_DIR=$WORKER_ACCOUNT_ROOT
+  ;;
+esac
 
 secondmate_registry_value() {
   secondmate_registry_field "$DATA/secondmates.md" "$1" "$2"
@@ -4406,6 +4458,9 @@ sq_ompcfg=$(shell_quote "${OMP_WORKER_CFG:-$FM_ROOT/.omp/fm-worker-overlay.yml}"
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
+case "$HARNESS" in
+pi | pi-signed) MODELFLAG="--provider $(shell_quote "$WORKER_ACCOUNT_PROVIDER") $MODELFLAG" ;;
+esac
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
@@ -4439,15 +4494,24 @@ claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo 
   ;;
 esac
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
-# inherit firstmate's current environment, so a bare `claude` in the pane falls
-# back to the default ~/.claude store even when firstmate itself runs under a
-# different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
-# Forward firstmate's own resolved store onto the claude launch so the crewmate
-# uses the same credential/config firstmate is authenticated with. Only when set;
-# an unset value is the single-store default and needs no prefix.
-if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
-fi
+# inherit firstmate's current environment, so a bare `claude` or `pi` in the
+# pane would spend the destination shell's ambient account. Prefix the selected
+# root onto the launch instead; the ordinary Claude account is CLAUDE_CONFIG_DIR
+# unset. Unless the home declared `environment`, Claude also sheds environment
+# credentials its documented authentication precedence ranks above the root's
+# stored login.
+case "$HARNESS" in
+claude)
+  if [ -n "$WORKER_ACCOUNT_ROOT" ]; then
+    LAUNCH="$(fm_worker_account_claude_env "$WORKER_ACCOUNT_ENV") CLAUDE_CONFIG_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
+  else
+    LAUNCH="$(fm_worker_account_claude_env "$WORKER_ACCOUNT_ENV") -u CLAUDE_CONFIG_DIR $LAUNCH"
+  fi
+  ;;
+pi | pi-signed)
+  LAUNCH="PI_CODING_AGENT_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
+  ;;
+esac
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")

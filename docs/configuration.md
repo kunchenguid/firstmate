@@ -368,6 +368,62 @@ Any other value, or an unreadable file, refuses every spawn from that home, whic
 The file is a captain-wide safety preference, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract; a secondmate's own Claude crewmates then launch on the same posture.
 The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the verified shape of both launches and which once-per-machine dialog each one can meet.
 
+## Worker accounts (config/claude-account, config/pi-account)
+
+Claude, Pi, and Pi-signed managed launches require an explicit account selection in the launching home.
+A missing file refuses before any worker endpoint, worktree, or task record exists, and names the file to create.
+Firstmate never treats the supervising process's environment or the runtime's default login as consent to spend that account.
+`ordinary` is the explicit selection of the runtime's default account; any other value is one absolute path to an existing readable, searchable directory.
+
+| Runner | File | Variable the launch receives | `ordinary` means |
+| --- | --- | --- | --- |
+| `claude` | `config/claude-account` | `CLAUDE_CONFIG_DIR` | the variable unset |
+| `pi`, `pi-signed` | `config/pi-account` | `PI_CODING_AGENT_DIR` | `~/.pi/agent` |
+
+For Claude, `ordinary` unsets `CLAUDE_CONFIG_DIR` rather than setting it to `~/.claude`.
+Claude Code keys its macOS Keychain entry to any `CLAUDE_CONFIG_DIR` that is set ([authentication, "Credential management"](https://code.claude.com/docs/en/authentication#credential-management)), and reads `$CLAUDE_CONFIG_DIR/.claude.json` instead of `~/.claude.json`, the file holding the sign-in session and trust decisions ([the `.claude` directory](https://code.claude.com/docs/en/claude-directory)).
+So `CLAUDE_CONFIG_DIR=~/.claude` is a separate, usually empty account, not the default login.
+
+`config/claude-account` holds `ordinary` or one absolute path on line 1.
+`config/pi-account` holds that same root token on line 1 and, on line 2, the providers this home may spend, separated by spaces (for example `openai-codex codex-native`).
+Either file may end with one more line, `environment`, described below.
+Lines are separated by LF; the final newline is optional, and any other control character, including a CR, refuses.
+A Pi root can hold several provider identities at once, so selecting the root alone is insufficient.
+The launch `--model` must be `<provider>/<id>` for one of those providers; an unqualified model, or a provider the file does not name, refuses because the shared root's `defaultProvider` must never pick which identity a launch spends.
+The declared providers are the work/personal boundary: a home that has not named a provider cannot spend an extra identity merely because it is available in the shared root.
+The `--model` prefix alone does not bind Pi: when the named provider has no usable match, Pi falls back to an identical model id under another, authenticated provider, such as OpenRouter.
+So every managed Pi launch also passes `--provider <the model's provider>`, which confines Pi's model lookup to that provider.
+A raw Pi launch command is launched as written, so it must pass that same `--provider` itself; a raw command without it, or naming another provider, refuses.
+
+Both files are local, gitignored, and deliberately not inherited.
+A ship or scout reads the active home.
+A local secondmate is a supervisor and reads the launching home, never an ambient `CLAUDE_CONFIG_DIR` and never the secondmate home's own worker files.
+Relaunch and startup recovery use that same home.
+A remote secondmate's agent is launched on its host against its own remote home's configuration, so it reads that home's file, the same one its workers read.
+Create the file there; account directories are never copied over SSH.
+
+Before any endpoint exists, and before a relaunch stops the running agent, Firstmate asks the runner's own non-interactive check whether the selected root can authenticate the launch.
+Claude is asked through `quota-axi auth --json --provider claude`.
+A source that is available or expired passes.
+A source skipped with `credentialPresent` passes only when the root's `.claude.json` (`~/.claude.json` for `ordinary`) records a login (`oauthAccount`).
+Pi is asked `pi auth check --provider <the launch model's provider> --json --no-refresh`; status `ready` passes, and any other status it reports refuses.
+Two answers fall through to a second check, `pi --list-models <provider>`, which lists only the models the root can authenticate.
+One is `not_ready`/`provider_not_found`, because `pi auth check` loads no extensions and so cannot see a provider an extension registers.
+The other is an answer that is not JSON, which is what a Pi without `pi auth check` (0.84.0 and earlier) prints.
+The launch then passes only when that list includes any model under the launch model's provider, the same provider-level question `pi auth check` answers.
+A `codex-native/<id>` model is not checked: that provider signs in through Codex's own login.
+The check runs with only `HOME`, `PATH`, `TMPDIR`, and the selected root in its environment, so a provider key left in the caller cannot answer for an empty root.
+[`bin/fm-worker-account-lib.sh`](../bin/fm-worker-account-lib.sh) owns resolution, validation, and the check.
+
+Environment credentials are ambient unless the file's last line is `environment`.
+Without that line, a Claude launch unsets the environment credentials Claude ranks above the `/login` stored in the root: `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_ANTHROPIC_AWS`, `CLAUDE_CODE_USE_MANTLE`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_PROFILE`, and `ANTHROPIC_FEDERATION_RULE_ID`.
+Pi ranks the credentials stored in its root above environment variables, so a Pi launch unsets nothing, and the check above refuses a provider the root has not stored.
+With the `environment` line, the launch keeps those credentials, so an API key, a `claude setup-token` token, or a Bedrock, Vertex, Foundry, or Claude Platform on AWS setup authenticates the worker.
+No check runs then: the values come from the worker's pane when it starts, which the spawn cannot read.
+The selected root still supplies settings and is the fallback login when the pane has none of them.
+With `config/launch-env-allowlist` enabled, the credential names must also be listed there.
+Other runners carry no declaration, because the official controls cannot isolate them or Firstmate has not adopted one yet; they still launch on their ambient account.
+
 ## Worker launch environment (config/launch-env-allowlist)
 
 The optional local, gitignored `config/launch-env-allowlist` limits the ambient environment passed to newly launched workers, scouts, and secondmates, including relaunches.
@@ -401,8 +457,8 @@ Choose the minimum additions for the authentication method actually in use:
 | Provider or Git transport | Additional names needed |
 | --- | --- |
 | Provider login stored under the normal home directory | None for the environment contract; the same user still has access to that provider's stored login. |
-| Provider configured through environment variables | The exact credential and endpoint names required by that provider, for example `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`; a multi-provider tool needs each provider it will actually use. |
-| Custom provider store | Its configured location variables, such as `CODEX_HOME`, `GROK_HOME`, or `XDG_CONFIG_HOME`; Firstmate's existing explicit Claude and Muse store assignments still apply. |
+| Provider configured through environment variables | The exact credential and endpoint names required by that provider, for example `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`; a multi-provider tool needs each provider it will actually use. Claude and Pi also need the `environment` line in their [worker account file](#worker-accounts-configclaude-account-configpi-account). |
+| Custom provider store | Its configured location variables, such as `CODEX_HOME`, `GROK_HOME`, or `XDG_CONFIG_HOME`; Firstmate's explicit Claude and Pi account roots ([worker accounts](#worker-accounts-configclaude-account-configpi-account)) and Muse store assignment still apply. |
 | Muse environment authentication | `META_API_KEY`, already present in the target tmux session environment; Firstmate's preflight requires the stored-login path on other backends. |
 | Git over SSH with an agent | `SSH_AUTH_SOCK`; add `GIT_SSH_COMMAND` only if the chosen transport requires that override. |
 | Git over SSH with a key file | No credential variable when normal SSH configuration selects the key; file permissions and any passphrase handling still apply. |

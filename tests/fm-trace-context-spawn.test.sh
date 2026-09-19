@@ -4,8 +4,8 @@
 # See docs/verification/trace-context.md for the maintained coverage inventory.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
 
@@ -90,6 +90,7 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse
+  fm_test_fake_account_auth "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -103,6 +104,7 @@ make_spawn_case() {
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf 'claude\n' > "$home/config/crew-harness"
+  fm_test_worker_accounts "$home"
   printf '%s\n' "$$" > "$home/state/.lock"
   printf '%s off\n' "$$" > "$home/state/.trace-context-effective"
   fm_git_worktree "$proj" "$wt" "wt-$name"
@@ -197,15 +199,17 @@ run_two_level() {
   sm="$base/sm"
   mkdir -p "$prim/config" "$prim/data" "$prim/state" "$prim/projects"
   printf 'claude\n' > "$prim/config/crew-harness"
+  fm_test_worker_accounts "$prim"
   [ "$pfile" = present ] && : > "$prim/config/trace-context"
   touch "$prim/state/.last-watcher-beat"
   start_trace_session "$prim" "$penv"
 
   # Seed the secondmate home so validate_firstmate_home_for_spawn accepts it.
-  mkdir -p "$sm/bin" "$sm/data"
+  mkdir -p "$sm/bin" "$sm/data" "$sm/config"
   printf '# Firstmate\n' > "$sm/AGENTS.md"
   printf 'sm-%s\n' "$name" > "$sm/.fm-secondmate-home"
   printf 'charter\n' > "$sm/data/charter.md"
+  fm_test_worker_accounts "$sm"
 
   # Spawn 1: the primary launches the secondmate; capture what it injects.
   sm_id="sm-$name"
@@ -382,6 +386,7 @@ test_duplicate_secondmate_spawn_does_not_converge_trace_context() {
   log="$base/launch.log"
   mkdir -p "$prim/config" "$prim/data/$id" "$prim/state" "$prim/projects"
   : > "$prim/config/trace-context"
+  fm_test_worker_accounts "$prim"
   printf 'charter brief\n' > "$prim/data/$id/brief.md"
   touch "$prim/state/.last-watcher-beat"
   start_trace_session "$prim"
@@ -515,6 +520,7 @@ test_two_routed_tasks_through_one_secondmate_root_distinct_traces() {
   sm="$base/sm-home"
   mkdir -p "$sm/data" "$sm/projects" "$sm/state" "$sm/config"
   printf 'claude\n' > "$sm/config/crew-harness"
+  fm_test_worker_accounts "$sm"
   : > "$sm/config/trace-context"
   printf '%s\n' "$$" > "$sm/state/.lock"
   touch "$sm/state/.last-watcher-beat"

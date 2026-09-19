@@ -20,6 +20,10 @@
 # Primary config/claude-permission-mode is a captain-wide safety preference
 # (bypass or auto for every claude launch), so it flows down too and a
 # secondmate's own claude crewmates launch on the same permission posture.
+# config/claude-account and config/pi-account are deliberately NOT inherited:
+# they name the accounts that home's own workers spend; a local secondmate
+# agent's own launch reads the launching home instead, and a remote one reads
+# its own remote home's file.
 # It also pushes
 # the one primary-authoritative shared captain-preference file,
 # data/captain-shared.md, into each secondmate home's data/ as a read-only copy.

@@ -19,8 +19,8 @@
 #      agent exited.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
@@ -129,12 +129,14 @@ SH
 exit 0
 SH
   chmod +x "$fb/sleep"
+  fm_test_fake_account_auth "$fb"
 }
 
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
 new_case() {
   local id=${2:-t1} dir="$TMP_ROOT/$1-$RANDOM"
-  mkdir -p "$dir/home/state" "$dir/home/data" "$dir/fake"
+  mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/fake"
+  fm_test_worker_accounts "$dir/home"
   : > "$dir/fake/literal"
   : > "$dir/fake/keys"
   printf 'claude' > "$dir/fake/command"
@@ -683,6 +685,7 @@ test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
   local dir out rc id=rl-ultra
   dir=$(new_case native-ultra "$id")
   add_ship_task "$dir" "$id" pi
+  printf '%s\n' "$dir/home/accounts/pi" "openai-codex codex-native" > "$dir/home/config/pi-account"
   printf pi > "$dir/fake/command"
   printf pi > "$dir/fake/becomes"
   printf '#!/usr/bin/env bash\nprintf "Options: --tui-mode\\n"\n' > "$dir/fakebin/pi"
@@ -905,6 +908,46 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop() {
   pass "fm-control relaunch: an adapter unverified for this task kind refuses before the agent is stopped"
 }
 
+# An explicit --harness drops the configured secondmate model, so the launch
+# owner receives no --model. The pre-stop account check must judge that same
+# empty model, or it passes, stops the agent, and the launch then refuses.
+test_secondmate_relaunch_onto_pi_without_a_model_refuses_before_stop() {
+  local dir home out rc
+  dir=$(new_case smpimodel sm8)
+  home="$dir/home"
+  mkdir -p "$home/config" "$home/data/sm8"
+  printf 'pi fake/test\n' > "$home/config/secondmate-harness"
+  fm_test_fake_pi_runner "$dir/fakebin" pi
+  printf '# secondmate brief\n' > "$home/data/sm8/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'sm8\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-sm8"
+    echo "endpoint_task_id=sm8"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/sm8.meta"
+  printf '%s\n' "fm-sm8" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  out=$(run_control "$dir" sm8 relaunch --harness pi); rc=$?
+  expect_code 1 "$rc" "a Pi secondmate relaunch with no --model should refuse"
+  assert_contains "$out" "names no provider" \
+    "the refusal should be the Pi account guard the launch would hit"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "the account refusal must land before the running agent is stopped"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "the account refusal must send nothing"
+  pass "fm-control relaunch: the pre-stop account check judges the model the launch will receive"
+}
+
 test_explicit_secondmate_harness_ignores_configured_profile_axes() {
   local dir home out rc
   dir=$(new_case smexplicit sm4)
@@ -1106,6 +1149,26 @@ test_missing_worktree_refuses_before_stopping_anything() {
   [ "$(cat "$dir/fake/command")" = claude ] || fail "a refused relaunch must not stop the agent"
   [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must send nothing"
   pass "fm-control relaunch: an unaccountable local copy refuses before the agent is touched"
+}
+
+test_unusable_worker_account_refuses_before_stopping_anything() {
+  local dir out rc
+  dir=$(new_case noaccount rl10b)
+  add_ship_task "$dir" rl10b claude
+  rm -f "$dir/home/config/claude-account"
+  out=$(run_control "$dir" rl10b relaunch --note "x"); rc=$?
+  expect_code 1 "$rc" "a relaunch from a home without a Claude account should refuse"
+  assert_contains "$out" "config/claude-account" "the refusal should name the file to create"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "an account refusal must not stop the agent"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "an account refusal must send nothing"
+  printf '%s\n' "$dir/home/accounts/claude" > "$dir/home/config/claude-account"
+  printf 'missing\n' > "$dir/home/accounts/claude/.fake-auth"
+  out=$(run_control "$dir" rl10b relaunch --note "x"); rc=$?
+  expect_code 1 "$rc" "a relaunch onto a Claude account with no login should refuse"
+  assert_contains "$out" "holds no usable login" "the refusal should say the account cannot authenticate"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a lapsed login must not stop the agent"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a lapsed login must send nothing"
+  pass "fm-control relaunch: an undeclared or unusable worker account refuses before the agent is touched"
 }
 
 test_missing_instructions_refuse_before_stopping_anything() {
@@ -1712,6 +1775,8 @@ test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
 test_missing_worktree_refuses_before_stopping_anything
+test_unusable_worker_account_refuses_before_stopping_anything
+test_secondmate_relaunch_onto_pi_without_a_model_refuses_before_stop
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
 test_checkpoint_refuses_uninspectable_head_and_status
