@@ -1094,6 +1094,70 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+test_contribution_input_large_backlog() {
+  local home arg_max count
+  home=$(make_home contribution-large)
+  arg_max=$(getconf ARG_MAX)
+  count=$((arg_max / 1024 + 1))
+  # Exceed the platform's whole argv budget, including on systems without
+  # Linux's smaller per-argument limit. Keep individual backlog lines ordinary.
+  jq -nr --argjson count "$count" 'range($count) | "padding-\(.) " + ("x" * 1024)' > "$home/padding"
+  {
+    printf '## In flight\n- [ ] owned - Owned contribution (repo: sample) (kind: ship)\n\n## Queued\n'
+    cat "$home/padding"
+  } > "$home/data/backlog.md"
+  fm_write_meta "$home/state/owned.meta" "kind=ship" "yolo=off" \
+    "pr=https://github.com/example/sample/pull/1" "pr_head=abc123"
+  mkdir "$home/tmp"
+  FM_HOME="$home" TMPDIR="$home/tmp" "$SNAPSHOT" --contribution-input \
+    > "$home/output.json" 2> "$home/stderr" || fail 'large contribution-input snapshot failed'
+  [ -s "$home/output.json" ] || fail 'large contribution-input snapshot silently succeeded with empty output'
+  jq -e --arg path "$home/data/backlog.md" --argjson arg_max "$arg_max" --rawfile padding "$home/padding" '
+    (keys == ["backlog", "tasks"])
+    and .backlog.path == $path and .backlog.present == true
+    and (.backlog | tojson | length) > $arg_max
+    and .backlog.records[0].id == "owned"
+    and .backlog.records[0].state == "in_flight"
+    and ([.backlog.records[1:][] | .raw] == ($padding | split("\n") | .[:-1]))
+    and .tasks == [{id:"owned",kind:"ship",pr:{url:"https://github.com/example/sample/pull/1",head:"abc123"},merge_authority:"attended"}]
+  ' "$home/output.json" >/dev/null || fail 'large contribution-input snapshot lost backlog or task data'
+  [ -z "$(find "$home/tmp" -mindepth 1 -print)" ] || fail 'successful contribution snapshot leaked transport files'
+  pass 'contribution-input preserves backlog larger than ARG_MAX and task ownership'
+}
+
+test_contribution_input_assembly_failure() {
+  local home real_jq rc=0
+  home=$(make_home contribution-assembly-failure)
+  real_jq=$(command -v jq)
+  mkdir "$home/fakebin" "$home/tmp"
+  cat > "$home/fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+previous=
+for arg in "$@"; do
+  case "$previous:$arg" in
+    --slurpfile:backlog)
+      printf 'injected assembly failure\n' > "$FM_HOME/injected"
+      exit 42
+      ;;
+  esac
+  previous=$arg
+done
+exec "$REAL_JQ" "$@"
+SH
+  chmod +x "$home/fakebin/jq"
+  PATH="$home/fakebin:$PATH" REAL_JQ="$real_jq" FM_HOME="$home" TMPDIR="$home/tmp" \
+    "$SNAPSHOT" --contribution-input > "$home/output.json" 2> "$home/stderr" || rc=$?
+  [ -s "$home/injected" ] || fail 'assembly failure injection was not reached'
+  [ "$rc" -ne 0 ] || fail 'contribution-input assembly failure silently exited zero'
+  assert_contains "$(cat "$home/stderr")" 'fm-fleet-snapshot: contribution input assembly failed' \
+    'contribution-input assembly failure should explain the failed operation'
+  [ ! -s "$home/output.json" ] || fail 'failed assembly should not emit a snapshot'
+  [ -z "$(find "$home/tmp" -mindepth 1 -print)" ] || fail 'failed contribution snapshot leaked transport files'
+  pass 'contribution-input assembly failure exits nonzero with a diagnostic and cleans up'
+}
+
+test_contribution_input_assembly_failure
+test_contribution_input_large_backlog
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
