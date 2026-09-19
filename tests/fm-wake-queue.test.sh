@@ -374,15 +374,15 @@ EOF
   ! grep -F 'secondmate wake-loop stalled' "$dir/watch-first.out" "$dir/watch-second.out" >/dev/null \
     || fail "a declared external wait was mislabeled as a stalled wake loop"
 
-  # The LIVE half of that same recheck is deliberately outside this exclusion. The
-  # rows above speak for a lane whose agent is confirmed gone, so nothing there can
-  # drain the mate's queue and the row's own bounded cadence re-rings it; a live
-  # parked lane still has an agent that should be draining, so its recheck is
-  # ordinary evidence. bin/fm-watch.sh's declared_wait_recheck_reason keeps the
-  # liveness clause that holds the live wording out of this class, and without this
-  # direction the exclusion could be widened to every live parked lane in the
-  # mate's home - a silently larger blind spot - with every assertion above still
-  # passing.
+  # The half written while liveness is fail-open is deliberately outside this
+  # exclusion. The rows above speak for a lane whose agent is CONFIRMED gone, so
+  # nothing there can drain the mate's queue and the row's own bounded cadence
+  # re-rings it; a lane whose agent is merely not confirmed gone may still be
+  # draining, so its recheck is ordinary evidence. bin/fm-watch.sh's
+  # declared_wait_recheck_reason keeps the not-confirmed-gone clause that holds
+  # that wording out of this class, and without this direction the exclusion could
+  # be widened to every parked lane in the mate's home - a silently larger blind
+  # spot - with every assertion above still passing.
   dir=$(make_case secondmate-live-declared-pause-queue)
   state="$dir/state"
   sub="$dir/secondmate"
@@ -391,7 +391,7 @@ EOF
   printf 'window=firstmate:fm-mate\nkind=secondmate\nhome=%s\n' "$sub" > "$state/mate.meta"
   cp "$fakebin/date" "$dir/fakebin/date"
   fakebin="$dir/fakebin"
-  printf '100\t7\tstale\tfleet:w2:p4\tstale: fleet:w2:p4 (paused 3613s, awaiting external - the agent is still live, declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)\n' \
+  printf '100\t7\tstale\tfleet:w2:p4\tstale: fleet:w2:p4 (paused 3613s, awaiting external - the agent is not confirmed gone, declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)\n' \
     > "$sub/state/.wake-queue"
   printf '1000\n' > "$dir/now"
   PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \

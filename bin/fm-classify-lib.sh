@@ -121,6 +121,16 @@ fm_utc_iso_to_epoch() {  # <timestamp>
     || return 1
 }
 
+# The inverse read, so a supervisor-facing alarm can name a declared time back in
+# the shape the worker wrote it rather than as raw epoch seconds. Prints the epoch
+# itself when neither date flavor can render it: an alarm that has to say WHEN a
+# wait was due must never lose the fact that a time was declared at all.
+fm_utc_epoch_to_iso() {  # <epoch> -> <YYYY-MM-DDTHH:MM:SSZ>
+  date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || printf '%s' "$1"
+}
+
 # The resolution verb and durable-backlog-transfer verb that CLOSE a keyed
 # status decision opened by needs-decision or blocked. See status_open_decisions
 # below for the status-fold contract. The transfer verb is written only after

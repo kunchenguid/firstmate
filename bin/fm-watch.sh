@@ -937,7 +937,11 @@ wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
 #
 # A declared clearing time that has ALREADY passed (`paused: ... until <t>`) is
 # not evidence: the wait the worker described is over, so it no longer explains
-# the silence, and the pane keeps the unchanged schedule.
+# the silence, and the pane keeps the unchanged schedule. That time is still
+# PRINTED with the refusal, because the escalation the pane is handed to has to
+# be able to say what the lane declared: a declared time that came and went with
+# the lane still quiet is MORE suspicious than no declaration at all, and an
+# alarm that omits it reads as though the worker had never said anything.
 # Nothing here weakens detection for a pane with no declaration - it never runs
 # for them beyond one status-line read, and their escalation schedule, reason and
 # wording are untouched.
@@ -946,7 +950,7 @@ wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
 # external dependency the worker named, `captain-held:` on the captain themself -
 # so a recheck that named the wrong one would point the reader away from the
 # person who can clear it.
-wedge_wait_evidence() {  # <task> -> `declared` or `held` on stdout
+wedge_wait_evidence() {  # <task> -> `declared`/`held` and 0, or `expired <epoch>` and 1
   local task=$1 last until
   [ -n "$task" ] || return 1
   last=$(last_status_line "$STATE/$task.status")
@@ -956,9 +960,33 @@ wedge_wait_evidence() {  # <task> -> `declared` or `held` on stdout
   fi
   status_is_paused "$last" || return 1
   if until=$(status_paused_until "$last"); then
-    [ "$(date +%s)" -lt "$until" ] || return 1
+    if [ "$(date +%s)" -ge "$until" ]; then
+      printf 'expired %s' "$until"
+      return 1
+    fi
   fi
   printf 'declared'
+}
+
+# The clause an escalation carries when the lane DID declare a wait and its own
+# declared time has passed - the `expired <epoch>` refusal above, handed straight
+# to the alarm that refusal produces. Nothing about the escalation itself moves:
+# same threshold, same climbing count, same demand-deep-inspection at its bound,
+# because an expired declaration explains no silence. What changes is that the
+# alarm stops arriving bare. A supervisor reading `possible wedge` alone cannot
+# tell this lane from one that never said anything, so they open the status log to
+# find out - and a reader who does that a few times starts discounting the alarm,
+# which is how the genuinely wedged lane gets missed.
+# Prints nothing for every other evidence value, so a lane that declared nothing
+# keeps the identical wording it has today.
+expired_wait_escalation_note() {  # <wedge_wait_evidence-output>
+  local evidence=$1 until
+  case "$evidence" in
+    'expired '*) until=${evidence#expired } ;;
+    *) return 0 ;;
+  esac
+  printf ', the lane declared a wait until %s and that time passed %ss ago with the pane still idle' \
+    "$(fm_utc_epoch_to_iso "$until")" "$(( $(date +%s) - until ))"
 }
 
 # Defer ONE wedge escalation for a pane whose own declaration explains the quiet
@@ -1105,6 +1133,10 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
+# An expired declaration is escalated rather than deferred, and the escalation
+# names it (expired_wait_escalation_note above): the consult refuses the evidence
+# and keeps the whole unchanged ladder for that lane, while the alarm it fires
+# still tells the reader a wait was declared and when it was due.
 # The wait-evidence consult (wedge_wait_evidence, one status-line read), the
 # worktree write probe, and the dead-record probe (wedge_dead_record) run ONLY
 # here, inside the at-threshold branch that is about to escalate: at most one each
@@ -1114,7 +1146,7 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # cheaper deferrals keep the panes they already own on their existing bounded
 # cadences and only a pane that would otherwise alarm pays for a backend read.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason evidence
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason evidence expired
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -1140,9 +1172,10 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
-        reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
+        expired=$(expired_wait_escalation_note "$evidence")
+        reason="stale: $win (idle ${age}s, possible wedge, escalation $n$expired)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
+          reason="stale: $win (idle ${age}s, possible wedge, escalation $n$expired, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
         fi
         fm_wake_append stale "$win" "$reason" || exit 1
         rm -f "$since_file"
@@ -1212,15 +1245,23 @@ declared_wait_recheck_reason() {  # <window> <wait-age> <declared|due|beyond|hel
       action='confirm the wait still holds'
       ;;
   esac
-  # The live half says so, for two reasons. It is the more useful message - there
-  # is still an agent there to answer, where the absorbed half speaks for a lane
-  # whose agent is confirmed gone - and it keeps this wording OUT of the
-  # declared-external-pause class that secondmate_oldest_queue_row above excludes
-  # from a mate's wake-loop stall evidence. That exclusion was written for the
-  # absorbed half, whose bounded cadence re-rings the row on its own; widening it
-  # to every live parked lane would quietly enlarge a stall detector's blind spot,
-  # which is a different change from this one.
-  [ -z "$live" ] || evidence="the agent is still live, $evidence"
+  # The live half reports exactly what its caller established and no more. What
+  # reaches surface_nonterminal_stale is the ABSENCE of a confirmed-gone verdict:
+  # pause_state_class answers `none` for a proven-alive agent and equally for
+  # every inconclusive read - ambiguous, unreadable, unverified, or a backend
+  # query that failed outright and fell back to `unknown`. Claiming the agent is
+  # still live would therefore state as fact something no read established, and
+  # would do it as reassurance, which is the same credibility failure this
+  # wording exists to remove pointing the other way: a supervisor told there is
+  # someone there to answer stops looking at a lane whose endpoint may already be
+  # gone. Saying only that it is not confirmed gone is what the evidence carries,
+  # and it still keeps this wording OUT of the declared-external-pause class that
+  # secondmate_oldest_queue_row above excludes from a mate's wake-loop stall
+  # evidence. That exclusion was written for the absorbed half, whose bounded
+  # cadence re-rings the row on its own; widening it to every parked lane whose
+  # agent may still be draining the queue would quietly enlarge a stall
+  # detector's blind spot, which is a different change from this one.
+  [ -z "$live" ] || evidence="the agent is not confirmed gone, $evidence"
   printf 'stale: %s (%s %ss, %s - %s; %s)' "$win" "$verb" "$age" "$human" "$evidence" "$action"
 }
 
