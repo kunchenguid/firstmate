@@ -122,7 +122,7 @@ test_local_only_detached_head_is_refused() {
   pass "local-only detached HEAD only in the disposable copy is refused"
 }
 
-test_standalone_local_only_needs_distinct_project_ref() {
+test_standalone_local_only_needs_project_ref() {
   local repo wt sha
   repo="$TMP_ROOT/stand-project"
   wt="$TMP_ROOT/stand-copy"
@@ -138,7 +138,7 @@ test_standalone_local_only_needs_distinct_project_ref() {
     || fail "project clone did not gain the named head"
   accept_done ship local-only "$wt" "$repo" "done: ready in branch fm/stand" \
     || fail "standalone local-only named head present in the project clone was refused"
-  pass "standalone local-only done: requires the named head in a distinct project clone"
+  pass "standalone local-only done: requires the named head in the project clone"
 }
 
 test_free_text_sha_is_not_the_named_head() {
@@ -271,6 +271,25 @@ test_ci_ready_variants_are_gated() {
   pass "no-mistakes CI-ready done: with extra text is gated"
 }
 
+test_keyed_and_spaced_done_lines_are_gated() {
+  local repo wt line mode rc
+  repo="$TMP_ROOT/keyed-repo"
+  wt="$TMP_ROOT/keyed-wt"
+  fm_git_worktree "$repo" "$wt" fm/keyed
+  git -C "$wt" commit -q --allow-empty -m 'only in the disposable copy'
+  for line in \
+    'no-mistakes|done [key=fix]: PR https://github.com/o/r/pull/5 checks green' \
+    'no-mistakes|done : PR https://github.com/o/r/pull/5 checks green' \
+    'direct-PR|done [key=fix]: PR https://github.com/o/r/pull/5' \
+    'direct-PR|done: [key=fix] PR https://github.com/o/r/pull/5'; do
+    mode=${line%%|*}
+    rc=0
+    accept_done ship "$mode" "$wt" "$repo" "${line#*|}" >/dev/null || rc=$?
+    [ "$rc" -eq 1 ] || fail "$mode done line skipped the gate: ${line#*|}"
+  done
+  pass "keyed and spaced ship done: lines are gated"
+}
+
 test_non_done_lines_are_not_gated() {
   local repo wt
   repo="$TMP_ROOT/nongate-repo"
@@ -295,9 +314,10 @@ test_merge_marker_binds_to_the_named_pr
 test_forge_recorded_head_is_accepted_without_local_object
 test_direct_pr_recorded_head_does_not_cover_unpushed_commit
 test_ci_ready_variants_are_gated
+test_keyed_and_spaced_done_lines_are_gated
 test_local_only_linked_branch_is_accepted
 test_local_only_detached_head_is_refused
-test_standalone_local_only_needs_distinct_project_ref
+test_standalone_local_only_needs_project_ref
 test_non_done_lines_are_not_gated
 
 echo "all fm-dod-lib tests passed"
