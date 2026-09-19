@@ -200,7 +200,8 @@ const PROCESSING_INSTRUCTION =
   "This text is hidden operational input for you only: do not quote these instructions, do not paraphrase them into captain chat, and do not re-emit the already-shown anchor entries. " +
   "The outcomes below are already stored durably and already shown to the captain as anchor entries in this transcript; each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
   "Process each outcome now as firstmate: answer or escalate a decision, act on a blocker or failure, or record that no further action is needed. " +
-  "When a listed outcome includes an https:// URL, copy that URL in full into any captain-facing reply that needs it; never emit a truncated https:// URL. " +
+  "A ready-for-review, merge, or other outcome that AGENTS.md section 9 says needs a reply requires your own reply with the full PR URL; that is not a no-further-action case. " +
+  "When a listed outcome includes an https:// URL, copy that URL in full into that reply; never emit a truncated https:// URL. " +
   "When every outcome below is processed, call fm_branch_processed with through={N} exactly once. " +
   "Until that call the outcomes stay open and are presented again; an answer that does not make that call never counts as processing.";
 type MirrorItem = { tag: "captain" | "main"; text: string };
