@@ -221,6 +221,33 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+# The task scaffold is the instruction surface every ship and scout reads.
+# Keep the efficient-delivery policy in that generated contract without
+# duplicating Firstmate's full decision procedure into each brief.
+test_task_briefs_receive_efficient_delivery_guidance() {
+  local home kind brief
+  home="$TMP_ROOT/efficient-delivery-home"
+  mkdir -p "$home/data"
+
+  for kind in no-mistakes direct-PR local-only scout; do
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$kind" sample --scout >/dev/null 2>&1 \
+        || fail "$kind brief did not scaffold"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$kind" sample --mode "$kind" >/dev/null 2>&1 \
+        || fail "$kind brief did not scaffold"
+    fi
+    brief="$home/data/$kind/brief.md"
+    assert_grep "Keep accepted task scope focused on the shortest robust path" "$brief" \
+      "$kind brief did not prioritize the shortest robust path"
+    assert_grep "route unrelated polish and speculative low-impact findings to firstmate for record or deferral" "$brief" \
+      "$kind brief did not route low-impact findings for triage"
+    assert_grep "never answer ask-user findings yourself" "$brief" \
+      "$kind brief weakened the finding-authority boundary"
+  done
+  pass "fm-brief.sh: every task brief receives concise efficient-delivery guidance"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -929,6 +956,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_task_briefs_receive_efficient_delivery_guidance
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
