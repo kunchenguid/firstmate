@@ -3540,11 +3540,10 @@ EOF
   pass 'legacy live rebased run is authoritative over an older failed row'
 }
 
-# The head-free route is licensed by the daemon being reachable. A record left
-# saying `running` by a daemon that died under it is evidence from a dead
-# instrument: once the worktree moves off the run head, nothing corroborates it,
-# so it must stop answering and the status log takes over.
-test_live_record_at_diverged_head_needs_a_live_daemon() {
+# The head-free route is licensed by the daemon being reachable. Once the daemon
+# answers down AND no ledger row anchors the run, nothing ties the record to this
+# worktree at all, so it stops answering and the status log takes over.
+test_live_record_at_diverged_head_does_not_bind_an_unproven_record() {
   reset_fakes
   local d rebased out; d=$(new_case zombie-daemon-down)
   make_repo_on_branch "$d/wt" fm/feat-zombie
@@ -3599,9 +3598,9 @@ EOF
 }
 
 # The modern selected-run route reaches the same diverged-head shape: the run
-# head RESOLVES but diverged after the pipeline rebased, so the unresolvable-head
-# arm does not fire and the dead instrument has to be named here too.
-test_selected_run_diverged_head_reports_the_dead_daemon() {
+# head RESOLVES but diverged after the pipeline rebased, and no ledger row
+# anchors it, so identity is unproven and the record must not answer at all.
+test_selected_run_diverged_head_does_not_bind_an_unproven_record() {
   reset_fakes
   local d rebased out; d=$(new_case selected-diverged-down)
   make_repo_on_branch "$d/wt" fm/feat-seldiv
@@ -3625,22 +3624,26 @@ runs[1]{id,branch,status,head,pr}:
   pass "an unproven record at a diverged head does not answer on the selected route"
 }
 
-# The crew observed the refused socket itself. A run record the dead daemon left
-# behind is the weaker witness, so the blocker stays blocked on the diverged-head
-# route too - the same invariant the head-match route has always honoured.
+# The crew observed the refused socket itself. The ledger anchor BINDS a record
+# here and the dead daemon makes it unverified, so this drives the dead-daemon
+# verdict directly - and the blocker must still outrank it.
 test_socket_refused_log_survives_the_dead_daemon_verdict() {
   reset_fakes
-  local d rebased out; d=$(new_case socket-refused-diverged)
+  local d local_short out; d=$(new_case socket-refused-anchored)
   make_repo_on_branch "$d/wt" fm/feat-sockdiv
-  rebased=$(make_rebased_head "$d/wt")
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-sockdiv.meta" "window=fm:fm-feat-sockdiv" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'blocked: no-mistakes daemon socket refused connections\n' > "$d/state/feat-sockdiv.status"
-  FM_FAKE_RUN_HEAD=$rebased
+  FM_FAKE_RUN_HEAD=f0f0f0f0
   FM_FAKE_AXI_STATUS="$(run_running fm/feat-sockdiv)
 branch_sync:
   state: synced"
-  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-sockdiv f0f0f0f0  2026-08-27 13:53
+  completed  fm/feat-sockdiv ${local_short}  2026-08-27 12:09
+EOF
+)"
   FM_FAKE_DAEMON_DOWN=1
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-sockdiv
@@ -3651,29 +3654,65 @@ branch_sync:
   pass "a socket-refused blocker survives the dead-daemon verdict"
 }
 
+# The same anchored, genuinely-bound shape with an ORDINARY blocker: the header
+# rule says a blocked tip stays blocked with the unverified record named, and
+# nothing else reached that path with a `blocked:` tip.
+test_ordinary_blocked_tip_survives_the_dead_daemon_verdict() {
+  reset_fakes
+  local d local_short out; d=$(new_case ordinary-blocked-anchored)
+  make_repo_on_branch "$d/wt" fm/feat-obanch
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-obanch.meta" "window=fm:fm-feat-obanch" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'blocked: database upload failed with broken pipe\n' > "$d/state/feat-obanch.status"
+  FM_FAKE_RUN_HEAD=f0f0f0f0
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-obanch)
+branch_sync:
+  state: synced"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-obanch f0f0f0f0  2026-08-27 13:53
+  completed  fm/feat-obanch ${local_short}  2026-08-27 12:09
+EOF
+)"
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-obanch
+  out=$(run_crew_state "$d" feat-obanch)
+  assert_contains "$out" "state: blocked" "an ordinary blocker stays blocked when the record is unverified"
+  assert_contains "$out" "broken pipe" "the crew's own blocker reaches the supervisor"
+  assert_contains "$out" "daemon unreachable" "the unverified record is named as the reason"
+  assert_not_contains "$out" "superseded" "an unverified record never supersedes an open blocker"
+  pass "an ordinary blocked tip survives the dead-daemon verdict"
+}
+
 # An open gate is the crew's own first-hand evidence too: an unverified record
 # cannot close it, so needs-decision stays parked and names the reason.
 test_needs_decision_survives_the_dead_daemon_verdict() {
   reset_fakes
-  local d rebased out; d=$(new_case needs-decision-diverged)
+  local d local_short out; d=$(new_case needs-decision-anchored)
   make_repo_on_branch "$d/wt" fm/feat-ndiv
-  rebased=$(make_rebased_head "$d/wt")
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-ndiv.meta" "window=fm:fm-feat-ndiv" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'needs-decision: approve the schema change\n' > "$d/state/feat-ndiv.status"
-  FM_FAKE_RUN_HEAD=$rebased
+  FM_FAKE_RUN_HEAD=f0f0f0f0
   FM_FAKE_AXI_STATUS="$(run_running fm/feat-ndiv)
 branch_sync:
   state: synced"
-  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-ndiv f0f0f0f0  2026-08-27 13:53
+  completed  fm/feat-ndiv ${local_short}  2026-08-27 12:09
+EOF
+)"
   FM_FAKE_DAEMON_DOWN=1
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-ndiv
   out=$(run_crew_state "$d" feat-ndiv)
   assert_contains "$out" "state: parked" "an open decision is not hidden behind a generic unknown"
   assert_contains "$out" "approve the schema change" "the crew's own decision note reaches the supervisor"
-  assert_not_contains "$out" "superseded" "an unproven record never supersedes an open decision"
-  pass "an open decision survives an unproven record with a dead daemon"
+  assert_contains "$out" "daemon unreachable" "the unverified record is named as the reason"
+  assert_not_contains "$out" "superseded" "an unverified record never supersedes an open decision"
+  pass "an open decision survives the dead-daemon verdict"
 }
 
 # A visibly working crew must never be overridden by a stale record that merely
@@ -3912,31 +3951,65 @@ EOF
   pass "the selected route keeps an anchored parked run's gate with a dead daemon"
 }
 
-# An open decision outranks the unverified record on the selected route as well:
-# the early identity emit used to exit before the reconciliation could say so.
+# An open decision outranks the unverified record on the selected route as well.
+# The ledger anchor binds the run here, so the dead-daemon verdict is genuinely
+# produced and the reconciliation is what keeps the decision visible.
 test_selected_run_dead_daemon_leaves_the_open_decision_open() {
   reset_fakes
-  local d rebased out; d=$(new_case selected-dead-decision)
+  local d h2 short out; d=$(new_case selected-dead-decision)
   make_repo_on_branch "$d/wt" fm/feat-seldec
-  rebased=$(make_rebased_head "$d/wt")
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  h2=$(mint_unfetched_fix_head "$d/wt")
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/seldec.meta" "window=fm:fm-seldec" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'needs-decision: approve the schema change\n' > "$d/state/seldec.status"
-  FM_FAKE_RUN_HEAD=$rebased
+  FM_FAKE_RUN_HEAD="$h2"
   FM_FAKE_AXI_HOME="count: 1 of 1 total
 runs[1]{id,branch,status,head,pr}:
-  \"01RUN\",fm/feat-seldec,running,$rebased,\"\""
+  \"01RUN\",fm/feat-seldec,running,$h2,\"\""
   FM_FAKE_AXI_STATUS="$(run_running fm/feat-seldec)"
   FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
-  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-seldec $(git -C "$d/wt.pipe" rev-parse --short=7 HEAD)  2026-07-30 22:05
+  failed     fm/feat-seldec ${short}  2026-07-29 20:00
+EOF
+)"
   FM_FAKE_DAEMON_DOWN=1
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" seldec
   out=$(run_crew_state "$d" seldec)
-  assert_contains "$out" "state: parked" "the open decision is not hidden behind the unproven record"
+  assert_contains "$out" "state: parked" "the open decision is not hidden behind the unverified record"
   assert_contains "$out" "approve the schema change" "the crew's own decision note reaches the supervisor"
-  assert_not_contains "$out" "superseded" "an unproven record never supersedes an open decision"
-  pass "an open decision survives an unproven record on the selected route"
+  assert_contains "$out" "daemon unreachable" "the unverified record is named as the reason"
+  assert_not_contains "$out" "superseded" "an unverified record never supersedes an open decision"
+  pass "an open decision survives the dead-daemon verdict on the selected route"
+}
+
+# An unrecognised ledger word yields an unknown verdict from a LIVE daemon, so it
+# is not an unverified record: the ordinary supersede note applies, as it did
+# before the coarse-unknown special case existed.
+test_unrecognised_ledger_word_keeps_the_ordinary_supersede_note() {
+  reset_fakes
+  local d local_short out; d=$(new_case unrecognised-word-supersede)
+  make_repo_on_branch "$d/wt" fm/feat-uws
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-uws.meta" "window=fm:fm-feat-uws" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision: approve the schema change\n' > "$d/state/feat-uws.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-23 14:00
+  pending    fm/feat-uws ${local_short}  2026-08-23 13:53
+EOF
+)"
+  FM_FAKE_DAEMON_DOWN=0
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-uws
+  out=$(run_crew_state "$d" feat-uws)
+  assert_contains "$out" "state: unknown" "an unrecognised word still reads unknown"
+  assert_contains "$out" "runs list status: pending" "the unrecognised word is reported as itself"
+  assert_contains "$out" "superseded (run unknown)" "a live daemon's unknown keeps the ordinary supersede note"
+  pass "an unrecognised ledger word keeps the ordinary supersede note"
 }
 
 # The coarse ledger word `pending` is not an acceptance: it keeps its unknown
@@ -4471,13 +4544,14 @@ test_live_rebased_run_beats_older_failed_run_at_local_head
 test_live_rebased_run_reads_working_for_every_executing_status
 test_legacy_live_rebased_run_is_authoritative
 test_legacy_surface_binds_fixing_and_ci_at_a_rebased_head
-test_live_record_at_diverged_head_needs_a_live_daemon
+test_live_record_at_diverged_head_does_not_bind_an_unproven_record
 test_unproven_record_with_dead_daemon_does_not_override_a_busy_pane
 test_coarse_live_row_over_ordinary_blocked_keeps_superseded_reading
 test_socket_refused_log_survives_the_dead_daemon_verdict
+test_ordinary_blocked_tip_survives_the_dead_daemon_verdict
 test_needs_decision_survives_the_dead_daemon_verdict
 test_parked_gate_survives_a_dead_daemon
-test_selected_run_diverged_head_reports_the_dead_daemon
+test_selected_run_diverged_head_does_not_bind_an_unproven_record
 test_live_record_at_diverged_head_binds_while_daemon_answers
 test_anchored_continuation_still_needs_a_live_daemon
 test_anchored_continuation_binds_while_daemon_answers
@@ -4488,6 +4562,7 @@ test_selected_run_anchored_continuation_binds_while_daemon_answers
 test_selected_run_anchored_parked_keeps_its_gate_with_a_dead_daemon
 test_selected_run_dead_daemon_leaves_the_open_decision_open
 test_coarse_pending_ledger_word_reads_unknown
+test_unrecognised_ledger_word_keeps_the_ordinary_supersede_note
 test_unanswered_daemon_probe_does_not_suppress_live_run
 test_coarse_live_row_with_daemon_down_is_unverified
 test_coarse_live_row_does_not_claim_gate_superseded

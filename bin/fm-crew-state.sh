@@ -68,11 +68,16 @@
 #      branch-name-only acceptance: an executing `axi status` record is the one
 #      live bind, so a ledger row that cannot be tied to this worktree's head
 #      never answers on branch name alone. A record whose daemon has ANSWERED
-#      down reads unknown and names the dead instrument - but only once identity
-#      is already proven, by head equality/ancestry or by the ledger anchor. A
-#      record with NEITHER is not this worktree's run to report on: it leaves
-#      HAVE_RUN=0 so the pane and status log answer, because a stale record
-#      naming this branch must never override a crew that is visibly working.
+#      down reads unknown and names the dead instrument on the two routes that
+#      bind a run the worktree has MOVED OFF: the ledger-anchored continuation,
+#      and a head-tied coarse ledger row. It is deliberately NOT extended to the
+#      head-matching arm - while the run head still equals or precedes the
+#      worktree HEAD the record keeps its original working reading, as it always
+#      has, and a fleet-wide change to that is out of scope here. A record whose
+#      identity is proven by NEITHER head nor ledger anchor is not this
+#      worktree's run to report on: it leaves HAVE_RUN=0 so the pane and status
+#      log answer, because a stale record naming this branch must never override
+#      a crew that is visibly working.
 #      A run PARKED at a gate is exempt from the dead-instrument verdict: an
 #      open decision stays open when the instrument dies, so it keeps its gate
 #      and findings.
@@ -1033,8 +1038,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       if [ -n "$RUN_DEAD_DAEMON" ]; then
         emit "$LOG_TIP_STATE" status-log "$(status_line_note "$LOG_LINE")${SEP}$RUN_DEAD_DAEMON"
       fi
-      if [ "$RUN_STATE" != parked ] \
-        && ! { [ "$RUN_SOURCE" = coarse ] && [ "$RUN_STATE" = unknown ]; }; then
+      if [ "$RUN_STATE" != parked ]; then
         if [ "$RUN_STATE" = working ]; then
           if [ "$RUN_SOURCE" = coarse ] && [ "$LOG_VERB" = needs-decision ]; then
             # The runs ledger keeps a parked run's status word at `running`
