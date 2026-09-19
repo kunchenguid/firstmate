@@ -15,6 +15,8 @@
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
 #   placeholders, an empty Task, an incomplete pair of Task subsections, or a
 #   `## Captain's intent` line opening with a Captain label or address.
+#   For the optional bin/fm-jev-brief-preflight.sh check, see the operator
+#   contract in docs/configuration.md "Jev brief preflight".
 #   Every ship or scout spawn renders `launch-brief.md`; for a no-mistakes ship
 #   it also carries the current `--intent` contract and the extracted captain
 #   intent. A legacy mixed Task is accepted there only under bin/fm-dod-lib.sh's
@@ -2691,6 +2693,16 @@ if [ "$KIND" = ship ]; then
   if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] &&
     [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
+  fi
+fi
+
+# Shadow Jev brief preflight: never refuses, never required for launch.
+# A helper failure, timeout, or skip must not change the spawn outcome.
+if { [ "$KIND" = ship ] || [ "$KIND" = scout ]; } && [ -n "${SOURCE_BRIEF:-}" ]; then
+  if [ -n "${MODE:-}" ]; then
+    "$FM_ROOT/bin/fm-jev-brief-preflight.sh" --brief "$SOURCE_BRIEF" --task "$ID" --kind "$KIND" --mode "$MODE" || true
+  else
+    "$FM_ROOT/bin/fm-jev-brief-preflight.sh" --brief "$SOURCE_BRIEF" --task "$ID" --kind "$KIND" || true
   fi
 fi
 

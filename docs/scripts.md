@@ -56,6 +56,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-jev-tool-gate.sh` | Remainder Jev Choice after a deterministic arm-policy allow; shadow-log default (docs/arm-pretool-check.md) |
 | `fm-jev-skill-select.sh` | Once-per-session Jev skill suggestion; shadow-log default, no spawn injection (docs/configuration.md) |
 | `fm-jev-queue-triage.sh` | Advisory heartbeat next-work signal ([configuration](configuration.md#jev-queue-triage-heartbeat)) |
+| `fm-jev-brief-preflight.sh` | Advisory spawn-path brief check ([configuration](configuration.md#jev-brief-preflight-fm_jev_brief_preflight)) |
 | `fm-subagent-pretool-check.sh` | Primary-home delegation-shape PreToolUse guard (docs/subagent-guard.md) |
 | `fm-supervision-instructions.sh` | Render the session-start primary-harness supervision block or the one-line repair instruction |
 | `fm-home-seed.sh`        | Transactionally provision a local secondmate home and maintain `data/secondmates.md` |

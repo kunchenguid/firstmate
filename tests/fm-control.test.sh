@@ -37,6 +37,34 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 
 VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse omp"
 
+test_harness_lookup_consumes_catalog() (
+  # A catalog larger than a pipe buffer makes an early reader close observable
+  # without depending on process scheduling or a particular OS pipe capacity.
+  # shellcheck disable=SC2329 # Called by the sourced harness lookup.
+  fm_control_harnesses() {
+    local i
+    printf 'claude\n'
+    for ((i=0; i<20000; i++)); do
+      printf 'codex\n' || return 1
+    done
+    printf 'devin\n'
+    printf 'complete\n' > "$TMP_ROOT/catalog-complete"
+  }
+  local candidate out rc expected
+  for candidate in claude devin unknown; do
+    rm -f "$TMP_ROOT/catalog-complete"
+    out=$(fm_control_harness_supported "$candidate" 2>&1); rc=$?
+    expected=0
+    [ "$candidate" != unknown ] || expected=1
+    [ "$rc" -eq "$expected" ] || fail "wrong harness verdict for $candidate: $rc"
+    [ -z "$out" ] || fail "harness lookup emitted diagnostics: $out"
+    [ -f "$TMP_ROOT/catalog-complete" ] || fail "harness lookup interrupted its catalog producer"
+  done
+  pass "harness lookup consumes the catalog for early, late, and absent matches"
+)
+
+test_harness_lookup_consumes_catalog || exit 1
+
 # The expectation table, written out independently of the implementation so a
 # silent change to either side shows up here. The fourth field is the composer
 # clear that must FOLLOW the interrupt key, empty for every adapter that leaves
