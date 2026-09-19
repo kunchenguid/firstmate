@@ -933,6 +933,80 @@ EOF
   pass "a captain outcome reaches main's model as one typed, sequence-keyed processing request while routine notes stay plain"
 }
 
+test_silent_routine_task_outcome_is_stored_without_a_note() {
+  local repo home out status
+  repo="$TMP_ROOT/silent-routine-root"
+  home="$TMP_ROOT/silent-routine-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, mainEntries, outcomeScript, defaultSessionCtx, home }; })()`);
+const { fire, dispatch, settle, sentToMain, mainEntries, outcomeScript, defaultSessionCtx, home } = globalThis.__t;
+import { readFileSync } from "node:fs";
+
+await fire("session_start", {}, defaultSessionCtx);
+let finishWakePrompt;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishWakePrompt = resolve; });
+const offer = dispatch("signal: build step 4 of 12 still running");
+if (!offer.accepted) throw new Error("branch did not accept the task-local wake");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "branch wake prompt");
+const session = globalThis.__fmSessions[0];
+const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+
+// 1. An unchanged still-working update is stored durably with no rendered
+// note and no main turn.
+const silent = await report.execute("still-working", { task: "branch-driver", verdict: "routine", summary: "still working, build step 4 of 12", wake: "signal: working", silent: true }, undefined, undefined, {});
+if (silent.isError) throw new Error(`silent routine task report failed: ${JSON.stringify(silent)}`);
+if (sentToMain.length !== 1) throw new Error(`silent routine report merged ${sentToMain.length} notes instead of one hidden merge`);
+if (sentToMain[0].message.display !== false) throw new Error("a silent still-working update rendered a note");
+if (sentToMain[0].options.triggerTurn) throw new Error("a silent still-working update opened a main turn");
+finishWakePrompt();
+await offer.settlement;
+globalThis.__fmOnBranchPrompt = undefined;
+
+// 2. A routine result worth a note still renders its sailboat note, and a
+// finished captain result still persists its visible entry and opens exactly
+// one sequence-keyed processing turn.
+const visible = await report.execute("worth-a-note", { task: "branch-driver", verdict: "routine", summary: "worker recovered automatically, backlog reconciled" }, undefined, undefined, {});
+if (visible.isError) throw new Error(`visible routine report failed: ${JSON.stringify(visible)}`);
+if (sentToMain[1].message.display !== true || !sentToMain[1].message.content.startsWith("⛵ branch-driver: worker recovered")) {
+  throw new Error(`worth-reporting routine note changed: ${JSON.stringify(sentToMain[1])}`);
+}
+const finished = await report.execute("finished", { task: "branch-driver", verdict: "captain", summary: "build finished, PR https://example.com/pr/9 checks green" }, undefined, undefined, {});
+if (finished.isError) throw new Error(`captain report failed: ${JSON.stringify(finished)}`);
+const captainEntries = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome");
+if (captainEntries.length !== 1 || captainEntries[0].data.summary !== "build finished, PR https://example.com/pr/9 checks green") {
+  throw new Error(`finished captain result was not persisted visibly: ${JSON.stringify(captainEntries)}`);
+}
+const processingRequests = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
+if (processingRequests.length !== 1 || !processingRequests[0].message.content.includes("[seq 3] branch-driver: build finished, PR https://example.com/pr/9 checks green")) {
+  throw new Error(`finished captain result did not open exactly one keyed processing turn: ${JSON.stringify(sentToMain)}`);
+}
+
+// 3. Silent stays routine-only: a silent captain report is refused before
+// the store is touched.
+const refused = await report.execute("silent-captain", { task: "branch-driver", verdict: "captain", summary: "must stay refused", silent: true }, undefined, undefined, {});
+if (!refused.isError) throw new Error("a silent captain report was accepted");
+
+// 4. The store holds all three outcomes in order with the silent flag, and
+// every merged row advanced the read cursor.
+const rows = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+if (rows.length !== 3) throw new Error(`expected 3 store rows, got ${rows.length}`);
+if (rows[0].silent !== true || rows[0].verdict !== "routine" || rows[0].task !== "branch-driver") {
+  throw new Error(`still-working row lost its silent routine identity: ${JSON.stringify(rows[0])}`);
+}
+if (rows[1].silent !== false || rows[2].verdict !== "captain") throw new Error(`later rows changed shape: ${JSON.stringify(rows)}`);
+if (outcomeScript(["unread"]) !== "") throw new Error("merged outcomes were not marked read");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "a silent routine task outcome must store without a note while captain delivery stays immediate: $out"
+  pass "a silent routine task outcome is stored without a note while worth-reporting routine and captain outcomes surface as before"
+}
+
 test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery() {
   local repo home out status
   repo="$TMP_ROOT/requested-outcome-root"
@@ -5273,6 +5347,7 @@ test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable
 test_branch_dispatch_two_stage_filter_and_prefix_contract
 test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery
+test_silent_routine_task_outcome_is_stored_without_a_note
 test_captain_outcome_is_exactly_once_across_crash_reload_and_unrelated_response
 test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
