@@ -7,9 +7,12 @@
 #
 #   fm_timeout_mechanism
 #       Prints the mechanism fm_run_timed will use on this host: "timeout",
-#       "gtimeout", "perl", or "bash". Set FM_TIMEOUT_MECHANISM_OVERRIDE=bash
-#       to force the dependency-free fallback, or =perl to force the perl one
-#       on a host that also has timeout, so tests can reach either path.
+#       "gtimeout", "perl", or "bash". FM_TIMEOUT_MECHANISM_OVERRIDE names one
+#       of those four to force it, so a test can reach a path this host would
+#       not otherwise select; an override naming a tool the host does not have
+#       falls through to normal detection, and unset or empty leaves detection
+#       entirely unchanged. Callers never set it; it exists so every mechanism
+#       stays reachable on whichever machine the suite runs.
 #
 #   fm_run_timed <seconds> <command> [args...]
 #       Runs the command with a hard bound. Exit status is the command's own,
@@ -31,11 +34,19 @@
 set -u
 
 fm_timeout_mechanism() {
-  if [ "${FM_TIMEOUT_MECHANISM_OVERRIDE:-}" = bash ]; then
-    printf 'bash\n'
-  elif [ "${FM_TIMEOUT_MECHANISM_OVERRIDE:-}" = perl ] && command -v perl >/dev/null 2>&1; then
-    printf 'perl\n'
-  elif command -v timeout >/dev/null 2>&1; then
+  case "${FM_TIMEOUT_MECHANISM_OVERRIDE:-}" in
+    bash)
+      printf 'bash\n'
+      return 0
+      ;;
+    timeout | gtimeout | perl)
+      if command -v "${FM_TIMEOUT_MECHANISM_OVERRIDE:-}" >/dev/null 2>&1; then
+        printf '%s\n' "${FM_TIMEOUT_MECHANISM_OVERRIDE:-}"
+        return 0
+      fi
+      ;;
+  esac
+  if command -v timeout >/dev/null 2>&1; then
     printf 'timeout\n'
   elif command -v gtimeout >/dev/null 2>&1; then
     printf 'gtimeout\n'

@@ -339,6 +339,47 @@ test_skip_switch_accepts_only_off() {
   pass "the setup skip switch honors off and refuses any other value"
 }
 
+test_hook_exceeding_its_bound_refuses() {
+  local rec id out status
+  id='setup-bound-r1'
+  rec=$(make_case bound "$id")
+  read_case_record "$rec"
+  write_hook <<'HOOK'
+#!/usr/bin/env bash
+sleep 60
+HOOK
+
+  out=$(FM_SPAWN_SETUP_TIMEOUT=1 run_ship "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched after its setup hook ran past its bound"$'\n'"$out"
+  assert_contains "$out" "did not finish within 1s" \
+    "the refusal did not name the bound that was hit, so the override was not honored"
+  assert_contains "$out" "half-provisioned worktree" \
+    "the refusal did not explain what a hook killed mid-run leaves behind"
+  assert_absent "$HOME_DIR/state/$id.meta" "a refused spawn published task metadata"
+  pass "a setup hook that runs past the configured bound is killed and refuses the spawn"
+}
+
+test_an_unusable_bound_falls_back_instead_of_reaching_the_timeout_tool() {
+  local rec id out status
+  id='setup-bound-invalid-r1'
+  rec=$(make_case bound-invalid "$id")
+  read_case_record "$rec"
+  # A value the bound cannot use must become the default rather than reach
+  # fm_run_timed, where a non-numeric bound errors and a zero one silently
+  # disables the deadline the lock depends on.
+  write_recording_hook
+
+  out=$(FM_SPAWN_SETUP_TIMEOUT=not-a-number run_ship "$id")
+  status=$?
+  expect_code 0 "$status" "an unusable setup bound should fall back and still provision"$'\n'"$out"
+  assert_contains "$out" "spawned $id" "the spawn with an unusable bound did not report success"
+  assert_present "$CASE_DIR/hook-ran" "an unusable bound stopped the hook from running at all"
+  assert_not_contains "$out" "did not finish within" \
+    "an unusable bound was passed through instead of falling back to the default"
+  pass "a setup bound that is not a positive integer falls back to the default"
+}
+
 # The ordering this pins is load-bearing rather than cosmetic: a project's own
 # setup commonly syncs a main checkout's .claude/ into the worktree, and
 # firstmate's launch settings carry the worker's own supervision wiring. The
@@ -409,6 +450,8 @@ test_hook_that_dirties_the_worktree_refuses
 test_unusable_hook_refuses_rather_than_skipping
 test_hook_named_for_another_project_is_not_run
 test_skip_switch_accepts_only_off
+test_hook_exceeding_its_bound_refuses
+test_an_unusable_bound_falls_back_instead_of_reaching_the_timeout_tool
 test_hook_runs_before_the_worker_launch_settings_are_written
 
 echo "# all fm-spawn-setup-hook tests passed"

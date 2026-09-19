@@ -9,9 +9,11 @@
 # assert the status it reports: a normal exit survives, a signal death is
 # nonzero (128 + signal, the shell convention), and the bound still reports 124.
 #
-# Each case runs under every mechanism the host can reach, forced explicitly, so
-# a host with GNU timeout installed still exercises the perl fallback that a
-# coreutils-less machine actually uses.
+# Each case runs under all four mechanisms - timeout, gtimeout, perl, bash -
+# forced explicitly one at a time, so a CI host with GNU timeout still exercises
+# the perl fallback a coreutils-less machine actually uses, and a stock Mac
+# still exercises the timeout path CI runs on. A mechanism whose tool this host
+# does not have is reported as an explicit skip rather than passed over.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -20,12 +22,33 @@ set -u
 LIB="$ROOT/bin/fm-timeout-lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-timeout-lib)
 
+ALL_MECHANISMS='timeout gtimeout perl bash'
+
 # The mechanisms this host can actually run. bash is dependency-free and always
-# present; perl is the one a stock macOS host falls through to.
+# present; the other three need their tool installed. Asking the library rather
+# than probing PATH here keeps the list honest: a mechanism is only "available"
+# if forcing it actually makes fm_run_timed take that path.
 available_mechanisms() {
-  printf 'bash\n'
-  command -v perl >/dev/null 2>&1 && printf 'perl\n'
+  local mechanism
+  for mechanism in $ALL_MECHANISMS; do
+    [ "$(FM_TIMEOUT_MECHANISM_OVERRIDE="$mechanism" bash -c '. "$1"; fm_timeout_mechanism' _ "$LIB")" = "$mechanism" ] &&
+      printf '%s\n' "$mechanism"
+  done
   return 0
+}
+
+# Naming what this host cannot reach keeps a partial run from reading as a full
+# one: on a stock Mac that is timeout and gtimeout, on CI it is usually neither.
+report_unavailable_mechanisms() {
+  local mechanism available
+  available=$(available_mechanisms)
+  for mechanism in $ALL_MECHANISMS; do
+    case "$available" in
+      *"$mechanism"*) ;;
+      *) printf '# skip - the %s mechanism needs a %s binary this host does not have\n' \
+        "$mechanism" "$mechanism" ;;
+    esac
+  done
 }
 
 # Drop a child script and print its path.
@@ -46,17 +69,53 @@ run_timed_status() { # <mechanism> <seconds> <command...>
   printf '%s\n' "$?"
 }
 
-test_mechanism_forcing_reaches_the_path_under_test() {
-  local mechanism seen
-  # Without this the whole suite could pass vacuously by testing one mechanism
-  # four times, which is exactly what happens on a host with GNU timeout if the
-  # override only honors bash.
-  for mechanism in $(available_mechanisms); do
-    seen=$(FM_TIMEOUT_MECHANISM_OVERRIDE="$mechanism" bash -c '. "$1"; fm_timeout_mechanism' _ "$LIB")
-    assert_equals "$mechanism" "$seen" \
-      "forcing the $mechanism mechanism did not select it, so cases below would not exercise it"
+resolve_mechanism() { # [<override>]
+  if [ "$#" -ge 1 ]; then
+    FM_TIMEOUT_MECHANISM_OVERRIDE="$1" bash -c '. "$1"; fm_timeout_mechanism' _ "$LIB"
+  else
+    bash -c 'unset FM_TIMEOUT_MECHANISM_OVERRIDE; . "$1"; fm_timeout_mechanism' _ "$LIB"
+  fi
+}
+
+test_the_override_never_shifts_what_callers_get_by_default() {
+  local detected expected
+  # The knob exists for this suite, not for callers, so an unset or empty value
+  # has to leave the documented precedence - timeout, gtimeout, perl, bash -
+  # exactly as it was before the knob widened.
+  if command -v timeout >/dev/null 2>&1; then
+    expected=timeout
+  elif command -v gtimeout >/dev/null 2>&1; then
+    expected=gtimeout
+  elif command -v perl >/dev/null 2>&1; then
+    expected=perl
+  else
+    expected=bash
+  fi
+
+  detected=$(resolve_mechanism)
+  assert_equals "$expected" "$detected" "an unset override did not leave host detection unchanged"
+  detected=$(resolve_mechanism '')
+  assert_equals "$expected" "$detected" "an empty override did not leave host detection unchanged"
+  detected=$(resolve_mechanism 'not-a-mechanism')
+  assert_equals "$expected" "$detected" "an unrecognized override was not ignored in favor of host detection"
+  pass "the mechanism override changes nothing for callers that do not set it"
+}
+
+test_an_override_for_a_missing_tool_falls_back_instead_of_breaking() {
+  local mechanism detected available
+  available=$(available_mechanisms)
+  assert_contains "$available" bash "the dependency-free bash mechanism should always be reachable"
+  for mechanism in $ALL_MECHANISMS; do
+    case "$available" in
+      *"$mechanism"*) continue ;;
+    esac
+    detected=$(resolve_mechanism "$mechanism")
+    assert_not_equals "$mechanism" "$detected" \
+      "forcing the absent $mechanism mechanism claimed to select it"
+    assert_not_equals "" "$detected" \
+      "forcing the absent $mechanism mechanism resolved to nothing at all"
   done
-  pass "each available mechanism can be forced, so every case below reaches the path it names"
+  pass "forcing a mechanism this host lacks falls back to a usable one instead of failing"
 }
 
 test_signal_killed_command_is_not_reported_as_success() {
@@ -114,7 +173,9 @@ test_the_bound_still_reports_124() {
   pass "a command that runs past its bound still reports 124 on every mechanism"
 }
 
-test_mechanism_forcing_reaches_the_path_under_test
+report_unavailable_mechanisms
+test_the_override_never_shifts_what_callers_get_by_default
+test_an_override_for_a_missing_tool_falls_back_instead_of_breaking
 test_ordinary_exit_statuses_survive_the_runner
 test_signal_killed_command_is_not_reported_as_success
 test_a_terminating_signal_other_than_kill_is_also_nonzero

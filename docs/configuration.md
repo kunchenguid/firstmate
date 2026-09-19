@@ -461,8 +461,11 @@ It is not, however, a full rollback, and retrying the same task id can need up t
 
 Hooks are skipped for relaunches, for secondmates, and on the Orca backend, which provisions its worktrees from its own repository hook at creation time.
 `FM_SPAWN_SETUP=off` skips a configured hook for one spawn with a notice, for the case where the environment is known good and the seconds are not wanted; any other value refuses rather than guessing.
-A hook is bounded at a fixed 120 seconds, because it runs while the spawn still holds the shared Treehouse project lock: for as long as a hook runs, another spawn into the same project, and a teardown returning one of its slots, refuse outright rather than wait ("another Treehouse slot allocation or return is in progress").
-Keep a hook well inside that bound, and leave anything slower - a full image build, a database container - to the worker's first command instead.
+A hook is bounded at 120 seconds by default, and exceeding the bound refuses the spawn like any other failure.
+The default is tight because a hook runs while the spawn still holds the shared Treehouse project lock: for as long as a hook runs, another spawn into the same project, and a teardown returning one of its slots, refuse outright rather than wait ("another Treehouse slot allocation or return is in progress").
+`FM_SPAWN_SETUP_TIMEOUT` raises or lowers it in whole seconds; anything that is not a positive integer uses 120.
+Raise it when a hook is legitimately slow - a cold package store, a distant registry - rather than reaching for `FM_SPAWN_SETUP=off`, which skips provisioning altogether and is not an escape hatch for slowness.
+Anything slower still - a full image build, a database container - belongs in the worker's first command instead of the hook, where it does not hold the lock.
 [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the exact mechanics, with regression coverage in [`tests/fm-spawn-setup-hook.test.sh`](../tests/fm-spawn-setup-hook.test.sh).
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
@@ -1080,6 +1083,7 @@ FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
 FM_SPAWN_SETUP=         # optional per-spawn skip of a configured spawn setup hook; only "off" is accepted, any other value refuses
+FM_SPAWN_SETUP_TIMEOUT=120  # seconds bounding one spawn setup hook; anything but a positive integer uses 120
 FM_TASK_ID=             # internal task-worker marker fm-spawn.sh exports into ship and scout panes, never set by hand; bin/fm-test-run.sh refuses to execute in the repository primary checkout while it is set
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_SUBMIT_POLLS=6  # herdr-only: agent-state samples spread across each Enter attempt's budget when confirming a submit (docs/herdr-backend.md "Current transport behavior")

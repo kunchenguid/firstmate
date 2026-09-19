@@ -262,11 +262,14 @@
 #   present but not a runnable file refuses by name rather than by exec failure,
 #   whose diagnostic varies with the host's timeout mechanism.
 #   It runs synchronously with cwd set to the task worktree and stdin detached,
-#   under a hard 120-second bound, receiving FM_TASK_ID, FM_TASK_KIND,
-#   FM_PROJECT (the absolute project clone this home spawns from), and
-#   FM_WORKTREE. It runs while this spawn still holds the shared Treehouse
-#   project lock, so another spawn or a teardown for the same project refuses
-#   rather than waits for as long as a hook runs; the bound caps that window.
+#   under a hard FM_SPAWN_SETUP_TIMEOUT bound (default 120 seconds; invalid or
+#   zero values use 120), receiving FM_TASK_ID, FM_TASK_KIND, FM_PROJECT (the
+#   absolute project clone this home spawns from), and FM_WORKTREE. It runs
+#   while this spawn still holds the shared Treehouse project lock, so another
+#   spawn or a teardown for the same project refuses rather than waits for as
+#   long as a hook runs; the bound caps that window, which is why the default is
+#   tight and a hook that legitimately needs longer raises it rather than
+#   skipping provisioning.
 #   A nonzero exit, the bound, or a worktree left carrying files git does not
 #   ignore refuses the spawn and names the kept hook log; a hook may write only
 #   ignored paths, because anything else is later read as the worker's own
@@ -2964,7 +2967,8 @@ freshen_spawn_worktree_base() { # <worktree>
 # Refusing here instead means the operator meets the problem while the hook's
 # output is still the newest thing on disk.
 run_spawn_setup_hook() { # <worktree>
-  local worktree=$1 hook log status rc=0 bound=120
+  local worktree=$1 hook log status rc=0 bound=${FM_SPAWN_SETUP_TIMEOUT:-120}
+  case "$bound" in '' | *[!0-9]* | 0*) bound=120 ;; esac
   hook="$CONFIG/spawn-setup/$(basename "$PROJ_ABS")"
   # Absent is the unconfigured majority and stays silent. Every other shape
   # reports, because a hook the captain wrote and firstmate then skipped is the
@@ -3022,7 +3026,7 @@ run_spawn_setup_hook() { # <worktree>
   }
   if [ -n "$status" ]; then
     echo "error: spawn-setup hook '$hook' left files git does not ignore in '$worktree'; a hook may write only ignored paths, because anything else is later read as the worker's own unlanded work; refusing to launch" >&2
-    spawn_setup_hook_leftovers "$worktree"
+    spawn_setup_hook_leftovers "$worktree" "$status"
     spawn_setup_hook_log_tail "$log"
     return 1
   fi
@@ -3035,10 +3039,17 @@ run_spawn_setup_hook() { # <worktree>
 # interrupted partway through is the likeliest to have written one, so this
 # belongs to the failure and timeout refusals as much as to the dirty-tree one.
 # Silent when the tree is clean, or unreadable and some other refusal is already
-# being reported.
-spawn_setup_hook_leftovers() { # <worktree>
+# being reported. A caller that already read the porcelain text passes it in, so
+# one observation backs both its verdict and this excerpt: re-reading after the
+# bound has signalled the hook's process group can catch a grandchild still
+# flushing and print an excerpt that contradicts the refusal above it.
+spawn_setup_hook_leftovers() { # <worktree> [<porcelain-status>]
   local worktree=$1 status
-  status=$(git -C "$worktree" -c core.quotePath=false status --porcelain 2>/dev/null) || return 0
+  if [ "$#" -ge 2 ]; then
+    status=$2
+  else
+    status=$(git -C "$worktree" -c core.quotePath=false status --porcelain 2>/dev/null) || return 0
+  fi
   [ -n "$status" ] || return 0
   echo "--- first 10 entries of git status in $worktree ---" >&2
   printf '%s\n' "$status" | head -10 >&2
