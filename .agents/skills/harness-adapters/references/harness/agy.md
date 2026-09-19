@@ -12,7 +12,7 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 | Launch | `agy --prompt-interactive "<brief>" --model <id> --effort <level> --dangerously-skip-permissions`, with the resolved absolute binary; the brief auto-submits with no extra Enter. The spawn pre-registers the worktree in agy's trust store first, then waits for a busy turn (answering the folder-trust dialog if it renders anyway) before reporting success. |
 | Busy state | No hook or plugin writer, so nothing is armed and no record is seeded; on Herdr the native `working` status classifies busy, and everywhere else the `agy-regex` rendered-tail fallback in `../../../../../bin/fm-busy-lib.sh` does. |
 | Rendered tail | Busy status row carries `esc to cancel` on the left; the idle row shows `? for shortcuts` instead. The `Generating...` word beside the braille spinner is free-floating output and is not a signal. |
-| Turn end | No turn-end hook or notification touch exists; completion arrives through the worker status protocol and, on Herdr, the native return to `idle`. |
+| Turn end | A global `Stop` hook in `$HOME/.gemini/config/hooks.json`, installed by `../../../../../bin/fm-agy-turnend-hook.sh` and gated by a per-task token, touches `state/<id>.turn-ended`. It fires only when the payload's `fullyIdle` is true. |
 | Exit | `/quit`, one Enter; the process exits. |
 | Interrupt | Single `Escape`, which prints the Interrupted row and leaves an idle composer with no repollution, so no clear key follows. |
 | Skill | No verified slash-skill form; use natural language. |
@@ -46,10 +46,23 @@ agy is deliberately absent from the session-lock name vocabulary in `../../../..
 
 `../../../../../bin/fm-spawn.sh` arms no busy generation for agy and writes no sidecar, exactly because no writer could ever clear a seeded record.
 `fm_busy_agy_tail_busy` matches the pinned `esc to cancel` status row alone, hardcoded with no environment override, and `fm_busy_classify` reports `unknown agy-regex` rather than idle when it is absent, because a long turn can scroll the marker out of the captured tail.
-Teardown removes nothing agy-specific because the spawn leaves nothing behind.
+Teardown retires the worktree pointer, the state token, and the private registry entry the spawn minted.
+
+## Crew turn-end hook
+
+agy exposes a hooks facility that is absent from `--help` and has changed recently in its own changelog, so describe it by behavior rather than by version: named hooks live in `$HOME/.gemini/config/hooks.json`, verified present on agy 1.2.2.
+
+`../../../../../bin/fm-agy-turnend-hook.sh` owns one `firstmate-turn-end` key in that file, one silent always-zero hook script, and one private token registry under `$HOME/.gemini/antigravity-cli/fm-turn-end.d/`.
+Every operator hook in that file is read back and rewritten untouched, and a missing, malformed, or symlinked config is refused without a write.
+Each agy worker worktree receives a gitignored `.fm-agy-turnend` pointer, and the global hook touches `state/<id>.turn-ended` only when the Stop payload's `workspacePaths`, the pointer, and the registry entry all agree.
+
+The `fullyIdle` gate is load-bearing.
+agy moves a shell command that outruns its `WaitMsBeforeAsync` into the background, yields the composer, and fires `Stop` with `fullyIdle` false while that command is still running; a second `Stop` with `fullyIdle` true follows once it finishes.
+Waking firstmate on the first event would report a worker done while its own build or test run is still going, so any future busy-state writer must apply the same gate.
 
 ## Primary integration
 
 Unsupported and unverified.
-`../../../../../docs/supervision-protocols/` carries no agy protocol, no turn-end guard adapter exists for it, and this adapter verified only the crewmate-side launch, busy state, interrupt, and exit.
+The crew `Stop` hook above is not a primary supervision protocol: its payload reports only that a turn ended.
+`../../../../../docs/supervision-protocols/` carries no agy protocol, no primary turn-end guard adapter exists for it, and this adapter verified only the crewmate-side launch, busy state, turn end, interrupt, and exit.
 `references/common/primary-hooks.md`'s unsupported-boundary rule applies: never invent a wake protocol from a similar TUI.
