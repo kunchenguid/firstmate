@@ -57,6 +57,14 @@
 # it carries the AGENTS.md authoring bar (widely useful knowledge only, pointers
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
+# Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
+# fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
+# second owner of a contract that must stay current across relaunches.
+# Every ship/scout scaffold also reinforces the configuration-owned nested
+# delegation rule.
+# Native child-agent facilities are outside fm-spawn.sh's
+# interception point, so the brief names the required profile classification
+# without claiming runtime enforcement that Firstmate cannot provide.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -105,6 +113,11 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
   STATE=$(resolve_directory_input FM_STATE_OVERRIDE "$FM_STATE_OVERRIDE") || exit 1
 else
   STATE="$FM_HOME/state"
+fi
+if [ -n "${FM_CONFIG_OVERRIDE:-}" ]; then
+  CONFIG=$(resolve_directory_input FM_CONFIG_OVERRIDE "$FM_CONFIG_OVERRIDE") || exit 1
+else
+  CONFIG="$FM_HOME/config"
 fi
 KIND=ship
 HERDR_LAB=0
@@ -196,6 +209,41 @@ When a terminal message says an instruction is waiting there - and at any natura
 The move IS the acknowledgement: without it firstmate rings again and eventually treats you as stuck. An empty or absent inbox needs no action.
 EOF
 INBOX_SECTION=${INBOX_SECTION%$'\n'}
+
+# This is the single deliberate reinforcement of docs/configuration.md's
+# nested-delegation policy.
+# A worker needs the rule at the precise point a
+# third-party native child-agent facility may be available, while the complete
+# policy, schema, and enforcement boundary remain with the configuration doc.
+NESTED_ROUTING_SECTION=
+if [ "$KIND" != secondmate ]; then
+  ROUTING_CONFIG="\`$CONFIG/crew-dispatch.json\`"
+  CREW_HARNESS_CONFIG="\`$CONFIG/crew-harness\`"
+  FIRSTMATE_HARNESS=$(FM_HOME="$FM_HOME" FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-harness.sh")
+  FIRSTMATE_ROUTING_BASELINE="\`$FIRSTMATE_HARNESS\` with that harness's default model and effort"
+  ROUTING_SCHEMA="\`$FM_ROOT/docs/configuration.md\` under Crew dispatch profiles"
+  HARNESS_POLICY="\`$FM_ROOT/AGENTS.md\` section 4"
+  QUOTA_ARRAY_SKILL="\`$FM_ROOT/.agents/skills/quota-array-dispatch/SKILL.md\`"
+IFS= read -r -d '' NESTED_ROUTING_SECTION <<EOF || true
+# Nested delegation and model routing
+$ROUTING_CONFIG is the active firstmate home's current worker-routing authority when that file is present.
+Before classification, if that file is present but unreadable, malformed JSON, or invalid under $ROUTING_SCHEMA, do not use the static fallback or create a child; report the invalid policy to Firstmate.
+Before creating a child through a native subagent or delegation facility, classify the child task under that current policy and explicitly apply the complete selected profile: its configured harness, model, and effort, with an omitted model or effort fixed to the selected harness's default rather than inherited from your session.
+If the matching rule or default is a profile array, do not choose among its candidates; report the array to Firstmate, which alone loads $QUOTA_ARRAY_SKILL and returns the concrete selection.
+If no rule matches and the policy has no default, read $CREW_HARNESS_CONFIG at child intake.
+A current concrete adapter in that file may be used only if $HARNESS_POLICY verifies it for crewmates or scouts, selecting that harness with its default model and effort.
+If the file is absent, empty, or \`default\`, use the captured Firstmate baseline $FIRSTMATE_ROUTING_BASELINE.
+If the current value is unverified, report that exact value to Firstmate and use the captured baseline instead.
+Use the captured baseline only if $HARNESS_POLICY verifies it for a primary session; otherwise do not create a child and report the unverified baseline to Firstmate.
+Include this entire Nested delegation and model routing section unchanged in every native child's instructions so the requirement repeats at every delegation depth.
+Create the native child only when its facility can represent that complete selection and receive this section.
+If the facility cannot represent every selected axis or deliver this section, do not create the child; report the mismatch to Firstmate so the child can be routed through the fleet lifecycle.
+Do not use legacy Fable/Opus/Sonnet/Haiku routing tiers to select a child profile.
+A model explicitly selected by $ROUTING_CONFIG remains authoritative even when its name contains one of those words.
+Firstmate cannot intercept every third-party native child facility, so this is a briefing requirement rather than claimed runtime enforcement for those tools.
+EOF
+  NESTED_ROUTING_SECTION=${NESTED_ROUTING_SECTION%$'\n'}
+fi
 
 if [ "$KIND" = secondmate ]; then
 SECONDMATE_PROJECTS=""
@@ -330,6 +378,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 $HERDR_SECTION
 
+$NESTED_ROUTING_SECTION
+
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
@@ -402,6 +452,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 $HERDR_SECTION
+
+$NESTED_ROUTING_SECTION
 
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.

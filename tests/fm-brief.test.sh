@@ -382,6 +382,107 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+test_nested_delegation_model_routing_contract() {
+  local home id brief kind routing_config quota_skill harness_policy crew_harness_config override_config override_routing_config override_crew_harness_config
+  local CLAUDECODE=1 CURSOR_AGENT='' CURSOR_INVOKED_AS='' GEMINI_CLI='' ATLASSIAN_AGENT_TYPE='' ROVODEV_CLI=''
+  local FM_OMP_HARNESS='' PI_CODING_AGENT='' FM_PI_HARNESS='' GROK_AGENT=''
+  export CLAUDECODE CURSOR_AGENT CURSOR_INVOKED_AS GEMINI_CLI ATLASSIAN_AGENT_TYPE ROVODEV_CLI
+  export FM_OMP_HARNESS PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT
+  home="$TMP_ROOT/nested routing home"
+  mkdir -p "$home/data" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  routing_config="\`$home/config/crew-dispatch.json\`"
+  crew_harness_config="\`$home/config/crew-harness\`"
+  quota_skill="\`$ROOT/.agents/skills/quota-array-dispatch/SKILL.md\`"
+  harness_policy="\`$ROOT/AGENTS.md\` section 4"
+
+  for kind in ship scout; do
+    id="brief-nested-routing-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep '# Nested delegation and model routing' "$brief" \
+      "$kind brief omitted the nested-delegation routing section"
+    assert_grep "$routing_config is the active firstmate home's current worker-routing authority" "$brief" \
+      "$kind brief did not identify the resolved active-home routing file"
+    assert_no_grep "\`config/crew-dispatch.json\` in the active firstmate home" "$brief" \
+      "$kind brief retained an unusable worktree-relative routing path"
+    assert_grep 'classify the child task under that current policy' "$brief" \
+      "$kind brief omitted the same-policy child classification rule"
+    assert_grep 'explicitly apply the complete selected profile: its configured harness, model, and effort' "$brief" \
+      "$kind brief omitted the explicit child profile rule"
+    assert_grep 'if that file is present but unreadable, malformed JSON, or invalid under' "$brief" \
+      "$kind brief did not refuse invalid current routing policy"
+    assert_grep 'do not use the static fallback or create a child' "$brief" \
+      "$kind brief selected around invalid current routing policy"
+    assert_grep 'do not choose among its candidates; report the array to Firstmate' "$brief" \
+      "$kind brief let the worker resolve a profile array"
+    assert_grep "which alone loads $quota_skill and returns the concrete selection" "$brief" \
+      "$kind brief omitted Firstmate-owned profile-array selection"
+    assert_grep "read $crew_harness_config at child intake" "$brief" \
+      "$kind brief omitted the current static-harness fallback"
+    assert_grep "A current concrete adapter in that file may be used only if $harness_policy verifies it for crewmates or scouts" "$brief" \
+      "$kind brief froze the concrete static-harness fallback"
+    assert_grep "If the file is absent, empty, or \`default\`, use the captured Firstmate baseline \`claude\` with that harness" "$brief" \
+      "$kind brief omitted the captured baseline for an unset static harness"
+    assert_grep 'If the current value is unverified, report that exact value to Firstmate and use the captured baseline instead.' "$brief" \
+      "$kind brief did not report and replace an unverified static harness"
+    assert_grep "Use the captured baseline only if $harness_policy verifies it for a primary session" "$brief" \
+      "$kind brief did not validate the captured Firstmate baseline"
+    assert_grep 'otherwise do not create a child and report the unverified baseline to Firstmate.' "$brief" \
+      "$kind brief did not fail closed on an unverified Firstmate baseline"
+    assert_grep "Include this entire Nested delegation and model routing section unchanged in every native child's instructions" "$brief" \
+      "$kind brief did not propagate nested routing recursively"
+    assert_grep 'Create the native child only when its facility can represent that complete selection and receive this section.' "$brief" \
+      "$kind brief did not fail closed on unrepresentable profiles"
+    assert_grep 'do not create the child; report the mismatch to Firstmate' "$brief" \
+      "$kind brief did not reroute an unrepresentable profile through Firstmate"
+    assert_grep 'Do not use legacy Fable/Opus/Sonnet/Haiku routing tiers to select a child profile.' "$brief" \
+      "$kind brief retained legacy tier-based selection"
+    assert_grep "A model explicitly selected by $routing_config remains authoritative" "$brief" \
+      "$kind brief rejects valid configured model names that resemble legacy tiers"
+    assert_grep 'cannot intercept every third-party native child facility' "$brief" \
+      "$kind brief overclaims Firstmate runtime enforcement"
+  done
+
+  override_config="$TMP_ROOT/override routing config"
+  mkdir -p "$override_config"
+  printf 'grok\n' > "$override_config/crew-harness"
+  override_routing_config="\`$override_config/crew-dispatch.json\`"
+  override_crew_harness_config="\`$override_config/crew-harness\`"
+  id="brief-nested-routing-override"
+  FM_HOME="$home" FM_CONFIG_OVERRIDE="$override_config" \
+    "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "$override_routing_config is the active firstmate home's current worker-routing authority" "$brief" \
+    "ship brief did not identify the effective overridden routing file"
+  assert_no_grep "$routing_config is the active firstmate home's current worker-routing authority" "$brief" \
+    "ship brief ignored FM_CONFIG_OVERRIDE for nested routing"
+  assert_grep "read $override_crew_harness_config at child intake" "$brief" \
+    "ship brief did not read the overridden static fallback at child intake"
+  assert_grep "use the captured Firstmate baseline \`claude\` with that harness" "$brief" \
+    "ship brief omitted the Firstmate baseline from overridden routing"
+  assert_no_grep "resolved selection is \`codex\`" "$brief" \
+    "ship brief froze the original static harness at generation time"
+  assert_no_grep "resolved selection is \`grok\`" "$brief" \
+    "ship brief froze the overridden static harness at generation time"
+
+  printf 'bogus\n' > "$override_config/crew-harness"
+  id="brief-nested-routing-unverified-static"
+  FM_HOME="$home" FM_CONFIG_OVERRIDE="$override_config" \
+    "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep 'If the current value is unverified, report that exact value to Firstmate and use the captured baseline instead.' "$brief" \
+    "ship brief with an unverified static harness omitted the report and verified fallback"
+  assert_grep "Use the captured baseline only if $harness_policy verifies it for a primary session" "$brief" \
+    "ship brief with an unverified static harness did not validate its fallback"
+
+  pass "fm-brief.sh: ship and scout briefs require configured nested model routing without overclaiming enforcement"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -795,6 +896,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_nested_delegation_model_routing_contract
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

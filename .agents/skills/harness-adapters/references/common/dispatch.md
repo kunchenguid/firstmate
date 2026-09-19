@@ -17,7 +17,8 @@ The inherited dispatch file applies the same best-fit profiles there.
 ## Owners
 
 `../../../bin/fm-spawn.sh` owns launch, autonomy, concrete flags, task-kind compatibility, and worker turn-end wiring.
-Natural-language rules stay with firstmate, while scripts receive concrete axes.
+Natural-language rules stay with firstmate for fleet intake, while a worker classifies its native child under the generated nested-routing contract and routes any matched profile array back to Firstmate for resolution.
+Scripts receive concrete axes.
 
 `../../../bin/fm-busy-lib.sh` owns semantic busy trust.
 Composer shapes, glyphs, placeholders, popups, rendered delivery signals, and the `empty` / `pending` / `pending-unproven` / `unknown` decision belong only to `../../../bin/fm-composer-lib.sh`.

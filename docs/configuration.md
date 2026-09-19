@@ -333,8 +333,8 @@ For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected exec
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
-`config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
-The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
+`config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules used to route a crewmate or scout.
+At fleet intake, the shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
 When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
 Batch spawns satisfy the same requirement with a shared `--harness`.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
@@ -364,7 +364,7 @@ The single-object form stays fully backward-compatible, and every profile needs 
 Profile `model` and `effort` fields and rule `why` are optional.
 An omitted model or effort means the selected harness uses its own default for that axis.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
-If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
+At fleet intake, if no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
 If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.
@@ -372,6 +372,20 @@ Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstr
 Malformed JSON, an empty or malformed rule/default array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
+
+### Nested delegation
+
+When active, `config/crew-dispatch.json` is also the current authority for every worker's model and effort selection at every delegation depth.
+At every native-child intake, a present but unreadable or invalid dispatch file blocks both static fallback and child creation until the worker reports it to Firstmate.
+The worker classifies the child task against the same rules or default and explicitly applies the complete selected profile: its configured harness, model, and effort, with an omitted model or effort fixed to the selected harness's default rather than inherited or improvised from the parent session.
+When classification selects a profile array, the worker must route that array to Firstmate, which alone applies `quota-array-dispatch` and returns the concrete selection.
+When no rule matches and the dispatch policy has no default, the worker reads the current `config/crew-harness`: an adapter verified for crewmates or scouts selects that harness's default model and effort, while an absent, empty, `default`, or unverified value selects the Firstmate harness baseline captured in the generated brief.
+The worker reports an unverified static value before falling back, and it may use the captured baseline only when that harness remains verified for a primary session; an unverified baseline blocks child creation and must also be reported.
+Every native child's instructions must receive the complete generated nested-routing block unchanged so the same requirement propagates to every depth.
+The worker may create the native child only when that facility can represent the complete selection and receive that block; otherwise it must report the mismatch to Firstmate so the child can be routed through the fleet lifecycle.
+No legacy Fable/Opus/Sonnet/Haiku tier policy may choose a child profile, but a model explicitly selected by the active configuration remains authoritative even when its name contains one of those words.
+`fm-spawn.sh` enforces explicit resolved profiles only for fleet crewmate and scout spawns.
+Firstmate cannot intercept every third-party native child-agent tool, so ship and scout briefs carry this as an explicit worker requirement rather than claiming runtime enforcement outside the fleet lifecycle.
 
 ## Toolchain
 
