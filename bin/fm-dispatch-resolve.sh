@@ -269,16 +269,11 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
   def prov($p): ([$q.providers[] | select(.provider == $p)] | first) // null;
   def rows($p): (prov($p) | .quotaSemantics.effectiveAvailability // []);
-  def bare($m): ($m | split("/") | last);
   def provider_of($c): ($c.provider // $pmap[$c.harness] // null);
   def measured($p):
     (prov($p) != null and (["known", "partial"] | index(prov($p).quotaSemantics.status)) != null);
-  def applicable($p; $m):
-    (bare($m)) as $bare |
-    [rows($p)[] | select(
-      .scope == "all_models" or .scope == "all_products" or
-      ($m != "" and (.scope == ("model:" + $bare) or .scope == ("product:" + $bare)))
-    )];
+  def universal($p): [rows($p)[] | select(.scope == "all_models" or .scope == "all_products")];
+  def named($p): [rows($p)[] | select((.scope | startswith("model:")) or (.scope | startswith("product:")))];
   def floor_state($f; $p):
     if $f == null then "none"
     elif prov($p) == null or (measured($p) | not) then "unknown"
@@ -295,8 +290,9 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     if $p == null then {profile: $c, eligible: false, reason: "no provider family for harness \($c.harness); declare provider on the profile"}
     elif prov($p) == null then {profile: $c, provider: $p, eligible: true, unranked: true, reason: "provider \($p) not in the quota snapshot"}
     else
-      (applicable($p; ($c.model // ""))) as $rows |
-      (evidence($rows)) as $bounds |
+      (universal($p)) as $rows |
+      (named($p)) as $named |
+      (evidence(rows($p))) as $bounds |
       (floor_state($c.floor; $p)) as $profile_floor_state |
       if any($rows[]; (.runway.status // "") == "exhausted_now") then
         ($rows | map(select((.runway.status // "") == "exhausted_now")) | first) as $bad |
@@ -313,6 +309,11 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
       elif (measured($p) | not) then
         ($rows | first) as $row |
         {profile: $c, provider: $p, bounds: $bounds, scope: ($row.scope // null), pct: ($row.effectivePercentRemaining // null), runway: ($row.runway.status // null), eligible: true, unranked: true, unknown: true, reason: "provider \($p) unmeasured (\(prov($p).quotaSemantics.status))"}
+      elif ($named | length) > 0 then
+        (($rows | first) // ($named | first)) as $row |
+        {profile: $c, provider: $p, bounds: $bounds, scope: $row.scope, pct: ($row.effectivePercentRemaining // null),
+         spendPriority: ($row.selection.spendPriority // null), runway: ($row.runway.status // null), eligible: true, unranked: true, unknown: true,
+         reason: "named quota scope applicability is unproven without catalog evidence: \($named | map(.scope) | unique | join(", "))"}
       elif ($rows | length) == 0 then
         {profile: $c, provider: $p, bounds: $bounds, eligible: true, unranked: true, unknown: true, reason: "no applicable quota row for provider \($p)"}
       elif $profile_floor_state == "unknown" then
@@ -361,10 +362,10 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     confidence: $a.confidence, probabilities: $a.probabilities
   } as $ev |
   if $sel.invalid then $ev + {status: "error", reason: $sel.invalid}
-  elif $a.confidence < ($floor | tonumber) then
-    $ev + {status: "ambiguous", reason: "confidence \($a.confidence) below floor \($floor)", candidates: ($answer_use | map(evaluate(.)))}
   elif $sel.escalate then
     $ev + {status: "escalate", reason: $sel.escalate, candidates: ($answer_use | map(evaluate(.)))}
+  elif $a.confidence < ($floor | tonumber) then
+    $ev + {status: "ambiguous", reason: "confidence \($a.confidence) below floor \($floor)", candidates: ($answer_use | map(evaluate(.)))}
   elif ($sel.use | length) == 0 then $ev + {status: "escalate", reason: "no profiles configured for \($sel.source)", note: $sel.note, candidates: []}
   else
     ($sel.use | map(evaluate(.))) as $cands |

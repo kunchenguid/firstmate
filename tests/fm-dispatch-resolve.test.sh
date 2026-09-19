@@ -79,8 +79,7 @@ write_quota() {  # <path> <cursor spendPriority> [<claude all_models spendPriori
   "schemaVersion": 5,
   "providers": [
     { "provider": "claude", "state": { "status": "fresh" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
-      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 79, "runway": { "status": "through_reset" }, "selection": { "spendPriority": $claude } },
-      { "scope": "model:fable", "status": "known", "effectivePercentRemaining": 15, "runway": { "status": "through_reset" }, "selection": { "spendPriority": -0.79 } } ] } },
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 79, "runway": { "status": "through_reset" }, "selection": { "spendPriority": $claude } } ] } },
     { "provider": "codex", "state": { "status": "fresh" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
       { "scope": "all_models", "status": "known", "effectivePercentRemaining": 31, "runway": { "status": "through_reset" }, "selection": { "spendPriority": -0.1649 } } ] } },
     { "provider": "cursor", "state": { "status": "fresh" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
@@ -339,25 +338,37 @@ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 0 "$code" "escalate exits 0"
 assert_contains "$out" '  status: escalate' "approval-gated rule escalates"
 assert_contains "$out" "  reason: rule requires the captain's explicit approval before dispatch" "escalate names the approval gate"
-assert_contains "$out" 'candidate: claude:fable  provider=claude  scope=model:fable  remaining=15%  spendPriority=-0.79  runway=through_reset  bounds=all_models:79%/through_reset,model:fable:15%/through_reset  -> eligible' "approval escalation preserves matched candidate evidence"
+assert_contains "$out" 'candidate: claude:fable  provider=claude  scope=all_models  remaining=79%  spendPriority=-0.4627  runway=through_reset  -> eligible' "approval escalation preserves matched candidate evidence"
 assert_not_contains "$out" '  profile:' "escalate emits no profile line"
+write_response "$RESPONSE" rule_3 0.59
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: escalate' "captain approval takes precedence over low confidence"
+assert_contains "$out" "  reason: rule requires the captain's explicit approval before dispatch" "low confidence cannot obscure the approval reason"
+assert_not_contains "$out" '  reason: confidence' "approval escalation is not reclassified as ambiguous"
 pass "escalate: a rule declared approval: captain never yields a profile"
 
 # --- rule floor fails: fall through to default -------------------------------
 reset_log
+RULE_FLOOR_QUOTA="$TMP_ROOT/rule-floor.json"
+jq '(.providers[] | select(.provider == "claude") | .quotaSemantics.effectiveAvailability) += [
+  {"scope":"model:fable","status":"known","effectivePercentRemaining":15,"runway":{"status":"through_reset"},"selection":{"spendPriority":-0.79}}
+]' "$QUOTA" > "$RULE_FLOOR_QUOTA"
 write_response "$RESPONSE" rule_1 0.97
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$RULE_FLOOR_QUOTA" run code out err "$BRIEF"
 assert_contains "$out" '  status: clear' "rule floor fall-through still resolves"
 assert_contains "$out" '  note: rule rule_1 floor model:fable below 20%: fall through to default' "rule floor fall-through is explained"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-high'" "fall-through resolves among the default profiles"
 assert_not_contains "$out" 'candidate: claude:fable' "the floored rule's own profile is not a candidate"
 
-MISSING_RULE_FLOOR="$TMP_ROOT/missing-rule-floor.json"
-jq '(.providers[] | select(.provider == "claude") | .quotaSemantics.effectiveAvailability) |= map(select(.scope != "model:fable"))' "$QUOTA" > "$MISSING_RULE_FLOOR"
-TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$MISSING_RULE_FLOOR" run code out err "$BRIEF"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: escalate' "an unverifiable rule floor escalates"
 assert_contains "$out" '  reason: rule rule_1 floor claude/model:fable is unverifiable' "the unverifiable rule floor names its provider and scope"
 assert_not_contains "$out" '  profile:' "an unverifiable rule floor never authorizes default routing"
+write_response "$RESPONSE" rule_1 0.59
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: escalate' "an unverifiable rule floor takes precedence over low confidence"
+assert_contains "$out" '  reason: rule rule_1 floor claude/model:fable is unverifiable' "low confidence cannot obscure the rule-floor reason"
+assert_not_contains "$out" '  reason: confidence' "rule-floor escalation is not reclassified as ambiguous"
 pass "rule floor: known shortfall falls through while unavailable evidence escalates"
 
 # --- declared provider and profile floor --------------------------------------
@@ -444,7 +455,7 @@ jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics) |= (.status
   {"scope":"model:cursor-grok-4.6-medium","status":"unknown","runway":{"status":"unknown"}}
 ])' "$QUOTA" > "$PARTIAL_UNKNOWN"
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$PARTIAL_UNKNOWN" run code out err "$BRIEF"
-assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=model:cursor-grok-4.6-medium  remaining=-%  spendPriority=-  runway=-  bounds=all_models:91%/through_reset,model:cursor-grok-4.6-medium:-%/unknown  -> eligible, unranked: quota row model:cursor-grok-4.6-medium unknown: not rankable: disclosed uncertainty' "an unknown exact-model row preserves partial known evidence without ranking"
+assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=all_models  remaining=91%  spendPriority=0.7597  runway=through_reset  bounds=all_models:91%/through_reset,model:cursor-grok-4.6-medium:-%/unknown  -> eligible, unranked: named quota scope applicability is unproven without catalog evidence: model:cursor-grok-4.6-medium: disclosed uncertainty' "an unknown named-model row preserves evidence without guessing applicability"
 assert_contains "$out" '  note: 2 eligible candidate(s) unranked (cursor, kimi)' "clear result lists every provider with unranked uncertainty"
 assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --effort 'high'" "another measured candidate can clear"
 
@@ -470,11 +481,11 @@ jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.effectiveAva
   {"scope":"model:other","status":"known","effectivePercentRemaining":91,"runway":{"status":"through_reset"},"selection":{"spendPriority":0.8}}
 ]' "$QUOTA" > "$NO_APPLICABLE"
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$NO_APPLICABLE" run code out err "$BRIEF"
-assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  -> eligible, unranked: no applicable quota row for provider cursor: disclosed uncertainty' "a candidate without an applicable row remains eligible but unranked"
+assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=model:other  remaining=91%  spendPriority=0.8  runway=through_reset  -> eligible, unranked: named quota scope applicability is unproven without catalog evidence: model:other: disclosed uncertainty' "a named-only provider remains eligible without guessed applicability"
 assert_contains "$out" '  note: 2 eligible candidate(s) unranked (cursor, kimi)' "no-applicable-row uncertainty appears in the clear-result note"
 pass "partial and missing quota evidence remain eligible but unranked"
 
-# --- provider-wide rows remain bounds beside exact model rows ------------------
+# --- named model scopes require catalog evidence -------------------------------
 reset_log
 BOUNDED="$TMP_ROOT/bounded.json"
 jq '(.providers[] | select(.provider == "claude") | .quotaSemantics.effectiveAvailability) += [
@@ -482,15 +493,28 @@ jq '(.providers[] | select(.provider == "claude") | .quotaSemantics.effectiveAva
 ]' "$QUOTA" > "$BOUNDED"
 write_response "$RESPONSE" rule_4 0.9
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$BOUNDED" run code out err "$BRIEF"
-assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=79%  spendPriority=-0.4627' "the limiting provider-wide row drives ranking"
-assert_contains "$out" 'bounds=all_models:79%/through_reset,model:sonnet:99%/through_reset' "all applicable quota bounds are disclosed"
+assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=79%  spendPriority=-0.4627  runway=through_reset  bounds=all_models:79%/through_reset,model:sonnet:99%/through_reset  -> eligible, unranked: named quota scope applicability is unproven without catalog evidence: model:sonnet: disclosed uncertainty' "an apparent name match remains unranked without catalog evidence"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "a candidate with proven universal bounds can still clear"
+
+SPARK_RULES="$TMP_ROOT/spark-rules.json"
+jq '.rules[3].use = {"harness":"codex","model":"gpt-5.3-codex-spark"}' "$BASE_RULES" > "$SPARK_RULES"
+cp "$SPARK_RULES" "$RULES"
+SPARK_QUOTA="$TMP_ROOT/spark-quota.json"
+jq '(.providers[] | select(.provider == "codex") | .quotaSemantics.effectiveAvailability) += [
+  {"scope":"model:codex_bengalfox","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"},"selection":{"spendPriority":-2}}
+]' "$QUOTA" > "$SPARK_QUOTA"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SPARK_QUOTA" run code out err "$BRIEF"
+assert_contains "$out" '  status: escalate' "a catalog-dependent Spark scope is non-clear"
+assert_contains "$out" 'candidate: codex:gpt-5.3-codex-spark  provider=codex  scope=all_models  remaining=31%  spendPriority=-0.1649  runway=through_reset  bounds=all_models:31%/through_reset,model:codex_bengalfox:0%/exhausted_now  -> eligible, unranked: named quota scope applicability is unproven without catalog evidence: model:codex_bengalfox: disclosed uncertainty' "the differently named exhausted Spark scope remains inspectable"
+assert_not_contains "$out" '  profile:' "unproven Spark scope applicability emits no profile"
+cp "$BASE_RULES" "$RULES"
 
 EXHAUSTED_WIDE="$TMP_ROOT/exhausted-wide.json"
 jq '(.providers[] | select(.provider == "claude") | .quotaSemantics.effectiveAvailability[] | select(.scope == "all_models")) |= (.effectivePercentRemaining = 0 | .runway.status = "exhausted_now")' "$BOUNDED" > "$EXHAUSTED_WIDE"
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$EXHAUSTED_WIDE" run code out err "$BRIEF"
 assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=0%' "the exhausted account-wide bound is the candidate evidence"
 assert_contains "$out" '-> not eligible: runway exhausted_now at all_models' "a healthy exact row cannot bypass an exhausted account-wide bound"
-pass "provider-wide and exact quota rows combine into one limiting candidate"
+pass "named model scopes stay non-clear without catalog evidence"
 
 # --- default choice ------------------------------------------------------------
 reset_log
