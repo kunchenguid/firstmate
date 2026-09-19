@@ -203,6 +203,15 @@ test_rejects_duplicate_description() {
   assert_contains "$out" "description is missing or invalid" "failure names duplicate descriptions"
 }
 
+test_rejects_duplicate_name() {
+  local dir out
+  dir="$TMP_ROOT/duplicate-name/verify-timetracker"
+  make_good_skill "$dir"
+  sed -i '/^name: verify-timetracker$/a name: verify-other' "$dir/SKILL.md"
+  out=$(run_check "$dir") && fail "duplicate name keys must fail" || true
+  assert_contains "$out" "multiple name: fields" "failure names duplicate names"
+}
+
 test_rejects_whitespace_only_section() {
   local dir out
   dir="$TMP_ROOT/whitespace-section/verify-timetracker"
@@ -321,6 +330,7 @@ test_accepts_supported_description_forms
 test_rejects_invalid_descriptions
 test_rejects_invalid_quoted_escape
 test_rejects_duplicate_description
+test_rejects_duplicate_name
 test_rejects_whitespace_only_section
 test_rejects_removed_kill_rule
 test_rejects_process_name_kill_instruction

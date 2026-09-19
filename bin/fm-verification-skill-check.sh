@@ -61,8 +61,13 @@ if ! FRONTMATTER=$(awk '
   fail "SKILL.md must have opening and closing YAML frontmatter delimiters"
   FRONTMATTER=
 fi
+NAME_COUNT=$(printf '%s\n' "$FRONTMATTER" | awk '/^name:[[:space:]]*/ { count++ } END { print count + 0 }')
 NAME=$(printf '%s\n' "$FRONTMATTER" | sed -n 's/^name:[[:space:]]*//p' | head -1)
-[ -n "$NAME" ] || fail "SKILL.md frontmatter has no name: field"
+case "$NAME_COUNT" in
+  0) fail "SKILL.md frontmatter has no name: field" ;;
+  1) ;;
+  *) fail "SKILL.md frontmatter has multiple name: fields" ;;
+esac
 if ! printf '%s\n' "$FRONTMATTER" | awk '
   /^description:[[:space:]]*/ {
     descriptions++
