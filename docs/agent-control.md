@@ -72,6 +72,8 @@ It is not deterministic across the verified adapters: codex, grok, and gemini re
    A secondmate relaunch does not require one and never rewrites its standing charter.
 4. **Stop the old agent** through the `exit` verb, with its postcondition.
 5. **Launch the replacement** through its single owner, `bin/fm-spawn.sh --relaunch`, which adopts the recorded endpoint and worktree instead of creating either, clears the previous harness's per-task wiring, and arms a fresh busy generation.
+   The replacement record rewrites the spawn-owned fields and carries the prior record's other lines forward as the tail, so no non-link field lands after `pr=` and an armed PR merge poll stays valid.
+   The tail contract is enforced by [`fm_pr_metadata_identity_parse`](../bin/fm-pr-lib.sh) - it rejects any other line after `pr=` - and pinned by `tests/fm-control-relaunch.test.sh`.
 
 Switching harness is therefore one ordinary relaunch rather than a separate mechanism.
 
@@ -123,5 +125,5 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 ## Verification
 
 - `tests/fm-control.test.sh` - the adapter contract for its verified-harness lane (adapters outside the lane pin their control mechanics in their own harness suites), the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
-- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
+- `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, rollback after a failed launch, and an armed PR merge poll surviving replacement record publication with and without trace-context recording.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.
