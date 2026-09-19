@@ -704,6 +704,34 @@ test_resume_refuses_to_overwrite_existing_harness_wiring() {
   pass "a resume refuses to overwrite per-task wiring it did not write, and only where a conflict is real"
 }
 
+# --- one workspace holds one worker ------------------------------------------
+
+test_resume_refuses_a_worktree_another_task_already_holds() {
+  local rec id other out status before
+  id=resume-exclusive-wt-q8
+  other=resume-incumbent-q8
+  rec=$(make_case resume-exclusive-wt "$id")
+  read_case "$rec"
+  dirty_the_worktree "$EXISTING_DIR"
+  before=$(fingerprint_of "$EXISTING_DIR")
+
+  # An incumbent task already recorded against this exact workspace.
+  fm_test_spawn_brief "$HOME_DIR" "$other"
+  out=$(run_resume "$other" "$EXISTING_DIR" --mode direct-PR --yolo off)
+  status=$?
+  expect_code 0 "$status" "the incumbent resume should have launched"$'\n'"$out"
+
+  out=$(run_resume "$id" "$EXISTING_DIR" --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a second worker was dispatched into a workspace another task already holds"$'\n'"$out"
+  assert_contains "$out" "already task $other's recorded worktree"     "the refusal did not name the task that already holds the workspace"
+  assert_absent "$HOME_DIR/state/$id.meta" "the refused second resume still published a task record"
+  [ "$(fingerprint_of "$EXISTING_DIR")" = "$before" ]     || fail "the refused second resume changed the workspace"
+  # The incumbent is untouched.
+  assert_grep "worktree=$EXISTING_DIR" "$HOME_DIR/state/$other.meta"     "the refusal disturbed the incumbent task's record"
+  pass "a worktree another task in this home already holds is never handed to a second worker"
+}
+
 test_resume_clean_existing_worktree
 test_resume_dirty_existing_worktree_preserves_every_change
 test_reject_nonexistent_path
@@ -720,5 +748,6 @@ test_resume_is_refused_alongside_the_other_provisioning_modes
 test_teardown_never_returns_a_continued_worktree
 test_teardown_still_refuses_unlanded_work_in_a_continued_worktree
 test_resume_refuses_to_overwrite_existing_harness_wiring
+test_resume_refuses_a_worktree_another_task_already_holds
 
 echo "# all fm-spawn-resume-worktree tests passed"

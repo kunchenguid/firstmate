@@ -88,6 +88,11 @@
 #   file into the worktree. A resume REFUSES when that exact path already
 #   exists rather than overwriting a file this spawn did not create; the other
 #   harnesses keep their wiring outside the worktree and are unaffected.
+#   A worktree already recorded as another task's in this home is refused too,
+#   because two workers in one workspace overwrite each other; a worktree in use
+#   by another firstmate home cannot be seen from here and stays the operator's
+#   call, since a resume deliberately writes no ownership claim into a workspace
+#   it does not own.
 #   It requires an absolute path; it is refused with --relaunch, --secondmate,
 #   backend=orca, and batch pairs; it is accepted for ship and --scout, and a ship resume
 #   still requires --mode and --yolo exactly as any other ship spawn does.
@@ -3063,6 +3068,30 @@ if [ "$RESUME_WT_SET" -eq 1 ]; then
     echo "error: --resume-worktree '$WT' is not an isolated worktree of $PROJ_ABS ($SPAWN_WT_REASON); refusing to launch to avoid tangling the primary checkout, and leaving the target untouched" >&2
     exit 1
   fi
+  # One workspace holds one worker's work. A fresh spawn cannot collide, because
+  # it allocates its own slot and claims it; a resume names an arbitrary path, so
+  # this collision is new to the mode and is checked here rather than discovered
+  # when two workers overwrite each other. The per-home task-set lock is already
+  # held by this point, so this read of the home's task records is consistent
+  # with every other spawn in it.
+  #
+  # It is a SAME-HOME check. A resumed worktree deliberately carries no
+  # slot-owner claim - writing firstmate's bookkeeping into a workspace it does
+  # not own is exactly what this mode avoids - so a worktree already in use by
+  # another firstmate home cannot be detected from here, and that case stays the
+  # operator's call.
+  for resume_other in "$STATE"/*.meta; do
+    [ -f "$resume_other" ] && [ ! -L "$resume_other" ] || continue
+    resume_other_id=$(basename "$resume_other" .meta)
+    [ "$resume_other_id" != "$ID" ] || continue
+    resume_other_wt=$(fm_meta_get "$resume_other" worktree)
+    [ -n "$resume_other_wt" ] || continue
+    resume_other_real=$(CDPATH='' cd -- "$resume_other_wt" 2>/dev/null && pwd -P) || continue
+    [ "$resume_other_real" = "$WT" ] || continue
+    echo "error: --resume-worktree '$WT' is already task $resume_other_id's recorded worktree; refusing to put a second worker in one workspace, where the two would overwrite each other's work. Reconcile that task first (bin/fm-crew-state.sh $resume_other_id), then retry." >&2
+    exit 1
+  done
+
   # Firstmate arms each harness's per-task turn-end and busy-state wiring by
   # writing one file INTO the worktree, and that write overwrites whatever is
   # already at the path. A fresh pool slot is proven clean first, so nothing can
