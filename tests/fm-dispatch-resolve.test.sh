@@ -99,8 +99,17 @@ write_quota "$QUOTA" 0.7597
 write_response() {  # <path> <choice> <confidence>
   cat > "$1" <<JSON
 { "model": "jev-1.13.0",
-  "answers": { "rule": { "type": "choice", "choice": "$2", "confidence": $3,
-    "probabilities": { "rule_1": 0.01, "rule_2": 0.01, "rule_3": 0.01, "rule_4": 0.96, "default": 0.01 } } },
+  "answers": {
+    "rule": { "type": "choice", "choice": "$2", "confidence": $3,
+      "probabilities": { "rule_1": 0.01, "rule_2": 0.01, "rule_3": 0.01, "rule_4": 0.96, "default": 0.01 } },
+    "intent": {"type":"choice","choice":"bugfix","confidence":0.91,"probabilities":{"implementation":0.02,"bugfix":0.91,"investigation":0.01,"review":0.01,"operations":0.01,"documentation":0.01,"design":0.01,"other":0.01}},
+    "domain": {"type":"choice","choice":"project_code","confidence":0.88,"probabilities":{"firstmate":0.02,"project_code":0.88,"infrastructure":0.02,"github":0.02,"browser_visual":0.02,"docs":0.02,"unknown":0.02}},
+    "difficulty": {"type":"choice","choice":"medium","confidence":0.87,"probabilities":{"low":0.05,"medium":0.87,"high":0.04,"xhigh":0.04}},
+    "risk": {"type":"choice","choice":"low","confidence":0.86,"probabilities":{"low":0.86,"medium":0.08,"high":0.03,"sensitive":0.03}},
+    "effort": {"type":"choice","choice":"medium","confidence":0.89,"probabilities":{"low":0.04,"medium":0.89,"high":0.04,"xhigh":0.03}},
+    "model_class": {"type":"choice","choice":"standard","confidence":0.9,"probabilities":{"small_fast":0.02,"standard":0.9,"strong_reasoning":0.02,"current_web":0.02,"vision":0.02,"code_execution":0.02}},
+    "escalation": {"type":"choice","choice":"no","confidence":0.93,"probabilities":{"no":0.93,"yes":0.07}}
+  },
   "usage": { "input_tokens": 812, "output_tokens": 60 } }
 JSON
 }
@@ -131,6 +140,18 @@ if [ "${FAKE_CURL_FAIL:-0}" = 1 ]; then
   exit 7
 fi
 cp "${FAKE_CURL_RESPONSE:?}" "$out"
+if jq -e '.answers.rule and (.answers.intent | not)' "$out" >/dev/null 2>&1; then
+  tmp="$out.add-classifier"
+  jq '.answers += {
+    intent: {"type":"choice","choice":"bugfix","confidence":0.91,"probabilities":{"implementation":0.02,"bugfix":0.91,"investigation":0.01,"review":0.01,"operations":0.01,"documentation":0.01,"design":0.01,"other":0.01}},
+    domain: {"type":"choice","choice":"project_code","confidence":0.88,"probabilities":{"firstmate":0.02,"project_code":0.88,"infrastructure":0.02,"github":0.02,"browser_visual":0.02,"docs":0.02,"unknown":0.02}},
+    difficulty: {"type":"choice","choice":"medium","confidence":0.87,"probabilities":{"low":0.05,"medium":0.87,"high":0.04,"xhigh":0.04}},
+    risk: {"type":"choice","choice":"low","confidence":0.86,"probabilities":{"low":0.86,"medium":0.08,"high":0.03,"sensitive":0.03}},
+    effort: {"type":"choice","choice":"medium","confidence":0.89,"probabilities":{"low":0.04,"medium":0.89,"high":0.04,"xhigh":0.03}},
+    model_class: {"type":"choice","choice":"standard","confidence":0.9,"probabilities":{"small_fast":0.02,"standard":0.9,"strong_reasoning":0.02,"current_web":0.02,"vision":0.02,"code_execution":0.02}},
+    escalation: {"type":"choice","choice":"no","confidence":0.93,"probabilities":{"no":0.93,"yes":0.07}}
+  }' "$out" > "$tmp" && mv "$tmp" "$out"
+fi
 printf '%s' "${FAKE_CURL_HTTP:-200}"
 SH
 chmod +x "$FAKEBIN/curl"
@@ -237,14 +258,16 @@ body=$(cat "$LOG/body")
 assert_equals 'jev-latest' "$(jq -r .model <<<"$body")" "default model is jev-latest"
 assert_equals 'pager' "$(jq -r .state.task.project <<<"$body")" "project rides in the state"
 assert_contains "$(jq -r .state.task.brief <<<"$body")" 'off-by-one in the pager' "the whole brief rides in the state"
-assert_equals '["rule"]' "$(jq -c '.questions | keys' <<<"$body")" "only the rule Choice is asked"
+assert_equals '["difficulty","domain","effort","escalation","intent","model_class","risk","rule"]' "$(jq -c '.questions | keys' <<<"$body")" "rule and router classification Choices are asked"
 assert_equals '["default","rule_1","rule_2","rule_3","rule_4"]' "$(jq -c '.questions.rule.criteria | keys' <<<"$body")" "one option per rule plus default"
 assert_equals 'No listed rule applies to this task.' "$(jq -r '.questions.rule.criteria.default' <<<"$body")" "the fixed generic none criterion is the default option"
 assert_equals 'A simple bug fix with a stated root cause.' "$(jq -r '.questions.rule.criteria.rule_4' <<<"$body")" "rule when text is the option verbatim"
 assert_not_contains "$body" 'SECRET-WHY-TEXT' "why text never leaves the machine"
 assert_not_contains "$body" 'spendPriority' "quota never leaves the machine"
 assert_not_contains "$body" 'cursor-grok' "use profiles never leave the machine"
-pass "clear: one rule Choice request, key on the fd header only, spendPriority argmax over every candidate"
+assert_equals '["high","low","medium","xhigh"]' "$(jq -c '.questions.effort.criteria | keys' <<<"$body")" "effort recommendation axis is explicit and bounded"
+assert_contains "$out" '  classification: intent=bugfix(0.91) domain=project_code(0.88) difficulty=medium(0.87) risk=low(0.86) effort=medium(0.89) model_class=standard(0.9) escalation=no(0.93)' "typed classifier evidence is emitted beside the rule match"
+pass "clear: one rule Choice request, router classifier evidence, key on the fd header only, spendPriority argmax over every candidate"
 
 # --- rules are snapshotted and line output is injection-safe -------------------
 MUTATED_RULES="$TMP_ROOT/mutated-rules.json"
@@ -337,10 +360,28 @@ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 0 "$code" "ambiguous exits 0"
 assert_contains "$out" '  status: ambiguous' "below the floor is ambiguous"
 assert_contains "$out" '  reason: confidence 0.41 below floor 0.6' "ambiguous names the floor"
+assert_contains "$out" '  classification:' "ambiguous still publishes classifier evidence"
 assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=79%  spendPriority=-0.4627  runway=projected_exhaustion  -> eligible' "ambiguous preserves matched candidate evidence"
 assert_contains "$out" 'candidate: kimi:kimi-code/k3  provider=kimi  -> eligible, unranked: provider kimi unmeasured (unknown): disclosed uncertainty' "ambiguous preserves eligible unranked candidate evidence"
 assert_not_contains "$out" '  profile:' "ambiguous emits no profile line"
-pass "ambiguous: confidence below the fixed floor hands the decision back"
+CLASSIFIER_LOW="$TMP_ROOT/classifier-low.json"
+write_response "$CLASSIFIER_LOW" rule_4 0.9
+jq '.answers.risk.confidence = 0.42 | .answers.risk.probabilities = {"low":0.42,"medium":0.28,"high":0.2,"sensitive":0.1}' "$CLASSIFIER_LOW" > "$RESPONSE"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "low-confidence classifier axes fall back instead of launching"
+assert_contains "$out" '  reason: classifier confidence below floor 0.6: risk' "low-confidence classifier axis is named"
+assert_not_contains "$out" '  profile:' "low-confidence classifier evidence cannot authorize a model launch"
+
+CLASSIFIER_ESCALATE="$TMP_ROOT/classifier-escalate.json"
+write_response "$CLASSIFIER_ESCALATE" rule_4 0.9
+jq '.answers.risk.choice = "sensitive" | .answers.risk.confidence = 0.81 | .answers.risk.probabilities = {"low":0.04,"medium":0.05,"high":0.1,"sensitive":0.81} | .answers.escalation.choice = "yes" | .answers.escalation.confidence = 0.84 | .answers.escalation.probabilities = {"no":0.16,"yes":0.84}' "$CLASSIFIER_ESCALATE" > "$RESPONSE"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: escalate' "classifier escalation recommendation escalates before dispatch"
+assert_contains "$out" '  reason: classifier recommends escalation before dispatch' "classifier escalation reason is local policy output"
+assert_not_contains "$out" '  profile:' "sensitive classifier evidence cannot directly authorize a model launch or sensitive action"
+pass "ambiguous: confidence below the fixed floors hands the decision back"
 
 # --- escalate: captain approval ------------------------------------------------
 reset_log
@@ -664,40 +705,40 @@ assert_contains "$out" '  reason: http 000 after' "transport failure reads as ht
 reset_log
 printf '%s\n' '{"model":"jev","answers":{}}' > "$RESPONSE"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
-assert_contains "$out" '  reason: response is not a rule Choice answer' "a malformed answer is an error outcome"
+assert_contains "$out" '  reason: response is not a typed dispatch classifier answer' "a malformed answer is an error outcome"
 reset_log
 write_response "$RESPONSE" rule_4 0.9
 jq '.usage = "bad"' "$RESPONSE" > "$TMP_ROOT/malformed-usage.json"
 mv "$TMP_ROOT/malformed-usage.json" "$RESPONSE"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "malformed usage is an error outcome"
-assert_contains "$out" '  reason: response is not a rule Choice answer' "malformed usage cannot break text rendering silently"
+assert_contains "$out" '  reason: response is not a typed dispatch classifier answer' "malformed usage cannot break text rendering silently"
 reset_log
 write_response "$RESPONSE" rule_4 0.9
 jq 'del(.answers.rule.probabilities.default)' "$RESPONSE" > "$TMP_ROOT/malformed-probabilities.json"
 mv "$TMP_ROOT/malformed-probabilities.json" "$RESPONSE"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "missing probability choice is an error outcome"
-assert_contains "$out" '  reason: response is not a rule Choice answer' "probabilities must name every offered choice"
+assert_contains "$out" '  reason: response is not a typed dispatch classifier answer' "probabilities must name every offered choice"
 reset_log
 write_response "$RESPONSE" rule_4 0.9
 jq '.answers.rule.probabilities.rule_4 = "high"' "$RESPONSE" > "$TMP_ROOT/malformed-probabilities.json"
 mv "$TMP_ROOT/malformed-probabilities.json" "$RESPONSE"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "nonnumeric probability is an error outcome"
-assert_contains "$out" '  reason: response is not a rule Choice answer' "probabilities must be numeric and bounded"
+assert_contains "$out" '  reason: response is not a typed dispatch classifier answer' "probabilities must be numeric and bounded"
 reset_log
 write_response "$RESPONSE" rule_4 0.9
 jq '.answers.rule.probabilities[] = 0' "$RESPONSE" > "$TMP_ROOT/malformed-probabilities.json"
 mv "$TMP_ROOT/malformed-probabilities.json" "$RESPONSE"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "a zero-mass probability distribution is an error outcome"
-assert_contains "$out" '  reason: response is not a rule Choice answer' "probabilities must sum to approximately one"
+assert_contains "$out" '  reason: response is not a typed dispatch classifier answer' "probabilities must sum to approximately one"
 reset_log
 write_response "$RESPONSE" rule_4 2
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "out-of-range confidence is an error outcome"
-assert_contains "$out" '  reason: response is not a rule Choice answer' "out-of-range confidence is a malformed answer"
+assert_contains "$out" '  reason: response is not a typed dispatch classifier answer' "out-of-range confidence is a malformed answer"
 reset_log
 write_response "$RESPONSE" rule_9 0.9
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
