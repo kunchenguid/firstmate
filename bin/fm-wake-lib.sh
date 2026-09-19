@@ -178,10 +178,10 @@ fm_watcher_healthy() {
 # arm layer (bin/fm-watch-arm.sh, bin/fm-claude-stop-autoarm.sh) needs exactly
 # that - it decides whether to start, attach to, or replace a real watcher
 # process, so a leftover beacon must never satisfy it. bin/fm-turnend-guard.sh
-# also keeps this strict check because it fires at the turn boundary where the
-# auto-arm brings a fresh watcher up. The pull warning (bin/fm-guard.sh) fires
-# mid-turn, where the auto-arm model runs no watcher at all, so it wants a
-# different, model-aware question:
+# still requires this for a live holder, then also accepts
+# fm_extension_handoff_healthy for the Pi/omp tear-down-and-respawn window.
+# The pull warning (bin/fm-guard.sh) fires mid-turn, where the auto-arm model
+# runs no watcher at all, so it wants a different, model-aware question:
 
 # fm_supervision_model
 # Print the supervision model of this home's PRIMARY harness:
@@ -284,6 +284,28 @@ fm_extension_owns_supervision() {
   fm_pi_extension_owns_supervision "$1" "$2" || fm_omp_extension_owns_supervision "$1" "$2"
 }
 
+# fm_extension_handoff_healthy <state> [grace] [root]
+# True when a genuinely unheld watcher lock, a beacon still inside grace, and a
+# live Pi or omp session that owns continuity prove the extension's own
+# tear-down-and-respawn window, not a dead watcher. This is the single owner of
+# that three-part proof: the pull-warning verdict and the turn-end guard both
+# call it. A lock that still records a pid is never a hand-off here, even when
+# that pid is dead or identity-mismatched; those stay down under the strict
+# health check. A leftover beacon with no ownership proof, or a beacon at or
+# past grace, is also down: an unloaded, version-drifted, or exited session
+# alarms immediately, and a cycle the extension never restores alarms once the
+# beacon ages out.
+fm_extension_handoff_healthy() {
+  local state=$1 grace=${2:-${FM_GUARD_GRACE:-300}} root=${3:-$FM_ROOT} age
+  fm_watcher_lock_unheld "$state" || return 1
+  age=$(fm_path_age "$state/.last-watcher-beat")
+  case "$age" in
+    ''|*[!0-9]*) return 1 ;;
+    *) [ "$age" -lt "$grace" ] || return 1 ;;
+  esac
+  fm_extension_owns_supervision "$state" "$root"
+}
+
 fm_extension_pair_owns_supervision() {  # <state> <extension-dir> <source:marker>...
   local state=$1 dir=$2 lock session_pid pair source marker version
   shift 2
@@ -351,7 +373,11 @@ fm_afk_mode() {
 
 # fm_watcher_supervision_verdict <state> <watch-path> [grace] [home] [root]
 # Model-aware "is supervision healthy right now" verdict for the pull warning
-# guard (bin/fm-guard.sh), NOT the arm layer or the turn-end guard. Sets:
+# guard (bin/fm-guard.sh), not the arm layer. The turn-end guard keeps its own
+# PID-strict live-holder check and calls fm_extension_handoff_healthy for the
+# extension-model window below; it does not use this whole verdict, because
+# the autoarm branch would treat a leftover beacon as healthy at Claude Stop.
+# Sets:
 #   FM_WATCHER_VERDICT_OK      true when supervision is healthy for this model
 #   FM_WATCHER_VERDICT_REASON  when not ok, the true failing condition:
 #                              no-watcher   - a live watcher process is the real
@@ -403,8 +429,7 @@ fm_watcher_supervision_verdict() {
     # shellcheck disable=SC2034 # Read by callers after the function returns.
     FM_WATCHER_VERDICT_OK=true
   elif [ "$fresh" = true ]; then
-    if [ "$model" = extension ] && fm_watcher_lock_unheld "$state" \
-      && fm_extension_owns_supervision "$state" "$root"; then
+    if [ "$model" = extension ] && fm_extension_handoff_healthy "$state" "$grace" "$root"; then
       # shellcheck disable=SC2034 # Read by callers after the function returns.
       FM_WATCHER_VERDICT_OK=true
     else

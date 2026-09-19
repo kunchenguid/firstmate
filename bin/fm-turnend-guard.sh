@@ -47,6 +47,13 @@
 # are unchanged everywhere else, including for a dead daemon pid or a beacon
 # older than AFK_GRACE, which still block.
 #
+# Pi and omp (the extension supervision model) tear the watcher down on every
+# actionable wake and spawn the replacement themselves. That EXIT-trap release
+# leaves the lock genuinely unheld with a leftover beat a few seconds old.
+# fm_extension_handoff_healthy in bin/fm-wake-lib.sh is the single owner of the
+# proof that this window is a hand-off rather than a dead watcher; without it
+# the turn-end guard sampled the gap as SUPERVISION IS OFF.
+#
 # Loop-guard, codex/Grok (default) mode: never block twice in the same turn.
 # Codex uses stop_hook_active and Grok uses stopHookActive; typed camel-case
 # takes precedence when both spellings are present. A true value means the
@@ -203,6 +210,20 @@ allow_supervised_stop() {
 }
 
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+  allow_supervised_stop
+fi
+
+# Pi and omp tear the watcher down on every actionable wake and spawn the
+# replacement themselves. The dying cycle's EXIT trap releases the singleton
+# (cycle-exit lock_after=pid:none) while the leftover beat is still a few
+# seconds old. Requiring a live lock holder here sampled that window as
+# "supervision off" and forced a repair on a healthy hand-off. The same
+# three-part proof the pull warning already uses distinguishes that window
+# from a genuinely absent watcher: unheld lock, fresh beat, live extension
+# ownership (fm_extension_handoff_healthy in bin/fm-wake-lib.sh). A lock that
+# still names a pid, a stale leftover beat, or a missing/dead/drifted session
+# still blocks.
+if fm_extension_handoff_healthy "$STATE" "$GRACE" "$FM_ROOT"; then
   allow_supervised_stop
 fi
 

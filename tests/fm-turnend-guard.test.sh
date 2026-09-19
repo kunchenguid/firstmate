@@ -6,7 +6,8 @@
 #                used by fm-guard.sh and by the hook's banner details.
 #   HOOK       - bin/fm-turnend-guard.sh, the shared primary hook predicate that
 #                scopes in-flight work to the PRIMARY checkout only and requires
-#                a live, identity-matched watcher lock plus a fresh beacon.
+#                a live, identity-matched watcher lock plus a fresh beacon, or
+#                the Pi/omp extension-handoff proof when the lock is unheld.
 # All hermetic over temp dirs; no real agent session is invoked.
 set -u
 
@@ -27,6 +28,9 @@ AWAY_REQUIRED_REASON='Away mode owns watcher supervision'
 # structural ancestor of a different harness outranks a marker - so those
 # invocations also blind the ancestry walk. Only per-pid comm/args/ppid queries
 # are answered here; watcher liveness still reaches the real ps.
+# Cursor exports CURSOR_AGENT=1 into every child, and that marker outranks
+# CLAUDECODE when ancestry is empty, so drop inherited foreign markers here.
+unset CURSOR_AGENT CURSOR_INVOKED_AS PI_CODING_AGENT FM_PI_HARNESS FM_OMP_HARNESS FM_SUPERVISION_MODEL
 BLIND_BIN=$(fm_fakebin "$TMP_ROOT/blind-ancestry")
 fm_fake_blind_ancestry "$BLIND_BIN"
 
@@ -297,6 +301,33 @@ record_watcher_lock() {
   printf '%s\n' "$identity" > "$dir/state/.watch.lock/pid-identity"
 }
 
+# Durable evidence a live Pi session leaves behind: both primary extensions
+# present under the fixture root, and a marker per extension recording that
+# build plus the session pid in state/.lock. Matches the pull-warning fixture
+# in tests/fm-guard-stale-banner.test.sh so the same ownership signals gate
+# both surfaces.
+record_pi_extension_session() {
+  local dir=$1 session_pid=${2:-} omit=${3:-} drift=${4:-} pair source marker version
+  mkdir -p "$dir/.pi/extensions"
+  for pair in \
+    "fm-primary-pi-watch.ts:.pi-watch-extension-loaded:watch" \
+    "fm-primary-turnend-guard.ts:.pi-turnend-extension-loaded:turnend"; do
+    source=${pair%%:*}
+    marker=${pair#*:}; marker=${marker%%:*}
+    printf '// %s for %s\n' "${pair##*:}" "$(basename "$dir")" > "$dir/.pi/extensions/$source"
+    [ "$omit" = "${pair##*:}" ] && continue
+    if [ "$drift" = "${pair##*:}" ]; then
+      version="sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    else
+      version=$(FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pi_extension_version "$2"' \
+        _ "$ROOT/bin/fm-wake-lib.sh" "$dir/.pi/extensions/$source") || return 1
+    fi
+    printf '%s\n%s\n' "$version" "$session_pid" > "$dir/state/$marker"
+  done
+  [ -n "$session_pid" ] && printf '%s\n' "$session_pid" > "$dir/state/.lock"
+  return 0
+}
+
 test_hook_silent_when_no_work_in_flight() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-idle")
@@ -339,6 +370,88 @@ test_hook_blocks_when_dead_lock_has_fresh_beacon() {
   expect_code 2 "$status" "hook must block when the watcher lock pid is dead despite a fresh beacon"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: blocks on a dead watcher lock even when the beacon is fresh"
+}
+
+test_hook_silent_during_pi_extension_handoff() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pi-handoff")
+  : > "$dir/state/task1.meta"
+  touch "$dir/state/.last-watcher-beat"
+  sleep 60 &
+  pid=$!
+  record_pi_extension_session "$dir" "$pid" || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not record the Pi extension session for the hand-off fixture"
+  }
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "hook must exit 0 during a Pi tear-down-and-respawn window"
+  [ -z "$out" ] || fail "hook produced output during a healthy Pi hand-off: $out"
+  pass "fm-turnend-guard: silent during a Pi extension hand-off with a fresh leftover beat"
+}
+
+test_hook_blocks_dead_lock_despite_pi_extension_ownership() {
+  local dir dead pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pi-dead-lock")
+  : > "$dir/state/task1.meta"
+  touch "$dir/state/.last-watcher-beat"
+  dead=$(nonexistent_pid)
+  record_watcher_lock "$dir" "$dead" "dead watcher identity"
+  sleep 60 &
+  pid=$!
+  record_pi_extension_session "$dir" "$pid" || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not record the Pi extension session for the dead-lock fixture"
+  }
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "a held dead lock must still block even with live Pi ownership"
+  assert_contains "$out" "TURN WOULD END BLIND" "dead-lock block must keep the alarm banner"
+  pass "fm-turnend-guard: a dead lock pid is not a Pi hand-off"
+}
+
+test_hook_blocks_stale_beacon_despite_pi_extension_ownership() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pi-stale-handoff")
+  : > "$dir/state/task1.meta"
+  touch -t 202001010000 "$dir/state/.last-watcher-beat"
+  sleep 60 &
+  pid=$!
+  record_pi_extension_session "$dir" "$pid" || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not record the Pi extension session for the stale-handoff fixture"
+  }
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "an unheld lock with a stale leftover beat must still block"
+  assert_contains "$out" "TURN WOULD END BLIND" "stale-handoff block must keep the alarm banner"
+  pass "fm-turnend-guard: a stale leftover beat is a dead watcher, not a hand-off"
+}
+
+test_hook_blocks_pi_handoff_when_session_is_dead() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-pi-dead-session")
+  : > "$dir/state/task1.meta"
+  touch "$dir/state/.last-watcher-beat"
+  sleep 60 &
+  pid=$!
+  record_pi_extension_session "$dir" "$pid" || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not record the Pi extension session for the dead-session fixture"
+  }
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "an unheld lock with a leftover beat must block once the Pi session is dead"
+  assert_contains "$out" "TURN WOULD END BLIND" "dead-session block must keep the alarm banner"
+  pass "fm-turnend-guard: a dead Pi session does not satisfy the hand-off proof"
 }
 
 test_hook_silent_with_live_lock_and_fresh_beacon() {
@@ -2202,6 +2315,10 @@ test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_source_only_home
 test_hook_blocks_when_dead_lock_has_fresh_beacon
+test_hook_silent_during_pi_extension_handoff
+test_hook_blocks_dead_lock_despite_pi_extension_ownership
+test_hook_blocks_stale_beacon_despite_pi_extension_ownership
+test_hook_blocks_pi_handoff_when_session_is_dead
 test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_non_claude_health_ignores_claude_budget_contention
 test_hook_blocks_with_live_lock_and_stale_beacon
