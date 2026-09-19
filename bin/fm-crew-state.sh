@@ -105,7 +105,11 @@
 #      agree, and are reported as parked. A `blocked:` line that reports a
 #      refused or missing daemon socket remains blocked even if an attributed
 #      run record is stale or terminal, for as long as that blocker is still the
-#      log's latest event. Other daemon, timeout, or unreachability
+#      log's latest event. The same holds for any open decision when the run
+#      record itself is UNVERIFIED (its daemon answered down): the crew saw its
+#      gate or blocker first hand, so needs-decision stays parked and blocked
+#      stays blocked, with the unverified record named as the reason.
+#      Other daemon, timeout, or unreachability
 #      claims are superseded BECAUSE THE RUN IS ALIVE when the run is
 #      running/fixing with recent reported activity: a killed or timed-out drive
 #      call is not daemon death, so that claim is answered by steering the crew
@@ -738,6 +742,7 @@ HAVE_RUN=0
 # the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
 NM_DAEMON_ANSWER=""
+RUN_DEAD_DAEMON=""
 COARSE_STATUS=""
 SELECTED_RUN_ID=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
@@ -794,7 +799,8 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
             emit unknown run-step "selected run code identity unverified; run ids: $candidate_ids"
           fi
         elif fm_nm_run_is_executing "$RUN_OUT" && nm_daemon_answered_down; then
-          emit unknown run-step "no-mistakes daemon unreachable; last run record $(strip_quotes "$(nm_field status)") - unverified"
+          HAVE_RUN=1
+          RUN_DEAD_DAEMON="no-mistakes daemon unreachable; last run record $(strip_quotes "$(nm_field status)") - unverified; run ids: $candidate_ids"
         fi
         SELECTED_RUN_ID=$selected_id
         ;;
@@ -850,17 +856,19 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
           # instrument has to be named, and the full TOON would print `working`.
           [ "$run_branch" = "$CREW_BRANCH" ] || RUN_SOURCE=coarse
           # The ledger word alone cannot tell executing from waiting at a gate,
-          # so the run's own TOON decides: a PARKED run keeps its gate and
-          # findings whatever the daemon answers, because an open decision is
-          # still open when the instrument dies.
-          if ! fm_nm_run_is_parked "$RUN_OUT" \
-            && [ "$(fm_nm_run_status_class "$COARSE_STATUS")" = live ] \
+          # so the run's own TOON decides: a PARKED run of THIS crew keeps its
+          # gate and findings whatever the daemon answers, because an open
+          # decision is still open when the instrument dies. A foreign-branch
+          # answer carries no gate of ours to protect.
+          if [ "$(fm_nm_run_status_class "$COARSE_STATUS")" = live ] \
+            && ! { [ "$run_branch" = "$CREW_BRANCH" ] && fm_nm_run_is_parked "$RUN_OUT"; } \
             && nm_daemon_answered_down; then
-            RUN_SOURCE=coarse
+            RUN_DEAD_DAEMON="no-mistakes daemon unreachable; last ledger record $COARSE_STATUS - unverified; run id: $(strip_quotes "$(nm_field id)")"
           fi
         elif [ "$run_branch" = "$CREW_BRANCH" ] && fm_nm_run_is_executing "$RUN_OUT" \
           && nm_daemon_answered_down; then
-          emit unknown run-step "no-mistakes daemon unreachable; last run record $(strip_quotes "$(nm_field status)") - unverified"
+          HAVE_RUN=1
+          RUN_DEAD_DAEMON="no-mistakes daemon unreachable; last run record $(strip_quotes "$(nm_field status)") - unverified; run id: $(strip_quotes "$(nm_field id)")"
         fi
       fi
     fi
@@ -875,23 +883,19 @@ if [ "$HAVE_RUN" = 1 ]; then
   CI_STEP_STATUS=""
   CI_LOG_STATE=""
   RUN_STATUS=""
-  if [ "$RUN_SOURCE" = coarse ]; then
+  if [ -n "$RUN_DEAD_DAEMON" ]; then
+    # ONE dead-instrument verdict for every route that reaches one. It is set,
+    # not emitted, so the status-log reconciliation below still runs: an
+    # unverified record must not silence the crew's own open decision.
+    RUN_STATE=unknown
+    RUN_DETAIL=$RUN_DEAD_DAEMON
+  elif [ "$RUN_SOURCE" = coarse ]; then
     # No step/gate detail is available from the plain runs list - only ever
     # working, done, failed, or unknown. Gate detail requires the identity-aware
     # read above. The status event span remains independently available to the
     # supervisor through fm-classify-lib.sh's status_span_first_actionable.
     case "$COARSE_STATUS" in
-      pending|running)
-        # Same instrument as the failed row below, and the weaker record of the
-        # two: never finalized. With the daemon answered down nothing is
-        # executing this row, and the verdict has to say so rather than let a
-        # dead instrument read as work in progress.
-        if nm_daemon_answered_down; then
-          RUN_STATE=unknown
-          RUN_DETAIL="no-mistakes daemon unreachable; last ledger record $COARSE_STATUS - unverified"
-        else
-          RUN_STATE=working; RUN_DETAIL="validating (background run)"
-        fi ;;
+      pending|running) RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
       failed)
         # The ledger row is terminal but the coarse path has no steps table
@@ -1012,6 +1016,13 @@ if [ "$HAVE_RUN" = 1 ]; then
         && [ "$(status_line_verb "$LOG_LATEST")" = blocked ] \
         && log_reports_daemon_socket_down "$LOG_LATEST"; then
         emit blocked status-log "$(status_line_note "$LOG_LATEST")${SEP}daemon socket down despite attributed run record"
+      fi
+      # An UNVERIFIED record cannot close an open decision. The crew observed
+      # its gate or its blocker first hand; a record the dead instrument left
+      # behind is the weaker witness, so the log answers and the unverified
+      # record is reported as the reason rather than replacing it.
+      if [ -n "$RUN_DEAD_DAEMON" ] && [ "$(map_log_state "$LOG_LINE")" != unknown ]; then
+        emit "$(map_log_state "$LOG_LINE")" status-log "$(status_line_note "$LOG_LINE")${SEP}$RUN_DEAD_DAEMON"
       fi
       if [ "$RUN_STATE" != parked ] \
         && ! { [ "$RUN_SOURCE" = coarse ] && [ "$RUN_STATE" = unknown ]; }; then

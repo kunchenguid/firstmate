@@ -3563,6 +3563,7 @@ branch_sync:
   out=$(run_crew_state "$d" feat-zombie)
   assert_contains "$out" "state: unknown" "a live record at a diverged head must not read as work with the daemon answering down"
   assert_contains "$out" "daemon unreachable" "the dead instrument is named rather than dropped silently"
+  assert_contains "$out" "run id: 01RUN" "the verdict carries the run identity for a later --run read"
   assert_not_contains "$out" "state: working" "a stale status log must not answer for a dead instrument"
   pass "a live record at a diverged head reports the dead daemon"
 }
@@ -3623,8 +3624,61 @@ runs[1]{id,branch,status,head,pr}:
   out=$(run_crew_state "$d" seldiv)
   assert_contains "$out" "state: unknown" "the selected diverged-head route must not read working with the daemon down"
   assert_contains "$out" "daemon unreachable" "the dead instrument is named on the selected route too"
+  assert_contains "$out" "run ids: 01RUN" "the selected-route verdict carries the candidate run ids"
   assert_not_contains "$out" "state: working" "a stale status log must not answer for a dead instrument"
   pass "the selected-run diverged-head route reports the dead daemon"
+}
+
+# The crew observed the refused socket itself. A run record the dead daemon left
+# behind is the weaker witness, so the blocker stays blocked on the diverged-head
+# route too - the same invariant the head-match route has always honoured.
+test_socket_refused_log_survives_the_dead_daemon_verdict() {
+  reset_fakes
+  local d rebased out; d=$(new_case socket-refused-diverged)
+  make_repo_on_branch "$d/wt" fm/feat-sockdiv
+  rebased=$(make_rebased_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-sockdiv.meta" "window=fm:fm-feat-sockdiv" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'blocked: no-mistakes daemon socket refused connections\n' > "$d/state/feat-sockdiv.status"
+  FM_FAKE_RUN_HEAD=$rebased
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-sockdiv)
+branch_sync:
+  state: synced"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-sockdiv
+  out=$(run_crew_state "$d" feat-sockdiv)
+  assert_contains "$out" "state: blocked" "a first-hand socket refusal is not demoted to a generic unknown"
+  assert_contains "$out" "socket refused" "the crew's own blocker reaches the supervisor"
+  assert_not_contains "$out" "state: unknown" "the unverified record must not replace the blocker"
+  pass "a socket-refused blocker survives the dead-daemon verdict"
+}
+
+# An open gate is the crew's own first-hand evidence too: an unverified record
+# cannot close it, so needs-decision stays parked and names the reason.
+test_needs_decision_survives_the_dead_daemon_verdict() {
+  reset_fakes
+  local d rebased out; d=$(new_case needs-decision-diverged)
+  make_repo_on_branch "$d/wt" fm/feat-ndiv
+  rebased=$(make_rebased_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ndiv.meta" "window=fm:fm-feat-ndiv" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision: approve the schema change\n' > "$d/state/feat-ndiv.status"
+  FM_FAKE_RUN_HEAD=$rebased
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-ndiv)
+branch_sync:
+  state: synced"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-ndiv
+  out=$(run_crew_state "$d" feat-ndiv)
+  assert_contains "$out" "state: parked" "an open decision is not hidden behind a generic unknown"
+  assert_contains "$out" "approve the schema change" "the crew's own decision note reaches the supervisor"
+  assert_contains "$out" "daemon unreachable" "the unverified record is named as the reason"
+  assert_not_contains "$out" "superseded" "an unverified record never supersedes an open decision"
+  pass "an open decision survives the dead-daemon verdict"
 }
 
 # The head-free route still binds while the daemon answers: the daemon probe
@@ -3732,8 +3786,8 @@ EOF
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-cus
   out=$(run_crew_state "$d" feat-cus)
-  assert_contains "$out" "state: unknown" "the bound coarse record reports itself unverified"
-  assert_contains "$out" "daemon unreachable" "the dead instrument is named"
+  assert_contains "$out" "state: parked" "the open decision outranks an unverified coarse record"
+  assert_contains "$out" "daemon unreachable" "the dead instrument is named as the reason"
   assert_not_contains "$out" "superseded" "an unverified record makes no supersede claim about the open decision"
   pass "an unverified coarse record never claims the status log superseded"
 }
@@ -4277,6 +4331,8 @@ test_live_rebased_run_reads_working_for_every_executing_status
 test_legacy_live_rebased_run_is_authoritative
 test_legacy_surface_binds_fixing_and_ci_at_a_rebased_head
 test_live_record_at_diverged_head_needs_a_live_daemon
+test_socket_refused_log_survives_the_dead_daemon_verdict
+test_needs_decision_survives_the_dead_daemon_verdict
 test_parked_gate_survives_a_dead_daemon
 test_selected_run_diverged_head_reports_the_dead_daemon
 test_live_record_at_diverged_head_binds_while_daemon_answers
