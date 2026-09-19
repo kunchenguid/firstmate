@@ -38,8 +38,8 @@
 # cursor and folded open-set as a side effect, so a per-drain fleet-wide scan
 # stays bounded by new appends instead of re-reading each task's whole lifetime
 # log every time. status_home_appends_record writes the per-task home-owned
-# append ledger (see "home-owned status-append ledger" below) so later drains
-# and signal scans can treat this home's own bookkeeping bytes as already owned.
+# append ledger (see "home-owned status-append ledger" below) so signal scans
+# and wake annotations can treat this home's own bookkeeping bytes as already owned.
 # crew_worktree_written_since reads the task's meta file and walks a bounded slice
 # of its worktree instead of a status file, so callers run it only at the moment
 # they would otherwise escalate.
@@ -1741,8 +1741,9 @@ window_to_task() {
 # --- home-owned status-append ledger ----------------------------------------
 #
 # This home's bookkeeping closes (fm_wake_status_append_self_announced) record
-# the exact byte range they appended so later drains and signal scans can treat
-# those bytes as already owned. That is the multi-answer path: two distinct
+# the exact byte range they appended so signal scans and wake annotations treat
+# those bytes as already owned, while the drain's UNREAD STATUS section still
+# presents them. That is the multi-answer path: two distinct
 # --resolve-key closes must not each force a captain-facing wake solely because
 # each one appended a status line, while a worker-authored line that is not in
 # this ledger still signals.
