@@ -708,17 +708,58 @@ test_scan_marker_replaces_symlink_safely() {
   pass "scan marker replaces a symlink without overwriting its target"
 }
 
-test_nonterminal_and_captain_held_states_do_not_report() {
+test_nonterminal_obligations_surface_without_noise() {
+  local state key first
+  for state in blocked parked unknown; do
+    make_world "obligation-$state"
+    case "$state" in
+      blocked) write_child "$MAIN" child 'blocked: release credential missing' ;;
+      parked) write_child "$MAIN" child 'needs-decision: choose release channel' ;;
+      unknown) write_child "$MAIN" child 'working: last known progress' ;;
+    esac
+    FM_FAKE_CREW_STATE="$state" run_reconcile "$MAIN" --startup
+    key="inactive-worker:child:"
+    [ "$(wake_count "$MAIN" "$key")" = 1 ] || fail "$state did not surface one inactive worker obligation"
+    first=$(cat "$MAIN/state/.wake-queue")
+    case "$first" in
+      *"task=child state=$state"*) ;;
+      *) fail "$state obligation did not name its exact state: $first" ;;
+    esac
+    case "$state:$first" in
+      blocked:*'reason=release credential missing'*) ;;
+      parked:*'reason=choose release channel'*) ;;
+      unknown:*'reason=last known progress'*) ;;
+      *) fail "$state obligation did not preserve its exact reason: $first" ;;
+    esac
+    FM_FAKE_CREW_STATE="$state" run_reconcile "$MAIN" --startup
+    [ "$(wake_count "$MAIN" "$key")" = 1 ] || fail "$state obligation repeated without changing"
+    printf '%s\n' "${state}: changed reason" > "$MAIN/state/child.status"
+    age "$MAIN/state/child.status"
+    FM_FAKE_CREW_STATE="$state" run_reconcile "$MAIN" --startup
+    [ "$(wake_count "$MAIN" "$key")" = 2 ] || fail "$state obligation change did not surface"
+    : > "$MAIN/state/.wake-queue"
+    FM_FAKE_CREW_STATE='working' run_reconcile "$MAIN" --startup
+    [ ! -e "$MAIN/state/.inactive-obligation-child" ] || fail "$state obligation marker survived resumed work"
+    age "$MAIN/state/child.meta" "$MAIN/state/child.status" "$MAIN/state/child.turn-ended"
+    FM_FAKE_CREW_STATE="$state" run_reconcile "$MAIN" --startup
+    [ "$(wake_count "$MAIN" "$key")" = 1 ] || fail "$state did not re-surface after a resolved episode recurred"
+  done
+  pass "blocked, parked, and unknown inactive workers surface exact obligations once per episode"
+}
+
+test_working_paused_and_captain_held_states_do_not_report() {
   local state
-  for state in working paused parked unknown; do
+  for state in working paused; do
     make_world "nonterminal-$state"; write_child "$MAIN" child 'working: still active'
     FM_FAKE_CREW_STATE="$state" run_reconcile "$MAIN" --startup
+    [ ! -s "$MAIN/state/.wake-queue" ] || fail "$state produced an inactive obligation"
     [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail "$state produced a terminal outcome"
   done
   make_world captain-held; write_child "$MAIN" child 'captain-held: awaiting captain'
   FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  [ ! -s "$MAIN/state/.wake-queue" ] || fail "captain-held item produced an inactive obligation"
   [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail "captain-held item was reconciled"
-  pass "nonterminal and captain-held workers remain outside inactive terminal reporting"
+  pass "working, paused, and captain-held workers retain their existing supervision paths"
 }
 
 # The actual watcher poll invokes the helper, while an idle secondmate remains
@@ -894,9 +935,11 @@ test_reconciliation_never_calls_forge() {
 test_automatic_teardown_invokes_standard_cleanup() {
   make_world automatic-teardown
   write_child "$MAIN" child 'done: green'
+  printf 'stale-obligation\n' > "$MAIN/state/.inactive-obligation-child"
   FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup > "$WORLD/reconcile.out" 2>&1
   [ ! -e "$MAIN/state/child.meta" ] || fail "standard teardown retained eligible task metadata: $(cat "$WORLD/reconcile.out")"
   [ ! -e "$MAIN/state/child.status" ] || fail "standard teardown retained volatile status"
+  [ ! -e "$MAIN/state/.inactive-obligation-child" ] || fail "standard teardown retained inactive obligation marker"
   [ "$(outcome_count "$MAIN" pending)" = 1 ] || fail "standard teardown removed terminal receipt"
   grep -Fxq 'receipt-present' "$MAIN/endpoint-cleanup.log" || fail "endpoint cleanup preceded durable receipt"
   FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup >/dev/null
@@ -1061,7 +1104,8 @@ test_legacy_metadata_rewrite_keeps_receipt_identity
 test_relaunch_cannot_replace_metadata_during_state_snapshot
 test_heartbeat_cap_does_not_delay_reconciliation
 test_scan_marker_replaces_symlink_safely
-test_nonterminal_and_captain_held_states_do_not_report
+test_nonterminal_obligations_surface_without_noise
+test_working_paused_and_captain_held_states_do_not_report
 test_watcher_hook_and_idle_secondmate_exemption
 test_watcher_poll_delivers_child_ledger_line_to_parent
 test_stalled_state_read_is_bounded_and_scan_progresses

@@ -424,6 +424,8 @@ Relay may require that same live cycle with no fleet work.
 Do not substitute another harness's wait shape, use shell `&`, or create a second cycle when a healthy one already exists.
 For every actionable wake, follow the ordinary-wake continuation in the emitted protocol; use its repair action only when the live cycle is missing or failed.
 No turn ends blind while work is under way, including turns described as holding or waiting.
+Every ordinary worker that is not authoritatively working must remain on an explicit lifecycle path: a declared bounded pause, a surfaced blocker or captain decision, safe recovery in its existing local copy, or guarded cleanup after a preserved terminal result.
+`bin/fm-inactive-reconcile.sh` is the deterministic backstop for an inactive worker that otherwise falls out of that path; `stuck-crewmate-recovery` owns the response and never authorizes forced cleanup or discarded work.
 
 At the start of every wake-handling turn, drain the durable wake queue before peeking, reading beyond the reason line, steering, or starting work.
 Session start is the only exception because its one-shot digest already presented the queue while locked or deliberately left it untouched in lock-refused read-only mode.

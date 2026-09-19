@@ -47,10 +47,13 @@
 # terminal done or failed line belongs to the ledger-first path above and is
 # skipped here, so one outcome is never reported twice. It then uses
 # fm-crew-state.sh as the sole current-state source.
-# Only a done or failed state is suspicious enough to create a durable terminal
-# outcome record or wake the supervisor.
-# Working, paused, parked, blocked, unknown, persistent secondmates, and
-# captain-held work retain their existing supervision semantics.
+# A done or failed state creates the durable terminal outcome and standard
+# non-force cleanup path below. A blocked or parked state, or an unknown state
+# that cannot prove current execution, creates one durable actionable wake per
+# task incarnation and exact state/status fingerprint. That wake names the
+# blocker or decision from the status ledger, so an acknowledged notification
+# is not emitted again unless the obligation changes. Working remains active;
+# paused and captain-held work retain their existing bounded wait semantics.
 #
 # A terminal-outcomes/<fingerprint>.pending record remains until its upstream
 # receipt is durable.
@@ -111,6 +114,28 @@ RECONCILE_AUTO_TEARDOWN_RECORD=
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+
+inactive_obligation_marker() { # <id>
+  printf '%s/.inactive-obligation-%s\n' "$STATE" "$1"
+}
+
+surface_inactive_obligation() { # <id> <incarnation> <state> <state-line> <status-line>
+  local id=$1 incarnation=$2 state=$3 state_line=$4 status_line=$5 marker fingerprint previous tmp note payload
+  marker=$(inactive_obligation_marker "$id")
+  fingerprint=$(sha256_text "$incarnation|$id|$state|$(clean_field "$state_line")|$(clean_field "$status_line")")
+  previous=$(cat "$marker" 2>/dev/null || true)
+  [ "$previous" != "$fingerprint" ] || return 0
+  note=$(status_line_note "$status_line")
+  [ -n "$note" ] || note=$(clean_field "$state_line")
+  payload="inactive worker requires action: task=$id state=$state reason=$(clean_field "$note")"
+  publish_actionable "inactive-worker:$id:$fingerprint" "$payload" || {
+    [ "$?" -eq 1 ] || return 1
+  }
+  tmp=$(mktemp "$STATE/.inactive-obligation-$id.XXXXXX") || return 1
+  printf '%s\n' "$fingerprint" > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$marker"
+}
 
 FM_INACTIVE_RECONCILE_SECS=${FM_INACTIVE_RECONCILE_SECS:-900}
 case "$FM_INACTIVE_RECONCILE_SECS" in
@@ -530,10 +555,14 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     child_terminal_ledger_line "$status" >/dev/null
     case "$?" in 0|2) return 0 ;; esac
   fi
+  incarnation=$(meta_incarnation "$meta")
   case "$state_line" in
     'state: done '*) state='done' ;;
     'state: failed '*) state='failed' ;;
-    *) return 0 ;;
+    'state: blocked '*) surface_inactive_obligation "$id" "$incarnation" blocked "$state_line" "$last"; return ;;
+    'state: parked '*) surface_inactive_obligation "$id" "$incarnation" parked "$state_line" "$last"; return ;;
+    'state: unknown '*) surface_inactive_obligation "$id" "$incarnation" unknown "$state_line" "$last"; return ;;
+    *) rm -f -- "$(inactive_obligation_marker "$id")"; return 0 ;;
   esac
   pr=$(pr_for_task "$meta")
   incarnation=$(meta_incarnation "$meta")

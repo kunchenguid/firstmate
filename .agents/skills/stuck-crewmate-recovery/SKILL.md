@@ -28,12 +28,14 @@ For a REMOTE secondmate, `fm-crew-state` and `fm-peek` read the actual remote en
 Recover a genuinely stuck remote mate only through `bin/fm-spawn.sh <id> --secondmate`, never raw herdr pane close/kill surgery, which strands the endpoint binding.
 
 Treat the digest's endpoint result as a presence signal, not proof that the task's work or validation run is gone.
-For every stale notification, resolve the exact task and read `bin/fm-crew-state.sh <id>` before trusting its status log or deciding whether to absorb the stale pane.
+For every stale notification or `inactive worker requires action` notification, resolve the exact task and read `bin/fm-crew-state.sh <id>` before trusting its status log or deciding whether to absorb the worker.
 The verified `captain-held` transfer is the separate status-backed exception: its durable hold remains on the declared-wait path even when no worker metadata remains.
-An authoritative `state: working` from `source: run-step` or `source: pane` means the worker is genuinely in progress: do not ask the captain for action; continue supervision.
+An authoritative `state: working` from `source: run-step` or `source: pane` means the worker is genuinely in progress: continue supervision rather than escalating.
 A declared `paused` state remains the existing bounded external-wait path; it is intentional waiting and must not be mislabeled a wedge.
-Any other current state, including `parked`, `done`, `blocked`, `failed`, `unknown`, or an unreadable result, does not support absorption as routine progress.
-Surface a concrete recovery decision instead: inspect the recorded endpoint and worktree, then choose the normal lifecycle action only after ownership and preserved work are reconciled.
+A `blocked` state must remain alive, explicitly monitored, and surfaced with the exact blocker until it is resolved; do not repeatedly wake for an unchanged blocker, and do not clean it up merely because its endpoint is idle.
+A `parked` state must resolve to the concrete captain decision, credential, or access that resumes it; use the existing captain-call lifecycle rather than leaving an implicit wait.
+A `done` or `failed` state follows the terminal-outcome receipt and standard non-force cleanup path, which preserves evidence and retains the worker whenever teardown finds uncommitted or unlanded work.
+An `unknown` or unreadable state is not permission to absorb or clean up: inspect the recorded endpoint and local copy, then recover or relaunch only after ownership and preserved work are reconciled.
 When the pane cannot be mapped to an exact task, identify it from the recorded backend inventory without label-based guessing; leave it untouched and surface the decision to inspect the unidentified pane before any relaunch.
 
 When no authoritative run accounts for the task, inspect only its recorded backend and worktree inventory.
