@@ -879,6 +879,25 @@ test_fm_send_still_marks_the_same_secondmate_task() {
   pass "fm-control's arrival leaves fm-send's from-firstmate marking untouched"
 }
 
+test_harness_lookup_drains_producer() (
+  # Exceed pipe capacity so an early match cannot hide a closed reader behind
+  # buffering. Wait for the producer to prove it completed without SIGPIPE.
+  # shellcheck disable=SC2329 # Called by the imported harness lookup.
+  fm_control_harnesses() {
+    awk 'BEGIN { print "claude"; for (i = 0; i < 65536; i++) print "codex" }'
+  }
+  fm_control_harness_supported claude || fail "first harness was not supported"
+  wait "$!" || fail "harness lookup closed its producer pipe early"
+  fm_control_harness_supported codex || fail "later harness was not supported"
+  wait "$!" || fail "later match closed its producer pipe early"
+  if fm_control_harness_supported unknown; then
+    fail "unknown harness was supported"
+  fi
+  wait "$!" || fail "unknown harness lookup did not drain its producer"
+  pass "harness lookup drains its producer for matches and misses"
+)
+
+test_harness_lookup_drains_producer || exit 1
 test_exit_types_each_harness_verified_command
 test_interrupt_sends_each_harness_verified_key
 test_opencode_interrupts_twice_and_others_once

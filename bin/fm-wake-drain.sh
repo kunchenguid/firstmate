@@ -3,7 +3,8 @@
 # optionally acknowledge handled records,
 # annotate every unread line for validated signal status keys, surface unread
 # informational status lines, latest captain-facing statuses not covered by a
-# newer branch outcome, OPEN DECISIONS, and captain-call record divergence,
+# newer branch outcome, OPEN DECISIONS, captain-call record divergence, and
+# the advisory Jev queue-triage line on a heartbeat row,
 # then assert liveness.
 #
 # Keep sequence-bound row consumption independent from generation-bound episode
@@ -577,6 +578,20 @@ print_status_sections() {
   rm -f -- "$prepared"
 }
 
+# One advisory next-work line, only when this drain is presenting a heartbeat.
+# The watcher produces the record; this prints the surface file if a
+# recommendation exists. Missing or empty is silent. Contract:
+# bin/fm-jev-queue-triage.sh; docs/configuration.md "Jev queue triage".
+print_jev_queue_triage_line() {
+  local rows=$1 line_file="$STATE/jev-queue-triage.line" line
+  [ -n "$rows" ] || return 0
+  printf '%s\n' "$rows" | awk -F '\t' '$3 == "heartbeat" { found=1 } END { exit !found }' || return 0
+  [ -f "$line_file" ] || return 0
+  line=$(head -n 1 "$line_file" 2>/dev/null) || return 0
+  [ -n "$line" ] || return 0
+  printf '%s\n' "$line" || return 1
+}
+
 print_status_presentation() {  # [<deduped-raw-rows>]
   local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot annotation_manifest fully_presented='' rc=0
   local lock_rc holder_pid
@@ -859,6 +874,7 @@ case "${FM_WAKE_DRAIN_TEST_DELAY_BEFORE_COMMIT:-0}" in
 esac
 if [ -n "$RAW_ROWS" ]; then
   printf '%s\n' "$RAW_ROWS" || exit "$?"
+  print_jev_queue_triage_line "$RAW_ROWS" || true
 fi
 fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
 RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
