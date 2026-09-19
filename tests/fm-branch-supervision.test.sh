@@ -966,15 +966,31 @@ EOF
   [ "$status" -eq 6 ] || fail "a branch secondmate spawn exited $status, not 6: $out"
   assert_contains "$out" "the supervision branch never performs this action" "a branch secondmate spawn was not refused at the partition"
 
-  hook="$home/archive-after-early"
-  cat > "$hook" <<HOOK
+  rm -f "$root/bin"
+  mkdir -p "$root/bin"
+  for f in "$ROOT/bin"/*; do
+    ln -s "$f" "$root/bin/${f##*/}"
+  done
+  rm -f "$root/bin/fm-afk-contract.sh"
+  cat > "$root/bin/fm-afk-contract.sh" <<WRAPPER
 #!/usr/bin/env bash
 set -eu
-FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null
-HOOK
-  chmod +x "$hook"
-  out=$(FM_TEST_SPAWN_AFTER_EARLY_CAP="$hook" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
-    FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-spawn.sh" task-queued --mode no-mistakes --yolo off 2>&1)
+REAL="$ROOT/bin/fm-afk-contract.sh"
+COUNT="$home/contract-validate-count"
+if [ "\${1:-}" = validate ]; then
+  n=0
+  [ -f "\$COUNT" ] && n=\$(cat "\$COUNT")
+  n=\$((n + 1))
+  printf '%s\n' "\$n" > "\$COUNT"
+  if [ "\$n" -eq 2 ]; then
+    "\$REAL" archive >/dev/null
+  fi
+fi
+exec "\$REAL" "\$@"
+WRAPPER
+  chmod +x "$root/bin/fm-afk-contract.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
+    "$root/bin/fm-spawn.sh" task-queued --mode no-mistakes --yolo off 2>&1)
   status=$?
   [ "$status" -eq 6 ] || fail "an archived-after-early-guard spawn exited $status, not 6: $out"
   assert_contains "$out" "the supervision branch never performs this action" \
@@ -987,33 +1003,44 @@ HOOK
 }
 
 test_away_spend_cap_is_rechecked_under_the_task_set_lock() {
-  local home root out hook i
+  local home root out i
   home="$TMP_ROOT/away-cap-lock-home"
   root="$TMP_ROOT/away-cap-lock-root"
-  mkdir -p "$home/state" "$home/data" "$home/config" "$root"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$root/bin"
   git init -q -b main "$root"
   git -C "$root" commit -q --allow-empty -m init
-  ln -s "$ROOT/bin" "$root/bin"
+  for f in "$ROOT/bin"/*; do
+    ln -s "$f" "$root/bin/${f##*/}"
+  done
+  rm -f "$root/bin/fm-afk-contract.sh"
+  cat > "$root/bin/fm-afk-contract.sh" <<WRAPPER
+#!/usr/bin/env bash
+set -eu
+REAL="$ROOT/bin/fm-afk-contract.sh"
+COUNT="$home/contract-field-count"
+if [ "\${1:-}" = field ]; then
+  n=0
+  [ -f "\$COUNT" ] && n=\$(cat "\$COUNT")
+  n=\$((n + 1))
+  printf '%s\n' "\$n" > "\$COUNT"
+  if [ "\$n" -eq 1 ]; then
+    : > "$home/early-cap-passed"
+    i=0
+    while [ ! -f "$home/competitor-published" ]; do
+      i=\$((i + 1))
+      [ "\$i" -lt 200 ] || exit 1
+      sleep 0.05
+    done
+  fi
+fi
+exec "\$REAL" "\$@"
+WRAPPER
+  chmod +x "$root/bin/fm-afk-contract.sh"
   FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" propose --spend 1 >/dev/null || fail "away propose failed"
   FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null || fail "away confirm failed"
 
-  hook="$home/after-early-cap"
-  cat > "$hook" <<HOOK
-#!/usr/bin/env bash
-set -eu
-: > "$home/early-cap-passed"
-i=0
-while [ ! -f "$home/competitor-published" ]; do
-  i=\$((i + 1))
-  [ "\$i" -lt 200 ] || exit 1
-  sleep 0.05
-done
-HOOK
-  chmod +x "$hook"
-
-  FM_TEST_SPAWN_AFTER_EARLY_CAP="$hook" \
   FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
-    "$ROOT/bin/fm-spawn.sh" task-q1 --mode no-mistakes --yolo off \
+    "$root/bin/fm-spawn.sh" task-q1 --mode no-mistakes --yolo off \
     > "$home/q1.out" 2>&1 &
   i=0
   while [ ! -f "$home/early-cap-passed" ]; do

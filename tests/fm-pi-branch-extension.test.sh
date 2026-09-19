@@ -1719,15 +1719,20 @@ contract(["confirm"]);
 const processingMsg = { role: "custom", customType: pending.message.customType, content: pending.message.content, display: false };
 let aborted = false;
 const abortCtx = { ...defaultSessionCtx, abort() { aborted = true; } };
-const followUpResult = await fire("context", {
-  messages: [{ role: "user", content: "captain still in this turn" }, processingMsg],
+const streamingResult = await fire("context", {
+  messages: [
+    { role: "user", content: "captain still in this turn" },
+    { role: "assistant", content: [{ type: "toolCall", id: "t1" }] },
+    { role: "toolResult", toolCallId: "t1", content: "tool finished" },
+    processingMsg,
+  ],
 }, abortCtx);
-if (aborted) throw new Error("stripping a followUp processing message aborted the streaming captain turn");
-if (followUpResult?.messages?.some((message) => message.customType === "fm-branch-process")) {
-  throw new Error(`followUp processing was not stripped: ${JSON.stringify(followUpResult)}`);
+if (aborted) throw new Error("stripping processing aborted a captain-opened streaming turn after a tool call");
+if (streamingResult?.messages?.some((message) => message.customType === "fm-branch-process")) {
+  throw new Error(`streaming processing was not stripped: ${JSON.stringify(streamingResult)}`);
 }
-if (!followUpResult?.messages?.some((message) => message.role === "user")) {
-  throw new Error("followUp suppression dropped the captain turn");
+if (!streamingResult?.messages?.some((message) => message.role === "user")) {
+  throw new Error("streaming suppression dropped the captain turn");
 }
 aborted = false;
 const nextTurnResult = await fire("context", {
@@ -1742,12 +1747,6 @@ const history = [
   { role: "assistant", content: "earlier firstmate reply" },
 ];
 aborted = false;
-const openedByRequest = await fire("context", { messages: [...history, processingMsg] }, abortCtx);
-if (!aborted) throw new Error("a dedicated processing turn with history was not aborted under the record");
-if (openedByRequest?.messages?.some((message) => message.customType === "fm-branch-process")) {
-  throw new Error(`dedicated processing with history was not stripped: ${JSON.stringify(openedByRequest)}`);
-}
-aborted = false;
 const openedByCaptain = await fire("context", {
   messages: [...history, { role: "user", content: "current captain prompt" }, processingMsg],
 }, abortCtx);
@@ -1755,8 +1754,13 @@ if (aborted) throw new Error("stripping processing aborted a captain-opened turn
 if (openedByCaptain?.messages?.some((message) => message.customType === "fm-branch-process")) {
   throw new Error(`captain-opened processing was not stripped: ${JSON.stringify(openedByCaptain)}`);
 }
-if (!openedByCaptain?.messages?.some((message) => message.content === "current captain prompt")) {
-  throw new Error("captain-opened suppression dropped the current prompt");
+await fire("agent_end", {});
+await fire("agent_start", {}, defaultSessionCtx);
+aborted = false;
+const openedByRequest = await fire("context", { messages: [...history, processingMsg] }, abortCtx);
+if (!aborted) throw new Error("a dedicated processing turn with history was not aborted under the record");
+if (openedByRequest?.messages?.some((message) => message.customType === "fm-branch-process")) {
+  throw new Error(`dedicated processing with history was not stripped: ${JSON.stringify(openedByRequest)}`);
 }
 await fire("agent_end", {});
 await fire("agent_settled", {});

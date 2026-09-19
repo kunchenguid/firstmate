@@ -1389,9 +1389,6 @@ spawn_refuse_if_away_spend_cap() {
 # costs nothing to unwind; rechecked after the task-set lock so two fresh
 # spawns cannot both publish from a stale count.
 spawn_refuse_if_away_spend_cap
-if [ -x "${FM_TEST_SPAWN_AFTER_EARLY_CAP:-}" ]; then
-  "$FM_TEST_SPAWN_AFTER_EARLY_CAP"
-fi
 spawn_require_relocated_queued_work() {
   local actor
   [ "$RELAUNCH" -ne 1 ] || return 0

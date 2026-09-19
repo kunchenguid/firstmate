@@ -656,6 +656,8 @@ export default function (pi: ExtensionAPI) {
   // session generation.
   type ProcessingState = { sequences: string; through: number; triggered: number; pending: boolean; nextTurnQueued: boolean };
   let processing: ProcessingState | null = null;
+  let queuedTriggeringProcessing = false;
+  let processingOpenedThisRun = false;
   let processedInitializedGeneration = -1;
   // One revision for BOTH selections: a model or effort change invalidates an
   // in-flight branch build exactly the same way.
@@ -1090,6 +1092,7 @@ export default function (pi: ExtensionAPI) {
     if (processing.triggered < PROCESSING_TRIGGERED_ATTEMPTS) {
       processing.triggered += 1;
       processing.pending = true;
+      queuedTriggeringProcessing = true;
       pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
     } else if (!processing.nextTurnQueued) {
       processing.nextTurnQueued = true;
@@ -1666,6 +1669,8 @@ ${context.command}
     // Pi delivers a queued nextTurn copy with the prompt that starts this run,
     // so a fresh copy may be queued again once this run settles unacknowledged.
     if (processing) processing.nextTurnQueued = false;
+    processingOpenedThisRun = queuedTriggeringProcessing;
+    queuedTriggeringProcessing = false;
   });
   pi.on?.("context", (event, ctx) => {
     if (!afkPostureRecordPresent(state)) return;
@@ -1673,16 +1678,7 @@ ${context.command}
     const kept = messages.filter((message) => !isProcessingCustomMessage(message));
     if (kept.length === messages.length) return;
     processing = null;
-    let openedByUser = false;
-    for (let i = kept.length - 1; i >= 0; i -= 1) {
-      const role = kept[i].role;
-      if (role === "assistant") break;
-      if (role === "user") {
-        openedByUser = true;
-        break;
-      }
-    }
-    if (!openedByUser) ctx?.abort?.();
+    if (processingOpenedThisRun) ctx?.abort?.();
     return { messages: kept };
   });
   pi.on?.("agent_end", () => {
@@ -1696,6 +1692,8 @@ ${context.command}
   // reply that only paraphrased it - and is presented again.
   pi.on?.("agent_settled", async () => {
     mainStreaming = false;
+    queuedTriggeringProcessing = false;
+    processingOpenedThisRun = false;
     if (processing) processing.pending = false;
     const settledGeneration = generation;
     await enqueueDelivery(async () => {
