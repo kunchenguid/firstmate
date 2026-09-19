@@ -22,6 +22,7 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
+#                 "SUPERWHISPER_DRIFT: global Pi settings re-enabled Superwhisper in <path> (remediation: pi remove npm:@superwhisper/pi)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate home is fast-forwarded, its target is
 #          firstmate's own current default-branch commit. A local worktree uses
@@ -1526,6 +1527,28 @@ detect_local_config() {
   fi
   detect_code_root_backlog_fork
   detect_home_summary_publication
+  detect_superwhisper_drift
+}
+
+# Superwhisper drift detection. Firstmate keeps Superwhisper scoped to the
+# primary session via project-local registration; global re-enablement in
+# ~/.pi/agent/settings.json causes worker sessions and non-owner sessions
+# across the machine to load it. Detect-only: reports drift without modifying
+# user configuration. The globally enabled Codex plugin is desired for the
+# captain's dedicated ChatGPT/Codex sessions and is not reported as drift.
+detect_superwhisper_drift() {
+  local pi_settings="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/settings.json"
+  [ -f "$pi_settings" ] && [ -r "$pi_settings" ] || return 0
+  grep -Eq '"(npm:)?@?superwhisper/pi"' "$pi_settings" 2>/dev/null || return 0
+  if command -v jq >/dev/null 2>&1; then
+    local matched
+    matched=$(jq -r '.packages // [] | if any(. == "npm:@superwhisper/pi" or . == "@superwhisper/pi" or test("(^|:)@?superwhisper/pi($|@)")) then "DRIFT" else "" end' "$pi_settings" 2>/dev/null || true)
+    if [ "$matched" = "DRIFT" ]; then
+      echo "SUPERWHISPER_DRIFT: global Pi settings re-enabled Superwhisper in $pi_settings (remediation: pi remove npm:@superwhisper/pi)"
+    fi
+  else
+    echo "SUPERWHISPER_DRIFT: global Pi settings re-enabled Superwhisper in $pi_settings (remediation: pi remove npm:@superwhisper/pi)"
+  fi
 }
 
 # Shadow-backlog check. When this home's data directory is not the code root's,
