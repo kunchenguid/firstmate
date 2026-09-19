@@ -40,6 +40,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-forge-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-forge-lib.sh"
 # Inert unless FM_TIMING_LOG names a file; only the deferred network stage sets it.
 # shellcheck source=bin/fm-timing-lib.sh
 . "$SCRIPT_DIR/fm-timing-lib.sh"
@@ -332,6 +334,12 @@ sync_project() {
   fi
   if ! git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
     echo "$label: skipped: no origin remote"
+    return 0
+  fi
+  # Fleet sync is a network mutation, so an origin outside the supported forge
+  # boundary must be left untouched regardless of whether this script was
+  # launched by bootstrap or invoked directly.
+  if [ "$(fm_forge_detect_provider "$PROJ")" = unknown ]; then
     return 0
   fi
 
