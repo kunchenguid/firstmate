@@ -1124,11 +1124,7 @@ crew_dispatch_validate() {
   typed_key=$TYPESAFE_API_KEY_PRIVATE
   [ -n "$typed_key" ] || typed_key=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
   [ -z "$typed_key" ] || typed_active=true
-  if $typed_active; then
-    verified_harnesses=$(fm_control_harnesses | jq -Rsc 'split("\n") | map(select(length > 0))')
-  else
-    verified_harnesses='["claude","codex","opencode","pi","pi-signed","grok","kimi","cursor","agy","muse","rovo","omp"]'
-  fi
+  verified_harnesses=$(fm_control_harnesses | jq -Rsc 'split("\n") | map(select(length > 0))')
   err=$(jq -r --argjson typed "$typed_active" --argjson verified_harnesses "$verified_harnesses" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
     def verified($h): $verified_harnesses | index($h);
     def provider_id($p): ($p | type) == "string" and ($p | test($provider_re));
