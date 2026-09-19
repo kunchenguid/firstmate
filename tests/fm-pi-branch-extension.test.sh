@@ -1223,6 +1223,61 @@ EOF
   pass "requested and unsolicited healthy outcomes keep distinct delivery and event ownership"
 }
 
+test_periodic_progress_summary_preserves_captain_delivery() {
+  local repo home out status
+  repo="$TMP_ROOT/periodic-progress-root"
+  home="$TMP_ROOT/periodic-progress-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx }; })()`);
+const { fire, dispatch, settle, sentToMain, mainEntries, mainTools, outcomeScript, defaultSessionCtx } = globalThis.__t;
+await fire("session_start", {}, defaultSessionCtx);
+let finish;
+globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finish = resolve; });
+const offer = dispatch("signal: build is progressing");
+await settle(() => Boolean(finish), "progress prompt");
+const report = globalThis.__fmSessions[0].options.customTools.find((tool) => tool.name === "fm_branch_report");
+async function emit(task, verdict, summary, silent = false) {
+  const result = await report.execute(summary, { task, verdict, summary, silent }, undefined, undefined, {});
+  if (result.isError) throw new Error(JSON.stringify(result));
+}
+for (let step = 1; step <= 12; step++) await emit("branch-driver", "routine", `Build step ${step}`, true);
+if (sentToMain.some((sent) => sent.message.display || sent.options.triggerTurn)) throw new Error("routine steps cluttered chat or triggered main");
+finish();
+await offer.settlement;
+globalThis.__fmOnBranchPrompt = async () => {
+  const pending = outcomeScript(["pending-progress"]).trim().split("\n").map(JSON.parse);
+  if (pending.length !== 1 || pending[0].summary !== "Build step 12") throw new Error("heartbeat lost consumed progress");
+  await emit("fleet", "routine", "Build continues, twelve steps completed");
+};
+const heartbeat = dispatch("heartbeat", undefined, true);
+if (!heartbeat.accepted) throw new Error("periodic heartbeat refused");
+await heartbeat.settlement;
+if (sentToMain.filter((sent) => sent.message.display).length !== 1) throw new Error("batch did not render exactly one periodic note");
+if (outcomeScript(["pending-progress"]) !== "") throw new Error("periodic summary left pending progress");
+for (const summary of ["Decision needed", "Build failed", "Requested work finished"]) {
+  await emit("branch-driver", "routine", "Still working", true);
+  await emit("branch-driver", "captain", summary);
+  const entries = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome");
+  if (entries.at(-1)?.data.summary !== summary) throw new Error(`captain result delayed: ${summary}`);
+  const requests = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
+  if (!requests.at(-1)?.message.content.includes(summary) || !requests.at(-1)?.options.triggerTurn) throw new Error(`main was not triggered immediately: ${summary}`);
+  if (outcomeScript(["pending-progress"]) !== "") throw new Error("captain outcome left obsolete progress pending");
+  const processed = mainTools.find((tool) => tool.name === "fm_branch_processed");
+  const ack = await processed.execute("ack", { through: entries.at(-1).data.seq }, undefined, undefined, {});
+  if (ack.isError) throw new Error("captain processing acknowledgement failed");
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "periodic progress and immediate captain delivery: $out"
+  pass "twelve silent steps render one periodic summary while captain outcomes remain immediate"
+}
+
 test_captain_outcome_is_exactly_once_across_crash_reload_and_unrelated_response() {
   local repo home out status
   repo="$TMP_ROOT/visible-outcome-recovery-root"
@@ -5343,11 +5398,17 @@ EOF
   pass "an extension-registered provider resolves in the isolated branch runtime"
 }
 
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit 0
+fi
+
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable
 test_branch_dispatch_two_stage_filter_and_prefix_contract
 test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery
 test_silent_routine_task_outcome_is_stored_without_a_note
+test_periodic_progress_summary_preserves_captain_delivery
 test_captain_outcome_is_exactly_once_across_crash_reload_and_unrelated_response
 test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot

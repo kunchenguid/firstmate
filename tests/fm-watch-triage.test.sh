@@ -5011,6 +5011,54 @@ test_procevent_marker_failure_exits_and_replays() {
 
 # --- heartbeat: no-change absorbed, backstop surfaces a missed status --------
 
+test_pi_pending_progress_uses_heartbeat_cadence() {
+  local dir state fakebin out pid step seq pending
+  dir=$(make_case heartbeat-progress); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  for step in $(seq 1 12); do
+    seq=$(FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" append \
+      --task build --verdict routine --silent true --summary "Build step $step") || fail "progress append failed"
+  done
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through "$seq" || fail "progress consumption failed"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task fleet --verdict routine --silent true --summary 'Quiet review' >/dev/null || fail "silent fleet append failed"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task other --verdict routine --summary 'Other task recovered' >/dev/null || fail "unrelated visible append failed"
+  pending=$(FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" pending-progress)
+  [ "$(printf '%s\n' "$pending" | jq -s 'length')" = 1 ] || fail "progress did not coalesce per task"
+  [ "$(printf '%s\n' "$pending" | jq -r '.summary')" = 'Build step 12' ] || fail "pending progress lost the latest update"
+  set_mtime 1000000000 "$state/.last-heartbeat"
+  watch_bg "$state" "$fakebin" "$out" env PI_CODING_AGENT=false FM_HEARTBEAT=30
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "non-Pi watcher surfaced branch progress"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "non-Pi watcher queued progress"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "intentional non-Pi watcher stop was not acknowledged"
+  echo 0 > "$state/.heartbeat-streak"
+  touch "$state/.last-heartbeat"
+  watch_bg "$state" "$fakebin" "$out" env PI_CODING_AGENT=true FM_HEARTBEAT=30
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "pending progress bypassed the heartbeat cadence"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "progress woke before the cadence"; }
+  set_mtime 1000000000 "$state/.last-heartbeat"
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "due Pi heartbeat absorbed pending progress"; }
+  grep -Fx heartbeat "$out" >/dev/null || fail "pending progress did not produce a heartbeat"
+  [ "$(wc -l < "$state/.wake-queue" | tr -d ' ')" = 1 ] || fail "one batch created multiple wakes"
+  ack_stopped_cycle "$state" || fail "heartbeat acknowledgement failed"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task fleet --verdict routine --summary 'Build is still progressing' >/dev/null || fail "summary append failed"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task fleet --verdict routine --silent true --summary 'No further change' >/dev/null || fail "quiet review append failed"
+  [ -z "$(FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" pending-progress)" ] || fail "summary did not consume progress"
+  set_mtime 1000000000 "$state/.last-heartbeat"
+  watch_bg "$state" "$fakebin" "$out" env PI_CODING_AGENT=true FM_HEARTBEAT=30
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "summarized progress woke again"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "quiet Pi heartbeat was not absorbed"; }
+  [ "$(cat "$state/.heartbeat-streak")" -ge 1 ] || { reap "$pid"; fail "quiet heartbeat did not back off"; }
+  reap "$pid"
+  pass "Pi pending progress coalesces at the heartbeat cadence and quiet reviews stay absorbed"
+}
+
 test_heartbeat_no_change_absorbed() {
   local dir state fakebin out pid i sig
   dir=$(make_case heartbeat-absorb); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
@@ -5539,6 +5587,7 @@ test_procevent_launch_failed_episodes_are_each_delivered
 test_procevent_surface_serializes_with_drain
 test_procevent_surface_crash_boundaries
 test_procevent_marker_failure_exits_and_replays
+test_pi_pending_progress_uses_heartbeat_cadence
 test_heartbeat_no_change_absorbed
 test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_a_masked_status

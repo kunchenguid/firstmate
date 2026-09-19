@@ -6,7 +6,7 @@ The poster is the visual of the idea.
 This document stays the owner and the contract.
 
 Fleet supervision on the Pi primary harness runs on a second conversation - the supervision branch - inside the same `pi` process as the captain's chat.
-Supervision is default-on: once a Pi primary session owns this home's fleet lock, the branch handles eligible task-local rows from ordinary actionable wakes plus heartbeat scans that the cheap bash-level scan flags as possibly captain-relevant, then merges each outcome back into the captain conversation's transcript.
+Supervision is default-on: once a Pi primary session owns this home's fleet lock, the branch handles eligible task-local rows from ordinary actionable wakes plus heartbeat scans with pending suppressed progress or a possibly captain-relevant change, then merges each outcome back into the captain conversation's transcript.
 Ordinary main-only rows remain on main even when eligible task-local rows share their queue, except that a decision-owned signal or stale trigger keeps its entire coalesced trigger batch on main.
 An unresolvable row makes the scan unsafe and returns the whole wake to main, and every watcher-failure alarm also stays on main.
 All of that describes the attended posture; the away posture, recorded by `state/.afk-contract`, hands every row to the branch and parks main (see "Postures" below).
@@ -132,8 +132,9 @@ Main can read the durable outcome store on demand through its `fm_branch_outcome
 
 ## Heartbeat routing
 
-The cheap bash-level heartbeat scan absorbs a genuinely no-op pass before it reaches Pi, unchanged from before.
-Only a scan already flagged as possibly captain-relevant emits the bare `heartbeat` wake; `.pi/extensions/fm-primary-pi-watch.ts` flags that offer `heartbeat: true`, and the branch accepts it without a project only when every branch-ownable row observed in the unread-queue eligibility check is either heartbeat-kind or a resolvable task-local signal or stale event.
+The cheap bash-level heartbeat scan absorbs a genuinely no-op pass before it reaches Pi.
+For a Pi primary with pending suppressed progress, the existing heartbeat cadence emits a review so the branch can summarize it; `bin/fm-branch-outcome.sh pending-progress` owns the pending-progress contract.
+A scan with pending suppressed progress or a possibly captain-relevant change emits the bare `heartbeat` wake; `.pi/extensions/fm-primary-pi-watch.ts` flags that offer `heartbeat: true`, and the branch accepts it without a project only when every branch-ownable row observed in the unread-queue eligibility check is either heartbeat-kind or a resolvable task-local signal or stale event.
 
 A heartbeat is never vetoed or ridden into main by a co-present check row or decision-owned signal/stale row.
 Those rows are main-owned while attended: they are excluded from what the branch may claim and left queued for main, which is woken for each on its own watcher cycle, so nothing starves by being left behind; under the away-posture record the branch claims them too ("Postures" below).

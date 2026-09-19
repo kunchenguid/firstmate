@@ -2720,6 +2720,12 @@ EOF
       touch "$STATE/.last-heartbeat"
       mark_all_captain_relevant_surfaced || true
       wake "heartbeat"
+    elif [ "${PI_CODING_AGENT:-}" = true ] \
+        && [ -s "$STATE/branch-outcomes.jsonl" ] \
+        && [ -n "$("$SCRIPT_DIR/fm-branch-outcome.sh" pending-progress)" ]; then
+      fm_wake_append heartbeat heartbeat heartbeat || exit 1
+      touch "$STATE/.last-heartbeat"
+      wake "heartbeat"
     else
       if ! mark_all_captain_relevant_surfaced; then
         fm_wake_append heartbeat heartbeat heartbeat || exit 1
