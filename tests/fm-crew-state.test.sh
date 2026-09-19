@@ -105,6 +105,9 @@ case "${1:-}" in
   daemon)
     # FM_FAKE_DAEMON_DOWN: the explicit down-probe fails, as the real
     # `no-mistakes daemon status` does when the daemon is not running.
+    # FM_FAKE_DAEMON_TIMEOUT: the probe does not answer at all, which is what
+    # the bounded call reports as 124 when `timeout` kills a slow daemon status.
+    [ "${FM_FAKE_DAEMON_TIMEOUT:-0}" = 1 ] && exit 124
     [ "${FM_FAKE_DAEMON_DOWN:-0}" = 1 ] && exit 1
     printf '%s\n' 'daemon running (pid 4242)'
     exit 0 ;;
@@ -298,6 +301,7 @@ reset_fakes() {
   FM_FAKE_HERDR_SHELL_PID=$$
   FM_FAKE_CI_LOGS=""
   FM_FAKE_DAEMON_DOWN=0
+  FM_FAKE_DAEMON_TIMEOUT=0
   FM_FAKE_PR_STATE=MERGED
   FM_FAKE_PR_MERGED=true
   FM_FAKE_PR_READ_FAIL=0
@@ -309,7 +313,7 @@ reset_fakes() {
   unset FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
-  export FM_FAKE_DAEMON_DOWN FM_FAKE_AXI_HOME
+  export FM_FAKE_DAEMON_DOWN FM_FAKE_DAEMON_TIMEOUT FM_FAKE_AXI_HOME
   export FM_FAKE_AXI_HOME_ERROR FM_FAKE_AXI_STATUS_RUN_ERROR FM_FAKE_AXI_STATUS_ERROR
   export FM_FAKE_PR_STATE FM_FAKE_PR_MERGED FM_FAKE_PR_READ_FAIL FM_FAKE_PR_READ_LOG FM_FAKE_PR_STATE_AXI
   export FM_FAKE_GLAB_STATE FM_FAKE_GLAB_READ_FAIL FM_FAKE_GLAB_READ_LOG
@@ -3552,6 +3556,79 @@ branch_sync:
   pass "a live record at a diverged head binds while the daemon answers"
 }
 
+# A probe that does not ANSWER proves nothing about the daemon, so it must not
+# suppress a live rebased run: otherwise a slow `daemon status` on a busy fleet
+# drops the crew back to a stale `failed:` log line, and the crew flaps between
+# working and failed on probe latency alone.
+test_unanswered_daemon_probe_does_not_suppress_live_run() {
+  reset_fakes
+  local d rebased out; d=$(new_case probe-timeout)
+  make_repo_on_branch "$d/wt" fm/feat-probeto
+  rebased=$(make_rebased_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-probeto.meta" "window=fm:fm-feat-probeto" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'failed: earlier run failed\n' > "$d/state/feat-probeto.status"
+  FM_FAKE_RUN_HEAD=$rebased
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-probeto)
+branch_sync:
+  state: synced"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_DAEMON_TIMEOUT=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-probeto
+  out=$(run_crew_state "$d" feat-probeto)
+  assert_contains "$out" "source: run-step" "an unanswered probe must not unbind the live run"
+  assert_contains "$out" "state: working" "the live rebased run still reads working"
+  assert_not_contains "$out" "state: failed" "the stale failed event must not answer on probe latency"
+  pass "an unanswered daemon probe leaves a live rebased run bound"
+}
+
+# The coarse live row is evidence from the same instrument as the coarse failed
+# row, so an answered-down daemon must unverify it the same way.
+test_coarse_live_row_with_daemon_down_is_unverified() {
+  reset_fakes
+  local d rebased out; d=$(new_case coarse-live-daemon-down)
+  make_repo_on_branch "$d/wt" fm/feat-cldd
+  rebased=$(make_rebased_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cldd.meta" "window=fm:fm-feat-cldd" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: validating\n' > "$d/state/feat-cldd.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-23 14:00
+  running    fm/feat-cldd ${rebased}  2026-08-23 13:53
+EOF
+)"
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-cldd
+  out=$(run_crew_state "$d" feat-cldd)
+  assert_not_contains "$out" "state: working" "a live ledger row must not read as work with the daemon answering down"
+  assert_contains "$out" "daemon unreachable" "the dead instrument is named"
+  pass "a coarse live row with the daemon down reads unverified"
+}
+
+# `live-any-head` is documented as the FOREIGN-branch concession. An `axi status`
+# answer with no branch: key at all is not a foreign-branch answer - it is an
+# unreadable one - so the coarse route must stay strict and a same-branch row at
+# an unresolvable head must not bind.
+test_branchless_status_does_not_enable_live_any_head() {
+  reset_fakes
+  local d out; d=$(new_case branchless-status)
+  make_repo_on_branch "$d/wt" fm/feat-bl
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-bl.meta" "window=fm:fm-feat-bl" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/feat-bl.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-bl | grep -v '^  branch:')"
+  FM_FAKE_RUNS_LIST="  running    fm/feat-bl f0f0f0f0  2026-08-27 13:53"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-bl
+  out=$(run_crew_state "$d" feat-bl)
+  assert_not_contains "$out" "source: run-step" "a branchless answer must not license the coarse live-any-head route"
+  assert_contains "$out" "source: status-log" "the status log answers instead"
+  pass "a branchless axi answer keeps the coarse route strict"
+}
+
 # A coarse ledger row keeps a PARKED run's status word at `running`
 # (tests/captures/no-mistakes-v1.70.1/parked.toon), so it is equally consistent
 # with the gate still being open and must never claim the crew's own
@@ -3940,6 +4017,9 @@ test_live_rebased_run_reads_working_for_every_executing_status
 test_legacy_live_rebased_run_is_authoritative
 test_live_record_at_diverged_head_needs_a_live_daemon
 test_live_record_at_diverged_head_binds_while_daemon_answers
+test_unanswered_daemon_probe_does_not_suppress_live_run
+test_coarse_live_row_with_daemon_down_is_unverified
+test_branchless_status_does_not_enable_live_any_head
 test_coarse_live_row_does_not_claim_gate_superseded
 test_coarse_live_rebased_row_is_authoritative
 test_terminal_rebased_run_is_not_attributed

@@ -39,8 +39,9 @@
 #      branch whose head was rewritten or diverged must not be attributed.
 #      A run EXECUTING on this crew's branch (pending, running, fixing, or ci)
 #      is authoritative REGARDLESS of head (fm_nm_run_is_executing in
-#      bin/fm-nm-run-lib.sh) as long as an explicit probe does not prove the
-#      daemon down (nm_daemon_probe_down): the pipeline rebases the branch and
+#      bin/fm-nm-run-lib.sh) as long as an explicit probe has not ANSWERED that
+#      the daemon is down (nm_daemon_answered_down): the pipeline rebases the
+#      branch and
 #      commits its fix rounds in its own checkout, so a live run's head
 #      routinely differs from the local head, and reading an older run that
 #      still matches the local head would report a working crew as failed - but
@@ -62,8 +63,9 @@
 #      anchored by the row immediately before it having ended at exactly this
 #      worktree's head (rule owned by fm_nm_runs_status_for_worktree in
 #      bin/fm-nm-run-lib.sh). In the coarse runs-ledger fallback, and only
-#      when `axi status` answered ANOTHER branch's run, a newest same-branch
-#      row that is running or pending answers whatever its head.
+#      when `axi status` answered ANOTHER named branch's run, a newest
+#      same-branch row that is running or pending answers whatever its head,
+#      under the same answered-down rule as the terminal row below.
 #      fm_nm_select_run in bin/fm-nm-run-lib.sh owns complete run selection
 #      and ambiguity reporting. The selected run's id-addressed status must
 #      agree on id, branch, and live/terminal class before attribution;
@@ -604,6 +606,25 @@ nm_daemon_probe_down() {
   return 1
 }
 
+# 0 only when the probe ANSWERED and that answer was "down". Suppressing a LIVE
+# record needs this stricter question: `not provably up` above is fail-closed,
+# which is safe when it degrades a terminal record to unknown, but on a live
+# record it would drop a working crew back to a possibly-stale status log every
+# time the probe merely ran slow - the crew would flap between working and
+# failed on probe latency alone. 124 is the bounded call's own did-not-answer
+# code (both the timeout and perl arms of fm_nm_run_bounded use it), and proves
+# nothing about the daemon. The no-timeout-tool return of 1 cannot reach here:
+# without a timeout tool the `axi status` read above is empty too, so this whole
+# block is skipped.
+nm_daemon_answered_down() {
+  local rc=0
+  fm_nm_run_checked "$WT" "$NM_TIMEOUT" daemon status >/dev/null || rc=$?
+  case "$rc" in
+    0|124) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 nm_ci_step_status() {
   local row rest
   row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,' | head -1)
@@ -748,7 +769,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
           emit unknown run-step "selected run status disagrees with inventory; run ids: $candidate_ids"
         fi
         if nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT" \
-          || { fm_nm_run_is_executing "$RUN_OUT" && ! nm_daemon_probe_down; }; then
+          || { fm_nm_run_is_executing "$RUN_OUT" && ! nm_daemon_answered_down; }; then
           HAVE_RUN=1
         elif [ -z "$(fm_nm_resolve_commit "$WT" "$(strip_quotes "$(nm_field head)")")" ]; then
           if fm_nm_run_is_active "$RUN_OUT" \
@@ -773,7 +794,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # worktree moves off the run head.
       if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] \
         && { nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT" \
-          || { fm_nm_run_is_executing "$RUN_OUT" && ! nm_daemon_probe_down; }; }; then
+          || { fm_nm_run_is_executing "$RUN_OUT" && ! nm_daemon_answered_down; }; }; then
         HAVE_RUN=1
         # Without run ids, contradictory liveness cannot prove precedence.
         # A live replacement also needs an id-addressed status read: a bare
@@ -803,8 +824,10 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         # `live-any-head` only for a foreign-branch answer: a same-branch run
         # that reached here is parked or terminal, and a bare live ledger row
         # can neither tell those apart nor license reusing that run's detail.
-        coarse_mode=live-any-head
-        [ "$run_branch" != "$CREW_BRANCH" ] || coarse_mode=""
+        coarse_mode=""
+        if [ -n "$run_branch" ] && [ "$run_branch" != "$CREW_BRANCH" ]; then
+          coarse_mode=live-any-head
+        fi
         COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)" "" "$coarse_mode")
         if [ -n "$COARSE_STATUS" ]; then
           HAVE_RUN=1
@@ -834,7 +857,16 @@ if [ "$HAVE_RUN" = 1 ]; then
     # read above. The status event span remains independently available to the
     # supervisor through fm-classify-lib.sh's status_span_first_actionable.
     case "$COARSE_STATUS" in
-      pending|running) RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
+      pending|running)
+        # Same instrument as the failed row below: a live row the daemon has
+        # answered it is not running is unverified evidence, and a never
+        # finalized record is the weaker of the two, not the stronger.
+        if nm_daemon_answered_down; then
+          RUN_STATE=unknown
+          RUN_DETAIL="no-mistakes daemon unreachable; last ledger record $COARSE_STATUS - unverified"
+        else
+          RUN_STATE=working; RUN_DETAIL="validating (background run)"
+        fi ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
       failed)
         # The ledger row is terminal but the coarse path has no steps table
