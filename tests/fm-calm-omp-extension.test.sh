@@ -719,6 +719,82 @@ JS
   pass "OMP Calm registers the in-process session replacement events and forgets remembered rows on session_switch"
 }
 
+test_session_replacement_keeps_midturn_classification() {
+  local fixture home out status
+  fixture="$TMP_ROOT/session-replacement-midturn"
+  home="$fixture/home"
+  install_omp_calm_fixture "$fixture"
+  mkdir -p "$home/config"
+  printf 'on\n' >"$home/config/calm"
+  out=$(cd "$fixture" && FM_HOME="$home" EXT="$fixture/.omp/extensions/fm-calm.ts" node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+import * as Agent from "@oh-my-pi/pi-coding-agent";
+
+const handlers = new Map();
+let calmCommand;
+const pi = {
+  pi: { Container: class { render() { return []; } } },
+  events: { emit() {} },
+  on(event, handler) { handlers.set(event, handler); },
+  registerCommand(name, command) { if (name === "calm") calmCommand = command; },
+  registerMessageRenderer() {},
+  registerAssistantThinkingRenderer() {},
+};
+const mod = await import(`${pathToFileURL(process.env.EXT).href}?midturn=${Date.now()}`);
+mod.default(pi);
+const ui = {
+  notify() {},
+  getToolsExpanded() { return false; },
+  setToolsExpanded() {},
+  setStatus() {},
+};
+const ctx = { ui };
+handlers.get("session_start")({ type: "session_start" }, ctx);
+
+const FULL = {
+  role: "assistant",
+  stopReason: "toolUse",
+  timestamp: 7001,
+  content: [
+    { type: "thinking", thinking: "secret plan" },
+    { type: "text", text: "CALM_REBUILT_NOTE" },
+    { type: "toolCall" },
+  ],
+};
+const BEFORE = {
+  role: "assistant",
+  stopReason: "stop",
+  timestamp: 7001,
+  content: [
+    { type: "thinking", thinking: "secret plan" },
+    { type: "text", text: "CALM_REBUILT_NOTE" },
+  ],
+};
+handlers.get("message_end")({ type: "message_end", message: FULL }, ctx);
+
+// OMP rebuilds the transcript on /tree, /branch, or /resume: a fresh component is
+// fed only the derived before-tools message and no new live message events fire.
+handlers.get("session_tree")({ type: "session_tree" }, ctx);
+const rebuilt = new Agent.AssistantMessageComponent(false);
+rebuilt.updateContent(BEFORE, { transient: true });
+if ((rebuilt.rendered || []).some((line) => line === "text:CALM_REBUILT_NOTE")) {
+  throw new Error(`Calm-on must still hide a rebuilt mid-turn note, got ${JSON.stringify(rebuilt.rendered)}`);
+}
+if ((rebuilt.rendered || []).some((line) => line.startsWith("thinking:"))) {
+  throw new Error(`Calm-on must still hide thinking after a rebuild, got ${JSON.stringify(rebuilt.rendered)}`);
+}
+await calmCommand.handler("", ctx);
+if (!(rebuilt.rendered || []).some((line) => line === "text:CALM_REBUILT_NOTE")) {
+  throw new Error("Calm-off must restore the rebuilt mid-turn note");
+}
+JS
+)
+  status=$?
+  expect_code 0 "$status" "session replacement mid-turn: $out"
+  [ -z "$out" ] || fail "session replacement mid-turn printed output: $out"
+  pass "OMP Calm keeps mid-turn classification across an in-process session rebuild"
+}
+
 test_calm_off_retry_preserves_options() {
   local fixture out status
   fixture="$TMP_ROOT/off-retry"
@@ -813,5 +889,6 @@ test_double_install_keeps_shared_state
 test_retry_recovery_keeps_original_note
 test_native_hide_thinking_is_additive
 test_session_replacement_resets_remembered
+test_session_replacement_keeps_midturn_classification
 test_calm_off_retry_preserves_options
 test_degraded_public_api_seam

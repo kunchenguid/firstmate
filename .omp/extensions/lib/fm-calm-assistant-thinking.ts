@@ -129,7 +129,6 @@ export function installOmpCalmAssistantThinking(): void {
     },
     reset() {
       patch.remembered.clear();
-      patch.midTurnKeys.clear();
     },
   };
 
