@@ -60,7 +60,8 @@ if name == 'tmux':
     if args[-2:] == ['show-environment', '-g']:
         print('NONSECRET=fixture')
     elif 'display-message' in args:
-        if (a / 'runtime-drift').exists():
+        target = args[args.index('-t') + 1]
+        if (a / 'runtime-drift').exists() or target != '=' + f['session'] + ':':
             print('wrong-session')
         else:
             print(str(f['pid']) + '\t' + f['session'] + '\t' + f['socket'])

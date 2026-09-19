@@ -83,6 +83,28 @@ if TMUX="$SOCKET,$$,0" FM_ACCOUNT_TASK_SESSION=firstmate fm_backend_tmux_contain
 fi
 pass "real tmux: restricted account tasks reuse only a prequalified non-shared exact session and never repair or fall back"
 
+# The receiver asks tmux for the bound runtime identity before every operation.
+# The trailing colon is required to establish session context for session_name;
+# an exact session token without it returns an empty session_name on tmux 3.7c.
+runtime_pid=$(tmux display-message -p -t "=$SESSION:" '#{pid}') \
+  || fail "real tmux: could not read restricted runtime pid"
+runtime_socket=$(tmux display-message -p -t "=$SESSION:" '#{socket_path}') \
+  || fail "real tmux: could not read restricted runtime socket"
+runtime_identity=$(tmux display-message -p -t "=$SESSION:" \
+  '#{pid}	#{session_name}	#{socket_path}') \
+  || fail "real tmux: session-qualified restricted runtime target was refused"
+expected_runtime_identity=$(printf '%s\t%s\t%s' "$runtime_pid" "$SESSION" "$runtime_socket")
+[ "$runtime_identity" = "$expected_runtime_identity" ] \
+  || fail "real tmux: restricted runtime identity selected another or no session: $runtime_identity"
+missing_identity=$(tmux display-message -p -t '=missing-route:' \
+  $'#{pid}\t#{session_name}\t#{socket_path}' 2>/dev/null || true)
+missing_expected=$(printf '%s\t%s\t%s' "$runtime_pid" missing-route "$runtime_socket")
+[ "$missing_identity" != "$missing_expected" ] \
+  || fail "real tmux: missing restricted runtime target authenticated as present"
+[ "$missing_identity" != "$runtime_identity" ] \
+  || fail "real tmux: missing restricted runtime target selected the qualified session"
+pass "real tmux: account-task runtime admission resolves only its exact session-qualified target"
+
 fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" \
   || fail "fm_backend_tmux_create_task failed to create the task window"
 tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$WINDOW" \

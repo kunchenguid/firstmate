@@ -480,8 +480,9 @@ class Route:
         require(within(socket, Path(self.b["account_home"])), "foreign-socket")
         info = safe_path(socket, self.uid, private=True)
         require(stat.S_ISSOCK(info.st_mode), "not-socket")
+        # The trailing colon establishes session context without selecting a window.
         server = command([self.tool("tmux"), "-S", str(socket), "display-message", "-p", "-t",
-                          "=" + runtime["session"], "#{pid}\t#{session_name}\t#{socket_path}"],
+                          "=" + runtime["session"] + ":", "#{pid}\t#{session_name}\t#{socket_path}"],
                          self.env, self.home, output=True).decode().strip()
         require(server == f'{runtime["pid"]}\t{runtime["session"]}\t{socket}', "runtime-drift")
         env = command([self.tool("tmux"), "-S", str(socket), "show-environment", "-g"],

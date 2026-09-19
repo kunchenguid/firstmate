@@ -135,6 +135,7 @@ Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-
 
 The account-task exact-session branch was verified on 2026-09-19 with tmux 3.7c on macOS 26.5.2 arm64.
 The real-backend test used a private tmux socket, created one qualified `smoke` session, exercised ordinary lazy creation of `firstmate`, then proved that the restricted marker reused only `smoke`, refused a missing session without creating it or falling back, and refused the shared `firstmate` name.
+It also proved that the receiver's exact `=<session>:` target reports the bound session name, process, and socket and refuses a missing exact session instead of selecting another one.
 
 ```sh
 tmux -V
@@ -146,6 +147,7 @@ Bounded observed output:
 ```text
 tmux 3.7c
 ok - real tmux: restricted account tasks reuse only a prequalified non-shared exact session and never repair or fall back
+ok - real tmux: account-task runtime admission resolves only its exact session-qualified target
 ok - real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
 ```
