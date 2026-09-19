@@ -208,7 +208,19 @@ map_log_state() {  # <line>
   esac
 }
 
+case "${OSTYPE:-}" in
+  darwin*) file_observation() { /usr/bin/stat -f '%m:%z:%d:%i' "$1" 2>/dev/null; } ;;
+  *) file_observation() { stat -c '%Y:%s:%d:%i' "$1" 2>/dev/null; } ;;
+esac
+
+LOG_OBSERVATION_BEFORE=$(file_observation "$LOG")
 LOG_LINE=$(status_current_line "$LOG" "$KIND")
+LOG_OBSERVATION_AFTER=$(file_observation "$LOG")
+LOG_OBSERVED_MTIME=
+if [ -n "$LOG_OBSERVATION_BEFORE" ] \
+  && [ "$LOG_OBSERVATION_BEFORE" = "$LOG_OBSERVATION_AFTER" ]; then
+  LOG_OBSERVED_MTIME=${LOG_OBSERVATION_AFTER%%:*}
+fi
 LOG_VERB=$(status_line_verb "$LOG_LINE")
 
 # --- remote secondmate: the true source is the remote endpoint ---------------
@@ -1021,15 +1033,6 @@ if ! pane_readable "$BACKEND_TARGET"; then
   esac
 fi
 
-# Whole-second mtime, or empty when the path cannot be read. Platform spelling is
-# chosen once; /usr/bin/stat on Darwin so a GNU coreutils stat earlier on PATH
-# cannot change the flags this call means.
-if [ "$(uname)" = Darwin ]; then
-  file_mtime() { /usr/bin/stat -f %m "$1" 2>/dev/null; }
-else
-  file_mtime() { stat -c %Y "$1" 2>/dev/null; }
-fi
-
 # Steering this crew still owes, or that reached it AFTER its last declaration.
 # Either one makes a trailing `done:`/`failed:` line an obsolete claim: firstmate
 # gave the worker more to do, so the work it declared finished is no longer the
@@ -1048,21 +1051,21 @@ fi
 # anything yet. A fire-and-forget record is excluded from both, exactly as the
 # re-ring ladder excludes it.
 steering_outstanding_after_declaration() {
-  local inbox="$STATE/$ID.inbox" f log_mtime msg_mtime
+  local inbox="$STATE/$ID.inbox" f msg_mtime
   [ -d "$inbox" ] || return 1
   for f in "$inbox"/[0-9]*.msg; do
     [ -e "$f" ] || continue
     grep -q '^delivery=fire-and-forget$' "$f" 2>/dev/null && continue
     return 0
   done
-  log_mtime=$(file_mtime "$LOG")
-  case "$log_mtime" in ''|*[!0-9]*) return 1 ;; esac
+  case "$LOG_OBSERVED_MTIME" in ''|*[!0-9]*) return 0 ;; esac
   for f in "$inbox"/[0-9]*.msg "$inbox"/handled/[0-9]*.msg; do
     [ -e "$f" ] || continue
     grep -q '^delivery=fire-and-forget$' "$f" 2>/dev/null && continue
-    msg_mtime=$(file_mtime "$f")
+    msg_mtime=$(file_observation "$f")
+    msg_mtime=${msg_mtime%%:*}
     case "$msg_mtime" in ''|*[!0-9]*) continue ;; esac
-    [ "$msg_mtime" -gt "$log_mtime" ] && return 0
+    [ "$msg_mtime" -gt "$LOG_OBSERVED_MTIME" ] && return 0
   done
   return 1
 }

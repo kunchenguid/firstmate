@@ -79,6 +79,11 @@ make_fakebin() {  # <dir> -> echoes fakebin path
   cat > "$fb/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ -n "${FM_FAKE_STATUS_APPEND_PATH:-}" ] \
+  && [ ! -e "${FM_FAKE_STATUS_APPEND_PATH}.appended" ]; then
+  printf '%s\n' "$FM_FAKE_STATUS_APPEND_LINE" >> "$FM_FAKE_STATUS_APPEND_PATH"
+  : > "${FM_FAKE_STATUS_APPEND_PATH}.appended"
+fi
 case "${1:-}" in
   axi)
     shift
@@ -306,6 +311,8 @@ reset_fakes() {
   FM_FAKE_GLAB_STATE=merged
   FM_FAKE_GLAB_READ_FAIL=0
   FM_FAKE_GLAB_READ_LOG=
+  FM_FAKE_STATUS_APPEND_PATH=
+  FM_FAKE_STATUS_APPEND_LINE=
   unset FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
@@ -313,6 +320,7 @@ reset_fakes() {
   export FM_FAKE_AXI_HOME_ERROR FM_FAKE_AXI_STATUS_RUN_ERROR FM_FAKE_AXI_STATUS_ERROR
   export FM_FAKE_PR_STATE FM_FAKE_PR_MERGED FM_FAKE_PR_READ_FAIL FM_FAKE_PR_READ_LOG FM_FAKE_PR_STATE_AXI
   export FM_FAKE_GLAB_STATE FM_FAKE_GLAB_READ_FAIL FM_FAKE_GLAB_READ_LOG
+  export FM_FAKE_STATUS_APPEND_PATH FM_FAKE_STATUS_APPEND_LINE
   export FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
 }
 
@@ -1839,6 +1847,22 @@ test_unverified_harness_acknowledged_steer_after_declaration_invalidates() {
   assert_contains "$out" "state: unknown" "a steer that arrived after the declaration invalidates it"
   assert_not_contains "$out" "source: status-log" "an obsolete completion must not be reported as current"
   pass "a steer acknowledged after the declaration still invalidates it"
+}
+
+test_status_append_after_snapshot_cannot_validate_cached_declaration() {
+  reset_fakes
+  local d out
+  make_unverified_case changing codex 'done: ready in branch fm/changing'
+  d=$UNVERIFIED_CASE
+  write_steer "$d" changing handled 001 newer
+  FM_FAKE_STATUS_APPEND_PATH="$d/state/changing.status"
+  FM_FAKE_STATUS_APPEND_LINE='working: answering the newer steer'
+  out=$(run_crew_state "$d" changing)
+  [ "$(tail -1 "$d/state/changing.status")" = "$FM_FAKE_STATUS_APPEND_LINE" ] \
+    || fail "the concurrent status append did not occur during the reader call"
+  assert_contains "$out" "state: unknown" "a later append cannot make the cached declaration look newer than its steer"
+  assert_not_contains "$out" "source: status-log" "a cached completion must not borrow a later status timestamp"
+  pass "steering is compared with the captured declaration observation"
 }
 
 # ... but a steer the worker had already answered BEFORE declaring done is not
@@ -3840,6 +3864,7 @@ test_unverified_harness_completed_worker_reads_its_declaration
 test_unverified_harness_boundary_holds_against_a_contingent_unknown
 test_unverified_harness_unhandled_steer_invalidates_completion
 test_unverified_harness_acknowledged_steer_after_declaration_invalidates
+test_status_append_after_snapshot_cannot_validate_cached_declaration
 test_unverified_harness_steer_before_declaration_leaves_it_standing
 test_unverified_harness_fire_and_forget_does_not_invalidate
 test_unverified_harness_active_run_outranks_stale_completion
