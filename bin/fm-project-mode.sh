@@ -54,7 +54,6 @@
 #           rejects, which is a registry error rather than an absent branch
 # A guessed branch is exactly the failure this token exists to remove, so the
 # caller receives one of those three answers rather than an invented one.
-# --branch and --raw are mutually exclusive.
 # Usage: fm-project-mode.sh [--raw | --branch] <project-name>
 set -eu
 
@@ -69,12 +68,6 @@ case "${1:-}" in
   --raw) RAW=1; shift ;;
   --branch) BRANCH_ONLY=1; shift ;;
 esac
-case "${1:-}" in
-  --*)
-    echo "error: fm-project-mode.sh takes at most one of --raw or --branch; got an extra \"$1\"" >&2
-    exit 2
-    ;;
-esac
 NAME=${1:?usage: fm-project-mode.sh [--raw | --branch] <project-name>}
 
 if [ ! -f "$REG" ]; then
@@ -86,12 +79,14 @@ if [ ! -f "$REG" ]; then
   exit 0
 fi
 
-# awk emits "<mode> <yolo> <branch>" (one line) or nothing if the project is
-# absent. An unregistered working branch is emitted as "-", which is not a legal
-# git branch name, so it can never be mistaken for a registered one.
+# awk emits "<mode> <yolo> <branch-present> <branch>" (one line) or nothing if
+# the project is absent. Whether a branch was registered is carried by its own
+# 0/1 field rather than by a reserved branch name: git's syntax check accepts
+# every placeholder that could be spelled here, "-" included, so no value of the
+# branch field can stand for its own absence.
 parsed=$(awk -v n="$NAME" '
   $1=="-" && $2==n {
-    mode="no-mistakes"; yolo="off"; branch="-";
+    mode="no-mistakes"; yolo="off"; present=0; branch="-";
     if ($3 ~ /^\[/) {
       s="";
       for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) break }
@@ -100,10 +95,10 @@ parsed=$(awk -v n="$NAME" '
       if (a[1] != "" && a[1] != "+yolo" && a[1] !~ /^branch=/) mode = a[1];
       for (j=1; j<=k; j++) {
         if (a[j]=="+yolo") yolo="on";
-        else if (a[j] ~ /^branch=/) { branch = substr(a[j], 8); if (branch == "") branch = "-" }
+        else if (a[j] ~ /^branch=/) { v = substr(a[j], 8); if (v != "") { present=1; branch=v } }
       }
     }
-    print mode, yolo, branch; exit
+    print mode, yolo, present, branch; exit
   }
 ' "$REG")
 
@@ -116,7 +111,7 @@ if [ -z "$parsed" ]; then
   exit 0
 fi
 
-read -r mode yolo branch <<EOF
+read -r mode yolo branch_present branch <<EOF
 $parsed
 EOF
 
@@ -125,11 +120,14 @@ if [ "$BRANCH_ONLY" -eq 1 ]; then
   # so a typo is reported as a registry error rather than passed on as a ref
   # expression that could resolve somewhere unintended. The full refs/heads/ form
   # keeps the check purely syntactic and usable outside any repository, unlike
-  # --branch, which also expands shorthand such as @{-1}.
-  if [ "$branch" = "-" ]; then
+  # --branch, which also expands shorthand such as @{-1}. A leading dash passes
+  # that check but is refused too: every caller hands this answer to git as an
+  # operand, where such a name is read as an option instead.
+  if [ "$branch_present" -eq 0 ]; then
     exit 1
   fi
-  if ! git check-ref-format "refs/heads/$branch" >/dev/null 2>&1; then
+  case "$branch" in -*) branch_bad=1 ;; *) branch_bad=0 ;; esac
+  if [ "$branch_bad" -eq 1 ] || ! git check-ref-format "refs/heads/$branch" >/dev/null 2>&1; then
     echo "error: project \"$NAME\" registers branch=\"$branch\", which is not a valid branch name" >&2
     exit 3
   fi

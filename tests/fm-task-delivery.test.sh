@@ -447,6 +447,7 @@ test_project_mode_reads_the_registered_working_branch() {
 - legacyproj - fixture (added 2026-09-18)
 - emptyproj [no-mistakes branch=] - fixture (added 2026-09-18)
 - badproj [no-mistakes branch=bad..name] - fixture (added 2026-09-18)
+- dashproj [no-mistakes branch=-] - fixture (added 2026-09-18)
 EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" --branch devproj 2>/dev/null)
   [ "$out" = develop ] || fail "--branch did not read the registered working branch (got '$out')"
@@ -485,6 +486,19 @@ EOF
   assert_contains "$err" "not a valid branch name" \
     "a malformed branch token was ignored without saying so"
   assert_contains "$err" 'bad..name' "the diagnostic did not name the offending token"
+
+  # A lone dash is a branch name git's syntax check accepts, so nothing but an
+  # explicit refusal keeps it from being handed on and read as an option, and
+  # reporting it as an absent branch would send the caller silently down the
+  # origin-default path this token exists to close.
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch dashproj 2>/dev/null)
+  status=$?
+  [ "$status" -eq 3 ] \
+    || fail "--branch answered $status for branch=-, not the malformed-token status 3"
+  [ -z "$out" ] || fail "--branch printed the lone-dash branch name (got '$out')"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" --branch dashproj 2>&1 >/dev/null)
+  assert_contains "$err" "not a valid branch name" \
+    "a lone-dash branch token was ignored without saying so"
   pass "fm-project-mode: --branch reads a registered working branch and never invents one"
 }
 

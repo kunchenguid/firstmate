@@ -17,6 +17,8 @@
 # branch's own commits are presented as the task's change.
 #   (f) base_branch= recorded -> diff against that branch
 #   (g) base_branch= absent   -> unchanged default-branch resolution
+#   (h) base_branch= recorded but deleted from origin (the ordinary fate of a
+#       working branch once it merges) -> legible fallback to the default branch
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -227,6 +229,37 @@ test_absent_base_branch_keeps_the_default_branch_resolution() {
   pass "fm-review-diff without base_branch= resolves the default branch exactly as before"
 }
 
+test_recorded_base_branch_deleted_on_origin_falls_back_legibly() {
+  local case_dir out err status
+  case_dir=$(make_case deleted-base-branch)
+  make_working_branch_case "$case_dir" release/2026
+  write_task_meta "$case_dir" "base_branch=release/2026"
+  # The release branch merges and origin drops it while the task is in flight.
+  git -C "$case_dir/origin.git" branch -q -D release/2026
+
+  set +e
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  status=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+
+  [ "$status" -eq 0 ] \
+    || fail "deleted-base-branch: review should continue against the default branch (exit $status)"
+  assert_contains "$err" 'release/2026' \
+    "deleted-base-branch: the diagnostic did not name the recorded base branch"
+  assert_contains "$err" 'base_branch=' \
+    "deleted-base-branch: the diagnostic did not say where the recorded base came from"
+  assert_contains "$err" "falling back to the project's default branch 'main'" \
+    "deleted-base-branch: the diagnostic did not say it was falling back to the default branch"
+  assert_not_contains "$err" 'fatal:' \
+    "deleted-base-branch: git's own fatal reached the operator"
+  assert_contains "$out" 'diff base: origin/main' \
+    "deleted-base-branch: the diff should continue against the default branch"
+  assert_contains "$out" '+the task change' \
+    "deleted-base-branch: the fallback diff should still show the task's own commit"
+  pass "fm-review-diff falls back legibly when the recorded base branch is gone from origin"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
@@ -234,3 +267,4 @@ test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
 test_recorded_base_branch_decides_the_review_base
 test_absent_base_branch_keeps_the_default_branch_resolution
+test_recorded_base_branch_deleted_on_origin_falls_back_legibly

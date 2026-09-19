@@ -6,7 +6,10 @@
 # that branch is the base. bin/fm-spawn.sh owns resolving and recording it, and
 # its header owns the rules that decide it. Without that record - a task from
 # before spawn wrote one, or a slot that never resolved a branch - the base is
-# the project's default branch as it has always been.
+# the project's default branch as it has always been. A recorded base branch
+# that origin no longer carries, which is the ordinary fate of a working branch
+# once it merges, falls back to that same default branch and says so, naming the
+# recorded branch and the task record it came from.
 #
 # Pooled project clones do not keep their local default branch current, so this
 # helper compares remote-backed projects against origin/<base> after fetching
@@ -72,10 +75,15 @@ default_branch() {
   return 1
 }
 
-BASE_BRANCH=$(grep '^base_branch=' "$META" | tail -1 | cut -d= -f2- || true)
+RECORDED_BASE_BRANCH=$(grep '^base_branch=' "$META" | tail -1 | cut -d= -f2- || true)
+BASE_BRANCH=$RECORDED_BASE_BRANCH
 if [ -z "$BASE_BRANCH" ]; then
   BASE_BRANCH=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
 fi
+
+fetch_base_branch() { # <branch>
+  git -C "$WT" fetch origin "+refs/heads/$1:refs/remotes/origin/$1" --quiet
+}
 
 BRANCH="fm/$ID"
 if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
@@ -146,7 +154,14 @@ fi
 if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
   # origin/<base> stale on some Git versions and only refresh FETCH_HEAD.
-  git -C "$WT" fetch origin "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH" --quiet
+  if [ -n "$RECORDED_BASE_BRANCH" ] && ! fetch_base_branch "$BASE_BRANCH" 2>/dev/null; then
+    FALLBACK_BRANCH=$(default_branch) || { echo "error: task $ID records base_branch=$RECORDED_BASE_BRANCH, which origin no longer carries, and $PROJ has no default branch to fall back to; expected origin/HEAD, main, or master" >&2; exit 1; }
+    echo "warning: origin no longer carries '$RECORDED_BASE_BRANCH', the base branch recorded as base_branch= in $META when this task's worktree was placed; falling back to the project's default branch '$FALLBACK_BRANCH'" >&2
+    BASE_BRANCH=$FALLBACK_BRANCH
+    fetch_base_branch "$BASE_BRANCH"
+  elif [ -z "$RECORDED_BASE_BRANCH" ]; then
+    fetch_base_branch "$BASE_BRANCH"
+  fi
   BASE="origin/$BASE_BRANCH"
 else
   BASE="$BASE_BRANCH"
