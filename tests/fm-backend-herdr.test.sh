@@ -101,6 +101,9 @@ case "${1:-}" in
         printf '%s=%s\n' "$name" "$value"
       done
       printf 'args=%s\n' "$*"
+      if command -v setsid >/dev/null 2>&1; then
+        ps -o sid=,pid= -p "$$" | awk '{printf "sid=%s pid=%s\n", $1, $2}'
+      fi
     } > "$FM_HERDR_SERVER_ENV_LOG"
     : > "$FM_HERDR_SERVER_MARKER"
     ;;
@@ -1101,6 +1104,13 @@ test_server_ensure_scrubs_home_and_harness_identity() {
   assert_contains "$output" "FM_HERDR_SENTINEL=kept" "server_ensure removed an unrelated environment variable"
   assert_contains "$output" "HERDR_SESSION=fmtest" "server_ensure lost explicit Herdr session routing"
   assert_contains "$output" "args=server --session fmtest" "server_ensure lost the trailing Herdr session flag"
+  if command -v setsid >/dev/null 2>&1; then
+    assert_contains "$output" "sid=" "server_ensure did not record the server's POSIX session"
+    local sid pid
+    sid=$(printf '%s\n' "$output" | sed -n 's/^sid=\([0-9]*\) pid=[0-9]*$/\1/p')
+    pid=$(printf '%s\n' "$output" | sed -n 's/^sid=[0-9]* pid=\([0-9]*\)$/\1/p')
+    [ -n "$pid" ] && [ "$sid" = "$pid" ] || fail "server_ensure launched the server outside its own POSIX session (sid=$sid pid=$pid)"
+  fi
   pass "fm_backend_herdr_server_ensure: scrubs home and harness identity without disturbing unrelated environment or session routing"
 }
 
