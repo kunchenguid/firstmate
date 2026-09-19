@@ -658,8 +658,10 @@ nm_ci_checks_state() {
 # matching run: either it names another branch (routine once several crews
 # validate the same underlying repo concurrently - a worktree with its own
 # active run reliably gets that run answered, even under concurrent load), or
-# it names this branch's run but the strict head rule rejected it (an
-# executing same-branch row still answers through live-any-head). The real
+# it names this branch's run but the strict head rule rejected it - a run that
+# is parked or terminal, since an executing same-branch run binds before this
+# fallback is reached, so the ledger resolves it STRICTLY and only a
+# foreign-branch answer gets live-any-head. The real
 # run-listing command is the top-level `no-mistakes runs` (the `axi` surface
 # has no runs-listing subcommand; tests/fm-crew-state.test.sh owns the
 # 2026-07-02 dead-code incident history this fallback replaced).

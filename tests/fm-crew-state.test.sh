@@ -2799,6 +2799,35 @@ branch_sync:
   pass "a parked run keeps the strict head rule without pipeline_owned"
 }
 
+# The CLI leaves the top-level `status:` word at `running` while a run WAITS at
+# a gate, so the word alone cannot decide "executing". A gate-parked run at an
+# unresolvable head, on a branch the pipeline has released, must keep the strict
+# head rule in both gate shapes - otherwise the crew reports a stale
+# `parked at <gate>` from a run whose code identity was never verified.
+test_gate_parked_run_with_live_status_word_not_attributed() {
+  local fixture d out
+  for fixture in run_parked_scalar_gate_running run_parked_in_gate_block; do
+    reset_fakes
+    d=$(new_case "f10-gate-parked-$fixture")
+    make_repo_on_branch "$d/wt" fm/feat-f10q
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-f10q.meta" "window=fm:fm-feat-f10q" "worktree=$d/wt" "kind=ship" "harness=claude"
+    printf 'working: implementing\n' > "$d/state/feat-f10q.status"
+    FM_FAKE_RUN_HEAD=f0f0f0f0
+    FM_FAKE_AXI_STATUS="$($fixture fm/feat-f10q)
+branch_sync:
+  state: synced"
+    FM_FAKE_RUNS_LIST=""
+    FM_FAKE_BUSY=0
+    arm_idle_record "$d/state" feat-f10q
+    out=$(run_crew_state "$d" feat-f10q)
+    assert_not_contains "$out" "source: run-step" "$fixture: a gate-parked run at an unresolvable head must not bind"
+    assert_not_contains "$out" "parked at" "$fixture: no gate detail may come from an unverified run"
+    assert_contains "$out" "source: status-log" "$fixture: the status log answers for the unbound parked run"
+    pass "$fixture keeps the strict head rule despite its live status word"
+  done
+}
+
 # Negative control: the exemption also requires an ACTIVE run - a terminal run
 # released the branch, so an inconsistent pipeline_owned label must not bind a
 # terminal run by branch name alone.
@@ -3800,6 +3829,7 @@ test_coarse_live_row_binds_without_head_anchor
 test_coarse_terminal_row_at_foreign_head_not_attributed
 test_executing_run_binds_without_pipeline_owned_sync
 test_non_pipeline_owned_parked_unresolvable_head_not_attributed
+test_gate_parked_run_with_live_status_word_not_attributed
 test_pipeline_owned_terminal_run_not_exempt
 test_missing_run_head_falls_back_to_current_state
 test_active_fix_round_unfetched_pipeline_head_reports_current

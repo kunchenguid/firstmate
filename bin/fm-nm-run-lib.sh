@@ -312,6 +312,18 @@ fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
   fm_nm_run_is_active "$1"
 }
 
+# 0 if the run in captured `axi status` TOON $1 carries a PARKED marker, using
+# the same gate evidence fm-crew-state.sh renders `parked at <gate>` from: a
+# top-level `gate:` line, an `awaiting_agent:` line, an awaiting_approval or
+# fix_review `status:`/`state:` scalar, or a steps/gate table row whose status
+# column is one of those. The top-level `status:` word alone does NOT decide
+# this: the CLI leaves it at `running` while a run waits at a gate, so the word
+# and the gate markers routinely disagree.
+fm_nm_run_is_parked() {  # <toon-output>
+  printf '%s\n' "$1" | grep -Eq \
+    '^[[:space:]]*(gate|awaiting_agent):[[:space:]]*|^[[:space:]]*(status|state):[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*$|^[[:space:]]*[^,]+,[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*,'
+}
+
 # 0 if the run in captured `axi status` TOON $1 is EXECUTING: in flight and
 # actively working (pending, running, fixing, or ci), not parked at a gate.
 # Read-only current-state reporting (fm-crew-state.sh) treats an executing run
@@ -324,6 +336,7 @@ fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
 # ledger rule below.
 fm_nm_run_is_executing() {  # <toon-output>
   fm_nm_run_is_active "$1" || return 1
+  fm_nm_run_is_parked "$1" && return 1
   case "$(fm_nm_strip_quotes "$(fm_nm_field "$1" status)")" in
     pending|running|fixing|ci) return 0 ;;
   esac
