@@ -153,9 +153,8 @@ ok - pi-signed is a distinct persistent secondmate runtime with shared Pi superv
 ok - fm-control relaunch: Pi retains scoped one-run project approval
 ```
 
-`bin/fm-spawn.sh` requires the resolved Pi-family executable to advertise `--approve` before it creates an endpoint, then passes that flag on every canonical Pi and pi-signed launch.
+[`fm-spawn.sh`](../../bin/fm-spawn.sh) owns the scoped approval and compatibility contract exercised here.
 The deterministic launch regression covers ordinary workers, scouts, secondmates, relaunches, the shared external-extension shape, and a missing-flag refusal before launch.
-The flag is per invocation, so it does not alter the operator's global project-trust default.
 
 ### Agent liveness name sources
 

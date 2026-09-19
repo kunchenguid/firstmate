@@ -155,10 +155,11 @@
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
-#   a failed or inconclusive probe omits it so older Pi versions remain launchable.
-#   Every Pi-family launch also carries Pi's scoped one-run --approve flag, which
+#   a failed or inconclusive TUI probe omits it, provided the required approval
+#   capability check below succeeds.
+#   Every canonical Pi-family launch also carries Pi's scoped one-run --approve flag, which
 #   trusts project-local resources for that launch only and leaves global trust
-#   defaults untouched. The same help probe must advertise --approve or spawn
+#   defaults untouched. A separate --help probe must advertise --approve or spawn
 #   refuses before endpoint creation, because an unsupported launch could park
 #   at Pi's folder-trust prompt and be mistaken for productive work. A missing
 #   selected executable also refuses before endpoint creation, and pi-signed
