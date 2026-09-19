@@ -1041,6 +1041,9 @@ HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
+HERDR_FLAT_ABORT_CLEANUP=0
+HERDR_FLAT_ABORT_SESSION=
+HERDR_FLAT_ABORT_PANE=
 HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
@@ -1095,6 +1098,7 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  local herdr_abort_session herdr_flat_presence
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -1119,11 +1123,19 @@ spawn_abort_cleanup() {
       fi
     fi
   fi
-  if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] &&
+  if { [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] || [ "$HERDR_FLAT_ABORT_CLEANUP" = 1 ]; } &&
     [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
-    if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
-      echo "warning: herdr presentation focus lock unavailable; retaining the projection journal and refusing concurrent abort cleanup" >&2
-      HERDR_PROJECTION_ABORT_CLEANUP=0
+    herdr_abort_session=${HERDR_PROJECTION_ABORT_SESSION:-}
+    [ -n "$herdr_abort_session" ] || herdr_abort_session=${HERDR_FLAT_ABORT_SESSION:-}
+    if ! spawn_herdr_presentation_order_lock_acquire "$herdr_abort_session"; then
+      if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
+        echo "warning: herdr presentation focus lock unavailable; retaining the projection journal and refusing concurrent abort cleanup" >&2
+        HERDR_PROJECTION_ABORT_CLEANUP=0
+      fi
+      if [ "$HERDR_FLAT_ABORT_CLEANUP" = 1 ]; then
+        echo "warning: herdr presentation focus lock unavailable; the pane $HERDR_FLAT_ABORT_SESSION:$HERDR_FLAT_ABORT_PANE created by the aborted spawn of $ID was not closed and a hung treehouse get may remain there; close that exact pane or relaunch the task through bin/fm-control.sh instead of a pattern kill" >&2
+        HERDR_FLAT_ABORT_CLEANUP=0
+      fi
     fi
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
@@ -1132,6 +1144,19 @@ spawn_abort_cleanup() {
       "$HERDR_PROJECTION_ABORT_SESSION" \
       "$HERDR_PROJECTION_ABORT_TASK_PANE" \
       "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
+  fi
+  # A flat spawn owns the exact pane it created: closing it on abort takes the
+  # pane shell and any hung `treehouse get` with it, so cleanup never needs the
+  # fleet-wide pattern kill that once froze every running worker (fix A).
+  # Closing cannot be confirmed for every backend state, so a pane that would
+  # not close is reported rather than silently counted as cleaned.
+  if [ "$HERDR_FLAT_ABORT_CLEANUP" = 1 ]; then
+    HERDR_FLAT_ABORT_CLEANUP=0
+    fm_backend_herdr_kill_serialized "$HERDR_FLAT_ABORT_SESSION" "$HERDR_FLAT_ABORT_PANE" || true
+    herdr_flat_presence=$(fm_backend_herdr_pane_presence_state "$HERDR_FLAT_ABORT_SESSION" "$HERDR_FLAT_ABORT_PANE" || true)
+    if [ "$herdr_flat_presence" != dead ]; then
+      echo "warning: the pane $HERDR_FLAT_ABORT_SESSION:$HERDR_FLAT_ABORT_PANE created by the aborted spawn of $ID could not be confirmed closed ($herdr_flat_presence) and a hung treehouse get may remain there; close that exact pane or relaunch the task through bin/fm-control.sh instead of a pattern kill" >&2
+    fi
   fi
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
@@ -3169,6 +3194,16 @@ EOF
       echo "error: herdr did not return a tab/pane id for $W" >&2
       exit 1
     fi
+    if [ "$HERDR_PROJECTED" -ne 1 ]; then
+      # From here until the launch command is sent, any exit must close exactly
+      # this flat pane through the abort trap; otherwise a failed
+      # treehouse-get wait leaves the pane, its shell, and the hung
+      # `treehouse get` behind - the accumulation that motivated the
+      # fleet-wide pattern kills this cleanup replaces.
+      HERDR_FLAT_ABORT_CLEANUP=1
+      HERDR_FLAT_ABORT_SESSION=$HERDR_SES
+      HERDR_FLAT_ABORT_PANE=$HERDR_PANE_ID
+    fi
     T="$HERDR_SES:$HERDR_PANE_ID"
     ;;
   zellij)
@@ -4531,6 +4566,7 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
+HERDR_FLAT_ABORT_CLEANUP=0
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then

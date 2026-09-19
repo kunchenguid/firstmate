@@ -11,6 +11,7 @@ The tracked harness adapters forward command text without classifying it.
 A firstmate primary must arm `bin/fm-watch-arm.sh` or run `bin/fm-watch-checkpoint.sh` through an observable harness call.
 A shell background operator, pipeline, redirection, wrapper, or unrelated command list can hide failure or let the watcher child die with the tool call.
 The seatbelt rejects those command shapes before execution.
+It also refuses a fleet-wide `pkill`/`killall` pattern that can match `treehouse`, because `pkill -f` walks every process on the host and killing the live `treehouse get` parent of running workers froze the fleet on 2026-09-16.
 
 This policy is not a post-arm liveness guarantee.
 `bin/fm-guard.sh` and `bin/fm-turnend-guard.sh` apply their respective post-arm supervision predicates to the watcher lock and beacon after an allowed call.
@@ -32,13 +33,13 @@ The wrapper discovers the code root from its own location.
 The active firstmate home is `${FM_HOME:-<code-root>}`.
 It passes both roots and the exact command string to the Node policy owner.
 
-The wrapper fast-allows a command without invoking the Node policy owner only when the command cannot contain the `fm-watch` byte sequence even after the classifier's decoders run.
+The wrapper fast-allows a command without invoking the Node policy owner only when the command cannot contain the `fm-watch` byte sequence or a `treehouse` kill pattern even after the classifier's decoders run.
 The fast path may allow only when both of these hold:
 
-1. The stripped text lacks the `fm-watch` watcher substring, after mirroring the classifier's cheapest byte normalizations - dropping line-continuation and escape backslashes, quotes, and newlines.
+1. The stripped text lacks the `fm-watch` watcher substring and the `treehouse` substring, after mirroring the classifier's cheapest byte normalizations - dropping line-continuation and escape backslashes, quotes, newlines, and the pkill-pattern bracket delimiters.
 2. The raw command carries no quoting-decoder marker: a `$` immediately followed by a single quote (ANSI-C `$'...'`) or a double quote (bash locale `$"..."`).
 
-Any `fm-watch` match or any quoting-decoder marker delegates to the classifier.
+Any `fm-watch` or `treehouse` match, or any quoting-decoder marker, delegates to the classifier.
 Normalizing first keeps this a strict superset: a protected watcher path obfuscated as `fm-watc\<newline>h-arm.sh` or `fm-"watch"-arm.sh` still delegates, and stripping only those non-alphanumeric bytes can never destroy an existing `fm-watch` run.
 The quoting-decoder marker closes the case the byte strip cannot: `bin/fm-$'\x77'atch-arm.sh` and `bin/fm-$"watch"-arm.sh` both resolve to `bin/fm-watch-arm.sh` only after the classifier decodes the encoded character, so a cheap byte strip would otherwise lose the `fm-watch` bytes and fast-allow them.
 This marker set is coupled to the classifier's decoder set in `bin/fm-arm-command-policy.mjs`: adding any new quote or expansion form the classifier decodes requires extending this marker set in the same change, or the prefilter stops being a strict superset.
@@ -125,6 +126,19 @@ When the command carries such grammar and its raw bytes reference both a `fm-wat
 This backstop mirrors the protected-execution fail-closed rule and covers forms like `while true; do pkill -f fm-watch; done`, `for x in 1; do pkill -f fm-watch; done`, `case x in x) pkill -f fm-watch ;; esac`, and `until false; do kill $(pgrep -f fm-watch); done`.
 It is gated on the grammar being unsupported: in grammar the classifier does model, command-position analysis is authoritative, so data mentions such as `echo 'pkill -f fm-watch'` and a loop that only names the watcher without a kill verb such as `for f in 1; do echo fm-watch; done` remain allowed.
 
+## Broad treehouse kills
+
+An actually executed `pkill` or `killall` command is denied when any parsed pattern argument can match a `treehouse` process.
+The recorded incident command is the canonical refusal: `pkill -f 'treehouse[ ]get'`.
+`pkill -f` matches every process on the host, so that command killed the live `treehouse get` parent of every running worker, orphaned their nested shells, and background-stopped them with SIGTTIN.
+The check strips character-class brackets before matching, so the self-protecting form `pkill -f '[t]reehouse get'` is refused too.
+Read-only mentions stay data: `echo 'pkill -f treehouse'` and `grep -n treehouse get docs` are allowed.
+A task-scoped kill that names something else, such as `pkill -f 'villa-public-forms'`, is allowed.
+
+A pkill pattern held in a tracked variable is refused as well: `pattern=treehouse; pkill -f "$pattern"` denies.
+Unsupported compound grammar follows the same fail-closed backstop as broad watcher kills: `while true; do pkill -f treehouse; done` denies with `broad-treehouse-kill`.
+The refusal reason says what to do instead - close the exact task pane or relaunch the task through `bin/fm-control.sh`.
+
 ## Stable reason codes
 
 Every semantic deny includes one stable code in square brackets before its prose reason.
@@ -137,6 +151,7 @@ Every semantic deny includes one stable code in square brackets before its prose
 | `watcher-bundled` | The outer command list is not the blessed setup-plus-final tree. |
 | `watcher-nested` | A wrapper, group, substitution, nested shell, `eval`, or constructed dynamic payload executes the protected command. |
 | `broad-watcher-kill` | An actual broad process kill targets the watcher. |
+| `broad-treehouse-kill` | An actual broad `pkill`/`killall` pattern can match treehouse workers. |
 | `unclassifiable-protected-command` | Malformed or unsupported syntax contains a protected command and cannot be safely classified. |
 | `watcher-direct` | A direct `bin/fm-watch.sh` execution; the watcher must be reached through `bin/fm-watch-arm.sh` or `bin/fm-watch-checkpoint.sh`. |
 
@@ -236,6 +251,7 @@ Every native-path automatic marker was present and every deny sentinel remained 
 `tests/fm-arm-pretool-check.test.sh` owns the adversarial acceptance matrix.
 Every row runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
 The suite also verifies real newline bytes, direct classifier reason codes, comments, heredoc data, malformed and unsupported protected syntax, constructed dynamic payloads, malformed transport fail-open behavior, missing runtime fail-open behavior, output shapes, and exact adapter field forwarding plus exit-2 mapping.
+It includes the recorded incident command `pkill -f 'treehouse[ ]get'` and its bracket form as must-deny rows, and a task-scoped `pkill` as the must-allow row.
 
 Run:
 
