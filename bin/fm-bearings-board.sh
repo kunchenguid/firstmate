@@ -15,9 +15,10 @@
 #            already landed, give every surviving decision card the standard
 #            reconcile choice, and inject the result into a fresh copy of the
 #            shipped template at the stable board path. Establish the Lavish
-#            session on that board and PROVE it is live BEFORE binding and
-#            arming its answer source, so a registered poll can never race a
-#            session that does not exist or attach to one that has ended.
+#            session on that board without opening a browser, then PROVE it is
+#            live BEFORE binding and arming its answer source, so a registered
+#            poll can never race a session that does not exist or attach to one
+#            that has ended.
 #            Bind to the keyed-answer intake (bin/fm-captain-hold.sh) ALWAYS
 #            precedes arm, so the board can never produce an answer that has
 #            nowhere to go (captain-hold-lifecycle's ordering rule, enforced
@@ -240,22 +241,22 @@ lavish_board_live() {  # <establish output> <canonical-board-path>
   lavish_session_listed_open "$2"
 }
 
-# Establish the board session and PROVE it is live before anything arms a poll
-# on it. A session the captain ended is reopened once - the captain asked for
-# this board, which is exactly the attention `--reopen` exists for - and a
-# session that is still not live after that refuses the build rather than
-# arming a poll that can never attach.
+# Establish the board session without opening a browser and PROVE it is live
+# before anything arms a poll on it. A session the captain ended is reopened
+# once without opening a browser; the returned URL remains available for the
+# captain to open explicitly. A session that is still not live after that
+# refuses the build rather than arming a poll that can never attach.
 establish_board_session() {  # <board>
   local board=$1 real out status version
   BOARD_SESSION_REOPENED=0
   real=$(board_realpath "$board") || fail "cannot resolve the board path: $board"
-  out=$(lavish-axi "$board") || fail "cannot establish the board Lavish session"
+  out=$(lavish-axi "$board" --no-open) || fail "cannot establish the board Lavish session"
   printf '%s\n' "$out"
   if lavish_board_live "$out" "$real"; then
     printf 'session: live\n'
     return 0
   fi
-  out=$(lavish-axi "$board" --reopen) || fail "cannot reopen the ended board Lavish session"
+  out=$(lavish-axi "$board" --no-open --reopen) || fail "cannot reopen the ended board Lavish session"
   printf '%s\n' "$out"
   if lavish_board_live "$out" "$real"; then
     BOARD_SESSION_REOPENED=1
