@@ -13,6 +13,8 @@ def valid_record:
     and ((.notified // []) | type == "array" and all(.[]; type == "string"))
     and (.error == null or (.error | type == "string"))
     and (.checked_at == null or (.checked_at | fromdateiso8601 | type == "number"))
+    and (.attempted_at == null or (.attempted_at | fromdateiso8601 | type == "number"))
+    and (.unmeasured == null or (.unmeasured | type == "number"))
     and (.verdict == null or (.verdict | (.head | sha) and (.source | type == "string")
       and (.actor | IN("captain","fleet","maintainer","nobody")) and (.summary | type == "string")))
     and (.observation == null or (.kind as $kind | .observation |
