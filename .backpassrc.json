@@ -1,0 +1,35 @@
+{
+  "memoryFiles": [
+    "AGENTS.md",
+    "CLAUDE.md"
+  ],
+  "budgetTokens": 5000,
+  "skillsDir": ".agents/skills",
+  "minGapEvidence": 2,
+  "maxTranscripts": 100,
+  "analysis": {
+    "agent": null,
+    "model": null,
+    "effort": null
+  },
+  "synthesis": {
+    "agent": null,
+    "model": null,
+    "effort": null
+  },
+  "discovery": {
+    "harnesses": [
+      "claude",
+      "codex",
+      "pi",
+      "opencode",
+      "grok",
+      "cursor",
+      "hermes"
+    ],
+    "since": "30d",
+    "worktreeGlobs": [],
+    "minUserTurns": 2
+  },
+  "jobs": 4
+}
