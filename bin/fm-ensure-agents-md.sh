@@ -15,8 +15,10 @@
 # decides the outcome instead of whoever invoked the helper.
 # Owns the canonical "## Maintaining this file" self-governance wording for
 # project AGENTS.md files, injecting it idempotently into created skeletons,
-# promoted CLAUDE.md files, and existing AGENTS.md files lacking both the exact
-# heading and the project-owned mark below (exact first line, LF or CRLF):
+# promoted CLAUDE.md files, and existing AGENTS.md files that are already on the
+# CLAUDE.md pointer convention - a canonical pointer file or a correct
+# CLAUDE.md -> AGENTS.md symlink - and lack both the exact heading and the
+# project-owned mark below (exact first line, LF or CRLF):
 # <!-- firstmate:maintained-by-project -->
 # Projects may place this mark at the start of the file and retain equivalent
 # maintenance guidance under their own heading. It declares guidance is present, not
@@ -41,11 +43,14 @@ usage() {
 A repository that keeps a real AGENTS.md and no CLAUDE.md is left untouched:
 that is its own convention, so no pointer and no canonical section are added.
 
-To retain equivalent project-owned maintenance guidance without adding the
-canonical section, use this exact first line of AGENTS.md (LF or CRLF):
+The canonical section is added only to created skeletons, promoted CLAUDE.md
+files, and repositories already on the CLAUDE.md pointer convention.
+
+Where it does apply, retain equivalent project-owned maintenance guidance
+without it by using this exact first line of AGENTS.md (LF or CRLF):
 <!-- firstmate:maintained-by-project -->
 The mark declares retained guidance, not permission to remove governance.
-Without the first-line mark or exact canonical heading, the helper adds the section.
+Without that first line or the exact canonical heading, the helper adds the section.
 EOF
 }
 
