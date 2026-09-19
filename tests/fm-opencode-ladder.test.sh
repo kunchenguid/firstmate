@@ -53,6 +53,13 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 
 FREE='opencode/muse-spark-1.3-contributor-free'
 GO='opencode-go/muse-spark-1.3-contributor'
+# The plugin's own vocabulary: OpenCode's event stream reports model.id with
+# NO provider prefix, and recordRetry passes it straight through to the
+# sidecar. Production sidecars (2026-09-19) carry these bare forms, so the
+# regression below speaks them - a fixture in the gate's prefixed vocabulary
+# would be blind to a producer-side mismatch by construction.
+FREE_BARE='muse-spark-1.3-contributor-free'
+GO_BARE='muse-spark-1.3-contributor'
 
 now_s() { date +%s; }
 ms_from_now() {  # <offset-secs> -> epoch ms
@@ -160,6 +167,38 @@ test_recorded_refusal_falls_through_to_go() {
     *) fail "fall-through must name the exhausted free tier, said: ${NOTE:-<silent>}" ;;
   esac
   pass "the recorded free refusal falls through to Go with the reason stated"
+}
+
+test_plugin_vocabulary_free_cap_falls_through_to_go() {
+  local state out
+  state=$(fresh_state barefree)
+  # The plugin's own vocabulary, byte-shape as the 2026-09-19 production
+  # sidecars: `model=muse-spark-1.3-contributor-free` with no provider prefix,
+  # and the 19h17m horizon (69412s) from that specimen, recomputed relative to
+  # run time through the real record helper. The verdict is asserted through
+  # the public gate, never against implementation bytes.
+  record_cap "$state" lane1 69412 "$FREE_BARE" || fail "record refused the bare-model observation"
+  out=$(run_gate "$state" "$FREE") || fail "gate must never refuse, even past the cap"
+  split_gate "$out"
+  [ "$GOT" = "$GO" ] || fail "a bare-model free cap must fall through to Go, got '$GOT'"
+  case "$NOTE" in
+    *'free'*|*'Free'*) : ;;
+    *) fail "fall-through must name the exhausted free tier, said: ${NOTE:-<silent>}" ;;
+  esac
+  pass "a free cap in the plugin's bare-model vocabulary falls through to Go"
+}
+
+test_plugin_vocabulary_go_cap_does_not_move_free() {
+  local state out
+  state=$(fresh_state barego)
+  # Stripping the prefix must not collapse the rungs: the Go tier records the
+  # bare `muse-spark-1.3-contributor` (no `-free` suffix), and that cap says
+  # nothing about free.
+  record_cap "$state" lane1 69412 "$GO_BARE" || fail "record refused a bare Go-bound cap"
+  out=$(run_gate "$state" "$FREE") || fail "gate must never refuse"
+  split_gate "$out"
+  [ "$GOT" = "$FREE" ] || fail "a bare-model Go-tier cap must not move a free request, got '$GOT'"
+  pass "a Go cap in the plugin's bare-model vocabulary leaves free dispatch alone"
 }
 
 test_transient_retry_stays_free() {
@@ -419,6 +458,8 @@ test_idle_healthy_lane_stays_free() {
 test_fresh_home_dispatches_free
 test_explicit_free_stays_free_when_healthy
 test_recorded_refusal_falls_through_to_go
+test_plugin_vocabulary_free_cap_falls_through_to_go
+test_plugin_vocabulary_go_cap_does_not_move_free
 test_transient_retry_stays_free
 test_expired_cap_climbs_back_to_free
 test_go_cap_does_not_move_free

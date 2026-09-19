@@ -130,6 +130,20 @@ fm_opencode_ladder_horizon_human() {  # <seconds>
   fi
 }
 
+# fm_opencode_ladder_bare_model: <model> without its provider prefix.
+# The retry sidecar's model comes from OpenCode's own event stream (model.id),
+# which carries no provider prefix (`muse-spark-1.3-contributor-free`), while
+# the rung constants above carry one (`opencode/...`). Every evidence
+# comparison normalises both sides through here, so either form binds the
+# right rung. The suffix is what separates the tiers once the prefix is gone -
+# free stays `...-free` and Go stays bare - so stripping never collapses them.
+fm_opencode_ladder_bare_model() {  # <model>
+  case "$1" in
+    */*) printf '%s' "${1##*/}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 # fm_opencode_ladder_free_capped: is the free tier proven exhausted on the
 # CURRENT evidence in <state-dir>? Prints one line and returns 0 when some
 # lane's sidecar classifies quota-scale (`blocked`) through
@@ -157,7 +171,9 @@ fm_opencode_ladder_free_capped() {  # <state-dir>
   local state_dir=$1 f id out word status='' horizon='' model=''
   local free_horizon='' unbound_horizon=''
   local text_free='' text_unbound=''
-  local meta harness lane_model cap_file
+  local meta harness lane_model lane_bare cap_file
+  local free_bare model_bare
+  free_bare=$(fm_opencode_ladder_bare_model "$FM_OPENCODE_LADDER_FREE")
   [ -n "$state_dir" ] && [ -d "$state_dir" ] || return 1
   [ -x "$_FM_OPENCODE_LADDER_RETRY" ] || return 1
   for f in "$state_dir"/*.opencode-retry; do
@@ -175,7 +191,8 @@ fm_opencode_ladder_free_capped() {  # <state-dir>
     done
     [ "$status" = blocked ] || continue
     case "$horizon" in ''|*[!0-9]*) continue ;; esac
-    if [ "$model" = "$FM_OPENCODE_LADDER_FREE" ]; then
+    model_bare=$(fm_opencode_ladder_bare_model "$model")
+    if [ "$model_bare" = "$free_bare" ]; then
       if [ -z "$free_horizon" ] || [ "$horizon" -gt "$free_horizon" ]; then
         free_horizon=$horizon
       fi
@@ -206,7 +223,8 @@ fm_opencode_ladder_free_capped() {  # <state-dir>
       cap_file=$(fm_opencode_ladder_pane_file "$state_dir" "$id" 2>/dev/null) || continue
       if "$_FM_OPENCODE_LADDER_RETRY" scan-text --file "$cap_file" >/dev/null 2>&1; then
         lane_model=$(fm_meta_get "$meta" model 2>/dev/null) || lane_model=''
-        if [ "$lane_model" = "$FM_OPENCODE_LADDER_FREE" ]; then
+        lane_bare=$(fm_opencode_ladder_bare_model "$lane_model")
+        if [ "$lane_bare" = "$free_bare" ]; then
           text_free=1
         else
           text_unbound=1
