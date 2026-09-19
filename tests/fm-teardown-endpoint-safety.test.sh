@@ -828,8 +828,11 @@ test_remote_layout_homes_serialize_on_one_project_lock() {
   # it, standing in for a slot allocation running in that home right now.
   lock=$(resolve_project_lock "$child_home" "$child_project") \
     || fail "the local child could not resolve the shared project lock"
+  # The holder must keep a stable process identity while it holds the lock:
+  # exec'ing sleep would replace this process's command line and make the
+  # recorded pid-identity read as a foreign holder.
   FM_HOME="$child_home" bash -c \
-    '. "$1"; fm_lock_try_acquire "$2" || exit 1; : > "$3"; exec sleep 30' _ \
+    '. "$1"; fm_lock_try_acquire "$2" || exit 1; : > "$3"; sleep 30 & wait' _ \
     "$ROOT/bin/fm-wake-lib.sh" "$lock" "$dir/lock-held" &
   holder=$!
   while [ ! -e "$dir/lock-held" ] && [ "$waited" -lt 100 ]; do

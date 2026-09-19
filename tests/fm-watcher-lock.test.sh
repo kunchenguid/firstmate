@@ -15,9 +15,9 @@ LIB="$ROOT/bin/fm-wake-lib.sh"
 
 # An arm only reports its typed failure after wait_for_healthy_successor has
 # spent the whole confirmation budget, so cases that wait for that failure must
-# outlast the largest production default (30s on MSYS, 10s elsewhere - see
-# ARM_CONFIRM_DEFAULT in bin/fm-watch-arm.sh). This is a ceiling spent only when
-# an arm genuinely fails to exit; a passing case returns as soon as it does.
+# outlast the production default (30s - see ARM_CONFIRM_DEFAULT in
+# bin/fm-watch-arm.sh). This is a ceiling spent only when an arm genuinely
+# fails to exit; a passing case returns as soon as it does.
 ARM_FAIL_EXIT_POLLS=400
 
 TMP_ROOT=$(fm_test_tmproot fm-watcher-lock-tests)
@@ -1162,6 +1162,62 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+# The arm's confirmation budget is short, so a watcher must publish its
+# confirmable state and install its cleanup traps immediately after acquiring
+# the lock, before the recovery-marker section that can wait on contended
+# small locks. A TERM landing inside that marker wait used to kill the child
+# with no trap installed, leaving a corpse .watch.lock the next child had to
+# steal - the self-reinforcing arm-timeout thrash. Now the EXIT trap must run
+# watcher_cleanup and release the lock.
+test_sigterm_during_marker_wait_releases_watch_lock() {
+  local dir state out wpid rc holder_pid i
+  dir=$(make_case term-during-marker-wait)
+  state="$dir/state"
+  out="$dir/watch.out"
+
+  # Hold the recovery-marker lock so the watcher's startup marker section
+  # blocks inside its bounded acquire when the TERM lands.
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 10
+    printf "ready\n" > "$3"
+    sleep 30
+  ' _ "$LIB" "$state/.watcher-down.lock" "$dir/holder.ready" &
+  holder_pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$dir/holder.ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$dir/holder.ready" ] \
+    || { kill "$holder_pid" 2>/dev/null || true; fail "marker-lock fixture holder never acquired"; }
+
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=5 \
+    "$WATCH" > "$out" 2>&1 &
+  wpid=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -e "$state/.watch.lock" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -e "$state/.watch.lock" ] \
+    || { kill "$wpid" "$holder_pid" 2>/dev/null || true; fail "watcher never acquired its lock: $(cat "$out")"; }
+
+  kill -TERM "$wpid" 2>/dev/null || true
+  # Free the marker lock so the cleanup path's bounded publish can finish.
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  rc=0
+  wait_for_exit "$wpid" 100 || rc=$?
+  [ "$rc" -ne 124 ] \
+    || { cat "$out" >&2; fail "watcher survived TERM during the marker wait"; }
+  [ ! -e "$state/.watch.lock" ] && [ ! -L "$state/.watch.lock" ] \
+    || fail "watcher left a corpse .watch.lock after TERM during the marker wait"
+  pass "TERM during the startup marker wait runs cleanup and releases the watcher lock"
+}
+
 test_wait_deadline_reaps_a_stopped_child
 test_singleton_start
 test_pid_identity_is_locale_invariant
@@ -1192,3 +1248,4 @@ test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
+test_sigterm_during_marker_wait_releases_watch_lock

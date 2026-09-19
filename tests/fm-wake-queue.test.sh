@@ -1691,7 +1691,7 @@ test_subshell_lock_ownership_without_bashpid() {
 # lock once contention clears so it can safely hold and release the critical
 # section itself.
 test_bounded_lock_handoff_after_contention() {
-  local dir state lock holder_pid waiter_pid i recorded_pid real_sleep sleep_log
+  local dir state lock holder_pid waiter_pid waiter_identity i recorded_pid real_sleep sleep_log
   dir=$(make_case bounded-lock-handoff)
   state="$dir/state"
   lock="$state/.fixture.lock"
@@ -1754,6 +1754,10 @@ SH
   [ "$recorded_pid" = "$waiter_pid" ] && [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$waiter_pid" ] \
     || { kill "$waiter_pid" 2>/dev/null || true; fail "bounded acquire did not hand lock ownership to its caller"; }
 
+  waiter_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$waiter_pid" 2>/dev/null || true)
+  [ -n "$waiter_identity" ] && [ "$(cat "$lock/pid-identity" 2>/dev/null || true)" = "$waiter_identity" ] \
+    || { kill "$waiter_pid" 2>/dev/null || true; fail "bounded acquire did not hand lock identity to its caller"; }
+
   : > "$dir/release-waiter"
   wait "$waiter_pid" || fail "caller could not release its handed-off lock"
   [ ! -e "$lock" ] && [ ! -L "$lock" ] || fail "handed-off lock remained after caller release"
@@ -1763,6 +1767,66 @@ SH
 # A live-but-stuck presentation lock must not strand the executable drain. The
 # presentation remains retriable on the next pass, while the separate queue
 # mutation lock keeps its blocking all-or-nothing acknowledgement contract.
+
+# A lock owner record carries the holder's pid-identity beside its pid, so a
+# contender can prove a live pid is NOT the recorded holder - a recycled pid,
+# or a zombie whose identity no longer matches - and reclaim instead of
+# wedging forever on a bare kill -0 verdict.
+test_lock_records_pid_identity_and_reclaims_foreign_holder() {
+  local dir state lock holder_pid holder_identity i rc
+  dir=$(make_case lock-identity-reclaim)
+  state="$dir/state"
+  lock="$state/.fixture.lock"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_acquire_wait "$2" || exit 10
+    printf "ready\n" > "$3"
+    while [ ! -e "$4" ]; do sleep 0.05; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$dir/holder.ready" "$dir/release-holder" &
+  holder_pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && [ ! -s "$dir/holder.ready" ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -s "$dir/holder.ready" ] \
+    || { kill "$holder_pid" 2>/dev/null || true; fail "identity fixture holder never acquired its lock"; }
+  [ "$(cat "$lock/pid" 2>/dev/null || true)" = "$holder_pid" ] \
+    || { kill "$holder_pid" 2>/dev/null || true; fail "holder pid was not recorded"; }
+  holder_identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$holder_pid" 2>/dev/null || true)
+  [ -n "$holder_identity" ] \
+    || { kill "$holder_pid" 2>/dev/null || true; fail "could not compute the holder identity"; }
+  [ "$(cat "$lock/pid-identity" 2>/dev/null || true)" = "$holder_identity" ] \
+    || { kill "$holder_pid" 2>/dev/null || true; fail "holder pid-identity was not recorded"; }
+
+  # A live pid whose recorded identity matches is still held: the contender
+  # must refuse, not steal.
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" && exit 11
+    [ "$FM_LOCK_HELD_PID" = "$3" ] || exit 12
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" "$holder_pid" || rc=$?
+  [ "$rc" -eq 0 ] \
+    || { : > "$dir/release-holder"; kill "$holder_pid" 2>/dev/null || true; fail "identity-matched live holder was not honored (rc=$rc)"; }
+
+  # Same live pid, foreign recorded identity: exactly what a recycled pid looks
+  # like. The contender must reclaim rather than wedge.
+  printf 'foreign-identity\n' > "$lock/pid-identity"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 11
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" \
+    || { : > "$dir/release-holder"; kill "$holder_pid" 2>/dev/null || true; fail "foreign-identity live holder was not reclaimed"; }
+  [ ! -e "$lock" ] && [ ! -L "$lock" ] \
+    || { : > "$dir/release-holder"; kill "$holder_pid" 2>/dev/null || true; fail "reclaimed lock was not released cleanly"; }
+  : > "$dir/release-holder"
+  wait "$holder_pid" 2>/dev/null || true
+  pass "lock records pid-identity and reclaims a live holder whose identity does not match"
+}
 test_live_presentation_holder_is_deadlined_without_weakening_ack() {
   local dir state status queue_out queue_err first_out first_err second_out second_err replay_out replay_err
   local queue_holder presentation_holder ack_holder i start elapsed rc advisory_count
@@ -1782,11 +1846,15 @@ test_live_presentation_holder_is_deadlined_without_weakening_ack() {
   append_wake "$state" signal task.status "signal: $status" \
     || fail "could not seed the presentation-deadline wake"
 
+  # The holder must keep a stable process identity while it holds the lock:
+  # exec'ing sleep would replace this process's command line and make the
+  # recorded pid-identity read as a foreign holder.
+
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     fm_lock_acquire_wait "$2"
     printf "ready\n" > "$3"
-    exec sleep 30
+    sleep 30 & wait
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.wake-queue.lock" "$dir/queue.ready" &
   queue_holder=$!
   i=0
@@ -1826,7 +1894,7 @@ test_live_presentation_holder_is_deadlined_without_weakening_ack() {
     . "$1"
     fm_lock_acquire_wait "$2"
     printf "ready\n" > "$3"
-    exec sleep 30
+    sleep 30 & wait
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.status-presentation-lock" "$dir/presentation.ready" &
   presentation_holder=$!
   i=0
@@ -1871,7 +1939,7 @@ test_live_presentation_holder_is_deadlined_without_weakening_ack() {
     . "$1"
     fm_lock_acquire_wait "$2"
     printf "ready\n" > "$3"
-    exec sleep 30
+    sleep 30 & wait
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.wake-queue.lock" "$dir/ack.ready" &
   ack_holder=$!
   i=0
@@ -1983,6 +2051,7 @@ test_historical_annotation_skips_announced_status() {
 test_self_held_lock_reclaims_instead_of_deadlocking
 test_subshell_lock_ownership_without_bashpid
 test_bounded_lock_handoff_after_contention
+test_lock_records_pid_identity_and_reclaims_foreign_holder
 test_live_presentation_holder_is_deadlined_without_weakening_ack
 test_malformed_presentation_lock_reports_acquire_failure
 test_secondmate_foreign_queue_stall_tracks_progress_and_alerts_once
