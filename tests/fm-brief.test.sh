@@ -821,6 +821,29 @@ test_ship_and_scout_teach_validation_round_pause() {
   pass "fm-brief.sh: ship and scout scaffolds teach validation-round pauses"
 }
 
+# The `until` promise is the only reason a worker writes a bounded time at all,
+# so it has to match what the supervisor actually does past that time. It used to
+# promise a recheck outright, while the wedge ladder escalates a lane that is
+# quiet past its own deadline - which made following our own advice the thing
+# that produced the repeated possible-wedge alarms the 2026-09-18 report
+# measured. The brief is a generated worker-facing artifact; this reads the
+# emitted brief.md for what it now promises.
+test_declared_until_promise_matches_the_wedge_contract() {
+  local home brief
+  home="$TMP_ROOT/until-promise-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-until-promise firstmate --scout >/dev/null 2>&1
+  brief="$home/data/brief-until-promise/brief.md"
+
+  assert_grep 'the long cadence holds only while something other than your pane still shows work' "$brief" \
+    "the scout brief still promises an unconditional recheck past the declared time"
+  assert_grep 'suspicious than one that never named a time and is escalated with the declaration named' "$brief" \
+    "the scout brief does not warn what a lane quiet past its own declared time costs"
+  assert_grep 'append a fresh' "$brief" \
+    "the scout brief does not tell a worker what to do when the estimate slips"
+  pass "fm-brief.sh: the declared-until promise states what it buys and what it costs"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -946,6 +969,7 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_ship_and_scout_teach_validation_round_pause
+test_declared_until_promise_matches_the_wedge_contract
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor

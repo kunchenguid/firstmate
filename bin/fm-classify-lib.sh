@@ -260,18 +260,34 @@ status_is_paused_or_captain_held() {  # <status-line>
 
 # A condition-aware declared wait: a `paused:` line may say WHEN it expects to
 # clear with `until <YYYY-MM-DDTHH:MM[:SS]Z>` anywhere in its text (UTC only, so
-# no local-zone guess is ever recorded). Prints that time as epoch seconds so a
-# supervisor rechecks the wait when the worker said it would clear instead of on
-# the flat cadence; returns 1 when the line is not a pause or declares no time,
-# or the time is malformed, so a bad token falls back to the cadence rather than
-# silencing the wait.
-status_paused_until() {  # <status-line> -> epoch on stdout
+# no local-zone guess is ever recorded), written here exactly as the worker typed
+# it. A supervisor-facing alarm quotes these characters rather than a
+# re-rendering of them, so the alarm and the status log read as one thing.
+#
+# This token is the ONLY worker-authored text such an alarm may carry into the
+# durable wake queue, which is tab-separated and pattern-matched by other
+# readers, so the two shapes below are the whole vocabulary that can ever reach
+# it: digits and `-:TZ`, no tab, no newline, no unbounded prose. They are a SHAPE
+# test only - a nonexistent date such as month 13 passes here and is refused by
+# fm_utc_iso_to_epoch - so a consumer may print this token only once THAT reader
+# has also accepted it, and must take its own no-time path otherwise.
+status_paused_until_token() {  # <status-line> -> <YYYY-MM-DDTHH:MM[:SS]Z>
   local line=$1 token
   status_is_paused "$line" || return 1
   token=$(printf '%s' "$line" \
     | sed -n 's/.*[[:space:]][Uu][Nn][Tt][Ii][Ll][[:space:]]\{1,\}\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]Z\).*/\1/p; s/.*[[:space:]][Uu][Nn][Tt][Ii][Ll][[:space:]]\{1,\}\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z\).*/\1/p' \
     | head -1)
   [ -n "$token" ] || return 1
+  printf '%s' "$token"
+}
+
+# The same declaration as epoch seconds, so a supervisor rechecks the wait when
+# the worker said it would clear instead of on the flat cadence; returns 1 when
+# the line is not a pause or declares no time, or the time is malformed, so a bad
+# token falls back to the cadence rather than silencing the wait.
+status_paused_until() {  # <status-line> -> epoch on stdout
+  local token
+  token=$(status_paused_until_token "$1") || return 1
   fm_utc_iso_to_epoch "$token"
 }
 
@@ -1960,6 +1976,25 @@ crew_absorb_class() {  # <id>
 # working/paused/none decision.
 crew_is_provably_working() {  # <id>
   [ "$(crew_absorb_class "$1")" = working ]
+}
+
+# 0 if crew <id>'s working verdict is attributed to an ACTIVE RUN rather than to
+# its pane. crew_absorb_class above deliberately accepts either source, because
+# either is enough to absorb one stale sighting. Past a worker's own declared
+# clearing time it is not: a pane whose hash has not changed for a whole
+# escalation window while it still renders a busy footer is the wedge suspect
+# itself, so only the run attribution is evidence independent of the pane the
+# alarm is about.
+crew_run_attributed() {  # <id>
+  local id=$1 line state src
+  [ -n "$id" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || return 1
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  state=${line#state: }; state=${state%% *}
+  [ "$state" = working ] || return 1
+  case "$line" in *"source: "*) ;; *) return 1 ;; esac
+  src=${line#*source: }; src=${src%% *}
+  [ "$src" = run-step ]
 }
 
 # 0 if crew <id>'s authoritative current state is a declared external-wait pause.
