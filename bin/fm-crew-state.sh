@@ -22,7 +22,7 @@
 # Output is one stable, parseable, token-tight line firstmate can read every
 # heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|idle|parked|done|blocked|paused|stopped|failed|unknown> · source: <run-step|pane|status-log|endpoint|remote-endpoint|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
@@ -89,8 +89,11 @@
 #   4. No current run for this crew (pre-validation, uninitialized repository,
 #      proven historical head, or kind=scout): fall back to the recorded
 #      backend's pane busy state, then the resolved status declaration
-#      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      when its verb maps to a recognized run-state. An unverified Codex tmux
+#      busy verdict gets one bounded pane read: a busy surface reports working,
+#      an empty or draft composer reports idle, and a bare shell with no agent
+#      reports stopped. An unclassified live agent remains unknown. Decision-only
+#      events such as `resolved` never become current state or detail.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux and herdr, which own a
@@ -255,7 +258,8 @@ pane_readable() {  # <target>
 # crew_busy_verdict: the crew's semantic busy state from the one contract
 # owner (bin/fm-busy-lib.sh), as "<busy|idle|unknown> <source>". A converted
 # adapter answers from its own lifecycle record; Grok answers from its
-# isolated rendered-tail fallback; a herdr crew's native `busy` is accepted
+# isolated rendered-tail fallback; an unverified Codex tmux lane uses the
+# bounded delivery-pane classifier below; a herdr crew's native `busy` is accepted
 # when no record exists, but its native `idle` is NOT, because agent.get
 # reports generation state (idle while a crew blocks on its own long-running
 # foreground tool call) rather than turn state.
@@ -265,6 +269,33 @@ crew_busy_verdict() {  # <target>
     grok*) tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40='' ;;
   esac
   fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
+}
+
+# codex_tmux_pane_verdict is a narrow current-state fallback for the interactive
+# Codex TUI while its lifecycle hooks remain unverified.
+# It reuses the bounded pane classifier that watcher delivery already uses.
+# This does not alter fm-busy-lib.sh's semantic busy-record contract for Codex
+# or any other harness or backend.
+codex_tmux_pane_verdict() {  # <target> -> busy|idle-empty|idle-draft|stopped|unknown
+  local busy_state composer_state agent_state
+  [ "$TASK_BACKEND" = tmux ] || return 1
+  case "$HARNESS" in codex*) ;; *) return 1 ;; esac
+  busy_state=$(fm_pane_busy_state "$1" codex)
+  if [ "$busy_state" = busy ]; then
+    printf 'busy'
+    return
+  fi
+  composer_state=$(fm_tmux_composer_state "$1")
+  case "$composer_state" in
+    empty) printf 'idle-empty'; return ;;
+    pending) printf 'idle-draft'; return ;;
+  esac
+  agent_state=$(fm_backend_agent_state "$TASK_BACKEND" "$1")
+  if [ "$agent_state" = dead ]; then
+    printf 'stopped'
+  else
+    printf 'unknown'
+  fi
 }
 
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --
@@ -1018,7 +1049,16 @@ if [ "$KIND" != secondmate ]; then
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
     idle) ;;
-    *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
+    *)
+      CODEX_PANE_VERDICT=$(codex_tmux_pane_verdict "$BACKEND_TARGET" 2>/dev/null || true)
+      case "$CODEX_PANE_VERDICT" in
+        busy) emit working pane "harness busy (codex tmux pane)" ;;
+        idle-empty) emit idle pane "positively empty Codex composer" ;;
+        idle-draft) emit idle pane "ready Codex composer with unsubmitted draft" ;;
+        stopped) emit stopped pane "bare shell; Codex agent process absent" ;;
+        *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
+      esac
+      ;;
   esac
 fi
 

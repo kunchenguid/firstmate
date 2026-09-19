@@ -130,7 +130,7 @@ No captain hold can fall through them and none can match two, which is what keep
 Existing undated holds without a hold-set stamp fall back to the task's `since` date.
 That aging is a projection safety net only.
 The durable deferral remains re-holding with `--until`.
-Its secondmate-home summary classifies an actionable captain hold as `captain_decision` and preserves every captain hold in the bounded queued inventory of the owning home.
+Its secondmate-home summary classifies an actionable captain hold as `captain_decision`, unless an active steward exemption bound to that exact hold identity suppresses it (the `steward_exemptions[]` contract in `bin/fm-fleet-snapshot.sh`'s header), and preserves every captain hold in the bounded queued inventory of the owning home.
 
 `bin/fm-bearings-snapshot.sh` places each captain hold by its `hold_bucket` and inspects no prose of its own.
 A `live` hold is a default Captain's Call entry.

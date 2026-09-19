@@ -36,6 +36,7 @@ case "${1:-}" in
     case "$*" in
       *pane_current_command*)
         case "$target" in
+          *long-held*|*dos-analyst-canonical-permission-not-word-union-l351y*) printf 'zsh\n' ;;
           *dead-secondmate*) printf 'zsh\n' ;;
           *) printf 'codex\n' ;;
         esac
@@ -46,6 +47,7 @@ case "${1:-}" in
   capture-pane)
     case "$target" in
       *ship-task*|*active-secondmate*) printf 'work in progress\nesc to interrupt\n' ;;
+      *long-held*|*dos-analyst-canonical-permission-not-word-union-l351y*) printf '$\n' ;;
       *) printf 'all quiet\n> \n' ;;
     esac
     ;;
@@ -1094,9 +1096,217 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+test_home_summary_declares_active_steward_exemption_without_hiding_state_change() {
+  local home fakebin out
+  home=$(make_home steward-exemption)
+  mkdir -p "$home/projects/held"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] long-held - Long explained external hold (repo: alpha) (kind: ship) (hold: awaits an external review) (hold-kind: external) (since 2026-09-01)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/long-held.meta" \
+    "window=firstmate:fm-long-held" "worktree=$home/projects/held" \
+    "project=alpha" "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_idle "$home/state" long-held
+  printf 'blocked: awaiting an external review\n' > "$home/state/long-held.status"
+  cat > "$home/state/steward-exemptions.json" <<'EOF'
+{"schema":"fm-steward-exemptions.v1","exemptions":[{"task_id":"long-held","reason":"durable external review hold","set_by":"steward","reviewed_date":"2026-09-17","expires_on":"2026-10-17","state":"blocked","detail":"awaiting an external review","hold_identity":{"source":"backlog","kind":"external","reason":"awaits an external review"},"decision_keys":["default"]}]}
+EOF
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-09-17T00:00:00Z "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == true
+      and .state == "no_active_work"
+      and (.holds | length) == 0
+      and (.decisions_open | length) == 0
+      and .counts.holds == 0
+      and .counts.decisions_open == 0
+      and .steward_exemptions == [{task_id:"long-held",reason:"durable external review hold",set_by:"steward",reviewed_date:"2026-09-17",expires_on:"2026-10-17",state:"blocked",detail:"awaiting an external review",hold_identity:{source:"backlog",kind:"external",reason:"awaits an external review"},decision_keys:["default"],active:true}]
+  ' >/dev/null || fail "active steward exemption must be declared but removed from holds: $out"
+
+  printf 'blocked: credentials revoked\n' > "$home/state/long-held.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-09-17T00:00:00Z "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == true
+      and .state == "externally_held"
+      and (.holds | map(.id) == ["long-held"])
+      and (.decisions_open | map(select(.id == "long-held" and .summary == "credentials revoked")) | length) == 1
+      and .steward_exemptions[0].active == false
+  ' >/dev/null || fail "same-state detail changes must deactivate steward exemptions: $out"
+
+  printf 'done: review completed\n' > "$home/state/long-held.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-09-17T00:00:00Z "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == false
+      and .invalidity == {kind:"terminal_in_flight",ids:["long-held"]}
+      and .state == "externally_held"
+      and (.holds | map(.id) == ["long-held"])
+      and .steward_exemptions[0].active == false
+  ' >/dev/null || fail "a changed exempted row must surface as terminal inventory drift: $out"
+
+  rm -rf "$home/projects/held"
+  cat > "$home/state/steward-exemptions.json" <<'EOF'
+{"schema":"fm-steward-exemptions.v1","exemptions":[{"task_id":"long-held","reason":"durable stopped external hold","set_by":"steward","reviewed_date":"2026-09-17","expires_on":"2026-10-17","state":"unknown","detail":"worktree gone (torn down?)","hold_identity":{"source":"backlog","kind":"external","reason":"awaits an external review"}}]}
+EOF
+  printf 'needs-decision [key=new-route]: choose a new route\n' > "$home/state/long-held.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-09-17T00:00:00Z "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == true
+      and .invalidity == {kind:null,ids:[]}
+      and .state == "captain_decision"
+      and (.holds | length) == 0
+      and (.decisions_open | map({id,key,summary})) == [{id:"long-held",key:"new-route",summary:"choose a new route"}]
+      and .steward_exemptions[0].active == true
+      and (.endpoints | map(select(.id == "long-held" and .state == "unknown")) | length) == 1
+  ' >/dev/null || fail "an exact stopped-lane exemption must suppress flags without hiding endpoint inventory: $out"
+
+  sed -i.bak 's/awaits an external review/awaits a different external review/' "$home/data/backlog.md" && rm -f "$home/data/backlog.md.bak"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-09-17T00:00:00Z "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == false
+      and .invalidity == {kind:"child_current_unavailable",ids:["long-held"]}
+      and .state == "unknown"
+      and (.holds | map(select(.id == "long-held" and .reason == "awaits a different external review")) | length) == 1
+      and .steward_exemptions[0].active == false
+  ' >/dev/null || fail "a changed hold identity must resurface both the hold and unknown-child invalidity: $out"
+
+  cat > "$home/state/steward-exemptions.json" <<'EOF'
+{"schema":"fm-steward-exemptions.v1","exemptions":[{"task_id":"long-held","reason":"reviewed route decision","set_by":"steward","reviewed_date":"2026-09-17","expires_on":"2026-10-17","state":"unknown","detail":"worktree gone (torn down?)","decision_keys":["reviewed-route"]}]}
+EOF
+  printf 'needs-decision [key=reviewed-route]: reviewed route\nneeds-decision [key=new-route]: choose a new route\n' > "$home/state/long-held.status"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-09-17T00:00:00Z "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == false
+      and .invalidity == {kind:"child_current_unavailable",ids:["long-held"]}
+      and .state == "unknown"
+      and (.holds | map(select(.id == "long-held" and .reason == "awaits a different external review")) | length) == 1
+      and (.decisions_open | map({id,key,summary})) == [{id:"long-held",key:"new-route",summary:"choose a new route"}]
+      and .steward_exemptions[0].active == true
+  ' >/dev/null || fail "a decision-bound exemption must not suppress a distinct hold, decision, or invalidity: $out"
+
+  sed -i.bak 's/awaits a different external review/awaits an external review/' "$home/data/backlog.md" && rm -f "$home/data/backlog.md.bak"
+  mkdir -p "$home/projects/held"
+  fm_write_meta "$home/state/long-held.meta" \
+    "window=firstmate:fm-long-held" "worktree=$home/projects/held" \
+    "project=alpha" "harness=codex" "kind=ship" "mode=no-mistakes"
+  cat > "$home/state/steward-exemptions.json" <<'EOF'
+{"schema":"fm-steward-exemptions.v1","exemptions":[{"task_id":"long-held","reason":"durable exited-agent hold","set_by":"steward","reviewed_date":"2026-09-17","expires_on":"2026-10-17","state":"stopped","detail":"bare shell; Codex agent process absent","hold_identity":{"source":"backlog","kind":"external","reason":"awaits an external review"}}]}
+EOF
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-09-17T00:00:00Z "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == true
+      and (.holds | length) == 0
+      and (.endpoints | map(select(.id == "long-held" and .state == "stopped")) | length) == 1
+      and .steward_exemptions[0].active == true
+  ' >/dev/null || fail "a stopped-bound exemption must activate for the exact stopped pane state: $out"
+
+  sed -i.bak 's/"state":"stopped","detail":"bare shell; Codex agent process absent"/"state":"unknown","detail":"harness state unavailable (unknown codex-unverified)"/' "$home/state/steward-exemptions.json" && rm -f "$home/state/steward-exemptions.json.bak"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-09-17T00:00:00Z "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    (.holds | map(.id) == ["long-held"])
+      and (.endpoints | map(select(.id == "long-held" and .state == "stopped")) | length) == 1
+      and .steward_exemptions[0].active == false
+  ' >/dev/null || fail "a superseded unknown exemption must not match a stopped pane state: $out"
+
+  sed -i.bak 's/"expires_on":"2026-10-17"/"expires_on":"2026-02-31"/' "$home/state/steward-exemptions.json" && rm -f "$home/state/steward-exemptions.json.bak"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-02-01T00:00:00Z "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    (.holds | map(.id) == ["long-held"])
+      and .steward_exemptions == []
+  ' >/dev/null || fail "an impossible calendar expiry must not admit or activate an exemption: $out"
+  pass "steward exemptions are declared, identity-bound, and state-bound"
+}
+
+test_named_steward_exemptions_deploy_with_exact_identities() {
+  local home fakebin out
+  home=$(make_home named-steward-exemptions)
+  mkdir -p "$home/projects/analyst"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] dos-4r01e-closure-0913 - Closure panel hold (repo: alpha) (kind: ship) (hold: Mandatory safety-tier closure panel awaits three eligible designated review routes; verified code and served-artifact evidence remain preserved.) (hold-kind: external) (since 2026-09-13)
+- [ ] dos-analyst-canonical-permission-not-word-union-l351y - Copy8 custody hold (repo: alpha) (kind: ship) (hold: Row closure is proven, but guarded cleanup refuses because copy8 still contains uncommitted custody material; preserve behind dos-analyst-l351y-custody-reconcile-0912 pending exact D3/D4 disposition.) (hold-kind: external) (since 2026-09-12)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/dos-4r01e-closure-0913.meta" \
+    "window=firstmate:fm-dos-4r01e-closure-0913" \
+    "worktree=$home/projects/missing-closure" "project=alpha" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  fm_write_meta "$home/state/dos-analyst-canonical-permission-not-word-union-l351y.meta" \
+    "window=firstmate:fm-dos-analyst-canonical-permission-not-word-union-l351y" \
+    "worktree=$home/projects/analyst" "project=alpha" \
+    "harness=codex" "kind=ship" "mode=no-mistakes"
+  cat > "$home/state/steward-exemptions.json" <<'EOF'
+{
+  "schema": "fm-steward-exemptions.v1",
+  "exemptions": [
+    {
+      "task_id": "dos-4r01e-closure-0913",
+      "reason": "mandatory safety-tier closure panel awaits three eligible designated review routes; verification snapshot preserved",
+      "set_by": "captain corr=44b46505b3c830c1",
+      "reviewed_date": "2026-09-17",
+      "expires_on": "2026-10-17",
+      "state": "unknown",
+      "detail": "worktree gone (torn down?)",
+      "hold_identity": {
+        "source": "backlog",
+        "kind": "external",
+        "reason": "Mandatory safety-tier closure panel awaits three eligible designated review routes; verified code and served-artifact evidence remain preserved."
+      },
+      "decision_keys": []
+    },
+    {
+      "task_id": "dos-analyst-canonical-permission-not-word-union-l351y",
+      "reason": "copy8 custody preserved behind dos-analyst-l351y-custody-reconcile-0912 pending D3/D4 disposition",
+      "set_by": "captain corr=44b46505b3c830c1",
+      "reviewed_date": "2026-09-17",
+      "expires_on": "2026-10-17",
+      "state": "stopped",
+      "detail": "bare shell; Codex agent process absent",
+      "hold_identity": {
+        "source": "backlog",
+        "kind": "external",
+        "reason": "Row closure is proven, but guarded cleanup refuses because copy8 still contains uncommitted custody material; preserve behind dos-analyst-l351y-custody-reconcile-0912 pending exact D3/D4 disposition."
+      },
+      "decision_keys": []
+    }
+  ]
+}
+EOF
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-09-17T00:00:00Z "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == true
+      and (.holds | length) == 0
+      and (.steward_exemptions | map(select(.active)) | map(.task_id) | sort)
+        == ["dos-4r01e-closure-0913","dos-analyst-canonical-permission-not-word-union-l351y"]
+      and (.endpoints | map({id,state}) | sort_by(.id))
+        == [{id:"dos-4r01e-closure-0913",state:"unknown"},
+            {id:"dos-analyst-canonical-permission-not-word-union-l351y",state:"stopped"}]
+  ' >/dev/null || fail "the deployed named records must exempt both exact durable holds: $out"
+
+  sed -i.bak 's/pending exact D3\/D4 disposition/pending a changed disposition/' "$home/data/backlog.md" && rm -f "$home/data/backlog.md.bak"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-09-17T00:00:00Z "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    (.holds | map(.id) == ["dos-analyst-canonical-permission-not-word-union-l351y"])
+      and (.steward_exemptions | map({task_id,active}) | sort_by(.task_id))
+        == [{task_id:"dos-4r01e-closure-0913",active:true},
+            {task_id:"dos-analyst-canonical-permission-not-word-union-l351y",active:false}]
+  ' >/dev/null || fail "a changed named hold identity must resurface only that durable row: $out"
+  pass "named steward exemption deployment is exact-identity bound"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
+test_home_summary_declares_active_steward_exemption_without_hiding_state_change
+test_named_steward_exemptions_deploy_with_exact_identities
 test_undated_captain_hold_phrasing_and_aging
 test_hold_buckets_are_total_and_text_blind
 test_main_inventory_orphan_and_unstructured_disclosure
