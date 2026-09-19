@@ -3624,7 +3624,7 @@ runs[1]{id,branch,status,head,pr}:
   out=$(run_crew_state "$d" seldiv)
   assert_contains "$out" "state: unknown" "the selected diverged-head route must not read working with the daemon down"
   assert_contains "$out" "daemon unreachable" "the dead instrument is named on the selected route too"
-  assert_contains "$out" "run ids: 01RUN" "the selected-route verdict carries the candidate run ids"
+  assert_contains "$out" "run: 01RUN" "the selected-route verdict carries the run identity"
   assert_not_contains "$out" "state: working" "a stale status log must not answer for a dead instrument"
   pass "the selected-run diverged-head route reports the dead daemon"
 }
@@ -3822,8 +3822,96 @@ EOF
   arm_idle_record "$d/state" selanchor
   out=$(run_crew_state "$d" selanchor)
   assert_not_contains "$out" "state: working" "the selected anchored route must not read working with the daemon answering down"
-  assert_contains "$out" "code identity unverified" "the unverifiable identity is reported instead"
-  pass "the selected-run anchored continuation obeys the daemon rule"
+  assert_contains "$out" "daemon unreachable" "the ledger anchor proved identity, so liveness is what is reported"
+  assert_not_contains "$out" "code identity unverified" "an anchored run's identity is proven, not unverified"
+  assert_contains "$out" "run: 01RUN" "the verdict still names the run for a later --run read"
+  pass "the selected-run anchored continuation reports the dead daemon, not an identity failure"
+}
+
+# The selected route honours the parked exemption too: an anchored PARKED run
+# with a dead daemon keeps its gate and findings, exactly as the legacy route
+# does on the same evidence.
+test_selected_run_anchored_parked_keeps_its_gate_with_a_dead_daemon() {
+  reset_fakes
+  local d local_short out; d=$(new_case selected-anchored-parked)
+  make_repo_on_branch "$d/wt" fm/feat-selpark
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/selpark.meta" "window=fm:fm-selpark" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision: approve the schema change\n' > "$d/state/selpark.status"
+  FM_FAKE_RUN_HEAD=f0f0f0f0
+  FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  \"01RUN\",fm/feat-selpark,running,f0f0f0f0,\"\""
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-selpark)
+branch_sync:
+  state: synced"
+  FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-selpark f0f0f0f0  2026-08-27 13:53
+  completed  fm/feat-selpark ${local_short}  2026-08-27 12:09
+EOF
+)"
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" selpark
+  out=$(run_crew_state "$d" selpark)
+  assert_contains "$out" "state: parked" "an anchored parked run stays parked when the instrument dies"
+  assert_contains "$out" "parked at review" "the gate reaches the supervisor on the selected route too"
+  assert_contains "$out" "finding(s)" "the gate findings reach the supervisor"
+  assert_not_contains "$out" "state: unknown" "a parked run is not a dead live record"
+  pass "the selected route keeps an anchored parked run's gate with a dead daemon"
+}
+
+# An open decision outranks the unverified record on the selected route as well:
+# the early identity emit used to exit before the reconciliation could say so.
+test_selected_run_dead_daemon_leaves_the_open_decision_open() {
+  reset_fakes
+  local d rebased out; d=$(new_case selected-dead-decision)
+  make_repo_on_branch "$d/wt" fm/feat-seldec
+  rebased=$(make_rebased_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/seldec.meta" "window=fm:fm-seldec" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision: approve the schema change\n' > "$d/state/seldec.status"
+  FM_FAKE_RUN_HEAD=$rebased
+  FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  \"01RUN\",fm/feat-seldec,running,$rebased,\"\""
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-seldec)"
+  FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" seldec
+  out=$(run_crew_state "$d" seldec)
+  assert_contains "$out" "state: parked" "the open decision is not hidden behind the unverified record"
+  assert_contains "$out" "approve the schema change" "the crew's own decision note reaches the supervisor"
+  assert_contains "$out" "daemon unreachable" "the unverified record is named as the reason"
+  pass "an open decision survives the dead-daemon verdict on the selected route"
+}
+
+# The coarse ledger word `pending` is not an acceptance: it keeps its unknown
+# reading rather than claiming the crew is validating.
+test_coarse_pending_ledger_word_reads_unknown() {
+  reset_fakes
+  local d local_short out; d=$(new_case coarse-pending)
+  make_repo_on_branch "$d/wt" fm/feat-cpend
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cpend.meta" "window=fm:fm-feat-cpend" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/feat-cpend.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-23 14:00
+  pending    fm/feat-cpend ${local_short}  2026-08-23 13:53
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-cpend
+  out=$(run_crew_state "$d" feat-cpend)
+  assert_contains "$out" "state: unknown" "a pending ledger word is not a working claim"
+  assert_contains "$out" "runs list status: pending" "the unrecognised word is reported as itself"
+  pass "a coarse pending ledger word reads unknown"
 }
 
 # The same anchored selected-run shape with the daemon answering still binds.
@@ -3935,6 +4023,7 @@ EOF
   assert_contains "$out" "state: unknown" "a live ledger row must not read as work with the daemon answering down"
   assert_contains "$out" "daemon unreachable" "the dead instrument is named in the verdict"
   assert_contains "$out" "unverified" "the record is reported unverified, not working"
+  assert_not_contains "$out" "01RUN" "the foreign crew's run id must not be offered as this crew's"
   pass "a coarse live row with the daemon down reads unverified"
 }
 
@@ -3959,10 +4048,11 @@ EOF
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-cg
   out=$(run_crew_state "$d" feat-cg)
-  assert_contains "$out" "source: run-step" "the coarse live row still binds"
-  assert_not_contains "$out" "superseded by active run" "a coarse row cannot prove the gate event resolved"
-  assert_contains "$out" "cannot tell working from parked" "the coarse limit is named in the detail"
-  pass "a coarse live row never claims the gate event was superseded"
+  assert_contains "$out" "state: parked" "the open decision answers in the state, not only in the detail"
+  assert_contains "$out" "review gate has an ask-user finding" "the crew's own decision note reaches the supervisor"
+  assert_not_contains "$out" "superseded" "a coarse row cannot prove the gate event resolved"
+  assert_contains "$out" "cannot tell working from parked" "the coarse limit is named as the reason"
+  pass "a coarse live row leaves the open decision open"
 }
 
 # Coarse negative control (axi answers another branch): a live row on the task's
@@ -4342,6 +4432,9 @@ test_unverified_coarse_record_makes_no_supersede_claim
 test_unverified_coarse_failed_record_makes_no_supersede_claim
 test_selected_run_anchored_continuation_needs_a_live_daemon
 test_selected_run_anchored_continuation_binds_while_daemon_answers
+test_selected_run_anchored_parked_keeps_its_gate_with_a_dead_daemon
+test_selected_run_dead_daemon_leaves_the_open_decision_open
+test_coarse_pending_ledger_word_reads_unknown
 test_unanswered_daemon_probe_does_not_suppress_live_run
 test_coarse_live_row_with_daemon_down_is_unverified
 test_coarse_live_row_does_not_claim_gate_superseded
