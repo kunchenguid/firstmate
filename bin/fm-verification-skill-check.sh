@@ -45,15 +45,14 @@ has_content() {
   printf '%s\n' "$1" | grep -q '[^[:space:]]'
 }
 
-# Section extractor: prints the body of one ## H2 section (up to the next ##),
-# empty when the section is absent.
 section_body() {
-  # $1 = file, $2 = heading text
-  awk -v want="$2" '
+  local file=$1
+  local heading=$2
+  awk -v want="$heading" '
     $0 == "## " want { insec = 1; next }
     /^## / { insec = 0 }
     insec { print }
-  ' "$1"
+  ' "$file"
 }
 
 SKILL="$DIR/SKILL.md"
@@ -73,18 +72,21 @@ if ! FRONTMATTER=$(awk '
 fi
 NAME=$(printf '%s\n' "$FRONTMATTER" | sed -n 's/^name:[[:space:]]*//p' | head -1)
 [ -n "$NAME" ] || fail "SKILL.md frontmatter has no name: field"
-DESCRIPTION=$(printf '%s\n' "$FRONTMATTER" | awk '
+if ! printf '%s\n' "$FRONTMATTER" | awk '
   /^description:[[:space:]]*/ {
     value = $0
     sub(/^description:[[:space:]]*/, "", value)
-    if (value !~ /^[>|][-+]?$/ && value ~ /[^[:space:]]/) { print value; exit }
-    reading = 1
-    next
+    if (value ~ /^[>|][-+]?$/) { block = 1; next }
+    lower = tolower(value)
+    if (value ~ /^[[:alnum:]]/ && lower !~ /^(null|~)([[:space:]]|$)/) valid = 1
+    exit
   }
-  reading && /^[[:space:]]+/ && /[^[:space:]]/ { print; exit }
-  reading && !/^[[:space:]]*$/ { exit }
-')
-has_content "$DESCRIPTION" || fail "SKILL.md frontmatter has no non-empty description: field"
+  block && /^[[:space:]]+/ && /[^[:space:]]/ { valid = 1; exit }
+  block && !/^[[:space:]]*$/ { exit }
+  END { exit valid ? 0 : 1 }
+'; then
+  fail "SKILL.md frontmatter description is missing or invalid"
+fi
 case "$NAME" in
   verify-*) ;;
   *) fail "skill name must start with verify- (got: ${NAME:-none})" ;;

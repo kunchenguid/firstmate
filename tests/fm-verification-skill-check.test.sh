@@ -124,7 +124,38 @@ test_rejects_missing_description() {
   make_good_skill "$dir"
   sed -i '/^description: >-$/,+2d' "$dir/SKILL.md"
   out=$(run_check "$dir") && fail "missing frontmatter description must fail" || true
-  assert_contains "$out" "no non-empty description" "failure names the missing description"
+  assert_contains "$out" "description is missing or invalid" "failure names the missing description"
+}
+
+test_accepts_supported_description_forms() {
+  local dir form out code
+  for form in plain literal; do
+    dir="$TMP_ROOT/description-$form/verify-timetracker"
+    make_good_skill "$dir"
+    case "$form" in
+      plain)
+        sed -i '/^description: >-$/,+2c\description: Drive the timetracker CLI as a user.' "$dir/SKILL.md"
+        ;;
+      literal)
+        sed -i 's/^description: >-$/description: |-/' "$dir/SKILL.md"
+        ;;
+    esac
+    out=$(run_check "$dir") && code=0 || code=$?
+    expect_code 0 "$code" "$form description passes the shape check"
+  done
+}
+
+test_rejects_invalid_descriptions() {
+  local dir index out value
+  index=0
+  for value in '' 'null' '""' '[unfinished'; do
+    index=$((index + 1))
+    dir="$TMP_ROOT/invalid-description-$index/verify-timetracker"
+    make_good_skill "$dir"
+    sed -i "/^description: >-$/,+2c\\description: $value" "$dir/SKILL.md"
+    out=$(run_check "$dir") && fail "invalid description '$value' must fail" || true
+    assert_contains "$out" "description is missing or invalid" "failure names invalid description '$value'"
+  done
 }
 
 test_rejects_whitespace_only_section() {
@@ -212,6 +243,8 @@ test_accepts_well_shaped_skill
 test_rejects_missing_sections
 test_rejects_unclosed_frontmatter
 test_rejects_missing_description
+test_accepts_supported_description_forms
+test_rejects_invalid_descriptions
 test_rejects_whitespace_only_section
 test_rejects_removed_kill_rule
 test_rejects_missing_feature_map
