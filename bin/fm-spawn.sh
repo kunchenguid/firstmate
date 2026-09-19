@@ -3729,6 +3729,10 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       echo "error: restricted account-task worktree cannot be resolved; refusing before launch" >&2
       exit 1
     }
+    if [ "$account_worktree" = "$account_workspace_root" ]; then
+      echo "error: restricted account-task worktree is outside its qualified workspace root; refusing before launch" >&2
+      exit 1
+    fi
     case "$account_worktree/" in
       "$account_workspace_root"/*) ;;
       *)

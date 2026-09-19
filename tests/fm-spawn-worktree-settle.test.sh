@@ -56,7 +56,12 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
-  send-keys) exit 0 ;;
+  send-keys)
+    case "$*" in
+      *codex*) [ -z "${FM_FAKE_WORKER_LAUNCH:-}" ] || : > "$FM_FAKE_WORKER_LAUNCH" ;;
+    esac
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -110,6 +115,7 @@ run_settle_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    FM_FAKE_WORKER_LAUNCH="${FM_FAKE_WORKER_LAUNCH:-}" \
     FM_ACCOUNT_TASK_WORKSPACE_ROOT="${FM_ACCOUNT_TASK_WORKSPACE_ROOT:-}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
@@ -242,10 +248,29 @@ test_restricted_account_workspace_root_is_enforced() {
   pass "restricted account-task spawn refuses a worktree outside its qualified root before launch"
 }
 
+test_restricted_account_workspace_root_must_be_ancestor() {
+  local rec id out status launch_marker
+  id=settle-account-exact-root-z6
+  rec=$(make_settle_case settle-account-exact-root "$id" 0)
+  read_settle_record "$rec"
+  launch_marker="$TMP_ROOT/settle-account-exact-root/worker-launched"
+
+  out=$(FM_ACCOUNT_TASK_WORKSPACE_ROOT="$WT_DIR" \
+    FM_FAKE_WORKER_LAUNCH="$launch_marker" run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "restricted spawn accepted its qualified root as its worktree"
+  assert_contains "$out" "outside its qualified workspace root" \
+    "restricted spawn did not reject a worktree equal to the workspace root"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "exact-root refusal published task metadata"
+  [ ! -e "$launch_marker" ] || fail "exact-root refusal launched a worker"
+  pass "restricted account-task spawn requires a strict workspace-root descendant"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
 test_restricted_account_workspace_root_is_enforced
+test_restricted_account_workspace_root_must_be_ancestor
 
 echo "# all fm-spawn-worktree-settle tests passed"
