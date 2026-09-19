@@ -359,14 +359,18 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   def rows($p; $lane): (prov($p; $lane) | .quotaSemantics.effectiveAvailability // []);
   def bare($m): ($m | split("/") | last);
   def provider_of($c): ($c.provider // $pmap[$c.harness] // null);
-  def lane_of($c): quota_lane($c.harness; $c.model);
-  def measured($p; $lane):
-    (prov($p; $lane) != null and (["known", "partial"] | index(prov($p; $lane).quotaSemantics.status)) != null);
-  def applicable($p; $lane; $m):
-    (bare($m)) as $bare |
-    [rows($p; $lane)[] | select(
-      .scope == "all_models" or .scope == "all_products" or
-      ($m != "" and (.scope == ("model:" + $bare) or .scope == ("product:" + $bare)))
+  def measured($p):
+    (prov($p) != null and
+     ((["known", "partial"] | index(prov($p).quotaSemantics.status)) != null or
+      (prov($p).quotaSemantics.status == "unknown" and
+       any((prov($p).quotaSemantics.effectiveAvailability // [])[]; .status == "known"))));
+  def scope_applies($p; $scope; $m):
+    $scope == "all_models" or $scope == "all_products" or
+    ($p == "agy" and $scope == "gemini_only") or
+    ($m != "" and ($scope == ("model:" + (bare($m))) or $scope == ("product:" + (bare($m)))));
+  def applicable($p; $m):
+    [rows($p)[] | select(
+      scope_applies($p; .scope; $m)
     )];
   def floor_state($f; $p; $lane):
     if $f == null then "none"
