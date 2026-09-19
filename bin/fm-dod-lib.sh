@@ -84,7 +84,8 @@ fm_ship_pr_readiness_block() {  # <no-mistakes|direct-PR|local-only> <on|off>
       cat <<'EOF'
 # Pull request readiness
 This task's merge posture is `yolo=on`.
-Create the pull request without `--draft`, then run `gh-axi pr ready <number>` using the pull request number from the creation result before reporting completion.
+If this task needs a new pull request, create it without `--draft`; do not create another pull request when the task is working on an existing one.
+Before reporting completion, ensure the task's resulting or existing pull request is ready for review, running `gh-axi pr ready <number>` if it is a draft.
 EOF
       ;;
     no-mistakes:on)

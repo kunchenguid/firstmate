@@ -224,7 +224,7 @@ EOF
   for mode in direct-PR no-mistakes; do
     id="delivery-yolo-$mode-on"
     write_brief "$home" "$id" "$mode"
-    printf '\n# Pull request readiness\nThis heading is ordinary task content.\n' >> "$home/data/$id/brief.md"
+    printf '\n# Pull request readiness\nWork on the existing external pull request instead of creating another one.\n' >> "$home/data/$id/brief.md"
     run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode "$mode" --yolo on >/dev/null 2>&1 || true
     brief="$home/data/$id/launch-brief.md"
     assert_present "$brief" "$mode/on: spawn did not publish the worker launch brief"
@@ -232,8 +232,14 @@ EOF
       "$mode/on: ordinary brief content suppressed the authoritative yolo posture"
     case "$mode" in
       direct-PR)
-        assert_grep "Create the pull request without \`--draft\`" "$brief" \
-          "direct-PR/on: worker was not told to create a ready pull request"
+        assert_grep "If this task needs a new pull request, create it without \`--draft\`" "$brief" \
+          "direct-PR/on: new pull requests were not required to start ready"
+        assert_grep "do not create another pull request when the task is working on an existing one" "$brief" \
+          "direct-PR/on: existing pull-request work was told to create a duplicate"
+        assert_grep "ensure the task's resulting or existing pull request is ready for review" "$brief" \
+          "direct-PR/on: resulting or existing pull request was not required to be ready"
+        assert_no_grep '^Create the pull request without `--draft`' "$brief" \
+          "direct-PR/on: existing pull-request work retained an unconditional creation instruction"
         assert_grep 'gh-axi pr ready <number>' "$brief" \
           "direct-PR/on: worker was not told to confirm ready-for-review state" ;;
       no-mistakes)
