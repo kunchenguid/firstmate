@@ -443,6 +443,7 @@ test_promotion_branch_command_is_shell_safe() {
     --mode local-only --yolo off --branch-prefix "$prefix" >/dev/null 2>&1 \
     || fail "a ref-format-valid metacharacter prefix should promote safely"
   instructions="$home/data/$id/ship-instructions.md"
+  # shellcheck disable=SC2016  # Single quotes are required: the sed expression holds literal backticks.
   command=$(sed -n 's/.*create your branch: `\(.*\)`\.$/\1/p' "$instructions")
   [ -n "$command" ] || fail "promotion instructions exposed no branch-creation command"
   repo="$TMP_ROOT/promote-branch-shell-safe-repo"
