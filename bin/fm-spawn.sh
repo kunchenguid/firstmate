@@ -496,6 +496,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-continuation-lib.sh
+. "$SCRIPT_DIR/fm-continuation-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -512,6 +514,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-candidate-availability-lib.sh
+. "$SCRIPT_DIR/fm-candidate-availability-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1039,6 +1043,8 @@ ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
+HERDR_HOME_IDENTITY=
+HERDR_SOCKET_PATH=${HERDR_SOCKET_PATH:-}
 HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
 HERDR_PRESENTATION_ORDER_LOCK=
@@ -2090,6 +2096,21 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
     fi
   fi
 fi
+# Final pre-launch gate: consult the same generic candidate-availability
+# result fm-quota-choose.sh uses (bin/fm-candidate-availability-lib.sh). No
+# quota-axi snapshot is taken here, so this only ever hard-blocks the one
+# source that already carries its own authoritative live check independent of
+# quota-axi - Copilot's premium-route quota. A local candidate is always
+# eligible and a quota-axi-covered candidate is reported "unknown" here
+# (no snapshot to judge it by) without blocking the launch, preserving the
+# existing routing architecture where dispatch-time quota reasoning for
+# Claude/Codex/etc. happens before fm-spawn.sh is ever invoked.
+CANDIDATE_AVAILABILITY=$(fm_candidate_availability "" "$HARNESS" "$MODEL")
+if [ "$(printf '%s\n' "$CANDIDATE_AVAILABILITY" | jq -r '.source')" = copilot ] &&
+   [ "$(printf '%s\n' "$CANDIDATE_AVAILABILITY" | jq -r '.eligible')" != true ]; then
+  fm_copilot_model_refusal "$MODEL"
+  exit 1
+fi
 # Ultra is an explicit native capability, never a Pi thinking-level alias.
 # Validate the fully resolved profile before worktree or endpoint provisioning.
 if [ "$EFFORT" = ultra ]; then
@@ -2589,6 +2610,41 @@ if [ "$KIND" = secondmate ]; then
   else
     BRIEF="$DATA/$ID/brief.md"
   fi
+  # A relaunch's continuation record (bin/fm-continuation-lib.sh; written by
+  # bin/fm-control.sh as part of the same transaction) is delivered to the
+  # replacement the same way a ship/scout's progress note is - overlaid onto a
+  # one-shot launch instructions file - because a secondmate's standing
+  # charter is never rewritten (AGENTS.md section 7). No record, or one that
+  # fails validation (foreign or corrupt), launches on the charter unchanged;
+  # this is delivery only, so it never blocks the spawn.
+  if [ "$RELAUNCH" -eq 1 ]; then
+    SM_CONTINUATION=$(fm_continuation_path "$STATE" "$ID")
+    if [ -f "$SM_CONTINUATION" ] && fm_continuation_validate "$SM_CONTINUATION" "$ID" >/dev/null 2>&1; then
+      mkdir -p "$DATA/$ID" || {
+        echo "error: could not create $DATA/$ID for the continuation-record overlay" >&2
+        exit 1
+      }
+      SM_LAUNCH_BRIEF="$DATA/$ID/launch-charter.md"
+      SM_LAUNCH_BRIEF_TMP="$DATA/$ID/.launch-charter.md.${BASHPID:-$$}"
+      {
+        cat "$BRIEF" &&
+          printf '\n' &&
+          echo "## Continuation record" &&
+          echo &&
+          fm_continuation_render_markdown "$SM_CONTINUATION"
+      } > "$SM_LAUNCH_BRIEF_TMP" || {
+        rm -f -- "$SM_LAUNCH_BRIEF_TMP"
+        echo "error: could not render current launch instructions for $BRIEF" >&2
+        exit 1
+      }
+      if ! mv "$SM_LAUNCH_BRIEF_TMP" "$SM_LAUNCH_BRIEF"; then
+        rm -f -- "$SM_LAUNCH_BRIEF_TMP"
+        echo "error: could not publish current launch instructions for $BRIEF" >&2
+        exit 1
+      fi
+      BRIEF="$SM_LAUNCH_BRIEF"
+    fi
+  fi
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
@@ -3084,7 +3140,10 @@ else
     fi
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
-    if [ "$KIND" != secondmate ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
+    # Ordinary workers now use the owning home's stable workspace directly.
+    # Disposable presentation workspaces remain readable for existing tasks but
+    # are never created by a new spawn.
+    if [ "$KIND" = "__legacy_disposable_projection_disabled__" ] && fm_backend_herdr_presentation_enabled "$CONFIG" "$STATE"; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
@@ -3225,6 +3284,8 @@ EOF
       echo "error: herdr did not return a tab/pane id for $W" >&2
       exit 1
     fi
+    HERDR_HOME_IDENTITY=$(cd "$HERDR_LABEL_HOME" 2>/dev/null && pwd -P) || exit 1
+    HERDR_SOCKET_PATH=$(fm_backend_herdr_presentation_session_socket_path "$HERDR_SES") || exit 1
     T="$HERDR_SES:$HERDR_PANE_ID"
     ;;
   zellij)
@@ -3614,6 +3675,85 @@ agy_wait_for_working() {
 }
 
 agy_spawn_fail() {  # <detail>
+  printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
+  rovo_endpoint_cleanup
+}
+
+# claude carries its brief on the launch command exactly like agy (a
+# positional prompt that auto-submits), so it needs no delivery gate either -
+# but unlike kimi/rovo/agy it had no post-launch confirmation at all: trust
+# pre-registration (bin/fm-claude-trust.sh) only removes the workspace-trust
+# and external-imports dialogs when it can prove the target is a genuine
+# isolated worktree or a seeded secondmate home, and a worker whose pane still
+# meets one of those dialogs - or a stale/expired credential - would sit there
+# indefinitely with nothing to catch it beyond a much later, much slower
+# stale-wake heuristic. This gate closes that gap deterministically at
+# startup, for every claude spawn kind (ship, scout, and secondmate carry the
+# same one-positional-brief launch shape).
+#
+# Deliberately NOT the kimi/rovo/agy shape of waiting for positive proof of a
+# busy turn: fm-spawn arms claude's busy record to busy/fm-spawn BEFORE the
+# brief is even sent (see the busy-state arm above), so a busy verdict alone
+# proves nothing here, and the one semantic proof that would - the record's
+# source flipping to claude-hook via the UserPromptSubmit hook this same
+# spawn installs - only ever fires from a REAL claude process, which most
+# fake-adapter test doubles across the suite do not run. Requiring it would
+# make every one of those doubles simulate a vendor hook or fail this gate.
+# Instead this only ever fails on POSITIVE evidence of one of three known
+# blocking renders - the workspace-trust dialog title, the external-imports
+# dialog title (harness-adapters claude.md owns both, verified against the
+# installed release), and a stale/expired credential's "Login expired" banner
+# (docs/remote-secondmates.md) - within a short settle window. All three
+# render synchronously at Claude's own startup, before the brief is ever
+# read, so the window only needs to be long enough for that startup check to
+# run, not for a full turn to complete; an ordinary pane that shows none of
+# them (an empty capture included, e.g. an inert test double) passes. None of
+# the three is safe to answer from here - firstmate's steering plane cannot
+# navigate a selection, and "Login expired" needs a human's credential fix -
+# so this only detects and reports, exactly like the trust script itself
+# refuses rather than guesses.
+CLAUDE_TRUST_DIALOG_TITLE='Quick safety check: Is this a project you created or one you trust?'
+CLAUDE_IMPORT_DIALOG_TITLE='Allow external CLAUDE.md file imports?'
+CLAUDE_LOGIN_EXPIRED='Login expired'
+CLAUDE_BLOCK_REASON=
+
+claude_capture() {
+  fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
+}
+
+claude_pane_blocking_reason() {  # <plain-pane-capture> -> prints a reason and returns 0, or returns 1
+  local pane=$1
+  if printf '%s\n' "$pane" | grep -Fq "$CLAUDE_TRUST_DIALOG_TITLE"; then
+    printf 'the workspace-trust dialog is showing, so pre-registration did not take effect'
+    return 0
+  fi
+  if printf '%s\n' "$pane" | grep -Fq "$CLAUDE_IMPORT_DIALOG_TITLE"; then
+    printf 'the external CLAUDE.md imports dialog is showing and firstmate cannot answer it on the captain'\''s behalf'
+    return 0
+  fi
+  if printf '%s\n' "$pane" | grep -Fq "$CLAUDE_LOGIN_EXPIRED"; then
+    printf 'claude reports "Login expired"; the launching credential store needs re-authentication'
+    return 0
+  fi
+  return 1
+}
+
+claude_wait_for_working() {
+  local i=0 max=${FM_CLAUDE_READY_POLLS:-6} interval=${FM_CLAUDE_POLL_INTERVAL:-0.5} pane reason
+  while [ "$i" -lt "$max" ]; do
+    pane=$(claude_capture)
+    if reason=$(claude_pane_blocking_reason "$pane"); then
+      CLAUDE_BLOCK_REASON=$reason
+      return 1
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 0
+}
+
+claude_spawn_fail() {  # <detail>
   printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
   rovo_endpoint_cleanup
@@ -4252,7 +4392,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_socket_path herdr_home herdr_workspace_binding_version herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4279,6 +4419,9 @@ preserve_relaunch_meta() {
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"
+    echo "herdr_socket_path=$HERDR_SOCKET_PATH"
+    echo "herdr_home=$HERDR_HOME_IDENTITY"
+    echo "herdr_workspace_binding_version=1"
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
     echo "herdr_tab_id=$HERDR_TAB_ID"
     echo "herdr_pane_id=$HERDR_PANE_ID"
@@ -4648,6 +4791,14 @@ if [ "$HARNESS" = agy ]; then
     exit 1
   fi
 fi
+case "$HARNESS" in
+  claude*)
+    if ! claude_wait_for_working; then
+      claude_spawn_fail "${CLAUDE_BLOCK_REASON:-claude did not confirm it started processing its brief} in window $T"
+      exit 1
+    fi
+    ;;
+esac
 if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
   if ! fm_config_reread_discard_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
     if fm_config_reread_quarantine_pending "$PROJ_ABS" "$ID" "$FM_HOME"; then
