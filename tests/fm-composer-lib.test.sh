@@ -485,6 +485,73 @@ test_matrix_pi_separated_needs_identity() {
   pass "matrix: pi's separated composer needs identity + structure; the blank row alone never proves it"
 }
 
+# --- pi footer region: what a pane-content hash must not cover ----------------
+# bin/fm-watch.sh hashes a pane capture to answer "did this pane change?". pi's
+# footer is not pane content: pi hands it to extensions (`ctx.ui.setFooter`), so
+# a status line showing a quota countdown, a clock, or a token counter repaints
+# on a timer while the transcript above never moves. That repaint made a
+# finished worker look changed once a minute, and the terminal-stale path
+# re-alarmed on every tick (task fm-pi-footer-stale-churn).
+# fm_composer_pi_strip_footer returns the region that IS content: every row down
+# to pi's composer-closing separator. This fixture is the real shape a live pi
+# pane renders under a rich status line - transcript, the separated
+# composer pair, then the two footer rows whose second carries the countdown.
+
+test_pi_footer_strip_bounds_the_hashed_region() {
+  local pane ticked moved out
+  pane=$'done: PR https://example.invalid/pull/1 checks green\ntranscript line\n────────────────────────\n────────────────────────\nGLM-5.3-Flash  ░░░░|░░░░░░░░  0%  low\n5-hour: 0% | weekly: 100% (r: 1d 21h 1m)'
+  ticked=$'done: PR https://example.invalid/pull/1 checks green\ntranscript line\n────────────────────────\n────────────────────────\nGLM-5.3-Flash  ░░░░|░░░░░░░░  0%  low\n5-hour: 0% | weekly: 100% (r: 1d 21h 0m)'
+  moved=$'done: PR https://example.invalid/pull/1 checks green\ntranscript line changed\n────────────────────────\n────────────────────────\nGLM-5.3-Flash  ░░░░|░░░░░░░░  0%  low\n5-hour: 0% | weekly: 100% (r: 1d 21h 1m)'
+
+  out=$(fm_composer_pi_strip_footer "$pane") \
+    || fail "a pi screen with a composer pair and a footer must yield a content region"
+  case "$out" in
+    *5-hour*|*GLM-5.3-Flash*) fail "the pi footer must not be part of the hashed region" ;;
+  esac
+  case "$out" in
+    *'transcript line'*) ;;
+    *) fail "the transcript above the composer must stay in the hashed region" ;;
+  esac
+  [ "$out" = "$(fm_composer_pi_strip_footer "$ticked")" ] \
+    || fail "a footer-only countdown tick must hash exactly like the pane it repainted"
+  [ "$out" != "$(fm_composer_pi_strip_footer "$moved")" ] \
+    || fail "content above the composer must keep moving the hash"
+
+  # The composer's own rows stay: the closing separator is the boundary, and a
+  # worker's draft sitting between the pair is content the hash may cover.
+  pane=$'transcript\n────────────────────────\nhello-composer-probe\n────────────────────────\n5-hour: 0% (r: 5m)'
+  out=$(fm_composer_pi_strip_footer "$pane") \
+    || fail "a pi screen with a typed composer row must yield a content region"
+  case "$out" in
+    *'hello-composer-probe'*) ;;
+    *) fail "the composer rows above the closing separator must stay in the hashed region" ;;
+  esac
+
+  # A text-bearing rule row is not a separator (pi's `── ⠸ Working ──` spinner row
+  # is not one), so a busy pane keeps its indicator and still loses only its
+  # footer. Structure decides, never the footer's own text.
+  pane=$'transcript\n── ⠸ Working ────────────────────\n────────────────────────\n5-hour: 0% (r: 5m)'
+  out=$(fm_composer_pi_strip_footer "$pane") \
+    || fail "a busy pi screen must still yield a content region"
+  case "$out" in
+    *'Working'*) ;;
+    *) fail "a busy indicator above the composer is content and must stay hashed" ;;
+  esac
+  case "$out" in
+    *5-hour*) fail "a busy pi screen must still lose its footer" ;;
+  esac
+
+  # No structural boundary, or nothing above it, is a refusal: the caller falls
+  # back to hashing the whole capture rather than a constant that cannot move.
+  if out=$(fm_composer_pi_strip_footer $'transcript\nno rules here\n5-hour: 0% (r: 5m)'); then
+    fail "a screen with no separator row must not claim a content region, got '$out'"
+  fi
+  if out=$(fm_composer_pi_strip_footer $'────────────────────────\n5-hour: 0% (r: 5m)'); then
+    fail "a separator with nothing above it must not claim a content region, got '$out'"
+  fi
+  pass "fm_composer_pi_strip_footer: bounds pi content at the composer rule, never at footer text"
+}
+
 test_matrix_opencode_leftbar_signals() {
   # Real idle opencode: `┃`-prefixed rows holding an "Ask anything" hint,
   # blanks, and a Build-mode footer. Two independent idle signals: the shared
@@ -790,6 +857,7 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
+test_pi_footer_strip_bounds_the_hashed_region
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box

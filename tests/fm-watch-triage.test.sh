@@ -1884,6 +1884,111 @@ test_terminal_stale_surfaced() {
   pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
 }
 
+# --- pi footer churn: a footer repaint is not a pane change ---------------------
+# A pi pane's footer is a surface pi gives to extensions (`ctx.ui.setFooter`), and a
+# rich status line renders a quota countdown there that repaints once a minute. The
+# pane's content does not move, but the capture does, so the stale backbone saw a
+# new hash per tick and the terminal path re-alarmed on every one: a finished pi
+# worker cost a supervision turn a minute until the work was held for the captain
+# (task fm-pi-footer-stale-churn).
+# fm_composer_pi_strip_footer bounds the hashed region at pi's own composer rule,
+# so these are the two halves of the contract this test pins: the first sight of a
+# finished worker still alarms exactly once, and a footer-only repaint never does
+# - while content above the composer keeps moving the hash, so the fix can never
+# be satisfied by a hash that stopped moving.
+PI_FOOTER_WATCH_PID=
+
+# The bottom of a real pi pane as a live capture renders it: the transcript, the
+# separated composer pair, and the two footer rows such a status line draws, whose
+# second carries the countdown. <countdown> is its only variable.
+pi_footer_screen() {  # <reset-countdown>
+  cat <<EOF
+done: PR https://example.invalid/pull/9 checks green
+────────────────────────────────
+────────────────────────────────
+GLM-5.3-Flash  ░░░░|░░░░░░░░░░░░░░░░░  0%  low
+5-hour: 0% | weekly: 100% (r: $1)
+EOF
+}
+
+make_pi_footer_case() {  # <name> <harness>
+  local dir state
+  dir=$(make_case "$1"); state="$dir/state"
+  printf 'window=test:fm-pi-fin\nkind=ship\nharness=%s\nbackend=tmux\n' "$2" > "$state/pi-fin.meta"
+  printf 'done: PR https://example.invalid/pull/9 checks green\n' > "$state/pi-fin.status"
+  printf '%s' "$(seen_sig "$state/pi-fin.status")" > "$state/.seen-pi-fin_status"
+  printf '%s\n' "$dir"
+}
+
+pi_footer_launch() {  # <dir> <out> <capture>
+  local dir=$1 out=$2 capture=$3
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-pi-fin \
+    FM_FAKE_TMUX_CAPTURE="$capture" FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" >> "$out" 2>&1 &
+  PI_FOOTER_WATCH_PID=$!
+}
+
+pi_footer_stale_wakes() {  # <state>
+  awk -F '\t' '$3 == "stale" && $4 == "test:fm-pi-fin" { n++ } END { print n + 0 }' \
+    "$1/.wake-queue" 2>/dev/null || echo 0
+}
+
+test_pi_footer_repaint_does_not_restale_a_finished_worker() {
+  local harness dir state out capture ticks wakes
+  for harness in pi pi-signed; do
+    dir=$(make_pi_footer_case "pi-footer-churn-$harness" "$harness")
+    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    pi_footer_screen '(r: 1d 21h 1m)' > "$capture"
+
+    # The first sight of the finished worker still reaches firstmate exactly once.
+    pi_footer_launch "$dir" "$out" "$capture"
+    if ! wait_for_exit "$PI_FOOTER_WATCH_PID" 100; then
+      reap "$PI_FOOTER_WATCH_PID"
+      fail "[$harness] the first sight of a finished worker did not surface"
+    fi
+    wakes=$(pi_footer_stale_wakes "$state")
+    [ "$wakes" -eq 1 ] \
+      || fail "[$harness] the first sight of a finished worker produced $wakes stale wakes instead of one"
+    ack_stopped_cycle "$state" || fail "[$harness] could not acknowledge the first stale surface"
+
+    # The footer repaints its countdown and the pane's content does not move. Three
+    # poll cycles give the old hash a full sighting, a stable count, and the alarm
+    # that sighting used to earn, so this window cannot pass vacuously.
+    : > "$out"
+    pi_footer_screen '(r: 1d 21h 0m)' > "$capture"
+    pi_footer_launch "$dir" "$out" "$capture"
+    ticks=0
+    while [ "$ticks" -lt 3 ]; do
+      if ! wait_poll_cycle "$state" "$PI_FOOTER_WATCH_PID" 300; then
+        reap "$PI_FOOTER_WATCH_PID"
+        fail "[$harness] a footer-only repaint re-alarmed the finished worker: $(cat "$out")"
+      fi
+      ticks=$((ticks + 1))
+    done
+    reap "$PI_FOOTER_WATCH_PID"
+    wakes=$(pi_footer_stale_wakes "$state")
+    [ "$wakes" -eq 0 ] \
+      || fail "[$harness] a footer-only repaint re-alarmed the finished worker $wakes time(s)"
+
+    # And the hash still covers the pane's content: a real change above the
+    # composer is a new pane, and it alarms on its own sighting.
+    : > "$out"
+    pi_footer_screen '(r: 1d 20h 59m)' \
+      | sed 's/^done:.*/done: PR https:\/\/example.invalid\/pull\/10 checks green/' > "$capture"
+    pi_footer_launch "$dir" "$out" "$capture"
+    if ! wait_for_exit "$PI_FOOTER_WATCH_PID" 100; then
+      reap "$PI_FOOTER_WATCH_PID"
+      fail "[$harness] content changed above the composer stopped alarming: $(cat "$out")"
+    fi
+    wakes=$(pi_footer_stale_wakes "$state")
+    [ "$wakes" -eq 1 ] \
+      || fail "[$harness] a content change above the composer produced $wakes stale wakes instead of one"
+  done
+  pass "pi footer churn: surfaced once, silent through a footer repaint, still alarming on real content"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -5486,6 +5591,7 @@ test_routine_appends_after_a_classified_event_stay_absorbed
 test_unreadable_status_reports_once_per_file_state
 test_permission_recovery_surfaces_preserved_status
 test_terminal_stale_surfaced
+test_pi_footer_repaint_does_not_restale_a_finished_worker
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold

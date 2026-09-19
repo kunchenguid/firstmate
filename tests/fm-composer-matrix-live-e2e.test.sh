@@ -14,7 +14,11 @@
 #   - the zellij false-positive regression live (when zellij is installed): a
 #     pane whose content changes for reasons unrelated to submission must NOT
 #     report a delivered send, and a real claude-in-zellij `dump-screen
-#     --ansi` capture must classify empty through the zellij thin adapter.
+#     --ansi` capture must classify empty through the zellij thin adapter;
+#   - pi's footer region live: a real idle pi pane's footer must sit below the
+#     composer-closing separator, so the region bin/fm-watch.sh hashes for
+#     pane change stops at that row and drops a bounded footer-sized tail
+#     (task fm-pi-footer-stale-churn).
 #
 # Run explicitly with FM_COMPOSER_MATRIX_LIVE=1. No prompt is ever submitted
 # to any harness, so no model tokens are spent. An absent harness is reported
@@ -110,8 +114,62 @@ check_harness_idle_empty() {  # <name> <launch-cmd...>
   else
     CHECKED=$((CHECKED + 1))
     pass "$name ($version): real idle composer classifies empty"
+    [ "$name" != pi ] || check_pi_footer_region "$SESSION:$win" "$version"
   fi
   tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+}
+
+# check_pi_footer_region: the live half of the pane-hash contract. The watcher
+# hashes a pane capture to answer "did this pane change?", and fm-watch.sh's
+# pane_hash_input drops the rows below pi's composer-closing separator so the
+# harness repainting its own status surface is not mistaken for worker output
+# (task fm-pi-footer-stale-churn). That boundary is a vendor-rendered row, so a
+# stub can only confirm the assumption written into it. On the real idle pane it
+# must hold: the region above the boundary is byte-identical to the capture
+# rather than a rewrite, the boundary row is a solid separator, and the tail it
+# drops is footer-sized instead of a transcript. Pi drawing its footer above the
+# separator, or dropping the separator, fails here naming the versions.
+check_pi_footer_region() {  # <tmux-target> <version>
+  local target=$1 version=$2 capture region rows_raw rows_kept removed last_row
+  capture=$(tmux -L "$SOCKET" capture-pane -p -t "$target" -S -40 2>/dev/null || true)
+  if ! region=$(fm_composer_pi_strip_footer "$capture" 2>/dev/null) || [ -z "$region" ]; then
+    FAILED=1
+    printf 'not ok - pi (%s): a real idle pane yielded no content region above its composer separator\n' \
+      "$version" >&2
+    return 0
+  fi
+  case "$capture" in
+    "$region"*) ;;
+    *)
+      FAILED=1
+      printf 'not ok - pi (%s): the hashed region is not the capture above the boundary\n' "$version" >&2
+      return 0
+      ;;
+  esac
+  rows_raw=$(printf '%s' "$capture" | awk 'END { print NR }')
+  rows_kept=$(printf '%s' "$region" | awk 'END { print NR }')
+  removed=$((rows_raw - rows_kept))
+  if [ "$removed" -lt 1 ] || [ "$removed" -gt 8 ]; then
+    FAILED=1
+    printf 'not ok - pi (%s): the footer below the composer separator is %s row(s), not a 1-8 row tail\n' \
+      "$version" "$removed" >&2
+    return 0
+  fi
+  last_row=${region##*$'\n'}
+  case "$last_row" in
+    ''|*[!─]*)
+      FAILED=1
+      printf 'not ok - pi (%s): the hashed region does not end on a solid separator row\n' "$version" >&2
+      return 0
+      ;;
+  esac
+  [ "${#last_row}" -ge 8 ] || {
+    FAILED=1
+    printf 'not ok - pi (%s): the boundary row is under 8 columns wide\n' "$version" >&2
+    return 0
+  }
+  CHECKED=$((CHECKED + 1))
+  pass "pi ($version): the idle footer sits below the composer separator and stays out of the hashed region"
 }
 
 # --- 1. Every installed verified harness must reach a proven-empty composer --

@@ -640,6 +640,31 @@ tests/fm-composer-codex-idle-live-e2e.test.sh
 The verification machine runs its fleet on Herdr and has no tmux installed, so on 2026-09-15 that guard reported `skip: live: tmux absent` there, and the Herdr capture above is this entry's live evidence.
 The guard also notes whether the starfield and the placeholder were actually drawn during its read, because codex need not animate them under every model or mode; a refresh on a tmux host should record that note beside the verdict rather than assume the starfield was exercised.
 
+### 2026-09-16 pi's footer region under the hashed pane content
+
+Verified on 2026-09-16 on Linux x86_64 with pi 0.85.1 on tmux 3.4, on an isolated private socket, with no prompt submitted to any harness.
+The subject is the boundary `bin/fm-watch.sh`'s `pane_hash_input` uses to decide what a pane hash covers: the rows above pi's composer-closing separator, so a footer the harness repaints on a timer is not mistaken for worker output (task fm-pi-footer-stale-churn).
+Pi renders that boundary itself, and the footer below it is an extension surface (`ctx.ui.setFooter`), so both halves are vendor-rendered and neither a fixture nor a stub can prove them.
+
+The guard is the same live composer-matrix run, extended to assert the boundary on the real idle pi pane it already requires to classify `empty`:
+
+```sh
+FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
+```
+
+Observed output on that host (the worktree ran from an untrusted checkout, so codex parked on its first-launch trust dialog and was unreadable, exactly the condition the [Composer classification matrix](#composer-classification-matrix) entry records as belonging to an untrusted worktree):
+
+```text
+ok - claude (2.1.273 (Claude Code)): real idle composer classifies empty
+ok - pi (0.85.1): real idle composer classifies empty
+ok - pi (0.85.1): the idle footer sits below the composer separator and stays out of the hashed region
+ok - strict posture live: a blank shell row classifies unknown and injection defers
+```
+
+On the real idle pane the strip succeeded, its output was a byte-identical prefix of the capture rather than a rewrite of it, the row it ended on was the solid separator of at least 8 columns, and the tail it dropped was a footer-sized run of rows.
+A pi release that draws its footer above that separator, stops drawing the separator, or moves the footer into the transcript fails this assertion naming the pi version, which is the drift this entry exists to catch.
+The portable half of the same contract - footer-only countdown ticks stay out of the hashed region, a transcript change above the separator moves it, and a screen with no separator falls back to the whole capture - is `test_pi_footer_strip_bounds_the_hashed_region` in `tests/fm-composer-lib.test.sh`, with the watcher consumers pinned in `tests/fm-watch-triage.test.sh`; this entry owns only the vendor-rendered boundary those fixtures cannot prove.
+
 ## Steering-inbox doorbell
 
 The steering channel's one behavioral assumption - a real worker agent follows the constant self-describing doorbell line (list the inbox, read and act on its records in numeric order, then `mv` each into `handled/`) - was verified on 2026-08-23 against every installed verified harness, on tmux 3.6a, macOS arm64, on an isolated private socket, driving the REAL `bin/fm-send.sh` end to end (durable record plus doorbell, with one mid-wait re-ring playing the watcher's role).
