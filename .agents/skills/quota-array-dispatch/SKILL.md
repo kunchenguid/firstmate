@@ -108,6 +108,12 @@ A high `spendPriority` on a nearly empty window that will exhaust soon must not 
 Unknown or unmeasurable runway stays eligible with disclosed uncertainty and is never assumed to pass.
 Do not invent a generic percentage floor, and honor an explicit captain floor for a candidate when one exists.
 
+## Weight raw headroom over a pace projection
+
+A standing captain correction: do not let a pace-based "projected exhaustion" warning alone push work off Claude while raw headroom is still comfortable.
+The runway projection assumes continued heavy burn and overstates scarcity for anything but sustained dispatch.
+Weight raw `percentRemaining` over the projection: keep the task on Claude when raw is still comfortably high (roughly 30%+ on the limiting window), and reserve overflow for genuinely low raw headroom or a task that could plausibly run long enough to hit the projection.
+
 ## Rank by spendPriority
 
 Among candidates that pass all three gates, pick the highest known `spendPriority`.

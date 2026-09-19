@@ -482,6 +482,12 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
+      # AGENTS.md is loaded in full on every turn of every session of every
+      # fleet member, so its size is a shared running cost rather than a style
+      # preference. The script owns the budget, the measured file set, and the
+      # failure guidance; tests/fm-context-budget.test.sh pins its logic.
+      - name: Always-loaded agent instructions must stay within budget
+        run: bin/fm-context-budget.sh check
       - name: Compatibility pointers must stay intact
         run: |
           set -eu

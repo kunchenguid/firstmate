@@ -16,16 +16,20 @@ AFK=0
 AFK_MODE=away
 X_MODE=0
 REPAIR_LINE=0
+STARTUP_BRIEF=0
 QUEUE_PENDING=0
 
 usage() {
   cat <<'EOF'
-Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--afk-mode away|quiet] [--x-mode 0|1] [--repair-line] [--queue-pending 0|1]
+Usage: fm-supervision-instructions.sh [--harness <name>] [--read-only 0|1] [--afk 0|1] [--afk-mode away|quiet] [--x-mode 0|1] [--repair-line] [--startup-brief] [--queue-pending 0|1]
 
 Print the current primary harness's supervision operating instructions.
 With --repair-line, print one concise repair instruction for guard and hook messages.
---afk-mode only matters when --afk 1 (present); it selects the away-mode vs
-quiet-mode (kunchenguid/firstmate#2356) wording, and defaults to away.
+--afk-mode only matters when --afk 1; it selects away-mode or quiet-mode wording and defaults to away.
+With --startup-brief, print only the dynamic current-state lines plus a pointer to
+the authoritative protocol, omitting the static per-harness protocol body. Session
+start uses this because the body is byte-identical for an unchanged harness.
+The full body stays one command away for any turn that needs it.
 EOF
 }
 
@@ -73,6 +77,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --repair-line)
       REPAIR_LINE=1
+      shift
+      ;;
+    --startup-brief)
+      STARTUP_BRIEF=1
       shift
       ;;
     -h|--help)
@@ -240,5 +248,20 @@ else
 fi
 ordinary_wake_line
 printf '\n'
-render_snippet
+if [ "$STARTUP_BRIEF" -eq 1 ]; then
+  # The detailed per-harness protocol is static for an unchanged harness, so it
+  # is referenced rather than reprinted. Name the exact command and the exact
+  # doc so a turn that needs the body can reach it without exploring the repo.
+  printf 'Detailed protocol for this harness is NOT reprinted here.\n'
+  printf 'Load it when you actually supervise - handling a wake, repairing a cycle,\n'
+  printf 'or ending a turn with work under way:\n'
+  printf '  bin/fm-supervision-instructions.sh\n'
+  # Name the snippet actually selected, not the harness: pi-signed reuses pi.md,
+  # and an unverified harness falls back to unknown.md. A pointer to a file that
+  # does not exist is worse than no pointer.
+  printf 'Authoritative source: docs/supervision-protocols/%s\n' "$(basename "$SNIPPET")"
+  printf 'Per-wake handling and the guard contract: load the supervision-protocol skill.\n'
+else
+  render_snippet
+fi
 printf '\n'

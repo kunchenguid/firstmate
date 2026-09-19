@@ -445,6 +445,37 @@ test_ship_project_memory_wording() {
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
 }
 
+test_ship_brief_carries_the_project_output_contract() {
+  local home id brief
+  home="$TMP_ROOT/output-contract-home"
+  mkdir -p "$home/data"
+  id="brief-output-contract"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode direct-PR >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+
+  # These were standing captain rules that lived only in data/captain.md, so they
+  # applied only when the agent remembered to append them by hand. They now ship
+  # with every generated ship brief.
+  assert_grep "Never write \`firstmate\`" "$brief" \
+    "ship brief lost the fleet-terminology prohibition"
+  assert_grep "Never add an agent co-author trailer" "$brief" \
+    "ship brief lost the co-author trailer prohibition"
+  assert_grep "Generated with Claude Code" "$brief" \
+    "ship brief lost the attribution footer prohibition"
+  assert_grep "external issue-tracker IDs" "$brief" \
+    "ship brief lost the tracker-id prohibition"
+  assert_grep "decision history" "$brief" \
+    "ship brief lost the decision-history prohibition"
+  assert_grep "transient delivery-phase wording" "$brief" \
+    "ship brief lost the phase-wording prohibition"
+  assert_grep "Applies retroactively" "$brief" \
+    "ship brief lost the retroactive-scrub rule"
+  assert_grep "fm-output-contract-check.sh" "$brief" \
+    "ship brief does not name the mechanical check that validates this contract"
+  pass "fm-brief.sh: ship brief carries the project output contract"
+}
+
 test_herdr_lab_contract_is_explicit_and_complete() {
   local home id brief
   home="$TMP_ROOT/herdr-lab-home"
@@ -936,6 +967,7 @@ test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ask_user_escalation_format
 test_ship_project_memory_wording
+test_ship_brief_carries_the_project_output_contract
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout

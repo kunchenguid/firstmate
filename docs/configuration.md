@@ -236,25 +236,40 @@ Before changing it, inspect the current file and curate the matching bullet in p
 Shared captain preferences that apply across secondmate domains live only in the primary home's optional `data/captain-shared.md`.
 `secondmate-provisioning` owns its propagation contract, including the required header, read-only secondmate copies, quarantine diagnostics, and the rollout rule that existing homes trim `data/captain.md` by hand after first propagation rather than deleting private content automatically.
 
-## Operational learnings (data/learnings.md)
+## Operational learnings (data/learnings/)
 
-Fleet-local operational facts and gotchas live locally in `data/learnings.md`; it is gitignored and printed after the captain-preference files in the session-start context digest.
-The file is created lazily on first learning and follows the internal [`stow` skill's](../.agents/skills/stow/SKILL.md) aging-tier and cold-archive contract: inspect the current file first and curate it instead of appending forever.
+Fleet-local operational facts and gotchas live locally in the gitignored `data/learnings/` tree, which is topic-split so startup context stays bounded.
+`data/learnings/index.md` is the only learnings file the session-start context digest prints: it carries the handful of gotchas that fire before any topic file could be chosen, plus a trigger table naming each `data/learnings/<topic>.md` and when to read it.
+A topic file is read with an ordinary file read when the current task matches its trigger, and the directory is never bulk-read.
+The tree is created lazily on first learning and follows the internal [`stow` skill's](../.agents/skills/stow/SKILL.md) aging-tier and cold-archive contract: inspect the current file first and curate it instead of appending forever.
+A home that predates the split may still hold a single flat `data/learnings.md`; session start prints that file whole, with a note, so no learning is silently dropped until it is split.
 There is no shared learnings file by captain decision.
 
-## Startup memory budget (config/startup-memory-budget)
+## Startup memory budgets (config/startup-memory-budget, config/learning-topic-budget)
 
-`config/startup-memory-budget` is the primary-authoritative per-home allowance for the startup prompt-memory surface: `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md` together.
-The locked mutable bootstrap path materializes its visible default of `7500` estimated tokens in a primary home when the file is absent.
+Two independent classes are budgeted so one cannot silently consume the other's room.
+`config/startup-memory-budget` is the primary-authoritative per-home allowance for the always-loaded startup prompt-memory surface: `data/captain.md`, `data/captain-shared.md`, and the learnings INDEX together - what every turn of every session pays for.
+`config/learning-topic-budget` bounds each individual `data/learnings/<topic>.md`, which is read only when its trigger matches; it is optional and defaults to the tracked `1500` estimated tokens, and an existing file is held to the same safety and format rules as the startup budget.
+The locked mutable bootstrap path materializes the startup budget's visible default of `5000` estimated tokens in a primary home when the file is absent.
 To select another allowance, replace the primary home's file with one valid positive value in the exact format below; the next locked bootstrap convergence or `bin/fm-config-push.sh` propagates it to registered secondmates.
 A secondmate does not create an independent default and instead receives the primary value through the inherited-local-material contract in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
 The file must be one positive base-10 integer followed by exactly one newline in a regular, single-linked file beneath a non-symlinked `config/` directory.
 Malformed, multi-line, symlinked, hardlinked, special, or otherwise unsafe values are rejected rather than treated as a default.
-Use `bin/fm-startup-memory-budget.sh read` to validate and print the effective value, or `bin/fm-startup-memory-budget.sh report` to account for the three files.
+Use `bin/fm-startup-memory-budget.sh read` to validate and print the effective startup value, `bin/fm-startup-memory-budget.sh report` to account for both classes, or `bin/fm-startup-memory-budget.sh check` to exit non-zero when either class is over budget.
+The locked bootstrap path runs that check and prints a `STARTUP_MEMORY_BUDGET: over budget` diagnostic, so real growth is detected rather than only the config value being validated.
 The stable local estimate is `ceil(UTF-8 bytes / 3)` per file, a conservative portable approximation rather than a provider-exact tokenizer.
 An inherited `data/captain-shared.md` counts in a secondmate's total but remains primary-owned and read-only there.
 The internal [`/stow` skill](../.agents/skills/stow/SKILL.md) owns curation and its automatic secondmate cascade, which accounts every home against this same per-home allowance separately rather than against a fleet total.
 The helper's header owns exact parsing, publication, and report output mechanics.
+
+## Crewmate concurrency cap (config/crew-concurrency-cap)
+
+`config/crew-concurrency-cap` is an optional local, gitignored override for the captain's standing limit on simultaneously active Claude-backed crewmates.
+It defaults to the tracked `2` when absent, and `0` disables the check entirely.
+`bin/fm-spawn.sh` enforces it before any fleet mutation: it counts ordinary crewmates (`kind=ship` or `kind=scout`) on a Claude harness whose recorded endpoint is still alive, so a finished-but-not-torn-down task never consumes a slot.
+Exceeding the cap requires `--captain-authorized`, which asserts that the captain approved that specific spawn; the same flag is what lifts the Opus authorization gate.
+The file must be one non-negative base-10 integer followed by exactly one newline in a regular, single-linked file; a malformed override is a refusal rather than a silent fall back to the default, because silently defaulting would quietly widen a captain restriction.
+A persistent secondmate's "counts only while actively processing" nuance is deliberately not mechanized - it needs a live per-secondmate state read the spawn path avoids - and remains a standing rule in `data/captain.md`.
 
 ## Stow pass horizon (config/stow-pass-horizon)
 

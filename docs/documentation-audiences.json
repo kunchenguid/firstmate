@@ -129,6 +129,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/captain-comms/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/captain-hold-lifecycle/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -245,11 +249,23 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/session-start/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/stow/SKILL.md",
       "audience": "agent-runtime"
     },
     {
       "path": ".agents/skills/stuck-crewmate-recovery/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/supervision-protocol/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/task-lifecycle/SKILL.md",
       "audience": "agent-runtime"
     },
     {

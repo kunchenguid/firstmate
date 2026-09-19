@@ -9,7 +9,17 @@
 # bin/fm-startup-memory-budget.sh and the internal /stow skill.
 
 FM_STARTUP_MEMORY_BUDGET_FILE="startup-memory-budget"
-FM_STARTUP_MEMORY_BUDGET_DEFAULT="7500"
+# The always-loaded startup set is captain.md, captain-shared.md, and the
+# learnings INDEX only - topic learning files are read on demand and are
+# budgeted separately below, so this bucket no longer has to absorb a whole
+# accumulated learnings file.
+FM_STARTUP_MEMORY_BUDGET_DEFAULT="5000"
+
+# Per-topic learning-file budget. Each data/learnings/<topic>.md is bounded on
+# its own rather than sharing one pooled allowance, so a single sprawling topic
+# cannot quietly consume the room every other topic needs.
+FM_LEARNING_TOPIC_BUDGET_FILE="learning-topic-budget"
+FM_LEARNING_TOPIC_BUDGET_DEFAULT="1500"
 FM_STARTUP_MEMORY_BUDGET_ERROR=""
 FM_STARTUP_MEMORY_BUDGET_VALUE=""
 FM_STARTUP_MEMORY_MEASURE_BYTES=""
@@ -93,6 +103,24 @@ fm_startup_memory_budget_read() {
   local config_dir=$1 path
   fm_startup_memory_budget_config_dir_safe "$config_dir" || return 1
   path="$config_dir/$FM_STARTUP_MEMORY_BUDGET_FILE"
+  fm_startup_memory_budget_file_valid "$path" || return 1
+  printf '%s\n' "$FM_STARTUP_MEMORY_BUDGET_VALUE"
+}
+
+# fm_learning_topic_budget_read <config-dir>
+# Prints the per-topic learning budget. Unlike the startup budget this knob is
+# optional: an absent file yields the tracked default above, which keeps every
+# already-provisioned home enforcing a bound without a migration step. An
+# existing file is still held to the same safety and format rules, so a
+# malformed override is a visible error rather than a silent fallback.
+fm_learning_topic_budget_read() {
+  local config_dir=$1 path
+  path="$config_dir/$FM_LEARNING_TOPIC_BUDGET_FILE"
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    printf '%s\n' "$FM_LEARNING_TOPIC_BUDGET_DEFAULT"
+    return 0
+  fi
+  fm_startup_memory_budget_config_dir_safe "$config_dir" || return 1
   fm_startup_memory_budget_file_valid "$path" || return 1
   printf '%s\n' "$FM_STARTUP_MEMORY_BUDGET_VALUE"
 }

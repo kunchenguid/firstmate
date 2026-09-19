@@ -102,9 +102,9 @@ test_primary_bootstrap_materializes_visible_default() {
 
   out=$(run_bootstrap "$root" "$home" "$fakebin")
   [ -z "$out" ] || fail "default materialization should stay quiet, got: $out"
-  [ "$(<"$home/config/startup-memory-budget")" = 7500 ] \
-    || fail "bootstrap did not materialize the visible 7500 default"
-  [ "$(FM_HOME="$home" "$BUDGET" read)" = 7500 ] \
+  [ "$(<"$home/config/startup-memory-budget")" = 5000 ] \
+    || fail "bootstrap did not materialize the visible 5000 default"
+  [ "$(FM_HOME="$home" "$BUDGET" read)" = 5000 ] \
     || fail "read command did not expose the generated default"
 
   printf '321\n' > "$home/config/startup-memory-budget"
@@ -181,8 +181,8 @@ test_budget_accounting_reports_all_three_files_and_safe_failure() {
     "report did not account for captain memory"
   assert_contains "$out" 'file=data/captain-shared.md bytes=7 estimated_tokens=3 status=present' \
     "report did not account for shared memory"
-  assert_contains "$out" 'file=data/learnings.md bytes=0 estimated_tokens=0 status=absent' \
-    "report did not account for absent learnings"
+  assert_contains "$out" 'file=data/learnings/index.md bytes=0 estimated_tokens=0 status=absent' \
+    "report did not account for absent learnings index"
   assert_contains "$out" 'total_estimated_tokens=5' "report total was not the sum of all three files"
   assert_contains "$out" 'budget_status=within-budget' "report did not classify the initial total"
 

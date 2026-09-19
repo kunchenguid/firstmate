@@ -5,7 +5,7 @@
 # producing ONE ordered digest, so a session starts in one or two turns
 # instead of the six-plus separate reads the old docs required: run
 # fm-bootstrap.sh, then separately read data/projects.md, data/secondmates.md,
-# data/captain.md, data/captain-shared.md, data/learnings.md, then run
+# data/captain.md, data/captain-shared.md, data/learnings/index.md, then run
 # fm-lock.sh, fm-wake-drain.sh, then read data/backlog.md, every state/*.meta,
 # and every state/*.status.
 # Every one of those reads is UNCONDITIONAL at every session start, so they
@@ -52,7 +52,7 @@
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
 #   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
-#                       data/captain-shared.md, data/learnings.md: read-only,
+#                       data/captain-shared.md, data/learnings/index.md: read-only,
 #                       always safe, always runs.
 #   9. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
@@ -388,6 +388,39 @@ print_file_or_absent() {
 
 print_backlog_pointer() {
   printf 'Full task bodies remain available on demand: bin/fm-tasks-axi.sh show <id> --full when compatible tasks-axi is available, or data/backlog.md.\n'
+}
+
+# Learnings are topic-split: only data/learnings/index.md is startup input, and
+# each topic file is read when the current task matches its trigger. A home that
+# has not been split yet still carries a flat data/learnings.md, so that file is
+# printed whole rather than silently dropping every learning it holds.
+print_learnings_index() {
+  local dir="$DATA/learnings" index="$DATA/learnings/index.md" topic count
+  if [ -f "$index" ]; then
+    subsection "data/learnings/index.md (topic files load on demand)"
+    if [ -s "$index" ]; then
+      cat "$index"
+    else
+      printf '(present, empty)\n'
+    fi
+    count=0
+    for topic in "$dir"/*.md; do
+      [ -f "$topic" ] || continue
+      [ "$topic" = "$index" ] && continue
+      count=$((count + 1))
+    done
+    printf '\n%s topic file(s) available in %s - read one only when its trigger matches.\n' \
+      "$count" "$dir"
+    return 0
+  fi
+  if [ -f "$DATA/learnings.md" ]; then
+    print_file_or_absent "$DATA/learnings.md" "data/learnings.md (flat; not yet topic-split)"
+    printf '\nNOTE: this home still uses a single learnings file. Splitting it into\n'
+    printf 'data/learnings/index.md plus topic files keeps startup context bounded.\n'
+    return 0
+  fi
+  subsection "data/learnings/index.md"
+  printf 'ABSENT\n'
 }
 
 # A queued title line whose own text already marks it held or blocked. The
@@ -787,12 +820,15 @@ if [ "$PRIMARY_HARNESS" = omp ]; then
     printf 'OMP_WATCH_EXTENSION: not loaded - restart omp with this home as its working directory so %s and %s auto-load from .omp/extensions/ for turn-end guard and background wake coverage; pass -e %s -e %s only when omp must start from another directory, never together with auto-discovery (omp loads a file named both ways twice)\n' "$OMP_TURNEND_EXT" "$OMP_EXT" "$OMP_TURNEND_EXT" "$OMP_EXT"
   fi
 fi
+# --startup-brief emits dynamic state and a pointer instead of duplicating the
+# authoritative static per-harness protocol body in every digest.
 "$SCRIPT_DIR/fm-supervision-instructions.sh" \
   --harness "$PRIMARY_HARNESS" \
   --read-only "$READ_ONLY" \
   --afk "$AFK_PRESENT" \
   --afk-mode "$AFK_MODE" \
-  --x-mode "$X_MODE_PRESENT"
+  --x-mode "$X_MODE_PRESENT" \
+  --startup-brief
 
 # --- 5. read-once contract -------------------------------------------------
 # Ahead of the two digests it governs, not after them: a truncated tail is
@@ -803,26 +839,28 @@ fi
 stage read-once
 section "READ-ONCE CONTRACT"
 cat <<'EOF'
-Everything below is printed in full for this session start: every state/*.meta,
-a compact data/backlog.md listing, a bounded tail of every state/*.status,
+This digest is the authoritative startup input. It prints every state/*.meta, a
+compact data/backlog.md listing, a bounded tail of every state/*.status,
 data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
-and data/learnings.md.
-Do NOT re-read any of them after reading this digest, and do NOT bulk-read
-data/backlog.md or state/*.status: re-reading everything defeats the entire
-point of this command.
+and data/learnings/index.md only.
+Do not re-read what it prints, and do not bulk-read data/backlog.md,
+state/*.status, or data/learnings/.
 
-Go to a source directly only when:
-  - this digest flagged it ABSENT (then rebuild or create it per AGENTS.md),
+Read further only for a named reason:
+  - a source printed ABSENT (rebuild or create it per AGENTS.md),
   - its contents looked unparseable or corrupt,
-  - an individual full status log is needed for older wake-event history, or a
-    status line was capped and its tail matters (each task's full log path is
-    printed with its tail),
+  - older wake-event history or a capped status line matters (full log path is
+    printed with each tail),
   - a full task body is needed (bin/fm-tasks-axi.sh show <id> --full, or data/backlog.md),
-  - the backlog listing disclosed omitted queued items and this turn needs them,
-  - the NETWORK CHECKS section reported its checks still IN PROGRESS and this
-    turn needs their verdict (bin/fm-startup-network.sh report),
-  - or a STARTUP TRUNCATED banner named the stage that would have printed it, in
-    which case that stage's sources were never emitted and must be reconciled.
+  - the backlog listing disclosed omitted queued items this turn needs,
+  - NETWORK CHECKS reported checks IN PROGRESS and this turn needs the verdict
+    (bin/fm-startup-network.sh report),
+  - a STARTUP TRUNCATED banner named a stage, whose sources were never emitted,
+  - or the current task matches a data/learnings/index.md topic trigger.
+
+A persisted copy of this output is NOT startup input. Do not read it just
+because the harness previewed this digest; use it only to investigate an
+exceptional condition named above.
 EOF
 
 # --- 6. fleet-state digest ---------------------------------------------
@@ -948,7 +986,7 @@ print_file_or_absent "$DATA/projects.md" "data/projects.md"
 print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
 print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
-print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+print_learnings_index
 
 # --- 9. closing reminder -----------------------------------------------
 stage next-step
@@ -990,8 +1028,8 @@ This script never starts supervision itself.
 EOF
 fi
 cat <<'EOF'
-The digest above is complete for this session start. The READ-ONCE CONTRACT
-section near the top of it governs what may still be read from disk.
+This digest is complete for this session start; the READ-ONCE CONTRACT above
+governs any further read.
 EOF
 
 if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then

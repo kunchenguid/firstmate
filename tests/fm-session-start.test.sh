@@ -730,7 +730,7 @@ EOF
 
   printf '%s\n' '- demo [no-mistakes] - a demo project (added 2026-07-01)' > "$home/data/projects.md"
   : > "$home/data/captain.md"
-  # secondmates.md, captain-shared.md, and learnings.md deliberately absent
+  # secondmates.md, captain-shared.md, and learnings/index.md deliberately absent
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
@@ -748,13 +748,13 @@ EOF
     "digest did not label the shared captain section"
 
   assert_contains "$out" "data/secondmates.md" "digest did not label the secondmates.md section"
-  assert_contains "$out" "data/learnings.md" "digest did not label the learnings.md section"
+  assert_contains "$out" "data/learnings/index.md" "digest did not label the learnings index section"
 
   # Exactly four context ABSENT markers (secondmates.md, captain-shared.md,
-  # learnings.md; backlog.md is covered by its own test) - and the
+  # learnings/index.md; backlog.md is covered by its own test) - and the
   # present-but-empty captain.md must NOT print ABSENT.
   absent_count=$(printf '%s\n' "$out" | grep -c '^ABSENT$')
-  [ "$absent_count" -eq 4 ] || fail "expected 4 ABSENT markers (secondmates.md, captain-shared.md, learnings.md, backlog.md), got $absent_count: $out"
+  [ "$absent_count" -eq 4 ] || fail "expected 4 ABSENT markers (secondmates.md, captain-shared.md, learnings/index.md, backlog.md), got $absent_count: $out"
 
   cap_section=$(printf '%s\n' "$out" | awk '/^data\/captain\.md$/{flag=1;next}/^data\//{flag=0}flag')
   assert_contains "$cap_section" "(present, empty)" "empty-but-present captain.md was not distinguished from ABSENT"
@@ -1032,14 +1032,16 @@ EOF
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "Do NOT re-read any of them after reading this digest" \
+  assert_contains "$out" "Do not re-read what it prints" \
     "the read-once contract lost its core instruction"
-  assert_contains "$out" "STARTUP TRUNCATED banner named the stage that would have printed it" \
+  assert_contains "$out" "STARTUP TRUNCATED banner named a stage" \
     "the read-once contract does not void itself for a stage that never ran"
-  assert_contains "$out" "The READ-ONCE CONTRACT" \
+  assert_contains "$out" "READ-ONCE CONTRACT" \
     "the closing reminder does not point back at the contract"
+  assert_contains "$out" "A persisted copy of this output is NOT startup input." \
+    "the contract must forbid auto-reading a persisted copy of the digest"
 
-  contract_count=$(printf '%s\n' "$out" | grep -c 'Do NOT re-read any of them')
+  contract_count=$(printf '%s\n' "$out" | grep -c 'Do not re-read what it prints')
   [ "$contract_count" -eq 1 ] \
     || fail "the read-once contract is stated $contract_count times instead of once: $out"
 
@@ -2485,7 +2487,16 @@ EOF
   block_count=$(printf '%s\n' "$out" | grep -c '^SUPERVISION OPERATING INSTRUCTIONS - primary harness:')
   [ "$block_count" -eq 1 ] || fail "expected exactly one supervision block, got $block_count"
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: pi" "pi supervision block missing"
-  assert_contains "$out" "Mode: Pi extension background wake." "pi snippet missing from session start"
+  # The static per-harness protocol body is deliberately NOT reprinted at
+  # startup: it is byte-identical every session and authoritative in
+  # docs/supervision-protocols/. Startup keeps the dynamic state plus a pointer.
+  assert_not_contains "$out" "Mode: Pi extension background wake." \
+    "the static protocol body must not be reprinted into the startup digest"
+  assert_contains "$out" "Detailed protocol for this harness is NOT reprinted here." \
+    "startup digest lost the protocol pointer"
+  assert_contains "$out" "docs/supervision-protocols/pi.md" \
+    "startup digest did not name the authoritative protocol source"
+  assert_contains "$out" "Current state:" "startup digest lost the dynamic supervision state"
   assert_contains "$out" "PI_WATCH_EXTENSION: not loaded" "pi extension load diagnostic missing"
   assert_contains "$out" "restart plain pi so $root/.pi/extensions/fm-primary-turnend-guard.ts and $root/.pi/extensions/fm-primary-pi-watch.ts auto-load" "pi extension load diagnostic omits the turn-end guard extension"
 
@@ -2496,6 +2507,46 @@ EOF
   [ "$sup_line" -lt "$context_line" ] || fail "supervision block did not precede context"
 
   pass "session start emits exactly one detected harness block and reports Pi extension load state"
+}
+
+test_context_digest_is_progressive_not_a_full_dump() {
+  local rec root home fakebin out
+  rec=$(new_world progressive-context)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  printf '# captain\n' > "$home/data/captain.md"
+  mkdir -p "$home/data/learnings"
+  printf '# index\n\nrouter: github.md when repos are involved\n' \
+    > "$home/data/learnings/index.md"
+  printf '# github topic\n\n- UNIQUE_TOPIC_BODY_MARKER\n' \
+    > "$home/data/learnings/github.md"
+  printf '# aws topic\n\n- ANOTHER_TOPIC_BODY_MARKER\n' \
+    > "$home/data/learnings/aws-terraform.md"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  # captain.md stays eager: it carries behavioral corrections.
+  assert_contains "$out" "data/captain.md" "captain.md must remain eagerly loaded"
+  # Only the learnings index is startup input.
+  assert_contains "$out" "data/learnings/index.md" "the learnings index must be printed"
+  assert_contains "$out" "router: github.md when repos are involved" \
+    "the index body must be printed so topics are discoverable"
+  assert_not_contains "$out" "UNIQUE_TOPIC_BODY_MARKER" \
+    "a topic learning file must NOT be dumped into the startup digest"
+  assert_not_contains "$out" "ANOTHER_TOPIC_BODY_MARKER" \
+    "a topic learning file must NOT be dumped into the startup digest"
+  assert_contains "$out" "2 topic file(s) available" \
+    "the digest must disclose how many topic files exist"
+
+  # The persisted-digest fallback must be gone.
+  assert_contains "$out" "A persisted copy of this output is NOT startup input." \
+    "the read-once contract must forbid auto-reading a persisted copy"
+
+  pass "context digest is progressive: index and captain eager, topic bodies on demand"
 }
 
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization() {
@@ -2511,8 +2562,10 @@ EOF
 
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: pi-signed" \
     "session start normalized a pi-signed primary to pi"
-  assert_contains "$out" "Mode: Pi extension background wake." \
-    "pi-signed primary did not reuse Pi's supervision protocol"
+  # The body is not reprinted at startup; the pointer must still resolve to the
+  # pi snippet pi-signed actually reuses, not a nonexistent pi-signed.md.
+  assert_contains "$out" "docs/supervision-protocols/pi.md" \
+    "pi-signed primary did not point at Pi's supervision protocol"
   assert_contains "$out" "PI_WATCH_EXTENSION: not loaded" \
     "pi-signed primary skipped Pi extension validation"
   assert_contains "$out" "restart pi-signed so $root/.pi/extensions/fm-primary-turnend-guard.ts and $root/.pi/extensions/fm-primary-pi-watch.ts auto-load" \
@@ -2707,6 +2760,7 @@ test_next_step_afk_delegates_to_daemon
 test_next_step_quiet_mode_delegates_to_daemon
 test_next_step_afk_legacy_empty_flag_defaults_away
 test_supervision_block_exactly_one_and_pi_diagnostic
+test_context_digest_is_progressive_not_a_full_dump
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
 test_pi_diagnostic_rejects_stale_loaded_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
