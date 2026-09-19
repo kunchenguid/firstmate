@@ -254,6 +254,27 @@
 #   This is an exec environment boundary, not a sandbox for the pane's startup
 #   shell, credential files, same-user processes, or later shell initialization.
 #   See docs/configuration.md for provider/Git setup and supported limits.
+# Spawn setup hook (config/spawn-setup/<project-dir-basename>):
+#   Optional per-project provisioning for the worktree a ship or scout spawn is
+#   about to launch into, so a worker never opens on a bare pool checkout with
+#   no dependencies, local env file, or allocated ports. An absent hook is a
+#   silent no-op, which is every project that has not opted in.
+#   A present hook must be an executable regular file; any other shape refuses
+#   the spawn rather than silently skipping provisioning the captain configured.
+#   It runs synchronously with cwd set to the task worktree and stdin detached,
+#   under a hard FM_SPAWN_SETUP_TIMEOUT bound (default 600 seconds; invalid or
+#   zero values use 600), receiving FM_TASK_ID, FM_TASK_KIND, FM_PROJECT (the
+#   absolute project clone this home spawns from), and FM_WORKTREE.
+#   A nonzero exit, the bound, or a worktree left carrying files git does not
+#   ignore refuses the spawn and names the kept hook log; a hook may write only
+#   ignored paths, because anything else is later read as the worker's own
+#   unlanded work. The refusal happens before any endpoint, worktree record, or
+#   task state exists, the same class as the pooled-base refusals beside it.
+#   Skipped for relaunches, secondmates, and the orca backend, which provisions
+#   its worktrees from its own repository hook. FM_SPAWN_SETUP=off skips a
+#   configured hook for one spawn with a notice; any other value refuses.
+#   The directory is home-local and gitignored, and is NOT inherited into
+#   secondmate homes (bin/fm-config-inherit-lib.sh). See docs/configuration.md.
 # Claude permission mode (config/claude-permission-mode):
 #   One token selecting the permission flag every claude launch (ship, scout,
 #   secondmate, and relaunch) carries. Absent or `bypass` keeps today's
@@ -2904,6 +2925,104 @@ freshen_spawn_worktree_base() { # <worktree>
   fi
 }
 
+# Per-project provisioning for the worktree this spawn is about to launch into.
+#
+# A pool slot is handed over as a bare checkout: no installed dependencies, no
+# local env file, no allocated ports. Firstmate cannot know what any project
+# needs, so the hook IS the whole contract - an executable at
+# config/spawn-setup/<project-dir-basename>, run with cwd set to the task
+# worktree. An absent hook means the project needs nothing, which is every
+# project that has not opted in. The knowledge lives in the home's own
+# gitignored config/ rather than in the project, because the steps are
+# machine-local and a borrowed repository cannot know which pool borrowed it.
+#
+# Placement carries the safety, so keep the call where it is. It runs after
+# freshen_spawn_worktree_base, so that clean-tree refusal still inspects a tree
+# no hook has touched, and before this script writes the worktree's
+# .claude/settings.local.json, so a hook that syncs a main checkout's .claude/
+# cannot overwrite firstmate's own busy and turn-end wiring. Both are before any
+# per-task state exists, which puts a refusal here in the same class as
+# freshen's: the abort trap releases the slot claim and the spawn leaves nothing
+# behind.
+#
+# A hook may write only paths the worktree already ignores. That is asserted
+# rather than trusted, because bin/fm-teardown.sh reads any other untracked file
+# as the worker's own unlanded work and would then refuse to return the slot.
+# Refusing here instead means the operator meets the problem while the hook's
+# output is still the newest thing on disk.
+run_spawn_setup_hook() { # <worktree>
+  local worktree=$1 hook log status rc=0 bound=${FM_SPAWN_SETUP_TIMEOUT:-600}
+  case "$bound" in '' | *[!0-9]* | 0*) bound=600 ;; esac
+  hook="$CONFIG/spawn-setup/$(basename "$PROJ_ABS")"
+  # Absent is the unconfigured majority and stays silent. Every other shape
+  # reports, because a hook the captain wrote and firstmate then skipped is the
+  # exact failure this hook exists to remove.
+  if [ ! -e "$hook" ] && [ ! -L "$hook" ]; then
+    return 0
+  fi
+  case "${FM_SPAWN_SETUP:-}" in
+  '') ;;
+  off)
+    echo "notice: FM_SPAWN_SETUP=off; skipping $hook, so this worker starts in an unprovisioned worktree" >&2
+    return 0
+    ;;
+  *)
+    echo "error: FM_SPAWN_SETUP is '$FM_SPAWN_SETUP'; the only accepted value is off (unset or empty runs the project's spawn-setup hook)" >&2
+    return 1
+    ;;
+  esac
+  if [ ! -f "$hook" ] || [ ! -x "$hook" ]; then
+    echo "error: spawn-setup hook '$hook' exists but is not an executable regular file; refusing to launch a worker into a worktree this project expects to be provisioned (make it executable, point it at a real script, or remove it)" >&2
+    return 1
+  fi
+  log=$(mktemp "${TMPDIR:-/tmp}/fm-spawn-setup.XXXXXX" 2>/dev/null) || {
+    echo "error: could not create a log file for spawn-setup hook '$hook'; refusing to launch a worker whose provisioning could not be recorded" >&2
+    return 1
+  }
+  # stdin is detached and the bound is hard (bin/fm-timeout-lib.sh kills the
+  # whole process group), so a hook that prompts or wedges cannot hold the spawn
+  # open while it still owns the shared Treehouse project lock.
+  (
+    cd "$worktree" || exit 1
+    export FM_TASK_ID="$ID" FM_TASK_KIND="$KIND" FM_PROJECT="$PROJ_ABS" FM_WORKTREE="$worktree"
+    fm_run_timed "$bound" "$hook"
+  ) >"$log" 2>&1 </dev/null || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if [ "$rc" -eq 124 ]; then
+      echo "error: spawn-setup hook '$hook' did not finish within ${bound}s in '$worktree'; refusing to launch a worker into a half-provisioned worktree" >&2
+    else
+      echo "error: spawn-setup hook '$hook' failed (exit $rc) in '$worktree'; refusing to launch a worker into an unprovisioned worktree" >&2
+    fi
+    spawn_setup_hook_log_tail "$log"
+    return 1
+  fi
+  rm -f "$log" 2>/dev/null || true
+  status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
+    echo "error: could not inspect '$worktree' after spawn-setup hook '$hook' ran; refusing to launch" >&2
+    return 1
+  }
+  if [ -n "$status" ]; then
+    echo "error: spawn-setup hook '$hook' left files git does not ignore in '$worktree'; a hook may write only ignored paths, because anything else is later read as the worker's own unlanded work; refusing to launch" >&2
+    echo "--- first 10 entries of git status in $worktree ---" >&2
+    printf '%s\n' "$status" | head -10 >&2
+    return 1
+  fi
+}
+
+# The tail is the actionable part of a failed hook: the error the project's own
+# setup script printed. The complete log is kept and named, so a truncated
+# excerpt is never the only copy of what went wrong.
+spawn_setup_hook_log_tail() { # <log>
+  local log=$1
+  if [ -s "$log" ]; then
+    echo "--- last 10 lines of $log ---" >&2
+    tail -n 10 "$log" >&2 || true
+    echo "--- end of excerpt; complete output kept at $log ---" >&2
+  else
+    echo "the hook produced no output; its empty log is kept at $log" >&2
+  fi
+}
+
 herdr_projection_meta_field_exact() { # <meta> <key>
   local meta=$1 key=$2 count
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -3736,6 +3855,14 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
+  # Orca provisions its own worktrees from its own repository hook at creation
+  # time, so it is the one backend that arrives here already set up; running a
+  # second hook over it would only duplicate that work. A relaunch and a
+  # secondmate are excluded by the condition above for the same reason they skip
+  # the refresh: neither acquires a worktree here.
+  if [ "$BACKEND" != orca ]; then
+    run_spawn_setup_hook "$WT" || exit 1
+  fi
 fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,

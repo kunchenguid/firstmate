@@ -422,6 +422,39 @@ This applies only to agents Firstmate launches; the captain's own primary Firstm
 
 Every claude launch's inline `--settings` JSON also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, so a spawned worker never writes a Co-Authored-By trailer, Claude-Session link, or generated-with line into a commit or PR body regardless of which settings scopes end up loaded.
 
+## Spawn setup hooks (config/spawn-setup/)
+
+A pooled worktree is handed to a worker as a bare checkout: no installed dependencies, no local environment file, no allocated ports.
+For a project that needs any of that before work can start, put an executable at `config/spawn-setup/<project-directory-basename>` and Firstmate runs it as part of every ship and scout spawn into that project, so the worker's window is already provisioned instead of relying on the worker remembering a setup command.
+The optional `config/spawn-setup/` directory is local and gitignored, and it is **not** inherited into secondmate homes: provisioning steps are machine-local, and each home decides for itself whether its pool runs them.
+An absent hook is a silent no-op, which is every project that has not opted in.
+
+The hook name must match the basename of the project directory Firstmate spawns from, so a clone at `projects/her-web` is provisioned by `config/spawn-setup/her-web`.
+Firstmate runs it synchronously, with the current directory set to the task worktree and standard input detached, and waits for it before launching the worker.
+The hook receives `FM_TASK_ID`, `FM_TASK_KIND` (`ship` or `scout`), `FM_PROJECT` (the absolute path of the project clone this home spawns from), and `FM_WORKTREE`.
+Keep the hook itself a one-line forward to the project's own setup script rather than reimplementing that script's steps, so the two cannot drift apart.
+For example, a her-web clone provisioned by the shared Her development pipeline uses:
+
+```sh
+#!/usr/bin/env bash
+# Provision a freshly allocated her-web worktree: dependencies, local env file,
+# ports. Light tier only - no database container, which `pnpm dev` provisions on
+# demand - so a spawn never depends on Docker being up.
+set -euo pipefail
+export HER_WEB_MAIN_REPO="$FM_PROJECT"
+exec bash /Users/suyuan/Documents/her-source/her-dev-pipeline/scripts/worktree-setup.sh "$PWD" her-web
+```
+
+`HER_WEB_MAIN_REPO` points that script at the clone Firstmate itself spawns from rather than its built-in default, so the files it copies into the worktree are the ones this home's own checkout carries.
+
+The spawn refuses, before any window, worktree record, or task state exists, when the hook exits nonzero, exceeds its time bound, is present but not an executable regular file, or leaves behind files Git does not ignore.
+That last rule is the important one: a hook may write only paths the worktree already ignores, because Firstmate reads any other untracked file as the worker's own unlanded work and would later refuse to clean up the slot.
+A refusal names the hook's kept log, and the same refusal class means nothing is left behind to reconcile.
+Hooks are skipped for relaunches, for secondmates, and on the Orca backend, which provisions its worktrees from its own repository hook at creation time.
+`FM_SPAWN_SETUP=off` skips a configured hook for one spawn with a notice, for the case where the environment is known good and the seconds are not wanted; any other value refuses rather than guessing.
+`FM_SPAWN_SETUP_TIMEOUT` bounds the hook in seconds and defaults to 600; invalid or zero values use 600.
+[`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the exact mechanics, with regression coverage in [`tests/fm-spawn-setup-hook.test.sh`](../tests/fm-spawn-setup-hook.test.sh).
+
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
@@ -1036,6 +1069,8 @@ FM_CONFIG_OVERRIDE=      # alternate config dir, mainly for tests
 FM_PROC_ROOT_OVERRIDE=   # alternate /proc root for Linux process-identity reads in fm-wake-lib.sh and fm-teardown.sh, mainly for tests
 FM_BACKEND=             # optional runtime backend override for new spawns; tmux/herdr/zellij/orca/cmux support ship/scout spawns, codex-app is not accepted
 FM_TRACE_CONTEXT=       # optional trace-context override; see "Trace context propagation"
+FM_SPAWN_SETUP=         # optional per-spawn skip of a configured spawn setup hook; only "off" is accepted, any other value refuses
+FM_SPAWN_SETUP_TIMEOUT=600  # seconds bounding one spawn setup hook; invalid or zero values use 600
 FM_TASK_ID=             # internal task-worker marker fm-spawn.sh exports into ship and scout panes, never set by hand; bin/fm-test-run.sh refuses to execute in the repository primary checkout while it is set
 HERDR_SESSION=default  # herdr-only: named session for normal backend ops; not enough for destructive cleanup (docs/herdr-backend.md)
 FM_BACKEND_HERDR_SUBMIT_POLLS=6  # herdr-only: agent-state samples spread across each Enter attempt's budget when confirming a submit (docs/herdr-backend.md "Current transport behavior")
