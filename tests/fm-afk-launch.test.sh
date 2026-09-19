@@ -27,6 +27,9 @@ CONTRACT="$ROOT/bin/fm-afk-contract.sh"
 # every unit below; the Pi refusal has its own units (unit_pi_never_launches_the_daemon).
 unset PI_CODING_AGENT FM_PI_HARNESS CURSOR_AGENT CURSOR_INVOKED_AS GEMINI_CLI ATLASSIAN_AGENT_TYPE ROVODEV_CLI
 export CLAUDECODE=1
+# Away entry verifies the wedge alarm can reach the captain (docs/wedge-alarm.md);
+# units that are not about that check opt out so no test posts a real alert.
+export FM_WEDGE_ALARM_CHANNEL=off
 
 FAILED=0
 fail() { printf 'not ok - %s\n' "$1" >&2; FAILED=1; }
@@ -114,6 +117,33 @@ unit_pi_never_launches_the_daemon() {
     fi
     rm -rf "$st"
   done
+}
+
+# Away entry sends one real test alert through the configured out-of-band channel
+# and refuses to enter when none delivers, so a broken channel fails at entry
+# instead of at the hour the wedge alarm is needed.
+unit_entry_verifies_wedge_alarm_delivery() {
+  local st out rc sent
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-entry-alarm.XXXXXX")
+  mkdir -p "$st/state"
+  confirm_posture "$st" || fail "wedge alarm entry: could not record the away posture"
+  sent="$st/sent"
+  out=$(FM_WEDGE_ALARM_CHANNEL='command:false' FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ ! -e "$st/state/.afk" ] && printf '%s' "$out" | grep -F 'not delivered' >/dev/null; then
+    pass "wedge alarm entry: a channel that cannot deliver refuses away entry and leaves no posture flag"
+  else
+    fail "wedge alarm entry: broken channel did not refuse entry (rc=$rc): $out"
+  fi
+  out=$(FM_WEDGE_ALARM_CHANNEL="command:printf '%s' \"\$1\" > $sent" FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ -e "$st/state/.afk" ] && grep -Fq 'alarm check' "$sent" 2>/dev/null; then
+    pass "wedge alarm entry: a working channel receives one test alert and entry proceeds"
+  else
+    fail "wedge alarm entry: working channel did not receive the test alert or entry failed (rc=$rc): $out"
+  fi
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
+  rm -rf "$st"
 }
 
 unit_daemon_entry_requires_confirmation() {
@@ -1200,6 +1230,7 @@ unit_mode_garbage_and_legacy_content_reads_away
 unit_stop_ordering
 unit_stop_rejects_reused_pid
 unit_failed_start_rolls_back_state
+unit_entry_verifies_wedge_alarm_delivery
 unit_concurrent_start_serialized
 unit_lock_initialization_grace
 unit_signal_exits_with_lock_cleanup
