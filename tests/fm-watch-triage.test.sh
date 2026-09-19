@@ -449,7 +449,25 @@ test_status_is_paused_classifier() {
   status_is_captain_held 'working: the captain-held backlog item is next' \
     && fail "a working line mentioning captain-held false-matched"
   status_is_captain_held '' && fail "empty line classified as captain-held"
-  pass "status_is_paused: only the leading paused verb matches, paused is not captain-relevant, and the two declared-wait verbs stay separable"
+  # An open needs-decision is the same kind of deliberate idle-for-a-while wait
+  # as paused/captain-held (issue: the watcher wedge-escalated a pane parked on
+  # an answered-later decision every STALE_ESCALATE_SECS), so it takes the same
+  # bounded cadence, with or without a stated decision key.
+  status_is_paused_or_captain_held 'needs-decision: pick option A or B' \
+    || fail "bare needs-decision not recognized by the bounded-idle classifier"
+  status_is_paused_or_captain_held 'needs-decision [key=api-shape]: pick option A or B' \
+    || fail "keyed needs-decision not recognized by the bounded-idle classifier"
+  # blocked is a different kind of stop: AGENTS.md section 8 says it can mean
+  # firstmate action is needed, so it must keep the faster wedge-escalation
+  # cadence rather than folding into this predicate.
+  status_is_paused_or_captain_held 'blocked: the no-mistakes daemon errored' \
+    && fail "blocked was absorbed into the bounded-idle classifier"
+  # Once the decision is answered, the resolved line becomes the new last event
+  # and the pane must promptly fall out of the paused treatment so a genuinely
+  # resumed-but-hung worker still wedge-escalates.
+  status_is_paused_or_captain_held 'resolved [key=api-shape]: picked option A' \
+    && fail "an answered needs-decision remained classed as a declared wait"
+  pass "status_is_paused: only the leading paused verb matches, paused is not captain-relevant, and the three declared-wait verbs (paused, captain-held, needs-decision) stay separable from blocked and from their own resolutions"
 }
 
 # crew_absorb_class: the single fm-crew-state.sh read that returns BOTH absorb
@@ -3988,6 +4006,105 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated() {
   pass "a busy pane under a declared pause is rechecked on the long cadence, and lifting the pause restores the wedge escalation"
 }
 
+# --- open needs-decision + busy pane: the busy-turn bound must honor it too
+# Regression for the observed false-alarm loop: a crewmate that posted
+# needs-decision and stopped, waiting on the captain, was wedge-escalated every
+# STALE_ESCALATE_SECS ("possible wedge") because the busy-turn bound only
+# recognized paused/captain-held as a declared wait. Mirrors
+# test_busy_declared_pause_is_rechecked_not_wedge_escalated: (A) the open
+# decision is absorbed instead of wedged, (B) it is still rechecked on the long
+# PAUSE_RESURFACE_SECS cadence with the needs-decision-specific wording, and (C)
+# answering it with a `resolved [key=...]:` line on the SAME busy, over-age pane
+# restores the wedge escalation, proving the discriminator is the open decision
+# itself and not a blanket silencing of the escalator.
+test_busy_needs_decision_is_rechecked_not_wedge_escalated() {
+  local dir state fakebin out capture_file window key sig pid statusf back
+  dir=$(make_case busy-needs-decision); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-review-scout"
+  statusf="$state/review-scout.status"
+  printf 'Working... (7200.4s) lavish-axi poll' > "$capture_file"
+  printf 'window=%s\nkind=scout\nharness=pi\n' "$window" > "$state/review-scout.meta"
+  record_pi_busy "$state" review-scout
+  printf 'needs-decision [key=route]: pick option A or B\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-review-scout_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  touch -t 200001010000 "$state/review-scout.meta"
+
+  # Phase A: past the bound, with the wedge threshold set as low as it goes, the
+  # open decision is absorbed on the long cadence and never starts a wedge.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy (pi-ext)' \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "an open needs-decision on a busy review pane was escalated: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -s "$out" ] || fail "an open needs-decision on a busy review pane printed a wake reason: $(cat "$out")"
+  [ -e "$state/.paused-$key" ] || fail "the busy-turn bound did not apply the declared-wait cadence to needs-decision"
+  [ ! -e "$state/.stale-since-$key" ] || fail "an open needs-decision on a busy pane started the wedge timer"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "an open needs-decision on a busy pane incremented the escalation counter"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional needs-decision phase-A stop"
+
+  # Phase B: age the pause past the (now normal) long cadence and let the pane
+  # settle on one stable hash. It re-surfaces once as a recheck naming the
+  # captain, never as a wedge.
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-review-scout_status"
+  printf '%s' "$(hash_text "$(cat "$capture_file")")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy (pi-ext)' \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "an open needs-decision past the long cadence was never rechecked"; }
+  grep -F "needs-decision" "$out" >/dev/null || fail "the recheck was not labeled a needs-decision recheck: $(cat "$out")"
+  grep -F "awaiting the captain" "$out" >/dev/null || fail "the recheck did not name the captain: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "an open needs-decision on a busy pane was mislabeled a possible wedge: $(cat "$out")"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the needs-decision re-surface throttle was cleared by the busy-turn bound"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a needs-decision recheck used the wedge timer"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the needs-decision recheck"
+
+  # Phase C: the decision is answered on the SAME busy, over-age pane. A still-
+  # absorbed pane here would mean an actually-resumed-but-hung worker's wedge
+  # detection was weakened. It must wedge-escalate exactly as before.
+  printf 'resolved [key=route]: captain picked option A\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-review-scout_status"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy (pi-ext)' \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "an answered needs-decision escalated before the wedge threshold: $(cat "$out")"; }
+  reap "$pid"
+  [ -s "$state/.stale-since-$key" ] || fail "an answered needs-decision did not restore the busy-turn wedge timer"
+  [ ! -e "$state/.paused-$key" ] || fail "an answered needs-decision left stale declared-wait bookkeeping behind"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional answered-decision priming stop"
+
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_FAKE_CREW_STATE='state: working · source: pane · harness busy (pi-ext)' \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "an answered needs-decision on an over-age busy pane no longer wedge-escalates"; }
+  grep -F "possible wedge" "$out" >/dev/null || fail "the restored busy-turn escalation did not flag a possible wedge: $(cat "$out")"
+  pass "a busy pane under an open needs-decision is rechecked on the long cadence, and answering it restores the wedge escalation"
+}
+
 # --- declared pause + busy pane + AWAY MODE: the bound must hand off, not decorate
 # Away mode is daemon-owned: the watcher reverts to one-shot and lets the daemon
 # classify. The busy-turn bound used to be the one stale path that ignored that,
@@ -5503,6 +5620,7 @@ test_busy_pane_native_progress_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_busy_declared_pause_is_rechecked_not_wedge_escalated
+test_busy_needs_decision_is_rechecked_not_wedge_escalated
 test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced

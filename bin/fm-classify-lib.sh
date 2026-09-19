@@ -246,16 +246,24 @@ status_is_captain_held() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
 }
 
-# 0 if a status line declares either an external-wait pause or a verified
-# captain-held transfer.
-# Both declarations can intentionally leave a crew's endpoint idle, so both
-# supervisors give them one cadence: the away-mode daemon defers the wedge and
-# ages a pause marker instead, and the watcher applies its bounded pause cadence
-# once pause_state_class has admitted the wait (fm-watch.sh owns which liveness
-# evidence each kind of crew must supply for that).
+# 0 if a status line declares an external-wait pause, a verified captain-held
+# transfer, or an open needs-decision.
+# All three declarations can intentionally leave a crew's endpoint idle while it
+# waits on a human, so every supervisor gives them one cadence: the away-mode
+# daemon defers the wedge and ages a pause marker instead, and the watcher
+# applies its bounded pause cadence once pause_state_class has admitted the wait
+# (fm-watch.sh owns which liveness evidence each kind of crew must supply for
+# that). needs-decision is read off the same last-event line as the other two,
+# so a later `resolved [key=...]:` event (bin/fm-brief.sh rule 6) replaces it as
+# the last line and this predicate stops matching on its next read - no separate
+# closing logic is needed here. blocked deliberately stays out of this predicate:
+# per AGENTS.md section 8 it can mean firstmate action is needed, not a
+# deliberate wait, so it keeps the faster wedge-escalation cadence.
 status_is_paused_or_captain_held() {  # <status-line>
   local line=$1
-  status_is_paused "$line" || status_is_captain_held "$line"
+  status_is_paused "$line" && return 0
+  status_is_captain_held "$line" && return 0
+  [ "$(status_line_verb "$line")" = needs-decision ]
 }
 
 # A condition-aware declared wait: a `paused:` line may say WHEN it expects to
