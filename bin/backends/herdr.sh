@@ -15,9 +15,12 @@
 # herdr-verification-p2.md "Task container shape", refined by
 # docs/herdr-backend.md "Default task container shape"): ONE herdr workspace PER
 # FIRSTMATE HOME (the primary, and each secondmate, gets its own), ONE herdr TAB
-# per task inside its home's workspace. The default-on presentation projection
-# creates a disposable workspace for a clean fresh task instead unless the home
-# opts out. That
+# per task inside its home's durable stable-binding workspace
+# (docs/herdr-backend.md "Stable home spaces and ordinary worker tabs"). The
+# legacy presentation projection below, which created a disposable workspace
+# for a clean fresh task instead, no longer runs for any new spawn; its code
+# path stays only for cleanup/recovery of already-projected tasks
+# (docs/herdr-backend.md "Legacy presentation spaces"). That legacy
 # workspace is a non-authoritative visual projection containing only the normal
 # task pane. Its random token and mutable label never authorize lookup,
 # adoption, reuse, closure, deletion, task ownership, or endpoint selection.
@@ -328,13 +331,14 @@ fm_backend_herdr_presentation_default_supported() {  # <state-dir> [<session>]
 }
 
 # fm_backend_herdr_presentation_enabled <config-dir> [<state-dir>]: the one gate
-# bin/fm-spawn.sh consults before projecting this home's children into
-# disposable one-task workspaces (docs/herdr-backend.md "Presentation spaces"
-# owns the full contract). An explicit "off" or "on" is obeyed as written; a
-# home that configured nothing is projected only at or above the version floor,
-# and otherwise falls back to the flat layout with one warning. Sets
-# FM_BACKEND_HERDR_PRESENTATION_PREFERENCE for the new-projection boundary to
-# distinguish an unconfigured default from an explicit opt-in.
+# the disabled legacy projection path in bin/fm-spawn.sh consults before
+# projecting this home's children into disposable one-task workspaces
+# (docs/herdr-backend.md "Legacy presentation spaces" owns the full contract);
+# no new spawn reaches that path. An explicit "off" or "on" is obeyed as
+# written; a home that configured nothing is projected only at or above the
+# version floor, and otherwise falls back to the flat layout with one warning.
+# Sets FM_BACKEND_HERDR_PRESENTATION_PREFERENCE for the new-projection
+# boundary to distinguish an unconfigured default from an explicit opt-in.
 fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>]
   local config_dir=${1:-} state_dir=${2:-} preference
   preference=$(fm_backend_herdr_presentation_preference "$config_dir")
