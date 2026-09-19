@@ -15,8 +15,8 @@
 # Removing state/<id>.meta and landing the backlog transition are one step, not
 # two: bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run
 # under the task's own meta lock before this script reports success. Because the
-# completion links (the PR, the report path, a local-main note) live only in the
-# record being removed, the intended transition is recorded in
+# completion evidence can disappear with the task record or worktree, the
+# intended transition is recorded in
 # state/<id>.backlog-close first, so a process killed between the halves leaves
 # the next session start enough to finish it; a landed close removes that record.
 # A close that fails is fatal and loud, preserves its pending-close record, and
@@ -25,6 +25,18 @@
 # data/backlog.md; those cases print the manual follow-up. A configured
 # non-markdown adapter remains active without a markdown file; any active
 # automatic backend without compatible tasks-axi refuses before cleanup.
+# For automatic PR-based ship completion, Bitbucket-style HTTPS URLs ending in
+# /pull-requests/<positive-number> use --note "PR=<url>;landed-commit=<commit>"
+# because tasks-axi's --pr accepts GitHub pull-request URLs only; GitHub keeps
+# its existing --pr path. The Bitbucket commit comes first from a validated
+# pending-close note matching this spawn incarnation and exact PR URL, then
+# from the task's merge_commit, landed_commit, or pr_head metadata, in that
+# order, accepting only nonempty hexadecimal values. The last fallback is HEAD
+# from an existing worktree that teardown owns, never a reassigned slot.
+# Without that evidence teardown refuses before destructive cleanup, even with
+# --force; restore the task's landing record before retrying. Captured evidence
+# permits a retry after the worktree disappears. This records completion, not
+# a new forge merge check; tests/fm-backlog-atomicity.test.sh pins the contract.
 # None of this loosens the landed-work gates below: the transition runs only on
 # the paths that already proceed to remove the record.
 # The close - and only the close - is replaced by `tasks-axi reopen` with the
@@ -97,7 +109,8 @@
 # owns the claim, its location, and its states. A claim naming another task is
 # proof of reassignment: the slot is no longer this task's, so teardown warns,
 # names the claimant, and then finishes only this task's own cleanup - endpoint,
-# status, records, checks, backlog - while every step that would read or touch
+# status, records, checks, backlog - subject to the completion-evidence gate
+# above, while every step that would read or touch
 # that slot is skipped: no process kill under it, no dirty or landed-work
 # inspection of it, no branch or hook removal in it, no Treehouse return, and
 # never the other task's claim. Skipping the inspection discards nothing of this
@@ -1448,12 +1461,42 @@ work_is_landed() {
   content_in_default
 }
 
-# The completion links this teardown already holds locally. A scout's
-# deliverable is its report, a local-only ship lands on local main, and every
-# other ship carries the PR recorded on its own record.
+# Completion evidence selection and the Bitbucket compatibility boundary are
+# owned by this script's header.
 BACKLOG_DONE_ARGS=()
+backlog_landed_commit() {
+  local candidate marker note
+  marker=$(fm_backlog_close_marker_path "$STATE" "$ID") || return 1
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    fm_backlog_close_marker_validate "$marker" "$DATA" "$ID" "$STATE" || return 1
+    if [ "$FM_BACKLOG_CLOSE_VALIDATED_SPAWN_GEN" = "$TEARDOWN_META_SPAWN_GEN" ] \
+       && [ "${FM_BACKLOG_CLOSE_VALIDATED_ARGS[0]-}" = --note ]; then
+      note=${FM_BACKLOG_CLOSE_VALIDATED_ARGS[1]-}
+      case "$note" in
+        "PR=$PR_URL;landed-commit="*)
+          candidate=${note#"PR=$PR_URL;landed-commit="}
+          case "$candidate" in
+            ''|*[!0-9a-fA-F]*) ;;
+            *) printf '%s\n' "$candidate"; return 0 ;;
+          esac
+          ;;
+      esac
+    fi
+  fi
+  for candidate in \
+    "$(grep '^merge_commit=' "$META" | tail -1 | cut -d= -f2- || true)" \
+    "$(grep '^landed_commit=' "$META" | tail -1 | cut -d= -f2- || true)" \
+    "$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)"; do
+    case "$candidate" in
+      ''|*[!0-9a-fA-F]*) ;;
+      *) printf '%s\n' "$candidate"; return 0 ;;
+    esac
+  done
+  teardown_owns_worktree && [ -n "$WT" ] && [ -d "$WT" ] \
+    && git -C "$WT" rev-parse --verify "HEAD^{commit}" 2>/dev/null
+}
 backlog_done_args() {
-  local data_relative
+  local data_relative commit
   BACKLOG_DONE_ARGS=()
   case "$KIND" in
     scout)
@@ -1464,7 +1507,15 @@ backlog_done_args() {
       if [ "$MODE" = local-only ]; then
         BACKLOG_DONE_ARGS=(--note "local main")
       elif [ -n "$PR_URL" ]; then
-        BACKLOG_DONE_ARGS=(--pr "$PR_URL")
+        if fm_backlog_bitbucket_pr_url "$PR_URL"; then
+          if ! commit=$(backlog_landed_commit) || [ -z "$commit" ]; then
+            echo "error: Bitbucket task $ID lacks valid incarnation-matching landed-commit evidence; restore its landing record before teardown" >&2
+            return 1
+          fi
+          BACKLOG_DONE_ARGS=(--note "PR=$PR_URL;landed-commit=$commit")
+        else
+          BACKLOG_DONE_ARGS=(--pr "$PR_URL")
+        fi
       fi
       ;;
   esac
