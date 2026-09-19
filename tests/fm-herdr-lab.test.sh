@@ -498,6 +498,292 @@ test_viewer_launcher_refuses_unsafe_arguments() {
   pass "fm-herdr-lab: the viewer launcher refuses unsafe sessions and pidfiles"
 }
 
+# launchd itself is exercised only by a real lab run. These pin what the
+# launchagent commands will ever load, signal, or boot out, against a fake
+# launchctl whose bootstrap starts the named lab session.
+LAUNCHCTL_LOG="$TMP_ROOT/launchctl.log"
+
+install_launchagent_fakes() { # [uname-output]
+  cat > "$FAKEBIN/uname" <<SH
+#!/usr/bin/env bash
+printf '%s\n' '${1:-Darwin}'
+SH
+  cat > "$FAKEBIN/plutil" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = -lint ] && grep -q '<plist version="1.0">' "${2:-/dev/null}"
+SH
+  cat > "$FAKEBIN/launchctl" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "$FM_FAKE_LAUNCHCTL_LOG"
+state=$FM_FAKE_HERDR_STATE
+target=${2:-}
+label=${target##*/}
+case "${1:-}" in
+  bootstrap)
+    label=$(sed -n 's:^[[:space:]]*<string>\(dev\.firstmate\.herdr-lab\.[^<]*\)</string>$:\1:p' "${3:-/dev/null}" | head -n 1)
+    [ -n "$label" ] || exit 5
+    : > "$state/launchctl-gui-$label"
+    printf '%s\n' running > "$state/${label#dev.firstmate.herdr-lab.}"
+    ;;
+  print)
+    [ -f "$state/launchctl-${target%%/*}-$label" ] || exit 113
+    printf 'state = running\npid = %s\n' "${FM_FAKE_LAUNCHCTL_PID:-4242}"
+    ;;
+  bootout)
+    session=${label#dev.firstmate.herdr-lab.}
+    lab=absent
+    [ ! -f "$state/$session" ] || lab=$(cat "$state/$session")
+    printf 'bootout found the session %s\n' "$lab" >> "$FM_FAKE_LAUNCHCTL_LOG"
+    [ "${FM_FAKE_LAUNCHCTL_BOOTOUT_STUCK:-}" != 1 ] || exit 0
+    rm -f "$state/launchctl-gui-$label"
+    [ "$lab" != running ] || printf '%s\n' stopped > "$state/$session"
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$FAKEBIN/uname" "$FAKEBIN/plutil" "$FAKEBIN/launchctl"
+  : > "$LAUNCHCTL_LOG"
+  : > "$FAKE_LOG"
+}
+
+remove_launchagent_fakes() {
+  rm -f "$FAKEBIN/uname" "$FAKEBIN/plutil" "$FAKEBIN/launchctl"
+}
+
+run_launchagent_fake() {
+  FM_FAKE_LAUNCHCTL_LOG="$LAUNCHCTL_LOG" run_with_fake "$@"
+}
+
+test_launchagent_provision_renders_and_tears_down() {
+  local name="fm-lab-agent-$$" uid label plist out root line shell
+  install_launchagent_fakes
+  uid=$(id -u)
+  label="dev.firstmate.herdr-lab.$name"
+  plist="$TRIPWIRES/$name.launchagent.plist"
+  root=$(cd "$ROOT" && pwd -P)
+  out=$(run_launchagent_fake fm_herdr_lab_launchagent_provision "$name" "$ROOT" 2>&1) \
+    || fail "launch agent provision failed: $out"
+  assert_contains "$out" "launch agent $label runs lab session $name" \
+    "provision did not report the running lab launch agent"
+  assert_present "$plist" "provision did not keep its plist in the lab state directory"
+  assert_present "$TRIPWIRES/$name.fleet-state.json" "launch agent provision skipped the fleet-state tripwire"
+  assert_grep "bootstrap gui/$uid $plist" "$LAUNCHCTL_LOG" "provision did not bootstrap its own plist into gui/<uid>"
+  [ "$(cat "$FAKE_STATE/$name")" = running ] || fail "provision returned before the lab session ran"
+  if command -v python3 >/dev/null 2>&1; then
+    out=$(python3 - "$plist" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    job = plistlib.load(handle)
+arguments = job["ProgramArguments"]
+print("label=" + job["Label"])
+print("flags=" + " ".join(arguments[1:3]))
+print("program=" + arguments[3])
+print("session=%s run_at_load=%s keep_alive=%s throttle=%s" % (
+    job["LimitLoadToSessionType"], job["RunAtLoad"], job["KeepAlive"], job["ThrottleInterval"]))
+print("log=" + job["StandardOutPath"])
+PY
+    ) || fail "the rendered launch agent is not a readable plist"
+    assert_contains "$out" "label=$label" "the plist does not carry the lab label"
+    assert_contains "$out" "flags=-l -c" "the plist does not run the guard through a login shell"
+    assert_contains "$out" "program=exec '$root/bin/fm-remote-herdr-guard.sh' '$FAKEBIN/herdr' '$name'" \
+      "the plist does not exec the code root's guard for the lab session"
+    assert_contains "$out" "session=Aqua run_at_load=True keep_alive={'SuccessfulExit': False} throttle=10" \
+      "the plist does not carry the fm-remote launch agent contract"
+    assert_contains "$out" "log=$TRIPWIRES/$name.launchagent.log" "the plist does not log into the lab state directory"
+    # The lab agent must be the fm-remote agent bin/fm-remote-doctor.sh
+    # installs, differing only in label, command, and log: compare the
+    # provisioned plist against that production shape as parsed plists.
+    shell=${SHELL:-}
+    [ -n "$shell" ] && [ -x "$shell" ] || shell=/bin/sh
+    fm_remote_herdr_render_launch_agent dev.firstmate.herdr.fm-remote "$shell" \
+      "exec '$root/bin/fm-remote-herdr-guard.sh' '$FAKEBIN/herdr' 'fm-remote'" \
+      "$TMP_ROOT/Library/Logs/dev.firstmate.herdr.fm-remote.log" > "$TMP_ROOT/$name.production.plist"
+    out=$(python3 - "$plist" "$TMP_ROOT/$name.production.plist" <<'PY'
+import plistlib
+import sys
+
+lab, production = (plistlib.load(open(path, "rb")) for path in sys.argv[1:3])
+lab_args, production_args = lab.pop("ProgramArguments"), production.pop("ProgramArguments")
+parameters = ("Label", "StandardOutPath", "StandardErrorPath")
+same_parameters = [key for key in parameters if lab.pop(key) == production.pop(key)]
+drift = sorted(key for key in set(lab) | set(production) if lab.get(key) != production.get(key))
+print("drift=" + (",".join(drift) or "none"))
+print("same_parameters=" + (",".join(same_parameters) or "none"))
+print("same_shell_and_flags=%s" % (lab_args[:3] == production_args[:3]))
+print("same_command=%s" % (lab_args[3] == production_args[3]))
+PY
+    ) || fail "the lab and production launch agents could not be compared as plists"
+    assert_contains "$out" "drift=none" "the lab launch agent differs from the fm-remote contract beyond label, command, and log: $out"
+    assert_contains "$out" "same_parameters=none" "the lab launch agent shares a label or log path with the fm-remote agent: $out"
+    assert_contains "$out" "same_shell_and_flags=True" "the lab launch agent does not run its command through the same login-shell flags: $out"
+    assert_contains "$out" "same_command=False" "the lab launch agent runs the fm-remote session's command: $out"
+  fi
+  if [ -x /usr/bin/plutil ]; then
+    /usr/bin/plutil -lint "$plist" >/dev/null || fail "the rendered launch agent does not pass plutil -lint"
+  fi
+
+  run_launchagent_fake fm_herdr_lab_teardown "$name" || fail "teardown of a launch agent lab failed"
+  assert_grep "bootout gui/$uid/$label" "$LAUNCHCTL_LOG" "teardown did not boot out the lab launch agent"
+  assert_grep "bootout found the session running" "$LAUNCHCTL_LOG" \
+    "teardown stopped the session before booting out the launch agent that restarts it"
+  [ "$(cat "$FAKE_STATE/$name")" = deleted ] || fail "teardown did not delete the launch agent lab session"
+  assert_absent "$plist" "teardown left the lab plist behind"
+  assert_absent "$TRIPWIRES/$name.launchagent" "teardown left the launch agent record behind"
+  assert_absent "$TRIPWIRES/$name.launch-agents" "teardown left the launch-agent tripwire behind"
+  assert_absent "$TRIPWIRES/$name.fleet-state.json" "teardown left the fleet-state tripwire behind"
+  while IFS= read -r line; do
+    case "$line" in
+      "bootout found the session "*) ;;
+      "print gui/$uid/dev.firstmate.herdr"|"print user/$uid/dev.firstmate.herdr") ;;
+      "print gui/$uid/dev.firstmate.herdr.fm-remote"|"print user/$uid/dev.firstmate.herdr.fm-remote") ;;
+      "bootstrap gui/$uid $plist"|*" gui/$uid/$label"|*" user/$uid/$label") ;;
+      *) fail "a launchctl call reached beyond the lab label: $line" ;;
+    esac
+  done < "$LAUNCHCTL_LOG"
+  while IFS= read -r line; do
+    case "$line" in
+      *"--session $name") ;;
+      *) fail "Herdr call lacks a trailing lab session: $line" ;;
+    esac
+  done < "$FAKE_LOG"
+  remove_launchagent_fakes
+  pass "fm-herdr-lab: a launch agent lab renders the fm-remote contract under its own label and boots out first on teardown"
+}
+
+test_launchagent_refuses_unowned_or_unready_targets() {
+  local name="fm-lab-agent-refuse-$$" status=0 out action
+  install_launchagent_fakes
+  : > "$FAKE_STATE/launchctl-user-dev.firstmate.herdr-lab.$name"
+  out=$(run_launchagent_fake fm_herdr_lab_launchagent_provision "$name" "$ROOT" 2>&1) || status=$?
+  expect_code 1 "$status" "provision must refuse a lab label already loaded in another domain"
+  assert_contains "$out" "already loaded in user/" "the refusal did not name the loaded domain"
+  rm -f "$FAKE_STATE/launchctl-user-dev.firstmate.herdr-lab.$name"
+
+  status=0
+  out=$(run_launchagent_fake fm_herdr_lab_launchagent_provision "$name" "$TMP_ROOT" 2>&1) || status=$?
+  expect_code 1 "$status" "provision must refuse a code root without the guard"
+  assert_contains "$out" "fm-remote-herdr-guard.sh" "the refusal did not name the missing guard"
+
+  status=0
+  run_launchagent_fake fm_herdr_lab_launchagent_provision default "$ROOT" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "provision must refuse the default session"
+
+  for action in restart print; do
+    status=0
+    run_launchagent_fake fm_herdr_lab_launchagent "$action" "$name" >/dev/null 2>&1 || status=$?
+    expect_code 1 "$status" "launchagent $action must refuse a session without a recorded lab launch agent"
+  done
+  status=0
+  run_launchagent_fake fm_herdr_lab_launchagent kill "$name" job KILL >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "launchagent kill must refuse a session without a recorded lab launch agent"
+  assert_absent "$TRIPWIRES/$name.fleet-state.json" "a refused provision recorded lab ownership"
+  assert_no_grep bootstrap "$LAUNCHCTL_LOG" "a refused command still bootstrapped a launch agent"
+  assert_no_grep kickstart "$LAUNCHCTL_LOG" "a refused command still restarted a launch agent"
+  assert_no_grep "kill " "$LAUNCHCTL_LOG" "a refused command still signalled a launch agent"
+
+  install_launchagent_fakes Linux
+  status=0
+  out=$(run_launchagent_fake fm_herdr_lab_launchagent_provision "$name" "$ROOT" 2>&1) || status=$?
+  expect_code 1 "$status" "provision must refuse a host without launchd"
+  assert_contains "$out" "needs macOS launchd" "the refusal did not name the missing launchd"
+  assert_no_grep "print " "$LAUNCHCTL_LOG" "a host without launchd still reached launchctl"
+  remove_launchagent_fakes
+  pass "fm-herdr-lab: launch agent commands refuse loaded labels, missing guards, unowned sessions, and hosts without launchd"
+}
+
+test_launchagent_signals_only_its_own_job() {
+  local name="fm-lab-agent-signal-$$" uid label status=0 job server stray i=0
+  install_launchagent_fakes
+  uid=$(id -u)
+  label="dev.firstmate.herdr-lab.$name"
+  run_launchagent_fake fm_herdr_lab_launchagent_provision "$name" "$ROOT" >/dev/null \
+    || fail "signal fixture provision failed"
+
+  run_launchagent_fake fm_herdr_lab_provision "$name" >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "plain provision must refuse a session a lab launch agent runs"
+
+  run_launchagent_fake fm_herdr_lab_launchagent restart "$name" || fail "launchagent restart failed"
+  assert_grep "kickstart -k gui/$uid/$label" "$LAUNCHCTL_LOG" "restart did not kickstart the lab label"
+  run_launchagent_fake fm_herdr_lab_launchagent kill "$name" job TERM || fail "launchagent kill job failed"
+  assert_grep "kill SIGTERM gui/$uid/$label" "$LAUNCHCTL_LOG" "kill job did not signal the lab label through launchd"
+  status=0
+  run_launchagent_fake fm_herdr_lab_launchagent kill "$name" job STOP >/dev/null 2>&1 || status=$?
+  expect_code 2 "$status" "an unsupported signal must be refused"
+  status=0
+  run_launchagent_fake fm_herdr_lab_launchagent kill "$name" viewer TERM >/dev/null 2>&1 || status=$?
+  expect_code 2 "$status" "an unsupported kill target must be refused"
+
+  # A herdr-named server for the session under a stand-in job process, and a
+  # stray one with the same argv outside it.
+  rm -f "$TMP_ROOT/agent-server.pid"
+  ( ( exec -a herdr bash -c 'while :; do sleep 0.2; done' server --session "$name" ) &
+    printf '%s\n' "$!" > "$TMP_ROOT/agent-server.pid"
+    wait ) 2>/dev/null &
+  job=$!
+  ( exec -a herdr bash -c 'while :; do sleep 0.2; done' server --session "$name" ) 2>/dev/null &
+  stray=$!
+  while [ ! -s "$TMP_ROOT/agent-server.pid" ] && [ "$i" -lt 100 ]; do
+    "$REAL_SLEEP" 0.05
+    i=$((i + 1))
+  done
+  server=$(cat "$TMP_ROOT/agent-server.pid")
+  "$REAL_SLEEP" 0.3
+  FM_FAKE_LAUNCHCTL_PID=$job run_launchagent_fake fm_herdr_lab_launchagent kill "$name" server TERM \
+    || fail "kill server did not signal the herdr server under the lab job"
+  wait "$job" 2>/dev/null || true
+  kill -0 "$server" 2>/dev/null && fail "kill server left the herdr server under the lab job running"
+  kill -0 "$stray" 2>/dev/null || fail "kill server signalled a herdr server outside the lab job"
+  status=0
+  FM_FAKE_LAUNCHCTL_PID=1 run_launchagent_fake fm_herdr_lab_launchagent kill "$name" server TERM \
+    >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "kill server must refuse when no herdr server runs under the lab job"
+  kill -0 "$stray" 2>/dev/null || fail "a refused kill server still signalled a herdr server outside the lab job"
+  kill "$stray" 2>/dev/null || true
+  wait "$stray" 2>/dev/null || true
+
+  run_launchagent_fake fm_herdr_lab_teardown "$name" || fail "signal fixture teardown failed"
+  remove_launchagent_fakes
+  pass "fm-herdr-lab: launch agent restart and kill reach only the lab job and the herdr server it runs"
+}
+
+test_launchagent_teardown_refuses_a_loaded_label() {
+  local name="fm-lab-agent-stuck-$$" status=0 out
+  install_launchagent_fakes
+  run_launchagent_fake fm_herdr_lab_launchagent_provision "$name" "$ROOT" >/dev/null \
+    || fail "stuck-bootout fixture provision failed"
+  out=$(FM_FAKE_HERDR_FAST_POLL=1 FM_FAKE_LAUNCHCTL_BOOTOUT_STUCK=1 \
+    run_launchagent_fake fm_herdr_lab_teardown "$name" 2>&1) || status=$?
+  expect_code 1 "$status" "teardown must refuse while the lab launch agent stays loaded"
+  assert_contains "$out" "still loaded after bootout" "the refusal did not name the loaded launch agent"
+  [ "$(cat "$FAKE_STATE/$name")" = running ] || fail "the refused teardown stopped or deleted the session anyway"
+  assert_present "$TRIPWIRES/$name.launchagent" "the refused teardown dropped the launch agent record it still needs"
+  run_launchagent_fake fm_herdr_lab_teardown "$name" || fail "teardown after the launch agent unloaded failed"
+  assert_absent "$TRIPWIRES/$name.launchagent" "the completed teardown left the launch agent record behind"
+  remove_launchagent_fakes
+  pass "fm-herdr-lab: teardown refuses to finish while its lab launch agent stays loaded"
+}
+
+test_launchagent_tripwire_protects_firstmate_launch_agents() {
+  local name="fm-lab-agent-tripwire-$$" status=0 out
+  install_launchagent_fakes
+  run_launchagent_fake fm_herdr_lab_launchagent_provision "$name" "$ROOT" >/dev/null \
+    || fail "launch-agent tripwire fixture provision failed"
+  : > "$FAKE_STATE/launchctl-gui-dev.firstmate.herdr.fm-remote"
+  out=$(run_launchagent_fake fm_herdr_lab_teardown "$name" 2>&1) || status=$?
+  expect_code 1 "$status" "a Firstmate launch agent that changed during lab work must fail teardown"
+  assert_contains "$out" "LAUNCH-AGENT TRIPWIRE FAILED" "the failure did not name the launch-agent tripwire"
+  assert_present "$TRIPWIRES/$name.launch-agents" "the failed launch-agent tripwire discarded its evidence"
+  rm -f "$FAKE_STATE/launchctl-gui-dev.firstmate.herdr.fm-remote"
+  run_launchagent_fake fm_herdr_lab_teardown "$name" || fail "teardown after the Firstmate launch agent was restored failed"
+  assert_absent "$TRIPWIRES/$name.launch-agents" "the completed teardown left the launch-agent tripwire behind"
+  assert_absent "$TRIPWIRES/$name.fleet-state.json" "the completed teardown left the fleet-state tripwire behind"
+  remove_launchagent_fakes
+  pass "fm-herdr-lab: a Firstmate launch agent that changes during lab work fails teardown"
+}
+
 test_refuses_unsafe_names
 test_provision_run_and_guarded_teardown
 test_missing_tripwire_blocks_destruction
@@ -515,3 +801,8 @@ test_interrupted_viewer_start_cancels_launcher
 test_teardown_refuses_while_viewer_attached
 test_viewer_stop_retains_record_when_detach_is_unreadable
 test_viewer_launcher_refuses_unsafe_arguments
+test_launchagent_provision_renders_and_tears_down
+test_launchagent_refuses_unowned_or_unready_targets
+test_launchagent_signals_only_its_own_job
+test_launchagent_teardown_refuses_a_loaded_label
+test_launchagent_tripwire_protects_firstmate_launch_agents

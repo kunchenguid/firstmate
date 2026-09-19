@@ -13,20 +13,31 @@
 # Aqua audit session and login-keychain access; the login shell only gives the
 # server the account's own environment.
 # `herdr server` stays in the foreground under launchd, as verified in
-# docs/verification/runtime-backends.md under "fm-remote server birth and login-keychain access", so the final exec provides the complete supervision lifecycle.
+# docs/verification/runtime-backends.md under "fm-remote server birth and login-keychain access".
+# The guard's final exec runs it through bin/fm-remote-herdr-supervisor.pl,
+# which stays that launchd-supervised foreground process while the server leads
+# its own POSIX session, the shape Herdr saved SSH machines require; that
+# script's header owns the supervision contract. A perl that can compile the
+# supervisor must resolve on the launch agent's PATH (macOS ships
+# /usr/bin/perl): without one the guard starts no server and stops none, so a
+# server in the shape saved SSH machines refuse is never produced here.
 #
 # Decision, made once per launch (exit codes matter under SuccessfulExit=false:
 # 0 tells launchd the job is done until something restarts it, non-zero asks
 # for a retry after the throttle interval):
-#   no server owns the session socket  -> exec `herdr server --session <s>`
-#                                          (foreground, launchd-supervised)
+#   no server owns the session socket  -> start `herdr server --session <s>`
+#                                          (supervised, launchd-owned)
+#   a server must be started but no perl on this PATH can run the
+#   supervisor                         -> exit 1 before starting or stopping
+#                                          anything, naming the prerequisite,
+#                                          so launchd retries once perl resolves
 #   the owner was born in the Aqua session (launchd or the Aqua remote-job
 #   worker)                            -> exit 0, leave it alone
 #   the owner was born anywhere else (an SSH remote attach, a shell over
 #   ssh/mosh, or a birth it cannot prove) -> `herdr server stop`, wait until the
-#                                          socket is released, then exec
-#                                          `herdr server --session <s>` at once
-#                                          so the socket is rebound before a
+#                                          socket is released, then start the
+#                                          server the same way at once so the
+#                                          socket is rebound before a
 #                                          reconnecting SSH attach can start
 #                                          another foreign server
 #   the foreign server does not release the socket in time -> exit 1
@@ -53,6 +64,8 @@ SESSION=$2
 [ -n "$SESSION" ] || usage
 command -v jq >/dev/null 2>&1 || { printf 'fm-remote-herdr-guard: jq does not resolve on the launch agent PATH\n' >&2; exit 1; }
 STOP_WAIT_TENTHS=${FM_REMOTE_HERDR_GUARD_STOP_WAIT_TENTHS:-50}
+SUPERVISOR="$SCRIPT_DIR/fm-remote-herdr-supervisor.pl"
+PERL_BIN=
 
 log() { printf 'fm-remote-herdr-guard: %s\n' "$*"; }
 
@@ -64,9 +77,18 @@ status_running() { # <status-json>
   [ "$(printf '%s' "$1" | jq -r '.server.running // false' 2>/dev/null)" = true ]
 }
 
+require_supervisor() { # exits 1 unless a perl on this PATH can run the supervisor
+  if PERL_BIN=$(command -v perl 2>/dev/null) && "$PERL_BIN" -c "$SUPERVISOR" >/dev/null 2>&1; then
+    return 0
+  fi
+  log "no perl on this PATH can run $SUPERVISOR, which the herdr server for session $SESSION needs to lead its own session as Herdr saved SSH machines require; put a working perl on this account's login-shell PATH (macOS ships /usr/bin/perl); exiting 1 without starting or stopping any server so launchd retries"
+  exit 1
+}
+
 start_server() {
-  log "starting the herdr server for session $SESSION inside this launch agent (pid $$)"
-  exec "$HERDR_BIN" server --session "$SESSION"
+  require_supervisor
+  log "starting the herdr server for session $SESSION as the leader of its own session under this launch agent (pid $$)"
+  exec "$PERL_BIN" "$SUPERVISOR" "$HERDR_BIN" server --session "$SESSION"
 }
 
 STATUS=$(herdr_status)
@@ -92,6 +114,7 @@ if fm_remote_herdr_birth_is_aqua "$BIRTH"; then
   exit 0
 fi
 
+require_supervisor
 log "session $SESSION is served by ${OWNER:+pid }${OWNER:-an unproven process} born outside the Aqua login session ($BIRTH); its panes cannot reach the login keychain, taking the session over"
 HERDR_SESSION="$SESSION" "$HERDR_BIN" server stop --session "$SESSION" >/dev/null 2>&1 \
   || log "herdr server stop for session $SESSION did not succeed; waiting for the socket anyway"
