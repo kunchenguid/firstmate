@@ -374,9 +374,67 @@ test_watcher_config_off_skips_jev() {
   pass "config/jev-wake-triage=off disables triage and escalates as today"
 }
 
+# FM_JEV_WAKE_TRIAGE is the documented override of config/jev-wake-triage in
+# both directions. The watcher reads the env value before it opens the file, so
+# the off case needs no config fixture; the on case pins a config directory that
+# says off, which is the only way to prove the env value wins over a file.
+test_watcher_env_off_skips_jev() {
+  local dir state fakebin out capture_file window key pid
+  dir=$(prime_stale_case jev-env-off)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  capture_file="$dir/pane.txt"; window="test:fm-jev-jev-env-off"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  install_fake_jev "$fakebin" suppress
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_JEV_WAKE_TRIAGE=off
+  FM_JEV_WAKE_TRIAGE_BIN="$fakebin/fm-jev-wake-triage.sh" \
+    start_stale_watch "$state" "$fakebin" "$out" "$window" "$capture_file"
+  pid=$!
+  wait_for_exit "$pid" 100 || { unset FM_JEV_WAKE_TRIAGE; fail "FM_JEV_WAKE_TRIAGE=off did not keep today's escalate path: $(cat "$out")"; }
+  unset FM_JEV_WAKE_TRIAGE
+  grep -F "possible wedge" "$out" >/dev/null || fail "FM_JEV_WAKE_TRIAGE=off lost today's escalate reason: $(cat "$out")"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = 1 ] || fail "FM_JEV_WAKE_TRIAGE=off did not count today's escalation"
+  [ ! -e "$fakebin/jev.argv" ] || fail "FM_JEV_WAKE_TRIAGE=off still invoked Jev"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the env-off escalation"
+  unset FM_FAKE_CREW_STATE
+  pass "FM_JEV_WAKE_TRIAGE=off disables triage with no config file present"
+}
+
+test_watcher_env_on_beats_config_off() {
+  local dir state fakebin out capture_file window key pid back
+  dir=$(prime_stale_case jev-env-on)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  capture_file="$dir/pane.txt"; window="test:fm-jev-jev-env-on"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  back=$(cat "$state/.stale-since-$key")
+  mkdir -p "$dir/config"
+  printf 'off\n' > "$dir/config/jev-wake-triage"
+  install_fake_jev "$fakebin" suppress
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_JEV_WAKE_TRIAGE=on
+  FM_CONFIG_OVERRIDE="$dir/config" FM_JEV_WAKE_TRIAGE_BIN="$fakebin/fm-jev-wake-triage.sh" \
+    start_stale_watch "$state" "$fakebin" "$out" "$window" "$capture_file"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; unset FM_JEV_WAKE_TRIAGE; fail "FM_JEV_WAKE_TRIAGE=on did not suppress over a config file that says off: $(cat "$out")"
+  fi
+  unset FM_JEV_WAKE_TRIAGE
+  [ ! -s "$out" ] || { reap "$pid"; fail "FM_JEV_WAKE_TRIAGE=on printed a wake reason: $(cat "$out")"; }
+  [ -s "$fakebin/jev.argv" ] || { reap "$pid"; fail "FM_JEV_WAKE_TRIAGE=on never invoked Jev over the config file"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "FM_JEV_WAKE_TRIAGE=on advanced the escalation counter"; }
+  [ "$(cat "$state/.stale-since-$key" 2>/dev/null || echo 0)" -gt "$back" ] \
+    || { reap "$pid"; fail "FM_JEV_WAKE_TRIAGE=on did not restart the idle timer"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the env-on watcher stop"
+  unset FM_FAKE_CREW_STATE
+  pass "FM_JEV_WAKE_TRIAGE=on re-enables triage over config/jev-wake-triage=off"
+}
+
 test_watcher_pipeline_wait_suppresses
 test_watcher_true_wedge_escalates
 test_watcher_jev_error_fails_open
 test_watcher_config_off_skips_jev
+test_watcher_env_off_skips_jev
+test_watcher_env_on_beats_config_off
 
 echo "# all fm-jev-wake-triage tests passed"
