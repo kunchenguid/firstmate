@@ -103,6 +103,17 @@ workspace_of_pane() {  # <pane_id>
   lab pane get "$1" 2>/dev/null | jq -r '.result.pane.workspace_id // empty' 2>/dev/null
 }
 
+# A pane's own cwd is the directory Herdr restores it in after a restart,
+# distinct from the live foreground_cwd of whatever runs inside it.
+assert_pane_created_in_worktree() {  # <pane_id> <meta> <label>
+  local cwd wt
+  cwd=$(lab pane get "$1" 2>/dev/null | jq -r '.result.pane.cwd // empty' 2>/dev/null)
+  wt=$(grep '^worktree=' "$2" 2>/dev/null | cut -d= -f2-)
+  [ -n "$cwd" ] && [ -n "$wt" ] || fail "$3: could not read the task pane's cwd ('$cwd') or its recorded worktree ('$wt')"
+  [ "$(cd "$cwd" && pwd -P)" = "$(cd "$wt" && pwd -P)" ] \
+    || fail "$3: the task pane was created in '$cwd', not its worktree '$wt', so a restored pane would resume outside it"
+}
+
 label_of_workspace() {  # <workspace_id>
   lab workspace list 2>/dev/null \
     | jq -r --arg id "$1" '.result.workspaces[]? | select(.workspace_id == $id) | .label' 2>/dev/null
@@ -231,6 +242,8 @@ WS_PRIMARY=$(workspace_of_pane "$UNIQA_PANE")
 [ "$(label_of_workspace "$WS_PRIMARY")" = firstmate ] || fail "uniqA did not land in a 'firstmate' workspace"
 [ "$(focused_workspace)" = "$WS_OTHER" ] || fail "the spawn stole focus from the captain's workspace"
 pass "real herdr E2E: with one 'firstmate' workspace and no herdr parent, a crewmate still lands in this home's own workspace without stealing focus"
+assert_pane_created_in_worktree "$UNIQA_PANE" "$UNIQA_META" uniqA
+pass "real herdr E2E: a flat task pane is created with its task worktree as its own cwd"
 
 # --- 2. unique label, WITH a launcher pane: same workspace, now by identity --
 
@@ -274,6 +287,7 @@ PRESU_JOURNAL="$PRES_HOME/state/presU.herdr-presentation"
 [ "$(journal_field "$PRESU_JOURNAL" workspace_id)" = "$PRESU_WS" ] \
   || fail "the projection journal does not name its own workspace"
 [ "$(focused_workspace)" = "$WS_OTHER" ] || fail "a projected spawn stole focus from the captain's workspace"
+assert_pane_created_in_worktree "$PRESU_PANE" "$PRESU_META" presU
 pass "real herdr E2E: presentation spaces still create the isolated child workspace and bind it under the launcher's exact parent, without stealing focus"
 
 # --- 3. duplicate label, launcher in the NON-first match, driven from a real

@@ -280,6 +280,7 @@ No Herdr-specific copy of that protocol exists.
 ## Restart and liveness behavior
 
 Stopping and restarting a named Herdr server preserves workspace, tab, pane, and label ids, but the underlying harness processes and live agent registrations do not survive.
+A restored pane starts in the directory it was created in, so a ship or scout spawn durably leases its Treehouse worktree before creating the task pane and creates the pane there; a restored task pane therefore comes back in its task worktree rather than the project checkout, and the lease keeps that slot the task's own until teardown returns it.
 A restored same-labeled tab with a missing pane or no registered agent is a husk.
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
