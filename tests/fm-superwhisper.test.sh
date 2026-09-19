@@ -20,6 +20,14 @@ BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 TMP_ROOT=$(fm_test_tmproot fm-superwhisper)
 fm_git_identity fmtest fmtest@example.invalid
 
+hash_path() {
+  if command -v md5 >/dev/null 2>&1; then
+    printf '%s' "$1" | md5 -q
+  else
+    printf '%s' "$1" | md5sum | awk '{print $1}'
+  fi
+}
+
 test_pi_worker_launches_with_no_extensions_and_preserves_explicit_hooks() {
   local case_dir home proj wt fakebin launchlog id out status launch
   id=test-pi-worker-ne
@@ -157,7 +165,7 @@ SH
   # mkdir target or a root-level /disabled-* redirection.
   local fallback_state=/tmp/superwhisper-agent
   local cwd_hash fallback_marker fallback_result
-  cwd_hash=$(printf %s "$wt" | md5 -q)
+  cwd_hash=$(hash_path "$wt")
   fallback_marker="$fallback_state/disabled-$cwd_hash"
   fallback_result="$case_dir/codex-fallback-result"
   rm -f "$fallback_marker"
@@ -184,7 +192,7 @@ test_codex_agent_hook_respects_cwd_disabled_marker_when_present() {
   mkdir -p "$test_dir" "$sw_state_dir"
 
   local cwd_hash marker
-  cwd_hash=$(printf %s "$test_dir" | md5 -q)
+  cwd_hash=$(hash_path "$test_dir")
   marker="$sw_state_dir/disabled-$cwd_hash"
 
   # With marker present: agent-hook must report superwhisper disabled for cwd.
