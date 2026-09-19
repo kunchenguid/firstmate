@@ -7,6 +7,12 @@
 # file present (unless it is already the canonical pointer), converts a correct
 # CLAUDE.md -> AGENTS.md symlink into the pointer file, and refuses to clobber
 # distinct real files or wrong symlinks.
+# A repository that already keeps a real AGENTS.md with no CLAUDE.md of any kind
+# has established its own convention, so it is left untouched: no pointer and no
+# self-governance section. That case is deliberate rather than an oversight -
+# repositories on that convention were deleting both artifacts back out again
+# every time this helper ran, so the convention the repository already follows
+# decides the outcome instead of whoever invoked the helper.
 # Owns the canonical "## Maintaining this file" self-governance wording for
 # project AGENTS.md files, injecting it idempotently into created skeletons,
 # promoted CLAUDE.md files, and existing AGENTS.md files lacking both the exact
@@ -31,6 +37,9 @@ set -eu
 usage() {
   echo "usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]" >&2
   cat >&2 <<'EOF'
+
+A repository that keeps a real AGENTS.md and no CLAUDE.md is left untouched:
+that is its own convention, so no pointer and no canonical section are added.
 
 To retain equivalent project-owned maintenance guidance without adding the
 canonical section, use this exact first line of AGENTS.md (LF or CRLF):
@@ -208,13 +217,10 @@ if [ -e "$AGENTS" ]; then
     exit 1
   fi
   if [ ! -e "$CLAUDE" ]; then
-    ensure_maintenance_section
-    install_claude_pointer
-    if [ "$MAINT_INJECTED" -eq 1 ]; then
-      echo "updated: added ## Maintaining this file to AGENTS.md and wrote CLAUDE.md @AGENTS.md pointer in $DIR"
-    else
-      echo "wrote: CLAUDE.md @AGENTS.md pointer in $DIR"
-    fi
+    # A real AGENTS.md with no CLAUDE.md of any kind is a repository that keeps
+    # AGENTS.md alone. That is its established convention, so neither the
+    # pointer nor the self-governance section is imposed on it.
+    echo "unchanged: $DIR keeps AGENTS.md alone; left as is"
     exit 0
   fi
   if [ -f "$CLAUDE" ]; then

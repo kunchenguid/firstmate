@@ -240,8 +240,9 @@ fm_dod_block() {  # <mode> <task-id>
 # Definition of done
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+The deliverable is the PR, and you are done only once you have appended \`done: PR {url}\` to the status file.
+Committing your implementation is a step on the way there, never completion.
+When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append that \`done: PR {url}\` line and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
       ;;
@@ -260,9 +261,10 @@ EOF
       cat <<EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
-The task is complete only when committed on your branch.
-When you believe it is complete, append \`done: {summary}\` to the status file and stop.
-Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
+This task ships **no-mistakes**: the deliverable is a PR with CI green, and you are done only once you have appended \`done: PR {url} checks green\` to the status file.
+Committing your implementation is a step on the way there, never completion.
+That step: when the implementation is committed on your branch, append \`done: implemented, ready to validate - {summary}\` to the status file and stop.
+Firstmate will then instruct you to run /no-mistakes to validate and ship the PR, and you carry the task through to the CI-green report below.
 
 You drive no-mistakes by responding to its gates, not by implementing fixes.
 Follow the guidance no-mistakes itself provides for the mechanics: it loads when you invoke /no-mistakes, and \`no-mistakes axi run --help\` plus the \`help\` lines in each \`axi\` response are authoritative and version-matched to the installed binary.

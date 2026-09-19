@@ -153,20 +153,51 @@ test_correct_symlink_migrates_to_pointer_without_clobbering_agents() {
   pass "fm-ensure-agents-md.sh: correct symlink migrates to pointer without clobbering AGENTS.md"
 }
 
-test_existing_agents_md_without_claude_gains_section_and_pointer() {
-  local repo agents out count
+# A repository keeping a real AGENTS.md and no CLAUDE.md has already chosen its
+# convention. Repositories on it were deleting the pointer and the canonical
+# section back out after every run, so the helper must leave that shape alone
+# rather than re-imposing artifacts the repository rejects.
+test_existing_agents_md_without_claude_is_left_alone() {
+  local repo agents out
   repo="$TMP_ROOT/existing-bare-project"
   mkdir -p "$repo"
   printf '# Existing agent memory\n\nDeploy with kubectl.\n' > "$repo/AGENTS.md"
   agents="$repo/AGENTS.md"
+  cp "$agents" "$repo/.before"
   out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
     || fail "fm-ensure-agents-md.sh failed for existing AGENTS.md without CLAUDE.md"
-  assert_contains "$out" "updated:" "injection without CLAUDE.md did not report an update"
+  assert_contains "$out" "unchanged:" "AGENTS.md-alone project was not reported unchanged"
+  assert_absent "$repo/CLAUDE.md" "AGENTS.md-alone project gained a CLAUDE.md pointer"
+  [ ! -L "$repo/CLAUDE.md" ] || fail "AGENTS.md-alone project gained a CLAUDE.md symlink"
+  cmp -s "$repo/.before" "$agents" \
+    || fail "AGENTS.md-alone project had its AGENTS.md modified"
+  assert_no_grep "## Maintaining this file" "$agents" \
+    "AGENTS.md-alone project gained the canonical self-governance section"
+  # Re-running must stay a no-op rather than drifting into the pointer convention.
+  "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
+    || fail "fm-ensure-agents-md.sh failed on AGENTS.md-alone re-run"
+  assert_absent "$repo/CLAUDE.md" "AGENTS.md-alone re-run created a CLAUDE.md pointer"
+  cmp -s "$repo/.before" "$agents" || fail "AGENTS.md-alone re-run modified AGENTS.md"
+  pass "fm-ensure-agents-md.sh: a project keeping AGENTS.md alone is left untouched"
+}
+
+# The pointer convention is unaffected: a project already carrying the canonical
+# CLAUDE.md pointer still gains the self-governance section it is missing.
+test_pointer_convention_still_gains_section() {
+  local repo agents out count
+  repo="$TMP_ROOT/pointer-convention-project"
+  mkdir -p "$repo"
+  printf '# Existing agent memory\n\nDeploy with kubectl.\n' > "$repo/AGENTS.md"
+  write_fixture_claude_pointer "$repo"
+  agents="$repo/AGENTS.md"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh failed for a pointer-convention project"
+  assert_contains "$out" "updated:" "pointer-convention injection did not report an update"
   assert_claude_pointer "$repo/CLAUDE.md"
   assert_grep "Deploy with kubectl." "$agents" "injection dropped existing AGENTS.md content"
   count=$(grep -Fc "## Maintaining this file" "$agents")
   [ "$count" -eq 1 ] || fail "injection wrote $count self-governance sections"
-  pass "fm-ensure-agents-md.sh: existing AGENTS.md without CLAUDE.md gains section and pointer"
+  pass "fm-ensure-agents-md.sh: a pointer-convention project still gains the section"
 }
 
 test_existing_agents_md_with_section_reports_unchanged() {
@@ -192,8 +223,11 @@ test_existing_agents_md_with_section_reports_unchanged() {
 
 test_marked_project_guidance_stays_unchanged() {
   local repo eol route out
+  # A bare AGENTS.md route is deliberately absent: the helper now leaves that
+  # shape untouched whether or not it carries the mark
+  # (test_existing_agents_md_without_claude_is_left_alone).
   for eol in $'\n' $'\r\n'; do
-    for route in bare pointer symlink promotion; do
+    for route in pointer symlink promotion; do
       repo=$(mktemp -d "$TMP_ROOT/marked-$route.XXXXXX")
       printf '%s%s' '<!-- firstmate:maintained-by-project -->' "$eol" \
         '# Project memory' "$eol" \
@@ -235,6 +269,9 @@ test_reworded_guidance_requires_first_line_marker() {
         'Keep broadly useful knowledge concise; link to sources and rewrite stale entries.' \
         'Preserve these rules for every agent.' |
         while IFS= read -r line; do printf '%s%s' "$line" "$eol"; done > "$repo/AGENTS.md"
+      # The pointer convention is what invites injection at all; a project
+      # keeping AGENTS.md alone is left untouched regardless of its guidance.
+      write_fixture_claude_pointer "$repo"
       "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
         || fail "ensure failed for unmarked reworded guidance"
       # AGENTS.md is the helper's generated output contract, not implementation source.
@@ -421,7 +458,8 @@ test_promoted_claude_md_includes_self_governance
 test_promoted_claude_md_without_trailing_newline_keeps_blank_separator
 test_existing_agents_md_with_symlink_gains_self_governance
 test_correct_symlink_migrates_to_pointer_without_clobbering_agents
-test_existing_agents_md_without_claude_gains_section_and_pointer
+test_existing_agents_md_without_claude_is_left_alone
+test_pointer_convention_still_gains_section
 test_existing_agents_md_with_section_reports_unchanged
 test_existing_crlf_agents_md_with_section_stays_unchanged
 test_existing_crlf_agents_md_without_section_preserves_crlf

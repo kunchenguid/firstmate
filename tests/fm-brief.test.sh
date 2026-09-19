@@ -376,6 +376,42 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
 }
 
+# Workers read the first `done:` under "Definition of done" as what done means,
+# and stopped at the implementation commit because that is what it named. For
+# every PR-delivering mode the PR report line must come first, and committing
+# must read as a step rather than as completion. local-only is excluded on
+# purpose: there the commit really is the deliverable.
+test_pr_deliverable_precedes_implementation_commit() {
+  local home id brief dod mode pr_line commit_line
+  home="$TMP_ROOT/dod-order-home"
+  mkdir -p "$home/data"
+  for mode in no-mistakes direct-PR; do
+    id="brief-dodorder-$(printf '%s' "$mode" | tr -d '-')"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$mode: brief was not scaffolded"
+    dod=$(sed -n '/^# Definition of done$/,$p' "$brief")
+    [ -n "$dod" ] || fail "$mode: brief has no Definition of done section"
+    pr_line=$(printf '%s\n' "$dod" | grep -nF 'done: PR {url}' | head -n 1 | cut -d: -f1)
+    commit_line=$(printf '%s\n' "$dod" | grep -nEi 'commit' | head -n 1 | cut -d: -f1)
+    [ -n "$pr_line" ] || fail "$mode: Definition of done never names the PR report line"
+    [ -n "$commit_line" ] || fail "$mode: Definition of done dropped the implementation commit step"
+    [ "$pr_line" -lt "$commit_line" ] \
+      || fail "$mode: implementation commit (line $commit_line) is named before the PR deliverable (line $pr_line)"
+    printf '%s\n' "$dod" | grep -qF 'The task is complete only when committed on your branch' \
+      && fail "$mode: Definition of done still presents the implementation commit as completion"
+    printf '%s\n' "$dod" | grep -qF 'Committing your implementation is a step on the way there, never completion.' \
+      || fail "$mode: Definition of done does not demote the implementation commit to a step"
+  done
+  # local-only keeps the commit as its deliverable, so it keeps that sentence.
+  id="brief-dodorder-localonly"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode local-only >/dev/null 2>&1
+  assert_grep 'The task is complete only when committed on your branch' \
+    "$home/data/$id/brief.md" \
+    "local-only lost its commit-is-the-deliverable statement"
+  pass "fm-brief.sh: PR-delivering modes name the PR before the implementation commit"
+}
+
 test_ask_user_escalation_format() {
   local home id brief mode other_id other_brief
   home="$TMP_ROOT/ask-user-home"
@@ -934,6 +970,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_pr_deliverable_precedes_implementation_commit
 test_ask_user_escalation_format
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
