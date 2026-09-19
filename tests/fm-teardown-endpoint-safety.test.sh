@@ -966,6 +966,89 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   pass "fm-teardown: a pool slot claimed by another task is left alone while the task's own cleanup finishes"
 }
 
+# The retry-after-partial-failure sequence (observed 2026-09-18): a teardown that
+# genuinely owns its slot returns it and drops its claim, then fails on a LATER,
+# unrelated step (here the endpoint close, standing in for the Herdr pane-close
+# refusal seen in production) and exits non-zero with every durable record
+# retained. Before the operator reruns teardown as instructed, a spawn takes the
+# now-free slot for a different task and claims it. The retry must not return
+# that slot a second time out from under the new live task, and must say so.
+test_retried_teardown_after_partial_close_failure_never_returns_a_reassigned_slot() {
+  local dir socket session='retry collision' id=stale-task other=live-task rc returns_before returns_after
+
+  [ -n "$REAL_TMUX" ] || { echo "skip - tmux not installed"; return 0; }
+
+  dir=$(make_case retry-slot-collision)
+  mark_case_as_treehouse_pool "$dir"
+  rm -f "$dir/worktree/sentinel"
+  [ -z "$(git -C "$dir/worktree" status --porcelain)" ] \
+    || fail "retry-slot-collision fixture is not clean: $(git -C "$dir/worktree" status --porcelain)"
+
+  socket=dedicated.sock
+  ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" new-session -d -s "$session" -n control )
+  ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" new-window -d -t "=$session:" -n "fm-$id" )
+  write_close_failing_tmux_shim "$dir" "$socket" "$REAL_TMUX"
+
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=$session:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" "mode=no-mistakes"
+  claim_pool_slot "$dir" "$id"
+
+  # First run: this task genuinely owns the slot, so the worktree return and
+  # claim release both go through - then the endpoint close fails, the same
+  # partial-failure shape a refused Herdr pane close produces in production.
+  set +e
+  env -u TMUX -u TMUX_PANE FM_TEST_BLOCK_KILL=1 \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" \
+    > "$dir/first.out" 2> "$dir/first.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "retry-slot-collision: first run unexpectedly reported success"
+  assert_present "$dir/home/state/$id.meta" \
+    "retry-slot-collision: the failed close removed the task record"
+  returns_before=$(grep -cF "treehouse <return>" "$dir/runtime.log" 2>/dev/null || true)
+  [ "${returns_before:-0}" -ge 1 ] \
+    || fail "retry-slot-collision: fixture did not exercise a genuine worktree return before the close failure"
+  [ ! -e "$dir/pool/1/.fm-slot-owner" ] \
+    || fail "retry-slot-collision: the first run's own claim was not released after its return"
+
+  # Between the two runs, a different task takes the same pool slot for real
+  # work (bin/fm-spawn.sh's actual sequence): it claims the slot and its own
+  # record names the same worktree.
+  claim_pool_slot "$dir" "$other" "$dir/other-home"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=$session:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" "mode=no-mistakes"
+
+  # Retry, exactly as the operator was told to do. It must never touch the
+  # slot that is no longer this task's.
+  set +e
+  env -u TMUX -u TMUX_PANE \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" \
+    > "$dir/retry.out" 2> "$dir/retry.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "retry-slot-collision: the retry reported success while a live task still holds the slot"
+  returns_after=$(grep -cF "treehouse <return>" "$dir/runtime.log" 2>/dev/null || true)
+  [ "$returns_after" -eq "$returns_before" ] \
+    || fail "retry-slot-collision: the retry returned the slot again out from under the live task: $(cat "$dir/runtime.log")"
+  assert_present "$dir/home/state/$other.meta" \
+    "retry-slot-collision: the retry removed the live task's own record"
+  assert_present "$dir/pool/1/.fm-slot-owner" \
+    "retry-slot-collision: the retry removed the live task's slot claim"
+  assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" "task=$other" \
+    "retry-slot-collision: the retry rewrote the live task's slot claim"
+  assert_contains "$(cat "$dir/retry.err")" "$other" \
+    "retry-slot-collision: the refusal did not name the task now holding the slot"
+  assert_contains "$(cat "$dir/retry.err")" "is also task $other" \
+    "retry-slot-collision: the refusal was not the record-exclusivity collision message"
+
+  ( cd "$dir" && env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$socket" kill-server 2>/dev/null ) || true
+  pass "fm-teardown: a retried teardown after a partial failure never returns a pool slot another task has since claimed"
+}
+
 # The two states that must never become a false refusal: the task's own claim,
 # and no claim at all (a slot taken before claims existed, or already returned).
 test_own_and_absent_slot_claims_still_tear_down() {
@@ -1386,6 +1469,7 @@ test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
+test_retried_teardown_after_partial_close_failure_never_returns_a_reassigned_slot
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
