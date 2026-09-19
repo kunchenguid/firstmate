@@ -861,10 +861,14 @@ test_scout_lavish_line_follows_presentation_floor() {
     brief="$case_dir/home/data/scout-lavish/brief.md"
     if [ "$expect" = hosting ]; then
       assert_grep "$hosting" "$brief" "$label: scout brief did not offer the Lavish review loop"
+      assert_grep "lavish-pages/SKILL.md" "$brief" \
+        "$label: scout brief offered Lavish without the page-language contract"
       assert_no_grep "$text_only" "$brief" "$label: scout brief withheld Lavish from a compatible build"
     else
       assert_grep "$text_only" "$brief" "$label: scout brief did not ask for a text report"
       assert_no_grep "$hosting" "$brief" "$label: scout brief offered a below-floor Lavish"
+      assert_no_grep "lavish-pages/SKILL.md" "$brief" \
+        "$label: text-only scout brief still required the Lavish page contract"
     fi
   done <<'ROWS'
 lavish-axi at the floor^0.1.46^hosting
