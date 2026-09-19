@@ -64,8 +64,10 @@
 #      worktree's head (rule owned by fm_nm_runs_status_for_worktree in
 #      bin/fm-nm-run-lib.sh). In the coarse runs-ledger fallback, and only
 #      when `axi status` answered ANOTHER named branch's run, a newest
-#      same-branch row that is running or pending answers whatever its head,
-#      under the same answered-down rule as the terminal row below.
+#      same-branch row that is running or pending answers whatever its head -
+#      but, like every other head-free route, only while the daemon has not
+#      answered that it is down, so a live ledger row never binds on a dead
+#      instrument and the crew's own status log keeps the answer.
 #      fm_nm_select_run in bin/fm-nm-run-lib.sh owns complete run selection
 #      and ambiguity reporting. The selected run's id-addressed status must
 #      agree on id, branch, and live/terminal class before attribution;
@@ -618,11 +620,14 @@ nm_daemon_probe_down() {
 # block is skipped.
 nm_daemon_answered_down() {
   local rc=0
-  fm_nm_run_checked "$WT" "$NM_TIMEOUT" daemon status >/dev/null || rc=$?
-  case "$rc" in
-    0|124) return 1 ;;
-    *) return 0 ;;
-  esac
+  if [ -z "$NM_DAEMON_ANSWER" ]; then
+    fm_nm_run_checked "$WT" "$NM_TIMEOUT" daemon status >/dev/null || rc=$?
+    case "$rc" in
+      0|124) NM_DAEMON_ANSWER=other ;;
+      *) NM_DAEMON_ANSWER=down ;;
+    esac
+  fi
+  [ "$NM_DAEMON_ANSWER" = down ]
 }
 
 nm_ci_step_status() {
@@ -724,6 +729,7 @@ HAVE_RUN=0
 # word came back from the runs-list fallback, so the run-step block below skips
 # the TOON field parsing entirely for this crew.
 RUN_SOURCE=full
+NM_DAEMON_ANSWER=""
 COARSE_STATUS=""
 SELECTED_RUN_ID=""
 # Scouts and secondmates never drive a no-mistakes validation of their own
@@ -773,6 +779,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
           HAVE_RUN=1
         elif [ -z "$(fm_nm_resolve_commit "$WT" "$(strip_quotes "$(nm_field head)")")" ]; then
           if fm_nm_run_is_active "$RUN_OUT" \
+            && ! nm_daemon_answered_down \
             && [ "$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)" "$(strip_quotes "$(nm_field head)")")" = running ]; then
             HAVE_RUN=1
           else
@@ -829,7 +836,8 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
           coarse_mode=live-any-head
         fi
         COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)" "" "$coarse_mode")
-        if [ -n "$COARSE_STATUS" ]; then
+        if [ -n "$COARSE_STATUS" ] \
+          && { [ "$(fm_nm_run_status_class "$COARSE_STATUS")" != live ] || ! nm_daemon_answered_down; }; then
           HAVE_RUN=1
           # A branch-matching answer the strict rule rejected is this branch's
           # own current run once the ledger proves the pipeline-owned
@@ -857,16 +865,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     # read above. The status event span remains independently available to the
     # supervisor through fm-classify-lib.sh's status_span_first_actionable.
     case "$COARSE_STATUS" in
-      pending|running)
-        # Same instrument as the failed row below: a live row the daemon has
-        # answered it is not running is unverified evidence, and a never
-        # finalized record is the weaker of the two, not the stronger.
-        if nm_daemon_answered_down; then
-          RUN_STATE=unknown
-          RUN_DETAIL="no-mistakes daemon unreachable; last ledger record $COARSE_STATUS - unverified"
-        else
-          RUN_STATE=working; RUN_DETAIL="validating (background run)"
-        fi ;;
+      pending|running) RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
       failed)
         # The ledger row is terminal but the coarse path has no steps table
@@ -988,7 +987,8 @@ if [ "$HAVE_RUN" = 1 ]; then
         && log_reports_daemon_socket_down "$LOG_LATEST"; then
         emit blocked status-log "$(status_line_note "$LOG_LATEST")${SEP}daemon socket down despite attributed run record"
       fi
-      if [ "$RUN_STATE" != parked ]; then
+      if [ "$RUN_STATE" != parked ] \
+        && ! { [ "$RUN_SOURCE" = coarse ] && [ "$RUN_STATE" = unknown ]; }; then
         if [ "$RUN_STATE" = working ]; then
           if [ "$RUN_SOURCE" = coarse ]; then
             # The runs ledger keeps a parked run's status word at `running`
