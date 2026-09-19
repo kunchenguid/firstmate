@@ -968,6 +968,119 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
 
 # The two states that must never become a false refusal: the task's own claim,
 # and no claim at all (a slot taken before claims existed, or already returned).
+# The 2026-09-15 deadlock: a long-dead task's record and its live successor's
+# record name the same slot, and the slot's claim names the successor. The
+# claim is read before the record scan, so the stale task's own cleanup runs
+# and the slot stays the successor's. Run the scan first and this refuses in
+# both directions, which is what left 11 of 16 slots stuck.
+test_a_stale_record_tears_down_while_its_successor_keeps_the_slot() {
+  local dir id=stale-task other=successor-task worker rc
+
+  dir=$(make_case slot-stale-record-vs-successor)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$other"
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] \
+    || fail "teardown of a stale record deadlocked against its live successor's record: $(cat "$dir/stderr")"
+  kill -0 "$worker" 2>/dev/null || fail "teardown killed the successor's worker"
+  assert_present "$dir/worktree/sentinel" "teardown reset the successor's slot"
+  assert_present "$dir/home/state/$other.meta" "teardown removed the successor's record"
+  assert_reassigned_slot_left_alone "$dir" "$id" "$other" \
+    "stale record colliding with its live successor's record"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+
+  pass "fm-teardown: a stale record tears down while the successor that holds its old slot keeps it"
+}
+
+# An endpoint that does not answer is not proof the record is stale: for every
+# backend but tmux an unqueryable target reads exactly like an absent one
+# (bin/fm-backend.sh), and a secondmate home holds its slot on a durable
+# treehouse lease that outlives the agent. So a colliding record whose window is
+# gone must still refuse, on worktree= and on home= alike.
+test_a_colliding_record_with_a_dead_endpoint_still_refuses() {
+  local dir id=successor-task other=stale-task rc
+
+  # The colliding record's endpoint is the only query that fails; every other
+  # tmux call still answers, so nothing but that record's liveness differs from
+  # a teardown that would otherwise run to completion.
+  seed_dead_endpoint_collision() {  # <case> <colliding-field>
+    local dir=$1 field=$2
+    mark_case_as_treehouse_pool "$dir"
+    cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *display-message*firstmate:fm-$other*) exit 1 ;;
+esac
+printf 'tmux' >> "\${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "\$@" >> "\${FM_RUNTIME_LOG:?}"
+printf '\n' >> "\${FM_RUNTIME_LOG:?}"
+exit 0
+SH
+    chmod +x "$dir/fakebin/tmux"
+    fm_write_meta "$dir/home/state/$id.meta" \
+      "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+      "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+    if [ "$field" = home ]; then
+      fm_write_meta "$dir/home/state/$other.meta" \
+        "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+        "worktree=$dir/worktree" "home=$dir/worktree" \
+        "project=$dir/project" "harness=codex" "kind=secondmate" \
+        "mode=secondmate" "yolo=off" "projects=alpha"
+    else
+      fm_write_meta "$dir/home/state/$other.meta" \
+        "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+        "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+    fi
+    claim_pool_slot "$dir" "$id"
+  }
+
+  assert_dead_endpoint_collision_refused() {  # <case> <description>
+    local dir=$1 description=$2 rc
+    set +e
+    run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] \
+      || fail "$description: teardown reaped a slot a colliding record names: $(cat "$dir/stdout")"
+    assert_present "$dir/home/state/$id.meta" "$description: the refusal removed the task record"
+    assert_present "$dir/home/state/$other.meta" "$description: the refusal removed the colliding record"
+    assert_present "$dir/worktree/sentinel" "$description: the refusal reset the slot's copy"
+    assert_present "$dir/pool/1/.fm-slot-owner" "$description: the refusal removed the slot claim"
+    ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+      || fail "$description: the slot was returned to the pool: $(cat "$dir/runtime.log")"
+    assert_contains "$(cat "$dir/stderr")" "worktree-recovered/stale-meta" \
+      "$description: the refusal should print the manual stale-record workaround"
+  }
+
+  # The record-vs-record shape of the 2026-09-15 incident, seen from the task
+  # the slot claim names.
+  dir=$(make_case slot-claimant-vs-dead-record)
+  seed_dead_endpoint_collision "$dir" worktree
+  assert_dead_endpoint_collision_refused "$dir" "colliding record with a dead endpoint"
+
+  # The same dead endpoint on a secondmate home record, whose slot is leased
+  # rather than claimed, so a stopped agent is routine and recoverable.
+  dir=$(make_case slot-claimant-vs-dead-secondmate-home)
+  seed_dead_endpoint_collision "$dir" home
+  assert_dead_endpoint_collision_refused "$dir" "colliding secondmate home with a dead endpoint"
+
+  pass "fm-teardown: a colliding record whose endpoint does not answer still refuses"
+}
+
 test_own_and_absent_slot_claims_still_tear_down() {
   local dir id=owned-task
 
@@ -1386,6 +1499,8 @@ test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
+test_a_stale_record_tears_down_while_its_successor_keeps_the_slot
+test_a_colliding_record_with_a_dead_endpoint_still_refuses
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts

@@ -17,6 +17,7 @@
 #                 "BACKLOG_RECONCILE: <id>: <what this home could not reconcile>",
 #                 "BACKLOG_RECONCILE: code-root <file> is not this home's <file>; ...",
 #                 "TANGLE: <remediation>",
+#                 "POOL_LEAK: <pool> slot <n> <what holds it>; <how to return it>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -53,6 +54,11 @@
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
+#          A POOL_LEAK line means a Treehouse pool slot is still held by a task
+#          that has finished, so the pool is short that slot until cleanup runs;
+#          bin/fm-pool-leak-lib.sh owns the scan and what it reports for each
+#          line prints. Detection only: no slot is ever returned, reset, or
+#          re-claimed here, because a held slot can still hold unlanded work.
 #          treehouse is also MISSING when its installed version lacks
 #          "treehouse get --lease" support.
 #          no-mistakes is also MISSING when its installed version is older than
@@ -193,6 +199,12 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# Both are pure function definitions with no source-time state-directory
+# creation, so they stay loadable on the read-only detect path.
+# shellcheck source=bin/fm-treehouse-slot-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-treehouse-slot-lib.sh"
+# shellcheck source=bin/fm-pool-leak-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-pool-leak-lib.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # fm-timing-lib.sh is inert unless FM_TIMING_LOG names a file, which only the
@@ -1520,6 +1532,7 @@ detect_local_config() {
     echo "MISSING_MANUAL: cursor-agent (instructions: $(manual_install_url cursor-agent))"
   fi
   crew_dispatch_validate
+  fm_pool_leak_report "$STATE"
   if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
     && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
     echo "BOOTSTRAP_INFO: tasks-axi available"
