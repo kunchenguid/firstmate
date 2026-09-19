@@ -277,6 +277,13 @@
 #   This is an exec environment boundary, not a sandbox for the pane's startup
 #   shell, credential files, same-user processes, or later shell initialization.
 #   See docs/configuration.md for provider/Git setup and supported limits.
+# Restricted account-task workspace admission:
+#   FM_ACCOUNT_TASK_WORKSPACE_ROOT is receiver-owned internal input from
+#   bin/fm-account-task.py. When present for a fresh ship/scout spawn, the
+#   isolated worktree resolved after `treehouse get` must be strictly beneath
+#   that already-qualified absolute root. A mismatch refuses before metadata or
+#   the harness launch and never falls back to another root. Ordinary spawns do
+#   not set it and remain unchanged.
 # Claude permission mode (config/claude-permission-mode):
 #   One token selecting the permission flag every claude launch (ship, scout,
 #   secondmate, and relaunch) carries. Absent or `bypass` keeps today's
@@ -3878,6 +3885,23 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  if [ -n "${FM_ACCOUNT_TASK_WORKSPACE_ROOT:-}" ]; then
+    account_workspace_root=$(cd "$FM_ACCOUNT_TASK_WORKSPACE_ROOT" 2>/dev/null && pwd -P) || {
+      echo "error: restricted account-task workspace root is not a readable directory; refusing before launch" >&2
+      exit 1
+    }
+    account_worktree=$(cd "$WT" 2>/dev/null && pwd -P) || {
+      echo "error: restricted account-task worktree cannot be resolved; refusing before launch" >&2
+      exit 1
+    }
+    case "$account_worktree/" in
+      "$account_workspace_root"/*) ;;
+      *)
+        echo "error: restricted account-task worktree is outside its qualified workspace root; refusing before launch" >&2
+        exit 1
+        ;;
+    esac
+  fi
 
   # Claim the pool slot for this task. The interactive `treehouse get` sent to
   # the pane above records only a process lease (Treehouse's durable

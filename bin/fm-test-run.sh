@@ -364,7 +364,7 @@ family_for_basename() {
     fm-herdr-submit-confirm-live-e2e.test.sh)
       printf '%s\n' live-harness-optin
       ;;
-    fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
+    fm-account-task.test.sh|fm-backend-herdr.test.sh|fm-backend-tmux-smoke.test.sh|fm-backend.test.sh|\
     fm-tmux-agent-liveness.test.sh|\
     fm-control.test.sh|fm-control-relaunch.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
@@ -1345,6 +1345,9 @@ families_for_unmapped_bin() {
 families_for_changed_path() {
   local path=$1 fixture_ref
   case "$path" in
+    tests/fm-account-task.test.py)
+      printf '%s\n' "__script__:fm-account-task.test.sh"
+      ;;
     tests/fm-backend-herdr-eventwait.test.py)
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch

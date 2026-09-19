@@ -110,6 +110,7 @@ run_settle_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    FM_ACCOUNT_TASK_WORKSPACE_ROOT="${FM_ACCOUNT_TASK_WORKSPACE_ROOT:-}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -221,9 +222,30 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
 }
 
+# A restricted receiver pins a workspace root before invoking fm-spawn.
+# The real spawn path must enforce that root after Treehouse settles but before
+# publishing metadata or launching the worker.
+test_restricted_account_workspace_root_is_enforced() {
+  local rec id out status approved
+  id=settle-account-root-z5
+  rec=$(make_settle_case settle-account-root "$id" 0)
+  read_settle_record "$rec"
+  approved="$TMP_ROOT/settle-account-root/approved"
+  mkdir -p "$approved"
+
+  out=$(FM_ACCOUNT_TASK_WORKSPACE_ROOT="$approved" run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "restricted spawn accepted a worktree outside its qualified root"
+  assert_contains "$out" "outside its qualified workspace root" \
+    "restricted spawn did not name the workspace-root refusal"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "restricted workspace refusal published task metadata"
+  pass "restricted account-task spawn refuses a worktree outside its qualified root before launch"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
+test_restricted_account_workspace_root_is_enforced
 
 echo "# all fm-spawn-worktree-settle tests passed"
