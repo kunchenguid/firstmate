@@ -1,5 +1,16 @@
 #!/usr/bin/env bash
 # Shared durable wake queue and portable lock helpers.
+#
+# Watcher singleton lock (state/.watch.lock):
+# The published lock is a symlink to state/.watch.lock.owner.<token>, or a
+# legacy directory of the same name. The owner record is pid, fm-home,
+# watcher-path, and pid-identity. fm_lock_try_create writes that complete
+# record into the owner directory, then publishes with one symlink, so a
+# pid-only partial lock cannot appear. A lock whose pid is dead and whose
+# identity is missing or empty is reclaimable by liveness when it lives in
+# this home (fm-home absent or equal to FM_HOME). A live pid is never
+# reclaimed. A dead lock naming another home is held back only while the
+# beacon is fresh, so no lock is unreclaimable forever.
 
 FM_WAKE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_WAKE_DEFAULT_ROOT="$(cd "$FM_WAKE_LIB_DIR/.." && pwd)"
@@ -66,28 +77,38 @@ fm_pid_identity() {
   # full NUL-separated cmdline keeps PID reuse a mismatch even on a tick collision.
   # Git Bash/MSYS exposes these compatible files but its Cygwin ps rejects the
   # portable fallback's -o fields, so capability detection must not key on uname.
+  # A /proc that is present but unreadable, truncated, or missing od falls through
+  # to the portable ps form instead of reporting no identity at all: watcher
+  # lock publication requires a non-empty, verifiable identity.
   if [ -r "$proc_root/$pid/stat" ] && [ -r "$proc_root/$pid/cmdline" ]; then
-    stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null) || return 1
-    # After the final comm delimiter, array index 19 is proc stat field 22.
-    read -r -a stat_fields <<< "${stat_line##*)}"
-    [ "${#stat_fields[@]}" -ge 20 ] || return 1
-    starttime=${stat_fields[19]}
-    case "$starttime" in
-      ''|*[!0-9]*) return 1 ;;
-    esac
-    cmdline_hex=$(od -An -v -tx1 "$proc_root/$pid/cmdline" 2>/dev/null | tr -d '[:space:]') || return 1
-    [ -n "$cmdline_hex" ] || return 1
-    identity_key=proc-starttime
-    [ "$_FM_UNAME" != Linux ] || identity_key=linux-starttime
-    printf '%s=%s cmdline-hex=%s\n' "$identity_key" "$starttime" "$cmdline_hex"
-    return 0
+    starttime=
+    cmdline_hex=
+    if stat_line=$(cat "$proc_root/$pid/stat" 2>/dev/null); then
+      # After the final comm delimiter, array index 19 is proc stat field 22.
+      read -r -a stat_fields <<< "${stat_line##*)}"
+      if [ "${#stat_fields[@]}" -ge 20 ]; then
+        starttime=${stat_fields[19]}
+        case "$starttime" in
+          ''|*[!0-9]*) starttime= ;;
+        esac
+      fi
+      cmdline_hex=$(od -An -v -tx1 "$proc_root/$pid/cmdline" 2>/dev/null | tr -d '[:space:]') \
+        || cmdline_hex=
+    fi
+    if [ -n "$starttime" ] && [ -n "$cmdline_hex" ]; then
+      identity_key=proc-starttime
+      [ "$_FM_UNAME" != Linux ] || identity_key=linux-starttime
+      printf '%s=%s cmdline-hex=%s\n' "$identity_key" "$starttime" "$cmdline_hex"
+      return 0
+    fi
   fi
   # Pin LC_ALL=C so lstart's date format is locale-invariant: the identity is
   # written under one locale but re-read under the machine's ambient locale, which
   # would otherwise mismatch on a non-C locale (e.g. ko_KR) and reject a live watcher.
   out=$(LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
+  out=$(printf '%s\n' "$out" | sed 's/^[[:space:]]*//')
   [ -n "$out" ] || return 1
-  printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
+  printf '%s\n' "$out"
 }
 
 fm_path_mtime() {
@@ -415,6 +436,81 @@ fm_watcher_supervision_verdict() {
   return 0
 }
 
+# fm_watch_lock_foreign_home <lockdir> [home]
+# True when the watcher lock records an fm-home that is not this home.
+# A missing fm-home is not foreign: that is the identity-missing own-home case.
+fm_watch_lock_foreign_home() {
+  local lockdir=$1 home=${2:-$FM_HOME} lock_home
+  lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
+  [ -n "$lock_home" ] && [ "$lock_home" != "$home" ]
+}
+
+# fm_watch_lock_beacon_stale <state> [grace]
+# True when the watcher beacon is absent or older than the stale grace, i.e.
+# no watcher has touched this state directory recently enough to be believed.
+fm_watch_lock_beacon_stale() {
+  local state=$1 grace=${2:-} beat
+  [ -n "$grace" ] \
+    || grace=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}}
+  case "$grace" in ''|*[!0-9]*) grace=300 ;; esac
+  beat="$state/.last-watcher-beat"
+  [ -e "$beat" ] || return 0
+  [ "$(fm_path_age "$beat")" -ge "$grace" ]
+}
+
+# fm_watch_lock_foreign_home_holds <lockdir> <state>
+# True when a dead-pid watcher lock recording another home must still be left
+# alone: only while the beacon is fresh, which is the one case where the
+# unseen peer may really be alive. Once the beacon is stale past the grace the
+# lock is reclaimable whatever fm-home it names - refusing forever is exactly
+# the permanently unreclaimable lock that takes supervision down.
+fm_watch_lock_foreign_home_holds() {
+  local lockdir=$1 state=$2
+  fm_watch_lock_foreign_home "$lockdir" || return 1
+  ! fm_watch_lock_beacon_stale "$state"
+}
+
+# fm_watch_lock_abandoned_own_home <state> <watch-path> [home]
+# True when this home's watcher lock names a dead or empty pid, its identity
+# is missing or empty, and nothing names another home or another watcher.
+# A live pid is never abandoned here. Identity-present dead locks use the
+# ordinary stale-pid steal instead.
+fm_watch_lock_abandoned_own_home() {
+  local state=$1 watch_path=$2 home=${3:-$FM_HOME} lockdir pid lock_home lock_path lock_identity
+  lockdir="$state/.watch.lock"
+  [ -e "$lockdir" ] || [ -L "$lockdir" ] || return 1
+  pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  fm_pid_alive "$pid" && return 1
+  lock_home=$(cat "$lockdir/fm-home" 2>/dev/null || true)
+  if [ -n "$lock_home" ] && [ "$lock_home" != "$home" ]; then
+    return 1
+  fi
+  lock_path=$(cat "$lockdir/watcher-path" 2>/dev/null || true)
+  if [ -n "$lock_path" ] && [ "$lock_path" != "$watch_path" ]; then
+    return 1
+  fi
+  lock_identity=$(cat "$lockdir/pid-identity" 2>/dev/null || true)
+  [ -z "$lock_identity" ]
+}
+
+# Write the watcher ownership files into an unpublished owner directory.
+# Called before the symlink is published so the visible lock is never pid-only.
+# Returns 2 - and only 2 - when this host yields no verifiable process identity,
+# so callers can tell that unretryable refusal from an owner-record write
+# failure, which returns 1 like every other error here.
+fm_lock_write_watch_ownership() {
+  local ownerdir=$1 pid identity
+  pid=$(cat "$ownerdir/pid" 2>/dev/null || true)
+  case "$pid" in
+    ''|*[!0-9]*|0) return 1 ;;
+  esac
+  printf '%s\n' "$FM_HOME" > "$ownerdir/fm-home" || return 1
+  printf '%s\n' "${FM_WATCH_PATH:-$FM_WAKE_LIB_DIR/fm-watch.sh}" > "$ownerdir/watcher-path" || return 1
+  identity=$(fm_pid_identity "$pid" 2>/dev/null || true)
+  [ -n "$identity" ] || return 2
+  printf '%s\n' "$identity" > "$ownerdir/pid-identity" || return 1
+}
+
 fm_lock_clean_known_files() {
   local lockdir=$1
   rm -f \
@@ -533,9 +629,18 @@ fm_lock_claim() {
   return 0
 }
 
+# FM_LOCK_IDENTITY_REFUSED distinguishes the one creation failure that no retry
+# can resolve - no verifiable process identity for the watcher - from losing a
+# creation or steal race, which resolves itself into a single healthy watcher,
+# and from an owner-record write failure, which is a different cause and must
+# not be reported as an identity problem. Only a watch-lock creation attempt
+# writes it, so the recursive steal-lock acquire inside fm_lock_try_acquire
+# cannot clobber it.
+FM_LOCK_IDENTITY_REFUSED=
 fm_lock_try_create() {
-  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
+  local lockdir=$1 allowed_steal_owner=${2:-} ownerdir ownership_rc
   FM_LOCK_OWNER_DIR=
+  [ "$lockdir" != "$STATE/.watch.lock" ] || FM_LOCK_IDENTITY_REFUSED=
   ownerdir=$(fm_lock_owner_dir "$lockdir") || return 1
   if [ -e "$lockdir" ] || [ -L "$lockdir" ]; then
     fm_lock_discard_owner "$ownerdir"
@@ -544,6 +649,15 @@ fm_lock_try_create() {
   if ! fm_lock_prepare_owner "$ownerdir"; then
     fm_lock_discard_owner "$ownerdir"
     return 1
+  fi
+  if [ "$lockdir" = "$STATE/.watch.lock" ]; then
+    ownership_rc=0
+    fm_lock_write_watch_ownership "$ownerdir" || ownership_rc=$?
+    if [ "$ownership_rc" -ne 0 ]; then
+      [ "$ownership_rc" -ne 2 ] || FM_LOCK_IDENTITY_REFUSED=1
+      fm_lock_discard_owner "$ownerdir"
+      return 1
+    fi
   fi
   if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
@@ -948,6 +1062,14 @@ fm_lock_try_acquire() {
     FM_LOCK_HELD_PID=$pid
     return 1
   fi
+  # A dead watcher lock that names another home stays put only while the beacon
+  # is fresh. Identity-missing locks with absent or matching fm-home remain
+  # reclaimable by liveness.
+  if [ "$lockdir" = "$STATE/.watch.lock" ] \
+    && fm_watch_lock_foreign_home_holds "$lockdir" "$STATE"; then
+    FM_LOCK_HELD_PID=$pid
+    return 1
+  fi
 
   steal="$lockdir.steal"
   if ! fm_lock_try_acquire "$steal"; then
@@ -988,8 +1110,19 @@ fm_lock_try_acquire() {
     FM_LOCK_OWNER_DIR=
     return 1
   fi
-
   if [ "$lockdir" = "$STATE/.watch.lock" ] \
+    && fm_watch_lock_foreign_home_holds "$lockdir" "$STATE"; then
+    fm_lock_release "$steal"
+    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    FM_LOCK_OWNER_DIR=
+    return 1
+  fi
+
+  # Only an existing lock records downtime here. A failed creation or a
+  # concurrent steal can leave no lock to recover; absence alone is not
+  # evidence of watcher downtime.
+  if [ "$lockdir" = "$STATE/.watch.lock" ] \
+    && { [ -e "$lockdir" ] || [ -L "$lockdir" ]; } \
     && ! _fm_recovery_marker_publish "$STATE/.watcher-down" downtime; then
     fm_lock_release "$steal"
     FM_LOCK_HELD_PID=$cur
