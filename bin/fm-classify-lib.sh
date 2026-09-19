@@ -1808,10 +1808,6 @@ EOF
   return 1
 }
 
-status_home_appends_contains_offset() {  # <status-file> <offset>
-  _fm_offset_in_home_append_ranges "$(status_home_appends_ranges "$1")" "$2"
-}
-
 status_home_appends_covers() {  # <status-file> <start> <end>
   local start=$2 end=$3 range_start range_end
   case "$start:$end" in *[!0-9:]*) return 1 ;; esac
@@ -1886,31 +1882,6 @@ _fm_status_home_appends_merge_locked() {  # <status-file> <ledger-path> <start> 
     fi
   } > "$tmp" || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$path" || { rm -f "$tmp"; return 1; }
-}
-
-# 0 when every non-blank line in [start, end) is a keyed needs-decision or
-# blocked line. Empty spans succeed. A worker `resolved`, `failed`, `paused`,
-# `working`, or unkeyed line fails, so lag never hides those.
-_fm_status_span_is_decision_lag() {  # <status-file> <start> <end>
-  local f=$1 start=$2 end=$3 chunk line verb
-  local LC_ALL=C
-  case "$start:$end" in *[!0-9:]*) return 1 ;; esac
-  [ "$end" -ge "$start" ] || return 1
-  [ "$end" -eq "$start" ] && return 0
-  chunk=$(_fm_status_read_span "$f" "$start" "$((end - start))") || return 1
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
-    verb=$(status_line_verb "$line")
-    case "$verb" in
-      needs-decision|blocked) ;;
-      *) return 1 ;;
-    esac
-    _fm_key_before_colon "$line" || _fm_key_at_note_head "$line" >/dev/null || return 1
-    _fm_decision_key "$line" >/dev/null || return 1
-  done <<EOF
-$chunk
-EOF
-  return 0
 }
 
 # Capture the bytes of an append-only status log at or after <start-offset> under

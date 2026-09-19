@@ -1628,13 +1628,14 @@ test_self_announced_append_guards() {
   pass "self-announced appends suppress only their own bytes and fail toward waking"
 }
 
-# Two distinct --resolve-key closes after an OPEN DECISIONS fold must not each
-# leave the file wake-worthy. The fold listed both keys; each answer records its
-# own byte range so later scans treat those ranges as already owned. A worker
-# line that is not in that ledger still wakes, including a worker `resolved`
-# sitting in the folded span (lag verbs are only keyed needs-decision/blocked).
+# Two distinct --resolve-key closes after an OPEN DECISIONS fold record their
+# own byte ranges, so the watcher's span classification never reports the
+# answers. The fold alone does not mark the worker's decisions seen, because
+# any actor's drain folds: a folded decision this home has not answered still
+# classifies as a new signal. Once the watcher has classified the span, the
+# owned answers stay quiet and a later worker line wakes.
 test_separate_self_announced_answers_after_fold_are_owned() {
-  local dir state status rc
+  local dir state status rc events
   dir=$(make_case multi-answer-owned)
   state="$dir/state"
   status="$state/t.status"
@@ -1648,27 +1649,39 @@ test_separate_self_announced_answers_after_fold_are_owned() {
   {
     printf 'needs-decision [key=k1]: pick REST or RPC\n'
     printf 'needs-decision [key=k2]: pick us-east or eu-west\n'
+    printf 'needs-decision [key=k3]: pick a database\n'
   } > "$status"
   FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>"$dir/fold.err" \
     || fail "the OPEN DECISIONS fold drain failed"
-
-  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
-    'resolved [key=k1]: answered: REST' \
-    || fail "the first folded answer was not self-announced (rc=$?)"
   run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
-    || fail "the first folded answer was left to re-wake this home"
+    && fail "a fold alone marked unclassified worker decisions as seen"
 
+  rc=0
   run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
-    'resolved [key=k2]: answered: eu-west' \
-    || fail "the second folded answer was not self-announced (rc=$?)"
+    'resolved [key=k1]: answered: REST' || rc=$?
+  [ "$rc" -eq 1 ] || fail "the first answer over unclassified decisions did not fail toward waking (rc=$rc)"
+  rc=0
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k2]: answered: eu-west' || rc=$?
+  [ "$rc" -eq 1 ] || fail "the second answer over unclassified decisions did not fail toward waking (rc=$rc)"
   run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
-    || fail "the second folded answer was left to re-wake this home"
+    && fail "unclassified worker decisions were hidden behind this home's answers"
+
+  events=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; status_span_first_actionable "$2" 0' _ "$ROOT/bin/fm-classify-lib.sh" "$status") \
+    || fail "the unanswered folded decision was not classified as actionable"
+  [ "$events" = 'needs-decision [key=k3]: pick a database' ] \
+    || fail "the span classification reported more than the unanswered decision: $events"
+
+  run_wake_lib fm_wake_status_mark_current "$state" "$status" \
+    || fail "could not record the watcher classifying the decisions"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    || fail "the owned answers were left to re-wake this home"
 
   printf 'blocked [key=creds]: need staging credentials\n' >> "$status"
   run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
     && fail "a later worker line after two owned answers was swallowed"
 
-  pass "separate self-announced answers after a fold stay owned; a later worker line still wakes"
+  pass "separate self-announced answers after a fold stay owned; worker decisions and later lines still wake"
 }
 
 test_folded_worker_resolved_is_not_owned_lag() {
@@ -1702,7 +1715,7 @@ test_folded_worker_resolved_is_not_owned_lag() {
 }
 
 test_owned_appends_are_not_replayed_as_unread() {
-  local dir state status out
+  local dir state status out rc
   dir=$(make_case owned-unread)
   state="$dir/state"
   status="$state/t.status"
@@ -1719,12 +1732,14 @@ test_owned_appends_are_not_replayed_as_unread() {
   } > "$status"
   FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>"$dir/fold.err" \
     || fail "the OPEN DECISIONS fold drain failed"
+  rc=0
   run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
-    'resolved [key=k1]: answered: first' \
-    || fail "the first owned close failed"
+    'resolved [key=k1]: answered: first' || rc=$?
+  [ "$rc" -le 1 ] || fail "the first owned close was not appended (rc=$rc)"
+  rc=0
   run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
-    'resolved [key=k2]: answered: second' \
-    || fail "the second owned close failed"
+    'resolved [key=k2]: answered: second' || rc=$?
+  [ "$rc" -le 1 ] || fail "the second owned close was not appended (rc=$rc)"
   printf 'blocked: need staging credentials\n' >> "$status"
   append_wake "$state" signal t.status "signal: $status" \
     || fail "could not queue the later worker signal"
