@@ -4300,11 +4300,15 @@ preserve_relaunch_meta() {
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-  if [ "$RELAUNCH" -eq 1 ]; then
-    preserve_relaunch_meta
-  fi
+  # control_relaunch_tx is written before the preserved tail, never after it:
+  # an armed PR poll requires pr=/pr_head= to stay the last meta lines
+  # (bin/fm-pr-lib.sh's fm_pr_metadata_identity_parse rejects any other line
+  # after pr=), and preserve_relaunch_meta carries that tail forward.
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
+  fi
+  if [ "$RELAUNCH" -eq 1 ]; then
+    preserve_relaunch_meta
   fi
 } >"$SPAWN_META_PATH" || {
   echo "error: task record for $ID could not be prepared at $SPAWN_META_PATH" >&2
@@ -4499,9 +4503,22 @@ spawn_record_traceparent() {
     acquired=1
   fi
   SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
+  # Insert the carrier before the first pr= line, never after it: the meta
+  # tail contract (bin/fm-pr-lib.sh's fm_pr_metadata_identity_parse) rejects
+  # any line after pr= that is not pr_head= or an x_* link field, and a
+  # relaunch-published record must keep its armed PR poll valid.
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] ||
-    ! awk -F= '$1 != "traceparent"' "$meta" >"$SPAWN_META_TMP" ||
-    ! printf 'traceparent=%s\n' "$SPAWN_TRACEPARENT" >>"$SPAWN_META_TMP" ||
+    ! awk -F= -v tp="$SPAWN_TRACEPARENT" '
+      $1 == "traceparent" { next }
+      $1 == "pr" && !placed {
+        printf "traceparent=%s\n", tp
+        placed = 1
+      }
+      { print }
+      END {
+        if (!placed) printf "traceparent=%s\n", tp
+      }
+    ' "$meta" >"$SPAWN_META_TMP" ||
     ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; then
     status=1
     rm -f "$SPAWN_META_TMP" 2>/dev/null || true
