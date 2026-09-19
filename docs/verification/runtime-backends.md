@@ -131,6 +131,32 @@ zsh
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
+### Pi one-run project-resource approval
+
+On 2026-09-19, the installed Pi 0.85.1 advertised the scoped `--approve` flag as `Trust project-local files for this run`.
+
+```sh
+pi --version
+pi --help | grep -- '--approve'
+bash tests/fm-spawn-dispatch-profile.test.sh
+bash tests/fm-control-relaunch.test.sh
+```
+
+Observed bounded output:
+
+```text
+0.85.1
+  --approve, -a                  Trust project-local files for this run
+ok - Pi-family launches refuse rather than reporting success at a possible folder-trust prompt
+ok - Pi and pi-signed scouts retain external extensions and scoped one-run approval
+ok - pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics
+ok - fm-control relaunch: Pi retains scoped one-run project approval
+```
+
+`bin/fm-spawn.sh` requires the resolved Pi-family executable to advertise `--approve` before it creates an endpoint, then passes that flag on every canonical Pi and pi-signed launch.
+The deterministic launch regression covers ordinary workers, scouts, secondmates, relaunches, the shared external-extension shape, and a missing-flag refusal before launch.
+The flag is per invocation, so it does not alter the operator's global project-trust default.
+
 ### Agent liveness name sources
 
 The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.
