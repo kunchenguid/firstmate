@@ -28,7 +28,7 @@
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#        fm-spawn.sh <task-id> --relaunch [--preflight] [--harness <name>] [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
 #   the launch half of the control plane (bin/fm-control.sh relaunch), which
@@ -45,6 +45,15 @@
 #   the new incarnation. The replacement still never starts outside the copy
 #   holding the work: a Herdr shell that has drifted out of the recorded
 #   worktree is told once to return, and only a shell that will not go refuses.
+#   --preflight (with --relaunch only) runs every refusal the launch can raise
+#   while the previous agent is still running - the task record and endpoint
+#   identity, the harness and its launch command, the instructions, the
+#   worktree's isolation, and the backlog item's dispatchability - then prints
+#   `relaunch-preflight <id> ok` and exits without stopping, sending, writing,
+#   or publishing anything. It accepts a positively alive or agent-free
+#   endpoint. bin/fm-control.sh runs it before the irreversible stop, so a
+#   refused replacement leaves the running agent exactly as it was; only the
+#   endpoint-shell location check, which needs the agent gone, stays post-stop.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
@@ -535,6 +544,7 @@ MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
+PREFLIGHT=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -592,6 +602,7 @@ for a in "$@"; do
     KIND_SET=1
     ;;
   --relaunch) RELAUNCH=1 ;;
+  --preflight) PREFLIGHT=1 ;;
   --harness) want_value=harness ;;
   --harness=*)
     HARNESS_ARG=${a#--harness=}
@@ -687,6 +698,10 @@ esac
 # so every axis this block resolves for a fresh spawn instead comes from that
 # task's own durable record below. Contradicting it on the command line is a
 # refusal rather than a silently-ignored flag.
+if [ "$PREFLIGHT" -eq 1 ] && [ "$RELAUNCH" -ne 1 ]; then
+  echo "error: --preflight applies to --relaunch only" >&2
+  exit 1
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "$BACKEND_SET" -eq 0 ] || {
     echo "error: --relaunch reuses the task's recorded backend; --backend cannot override it" >&2
@@ -1546,7 +1561,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_STATE=$(fm_backend_agent_state "$BACKEND" "$RELAUNCH_TARGET")
-  [ "$RELAUNCH_STATE" = dead ] || {
+  # A preflight runs while the agent it will replace is still running, so it
+  # accepts that agent; any state other than positively alive or dead is still
+  # an endpoint no replacement can be proven safe in.
+  [ "$RELAUNCH_STATE" = dead ] || { [ "$PREFLIGHT" -eq 1 ] && [ "$RELAUNCH_STATE" = alive ]; } || {
     echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
     exit 1
   }
@@ -2344,7 +2362,7 @@ case "$LAUNCH" in
     echo "error: refusing Kimi spawn because backend '$BACKEND' has no verified viewport-bounded capture; Kimi 2.0.0 gates a fresh worktree on a trust dialog that can only be answered and confirmed cleared from a scrollback-free read of the live pane" >&2
     exit 1
   }
-  if [ "$KIND" != secondmate ]; then
+  if [ "$KIND" != secondmate ] && [ "$PREFLIGHT" -eq 0 ]; then
     "$FM_ROOT/bin/fm-kimi-turnend-hook.sh" install || {
       echo "error: refusing Kimi spawn because the global turn-end hook could not be installed safely" >&2
       exit 1
@@ -2549,7 +2567,7 @@ if [ "$KIND" = secondmate ]; then
   # already synced the home to ITS primary commit, and $FM_ROOT here is only that
   # host's own Firstmate copy; syncing again would target the wrong checkout, so
   # the caller turns this step off (bin/fm-remote-secondmate-control.sh).
-  if [ "${FM_SKIP_SECONDMATE_SYNC:-0}" = 1 ]; then
+  if [ "${FM_SKIP_SECONDMATE_SYNC:-0}" = 1 ] || [ "$PREFLIGHT" -eq 1 ]; then
     :
   elif sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
     sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes "$ID" "$STATE" 2>&1 || true)
@@ -2564,11 +2582,11 @@ if [ "$KIND" = secondmate ]; then
   else
     echo "warning: secondmate $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
   fi
-  mkdir -p "$PROJ_ABS/state" || {
+  [ "$PREFLIGHT" -eq 1 ] || mkdir -p "$PROJ_ABS/state" || {
     echo "error: could not create secondmate state directory for $PROJ_ABS" >&2
     exit 1
   }
-  if [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
+  if [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ] && [ "$PREFLIGHT" -eq 0 ]; then
     CONFIG_INHERIT_LOCK=$(fm_config_inherit_lock_path "$PROJ_ABS") || {
       echo "error: could not resolve secondmate inheritance lock for $PROJ_ABS" >&2
       exit 1
@@ -2651,7 +2669,11 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     echo "error: could not render current launch contract for $SOURCE_BRIEF" >&2
     exit 1
   }
-  if ! mv "$BRIEF_TMP" "$BRIEF"; then
+  if [ "$PREFLIGHT" -eq 1 ]; then
+    # Proven renderable; the real relaunch publishes it after the stop.
+    rm -f -- "$BRIEF_TMP"
+    BRIEF=$SOURCE_BRIEF
+  elif ! mv "$BRIEF_TMP" "$BRIEF"; then
     rm -f -- "$BRIEF_TMP"
     echo "error: could not publish current launch contract for $SOURCE_BRIEF" >&2
     exit 1
@@ -3029,6 +3051,16 @@ fi
 if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
   echo "error: task $ID has a pending authoritative backlog close at $STATE/$ID.backlog-close; finish or repair that close before dispatching a new worker" >&2
   exit 1
+fi
+if [ "$PREFLIGHT" -eq 1 ]; then
+  # Everything past this point either needs the previous agent gone (the
+  # endpoint shell's location) or changes the task, so the preflight ends here.
+  if [ "$KIND" != secondmate ]; then
+    WT=$RELAUNCH_WT
+    validate_spawn_worktree "relaunch" "$RELAUNCH_TARGET"
+  fi
+  echo "relaunch-preflight $ID ok harness=$HARNESS kind=$KIND backend=$BACKEND endpoint=$RELAUNCH_TARGET"
+  exit 0
 fi
 
 W="fm-$ID"
