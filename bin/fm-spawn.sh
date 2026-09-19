@@ -1749,8 +1749,8 @@ resolve_pi_executable() {
 }
 
 # Pi's CLI surface is version-dependent, so probe the resolved executable's help
-# before composing the optional regular-TUI flag. An absent or inconclusive probe
-# omits the flag so older Pi versions can still spawn.
+# before composing the optional regular-TUI flag. See the header's launch
+# compatibility contract for the separate required capability.
 pi_supports_tui_mode() {
   local executable=$1 help
   help=$("$executable" --help 2>&1) || return 1
