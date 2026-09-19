@@ -364,14 +364,14 @@ Per rule, `when` and `use` are required; the top-level `rules` array itself may 
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
 Profile `model` and `effort` fields and rule `why` are optional.
-Rule `approval` and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) applies in code; without that opt-in they are inert.
-`approval` accepts only `captain` and means a matching rule never dispatches from the tool's answer alone.
-Rule and profile floors use quota-axi percentages and unavailable floor evidence escalates rather than selecting around uncertainty.
+Rule `approval` and `floor`, and profile `provider` and `floor` are optional declarations available to [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) and the normal dispatch intake; without the opt-in matcher, they do not alter rule matching.
+`approval` accepts only `captain` and means a matching rule requires the captain's explicit approval before dispatch.
+Rule and profile floors use quota-axi percentages; the matcher reports the rule and leaves floor and provider evaluation to the normal quota-aware intake rather than treating declarations as proof.
 An omitted model or effort means the selected harness uses its own default for that axis.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.
 If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
-See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`; its Pi default declares the provider required for typed resolution.
+See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
 Malformed JSON, an empty or malformed rule/default array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
@@ -382,11 +382,12 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 
 `bin/fm-dispatch-resolve.sh` optionally uses TypeSafe AI's Jev System One endpoint to select among the written dispatch rules for a brief.
 It is off unless `TYPESAFE_API_KEY` is present in the process environment or the effective home's `.env`; off preserves the existing deterministic intake and performs no network or quota request.
-When enabled, the tool sends only the project and brief plus the rule `when` choices, then applies confidence, captain approval, declared quota floors, provider evidence, and quota-aware `spendPriority` ranking locally.
-It returns an inspectable `clear`, `ambiguous`, `escalate`, or `error` block; every non-configuration outcome exits zero and leaves firstmate's existing routing available.
+When enabled, the tool sends only the project and brief plus the rule `when` choices, then applies its confidence floor and mandatory captain approval locally.
+It returns an inspectable `ambiguous`, `escalate`, or `error` block with the matched rule and probabilities; every non-configuration outcome exits zero and returns to firstmate's existing routing.
+It never authorizes a profile or calls quota-axi because it cannot prove the fork's catalog/provider relationship, authentication, reasoning-class fit, or full quota gates; the normal dispatch and `quota-array-dispatch` intake owns those checks.
 Only written rules are selectable, and malformed configuration exits two before any request.
 The API key is kept out of argv, logs, and child environments, and the request timeout is bounded.
-Firstmate invokes the resolver directly after writing the brief and passes a `clear` profile to `fm-spawn` only when it has no reason to override.
+Firstmate invokes the resolver directly after writing the brief as the first rule-match resource, then retains override authority and resolves the matched rule through the normal intake.
 
 ```sh
 bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name>
