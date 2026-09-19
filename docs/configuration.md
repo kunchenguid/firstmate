@@ -512,6 +512,11 @@ The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captai
 By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates.
 Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
 
+The primary's `TYPESAFE_API_KEY=` line is secret-class inherited material, and `bin/fm-config-inherit-lib.sh` owns the declared key set and the write.
+Every local secondmate convergence point (secondmate launch, the locked bootstrap sweep, and `bin/fm-config-push.sh`) carries that one line verbatim into the secondmate home's `.env` at mode 600, replaces or removes it when the primary's line changes or disappears, and leaves every other `.env` line, including the per-home Relay and mail credentials, untouched.
+The propagation report names the key as `.env:TYPESAFE_API_KEY` with the ordinary pushed, unchanged, skipped, or error status and never carries the value, and the config-reread instruction never inlines it.
+The resolver reads `.env` fresh on every call, so a converged secondmate needs no re-read.
+A remote secondmate home never receives the key: the remote route reports it as skipped, and that home's `.env` stays hand-managed.
 The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
 The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
 The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.

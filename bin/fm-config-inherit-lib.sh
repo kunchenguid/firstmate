@@ -22,7 +22,11 @@
 # secondmate's own claude crewmates launch on the same permission posture.
 # It also pushes
 # the one primary-authoritative shared captain-preference file,
-# data/captain-shared.md, into each secondmate home's data/ as a read-only copy.
+# data/captain-shared.md, into each secondmate home's data/ as a read-only copy,
+# and converges the declared secret-class .env keys (FM_INHERITABLE_ENV_KEYS,
+# today only the typed-dispatch TYPESAFE_API_KEY) line-by-line into each local
+# secondmate home's .env at mode 600, so a primary that opts into typed
+# dispatch does not leave every secondmate dispatching the old way.
 #
 # Usage: . bin/fm-config-inherit-lib.sh   (no FM_* setup required)
 #
@@ -54,6 +58,15 @@
 # reconciled by the ordinary remote sync/update path before the transfer
 # succeeds; there is no separate allowlist version negotiation.
 #
+# Secret-class .env keys are deliberately NOT in that remote allowlist: the
+# remote receiver replaces whole files under config/ and data/ from a staged
+# stdin payload, and a home's .env also holds per-home secrets (the Relay
+# pairing token, mail-plane credentials) that must never converge. The remote
+# sender reports the key as skipped instead, and a remote home's key stays
+# hand-managed in that home's .env.
+#
+# shellcheck source=bin/fm-env-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-env-lib.sh"
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-startup-memory-budget-lib.sh"
 
@@ -67,6 +80,22 @@ FM_SHARED_CAPTAIN_MODE="444"
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
 FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context launch-env-allowlist claude-permission-mode}"
+
+# Secret-class inheritance: the declared .env keys (space-separated) whose
+# primary assignment line converges verbatim into each local secondmate home's
+# .env. Only these keys move; every other .env line in the destination is left
+# alone because FMX_PAIRING_TOKEN and the mail-plane credentials are per-home
+# by design. Values never reach the propagation report, stderr, or the
+# config-reread instruction, which inlines FM_INHERITABLE_CONFIG items only.
+FM_INHERITABLE_ENV_KEYS="${FM_INHERITABLE_ENV_KEYS:-TYPESAFE_API_KEY}"
+FM_INHERITABLE_ENV_FILE=".env"
+FM_INHERITABLE_ENV_MODE="600"
+
+# Report item name for one inherited .env key: the file plus the key, so it can
+# never collide with a config item name or be mistaken for a whole-file copy.
+fm_inherit_env_item() {  # <key>
+  printf '%s:%s' "$FM_INHERITABLE_ENV_FILE" "$1"
+}
 
 # Items whose value is a home-SESSION enablement decision rather than durable
 # local configuration. They are inherited at the launch convergence point, where
@@ -448,6 +477,148 @@ propagate_secondmate_inheritance() {
   rc=0
   propagate_inheritable_config "$src_config" "$dest_home/config" || rc=1
   propagate_shared_captain_preferences "$src_data" "$dest_home/data" || rc=1
+  propagate_inheritable_env "$src_home" "$dest_home" || rc=1
+  return "$rc"
+}
+
+inheritable_env_file_safe_existing() {
+  local path=$1
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  [ "$(fm_inherit_file_link_count "$path")" = 1 ]
+}
+
+# True when <dest-home>/.env may be written: either the home is not a git
+# worktree, or git ignores .env there, so inheritance never dirties tracked files.
+inheritable_env_destination_allowed() {  # <dest-home>
+  local dest_home=$1 dest_home_abs top dest_path rel_path
+  dest_home_abs=$(cd "$dest_home" 2>/dev/null && pwd -P) || return 1
+  if ! git -C "$dest_home_abs" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    return 0
+  fi
+  top=$(git -C "$dest_home_abs" rev-parse --show-toplevel 2>/dev/null) || return 1
+  dest_path="$dest_home_abs/$FM_INHERITABLE_ENV_FILE"
+  case "$dest_path" in
+    "$top"/*) rel_path=${dest_path#"$top"/} ;;
+    *) return 1 ;;
+  esac
+  git -C "$top" check-ignore -q -- "$rel_path" 2>/dev/null
+}
+
+# inheritable_env_render <dest-env> <key> <line>
+# Print <dest-env> with <key>'s assignment lines replaced by <line> in place
+# (first occurrence keeps its position, later duplicates drop) or appended when
+# the key is absent; an empty <line> removes every assignment of the key.
+# Idempotent by construction: rendering a converged file reproduces its bytes.
+inheritable_env_render() {
+  local dest=$1 key=$2 line=$3 source
+  if [ -f "$dest" ]; then source=$dest; else source=/dev/null; fi
+  FM_INHERIT_ENV_LINE="$line" awk -v key="$key" '
+    BEGIN { re = "^[[:space:]]*(export[[:space:]]+)?" key "="; repl = ENVIRON["FM_INHERIT_ENV_LINE"]; done = 0 }
+    $0 ~ re { if (!done && repl != "") { print repl; done = 1 }; next }
+    { print }
+    END { if (!done && repl != "") print repl }
+  ' "$source"
+}
+
+# propagate_inheritable_env <src-home> <dest-home>
+# Converge each FM_INHERITABLE_ENV_KEYS key from the primary's .env into the
+# secondmate home's .env: the primary's last assignment line is carried
+# verbatim, and a key the primary does not set is removed downstream
+# (primary-authoritative). The destination is rewritten atomically at mode 600
+# only when its bytes would change, so a converged home never churns; a
+# byte-identical destination still has mode 600 restored, since the file holds
+# secret material. Every other destination line is preserved. Reports one line
+# per key through FM_CONFIG_INHERIT_REPORT with the same
+# pushed/unchanged/skipped/error vocabulary as config items; no report,
+# diagnostic, or error ever carries a value. Returns non-zero only on a real
+# copy or inspection error.
+propagate_inheritable_env() {
+  local src_home=$1 dest_home=$2 src dest key item line tmp reason rc
+  [ -n "$src_home" ] || return 1
+  [ -n "$dest_home" ] || return 1
+  src="$src_home/$FM_INHERITABLE_ENV_FILE"
+  dest="$dest_home/$FM_INHERITABLE_ENV_FILE"
+  rc=0
+  for key in $FM_INHERITABLE_ENV_KEYS; do
+    case "$key" in
+      ''|*[!A-Za-z0-9_]*) return 1 ;;
+    esac
+    item=$(fm_inherit_env_item "$key")
+    if { [ -e "$src" ] || [ -L "$src" ]; } && ! inheritable_env_file_safe_existing "$src"; then
+      reason="primary $FM_INHERITABLE_ENV_FILE is not a regular file"
+      warn_inheritable_config_error "$item" "$src" "$reason"
+      record_inheritable_config_result "$item" error "$reason"
+      rc=1
+      continue
+    fi
+    if [ -f "$src" ] && [ ! -r "$src" ]; then
+      reason="cannot inspect primary $FM_INHERITABLE_ENV_FILE"
+      warn_inheritable_config_error "$item" "$src" "$reason"
+      record_inheritable_config_result "$item" error "$reason"
+      rc=1
+      continue
+    fi
+    if { [ -e "$dest" ] || [ -L "$dest" ]; } && ! inheritable_env_file_safe_existing "$dest"; then
+      reason="unsafe destination"
+      warn_inheritable_config_error "$item" "$dest" "$reason"
+      record_inheritable_config_result "$item" error "$reason"
+      rc=1
+      continue
+    fi
+    line=$(fmx_env_line "$key" "$src")
+    if [ -z "$line" ] && [ -z "$(fmx_env_line "$key" "$dest")" ]; then
+      record_inheritable_config_result "$item" unchanged ""
+      continue
+    fi
+    if ! inheritable_env_destination_allowed "$dest_home"; then
+      reason=$(inheritable_config_skip_reason)
+      warn_inheritable_config_skip "$item" "$dest_home" "$reason"
+      record_inheritable_config_result "$item" skipped "$reason"
+      continue
+    fi
+    tmp=$(umask 077; mktemp "$dest_home/.fm-inherit-env.XXXXXX" 2>/dev/null) || {
+      reason="failed to stage"
+      warn_inheritable_config_error "$item" "$dest" "$reason"
+      record_inheritable_config_result "$item" error "$reason"
+      rc=1
+      continue
+    }
+    if ! inheritable_env_render "$dest" "$key" "$line" > "$tmp"; then
+      rm -f "$tmp" 2>/dev/null || true
+      reason="failed to render"
+      warn_inheritable_config_error "$item" "$dest" "$reason"
+      record_inheritable_config_result "$item" error "$reason"
+      rc=1
+      continue
+    fi
+    if [ -f "$dest" ] && cmp -s "$tmp" "$dest"; then
+      rm -f "$tmp" 2>/dev/null || true
+      if [ "$(fm_inherit_file_mode "$dest")" = "$FM_INHERITABLE_ENV_MODE" ]; then
+        record_inheritable_config_result "$item" unchanged ""
+      elif chmod "$FM_INHERITABLE_ENV_MODE" "$dest" 2>/dev/null; then
+        record_inheritable_config_result "$item" unchanged "restored mode $FM_INHERITABLE_ENV_MODE"
+      else
+        reason="failed to restore mode $FM_INHERITABLE_ENV_MODE"
+        warn_inheritable_config_error "$item" "$dest" "$reason"
+        record_inheritable_config_result "$item" error "$reason"
+        rc=1
+      fi
+      continue
+    fi
+    if chmod "$FM_INHERITABLE_ENV_MODE" "$tmp" 2>/dev/null && mv -f "$tmp" "$dest" 2>/dev/null; then
+      if [ -n "$line" ]; then
+        record_inheritable_config_result "$item" pushed ""
+      else
+        record_inheritable_config_result "$item" pushed "mirrored primary absence"
+      fi
+    else
+      rm -f "$tmp" 2>/dev/null || true
+      reason="failed to copy"
+      warn_inheritable_config_error "$item" "$dest" "$reason"
+      record_inheritable_config_result "$item" error "$reason"
+      rc=1
+    fi
+  done
   return "$rc"
 }
 
