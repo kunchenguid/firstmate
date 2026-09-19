@@ -1197,7 +1197,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   age=$(( now - mtime ))
   last=$(last_status_line "$statusf")
   min_age=$PAUSE_RESURFACE_SECS
-  declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
+  declaration=$(stale_wait_declaration "$task")
   if status_is_captain_held "$last"; then
     if afk_record_present; then
       triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $win"
@@ -1270,7 +1270,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
       key=$(window_key "$win")
       rm -f "$since_file" "$escalation_file"
       clear_write_tracking "$key"
-      declared="declared:$(fm_wake_signal_sig "$statusf" || true)"
+      declared=$(stale_wait_declaration "$task")
       if captain_held_silenced "$(last_status_line "$statusf")"; then
         printf '%s' "$declared" > "$STATE/.stale-$key"
         triage_log "absorbed busy over-age pane (captain-held, never rechecked while the away-posture record exists): $win"
@@ -1375,12 +1375,15 @@ pause_state_class() {  # <window> <task>
 
 # The two records of one ordinary crew wait, and why its stale alarm reads both.
 #
-# status_is_paused_or_captain_held reads the status LINE a worker wrote, which is
+# status_is_paused_or_captain_held reads the status log's last LINE, which is
 # the only record when the worker itself is waiting. It is not the only record
-# there is: once firstmate hands work to the captain, the wait is written into the
-# BACKLOG by bin/fm-captain-hold.sh, and the worker's last line stays whatever it
-# was - routinely `done: PR ...` after a delivery, which no line predicate can
-# read as a wait. An alarm bounded only by the line therefore re-fires for the
+# there is: once firstmate hands work to the captain, bin/fm-captain-hold.sh
+# writes the wait into the BACKLOG and mirrors it onto a lane's log as a
+# `captain-held` line, but that line stops being the last one as soon as the
+# worker writes anything newer, and a hold recorded before the mirror existed
+# never reached the log at all. Either way the last line is whatever the worker
+# wrote - routinely `done: PR ...` after a delivery, which no line predicate can
+# read as a wait. An alarm bounded only by the line would then re-fire for the
 # captain's whole thinking time, on exactly the work they already have in hand.
 #
 # `open` is that record's own read-only predicate and owns its semantics: exit 0
@@ -1408,12 +1411,13 @@ task_captain_call_open() {  # <task>
   return 0
 }
 
-# The identity a re-surface throttle is bound to: the task's whole status-log
-# signature. Any new status event - a replacement wait, a fresh delivery, a
-# blocker - changes it and so starts its own window instead of inheriting the
-# silence of the one before it.
+# The identity a re-surface throttle is bound to: the task's status-log
+# signature as its worker left it (status_worker_signature). Any new worker
+# event - a replacement wait, a fresh delivery, a blocker - changes it and so
+# starts its own window instead of inheriting the silence of the one before it,
+# while the hold-command lines firstmate records itself do not.
 stale_wait_declaration() {  # <task>
-  printf 'declared:%s' "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
+  printf 'declared:%s' "$(status_worker_signature "$STATE/$1.status" || true)"
 }
 
 # The same scope for a captain call, carrying the CALL's own lifecycle identity
@@ -1425,7 +1429,7 @@ stale_wait_declaration() {  # <task>
 # waiting on the captain that is never surfaced is invisible, where a delivery
 # announced twice is merely noise.
 captain_call_declaration() {  # <task> <call-identity>
-  printf 'captain-hold:%s:%s' "$2" "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
+  printf 'captain-hold:%s:%s' "$2" "$(status_worker_signature "$STATE/$1.status" || true)"
 }
 
 # 0 when <declaration> has already been alarmed for this window inside the
@@ -2485,7 +2489,11 @@ EOF
     key=$(window_key "$w")
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
-      clear_pause_tracking "$key"
+      if status_hold_settled "$STATE/$task.status"; then
+        clear_pause_state "$key"
+      else
+        clear_pause_tracking "$key"
+      fi
     fi
     # An idle secondmate endpoint is healthy by design, so a mate is admitted to
     # the pane-stale path ONLY to serve a status-declared wait's bounded

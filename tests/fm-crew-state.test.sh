@@ -772,6 +772,14 @@ test_socket_refusal_override_expires_when_the_crew_moves_on() {
   assert_contains "$out" "source: status-log" "the override remains status-log evidence"
   assert_contains "$out" "daemon socket down despite attributed run record" "the override names its reason"
 
+  # A captain hold's standing mirror line is firstmate's, not a later crew
+  # event, so the socket-down evidence still stands while the lane is held.
+  printf 'captain-held [key=captain-hold-feat-ds-1]: operator review\n' >> "$d/state/feat-ds.status"
+  out=$(run_crew_state "$d" feat-ds)
+  assert_contains "$out" "state: blocked" "a standing hold mirror hid the socket-down blocker"
+  assert_contains "$out" "daemon socket down despite attributed run record" \
+    "a standing hold mirror retired the socket-down evidence"
+
   printf 'working: reattached and continuing\n' >> "$d/state/feat-ds.status"
   out=$(run_crew_state "$d" feat-ds)
   assert_contains "$out" "state: working" "a later working event hands the reading back to the live run"
@@ -2091,6 +2099,30 @@ test_single_owner_terminal_declaration_supersedes_stale_decision() {
     done
   done
   pass "ship and scout terminal declarations supersede stale decisions"
+}
+
+# fm-captain-hold.sh mirrors a hold and its release onto the held lane's own log
+# under its captain-hold key. Those lines are the hold command's, not the
+# worker's, so a delivered scout keeps reading as done while held and after
+# release.
+test_hold_mirror_keeps_the_worker_terminal_state() {
+  reset_fakes
+  local d out
+  d=$(new_case hold-mirror-terminal)
+  mkdir -p "$d/wt"
+  make_fakebin "$d" >/dev/null
+  arm_idle_record "$d/state" task
+  fm_write_meta "$d/state/task.meta" "window=fm:fm-task" "worktree=$d/wt" "kind=scout" "harness=claude"
+  printf 'done: report ready\ncaptain-held [key=captain-hold-task-1]: captain review pending\n' \
+    > "$d/state/task.status"
+  out=$(run_crew_state "$d" task)
+  assert_contains "$out" "state: done" "a held scout still reads its own terminal declaration"
+  assert_contains "$out" "report ready" "the worker's declaration supplies the detail while held"
+  printf 'resolved [key=captain-hold-task-1]: captain call released by fm-captain-hold\n' \
+    >> "$d/state/task.status"
+  out=$(run_crew_state "$d" task)
+  assert_contains "$out" "state: done" "a released scout still reads its own terminal declaration"
+  pass "the hold mirror never displaces a worker's terminal state"
 }
 
 test_latest_status_preserves_legacy_completions() {
@@ -3543,6 +3575,7 @@ test_genuine_daemon_down_reports_blocked
 test_secondmate_open_block_survives_unrelated_append
 test_newest_open_decision_supplies_the_reported_detail
 test_single_owner_terminal_declaration_supersedes_stale_decision
+test_hold_mirror_keeps_the_worker_terminal_state
 test_latest_status_preserves_legacy_completions
 test_latest_status_subshell_work_does_not_grow_with_history
 test_genuine_parked_not_superseded

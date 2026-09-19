@@ -410,6 +410,39 @@ test_progress_after_inactive_delivery_starts_a_new_event() {
   pass "progress after an inactive fallback starts a distinct terminal event"
 }
 
+# fm-captain-hold.sh mirrors a hold and its release onto the held lane's own
+# log under its captain-hold key. Holding a delivered child for the captain and
+# releasing it leaves the worker's outcome unchanged, so neither the secondmate's
+# parent channel nor the main's presentation queue hears it a second time.
+test_hold_mirror_does_not_repeat_a_delivered_outcome() {
+  local hold release
+  hold='captain-held [key=captain-hold-child-1]: merge approval pending'
+  release='resolved [key=captain-hold-child-1]: captain call released by fm-captain-hold'
+
+  make_world mirror-mate; bind_secondmate local
+  write_child "$MATE" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE"
+  printf '%s\n' "$hold" >> "$MATE/state/child.status"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE"
+  printf '%s\n' "$release" >> "$MATE/state/child.status"
+  age "$MATE/state/child.status"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
+  [ "$(wc -l < "$MAIN/state/mate.status" | tr -d ' ')" = 1 ] \
+    || fail "a held and released child reached the parent twice: $(cat "$MAIN/state/mate.status")"
+  [ "$(outcome_count "$MATE" reported)" = 1 ] || fail "the hold mirror minted a second child receipt"
+
+  make_world mirror-main
+  write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  printf '%s\n%s\n' "$hold" "$release" >> "$MAIN/state/child.status"
+  age "$MAIN/state/child.status"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+    || fail "a held and released lane queued its outcome for presentation twice"
+  [ "$(outcome_count "$MAIN" pending)" = 1 ] || fail "the hold mirror minted a second presentation receipt"
+  pass "a captain hold and release never repeat a delivered child outcome"
+}
+
 # Receipt identity covers the complete terminal ledger line even when the
 # captain-facing rendering truncates two long notes to the same text.
 test_long_terminal_lines_have_distinct_receipts() {
@@ -904,6 +937,7 @@ test_pr_field_requires_recorded_pr_or_ready_signal_line
 test_terminal_line_during_state_read_yields_to_ledger_delivery
 test_terminal_line_after_inactive_delivery_is_not_reported_twice
 test_progress_after_inactive_delivery_starts_a_new_event
+test_hold_mirror_does_not_repeat_a_delivered_outcome
 test_long_terminal_lines_have_distinct_receipts
 test_secondmate_partial_ledger_line_waits_for_newline
 test_secondmate_remote_route_ledger_delivery

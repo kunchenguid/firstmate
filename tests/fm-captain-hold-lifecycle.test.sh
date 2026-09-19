@@ -954,6 +954,244 @@ EOF
   pass "release frees held work with the captain's words recorded and the body preserved"
 }
 
+# Watcher and away-mode classification read the status log's last event line,
+# never the backlog, so hold declares the hold there and every settlement path
+# retracts the declaration - attributed to the hold command through the
+# captain-hold key, self-announced so the recording turn does not re-wake, and
+# never dependent on a live worker. A held lane whose last line was `paused:`
+# leaves the declared-wait cadence, a stopped worker cannot make release
+# impossible, and a worker's unrelated open decision survives both sides.
+# Settlement also retracts a `complete` transfer left as a lane's last line
+# once every call it names is settled. A decision-only hold has no lane, so it
+# stays in the backlog alone.
+test_hold_and_release_reach_the_status_log() {
+  local home id lane last open diverged_out
+  home=$(make_home status-mirror)
+  id=sample-gated-work
+  tasks_in "$home" add "$id" "Ship the gated sample" --kind ship --repo sample >/dev/null \
+    || fail "could not create the gated work item"
+  write_origin_meta "$home" "$id" ship
+  cat > "$home/state/$id.status" <<'EOF'
+working: mid implementation
+needs-decision [key=api-shape]: which sample API shape
+paused: waiting on the sample upstream release
+EOF
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"
+    fm_wake_status_mark_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/$id.status" \
+    || fail "could not prime the announced status baseline"
+  run_captain "$home" hold "$id" --reason "operator review pending" >/dev/null \
+    || fail "could not hold the gated work item"
+  grep -Fx "captain-held [key=captain-hold-$id-1]: operator review pending" \
+    "$home/state/$id.status" >/dev/null \
+    || fail "hold did not declare the hold on the task's status log"
+  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
+  bash -c '. "$1"; status_is_captain_held "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$last" \
+    || fail "a held lane's last status line does not classify as captain-held: $last"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_signal_seen_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/$id.status" \
+    || fail "the hold declaration re-woke the home that recorded it"
+  run_captain "$home" hold "$id" --reason "operator review pending" >/dev/null \
+    || fail "idempotent hold retry failed"
+  [ "$(grep -c '^captain-held ' "$home/state/$id.status")" = 1 ] \
+    || fail "a repeated hold duplicated the status-log declaration"
+
+  # Release retracts the declaration with no worker alive to write anything,
+  # and the worker's unrelated open decision survives both sides.
+  printf 'Proceed as planned.\n' > "$home/go.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/go.txt" --release >/dev/null \
+    || fail "answer --release failed on the held work item"
+  grep -Fx "resolved [key=captain-hold-$id-1]: captain call released by fm-captain-hold" \
+    "$home/state/$id.status" >/dev/null \
+    || fail "release did not retract the status-log declaration"
+  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
+  [ "$last" = "paused: waiting on the sample upstream release" ] \
+    || fail "a settled mirror pair did not read through to the worker's own last event: $last"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_signal_seen_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/$id.status" \
+    || fail "the release retraction re-woke the home that recorded it"
+  open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
+  case "$open" in
+    api-shape$'\t'*) ;;
+    *) fail "hold or release disturbed the worker's own open decision: $open" ;;
+  esac
+
+  # A re-hold starts a new declaration, and a closing answer retracts it.
+  run_captain "$home" hold "$id" --reason "second operator review" >/dev/null \
+    || fail "could not re-hold the released work item"
+  grep -Fx "captain-held [key=captain-hold-$id-2]: second operator review" \
+    "$home/state/$id.status" >/dev/null \
+    || fail "re-hold did not declare a new lifecycle on the status log"
+  printf 'Ship it as reviewed.\n' > "$home/ship.txt"
+  run_captain "$home" answer "$id" --decision-file "$home/ship.txt" >/dev/null \
+    || fail "answer could not close the re-held work item"
+  grep -Fx "resolved [key=captain-hold-$id-2]: captain call answered by fm-captain-hold" \
+    "$home/state/$id.status" >/dev/null \
+    || fail "a closing answer did not retract the status-log declaration"
+  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
+  [ "$last" = "paused: waiting on the sample upstream release" ] \
+    || fail "a closing answer left the lane reading as the mirror instead of the worker: $last"
+  run_captain "$home" answer "$id" --decision-file "$home/ship.txt" >/dev/null \
+    || fail "identical answer retry was not idempotent"
+  [ "$(grep -c "resolved \[key=captain-hold-$id-2\]" "$home/state/$id.status")" = 1 ] \
+    || fail "a replayed settlement appended a second retraction"
+
+  # The skill's order - hold the work item the question gates, then run
+  # complete with it - leaves command_complete's captain-held transfer as the
+  # lane's last line. Settlement retracts it under its own key, with no worker
+  # alive, and both readers then read past the settled bookkeeping to the
+  # needs-decision the transfer answered; a replayed settlement appends
+  # nothing more.
+  lane=sample-transfer-lane
+  tasks_in "$home" add "$lane" "Guard the transfer sample" --kind scout --repo sample >/dev/null \
+    || fail "could not create the transfer lane"
+  write_origin_meta "$home" "$lane"
+  cat > "$home/state/$lane.status" <<'EOF'
+done: report complete
+needs-decision [key=route]: choose route north or route south
+EOF
+  run_captain "$home" hold "$lane" --reason "route choice pending" >/dev/null \
+    || fail "could not hold the transfer lane"
+  run_captain "$home" complete "$lane" "$lane" >/dev/null \
+    || fail "could not transfer the lane's decision to its captain-held task"
+  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status")
+  [ "$last" = "captain-held [key=route]: tracked by $lane" ] \
+    || fail "complete did not leave its transfer as the lane's last line: $last"
+  printf 'Take route north.\n' > "$home/transfer.txt"
+  run_captain "$home" answer "$lane" --decision-file "$home/transfer.txt" >/dev/null \
+    || fail "answer could not close the transfer lane"
+  run_captain "$home" answer "$lane" --decision-file "$home/transfer.txt" >/dev/null \
+    || fail "transfer answer retry was not idempotent"
+  [ "$(tail -n 1 "$home/state/$lane.status")" = "resolved [key=route]: captain call answered by fm-captain-hold" ] \
+    || fail "settlement did not retract the lane's captain-held transfer: $(tail -n 1 "$home/state/$lane.status")"
+  [ "$(grep -c '^resolved \[key=route\]' "$home/state/$lane.status")" = 1 ] \
+    || fail "a replayed settlement retracted the transfer twice"
+  for reader in last_status_line last_worker_status_line; do
+    last=$(bash -c '. "$1"; "$3" "$2"' _ \
+      "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status" "$reader")
+    [ "$last" = "needs-decision [key=route]: choose route north or route south" ] \
+      || fail "$reader did not read past the settled transfer to the answered decision: $last"
+  done
+
+  # A transfer naming several calls keeps the lane held until the last of them
+  # is settled.
+  lane=sample-inventory-lane
+  tasks_in "$home" add "$lane" "Scout the inventory sample" --kind scout --repo sample >/dev/null \
+    || fail "could not create the inventory lane"
+  write_origin_meta "$home" "$lane"
+  cat > "$home/state/$lane.status" <<'EOF'
+needs-decision [key=route]: choose route north or route south
+needs-decision [key=access]: choose open or restricted sample access
+EOF
+  run_captain "$home" hold sample-route-choice --title "Choose the sample route" \
+    --reason "route choice pending" >/dev/null || fail "could not hold the route call"
+  run_captain "$home" hold sample-access-choice --title "Choose the sample access" \
+    --reason "access choice pending" >/dev/null || fail "could not hold the access call"
+  run_captain "$home" complete "$lane" sample-route-choice sample-access-choice >/dev/null \
+    || fail "could not transfer the inventory lane's decisions"
+  run_captain "$home" answer sample-route-choice --decision-file "$home/transfer.txt" >/dev/null \
+    || fail "answer could not close the route call"
+  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status")
+  bash -c '. "$1"; status_is_captain_held "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$last" \
+    || fail "settling one call retracted a transfer that still names an open call: $last"
+  printf 'Keep sample access restricted.\n' > "$home/access.txt"
+  run_captain "$home" answer sample-access-choice --decision-file "$home/access.txt" >/dev/null \
+    || fail "answer could not close the access call"
+  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status")
+  [ "$last" = "needs-decision [key=access]: choose open or restricted sample access" ] \
+    || fail "settling the last named call did not read past the lane's transfers: $last"
+
+  # A lane held itself while its transfer to another call is its last line gets
+  # no mirror, so settling that other call must not strip the lane's own
+  # standing declaration; settling the lane's own call then retracts it.
+  lane=sample-gated-lane
+  tasks_in "$home" add "$lane" "Scout the gated sample" --kind scout --repo sample >/dev/null \
+    || fail "could not create the gated lane"
+  write_origin_meta "$home" "$lane"
+  printf 'needs-decision [key=scope]: choose the sample scope\n' > "$home/state/$lane.status"
+  run_captain "$home" hold sample-scope-choice --title "Choose the sample scope" \
+    --reason "scope choice pending" >/dev/null || fail "could not hold the scope call"
+  run_captain "$home" complete "$lane" sample-scope-choice >/dev/null \
+    || fail "could not transfer the gated lane's decision"
+  run_captain "$home" hold "$lane" --reason "lane gate pending" >/dev/null \
+    || fail "could not hold the gated lane"
+  [ "$(grep -c '^captain-held ' "$home/state/$lane.status")" = 1 ] \
+    || fail "a hold over a standing transfer duplicated its declaration"
+  run_captain "$home" answer sample-scope-choice --decision-file "$home/transfer.txt" >/dev/null \
+    || fail "answer could not close the scope call"
+  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status")
+  bash -c '. "$1"; status_is_captain_held "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$last" \
+    || fail "settling another call stripped the lane's own standing hold: $last"
+  run_captain "$home" answer "$lane" --decision-file "$home/transfer.txt" >/dev/null \
+    || fail "answer could not close the gated lane"
+  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status")
+  [ "$last" = "needs-decision [key=scope]: choose the sample scope" ] \
+    || fail "settling the lane's own call left its transfer standing: $last"
+
+  # A decision-only hold has no lane, so it mints no status log.
+  run_captain "$home" hold sample-plain-call \
+    --title "Pick a sample flavor" --reason "flavor choice pending" >/dev/null \
+    || fail "could not register the decision-only hold"
+  assert_absent "$home/state/sample-plain-call.status" \
+    "a decision-only hold created a status log with no lane to own it"
+
+  # A lane that has written no status line yet still gets the declaration,
+  # and creating its log does not re-wake the home that recorded the hold.
+  lane=sample-silent-lane
+  tasks_in "$home" add "$lane" "Ship the silent sample" --kind ship --repo sample >/dev/null \
+    || fail "could not create the silent lane"
+  write_origin_meta "$home" "$lane" ship
+  assert_absent "$home/state/$lane.status" "the silent lane already had a status log"
+  run_captain "$home" hold "$lane" --reason "operator review pending" >/dev/null \
+    || fail "could not hold the silent lane"
+  grep -Fx "captain-held [key=captain-hold-$lane-1]: operator review pending" \
+    "$home/state/$lane.status" >/dev/null \
+    || fail "hold did not declare the hold on a lane with no status log"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_signal_seen_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/$lane.status" \
+    || fail "the hold declaration that created the status log re-woke the home that recorded it"
+
+  # An evidence-backed reconcile close retracts a held lane's declaration.
+  lane=sample-reconciled-lane
+  tasks_in "$home" add "$lane" "Scout the reconciled sample" --kind scout --repo sample >/dev/null \
+    || fail "could not create the reconciled lane"
+  write_origin_meta "$home" "$lane"
+  printf 'paused: waiting on the sample upstream\n' > "$home/state/$lane.status"
+  run_captain "$home" hold "$lane" --reason "upstream choice pending" >/dev/null \
+    || fail "could not hold the reconciled lane"
+  request_reconciles "$home" sample-board "$lane" \
+    || fail "could not record the reconcile request"
+  printf 'The premise dissolved: the sample upstream already ships it.\n' > "$home/evidence.txt"
+  run_captain "$home" reconcile close "$lane" \
+    --evidence-file "$home/evidence.txt" >/dev/null \
+    || fail "reconcile close failed on the held lane"
+  grep -Fx "resolved [key=captain-hold-$lane-1]: captain call reconciled by fm-captain-hold" \
+    "$home/state/$lane.status" >/dev/null \
+    || fail "reconcile close did not retract the status-log declaration"
+
+  # The keyed retraction is the hold lifecycle's own namespace, so the
+  # divergence guard reads none of this as a captain call closed wrongly.
+  diverged_out=$(run_captain "$home" diverged) \
+    || fail "the divergence guard failed on a settled home"
+  [ -z "$diverged_out" ] \
+    || fail "the hold status mirror produced a false divergence signal: $diverged_out"
+  pass "hold and release mirror the hold on the status log the classifier reads"
+}
+
 # The hold-set stamp must be durable before the captain hold becomes visible.
 # A wrapper observes the real tasks-axi hold boundary, and a forced stamp-write
 # failure proves the command never publishes the hold without its timestamp.
@@ -4029,6 +4267,7 @@ test_retained_body_keeps_its_utf8_bytes
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work
+test_hold_and_release_reach_the_status_log
 test_hold_stamp_precedes_hold_visibility
 test_interrupted_answer_preserves_hold_age
 test_deferral_leaves_captains_call_until_due
