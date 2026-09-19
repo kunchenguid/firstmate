@@ -306,6 +306,9 @@ Idle secondmate panes are healthy; teardown is explicit and refuses while the se
 Secondmate homes converge conservatively to the primary's version and declared inherited local material at launch and during locked session start.
 The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the full guarded sync, propagation, nudge, and mid-session local-material push contract.
 
+A [restricted account-task route](account-task-route.md) is not a secondmate placement.
+It uses a fixed SSH forced command, an account-bound admission record, a receiver-owned replay ledger, task-only lifecycle verbs, and a sealed bounded result while deliberately exposing none of the remote secondmate command, provisioning, inheritance, repair, or return-channel surfaces.
+
 Secondmate agents can run on a different verified harness than crewmates.
 `config/secondmate-harness` controls the primary's secondmate launch harness and may also carry optional model and effort tokens as `<harness> [<model>] [<effort>]` on the first non-empty, non-comment line.
 A bare harness line remains harness-only, so existing `config/secondmate-harness` files keep their previous behavior.

@@ -131,6 +131,28 @@ zsh
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
+### Restricted exact-session reuse
+
+The account-task exact-session branch was verified on 2026-09-19 with tmux 3.7c on macOS 26.5.2 arm64.
+The real-backend test used a private tmux socket, created one qualified `smoke` session, exercised ordinary lazy creation of `firstmate`, then proved that the restricted marker reused only `smoke`, refused a missing session without creating it or falling back, and refused the shared `firstmate` name.
+
+```sh
+tmux -V
+bin/fm-test-run.sh tests/fm-backend-tmux-smoke.test.sh
+```
+
+Bounded observed output:
+
+```text
+tmux 3.7c
+ok - real tmux: restricted account tasks reuse only a prequalified non-shared exact session and never repair or fall back
+ok - real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
+```
+
+This is runtime-adapter evidence only.
+It does not claim that a live cross-account route, destination account, authentication source, or worker has been installed or qualified.
+
 ### Agent liveness name sources
 
 The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.

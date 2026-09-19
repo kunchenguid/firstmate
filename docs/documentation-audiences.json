@@ -25,6 +25,7 @@
   ],
   "readmeSetupTargets": [
     "docs/configuration.md",
+    "docs/account-task-route.md",
     "docs/wedge-alarm.md",
     "docs/tmux-backend.md",
     "docs/herdr-backend.md",
@@ -283,6 +284,10 @@
     {
       "path": "VISION.md",
       "audience": "public-product"
+    },
+    {
+      "path": "docs/account-task-route.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/agent-control.md",

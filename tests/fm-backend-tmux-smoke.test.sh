@@ -61,6 +61,28 @@ TARGET="$SESSION:$WINDOW"
 
 tmux new-session -d -s "$SESSION" -x 200 -y 50 \
   || fail "real tmux: new-session failed"
+
+# The ordinary path remains lazy and creates its historical detached session.
+ordinary=$(TMUX='' FM_ACCOUNT_TASK_SESSION='' fm_backend_tmux_container_ensure) \
+  || fail "real tmux: ordinary container ensure failed"
+[ "$ordinary" = firstmate ] || fail "ordinary container ensure returned '$ordinary' instead of firstmate"
+tmux has-session -t '=firstmate' || fail "ordinary container ensure did not create firstmate"
+
+# A restricted account task may adopt only its prequalified exact session.
+restricted=$(TMUX="$SOCKET,$$,0" FM_ACCOUNT_TASK_SESSION="$SESSION" fm_backend_tmux_container_ensure) \
+  || fail "real tmux: restricted container ensure refused its pinned session"
+[ "$restricted" = "$SESSION" ] || fail "restricted container ensure returned '$restricted'"
+if TMUX="$SOCKET,$$,0" FM_ACCOUNT_TASK_SESSION=missing-route fm_backend_tmux_container_ensure 2>/dev/null; then
+  fail "restricted container ensure created or fell back from a missing session"
+fi
+if tmux has-session -t '=missing-route' 2>/dev/null; then
+  fail "restricted container ensure created its missing session"
+fi
+if TMUX="$SOCKET,$$,0" FM_ACCOUNT_TASK_SESSION=firstmate fm_backend_tmux_container_ensure 2>/dev/null; then
+  fail "restricted container ensure accepted the shared firstmate session"
+fi
+pass "real tmux: restricted account tasks reuse only a prequalified non-shared exact session and never repair or fall back"
+
 fm_backend_tmux_create_task "$SESSION" "$WINDOW" "$HOME" \
   || fail "fm_backend_tmux_create_task failed to create the task window"
 tmux list-windows -t "$SESSION" -F '#{window_name}' | grep -qx "$WINDOW" \
