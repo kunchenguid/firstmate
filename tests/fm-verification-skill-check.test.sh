@@ -109,6 +109,15 @@ test_accepts_skill_without_helpers() {
   expect_code 0 "$code" "generated skill without helpers passes the shape check"
 }
 
+test_accepts_single_character_harness() {
+  local dir out code
+  dir="$TMP_ROOT/single-character-harness/verify-timetracker"
+  make_good_skill "$dir"
+  sed -i 's/^## Driving it with shell$/## Driving it with R/' "$dir/features/track-time.md"
+  out=$(run_check "$dir") && code=0 || code=$?
+  expect_code 0 "$code" "single-character harness name passes the shape check"
+}
+
 test_rejects_missing_sections() {
   local dir out
   dir="$TMP_ROOT/no-evidence/verify-timetracker"
@@ -292,6 +301,7 @@ test_rejects_missing_skill_file() {
 
 test_accepts_well_shaped_skill
 test_accepts_skill_without_helpers
+test_accepts_single_character_harness
 test_rejects_missing_sections
 test_rejects_unclosed_frontmatter
 test_rejects_missing_description

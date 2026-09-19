@@ -142,7 +142,7 @@ else
       has_content "$body" || fail "$filename is missing a non-empty '## $heading' section"
     done
     body=$(awk '
-      /^## Driving it with .+[^[:space:]][[:space:]]*$/ { insec = 1; next }
+      /^## Driving it with [^[:space:]](.*[^[:space:]])?[[:space:]]*$/ { insec = 1; next }
       /^## / { insec = 0 }
       insec { print }
     ' "$feature")
