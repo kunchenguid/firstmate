@@ -1409,6 +1409,11 @@ test_secondmate_checkpoint_refuses_unreadable_child_state() {
   expect_code 1 "$rc" "a non-readable child record should refuse"
   assert_contains "$out" "not a readable regular file" "the refusal should name the unreadable child record"
   [ "$(cat "$dir/fake/command")" = claude ] || fail "child record failure must not stop the secondmate"
+  pass "fm-control relaunch: unreadable child records fail checkpoint"
+  if [ "$(id -u)" = 0 ]; then
+    pass "fm-control relaunch: unlistable state check skipped as root (mode 000 does not restrict root)"
+    return 0
+  fi
   rmdir "$dir/smhome/state/bad.meta"
   printf 'window=x:c1\n' > "$dir/smhome/state/c1.meta"
   chmod 000 "$dir/smhome/state"
@@ -1418,7 +1423,7 @@ test_secondmate_checkpoint_refuses_unreadable_child_state() {
   assert_contains "$out" "no readable state directory" \
     "the refusal should name the unlistable home state directory"
   [ "$(cat "$dir/fake/command")" = claude ] || fail "unlistable child state must not stop the secondmate"
-  pass "fm-control relaunch: unreadable child records and unlistable state fail checkpoint"
+  pass "fm-control relaunch: unlistable state fails checkpoint"
 }
 
 test_secondmate_checkpoint_ignores_a_vanished_scratch_find_walk() {
