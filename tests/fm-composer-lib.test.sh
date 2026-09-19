@@ -783,6 +783,15 @@ test_matrix_opencode_leftbar_cwd_furniture() {
   assert_screen "opencode right-aligned non-path token stays typed on tmux" pending "$CAPS_TMUX" "$diverge" 1
   diverge=$'transcript line\n  ┃                                                                                                                     deck-07-\n  ┃  Build · gpt-oss-120b Internal OVHcloud                                                                          failure-modes'
   assert_screen "opencode bare branch fragment without a path start stays typed" pending "$CAPS_TMUX" "$diverge" 1
+  # The topmost fragment's OWN bytes must carry the "~/" prefix: a typed lone
+  # "~" directly above a rail whose top fragment starts with "/" (an
+  # outside-$HOME cwd) must not be absorbed into a "~/" assembled across the
+  # typed-row boundary, which would read a real composer empty.
+  diverge=$'transcript line\n  ┃  ~\n  ┃                                                            /Volumes/Data/worktree:fm/branch\n  ┃  Build · gpt-oss-120b Internal OVHcloud'
+  assert_screen "opencode typed lone tilde above outside-HOME rail stays typed on tmux" pending "$CAPS_TMUX" "$diverge" 1
+  assert_screen "opencode typed lone tilde above outside-HOME rail stays typed on herdr" pending "$CAPS_STYLED" "$diverge"
+  [ -z "$(_fm_composer_leftbar_cwd_start "$diverge" 1 3)" ] \
+    || fail "a typed lone '~' must not assemble '~/' across the typed-row boundary"
 
   # A second live pane, same day and version, whose cwd:branch is SHORTER than
   # the rail (fixtures/opencode-1.18.31-cwd/opencode-1.18.31-idle-short-cwd.ansi,

@@ -1349,9 +1349,12 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 #     half the row, so real typed text - which starts at the left edge - is
 #     still typed text, and a path-shaped string a user typed there is
 #     typed text too (position, not shape alone, decides);
-#   - the fragments concatenate to a home-abbreviated path, optionally
-#     followed by ":<branch>": beginning with "~/" and carrying no
-#     whitespace at all. A bare "/" start is deliberately NOT accepted: a
+#   - the run's TOPMOST fragment itself begins with "~/", so the fragments
+#     concatenate to a home-abbreviated path, optionally followed by
+#     ":<branch>" (each fragment is a single whitespace-free token).
+#     Checking the top fragment's own bytes keeps a typed lone "~" above the
+#     run from assembling a false "~/" across the typed-row boundary.
+#     A bare "/" start is deliberately NOT accepted: a
 #     composer holding only "/" is the first keystroke of a slash command
 #     and must never read empty, every evidenced fleet pane renders its
 #     cwd as "~/..." (the worktree pools live under $HOME), and a worker
@@ -1369,7 +1372,7 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 # FM_COMPOSER_GHOST_LUMA_MAX.
 _fm_composer_leftbar_cwd_start() {  # <screen> <first-row> <last-row>
   local screen=$1 first=$2 last=$3
-  local plain row raw rest frag indent len joined='' start=-1
+  local plain row raw rest frag indent len top_frag='' start=-1
   local footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   # The footer row is the region's LAST row (the same rule the classification
@@ -1402,17 +1405,21 @@ _fm_composer_leftbar_cwd_start() {  # <screen> <first-row> <last-row>
     # row is typed text and ends the run.
     len=${#rest}
     [ $((indent * 2)) -gt "$len" ] || break
-    joined="$frag$joined"
+    top_frag=$frag
     start=$row
     row=$((row - 1))
   done
-  [ -n "$joined" ] || return 1
+  [ -n "$top_frag" ] || return 1
+  # The prefix is checked on the TOPMOST recognised fragment's own bytes, not
+  # on the concatenation: a typed lone "~" directly above the run must not be
+  # absorbed into a "~/" assembled across the typed-row boundary (which would
+  # turn a real composer empty when the run's own top fragment starts with "/").
   # A shell case pattern cannot spell a literal "~/" without shellcheck
   # SC2088 (tilde does not expand in quotes), so the prefix is built once.
   local tilde tilde_slash
   tilde=$(printf '~')
   tilde_slash="$tilde/"
-  case "$joined" in
+  case "$top_frag" in
     "$tilde_slash"*) printf '%s\n' "$start"; return 0 ;;
   esac
   return 1
