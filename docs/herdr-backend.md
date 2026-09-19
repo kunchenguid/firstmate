@@ -192,7 +192,8 @@ Operational compromises:
 `herdr workspace create` seeds one default tab.
 Firstmate prunes it only after a real task tab exists and only when the same create response supplied the seeded tab id.
 An adopted workspace never supplies that id and can never enter the prune path, regardless of labels or tab count.
-Immediately before close, Firstmate rechecks the exact tab, expected seed label, and native agent state.
+The prune closes that exact tab, not only the create-response root pane, so a later sibling pane in the same tab cannot keep the starter tab alive.
+Immediately before close, Firstmate rechecks the exact tab, expected seed label, and native agent state on every pane in that tab.
 A working seed pane is never closed.
 
 This created-versus-adopted gate is a destructive safety boundary.
