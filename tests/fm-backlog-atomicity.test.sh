@@ -910,7 +910,7 @@ test_dispatch_refuses_a_pending_authoritative_close() {
 #!/usr/bin/env bash
 case "\$*" in
   *new-window*) : > "$case_dir/task-endpoint-created" ;;
-  *treehouse\\ get*) : > "$case_dir/local-copy-requested" ;;
+  *treehouse*\\ get*) : > "$case_dir/local-copy-requested" ;;
   *"#{pane_current_path}"*) printf '%s\n' "\${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "\${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
@@ -945,7 +945,7 @@ test_dispatch_refuses_a_held_row_before_creating_resources() {
 #!/usr/bin/env bash
 case "\$*" in
   *new-window*) : > "$case_dir/task-endpoint-created" ;;
-  *treehouse\\ get*) : > "$case_dir/local-copy-requested" ;;
+  *treehouse*\\ get*) : > "$case_dir/local-copy-requested" ;;
   *"#{pane_current_path}"*) printf '%s\n' "\${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "\${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
@@ -980,7 +980,7 @@ test_dispatch_refuses_a_blocked_row_before_creating_resources() {
 #!/usr/bin/env bash
 case "\$*" in
   *new-window*) : > "$case_dir/task-endpoint-created" ;;
-  *treehouse\\ get*) : > "$case_dir/local-copy-requested" ;;
+  *treehouse*\\ get*) : > "$case_dir/local-copy-requested" ;;
   *"#{pane_current_path}"*) printf '%s\n' "\${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "\${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
@@ -1015,7 +1015,7 @@ test_dispatch_refuses_a_held_in_flight_row_before_relaunch() {
 #!/usr/bin/env bash
 case "\$*" in
   *new-window*) : > "$case_dir/task-endpoint-created" ;;
-  *treehouse\\ get*) : > "$case_dir/local-copy-requested" ;;
+  *treehouse*\\ get*) : > "$case_dir/local-copy-requested" ;;
   *"#{pane_current_path}"*) printf '%s\n' "\${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
 esac
 case "\${1:-}" in display-message) printf 'firstmate\n'; exit 0 ;; esac
