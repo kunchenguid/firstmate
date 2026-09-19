@@ -78,7 +78,7 @@ if ! printf '%s\n' "$FRONTMATTER" | awk '
       || value ~ /^0[oO][0-7_]+$/
     timestamp = value ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]?-[0-9][0-9]?$/ \
       || value ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]?-[0-9][0-9]?[Tt][^[:space:]]+$/
-    quoted = value ~ /^"([^"\\]|\\.)+"$/ \
+    quoted = value ~ /^"([^"\\]|\\["\\/0abtnvfre N_LP_]|\\x[[:xdigit:]][[:xdigit:]]|\\u[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]]|\\U[[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]][[:xdigit:]])+"$/ \
       || value ~ /^\047([^\047]|\047\047)+\047$/
     if (quoted || (value ~ /^[[:alnum:]]/ \
         && lower !~ /^(null|~|true|false|yes|no|on|off)$/ \

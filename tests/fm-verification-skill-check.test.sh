@@ -147,7 +147,7 @@ test_rejects_missing_description() {
 
 test_accepts_supported_description_forms() {
   local dir form out code
-  for form in plain literal double-quoted single-quoted; do
+  for form in plain literal double-quoted single-quoted escaped-double-quoted; do
     dir="$TMP_ROOT/description-$form/verify-timetracker"
     make_good_skill "$dir"
     case "$form" in
@@ -162,6 +162,9 @@ test_accepts_supported_description_forms() {
         ;;
       single-quoted)
         sed -i "/^description: >-$/,+2c\\description: 'Drive the app: capture proof'" "$dir/SKILL.md"
+        ;;
+      escaped-double-quoted)
+        sed -i '/^description: >-$/,+2c\description: "Drive the app and capture \\"proof\\""' "$dir/SKILL.md"
         ;;
     esac
     out=$(run_check "$dir") && code=0 || code=$?
@@ -180,6 +183,15 @@ test_rejects_invalid_descriptions() {
     out=$(run_check "$dir") && fail "invalid description '$value' must fail" || true
     assert_contains "$out" "description is missing or invalid" "failure names invalid description '$value'"
   done
+}
+
+test_rejects_invalid_quoted_escape() {
+  local dir out
+  dir="$TMP_ROOT/bad-escape/verify-timetracker"
+  make_good_skill "$dir"
+  sed -i '/^description: >-$/,+2c\description: "Drive the app\\q"' "$dir/SKILL.md"
+  out=$(run_check "$dir") && fail "invalid quoted escape must fail" || true
+  assert_contains "$out" "description is missing or invalid" "failure names the invalid escape"
 }
 
 test_rejects_duplicate_description() {
@@ -307,6 +319,7 @@ test_rejects_unclosed_frontmatter
 test_rejects_missing_description
 test_accepts_supported_description_forms
 test_rejects_invalid_descriptions
+test_rejects_invalid_quoted_escape
 test_rejects_duplicate_description
 test_rejects_whitespace_only_section
 test_rejects_removed_kill_rule
