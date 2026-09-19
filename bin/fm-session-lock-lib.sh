@@ -33,12 +33,13 @@ FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
 FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp)
 
 # Print the exact harness name carried by executable path $1 - its own basename
-# or any directory component - or return 1.
+# or any directory component - or return 1. One named install tree that carries
+# no such component is recognized structurally instead; see below.
 #
 # This exists because Claude Code's native installer names the per-session
 # executable by its version (~/.local/share/claude/versions/2.1.220), so the
 # basename identifies nothing while the install path still says claude. Matching
-# whole path components only is what keeps that widening safe: an ordinary path
+# whole path components is what keeps that widening safe: an ordinary path
 # such as bin/fm-claude-stop-autoarm.sh or ~/.claude/hooks/notify.sh has no
 # "claude" component and is correctly not a harness process.
 fm_harness_path_name() {  # <path>
