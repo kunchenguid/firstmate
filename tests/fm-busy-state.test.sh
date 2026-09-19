@@ -330,6 +330,33 @@ test_kimi_unverified_gate() {
   pass "standalone kimi classifies unknown until the live verification gate opens"
 }
 
+# The predicate that separates "this adapter can never report activity" from "the
+# signal was lost right now". Readers use it to decide whether an unknown verdict
+# may keep outranking other evidence, so it must cover exactly the two gated
+# arms and nothing else - a wider match would let a lost signal license a stale
+# completion claim.
+test_unverified_harness_predicate_covers_only_the_gated_arms() {
+  local v
+  for v in 'unknown codex-unverified' 'unknown kimi-unverified'; do
+    fm_busy_verdict_unverified_harness "$v" \
+      || fail "'$v' is a harness with no verified source and must be recognized"
+  done
+  # Every contingent unknown reports a source that could have answered and did
+  # not, so the worker may be mid-turn.
+  for v in 'unknown missing' 'unknown malformed' 'unknown gen-mismatch' \
+           'unknown source-mismatch' 'unknown capture-failed' 'unknown no-target' \
+           'unknown cursor-transcript' 'unknown muse-session-log'; do
+    fm_busy_verdict_unverified_harness "$v" \
+      && fail "'$v' is a lost signal, not an unverifiable harness"
+  done
+  # A verdict that resolved is never this case, including on those same adapters.
+  for v in 'busy claude-hook' 'idle claude-hook' 'busy herdr-native' 'dead endpoint-gone'; do
+    fm_busy_verdict_unverified_harness "$v" \
+      && fail "'$v' resolved and must not be treated as unverifiable"
+  done
+  pass "the unverifiable-harness predicate covers only the gated arms, never a lost signal"
+}
+
 test_cursor_ignores_rendered_and_native_signals() {
   local state out
   state=$(new_state_dir cursor-gate)
@@ -477,6 +504,7 @@ test_converted_adapters_ignore_footer_text
 test_grok_regex_isolated
 test_codex_unverified_gate
 test_kimi_unverified_gate
+test_unverified_harness_predicate_covers_only_the_gated_arms
 test_cursor_ignores_rendered_and_native_signals
 test_dead_endpoint_overrides
 test_herdr_native_busy_only

@@ -1719,6 +1719,254 @@ test_no_run_footer_text_alone_is_not_working() {
   pass "a converted adapter never reads working from rendered footer text"
 }
 
+# --- unverifiable-harness declarations -------------------------------------
+# A harness with NO verified semantic source can only ever answer `unknown
+# <harness>-unverified` (bin/fm-busy-lib.sh short-circuits before any record,
+# native, or fallback read). Letting that verdict suppress the status-log
+# fallback made EVERY task on such an adapter permanently unknown: a finished
+# worker, a blocked one, and a wedged one all rendered identically, so the fleet
+# board reported completed work as unavailable. These pin the narrow exception
+# and, just as importantly, everything it must NOT reach.
+
+# Shared fixture for the cases below: a crew with no attributable run, a quiet
+# pane, and one declared outcome in its log. <harness> is the ONLY thing the
+# callers vary.
+#
+# It publishes the case directory in UNVERIFIED_CASE rather than echoing it,
+# because make_repo_on_branch exports FM_FAKE_RUN_HEAD - the real worktree HEAD a
+# fake run row must carry to be attributable. Called through `$(...)` that export
+# would die with the subshell, and the run-attribution case below would silently
+# read whichever head the previous test happened to leak.
+make_unverified_case() {  # <name> <harness> <status-line> -> sets UNVERIFIED_CASE
+  local name=$1 harness=$2 line=$3 d
+  d=$(new_case "$name")
+  make_repo_on_branch "$d/wt" "fm/$name"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/$name.meta" "window=fm:fm-$name" "worktree=$d/wt" \
+    "kind=ship" "harness=$harness"
+  printf '%s\n' "$line" > "$d/state/$name.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=0
+  UNVERIFIED_CASE=$d
+}
+
+# Write one steering record. <where> is the inbox root or handled/; <age> orders
+# it against the status log so the ordering half of the staleness test is driven
+# deliberately rather than by whatever order the fixture happened to write its
+# files in. The two files are otherwise written in the same second, and the
+# reader compares whole seconds, so a tie would silently vacate the ordering
+# case; one side is therefore pushed to a fixed past stamp. `touch -t` with an
+# absolute stamp is the portable spelling (BSD touch has no `-d <relative>`), so
+# `newer` ages the LOG rather than post-dating the record.
+write_steer() {  # <case-dir> <id> <where> <seq> <newer|older> [fire-and-forget]
+  local d=$1 id=$2 where=$3 seq=$4 age=$5 faf=${6:-} dir rec
+  dir="$d/state/$id.inbox"
+  [ "$where" = handled ] && dir="$dir/handled"
+  mkdir -p "$d/state/$id.inbox/handled"
+  rec="$dir/$seq.msg"
+  {
+    printf 'schema=fm-task-inbox.v1\nat=2026-09-19T08:00:00Z\n'
+    [ -n "$faf" ] && printf 'delivery=fire-and-forget\n'
+    printf -- '--\nalso cover the second export format\n'
+  } > "$rec"
+  case "$age" in
+    newer) touch -t 202001010000 "$d/state/$id.status" ;;
+    older) touch -t 202001010000 "$rec" ;;
+  esac
+}
+
+# The reported symptom, in its simplest form.
+test_unverified_harness_completed_worker_reads_its_declaration() {
+  reset_fakes
+  local d out
+  make_unverified_case codexdone codex 'done: ready in branch fm/codexdone'
+  d=$UNVERIFIED_CASE
+  out=$(run_crew_state "$d" codexdone)
+  assert_contains "$out" "state: done" "a completed worker on an unverifiable harness reports its own outcome"
+  assert_contains "$out" "source: status-log" "the outcome is attributed to the declaration, not to the pane"
+  assert_contains "$out" "ready in branch fm/codexdone" "the declared note survives into the detail"
+  assert_contains "$out" "activity unverified (codex-unverified)" "the line still discloses that live activity was unobservable"
+  pass "an unverifiable harness reports the crew's declared outcome with its uncertainty disclosed"
+}
+
+# The causal boundary, asserted as a DIVERGENCE so it cannot go quietly vacuous:
+# same log, same pane, same absent record - only the harness differs. Claude's
+# missing record is a source that should have answered and did not, which may be
+# hiding a turn in flight; codex's verdict is structural and can never answer.
+test_unverified_harness_boundary_holds_against_a_contingent_unknown() {
+  reset_fakes
+  local structural contingent out_structural out_contingent
+  make_unverified_case structural codex 'done: ready in branch fm/structural'
+  structural=$UNVERIFIED_CASE
+  out_structural=$(run_crew_state "$structural" structural)
+  reset_fakes
+  make_unverified_case contingent claude 'done: ready in branch fm/contingent'
+  contingent=$UNVERIFIED_CASE
+  out_contingent=$(run_crew_state "$contingent" contingent)
+  assert_contains "$out_structural" "state: done" "the structural verdict must not suppress the declaration"
+  assert_contains "$out_contingent" "state: unknown" "a contingent missing record must still suppress the declaration"
+  assert_not_contains "$out_contingent" "source: status-log" "a lost signal must not license a stale completion claim"
+  [ "$out_structural" != "$out_contingent" ] \
+    || fail "the two verdicts must diverge; identical output means the case proves nothing"
+  pass "only a structurally unverifiable harness reaches the declaration; a lost signal still suppresses it"
+}
+
+# A steer the worker has not acknowledged means firstmate gave it more to do, so
+# the completion it declared is no longer the whole job.
+test_unverified_harness_unhandled_steer_invalidates_completion() {
+  reset_fakes
+  local d out
+  make_unverified_case steered codex 'done: ready in branch fm/steered'
+  d=$UNVERIFIED_CASE
+  write_steer "$d" steered inbox 001 newer
+  out=$(run_crew_state "$d" steered)
+  assert_contains "$out" "state: unknown" "outstanding steering invalidates the declaration"
+  assert_not_contains "$out" "source: status-log" "a superseded completion must not be reported as current"
+  pass "an unacknowledged steer restores the honest unknown on an unverifiable harness"
+}
+
+# The half an unhandled-record check alone would miss: the worker acknowledged
+# its steer and has not appended anything since, so the log's last line predates
+# the instruction.
+test_unverified_harness_acknowledged_steer_after_declaration_invalidates() {
+  reset_fakes
+  local d out
+  make_unverified_case acked codex 'done: ready in branch fm/acked'
+  d=$UNVERIFIED_CASE
+  write_steer "$d" acked handled 001 newer
+  out=$(run_crew_state "$d" acked)
+  assert_contains "$out" "state: unknown" "a steer that arrived after the declaration invalidates it"
+  assert_not_contains "$out" "source: status-log" "an obsolete completion must not be reported as current"
+  pass "a steer acknowledged after the declaration still invalidates it"
+}
+
+# ... but a steer the worker had already answered BEFORE declaring done is not
+# evidence of anything outstanding, or the fix would never fire for a real crew.
+test_unverified_harness_steer_before_declaration_leaves_it_standing() {
+  reset_fakes
+  local d out
+  make_unverified_case answered codex 'done: ready in branch fm/answered'
+  d=$UNVERIFIED_CASE
+  write_steer "$d" answered handled 001 older
+  out=$(run_crew_state "$d" answered)
+  assert_contains "$out" "state: done" "a steer answered before the declaration leaves it standing"
+  assert_contains "$out" "source: status-log" "the declaration remains the current-state source"
+  pass "steering that predates the declaration does not invalidate it"
+}
+
+# fire-and-forget is excluded here for the same reason the re-ring ladder
+# excludes it: the record obliges the worker to do nothing.
+test_unverified_harness_fire_and_forget_does_not_invalidate() {
+  reset_fakes
+  local d out
+  make_unverified_case fyi codex 'done: ready in branch fm/fyi'
+  d=$UNVERIFIED_CASE
+  write_steer "$d" fyi inbox 001 newer fire-and-forget
+  out=$(run_crew_state "$d" fyi)
+  assert_contains "$out" "state: done" "a fire-and-forget record obliges no worker action"
+  assert_contains "$out" "source: status-log" "an informational record must not suppress the declaration"
+  pass "a fire-and-forget record leaves the declaration standing"
+}
+
+# An attributed run is authoritative and never reaches the fallback, so live
+# validation cannot be masked by a stale completion event underneath it.
+test_unverified_harness_active_run_outranks_stale_completion() {
+  reset_fakes
+  local d out
+  make_unverified_case validating codex 'done: ready in branch fm/validating'
+  d=$UNVERIFIED_CASE
+  FM_FAKE_AXI_STATUS="$(run_running fm/validating)"
+  out=$(run_crew_state "$d" validating)
+  assert_contains "$out" "state: working" "an active run outranks a stale completion event"
+  assert_contains "$out" "source: run-step" "validation in flight is reported from the run, not the log"
+  assert_not_contains "$out" "state: done" "a superseded completion must not survive an active run"
+  pass "active validation outranks a stale completion on an unverifiable harness"
+}
+
+# Nothing declared is still nothing known: the exception licenses reading a
+# declaration, never inventing one.
+test_unverified_harness_without_a_declaration_stays_unknown() {
+  reset_fakes
+  local d out
+  make_unverified_case silent codex ''
+  d=$UNVERIFIED_CASE
+  : > "$d/state/silent.status"
+  out=$(run_crew_state "$d" silent)
+  assert_contains "$out" "state: unknown" "no declaration leaves the crew unknown"
+  assert_contains "$out" "codex-unverified" "the unknown still names the verdict that produced it"
+  pass "an unverifiable harness with nothing declared stays unknown"
+}
+
+# A `blocked:` declaration must reach the supervisor for the same reason a
+# completion must: today it too was flattened into unknown.
+test_unverified_harness_blocked_declaration_reaches_the_supervisor() {
+  reset_fakes
+  local d out
+  make_unverified_case stuck codex 'blocked: the upstream credential is missing'
+  d=$UNVERIFIED_CASE
+  out=$(run_crew_state "$d" stuck)
+  assert_contains "$out" "state: blocked" "a blocker on an unverifiable harness is not unknown"
+  assert_contains "$out" "upstream credential is missing" "the blocker reason reaches the supervisor"
+  pass "an unverifiable harness surfaces a declared blocker instead of flattening it to unknown"
+}
+
+# A declared external wait is reported as a pause here too, which is a DELIBERATE
+# supervision consequence: crew_is_paused then rechecks the crew on the long
+# cadence instead of treating a quiet pane as a possible wedge, exactly as it
+# already does for a verified-harness crew that declared the same wait. It defers
+# the recheck, it does not silence it, and only the worker's own `paused:` line
+# can ask for it.
+test_unverified_harness_declared_pause_is_reported_as_a_pause() {
+  reset_fakes
+  local d out
+  make_unverified_case waiting codex 'paused: holding for the upstream tool release'
+  d=$UNVERIFIED_CASE
+  out=$(run_crew_state "$d" waiting)
+  assert_contains "$out" "state: paused" "a declared external wait is a pause, not an unknown"
+  assert_contains "$out" "holding for the upstream tool release" "the declared wait reason reaches the supervisor"
+  FM_CREW_STATE_BIN="$CREW_STATE" FM_STATE_OVERRIDE="$d/state" PATH="$d/fakebin:$PATH" \
+    bash -c '. "$0/bin/fm-classify-lib.sh"; crew_is_paused waiting || exit 1' "$ROOT" \
+    || fail "a declared pause must reach the supervisor's paused classification"
+  pass "a declared external wait on an unverifiable harness is reported as a pause"
+}
+
+# The fleet snapshot hands this reader a `cp -p` copy of the status log rather
+# than the live path, so the ordering half of the staleness test must survive
+# that indirection - it is the exact path the fleet board reads through.
+test_unverified_harness_declaration_survives_a_captured_status_copy() {
+  reset_fakes
+  local d out captured
+  make_unverified_case captured codex 'done: ready in branch fm/captured'
+  d=$UNVERIFIED_CASE
+  write_steer "$d" captured handled 001 newer
+  captured="$d/captured-status"
+  cp -p "$d/state/captured.status" "$captured"
+  out=$(PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    FM_CREW_STATE_STATUS_OVERRIDE="$captured" "$CREW_STATE" captured)
+  assert_contains "$out" "state: unknown" "a captured copy must preserve the declaration's age"
+  assert_not_contains "$out" "source: status-log" "the snapshot path must not resurrect an obsolete completion"
+  pass "the staleness test survives the fleet snapshot's captured status copy"
+}
+
+# A declared completion is the worker's word about its DELIVERABLE, never about
+# landing. crew_absorb_class only credits `working` from a run-step or pane
+# source, so a status-log verdict cannot buy a crew absorbed supervision either.
+test_unverified_harness_declaration_is_not_a_landing_claim() {
+  reset_fakes
+  local d out
+  make_unverified_case ready codex 'done: ready in branch fm/ready'
+  d=$UNVERIFIED_CASE
+  out=$(run_crew_state "$d" ready)
+  assert_contains "$out" "state: done" "the worker's own outcome is reported"
+  assert_not_contains "$out" "merged" "a declaration must not claim the work landed"
+  assert_not_contains "$out" "source: run-step" "a declaration must not borrow validated-run provenance"
+  FM_CREW_STATE_BIN="$CREW_STATE" FM_STATE_OVERRIDE="$d/state" PATH="$d/fakebin:$PATH" \
+    bash -c '. "$0/bin/fm-classify-lib.sh"; crew_is_provably_working ready && exit 1; exit 0' "$ROOT" \
+    || fail "a status-log declaration must not satisfy the provably-working proof"
+  pass "a declared completion claims the deliverable, not a landing or live work"
+}
+
 # Grok keeps its isolated temporary rendered-tail fallback until its structured
 # lifecycle is live-verified, so a grok crew still reads working from its own
 # verified signature.
@@ -3588,6 +3836,18 @@ test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_footer_text_alone_is_not_working
+test_unverified_harness_completed_worker_reads_its_declaration
+test_unverified_harness_boundary_holds_against_a_contingent_unknown
+test_unverified_harness_unhandled_steer_invalidates_completion
+test_unverified_harness_acknowledged_steer_after_declaration_invalidates
+test_unverified_harness_steer_before_declaration_leaves_it_standing
+test_unverified_harness_fire_and_forget_does_not_invalidate
+test_unverified_harness_active_run_outranks_stale_completion
+test_unverified_harness_without_a_declaration_stays_unknown
+test_unverified_harness_blocked_declaration_reaches_the_supervisor
+test_unverified_harness_declared_pause_is_reported_as_a_pause
+test_unverified_harness_declaration_survives_a_captured_status_copy
+test_unverified_harness_declaration_is_not_a_landing_claim
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_cli_failure_reads_unreachable_not_gone

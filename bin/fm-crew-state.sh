@@ -91,6 +91,19 @@
 #      backend's pane busy state, then the resolved status declaration
 #      when its verb maps to a recognized run-state. Decision-only events such as
 #      `resolved` never become current state or detail.
+#      A busy verdict is authoritative and an idle one permits the status-log
+#      fallback. An unknown verdict normally suppresses that fallback, because a
+#      source that should have answered and did not may be hiding a turn in
+#      flight. The ONE exception is a harness with no verified semantic source at
+#      all (fm_busy_verdict_unverified_harness in bin/fm-busy-lib.sh): that
+#      verdict is permanent for the installed binary and says nothing about
+#      activity, so suppressing on it made every task on such an adapter
+#      permanently unknown no matter what the worker reported. There the crew's
+#      own declaration is read, reported as `source: status-log`, and the line
+#      discloses `activity unverified (<source>)`. It is NOT a claim of idleness:
+#      outstanding steering (an unhandled ordinary inbox record, or any record
+#      newer than the status log) invalidates a stale declaration and restores
+#      the plain unknown, and an attributed run never reaches this path at all.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux and herdr, which own a
@@ -1008,17 +1021,89 @@ if ! pane_readable "$BACKEND_TARGET"; then
   esac
 fi
 
+# Whole-second mtime, or empty when the path cannot be read. Platform spelling is
+# chosen once; /usr/bin/stat on Darwin so a GNU coreutils stat earlier on PATH
+# cannot change the flags this call means.
+if [ "$(uname)" = Darwin ]; then
+  file_mtime() { /usr/bin/stat -f %m "$1" 2>/dev/null; }
+else
+  file_mtime() { stat -c %Y "$1" 2>/dev/null; }
+fi
+
+# Steering this crew still owes, or that reached it AFTER its last declaration.
+# Either one makes a trailing `done:`/`failed:` line an obsolete claim: firstmate
+# gave the worker more to do, so the work it declared finished is no longer the
+# whole job. bin/fm-task-inbox-lib.sh owns the steering-inbox contract - the
+# NNN.msg layout, the handled/ acknowledgement, and the delivery=fire-and-forget
+# header that marks a record the worker owes no action on. This reads those
+# records directly instead of sourcing that library ON PURPOSE: the library pulls
+# in bin/fm-wake-lib.sh, which creates the state directory at source time, and
+# this script must stay a read-only probe (see the header). Keep the two in step
+# if that record format ever changes.
+#
+# Both halves are needed and neither subsumes the other. An unhandled ordinary
+# record means an instruction is outstanding no matter when it arrived. A record
+# newer than the status log means the instruction arrived after the declaration,
+# which catches the worker that acknowledged its steer and has not appended
+# anything yet. A fire-and-forget record is excluded from both, exactly as the
+# re-ring ladder excludes it.
+steering_outstanding_after_declaration() {
+  local inbox="$STATE/$ID.inbox" f log_mtime msg_mtime
+  [ -d "$inbox" ] || return 1
+  for f in "$inbox"/[0-9]*.msg; do
+    [ -e "$f" ] || continue
+    grep -q '^delivery=fire-and-forget$' "$f" 2>/dev/null && continue
+    return 0
+  done
+  log_mtime=$(file_mtime "$LOG")
+  case "$log_mtime" in ''|*[!0-9]*) return 1 ;; esac
+  for f in "$inbox"/[0-9]*.msg "$inbox"/handled/[0-9]*.msg; do
+    [ -e "$f" ] || continue
+    grep -q '^delivery=fire-and-forget$' "$f" 2>/dev/null && continue
+    msg_mtime=$(file_mtime "$f")
+    case "$msg_mtime" in ''|*[!0-9]*) continue ;; esac
+    [ "$msg_mtime" -gt "$log_mtime" ] && return 0
+  done
+  return 1
+}
+
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # state is not meaningful for them; read their state from the status log only.
-# Only an exact busy verdict reports working here, and only an exact idle
-# verdict permits the status-log fallback below. Missing, malformed, stale, or
-# unverified semantic state remains unknown.
+# Only an exact busy verdict reports working here. An idle verdict permits the
+# status-log fallback below, and so does a harness with no verified semantic
+# source at all, under the narrow conditions the fallback's own comment owns.
+# Missing, malformed, stale, and every other untrusted semantic state remains
+# unknown, because there the signal could be hiding a turn in flight.
+
+# Set only when the busy verdict is structurally unverifiable for this harness
+# AND no steering invalidates the crew's own declaration. It is not a state: it
+# licenses the status-log fallback below to run, and is then disclosed in that
+# line's detail so the reader never claims live activity it could not observe.
+ACTIVITY_UNVERIFIED=
+
 if [ "$KIND" != secondmate ]; then
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
     idle) ;;
-    *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
+    *)
+      # An adapter with no verified semantic source can only ever answer unknown
+      # (fm_busy_verdict_unverified_harness owns which verdicts those are), so
+      # letting that verdict suppress the crew's own durable declaration made
+      # EVERY task on such a harness permanently unknown - a completed worker,
+      # a blocked one, and a wedged one all read the same. The verdict is not
+      # evidence of activity, so it must not outrank evidence that exists. It is
+      # still not permission to assume idleness: the fallback reports what the
+      # worker DECLARED, names status-log as the source, and discloses that live
+      # activity was unverifiable. Every contingent unknown keeps suppressing the
+      # log, because there the missing signal really could mean a turn in flight.
+      if fm_busy_verdict_unverified_harness "$BUSY_VERDICT" \
+        && ! steering_outstanding_after_declaration; then
+        ACTIVITY_UNVERIFIED=$BUSY_VERDICT
+      else
+        emit unknown pane "harness state unavailable ($BUSY_VERDICT)"
+      fi
+      ;;
   esac
 fi
 
@@ -1035,8 +1120,26 @@ fi
 if [ -n "$LOG_VERB" ]; then
   LOG_STATE=$(map_log_state "$LOG_LINE")
   if [ "$LOG_STATE" != unknown ]; then
-    emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
+    LOG_DETAIL=$(status_line_note "$LOG_LINE")
+    # Disclose the unverifiable activity in the same line that reports the
+    # declared state, so a reader (and every renderer downstream) sees the
+    # declaration AND its limit instead of one dressed up as the other.
+    #
+    # It goes FIRST, ahead of the crew's note, because renderers truncate this
+    # detail to fit a row - the bearings projection cuts it to 90 characters -
+    # and a crew's note routinely exceeds that on its own. Appended, the
+    # disclosure was the first thing cut, leaving a bare completion claim with
+    # nothing saying the activity behind it was never observed. Leading with it
+    # means the qualifier survives wherever the claim does.
+    [ -z "$ACTIVITY_UNVERIFIED" ] \
+      || LOG_DETAIL="activity unverified (${ACTIVITY_UNVERIFIED#* })${SEP}$LOG_DETAIL"
+    emit "$LOG_STATE" status-log "$LOG_DETAIL"
   fi
 fi
+
+# An unverifiable harness with nothing declared is exactly as unknown as before;
+# keep the verdict-naming line rather than the generic one.
+[ -z "$ACTIVITY_UNVERIFIED" ] \
+  || emit unknown pane "harness state unavailable ($ACTIVITY_UNVERIFIED)"
 
 emit unknown none "no current-state source available"
