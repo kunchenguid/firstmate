@@ -218,8 +218,12 @@ HOOK
 test_unusable_hook_refuses_rather_than_skipping() {
   local rec id out status shape
   # A hook the captain configured and firstmate then skipped is the exact
-  # failure the hook exists to remove, so neither shape may pass silently.
-  for shape in not-executable dangling-symlink; do
+  # failure the hook exists to remove, so no shape may pass silently. The
+  # refusal must also say what is wrong with the hook on its own: leaving that
+  # to exec failure reports a forgotten chmod +x as a bare "exit 255" with an
+  # empty log wherever fm_run_timed falls through to its perl mechanism, which
+  # is any host without coreutils.
+  for shape in not-executable dangling-symlink directory; do
     id="setup-unusable-${shape}-r1"
     rec=$(make_case "unusable-$shape" "$id")
     read_case_record "$rec"
@@ -231,17 +235,24 @@ test_unusable_hook_refuses_rather_than_skipping() {
     dangling-symlink)
       ln -s "$CASE_DIR/setup-script-that-moved" "$HOME_DIR/config/spawn-setup/project"
       ;;
+    directory)
+      mkdir -p "$HOME_DIR/config/spawn-setup/project"
+      ;;
     esac
 
     out=$(run_ship "$id")
     status=$?
     [ "$status" -ne 0 ] || fail "spawn skipped a configured but unusable setup hook ($shape)"$'\n'"$out"
+    assert_contains "$out" "is not a runnable file" \
+      "the refusal did not name what is wrong with the hook ($shape)"
+    assert_contains "$out" "chmod +x it" \
+      "the refusal did not tell the operator how to fix the hook ($shape)"
     assert_contains "$out" "refusing to launch a worker into an unprovisioned worktree" \
       "the refusal did not explain why an unprovisioned worktree is not launched into ($shape)"
     assert_not_contains "$out" "spawned $id" "a refused spawn still reported success ($shape)"
     assert_absent "$HOME_DIR/state/$id.meta" "a refused spawn published task metadata ($shape)"
   done
-  pass "a configured but unusable setup hook refuses the spawn instead of being skipped"
+  pass "a configured but unusable setup hook refuses by name instead of being skipped"
 }
 
 test_hook_named_for_another_project_is_not_run() {

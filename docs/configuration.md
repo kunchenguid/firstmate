@@ -448,10 +448,17 @@ exec bash /path/to/dev-pipeline/scripts/worktree-setup.sh "$PWD" her-web
 
 The script's own `HER_WEB_MAIN_REPO` variable is set to `$FM_PROJECT` so it reads the clone Firstmate itself spawns from rather than its built-in default, and the files it copies into the worktree are the ones this home's own checkout carries.
 
-The spawn refuses, before any window, worktree record, or task state exists, when the hook exits nonzero, exceeds its time bound, or leaves behind files Git does not ignore.
-A hook that is present but cannot be executed - not executable, a directory, a dangling symlink - fails to start and takes that same nonzero-exit refusal, so a hook you configured is never silently skipped.
-That last rule is the important one: a hook may write only paths the worktree already ignores, because Firstmate reads any other untracked file as the worker's own unlanded work and would later refuse to clean up that worktree.
-A refusal names the log file it kept from the hook, and because it happens before anything about the task is recorded, there is nothing to clean up before fixing the hook and spawning again.
+The spawn refuses when the hook exits nonzero, exceeds its time bound, or leaves behind files Git does not ignore.
+A hook that is present but is not a runnable file - not executable, a directory, a symlink whose target moved - refuses by name before it is run, because a forgotten `chmod +x` is the likeliest way a configured hook is wrong and a plain exec failure reports it differently on every host.
+The dirty-worktree rule is the important one: a hook may write only paths the worktree already ignores, because Firstmate reads any other untracked file as the worker's own unlanded work and would later refuse to clean up that worktree.
+
+A refusal is early enough that no task record, backlog transition, or worker exists, so nothing thinks the task is running.
+It is not, however, a full rollback, and retrying the same task id can need up to three things cleared first:
+
+- **Any unignored file the hook wrote**, left in place in the pooled worktree, because Firstmate never deletes untracked work to make a spawn proceed. Until you remove it, the next spawn handed that pool slot refuses too, with `pooled worktree '...' is not clean; refusing to discard uncommitted work while refreshing its base`.
+- **The task's window**, created before the hook ran and not killed on refusal. A same-id retry on the tmux backend otherwise stops at `window <session>:fm-<id> already exists`; close the empty window first.
+- **The hook log**, kept under the temp directory and named in the refusal, for you to read and then delete.
+
 Hooks are skipped for relaunches, for secondmates, and on the Orca backend, which provisions its worktrees from its own repository hook at creation time.
 `FM_SPAWN_SETUP=off` skips a configured hook for one spawn with a notice, for the case where the environment is known good and the seconds are not wanted; any other value refuses rather than guessing.
 A hook is bounded at a fixed 120 seconds, because it runs while the spawn still holds the shared Treehouse project lock: for as long as a hook runs, another spawn into the same project, and a teardown returning one of its slots, refuse outright rather than wait ("another Treehouse slot allocation or return is in progress").
