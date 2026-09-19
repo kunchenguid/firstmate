@@ -13,6 +13,11 @@
 # is open, not a draft, mergeable, free of conflicts, and every unwaived check
 # is green at the exact current head commit, where github_checks_not_green below
 # owns what makes a check green and judges each one by its current run.
+# A pull request carrying no checks at all is refused by that same green
+# condition rather than passing it: github_checks_not_green reports the names of
+# checks that are not green, so an empty rollup gives it nothing to report, and
+# github_rollup_count below supplies the count that tells "every check passed"
+# apart from "there was never a check".
 # Every failing condition is reported, not
 # just the first. The verified head is then passed to gh as
 # --match-head-commit, so a push that lands between that read and the merge
@@ -23,7 +28,11 @@
 # name, still requires every other check green, and still binds the head. It is
 # refused while the away-posture record exists, and it never
 # applies on GitLab, where a merge already requires the head pipeline to have
-# succeeded. After gh returns success, GitHub's live state is read back and
+# succeeded. The no-checks refusal is waived through that same flag but only by
+# the sentinel FM_PR_MERGE_NO_CHECKS_NAME below, never by a check name, so
+# waiving one red check never doubles as permission to merge a pull request no
+# check ever ran against.
+# After gh returns success, GitHub's live state is read back and
 # accepted only when the pull request is merged or in the merge queue. gh's
 # GraphQL API supplies that queue-aware read; when that read fails, gh-axi's
 # own view still proves a landed merge, and every outcome it cannot prove
@@ -564,10 +573,31 @@ github_checks_not_green() {
   ' 2>/dev/null || return 1
 }
 
+# The name an --allow-red waiver has to match to waive the no-checks refusal
+# below. It is parenthesised like "(unnamed check)" above so it cannot collide
+# with a real check name, and a pull request that did report a check of this
+# name would not have an empty rollup in the first place.
+FM_PR_MERGE_NO_CHECKS_NAME='(no checks)'
+
+# How many entries the rollup holds. github_checks_not_green above reports the
+# names of checks that are not green, so a pull request with no checks at all
+# yields nothing for it to report: the count is the only thing that separates
+# "every check passed" from "there was never a check". A rollup that is not an
+# array is the same unreadable state github_checks_not_green refuses on.
+github_rollup_count() {
+  local json=$1
+  printf '%s' "$json" | jq -r '
+    if (.statusCheckRollup | type) != "array"
+    then error("no check rollup")
+    else (.statusCheckRollup | length)
+    end
+  ' 2>/dev/null || return 1
+}
+
 # Pre-merge conditions for a GitHub pull request, read from one live view.
 # Sets FM_PR_MERGE_HEAD to the verified head on success.
 github_verify_mergeable() {
-  local json fields line red name covered
+  local json fields line red name covered rollup_count
   local total=0 named=0 refusals=''
   local state='' draft='' mergeable='' merge_state='' live_head='' base=''
 
@@ -618,6 +648,11 @@ FIELDS
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
   fi
+  if ! rollup_count=$(github_rollup_count "$json") \
+    || ! printf '%s' "$rollup_count" | grep -qE '^[0-9]+$'; then
+    echo "error: could not read the GitHub pull request state before merging" >&2
+    return 1
+  fi
 
   case "$state" in
     [oO][pP][eE][nN]) ;;
@@ -653,6 +688,20 @@ FIELDS
   done <<EOF
 $red
 EOF
+
+  if [ "$rollup_count" -eq 0 ]; then
+    covered=0
+    if [ "${#ALLOW_RED[@]}" -gt 0 ]; then
+      for check in "${ALLOW_RED[@]}"; do
+        [ "$check" = "$FM_PR_MERGE_NO_CHECKS_NAME" ] && covered=1
+      done
+    fi
+    [ "$covered" -eq 1 ] || {
+      refusals="$refusals  - the pull request has no checks at all, so no check is green
+"
+      uncovered="${uncovered:+$uncovered, }$FM_PR_MERGE_NO_CHECKS_NAME"
+    }
+  fi
 
   if [ -n "$refusals" ]; then
     printf 'error: refusing to merge %s\n' "$URL" >&2
