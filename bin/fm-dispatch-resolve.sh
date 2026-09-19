@@ -5,16 +5,24 @@
 # Usage:
 #   fm-dispatch-resolve.sh <brief-file> [--project <name>]
 #
-# Opt-in gate: TYPESAFE_API_KEY non-empty in this process environment, else a
-#   TYPESAFE_API_KEY= line in $FM_HOME/.env read with fmx_env_get, the same
-#   accessor as FMX_PAIRING_TOKEN (bin/fm-env-lib.sh). The environment wins.
-#   Absent in both: one "dispatch-resolve: off" line on stderr, nothing on
-#   stdout, exit 0, no network call, so firstmate dispatches exactly as today.
-#   The key lives in one shell variable and reaches curl as a header read from
-#   a file descriptor, never on argv; nothing logs or writes it.
+# Opt-in gate: TYPESAFE_PROVIDER selects which service serves Jev, defaulting
+#   to `typesafe` and accepting `openrouter`, and the selected service's key
+#   (TYPESAFE_API_KEY or OPENROUTER_API_KEY) activates the tool. Each setting is
+#   read from this process environment first, then from a KEY= line in
+#   $FM_HOME/.env read with fmx_env_get, the same accessor as FMX_PAIRING_TOKEN
+#   (bin/fm-env-lib.sh); the environment wins. An ambient OPENROUTER_API_KEY
+#   alone never activates the tool because that gateway key is common in other
+#   tools' environments, so `openrouter` must be selected explicitly; an unknown
+#   non-empty TYPESAFE_PROVIDER is an actionable exit 2 configuration error.
+#   Absent key: one "dispatch-resolve: off" line on stderr, nothing on stdout,
+#   exit 0, no network call, so firstmate dispatches exactly as today. The key
+#   lives in one shell variable and reaches curl as a header read from a file
+#   descriptor, never on argv; nothing logs or writes it.
 #
-# What it does when on with at least one rule: one POST to
-#   https://api.typesafe.ai/v1/systemone with the project name and the whole brief as
+# What it does when on with at least one rule: one POST to the selected service
+#   - https://api.typesafe.ai/v1/systemone with model `jev-latest`, or
+#   https://openrouter.ai/api/alpha/decisions with model `typesafe/jev-1.13` -
+#   with the project name and the whole brief as
 #   state and ONE Choice question whose
 #   options are every rule's `when` from config/crew-dispatch.json plus one
 #   fixed generic none option. Jev returns the matched rule, a probability per
@@ -44,7 +52,9 @@
 #   actionable, never selected around.
 #
 # Environment:
-#   TYPESAFE_API_KEY is the only resolver-specific environment setting.
+#   TYPESAFE_PROVIDER selects `typesafe` (default) or `openrouter`, and the
+#   selected service's key (TYPESAFE_API_KEY or OPENROUTER_API_KEY) activates
+#   the tool; those are the only resolver-specific environment settings.
 #
 # Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
 #   the captain-approval gate, or fm-spawn.sh validation; it publishes one
@@ -54,6 +64,9 @@ set -u
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
 export -n TYPESAFE_API_KEY_PRIVATE 2>/dev/null || true
 unset TYPESAFE_API_KEY
+OPENROUTER_API_KEY_PRIVATE=${OPENROUTER_API_KEY:-}
+export -n OPENROUTER_API_KEY_PRIVATE 2>/dev/null || true
+unset OPENROUTER_API_KEY
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -70,9 +83,11 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-timing-lib.sh"
 
 CONFIDENCE_FLOOR=0.6
-TS_MODEL=jev-latest
-TS_BASE=https://api.typesafe.ai
 TS_TIMEOUT=5
+TYPESAFE_ENDPOINT=https://api.typesafe.ai/v1/systemone
+TYPESAFE_MODEL=jev-latest
+OPENROUTER_ENDPOINT=https://openrouter.ai/api/alpha/decisions
+OPENROUTER_MODEL=typesafe/jev-1.13
 DEFAULT_WHEN="No listed rule applies to this task."
 
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
@@ -98,12 +113,31 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# ---- opt-in gate ---------------------------------------------------------------
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-  TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
+# ---- provider and opt-in gate --------------------------------------------------
+TYPESAFE_PROVIDER_VALUE=${TYPESAFE_PROVIDER:-}
+[ -n "$TYPESAFE_PROVIDER_VALUE" ] || TYPESAFE_PROVIDER_VALUE=$(fmx_env_get TYPESAFE_PROVIDER "$FM_HOME/.env")
+case "$TYPESAFE_PROVIDER_VALUE" in
+  ''|typesafe)
+    JEV_PROVIDER=typesafe
+    JEV_KEY_NAME=TYPESAFE_API_KEY
+    JEV_API_KEY=$TYPESAFE_API_KEY_PRIVATE
+    JEV_ENDPOINT=$TYPESAFE_ENDPOINT
+    JEV_MODEL=$TYPESAFE_MODEL
+    ;;
+  openrouter)
+    JEV_PROVIDER=openrouter
+    JEV_KEY_NAME=OPENROUTER_API_KEY
+    JEV_API_KEY=$OPENROUTER_API_KEY_PRIVATE
+    JEV_ENDPOINT=$OPENROUTER_ENDPOINT
+    JEV_MODEL=$OPENROUTER_MODEL
+    ;;
+  *) die "unknown TYPESAFE_PROVIDER: $TYPESAFE_PROVIDER_VALUE (expected typesafe or openrouter)" ;;
+esac
+if [ -z "$JEV_API_KEY" ]; then
+  JEV_API_KEY=$(fmx_env_get "$JEV_KEY_NAME" "$FM_HOME/.env")
 fi
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-  echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
+if [ -z "$JEV_API_KEY" ]; then
+  echo "dispatch-resolve: off ($JEV_KEY_NAME absent from the environment and $FM_HOME/.env, with TYPESAFE_PROVIDER=${TYPESAFE_PROVIDER_VALUE:-typesafe})" >&2
   exit 0
 fi
 
@@ -221,7 +255,7 @@ QUOTA=$(mktemp) || { rm -f "$RESP_FILE"; die "mktemp failed"; }
 trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA"' EXIT
 LAT_MS=null
 command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
-  REQUEST=$(jq -n --rawfile brief "$BRIEF" --arg project "$PROJECT" --arg model "$TS_MODEL" \
+  REQUEST=$(jq -n --rawfile brief "$BRIEF" --arg project "$PROJECT" --arg model "$JEV_MODEL" \
     --arg none_criterion "$DEFAULT_WHEN" --slurpfile rules "$RULES" '
     ($rules[0]) as $cfg |
     ($cfg.rules | to_entries | map({key: ("rule_" + ((.key + 1) | tostring)), value: .value.when}) | from_entries) as $criteria |
@@ -238,8 +272,8 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
     }')
   T0=$(fm_timing_now_ms)
   HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
-    -X POST "$TS_BASE/v1/systemone" -H 'Content-Type: application/json' \
-    -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$TYPESAFE_API_KEY_PRIVATE") \
+    -X POST "$JEV_ENDPOINT" -H 'Content-Type: application/json' \
+    -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$JEV_API_KEY") \
     --data-binary @- 2>/dev/null) || HTTP=000
   T1=$(fm_timing_now_ms)
   LAT_MS=$(( T1 - T0 ))

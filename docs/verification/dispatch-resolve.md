@@ -15,6 +15,14 @@ Observed error shapes: 401 `authentication_error` for a bad key, 403 when the he
 No rate-limit headers were present on any response; every response carried `x-typesafe-request-id`.
 Observed end-to-end latency from a Mac was 123 to 348 ms per request, with the server's own upstream time at 4 to 60 ms.
 
+## The OpenRouter decisions route
+
+Verified 2026-09-18 against OpenRouter.
+`GET /api/v1/models/typesafe/jev-1.13/endpoints` returns the model, while `typesafe/jev-latest` returns 404, so `typesafe/jev-1.13` is the correct OpenRouter model id.
+`POST https://openrouter.ai/api/alpha/decisions` is the live route: an invalid bearer token returns OpenRouter's own 401, while the `/api/v1/api/alpha/decisions` and `/api/v1/alpha/decisions` guesses return 404.
+The documented Decisions request (`{model, state, questions}`) and choice answer (`{type, choice, probabilities, confidence}`) match the direct typesafe.ai System One shape, so the resolver sends the same request body and applies the same code-side gates, differing only in endpoint, model, and bearer token.
+A live opted-in run needs an OpenRouter key and is not part of the suite; the offline suite covers the route with a fake `curl`.
+
 ## Live rule match against real briefs
 
 Run 2026-09-16 with the key injected for the one command through the vault (`av inject +TYPESAFE_API_KEY -- ...`), model `jev-latest`, confidence floor 0.6, timeout 5 s, one `quota-axi --json` snapshot for the whole run.
@@ -62,8 +70,9 @@ It proves absent, default-only, and empty-rules files return `no rules to match`
 It proves the documented starter configuration resolves its Pi default through the declared Claude provider, a `.env` key turns the tool on, and the environment wins over it.
 It proves the key is absent from child environments, never appears on `curl` argv, and arrives only as the bearer header on the descriptor.
 It proves the request uses the fixed endpoint and model, carries only the project, brief, and rule Choice with one option per rule plus the fixed neutral none option, and never carries `why`, `use`, or quota.
+It proves the OpenRouter route activates only under an explicit `TYPESAFE_PROVIDER=openrouter` with `OPENROUTER_API_KEY`, targets `https://openrouter.ai/api/alpha/decisions` with `typesafe/jev-1.13`, keeps a bare ambient `OPENROUTER_API_KEY` from activating the tool, and keeps the selected key off `curl` argv and out of every child environment.
 It proves the clear, fixed-floor ambiguous with candidate evidence, escalate (approval with candidate evidence, unverifiable rule floor, tie, nothing rankable), known rule-floor fall-through, known and unverifiable profile-floor evidence, explicit-provider and provider-ID enforcement, authoritative Agy and explicit-provider Gemini routing, partial providers, eligible unranked candidates and their clear-result note, concrete quota vetoes and profile-floor shortfalls taking precedence over uncertainty, account-wide quota veto, limiting-bound ranking, missing-curl and quota-axi failures, HTTP 429 and 500, transport failure, malformed usage, zero-mass or malformed probabilities or confidence, malformed or duplicate profile, invalid selector, removed-option rejection, and out-of-range rule ID paths behave as the contract states, with configuration errors exiting 2 before any network call.
-`tests/fm-bootstrap.test.sh` proves bootstrap ignores resolver-only fields without the typed key, validates each malformed shape when the environment or home `.env` activates typed resolution, and prevents an environment-provided key from reaching child processes.
+`tests/fm-bootstrap.test.sh` proves bootstrap ignores resolver-only fields without the typed key, validates each malformed shape when the environment or home `.env` activates typed resolution, activates it for OpenRouter only under an explicit `TYPESAFE_PROVIDER=openrouter`, and prevents an environment-provided `TYPESAFE_API_KEY` from reaching child processes.
 
 ```console
 $ bash tests/fm-dispatch-resolve.test.sh | tail -1

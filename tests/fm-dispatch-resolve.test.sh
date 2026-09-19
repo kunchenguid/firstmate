@@ -3,7 +3,8 @@
 #
 # Drives the public argv and environment interface with a fake curl on PATH
 # that records argv, the request body it read from stdin, and the header it
-# read from file descriptor 3, and answers with a canned typesafe.ai response.
+# read from file descriptor 3, and answers with a canned typesafe.ai or
+# OpenRouter response.
 # A fake quota-axi serves the selected schema-5 fixture. No case touches the
 # network, and the absent-key case proves the tool makes no call
 # at all.
@@ -23,6 +24,7 @@ BASE_RULES="$TMP_ROOT/rules.json"
 RULES="$HOME_DIR/config/crew-dispatch.json"
 QUOTA="$TMP_ROOT/quota.json"
 BASE_PATH=$PATH
+unset TYPESAFE_PROVIDER OPENROUTER_API_KEY 2>/dev/null || true
 mkdir -p "$HOME_DIR/config" "$LOG" "$NO_CURL_BIN"
 for command_name in bash chmod cp dirname jq mktemp rm; do
   ln -s "$(command -v "$command_name")" "$NO_CURL_BIN/$command_name"
@@ -110,7 +112,8 @@ cat > "$FAKEBIN/curl" <<'SH'
 # Fake curl: records argv (minus the -o target), the stdin body, and the header
 # read from fd 3, then answers with FAKE_CURL_RESPONSE and FAKE_CURL_HTTP.
 set -u
-if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
+if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ] \
+  || [ -n "${OPENROUTER_API_KEY+x}" ] || [ -n "${OPENROUTER_API_KEY_PRIVATE+x}" ]; then
   printf 'curl:secret-present\n' >> "${CHILD_ENV_LOG:?}"
 else
   printf 'curl:clean\n' >> "${CHILD_ENV_LOG:?}"
@@ -138,7 +141,8 @@ chmod +x "$FAKEBIN/curl"
 cat > "$FAKEBIN/quota-axi" <<'SH'
 #!/usr/bin/env bash
 set -u
-if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
+if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ] \
+  || [ -n "${OPENROUTER_API_KEY+x}" ] || [ -n "${OPENROUTER_API_KEY_PRIVATE+x}" ]; then
   printf 'quota-axi:secret-present\n' >> "${CHILD_ENV_LOG:?}"
 else
   printf 'quota-axi:clean\n' >> "${CHILD_ENV_LOG:?}"
@@ -212,6 +216,59 @@ reset_log
 TYPESAFE_API_KEY=$KEY FM_CONFIG_OVERRIDE="$OVERRIDE_CONFIG" run code out err "$BRIEF" --project pager
 assert_contains "$out" '  status: clear' "FM_CONFIG_OVERRIDE selects the canonical rules directory"
 pass "TYPESAFE_API_KEY= in .env activates the tool; environment and config overrides work"
+
+# --- OpenRouter provider ------------------------------------------------------
+OR_KEY='or-key-7a1b2c3d-never-on-argv'
+printf '%s\n' 'TYPESAFE_PROVIDER=openrouter' "export OPENROUTER_API_KEY=\"$OR_KEY\"" > "$HOME_DIR/.env"
+cat > "$RESPONSE" <<'JSON'
+{ "id": "gen-or-1", "model": "typesafe/jev-1.13", "provider": "typesafe",
+  "answers": { "rule": { "type": "choice", "choice": "rule_4", "confidence": 0.9,
+    "probabilities": { "rule_1": 0.01, "rule_2": 0.01, "rule_3": 0.01, "rule_4": 0.96, "default": 0.01 } } },
+  "usage": { "input_tokens": 812, "output_tokens": 60, "cost": 0.0000341 } }
+JSON
+reset_log
+run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "openrouter .env activation exits 0"
+assert_contains "$out" '  status: clear' "openrouter .env key resolves"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "openrouter result drives the same argmax"
+assert_equals 'typesafe/jev-1.13' "$(jq -r .model "$LOG/body")" "openrouter uses the versioned Jev model"
+assert_contains "$(cat "$LOG/argv")" 'https://openrouter.ai/api/alpha/decisions' "openrouter uses the decisions endpoint"
+assert_equals "Authorization: Bearer $OR_KEY" "$(cat "$LOG/header")" "openrouter key rides the fd header"
+assert_not_contains "$(cat "$LOG/argv")" "$OR_KEY" "the openrouter key never appears on curl argv"
+assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "the openrouter key is absent from child environments"
+rm -f "$HOME_DIR/.env"
+
+# The environment wins over .env for both the selector and its key.
+printf '%s\n' 'TYPESAFE_PROVIDER=typesafe' 'TYPESAFE_API_KEY=env-loses' > "$HOME_DIR/.env"
+reset_log
+TYPESAFE_PROVIDER=openrouter OPENROUTER_API_KEY=env-wins-or run code out err "$BRIEF"
+assert_equals 'Authorization: Bearer env-wins-or' "$(cat "$LOG/header")" "environment selector and key win over .env"
+assert_contains "$(cat "$LOG/argv")" 'https://openrouter.ai/api/alpha/decisions' "environment selector chooses openrouter"
+rm -f "$HOME_DIR/.env"
+
+# An ambient OpenRouter key alone must never activate typed dispatch.
+reset_log
+OPENROUTER_API_KEY=$OR_KEY run code out err "$BRIEF"
+expect_code 0 "$code" "ambient openrouter key alone exits 0"
+assert_equals '' "$out" "ambient openrouter key alone prints nothing on stdout"
+assert_contains "$err" 'dispatch-resolve: off (TYPESAFE_API_KEY absent' "ambient openrouter key alone stays off under the default selector"
+assert_absent "$LOG/argv" "ambient openrouter key alone never calls curl"
+
+# Selecting openrouter without its key is off.
+reset_log
+TYPESAFE_PROVIDER=openrouter run code out err "$BRIEF"
+expect_code 0 "$code" "openrouter without a key exits 0"
+assert_equals '' "$out" "openrouter without a key prints nothing on stdout"
+assert_contains "$err" 'dispatch-resolve: off (OPENROUTER_API_KEY absent' "openrouter without a key explains itself"
+assert_absent "$LOG/argv" "openrouter without a key never calls curl"
+
+# An unknown provider is an actionable configuration error before any call.
+reset_log
+TYPESAFE_PROVIDER=opernrouter TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 2 "$code" "unknown provider exits 2"
+assert_contains "$err" 'unknown TYPESAFE_PROVIDER: opernrouter (expected typesafe or openrouter)' "unknown provider is named"
+assert_absent "$LOG/argv" "unknown provider never reaches the network"
+pass "OpenRouter activates only under an explicit TYPESAFE_PROVIDER selector with its own key"
 
 # --- clear: request shape, secret handling, argmax --------------------------
 reset_log
