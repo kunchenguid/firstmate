@@ -115,18 +115,44 @@ EOF
 esac
 exit 0
 SH
+  # The fake pool keeps the one fact the real `treehouse status --json`
+  # publishes and this spawn path reads: which holder, if any, a worktree is
+  # leased to. `get --lease` records it, `return` drops it.
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
 printf '%s\n' "$*" >> "${FM_FAKE_TREEHOUSE_LOG:?}"
+LEASES="${FM_FAKE_TREEHOUSE_LEASES:?}"
+[ -f "$LEASES" ] || : > "$LEASES"
+holder=""
+prev=""
+for arg in "$@"; do
+  case "$prev" in
+    --lease-holder|--if-lease-holder) holder=$arg ;;
+  esac
+  prev=$arg
+done
 case "${1:-}" in
   get)
     case " $* " in
       *" --lease "*)
         [ "${FM_FAKE_TREEHOUSE_LEASE_FAIL:-0}" = 1 ] && exit 1
-        printf '%s\n' "${FM_FAKE_TREEHOUSE_WT:?}"
+        printf '%s\t%s\n' "${FM_FAKE_TREEHOUSE_WT:?}" "$holder" >> "$LEASES"
+        printf '%s\n' "$FM_FAKE_TREEHOUSE_WT"
         ;;
     esac
+    ;;
+  status)
+    awk -F'\t' '
+      BEGIN { printf "[" }
+      { if (NR > 1) printf ","
+        printf "{\"name\":\"%d\",\"path\":\"%s\",\"status\":\"leased\",\"lease_holder\":\"%s\"}", NR, $1, $2 }
+      END { printf "]\n" }
+    ' "$LEASES"
+    ;;
+  return)
+    awk -F'\t' -v p="${!#}" -v h="$holder" '$1 != p || (h != "" && $2 != h)' "$LEASES" > "$LEASES.tmp"
+    mv "$LEASES.tmp" "$LEASES"
     ;;
 esac
 exit 0
@@ -166,6 +192,7 @@ run_herdr_spawn() {  # <id>
     FM_SPAWN_NO_GUARD=1 HERDR_SESSION=fmtest \
     FM_FAKE_HERDR_STATE="$CASE_DIR/herdr-state.json" FM_FAKE_HERDR_LOG="$CASE_DIR/herdr.log" \
     FM_FAKE_TREEHOUSE_LOG="$CASE_DIR/treehouse.log" FM_FAKE_TREEHOUSE_WT="$WT_DIR" \
+    FM_FAKE_TREEHOUSE_LEASES="$CASE_DIR/treehouse-leases" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$1" "$PROJ_DIR" "sh -c 'echo herdr-cwd-ok'" --backend herdr --mode no-mistakes --yolo off 2>&1
 }
@@ -226,34 +253,40 @@ test_failed_lease_creates_no_pane() {
   pass "a failed worktree lease refuses before any Herdr task pane exists"
 }
 
-# A fresh spawn over an existing record (the restart-recovery corridor) leases
-# a new worktree and republishes the record naming it. The worktree the old
-# record named is superseded, and a durable lease is never handed out again, so
-# the spawn that supersedes it has to return it or the pool loses that slot.
-test_superseded_worktree_lease_is_returned() {
-  local id=herdr-cwd-d4 out status first_wt recorded_wt
-  make_case superseded-lease "$id"
+# The restart-recovery corridor: a reboot leaves the pane an agent-free husk
+# with the worker's unlanded work sitting in the leased worktree, and the
+# same-identity respawn replaces that husk. The respawn must take the slot the
+# task already holds - a second slot would strand the first one, leased to this
+# id with no record naming it and its unlanded work out of reach.
+test_recorded_worktree_is_reused_with_its_work() {
+  local id=herdr-cwd-d4 out status window pane recorded_wt leases
+  make_case reuse-recorded-worktree "$id"
   mkdir -p "$CASE_DIR/user-home"
   out=$(run_herdr_spawn "$id")
   status=$?
   expect_code 0 "$status" "first herdr spawn should succeed"$'\n'"$out"
-  first_wt=$WT_DIR
-  WT_DIR="$CASE_DIR/wt2"
-  git -C "$PROJ_DIR" worktree add --quiet -b wt2-superseded "$WT_DIR" \
-    || fail "could not prepare the second pool worktree"
+  printf 'unlanded\n' > "$WT_DIR/work.txt"
+  printf 'edited by the worker\n' >> "$WT_DIR/README.md"
   out=$(run_herdr_spawn "$id")
   status=$?
-  expect_code 0 "$status" "respawn over the existing record should succeed"$'\n'"$out"
+  expect_code 0 "$status" "same-identity respawn should succeed"$'\n'"$out"
   recorded_wt=$(sed -n 's/^worktree=//p' "$HOME_DIR/state/$id.meta")
   [ "$(cd "$recorded_wt" && pwd -P)" = "$(cd "$WT_DIR" && pwd -P)" ] \
-    || fail "respawn record names worktree '$recorded_wt', expected '$WT_DIR'"
-  assert_grep "return --force --if-lease-holder fm-$id $first_wt" "$CASE_DIR/treehouse.log" \
-    "the superseded worktree stayed leased to $id with no record naming it"
-  pass "a Herdr spawn that supersedes a record returns that record's leased worktree"
+    || fail "respawn record names worktree '$recorded_wt', expected the worktree it already held, '$WT_DIR'"
+  [ -f "$WT_DIR/work.txt" ] && grep -q 'edited by the worker' "$WT_DIR/README.md" \
+    || fail "the respawn discarded the unlanded work in the task's own worktree"
+  leases=$(grep -c -- '--lease --lease-holder' "$CASE_DIR/treehouse.log" || true)
+  [ "$leases" = 1 ] \
+    || fail "the respawn leased a second pool slot ($leases leases) instead of reusing the one $id already held"
+  window=$(sed -n 's/^window=//p' "$HOME_DIR/state/$id.meta")
+  pane=${window#*:}
+  [ "$(pane_field "$pane" cwd)" = "$recorded_wt" ] \
+    || fail "the replacement pane was created in '$(pane_field "$pane" cwd)', not the reused worktree '$recorded_wt'"
+  pass "a same-identity Herdr respawn reuses the worktree it already leases, unlanded work intact"
 }
 
 test_task_pane_is_created_in_its_worktree
 test_aborted_spawn_returns_its_lease
 test_failed_lease_creates_no_pane
-test_superseded_worktree_lease_is_returned
+test_recorded_worktree_is_reused_with_its_work
 # all fm-spawn-herdr-task-cwd tests passed

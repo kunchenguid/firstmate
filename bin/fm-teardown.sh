@@ -2944,6 +2944,24 @@ teardown_herdr_close_task_pane() {
   fi
 }
 
+# A refused, skipped, or failed Herdr close must never erase a live task's
+# durable endpoint identity: unless the exact pane is confirmed gone, retain
+# every record and stop before any removal so a later rerun can retry the
+# locked close. Only a structured not-found proves the pane gone; unknown
+# presence, missing or malformed endpoint identity, and missing confirmation
+# machinery all refuse. Idempotent: the close runs once and this re-reads it.
+teardown_herdr_require_endpoint_gone() {
+  fm_backend_source herdr || true
+  if ! declare -F fm_backend_herdr_endpoint_confirmed_gone >/dev/null 2>&1; then
+    echo "error: herdr endpoint confirmation is unavailable for $ID; retaining every durable task record" >&2
+    exit 1
+  fi
+  if ! fm_backend_herdr_endpoint_confirmed_gone "$T"; then
+    echo "error: herdr pane $T for $ID is not confirmed gone after its close was refused, skipped, or failed; retaining every durable task record - rerun teardown once the close can run under the session lock" >&2
+    exit 1
+  fi
+}
+
 teardown_herdr_require_prerequisites() {  # <task-id>
   local task_id=$1 prerequisite
   if ! fm_backend_source herdr; then
@@ -3455,9 +3473,13 @@ if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   conclude_task_no_mistakes_run "$WT"
 fi
 # A Herdr ship or scout pane's own shell sits in the task worktree, so the pane
-# closes before the reap and return below would end it unguarded.
+# closes before the reap and return below would end it unguarded - and its
+# confirmation runs here too: a refused close must stop while the endpoint, the
+# worktree, and every record are still intact, or the reap below would end that
+# pane's shell anyway and make the refusal unretriable.
 if [ "$BACKEND" = herdr ] && [ "$KIND" != secondmate ]; then
   teardown_herdr_close_task_pane
+  teardown_herdr_require_endpoint_gone
 fi
 if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
@@ -3528,22 +3550,8 @@ elif [ "$BACKEND" != orca ]; then
   fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
 fi
-# A refused, skipped, or failed Herdr close must never erase a live task's
-# durable endpoint identity: unless the exact pane is confirmed gone, retain
-# every record and stop before any removal below so a later rerun can retry
-# the locked close. Only a structured not-found proves the pane gone; unknown
-# presence, missing or malformed endpoint identity, and missing confirmation
-# machinery all refuse.
 if [ "$BACKEND" = herdr ]; then
-  fm_backend_source herdr || true
-  if ! declare -F fm_backend_herdr_endpoint_confirmed_gone >/dev/null 2>&1; then
-    echo "error: herdr endpoint confirmation is unavailable for $ID; retaining every durable task record" >&2
-    exit 1
-  fi
-  if ! fm_backend_herdr_endpoint_confirmed_gone "$T"; then
-    echo "error: herdr pane $T for $ID is not confirmed gone after its close was refused, skipped, or failed; retaining every durable task record - rerun teardown once the close can run under the session lock" >&2
-    exit 1
-  fi
+  teardown_herdr_require_endpoint_gone
 fi
 if [ "$KIND" != secondmate ]; then
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
