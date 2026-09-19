@@ -54,6 +54,10 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *) fail "branch prompt lost the requested-result, progress-routine, or routine-silence rules" ;;
   esac
   case "$out_a" in
+    *"Write fm_branch_report summaries in Simplified Chinese (简体中文), using the captain's outcome language"*) ;;
+    *) fail "branch prompt lost the Simplified Chinese summary rule" ;;
+  esac
+  case "$out_a" in
     *"# PR identity: copy or abstain"*"copied verbatim from the task's \`done: PR <url>\` status line or its \`pr=\` metadata field"*"Never assemble an owner, repository, host, or number"*"report the identifier you do have"*) ;;
     *) fail "branch prompt lost the copy-or-abstain PR identity rule" ;;
   esac
