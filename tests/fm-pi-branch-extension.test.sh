@@ -1248,6 +1248,13 @@ for (let step = 1; step <= 12; step++) await emit("branch-driver", "routine", `B
 if (sentToMain.some((sent) => sent.message.display || sent.options.triggerTurn)) throw new Error("routine steps cluttered chat or triggered main");
 finish();
 await offer.settlement;
+await emit("fleet", "captain", "Another worker is stuck");
+const escalation = mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome").at(-1);
+if (escalation?.data.summary !== "Another worker is stuck") throw new Error("fleet escalation was not immediately visible");
+const escalationRequest = sentToMain.filter((sent) => sent.message.customType === "fm-branch-process").at(-1);
+if (!escalationRequest?.options.triggerTurn || !escalationRequest.message.content.includes("Another worker is stuck")) throw new Error("fleet escalation did not immediately trigger main");
+const escalationAck = await mainTools.find((tool) => tool.name === "fm_branch_processed").execute("ack-fleet", { through: escalation.data.seq }, undefined, undefined, {});
+if (escalationAck.isError) throw new Error("fleet escalation acknowledgement failed");
 globalThis.__fmOnBranchPrompt = async () => {
   const pending = outcomeScript(["pending-progress"]).trim().split("\n").map(JSON.parse);
   if (pending.length !== 1 || pending[0].summary !== "Build step 12") throw new Error("heartbeat lost consumed progress");
@@ -5397,11 +5404,6 @@ EOF
   expect_code 0 "$status" "an extension-registered provider must resolve in the isolated branch runtime: $out"
   pass "an extension-registered provider resolves in the isolated branch runtime"
 }
-
-if [ -n "${FM_TEST_ONLY:-}" ]; then
-  "$FM_TEST_ONLY"
-  exit 0
-fi
 
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable

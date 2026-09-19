@@ -87,7 +87,7 @@
 #     Print the last n records (default 20), read or not.
 #   fm-branch-outcome.sh pending-progress
 #     Print the latest silent task outcomes not superseded by a visible outcome
-#     for that task or a visible fleet summary, independently of the read cursor.
+#     for that task or a visible routine fleet summary, independently of the read cursor.
 #     Silent fleet reviews neither add nor consume pending progress.
 #   fm-branch-outcome.sh startup-replay
 #     Session-start recovery: print the leading routine unread records under a
@@ -633,7 +633,7 @@ case "$CMD" in
       jq -sc '
         reduce .[] as $row ({};
           if $row.task == "fleet" then
-            if $row.silent == true then . else {} end
+            if $row.verdict == "routine" and $row.silent != true then {} else . end
           elif $row.silent == true then .[$row.task] = $row
           else del(.[$row.task]) end)
         | [.[]] | sort_by(.seq) | .[]

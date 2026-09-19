@@ -5023,6 +5023,8 @@ test_pi_pending_progress_uses_heartbeat_cadence() {
     --task fleet --verdict routine --silent true --summary 'Quiet review' >/dev/null || fail "silent fleet append failed"
   FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" append \
     --task other --verdict routine --summary 'Other task recovered' >/dev/null || fail "unrelated visible append failed"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task fleet --verdict captain --summary 'Another worker is stuck' >/dev/null || fail "fleet escalation append failed"
   pending=$(FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-branch-outcome.sh" pending-progress)
   [ "$(printf '%s\n' "$pending" | jq -s 'length')" = 1 ] || fail "progress did not coalesce per task"
   [ "$(printf '%s\n' "$pending" | jq -r '.summary')" = 'Build step 12' ] || fail "pending progress lost the latest update"
