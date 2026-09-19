@@ -37,20 +37,27 @@
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Branch name alone is not enough: a historical run on a reused
 #      branch whose head was rewritten or diverged must not be attributed.
-#      A run matches when its head equals the worktree HEAD, or the worktree HEAD
-#      is an ancestor of the run head (pipeline fix commits advanced the run on
-#      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution. While the pipeline owns the
-#      branch (branch_sync.state=pipeline_owned), its own custody attribution
-#      binds an ACTIVE run without head equality (fm_nm_run_is_pipeline_owned_active
-#      in bin/fm-nm-run-lib.sh).
-#      A run head whose commit object the task copy never fetched (the pipeline
-#      committed its fix round in its own checkout) cannot be verified locally;
-#      that row is recognized only as a provable pipeline-owned continuation -
-#      the branch's ACTIVE newest ledger row, anchored by the row immediately
-#      before it having ended at exactly this worktree's head - so an active fix
-#      round never reads as an older failed run (rule owned by
-#      fm_nm_runs_status_for_worktree in bin/fm-nm-run-lib.sh).
+#      A run EXECUTING on this crew's branch (pending, running, fixing, or ci)
+#      is authoritative REGARDLESS of head (fm_nm_run_is_executing in
+#      bin/fm-nm-run-lib.sh): the pipeline rebases the branch and commits its
+#      fix rounds in its own checkout, so a live run's head routinely differs
+#      from the local head, and reading an older run that still matches the
+#      local head would report a working crew as failed. Every other run -
+#      terminal, or parked at a gate - matches only when its head equals the
+#      worktree HEAD, or the worktree HEAD is an ancestor of the run head
+#      (pipeline fix commits advanced the run on the same line of history);
+#      local work that advanced past the run head, or diverged from it,
+#      invalidates attribution. While the pipeline owns the branch
+#      (branch_sync.state=pipeline_owned), its own custody attribution also
+#      binds an ACTIVE parked run without head equality
+#      (fm_nm_run_is_pipeline_owned_active in bin/fm-nm-run-lib.sh).
+#      A parked run head whose commit object the task copy never fetched cannot
+#      be verified locally; that row is recognized only as a provable
+#      pipeline-owned continuation - the branch's ACTIVE newest ledger row,
+#      anchored by the row immediately before it having ended at exactly this
+#      worktree's head (rule owned by fm_nm_runs_status_for_worktree in
+#      bin/fm-nm-run-lib.sh). In the coarse runs-ledger fallback, a newest
+#      same-branch row that is running or pending answers whatever its head.
 #      fm_nm_select_run in bin/fm-nm-run-lib.sh owns complete run selection
 #      and ambiguity reporting. The selected run's id-addressed status must
 #      agree on id, branch, and live/terminal class before attribution;
@@ -650,7 +657,8 @@ nm_ci_checks_state() {
 # matching run: either it names another branch (routine once several crews
 # validate the same underlying repo concurrently - a worktree with its own
 # active run reliably gets that run answered, even under concurrent load), or
-# it names this branch's run but the strict head rule rejected it. The real
+# it names this branch's run but the strict head rule rejected it (an
+# executing same-branch row still answers through live-any-head). The real
 # run-listing command is the top-level `no-mistakes runs` (the `axi` surface
 # has no runs-listing subcommand; tests/fm-crew-state.test.sh owns the
 # 2026-07-02 dead-code incident history this fallback replaced).
@@ -731,7 +739,8 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         if [ "$(fm_nm_run_status_class "$selected_status")" != "$current_class" ]; then
           emit unknown run-step "selected run status disagrees with inventory; run ids: $candidate_ids"
         fi
-        if nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT"; then
+        if fm_nm_run_is_executing "$RUN_OUT" \
+          || nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT"; then
           HAVE_RUN=1
         elif [ -z "$(fm_nm_resolve_commit "$WT" "$(strip_quotes "$(nm_field head)")")" ]; then
           if fm_nm_run_is_active "$RUN_OUT" \
@@ -746,12 +755,14 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     esac
     if [ "$HAVE_RUN" = 0 ] && [ -z "$SELECTED_RUN_ID" ]; then
       run_branch=$(strip_quotes "$(nm_field branch)")
-      # Head equality, or the pipeline-owned-active exemption: while the
-      # pipeline owns this branch, the daemon's own branch attribution is
-      # authoritative and the lane head need not be a git object here
-      # (fm_nm_run_is_pipeline_owned_active in bin/fm-nm-run-lib.sh).
+      # Executing-regardless-of-head, head equality, or the pipeline-owned
+      # parked-run exemption: a live run on this branch is current even after
+      # a rebase, and while the pipeline owns this branch a parked run binds
+      # without the lane head being a git object here (fm_nm_run_is_executing
+      # and fm_nm_run_is_pipeline_owned_active in bin/fm-nm-run-lib.sh).
       if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] \
-        && { nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT"; }; then
+        && { fm_nm_run_is_executing "$RUN_OUT" \
+          || nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT"; }; then
         HAVE_RUN=1
         # Without run ids, contradictory liveness cannot prove precedence.
         # A live replacement also needs an id-addressed status read: a bare
@@ -778,7 +789,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         # `[ -n "$RUN_OUT" ]`: an empty/timed-out primary call means the CLI
         # itself did not respond, so retrying it immediately with a second
         # bounded call would just double the wait for no better answer.
-        COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
+        COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)" "" live-any-head)
         if [ -n "$COARSE_STATUS" ]; then
           HAVE_RUN=1
           # A branch-matching answer the strict rule rejected is this branch's
@@ -807,7 +818,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     # read above. The status event span remains independently available to the
     # supervisor through fm-classify-lib.sh's status_span_first_actionable.
     case "$COARSE_STATUS" in
-      running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
+      pending|running) RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
       failed)
         # The ledger row is terminal but the coarse path has no steps table
