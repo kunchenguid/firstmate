@@ -134,14 +134,43 @@ FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 # log while a log whose tail holds no event still gets a full pass.
 FM_CLASSIFY_EVENT_WINDOW_LINES=200
 
+# The ERE matching this lane's own hold-mirror lines under <verb-ere>:
+# bin/fm-captain-hold.sh writes its declaration and retraction on a held
+# lane's log under the key captain-hold-<task>-<n>, and every reader that
+# treats those lines specially derives the key from the log's filename
+# through this one pattern.
+_fm_hold_mirror_line_ere() {  # <status-file> <verb-ere>
+  local task=${1##*/}
+  task=${task%.status}
+  printf '^(%s) \\[key=captain-hold-%s-[0-9]+\\]:' "$2" "${task//./\\.}"
+}
+
 # Return the last recognized status event, ignoring continuation prose and blanks
 # (empty if missing/blank), and with <previous-event-var> the event before it.
 # The optional previous event is what this reader returned before the latest one
 # was appended, so a consumer can name the head it is superseding; asking for it
 # always reads the whole file, since a bounded window cannot bound two events.
 # This is an event read; status_current_line below reconciles open decisions.
+# One settlement reads through the raw stream: when the latest event is the
+# hold mirror's own retraction (the resolved [key=captain-hold-<task>-<n>]
+# line), the pair has settled and the retraction is the hold command's
+# bookkeeping, not worker state, so the worker's own view from
+# last_worker_status_line stands in - a lane that was done, paused, or failed
+# before the hold reads that way to the watcher, the away-mode daemon, and the
+# return brief again. A hold still standing is returned raw, because those
+# readers must see it.
 last_status_line() {  # <status-file> [<previous-event-var>]
-  _fm_last_status_event '' "$@"
+  local latest
+  latest=$(_fm_last_status_event '' "$1")
+  if [[ $latest =~ $(_fm_hold_mirror_line_ere "$1" 'resolved') ]]; then
+    last_worker_status_line "$@"
+    return
+  fi
+  if [ "$#" -gt 1 ]; then
+    _fm_last_status_event '' "$@"
+    return
+  fi
+  printf '%s\n' "$latest"
 }
 
 # last_status_line read past bin/fm-captain-hold.sh's hold mirror: the
@@ -150,11 +179,10 @@ last_status_line() {  # <status-file> [<previous-event-var>]
 # command's, not the worker's, so a reader of the worker's own state (crew
 # state, the terminal-outcome ledger) must not let them displace the event the
 # worker last wrote. The watcher and away-mode daemon read last_status_line
-# directly, because the hold is exactly what they need to see.
+# directly: it keeps a standing hold visible to them and reads past the pair
+# itself once the hold settles.
 last_worker_status_line() {  # <status-file> [<previous-event-var>]
-  local task=${1##*/}
-  task=${task%.status}
-  _fm_last_status_event "^(captain-held|resolved) \\[key=captain-hold-${task//./\\.}-[0-9]+\\]:" "$@"
+  _fm_last_status_event "$(_fm_hold_mirror_line_ere "$1" 'captain-held|resolved')" "$@"
 }
 
 _fm_last_status_event() {  # <skip-ere> <status-file> [<previous-event-var>]

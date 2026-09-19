@@ -2108,6 +2108,126 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
   pass "a declared pause is absorbed on first sight, then re-surfaced as a recheck past the threshold, never wedge-escalated"
 }
 
+# A lane whose hold has SETTLED reads as the worker's own last event again:
+# last_status_line reads past the mirror's own resolved [key=captain-hold-<id>-<n>]
+# retraction, so a lane that delivered before the hold takes the terminal
+# branch (one stale wake, then inert) instead of the non-terminal wedge path
+# the raw retraction line used to send it down.
+test_settled_hold_mirror_over_done_lane_never_wedge_escalates() {
+  local dir state fakebin out capture_file window key pane_hash sig pid statusf
+  dir=$(make_case settled-mirror-done); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-done"
+  printf 'idle after the merge handoff' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/done.meta"
+  statusf="$state/done.status"
+  cat > "$statusf" <<'EOF'
+done: PR https://example.test/pull/1 checks green
+captain-held [key=captain-hold-done-1]: merge approval
+resolved [key=captain-hold-done-1]: captain call released by fm-captain-hold
+EOF
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-done_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle after the merge handoff")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green'
+
+  # First sight: the worker's own done: is the lane's last event again, so the
+  # watcher takes the terminal branch - one stale wake, never a wedge label.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface the settled done lane's first terminal stale"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the first terminal stale was not surfaced"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a settled done lane was mislabeled a possible wedge"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a terminal stale started the wedge timer"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the terminal stale"
+
+  # Re-armed on the unchanged pane past the escalation bound the lane stays
+  # inert: no second wake, no wedge state. Before the read-through fix the raw
+  # resolved line took the non-terminal branch and wedge-escalated here.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid" 500; then
+    reap "$pid"; fail "watcher re-surfaced or escalated a settled done lane: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a settled done lane printed a second wake: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a settled done lane enqueued a second wake"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "a settled done lane wedge-escalated"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a settled done lane started the wedge timer"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a settled hold mirror over a done lane surfaces one terminal stale, then stays inert and never wedge-escalates"
+}
+
+# The settled pair over a PAUSED lane keeps the declared wait: the watcher
+# re-surfaces it once past PAUSE_RESURFACE_SECS, and the throttle survives a
+# re-arm instead of being cleared by the raw retraction line every poll, so
+# the lane wakes once per cadence rather than once per relaunch.
+test_settled_hold_mirror_over_paused_lane_resurfaces_once_per_cadence() {
+  local dir state fakebin out capture_file window key pane_hash sig pid back statusf
+  dir=$(make_case settled-mirror-paused); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-held"
+  printf 'idle, holding for upstream' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/held.meta"
+  statusf="$state/held.status"
+  cat > "$statusf" <<'EOF'
+paused: holding for the upstream tool release
+captain-held [key=captain-hold-held-1]: operator review
+resolved [key=captain-hold-held-1]: captain call released by fm-captain-hold
+EOF
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-held_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, holding for upstream")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream tool release'
+
+  # Aged past the cadence: exactly one paused recheck, never a wedge, and the
+  # throttle marker is recorded.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not re-surface the settled paused lane past the cadence"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the paused re-surface was not printed"
+  grep -F "awaiting external" "$out" >/dev/null || fail "the re-surface was not labeled a paused recheck"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a settled paused lane was mislabeled a possible wedge"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the paused re-surface throttle marker was not recorded"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a paused re-surface must not use the wedge timer"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the paused re-surface"
+
+  # A second arming inside the cadence absorbs: the throttle the raw
+  # retraction line used to destroy every poll now holds, so the lane wakes
+  # once per cadence, not once per relaunch.
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher re-surfaced a settled paused lane inside the cadence: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a settled paused lane re-surfaced inside the cadence: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a settled paused lane enqueued a second wake inside the cadence"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a settled hold mirror over a paused lane resurfaces once per cadence, never once per relaunch"
+}
+
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
@@ -5507,6 +5627,8 @@ test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
+test_settled_hold_mirror_over_done_lane_never_wedge_escalates
+test_settled_hold_mirror_over_paused_lane_resurfaces_once_per_cadence
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
 test_live_declared_wait_churn_honors_the_resurface_throttle

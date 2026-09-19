@@ -1008,10 +1008,8 @@ EOF
     || fail "release did not retract the status-log declaration"
   last=$(bash -c '. "$1"; last_status_line "$2"' _ \
     "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
-  if bash -c '. "$1"; status_is_captain_held "$2"' _ \
-    "$ROOT/bin/fm-classify-lib.sh" "$last"; then
-    fail "a released lane still classifies as captain-held: $last"
-  fi
+  [ "$last" = "paused: waiting on the sample upstream release" ] \
+    || fail "a settled mirror pair did not read through to the worker's own last event: $last"
   FM_STATE_OVERRIDE="$home/state" bash -c '
     . "$1"; fm_wake_signal_seen_current "$2" "$3"
   ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/$id.status" \
@@ -1035,6 +1033,37 @@ EOF
   grep -Fx "resolved [key=captain-hold-$id-2]: captain call answered by fm-captain-hold" \
     "$home/state/$id.status" >/dev/null \
     || fail "a closing answer did not retract the status-log declaration"
+  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
+  [ "$last" = "paused: waiting on the sample upstream release" ] \
+    || fail "a closing answer left the lane reading as the mirror instead of the worker: $last"
+  run_captain "$home" answer "$id" --decision-file "$home/ship.txt" >/dev/null \
+    || fail "identical answer retry was not idempotent"
+  [ "$(grep -c "resolved \[key=captain-hold-$id-2\]" "$home/state/$id.status")" = 1 ] \
+    || fail "a replayed settlement appended a second retraction"
+
+  # The retraction guard matches the mirror's own key, so a lane whose own
+  # last line is command_complete's captain-held transfer is never retracted,
+  # even across a replayed settlement.
+  lane=sample-transfer-lane
+  tasks_in "$home" add "$lane" "Guard the transfer sample" --kind scout --repo sample >/dev/null \
+    || fail "could not create the transfer lane"
+  write_origin_meta "$home" "$lane"
+  cat > "$home/state/$lane.status" <<'EOF'
+done: report complete
+captain-held [key=route]: tracked by sample-transfer-lane
+EOF
+  run_captain "$home" hold "$lane" --reason "transfer guard" >/dev/null \
+    || fail "could not hold the transfer lane"
+  printf 'Close the transfer call.\n' > "$home/transfer.txt"
+  run_captain "$home" answer "$lane" --decision-file "$home/transfer.txt" >/dev/null \
+    || fail "answer could not close the transfer lane"
+  run_captain "$home" answer "$lane" --decision-file "$home/transfer.txt" >/dev/null \
+    || fail "transfer answer retry was not idempotent"
+  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status")
+  [ "$last" = "captain-held [key=route]: tracked by sample-transfer-lane" ] \
+    || fail "settlement disturbed a transfer line the mirror does not own: $last"
 
   # A decision-only hold has no lane, so it mints no status log.
   run_captain "$home" hold sample-plain-call \

@@ -288,12 +288,15 @@ status_declare_hold() {  # <task-id> <occurrence> <reason>
 }
 
 # Retract the declaration once the call is settled, but only while the log's
-# last event line still declares the hold: a worker that already moved on
-# owns its own newer state, and a matching retry must not append again.
+# last event line still declares it: a worker that already moved on owns its
+# own newer state, and a matching retry must not append again. The guard
+# matches the mirror's OWN keyed declaration: once last_status_line reads
+# past a settled pair, a worker line that happens to be command_complete's
+# captain-held transfer would otherwise invite a second retraction.
 status_retract_hold() {  # <task-id> <occurrence> <note>
   local id=$1 occurrence=$2 note=$3 status_file line rc=0
   status_file="$STATE/$id.status"
-  status_is_captain_held "$(last_status_line "$status_file")" || return 0
+  [[ $(last_status_line "$status_file") =~ $(_fm_hold_mirror_line_ere "$status_file" 'captain-held') ]] || return 0
   line="resolved [key=captain-hold-$id-$occurrence]: captain call $note by fm-captain-hold"
   fm_cap_line_var "$line"
   fm_wake_status_append_self_announced "$STATE" "$status_file" "$FM_LINE_CAP_LINE" || rc=$?
