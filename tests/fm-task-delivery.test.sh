@@ -212,50 +212,48 @@ EOF
 # mode-only brief. Every supported harness and runtime backend consumes this same
 # generated brief or its pointer, so those integration axes are not applicable.
 # The worker receives the rendered launch brief, so assert this generated
-# interface for both PR delivery paths and both postures.
+# interface for both PR delivery paths and prove that yolo-off adds no readiness
+# override.
 test_spawn_renders_yolo_pull_request_readiness_contract() {
-  local rec home proj fakebin mode yolo id brief
+  local rec home proj fakebin mode id brief
   rec=$(make_home yolo-readiness)
   IFS='|' read -r home proj fakebin <<EOF
 $rec
 EOF
 
   for mode in direct-PR no-mistakes; do
-    for yolo in on off; do
-      id="delivery-yolo-$mode-$yolo"
-      write_brief "$home" "$id" "$mode"
-      run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode "$mode" --yolo "$yolo" >/dev/null 2>&1 || true
-      brief="$home/data/$id/launch-brief.md"
-      assert_present "$brief" "$mode/$yolo: spawn did not publish the worker launch brief"
-      assert_grep "This task's merge posture is \`yolo=$yolo\`" "$brief" \
-        "$mode/$yolo: worker launch brief lost the explicit yolo posture"
-      case "$mode:$yolo" in
-        direct-PR:on)
-          assert_grep "Create the pull request without \`--draft\`" "$brief" \
-            "direct-PR/on: worker was not told to create a ready pull request"
-          assert_grep 'gh-axi pr ready <number>' "$brief" \
-            "direct-PR/on: worker was not told to confirm ready-for-review state"
-          assert_no_grep 'gh-axi pr create --draft' "$brief" \
-            "direct-PR/on: worker retained the draft creation command" ;;
-        direct-PR:off)
-          assert_grep 'gh-axi pr create --draft' "$brief" \
-            "direct-PR/off: worker lost the normal draft creation command"
-          assert_no_grep 'gh-axi pr ready <number>' "$brief" \
-            "direct-PR/off: worker was told to bypass the normal draft default" ;;
-        no-mistakes:on)
-          assert_grep 'After no-mistakes reports its CI-ready point' "$brief" \
-            "no-mistakes/on: worker was not told when to promote the pull request"
-          assert_grep 'gh-axi pr ready <number>' "$brief" \
-            "no-mistakes/on: worker was not told to confirm ready-for-review state" ;;
-        no-mistakes:off)
-          assert_grep "Preserve no-mistakes' configured pull-request draft setting" "$brief" \
-            "no-mistakes/off: worker was told to change the normal draft setting"
-          assert_no_grep 'gh-axi pr ready <number>' "$brief" \
-            "no-mistakes/off: worker was told to bypass the normal draft setting" ;;
-      esac
-    done
+    id="delivery-yolo-$mode-on"
+    write_brief "$home" "$id" "$mode"
+    printf '\n# Pull request readiness\nThis heading is ordinary task content.\n' >> "$home/data/$id/brief.md"
+    run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode "$mode" --yolo on >/dev/null 2>&1 || true
+    brief="$home/data/$id/launch-brief.md"
+    assert_present "$brief" "$mode/on: spawn did not publish the worker launch brief"
+    assert_grep "This task's merge posture is \`yolo=on\`" "$brief" \
+      "$mode/on: ordinary brief content suppressed the authoritative yolo posture"
+    case "$mode" in
+      direct-PR)
+        assert_grep "Create the pull request without \`--draft\`" "$brief" \
+          "direct-PR/on: worker was not told to create a ready pull request"
+        assert_grep 'gh-axi pr ready <number>' "$brief" \
+          "direct-PR/on: worker was not told to confirm ready-for-review state" ;;
+      no-mistakes)
+        assert_grep 'After no-mistakes reports its CI-ready point' "$brief" \
+          "no-mistakes/on: worker was not told when to promote the pull request"
+        assert_grep 'gh-axi pr ready <number>' "$brief" \
+          "no-mistakes/on: worker was not told to confirm ready-for-review state" ;;
+    esac
+
+    id="delivery-yolo-$mode-off"
+    write_brief "$home" "$id" "$mode"
+    run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode "$mode" --yolo off >/dev/null 2>&1 || true
+    brief="$home/data/$id/launch-brief.md"
+    assert_present "$brief" "$mode/off: spawn did not publish the worker launch brief"
+    assert_no_grep '^# Pull request readiness$' "$brief" \
+      "$mode/off: worker received a yolo-specific readiness override"
+    assert_no_grep 'gh-axi pr ready <number>' "$brief" \
+      "$mode/off: worker received a ready-for-review requirement"
   done
-  pass "fm-spawn: yolo readiness is rendered for direct-PR and no-mistakes workers"
+  pass "fm-spawn: only yolo-on renders authoritative pull-request readiness"
 }
 
 # Promotion is where a scout's ship contract is finally decided, so it requires the

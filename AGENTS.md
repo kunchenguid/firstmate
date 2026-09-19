@@ -352,7 +352,7 @@ The path's worker, automated gates, and captain approval remain authoritative:
 - **local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority before firstmate uses the guarded fast-forward merge path.
 
 Delivery mode and `yolo` are orthogonal.
-`yolo` governs routine merge authority and pull-request readiness: with it off, the captain approves every PR merge and every local-only landing while workers preserve the normal draft behavior; with it on, workers make created PRs ready for review and firstmate merges green, in-scope work itself.
+`yolo` governs routine merge authority and, when on, pull-request readiness: with it off, the captain approves every PR merge and every local-only landing; with it on, workers make created PRs ready for review and firstmate merges green, in-scope work itself.
 `bin/fm-dod-lib.sh` owns the exact yolo-specific worker instructions rendered at spawn or scout promotion.
 Never merge a red PR under either setting unless a current explicit captain instruction names the single GitHub check waived through `fm-pr-merge.sh --allow-red`; that attended-only waiver still requires every other check green.
 Destructive, irreversible, and security-sensitive merges still escalate.

@@ -2643,7 +2643,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     fm_brief_worker_role "$STATE" "$ID" &&
       printf '\n' &&
       cat "$SOURCE_BRIEF" &&
-      if [ "$KIND" = ship ] && ! grep -q '^# Pull request readiness$' "$SOURCE_BRIEF"; then
+      if [ "$KIND" = ship ]; then
         printf '\n' &&
           fm_ship_pr_readiness_block "$MODE" "$YOLO"
       fi

@@ -87,13 +87,6 @@ This task's merge posture is `yolo=on`.
 Create the pull request without `--draft`, then run `gh-axi pr ready <number>` using the pull request number from the creation result before reporting completion.
 EOF
       ;;
-    direct-PR:off)
-      cat <<'EOF'
-# Pull request readiness
-This task's merge posture is `yolo=off`.
-Preserve the normal draft default by creating the pull request with `gh-axi pr create --draft`; do not run `gh-axi pr ready`.
-EOF
-      ;;
     no-mistakes:on)
       cat <<'EOF'
 # Pull request readiness
@@ -101,14 +94,7 @@ This task's merge posture is `yolo=on`.
 After no-mistakes reports its CI-ready point and provides the pull request URL, run `gh-axi pr ready <number>` using that pull request number before reporting completion.
 EOF
       ;;
-    no-mistakes:off)
-      cat <<'EOF'
-# Pull request readiness
-This task's merge posture is `yolo=off`.
-Preserve no-mistakes' configured pull-request draft setting; do not run `gh-axi pr ready`.
-EOF
-      ;;
-    local-only:on|local-only:off)
+    direct-PR:off|no-mistakes:off|local-only:on|local-only:off)
       ;;
     *)
       echo "error: fm_ship_pr_readiness_block: unknown delivery posture '$mode'/'$yolo'" >&2
