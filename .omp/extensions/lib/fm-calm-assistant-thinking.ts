@@ -26,6 +26,7 @@ type AssistantMessageUpdateOptions = {
 };
 
 type AssistantMessageComponentLike = {
+  hideThinkingBlock?: boolean;
   setHideThinkingBlock(hide: boolean): void;
   invalidate(): void;
   updateContent(message: AssistantMessage, options?: AssistantMessageUpdateOptions): void;
@@ -39,10 +40,12 @@ type CalmAssistantThinkingPatch = {
     AssistantMessageUpdateOptions | undefined
   >;
   presentationMessages: WeakMap<AssistantMessageComponentLike, AssistantMessage>;
+  capturedThinkingHidden: WeakMap<AssistantMessageComponentLike, boolean>;
   originalUpdateContent: AssistantMessageComponentLike["updateContent"] | undefined;
   hidesThinking: () => boolean;
   hidesWorkingNote: () => boolean;
   remember: (component: AssistantMessageComponentLike) => void;
+  setThinkingVisibility: (component: AssistantMessageComponentLike) => void;
   applyToRemembered: () => void;
   reset: () => void;
 };
@@ -78,18 +81,30 @@ export function installOmpCalmAssistantThinking(): void {
     originalMessages: new WeakMap(),
     originalOptions: new WeakMap(),
     presentationMessages: new WeakMap(),
+    capturedThinkingHidden: new WeakMap(),
     originalUpdateContent: undefined,
     hidesThinking: () => calmPresentationHides("assistant-thinking"),
     hidesWorkingNote: () => calmPresentationHides("assistant-working-note"),
     remember(component) {
       patch.remembered.add(component);
     },
+    setThinkingVisibility(component) {
+      if (patch.hidesThinking()) {
+        if (!patch.capturedThinkingHidden.has(component)) {
+          patch.capturedThinkingHidden.set(component, component.hideThinkingBlock === true);
+        }
+        component.setHideThinkingBlock(true);
+      } else if (patch.capturedThinkingHidden.has(component)) {
+        const native = patch.capturedThinkingHidden.get(component) === true;
+        patch.capturedThinkingHidden.delete(component);
+        component.setHideThinkingBlock(native);
+      }
+    },
     applyToRemembered() {
-      const hide = patch.hidesThinking();
       const shouldHideWorkingNote = patch.hidesWorkingNote();
       for (const component of patch.remembered) {
         try {
-          component.setHideThinkingBlock(hide);
+          patch.setThinkingVisibility(component);
           const originalMessage = patch.originalMessages.get(component);
           if (shouldHideWorkingNote && originalMessage) {
             component.updateContent(originalMessage, patch.originalOptions.get(component));
@@ -152,7 +167,6 @@ export function installOmpCalmAssistantThinking(): void {
       patch.originalMessages.set(this, message);
       patch.originalOptions.set(this, options);
     }
-    const hideThinking = patch.hidesThinking();
     const hideWorkingNote =
       patch.hidesWorkingNote() &&
       isMidTurnAssistantMessage(message) &&
@@ -172,7 +186,7 @@ export function installOmpCalmAssistantThinking(): void {
             ),
           }
         : message;
-    this.setHideThinkingBlock(hideThinking);
+    patch.setThinkingVisibility(this);
     patch.presentationMessages.set(this, presentationMessage);
     stockUpdateContent.call(this, presentationMessage, options);
   };

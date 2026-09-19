@@ -68,8 +68,8 @@ export class UserMessageComponent {
   }
 }
 export class AssistantMessageComponent {
-  constructor() {
-    this.hideThinkingBlock = false;
+  constructor(hideThinkingBlock = false) {
+    this.hideThinkingBlock = hideThinkingBlock;
     this.lastMessage = undefined;
     this.lastOptions = undefined;
   }
@@ -459,6 +459,69 @@ JS
   pass "OMP retry recovery keeps the unfiltered original so Calm-off restores hidden working notes"
 }
 
+test_native_hide_thinking_is_additive() {
+  local fixture out status
+  fixture="$TMP_ROOT/native-hide-thinking"
+  install_omp_calm_fixture "$fixture"
+  out=$(cd "$fixture" && node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+import * as Agent from "@oh-my-pi/pi-coding-agent";
+
+const thinking = await import(pathToFileURL(`${process.cwd()}/.omp/extensions/lib/fm-calm-assistant-thinking.ts`).href);
+const vis = await import(pathToFileURL(`${process.cwd()}/.pi/extensions/lib/fm-calm-visibility-core.ts`).href);
+thinking.installOmpCalmAssistantThinking();
+const message = {
+  stopReason: "stop",
+  content: [
+    { type: "thinking", thinking: "secret plan" },
+    { type: "text", text: "answer for the captain" },
+  ],
+};
+const showsThinking = (component) => (component.rendered || []).some((line) => line.startsWith("thinking:"));
+
+// Calm off must be strictly additive: leave OMP's own value untouched.
+vis.setCalmPresentation(false);
+const nativeOn = new Agent.AssistantMessageComponent(true);
+nativeOn.updateContent(message);
+if (nativeOn.hideThinkingBlock !== true || showsThinking(nativeOn)) {
+  throw new Error("Calm off must keep OMP's native hidden thinking hidden");
+}
+nativeOn.invalidate();
+if (nativeOn.hideThinkingBlock !== true || showsThinking(nativeOn)) {
+  throw new Error("Calm off invalidate must keep OMP's native hidden thinking hidden");
+}
+const nativeOff = new Agent.AssistantMessageComponent(false);
+nativeOff.updateContent(message);
+if (nativeOff.hideThinkingBlock !== false || !showsThinking(nativeOff)) {
+  throw new Error("Calm off must leave OMP's native visible thinking visible");
+}
+
+// Calm on hides thinking, then restores the captured pre-Calm value.
+vis.setCalmPresentation(true);
+const calmOn = new Agent.AssistantMessageComponent(false);
+calmOn.updateContent(message);
+if (calmOn.hideThinkingBlock !== true || showsThinking(calmOn)) {
+  throw new Error("Calm on must hide thinking");
+}
+const nativeHidden = new Agent.AssistantMessageComponent(true);
+nativeHidden.updateContent(message);
+vis.setCalmPresentation(false);
+thinking.applyOmpCalmThinkingToRememberedRows();
+if (nativeHidden.hideThinkingBlock !== true) {
+  throw new Error("Calm off must restore the captured pre-Calm hide-thinking value, not false");
+}
+nativeHidden.updateContent(message);
+if (nativeHidden.hideThinkingBlock !== true) {
+  throw new Error("Calm off after restore must leave OMP's native hidden thinking hidden");
+}
+JS
+)
+  status=$?
+  expect_code 0 "$status" "native hide-thinking contract: $out"
+  [ -z "$out" ] || fail "native hide-thinking contract printed output: $out"
+  pass "OMP Calm leaves the native hide-thinking setting untouched while off, and restores it after Calm"
+}
+
 test_degraded_public_api_seam() {
   local fixture home out status
   fixture="$TMP_ROOT/degraded"
@@ -509,4 +572,5 @@ test_calm_command_persists_and_reloads
 test_operational_row_hide_show_and_thinking_collapse
 test_double_install_keeps_shared_state
 test_retry_recovery_keeps_original_note
+test_native_hide_thinking_is_additive
 test_degraded_public_api_seam
