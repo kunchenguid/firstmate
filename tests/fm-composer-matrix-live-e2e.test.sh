@@ -115,9 +115,25 @@ check_harness_idle_empty() {  # <name> <launch-cmd...>
 }
 
 # --- 1. Every installed verified harness must reach a proven-empty composer --
+# Each harness is launched the way bin/fm-spawn.sh launches it, minus the brief.
+# muse is the one that needs a flag: it gates every workspace no operator has
+# opened by hand behind its own trust dialog, which the strict classifier
+# correctly refuses to read as a composer, so a bare `muse` here could only ever
+# fail on that dialog and never exercise the composer at all. `--yolo` is the
+# flag the real spawn passes for exactly that reason, and this guard submits no
+# prompt, so nothing runs in the trusted workspace.
+harness_launch() {  # <name> -> launch argv on stdout, one word per line
+  case "$1" in
+    muse) printf '%s\n' muse --yolo ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
 for h in claude codex opencode pi grok kimi muse; do
   if command -v "$h" >/dev/null 2>&1; then
-    check_harness_idle_empty "$h" "$h"
+    launch=()
+    while IFS= read -r word; do launch+=("$word"); done < <(harness_launch "$h")
+    check_harness_idle_empty "$h" "${launch[@]}"
   else
     note "harness absent, not verified here: $h"
   fi

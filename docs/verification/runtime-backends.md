@@ -599,6 +599,33 @@ Issue #3436's recorded idle capture reproduced the cause on 2026-09-14: Grok 1.0
 The classifier now accepts only that exact three-column overhang (`FM_COMPOSER_GROK_TITLE_OVERHANG` in `bin/fm-composer-lib.sh`) carrying a typed `Grok <model> (<effort>)` title; the portable regressions feed the real capture through both the shared Herdr capability profile and `fm_backend_herdr_composer_state`, and prove idle is `empty`, typed content is `pending`, and an unrecognized oversized title remains `unknown`.
 Grok was not installed on the verification machine for this 2026-09-14 change, so the live guard still owes a refresh against the current release rather than treating the portable capture as current live evidence; the three-column width is not live-verified and may need adjustment if Grok's title rendering changes or scales with title length.
 This closes only #3436's idle-composer-misclassification symptom (Grok/Herdr composer read `unknown` instead of `empty`, blocking away-mode injection). The issue's second symptom - a leftover watcher never yielding and never being taken over or refused at AFK start - is unrelated to composer classification and is tracked separately in #2270, where #3436's reproduction serves as corroborating evidence.
+Muse self-updated to 1.3.0-R3401.1 on 2026-09-19 and redrew its composer: 0.1.0 drew an unbordered `⟩` row, while 1.3 draws a TITLED opening rule (`── Voice input (⌥ + v to start) ───…`), a `❯` row, and a solid closing rule above its status row.
+The classifier read every muse pane `unknown`, because the lone closing rule below the glyph row is the staleness evidence a solid rule carries, so `bin/fm-control.sh exit` and `relaunch` refused every muse target and neither second mate could be restarted without the captain typing `/exit` by hand.
+A titled rule now OPENS a separated region and does nothing else - it never closes one and never carries that staleness evidence - so muse 1.3's own rules pair around its glyph row while no composer anywhere gains a new deferral.
+The same release rotates hints from its tip catalogue around an empty composer at normal intensity, where ghost stripping cannot see them; a row that is nothing but one of those hints is now composer furniture bounding a bare composer's wrap region, which is what stops a doorbell being skipped on an idle pane.
+Muse draws roughly twenty such hints from one catalogue, and only the two seen unrung on a live mate are in the fleet idle set, so a pane showing a different hint can still read `pending`; widening that set is deliberate work, because every entry is a string that reads as an empty composer when a human types it.
+The guard was rerun on 2026-09-19 against every harness installed on the verification machine, on tmux 3.5a, macOS arm64, with no prompt submitted:
+
+```sh
+FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
+```
+
+```text
+ok - claude (2.1.278 (Claude Code)): real idle composer classifies empty
+not ok - codex (codex-cli 0.153.4): idle composer never classified empty (last verdict: unknown)
+# harness absent, not verified here: opencode
+# harness absent, not verified here: pi
+ok - grok (grok 1.0.34 (3736acbc8658) [stable]): real idle composer classifies empty
+# harness absent, not verified here: kimi
+ok - muse (Muse Code 1.3.0 (1.3.0-R3401.1)): real idle composer classifies empty
+ok - strict posture live: a blank shell row classifies unknown and injection defers
+```
+
+Muse, Claude, and Grok reached a proven `empty` against their current releases; this is also the first live result for Grok 1.0.34, superseding the refresh the 1.0.5 overhang change still owed.
+Codex was signed out on the verification machine, so its pane parked on a sign-in chooser rather than a composer, which the strict classifier correctly refuses to read; that result says nothing about codex's shape, which the portable byte-capture regression still covers.
+The guard now launches muse with `--yolo`, the same flag `bin/fm-spawn.sh` passes, because muse gates every workspace no operator has opened by hand behind its own trust dialog; a bare `muse` could only ever fail on that dialog and never exercise the composer.
+The portable half is `tests/fm-composer-lib.test.sh`, which carries the real 100-column and 44-column idle captures, the typed capture, a hint row, and a dead shell in the same geometry, and asserts that replacing the titled rule with ordinary transcript text takes the identical glyph row back to `unknown`.
+
 Cursor is deliberately outside this cursor-anchored empty-composer matrix because its terminal cursor is parked outside the composer; tmux's Cursor-specific, process-identity-gated cursorless fallback is covered by the [Cursor Agent CLI](#cursor-agent-cli) section's separate live evidence and drift guard.
 
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.

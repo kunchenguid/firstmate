@@ -1,6 +1,7 @@
 # Muse Code
 
 Verified 2026-08-05 on Muse Code 0.1.0-R708.1, build sha 427a430436.
+The composer and effort rows below were re-verified on 2026-09-19 against Muse Code 1.3.0-R3401.1, whose self-update redrew the composer; every other row still carries the 0.1.0 verification.
 The router owns Muse's task-kind boundary.
 
 ## Operating facts
@@ -18,8 +19,8 @@ The router owns Muse's task-kind boundary.
 | Autonomy | `--yolo` disables approval and sandbox and trusts the workspace. |
 | Trust | Dialog `Do you trust this workspace?`, choice `1 Trust and continue` preselected for Enter; `--yolo` suppresses it, which fresh task paths require. |
 | Marker | None; identity comes from anchored `muse-bin-*` ancestry, which `../../../bin/fm-harness.sh` keeps a retained foreign marker from overriding, while `MUSE_CURRENT_SESSION_LOG` is a path rather than identity and its export to tools is unverified. |
-| Composer | Bordered `⟩`, truecolor `38;2;90;160;255`, luminance about 149.9 and narrowly above ghost threshold 128; typed text is `38;2;204;211;219`, about 209.8, with no observed placeholder or ghost. |
-| Effort | `--reasoning-effort`, default `high`, accepts `none\|minimal\|low\|medium\|high\|xhigh\|ultra`; shared values expose low through xhigh, explicit captain `max` maps to `ultra`, and `none` or `minimal` remain unreachable. |
+| Composer | 1.3: a titled opening rule `── Voice input (⌥ + v to start) ───…` whose title text tracks the keybind rendering, a `❯` row in truecolor `38;2;251;191;36` (luminance about 191.3), and a solid `─` closing rule above the model/effort/cwd status row; typed text is `38;2;204;211;219`, about 209.8. An empty composer draws the glyph alone; Muse subscribes to terminal focus events and recolours that glyph to `38;2;90;160;255` (luminance about 149.9) while the pane is UNFOCUSED, which is the state firstmate reads a worker in. Muse rotates tip-catalogue hints such as `Type @ to search and insert workspace file paths` around it at normal intensity, so ghost stripping cannot see them. 0.1.0 drew an unbordered `⟩` in `38;2;90;160;255`, luminance about 149.9 and narrowly above ghost threshold 128. `../../../../../bin/fm-composer-lib.sh` owns every shape. |
+| Effort | `--reasoning-effort`, default `high`; 1.3 accepts `none\|minimal\|low\|medium\|high\|xhigh\|max\|ultra`, adding `max` as its own value. Shared values expose low through xhigh, explicit captain `max` maps to `ultra`, and `none` or `minimal` remain unreachable. A pane launched with `ultra` shows `xhigh` in its status row, so the status row never confirms the strongest class was selected. |
 
 ## Credential preflight
 
