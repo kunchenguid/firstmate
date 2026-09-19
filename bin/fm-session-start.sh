@@ -706,6 +706,8 @@ if [ -n "$DRIFT_OUT" ]; then
   if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
     DRIFT_ACTION='it is being relaunched into its worktree in the background; do not steer it until the worktree-drift check wake reports the outcome'
     FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-worktree-drift.sh" start || true
+  elif [ "$READ_ONLY" -eq 0 ]; then
+    DRIFT_ACTION='the watcher relaunches it into its worktree; do not steer it until the worktree-drift check wake reports the outcome'
   else
     DRIFT_ACTION="this session does not relaunch it; stop it before it acts there with bin/fm-control.sh <task> exit, then relaunch it"
   fi

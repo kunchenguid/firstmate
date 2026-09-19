@@ -1451,6 +1451,25 @@ EOF
   pass "session start: a read-only session flags a drifted worker without relaunching it"
 }
 
+test_worktree_drift_is_left_to_the_watcher_on_a_locked_reemit() {
+  local rec root home fakebin proj wt out
+  rec=$(new_drift_world drift-reemit)
+  IFS='|' read -r root home fakebin proj wt <<EOF
+$rec
+EOF
+  out=$(FM_WORKTREE_DRIFT_CONFIRM_SECS=0 FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    "$SESSION_START" --reemit)
+  assert_contains "$out" "SESSION START (CONTEXT RE-EMIT)" "fixture: the session must be a re-emit"
+  assert_not_contains "$out" "READ-ONLY SESSION" "fixture: the re-emit must hold the lock"
+  assert_contains "$out" "WORKTREE_DRIFT: task t1's worker is running in the primary checkout ($proj), not its worktree $wt; the watcher relaunches it into its worktree; do not steer it until the worktree-drift check wake reports the outcome" \
+    "a locked re-emit must defer the drifted worker to the watcher"
+  assert_not_contains "$out" "bin/fm-control.sh t1 exit" "a locked re-emit must not tell the supervisor to stop the worker"
+  sleep 1
+  assert_absent "$home/state/t1.control-relaunch" "a locked re-emit must not start its own relaunch"
+  pass "session start: a locked re-emit leaves a drifted worker to the watcher's relaunch"
+}
+
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
@@ -2780,6 +2799,7 @@ test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_worktree_drift_is_flagged_and_relaunched_at_session_start
 test_worktree_drift_is_flagged_but_not_relaunched_read_only
+test_worktree_drift_is_left_to_the_watcher_on_a_locked_reemit
 test_composition_invokes_real_scripts
 test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep
 test_non_pi_session_start_leaves_branch_state_untouched

@@ -10,16 +10,13 @@
 #      it is.
 #   2. repair relaunches it through fm-control into the worktree, and never
 #      writes the primary checkout it drifted into.
-#   3. repair re-registers a PR merge poll that stopped authenticating.
-#   4. a refused relaunch is reported once, not retried in a loop.
-#   5. --wake publishes the outcome to the durable wake queue, and a second
+#   3. a refused relaunch is reported once, not retried in a loop.
+#   4. --wake publishes the outcome to the durable wake queue, and a second
 #      concurrent repair stands down.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-# shellcheck source=/dev/null
-. "$ROOT/bin/fm-pr-lib.sh"
 
 DRIFT="$ROOT/bin/fm-worktree-drift.sh"
 TMP_ROOT=$(fm_test_tmproot fm-worktree-drift)
@@ -252,43 +249,7 @@ test_repair_does_nothing_when_no_worker_drifted() {
   pass "repair: a fleet with no drift is left alone"
 }
 
-# --- 3. PR poll ----------------------------------------------------------------
-
-test_repair_reregisters_a_pr_poll_that_stopped_authenticating() {
-  local dir out rc
-  dir=$(new_case repair-poll)
-  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" \
-    "$ROOT/bin/fm-pr-check.sh" t1 https://github.com/example/repo/pull/7 2>&1); rc=$?
-  expect_code 0 "$rc" "the PR poll should arm"$'\n'"$out"
-  printf 'decisions_reviewed=1\n' >> "$dir/home/state/t1.meta"
-  ! fm_pr_poll_artifacts_valid "$dir/home/state" t1 "$ROOT/bin/fm-pr-poll.sh" \
-    || fail "fixture: a record line after pr= should stop the poll authenticating"
-  out=$(run_drift "$dir" repair); rc=$?
-  expect_code 0 "$rc" "repair should succeed"$'\n'"$out"
-  assert_contains "$out" "its PR merge poll for https://github.com/example/repo/pull/7 was re-registered" \
-    "the outcome names the re-registration"
-  fm_pr_poll_artifacts_valid "$dir/home/state" t1 "$ROOT/bin/fm-pr-poll.sh" \
-    || fail "the relaunched lane's PR poll must authenticate again"
-  pass "repair: a PR merge poll that stopped authenticating is re-registered after the relaunch"
-}
-
-test_repair_leaves_an_authenticated_pr_poll_alone() {
-  local dir out rc reg_before
-  dir=$(new_case repair-poll-ok)
-  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" \
-    "$ROOT/bin/fm-pr-check.sh" t1 https://github.com/example/repo/pull/8 >/dev/null 2>&1
-  reg_before=$(cat "$dir/home/state/t1.pr-poll-registration")
-  out=$(run_drift "$dir" repair); rc=$?
-  expect_code 0 "$rc" "repair should succeed"$'\n'"$out"
-  assert_not_contains "$out" "re-register" "an authenticated poll needs no re-registration"
-  assert_equals "$reg_before" "$(cat "$dir/home/state/t1.pr-poll-registration")" \
-    "an authenticated poll's registration is untouched"
-  fm_pr_poll_artifacts_valid "$dir/home/state" t1 "$ROOT/bin/fm-pr-poll.sh" \
-    || fail "the relaunched lane's PR poll must still authenticate"
-  pass "repair: an armed PR poll that still authenticates is kept as is"
-}
-
-# --- 4. refused relaunch --------------------------------------------------------
+# --- 3. refused relaunch --------------------------------------------------------
 
 test_a_refused_relaunch_is_reported_once_and_not_retried() {
   local dir out before
@@ -311,7 +272,7 @@ test_a_refused_relaunch_is_reported_once_and_not_retried() {
   pass "repair: a refused relaunch is reported once and closes when the worker is back in its worktree"
 }
 
-# --- 5. wake queue and single flight --------------------------------------------
+# --- 4. wake queue and single flight --------------------------------------------
 
 test_wake_publishes_the_outcome_durably() {
   local dir out
@@ -334,7 +295,7 @@ test_a_second_concurrent_repair_stands_down() {
   pass "repair: a second concurrent repair stands down without touching the worker"
 }
 
-# --- 6. callers ------------------------------------------------------------------
+# --- 5. callers ------------------------------------------------------------------
 
 test_the_watcher_relaunches_a_drifted_worker_and_wakes() {
   local dir out pid i=0 before
@@ -369,8 +330,6 @@ test_scan_ignores_a_directory_that_changes_before_the_confirming_read
 test_scan_ignores_a_dead_agent_and_a_secondmate
 test_repair_relaunches_into_the_worktree_and_never_writes_the_primary
 test_repair_does_nothing_when_no_worker_drifted
-test_repair_reregisters_a_pr_poll_that_stopped_authenticating
-test_repair_leaves_an_authenticated_pr_poll_alone
 test_a_refused_relaunch_is_reported_once_and_not_retried
 test_wake_publishes_the_outcome_durably
 test_a_second_concurrent_repair_stands_down

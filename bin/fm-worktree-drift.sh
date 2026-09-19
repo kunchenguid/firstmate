@@ -39,9 +39,6 @@
 # old agent, returns the endpoint's shell to the recorded worktree, and starts
 # the replacement there. Nothing in this script, and nothing it runs, changes,
 # resets, or cleans the directory the worker drifted into.
-# After a successful relaunch, a task whose PR merge poll is registered but no
-# longer authenticates has it re-registered through bin/fm-pr-check.sh with
-# the task's recorded PR.
 # Each handled task prints one line starting `WORKTREE_DRIFT:` that names the
 # outcome. A failed relaunch records state/.worktree-drift-failed-<id> with the
 # drifted directory and is reported once; the same drift is not retried until
@@ -71,8 +68,6 @@ CONFIRM_SECS=${FM_WORKTREE_DRIFT_CONFIRM_SECS:-1}
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
-# shellcheck source=bin/fm-pr-lib.sh
-. "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
@@ -158,25 +153,6 @@ cmd_scan() {
   done < <(scan_ids "$@")
 }
 
-# Re-register an armed PR poll that stopped authenticating. Prints a clause
-# for the outcome line, or nothing when there is no poll to keep.
-reregister_pr_poll() {  # <task-id>
-  local id=$1 pr out
-  [ -e "$STATE/$id.pr-poll-registration" ] || return 0
-  [ ! -e "$STATE/$id.pr-poll-retirement" ] || return 0
-  fm_pr_poll_artifacts_valid "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" && return 0
-  pr=$(fm_meta_get "$STATE/$id.meta" pr)
-  if [ -z "$pr" ]; then
-    printf '; its PR merge poll no longer authenticates and the record names no PR to re-register'
-    return 0
-  fi
-  if out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$pr" 2>&1); then
-    printf '; its PR merge poll for %s was re-registered' "$pr"
-  else
-    printf '; re-registering its PR merge poll for %s FAILED: %s' "$pr" "$(printf '%s' "$out" | tr '\n' ' ')"
-  fi
-}
-
 emit() {  # <task-id> <line>
   printf '%s\n' "$2"
   [ "$WAKE" = 1 ] || return 0
@@ -185,7 +161,7 @@ emit() {  # <task-id> <line>
 }
 
 repair_one() {  # <task-id>, after task_drift found it drifted
-  local id=$1 cwd=$DRIFT_CWD where=$DRIFT_WHERE wt=$DRIFT_WT place marker note out poll
+  local id=$1 cwd=$DRIFT_CWD where=$DRIFT_WHERE wt=$DRIFT_WT place marker note out
   marker="$STATE/.worktree-drift-failed-$id"
   if [ -f "$marker" ] && [ "$(cat "$marker" 2>/dev/null)" = "$cwd" ]; then
     return 0
@@ -198,8 +174,7 @@ repair_one() {  # <task-id>, after task_drift found it drifted
   note="Your previous session was found running in $cwd instead of your recorded worktree $wt (a restored terminal resumed it in the directory the pane was created in). It was stopped before continuing there and relaunched in $wt. Verify isolation with pwd -P first, never run anything in $cwd, then continue from the local copy as it stands."
   if out=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-control.sh" "$id" relaunch --note "$note" 2>&1); then
     rm -f -- "$marker"
-    poll=$(reregister_pr_poll "$id")
-    emit "$id" "WORKTREE_DRIFT: task $id's worker was running in $place (dir $cwd), not its worktree $wt; it was relaunched into its worktree${poll}"
+    emit "$id" "WORKTREE_DRIFT: task $id's worker was running in $place (dir $cwd), not its worktree $wt; it was relaunched into its worktree"
   else
     printf '%s\n' "$cwd" > "$marker"
     emit "$id" "WORKTREE_DRIFT: task $id's worker is running in $place (dir $cwd), not its worktree $wt, and relaunching it into its worktree FAILED: $(printf '%s' "$out" | tr '\n' ' ')- stop it before it acts there (bin/fm-control.sh $id exit), then relaunch it"
