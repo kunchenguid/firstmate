@@ -67,9 +67,13 @@
 #      bin/fm-nm-run-lib.sh). The coarse runs-ledger fallback has NO
 #      branch-name-only acceptance: an executing `axi status` record is the one
 #      live bind, so a ledger row that cannot be tied to this worktree's head
-#      never answers on branch name alone. A live coarse answer whose daemon has
+#      never answers on branch name alone. An EXECUTING record whose daemon has
 #      ANSWERED down reads unknown and names the dead instrument, exactly as the
-#      terminal record below does.
+#      terminal record below does, on every route - the head being resolvable,
+#      diverged or absent changes nothing about a dead instrument, and silently
+#      dropping to a possibly-stale status log would hide it. A run PARKED at a
+#      gate is exempt: an open decision stays open when the instrument dies, so
+#      it keeps its gate and findings.
 #      fm_nm_select_run in bin/fm-nm-run-lib.sh owns complete run selection
 #      and ambiguity reporting. The selected run's id-addressed status must
 #      agree on id, branch, and live/terminal class before attribution;
@@ -789,6 +793,8 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
           else
             emit unknown run-step "selected run code identity unverified; run ids: $candidate_ids"
           fi
+        elif fm_nm_run_is_executing "$RUN_OUT" && nm_daemon_answered_down; then
+          emit unknown run-step "no-mistakes daemon unreachable; last run record $(strip_quotes "$(nm_field status)") - unverified"
         fi
         SELECTED_RUN_ID=$selected_id
         ;;
@@ -843,9 +849,18 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
           # down keeps the coarse status-word detail either way: the dead
           # instrument has to be named, and the full TOON would print `working`.
           [ "$run_branch" = "$CREW_BRANCH" ] || RUN_SOURCE=coarse
-          if [ "$(fm_nm_run_status_class "$COARSE_STATUS")" = live ] && nm_daemon_answered_down; then
+          # The ledger word alone cannot tell executing from waiting at a gate,
+          # so the run's own TOON decides: a PARKED run keeps its gate and
+          # findings whatever the daemon answers, because an open decision is
+          # still open when the instrument dies.
+          if ! fm_nm_run_is_parked "$RUN_OUT" \
+            && [ "$(fm_nm_run_status_class "$COARSE_STATUS")" = live ] \
+            && nm_daemon_answered_down; then
             RUN_SOURCE=coarse
           fi
+        elif [ "$run_branch" = "$CREW_BRANCH" ] && fm_nm_run_is_executing "$RUN_OUT" \
+          && nm_daemon_answered_down; then
+          emit unknown run-step "no-mistakes daemon unreachable; last run record $(strip_quotes "$(nm_field status)") - unverified"
         fi
       fi
     fi

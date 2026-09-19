@@ -3561,9 +3561,70 @@ branch_sync:
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-zombie
   out=$(run_crew_state "$d" feat-zombie)
-  assert_not_contains "$out" "source: run-step" "a live record at a diverged head must not answer while the daemon is provably down"
-  assert_contains "$out" "source: status-log" "the status log answers for the unbound record"
-  pass "a live record at a diverged head needs a reachable daemon to bind"
+  assert_contains "$out" "state: unknown" "a live record at a diverged head must not read as work with the daemon answering down"
+  assert_contains "$out" "daemon unreachable" "the dead instrument is named rather than dropped silently"
+  assert_not_contains "$out" "state: working" "a stale status log must not answer for a dead instrument"
+  pass "a live record at a diverged head reports the dead daemon"
+}
+
+# A run PARKED at a gate keeps its gate and findings when the daemon dies. The
+# ledger word stays `running` while a run waits (parked.toon), so classifying
+# off the ledger would relabel an open decision as a dead live record and the
+# findings would never reach the supervisor.
+test_parked_gate_survives_a_dead_daemon() {
+  reset_fakes
+  local d local_short out; d=$(new_case parked-dead-daemon)
+  make_repo_on_branch "$d/wt" fm/feat-parkdd
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-parkdd.meta" "window=fm:fm-feat-parkdd" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision: approve the schema change\n' > "$d/state/feat-parkdd.status"
+  FM_FAKE_RUN_HEAD=f0f0f0f0
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-parkdd)
+branch_sync:
+  state: synced"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-parkdd f0f0f0f0  2026-08-27 13:53
+  completed  fm/feat-parkdd ${local_short}  2026-08-27 12:09
+EOF
+)"
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-parkdd
+  out=$(run_crew_state "$d" feat-parkdd)
+  assert_contains "$out" "state: parked" "an open gate stays parked when the instrument dies"
+  assert_contains "$out" "parked at review" "the gate itself still reaches the supervisor"
+  assert_contains "$out" "finding(s)" "the gate findings still reach the supervisor"
+  assert_not_contains "$out" "state: unknown" "a parked run is not a dead live record"
+  pass "a parked gate survives a dead daemon with its findings intact"
+}
+
+# The modern selected-run route reaches the same diverged-head shape: the run
+# head RESOLVES but diverged after the pipeline rebased, so the unresolvable-head
+# arm does not fire and the dead instrument has to be named here too.
+test_selected_run_diverged_head_reports_the_dead_daemon() {
+  reset_fakes
+  local d rebased out; d=$(new_case selected-diverged-down)
+  make_repo_on_branch "$d/wt" fm/feat-seldiv
+  rebased=$(make_rebased_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/seldiv.meta" "window=fm:fm-seldiv" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: validating\n' > "$d/state/seldiv.status"
+  FM_FAKE_RUN_HEAD=$rebased
+  FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  \"01RUN\",fm/feat-seldiv,running,$rebased,\"\""
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-seldiv)"
+  FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" seldiv
+  out=$(run_crew_state "$d" seldiv)
+  assert_contains "$out" "state: unknown" "the selected diverged-head route must not read working with the daemon down"
+  assert_contains "$out" "daemon unreachable" "the dead instrument is named on the selected route too"
+  assert_not_contains "$out" "state: working" "a stale status log must not answer for a dead instrument"
+  pass "the selected-run diverged-head route reports the dead daemon"
 }
 
 # The head-free route still binds while the daemon answers: the daemon probe
@@ -3655,26 +3716,26 @@ EOF
 # decision superseded.
 test_unverified_coarse_record_makes_no_supersede_claim() {
   reset_fakes
-  local d rebased out; d=$(new_case coarse-unknown-supersede)
+  local d local_short out; d=$(new_case coarse-unknown-supersede)
   make_repo_on_branch "$d/wt" fm/feat-cus
-  rebased=$(make_rebased_head "$d/wt")
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-cus.meta" "window=fm:fm-feat-cus" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'needs-decision: approve the schema change\n' > "$d/state/feat-cus.status"
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
   FM_FAKE_RUNS_LIST="$(cat <<EOF
   running    fm/other-crew aaaaaaa  2026-08-23 14:00
-  running    fm/feat-cus ${rebased}  2026-08-23 13:53
+  running    fm/feat-cus ${local_short}  2026-08-23 13:53
 EOF
 )"
   FM_FAKE_DAEMON_DOWN=1
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-cus
   out=$(run_crew_state "$d" feat-cus)
-  assert_contains "$out" "state: parked" "the crew's own gate event survives an unverifiable run record"
-  assert_contains "$out" "source: status-log" "the status log answers, not the dead instrument"
-  assert_not_contains "$out" "superseded" "an unverifiable record makes no supersede claim"
-  pass "an unverifiable coarse record never claims the status log superseded"
+  assert_contains "$out" "state: unknown" "the bound coarse record reports itself unverified"
+  assert_contains "$out" "daemon unreachable" "the dead instrument is named"
+  assert_not_contains "$out" "superseded" "an unverified record makes no supersede claim about the open decision"
+  pass "an unverified coarse record never claims the status log superseded"
 }
 
 # The modern selected-run route reaches the anchored-continuation rule through
@@ -4216,6 +4277,8 @@ test_live_rebased_run_reads_working_for_every_executing_status
 test_legacy_live_rebased_run_is_authoritative
 test_legacy_surface_binds_fixing_and_ci_at_a_rebased_head
 test_live_record_at_diverged_head_needs_a_live_daemon
+test_parked_gate_survives_a_dead_daemon
+test_selected_run_diverged_head_reports_the_dead_daemon
 test_live_record_at_diverged_head_binds_while_daemon_answers
 test_anchored_continuation_still_needs_a_live_daemon
 test_anchored_continuation_binds_while_daemon_answers
