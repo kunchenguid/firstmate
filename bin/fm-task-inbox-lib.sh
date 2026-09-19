@@ -38,6 +38,9 @@
 #   --
 #   <exact message text; newlines are legal; a marked secondmate request keeps
 #    its from-firstmate marker and corr token verbatim in this body>
+# Readers must retain a final message line even when the record has no
+# terminating newline; otherwise acknowledging the record can silently drop
+# part of the instruction.
 #
 # Sequence numbers are never reused within a task: allocation scans both the
 # inbox root and handled/, so a message is processed at most once per worker
@@ -241,7 +244,7 @@ fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mod
 fm_task_inbox_body() {  # <record-path>
   local line
   [ -f "$1" ] || return 1
-  while IFS= read -r line; do
+  while IFS= read -r line || [ -n "$line" ]; do
     if [ "$line" = -- ]; then
       cat
       return 0
