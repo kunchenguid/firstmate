@@ -36,6 +36,10 @@
 #                       handoff retry, X-mode artifact writes, fleet sync) also run only when
 #                       locked; the four network sweeps run in the deferred
 #                       stage rather than this synchronous bootstrap section.
+#                       A read-only worktree-drift scan then prefixes one
+#                       WORKTREE_DRIFT line per live worker running outside its
+#                       recorded worktree; only a locked full start launches
+#                       the detached relaunch (bin/fm-worktree-drift.sh).
 #   3. wake-drain     - presents durable wakes and advances recovery handling
 #                       state, so it only runs when locked. The local bounded
 #                       inactive-outcome startup scan runs in the deferred worker.
