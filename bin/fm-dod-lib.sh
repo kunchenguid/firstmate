@@ -56,9 +56,9 @@
 # nothing, because a directive naming another base would have had that worker
 # ship a branch descending from the registered branch while bin/fm-merge-local.sh
 # still fast-forwards the default branch, landing every unrelated commit into
-# local main: this change's own foreign-commit symptom relocated into the one
-# lane that has no PR and no forge file list to reveal it. local-only with a
-# registered working branch is filed separately.
+# local main: the foreign-commit symptom this section exists to prevent,
+# relocated into the one lane that has no PR and no forge file list to reveal
+# it. local-only with a registered working branch is filed separately.
 # Each delivery mode is then told how its own PR reaches that base, and a kind
 # that raises no PR is told nothing further. A direct-PR worker raises the PR
 # itself, so it is given the flag. The no-mistakes pipeline raises it instead,

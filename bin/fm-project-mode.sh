@@ -53,13 +53,14 @@
 # to stderr, so a typo never silently drops the gate.
 #
 # --branch has no such fallback, deliberately, and it never folds "no branch is
-# registered" together with "the registered branch is one git rejects", because
+# registered" together with "the registered branch is malformed", because
 # a caller must be free to fall back on the first and refuse on the second:
 #   exit 0  prints the registered working branch to stdout
 #   exit 1  prints nothing; the registry records no working branch here
 #   exit 3  prints nothing to stdout and names the offending token on stderr;
-#           the project registers a branch= token that git's own syntax check
-#           rejects, which is a registry error rather than an absent branch
+#           the project registers a branch= token this script refuses as
+#           malformed, which is a registry error rather than an absent branch
+#           (the --branch check below owns which tokens are malformed)
 # A guessed branch is exactly the failure this token exists to remove, so the
 # caller receives one of those three answers rather than an invented one.
 # Usage: fm-project-mode.sh [--raw | --branch] <project-name>

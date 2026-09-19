@@ -16,7 +16,8 @@
 # after that contract and supersedes the clean default-branch base above: sending
 # a slot placed on the project's working branch back to the default branch is the
 # foreign-commit hazard that record exists to close. That owner renders nothing
-# for local-only, whose landing path still targets the default branch. The instructions also carry `# Task` with
+# for local-only, whose landing path still targets the default branch. The
+# instructions also carry `# Task` with
 # `## Captain's intent` preserved from the scout brief and promotion's ship-time
 # instructions under `## Firstmate spec`; the scout-time spec remains context but
 # is not relabeled as the ship spec. Promotion refuses leftover `{TASK}` /
