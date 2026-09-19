@@ -7,8 +7,8 @@
 # the command substitution textually and tracks quote state through the heredoc
 # body, so a single apostrophe, unbalanced quote, or unbalanced paren anywhere
 # in that body breaks parsing of the *entire rest of the script* - `bash -n`
-# fails, not just the generated brief. The DOD and Herdr-section builders now
-# use `IFS= read -r -d '' VAR <<EOF || true` instead, which removes the `$(...)`
+# fails, not just the generated brief. The Herdr-section builders now use
+# `IFS= read -r -d '' VAR <<EOF || true` instead, which removes the `$(...)`
 # wrapper and eliminates the whole defect class regardless of future prose.
 # test_no_heredoc_in_command_substitution guards that structure directly.
 # Ambient `bash -n` here is Bash 5 and cannot see the bug, so the real
@@ -17,6 +17,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-dod-lib.sh
+. "$ROOT/bin/fm-dod-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
@@ -38,8 +40,8 @@ test_script_parses() {
 # wrapping a heredoc in a command substitution (`VAR=$(cat <<EOF ... EOF)`).
 # That construct is what breaks Bash 3.2 parsing, and pinning one historical
 # apostrophe phrase (as the old test did) missed the #945 reintroduction. This
-# guards the *shape* directly against the whole file, so any future DOD or
-# section builder that reintroduces the class fails here regardless of prose.
+# guards the *shape* directly against the whole file, so any future section
+# builder that reintroduces the class fails here regardless of prose.
 test_no_heredoc_in_command_substitution() {
   local unsafe safe
   unsafe="$TMP_ROOT/heredoc-in-substitution.sh"
@@ -189,11 +191,9 @@ write_registry() {
 EOF
 }
 
-# fm-brief.sh must exit 0 and produce a brief with no unreplaced shell
-# metacharacter corruption for every ship delivery mode. This also guards
-# against any *new* unescaped apostrophe or unbalanced quote later added to
-# one of these DOD blocks, since a broken heredoc corrupts or empties the
-# generated brief content, not just the script's own syntax.
+# fm-brief.sh must exit 0 and produce a source brief with no unreplaced shell
+# metacharacter corruption for every ship delivery mode. The source records the
+# mode but leaves the Definition of done to the launch renderer.
 test_ship_modes_generate_clean_briefs() {
   local home id mode brief status
   home="$TMP_ROOT/ship-home"
@@ -206,9 +206,10 @@ test_ship_modes_generate_clean_briefs() {
     expect_code 0 "$status" "fm-brief.sh $id --mode $mode should exit 0"
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$id: brief was not scaffolded"
-    assert_grep "# Definition of done" "$brief" "$id: brief missing Definition of done section"
+    assert_no_grep "# Definition of done" "$brief" \
+      "$id: source brief duplicated the launch-owned Definition of done"
     grep -qx "Delivery contract: mode=$mode" "$brief" \
-      || fail "$id: brief did not record its machine-readable delivery contract line"
+      || fail "$id: source brief did not record its machine-readable delivery contract line"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
     assert_grep "{FIRSTMATE_SPEC}" "$brief" "$id: brief missing the {FIRSTMATE_SPEC} placeholder"
     assert_grep "## Captain's intent" "$brief" "$id: brief missing Captain's intent subsection"
@@ -218,7 +219,7 @@ test_ship_modes_generate_clean_briefs() {
       "$id: brief missing nonterminal working:/setup-complete gate protection"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
-  pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
+  pass "fm-brief.sh: ship source briefs record each delivery mode without owning the launch Definition of done"
 }
 
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
@@ -260,8 +261,8 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
-    "explicit no-mistakes brief did not render the pipeline definition of done"
+  assert_no_grep "# Definition of done" "$brief" \
+    "explicit no-mistakes source brief duplicated the launch-owned completion contract"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-explicit-a6 never-registered --mode local-only >/dev/null 2>&1 \
@@ -295,25 +296,29 @@ ROWS
 }
 
 test_faster_paths_use_configured_authority_without_stacked_review() {
-  local home id brief
+  local home id brief dod
   home="$TMP_ROOT/configured-authority-home"
   write_registry "$home"
   id="brief-direct-authority-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj --mode direct-PR >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
-  assert_grep "The configured merge authority decides whether to merge the PR; firstmate relays the outcome." "$brief" \
-    "direct-PR brief lost configured merge authority"
-  assert_no_grep "The captain reviews and merges the PR" "$brief" \
+  dod="$TMP_ROOT/direct-authority-dod"
+  fm_dod_block direct-PR "$id" > "$dod"
+  assert_grep "The configured merge authority decides whether to merge the PR; firstmate relays the outcome." "$dod" \
+    "direct-PR Definition of done lost configured merge authority"
+  assert_no_grep "The captain reviews and merges the PR" "$dod" \
     "direct-PR brief hard-coded captain-only authority"
   id="brief-local-authority-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj --mode local-only >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
-  assert_grep "The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path." "$brief" \
-    "local-only brief lost configured merge authority and guarded landing"
-  assert_no_grep "The captain approves the ready branch" "$brief" \
-    "local-only brief hard-coded captain-only authority"
-  assert_no_grep "Firstmate then reviews your branch diff" "$brief" \
-    "local-only brief retained a personal review stacked on the selected delivery path"
+  dod="$TMP_ROOT/local-authority-dod"
+  fm_dod_block local-only "$id" > "$dod"
+  assert_grep "The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path." "$dod" \
+    "local-only Definition of done lost configured merge authority and guarded landing"
+  assert_no_grep "The captain approves the ready branch" "$dod" \
+    "local-only Definition of done hard-coded captain-only authority"
+  assert_no_grep "Firstmate then reviews your branch diff" "$dod" \
+    "local-only Definition of done retained a personal review stacked on the selected delivery path"
   assert_no_grep "pass \`--intent\` as only this brief's \`## Captain's intent\`" "$home/data/$id/brief.md" \
     "local-only brief must not include the no-mistakes --intent contract"
   id="brief-direct-intent-a4"
@@ -326,13 +331,10 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
 test_no_mistakes_dod_wording() {
-  local home id brief spelling
-  home="$TMP_ROOT/wording-home"
-  mkdir -p "$home/data"
+  local id brief spelling
   id="brief-wording-b1"
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
-  brief="$home/data/$id/brief.md"
-  assert_present "$brief" "brief was not scaffolded"
+  brief="$TMP_ROOT/no-mistakes-dod"
+  fm_dod_block no-mistakes "$id" > "$brief"
   for spelling in 'Captain:' "Captain's words:" "Captain's ask:" "Captain's intent:" 'Captain,'; do
     assert_no_grep "$spelling" "$brief" "rendered intent contract still teaches operator-address labels"
   done
@@ -373,7 +375,7 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD still states the --yes ban as a preference"
   assert_no_grep "no-mistakes refuses" "$brief" \
     "no-mistakes DOD must not claim the tool itself refuses --yes"
-  pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
+  pass "fm-dod-lib.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
 }
 
 test_ask_user_escalation_format() {
@@ -384,6 +386,8 @@ test_ask_user_escalation_format() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
   assert_present "$brief" "brief was not scaffolded"
+  printf '\n' >> "$brief"
+  fm_dod_block no-mistakes "$id" >> "$brief"
 
   # A no-mistakes ask-user gate must escalate its ask-user findings as one status
   # event plus one verbatim findings snapshot file, using that same shape even

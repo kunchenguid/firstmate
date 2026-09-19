@@ -193,6 +193,108 @@ ROWS
   pass "fm-spawn: a rigor downgrade against the registered posture is announced, never blocked"
 }
 
+# Every ship launch receives one current mode-specific Definition of done,
+# independent of how its source brief was authored.
+test_ship_launch_renders_one_current_definition_of_done() {
+  local rec home proj fakebin out id brief launch before count
+  rec=$(make_home launch-dod)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+
+  # A hand-written direct-PR source with no completion section still receives
+  # the guard that prevents the worker from starting no-mistakes on its own.
+  id="launch-dod-direct-missing"
+  mkdir -p "$home/data/$id"
+  brief="$home/data/$id/brief.md"
+  cat > "$brief" <<'EOF'
+# Task
+## Captain's intent
+Ship without the no-mistakes pipeline.
+
+## Firstmate spec
+Open the pull request directly.
+EOF
+  before="$TMP_ROOT/launch-dod/direct-source-before"
+  cp "$brief" "$before"
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  assert_contains "$out" "current generated definition of done" \
+    "a hand-written source without a delivery marker did not explain its compatibility launch"
+  launch="$home/data/$id/launch-brief.md"
+  assert_grep "Do NOT run /no-mistakes" "$launch" \
+    "a hand-written direct-PR source did not receive the no-mistakes guard"
+  count=$(grep -c '^# Definition of done$' "$launch" || true)
+  [ "$count" -eq 1 ] || fail "a hand-written direct-PR source rendered $count Definitions of done"
+  count=$(grep -c '^Delivery contract: mode=direct-PR$' "$launch" || true)
+  [ "$count" -eq 1 ] || fail "a hand-written direct-PR source rendered $count delivery-mode markers"
+  cmp -s "$brief" "$before" || fail "launch rendering rewrote the hand-written source brief"
+
+  # Authored and legacy completion sections are replaced rather than copied.
+  # A following top-level section remains part of the worker's instructions.
+  id="launch-dod-direct-existing"
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR >/dev/null 2>&1 \
+    || fail "could not scaffold the direct-PR source"
+  brief="$home/data/$id/brief.md"
+  fill_brief_subsections "$brief" "Ship directly." "Preserve later notes."
+  cat >> "$brief" <<'EOF'
+
+# Definition of done
+Stale completion text.
+
+# Notes
+Keep this later section.
+
+# Definition of done
+Another stale completion section.
+EOF
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo off)
+  launch="$home/data/$id/launch-brief.md"
+  count=$(grep -c '^# Definition of done$' "$launch" || true)
+  [ "$count" -eq 1 ] || fail "a source with existing completion sections rendered $count Definitions of done"
+  assert_grep "Do NOT run /no-mistakes" "$launch" \
+    "the replacement direct-PR Definition of done lost its no-mistakes guard"
+  assert_no_grep "Stale completion text" "$launch" \
+    "launch rendering kept an authored Definition of done"
+  assert_no_grep "Another stale completion section" "$launch" \
+    "launch rendering kept a duplicate authored Definition of done"
+  assert_grep "Keep this later section" "$launch" \
+    "launch rendering dropped the top-level section after an authored Definition of done"
+
+  # no-mistakes gets both the generated completion contract and its authorized
+  # intent overlay. The two launch-owned sections remain separate.
+  id="launch-dod-no-mistakes"
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "could not scaffold the no-mistakes source"
+  brief="$home/data/$id/brief.md"
+  fill_brief_subsections "$brief" "Keep the authorized intent exact." "Test launch rendering."
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode no-mistakes --yolo off)
+  launch="$home/data/$id/launch-brief.md"
+  count=$(grep -c '^# Definition of done$' "$launch" || true)
+  [ "$count" -eq 1 ] || fail "a no-mistakes source rendered $count Definitions of done"
+  count=$(grep -c '^Delivery contract: mode=no-mistakes$' "$launch" || true)
+  [ "$count" -eq 1 ] || fail "a no-mistakes source rendered $count delivery-mode markers"
+  assert_grep "# Current no-mistakes intent contract" "$launch" \
+    "the no-mistakes launch lost its authorized intent overlay"
+
+  # Scouts have no resolved ship mode. Their report-specific completion section
+  # stays intact instead of being passed to the ship-only fm_dod_block function.
+  id="launch-dod-scout"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \
+    || fail "could not scaffold the scout source"
+  brief="$home/data/$id/brief.md"
+  fill_brief_subsections "$brief" "Investigate the launch contract." "Write a report."
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --scout)
+  launch="$home/data/$id/launch-brief.md"
+  count=$(grep -c '^# Definition of done$' "$launch" || true)
+  [ "$count" -eq 1 ] || fail "a scout source rendered $count Definitions of done"
+  assert_grep "Write your findings to" "$launch" \
+    "the scout launch lost its report-specific Definition of done"
+  assert_no_grep "Delivery contract: mode=" "$launch" \
+    "the scout launch received a ship delivery mode"
+
+  pass "fm-spawn: ship launches replace authored completion sections with one current mode contract"
+}
+
 # A scout's deliverable is a report, so it records no delivery posture at all;
 # teardown already treats an absent mode as the most protective one.
 test_scout_records_no_delivery_posture() {
@@ -355,18 +457,20 @@ STUB
     assert_grep "## Firstmate spec" "$payload" \
       "$mode: promoted worker did not receive the Firstmate spec subsection"
 
-    # Compare the public outputs of both real generation paths. The promoted
-    # payload ends at its Definition of done, as does an ordinary generated
-    # brief, so identical suffixes prove both workers receive the same contract.
-    rm "$home/data/$id/brief.md"
-    FM_HOME="$home" "$BRIEF" "$id" fixture-project --mode "$mode" >/dev/null 2>&1 \
-      || fail "$mode: ordinary ship brief generation should succeed"
+    # Compare the promoted payload with the public renderer that ordinary ship
+    # launches call. Identical output proves both paths use the same contract.
     brief_dod="$TMP_ROOT/promote-dod/brief-dod-$id"
     delivered_dod="$TMP_ROOT/promote-dod/delivered-dod-$id"
-    awk '/^# Definition of done$/ { emit=1 } emit' "$home/data/$id/brief.md" > "$brief_dod"
+    (
+      # shellcheck source=bin/fm-dod-lib.sh
+      . "$ROOT/bin/fm-dod-lib.sh"
+      fm_dod_block "$mode" "$id"
+    ) > "$brief_dod"
     awk '/^# Definition of done$/ { emit=1 } emit' "$payload" > "$delivered_dod"
+    # shellcheck disable=SC2031 # fm_dod_block's own "local mode" parameter shadows this loop
+    # variable only inside the subshell above; this loop's $mode is never reassigned.
     cmp -s "$brief_dod" "$delivered_dod" \
-      || fail "$mode: promotion and ordinary brief generation delivered different Definitions of done"
+      || fail "$mode: promotion and ordinary ship launches delivered different Definitions of done"
   done
 
   payload="$TMP_ROOT/promote-dod/payload-promote-dod-no-mistakes"
@@ -886,6 +990,7 @@ test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
 test_spawn_notices_a_rigor_downgrade_against_the_registry
+test_ship_launch_renders_one_current_definition_of_done
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promote_refuses_a_symlinked_task_record
