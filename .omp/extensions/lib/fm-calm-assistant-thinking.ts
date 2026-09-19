@@ -94,6 +94,7 @@ export function installOmpCalmAssistantThinking(): void {
           if (originalMessage && (shouldHideThinking || shouldHideWorkingNote)) {
             component.updateContent(originalMessage, patch.originalOptions.get(component));
           } else if (originalMessage && patch.originalUpdateContent) {
+            patch.presentationMessages.set(component, originalMessage);
             patch.originalUpdateContent.call(
               component,
               originalMessage,

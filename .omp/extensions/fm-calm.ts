@@ -180,15 +180,24 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  pi.on?.("session_start", (_event, ctx) => {
+  const resetForSessionReplacement = (_event: unknown, ctx: ExtensionContext): void => {
     resetOmpCalmThinkingRememberedRows();
     setCalmPresentation(loadCalmPreference(preferencePath));
     publishPresentationState();
     applyLivePresentation(ctx.ui);
-  });
+  };
+  for (const event of [
+    "session_start",
+    "session_switch",
+    "session_branch",
+    "session_tree",
+  ]) {
+    pi.on?.(event, resetForSessionReplacement);
+  }
 
   // Load-time preference so restored rows see Calm before the first paint when
-  // the home already has config/calm on. session_start reloads it for replacements.
+  // the home already has config/calm on. The session-start and in-process
+  // replacement events reload it.
   setCalmPresentation(loadCalmPreference(preferencePath));
   publishPresentationState();
 }
