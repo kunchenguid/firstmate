@@ -334,7 +334,7 @@ For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected exec
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
 `config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
-The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
+Firstmate chooses the best matching rule with judgment, optionally informed by the typed rule-match resource documented below, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
 When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
 Batch spawns satisfy the same requirement with a shared `--harness`.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
@@ -382,7 +382,7 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 `bin/fm-dispatch-resolve.sh` optionally uses TypeSafe AI's Jev System One endpoint to select among the written dispatch rules for a brief.
 It is off unless `TYPESAFE_API_KEY` is present in the process environment or the effective home's `.env`; off preserves the existing deterministic intake and performs no network or quota request.
 When enabled, the tool sends only the project and brief plus the rule `when` choices, then applies its confidence floor and mandatory captain approval locally.
-It returns an inspectable `ambiguous`, `escalate`, or `error` block with the matched rule and probabilities; every non-configuration outcome exits zero and returns to firstmate's existing routing.
+A valid answer returns an inspectable `ambiguous` or `escalate` block with the matched rule and probabilities, while API, network, or response failures return an `error` block; every non-configuration outcome exits zero and returns to firstmate's existing routing.
 It never authorizes a profile or calls quota-axi because it cannot prove the fork's catalog/provider relationship, authentication, reasoning-class fit, or full quota gates; the normal dispatch and `quota-array-dispatch` intake owns those checks.
 Only written rules are selectable, and malformed configuration exits two before any request.
 The API key is kept out of argv, logs, and child environments, and the request timeout is bounded.
