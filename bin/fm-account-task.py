@@ -51,8 +51,8 @@ The ledger pins the ENTIRE installed binding. Once disabled/drifted it cannot be
 re-enabled over the wire, even if the old bytes return. Accepted operations and
 launches are fsynced BEFORE side effects. A crashed pending operation is unknown
 and not re-executed. A later lifecycle operation may commit a launching task only
-from its exact published binding and generation-matched final launch receipt;
-this neither replays submit nor claims liveness.
+from its exact published binding, generation-matched launch receipt, and final
+In-flight backlog transition; this neither replays submit nor claims liveness.
 No journal entry is silently evicted: at 4096 operations or 128 tasks, new
 operations refuse,
 except that the idempotent disable latch remains available without journal growth.
@@ -523,6 +523,19 @@ class Route:
 
     def commit_binding(self, task):
         binding = self.meta(task)
+        raw = self.script("fm-tasks-axi.sh", ["show", task["local"]], output=True)
+        try:
+            lines = raw.decode("utf-8", "strict").splitlines()
+        except UnicodeError:
+            raise Refusal("task-binding-mismatch") from None
+        fields = {}
+        for line in lines:
+            match = re.fullmatch(r"  (state|held|blocked):\s*(\S+)\s*", line)
+            if match:
+                require(match.group(1) not in fields, "task-binding-mismatch")
+                fields[match.group(1)] = match.group(2)
+        require(fields == {"state": "in_flight", "held": "no", "blocked": "no"},
+                "task-binding-mismatch")
         task["binding"] = binding
         task["phase"] = "active"
         self.save()

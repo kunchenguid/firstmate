@@ -65,7 +65,7 @@ Unknown and duplicate fields, control characters, stale expiries, reused task na
 The receiver fsyncs an operation identity and request digest before a side effect.
 The same operation identity with the same bytes returns the recorded outcome, while the same identity with different bytes refuses.
 A crash while an operation is pending disables the route and returns unknown on replay instead of executing again.
-A new exact-task lifecycle operation may adopt a launching task only when the receiver can revalidate its complete published launch binding and generation-matched receipt from after the final delivery commit; missing or mismatched evidence remains unknown, and adoption neither replays submit nor claims worker liveness.
+A new exact-task lifecycle operation may adopt a launching task only when the receiver can revalidate its complete published launch binding, generation-matched receipt, and final In-flight backlog transition; missing or mismatched evidence remains unknown, and adoption neither replays submit nor claims worker liveness.
 A task name is never reused within a route epoch.
 The bounded ledger refuses new operations rather than evicting replay evidence, while the idempotent disable latch remains available without further journal growth.
 

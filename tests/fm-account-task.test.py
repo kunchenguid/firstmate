@@ -85,6 +85,16 @@ if name == 'fm-brief.sh':
     folder = home / 'data' / args[0]
     folder.mkdir(mode=0o700)
     (folder / 'brief.md').write_text('## Captain\'s intent\n{TASK}\n## Firstmate spec\n{FIRSTMATE_SPEC}\n')
+elif name == 'fm-tasks-axi.sh':
+    if args[0] == 'add':
+        (a / 'backlog-state').write_text('queued')
+    elif args[0] == 'show':
+        state = (a / 'backlog-state').read_text().strip()
+        print('task:')
+        print('  id: ' + args[1])
+        print('  state: ' + state)
+        print('  held: no')
+        print('  blocked: no')
 elif name == 'fm-spawn.sh':
     task, project = args[:2]
     scout = '--scout' in args
@@ -99,14 +109,14 @@ elif name == 'fm-spawn.sh':
     worktree.mkdir(mode=0o700)
     meta = {'harness':'pi', 'kind':'scout' if scout else 'ship',
             'window': f['session'] + ':fm-' + task, 'worktree':str(worktree),
-            'spawn_gen':'synthetic-generation-1', 'project':project}
+            'spawn_gen':'synthetic-generation-1',
+            'account_task_commit':'synthetic-generation-1', 'project':project}
     (home / 'state' / (task + '.meta')).write_text(''.join(k+'='+v+'\n' for k,v in meta.items()))
     (a / 'worker-launch-delivered').write_text(task)
     if (a / 'crash-before-commit').exists():
         os.kill(os.getppid(), signal.SIGKILL)
         sys.exit(0)
-    meta['account_task_commit'] = meta['spawn_gen']
-    (home / 'state' / (task + '.meta')).write_text(''.join(k+'='+v+'\n' for k,v in meta.items()))
+    (a / 'backlog-state').write_text('in_flight')
     if (a / 'crash-after-commit').exists():
         os.kill(os.getppid(), signal.SIGKILL)
         sys.exit(0)

@@ -283,8 +283,10 @@
 #   isolated worktree resolved after `treehouse get` must be strictly beneath
 #   that already-qualified absolute root. A mismatch refuses before metadata or
 #   the harness launch and never falls back to another root. A successful fresh
-#   launch records `account_task_commit=<spawn_gen>` only after the final delivery
-#   commit. Ordinary spawns do not set it and remain unchanged.
+#   launch records `account_task_commit=<spawn_gen>` immediately before the final
+#   backlog transition. Recovery requires both durable facts, so a crash on either
+#   side of that boundary cannot turn a provisional launch into an active task.
+#   Ordinary spawns do not set it and remain unchanged.
 # Claude permission mode (config/claude-permission-mode):
 #   One token selecting the permission flag every claude launch (ship, scout,
 #   secondmate, and relaunch) carries. Absent or `bypass` keeps today's
@@ -4950,6 +4952,10 @@ SPAWN_BACKLOG_COMMIT_STATUS=0
 # fails through the ordinary error plumbing, and the interrupted exit path
 # reports it as the reason the preservation could not be verified.
 FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-30}
+if ! spawn_record_account_task_commit; then
+  echo "error: account-task launch $ID could not prepare its generation receipt" >&2
+  exit 1
+fi
 if spawn_commit_backlog_transition; then
   SPAWN_FRESH_COMMIT_PENDING=0
 else
@@ -4973,10 +4979,6 @@ fi
 trap - HUP INT TERM
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   exit "$SPAWN_BACKLOG_COMMIT_STATUS"
-fi
-if ! spawn_record_account_task_commit; then
-  echo "error: committed account-task launch $ID could not publish its generation receipt" >&2
-  exit 1
 fi
 if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   case "$SPAWN_DEFERRED_SIGNAL" in

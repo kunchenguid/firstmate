@@ -117,6 +117,9 @@ run_settle_spawn() {
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
     FM_FAKE_WORKER_LAUNCH="${FM_FAKE_WORKER_LAUNCH:-}" \
     FM_ACCOUNT_TASK_WORKSPACE_ROOT="${FM_ACCOUNT_TASK_WORKSPACE_ROOT:-}" \
+    FM_REAL_TASKS_AXI="${FM_REAL_TASKS_AXI:-}" \
+    FM_TEST_COMMIT_META="${FM_TEST_COMMIT_META:-}" \
+    FM_TEST_COMMIT_OBSERVED="${FM_TEST_COMMIT_OBSERVED:-}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -267,12 +270,32 @@ test_restricted_account_workspace_root_must_be_ancestor() {
 }
 
 test_restricted_account_launch_publishes_commit_receipt() {
-  local rec id out status spawn_gen commit
+  local rec id out status spawn_gen commit real_tasks
   id=settle-account-commit-z7
   rec=$(make_settle_case settle-account-commit "$id" 0)
   read_settle_record "$rec"
+  real_tasks=$(command -v tasks-axi) || fail "tasks-axi is required for the commit-boundary regression"
+  touch "$HOME_DIR/data/backlog.md"
+  TASKS_AXI_BACKEND=markdown "$real_tasks" add "$id" "Account commit boundary" \
+    --file "$HOME_DIR/data/backlog.md" >/dev/null || fail "could not prepare the account-task backlog row"
+  cat > "$FAKEBIN_DIR/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = start ]; then
+  spawn_gen=$(sed -n 's/^spawn_gen=//p' "$FM_TEST_COMMIT_META")
+  commit=$(sed -n 's/^account_task_commit=//p' "$FM_TEST_COMMIT_META")
+  [ -n "$spawn_gen" ] && [ "$commit" = "$spawn_gen" ] || exit 86
+  : > "$FM_TEST_COMMIT_OBSERVED"
+fi
+exec "$FM_REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$FAKEBIN_DIR/tasks-axi"
 
-  out=$(FM_ACCOUNT_TASK_WORKSPACE_ROOT="$TMP_ROOT/settle-account-commit" \
+  out=$(TASKS_AXI_BACKEND=markdown \
+    FM_REAL_TASKS_AXI="$real_tasks" \
+    FM_TEST_COMMIT_META="$HOME_DIR/state/$id.meta" \
+    FM_TEST_COMMIT_OBSERVED="$TMP_ROOT/settle-account-commit/commit-observed" \
+    FM_ACCOUNT_TASK_WORKSPACE_ROOT="$TMP_ROOT/settle-account-commit" \
     run_settle_spawn "$id")
   status=$?
   expect_code 0 "$status" "restricted spawn should commit a qualified worktree launch"$'\n'"$out"
@@ -280,6 +303,8 @@ test_restricted_account_launch_publishes_commit_receipt() {
   commit=$(sed -n 's/^account_task_commit=//p' "$HOME_DIR/state/$id.meta")
   [ -n "$spawn_gen" ] || fail "restricted spawn omitted its generation"
   [ "$commit" = "$spawn_gen" ] || fail "restricted spawn did not bind its final commit receipt to the generation"
+  [ -e "$TMP_ROOT/settle-account-commit/commit-observed" ] \
+    || fail "the final backlog transition did not observe the generation-bound receipt"
   pass "restricted account-task spawn publishes a generation-bound final commit receipt"
 }
 
