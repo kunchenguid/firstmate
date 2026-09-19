@@ -176,6 +176,67 @@ record_pi_busy() {  # <state-dir> <id>
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
+# TERM must kill the watcher while it is inside a poll-body command
+# substitution. A user trap for TERM is deferred until that substitution
+# returns, and on bash 5.2 the trap string can fail to parse, so reap()
+# wait hangs and portable serial 1 dies on the live-gate case.
+test_term_during_poll_command_substitution_exits_promptly() {
+  local dir state fakebin out pid i window
+  dir=$(make_case term-during-poll-commsub)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-term"
+  cat > "$fakebin/date" <<'SH'
+#!/usr/bin/env bash
+# Block only the first +%s (poll-body age_of). Later +%s calls from EXIT
+# cleanup must stay fast so a successful TERM is not hidden by the shim.
+once=${FM_DATE_BLOCK_ONCE:?}
+if [ "$1" = '+%s' ] && [ ! -e "$once" ]; then
+  : > "$once"
+  sleep 8
+fi
+exec /usr/bin/date "$@"
+SH
+  chmod +x "$fakebin/date"
+  printf 'idle pane\n' > "$dir/pane.txt"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/t.meta"
+  printf 'working: doing a thing\n' > "$state/t.status"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: working · source: pane · busy' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_DATE_BLOCK_ONCE="$dir/date-blocked" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -e "$state/.last-watcher-beat" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$state/.last-watcher-beat" ] \
+    || { kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fail "watcher never wrote a liveness beat"; }
+  # The poll body calls date +%s immediately after the beat; give that
+  # substitution time to enter the blocking shim before signaling.
+  sleep 0.2
+  kill -TERM "$pid" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 20 ] && kill -0 "$pid" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "watcher survived TERM for 2s while blocked in a date command substitution"
+  fi
+  wait "$pid" 2>/dev/null || true
+  if grep -E 'unexpected EOF|syntax error' "$out" >/dev/null; then
+    fail "watcher emitted a shell parser error during TERM: $(cat "$out")"
+  fi
+  pass "TERM during a poll-body command substitution exits promptly without a trap parse error"
+}
+
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
 size_of() { LC_ALL=C wc -c < "$1" | tr -d '[:space:]'; }
@@ -5447,6 +5508,7 @@ test_worktree_write_probe_is_wall_clock_bounded
 test_signal_crew_provably_working_classifier
 test_secondmate_status_signal_never_absorbed_classifier
 test_provably_working_signal_absorbed
+test_term_during_poll_command_substitution_exits_promptly
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
 test_turn_ended_churning_pane_absorbed

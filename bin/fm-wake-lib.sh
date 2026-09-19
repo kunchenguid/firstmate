@@ -1023,11 +1023,19 @@ fm_lock_acquire_wait() {
 # waiting caller before exiting. The lock's ordinary stale-owner recovery makes
 # every interruption safe: before transfer the helper is the owner; after
 # transfer the still-live caller is the owner.
+# Default TERM/INT so a signal during command substitution still terminates;
+# EXIT releases the lock unless handoff already completed and cleared the trap.
+# shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap in the helper.
+_fm_lock_handoff_release() {
+  [ -n "${lockdir:-}" ] || return 0
+  fm_lock_release "$lockdir"
+}
+
 _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
   local lockdir=$1 caller_pid=$2 ownerdir current back
   case "$caller_pid" in ''|*[!0-9]*) return 1 ;; esac
   fm_pid_alive "$caller_pid" || return 1
-  trap 'fm_lock_release "$lockdir"; exit 143' TERM INT
+  trap _fm_lock_handoff_release EXIT
   fm_lock_acquire_wait "$lockdir" || return 1
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null) || {
@@ -1045,7 +1053,7 @@ _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
     fm_lock_release "$lockdir"
     return 1
   fi
-  trap - TERM INT
+  trap - EXIT
 }
 
 # fm_lock_acquire_wait_bounded <lockdir> <positive-seconds>
