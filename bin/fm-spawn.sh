@@ -3653,7 +3653,17 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # Allocate from THIS home's own Treehouse root. Without it every home cloning
+  # the same origin shares one pool, and a slot that is free there can still be a
+  # linked worktree of another home's clone - which the isolation assertion below
+  # refuses, blocking the task until a human releases the slot from the home that
+  # owns it. fm_treehouse_home_root (bin/fm-wake-lib.sh) owns the derivation and
+  # the reason returns need no matching flag.
+  SPAWN_TREEHOUSE_ROOT=$(fm_treehouse_home_root "$FM_HOME") || {
+    echo "error: could not resolve the Treehouse worktree root for home '$FM_HOME'; refusing to allocate task $ID a worktree from a pool shared with other homes" >&2
+    exit 1
+  }
+  spawn_send_text_line "$WT_TARGET" "treehouse --root $(shell_quote "$SPAWN_TREEHOUSE_ROOT") get"
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
