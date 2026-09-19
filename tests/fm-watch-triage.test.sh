@@ -2797,6 +2797,47 @@ wedge_threshold_fixture() {  # <name> <status-line> <status-age-secs>
   printf '%s\n' "$dir"
 }
 
+# wedge_work_evidence decides whether a lane quiet past its own declared time is
+# working anyway, and one of its sources is that lane's OWN progress marker. It
+# must read the marker for the task it was asked about, never for whatever `task`
+# its caller happens to have in scope: a single `local` that builds the marker path
+# from `$task` in the same statement that assigns it reads the caller's value
+# instead. The watcher's own callers usually hold the same name, which is exactly
+# why that mistake passes every end-to-end test, so this pins it at the function
+# with the two names deliberately apart - and in both directions, because the
+# mistake both hides real evidence and lends one lane's progress to another.
+test_wedge_work_evidence_reads_its_own_tasks_progress() {
+  local dir state since fn
+  dir=$(make_case work-evidence-own-task); state="$dir/state"
+  since="$state/.stale-since-probe"
+  : > "$since"
+  set_mtime "$(( $(date +%s) - 300 ))" "$since"
+  : > "$state/real.progress"
+  # Load only this function, never the whole watcher: sourcing fm-watch.sh would
+  # enter its poll loop. The other two evidence sources are stubbed silent so only
+  # the progress marker decides.
+  fn=$(awk '/^wedge_work_evidence\(\) \{/ { on = 1 } on { print } on && /^}/ { exit }' "$WATCH")
+  [ -n "$fn" ] || fail "could not extract wedge_work_evidence from the watcher"
+
+  ( STATE="$state"
+    crew_run_attributed() { return 1; }
+    crew_worktree_written_since() { return 1; }
+    eval "$fn"
+    task=decoy
+    wedge_work_evidence real "$since"
+  ) || fail "a lane's own progress since the quiet window opened was not counted as work evidence when its caller held another task"
+
+  ( STATE="$state"
+    crew_run_attributed() { return 1; }
+    crew_worktree_written_since() { return 1; }
+    eval "$fn"
+    # shellcheck disable=SC2034 # read by the pre-fix shape of the function under test
+    task=real
+    ! wedge_work_evidence decoy "$since"
+  ) || fail "a lane with no progress of its own was credited with its caller's task's progress"
+  pass "wedge_work_evidence reads the progress of the task it was asked about, whatever task its caller holds"
+}
+
 wedge_stale_wakes() {  # <state> <window>
   awk -F '\t' -v w="$2" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
     "$1/.wake-queue" 2>/dev/null || echo 0
@@ -5994,6 +6035,7 @@ test_live_due_declared_time_alarm_says_the_clearing_time_passed
 test_undeclared_live_lane_keeps_the_unnamed_stale_alarm
 test_captain_relevant_append_during_a_declared_wait_still_alarms
 test_live_paused_until_controls_recheck_time
+test_wedge_work_evidence_reads_its_own_tasks_progress
 test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict
 test_wedge_escalation_names_an_expired_declared_wait
 test_a_declared_time_that_names_no_real_instant_takes_the_no_time_path

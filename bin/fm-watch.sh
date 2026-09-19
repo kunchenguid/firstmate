@@ -995,7 +995,8 @@ wedge_wait_evidence() {  # <task> -> `declared`/`held` and 0, or `expired <token
 # the other way would alarm a worker who named a time HARDER than one who stayed
 # vague, which would teach every worker to be less precise.
 wedge_work_evidence() {  # <task> <since-file>
-  local task=$1 since_file=$2 progress="$STATE/$task.progress"
+  local task=$1 since_file=$2
+  local progress="$STATE/$task.progress"
   crew_run_attributed "$task" && return 0
   [ -f "$progress" ] && [ "$progress" -nt "$since_file" ] && return 0
   crew_worktree_written_since "$task" "$STATE" "$since_file"
