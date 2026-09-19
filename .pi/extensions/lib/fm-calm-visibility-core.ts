@@ -1,5 +1,6 @@
 // Harness-agnostic Calm transcript visibility policy.
-// Pi, OMP, and Claude Code share this allowlist and presentation state.
+// Pi and OMP share this allowlist and presentation state; the Claude Code mod
+// implements the same broad boundary through its own presentation module.
 // docs/calm.md owns the captain-facing contract; this module owns which
 // transcript classes Calm hides while the preference is on.
 export const CALM_TRANSCRIPT_CLASSES = [
