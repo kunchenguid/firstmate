@@ -411,7 +411,8 @@ The [Relay configuration reference](configuration.md#promised-public-replies-sta
 
 ## Project memory belongs to projects
 
-Durable project-intrinsic agent knowledge lives in each project's committed `AGENTS.md`, with `CLAUDE.md` as a real `@AGENTS.md` import pointer.
+Durable project-intrinsic agent knowledge lives in each project's committed `AGENTS.md`.
+When a project uses Firstmate's pointer convention, `CLAUDE.md` is a real `@AGENTS.md` import pointer.
 Ship briefs prompt crewmates to create or update those files through the normal delivery path; `data/projects.md` stays a thin private registry.
 [`bin/fm-ensure-agents-md.sh`](../bin/fm-ensure-agents-md.sh) owns the canonical self-governance wording and its idempotent insertion, while its header and help document which project shapes receive it, including the explicit mark for equivalent project-owned guidance and the untouched projects that keep `AGENTS.md` alone.
 It refuses a case-variant real memory file such as a lowercase `agents.md`, so the pointer's `@AGENTS.md` import resolves to a real `AGENTS.md` on a case-sensitive filesystem, and surfaces the mismatch for manual reconciliation.
