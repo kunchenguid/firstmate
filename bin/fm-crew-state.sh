@@ -39,10 +39,15 @@
 #      branch whose head was rewritten or diverged must not be attributed.
 #      A run EXECUTING on this crew's branch (pending, running, fixing, or ci)
 #      is authoritative REGARDLESS of head (fm_nm_run_is_executing in
-#      bin/fm-nm-run-lib.sh): the pipeline rebases the branch and commits its
-#      fix rounds in its own checkout, so a live run's head routinely differs
-#      from the local head, and reading an older run that still matches the
-#      local head would report a working crew as failed. Every other run -
+#      bin/fm-nm-run-lib.sh) as long as an explicit probe does not prove the
+#      daemon down (nm_daemon_probe_down): the pipeline rebases the branch and
+#      commits its fix rounds in its own checkout, so a live run's head
+#      routinely differs from the local head, and reading an older run that
+#      still matches the local head would report a working crew as failed - but
+#      a record still saying `running` because the daemon died under it is
+#      evidence from a dead instrument, exactly as for a terminal record, and
+#      must not answer once the worktree has moved off the run head. Every
+#      other run -
 #      terminal, or parked at a gate - matches only when its head equals the
 #      worktree HEAD, or the worktree HEAD is an ancestor of the run head
 #      (pipeline fix commits advanced the run on the same line of history);
@@ -742,8 +747,8 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         if [ "$(fm_nm_run_status_class "$selected_status")" != "$current_class" ]; then
           emit unknown run-step "selected run status disagrees with inventory; run ids: $candidate_ids"
         fi
-        if fm_nm_run_is_executing "$RUN_OUT" \
-          || nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT"; then
+        if nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT" \
+          || { fm_nm_run_is_executing "$RUN_OUT" && ! nm_daemon_probe_down; }; then
           HAVE_RUN=1
         elif [ -z "$(fm_nm_resolve_commit "$WT" "$(strip_quotes "$(nm_field head)")")" ]; then
           if fm_nm_run_is_active "$RUN_OUT" \
@@ -758,14 +763,17 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     esac
     if [ "$HAVE_RUN" = 0 ] && [ -z "$SELECTED_RUN_ID" ]; then
       run_branch=$(strip_quotes "$(nm_field branch)")
-      # Executing-regardless-of-head, head equality, or the pipeline-owned
-      # parked-run exemption: a live run on this branch is current even after
-      # a rebase, and while the pipeline owns this branch a parked run binds
+      # Head equality, the pipeline-owned parked-run exemption, or executing
+      # regardless of head: a live run on this branch is current even after a
+      # rebase, and while the pipeline owns this branch a parked run binds
       # without the lane head being a git object here (fm_nm_run_is_executing
-      # and fm_nm_run_is_pipeline_owned_active in bin/fm-nm-run-lib.sh).
+      # and fm_nm_run_is_pipeline_owned_active in bin/fm-nm-run-lib.sh). The
+      # head-free route additionally needs the daemon not provably down, so a
+      # record left saying `running` by a dead daemon stops answering once the
+      # worktree moves off the run head.
       if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] \
-        && { fm_nm_run_is_executing "$RUN_OUT" \
-          || nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT"; }; then
+        && { nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT" \
+          || { fm_nm_run_is_executing "$RUN_OUT" && ! nm_daemon_probe_down; }; }; then
         HAVE_RUN=1
         # Without run ids, contradictory liveness cannot prove precedence.
         # A live replacement also needs an id-addressed status read: a bare
@@ -950,7 +958,13 @@ if [ "$HAVE_RUN" = 1 ]; then
       fi
       if [ "$RUN_STATE" != parked ]; then
         if [ "$RUN_STATE" = working ]; then
-          if [ "$LOG_VERB" = blocked ] \
+          if [ "$RUN_SOURCE" = coarse ]; then
+            # The runs ledger keeps a parked run's status word at `running`
+            # (tests/captures/no-mistakes-v1.70.1/parked.toon), so a coarse
+            # live row is equally consistent with the gate still being open
+            # and cannot establish that this event resolved.
+            RUN_DETAIL="$RUN_DETAIL${SEP}status-log not superseded: a coarse run record cannot tell working from parked"
+          elif [ "$LOG_VERB" = blocked ] \
             && log_claims_pipeline_unreachable "$LOG_LINE" \
             && { [ "$RUN_STATUS" = running ] || [ "$RUN_STATUS" = fixing ]; } \
             && nm_run_activity_is_recent; then

@@ -3502,6 +3502,83 @@ EOF
   pass 'legacy live rebased run is authoritative over an older failed row'
 }
 
+# The head-free route is licensed by the daemon being reachable. A record left
+# saying `running` by a daemon that died under it is evidence from a dead
+# instrument: once the worktree moves off the run head, nothing corroborates it,
+# so it must stop answering and the status log takes over.
+test_live_record_at_diverged_head_needs_a_live_daemon() {
+  reset_fakes
+  local d rebased out; d=$(new_case zombie-daemon-down)
+  make_repo_on_branch "$d/wt" fm/feat-zombie
+  rebased=$(make_rebased_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-zombie.meta" "window=fm:fm-feat-zombie" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: validating\n' > "$d/state/feat-zombie.status"
+  FM_FAKE_RUN_HEAD=$rebased
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-zombie)
+branch_sync:
+  state: synced"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-zombie
+  out=$(run_crew_state "$d" feat-zombie)
+  assert_not_contains "$out" "source: run-step" "a live record at a diverged head must not answer while the daemon is provably down"
+  assert_contains "$out" "source: status-log" "the status log answers for the unbound record"
+  pass "a live record at a diverged head needs a reachable daemon to bind"
+}
+
+# The head-free route still binds while the daemon answers: the daemon probe
+# narrows the zombie case only, it does not undo the rebase fix.
+test_live_record_at_diverged_head_binds_while_daemon_answers() {
+  reset_fakes
+  local d rebased out; d=$(new_case live-daemon-up)
+  make_repo_on_branch "$d/wt" fm/feat-livedaemon
+  rebased=$(make_rebased_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-livedaemon.meta" "window=fm:fm-feat-livedaemon" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: validating\n' > "$d/state/feat-livedaemon.status"
+  FM_FAKE_RUN_HEAD=$rebased
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-livedaemon)
+branch_sync:
+  state: synced"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_DAEMON_DOWN=0
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-livedaemon
+  out=$(run_crew_state "$d" feat-livedaemon)
+  assert_contains "$out" "source: run-step" "a reachable daemon keeps the rebased live run authoritative"
+  assert_contains "$out" "state: working" "the live rebased run still reads working"
+  pass "a live record at a diverged head binds while the daemon answers"
+}
+
+# A coarse ledger row keeps a PARKED run's status word at `running`
+# (tests/captures/no-mistakes-v1.70.1/parked.toon), so it is equally consistent
+# with the gate still being open and must never claim the crew's own
+# needs-decision event was superseded.
+test_coarse_live_row_does_not_claim_gate_superseded() {
+  reset_fakes
+  local d rebased out; d=$(new_case coarse-gate-signal)
+  make_repo_on_branch "$d/wt" fm/feat-cg
+  rebased=$(make_rebased_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cg.meta" "window=fm:fm-feat-cg" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision: review gate has an ask-user finding\n' > "$d/state/feat-cg.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-23 14:00
+  running    fm/feat-cg ${rebased}  2026-08-23 13:53
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-cg
+  out=$(run_crew_state "$d" feat-cg)
+  assert_contains "$out" "source: run-step" "the coarse live row still binds"
+  assert_not_contains "$out" "superseded by active run" "a coarse row cannot prove the gate event resolved"
+  assert_contains "$out" "cannot tell working from parked" "the coarse limit is named in the detail"
+  pass "a coarse live row never claims the gate event was superseded"
+}
+
 # Coarse ledger only (axi answers another branch): the newest row on the task's
 # branch is running at a rebased head that resolves but diverged.
 test_coarse_live_rebased_row_is_authoritative() {
@@ -3861,6 +3938,9 @@ test_superseded_cancelled_run_preserves_replacement_gate
 test_live_rebased_run_beats_older_failed_run_at_local_head
 test_live_rebased_run_reads_working_for_every_executing_status
 test_legacy_live_rebased_run_is_authoritative
+test_live_record_at_diverged_head_needs_a_live_daemon
+test_live_record_at_diverged_head_binds_while_daemon_answers
+test_coarse_live_row_does_not_claim_gate_superseded
 test_coarse_live_rebased_row_is_authoritative
 test_terminal_rebased_run_is_not_attributed
 test_competing_live_runs_report_unknown_with_both_ids

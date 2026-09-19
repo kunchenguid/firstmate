@@ -342,6 +342,10 @@ fm_nm_run_is_parked() {  # <toon-output>
 # A run parked at a gate keeps the strict head rule, and no destructive caller
 # uses this predicate: teardown stays on fm_nm_head_matches_worktree and the
 # ledger rule below.
+# This predicate reads the RECORD only; it cannot tell a live run from one whose
+# daemon died still saying `running`. The head-free route through it is the
+# caller's to license, and fm-crew-state.sh pairs it with an explicit
+# daemon-down probe for exactly that reason.
 fm_nm_run_is_executing() {  # <toon-output>
   fm_nm_run_is_active "$1" || return 1
   fm_nm_run_is_parked "$1" && return 1
