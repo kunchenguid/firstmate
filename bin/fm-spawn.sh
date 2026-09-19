@@ -278,13 +278,14 @@
 #   --provider <the model's provider>, so Pi cannot resolve --model under
 #   another provider; a raw Pi command must pass that --provider itself or it
 #   refuses. A final `environment` line selects the runner's environment
-#   credentials as well. Declarations are home-local and never inherited. A ship or scout reads the active home; a local
-#   secondmate is a supervisor and reads the launching home. Relaunch uses that
-#   same home. The selected root is exported onto the launch and, for Claude
-#   without `environment`, environment credentials ranked above its stored
-#   login are shed. The selection follows the resolved harness, so a raw launch
-#   whose executable is claude, pi, or pi-signed receives it too. No credential
-#   files are copied or transferred.
+#   credentials as well. Declarations are home-local and never inherited. A
+#   ship or scout reads the active home; a local secondmate is a supervisor and
+#   reads the launching home. Relaunch uses that same home. The selected root
+#   is exported onto the launch and, for Claude without `environment`,
+#   environment credentials ranked above its stored login are shed. The
+#   selection follows the resolved harness, so a raw launch whose executable is
+#   claude, pi, or pi-signed receives it too. No credential files are copied or
+#   transferred.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode

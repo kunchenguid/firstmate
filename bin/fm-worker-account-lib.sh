@@ -72,9 +72,9 @@
 # only when a listed row's provider column is exactly the launch model's
 # provider, the same provider-level question `auth check` answers; no such row
 # within the bound refuses. --no-refresh keeps the check from rewriting a
-# root's tokens while other workers use them. A codex-native/<id> model is not checked: that
-# provider comes from the pi-codex-native extension and signs in through
-# Codex's own login, which has no worker-account declaration.
+# root's tokens while other workers use them. A codex-native/<id> model is not
+# checked: that provider comes from the pi-codex-native extension and signs in
+# through Codex's own login, which has no worker-account declaration.
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-timeout-lib.sh"
@@ -89,13 +89,14 @@ FM_WORKER_ACCOUNT_CLAUDE_SHED="CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CL
 
 # fm_worker_account_read <harness> <file>
 # Prints "root<TAB>providers<TAB>environment" for a valid declaration. The
-# space-separated providers are empty for Claude; the last field is `environment` or empty. The final
-# newline is optional; any other control byte, including a CR, refuses. Parses
-# bytes before the shell can drop NULs or trailing newlines; paths are literal,
-# not shell expressions. Returns 0 on success, 3 when the
-# file does not exist, 4 when it cannot be inspected (one error already
-# printed), 5 when it is not a readable regular file, and 6 when its contents
-# are not a valid declaration. Callers own the message for each refusal.
+# space-separated providers are empty for Claude; the last field is
+# `environment` or empty. The final newline is optional; any other control
+# byte, including a CR, refuses. Parses bytes before the shell can drop NULs or
+# trailing newlines; paths are literal, not shell expressions. Returns 0 on
+# success, 3 when the file does not exist, 4 when it cannot be inspected (one
+# error already printed), 5 when it is not a readable regular file, and 6 when
+# its contents are not a valid declaration. Callers own the message for each
+# refusal.
 fm_worker_account_read() {
   perl -MErrno=ENOENT -e '
     my ($harness, $f) = @ARGV;
@@ -137,10 +138,11 @@ fm_worker_account_pi_provider() {
 
 # fm_worker_account_raw_flag <raw launch command> <flag>
 # Prints the value of <flag> (--model or --provider) embedded in a raw launch
-# command as a separate word, the only form Pi parses, or nothing. A raw command is passed through verbatim, so fm-spawn's
-# own flags do not reach the agent and only these values say which account a
-# raw Pi launch would spend. Model and provider ids carry no spaces, so word
-# splitting is enough; one layer of shell quoting around the value is removed.
+# command as a separate word, the only form Pi parses, or nothing. A raw
+# command is passed through verbatim, so fm-spawn's own flags do not reach the
+# agent and only these values say which account a raw Pi launch would spend.
+# Model and provider ids carry no spaces, so word splitting is enough; one
+# layer of shell quoting around the value is removed.
 fm_worker_account_raw_flag() {
   local flag=$2 word next=0 value=
   # ponytail: O(n) word split is enough because model ids carry no spaces; a
