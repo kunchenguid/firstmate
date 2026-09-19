@@ -17,10 +17,10 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-busy-adapter-wiring)
 
-make_spawn_case() {  # <name> <harness> <id>
+make_spawn_case() {  # <name> <harness> <id> [home-leaf]
   local name=$1 harness=$2 id=$3 case_dir home proj wt fakebin
   case_dir="$TMP_ROOT/$name"
-  home="$case_dir/home"
+  home="$case_dir/${4:-home}"
   proj="$case_dir/project"
   wt="$case_dir/wt"
   fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini)
@@ -422,6 +422,82 @@ test_kimi_and_grok_install_no_unverified_wiring() {
   pass "kimi and grok install no unverified semantic wiring and classify through their own gates"
 }
 
+test_generated_hooks_preserve_paths() {
+  local harness variant leaf root_leaf code_root rec id out state artifact source
+  for harness in opencode pi omp; do
+    for variant in plain home-quote home-backslash root-quote root-backslash; do
+      leaf=home root_leaf=root
+      case "$variant" in
+        home-quote) leaf='home"quoted' ;;
+        home-backslash) leaf='home\users' ;;
+        root-quote) root_leaf='root"quoted' ;;
+        root-backslash) root_leaf='root\busy' ;;
+      esac
+      id="encoding-$harness-$variant"
+      rec=$(make_spawn_case "$id" "$harness" "$id" "$leaf")
+      read_case_record "$rec"
+      if [ "$harness" = omp ]; then
+        cat >"$FAKEBIN_DIR/omp" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in models) printf '%s\n' '{"models":[]}' ;; esac
+exit 0
+EOF
+        chmod +x "$FAKEBIN_DIR/omp"
+      fi
+      code_root="$CASE_DIR/$root_leaf"
+      ln -s "$ROOT" "$code_root"
+      out=$(ROOT="$code_root" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+      expect_code 0 $? "$id spawn should succeed: $out"
+      state="$HOME_DIR/state"
+      source="$harness-ext"
+      artifact="$state/$id.$harness-ext.ts"
+      if [ "$harness" = opencode ]; then
+        source=opencode-plugin
+        artifact="$WT_DIR/.opencode/plugins/fm-busy-state.js"
+      fi
+      # Node rejects backslashes in module URLs on POSIX. Load an unchanged
+      # copy from a plain path; the embedded event destinations stay original.
+      cp "$artifact" "$CASE_DIR/hook.${artifact##*.}"
+      artifact="$CASE_DIR/hook.${artifact##*.}"
+      # Import the emitted source, rather than node --check, which can accept
+      # malformed ambiguous ESM input. Real event writes also catch escapes
+      # such as \b that parse successfully but silently change the path.
+      out=$(EXT_PATH="$artifact" HARNESS="$harness" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
+if (process.env.HARNESS === "opencode") {
+  const hooks = await mod.FmBusyState({});
+  await hooks.event({ event: { type: "session.status", properties: {
+    sessionID: "main", status: { type: "busy" },
+  } } });
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "main" } } });
+} else {
+  const handlers = {};
+  mod.default({ on: (name, fn) => { handlers[name] = fn; },
+    events: { on: (name, fn) => { handlers[name] = fn; } } });
+  await handlers.agent_start();
+  if (process.env.HARNESS === "pi") {
+    await handlers.agent_settled({}, { isIdle: () => true });
+    handlers["codex-native:progress"]();
+  } else {
+    await handlers.agent_end({ willContinue: false });
+  }
+  handlers.turn_end();
+}
+EOF
+      ) || fail "$id generated hook did not load or run: $out"
+      out=$(classify "$harness" "$id" "$state")
+      [ "$out" = "idle $source" ] || fail "$id did not reach its true state path: $out"
+      assert_present "$state/$id.turn-ended" "$id did not touch its true turn-end path"
+      if [ "$harness" = pi ]; then
+        assert_present "$state/$id.progress" "$id did not touch its true progress path"
+      fi
+      pass "$id generated hook loads and preserves event paths"
+    done
+  done
+}
+
+test_generated_hooks_preserve_paths
 test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
