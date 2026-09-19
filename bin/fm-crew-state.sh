@@ -67,13 +67,15 @@
 #      bin/fm-nm-run-lib.sh). The coarse runs-ledger fallback has NO
 #      branch-name-only acceptance: an executing `axi status` record is the one
 #      live bind, so a ledger row that cannot be tied to this worktree's head
-#      never answers on branch name alone. An EXECUTING record whose daemon has
-#      ANSWERED down reads unknown and names the dead instrument, exactly as the
-#      terminal record below does, on every route - the head being resolvable,
-#      diverged or absent changes nothing about a dead instrument, and silently
-#      dropping to a possibly-stale status log would hide it. A run PARKED at a
-#      gate is exempt: an open decision stays open when the instrument dies, so
-#      it keeps its gate and findings.
+#      never answers on branch name alone. A record whose daemon has ANSWERED
+#      down reads unknown and names the dead instrument - but only once identity
+#      is already proven, by head equality/ancestry or by the ledger anchor. A
+#      record with NEITHER is not this worktree's run to report on: it leaves
+#      HAVE_RUN=0 so the pane and status log answer, because a stale record
+#      naming this branch must never override a crew that is visibly working.
+#      A run PARKED at a gate is exempt from the dead-instrument verdict: an
+#      open decision stays open when the instrument dies, so it keeps its gate
+#      and findings.
 #      fm_nm_select_run in bin/fm-nm-run-lib.sh owns complete run selection
 #      and ambiguity reporting. The selected run's id-addressed status must
 #      agree on id, branch, and live/terminal class before attribution;
@@ -109,9 +111,10 @@
 #      record itself is UNVERIFIED (its daemon answered down): the crew saw its
 #      gate or blocker first hand, so needs-decision stays parked and blocked
 #      stays blocked, with the unverified record named as the reason. A COARSE
-#      live row over an open decision answers the same way: the ledger keeps a
+#      live row over an open DECISION answers the same way: the ledger keeps a
 #      parked run's word at `running`, so it cannot establish that the decision
 #      resolved, and the decision answers in the state, not only in the detail.
+#      A blocked tip is not ambiguous that way and keeps the generic reading.
 #      Other daemon, timeout, or unreachability
 #      claims are superseded BECAUSE THE RUN IS ALIVE when the run is
 #      running/fixing with recent reported activity: a killed or timed-out drive
@@ -806,9 +809,6 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
           else
             emit unknown run-step "selected run code identity unverified; run ids: $candidate_ids"
           fi
-        elif fm_nm_run_is_executing "$RUN_OUT" && nm_daemon_answered_down; then
-          HAVE_RUN=1
-          RUN_DEAD_DAEMON="no-mistakes daemon unreachable; last run record $(strip_quotes "$(nm_field status)") - unverified"
         fi
         SELECTED_RUN_ID=$selected_id
         ;;
@@ -876,10 +876,6 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
               RUN_DEAD_DAEMON="$RUN_DEAD_DAEMON; run id: $(strip_quotes "$(nm_field id)")"
             fi
           fi
-        elif [ "$run_branch" = "$CREW_BRANCH" ] && fm_nm_run_is_executing "$RUN_OUT" \
-          && nm_daemon_answered_down; then
-          HAVE_RUN=1
-          RUN_DEAD_DAEMON="no-mistakes daemon unreachable; last run record $(strip_quotes "$(nm_field status)") - unverified; run id: $(strip_quotes "$(nm_field id)")"
         fi
       fi
     fi
@@ -914,8 +910,9 @@ if [ "$HAVE_RUN" = 1 ]; then
         # here. With the daemon provably down, the row is unverified evidence
         # from a dead instrument and must not read as work failure.
         if nm_daemon_probe_down; then
+          RUN_DEAD_DAEMON="no-mistakes daemon unreachable; last ledger record failed - unverified"
           RUN_STATE=unknown
-          RUN_DETAIL="no-mistakes daemon unreachable; last ledger record failed - unverified"
+          RUN_DETAIL=$RUN_DEAD_DAEMON
         else
           RUN_STATE=failed; RUN_DETAIL="run failed"
         fi ;;
@@ -1039,12 +1036,12 @@ if [ "$HAVE_RUN" = 1 ]; then
       if [ "$RUN_STATE" != parked ] \
         && ! { [ "$RUN_SOURCE" = coarse ] && [ "$RUN_STATE" = unknown ]; }; then
         if [ "$RUN_STATE" = working ]; then
-          if [ "$RUN_SOURCE" = coarse ]; then
+          if [ "$RUN_SOURCE" = coarse ] && [ "$LOG_VERB" = needs-decision ]; then
             # The runs ledger keeps a parked run's status word at `running`
             # (tests/captures/no-mistakes-v1.70.1/parked.toon), so a coarse
             # live row is equally consistent with the gate still being open
-            # and cannot establish that this event resolved. The open decision
-            # therefore answers, in the state and not only in the detail.
+            # and cannot establish that this decision resolved. Only a gate is
+            # ambiguous this way: a blocker keeps the generic reading below.
             emit "$LOG_TIP_STATE" status-log "$(status_line_note "$LOG_LINE")${SEP}a coarse run record cannot tell working from parked"
           elif [ "$LOG_VERB" = blocked ] \
             && log_claims_pipeline_unreachable "$LOG_LINE" \

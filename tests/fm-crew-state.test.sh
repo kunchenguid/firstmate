@@ -3561,11 +3561,9 @@ branch_sync:
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-zombie
   out=$(run_crew_state "$d" feat-zombie)
-  assert_contains "$out" "state: unknown" "a live record at a diverged head must not read as work with the daemon answering down"
-  assert_contains "$out" "daemon unreachable" "the dead instrument is named rather than dropped silently"
-  assert_contains "$out" "run id: 01RUN" "the verdict carries the run identity for a later --run read"
-  assert_not_contains "$out" "state: working" "a stale status log must not answer for a dead instrument"
-  pass "a live record at a diverged head reports the dead daemon"
+  assert_not_contains "$out" "source: run-step" "a record with neither head nor anchor identity must not bind"
+  assert_contains "$out" "source: status-log" "the crew's own evidence answers instead"
+  pass "an unproven record at a diverged head does not answer for the crew"
 }
 
 # A run PARKED at a gate keeps its gate and findings when the daemon dies. The
@@ -3622,11 +3620,9 @@ runs[1]{id,branch,status,head,pr}:
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" seldiv
   out=$(run_crew_state "$d" seldiv)
-  assert_contains "$out" "state: unknown" "the selected diverged-head route must not read working with the daemon down"
-  assert_contains "$out" "daemon unreachable" "the dead instrument is named on the selected route too"
-  assert_contains "$out" "run: 01RUN" "the selected-route verdict carries the run identity"
-  assert_not_contains "$out" "state: working" "a stale status log must not answer for a dead instrument"
-  pass "the selected-run diverged-head route reports the dead daemon"
+  assert_not_contains "$out" "source: run-step" "an unproven record must not bind on the selected route either"
+  assert_contains "$out" "source: status-log" "the crew's own evidence answers instead"
+  pass "an unproven record at a diverged head does not answer on the selected route"
 }
 
 # The crew observed the refused socket itself. A run record the dead daemon left
@@ -3676,9 +3672,62 @@ branch_sync:
   out=$(run_crew_state "$d" feat-ndiv)
   assert_contains "$out" "state: parked" "an open decision is not hidden behind a generic unknown"
   assert_contains "$out" "approve the schema change" "the crew's own decision note reaches the supervisor"
-  assert_contains "$out" "daemon unreachable" "the unverified record is named as the reason"
-  assert_not_contains "$out" "superseded" "an unverified record never supersedes an open decision"
-  pass "an open decision survives the dead-daemon verdict"
+  assert_not_contains "$out" "superseded" "an unproven record never supersedes an open decision"
+  pass "an open decision survives an unproven record with a dead daemon"
+}
+
+# A visibly working crew must never be overridden by a stale record that merely
+# names its branch. Identity is proven by neither head nor ledger anchor here,
+# so the busy pane answers - the base behaviour before the daemon guard existed.
+test_unproven_record_with_dead_daemon_does_not_override_a_busy_pane() {
+  reset_fakes
+  local d rebased out gen; d=$(new_case unproven-busy-pane)
+  make_repo_on_branch "$d/wt" fm/feat-unproven
+  rebased=$(make_rebased_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-unproven.meta" "window=fm:fm-feat-unproven" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/feat-unproven.status"
+  FM_FAKE_RUN_HEAD=$rebased
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-unproven)
+branch_sync:
+  state: synced"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=1
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-unproven)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-unproven busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  out=$(run_crew_state "$d" feat-unproven)
+  assert_contains "$out" "state: working" "a busy crew keeps reading working"
+  assert_contains "$out" "source: pane" "the live pane answers, not the stale record"
+  assert_not_contains "$out" "state: unknown" "an unproven record must not blank out a working crew"
+  pass "an unproven record with a dead daemon never overrides a busy pane"
+}
+
+# Only a gate is ambiguous under a coarse live row. An ordinary blocker keeps the
+# pre-existing reading, exactly as it does on the full route.
+test_coarse_live_row_over_ordinary_blocked_keeps_superseded_reading() {
+  reset_fakes
+  local d local_short out; d=$(new_case coarse-ordinary-blocked)
+  make_repo_on_branch "$d/wt" fm/feat-cob
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cob.meta" "window=fm:fm-feat-cob" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'blocked: database upload failed with broken pipe\n' > "$d/state/feat-cob.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-23 14:00
+  running    fm/feat-cob ${local_short}  2026-08-23 13:53
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-cob
+  out=$(run_crew_state "$d" feat-cob)
+  assert_contains "$out" "state: working" "an ordinary blocker over a live coarse row keeps working"
+  assert_contains "$out" "superseded by active run" "the generic superseded reading is kept"
+  assert_not_contains "$out" "state: blocked" "a validating crew must not read blocked"
+  assert_not_contains "$out" "cannot tell working from parked" "the gate-ambiguity reason is not for a blocker"
+  pass "an ordinary blocked tip over a coarse live row keeps the superseded reading"
 }
 
 # The head-free route still binds while the daemon answers: the daemon probe
@@ -3884,10 +3933,10 @@ runs[1]{id,branch,status,head,pr}:
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" seldec
   out=$(run_crew_state "$d" seldec)
-  assert_contains "$out" "state: parked" "the open decision is not hidden behind the unverified record"
+  assert_contains "$out" "state: parked" "the open decision is not hidden behind the unproven record"
   assert_contains "$out" "approve the schema change" "the crew's own decision note reaches the supervisor"
-  assert_contains "$out" "daemon unreachable" "the unverified record is named as the reason"
-  pass "an open decision survives the dead-daemon verdict on the selected route"
+  assert_not_contains "$out" "superseded" "an unproven record never supersedes an open decision"
+  pass "an open decision survives an unproven record on the selected route"
 }
 
 # The coarse ledger word `pending` is not an acceptance: it keeps its unknown
@@ -3966,9 +4015,11 @@ EOF
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-cfs
   out=$(run_crew_state "$d" feat-cfs)
-  assert_contains "$out" "unverified" "the coarse failed record reports itself unverified"
+  assert_contains "$out" "state: parked" "the open decision is not hidden by an unverified terminal record"
+  assert_contains "$out" "approve the schema change" "the crew's own decision note reaches the supervisor"
+  assert_contains "$out" "unverified" "the unverified record is named as the reason"
   assert_not_contains "$out" "superseded" "an unverified terminal record makes no supersede claim"
-  pass "an unverified coarse failed record never claims the status log superseded"
+  pass "an unverified coarse failed record leaves the open decision open"
 }
 
 # A probe that does not ANSWER proves nothing about the daemon, so it must not
@@ -4421,6 +4472,8 @@ test_live_rebased_run_reads_working_for_every_executing_status
 test_legacy_live_rebased_run_is_authoritative
 test_legacy_surface_binds_fixing_and_ci_at_a_rebased_head
 test_live_record_at_diverged_head_needs_a_live_daemon
+test_unproven_record_with_dead_daemon_does_not_override_a_busy_pane
+test_coarse_live_row_over_ordinary_blocked_keeps_superseded_reading
 test_socket_refused_log_survives_the_dead_daemon_verdict
 test_needs_decision_survives_the_dead_daemon_verdict
 test_parked_gate_survives_a_dead_daemon
