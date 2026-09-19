@@ -54,8 +54,9 @@
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
 # --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
 # report rather than a merge, and a charter is not a delivery contract.
-# There is no --yolo flag here. The worker never owns merge decisions, so yolo is
-# a spawn-time and firstmate-side input only (AGENTS.md section 7).
+# There is no --yolo flag here. The worker never owns merge decisions, so yolo
+# is a spawn-time and firstmate-side delivery input only (AGENTS.md section 7);
+# fm-spawn.sh renders its readiness instructions into the worker launch brief.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
@@ -147,10 +148,9 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
-    # yolo never reaches the worker: it is firstmate's merge authority, not a
-    # brief input. Refuse it loudly so it is never silently dropped here and then
-    # believed to have been recorded.
-    --yolo|--yolo=*) echo "error: --yolo is not a brief input; pass it to bin/fm-spawn.sh, which records the task's merge posture" >&2; exit 1 ;;
+    # yolo is decided at spawn or promotion: it is not a brief input. Refuse it
+    # loudly so it is never silently dropped and then believed to be recorded.
+    --yolo|--yolo=*) echo "error: --yolo is not a brief input; pass it to bin/fm-spawn.sh, which records the task's delivery posture" >&2; exit 1 ;;
     *) POS+=("$a") ;;
   esac
 done

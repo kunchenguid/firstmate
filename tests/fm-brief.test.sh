@@ -271,9 +271,9 @@ test_ship_mode_is_explicit_not_registry() {
   pass "fm-brief.sh: the explicit ship mode wins over the registered posture"
 }
 
-# yolo is firstmate's merge authority and never reaches the worker, and a scout
-# or charter carries no delivery contract. Each must refuse rather than accept and
-# discard the flag, which would look recorded but change nothing.
+# yolo is a spawn-time delivery input, not a brief input, and a scout or charter
+# carries no delivery contract. Each must refuse rather than accept and discard
+# the flag, which would look recorded but change nothing.
 test_delivery_flags_are_refused_where_they_do_not_apply() {
   local home out status label args expect
   home="$TMP_ROOT/refused-flags-home"

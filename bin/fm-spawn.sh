@@ -715,7 +715,7 @@ else
       exit 1
     }
     [ "$YOLO_SET" -eq 1 ] || {
-      echo "error: ship spawns require --yolo <on|off>; it is this task's merge authority, not a project lookup" >&2
+      echo "error: ship spawns require --yolo <on|off>; it is this task's delivery posture, not a project lookup" >&2
       exit 1
     }
     case "$MODE" in
@@ -2643,8 +2643,13 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
     fm_brief_worker_role "$STATE" "$ID" &&
       printf '\n' &&
       cat "$SOURCE_BRIEF" &&
+      if [ "$KIND" = ship ] && ! grep -q '^# Pull request readiness$' "$SOURCE_BRIEF"; then
+        printf '\n' &&
+          fm_ship_pr_readiness_block "$MODE" "$YOLO"
+      fi
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
-        fm_brief_intent_overlay "$CAPTAIN_INTENT"
+        printf '\n' &&
+          fm_brief_intent_overlay "$CAPTAIN_INTENT"
       fi
   } >"$BRIEF_TMP" || {
     rm -f -- "$BRIEF_TMP"

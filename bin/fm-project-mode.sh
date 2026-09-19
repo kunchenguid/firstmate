@@ -26,8 +26,9 @@
 #                          Mechanical output maps it to its most rigorous leg,
 #                          no-mistakes, so sync, seeding, and init treat such a
 #                          project as the remote-backed pipeline project it is.
-# yolo (orthogonal) = merge authority only: when on, firstmate merges green,
-#   in-scope work itself (AGENTS.md section 7).
+# yolo (orthogonal) = routine merge authority plus pull-request readiness: when
+# on, workers make created PRs ready for review and firstmate merges green,
+# in-scope work itself; fm-dod-lib.sh owns the exact worker instructions.
 #
 # --raw prints the registered annotation unmapped, so a caller that must tell a
 # conditional policy apart from a flat mode sees "no-mistakes-prod-only" itself.

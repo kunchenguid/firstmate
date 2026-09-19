@@ -83,7 +83,7 @@ done
   exit 1
 }
 [ "$YOLO_SET" -eq 1 ] || {
-  echo "error: promotion requires --yolo <on|off>; it is this task's merge authority, not a project lookup" >&2
+  echo "error: promotion requires --yolo <on|off>; it is this task's delivery posture, not a project lookup" >&2
   exit 1
 }
 case "$MODE" in
@@ -204,6 +204,8 @@ EOF
     printf '\nThe no-mistakes ask-user escalation below supersedes the scout rule 6 escalation shape.\n'
     printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
   fi
+  printf '\n'
+  fm_ship_pr_readiness_block "$MODE" "$YOLO"
   printf '\n'
   fm_dod_block "$MODE" "$ID"
 }

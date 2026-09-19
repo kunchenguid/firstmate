@@ -74,6 +74,50 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id>
   esac
 }
 
+# fm_ship_pr_readiness_block owns the mode-specific pull-request readiness
+# contract that depends on the spawn-time yolo posture. fm-brief.sh cannot render
+# this block because yolo is intentionally decided later at spawn or promotion.
+fm_ship_pr_readiness_block() {  # <no-mistakes|direct-PR|local-only> <on|off>
+  local mode=$1 yolo=$2
+  case "$mode:$yolo" in
+    direct-PR:on)
+      cat <<'EOF'
+# Pull request readiness
+This task's merge posture is `yolo=on`.
+Create the pull request without `--draft`, then run `gh-axi pr ready <number>` using the pull request number from the creation result before reporting completion.
+EOF
+      ;;
+    direct-PR:off)
+      cat <<'EOF'
+# Pull request readiness
+This task's merge posture is `yolo=off`.
+Preserve the normal draft default by creating the pull request with `gh-axi pr create --draft`; do not run `gh-axi pr ready`.
+EOF
+      ;;
+    no-mistakes:on)
+      cat <<'EOF'
+# Pull request readiness
+This task's merge posture is `yolo=on`.
+After no-mistakes reports its CI-ready point and provides the pull request URL, run `gh-axi pr ready <number>` using that pull request number before reporting completion.
+EOF
+      ;;
+    no-mistakes:off)
+      cat <<'EOF'
+# Pull request readiness
+This task's merge posture is `yolo=off`.
+Preserve no-mistakes' configured pull-request draft setting; do not run `gh-axi pr ready`.
+EOF
+      ;;
+    local-only:on|local-only:off)
+      ;;
+    *)
+      echo "error: fm_ship_pr_readiness_block: unknown delivery posture '$mode'/'$yolo'" >&2
+      return 1
+      ;;
+  esac
+}
+
+
 # Return 0 when a Task subsection still consists only of its scaffold
 # placeholder. A missing file and legacy briefs carry no such placeholders.
 fm_brief_task_placeholders_present() {  # <file>
