@@ -39,6 +39,33 @@
 #                                        so a caller that knows the terminal's foreground
 #                                        process group can keep a backgrounded process out
 #                                        of the selection.
+#        fm-harness.sh claude-permission-mode [<pid>]
+#                                        print the CONFIRMED permission-mode token for the
+#                                        nearest `claude` process at or above <pid> (default
+#                                        this process): a --permission-mode choice
+#                                        (acceptEdits|auto|bypassPermissions|manual|dontAsk|
+#                                        plan), or "bypass" for --dangerously-skip-permissions.
+#                                        Only flags before a launcher's own
+#                                        --append-system-prompt argument are searched, so a
+#                                        crewmate's brief text can never be misread as a flag,
+#                                        and the EARLIEST permission flag wins, so a trailing
+#                                        positional brief (a secondmate launch) that mentions
+#                                        one never overrides Claude's own leading flag.
+#                                        With no CLI flag found there, falls back to
+#                                        permissions.defaultMode in the user settings file
+#                                        (${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json)
+#                                        ONLY for the "auto" and "bypassPermissions" values -
+#                                        the two values Claude Code itself refuses to take from
+#                                        a project settings file (docs/configuration.md "Claude
+#                                        permission mode for the primary session") - and not
+#                                        when this root's own .claude/settings.json or
+#                                        .claude/settings.local.json names any other
+#                                        defaultMode, which takes precedence over it. Prints
+#                                        NOTHING - never a guessed default - when no claude
+#                                        ancestor is found, its command line cannot be read, or
+#                                        neither source names a mode: evidence-only, same as
+#                                        `ancestry`, so a caller only ever acts on a confirmed
+#                                        mode and fails quiet otherwise.
 # config/secondmate-harness format: a single line "<harness> [<model>] [<effort>]",
 # whitespace-separated. A bare "<harness>" (today's format) behaves exactly as before:
 # harness only, no model/effort. Only the first non-empty, non-comment line is parsed.
@@ -496,6 +523,75 @@ validate_native_effort() {
   return 1
 }
 
+# Print the user-settings permissions.defaultMode value, but only when it is
+# "auto" or "bypassPermissions" - the two values Claude Code documents as
+# taking effect ONLY from user, --settings, or managed settings, never from a
+# project's .claude/settings.json or .claude/settings.local.json. A shallow
+# grep, not a JSON parse: this is a best-effort fallback signal, not a security
+# boundary, and a malformed or absent file yields nothing rather than a guess.
+claude_user_settings_permission_mode() {
+  local f="${CLAUDE_CONFIG_DIR:-${HOME:-}/.claude}/settings.json" project
+  [ -n "${HOME:-}${CLAUDE_CONFIG_DIR:-}" ] || return 0
+  [ -f "$f" ] && [ -r "$f" ] || return 0
+  for project in "$FM_ROOT/.claude/settings.json" "$FM_ROOT/.claude/settings.local.json"; do
+    [ -f "$project" ] && [ -r "$project" ] || continue
+    LC_ALL=C grep -Eo '"defaultMode"[[:space:]]*:[[:space:]]*"[^"]*"' "$project" 2>/dev/null \
+      | LC_ALL=C grep -Evq '"(auto|bypassPermissions)"$' && return 0
+  done
+  LC_ALL=C grep -Eo '"defaultMode"[[:space:]]*:[[:space:]]*"(auto|bypassPermissions)"' "$f" 2>/dev/null \
+    | LC_ALL=C sed -E 's/.*"(auto|bypassPermissions)"$/\1/' | head -1
+}
+
+# See the usage header above for the full contract.
+harness_claude_permission_mode() {  # [<pid>]
+  local pid=${1:-$$} comm args flags rest mode flag head found best
+  for _ in 1 2 3 4 5 6 7 8; do
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 0
+    case "$(basename -- "$comm")" in
+    *claude*)
+      args=$(ps -o command= -p "$pid" 2>/dev/null) || return 0
+      # Bound the search to the flags Claude Code itself put on the command
+      # line, never to free-form text a launcher appended after them. A
+      # fm-spawn.sh launch carries the crewmate's brief through
+      # --append-system-prompt as the LAST argument, and that brief is
+      # untrusted, model-readable content that could itself contain the
+      # string "--permission-mode auto" without the session running in it.
+      flags=${args%%--append-system-prompt*}
+      # Among what remains, only the EARLIEST permission flag is Claude's own.
+      # A secondmate launch carries no --append-system-prompt and ends in a
+      # positional brief instead, but every Claude flag precedes that brief,
+      # so a later mention in its prose never outranks the real leading flag.
+      found='' best='' mode=''
+      for flag in "--permission-mode=" "--permission-mode " "--dangerously-skip-permissions"; do
+        case "$flags" in *"$flag"*) ;; *) continue ;; esac
+        head=${flags%%"$flag"*}
+        if [ -z "$found" ] || [ "${#head}" -lt "$best" ]; then
+          found=$flag best=${#head}
+        fi
+      done
+      case "$found" in
+      '')
+        mode=$(claude_user_settings_permission_mode)
+        ;;
+      --dangerously-skip-permissions)
+        mode=bypass
+        ;;
+      *)
+        rest=${flags#*"$found"}
+        mode=${rest%% *}
+        ;;
+      esac
+      [ -n "$mode" ] && echo "$mode"
+      return 0
+      ;;
+    esac
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    case "$pid" in '' | *[!0-9]*) return 0 ;; esac
+    [ "$pid" -ge 1 ] || return 0
+  done
+  return 0
+}
+
 case "${1:-}" in
   validate-native-effort) shift; validate_native_effort "$@" ;;
   ancestry)
@@ -514,6 +610,12 @@ case "${1:-}" in
     descent_pid="${1:-$$}"
     [ "$#" -eq 0 ] || shift
     harness_ancestry_descent "$descent_pid" ${1+"$@"}
+    ;;
+  claude-permission-mode)
+    case "${2:-}" in
+      ''|*[!0-9]*) [ -z "${2:-}" ] || { echo "error: claude-permission-mode takes a numeric pid" >&2; exit 2; } ;;
+    esac
+    harness_claude_permission_mode "${2:-$$}"
     ;;
   crew) resolve_crew ;;
   secondmate) resolve_secondmate ;;
