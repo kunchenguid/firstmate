@@ -29,6 +29,7 @@ If `FM_HOME` is set, remember that operational state lives under `$FM_HOME` whil
 Before switching or spawning against Orca:
 
 - Confirm Orca is intentionally selected through `--backend orca`, `FM_BACKEND=orca`, or local `config/backend`.
+- Optional local `config/orca-environment` pins a paired Orca environment such as Daystrom Server; see `docs/orca-backend.md`.
 - Confirm the Orca app is running and the backend readiness checks pass before expecting spawn to work.
 - Inspect active `state/*.meta` records before changing backend selection.
 - Treat a backend switch as affecting future spawns only; existing tasks keep their recorded backend.

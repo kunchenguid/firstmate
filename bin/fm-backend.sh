@@ -349,9 +349,18 @@ fm_meta_get() {  # <meta-file> <key>
 # fm_backend_of_meta: the backend recorded in <meta-file>, defaulting to
 # `tmux` when the field is absent - the P1 compatibility contract.
 fm_backend_of_meta() {  # <meta-file>
-  local v
-  v=$(fm_meta_get "$1" backend)
-  printf '%s' "${v:-tmux}"
+  local meta=$1 backend
+  backend=$(fm_meta_get "$meta" backend)
+  [ -n "$backend" ] || backend=tmux
+  # Bind the task's paired Orca environment for every later CLI call in this
+  # process; clear it for non-Orca tasks so a long-lived watcher cannot leak
+  # one task's environment onto another.
+  if [ "$backend" = orca ]; then
+    export FM_ORCA_TASK_ENVIRONMENT="$(fm_meta_get "$meta" orca_environment)"
+  else
+    unset FM_ORCA_TASK_ENVIRONMENT 2>/dev/null || true
+  fi
+  printf '%s' "$backend"
 }
 
 fm_backend_target_of_meta() {  # <meta-file>

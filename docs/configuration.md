@@ -177,6 +177,15 @@ The caller-facing label remains `fm-<id>`, but the actual cmux workspace title i
 Test cleanup must use the guarded path in [`docs/cmux-backend.md`](cmux-backend.md#current-operation-and-safety), never enumerate-and-close every workspace.
 `config/backend` is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
 
+## Orca paired environment (config/orca-environment / FM_ORCA_ENVIRONMENT)
+
+Optional local gitignored `config/orca-environment` pins every new `backend=orca` spawn to one paired Orca environment.
+The file holds a single environment display name or id from `orca environment list` (for example `Daystrom Server`), on one line with no comments.
+`FM_ORCA_ENVIRONMENT` overrides the file for one process.
+Absent means the default local Orca runtime, unchanged from prior behavior.
+The pin is not secondmate-inherited; each home that should target a remote Orca server sets its own file.
+[`docs/orca-backend.md`](orca-backend.md) owns create/readiness mechanics and the `orca_environment=` task metadata field.
+
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 
 The `/afk` sub-supervisor injects escalation digests into firstmate's own pane independently of where new task endpoints are spawned.

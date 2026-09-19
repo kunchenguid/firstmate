@@ -36,14 +36,36 @@ set -u
 LOG="${FM_ORCA_LOG:?}"
 RESP="${FM_ORCA_RESPONSES:?}"
 COUNT_FILE="$RESP/.count"
+# Strip global --environment <value> wherever it appears so sequence fixtures
+# stay stable while still logging the raw argv Firstmate emitted.
+args=("$@")
+norm=()
+i=0
+while [ "$i" -lt "${#args[@]}" ]; do
+  if [ "${args[$i]}" = --environment ]; then
+    i=$((i + 2))
+    continue
+  fi
+  norm+=("${args[$i]}")
+  i=$((i + 1))
+done
+set -- "${norm[@]}"
 next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
 {
   printf 'orca'
-  for a in "$@"; do printf '\x1f%s' "$a"; done
+  for a in "${args[@]}"; do printf '\x1f%s' "$a"; done
   printf '\n'
 } >> "$LOG"
 if [ "${1:-}" = status ] && [ "${FM_ORCA_STATUS_RESPONSE:-ready}" != sequence ]; then
   printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n'
+  exit 0
+fi
+if [ "${1:-}" = environment ] && [ "${2:-}" = list ]; then
+  if [ -f "$RESP/environment-list.out" ]; then
+    cat "$RESP/environment-list.out"
+    exit 0
+  fi
+  printf '{"ok":true,"result":{"environments":[{"id":"env-daystrom-id","name":"Daystrom Server"}]}}\n'
   exit 0
 fi
 n=$next
@@ -1344,6 +1366,83 @@ test_dispatcher_sources_orca_and_routes_primitives() {
   pass "fm-backend dispatcher: accepts orca and routes capture through bin/backends/orca.sh"
 }
 
+test_project_id_from_github_origin() {
+  local proj out
+  proj="$TMP_ROOT/project-id-github"
+  fm_git_init_commit "$proj"
+  git -C "$proj" remote add origin git@github.com:settlemint/dalp.git
+  out=$( bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_project_id_from_path "$1"' "$ROOT" "$proj" )
+  [ "$out" = github:settlemint/dalp ] || fail "expected github:settlemint/dalp, got '$out'"
+  pass "fm_backend_orca_project_id_from_path: derives github:owner/repo from origin"
+}
+
+test_worktree_create_uses_paired_environment() {
+  local out wt_id wt_path proj
+  proj="$TMP_ROOT/env-project"
+  fm_git_init_commit "$proj"
+  git -C "$proj" remote add origin https://github.com/settlemint/dalp.git
+  orca_case paired-env-create
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-env::/home/roderik/orca/wt-env","path":"/home/roderik/orca/wt-env"},"terminal":{"handle":"term-env"}}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ORCA_ENVIRONMENT="Daystrom Server" FM_BACKEND_CONFIG_DIR="$CASE_DIR/config" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_worktree_create "$1" fm-task' "$ROOT" "$proj" )
+  wt_id=${out%%$'\t'*}
+  wt_path=${out#*$'\t'}
+  term=${wt_path#*$'\t'}
+  wt_path=${wt_path%%$'\t'*}
+  [ "$wt_id" = 'wt-env::/home/roderik/orca/wt-env' ] || fail "unexpected worktree id '$wt_id'"
+  [ "$wt_path" = /home/roderik/orca/wt-env ] || fail "unexpected path '$wt_path'"
+  [ "$term" = term-env ] || fail "unexpected terminal '$term'"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''environment'$'\x1f''list'$'\x1f''--json' \
+    "paired create should resolve the environment id via environment list"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''--environment'$'\x1f''Daystrom Server'$'\x1f''worktree'$'\x1f''create'$'\x1f''--project'$'\x1f''github:settlemint/dalp'$'\x1f''--host'$'\x1f''runtime:env-daystrom-id'$'\x1f''--name'$'\x1f''fm-task'$'\x1f''--no-parent'$'\x1f''--setup'$'\x1f''skip'$'\x1f''--json' \
+    "paired create should use --project and --host runtime:<id>"
+  assert_no_grep $'repo\x1f''add' "$LOG" "paired create must not register the local Mac path on the remote host"
+  pass "fm_backend_orca_worktree_create: paired environment uses project+host runtime create"
+}
+
+test_runtime_check_targets_configured_environment() {
+  local status
+  orca_case runtime-env
+  PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ORCA_ENVIRONMENT="Daystrom Server" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_runtime_check' "$ROOT"
+  status=$?
+  [ "$status" -eq 0 ] || fail "runtime check should succeed for a ready paired environment"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''--environment'$'\x1f''Daystrom Server'$'\x1f''status'$'\x1f''--json' \
+    "runtime check should pass --environment into status"
+  pass "fm_backend_orca_runtime_check: targets configured environment"
+}
+
+test_spawn_records_orca_environment_metadata() {
+  local proj wt data state config id out
+  id="orcaenvz1"
+  proj="$TMP_ROOT/spawn-env-project"
+  wt="$TMP_ROOT/spawn-env-wt"
+  data="$TMP_ROOT/spawn-env-data"
+  state="$TMP_ROOT/spawn-env-state"
+  config="$TMP_ROOT/spawn-env-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  git -C "$proj" remote add origin git@github.com:settlemint/dalp.git 2>/dev/null || \
+    git -C "$proj" remote set-url origin git@github.com:settlemint/dalp.git
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'Daystrom Server\n' > "$config/orca-environment"
+  write_spawn_brief "$data" "$id"
+  touch "$state/.last-watcher-beat"
+  orca_case spawn-env
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-spawn-env::%s","path":"%s"},"terminal":{"handle":"term-spawn-env"}}}\n' "$wt" "$wt" > "$RESP/1.out"
+  out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off --backend orca 2>&1 )
+  assert_grep "backend=orca" "$state/$id.meta" "spawn meta missing backend"
+  assert_grep "orca_environment=Daystrom Server" "$state/$id.meta" "spawn meta missing orca_environment"
+  assert_grep "terminal=term-spawn-env" "$state/$id.meta" "spawn meta missing terminal"
+  assert_contains "$(cat "$LOG")" $'--project'$'\x1f''github:settlemint/dalp' \
+    "spawn with config/orca-environment should create via project id"
+  pass "fm-spawn.sh --backend orca: records orca_environment from config/orca-environment"
+}
+
 test_capture_reads_terminal_tail_json
 test_capture_falls_back_to_text_fields
 test_capture_fails_on_orca_error_json
@@ -1396,3 +1495,8 @@ test_teardown_refuses_orca_worktree_without_terminal_handle
 test_secondmate_force_teardown_removes_orca_child_via_orca
 test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch
 test_secondmate_force_teardown_refuses_partial_orca_child
+test_project_id_from_github_origin
+test_worktree_create_uses_paired_environment
+test_runtime_check_targets_configured_environment
+test_spawn_records_orca_environment_metadata
+
