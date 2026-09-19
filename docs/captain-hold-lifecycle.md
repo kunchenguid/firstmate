@@ -68,7 +68,8 @@ A repeated hold leaves the standing declaration untouched.
 A decision-only hold has no lane and nothing classifies a lane-less log, so it stays in the backlog alone rather than creating a status log that no teardown would retire.
 Every settlement path - close, release, repair, or an evidence-backed reconcile close - retracts the declaration itself with the matching keyed `resolved` line, so a stopped worker can never leave the lane reading as an answer still owed.
 The keyed pair closes only the hold lifecycle's own key, so a worker's unrelated open status decisions survive both sides, and both mirror lines go through the guarded self-announced append, so the turn recording them does not re-wake its own home.
-The watcher and away-mode daemon read the mirror as the lane's last line, while readers of the worker's own state - `fm-crew-state.sh` and the terminal-outcome ledger in `bin/fm-inactive-reconcile.sh` - read past both mirror lines through `last_worker_status_line` in `bin/fm-classify-lib.sh`, so a hold never changes a lane's reported state or re-reports an outcome it already delivered.
+While the hold stands, the watcher and away-mode daemon read the declaration as the lane's last line; once the pair settles, `last_status_line` in `bin/fm-classify-lib.sh` itself reads past the mirror's own retraction to the worker's last event, so a settled lane is done, paused, or failed again to every raw reader instead of looking like a quiet worker.
+Readers of the worker's own state at any time - `fm-crew-state.sh` and the terminal-outcome ledger in `bin/fm-inactive-reconcile.sh` - read past both mirror lines through `last_worker_status_line`, so a hold never changes a lane's reported state or re-reports an outcome it already delivered.
 
 ### Answering a call (`answer`)
 
