@@ -2646,7 +2646,7 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
       if [ "$KIND" = ship ]; then
         printf '\n' &&
           fm_ship_pr_readiness_block "$MODE" "$YOLO"
-      fi
+      fi &&
       if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
         printf '\n' &&
           fm_brief_intent_overlay "$CAPTAIN_INTENT"

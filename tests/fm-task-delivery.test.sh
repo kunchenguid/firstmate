@@ -256,6 +256,38 @@ EOF
   pass "fm-spawn: only yolo-on renders authoritative pull-request readiness"
 }
 
+test_spawn_refuses_a_partial_launch_brief() {
+  local rec home proj fakebin id out status leftover
+  rec=$(make_home render-failure)
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+  id=delivery-render-failure
+  write_brief "$home" "$id" direct-PR
+  cat > "$fakebin/cat" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  */brief.md)
+    printf 'partial launch brief\n'
+    exit 1
+    ;;
+esac
+exec /bin/cat "$@"
+EOF
+  chmod +x "$fakebin/cat"
+
+  out=$(run_spawn "$home" "$fakebin" "$id" "$proj" claude --mode direct-PR --yolo on)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a source brief read failure should exit non-zero"
+  assert_contains "$out" "could not render current launch contract" \
+    "source brief read failure did not refuse the launch"
+  assert_absent "$home/data/$id/launch-brief.md" \
+    "source brief read failure published a partial launch brief"
+  leftover=$(find "$home/data/$id" -maxdepth 1 -name '.launch-brief.md.*' -print 2>/dev/null || true)
+  [ -z "$leftover" ] || fail "source brief read failure left a staging file: $leftover"
+  pass "fm-spawn: a render failure cannot publish a partial launch brief"
+}
+
 # Promotion is where a scout's ship contract is finally decided, so it requires the
 # same explicit values and writes them into the task's durable record.
 test_promote_requires_and_records_the_delivery_contract() {
@@ -937,6 +969,7 @@ test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_spawn_renders_yolo_pull_request_readiness_contract
+test_spawn_refuses_a_partial_launch_brief
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
 test_project_mode_maps_the_conditional_policy
