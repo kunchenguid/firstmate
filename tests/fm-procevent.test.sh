@@ -1062,12 +1062,76 @@ orphan_pid=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/orphan-src.claim" 2>/dev/null
 if [ -z "$orphan_pid" ] || ! kill -0 "$orphan_pid" 2>/dev/null; then
   fail "orphan fixture runner did not start"
 fi
+# The claim is published before the runner's launch-floor check re-reads its
+# registration; a runner that finds the registration gone there retires itself
+# and releases the claim, leaving reconcile nothing to stop. Wait for the
+# last-launch stamp the runner writes after that check, so the removal below is
+# always observed by a runner that has committed to serving, and reconcile is
+# the one that stops it.
+orphan_committed=0
+for _ in $(seq 1 100); do
+  for stamp in "$HZ/state/procevent/orphan-src".*.last-launch; do
+    [ -e "$stamp" ] && orphan_committed=1
+  done
+  [ "$orphan_committed" -eq 1 ] && break
+  sleep 0.1
+done
+[ "$orphan_committed" -eq 1 ] || fail "orphan fixture runner never passed its launch floor"
 rm -f "$HZ/state/procevent/orphan-src.source"
 out=$(pe "$HZ" reconcile)
 assert_contains "$out" "stopped=1" "reconcile stops a runner whose registration was removed"
 for _ in $(seq 1 40); do kill -0 "$orphan_pid" 2>/dev/null || break; sleep 0.1; done
 kill -0 "$orphan_pid" 2>/dev/null && fail "reconcile left an orphaned runner alive"
 pass "reconcile reaps a runner whose source registration is gone"
+
+# The other ordering, forced: a runner that finds its registration gone at the
+# launch-floor check retires itself and releases its claim, and a later
+# reconcile then has nothing to stop and nothing uncertain.
+TRIG5="$TMP_ROOT/trigger-five"
+HY="$TMP_ROOT/hy"; new_home "$HY"
+pe_register "$HY" lavish self-retired-src -- "$BLOCKER" "$TRIG5" "self-retired" >/dev/null
+self_retired_identity=$(bash -c '. "$1"; fm_pr_file_identity "$2"' _ "$ROOT/bin/fm-pr-lib.sh" \
+  "$HY/state/procevent/self-retired-src.source") || fail "cannot derive the self-retired registration identity"
+SELF_RETIRED_STAMP="$HY/state/procevent/self-retired-src.${self_retired_identity//:/-}.last-launch"
+SELF_RETIRED_READY="$TMP_ROOT/self-retired-floor-ready"
+SELF_RETIRED_RELEASE="$TMP_ROOT/self-retired-floor-release"
+SELF_RETIRED_BIN="$TMP_ROOT/self-retired-bin"
+SELF_RETIRED_PERL=$(command -v perl) || fail "cannot find perl for the launch-floor barrier"
+mkdir -p "$SELF_RETIRED_BIN"
+cat > "$SELF_RETIRED_BIN/perl" <<'SH'
+#!/usr/bin/env bash
+if [ "${4-}" = "$FM_TEST_LAUNCH_FLOOR_STAMP" ]; then
+  printf 'ready\n' > "$FM_TEST_LAUNCH_FLOOR_READY"
+  while [ ! -e "$FM_TEST_LAUNCH_FLOOR_RELEASE" ]; do
+    kill -0 "$FM_TEST_LAUNCH_FLOOR_PARENT" 2>/dev/null || exit 75
+    /bin/sleep 0.02
+  done
+  exit 0
+fi
+exec "$FM_TEST_REAL_PERL" "$@"
+SH
+chmod +x "$SELF_RETIRED_BIN/perl"
+PATH="$SELF_RETIRED_BIN:$PATH" \
+  FM_TEST_REAL_PERL="$SELF_RETIRED_PERL" \
+  FM_TEST_LAUNCH_FLOOR_STAMP="$SELF_RETIRED_STAMP" \
+  FM_TEST_LAUNCH_FLOOR_READY="$SELF_RETIRED_READY" \
+  FM_TEST_LAUNCH_FLOOR_RELEASE="$SELF_RETIRED_RELEASE" \
+  FM_TEST_LAUNCH_FLOOR_PARENT=$$ \
+  FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=3 pe "$HY" reconcile >/dev/null
+wait_for "$SELF_RETIRED_READY" \
+  || fail "self-retired fixture runner never reached its launch floor"
+self_retired_pid=$(sed -n '2p' "$FM_PROCEVENT_CLAIM_ROOT/self-retired-src.claim" 2>/dev/null)
+[ -n "$self_retired_pid" ] || fail "self-retired fixture runner did not record its pid"
+rm -f "$HY/state/procevent/self-retired-src.source"
+: > "$SELF_RETIRED_RELEASE"
+for _ in $(seq 1 100); do kill -0 "$self_retired_pid" 2>/dev/null || break; sleep 0.1; done
+kill -0 "$self_retired_pid" 2>/dev/null \
+  && fail "a runner whose registration vanished during its launch floor did not retire itself"
+assert_absent "$FM_PROCEVENT_CLAIM_ROOT/self-retired-src.claim" "a self-retired runner left its claim behind"
+out=$(FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=3 pe "$HY" reconcile)
+assert_contains "$out" "stopped=0" "reconcile has nothing to stop after a runner retired itself"
+assert_contains "$out" "uncertain=0" "reconcile has nothing uncertain after a runner retired itself"
+pass "a runner whose registration vanishes during its launch floor retires itself and leaves reconcile clean"
 
 # --- a stale claim is reclaimable, a live one is not ------------------------
 CLAIM="$FM_PROCEVENT_CLAIM_ROOT/stale-src.claim"
