@@ -29,10 +29,9 @@
 # becomes `quota-<provider>`.
 #
 # Snapshots may be quota-axi schema 5 or 6 (bin/fm-quota-axi-lib.sh owns the
-# validator and the row join). The aggregate watch reads every row, including
-# each account of an expanded provider, without combining them. A --provider
-# watch binds to that provider's `default` row; an expanded provider with no
-# `default` row has no single account to track and reports error.
+# validator). Both watches read every matching account row independently,
+# without combining quotas. A --provider watch restricts those rows to the
+# requested provider; details preserve each row's accountKey when present.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -119,7 +118,7 @@ quota_json() {
 condition_status() {
   local json=$1 provider=${2:-} threshold=${3:-$DEFAULT_THRESHOLD}
   printf '%s\n' "$json" | fm_quota_json_valid || { printf 'error\n'; return; }
-  printf '%s\n' "$json" | jq -r --arg provider "$provider" --arg threshold "$threshold" "$FM_QUOTA_ROW_JQ"'
+  printf '%s\n' "$json" | jq -r --arg provider "$provider" --arg threshold "$threshold" '
     def classify($availability):
       ($availability | map(select(.status == "known"))) as $known |
       if ($availability | length) == 0 then "error"
@@ -128,19 +127,10 @@ condition_status() {
       elif any($known[]; .effectivePercentRemaining < ($threshold | tonumber)) then "low"
       else "healthy"
       end;
-    if (.providers | type) != "array" then "error"
-    elif $provider == "" then
-      if (.providers | length) == 0 then "healthy"
-      elif ([.providers[]?.quotaSemantics.effectiveAvailability[]?] | length) == 0 then "healthy"
-      else classify([.providers[]?.quotaSemantics.effectiveAvailability[]?])
-      end
-    else
-      quota_row(.; $provider; "") as $p |
-      if ($p // null) == null then "error"
-      elif ($p.quotaSemantics.effectiveAvailability | length) == 0 and
-           ($p.quotaSemantics.status == "unknown" or $p.quotaSemantics.status == "partial") then "healthy"
-      else classify($p.quotaSemantics.effectiveAvailability // [])
-      end
+    .providers |= map(select($provider == "" or .provider == $provider)) |
+    if (.providers | length) == 0 and $provider != "" then "error"
+    elif ([.providers[]?.quotaSemantics.effectiveAvailability[]?] | length) == 0 then "healthy"
+    else classify([.providers[]?.quotaSemantics.effectiveAvailability[]?])
     end
   ' 2>/dev/null || printf 'error\n'
 }
@@ -149,7 +139,7 @@ condition_status() {
 # Print a one-line summary of the quota state for the result document.
 details() {
   local json=$1 provider=${2:-}
-  printf '%s\n' "$json" | jq -c --arg provider "$provider" "$FM_QUOTA_ROW_JQ"'
+  printf '%s\n' "$json" | jq -c --arg provider "$provider" '
     def best_detail($availability):
       ($availability | map(select(.status == "known"))) as $known |
       ($availability | map(select((.runway.status // "") == "exhausted_now"))) as $exhausted |
@@ -157,22 +147,18 @@ details() {
       elif ($known | length) > 0 then ($known | min_by(.effectivePercentRemaining))
       else null
       end;
-    if $provider == "" then
+    [.providers[]? | select($provider == "" or .provider == $provider) |
+      {provider}
+      + (if has("accountKey") then {accountKey} else {} end)
+      + {best: best_detail(.quotaSemantics.effectiveAvailability // [])}
+    ] as $summary |
+    if $provider == "" or ($summary | length) > 1 then
       {
-        provider: "aggregate",
-        summary: [
-          (.providers[]? |
-            { provider: .provider }
-            + (if has("accountKey") then {accountKey} else {} end)
-            + { best: best_detail(.quotaSemantics.effectiveAvailability // []) }
-          )
-        ]
+        provider: (if $provider == "" then "aggregate" else $provider end),
+        summary: $summary
       }
     else
-      quota_row(.; $provider; "") as $p |
-      { provider: $provider }
-      + (if ($p | has("accountKey")) then {accountKey: $p.accountKey} else {} end)
-      + { best: best_detail($p.quotaSemantics.effectiveAvailability // []) }
+      $summary[0] // {provider: $provider, best: null}
     end
   ' 2>/dev/null
 }
