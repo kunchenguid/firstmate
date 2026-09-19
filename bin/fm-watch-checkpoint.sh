@@ -44,6 +44,11 @@ case "$SECONDS_ARG" in
   0) echo "error: --seconds must be greater than zero" >&2; exit 2 ;;
 esac
 
+# A checkpoint is neither an ordinary watcher start nor an Option B handling
+# successor. It keeps an announced recovery episode stable while preserving the
+# watcher's ordinary recovery of a generation that becomes pending.
+export FM_WATCH_FOREGROUND_CHECKPOINT=1
+
 OUT=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.out.XXXXXX") || exit 1
 ERR=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.err.XXXXXX") || {
   rm -f "$OUT"
