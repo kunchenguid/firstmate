@@ -121,12 +121,7 @@
 #      log's latest event. The same holds for any open decision when the run
 #      record itself is UNVERIFIED (its daemon answered down): the crew saw its
 #      gate or blocker first hand, so needs-decision stays parked and blocked
-#      stays blocked, with the unverified record named as the reason. A COARSE
-#      live row over an open DECISION is only half of that: the ledger keeps a
-#      parked run's word at `running`, so it can establish neither that the
-#      decision resolved nor that the gate is still open. It therefore records
-#      the ambiguity in the DETAIL and leaves the state working - a crew that is
-#      genuinely validating must not read as awaiting a human.
+#      stays blocked, with the unverified record named as the reason.
 #      Other daemon, timeout, or unreachability
 #      claims are superseded BECAUSE THE RUN IS ALIVE when the run is
 #      running/fixing with recent reported activity: a killed or timed-out drive
@@ -729,9 +724,10 @@ nm_ci_checks_state() {
 # validate the same underlying repo concurrently - a worktree with its own
 # active run reliably gets that run answered, even under concurrent load), or
 # it names this branch's run but the strict head rule rejected it - a run that
-# is parked or terminal, since an executing same-branch run binds before this
-# fallback is reached. The ledger resolves every answer STRICTLY: it never
-# accepts a row on branch name alone. The real
+# is parked, terminal, or executing with the daemon answered down, since an
+# executing run whose daemon still answers binds before this fallback is
+# reached. The ledger resolves every answer STRICTLY: it never accepts a row on
+# branch name alone, so a head-tied row can re-bind such a record as working. The real
 # run-listing command is the top-level `no-mistakes runs` (the `axi` surface
 # has no runs-listing subcommand; tests/fm-crew-state.test.sh owns the
 # 2026-07-02 dead-code incident history this fallback replaced).
@@ -880,6 +876,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
           # own current run once the ledger proves the pipeline-owned
           # continuation, so its axi TOON is the authoritative run detail
           # (RUN_SOURCE stays full); only a foreign-branch answer leaves
+          # coarse status-word detail.
           [ "$run_branch" = "$CREW_BRANCH" ] || RUN_SOURCE=coarse
         fi
       fi
@@ -917,13 +914,6 @@ if [ "$HAVE_RUN" = 1 ]; then
         if nm_daemon_probe_down; then
           RUN_STATE=unknown
           RUN_DETAIL="no-mistakes daemon unreachable; last ledger record failed - unverified"
-          # Only an ANSWERED down hands the verdict to the status-log tip. The
-          # probe above is fail-closed and counts a timeout as down, which is
-          # safe for degrading this record to unknown but would assert an open
-          # gate on probe latency alone.
-          if nm_daemon_answered_down; then
-            RUN_DEAD_DAEMON=$RUN_DETAIL
-          fi
         else
           RUN_STATE=failed; RUN_DETAIL="run failed"
         fi ;;

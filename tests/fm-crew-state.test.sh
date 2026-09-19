@@ -3741,7 +3741,6 @@ EOF
   assert_contains "$out" "state: working" "an ordinary blocker over a live coarse row keeps working"
   assert_contains "$out" "superseded by active run" "the generic superseded reading is kept"
   assert_not_contains "$out" "state: blocked" "a validating crew must not read blocked"
-  assert_not_contains "$out" "cannot tell working from parked" "the gate-ambiguity reason is not for a blocker"
   pass "an ordinary blocked tip over a coarse live row keeps the superseded reading"
 }
 
@@ -3956,59 +3955,7 @@ EOF
   pass "an unanswered probe never turns a failed coarse record into a gate"
 }
 
-# The same shape with the daemon ANSWERING down does hand the verdict to the
-# open decision - that is what an answered-down record licenses.
-test_answered_down_failed_coarse_record_leaves_the_decision_open() {
-  reset_fakes
-  local d local_short out; d=$(new_case coarse-failed-answered-down)
-  make_repo_on_branch "$d/wt" fm/feat-cfad
-  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-cfad.meta" "window=fm:fm-feat-cfad" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'needs-decision: approve the schema change\n' > "$d/state/feat-cfad.status"
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other-crew aaaaaaa  2026-08-23 14:00
-  failed     fm/feat-cfad ${local_short}  2026-08-23 13:53
-EOF
-)"
-  FM_FAKE_DAEMON_DOWN=1
-  FM_FAKE_BUSY=0
-  arm_idle_record "$d/state" feat-cfad
-  out=$(run_crew_state "$d" feat-cfad)
-  assert_contains "$out" "state: parked" "an answered-down record leaves the open decision open"
-  assert_contains "$out" "daemon unreachable" "the dead instrument is named as the reason"
-  pass "an answered-down failed coarse record leaves the decision open"
-}
 
-# One question, one bounded subprocess. This path asks the daemon twice - once to
-# degrade the terminal record, once to decide whether the verdict may be handed
-# to the status-log tip - and on a wedged daemon each call burns the full
-# timeout inside the supervisor's per-crew polling loop.
-test_coarse_failed_path_probes_the_daemon_once() {
-  reset_fakes
-  local d local_short out probes; d=$(new_case coarse-failed-probe-count)
-  make_repo_on_branch "$d/wt" fm/feat-cfpc
-  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-cfpc.meta" "window=fm:fm-feat-cfpc" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'needs-decision: approve the schema change\n' > "$d/state/feat-cfpc.status"
-  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
-  FM_FAKE_RUNS_LIST="$(cat <<EOF
-  running    fm/other-crew aaaaaaa  2026-08-23 14:00
-  failed     fm/feat-cfpc ${local_short}  2026-08-23 13:53
-EOF
-)"
-  FM_FAKE_DAEMON_DOWN=1
-  FM_FAKE_DAEMON_PROBE_LOG="$d/probes.log"
-  FM_FAKE_BUSY=0
-  arm_idle_record "$d/state" feat-cfpc
-  out=$(run_crew_state "$d" feat-cfpc)
-  probes=$(wc -l < "$d/probes.log" | tr -d ' ')
-  assert_contains "$out" "state: parked" "the verdict is unchanged by the probe count"
-  assert_equals "1" "$probes" "one bounded daemon probe answers both readers"
-  pass "the coarse failed path probes the daemon once"
-}
 
 # The selected route already appends `run: <id>` to every ordinary verdict, so
 # the dead-daemon detail must not carry its own copy.
@@ -4189,10 +4136,12 @@ EOF
   pass "the selected-run anchored continuation binds while the daemon answers"
 }
 
-# The same rule for the coarse TERMINAL record: once the daemon probe has
-# downgraded it to unverified, it cannot turn around and declare the crew's open
-# decision superseded.
-test_unverified_coarse_failed_record_makes_no_supersede_claim() {
+# A coarse TERMINAL record whose daemon is down is degraded to unknown, and that
+# is where it stops: the ledger row is head-tied, so its identity is PROVEN and
+# it records a run that reached a terminal failure at this worktree's own head.
+# A daemon dying afterwards does not unmake that outcome, so the reading must
+# not become a claim that a human decision is pending.
+test_coarse_failed_record_with_dead_daemon_reads_unknown() {
   reset_fakes
   local d local_short out; d=$(new_case coarse-failed-supersede)
   make_repo_on_branch "$d/wt" fm/feat-cfs
@@ -4210,11 +4159,10 @@ EOF
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-cfs
   out=$(run_crew_state "$d" feat-cfs)
-  assert_contains "$out" "state: parked" "the open decision is not hidden by an unverified terminal record"
-  assert_contains "$out" "approve the schema change" "the crew's own decision note reaches the supervisor"
-  assert_contains "$out" "unverified" "the unverified record is named as the reason"
-  assert_not_contains "$out" "superseded" "an unverified terminal record makes no supersede claim"
-  pass "an unverified coarse failed record leaves the open decision open"
+  assert_contains "$out" "state: unknown" "a dead daemon degrades the terminal record to unknown"
+  assert_contains "$out" "unverified" "the unverified record is named"
+  assert_not_contains "$out" "state: parked" "a recorded terminal failure is never relabelled an open decision"
+  pass "a coarse failed record with a dead daemon reads unknown"
 }
 
 # A probe that does not ANSWER proves nothing about the daemon, so it must not
@@ -4244,11 +4192,10 @@ branch_sync:
   pass "an unanswered daemon probe leaves a live rebased run bound"
 }
 
-# The coarse live row is evidence from the same instrument as the coarse failed
-# row, so an answered-down daemon must unverify it the same way - and say so.
-# The row sits at this worktree's own head, so identity is proven and only
-# liveness is in question.
-test_coarse_live_row_with_daemon_down_is_unverified() {
+# The coarse ledger row sits at this worktree's own head, so the head rule has
+# already proven its identity and exempts it from the dead-instrument verdict:
+# a dead daemon does not change what a head-tied row says about this crew.
+test_coarse_live_row_is_exempt_from_the_dead_daemon_verdict() {
   reset_fakes
   local d local_short out; d=$(new_case coarse-live-daemon-down)
   make_repo_on_branch "$d/wt" fm/feat-cldd
@@ -4272,11 +4219,10 @@ EOF
   pass "a head-tied coarse live row is exempt from the dead-daemon verdict"
 }
 
-# A coarse ledger row keeps a PARKED run's status word at `running`
-# (tests/captures/no-mistakes-v1.70.1/parked.toon), so it is equally consistent
-# with the gate still being open and must never claim the crew's own
-# needs-decision event was superseded.
-test_coarse_live_row_does_not_claim_gate_superseded() {
+# The coarse route carries no special reading for an open decision: a live row
+# over a needs-decision tip keeps the pre-existing supersede note, and the crew
+# reads working rather than awaiting a human.
+test_coarse_live_row_keeps_the_original_supersede_note() {
   reset_fakes
   local d local_short out; d=$(new_case coarse-gate-signal)
   make_repo_on_branch "$d/wt" fm/feat-cg
@@ -4673,22 +4619,20 @@ test_selected_run_diverged_head_does_not_bind_an_unproven_record
 test_live_record_at_diverged_head_binds_while_daemon_answers
 test_anchored_continuation_binds_while_daemon_answers
 test_unverified_coarse_record_makes_no_supersede_claim
-test_unverified_coarse_failed_record_makes_no_supersede_claim
+test_coarse_failed_record_with_dead_daemon_reads_unknown
 test_selected_run_anchored_continuation_needs_a_live_daemon
 test_selected_run_anchored_continuation_binds_while_daemon_answers
 test_selected_run_anchored_parked_keeps_its_gate_with_a_dead_daemon
 test_selected_run_dead_daemon_leaves_the_open_decision_open
 test_coarse_pending_ledger_word_reads_unknown
 test_unanswered_probe_does_not_turn_a_failed_coarse_record_into_a_gate
-test_answered_down_failed_coarse_record_leaves_the_decision_open
-test_coarse_failed_path_probes_the_daemon_once
 test_selected_route_dead_daemon_names_the_run_once
 test_head_tied_row_reads_the_same_whichever_run_axi_names
 test_coarse_head_tied_row_is_exempt_even_when_the_record_head_diverged
 test_unrecognised_ledger_word_keeps_the_ordinary_supersede_note
 test_unanswered_daemon_probe_does_not_suppress_live_run
-test_coarse_live_row_with_daemon_down_is_unverified
-test_coarse_live_row_does_not_claim_gate_superseded
+test_coarse_live_row_is_exempt_from_the_dead_daemon_verdict
+test_coarse_live_row_keeps_the_original_supersede_note
 test_coarse_live_rebased_row_is_not_attributed
 test_terminal_rebased_run_is_not_attributed
 test_competing_live_runs_report_unknown_with_both_ids
