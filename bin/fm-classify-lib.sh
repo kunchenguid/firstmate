@@ -152,6 +152,36 @@ last_status_line() {  # <status-file> [<previous-event-var>]
   printf '%s\n' "${scan##*$'\n'}"
 }
 
+# The declared-wait read: which declared wait, if any, is still in force.
+# This is the ONE owner of that reading contract; every site that decides
+# whether a `paused:` or `captain-held:` wait still stands reads it here.
+# A note: is a first-class status event (last_status_line returns it, it wakes
+# the supervisor as a status write, and it is presented as unread status), but
+# it is informational: it neither leaves a declared wait nor declares a new one.
+# So when the latest event is a note: and the latest event that is NOT a note:
+# declares a wait, that declaration is printed, verb and reason exactly as
+# written, and it keeps its identity, re-surface cadence and age; in every other
+# case the latest event is printed, identical to last_status_line.
+# Consequences: a note: under a live wait keeps the wait; any other event
+# (working:, resolved:, done:, a changed declaration) ends or replaces it as
+# before, and a note: written after the worker left the wait reads as that
+# note, exactly as today. Only note: is looked through; widening this to another
+# verb is a change to this contract, not to its callers.
+status_wait_line() {  # <status-file>
+  local f=$1 latest wait
+  latest=$(last_status_line "$f")
+  [ "$(status_line_verb "$latest")" = note ] || { printf '%s\n' "$latest"; return 0; }
+  if ! wait=$(tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null | _fm_status_event_scan skip-notes); then
+    wait=$(_fm_status_event_scan skip-notes < "$f") || wait=''
+  fi
+  wait=${wait##*$'\n'}
+  if status_is_paused_or_captain_held "$wait"; then
+    printf '%s\n' "$wait"
+  else
+    printf '%s\n' "$latest"
+  fi
+}
+
 # Print "<previous event>\n<latest event>" for the status lines on stdin, and
 # return 1 when the stream holds no recognized event at all, so a caller reading
 # a bounded window knows to widen it. A stream without events keeps its last
@@ -159,14 +189,16 @@ last_status_line() {  # <status-file> [<previous-event-var>]
 # Keep decision-closing events: skipping a resolved line would revive its opener.
 # A bare legacy free-text line counts as an event only when a captain token leads
 # it, so continuation prose that merely mentions one cannot hide a declaration.
-_fm_status_event_scan() {
-  local line last='' prev='' fallback='' verb legacy_re
+# With `skip-notes`, note: events are passed over, for status_wait_line.
+_fm_status_event_scan() {  # [skip-notes]
+  local line last='' prev='' fallback='' verb legacy_re skip_notes=${1-}
   legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in *[![:space:]]*) fallback=$line ;; *) continue ;; esac
     case "$line" in *:*) status_line_verb "$line" verb ;; *) verb='' ;; esac
     case "$verb" in
-      working|needs-decision|blocked|done|failed|note|\
+      note) [ -n "$skip_notes" ] || { prev=$last; last=$line; } ;;
+      working|needs-decision|blocked|done|failed|\
       "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}"|\
       "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}"|\
       "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}") prev=$last; last=$line ;;
@@ -606,8 +638,9 @@ status_open_decisions() {  # <status-file> [<kind>]
 
 # Resolve the log's current declaration at one boundary for crew-state consumers.
 # Any decision the fold still holds open wins over unrelated events, and the
-# fold's most recently opened record supplies it; the latest recognized event
-# stands when nothing is open.
+# fold's most recently opened record supplies it; when nothing is open the
+# latest recognized event stands, read through status_wait_line so a note: under
+# a declared wait leaves that wait current.
 # Actual run/pane evidence is still reconciled by fm-crew-state.sh.
 status_current_line() {  # <status-file> <kind>
   local open key verb note current=''
@@ -617,7 +650,7 @@ status_current_line() {  # <status-file> <kind>
   done <<EOF
 $open
 EOF
-  [ -n "$current" ] || current=$(last_status_line "$1")
+  [ -n "$current" ] || current=$(status_wait_line "$1")
   printf '%s\n' "$current"
 }
 
@@ -2101,8 +2134,11 @@ signal_crew_provably_working() {  # <file> ...
 # captain-relevant; 1 otherwise, including the no-status case. A 1 only means
 # "non-terminal"; the always-on watcher then applies crew_is_provably_working,
 # while the away-mode daemon applies its persistence recheck.
+# Read through status_wait_line, because this verdict gates the declared-wait
+# branch: a note: under a live wait that mentions a legacy token such as
+# `merged` must not take the terminal path the wait would otherwise hold.
 stale_is_terminal() {  # <window> <state>
   local win=$1 state=$2 last
-  last=$(last_status_line "$state/$(window_to_task "$win" "$state").status")
+  last=$(status_wait_line "$state/$(window_to_task "$win" "$state").status")
   [ -n "$last" ] && status_is_captain_relevant "$last"
 }
