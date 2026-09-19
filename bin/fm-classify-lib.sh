@@ -1576,8 +1576,6 @@ status_open_decisions_cursor_offset() {  # <status-file>
 # print nothing.
 status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
   local f=$1 captured_end=${2:-} cf offset size actual_size chunk_file line rc=0
-  local pos line_start owned_ranges
-  local LC_ALL=C
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   cf=$(_fm_open_decisions_cursor_path "$f")
   chunk_file="$cf.unread.$$"
@@ -1596,16 +1594,9 @@ status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
   [ "$offset" -lt "$size" ] || return 0
   _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
     || { rm -f "$chunk_file"; return 1; }
-  owned_ranges=$(status_home_appends_ranges "$f")
-  pos=$offset
   while IFS= read -r line || [ -n "$line" ]; do
-    line_start=$pos
-    pos=$((pos + ${#line} + 1))
     case "$line" in
-      *[![:space:]]*)
-        _fm_offset_in_home_append_ranges "$owned_ranges" "$line_start" && continue
-        printf '%s\n' "$line" || { rc=1; break; }
-        ;;
+      *[![:space:]]*) printf '%s\n' "$line" || { rc=1; break; } ;;
     esac
   done < "$chunk_file"
   rm -f "$chunk_file"
@@ -1843,12 +1834,21 @@ EOF
 }
 
 status_home_appends_record() {  # <status-file> <start> <end>
-  local f=$1 start=$2 end=$3 path ident tmp merged
-  local LC_ALL=C
+  local f=$1 start=$2 end=$3 path lock rc=0
   case "$start:$end" in *[!0-9:]*) return 1 ;; esac
   [ "$end" -gt "$start" ] || return 1
-  ident=$(_fm_open_decisions_file_ident "$f") || return 1
   path=$(status_home_appends_path "$f")
+  lock="$path.lock"
+  fm_lock_acquire_wait "$lock" || return 1
+  _fm_status_home_appends_merge_locked "$f" "$path" "$start" "$end" || rc=1
+  fm_lock_release "$lock" || rc=1
+  return "$rc"
+}
+
+_fm_status_home_appends_merge_locked() {  # <status-file> <ledger-path> <start> <end>
+  local f=$1 path=$2 start=$3 end=$4 ident tmp merged
+  local LC_ALL=C
+  ident=$(_fm_open_decisions_file_ident "$f") || return 1
   merged=$(printf '%s\n%s\t%s\n' "$(status_home_appends_ranges "$f")" "$start" "$end" | awk '
     NF == 2 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $2+0 > $1+0 {
       n++
@@ -2021,7 +2021,7 @@ status_span_first_actionable_record() {  # <status-file> <start-offset> [record-
     pos=$((pos + ${#line} + 1))
     line_number=$((line_number + 1))
     case "$line" in *[![:space:]]*) ;; *) continue ;; esac
-    _fm_offset_in_home_append_ranges "$owned_ranges" "$line_start" && continue
+    [ -z "$owned_ranges" ] || ! _fm_offset_in_home_append_ranges "$owned_ranges" "$line_start" || continue
     if status_is_captain_held "$line"; then
       # A transfer closes the status-log decision and remains non-actionable to
       # stale classification. The side-band marker lets signal routing surface
