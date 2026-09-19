@@ -111,6 +111,9 @@
 # Human views must render this output instead of parsing state files again.
 set -u
 
+# Large jq documents are staged here and read with --slurpfile. Linux limits
+# one argv string to 128 KiB (MAX_ARG_STRLEN), so --argjson cannot carry a
+# whole backlog.
 JSON_TRANSPORT_DIR=
 cleanup_json_files() {
   [ -n "$JSON_TRANSPORT_DIR" ] || return 0
@@ -233,7 +236,9 @@ JSON is the stable machine-readable output contract. The default snapshot
 refreshes only its parent-side remote-summary cache as an observational side effect.
 
 --contribution-input emits the canonical local backlog/tasks ownership pair only,
-without worker observations or cross-home collection.
+without worker observations or cross-home collection. Documents are staged
+through the same temporary transport as other snapshot modes so backlog size
+cannot overflow argv.
 
 --secondmate-home-summary emits the bounded structured summary used after a
 validated registered-home handoff. It is local-only, skips nested secondmate
@@ -1972,15 +1977,6 @@ contribution_tasks_json() {
   done | jq -s .
 }
 
-if [ "$OUTPUT_MODE" = contribution-input ]; then
-  # Reuse the canonical backlog parser, without observing workers or other homes.
-  contribution_tasks=$(contribution_tasks_json) || { echo "fm-fleet-snapshot: contribution task read failed" >&2; exit 1; }
-  jq -n --argjson backlog "$BACKLOG_JSON" --argjson tasks "$contribution_tasks" '{backlog:$backlog,tasks:$tasks}'
-  exit 0
-fi
-prefetch_task_current_states || { echo "fm-fleet-snapshot: task observation failed" >&2; exit 1; }
-TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
-
 JSON_TRANSPORT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-snapshot.XXXXXX") \
   || { echo "fm-fleet-snapshot: temporary transport directory creation failed" >&2; exit 1; }
 BACKLOG_JSON_FILE="$JSON_TRANSPORT_DIR/backlog.json"
@@ -1991,6 +1987,20 @@ SECONDMATE_CURRENT_JSON_FILE="$JSON_TRANSPORT_DIR/secondmate-current.json"
 SECONDMATE_LANDED_JSON_FILE="$JSON_TRANSPORT_DIR/secondmate-landed.json"
 printf '%s\n' "$BACKLOG_JSON" > "$BACKLOG_JSON_FILE" \
   || { echo "fm-fleet-snapshot: temporary backlog file write failed" >&2; exit 1; }
+
+if [ "$OUTPUT_MODE" = contribution-input ]; then
+  # Reuse the canonical backlog parser, without observing workers or other homes.
+  contribution_tasks=$(contribution_tasks_json) || { echo "fm-fleet-snapshot: contribution task read failed" >&2; exit 1; }
+  printf '%s\n' "$contribution_tasks" > "$JSON_TRANSPORT_DIR/contribution-tasks.json" \
+    || { echo "fm-fleet-snapshot: contribution task staging failed" >&2; exit 1; }
+  jq -n --slurpfile backlog "$BACKLOG_JSON_FILE" --slurpfile tasks "$JSON_TRANSPORT_DIR/contribution-tasks.json" \
+    '{backlog:$backlog[0],tasks:$tasks[0]}' \
+    || { echo "fm-fleet-snapshot: contribution input assembly failed" >&2; exit 1; }
+  exit 0
+fi
+prefetch_task_current_states || { echo "fm-fleet-snapshot: task observation failed" >&2; exit 1; }
+TASKS_JSON=$(task_json_lines) || { echo "fm-fleet-snapshot: task snapshot failed" >&2; exit 1; }
+
 printf '%s\n' "$TASKS_JSON" > "$TASKS_JSON_FILE" \
   || { echo "fm-fleet-snapshot: temporary task file write failed" >&2; exit 1; }
 
