@@ -725,7 +725,10 @@ main() {
   # backlog reader. `guard` returned above without sourcing fm-wake-lib.sh,
   # whose initialization creates the state directory, so the advertised
   # read-only guard is literal.
-  # shellcheck source=bin/fm-wake-lib.sh
+  # fm-wake-lib.sh is a canonical lint root in its own right; this in-function
+  # load stays an analysis boundary (source-graph budget:
+  # .agents/skills/firstmate-coding-guidelines/SKILL.md).
+  # shellcheck source=/dev/null
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   # shellcheck source=bin/fm-tasks-axi-lib.sh
   . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
