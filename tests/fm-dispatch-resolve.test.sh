@@ -379,12 +379,28 @@ assert_contains "$out" '  status: escalate' "an explicit escalation answer escal
 assert_contains "$out" '  reason: classifier recommends escalation before dispatch' "the escalation axis names itself"
 assert_not_contains "$out" '  profile:' "classifier evidence cannot authorize a model launch or sensitive action"
 
+write_response "$CLASSIFIER" rule_4 0.9
+jq '.answers.escalation.choice = "yes" | .answers.escalation.confidence = 0.55 | .answers.escalation.probabilities = {"no":0.45,"yes":0.55}' "$CLASSIFIER" > "$RESPONSE"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "an escalation answer below the confidence floor does not stop dispatch"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "a near-coin-flip escalation reading still resolves the matched route"
+assert_contains "$out" 'escalation=yes(0.55)' "the below-floor escalation reading is published as evidence"
+
 write_response "$CLASSIFIER" rule_3 0.95
 jq '.answers.escalation.choice = "yes" | .answers.escalation.confidence = 0.84 | .answers.escalation.probabilities = {"no":0.16,"yes":0.84}' "$CLASSIFIER" > "$RESPONSE"
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: escalate' "a declared approval gate and a classifier recommendation both escalate"
 assert_contains "$out" "  reason: rule requires the captain's explicit approval before dispatch" "the declared local gate is reported ahead of classifier evidence"
+
+write_response "$CLASSIFIER" rule_3 0.95
+jq '.answers.escalation.choice = "yes" | .answers.escalation.confidence = 0.51 | .answers.escalation.probabilities = {"no":0.49,"yes":0.51}' "$CLASSIFIER" > "$RESPONSE"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: escalate' "a declared approval gate escalates whatever the classifier confidence"
+assert_contains "$out" "  reason: rule requires the captain's explicit approval before dispatch" "the confidence floor applies to the classifier, never to declared local policy"
+assert_not_contains "$out" '  profile:' "a declared approval gate still yields no profile"
 
 write_response "$CLASSIFIER" rule_4 0.9
 jq '.answers.escalation.choice = "YES"' "$CLASSIFIER" > "$RESPONSE"
@@ -401,7 +417,7 @@ mv "$TMP_ROOT/missing-axis.json" "$RESPONSE"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "a missing classifier axis is an error outcome"
 assert_contains "$out" '  reason: response is not a typed dispatch classifier answer' "every declared classifier axis must be present and typed"
-pass "classifier evidence never vetoes local routing, and only the escalation axis stops dispatch"
+pass "classifier evidence never vetoes local routing, and only a confident escalation answer stops dispatch"
 
 # --- escalate: captain approval ------------------------------------------------
 reset_log

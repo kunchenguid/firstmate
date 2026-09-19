@@ -44,7 +44,8 @@
 #   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
 #   ambiguous -> rule confidence below the floor; decide as today from the probabilities
 #   escalate  -> the rule requires captain approval, the classifier recommends
-#                escalation, no candidate is rankable, or a genuine tie
+#                escalation at or above the confidence floor, no candidate is
+#                rankable, or a genuine tie
 #   error     -> API, network, response, or quota-axi failure; decide as today
 #   Every outcome exits 0 so an intake is never blocked by this tool.
 #   Exit 2 only for a usage or configuration error (unreadable brief, an
@@ -397,7 +398,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     $ev + {status: "ambiguous", reason: "confidence \($a.confidence) below floor \($floor)", candidates: ($answer_use | map(evaluate(.)))}
   elif $sel.escalate then
     $ev + {status: "escalate", reason: $sel.escalate, candidates: ($answer_use | map(evaluate(.)))}
-  elif ans("escalation").choice == "yes" then
+  elif ans("escalation").choice == "yes" and ans("escalation").confidence >= ($floor | tonumber) then
     $ev + {status: "escalate", reason: "classifier recommends escalation before dispatch", candidates: ($answer_use | map(evaluate(.)))}
   elif ($sel.use | length) == 0 then $ev + {status: "escalate", reason: "no profiles configured for \($sel.source)", note: $sel.note, candidates: []}
   else

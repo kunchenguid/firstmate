@@ -536,19 +536,20 @@ Known applicable rows from a provider with partial quota semantics remain rankab
 Any applicable `exhausted_now` row or known zero bound makes that candidate ineligible, and a known profile-floor shortfall does the same before unrelated quota uncertainty is considered.
 Missing or nonnumeric `spendPriority` evidence is never ranked, and every candidate is printed beside its evidence or the reason it was not rankable, including on ambiguous and approval-gated outcomes that emit no profile.
 On the opted-in path, duplicate concrete profiles with the same harness, model, and effort inside one rule or the default array are configuration errors rather than ties.
-The result is one of `clear` (a `profile:` line ready for `fm-spawn.sh`), `ambiguous` (rule confidence below the floor), `escalate` (an approval-gated rule, unverifiable rule floor, nothing rankable, a genuine tie, or a classifier escalation recommendation reported after every declared local gate), or `error` (API, network, malformed response metadata, rendering, or quota-axi failure), and every one of them exits 0.
+The result is one of `clear` (a `profile:` line ready for `fm-spawn.sh`), `ambiguous` (rule confidence below the floor), `escalate` (an approval-gated rule, unverifiable rule floor, nothing rankable, a genuine tie, or a classifier escalation recommendation at or above the confidence floor, reported after every declared local gate), or `error` (API, network, malformed response metadata, rendering, or quota-axi failure), and every one of them exits 0.
 Response probabilities for the rule and every classifier axis must contain exactly every offered choice, use numeric values from 0 through 1, and sum to approximately 1 within 0.01.
 Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, or missing `jq`, each reported and never selected around.
 Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
 The tool never replaces firstmate's judgment, `quota-array-dispatch`, secondmate scope enforcement, the captain-approval gate, safety boundaries, or `fm-spawn.sh` validation; `AGENTS.md` section 4 owns what firstmate does with each outcome.
 By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, secondmate scope, safety, or completion-runway gates.
 The classifier axes other than `escalation` are published evidence only: their choices and confidences ride on the `classification:` line and never gate the route, so low confidence on an axis no gate reads cannot veto an otherwise valid rule match.
-The `escalation` axis can make the tool decline to emit a profile, and no classifier answer can directly authorize a model launch, a merge, a sensitive action, or an exception to local policy; a declared `approval` or rule-floor gate is always reported ahead of it.
+The `escalation` axis can make the tool decline to emit a profile, but only when its own confidence reaches the same floor the rule answer must clear: a `yes` below the floor is published on the `classification:` line and routes as usual, so a near-coin-flip reading never spends a full intake.
+No classifier answer can directly authorize a model launch, a merge, a sensitive action, or an exception to local policy, and a declared `approval` or rule-floor gate is always reported ahead of the classifier, whatever its confidence.
 Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
 
 The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
 The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
-The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, rule confidence floor at 0.6, and request timeout at 10 seconds, measured against the shipped multi-axis request; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
+The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, the one confidence floor at 0.6 for both the rule answer and the escalation gate, and request timeout at 10 seconds, measured against the shipped multi-axis request; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
 The live rule-match and router-axis evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
 ## Toolchain
