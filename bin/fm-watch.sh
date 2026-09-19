@@ -937,10 +937,11 @@ wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
 #
 # A declared clearing time that has ALREADY passed (`paused: ... until <t>`) is
 # not evidence: the wait the worker described is over, so it no longer explains
-# the silence, and the pane keeps the unchanged schedule. That time is still
-# PRINTED with the refusal, because the escalation the pane is handed to has to
-# be able to say what the lane declared: a declared time that came and went with
-# the lane still quiet is MORE suspicious than no declaration at all, and an
+# the silence. What happens to that pane is then decided by evidence independent
+# of the declaration (wedge_work_evidence below), not by the declaration itself.
+# That time is still PRINTED with the refusal, because both outcomes have to be
+# able to say what the lane declared: a declared time that came and went with the
+# lane otherwise quiet is MORE suspicious than no declaration at all, and an
 # alarm that omits it reads as though the worker had never said anything.
 # Nothing here weakens detection for a pane with no declaration - it never runs
 # for them beyond one status-line read, and their escalation schedule, reason and
@@ -968,6 +969,45 @@ wedge_wait_evidence() {  # <task> -> `declared`/`held` and 0, or `expired <epoch
   printf 'declared'
 }
 
+# Independent evidence that a lane whose own declared time has PASSED is working
+# anyway, consulted only for that lane and only in the at-threshold branch below.
+# Three sources, cheapest first: a working verdict attributed to an active run
+# rather than to the pane (crew_run_attributed in fm-classify-lib.sh), observed
+# model or tool progress inside the current quiet window, and the same worktree
+# write probe the undeclared path uses.
+#
+# The pane is deliberately NOT one of them. A pane that renders a busy footer
+# while its hash has not changed for a whole escalation window is the wedge
+# suspect this ladder exists to catch, so accepting it here would defer exactly
+# the lane that most needs the alarm.
+#
+# The distinction this draws is not declared-versus-undeclared, it is whether
+# anything other than the worker's own expired estimate says work is happening.
+# An estimate that slipped on a demonstrably working lane is a slipped estimate;
+# a lane quiet past its own deadline with none of this is a suspect. Drawing it
+# the other way would alarm a worker who named a time HARDER than one who stayed
+# vague, which would teach every worker to be less precise.
+wedge_work_evidence() {  # <task> <since-file>
+  local task=$1 since_file=$2 progress="$STATE/$task.progress"
+  crew_run_attributed "$task" && return 0
+  [ -f "$progress" ] && [ "$progress" -nt "$since_file" ] && return 0
+  crew_worktree_written_since "$task" "$STATE" "$since_file"
+}
+
+# The expired declaration in the words both outcomes below use: the time the
+# worker named and how long ago it went by. A time that cannot be rendered back
+# into the shape the worker wrote costs the phrase that one clause and nothing
+# else - raw epoch seconds in its place would be the unreadable alarm this
+# vocabulary exists to replace.
+declared_time_passed_phrase() {  # <expired-epoch>
+  local until=$1 iso
+  if iso=$(fm_utc_epoch_to_iso "$until"); then
+    printf 'until %s and that time passed %ss ago' "$iso" "$(( $(date +%s) - until ))"
+    return 0
+  fi
+  printf 'whose time passed %ss ago' "$(( $(date +%s) - until ))"
+}
+
 # The clause an escalation carries when the lane DID declare a wait and its own
 # declared time has passed - the `expired <epoch>` refusal above, handed straight
 # to the alarm that refusal produces. Nothing about the escalation itself moves:
@@ -979,23 +1019,38 @@ wedge_wait_evidence() {  # <task> -> `declared`/`held` and 0, or `expired <epoch
 # which is how the genuinely wedged lane gets missed.
 # Prints nothing for every other evidence value, so a lane that declared nothing
 # keeps the identical wording it has today.
-# A time that cannot be rendered back into the shape the worker wrote costs the
-# alarm that one clause and nothing else: the declaration, its elapsed age and
-# the still-idle pane are all readable without it, while raw epoch seconds in
-# their place would be the unreadable alarm this note exists to replace.
 expired_wait_escalation_note() {  # <wedge_wait_evidence-output>
-  local evidence=$1 until iso
+  local evidence=$1
   case "$evidence" in
-    'expired '*) until=${evidence#expired } ;;
+    'expired '*) ;;
     *) return 0 ;;
   esac
-  if iso=$(fm_utc_epoch_to_iso "$until"); then
-    printf ', the lane declared a wait until %s and that time passed %ss ago with the pane still idle' \
-      "$iso" "$(( $(date +%s) - until ))"
-    return 0
-  fi
-  printf ', the lane declared a wait whose time passed %ss ago with the pane still idle' \
-    "$(( $(date +%s) - until ))"
+  printf ', the lane declared a wait %s with the pane still idle' \
+    "$(declared_time_passed_phrase "${evidence#expired }")"
+}
+
+# Defer ONE wedge escalation for a lane whose declared time has passed while
+# wedge_work_evidence above still says it is working. Deliberately the same shape
+# as wedge_defer_wait: the long PAUSE_RESURFACE_SECS cadence through the shared
+# resurface_absorbed and its own .waiting-resurfaced-<key> throttle, the idle
+# timer restarted so the next window probes the evidence again, and the
+# escalation counter left exactly as it was - neither advanced nor reset - so the
+# ladder RESUMES from the count it had reached the moment that evidence stops,
+# instead of starting over at one. A lane cannot re-set the ladder by working in
+# bursts.
+# The wording is its own, because this lane's ESTIMATE is what slipped: it names
+# the declared time, says it passed, says the lane is still working, and asks for
+# the one thing that would fix the record. Reusing `confirm the wait still holds`
+# would ask a reader to confirm a wait that is already over.
+wedge_defer_slipped_estimate() {  # <window> <task> <since-file> <triage-label> <idle-age> <expired-evidence>
+  local win=$1 task=$2 since_file=$3 label=$4 age=$5 evidence=$6 key wage
+  key=$(window_key "$win")
+  wage=$(declared_wait_age "$task")
+  clear_write_tracking "$key"
+  date +%s > "$since_file"
+  resurface_absorbed "$win" "$STATE/.waiting-resurfaced-$key" "$wage" \
+    "stale: $win (idle ${age}s, declared wait $(declared_time_passed_phrase "${evidence#expired }") while the lane is still working - a slipped estimate, rechecked on a long cadence not a wedge; ask the lane for a new expected time)"
+  triage_log "absorbed $label (the declared time passed while the lane is still working, idle ${age}s): $win"
 }
 
 # Defer ONE wedge escalation for a pane whose own declaration explains the quiet
@@ -1142,14 +1197,19 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
-# An expired declaration is escalated rather than deferred, and the escalation
-# names it (expired_wait_escalation_note above): the consult refuses the evidence
-# and keeps the whole unchanged ladder for that lane, while the alarm it fires
-# still tells the reader a wait was declared and when it was due.
+# An expired declaration is decided by evidence independent of it
+# (wedge_work_evidence above), not by the declaration: a lane that is still
+# demonstrably working takes the long cadence as a slipped estimate, while a lane
+# quiet past its own deadline keeps the whole unchanged ladder and its alarm names
+# what was declared and when it was due (expired_wait_escalation_note above).
+# Neither outcome touches the escalation counter, so the ladder resumes where it
+# left off as soon as the evidence stops.
 # The wait-evidence consult (wedge_wait_evidence, one status-line read), the
 # worktree write probe, and the dead-record probe (wedge_dead_record) run ONLY
 # here, inside the at-threshold branch that is about to escalate: at most one each
-# per window per STALE_ESCALATE_SECS, never per poll. The wait consult runs first,
+# per window per STALE_ESCALATE_SECS, never per poll. The expired lane's evidence
+# consult REPLACES the plain worktree probe rather than adding to it, so every
+# path through this branch still pays at most one worktree walk. The wait consult runs first,
 # because a pane whose worker already said why it is quiet has nothing to prove
 # through its worktree. The dead-record probe runs last of the three, so the two
 # cheaper deferrals keep the panes they already own on their existing bounded
@@ -1172,7 +1232,12 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           wedge_defer_wait "$win" "$task" "$since_file" "$label" "$age" "$evidence"
           return 0
         fi
-        if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
+        if [ -n "$evidence" ]; then
+          if wedge_work_evidence "$task" "$since_file"; then
+            wedge_defer_slipped_estimate "$win" "$task" "$since_file" "$label" "$age" "$evidence"
+            return 0
+          fi
+        elif crew_worktree_written_since "$task" "$STATE" "$since_file"; then
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
           return 0
         fi
@@ -1278,13 +1343,16 @@ declared_wait_recheck_reason() {  # <window> <wait-age> <declared|due|beyond|hel
 # the worker wrote the declaration down. Anchored there rather than on a per-window
 # marker for the reason handle_paused_stale and wedge_defer_wait both give - an
 # idle pane churns its display, and a marker an alarm kept touching would let that
-# churn reset the cadence. An unreadable status file reports 0 rather than a
-# negative or wildly wrong age.
+# churn reset the cadence. An unreadable status file, and a status file written
+# ahead of this clock, both report 0 rather than a negative or wildly wrong age -
+# the same guard the sibling this consolidates keeps (wedge_defer_wait).
 declared_wait_age() {  # <task>
-  local mtime
+  local mtime age
   mtime=$(stat_mtime "$STATE/$1.status")
   case "$mtime" in ''|*[!0-9]*) printf '0'; return ;; esac
-  printf '%s' "$(( $(date +%s) - mtime ))"
+  age=$(( $(date +%s) - mtime ))
+  [ "$age" -ge 0 ] || age=0
+  printf '%s' "$age"
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a

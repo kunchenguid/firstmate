@@ -2560,6 +2560,29 @@ test_live_declared_pause_alarm_claims_no_liveness_it_never_read() {
   pass "an alarm for a parked lane reports only that its agent is not confirmed gone, never a liveness verdict nothing read"
 }
 
+# G9. The age every declared-wait alarm prints is a duration, and a duration is
+# never negative. A status file written a moment before the clock steps backwards
+# (an NTP correction) leaves its mtime AHEAD of now, and the subtraction behind
+# that age then reads `paused -3s` to a supervisor.
+test_declared_wait_alarm_never_prints_a_negative_age() {
+  local dir state fakebin out window payload
+  dir=$(live_declared_wait_fixture live-pause-future-mtime \
+    'paused: waiting on the validation run to finish' -300)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  window="test:fm-parked"
+  parked_watch_round "$state" "$fakebin" "$out" "$dir/pane.txt" "$window" exit \
+    || fail "a lane whose status file is stamped ahead of the clock never surfaced"
+  payload=$(queued_stale_payloads "$state" "$window")
+  [ -n "$payload" ] || fail "the future-stamped declaration queued no stale wake to read"
+  case "$payload" in *"paused -"*)
+    fail "the alarm printed a negative wait age: $payload" ;;
+  esac
+  case "$payload" in *"(paused 0s,"*) ;;
+    *) fail "a wait age that cannot be measured forward was not reported as 0s: $payload" ;;
+  esac
+  pass "a status file stamped ahead of the clock reports a zero wait age, never a negative one"
+}
+
 # G2. The two declarations block on DIFFERENT humans, so the alarm must not hand a
 # `captain-held:` lane the external-dependency wording: a captain reading "confirm
 # the wait still holds" is pointed away from the one action that ends it.
@@ -2790,6 +2813,7 @@ wedge_reported_wait_secs() {  # <watch-out>
 test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict() {
   local dir state fakebin out capture window key n past reported
   local working='state: working · source: run-step · ci running'
+  local busy_pane='state: working · source: pane · busy footer'
 
   dir=$(wedge_threshold_fixture declared-wait-working \
     'paused: final validation at step 6/6 - clean whole-assembly baseline (~20 min)' 0)
@@ -2837,11 +2861,12 @@ test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict() {
 
   # A wait the worker said would already be over stops explaining the silence,
   # so the exemption ends exactly where the declaration does - as long as nothing
-  # ELSE accounts for the quiet.
+  # ELSE accounts for the quiet. A busy-looking pane is not that something else:
+  # an unchanged hash behind a busy footer is the wedge suspect itself.
   past=$(iso_utc_at "$(( $(date +%s) - 7200 ))")
   dir=$(wedge_threshold_fixture declared-wait-elapsed "paused: waiting on the build queue until $past" 0)
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
-  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$busy_pane" exit \
     || fail "a declared wait whose own clearing time had passed stayed silent"
   grep -F "possible wedge, escalation 1" "$out" >/dev/null \
     || fail "an elapsed declared wait did not keep the unchanged wedge wording: $(cat "$out")"
@@ -2882,7 +2907,7 @@ test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict() {
 # escalation fail on different assertions.
 test_wedge_escalation_names_an_expired_declared_wait() {
   local dir state fakebin out capture window key past payload n
-  local working='state: working · source: run-step · ci running'
+  local working='state: working · source: pane · busy footer'
   past=$(iso_utc_at "$(( $(date +%s) - 7200 ))")
   dir=$(wedge_threshold_fixture expired-wait-named \
     "paused: waiting on the build queue until $past" 0)
@@ -2947,7 +2972,7 @@ test_wedge_escalation_names_an_expired_declared_wait() {
 # the unreadable alarm the whole change exists to remove.
 test_wedge_escalation_note_survives_an_unrenderable_declared_time() {
   local dir state fakebin out capture window key past epoch payload n real_date
-  local working='state: working · source: run-step · ci running'
+  local working='state: working · source: pane · busy footer'
   epoch=$(( $(date +%s) - 7200 ))
   past=$(iso_utc_at "$epoch")
   dir=$(wedge_threshold_fixture expired-wait-unrenderable \
@@ -3000,6 +3025,113 @@ SH
     n=$((n + 1))
   done
   pass "an escalation whose declared time cannot be rendered keeps the note, minus the time, and the whole ladder"
+}
+
+# --- a slipped estimate is not a wedge -------------------------------------
+# The refinement the 2026-09-18 measurement forced. Escalating every expired
+# declaration alarmed the worker who NAMED a time harder than the one who stayed
+# vague: the vague lane is deferred on the long cadence indefinitely, while the
+# precise lane climbed the ladder at the short cadence once its estimate slipped.
+# That is a perverse incentive - it teaches workers to be less precise - and the
+# lanes the report measured were exactly this shape: a healthy pipeline run
+# attributed to the lane, alarming seven times in a row.
+# The distinction that actually matters is whether anything OTHER than the
+# worker's own expired estimate says work is happening. These tests pin both
+# directions and the seam between them, each against the durable queue payload.
+test_expired_declared_wait_with_an_active_run_is_a_slipped_estimate() {
+  local dir state fakebin out capture window key past payload
+  local running='state: working · source: run-step · ci running'
+  past=$(iso_utc_at "$(( $(date +%s) - 7200 ))")
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  # The declaration is old enough that the long cadence owes a recheck now, so
+  # the deferral's own wording is on the queue to read.
+  dir=$(wedge_threshold_fixture slipped-estimate-aged \
+    "paused: waiting on the build queue until $past" 2000)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  FM_TEST_PAUSE_RESURFACE=240 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$running" exit \
+    || fail "a slipped estimate on a running lane was never rechecked at all"
+  payload=$(queued_stale_payloads "$state" "$window")
+  [ -n "$payload" ] || fail "the slipped estimate queued no recheck to read"
+  case "$payload" in *"possible wedge"*)
+    fail "a lane with an attributed active run was still alarmed as a possible wedge: $payload" ;;
+  esac
+  case "$payload" in *"declared wait until $past"*) ;;
+    *) fail "the slipped-estimate recheck does not name the time the lane declared: $payload" ;;
+  esac
+  case "$payload" in *"while the lane is still working"*) ;;
+    *) fail "the slipped-estimate recheck does not say the lane is still working: $payload" ;;
+  esac
+  case "$payload" in *"a slipped estimate, rechecked on a long cadence not a wedge"*) ;;
+    *) fail "the recheck does not tell a reader this is the long cadence, not a wedge: $payload" ;;
+  esac
+  # The wait this lane declared is over, so asking a reader to confirm it still
+  # holds would point them at the wrong question.
+  case "$payload" in *"confirm the wait still holds"*)
+    fail "a slipped estimate borrowed the live declared-wait action: $payload" ;;
+  esac
+  case "$payload" in *"ask the lane for a new expected time"*) ;;
+    *) fail "the recheck does not name the action that fixes the record: $payload" ;;
+  esac
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "a slipped estimate counted $(cat "$state/.wedge-escalations-$key") wedge escalation(s)"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the slipped-estimate recheck"
+
+  # And the ladder does not climb while that run keeps going: a fresh
+  # declaration is absorbed silently on the same cadence every sibling deferral
+  # uses, round after round.
+  dir=$(wedge_threshold_fixture slipped-estimate-quiet \
+    "paused: waiting on the build queue until $past" 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$running" absorb \
+    || fail "a slipped estimate on a running lane escalated instead of being deferred: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "a slipped estimate queued a wedge wake: $(cat "$state/.wake-queue")"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "a deferred slipped estimate counted $(cat "$state/.wedge-escalations-$key") wedge escalation(s)"
+  pass "an expired declaration on a lane with an attributed active run is rechecked as a slipped estimate, not climbed as a wedge"
+}
+
+# The seam. A lane must not be able to hold the alarm off forever by working in
+# bursts: the deferral leaves the escalation counter exactly where it was, so the
+# ladder RESUMES at its next rung when the evidence stops rather than restarting
+# at one. Pinned as a sequence on ONE lane, because the guarantee is about what
+# survives between rounds.
+test_slipped_estimate_deferral_resumes_the_ladder_where_it_left_off() {
+  local dir state fakebin out capture window key past payload
+  local running='state: working · source: run-step · ci running'
+  local busy_pane='state: working · source: pane · busy footer'
+  past=$(iso_utc_at "$(( $(date +%s) - 7200 ))")
+  dir=$(wedge_threshold_fixture slipped-estimate-resume \
+    "paused: waiting on the build queue until $past" 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  # Nothing but the expired estimate: the ladder starts climbing.
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$busy_pane" exit \
+    || fail "an expired declaration with no evidence of work did not escalate"
+  payload=$(queued_stale_payloads "$state" "$window")
+  case "$payload" in *"possible wedge, escalation 1"*) ;;
+    *) fail "the first escalation did not reach the ladder: $payload" ;;
+  esac
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first escalation"
+
+  # A run is attributed to the lane: deferred, and the rung it had earned stays.
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$running" absorb \
+    || fail "the run-attributed round escalated instead of deferring: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "the deferred round queued a wake: $(cat "$state/.wake-queue")"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" -eq 1 ] \
+    || fail "the deferral moved the escalation counter to $(cat "$state/.wedge-escalations-$key" 2>/dev/null)"
+
+  # The run stops. The ladder must resume at rung two, not start over at one.
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$busy_pane" exit \
+    || fail "the ladder never resumed once the evidence of work stopped"
+  payload=$(queued_stale_payloads "$state" "$window")
+  case "$payload" in *"possible wedge, escalation 2"*) ;;
+    *) fail "the ladder restarted instead of resuming where it left off: $payload" ;;
+  esac
+  pass "a slipped-estimate deferral leaves the ladder at the rung it had reached, so the next escalation resumes rather than restarts"
 }
 
 # The other status-line record. A verified `captain-held:` transfer also reaches
@@ -5883,6 +6015,7 @@ test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
 test_live_declared_wait_churn_honors_the_resurface_throttle
 test_live_declared_pause_alarm_names_the_declared_wait
 test_live_declared_pause_alarm_claims_no_liveness_it_never_read
+test_declared_wait_alarm_never_prints_a_negative_age
 test_live_captain_held_alarm_names_the_captain_not_an_external_wait
 test_live_due_declared_time_alarm_says_the_clearing_time_passed
 test_undeclared_live_lane_keeps_the_unnamed_stale_alarm
@@ -5891,6 +6024,8 @@ test_live_paused_until_controls_recheck_time
 test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict
 test_wedge_escalation_names_an_expired_declared_wait
 test_wedge_escalation_note_survives_an_unrenderable_declared_time
+test_expired_declared_wait_with_an_active_run_is_a_slipped_estimate
+test_slipped_estimate_deferral_resumes_the_ladder_where_it_left_off
 test_wedge_threshold_recheck_names_the_captain_for_a_held_lane
 test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms

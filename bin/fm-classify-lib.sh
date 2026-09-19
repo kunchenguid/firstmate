@@ -1975,6 +1975,25 @@ crew_is_provably_working() {  # <id>
   [ "$(crew_absorb_class "$1")" = working ]
 }
 
+# 0 if crew <id>'s working verdict is attributed to an ACTIVE RUN rather than to
+# its pane. crew_absorb_class above deliberately accepts either source, because
+# either is enough to absorb one stale sighting. Past a worker's own declared
+# clearing time it is not: a pane whose hash has not changed for a whole
+# escalation window while it still renders a busy footer is the wedge suspect
+# itself, so only the run attribution is evidence independent of the pane the
+# alarm is about.
+crew_run_attributed() {  # <id>
+  local id=$1 line state src
+  [ -n "$id" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || return 1
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  state=${line#state: }; state=${state%% *}
+  [ "$state" = working ] || return 1
+  case "$line" in *"source: "*) ;; *) return 1 ;; esac
+  src=${line#*source: }; src=${src%% *}
+  [ "$src" = run-step ]
+}
+
 # 0 if crew <id>'s authoritative current state is a declared external-wait pause.
 # The stale path absorbs such a crew (on a long re-surface cadence) instead of
 # escalating a possible wedge.
