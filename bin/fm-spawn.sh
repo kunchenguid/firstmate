@@ -3582,17 +3582,20 @@ pi_wait_for_trust() {
   local pane i=0 max=${FM_PI_TRUST_POLLS:-60} interval=${FM_PI_TRUST_POLL_INTERVAL:-0.5}
   while [ "$i" -lt "$max" ]; do
     pane=$(pi_capture)
-    if pi_pane_shows_trust_dialog "$pane"; then
-      if [ "$PI_TRUST_ANSWERED" -eq 0 ]; then
-        spawn_send_key "$T" Enter
-        PI_TRUST_ANSWERED=1
-      fi
+    if ! pi_pane_shows_trust_dialog "$pane"; then
       return 0
     fi
+    spawn_send_key "$T" Enter
+    PI_TRUST_ANSWERED=1
     i=$((i + 1))
     [ "$i" -ge "$max" ] || sleep "$interval"
   done
-  return 0
+  return 1
+}
+
+pi_spawn_fail() { # <detail>
+  printf 'failed: %s\n' "$1" >>"$STATE/$ID.status"
+  echo "error: $1; inspect window $T" >&2
 }
 
 # agy carries its brief on the launch command, so it needs no delivery gate,
@@ -4676,7 +4679,10 @@ if [ "$HARNESS" = rovo ]; then
   fi
 fi
 if [ "$HARNESS" = pi ] || [ "$HARNESS" = pi-signed ]; then
-  pi_wait_for_trust
+  if ! pi_wait_for_trust; then
+    pi_spawn_fail "Pi's folder-trust dialog did not clear in window $T"
+    exit 1
+  fi
 fi
 if [ "$HARNESS" = agy ]; then
   if ! agy_wait_for_working; then

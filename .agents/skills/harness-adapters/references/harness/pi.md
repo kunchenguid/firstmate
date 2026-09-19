@@ -30,8 +30,8 @@ The router's Detection section owns how launch markers and ancestry select betwe
 Keep the instructions as one positional argument.
 Multiple positional arguments become separate queued messages; the spawn template already preserves the one-argument shape.
 
-Firstmate pre-registers each exact fresh task worktree in Pi's `~/.pi/agent/trust.json` before a Pi or Pi-signed crewmate or scout launch, preserving existing entries.
-If the dialog still appears, the spawn backstop answers it with Enter before reporting success.
+Firstmate pre-registers each exact fresh task worktree in Pi's `~/.pi/agent/trust.json` before a Pi or Pi-signed crewmate or scout launch, preserving existing entries; both the pane's logical worktree path and its resolved form are recorded when they differ.
+If the dialog still appears, the spawn backstop resends Enter on every poll it remains visible and only reports success once a later poll confirms it cleared, failing the spawn otherwise.
 The decision persists per path, so later spawns in the same pooled slot skip it.
 Pi secondmate homes retain their existing primary-launch behavior and are not pre-registered by the task-worktree helper.
 

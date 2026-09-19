@@ -4,6 +4,12 @@
 # path-to-boolean map in ~/.pi/agent/trust.json; this helper adds only the
 # requested worktree and preserves every existing entry.
 #
+# Its sibling bin/fm-agy-trust.sh found live that agy's dialog compares the
+# pane's LOGICAL working directory rather than the resolved one, so a
+# symlinked worktree registered only under its real path still parked. Pi has
+# not been verified either way, so both the logical path and its resolved
+# form are recorded here when they differ, the same safe default.
+#
 # Usage: fm-pi-trust.sh <worktree> <project>
 #   <worktree>  the isolated task worktree this spawn launches into
 #   <project>   the primary checkout that worktree belongs to
@@ -21,6 +27,7 @@ PROJ_ARG=$2
 
 refuse() { echo "error: refusing to pre-register Pi trust: $1" >&2; exit 1; }
 real_dir() { (cd -P -- "$1" 2>/dev/null && pwd -P); }
+logical_dir() { (cd -- "$1" 2>/dev/null && pwd -L); }
 common_dir_of() {
   local dir=$1 common
   common=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 1
@@ -29,6 +36,8 @@ common_dir_of() {
 
 WT_REAL=$(real_dir "$WT_ARG") || true
 [ -n "$WT_REAL" ] || refuse "worktree '$WT_ARG' is not an accessible directory"
+WT_LOGICAL=$(logical_dir "$WT_ARG") || true
+[ -n "$WT_LOGICAL" ] || WT_LOGICAL=$WT_REAL
 PROJ_REAL=$(real_dir "$PROJ_ARG") || true
 [ -n "$PROJ_REAL" ] || refuse "project '$PROJ_ARG' is not an accessible directory"
 [ -n "${HOME:-}" ] || refuse "HOME is not set, so Pi's trust store cannot be located"
@@ -68,16 +77,18 @@ if [ -e "$STORE" ]; then
   [ -w "$STORE" ] || refuse "'$STORE' is not writable"
 fi
 
-if ! node - "$STORE" "$WT_REAL" <<'NODE'
+if ! node - "$STORE" "$WT_LOGICAL" "$WT_REAL" <<'NODE'
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const [store, target] = process.argv.slice(2);
+const [store, ...wanted] = process.argv.slice(2);
+const targets = [...new Set(wanted)];
 const readStore = () => {
   try { return fs.readFileSync(store); }
   catch (err) { if (err.code === "ENOENT") return null; throw err; }
 };
 const fingerprint = (buf) => buf === null ? "absent" : crypto.createHash("sha256").update(buf).digest("hex");
+const recorded = (root) => targets.every((t) => root[t] === true);
 const attempt = () => {
   const original = readStore();
   const before = fingerprint(original);
@@ -86,8 +97,8 @@ const attempt = () => {
     root = JSON.parse(original.toString("utf8"));
     if (root === null || typeof root !== "object" || Array.isArray(root)) throw new Error(`${store} is not a JSON object`);
   }
-  if (root[target] === true) return "recorded";
-  root[target] = true;
+  if (recorded(root)) return "recorded";
+  for (const t of targets) root[t] = true;
   const tmp = path.join(path.dirname(store), `.trust.json.fm-trust.${process.pid}.${crypto.randomBytes(8).toString("hex")}`);
   fs.writeFileSync(tmp, `${JSON.stringify(root, null, 2)}\n`, { mode: 0o600, flag: "wx" });
   let renamed = false;
@@ -95,7 +106,7 @@ const attempt = () => {
     if (fingerprint(readStore()) !== before) return "moved";
     fs.renameSync(tmp, store); renamed = true;
   } finally { if (!renamed) fs.rmSync(tmp, { force: true }); }
-  return JSON.parse(fs.readFileSync(store, "utf8"))[target] === true ? "recorded" : "dropped";
+  return recorded(JSON.parse(fs.readFileSync(store, "utf8"))) ? "recorded" : "dropped";
 };
 try {
   for (let i = 0; i < 3; i += 1) {
@@ -103,11 +114,15 @@ try {
     if (result === "recorded") process.exit(0);
     if (result === "moved" && i >= 1) throw new Error(`${store} was modified while trust was being recorded`);
   }
-  throw new Error(`${store} did not retain trust for ${target} after 3 attempts`);
+  throw new Error(`${store} did not retain trust for ${targets.join(", ")} after 3 attempts`);
 } catch (err) { console.error(`error: ${err.message}`); process.exit(1); }
 NODE
 then
   refuse "could not record trust for '$WT_REAL' in '$STORE'"
 fi
 
-echo "trusted: $WT_REAL"
+if [ "$WT_LOGICAL" != "$WT_REAL" ]; then
+  echo "trusted: $WT_LOGICAL ($WT_REAL)"
+else
+  echo "trusted: $WT_REAL"
+fi
