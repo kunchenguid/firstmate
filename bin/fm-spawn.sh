@@ -1724,7 +1724,7 @@ launch_template() {
     # direct ChatGPT/Codex sessions, but silence sessions launched by
     # Firstmate. The hook supports a cwd-scoped disabled marker; create it
     # for this worker and remove it when the worker exits.
-    local sw_quiet_prefix='sh -c '\''sw_dir="${SUPERWHISPER_AGENT_STATE_DIR:-/tmp/superwhisper-agent}"; sw_marker="$sw_dir/disabled-$(if command -v md5 >/dev/null 2>&1; then printf %s "$PWD" | md5 -q; else printf %s "$PWD" | md5sum | awk "{print \$1}"; fi)"; mkdir -p "$sw_dir"; : > "$sw_marker"; trap "rm -f \"$sw_marker\"" EXIT; "$@"'\'' -- '
+    local sw_quiet_prefix='SUPERWHISPER_AGENT_STATE_DIR="${SUPERWHISPER_AGENT_STATE_DIR:-/tmp/superwhisper-agent}" sh -c '\''sw_dir="$SUPERWHISPER_AGENT_STATE_DIR"; sw_marker="$sw_dir/disabled-$(if command -v md5 >/dev/null 2>&1; then printf %s "$PWD" | md5 -q; else printf %s "$PWD" | md5sum | awk "{print \$1}"; fi)"; mkdir -p "$sw_dir"; : > "$sw_marker"; trap "rm -f \"$sw_marker\"" EXIT; "$@"'\'' -- '
     if [ "$kind" = secondmate ]; then
       printf '%s' "$sw_quiet_prefix"'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
