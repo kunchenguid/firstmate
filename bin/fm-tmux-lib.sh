@@ -95,9 +95,10 @@ fm_tmux_composer_caps() {
 #     agent died to a shell has no pi foreground process and gets NO identity,
 #     which is exactly what keeps the strict blank-row rule honest: a blank
 #     row between two stale rules stays unknown.
-#   - status: pi's verified busy footer via fm_pane_is_busy, mapped onto the
-#     idle/working vocabulary herdr's probe reports natively.
-# Prints "pi<TAB>idle" or "pi<TAB>working"; exits 1 when the pane is not a
+#   - status: pi's verified busy footer via fm_pane_is_busy. A rendered
+#     footer cannot tell a working pi from one blocked on a prompt, so busy
+#     reports `busy`, not herdr's native `working`.
+# Prints "pi<TAB>idle" or "pi<TAB>busy"; exits 1 when the pane is not a
 # live pi.
 fm_tmux_composer_identity() {  # <target>
   local target=$1 tty pgid tpgid comm found=0 status
@@ -124,7 +125,7 @@ EOF
   [ "$found" -eq 1 ] || return 1
   status=$(fm_pane_busy_state "$target" pi)
   case "$status" in
-    busy) printf 'pi\tworking' ;;
+    busy) printf 'pi\tbusy' ;;
     idle) printf 'pi\tidle' ;;
     *) return 1 ;;
   esac
