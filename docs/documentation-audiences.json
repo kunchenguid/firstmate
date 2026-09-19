@@ -369,6 +369,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/model-routing-outcomes.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/orca-backend.md",
       "audience": "operator-current"
     },

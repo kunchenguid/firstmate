@@ -3745,6 +3745,7 @@ mkdir -p "$TASK_TMP/gotmp"
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -3939,6 +3940,9 @@ EOF
 // "turn_end" fires at every inner turn boundary (one LLM response plus its
 // tool calls) and stays a wake NOTIFICATION touch for the watcher, never
 // current-state truth.
+// The fm-routing-request custom entry records only sanitized selected-route
+// facts observed by this handler. The observation is provisional because later
+// before_provider_request handlers may still change the provider payload.
 import { execFile } from "node:child_process";
 const busyEvent = (state: string, event: string) =>
   new Promise<void>((resolve) => {
@@ -3948,6 +3952,22 @@ const busyEvent = (state: string, event: string) =>
     ], () => resolve());
   });
 export default function (pi: any) {
+  let routeRequestSequence = 0;
+  pi.on("before_provider_request", (_event: any, ctx: any) => {
+    const model = ctx && ctx.model && typeof ctx.model === "object" ? ctx.model : {};
+    pi.appendEntry("fm-routing-request", {
+      schema: "fm-routing-request.v1",
+      taskId: "$ID",
+      spawnGen: "$SPAWN_GEN",
+      requestSequence: ++routeRequestSequence,
+      at: new Date().toISOString(),
+      observationStage: "provisional-before-remaining-handlers",
+      provider: typeof model.provider === "string" ? model.provider : null,
+      selectedModel: typeof model.id === "string" ? model.id : null,
+      selectedThinkingLevel: typeof ctx?.thinkingLevel === "string" ? ctx.thinkingLevel : null,
+      api: typeof model.api === "string" ? model.api : null,
+    });
+  });
   pi.on("agent_start", () => busyEvent("busy", "agent-start"));
   pi.on("agent_settled", (_event: any, ctx: any) => {
     if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
@@ -4179,7 +4199,6 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
-SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
