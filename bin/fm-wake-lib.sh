@@ -2167,18 +2167,19 @@ fm_wake_status_mark_current() {  # <state> <status-file>
   fm_wake_status_seen_commit "$1" "$2" "$size" "$ident"
 }
 
-# Guarded self-announced status append - the one dedup primitive for a status
-# line THIS home's own machinery writes as bookkeeping it has already presented
-# in the very turn or tick that writes it (an answerer-closes resolved line, a
-# pending-reply escalation close, a captain-held transfer). Such a close must
-# not wake the session that wrote it. This appends the line, records the exact
-# appended byte range in the home-owned append ledger (bin/fm-classify-lib.sh),
-# and then advances the watcher's seen marker across those bytes only when the
-# watcher's classified offset equals the pre-append size (every earlier byte was
-# already classified) and the post-append size equals the pre-append size plus
-# exactly the appended bytes (no foreign write interleaved).
+# Guarded self-announced status append - the one dedup primitive for the status
+# lines THIS home's own machinery writes as bookkeeping it has already presented
+# in the very turn or tick that writes them (answerer-closes resolved lines, a
+# pending-reply escalation close, captain-held transfers). Such a close must
+# not wake the session that wrote it. This appends one command's lines
+# together, records the exact appended byte range in the home-owned append
+# ledger (bin/fm-classify-lib.sh), and then advances the watcher's seen marker
+# across those bytes only when the watcher's classified offset equals the
+# pre-append size (every earlier byte was already classified) and the
+# post-append size equals the pre-append size plus exactly the appended bytes
+# (no foreign write interleaved).
 # On ANY other condition - missing file, pending foreign bytes, an interleaved
-# writer, an unreadable size or identity - the line is still appended and the
+# writer, an unreadable size or identity - the lines are still appended and the
 # owned range is still recorded when growth is proven, but the marker is left
 # alone so the watcher surfaces the unclassified foreign bytes. An OPEN
 # DECISIONS fold is no substitute: any actor's drain folds, so a worker line
@@ -2190,22 +2191,24 @@ fm_wake_status_mark_current() {  # <state> <status-file>
 # suppress new content.
 # Returns 0 appended and self-announced, 1 appended but left for the watcher
 # (the safe direction), 2 the append itself failed.
-fm_wake_status_append_self_announced() {  # <state> <status-file> <line>
-  local state=$1 file=$2 line=$3 pre_size='' pre_ident='' post_size post_ident
+fm_wake_status_append_self_announced() {  # <state> <status-file> <line>...
+  local state=$1 file=$2 line appended=0 pre_size='' pre_ident='' post_size post_ident
   local classified
   local LC_ALL=C
+  shift 2
   _fm_wake_require_classify || return 1
   if [ -e "$file" ]; then
     pre_size=$(_fm_status_file_size "$file") || pre_size=''
     pre_ident=$(_fm_open_decisions_file_ident "$file") || pre_ident=''
   fi
-  printf '%s\n' "$line" >> "$file" || return 2
+  printf '%s\n' "$@" >> "$file" || return 2
   case "$pre_size" in ''|*[!0-9]*) return 1 ;; esac
   post_size=$(_fm_status_file_size "$file") || return 1
   post_ident=$(_fm_open_decisions_file_ident "$file") || return 1
   case "$post_size" in ''|*[!0-9]*) return 1 ;; esac
   [ -n "$pre_ident" ] && [ "$post_ident" = "$pre_ident" ] || return 1
-  [ "$post_size" -eq $((pre_size + ${#line} + 1)) ] || return 1
+  for line in "$@"; do appended=$((appended + ${#line} + 1)); done
+  [ "$post_size" -eq $((pre_size + appended)) ] || return 1
   status_home_appends_record "$file" "$pre_size" "$post_size" || return 1
   classified=$(fm_wake_signal_seen_size "$state" "$file")
   [ "$classified" = "$pre_size" ] || return 1

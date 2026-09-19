@@ -137,6 +137,13 @@ test_answer_send_closes_open_decision() {
   assert_contains "$(cat "$log")" "Firstmate instruction waiting" "the doorbell should be rung for the answer"
   grep -F 'resolved [key=api-shape]: answered: go with REST' "$home/state/t1.status" >/dev/null \
     || fail "fm-send did not append the closing resolved line:"$'\n'"$(cat "$home/state/t1.status")"
+  # The drain folded the worker's `working:` line but never listed it, so the
+  # close must leave the file for the watcher instead of marking it seen.
+  if FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_signal_seen_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t1.status"; then
+    fail "the answerer's close hid a worker line the drain never listed"
+  fi
 
   out=$(drain_out "$home")
   if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
@@ -400,6 +407,41 @@ test_multiple_keys_close_together() {
     fail "an answered key is still open after a multi-key answer: $out"
   fi
   pass "fm-send --resolve-key: one answer closes each named key and only those"
+}
+
+# A session-start drain may list both decisions (folding them without a
+# watcher seen marker) and one answer still closes both. The fold is no
+# substitute for classification, so the worker's decision bytes stay
+# wake-worthy; the closes themselves succeed and drop those keys from OPEN
+# DECISIONS. Owned answer ranges keep later scans from treating the closes as
+# extra signals once the watcher has classified the span.
+test_multiple_keys_close_after_fold_is_self_announced() {
+  local dir fb log home rc out
+  dir="$TMP_ROOT/multi-fold"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home multi-fold)
+  fm_write_meta "$home/state/t7.meta" "window=sess:fm-t7" "kind=ship"
+  {
+    printf 'needs-decision [key=budget]: approve spend?\n'
+    printf 'needs-decision [key=vendor]: pick a vendor\n'
+  } > "$home/state/t7.status"
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F '[key=vendor]' >/dev/null \
+    || fail "precondition: the drain should list both decisions: $out"
+
+  run_send "$fb" "$home" "$log" t7 --resolve-key budget --resolve-key vendor \
+    "approve spend, pick acme"; rc=$?
+  expect_code 0 "$rc" "an answer resolving two folded keys should succeed"
+  if FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_signal_seen_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t7.status"; then
+    fail "folding then answering swallowed the unclassified worker decisions"
+  fi
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "an answered folded key is still open: $out"
+  fi
+  pass "fm-send --resolve-key: one answer closes folded keys without swallowing the worker decisions"
 }
 
 test_local_secondmate_answer_marked_and_closed() {
@@ -764,6 +806,69 @@ test_remote_reserved_pending_reply_key_closes_locally() {
   pass "fm-send --resolve-key: a remote secondmate reserved-key close is the same local ledger append"
 }
 
+# The decision-answer partition (bin/fm-send.sh header "Answering a decision"):
+# a --resolve-key naming an open needs-decision or a captain-held task is a
+# decision answer, main-owned while attended and refused for the supervision
+# branch before anything is sent; a blocked: key is ordinary steering for
+# either actor; and while the away-posture record exists the same branch
+# answer is sent and closes the key, because main is parked. Main itself never
+# meets the partition.
+test_decision_answer_partition_relocates_under_the_record() {
+  local dir fb log home rc out
+  dir="$TMP_ROOT/partition"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home partition)
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$home/state/t1.status"
+  printf 'blocked [key=token]: firstmate can refresh the token\n' >> "$home/state/t1.status"
+
+  # Attended branch: the decision is refused at the partition, nothing sent.
+  : > "$log"
+  out=$(env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_SUPERVISION_ACTOR=branch "$SEND" t1 --resolve-key api-shape "go with REST" 2>&1); rc=$?
+  expect_code 6 "$rc" "an attended branch answering a decision must be refused at the partition"
+  assert_contains "$out" "decision answer (fm-send --resolve-key) refused" "the partition refusal lost its action label"
+  [ ! -e "$home/state/t1.inbox" ] || fail "a refused decision answer still reached the worker's inbox"
+  [ ! -s "$log" ] || fail "a refused decision answer still rang the doorbell"
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F '[key=api-shape]' >/dev/null \
+    || fail "the refused answer closed the decision anyway: $out"
+
+  # Attended branch: a blocked: key is steering, sent and closed under the
+  # ordinary lease guard alone.
+  FM_SUPERVISION_ACTOR=branch run_send "$fb" "$home" "$log" t1 --resolve-key token "refreshed the token; resume"; rc=$?
+  expect_code 0 "$rc" "an attended branch resolving a blocker is ordinary steering"
+  grep -qF 'resolved [key=token]: answered: refreshed the token; resume' "$home/state/t1.status" \
+    || fail "the branch's blocker answer did not close the key:"$'\n'"$(cat "$home/state/t1.status")"
+  grep -qF "refreshed the token; resume" "$home/state/t1.inbox/001.msg" \
+    || fail "the branch's blocker answer did not reach the worker's inbox"
+
+  # Under the record: the same decision answer is sent and closes the key.
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" propose >/dev/null || fail "away propose failed"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null || fail "away confirm failed"
+  out=$(env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_SUPERVISION_ACTOR=branch "$SEND" t1 --resolve-key api-shape "go with REST" 2>&1); rc=$?
+  expect_code 0 "$rc" "under the away-posture record the branch's decision answer must be sent: $out"
+  assert_contains "$out" "main is parked" "the relocation did not announce itself"
+  grep -qF 'resolved [key=api-shape]: answered: go with REST' "$home/state/t1.status" \
+    || fail "the relocated answer did not close the decision:"$'\n'"$(cat "$home/state/t1.status")"
+  grep -qF "go with REST" "$home/state/t1.inbox/002.msg" \
+    || fail "the relocated answer did not reach the worker's inbox"
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F '[key=api-shape]' >/dev/null; then
+    fail "the relocated answer left the decision open: $out"
+  fi
+
+  # Main never meets the partition, attended or not.
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null || fail "away archive failed"
+  printf 'needs-decision [key=db]: postgres or sqlite\n' >> "$home/state/t1.status"
+  run_send "$fb" "$home" "$log" t1 --resolve-key db "postgres"; rc=$?
+  expect_code 0 "$rc" "main answering a decision attended is unaffected by the partition"
+  grep -qF 'resolved [key=db]: answered: postgres' "$home/state/t1.status" \
+    || fail "main's attended decision answer did not close the key"
+  pass "fm-send --resolve-key: a decision answer refuses the attended branch before sending, a blocked: key stays steering, and the away-posture record relocates the answer"
+}
+
 test_answer_send_closes_open_decision
 test_answer_close_is_self_announced
 test_separate_resolve_key_answers_do_not_rewake
@@ -774,6 +879,7 @@ test_not_open_key_refuses_before_send
 test_failed_ring_still_closes_at_enqueue
 test_failed_enqueue_does_not_close
 test_multiple_keys_close_together
+test_multiple_keys_close_after_fold_is_self_announced
 test_local_secondmate_answer_marked_and_closed
 test_remote_secondmate_answer_closes_locally
 test_remote_reply_corr_tag_does_not_block_resolve_key
@@ -785,3 +891,4 @@ test_unclosable_reserved_key_refuses_before_send
 test_long_decision_key_refuses_before_send
 test_failed_close_recovery_command_is_shell_safe
 test_remote_reserved_pending_reply_key_closes_locally
+test_decision_answer_partition_relocates_under_the_record

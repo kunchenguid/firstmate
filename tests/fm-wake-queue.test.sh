@@ -1571,9 +1571,10 @@ test_interruption_before_and_after_raw_commit() {
 # directions of the dedup contract are pinned through the real library
 # functions: a fully announced file plus the home's own bookkeeping close stays
 # announced (no wake), while ANY unannounced byte - a pending foreign line, a
-# missing marker, a later different note - reads as wake-worthy.
+# missing marker, a later different note - reads as wake-worthy. An OPEN
+# DECISIONS fold is no substitute for the watcher's classified offset.
 test_self_announced_append_guards() {
-  local dir state status
+  local dir state status rc=0
   dir=$(make_case self-announced-append)
   state="$dir/state"
   status="$state/t.status"
@@ -1588,6 +1589,13 @@ test_self_announced_append_guards() {
   printf 'working: first line\n' > "$status"
   run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
     && fail "a never-announced status file read as already announced"
+
+  # A close over those never-announced bytes must not swallow them.
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k0]: answered: too early' || rc=$?
+  [ "$rc" -eq 1 ] || fail "a close over never-announced bytes did not fail toward waking (rc=$rc)"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "a close over never-announced bytes swallowed the pending wake"
 
   # Prime the marker to current (the watcher just surfaced/absorbed everything).
   prime_status_seen "$state" "$status" || fail "could not prime the seen marker"
@@ -1608,7 +1616,7 @@ test_self_announced_append_guards() {
 
   # With that foreign line pending, a bookkeeping close must NOT advance the
   # marker over it: the close appends but the file stays wake-worthy.
-  local rc=0
+  rc=0
   run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
     'resolved [key=k1]: answered: second close' || rc=$?
   [ "$rc" -eq 1 ] || fail "a close over pending foreign bytes did not fail toward waking (rc=$rc)"
