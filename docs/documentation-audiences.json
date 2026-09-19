@@ -269,10 +269,6 @@
       "audience": "agent-runtime"
     },
     {
-      "path": "CLAUDE.md",
-      "audience": "agent-runtime"
-    },
-    {
       "path": "CONTRIBUTING.md",
       "audience": "maintainer-architecture"
     },

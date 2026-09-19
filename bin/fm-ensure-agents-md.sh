@@ -245,19 +245,10 @@ if [ -e "$AGENTS" ]; then
   fi
   if [ ! -e "$CLAUDE" ]; then
     ensure_maintenance_section
-    if claude_supports_native_agents_md; then
-      if [ "$MAINT_INJECTED" -eq 1 ]; then
-        echo "updated: added ## Maintaining this file to AGENTS.md in $DIR"
-      else
-        echo "unchanged: AGENTS.md in $DIR"
-      fi
+    if [ "$MAINT_INJECTED" -eq 1 ]; then
+      echo "updated: added ## Maintaining this file to AGENTS.md in $DIR"
     else
-      install_claude_pointer
-      if [ "$MAINT_INJECTED" -eq 1 ]; then
-        echo "updated: added ## Maintaining this file to AGENTS.md and wrote CLAUDE.md @AGENTS.md pointer in $DIR"
-      else
-        echo "wrote: CLAUDE.md @AGENTS.md pointer in $DIR"
-      fi
+      echo "unchanged: AGENTS.md in $DIR"
     fi
     exit 0
   fi
@@ -298,8 +289,7 @@ if [ -e "$CLAUDE" ]; then
     fi
     mv "$CLAUDE" "$AGENTS"
     ensure_maintenance_section
-    install_claude_pointer
-    echo "promoted: moved CLAUDE.md to AGENTS.md and wrote CLAUDE.md @AGENTS.md pointer in $DIR"
+    echo "promoted: moved CLAUDE.md to AGENTS.md in $DIR"
     exit 0
   fi
   echo "conflict: CLAUDE.md exists in $DIR but is not a regular file or symlink" >&2
@@ -307,9 +297,4 @@ if [ -e "$CLAUDE" ]; then
 fi
 
 write_skeleton
-if claude_supports_native_agents_md; then
-  echo "created: AGENTS.md in $DIR"
-else
-  install_claude_pointer
-  echo "created: AGENTS.md and CLAUDE.md @AGENTS.md pointer in $DIR"
-fi
+echo "created: AGENTS.md in $DIR"
