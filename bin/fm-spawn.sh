@@ -2007,9 +2007,22 @@ esac
 # secondmate whose supervision cycle could never be armed.
 # agy has none either: it exposes no hook surface for primary supervision and
 # docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
+# config/unverified-secondmate-harness is the captain's written acceptance, for
+# THIS home, of a secondmate on an adapter that is not verified for that kind. It
+# makes nothing verified and closes none of the gaps above - the mate still has no
+# primary supervision protocol to rely on and must be proven by hand once it is up.
+# It is a file rather than an environment variable on purpose: an automatic
+# liveness relaunch carries none of our environment, so a flag in the environment
+# would bring a dead mate back only when a human happened to be driving.
+# It is read only from the resolved FM_HOME, never from the working directory, so
+# one home's acceptance can never authorize a launch for a different home.
 if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ]; }; then
-  echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
-  exit 1
+  if [ -n "${FM_HOME:-}" ] && [ -f "$FM_HOME/config/unverified-secondmate-harness" ]; then
+    echo "warning: $HARNESS is NOT a verified secondmate adapter. Launching it only because config/unverified-secondmate-harness records the captain's explicit acceptance; this mate's supervision is unproven, so verify it by hand." >&2
+  else
+    echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
+    exit 1
+  fi
 fi
 
 # rovo carries the same primary-supervision gap as muse: no turn-end hook, no
@@ -2288,17 +2301,12 @@ effort_flag_for_harness() {
     esac
     ;;
   muse)
-    # muse 0.1.0-R708.1 --reasoning-effort accepts none|minimal|low|medium|
-    # high|xhigh|ultra and defaults to high, so low..xhigh map straight across.
-    # ultra is muse's max-CLASS level, so firstmate's max maps onto it - but
-    # only ever as an EXPLICIT captain choice, never as a fallback, because
-    # AGENTS.md section 4 forbids selecting max without captain preference and
-    # the omitted effort here leaves muse on its own high default. muse's extra
-    # none/minimal levels sit below firstmate's shared vocabulary and are
-    # deliberately unreachable rather than remapped onto low.
+    # Preserve the requested level: substituting ultra for max silently
+    # delivers xhigh on Muse Code 1.1.1. Let Muse refuse missing entitlement
+    # rather than selecting a fallback. The operating contract is owned by
+    # .agents/skills/harness-adapters/references/harness/muse.md.
     case "$effort" in
-    low | medium | high | xhigh) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
-    max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
+    low | medium | high | xhigh | max) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
     esac
     ;;
     # rovo has no --effort flag on `run`; its effort mapping rides
