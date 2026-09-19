@@ -108,15 +108,15 @@ home_of() { printf '%s/home\n' "$1"; }
 backlog_of() { printf '%s/home/data/backlog.md\n' "$1"; }
 
 add_item() {  # <case-dir> <id> [kind]
-  tasks-axi add "$2" "item for $2" --kind "${3:-ship}" --file "$(backlog_of "$1")" >/dev/null
+  fm_test_tasks_axi add "$2" "item for $2" --kind "${3:-ship}" --file "$(backlog_of "$1")" >/dev/null
 }
 
 start_item() {  # <case-dir> <id>
-  tasks-axi start "$2" --file "$(backlog_of "$1")" >/dev/null
+  fm_test_tasks_axi start "$2" --file "$(backlog_of "$1")" >/dev/null
 }
 
 row_state() {  # <case-dir> <id>
-  tasks-axi show "$2" --file "$(backlog_of "$1")" 2>/dev/null |
+  fm_test_tasks_axi show "$2" --file "$(backlog_of "$1")" 2>/dev/null |
     sed -n 's/^  state: *//p' | head -1
 }
 
@@ -696,9 +696,9 @@ test_backlog_callers_refuse_unreadable_backend_config() (
   mkdir -p "$data" "$case_dir/data" "$case_dir/config"
   printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$data/backlog.md"
   cp "$data/backlog.md" "$case_dir/data/backlog.md"
-  TASKS_AXI_BACKEND=markdown tasks-axi add "$id" "Configured row" --file "$data/backlog.md" >/dev/null \
+  TASKS_AXI_BACKEND=markdown fm_test_tasks_axi add "$id" "Configured row" --file "$data/backlog.md" >/dev/null \
     || fail "could not create the configured backlog"
-  TASKS_AXI_BACKEND=markdown tasks-axi add "$id" "Default row" --file "$case_dir/data/backlog.md" >/dev/null \
+  TASKS_AXI_BACKEND=markdown fm_test_tasks_axi add "$id" "Default row" --file "$case_dir/data/backlog.md" >/dev/null \
     || fail "could not create the default backlog"
   cp "$data/backlog.md" "$case_dir/configured-before"
   cp "$case_dir/data/backlog.md" "$case_dir/default-before"
@@ -740,9 +740,9 @@ test_captain_hold_preserves_relocated_backlog_on_backend_error() {
     mkdir -p "$data" "$home/data" "$home/config" "$home/state" "$case_dir/user-home"
     printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$data/backlog.md"
     cp "$data/backlog.md" "$home/data/backlog.md"
-    TASKS_AXI_BACKEND=markdown tasks-axi add "$id" "Hold regression" --file "$data/backlog.md" >/dev/null \
+    TASKS_AXI_BACKEND=markdown fm_test_tasks_axi add "$id" "Hold regression" --file "$data/backlog.md" >/dev/null \
       || fail "could not create the configured hold row"
-    TASKS_AXI_BACKEND=markdown tasks-axi add "$id" "Hold regression" --file "$home/data/backlog.md" >/dev/null \
+    TASKS_AXI_BACKEND=markdown fm_test_tasks_axi add "$id" "Hold regression" --file "$home/data/backlog.md" >/dev/null \
       || fail "could not create the default hold row"
     cp "$data/backlog.md" "$case_dir/configured-before"
     cp "$home/data/backlog.md" "$case_dir/default-before"
@@ -762,7 +762,7 @@ test_captain_hold_preserves_relocated_backlog_on_backend_error() {
         || fail "refused captain hold changed the configured backlog"
     else
       [ "$rc" -eq 0 ] || fail "captain hold rejected $config_state configuration: $out"
-      show=$(TASKS_AXI_BACKEND=markdown tasks-axi show "$id" --file "$data/backlog.md") \
+      show=$(TASKS_AXI_BACKEND=markdown fm_test_tasks_axi show "$id" --file "$data/backlog.md") \
         || fail "the configured hold row disappeared"
       assert_contains "$show" "held: yes" "captain hold did not update the configured backlog"
     fi
@@ -939,7 +939,7 @@ test_dispatch_refuses_a_held_row_before_creating_resources() {
   id=atomic-dispatch-held-b1
   case_dir=$(make_home dispatch-held "$id")
   add_item "$case_dir" "$id"
-  tasks-axi hold "$id" --reason "captain decision pending" --kind captain \
+  fm_test_tasks_axi hold "$id" --reason "captain decision pending" --kind captain \
     --file "$(backlog_of "$case_dir")" >/dev/null
   cat > "$case_dir/fakebin/tmux" <<SH
 #!/usr/bin/env bash
@@ -974,7 +974,7 @@ test_dispatch_refuses_a_blocked_row_before_creating_resources() {
   blocker=atomic-dispatch-blocker-b16
   case_dir=$(make_home dispatch-blocked "$id" "$blocker")
   add_item "$case_dir" "$blocker"
-  tasks-axi add "$id" "item for $id" --kind ship --blocked-by "$blocker" \
+  fm_test_tasks_axi add "$id" "item for $id" --kind ship --blocked-by "$blocker" \
     --file "$(backlog_of "$case_dir")" >/dev/null
   cat > "$case_dir/fakebin/tmux" <<SH
 #!/usr/bin/env bash
@@ -1009,7 +1009,7 @@ test_dispatch_refuses_a_held_in_flight_row_before_relaunch() {
   case_dir=$(make_home dispatch-held-in-flight "$id")
   add_item "$case_dir" "$id"
   start_item "$case_dir" "$id"
-  tasks-axi hold "$id" --reason "captain decision pending" --kind captain \
+  fm_test_tasks_axi hold "$id" --reason "captain decision pending" --kind captain \
     --file "$(backlog_of "$case_dir")" >/dev/null
   cat > "$case_dir/fakebin/tmux" <<SH
 #!/usr/bin/env bash
@@ -1062,14 +1062,14 @@ test_recovery_uses_the_parent_of_a_trailing_slash_data_record() {
   pin_markdown_backend "$case_dir"
   backlog="$relocated/backlog.md"
   printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' > "$backlog"
-  tasks-axi add "$id" "item for $id" --kind ship --file "$backlog" >/dev/null
-  tasks-axi start "$id" --file "$backlog" >/dev/null
+  fm_test_tasks_axi add "$id" "item for $id" --kind ship --file "$backlog" >/dev/null
+  fm_test_tasks_axi start "$id" --file "$backlog" >/dev/null
   marker="$(home_of "$case_dir")/state/$id.backlog-close"
   printf 'id=%s\ndata=%s/\nspawn_gen=spawn-relocated-recovery\narg=--note\narg=local%%20main\n' "$id" "$relocated" > "$marker"
   require_show_cwd "$case_dir" "$(cd "$case_dir" && pwd -P)"
 
   out=$(FM_DATA_OVERRIDE="$relocated/" run_bootstrap "$case_dir")
-  [ "$(tasks-axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = "done" ] \
+  [ "$(fm_test_tasks_axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = "done" ] \
     || fail "relocated-data recovery used the wrong addressing root: $out"
   assert_absent "$marker" "relocated-data recovery retained its close marker"
   pass "recovery uses the parent of a trailing-slash data record"
@@ -1086,8 +1086,8 @@ test_completion_targets_a_nested_relative_data_directory() {
   mv "$(home_of "$case_dir")/data" "$data"
   data_resolved=$(cd "$data" && pwd -P)
   backlog="$data/backlog.md"
-  tasks-axi add "$id" "item for $id" --kind ship --file "$backlog" >/dev/null
-  tasks-axi start "$id" --file "$backlog" >/dev/null
+  fm_test_tasks_axi add "$id" "item for $id" --kind ship --file "$backlog" >/dev/null
+  fm_test_tasks_axi start "$id" --file "$backlog" >/dev/null
   write_task_meta "$case_dir" "$id" ship local-only "spawn_gen=spawn-relative-data"
 
   out=$(cd "$case_dir" && \
@@ -1095,7 +1095,7 @@ test_completion_targets_a_nested_relative_data_directory() {
     FM_DATA_OVERRIDE="$relative_data" PATH="$case_dir/fakebin:$PATH" \
     "$TEARDOWN" "$id" 2>&1) \
     || fail "relative-data teardown failed: $out"
-  [ "$(tasks-axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = "done" ] \
+  [ "$(fm_test_tasks_axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = "done" ] \
     || fail "relative-data teardown mutated a different backlog file"
   assert_absent "$(home_of "$case_dir")/state/$id.meta" \
     "relative-data teardown retained its task record"
@@ -1115,17 +1115,17 @@ test_immediate_child_absolute_data_dispatches_and_completes() {
   mv "$(home_of "$case_dir")/data" "$data"
   data_resolved=$(cd "$data" && pwd -P)
   backlog="$data/backlog.md"
-  tasks-axi add "$id" "item for $id" --kind ship --file "$backlog" >/dev/null
+  fm_test_tasks_axi add "$id" "item for $id" --kind ship --file "$backlog" >/dev/null
 
   out=$(FM_DATA_OVERRIDE="$data" run_ship_spawn "$case_dir" "$id") \
     || fail "immediate-child-data spawn failed: $out"
-  [ "$(tasks-axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = in_flight ] \
+  [ "$(fm_test_tasks_axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = in_flight ] \
     || fail "immediate-child absolute dispatch mutated a different backlog"
   rm -f "$(home_of "$case_dir")/state/$id.meta"
   write_task_meta "$case_dir" "$id" ship local-only "spawn_gen=spawn-immediate-child"
   out=$(FM_DATA_OVERRIDE="$data" run_teardown "$case_dir" "$id") \
     || fail "immediate-child-data teardown failed: $out"
-  [ "$(tasks-axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = "done" ] \
+  [ "$(fm_test_tasks_axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = "done" ] \
     || fail "immediate-child absolute completion mutated a different backlog"
   assert_contains "$out" "closed in $data_resolved/backlog.md" \
     "relocated completion confirmed the wrong backlog path"
@@ -1140,17 +1140,17 @@ test_bare_relative_data_dispatches_and_completes() {
   data="$case_dir/records"
   mv "$(home_of "$case_dir")/data" "$data"
   backlog="$data/backlog.md"
-  tasks-axi add "$id" "item for $id" --kind ship --file "$backlog" >/dev/null
+  fm_test_tasks_axi add "$id" "item for $id" --kind ship --file "$backlog" >/dev/null
 
   out=$(cd "$case_dir" && FM_DATA_OVERRIDE=records run_ship_spawn "$case_dir" "$id") \
     || fail "bare-relative-data spawn failed: $out"
-  [ "$(tasks-axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = in_flight ] \
+  [ "$(fm_test_tasks_axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = in_flight ] \
     || fail "bare relative dispatch mutated a different backlog"
   rm -f "$(home_of "$case_dir")/state/$id.meta"
   write_task_meta "$case_dir" "$id" ship local-only "spawn_gen=spawn-bare-relative"
   out=$(cd "$case_dir" && FM_DATA_OVERRIDE=records run_teardown "$case_dir" "$id") \
     || fail "bare-relative-data teardown failed: $out"
-  [ "$(tasks-axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = "done" ] \
+  [ "$(fm_test_tasks_axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = "done" ] \
     || fail "bare relative completion mutated a different backlog"
   pass "bare relative data addresses one backlog through dispatch and completion"
 }
@@ -1229,7 +1229,7 @@ test_dispatch_refuses_an_unresolvable_data_directory() {
     "spawn did not identify the inaccessible data directory"
   assert_absent "$(home_of "$case_dir")/state/$id.meta" \
     "fatal backlog addressing created a task record"
-  [ "$(tasks-axi show "$id" --file "$saved/backlog.md" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = queued ] \
+  [ "$(fm_test_tasks_axi show "$id" --file "$saved/backlog.md" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = queued ] \
     || fail "fatal backlog addressing changed the queued row"
   pass "dispatch refuses an unresolvable backlog data directory"
 }
@@ -1252,7 +1252,7 @@ test_completion_refuses_an_unresolvable_data_directory() {
   assert_present "$meta" "fatal backlog addressing removed the task record"
   assert_absent "$(home_of "$case_dir")/state/$id.backlog-close" \
     "fatal backlog addressing wrote a close marker"
-  [ "$(tasks-axi show "$id" --file "$saved/backlog.md" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = in_flight ] \
+  [ "$(fm_test_tasks_axi show "$id" --file "$saved/backlog.md" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = in_flight ] \
     || fail "fatal backlog addressing changed the In-flight row"
   pass "completion refuses before mutation when backlog data is unresolvable"
 }
@@ -1294,7 +1294,7 @@ test_dispatch_refuses_a_closed_item() {
   id=atomic-dispatch-b3
   case_dir=$(make_home dispatch-closed "$id")
   add_item "$case_dir" "$id"
-  tasks-axi "done" "$id" --file "$(backlog_of "$case_dir")" >/dev/null
+  fm_test_tasks_axi "done" "$id" --file "$(backlog_of "$case_dir")" >/dev/null
 
   out=$(run_ship_spawn "$case_dir" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "spawn dispatched onto an item the backlog already closed"
@@ -1646,8 +1646,8 @@ test_completion_records_a_relative_report_for_relocated_data() {
   pin_markdown_backend "$case_dir/relocated"
   mv "$(home_of "$case_dir")/data" "$relocated"
   backlog="$relocated/backlog.md"
-  tasks-axi add "$id" "item for $id" --kind scout --file "$backlog" >/dev/null
-  tasks-axi start "$id" --file "$backlog" >/dev/null
+  fm_test_tasks_axi add "$id" "item for $id" --kind scout --file "$backlog" >/dev/null
+  fm_test_tasks_axi start "$id" --file "$backlog" >/dev/null
   write_task_meta "$case_dir" "$id" scout '' "spawn_gen=spawn-relocated-scout"
   mkdir -p "$relocated/$id"
   printf 'findings\n' > "$relocated/$id/report.md"
@@ -1658,7 +1658,7 @@ test_completion_records_a_relative_report_for_relocated_data() {
 
   out=$(FM_DATA_OVERRIDE="$relocated////" run_teardown "$case_dir" "$id") \
     || fail "relocated scout teardown failed: $out"
-  [ "$(tasks-axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = "done" ] \
+  [ "$(fm_test_tasks_axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = "done" ] \
     || fail "relocated scout backlog row was not closed"
   assert_grep "data/$id/report.md" "$backlog" \
     "relocated scout close did not record a relative report path"
@@ -1674,8 +1674,8 @@ test_space_containing_scout_report_marker_replays() {
   pin_markdown_backend "$case_dir/crew space"
   mv "$(home_of "$case_dir")/data" "$data"
   backlog="$data/backlog.md"
-  tasks-axi add "$id" "item for $id" --kind scout --file "$backlog" >/dev/null
-  tasks-axi start "$id" --file "$backlog" >/dev/null
+  fm_test_tasks_axi add "$id" "item for $id" --kind scout --file "$backlog" >/dev/null
+  fm_test_tasks_axi start "$id" --file "$backlog" >/dev/null
   write_task_meta "$case_dir" "$id" scout '' "spawn_gen=spawn-space-report"
   mkdir -p "$data/$id"
   printf 'findings\n' > "$data/$id/report.md"
@@ -1694,7 +1694,7 @@ test_space_containing_scout_report_marker_replays() {
   rm -f "$case_dir/fakebin/tasks-axi"
 
   out=$(FM_DATA_OVERRIDE="$data" run_bootstrap "$case_dir")
-  [ "$(tasks-axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = "done" ] \
+  [ "$(fm_test_tasks_axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = "done" ] \
     || fail "space-containing report marker did not replay: $out"
   assert_grep "data/$id/report.md" "$backlog" \
     "report path from a space-containing data directory was lost during replay"
@@ -1713,16 +1713,16 @@ test_trailing_newline_data_path_fails_closed() {
   cp "$data/$id/brief.md" "$home/data/$id/brief.md"
   ln -s "$data" "$case_dir/data-alias"
   backlog_alias="$case_dir/data-alias/backlog.md"
-  tasks-axi add "$id" "item for $id" --kind ship --file "$backlog_alias" >/dev/null
+  fm_test_tasks_axi add "$id" "item for $id" --kind ship --file "$backlog_alias" >/dev/null
 
   out=$(FM_DATA_OVERRIDE="$data" run_ship_spawn "$case_dir" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "trailing-newline data path bypassed dispatch transition"
   assert_absent "$home/state/$id.meta" \
     "trailing-newline dispatch published a task record"
-  [ "$(tasks-axi show "$id" --file "$backlog_alias" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = queued ] \
+  [ "$(fm_test_tasks_axi show "$id" --file "$backlog_alias" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = queued ] \
     || fail "trailing-newline dispatch changed the real backlog row: $out"
 
-  tasks-axi start "$id" --file "$backlog_alias" >/dev/null
+  fm_test_tasks_axi start "$id" --file "$backlog_alias" >/dev/null
   write_task_meta "$case_dir" "$id" ship local-only "spawn_gen=spawn-newline-data"
   rc=0
   out=$(FM_DATA_OVERRIDE="$data" run_teardown "$case_dir" "$id") || rc=$?
@@ -1731,7 +1731,7 @@ test_trailing_newline_data_path_fails_closed() {
     "trailing-newline teardown removed the task record"
   assert_absent "$home/state/$id.backlog-close" \
     "trailing-newline teardown published a close marker"
-  [ "$(tasks-axi show "$id" --file "$backlog_alias" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = in_flight ] \
+  [ "$(fm_test_tasks_axi show "$id" --file "$backlog_alias" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = in_flight ] \
     || fail "trailing-newline teardown changed the real backlog row: $out"
   pass "control-byte data paths fail closed before paired transitions"
 }
@@ -1743,16 +1743,16 @@ test_control_character_data_path_is_refused_before_cleanup() {
   data="$case_dir/crew"$'\t'"data"
   mv "$(home_of "$case_dir")/data" "$data"
   backlog="$data/backlog.md"
-  tasks-axi add "$id" "item for $id" --kind ship --file "$backlog" >/dev/null
+  fm_test_tasks_axi add "$id" "item for $id" --kind ship --file "$backlog" >/dev/null
 
   out=$(FM_DATA_OVERRIDE="$data" run_ship_spawn "$case_dir" "$id") || rc=$?
   [ "$rc" -ne 0 ] || fail "control-character data path passed dispatch preflight"
   assert_absent "$(home_of "$case_dir")/state/$id.meta" \
     "control-character dispatch published a task record"
-  [ "$(tasks-axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = queued ] \
+  [ "$(fm_test_tasks_axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = queued ] \
     || fail "control-character dispatch changed the backlog row: $out"
 
-  tasks-axi start "$id" --file "$backlog" >/dev/null
+  fm_test_tasks_axi start "$id" --file "$backlog" >/dev/null
   write_task_meta "$case_dir" "$id" ship local-only "spawn_gen=spawn-control-data"
   marker="$(home_of "$case_dir")/state/$id.backlog-close"
   rc=0
@@ -1761,7 +1761,7 @@ test_control_character_data_path_is_refused_before_cleanup() {
   assert_present "$(home_of "$case_dir")/state/$id.meta" \
     "control-character close preflight removed the task record"
   assert_absent "$marker" "control-character close preflight published a marker"
-  [ "$(tasks-axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = in_flight ] \
+  [ "$(fm_test_tasks_axi show "$id" --file "$backlog" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = in_flight ] \
     || fail "control-character close preflight changed the backlog row: $out"
   pass "unreplayable data paths are refused before destructive cleanup"
 }
@@ -2035,7 +2035,7 @@ test_recovery_backfills_a_recorded_link_on_an_already_done_item() {
   case_dir=$(make_home heal-done-backfill)
   add_item "$case_dir" "$id"
   start_item "$case_dir" "$id"
-  tasks-axi "done" "$id" --file "$(backlog_of "$case_dir")" >/dev/null
+  fm_test_tasks_axi "done" "$id" --file "$(backlog_of "$case_dir")" >/dev/null
   marker="$(home_of "$case_dir")/state/$id.backlog-close"
   printf 'id=%s\ndata=%s\nspawn_gen=spawn-heal-done\narg=--pr\narg=https://github.com/example/repo/pull/13\n' \
     "$id" "$(home_of "$case_dir")/data" > "$marker"
@@ -2593,7 +2593,7 @@ test_bootstrap_stops_when_data_disappears_before_reconciliation() {
   [ "$rc" -ne 0 ] || fail "bootstrap absorbed a fatal reconciliation addressing error: $out"
   assert_present "$(home_of "$case_dir")/state/$id.meta" \
     "fatal bootstrap reconciliation removed the task record"
-  [ "$(tasks-axi show "$id" --file "$saved/backlog.md" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = in_flight ] \
+  [ "$(fm_test_tasks_axi show "$id" --file "$saved/backlog.md" 2>/dev/null | sed -n 's/^  state: *//p' | head -1)" = in_flight ] \
     || fail "fatal bootstrap reconciliation changed the backlog row"
   pass "bootstrap stops when backlog data disappears before reconciliation"
 }
@@ -2628,7 +2628,7 @@ test_recovery_leaves_a_captain_held_item_alone() {
   id=atomic-heal-b11
   case_dir=$(make_home heal-held)
   add_item "$case_dir" "$id"
-  tasks-axi hold "$id" --reason "captain decision pending" --kind captain \
+  fm_test_tasks_axi hold "$id" --reason "captain decision pending" --kind captain \
     --file "$(backlog_of "$case_dir")" >/dev/null
   write_task_meta "$case_dir" "$id" ship no-mistakes
 

@@ -787,11 +787,11 @@ seed_public_commitment() {
   jq -n --arg h "$work_home" --arg w "$work_id" \
     '{relation_id:"rel-code", work_ref:{home_id:$h, task_id:$w},
       role:"fulfills", required:true, generation:1}' > "$home/relation.json"
-  (cd "$home" && tasks-axi public-followup add "$obligation" \
+  (cd "$home" && fm_test_tasks_axi public-followup add "$obligation" \
     --request-context-file "$home/request.json" --purpose promised-final \
     --expected-final-file "$home/expected.json" --expires-at 2026-10-01T00:00:00Z) >/dev/null \
     || fail "could not create the public commitment"
-  (cd "$home" && tasks-axi public-followup bind-work "$obligation" \
+  (cd "$home" && fm_test_tasks_axi public-followup bind-work "$obligation" \
     --relation-file "$home/relation.json") >/dev/null \
     || fail "could not bind work to the public commitment"
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" "$ROOT/bin/fm-public-followup.sh" register \

@@ -374,8 +374,8 @@ test_return_brief_composes_from_record_store_and_held_set() {
   local dir out rc gate health_line clauses_line waiting_line failed_line second
   dir="$TMP_ROOT/brief"
   install_runner "$dir"
-  (cd "$dir/home" && tasks-axi add fix-windows 'Fix the windows lane' --file data/backlog.md >/dev/null \
-    && tasks-axi hold fix-windows --reason 'awaiting the captain on the merge' --kind captain --file data/backlog.md >/dev/null) \
+  (cd "$dir/home" && fm_test_tasks_axi add fix-windows 'Fix the windows lane' --file data/backlog.md >/dev/null \
+    && fm_test_tasks_axi hold fix-windows --reason 'awaiting the captain on the merge' --kind captain --file data/backlog.md >/dev/null) \
     || fail "could not seed the held backlog"
   contract_in "$dir" propose --words 'merge the windows fix when green, then cut a prerelease' \
     --action merge --object 'task fix-windows PR' --when 'checks green' \
