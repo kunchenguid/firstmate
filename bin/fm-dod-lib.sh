@@ -223,6 +223,49 @@ fm_brief_intent_address_line() {  # <file>
   '
 }
 
+# Run the opt-in pre-publication voice check (bin/fm-voice-check.sh) on the
+# intent a no-mistakes pipeline will publish as the PR intent. Uses the
+# caller's FM_ROOT and FM_HOME. Returns the check's exit status: 0 for clear,
+# off, or an accepted unverified result (whose block is printed on stderr); on
+# any other status the check's output is left in FM_INTENT_VOICE_OUTPUT for
+# the caller's refusal message.
+fm_intent_voice_check() {  # <intent-text> [<accept-unverified-reason>]
+  local text=$1 accept=${2:-} status
+  local -a args=(--kind intent)
+  [ -z "$accept" ] || args+=(--accept-unverified "$accept")
+  FM_INTENT_VOICE_OUTPUT=$(printf '%s\n' "$text" | FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-voice-check.sh" "${args[@]}" - 2>&1)
+  status=$?
+  if [ "$status" -eq 0 ]; then
+    case "$FM_INTENT_VOICE_OUTPUT" in
+      *accepted-unverified:*) printf '%s\n' "$FM_INTENT_VOICE_OUTPUT" >&2 ;;
+    esac
+  fi
+  return "$status"
+}
+
+# Print the refusal for a failed fm_intent_voice_check.
+fm_intent_voice_refusal() {  # <brief> <status> <action: spawn|promotion> <override-flag>
+  local brief=$1 status=$2 action=$3 flag=$4
+  case "$status" in
+    1) printf "error: %s ## Captain's intent did not pass the pre-publication voice check; the pipeline publishes it verbatim as the PR intent, so keep only publishable words there (move relayed orders and context to ## Firstmate spec, and ask for the captain's words in the artifact's language) before %s\n" "$brief" "$action" >&2 ;;
+    3) printf "error: %s ## Captain's intent could not be verified by the pre-publication voice check; retry the %s, or pass %s <reason> only on an explicit instruction to publish this intent unverified\n" "$brief" "$action" "$flag" >&2 ;;
+    *) printf "error: %s ## Captain's intent voice check failed to run (exit %s)\n" "$brief" "$status" >&2 ;;
+  esac
+  printf '%s\n' "$FM_INTENT_VOICE_OUTPUT" >&2
+}
+
+# Render the worker-side pre-publication voice check step for one artifact the
+# worker publishes itself: the bounded correction loop and its escalation.
+# Uses the caller's FM_ROOT and FM_HOME. The backticks are literal Markdown.
+# shellcheck disable=SC2016
+fm_voice_check_step() {  # <kind> <publish-action> <what-to-write>
+  local kind=$1 action=$2 what=$3
+  printf 'Write %s to a file, run `FM_HOME=%s %s/bin/fm-voice-check.sh --kind %s <file>`, and %s only on exit 0.\n' \
+    "$what" "$FM_HOME" "$FM_ROOT" "$kind" "$action"
+  printf 'On exit 1, correct only the flagged passages, guided by the categories it printed, and check again; after at most two corrections that are still flagged, or on exit 3 (unverified), do not publish: append `needs-decision [key=voice-check]: %s voice check <status>: <printed categories>` and stop.\n' "$kind"
+  printf 'Pass `--accept-unverified <reason>` only when firstmate explicitly instructs it for this one publication; nothing publishes a flagged text.'
+}
+
 fm_ask_user_escalation_block() {  # <data-dir> <task-id>
   local data=$1 id=$2
   cat <<EOF
@@ -242,6 +285,8 @@ Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done: PR {url}\` to the status file and stop.
+Before opening the PR, check its text:
+$(fm_voice_check_step pr 'open the PR with exactly that title and description' 'the PR title and description')
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
       ;;
@@ -274,6 +319,8 @@ Do not include \`## Firstmate spec\`, later Firstmate build constraints, or your
 The \`--intent\` string you pass must be self-sufficient: that string plus the codebase must let a reader reconstruct roughly the same specification, without depending on a separate report, a PR, or context that lives only in this conversation.
 When the captain's intent refers to a report, decision, or PR ("do items 1, 2, 3, and 7 of the report"), write the substance of the referenced items into \`--intent\` in the captain's terms, not only the pointer; that substance is the captain's ask by reference, while Firstmate's build instructions and your own decisions still stay out.
 This replaces the no-mistakes skill's advice to enrich \`--intent\` with decisions and tradeoffs; that advice does not apply to Firstmate-dispatched work.
+Before every \`no-mistakes axi run\` that starts a run, the pipeline will publish the \`--intent\` string in the PR, so check it first:
+$(fm_voice_check_step intent 'start the run with exactly that string' 'that exact string')
 Do not hand-edit, commit, or fix findings yourself while a run is active - the pipeline applies every fix.
 
 One drive call blocks until the next gate or outcome, which routinely outlives what your harness lets a single command run: Claude Code kills a command at ten minutes maximum, while one fix round is capped around thirty minutes and up to three rounds chain.

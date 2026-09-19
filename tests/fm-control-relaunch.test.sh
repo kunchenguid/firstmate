@@ -568,6 +568,25 @@ test_relaunch_requires_a_note_for_a_ship_task() {
   pass "fm-control relaunch: a ship task refuses without the progress note its replacement needs"
 }
 
+test_no_mistakes_relaunch_skips_the_intent_voice_check() {
+  local dir out rc
+  dir=$(new_case voice rl4)
+  add_ship_task "$dir" rl4 claude
+  printf 'TYPESAFE_API_KEY=test-key\n' > "$dir/home/.env"
+  cat > "$dir/fakebin/curl" <<SH
+#!/usr/bin/env bash
+printf 'call\\n' >> "$dir/curl.log"
+exit 7
+SH
+  chmod +x "$dir/fakebin/curl"
+  out=$(run_control "$dir" rl4 relaunch --note "service is down"); rc=$?
+  expect_code 0 "$rc" "a no-mistakes relaunch must not depend on the voice check service"$'\n'"$out"
+  assert_not_contains "$out" "voice check" "a relaunch must not run the intent voice check"
+  [ ! -e "$dir/curl.log" ] || fail "a relaunch must make no voice check service call"
+  assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
+  pass "fm-control relaunch: a no-mistakes ship relaunch skips the intent voice check"
+}
+
 # --- 2. harness switch -------------------------------------------------------
 
 test_harness_switch_moves_the_record_and_clears_prior_wiring() {
@@ -1690,6 +1709,7 @@ test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
+test_no_mistakes_relaunch_skips_the_intent_voice_check
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
