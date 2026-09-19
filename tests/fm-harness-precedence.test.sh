@@ -721,12 +721,23 @@ SH
 # Stop-owned protocol to a Codex primary, so every turn end was blocked for
 # missing Claude recovery.
 test_supervision_protocol_follows_corrected_verdict() {
-  local dir home fakebin bin got
+  local dir home fakebin bin capbin got
   dir="$TMP_ROOT/supervision"
   home="$dir/home"
   mkdir -p "$home/state" "$home/config"
   bin=$(named_bin "$dir/codex-tree" codex)
   fakebin=$(blind_ancestry_bin "$dir/blind")
+  capbin=$(fm_fakebin "$dir/capbin")
+  cat > "$capbin/codex" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  --version) printf 'codex-cli %s\n' "0.154.0" ;;
+  'features list') printf 'hooks stable true\n' ;;
+  'queue --help') printf 'Usage: codex queue --thread <THREAD> --message <TEXT>\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$capbin/codex"
 
   got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
     -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_HOME="$home" \
@@ -736,11 +747,12 @@ test_supervision_protocol_follows_corrected_verdict() {
 
   got=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
     -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_HOME="$home" \
+    PATH="$capbin:$BASE_PATH" \
     "$bin" -c "r=\$(\"$RENDER\"); printf '%s' \"\$r\"")
   assert_contains "$got" "primary harness: codex" \
     "a Codex primary carrying a retained CLAUDECODE did not render the Codex protocol"
-  assert_contains "$got" "Mode: Codex foreground checkpoint." \
-    "the rendered block is not Codex's foreground-checkpoint protocol"
+  assert_contains "$got" "Mode: Codex native Stop-owned supervision." \
+    "the rendered block is not Codex's native Stop-owned protocol"
   assert_not_contains "$got" "Mode: Claude Stop-hook-owned supervision." \
     "the rendered block still carries Claude's Stop-owned protocol"
   pass "session start renders the Codex protocol for a Codex primary holding a retained CLAUDECODE"

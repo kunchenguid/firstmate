@@ -486,11 +486,35 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | Harness | Exact opt-in command | Observed guarantee |
 | --- | --- | --- |
 | Claude | `FM_CLAUDE_LIVE_E2E=1 tests/fm-claude-stop-autoarm-live-e2e.test.sh` | Session start reclaimed a stale owner before two Stop-owned cycles, and a competing live owner prevented arm, rewake, epoch write, or lock replacement. |
-| Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | The one-second foreground checkpoint returned without switching to the arm wrapper. |
+| Codex | `FM_CODEX_LIVE_E2E=1 tests/fm-codex-continuity-live-e2e.test.sh` | Codex 0.154.0, 2026-09-16: native async Stop ownership survived quiet idle and an ordinary user turn, delivered two successive wakes, and reaped the watcher on session shutdown. |
 | OpenCode | `FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh` | A verified successor existed before prompt handling, with no model re-arm or turn-end fallback. |
 | Pi | `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` | One initial tool call led to extension-owned successors and clean child retirement on exit. |
 | omp | `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` | One initial `fm_watch_arm_omp` invocation (the openai-codex model reaches extension tools through omp's `xd://` virtual-file bridge, a `write` to `xd://fm_watch_arm_omp`, counted as the same invocation) started a live watcher; an actionable close spawned a ledger-linked successor and woke main exactly once; the lab is reaped by path, and omp 18.1.11 did not exit within 30s of its rpc stdin closing, recorded as a note. omp 18.1.11, 2026-09-05. |
 | Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |
+
+### Codex native Stop ownership, 2026-09-16
+
+Verified with codex-cli 0.154.0 in an isolated Git checkout driven through a real interactive PTY.
+The fixture consumes the tracked Stop registration, registers a harmless custom check, and acquires its own session lock through a native SessionStart hook.
+It never uses the operator's fleet state or asks the model to arm a watcher.
+This establishes native continuity for the capable CLI; older or unsupported installations retain the foreground protocol, and compaction or context-reset delivery remains unverified.
+
+```sh
+FM_CODEX_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-codex-continuity-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - Codex native Stop survives idle and user turns, handles two wakes, and reaps watcher on shutdown
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=94296
+```
+
+The ordinary user turn retained the existing owner rather than starting a competing watcher.
+Each durable wake resumed the idle model through `codex queue --thread`, was drained and acknowledged, and was followed by a verified successor without a manual checkpoint or blind-turn warning.
+Terminating the native session also retired the callback and watcher; an earlier probe exposed an orphan on abrupt termination and the tracked-child cleanup addresses that case.
+Portable `tests/fm-codex-stop-autoarm.test.sh` separately exercises the registered hook command, competing firings, foreign session refusal, failed transport preserving queued events, and receipt binding/expiry.
+The current operating contract is [`../watcher-continuity.md`](../watcher-continuity.md#codex-native-stop-ownership).
 
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
 

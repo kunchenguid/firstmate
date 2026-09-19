@@ -401,6 +401,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "docs/supervision-protocols/codex-checkpoint.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "docs/supervision-protocols/codex.md",
       "audience": "agent-runtime"
     },

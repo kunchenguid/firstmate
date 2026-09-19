@@ -66,6 +66,8 @@ SUPERVISION OPERATING INSTRUCTIONS - primary harness: codex
 Mode: Codex foreground checkpoint.
 ```
 
+The Mode line records the foreground protocol of that 0.152.0 probe; native capability selection is verified separately below.
+
 Two boundaries are load-bearing here, and the marker-versus-ancestry precedence above is only the first.
 The walk also used to stop as soon as the next pid was 1, on the assumption that pid 1 is always init.
 That assumption inverts inside a PID namespace, where the harness is pid 1: the walk returned no ancestry at all, so the retained marker won by default even with precedence corrected.
@@ -73,6 +75,55 @@ The walk now examines that top process before stopping, which costs one `ps` cal
 The portable regression asserts both directions of that case: a host-shaped pid 1 still leaves the marker to answer, and a harness at pid 1 outranks it.
 
 Run on the host under Claude Code 2.1.252 with the same two markers set, the same probe reports `claude`, `comm claude`, and Claude's Stop-owned protocol, so the correction does not trade one misidentification for its inverse.
+
+### Codex supervision capability selection
+
+Verified on 2026-09-17 with codex-cli 0.154.0 on Linux.
+The installed CLI reports enabled hooks and exposes the verified queue interface; the shared gate exits 0:
+
+```sh
+codex --version
+codex features list | awk '$1 == "hooks"'
+codex queue --help | head -3
+bin/fm-codex-native-capable.sh
+```
+
+```text
+codex-cli 0.154.0
+hooks                                    stable             true
+Queue a message for an existing session
+
+Usage: codex queue [OPTIONS] --thread <THREAD> --message <TEXT>
+```
+
+The native prompt-submitting guard was refreshed with the gate active:
+
+```sh
+LC_ALL=C FM_CODEX_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-codex-continuity-live-e2e.test.sh
+```
+
+```text
+ok - Codex native Stop survives idle and user turns, handles two wakes, and reaps watcher on shutdown
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=80510
+```
+
+The official npm `@openai/codex@0.153.0` binary was also checked without submitting a prompt, with the current tracked Stop registrations copied into an isolated Git fixture:
+
+```sh
+node <isolated-package>/bin/codex.js --dangerously-bypass-hook-trust --no-alt-screen \
+  -C <isolated-git-fixture> -c check_for_update_on_startup=false
+PATH=<isolated-package>/node_modules/.bin:$PATH bin/fm-codex-native-capable.sh
+PATH=<isolated-package>/node_modules/.bin:$PATH bin/fm-supervision-instructions.sh \
+  --harness codex --read-only 0 --afk 0 --x-mode 0
+```
+
+After directory-trust acceptance, 0.153.0 reached its fully initialized idle composer with no hook parser error despite the `async: true` registration.
+The gate returned 1 without output, and the renderer printed `Mode: Codex foreground checkpoint.` with the prior instructions.
+This establishes real older-CLI parsing, startup and path selection, not end-to-end older-CLI watcher delivery.
+
+Portable `tests/fm-supervision-instructions.test.sh` covers older, malformed, prerelease and newer versions, disabled hooks, missing transport, and generic or incomplete command help.
+`tests/fm-codex-stop-autoarm.test.sh` exercises the fallback through the owner, supervision model, and Stop guard without native side effects, as well as native delivery and receipt ownership.
+The current contract is [Codex native Stop ownership](../watcher-continuity.md#codex-native-stop-ownership).
 
 ### Real harness process names behind the walk
 

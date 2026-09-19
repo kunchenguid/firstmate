@@ -48,6 +48,6 @@ The Stop payload includes `cwd`, but the tracked hook does not use it to choose 
 Codex runs the Stop command with process PWD set to the hook-loaded project root, while no `CODEX_PROJECT_DIR`, `CODEX_WORKSPACE_ROOT`, or `CODEX_CWD` root variable is set.
 The tracked hook anchors to `pwd -P`, verifies that root is Firstmate-shaped and hook-bearing, and then invokes the guard with the original payload.
 
-Codex's primary watcher protocol is `../../../bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`, not `../../../bin/fm-watch-arm.sh`.
-Codex cannot reason while a foreground tool call is running, so the checkpoint is deliberately foreground and bounded to return control regularly for user messages and queued notifications.
+Codex capability selection preserves foreground checkpoints when native Stop ownership is unavailable; [`../../../../../docs/watcher-continuity.md`](../../../../../docs/watcher-continuity.md#codex-native-stop-ownership) owns that lifecycle and its live verification entry point.
+The foreground checkpoint remains an explicit diagnostic and must not replace the native owner during ordinary supervision.
 Codex's PreToolUse watcher-arm seatbelt blocks directly through its project hook.
