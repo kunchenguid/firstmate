@@ -119,6 +119,7 @@ PRESENCE_RECORD="$STATE/captain-presence"
 NOTIFY_SEQ_FILE="$NOTIFY_DIR/.seq"
 NOTIFY_SEQ_LOCK="$NOTIFY_DIR/.seq.lock"
 CONFIRM_RECORD="$NOTIFY_DIR/.presence-confirm.record"
+CONFIRM_LOCK="$NOTIFY_DIR/.presence-confirm.lock"
 CAPTAIN_HOLD="$SCRIPT_DIR/fm-captain-hold.sh"
 MAX_TEXT_BYTES=4000
 
@@ -190,10 +191,9 @@ write_confirm_record() {  # <mode> <text> <status>
   mv "$tmp" "$CONFIRM_RECORD"
 }
 
-# Sends and durably records one mode-change acknowledgement. Returns 0 and
-# leaves status=sent on success; returns 1 and leaves status=failed (with the
-# exact mode/text preserved for a later retry) on delivery failure.
-send_presence_confirmation() {  # <mode> <text>
+# Writes pending, attempts delivery, then writes sent/failed. Assumes
+# CONFIRM_LOCK is already held by the caller - never call this directly.
+_send_presence_confirmation_locked() {  # <mode> <text>
   local mode=$1 text=$2
   write_confirm_record "$mode" "$text" pending || return 1
   if send_telegram_text "$text"; then
@@ -203,6 +203,21 @@ send_presence_confirmation() {  # <mode> <text>
     write_confirm_record "$mode" "$text" failed || true
     return 1
   fi
+}
+
+# Sends and durably records one mode-change acknowledgement. Returns 0 and
+# leaves status=sent on success; returns 1 and leaves status=failed (with the
+# exact mode/text preserved for a later retry) on delivery failure. Serialized
+# on CONFIRM_LOCK against confirm-retry so a slow, stale retry can never
+# clobber a newer mode's just-written confirmation record (the same
+# read-decide-send-write race this file's register/route locks already close).
+send_presence_confirmation() {  # <mode> <text>
+  local mode=$1 text=$2 rc=0
+  mkdir -p "$NOTIFY_DIR"
+  fm_lock_acquire_wait "$CONFIRM_LOCK"
+  _send_presence_confirmation_locked "$mode" "$text" || rc=$?
+  fm_lock_release "$CONFIRM_LOCK"
+  return "$rc"
 }
 
 cmd_presence() {
@@ -649,19 +664,20 @@ cmd_inbound() {
 }
 
 cmd_confirm_retry() {
-  local status mode text
-  if [ ! -f "$CONFIRM_RECORD" ]; then
-    printf 'confirmation:none\n'
-    return 0
-  fi
+  local status mode text rc=0
+  mkdir -p "$NOTIFY_DIR"
+  fm_lock_acquire_wait "$CONFIRM_LOCK"
   status=$(record_field "$CONFIRM_RECORD" status)
   if [ "$status" != failed ]; then
+    fm_lock_release "$CONFIRM_LOCK"
     printf 'confirmation:none\n'
     return 0
   fi
   mode=$(record_field "$CONFIRM_RECORD" mode)
   text=$(record_field "$CONFIRM_RECORD" text)
-  if send_presence_confirmation "$mode" "$text"; then
+  _send_presence_confirmation_locked "$mode" "$text" || rc=$?
+  fm_lock_release "$CONFIRM_LOCK"
+  if [ "$rc" -eq 0 ]; then
     printf 'confirmation:sent\n'
     return 0
   else
