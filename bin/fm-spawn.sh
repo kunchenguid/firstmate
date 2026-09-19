@@ -259,12 +259,12 @@
 #   about to launch into, so a worker never opens on a bare pool checkout with
 #   no dependencies, local env file, or allocated ports. An absent hook is a
 #   silent no-op, which is every project that has not opted in.
-#   A present hook must be an executable regular file; any other shape refuses
-#   the spawn rather than silently skipping provisioning the captain configured.
 #   It runs synchronously with cwd set to the task worktree and stdin detached,
-#   under a hard FM_SPAWN_SETUP_TIMEOUT bound (default 600 seconds; invalid or
-#   zero values use 600), receiving FM_TASK_ID, FM_TASK_KIND, FM_PROJECT (the
-#   absolute project clone this home spawns from), and FM_WORKTREE.
+#   under a hard 120-second bound, receiving FM_TASK_ID, FM_TASK_KIND,
+#   FM_PROJECT (the absolute project clone this home spawns from), and
+#   FM_WORKTREE. It runs while this spawn still holds the shared Treehouse
+#   project lock, so another spawn or a teardown for the same project refuses
+#   rather than waits for as long as a hook runs; the bound caps that window.
 #   A nonzero exit, the bound, or a worktree left carrying files git does not
 #   ignore refuses the spawn and names the kept hook log; a hook may write only
 #   ignored paths, because anything else is later read as the worker's own
@@ -2951,12 +2951,12 @@ freshen_spawn_worktree_base() { # <worktree>
 # Refusing here instead means the operator meets the problem while the hook's
 # output is still the newest thing on disk.
 run_spawn_setup_hook() { # <worktree>
-  local worktree=$1 hook log status rc=0 bound=${FM_SPAWN_SETUP_TIMEOUT:-600}
-  case "$bound" in '' | *[!0-9]* | 0*) bound=600 ;; esac
+  local worktree=$1 hook log status rc=0 bound=120
   hook="$CONFIG/spawn-setup/$(basename "$PROJ_ABS")"
   # Absent is the unconfigured majority and stays silent. Every other shape
   # reports, because a hook the captain wrote and firstmate then skipped is the
-  # exact failure this hook exists to remove.
+  # exact failure this hook exists to remove: a non-executable file, a
+  # directory, and a dangling symlink all fail to exec below and refuse there.
   if [ ! -e "$hook" ] && [ ! -L "$hook" ]; then
     return 0
   fi
@@ -2971,10 +2971,6 @@ run_spawn_setup_hook() { # <worktree>
     return 1
     ;;
   esac
-  if [ ! -f "$hook" ] || [ ! -x "$hook" ]; then
-    echo "error: spawn-setup hook '$hook' exists but is not an executable regular file; refusing to launch a worker into a worktree this project expects to be provisioned (make it executable, point it at a real script, or remove it)" >&2
-    return 1
-  fi
   log=$(mktemp "${TMPDIR:-/tmp}/fm-spawn-setup.XXXXXX" 2>/dev/null) || {
     echo "error: could not create a log file for spawn-setup hook '$hook'; refusing to launch a worker whose provisioning could not be recorded" >&2
     return 1
@@ -2996,17 +2992,19 @@ run_spawn_setup_hook() { # <worktree>
     spawn_setup_hook_log_tail "$log"
     return 1
   fi
-  rm -f "$log" 2>/dev/null || true
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect '$worktree' after spawn-setup hook '$hook' ran; refusing to launch" >&2
+    spawn_setup_hook_log_tail "$log"
     return 1
   }
   if [ -n "$status" ]; then
     echo "error: spawn-setup hook '$hook' left files git does not ignore in '$worktree'; a hook may write only ignored paths, because anything else is later read as the worker's own unlanded work; refusing to launch" >&2
     echo "--- first 10 entries of git status in $worktree ---" >&2
     printf '%s\n' "$status" | head -10 >&2
+    spawn_setup_hook_log_tail "$log"
     return 1
   fi
+  rm -f "$log" 2>/dev/null || true
 }
 
 # The tail is the actionable part of a failed hook: the error the project's own

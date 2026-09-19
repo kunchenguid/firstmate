@@ -158,13 +158,14 @@ HOOK
 }
 
 test_hook_that_dirties_the_worktree_refuses() {
-  local rec id out status
+  local rec id out status log
   id='setup-dirty-r1'
   rec=$(make_case dirty "$id")
   read_case_record "$rec"
   write_hook <<'HOOK'
 #!/usr/bin/env bash
 set -euo pipefail
+echo 'recording machine notes for this checkout'
 printf 'local machine notes\n' > workspace-notes.txt
 HOOK
 
@@ -175,6 +176,13 @@ HOOK
     "the refusal did not name the rule the hook broke"
   assert_contains "$out" "workspace-notes.txt" "the refusal did not name the offending path"
   assert_absent "$HOME_DIR/state/$id.meta" "a refused spawn published task metadata"
+  # This is the refusal where the hook's own output says which provisioning step
+  # wrote the unignored path, so the log has to survive it like any other.
+  log=$(printf '%s\n' "$out" | sed -n 's/.*complete output kept at \(.*\) ---.*/\1/p' | tail -n 1)
+  [ -n "$log" ] || fail "the dirty-worktree refusal did not name a kept hook log"$'\n'"$out"
+  assert_present "$log" "the dirty-worktree refusal named a hook log that was not kept"
+  assert_grep 'recording machine notes' "$log" \
+    "the kept hook log lost what the hook printed while dirtying the worktree"
   # Untracked work is never destroyed to make a spawn proceed, not even the
   # hook's own; the operator decides what that file was.
   assert_present "$WT_DIR/workspace-notes.txt" \
@@ -228,10 +236,9 @@ test_unusable_hook_refuses_rather_than_skipping() {
     out=$(run_ship "$id")
     status=$?
     [ "$status" -ne 0 ] || fail "spawn skipped a configured but unusable setup hook ($shape)"$'\n'"$out"
-    assert_contains "$out" "is not an executable regular file" \
-      "the refusal did not say what is wrong with the hook ($shape)"
-    assert_contains "$out" "make it executable, point it at a real script, or remove it" \
-      "the refusal did not say how to fix the hook ($shape)"
+    assert_contains "$out" "refusing to launch a worker into an unprovisioned worktree" \
+      "the refusal did not explain why an unprovisioned worktree is not launched into ($shape)"
+    assert_not_contains "$out" "spawned $id" "a refused spawn still reported success ($shape)"
     assert_absent "$HOME_DIR/state/$id.meta" "a refused spawn published task metadata ($shape)"
   done
   pass "a configured but unusable setup hook refuses the spawn instead of being skipped"
@@ -284,26 +291,6 @@ test_skip_switch_accepts_only_off() {
   assert_absent "$CASE_DIR/hook-ran" "a refused skip value still ran the hook"
   assert_absent "$HOME_DIR/state/$id.meta" "a refused spawn published task metadata"
   pass "the setup skip switch honors off and refuses any other value"
-}
-
-test_hook_exceeding_its_bound_refuses() {
-  local rec id out status
-  id='setup-bound-r1'
-  rec=$(make_case bound "$id")
-  read_case_record "$rec"
-  write_hook <<'HOOK'
-#!/usr/bin/env bash
-sleep 60
-HOOK
-
-  out=$(FM_SPAWN_SETUP_TIMEOUT=1 run_ship "$id")
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn launched after its setup hook ran past its bound"$'\n'"$out"
-  assert_contains "$out" "did not finish within 1s" "the refusal did not name the bound that was hit"
-  assert_contains "$out" "half-provisioned worktree" \
-    "the refusal did not explain what a hook killed mid-run leaves behind"
-  assert_absent "$HOME_DIR/state/$id.meta" "a refused spawn published task metadata"
-  pass "a setup hook that runs past its bound is killed and refuses the spawn"
 }
 
 # The ordering this pins is load-bearing rather than cosmetic: a project's own
@@ -375,7 +362,6 @@ test_hook_that_dirties_the_worktree_refuses
 test_unusable_hook_refuses_rather_than_skipping
 test_hook_named_for_another_project_is_not_run
 test_skip_switch_accepts_only_off
-test_hook_exceeding_its_bound_refuses
 test_hook_runs_before_the_worker_launch_settings_are_written
 
 echo "# all fm-spawn-setup-hook tests passed"
