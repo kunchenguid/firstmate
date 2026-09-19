@@ -420,7 +420,7 @@ scaffold_real_brief() { # <id> <fm-brief.sh args...>
 }
 
 test_launch_brief_names_the_branch_the_slot_is_on() {
-  local rec id out status launch source_bytes plain_pr
+  local rec id out status launch captured source_bytes plain_pr
   plain_pr='push your branch and open a PR with `gh-axi`, then append'
 
   id='pool-brief-registered-r1'
@@ -445,7 +445,34 @@ test_launch_brief_names_the_branch_the_slot_is_on() {
   assert_grep 'passing `--base develop`' "$launch" \
     "a direct-PR worker on a registered working branch was not told to target it"
 
-  # A scout raises no PR, so it is told where it is and nothing more.
+  # A no-mistakes ship hands everything from the intent heading to the end of its
+  # brief to the pipeline as the captain's own words, so the base section has to
+  # sit above that region rather than inside it.
+  id='pool-brief-no-mistakes-r1'
+  rec=$(make_case brief-no-mistakes "$id")
+  read_case_record "$rec"
+  publish_origin_branch develop
+  register_project_branch develop
+  scaffold_real_brief "$id" --mode no-mistakes
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" \
+    "a no-mistakes ship on a registered working branch should launch"$'\n'"$out"
+  launch="$HOME_DIR/data/$id/launch-brief.md"
+  assert_grep 'This worktree is based on `develop`' "$launch" \
+    "a no-mistakes worker was never told which branch its worktree is actually on"
+  assert_no_grep '--base' "$launch" \
+    "a no-mistakes worker was told to raise its own PR against a base"
+  captured="$TMP_ROOT/$id.intent"
+  awk '/^## Captain intent authorized for --intent$/ { emit=1; next } emit' "$launch" > "$captured"
+  [ -s "$captured" ] || fail "the no-mistakes intent-capture region is empty or absent"
+  assert_no_grep 'Current worktree base contract' "$captured" \
+    "the base section landed inside the span the worker passes on as --intent"
+  assert_no_grep 'This worktree is based on' "$captured" \
+    "base-section prose would reach the pipeline as the captain's own words"
+
+  # A scout carries no delivery mode, so it renders no base section for now.
   id='pool-brief-registered-scout-r1'
   rec=$(make_case brief-registered-scout "$id")
   read_case_record "$rec"
@@ -458,9 +485,28 @@ test_launch_brief_names_the_branch_the_slot_is_on() {
   expect_code 0 "$status" \
     "a scout on a registered working branch should launch"$'\n'"$out"
   launch="$HOME_DIR/data/$id/launch-brief.md"
-  assert_grep 'This worktree is based on `develop`' "$launch" \
-    "a scout was never told which branch its worktree is actually on"
+  assert_no_grep 'Current worktree base contract' "$launch" \
+    "a scout was handed a base section no delivery mode of its own honours"
   assert_no_grep '--base' "$launch" "a scout was handed a PR base it will never use"
+
+  # local-only lands through bin/fm-merge-local.sh, which still fast-forwards the
+  # default branch, so a section naming another base must not reach that worker.
+  id='pool-brief-local-only-r1'
+  rec=$(make_case brief-local-only "$id")
+  read_case_record "$rec"
+  publish_origin_branch develop
+  register_project_branch develop
+  scaffold_real_brief "$id" --mode local-only
+
+  out=$(run_spawn "$id" --mode local-only --yolo off)
+  status=$?
+  expect_code 0 "$status" \
+    "a local-only ship on a registered working branch should launch"$'\n'"$out"
+  launch="$HOME_DIR/data/$id/launch-brief.md"
+  assert_no_grep 'Current worktree base contract' "$launch" \
+    "a local-only worker was handed a base its landing path does not honour"
+  assert_grep 'rebase onto it so the eventual merge stays a fast-forward' "$launch" \
+    "the local-only rebase-onto-default rule no longer reaches the worker"
 
   # A project that registers no working branch keeps the brief it was written.
   id='pool-brief-unregistered-r1'

@@ -970,6 +970,43 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
 }
 
+# A relaunch places no slot: the worktree is already on the registered working
+# branch its own fresh spawn put it there, and the record that spawn left is the
+# only thing that still says so. A replacement worker handed the unqualified
+# brief would open its PR against the default branch, carrying the working
+# branch's own commits as this task's change.
+test_spawn_relaunch_keeps_the_recorded_working_branch_contract() {
+  local dir launch out
+  dir=$(new_case relaunchbase rl40)
+  add_ship_task "$dir" rl40 claude
+  {
+    grep -v '^mode=' "$dir/home/state/rl40.meta"
+    echo "mode=direct-PR"
+    echo "base_branch=develop"
+    echo "base_registered=1"
+  } > "$dir/home/state/rl40.meta.next"
+  mv "$dir/home/state/rl40.meta.next" "$dir/home/state/rl40.meta"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl40 --relaunch) \
+    || fail "a relaunch of a task on a registered working branch should succeed: $out"
+  launch="$dir/home/data/rl40/launch-brief.md"
+  assert_grep 'This worktree is based on `develop`' "$launch" \
+    "the replacement worker was not told which branch its worktree is on"
+  assert_grep 'passing `--base develop`' "$launch" \
+    "the replacement direct-PR worker was not told to open its PR against that branch"
+
+  dir=$(new_case relaunchnobase rl41)
+  add_ship_task "$dir" rl41 claude
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl41 --relaunch) \
+    || fail "a relaunch of a task with no recorded working branch should succeed: $out"
+  launch="$dir/home/data/rl41/launch-brief.md"
+  assert_no_grep 'Current worktree base contract' "$launch" \
+    "a task whose record names no working branch was handed a base section"
+  pass "fm-spawn --relaunch: the recorded working branch still reaches the replacement worker"
+}
+
 test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
   local dir home id brief launch out mode rule
   for mode in no-mistakes direct-PR local-only; do
@@ -1707,6 +1744,7 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_spawn_relaunch_keeps_the_recorded_working_branch_contract
 test_promoted_scout_relaunch_receives_the_current_delivery_contract
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch

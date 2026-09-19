@@ -48,6 +48,15 @@
 # bin/fm-spawn.sh from the branch it has just placed the slot on, and
 # bin/fm-promote.sh from what that spawn recorded (fm_recorded_working_branch).
 # A slot placed on origin's own default branch leaves every sentence unchanged.
+# It renders for direct-PR and no-mistakes only, and states the base as a fact
+# rather than directing how to branch from it. A directive there would silently
+# override contracts already stated above it, and under local-only it would have
+# had the worker ship a branch descending from the registered branch while
+# bin/fm-merge-local.sh still fast-forwards the default branch, landing every
+# unrelated commit into local main: this change's own foreign-commit symptom
+# relocated into the one lane that has no PR and no forge file list to reveal it.
+# local-only with a registered working branch is filed separately, and a scout,
+# which carries no delivery mode, renders nothing here pending that decision.
 
 fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
@@ -258,11 +267,15 @@ fm_recorded_working_branch() {  # <state-dir> <task-id>
 
 fm_brief_base_branch_overlay() {  # <working-branch> [mode]
   local base=$1 mode=${2:-}
+  [ -n "$base" ] || return 0
+  case "$mode" in
+    direct-PR|no-mistakes) ;;
+    *) return 0 ;;
+  esac
   cat <<EOF
 # Current worktree base contract
 This worktree is based on \`$base\`, the working branch registered for this project.
 This section establishes that base after every Setup or promotion instruction above and supersedes any of them that names a different base, including any that calls this worktree's base the default branch.
-Cut your task branch from \`$base\` and keep it based there; rebasing or merging any other branch into it would carry that branch's own commits as if they were your change.
 EOF
   [ "$mode" = direct-PR ] || return 0
   cat <<EOF

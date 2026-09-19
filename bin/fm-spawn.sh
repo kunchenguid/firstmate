@@ -223,12 +223,17 @@
 #   Every fresh ship or scout records the branch it resolved as base_branch= in
 #   state/<id>.meta, so a wrong base is provable from the task record rather
 #   than only from a PR's file list. A slot the registered working branch
-#   decided also records base_registered=1 and has bin/fm-dod-lib.sh's worktree
-#   base section appended to its launch brief. That section is rendered here,
-#   after the slot is placed, rather than in the brief: a brief is written before
-#   any slot exists and asserts the default branch, and resolving the branch a
-#   second time at brief time would let the two answers disagree. A slot placed
-#   on origin's own default branch leaves every brief sentence unchanged.
+#   decided also records base_registered=1 and carries bin/fm-dod-lib.sh's
+#   worktree base section in its launch brief. The brief is re-rendered once the
+#   slot is placed rather than written with that section from the start: a brief
+#   is authored before any slot exists and asserts the default branch, and
+#   resolving the branch a second time at brief time would let the two answers
+#   disagree. The re-render composes the whole file, so the section lands before
+#   the no-mistakes intent-capture region instead of inside the span that region
+#   hands to the pipeline as the captain's own words. A relaunch places no slot,
+#   so it renders the same section from the base_registered= record its own fresh
+#   spawn left behind. A slot placed on origin's own default branch leaves every
+#   brief sentence unchanged.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -2579,6 +2584,34 @@ fi
   echo "error: task $ID has no brief at inaccessible data path $BRIEF" >&2
   exit 1
 }
+
+# Compose data/<id>/launch-brief.md from the current contracts plus the authored
+# brief. Called once before the endpoint exists and, for a slot on a registered
+# working branch, again once that placement is known; it rebuilds the whole file
+# both times so the no-mistakes intent-capture region stays the final block and
+# nothing this script renders lands inside the span the worker passes on as
+# `--intent`. Reads SOURCE_BRIEF, BRIEF, KIND, MODE and CAPTAIN_INTENT, which the
+# ship/scout block below has already resolved.
+render_launch_brief() { # [working-branch]
+  local base=${1:-} section tmp="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
+  section=$(fm_brief_base_branch_overlay "$base" "$MODE") || return 1
+  {
+    fm_brief_worker_role "$STATE" "$ID" &&
+      printf '\n' &&
+      cat "$SOURCE_BRIEF" &&
+      { [ -z "$section" ] || printf '\n%s\n' "$section"; } &&
+      if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+        fm_brief_intent_overlay "$CAPTAIN_INTENT"
+      fi
+  } >"$tmp" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  mv "$tmp" "$BRIEF" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+}
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   if fm_brief_task_placeholders_present "$BRIEF"; then
     echo "error: $BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; fill ## Captain's intent and ## Firstmate spec before spawn" >&2
@@ -2608,22 +2641,8 @@ if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   # pre-scope briefs and relaunches. Charters never enter this worker path.
   SOURCE_BRIEF=$BRIEF
   BRIEF="$DATA/$ID/launch-brief.md"
-  BRIEF_TMP="$DATA/$ID/.launch-brief.md.${BASHPID:-$$}"
-  {
-    fm_brief_worker_role "$STATE" "$ID" &&
-      printf '\n' &&
-      cat "$SOURCE_BRIEF" &&
-      if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
-        fm_brief_intent_overlay "$CAPTAIN_INTENT"
-      fi
-  } >"$BRIEF_TMP" || {
-    rm -f -- "$BRIEF_TMP"
+  if ! render_launch_brief; then
     echo "error: could not render current launch contract for $SOURCE_BRIEF" >&2
-    exit 1
-  }
-  if ! mv "$BRIEF_TMP" "$BRIEF"; then
-    rm -f -- "$BRIEF_TMP"
-    echo "error: could not publish current launch contract for $SOURCE_BRIEF" >&2
     exit 1
   fi
 fi
@@ -3767,13 +3786,20 @@ fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
-# The only point that knows where the slot actually ended up. The launch-brief
-# overlay above runs before the slot is placed, so the base-dependent half of the
-# contract - which branch this worktree sits on, and which branch a direct-PR
-# worker must target - is appended here instead (bin/fm-dod-lib.sh owns it).
+# The first point that knows where the slot actually ended up: the render above
+# runs before it is placed. A relaunch places nothing and reuses the recorded
+# worktree, so the record its own fresh spawn left is what still names the branch
+# that worktree is on.
 if [ "$SPAWN_BASE_REGISTERED" = 1 ]; then
-  if ! { printf '\n'; fm_brief_base_branch_overlay "$SPAWN_BASE_BRANCH" "$MODE"; } >>"$BRIEF"; then
-    echo "error: could not append the working-branch contract for '$SPAWN_BASE_BRANCH' to $BRIEF; refusing to launch a worker whose brief names the wrong base" >&2
+  SPAWN_BRIEF_BASE=$SPAWN_BASE_BRANCH
+elif [ "$RELAUNCH" -eq 1 ]; then
+  SPAWN_BRIEF_BASE=$(fm_recorded_working_branch "$STATE" "$ID")
+else
+  SPAWN_BRIEF_BASE=
+fi
+if [ -n "$SPAWN_BRIEF_BASE" ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; }; then
+  if ! render_launch_brief "$SPAWN_BRIEF_BASE"; then
+    echo "error: could not render the working-branch contract for '$SPAWN_BRIEF_BASE' into $BRIEF; refusing to launch a worker whose brief names the wrong base" >&2
     exit 1
   fi
 fi

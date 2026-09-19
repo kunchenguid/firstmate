@@ -313,7 +313,7 @@ test_promote_refuses_a_symlinked_task_record() {
 # corrects the promotion step that would otherwise send the worker back to the
 # repository's default branch.
 test_promotion_targets_the_recorded_working_branch() {
-  local home sendroot id meta out payload
+  local home sendroot id meta mode out payload
   home="$TMP_ROOT/promote-base/home"
   sendroot="$TMP_ROOT/promote-base/sendroot"
   mkdir -p "$home/state" "$sendroot/bin"
@@ -324,19 +324,25 @@ printf '%s' "$2" > "$FM_TEST_CAPTURE"
 STUB
   chmod +x "$sendroot/bin/fm-send.sh"
 
-  for id in promote-base-registered promote-base-default; do
+  for id in promote-base-registered promote-base-default promote-base-local-only; do
     meta="$home/state/$id.meta"
-    if [ "$id" = promote-base-registered ]; then
-      printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nbase_branch=develop\nbase_registered=1\n' \
-        "$id" > "$meta"
-    else
-      printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nbase_branch=main\n' "$id" > "$meta"
-    fi
+    mode=direct-PR
+    case "$id" in
+      promote-base-default)
+        printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nbase_branch=main\n' "$id" > "$meta" ;;
+      promote-base-local-only)
+        mode=local-only
+        printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nbase_branch=develop\nbase_registered=1\n' \
+          "$id" > "$meta" ;;
+      *)
+        printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nbase_branch=develop\nbase_registered=1\n' \
+          "$id" > "$meta" ;;
+    esac
     FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null 2>&1 \
       || fail "$id: scout brief generation should succeed"
     fill_brief_subsections "$home/data/$id/brief.md" \
       "Ship the working-branch change." "Preserve the base the slot was placed on."
-    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo off 2>&1) \
+    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1) \
       || fail "$id: promotion should succeed"
     payload="$TMP_ROOT/promote-base/payload-$id"
     ( cd "$sendroot" \
@@ -361,6 +367,15 @@ STUB
     "a slot placed on the remote default was handed a PR base nothing asked for"
   assert_no_grep 'Current worktree base contract' "$payload" \
     "a slot placed on the remote default was handed a working-branch section"
+
+  # local-only lands through bin/fm-merge-local.sh, which still fast-forwards the
+  # default branch, so naming another base here would land that branch's own
+  # commits in local main with no PR and no forge file list to reveal it.
+  payload="$TMP_ROOT/promote-base/payload-promote-base-local-only"
+  assert_no_grep 'Current worktree base contract' "$payload" \
+    "a local-only worker was handed a base its landing path does not honour"
+  assert_grep 'rebase onto it so the eventual merge stays a fast-forward' "$payload" \
+    "the local-only rebase-onto-default rule no longer reaches the promoted worker"
   pass "fm-promote: a promoted worker targets the working branch its own slot was placed on"
 }
 
