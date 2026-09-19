@@ -60,6 +60,8 @@ EOF
 # Timetracker verification map
 
 Read the index, then the matching feature file as the recipe.
+
+- [Track time](track-time.md)
 EOF
   cat >"$dir/features/track-time.md" <<'EOF'
 # Track time
@@ -126,6 +128,26 @@ test_rejects_missing_feature_map() {
   assert_contains "$out" "features/README.md" "failure names the missing feature map"
 }
 
+test_rejects_unreferenced_feature() {
+  local dir out
+  dir="$TMP_ROOT/unreferenced-feature/verify-timetracker"
+  make_good_skill "$dir"
+  sed -i '/track-time\.md/d' "$dir/features/README.md"
+  out=$(run_check "$dir") && fail "unreferenced feature file must fail" || true
+  assert_contains "$out" "does not reference track-time.md" "failure names the unreferenced feature file"
+}
+
+test_rejects_malformed_feature_file() {
+  local dir heading out
+  for heading in "Sub-features" "How to get to it (user POV)" "Driving it with shell" "Gotchas"; do
+    dir="$TMP_ROOT/malformed-${heading//[^[:alnum:]]/-}/verify-timetracker"
+    make_good_skill "$dir"
+    sed -i "/^## $heading$/,/^## / { /^## $heading$/d; }" "$dir/features/track-time.md"
+    out=$(run_check "$dir") && fail "feature file without '$heading' must fail" || true
+    assert_contains "$out" "track-time.md is missing" "failure names the malformed feature file"
+  done
+}
+
 test_rejects_leftover_placeholders() {
   local dir out
   dir="$TMP_ROOT/placeholder/verify-timetracker"
@@ -164,6 +186,8 @@ test_accepts_well_shaped_skill
 test_rejects_missing_sections
 test_rejects_removed_kill_rule
 test_rejects_missing_feature_map
+test_rejects_unreferenced_feature
+test_rejects_malformed_feature_file
 test_rejects_leftover_placeholders
 test_rejects_name_directory_mismatch
 test_rejects_generic_skill_name

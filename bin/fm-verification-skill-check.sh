@@ -46,7 +46,7 @@ fail() {
 section_body() {
   # $1 = file, $2 = heading text
   awk -v want="$2" '
-    $0 ~ "^## " want "[[:space:]]*$" { insec = 1; next }
+    $0 == "## " want { insec = 1; next }
     /^## / { insec = 0 }
     insec { print }
   ' "$1"
@@ -89,13 +89,30 @@ EVIDENCE_BODY=$(section_body "$SKILL" "Evidence" | tr '\n' ' ')
 printf '%s\n' "$EVIDENCE_BODY" | grep -qi "user path" \
   || fail "Evidence section must require exercising the real user path"
 
-# Feature map index must exist and reference at least one feature file.
+# Feature map index must exist and reference every well-shaped feature file.
 FEATURES="$DIR/features/README.md"
 if [ ! -f "$FEATURES" ]; then
   fail "missing features/README.md feature-map index"
 else
   mapfile -t siblings < <(find "$DIR/features" -maxdepth 1 -type f ! -name README.md -name '*.md' | sort)
   [ "${#siblings[@]}" -ge 1 ] || fail "features/ has no feature files beside README.md"
+  for feature in "${siblings[@]}"; do
+    filename=$(basename "$feature")
+    if ! grep -Fq "($filename)" "$FEATURES" && ! grep -Fq "(./$filename)" "$FEATURES"; then
+      fail "features/README.md does not reference $filename"
+    fi
+
+    for heading in "Sub-features" "How to get to it (user POV)" "Gotchas"; do
+      body=$(section_body "$feature" "$heading")
+      [ -n "$body" ] || fail "$filename is missing a non-empty '## $heading' section"
+    done
+    body=$(awk '
+      /^## Driving it with .+[^[:space:]][[:space:]]*$/ { insec = 1; next }
+      /^## / { insec = 0 }
+      insec { print }
+    ' "$feature")
+    [ -n "$body" ] || fail "$filename is missing a non-empty '## Driving it with <harness>' section"
+  done
 fi
 
 # No unfilled placeholders or template markers may survive generation.
