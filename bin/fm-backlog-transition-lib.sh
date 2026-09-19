@@ -55,6 +55,12 @@
 # closes a row that reads as an open captain call. An answer that closes the row
 # first applies any supported retained artifact from the validated record, then
 # replay simply retires the record.
+#
+# LINK EVIDENCE. tasks-axi records a --pr link structurally only for the
+# GitHub /pull/<n> shape (fm_backlog_pr_link_supported). Any other PR URL -
+# a GitLab merge request, for example - is adapted to a --note carrying the
+# link, so the close lands and the link stays archived as row evidence
+# instead of the close, and every replay of it, failing forever.
 
 # Set by fm_backlog_transition_applies for a return-1 exemption.
 # shellcheck disable=SC2034 # Output global, read by the sourcing caller.
@@ -562,16 +568,96 @@ fm_backlog_start() {  # <data-dir> <id>
   fm_backlog_mutate "$1" start "$2"
 }
 
+# tasks-axi validates a --pr completion link itself and rejects every
+# well-formed link that is not GitHub's http(s) path-anchored /pull/<digits>
+# shape, including a GitLab .../-/merge_requests/<n> URL, and it is an
+# external binary this repo cannot change. This predicate is the single
+# owner of "this --pr link can be handed to tasks-axi as --pr": the URL's
+# final segment must be digits only (no query, fragment, or trailing slash),
+# sitting directly after a /pull/ path segment, and the scheme-stripped
+# remainder must hold exactly one non-overlapping /pull/ occurrence - that
+# one. Stripping the scheme first keeps a host that is literally "pull"
+# (https://pull/13) from matching across the scheme-authority boundary,
+# which tasks-axi also rejects, and the occurrence count rejects a doubled
+# .../pull/<n>/pull/<n> link (probed) while still accepting .../pull/pull/<n>,
+# whose two /pull/ substrings overlap. Verdicts verified case by case
+# against tasks-axi 0.2.5's own validation.
+fm_backlog_pr_link_supported() {  # <url>
+  local url=$1 tail rest occurrences=0
+  case "$url" in
+    http://*) rest=${url#http://} ;;
+    https://*) rest=${url#https://} ;;
+    *) return 1 ;;
+  esac
+  tail=${rest##*/}
+  case "$tail" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  case "$rest" in
+    */pull/"$tail") ;;
+    *) return 1 ;;
+  esac
+  while :; do
+    case "$rest" in
+      */pull/*)
+        occurrences=$((occurrences + 1))
+        rest=${rest#*/pull/}
+        ;;
+      *) break ;;
+    esac
+  done
+  [ "$occurrences" -eq 1 ]
+}
+
 fm_backlog_done() {  # <data-dir> <id> [flag...]
-  local data=$1 id=$2
+  local data=$1 id=$2 flag note_index=-1
+  local -a adapted=()
   shift 2
-  fm_backlog_mutate "$data" "done" "$id" "$@"
+  # A --pr link tasks-axi cannot record structurally still records the link:
+  # adapt that pair to --note so the close lands and the link stays archived
+  # (a done --note backfills onto an already Done row without changing its
+  # close date), instead of failing the close forever. Supported links pass
+  # through unchanged. tasks-axi accepts at most one --note, so when a note
+  # is already present the link folds into that note's value; a --pr or
+  # --note with no value at all stays malformed for tasks-axi to reject
+  # rather than being silently rewritten.
+  while [ "$#" -gt 0 ]; do
+    flag=$1
+    case "$flag" in
+      --pr|--note)
+        if [ "$#" -lt 2 ]; then
+          adapted+=("$flag")
+          shift
+          continue
+        fi
+        if [ "$flag" = "--pr" ] && fm_backlog_pr_link_supported "$2"; then
+          adapted+=(--pr "$2")
+        elif [ "$note_index" -ge 0 ]; then
+          if [ "$flag" = "--pr" ]; then
+            adapted[note_index]="${adapted[note_index]} PR $2"
+          else
+            adapted[note_index]="${adapted[note_index]} $2"
+          fi
+        else
+          if [ "$flag" = "--pr" ]; then
+            adapted+=(--note "PR $2")
+          else
+            adapted+=(--note "$2")
+          fi
+          note_index=$(( ${#adapted[@]} - 1 ))
+        fi
+        shift 2
+        ;;
+      *) adapted+=("$flag"); shift ;;
+    esac
+  done
+  fm_backlog_mutate "$data" "done" "$id" ${adapted[@]+"${adapted[@]}"}
 }
 
 fm_backlog_row_artifact_supported() {
   local id=$1 flag=${2:-} value=${3:-}
   case "$flag" in
-    --pr) return 0 ;;
+    --pr) fm_backlog_pr_link_supported "$value" ;;
     --report) [ "$value" = "data/$id/report.md" ] ;;
     *) return 1 ;;
   esac
@@ -604,7 +690,12 @@ fm_backlog_retain() {  # <data-dir> <id> [flag...]
         ;;
       --pr)
         deliverable="${deliverable:+$deliverable; }PR $arg"
-        row_args=(--pr "$arg")
+        # The deliverable body line above archives the link either way; the
+        # structured row field exists only for a link tasks-axi can record
+        # as --pr.
+        if fm_backlog_row_artifact_supported "$id" --pr "$arg"; then
+          row_args=(--pr "$arg")
+        fi
         ;;
       --note) deliverable="${deliverable:+$deliverable; }$arg" ;;
     esac
