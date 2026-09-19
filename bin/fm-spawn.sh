@@ -195,12 +195,17 @@
 #   itself a linked worktree of the project repository still launches. A pane
 #   that never reaches an isolated worktree refuses at the end of that wait,
 #   naming the last path seen and why it was rejected.
-#   That placement is proven only at launch. Every ship or scout pane therefore
-#   also receives `export FM_TASK_ID=<task-id>` before the launch command, on
-#   the same channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
-#   behavior suite from the repository primary checkout while that marker is
-#   set (its header owns the refusal). A secondmate runs in its own home and is
-#   not marked.
+#   Such a refusal, or any abort between endpoint creation and task-record
+#   publication, closes the window or pane this spawn just created once it is
+#   proven to be this spawn's own empty, unrecorded endpoint, so the retry is
+#   not refused on "window <session>:fm-<id> already exists" (tmux and herdr
+#   only; spawn_endpoint_abort_rollback owns the proofs).
+#   Worktree placement is proven only at launch. Every ship or scout pane
+#   therefore also receives `export FM_TASK_ID=<task-id>` before the launch
+#   command, on the same channel as GOTMPDIR, and bin/fm-test-run.sh refuses to
+#   execute the behavior suite from the repository primary checkout while that
+#   marker is set (its header owns the refusal). A secondmate runs in its own
+#   home and is not marked.
 #   Only after this isolation check, every fresh ship or scout requires a clean
 #   task worktree. When an origin configuration is detected, spawn fetches it,
 #   resolves the current remote default branch, and resets to its tip. When none
@@ -1058,6 +1063,9 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+SPAWN_ENDPOINT_ABORT_CLEANUP=0
+SPAWN_ENDPOINT_ABORT_TARGET=
+SPAWN_ENDPOINT_ABORT_WID=
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1091,6 +1099,79 @@ parse_orca_worktree_result() {
   else
     ORCA_TERMINAL=
   fi
+}
+
+# Transactional rollback for the endpoint a fresh spawn created but never
+# recorded. No task record names such an endpoint, so nothing else can ever
+# close it, and the clean retry would refuse on "window <session>:fm-<id>
+# already exists" (for example after the isolation wait refuses because every
+# pool copy is in use or dirty). This guard closes exactly that endpoint,
+# and only after every proof that it still belongs to this aborted spawn:
+#   no task record    - state/<id>.meta was never published, so no record
+#                       (a partial one included) owns the endpoint;
+#   identity          - the endpoint still answers under the name create_task
+#                       pinned to it (tmux re-reads through the stable window
+#                       id captured at creation, never the name alone), so a
+#                       pre-existing or externally replaced endpoint is never
+#                       closed;
+#   no agent          - the recovery-grade classifier reports the endpoint
+#                       agent-free; a live or unattributable pane is never
+#                       torn down;
+#   no composer work  - the composer holds no unsubmitted text; the strict
+#                       classifier's `unknown` verdict on a plain shell screen
+#                       is accepted only because the shell-only agent verdict
+#                       above proves no harness composer exists to hold work;
+#   no acquired copy  - the pane sits somewhere that is NOT an isolated
+#                       worktree and this spawn never claimed a pool slot, so
+#                       no isolated copy is closed or returned.
+# Armed only for backends whose liveness classifier is recovery-grade (tmux,
+# herdr): zellij and cmux read `unverified`, every proof would refuse, and
+# their endpoints stay exactly as before this rollback existed.
+spawn_endpoint_abort_rollback() {
+  [ "$SPAWN_ENDPOINT_ABORT_CLEANUP" = 1 ] || return 0
+  SPAWN_ENDPOINT_ABORT_CLEANUP=0
+  local agent composer seen
+  if [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; then
+    echo "warning: leaving endpoint $T for task $ID open; a task record exists, so this aborted spawn no longer owns it" >&2
+    return 0
+  fi
+  case "$BACKEND" in
+    tmux)
+      if [ "$(tmux display-message -p -t "$SPAWN_ENDPOINT_ABORT_WID" '#{window_name}' 2>/dev/null)" != "$W" ]; then
+        echo "warning: leaving endpoint $T for task $ID open; the window this spawn created no longer answers as $W, so a pre-existing or replaced window is never closed" >&2
+        return 0
+      fi
+      ;;
+  esac
+  agent=$(fm_backend_agent_alive "$BACKEND" "$SPAWN_ENDPOINT_ABORT_TARGET" 2>/dev/null || true)
+  if [ "$agent" != dead ]; then
+    echo "warning: leaving endpoint $T for task $ID open; its agent state is '${agent:-unknown}', not provably agent-free" >&2
+    return 0
+  fi
+  composer=$(fm_backend_composer_state "$BACKEND" "$SPAWN_ENDPOINT_ABORT_TARGET" "$W" 2>/dev/null || true)
+  case "$composer" in
+    empty|unknown) ;;
+    *)
+      echo "warning: leaving endpoint $T for task $ID open; its composer holds unsubmitted work ($composer)" >&2
+      return 0
+      ;;
+  esac
+  if [ "$SPAWN_SLOT_CLAIMED" != 0 ]; then
+    echo "warning: leaving endpoint $T for task $ID open; this spawn claimed a pool slot, so an acquired isolated copy is never touched" >&2
+    return 0
+  fi
+  case "$BACKEND" in
+    tmux) seen=$(fm_backend_tmux_current_path "$SPAWN_ENDPOINT_ABORT_TARGET" 2>/dev/null || true) ;;
+    herdr) seen=$(fm_backend_herdr_current_path "$SPAWN_ENDPOINT_ABORT_TARGET" 2>/dev/null || true) ;;
+    *) seen= ;;
+  esac
+  if [ -n "$seen" ] && spawn_worktree_isolated "$seen"; then
+    echo "warning: leaving endpoint $T for task $ID open; its pane sits in an isolated worktree ($seen), which is never torn down" >&2
+    return 0
+  fi
+  local tab_id=
+  [ "$BACKEND" = zellij ] && tab_id=${ZELLIJ_TAB_ID:-}
+  fm_backend_kill "$BACKEND" "$SPAWN_ENDPOINT_ABORT_TARGET" "$tab_id" "$W" 2>/dev/null || true
 }
 
 spawn_abort_cleanup() {
@@ -1189,6 +1270,12 @@ spawn_abort_cleanup() {
     SPAWN_META_LOCK_HELD=0
     fm_lock_release "$SPAWN_META_LOCK" || true
   fi
+  # A spawn that created its endpoint but never published its record must not
+  # strand it: close exactly the endpoint this spawn created, and only after
+  # every proof it still belongs to this aborted spawn (see the guard's own
+  # contract). Runs before the slot-claim release below so the guard sees
+  # whether this spawn had already acquired an isolated copy.
+  spawn_endpoint_abort_rollback
   # A spawn that aborts after claiming its slot but before its record survives
   # must not leave a claim naming a task no record describes. The release is a
   # read-then-remove, so it runs only while the project lock that wrote the
@@ -3056,6 +3143,12 @@ else
     # stays $T (the name form), which is safe now that rename is disabled.
     WID=$(fm_backend_tmux_create_task "$SES" "$W" "$PROJ_ABS") || exit 1
     WT_TARGET="$WID"
+    # Arm the transactional endpoint rollback: from here until the task record
+    # is published, an abort must not strand this window (see
+    # spawn_endpoint_abort_rollback's contract).
+    SPAWN_ENDPOINT_ABORT_CLEANUP=1
+    SPAWN_ENDPOINT_ABORT_TARGET=$T
+    SPAWN_ENDPOINT_ABORT_WID=$WID
     ;;
   herdr)
     # fm_backend_herdr_workspace_label resolves the target workspace from
@@ -3220,6 +3313,11 @@ else
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
+      # Arm the transactional endpoint rollback for the flat task pane; the
+      # projected-presentation path above owns its panes through its own
+      # abort cleanup instead.
+      SPAWN_ENDPOINT_ABORT_CLEANUP=1
+      SPAWN_ENDPOINT_ABORT_TARGET="$HERDR_SES:$HERDR_PANE_ID"
     fi
     if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
       echo "error: herdr did not return a tab/pane id for $W" >&2
@@ -4316,6 +4414,9 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   SPAWN_META_TMP=
+  # The record is published: teardown now owns the endpoint, so the
+  # transactional endpoint rollback disarms.
+  SPAWN_ENDPOINT_ABORT_CLEANUP=0
 fi
 
 # Fuse the backlog In-flight transition into the publication that just created
