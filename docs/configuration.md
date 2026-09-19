@@ -347,7 +347,6 @@ This section is the single owner of the canonical schema and its per-field seman
     {
       "when": "<natural-language condition describing a kind of task>",
       "approval": "captain",
-      "floor": { "scope": "<quota-axi scope>", "min_percent": 20, "provider": "<quota-axi provider>" },
       "use": [
         { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>", "provider": "<optional quota-axi provider>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 } }
       ],
@@ -364,9 +363,9 @@ Per rule, `when` and `use` are required; the top-level `rules` array itself may 
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
 Profile `model` and `effort` fields and rule `why` are optional.
-Rule `approval` and `floor`, and profile `provider` and `floor` are optional declarations available to [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) and the normal dispatch intake; without the opt-in matcher, they do not alter rule matching.
+Rule `approval` and profile `provider` and `floor` are optional declarations available to [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) and the normal dispatch intake; without the opt-in matcher, they do not alter rule matching.
 `approval` accepts only `captain` and means a matching rule requires the captain's explicit approval before dispatch.
-Rule and profile floors use quota-axi percentages; the matcher reports the rule and leaves floor and provider evaluation to the normal quota-aware intake rather than treating declarations as proof.
+Profile floors use quota-axi percentages; the matcher reports the rule and leaves profile floor and provider evaluation to the normal quota-aware intake rather than treating declarations as proof.
 An omitted model or effort means the selected harness uses its own default for that axis.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.

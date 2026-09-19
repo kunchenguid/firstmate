@@ -34,7 +34,6 @@ cat > "$BASE_RULES" <<'JSON'
   "rules": [
     {
       "when": "New feature work on the app.",
-      "floor": { "scope": "model:fable", "min_percent": 20, "provider": "claude" },
       "use": { "harness": "claude", "model": "fable", "effort": "xhigh" },
       "why": "SECRET-WHY-TEXT"
     },
@@ -142,6 +141,16 @@ run() {
   printf -v "$__err" '%s' "$(cat "$TMP_ROOT/stderr")"
 }
 
+run_traced() {
+  local __exit=$1 __out=$2 __err=$3 _out _code
+  shift 3
+  _out=$(PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" bash -x "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
+  _code=$?
+  printf -v "$__exit" '%s' "$_code"
+  printf -v "$__out" '%s' "$_out"
+  printf -v "$__err" '%s' "$(cat "$TMP_ROOT/stderr")"
+}
+
 run_without_curl() {
   local __exit=$1 __out=$2 __err=$3 _out _code
   shift 3
@@ -167,15 +176,18 @@ pass "absent key preserves deterministic dispatch"
 
 printf '%s\n' "export TYPESAFE_API_KEY=\"$KEY\"" > "$HOME_DIR/.env"
 reset_log
-run code out err "$BRIEF" --project pager
+run_traced code out err "$BRIEF" --project pager
 expect_code 0 "$code" ".env key invokes the matcher"
 assert_contains "$out" '  status: escalate' ".env key yields a non-clear match"
 assert_contains "$(cat "$LOG/header")" "Authorization: Bearer $KEY" ".env key reaches curl on fd 3"
+assert_not_contains "$err" "$KEY" ".env key stays out of shell trace output"
 reset_log
-TYPESAFE_API_KEY=env-wins run code out err "$BRIEF"
-assert_equals 'Authorization: Bearer env-wins' "$(cat "$LOG/header")" "process environment wins"
+TRACE_ENV_KEY='env-wins-trace-secret'
+TYPESAFE_API_KEY=$TRACE_ENV_KEY run_traced code out err "$BRIEF"
+assert_equals "Authorization: Bearer $TRACE_ENV_KEY" "$(cat "$LOG/header")" "process environment wins"
+assert_not_contains "$err" "$TRACE_ENV_KEY" "environment key stays out of shell trace output"
 rm -f "$HOME_DIR/.env"
-pass "environment activation works"
+pass "environment activation works without exposing keys to shell tracing"
 
 CURL_HOME_DIR="$TMP_ROOT/curl-home"
 CURL_TRACE="$TMP_ROOT/curl-trace.log"

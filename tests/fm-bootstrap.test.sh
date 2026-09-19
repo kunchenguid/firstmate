@@ -1100,6 +1100,33 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   pass "bootstrap surfaces active crew-dispatch rules only as verbose BOOTSTRAP_INFO"
 }
 
+test_typesafe_key_is_absent_from_shell_trace() {
+  local case_dir fakebin out trace env_key file_key
+  case_dir="$TMP_ROOT/dispatch-key-trace"
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  printf '%s\n' '{"rules":[{"when":"approval check","approval":"firstmate","use":{"harness":"codex"}}]}' \
+    > "$case_dir/home/config/crew-dispatch.json"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  trace="$case_dir/trace"
+
+  env_key='bootstrap-env-trace-secret'
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    TYPESAFE_API_KEY="$env_key" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    bash -x "$ROOT/bin/fm-bootstrap.sh" 2> "$trace")
+  assert_contains "$out" 'approval must be "captain" when present' "environment key activates typed validation under shell tracing"
+  assert_not_contains "$(cat "$trace")" "$env_key" "environment key stays out of bootstrap shell trace output"
+
+  file_key='bootstrap-file-trace-secret'
+  printf 'TYPESAFE_API_KEY=%s\n' "$file_key" > "$case_dir/home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 bash -x "$ROOT/bin/fm-bootstrap.sh" 2> "$trace")
+  assert_contains "$out" 'approval must be "captain" when present' ".env key activates typed validation under shell tracing"
+  assert_not_contains "$(cat "$trace")" "$file_key" ".env key stays out of bootstrap shell trace output"
+  pass "bootstrap typed-dispatch keys stay out of shell tracing"
+}
+
 test_crew_dispatch_validation() {
   local label body expect mode case_dir fakebin out n
   n=0
@@ -1182,4 +1209,5 @@ test_network_sweeps_recheck_lock_ownership
 test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
+test_typesafe_key_is_absent_from_shell_trace
 test_crew_dispatch_validation

@@ -143,6 +143,7 @@
 #          keeps detect-only meaning unlocked, exactly as before.
 #        fm-bootstrap.sh install <tool>...
 #          Install the named tools (only ones the captain approved).
+set +x
 set -u
 
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
@@ -1139,13 +1140,13 @@ crew_dispatch_validate() {
       ($items | any(has("model") and (((.model | type) != "string") or (.model | length) == 0)))
       or ($items | any(has("effort") and (((.effort | type) != "string") or (.effort | length) == 0)))
       or ($typed and ($items | any(has("provider") and (provider_id(.provider) | not))));
-    def floor_bad($f; $need_provider):
+    def profile_floor_bad($f):
       ($f | type) != "object"
       or (($f.scope | type) != "string") or (($f.scope | length) == 0)
       or (($f.min_percent | type) != "number") or ($f.min_percent < 0) or ($f.min_percent > 100)
-      or (if $need_provider then (provider_id($f.provider) | not) else ($f | has("provider")) end);
+      or ($f | has("provider"));
     def malformed_profile_floors($items):
-      ($items | any(has("floor") and floor_bad(.floor; false)));
+      ($items | any(has("floor") and profile_floor_bad(.floor)));
     def bad_efforts:
       configured_profiles
       | map({h: .harness, e: .effort})
@@ -1168,7 +1169,6 @@ crew_dispatch_validate() {
       end
     elif $typed and malformed_profile_floors([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile floor needs scope and min_percent 0..100"
     elif $typed and ([(.rules // [])[]? | select(has("approval") and .approval != "captain")] | length > 0) then "approval must be \"captain\" when present"
-    elif $typed and ([(.rules // [])[]? | select(has("floor") and floor_bad(.floor; true))] | length > 0) then "rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\\z"
     elif [(.rules // [])[]? | select(has("select") and ((.select? | type) != "string" or (.select | length) == 0))] | length > 0 then "select must be a non-empty string"
     elif [(.rules // [])[]? | .select? // empty | select(. != "quota-balanced")] | length > 0 then
       "unknown select: " + ([ (.rules // [])[]? | .select? // empty | select(. != "quota-balanced") ] | unique | join(", "))

@@ -46,6 +46,7 @@
 # Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
 #   the captain-approval gate, or fm-spawn.sh validation; it publishes one
 #   inspectable rule-match answer.
+set +x
 set -u
 
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
@@ -131,21 +132,18 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
     elif $h == "opencode" or $h == "kimi" or $h == "cursor" then false
     else true end;
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
-  def floor_bad($f; $need_provider):
+  def profile_floor_bad($f):
     ($f | type) != "object"
     or (($f.scope | type) != "string") or (($f.scope | length) == 0)
     or (($f.min_percent | type) != "number") or ($f.min_percent < 0) or ($f.min_percent > 100)
-    or (if $need_provider
-        then (provider_id($f.provider) | not)
-        else ($f | has("provider"))
-        end);
+    or ($f | has("provider"));
   def profile_bad($p):
     ($p | type) != "object"
     or (($p.harness | type) != "string") or (($p.harness | length) == 0)
     or ($p | has("model") and ((.model | type) != "string" or (.model | length) == 0))
     or ($p | has("effort") and ((.effort | type) != "string" or (.effort | length) == 0))
     or ($p | has("provider") and (provider_id(.provider) | not))
-    or ($p | has("floor") and floor_bad(.floor; false));
+    or ($p | has("floor") and profile_floor_bad(.floor));
   def duplicate_profiles($items):
     ($items | map([.harness, (.model // null), (.effort // null)] | @json)) as $keys
     | ($keys | length) != ($keys | unique | length);
@@ -158,7 +156,6 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
   elif any((.rules // [])[]; has("select") and ((.select | type) != "string" or (.select | length) == 0)) then "select must be a non-empty string"
   elif any((.rules // [])[]; has("select") and .select != "quota-balanced") then
     "unknown select: " + ([.rules[] | select(has("select") and .select != "quota-balanced") | .select] | unique | join(", "))
-  elif any((.rules // [])[]; has("floor") and floor_bad(.floor; true)) then "rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\\z"
   elif any((.rules // [])[] | profiles(.use)[]; profile_bad(.)) then "each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
   elif any((.rules // [])[]; duplicate_profiles(profiles(.use))) then "each rule use must not contain duplicate harness, model, and effort profiles"
   elif any((.rules // [])[] | profiles(.use)[]; (verified(.harness) | not)) then "each use profile must name a verified harness"
