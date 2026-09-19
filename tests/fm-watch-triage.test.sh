@@ -1501,6 +1501,39 @@ test_working_note_not_working_surfaced() {
   pass "a no-verb working: note whose crew is idle with no running pipeline is surfaced"
 }
 
+test_repeated_turn_end_wakes_debounced_without_masking_actionable_status() {
+  local dir state fakebin out drain_out status_file pid
+  dir=$(make_case turn-end-debounce); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; status_file="$state/task.status"
+  printf 'paused: waiting for the next turn\n' > "$status_file"
+  prime_status_seen "$state" "$status_file" || fail "could not prime paused status"
+  printf 'window=test:fm-debounce\nkind=ship\nharness=codex\n' > "$state/task.meta"
+  : > "$state/task.turn-ended"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "initial turn-end did not surface"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "initial wake drain failed"
+  [ -s "$state/.turnend-wake-since-test_fm-debounce" ] || fail "initial turn-end did not arm debounce"
+  : > "$out"
+  touch "$state/task.turn-ended"
+  FM_TURNEND_SURFACE_DEBOUNCE_SECS=60 watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_poll_cycle "$state" "$pid" 100 || { reap "$pid"; fail "debounced watcher did not remain alive"; }
+  [ ! -s "$out" ] || fail "repeated turn-end produced a duplicate wake: $(cat "$out")"
+  reap "$pid"
+  rm -f "$state/.wake-queue" "$state/.watcher-down"
+  printf 'needs-decision: captain input required\n' > "$status_file"
+  rm -f "$state/.seen-task_status" "$state/.turnend-wake-since-test_fm-debounce"
+  touch "$state/task.turn-ended"
+  FM_TURNEND_SURFACE_DEBOUNCE_SECS=60 watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "captain-relevant status was masked by debounce"
+  grep -F 'signal:' "$out" >/dev/null || fail "captain-relevant status did not surface: $(cat "$out")"
+  grep -F "$status_file" "$state/.wake-queue" >/dev/null \
+    || fail "captain-relevant status was not queued"
+  pass "repeated turn-end wakes debounce while actionable status remains immediate"
+}
+
 test_secondmate_status_note_surfaced_despite_busy_agent() {
   local dir state fakebin out drain_out pid
   dir=$(make_case secondmate-note-surfaced); state="$dir/state"; fakebin="$dir/fakebin"
@@ -5510,6 +5543,7 @@ test_turn_ended_invalid_churn_bound_surfaced
 test_turn_ended_oversized_churn_bound_surfaced
 test_turn_ended_invalid_churn_deadline_surfaced
 test_turn_ended_surfaced_batch_opens_no_partial_deadline
+test_repeated_turn_end_wakes_debounced_without_masking_actionable_status
 test_working_note_not_working_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
 test_secondmate_buried_block_wakes_despite_busy_agent

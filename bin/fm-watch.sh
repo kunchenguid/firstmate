@@ -229,6 +229,10 @@ esac
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
+TURNEND_SURFACE_DEBOUNCE_SECS=${FM_TURNEND_SURFACE_DEBOUNCE_SECS:-60} # seconds
+                                      # during which a surfaced turn-end suppresses
+                                      # repeated notification-only turn-ends
+
 TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task's
                                       # bare turn-ends may be deferred on pane-churn
                                       # evidence alone (signal_turnend_panes_churned)
@@ -401,6 +405,39 @@ window_key() {  # <window>
   local key=${1//:/_}
   key=${key//\//_}
   printf '%s' "${key//./_}"
+}
+
+# A repeated bare turn-end shortly after a surfaced one is duplicate notification
+# noise. Pane staleness remains the backstop for a stopped or wedged worker.
+turnend_debounce_marker() {
+  local f=$1 task meta w key
+  case "$f" in *.turn-ended) ;; *) return 1 ;; esac
+  task=$(basename "$f"); task=${task%.turn-ended}
+  meta="$STATE/$task.meta"
+  [ -f "$meta" ] || return 1
+  w=$(fm_backend_target_of_meta "$meta") || return 1
+  [ -n "$w" ] || return 1
+  key=$(window_key "$w")
+  printf '%s/.turnend-wake-since-%s' "$STATE" "$key"
+}
+turnend_debounce_active() {
+  local marker since now age
+  [[ $TURNEND_SURFACE_DEBOUNCE_SECS =~ ^[1-9][0-9]*$ ]] || return 1
+  marker=$(turnend_debounce_marker "$1") || return 1
+  [ -f "$marker" ] || return 1
+  since=$(cat "$marker" 2>/dev/null || true)
+  case "$since" in ''|*[!0-9]*) return 1 ;; esac
+  now=$(date +%s) || return 1
+  age=$((now - since))
+  [ "$age" -ge 0 ] && [ "$age" -lt "$TURNEND_SURFACE_DEBOUNCE_SECS" ]
+}
+turnend_debounce_mark() {
+  local f marker
+  for f in "$@"; do
+    case "$f" in *.turn-ended) ;; *) continue ;; esac
+    marker=$(turnend_debounce_marker "$f") || continue
+    date +%s > "$marker" || return 1
+  done
 }
 
 inbox_steer_escalate_unavailable() {  # <window> <task> <record>
@@ -720,6 +757,7 @@ watch_record_key_from_file() {  # <basename>
     .writing-since-*) printf '%s' "${1#.writing-since-}" ;;
     .writing-resurfaced-*) printf '%s' "${1#.writing-resurfaced-}" ;;
     .waiting-resurfaced-*) printf '%s' "${1#.waiting-resurfaced-}" ;;
+    .turnend-wake-since-*) printf '%s' "${1#.turnend-wake-since-}" ;;
     .hash-*) printf '%s' "${1#.hash-}" ;;
     .count-*) printf '%s' "${1#.count-}" ;;
     .stale-*) printf '%s' "${1#.stale-}" ;;
@@ -2440,6 +2478,23 @@ EOF
     # fm-primary-pi-watch.ts), and the away daemon, whose handle_durable_wakes
     # passes it to handle_wake (see the comment above handle_wake in
     # bin/fm-supervise-daemon.sh).
+    turnend_debounce_batch=1
+    for f in $files; do
+      case "$f" in
+        *.turn-ended) turnend_debounce_active "$f" || turnend_debounce_batch=0 ;;
+        *) turnend_debounce_batch=0 ;;
+      esac
+    done
+    if [ "$turnend_debounce_batch" -eq 1 ]; then
+      while IFS=$(printf '\t') read -r sf sig f; do
+        [ -n "$sf" ] || continue
+        printf '%s' "$sig" > "$sf"
+      done <<EOF
+$pending
+EOF
+      triage_log "absorbed debounced $reason"
+      continue
+    fi
     # shellcheck disable=SC2086  # same space-separated status-path list
     if afk_present || [ "$signal_actionable" -eq 0 ] \
       || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then
@@ -2475,6 +2530,7 @@ EOF
       done <<EOF
 $FM_SIGNAL_SURFACE_ENDPOINTS
 EOF
+      turnend_debounce_mark $files || exit 1
       wake "$reason"
     else
       while IFS=$(printf '\t') read -r sf sig f; do
