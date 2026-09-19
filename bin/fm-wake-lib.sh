@@ -2331,7 +2331,8 @@ fm_wake_status_mark_current() {  # <state> <status-file>
 # Guarded self-announced status append - the one dedup primitive for the status
 # lines THIS home's own machinery writes as bookkeeping it has already presented
 # in the very turn or tick that writes them (answerer-closes resolved lines, a
-# pending-reply escalation close, captain-held transfers). Such a close must
+# pending-reply escalation close, captain-held transfers, a captain-hold
+# status-log declaration or its retraction). Such a close must
 # not wake the session that wrote it, so this appends one command's lines
 # together, records the exact appended byte range in the home-owned append
 # ledger (bin/fm-classify-lib.sh), and then advances the watcher's seen marker
@@ -2344,17 +2345,19 @@ fm_wake_status_mark_current() {  # <state> <status-file>
 #     the post-append end (classifying after the append keeps the just-closed
 #     decisions from counting as live);
 #   - "already read" means the watcher's classified seen offset equals the
-#     pre-append size, or the OPEN DECISIONS fold cursor does and every
-#     non-blank line the watcher has not classified yet is a keyed
+#     pre-append size, or the file did not exist before the append (an empty
+#     baseline with nothing unseen), or the OPEN DECISIONS fold cursor does
+#     and every non-blank line the watcher has not classified yet is a keyed
 #     needs-decision or blocked line, which OPEN DECISIONS listed as open. The
 #     fold reads bytes it never prints, so a worker's `failed:`, `paused:`,
 #     `working:`, `resolved` or verb-less line there must still wake, and so
 #     must a captain-held line, which raises the watcher's needs-decision
 #     side-band;
-#   - on ANY other condition - a missing file, pending foreign bytes, an
-#     interleaved writer, an unreadable size or identity - the lines are still
-#     appended and the owned range is still recorded when growth is proven, but
-#     the marker is left alone, so the watcher surfaces the file normally.
+#   - on ANY other condition - a missing marker over an existing file, pending
+#     foreign bytes, an interleaved writer, an unreadable size or identity -
+#     the lines are still appended and the owned range is still recorded when
+#     growth is proven, but the marker is left alone, so the watcher surfaces
+#     the file normally.
 # Later signal scans treat owned ranges as already owned even when the watcher
 # has not caught up, so separate --resolve-key answers do not each force a
 # captain-facing wake. A later, different line from any other writer grows the
@@ -2368,7 +2371,7 @@ fm_wake_status_mark_current() {  # <state> <status-file>
 # Returns 0 appended and self-announced, 1 appended but left for the watcher
 # (the safe direction), 2 the append itself failed.
 fm_wake_status_append_self_announced() {  # <state> <status-file> <line>...
-  local state=$1 file=$2 line appended=0 pre_size='' pre_ident='' post_size post_ident
+  local state=$1 file=$2 line appended=0 existed=0 pre_size=0 pre_ident='' post_size post_ident
   local classified folded lag span_rc=0
   local LC_ALL=C stamped=()
   shift 2
@@ -2376,21 +2379,21 @@ fm_wake_status_append_self_announced() {  # <state> <status-file> <line>...
   for line in "$@"; do
     stamped+=("$(status_stamp_line "$line")")
   done
-  if [ -e "$file" ]; then
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    existed=1
     pre_size=$(_fm_status_file_size "$file") || pre_size=''
     pre_ident=$(_fm_open_decisions_file_ident "$file") || pre_ident=''
   fi
   printf '%s\n' "${stamped[@]}" >> "$file" || return 2
-  case "$pre_size" in ''|*[!0-9]*) return 1 ;; esac
   post_size=$(_fm_status_file_size "$file") || return 1
   post_ident=$(_fm_open_decisions_file_ident "$file") || return 1
-  case "$post_size" in ''|*[!0-9]*) return 1 ;; esac
-  [ -n "$pre_ident" ] && [ "$post_ident" = "$pre_ident" ] || return 1
+  case "$pre_size$post_size" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$existed" = 0 ] || { [ -n "$pre_ident" ] && [ "$post_ident" = "$pre_ident" ]; } || return 1
   for line in "${stamped[@]}"; do appended=$((appended + ${#line} + 1)); done
   [ "$post_size" -eq $((pre_size + appended)) ] || return 1
   status_home_appends_record "$file" "$pre_size" "$post_size" || return 1
   classified=$(fm_wake_signal_seen_size "$state" "$file")
-  if [ "$classified" != "$pre_size" ]; then
+  if [ "$existed" = 1 ] && [ "$classified" != "$pre_size" ]; then
     folded=$(status_open_decisions_cursor_offset "$file") || folded=0
     [ "$folded" = "$pre_size" ] && [ "$classified" -lt "$pre_size" ] || return 1
     lag=$(_fm_status_read_span "$file" "$classified" "$((pre_size - classified))") || return 1
