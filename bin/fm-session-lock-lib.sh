@@ -49,6 +49,15 @@ fm_harness_path_name() {  # <path>
       */"$name"/*) printf '%s' "$name"; return 0 ;;
     esac
   done
+  # The Claude desktop app (Code tab) runs its own version-named executable
+  # under ~/.claude/remote/ccd-cli/<version>. No component of that path is a
+  # harness name (".claude" is deliberately not one, see above), so a primary
+  # started from the app could never locate itself and every session start
+  # refused the fleet lock as read-only. Match exactly that install tree: a
+  # "ccd-cli" component directly followed by a version-shaped basename.
+  case "/$path" in
+    */ccd-cli/[0-9]*.[0-9]*) printf '%s' claude; return 0 ;;
+  esac
   return 1
 }
 
