@@ -37,6 +37,7 @@ The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in t
 ## Worker turn-end extension
 
 `../../../bin/fm-spawn.sh` keeps the worker turn-end extension in `state/`, outside the worktree, because project-local extension files worsen the trust gate and pollute the project.
+`../../../bin/fm-spawn.sh` launches Pi and Pi-signed workers, scouts, and secondmates with `-ne` to disable package extension discovery while preserving explicit `-e` extensions.
 The extension listens for Pi's `turn_end` event, not `agent_end`, so supervision is notified after each completed turn rather than only when the whole run exits.
 Native-harness progress uses the separate generation-bound marker owned by `../../../bin/fm-busy-event.sh`; it never fabricates Pi turn completion.
 Pi sets `PI_CODING_AGENT=true` for its children as its harness-detection marker.
@@ -46,6 +47,7 @@ Pi sets `PI_CODING_AGENT=true` for its children as its harness-detection marker.
 The primary turn-end behavior was verified on 2026-07-09 with Pi 0.80.5.
 `.pi/extensions/fm-primary-turnend-guard.ts` listens for logical-run `agent_settled`, not per-tool-loop `turn_end`, and uses `pi.sendUserMessage(..., { deliverAs: "followUp" })` to force one guarded follow-up when `../../../bin/fm-turnend-guard.sh` returns 2.
 Without `deliverAs: "followUp"`, Pi rejects the send while the agent is still processing.
+`.pi/extensions/fm-primary-turnend-guard.ts` also silences Superwhisper for non-owner ordinary Pi sessions opened at the Firstmate root via session-scoped disabled markers under `/tmp/superwhisper-agent` while leaving Firstmate's primary session enabled.
 On native Windows, the extension runs its session-start, both PreToolUse, turn-end, and operational-input Bash helpers through `bash`; macOS and Linux invoke those helpers directly.
 
 The primary watcher protocol also requires `.pi/extensions/fm-primary-pi-watch.ts`.

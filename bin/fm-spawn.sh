@@ -142,6 +142,8 @@
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
+#   Every Pi-family launch appends -ne to disable package extension discovery while
+#   preserving explicit -e turn-end and supervision extensions.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
 #   never falls back to pi.
 #   For omp (Oh My Pi), fm-spawn resolves the `omp` executable from PATH once and
@@ -335,6 +337,10 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
+# codex crewmate and secondmate launches wrap the command with an EXIT trap that
+# creates and removes a cwd-scoped Superwhisper disabled marker under
+# ${SUPERWHISPER_AGENT_STATE_DIR:-/tmp/superwhisper-agent} to silence worker
+# notifications while leaving direct captain sessions enabled.
 # claude is the one harness whose pre-launch setup can REFUSE the spawn: before
 # any per-task state exists, and before its worktree .claude/settings.local.json
 # hooks are written, every claude launch pre-registers the directory the pane
