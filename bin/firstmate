@@ -1,0 +1,310 @@
+#!/usr/bin/env bash
+# firstmate - project-local launcher and home scaffold.
+#
+# Usage:
+#   firstmate [--global] [--harness <name>] [harness args...]
+#       Resolve this launch's Firstmate home, then exec the harness from the
+#       install root (the git clone this script lives in):
+#         1. explicit $FM_HOME always wins;
+#         2. the nearest .firstmate/ ancestor of the caller's cwd, walking no
+#            higher than below $HOME and carrying an untracked .fm-home marker;
+#         3. --global, or a cwd outside any git repository, falls back to the
+#            global home ($HOME/.firstmate when it exists, else the install
+#            root - today's unset-FM_HOME semantics);
+#         4. a cwd inside a git repository with no .firstmate/ ancestor
+#            refuses to guess and names `firstmate init` (per-project home at
+#            the repo root), `firstmate init --org` (org home at an org root),
+#            and `firstmate --global`.
+#       The harness runs with cwd = install root so AGENTS.md, hooks, and
+#       extensions load exactly as they do from a checkout today; the caller's
+#       directory is preserved in FM_LAUNCH_DIR. When that directory is inside a
+#       git repository other than the install checkout, the session-start
+#       digest emits a LAUNCH CONTEXT section (bin/fm-session-start.sh). Harness selection: --harness, then the resolved
+#       home's config/primary-harness, then claude; whichever source supplies
+#       it must be a primary-capable adapter name. Pi, pi-signed, and omp get
+#       their launch-boundary identity marker (FM_PI_HARNESS / FM_OMP_HARNESS)
+#       set for this launch. Remaining args pass through to the harness verbatim.
+#   firstmate init [--org]
+#       Scaffold a .firstmate/ home. --org creates it at the current directory
+#       (an org root whose sibling directories are the projects); without
+#       --org it must run inside a git repository and creates a per-project
+#       home at that repo's root, registering the repo itself. Both write
+#       config/projects-root=.., a .tasks.toml backlog config, the untracked
+#       .fm-home trust marker, and a whitelist-style .firstmate/.gitignore. The home is never added to the
+#       enclosing repository's .git/info/exclude: git would then never read
+#       the whitelist negations, and the .gitignore's `*` already keeps the
+#       rest of the home private.
+set -eu
+
+# The launcher is installed by symlinking it onto PATH, so its own directory is
+# the symlink's target directory, not the one it was invoked through. readlink
+# -f is GNU-only and realpath is not guaranteed on macOS, so follow the chain by
+# hand, the way bin/fm-cursor-lib.sh does.
+launcher_script_dir() {
+  local path=$1 dir base hops=0 target
+  dir=$(CDPATH='' cd -- "$(dirname -- "$path")" 2>/dev/null && pwd -P) || return 1
+  base=$(basename -- "$path")
+  while [ -L "$dir/$base" ] && [ "$hops" -lt 16 ]; do
+    target=$(readlink -- "$dir/$base") || break
+    case "$target" in
+      /*) dir=$(CDPATH='' cd -- "$(dirname -- "$target")" 2>/dev/null && pwd -P) || break ;;
+      *) dir=$(CDPATH='' cd -- "$dir/$(dirname -- "$target")" 2>/dev/null && pwd -P) || break ;;
+    esac
+    base=$(basename -- "$target")
+    hops=$((hops + 1))
+  done
+  printf '%s\n' "$dir"
+}
+
+SCRIPT_DIR="$(launcher_script_dir "${BASH_SOURCE[0]}")"
+INSTALL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=bin/fm-projects-lib.sh
+. "$SCRIPT_DIR/fm-projects-lib.sh"
+
+usage() {
+  cat >&2 <<'EOF'
+usage: firstmate [--global] [--harness <name>] [harness args...]
+       firstmate init [--org]
+EOF
+}
+
+die() { echo "firstmate: $*" >&2; exit 1; }
+
+# The trust marker firstmate init writes into every scaffolded home. A home
+# discovered by walking .firstmate/ ancestors is honored only when it carries
+# this file: a committed .firstmate/ could otherwise inject a hostile
+# config/primary-harness or .tasks.toml into any launch under that repo.
+HOME_MARKER=".fm-home"
+
+# The verified harness adapters minus the crew-only ones (AGENTS.md section 4)
+# and minus kimi, which is verified as a crewmate harness but sits outside the
+# primary turn-end guard scope (references/harness/kimi.md); the launched harness,
+# from --harness or config/primary-harness, is restricted to this list so neither
+# can name an arbitrary binary or a harness with no primary supervision protocol.
+# README's Requirements own the supported primary set.
+VERIFIED_PRIMARY_HARNESSES="claude codex opencode pi pi-signed grok cursor omp"
+
+# nearest_firstmate_home <dir>: print the nearest .firstmate/ ancestor, or
+# nothing. The walk stops below $HOME: $HOME/.firstmate is the global home,
+# reached only through the fallback rules, never as an ancestor candidate.
+nearest_firstmate_home() {
+  local dir=$1 home_dir=''
+  dir=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
+  if [ -n "${HOME:-}" ]; then
+    home_dir=$(cd "$HOME" 2>/dev/null && pwd -P) || home_dir=''
+  fi
+  while :; do
+    [ -n "$home_dir" ] && [ "$dir" = "$home_dir" ] && return 1
+    if [ -d "$dir/.firstmate" ]; then
+      printf '%s\n' "$dir/.firstmate"
+      return 0
+    fi
+    [ "$dir" = "/" ] && return 1
+    dir=$(dirname "$dir")
+  done
+}
+
+# home_is_trusted <home>: true when the home carries the init-written marker
+# and that marker is not tracked by git. init never commits the marker, so a
+# tracked one arrived with a clone and proves nothing about this machine.
+# Only git's "not tracked" answer (exit 1) counts as untracked; any other git
+# failure inside a work tree (a corrupt index, say) fails closed. Ownership
+# checks are deliberately bypassed (safe.directory='*') so a home inside a
+# repository owned by another user can be read at all - without it every git
+# call here would fail and the "not a repo" leg would read that home as
+# trusted. What decides is the marker's tracked state, never git ownership.
+home_is_trusted() {
+  local rc=0
+  [ -f "$1/$HOME_MARKER" ] && [ ! -L "$1/$HOME_MARKER" ] || return 1
+  git -c safe.directory='*' -C "$1" ls-files --error-unmatch -- "$HOME_MARKER" >/dev/null 2>&1 || rc=$?
+  case "$rc" in
+    0) return 1 ;;
+    1) return 0 ;;
+  esac
+  ! git -c safe.directory='*' -C "$1" rev-parse --is-inside-work-tree >/dev/null 2>&1
+}
+
+# require_trusted_home <home>: die when an ancestor-discovered home lacks the
+# marker, naming how to bless it.
+require_trusted_home() {
+  local home=$1
+  home_is_trusted "$home" && return 0
+  die "untrusted home: $home has no local (untracked) $HOME_MARKER marker.
+  A .firstmate/ directory can carry committed config (harness, backlog
+  backend), so the launcher refuses to honor one it did not create; a
+  $HOME_MARKER committed to git does not count.
+  Bless it by running 'firstmate init' there, or knowingly: touch '$home/$HOME_MARKER'"
+}
+
+# repo_top <dir>: print the enclosing git worktree root, or nothing.
+repo_top() {
+  git -C "$1" rev-parse --show-toplevel 2>/dev/null
+}
+
+# scaffold_home <dir> [--register-self]: create the .firstmate/ layout.
+scaffold_home() {
+  local home=$1 register=${2:-}
+  mkdir -p "$home/data" "$home/state" "$home/config"
+  printf '..\n' > "$home/config/projects-root"
+  if [ -f "$INSTALL_ROOT/.tasks.toml" ]; then
+    cp "$INSTALL_ROOT/.tasks.toml" "$home/.tasks.toml"
+  else
+    printf 'backend = "markdown"\n\n[markdown]\npath = "data/backlog.md"\narchive = "data/done-archive.md"\ndone_keep = 10\n' > "$home/.tasks.toml"
+  fi
+  : > "$home/$HOME_MARKER"
+  cat > "$home/.gitignore" <<'EOF'
+# .firstmate/ is private operational state and stays uncommitted by default.
+# To share a config item with the team, append a negation for its exact path
+# below the config/* line, e.g.:
+#   !config/crew-harness
+# This file ignores itself so an uncommitted home leaves the repository clean;
+# a team that shares config commits it once with `git add -f`.
+# Keep data/, state/, and every non-whitelisted config item private.
+*
+!config/
+config/*
+# Whitelist shared config items below this line, one exact path per line.
+EOF
+  if [ "$register" = "--register-self" ]; then
+    local top name mode
+    top=$(repo_top "$home") || die "internal: --register-self outside a repo"
+    name=$(basename "$top")
+    if git -C "$top" remote get-url origin >/dev/null 2>&1; then
+      mode="no-mistakes-prod-only"
+    else
+      mode="local-only"
+    fi
+    printf -- '- %s [%s] - this repository (added %s)\n' "$name" "$mode" "$(date +%F)" \
+      > "$home/data/projects.md"
+  fi
+}
+
+cmd_init() {
+  local org=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --org) org=1 ;;
+      -h | --help) usage; exit 0 ;;
+      *) usage; die "unknown init argument: $1" ;;
+    esac
+    shift
+  done
+
+  local target home existing
+  if [ "$org" -eq 1 ]; then
+    target=$(pwd -P)
+  else
+    target=$(repo_top .) || die "firstmate init must run inside a git repository (or use --org at an org root)"
+  fi
+  home="$target/.firstmate"
+  [ -e "$home" ] && die "$home already exists"
+  existing=$(nearest_firstmate_home "$(dirname "$target")" || true)
+
+  scaffold_home "$home" "$([ "$org" -eq 0 ] && echo --register-self)"
+
+  echo "firstmate: created $home"
+  echo "firstmate: projects root is $target (config/projects-root=..)"
+  if [ -n "$existing" ]; then
+    echo "firstmate: note - launches under $target now resolve to this home, shadowing $existing"
+  fi
+  if [ "$org" -eq 1 ]; then
+    local discovered=()
+    local name
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      discovered+=("$name")
+    done < <(fm_project_discover "$target")
+    if [ "${#discovered[@]}" -gt 0 ]; then
+      echo "firstmate: discoverable sibling repos: ${discovered[*]}"
+      echo "firstmate: discovery is not authority - register each project in $home/data/projects.md before firstmate may refresh, spawn, seed, or land it"
+    fi
+  else
+    echo "firstmate: registered $(basename "$target") in $home/data/projects.md"
+  fi
+  echo "firstmate: run \`firstmate\` from anywhere under $target to launch against this home"
+}
+
+cmd_launch() {
+  local global=0 harness='' harness_set=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --global) global=1 ;;
+      --harness)
+        [ $# -ge 2 ] || die "--harness requires a value"
+        harness=$2
+        harness_set=1
+        shift
+        ;;
+      --harness=*)
+        harness=${1#--harness=}
+        harness_set=1
+        ;;
+      -h | --help) usage; exit 0 ;;
+      *) break ;;
+    esac
+    shift
+  done
+  local home=''
+  local ancestor_home=0
+  if [ -n "${FM_HOME:-}" ]; then
+    home=$FM_HOME
+  elif [ "$global" -eq 0 ] && home=$(nearest_firstmate_home .); then
+    ancestor_home=1
+  elif [ "$global" -eq 0 ] && repo_top . >/dev/null 2>&1; then
+    die "no .firstmate/ home found above $(pwd -P).
+  Run 'firstmate init' at a repo root for a per-project home,
+       'firstmate init --org' at an org root, or 'firstmate --global' for the global home."
+  else
+    if [ -n "${HOME:-}" ] && [ -d "$HOME/.firstmate" ]; then
+      home=$HOME/.firstmate
+    else
+      home=$INSTALL_ROOT
+    fi
+  fi
+  [ -d "$home" ] || die "resolved home does not exist: $home"
+  # An ancestor-discovered home must carry the init-written trust marker; an
+  # explicit FM_HOME and the global home are trusted by provenance.
+  [ "$ancestor_home" -eq 0 ] || require_trusted_home "$home"
+  # Canonicalize before export: a relative FM_HOME would otherwise resolve
+  # against the install root after the cd below, silently the wrong home.
+  home=$(cd "$home" && pwd -P) || die "cannot resolve home: $home"
+
+  if [ "$harness_set" -eq 0 ]; then
+    if [ -L "$home/config/primary-harness" ]; then
+      die "config/primary-harness must be a regular file, not a symlink: $home/config/primary-harness"
+    elif [ -f "$home/config/primary-harness" ]; then
+      harness=$(sed -n '1p' "$home/config/primary-harness" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    fi
+    [ -n "$harness" ] || harness=claude
+  fi
+  case " $VERIFIED_PRIMARY_HARNESSES " in
+    *" $harness "*) ;;
+    *) die "harness is not primary-capable: $harness (primary-capable: $VERIFIED_PRIMARY_HARNESSES)" ;;
+  esac
+  command -v "$harness" >/dev/null 2>&1 || die "harness not found on PATH: $harness"
+
+  export FM_HOME=$home
+  export FM_ROOT_OVERRIDE=$INSTALL_ROOT
+  FM_LAUNCH_DIR=$(pwd -P)
+  export FM_LAUNCH_DIR
+  case $harness in
+    pi | pi-signed) export FM_PI_HARNESS=$harness ;;
+    omp) export FM_OMP_HARNESS=omp ;;
+  esac
+  cd "$INSTALL_ROOT"
+  exec "$harness" "$@"
+}
+
+case "${1:-}" in
+  init)
+    shift
+    cmd_init "$@"
+    ;;
+  -h | --help)
+    usage
+    exit 0
+    ;;
+  *)
+    cmd_launch "$@"
+    ;;
+esac

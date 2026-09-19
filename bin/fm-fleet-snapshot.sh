@@ -13,7 +13,8 @@
 #   schema: stable schema id.
 #   generated: UTC observation time for this fresh command execution.
 #   fm_home: resolved operational home.
-#   roots: resolved root/config/data/state/projects directories.
+#   roots: resolved root/config/data/state/projects directories; projects is
+#     null when a malformed config/projects-root leaves no effective root.
 #   backlog: {path,present,records[]} where records are ordered as written in
 #     data/backlog.md and cover In flight, Queued, and Done.
 #     Canonical tasks-axi rows are structured; free-form non-empty lines in
@@ -123,7 +124,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
-PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+# shellcheck source=bin/fm-projects-lib.sh
+. "$SCRIPT_DIR/fm-projects-lib.sh"
+PROJECTS=$(fm_projects_root "$FM_HOME" "$CONFIG" 2>/dev/null) || PROJECTS=
 BACKLOG="$DATA/backlog.md"
 SNAPSHOT_NOW=${FM_SNAPSHOT_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 if [ -n "${FM_SNAPSHOT_NOW_EPOCH:-}" ]; then
@@ -2048,7 +2051,7 @@ jq -n \
      schema:"fm-fleet-snapshot.v1",
      generated:$generated,
      fm_home:$fm_home,
-     roots:{fm_root:$fm_root,state:$state,data:$data,config:$config,projects:$projects},
+     roots:{fm_root:$fm_root,state:$state,data:$data,config:$config,projects:($projects | if . == "" then null else . end)},
      backlog:$backlog,
      tasks:($tasks | map(. + {backlog:backlog_by_id(.id)})),
      main_inventory:$main_inventory,

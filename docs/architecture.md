@@ -437,6 +437,7 @@ Dirty clones, non-default branches, detached HEADs with unique commits, diverged
 Fetches blocked by an orphaned `.git/packed-refs.lock` use bounded retries and remove the lock only when the shared staleness proof can prove it abandoned; [configuration.md](configuration.md#toolchain) owns the recovery details and tuning knobs.
 Local-only projects, clones without an origin remote, and fetch failures remain benign skips.
 The refresh also prunes local branches whose remote is gone and that no worktree still needs.
+That whole description is the ordinary home's refresh; a `config/projects-root` org home refreshes only its registered projects and does so external-safe - fetch and fast-forward a clean default branch, never pruning, re-attaching, or otherwise touching a user's own working copy - and [configuration.md](configuration.md#project-local-homes-the-launcher-and-the-projects-root) owns that contract.
 
 ## Self-updates stay safe
 

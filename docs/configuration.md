@@ -26,6 +26,48 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Project-local homes, the launcher, and the projects root
+
+A Firstmate home is the directory holding `data/`, `state/`, `config/`, and the `.tasks.toml` backlog config; the tracked code root supplies `AGENTS.md`, `bin/`, skills, and docs.
+The two are independent: `FM_HOME` selects the home and `FM_ROOT_OVERRIDE` (or the script's own location) selects the code root, so one global install can serve many homes.
+
+The `firstmate` launcher (`bin/firstmate`, intended on `PATH`) resolves the home for a primary session, then `cd`s to the install root and execs the harness so instructions, hooks, and extensions load exactly as they do from a checkout.
+Home resolution order: an explicit `FM_HOME` always wins; otherwise the nearest `.firstmate/` ancestor of the caller's directory (a nested `.firstmate/` shadows an outer org home); otherwise, outside any git repository or with `--global`, the global home (`$HOME/.firstmate` when it exists, else the install root); a directory inside a git repository with no `.firstmate/` ancestor refuses to guess and names the init commands.
+The caller's directory is exported as `FM_LAUNCH_DIR`.
+When it lies inside a git repository other than the install checkout, `bin/fm-session-start.sh` emits a LAUNCH CONTEXT section naming the launch directory, the enclosing git repository as the working project, the registered alias, `unregistered`, or an unreadable registry, and the path of that repository's `AGENTS.md` or `CLAUDE.md`; a bounded, per-line-capped excerpt of that file follows the CONTEXT digest.
+A launch from a linked worktree names the worktree as the working project and resolves its registry alias by its own path, falling back to the main worktree.
+A launch outside any git repository claims no working project and omits the section, so no launch-directory instruction file is read.
+Secondmate launches clear `FM_LAUNCH_DIR`, so a secondmate never inherits its primary's launch context.
+An unregistered repository is named, not auto-registered.
+A direct harness launch with no `FM_LAUNCH_DIR` omits the section.
+The harness is `--harness <name>`, then the home's `config/primary-harness` (one token), then `claude`; remaining arguments pass through to the harness.
+Whichever source supplies it, the harness name must be a primary-capable adapter (`claude codex opencode pi pi-signed grok cursor omp`; the crew-only adapters `muse gemini rovo agy` are refused, and `kimi` is refused because it is verified as a crewmate harness but sits outside the primary turn-end guard scope), and any other value - including a symlinked `config/primary-harness` file or a value with interior whitespace - fails loudly at launch.
+That whitelist keeps a home config or flag from naming an arbitrary binary or a harness with no primary supervision protocol; [README requirements](../README.md#requirements) own the harnesses supported for a primary session.
+A `pi` or `pi-signed` launch exports `FM_PI_HARNESS` as that name and an `omp` launch exports `FM_OMP_HARNESS=omp`, so harness detection labels the primary from the launch itself rather than from an inherited marker.
+
+Home trust: `firstmate init` writes an empty `.firstmate/.fm-home` marker into every scaffolded home.
+A home discovered by walking `.firstmate/` ancestors is honored only when it carries that marker and git does not track it (init never commits the marker, so a committed one proves nothing, and a git error while checking - a corrupt index, say - inside a work tree fails closed; repository ownership checks are deliberately bypassed so a home inside another user's repository can be read at all, and it is the marker's tracked state, never ownership, that decides); the launcher refuses an unmarked one and names the blessing (`firstmate init`, or a knowing `touch .firstmate/.fm-home`), so a `.firstmate/` committed into a repository cannot inject a hostile `config/primary-harness` or `.tasks.toml` into launches beneath it.
+The ancestor walk stops below `$HOME`, so `$HOME/.firstmate` is only ever reached as the global home, never as an ancestor.
+An explicit `FM_HOME` and the global home are trusted by provenance and need no marker, and the resolved home is canonicalized (`cd` + `pwd -P`) before `FM_HOME` is exported.
+
+`firstmate init --org` scaffolds `.firstmate/` at the current directory (an org root), and `firstmate init` inside a git repository scaffolds a per-project home at that repo's root and registers the repository itself.
+Both write `config/projects-root` (below), a `.tasks.toml` backlog config, and a whitelist-style `.firstmate/.gitignore` that keeps the home private while letting a team commit selected `config/` items; the home is deliberately not added to `.git/info/exclude`, which would hide those whitelisted items from git.
+`.firstmate/` is private by default; to share a config item with a team, commit it by appending an exact-path negation such as `!config/crew-harness` to `.firstmate/.gitignore` and committing that `.gitignore` once with `git add -f` (it ignores itself, so an unshared home leaves the repository clean) - `data/` and `state/` are never shared.
+
+`config/projects-root` holds one line naming the directory whose children are this home's projects: a relative path resolves against the home, and `firstmate init` writes `..` so an org home's projects are the org root's sibling repositories.
+Resolution order for the effective projects root is `FM_PROJECTS_OVERRIDE`, then `config/projects-root`, then `$FM_HOME/projects`; `bin/fm-projects-lib.sh` owns the contract and every script that computes a projects root consumes it.
+A malformed `config/projects-root` fails loudly rather than falling back: scripts that act on projects refuse, bootstrap reports it as `FLEET_SYNC: fleet: skipped: <reason>` without abandoning its other duties, and the fleet snapshot keeps reporting with `roots.projects` set to `null`.
+
+Discovery is not authority: sibling repositories under a `config/projects-root` home are discoverable for intake and registry rebuild (`bin/fm-projects.sh discover`), but only registered `data/projects.md` entries and `data/project-paths.json` aliases are eligible for refresh, spawn, seeding, or landing.
+`data/project-paths.json` is a flat JSON object `{"<alias>": "<absolute-path>"}` registering a project that lives outside the projects root.
+The central resolver maps a project argument to a path in this order: a `projects/<name>` argument prefers the legacy `$FM_HOME/projects/<name>` clone then resolves `<name>` as an alias; a bare alias resolves through `data/project-paths.json`, then - in a `config/projects-root` home - the projects root itself when it is the git work-tree root named `<alias>` (the repository a per-project `firstmate init` registers), then `<projects-root>/<alias>` (in a `config/projects-root` home only when that directory is its own git work-tree root, so a same-named package directory inside a per-project repository never shadows it), then `$FM_HOME/projects/<alias>`; any other path, and an alias that resolves nowhere, passes through unchanged.
+Task metadata records `project_name=` (the stable alias or basename) beside `project=` (the absolute path), and `bin/fm-captain-hold.sh` derives a held task's repo from it.
+A whole-fleet refresh touches only registered projects in a `config/projects-root` home and keeps the legacy direct-children glob everywhere else; in a `config/projects-root` home the refresh is external-safe - fetch, then fast-forward only when clean and on the default branch; it never prunes local branches or re-attaches a detached HEAD, and any other state is skipped rather than touched. Other homes keep the full refresh, including gone-branch pruning and loud `STUCK:` reports.
+A single-argument `fm-fleet-sync.sh <project>` in a `config/projects-root` home likewise refuses a name that is not a registered alias and a path that resolves to no registered alias, so a discoverable-but-unregistered sibling can never be refreshed by name or by path.
+A registered alias whose directory is missing, is not a git repository, or is not its own clone root is reported with that - the same story the whole-fleet refresh tells - rather than being called unregistered.
+A project registered only through `data/project-paths.json` carries no delivery mode and is not seedable: `fm-home-seed.sh` refuses it and names the `data/projects.md` registration it needs.
+Homes without `config/projects-root` behave exactly as before, and `FM_HOME` semantics are unchanged.
+
 ## Calm preference (config/calm)
 
 The Pi Calm extension and the Claude Code Calm mod share the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, so one `/calm` choice applies on either harness.
@@ -297,6 +339,7 @@ A local standalone-clone home cannot receive a primary-local commit through that
 
 `FM_HOME` selects the operational home for one firstmate instance.
 When it is unset, most scripts use the repo root as the home; when it is set, scripts still run from this repo's `bin/`, but `state/`, `data/`, `config/`, and `projects/` come from `$FM_HOME`.
+A home with `config/projects-root` takes its projects from that root instead of `$FM_HOME/projects` (see "Project-local homes, the launcher, and the projects root" above).
 `FM_ROOT_OVERRIDE` overrides the firstmate repo root used by scripts, including the primary checkout watched by the worktree-tangle guard.
 When `FM_HOME` is unset, it also behaves as the old whole-root override.
 `bin/fm-send.sh` is intentionally stricter than that general fallback: it requires `FM_HOME` to be set before resolving a target, so operator steers cannot silently resolve against the wrong home.
@@ -331,6 +374,8 @@ Pi-family launches adapt the regular-TUI safeguard to the installed CLI's capabi
 Enabled primary-session turn-end guard integrations are tracked as repo-level hook files and documented in [`docs/turnend-guard.md`](turnend-guard.md).
 Kimi remains outside the primary turn-end guard integrations; [`docs/turnend-guard.md`](turnend-guard.md#compatibility-limits) owns its separate captain-approved crew wake hook.
 Primary-session watcher wake protocols are rendered at session start by [`bin/fm-supervision-instructions.sh`](../bin/fm-supervision-instructions.sh) from [`docs/supervision-protocols/`](supervision-protocols/).
+A primary harness with no snippet there falls back to `supervision-protocols/unknown.md`, which sends the captain to the generic `AGENTS.md` supervision contract and a bounded foreground wait instead of a verified watcher wake adapter.
+The [`firstmate` launcher's primary-capable whitelist](#project-local-homes-the-launcher-and-the-projects-root) refuses `kimi` for exactly this reason: it is verified as a crewmate harness but has no primary supervision snippet, so accepting it would yield a primary no verified wake adapter covers.
 Claude's Stop `asyncRewake` hook owns tokenless re-arm cycles, Cursor's stop hook parks on the watcher, Grok uses background-notify cycles, Codex uses bounded foreground checkpoints, Pi and pi-signed use the same two tracked primary extensions, omp uses its own two tracked `.omp/extensions/` files with a blocking `session_stop` turn-end hook, and OpenCode uses its TUI plugin.
 `config/crew-harness` is a local, gitignored file containing one adapter name for crewmate and scout launches.
 When pi-signed is selected, Firstmate preserves `FM_PI_HARNESS=pi-signed` and refuses the launch if the selected executable is unavailable rather than falling back to pi; [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns executable resolution and launch mechanics.

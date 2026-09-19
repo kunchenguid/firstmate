@@ -1094,6 +1094,22 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+test_malformed_projects_root_does_not_block_snapshot() {
+  local home fakebin out
+  home=$(make_home malformed-projects-root)
+  write_fixture "$home"
+  printf 'a\nb\n' > "$home/config/projects-root"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "a malformed projects-root stopped the fleet snapshot"
+  printf '%s' "$out" | jq -e '
+    .roots.projects == null
+      and .backlog.present == true
+      and ([.tasks[].id] | index("ship-task") != null)
+  ' >/dev/null || fail "malformed projects-root snapshot lost fleet state: $out"
+  pass "a malformed projects-root leaves the fleet snapshot readable"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
@@ -1112,3 +1128,4 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_malformed_projects_root_does_not_block_snapshot

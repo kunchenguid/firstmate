@@ -4,6 +4,11 @@
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+#   <project-dir> may be a path, a bare registered project name, or
+#   projects/<name>; names resolve through bin/fm-projects-lib.sh's central
+#   contract (data/project-paths.json, then the projects root, then the legacy
+#   $FM_HOME/projects clone). The task record carries both project=<abs path>
+#   and project_name=<stable alias or basename>.
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -428,8 +433,9 @@ if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
 fi
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+# shellcheck source=bin/fm-projects-lib.sh
+. "$SCRIPT_DIR/fm-projects-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 if ! LAUNCH_ENV_ENABLED=$(fm_config_source_present "$CONFIG/launch-env-allowlist"); then
@@ -2408,10 +2414,7 @@ resolved_existing_dir() {
 
 resolve_project_dir_arg() {
   local path=$1
-  case "$path" in
-  projects/*) printf '%s/%s\n' "$PROJECTS" "${path#projects/}" ;;
-  *) printf '%s\n' "$path" ;;
-  esac
+  fm_project_resolve "$FM_HOME" "$CONFIG" "$DATA" "$path"
 }
 
 path_is_ancestor_of() {
@@ -2482,6 +2485,11 @@ validate_firstmate_home_for_spawn() {
 validate_firstmate_operational_dirs() {
   local abs_home=$1 abs_active_home=$2 abs_root=$3 name dir abs_dir
   for name in data state config projects; do
+    # An org-shaped home holds no projects/ directory; its projects live as
+    # siblings under its config/projects-root.
+    if [ "$name" = projects ] && fm_projects_root_is_custom "$abs_home/config"; then
+      continue
+    fi
     dir="$abs_home/$name"
     if [ -L "$dir" ] && [ ! -e "$dir" ]; then
       echo "error: secondmate $name directory must resolve inside the secondmate home: $dir" >&2
@@ -2590,9 +2598,44 @@ if [ "$KIND" = secondmate ]; then
     BRIEF="$DATA/$ID/brief.md"
   fi
 else
-  PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
+  PROJ_RESOLVED=$(resolve_project_dir_arg "$PROJ") || exit 1
+  [ -n "$PROJ_RESOLVED" ] || {
+    echo "error: could not resolve a project directory for $PROJ" >&2
+    exit 1
+  }
+  PROJ_ABS=$(cd "$PROJ_RESOLVED" && pwd) || {
+    echo "error: project directory does not exist: $PROJ_RESOLVED" >&2
+    exit 1
+  }
   WT=""
   BRIEF="$DATA/$ID/brief.md"
+fi
+# The stable project name: a bare alias or projects/<name> argument keeps that
+# name, a path argument uses its registered alias when one resolves to it, and
+# a relaunch reuses the recorded name. Secondmates record home=/projects=
+# instead and carry no project_name.
+if [ "$KIND" = secondmate ]; then
+  PROJ_NAME=
+elif [ "$RELAUNCH" -eq 1 ]; then
+  PROJ_NAME=$(fm_meta_get "$RELAUNCH_META" project_name)
+  [ -n "$PROJ_NAME" ] || PROJ_NAME=$(basename "$PROJ_ABS")
+else
+  if fm_projects_root_is_custom "$CONFIG"; then
+    PROJ_REGISTERED_ALIAS=$(fm_project_alias_for_path "$FM_HOME" "$CONFIG" "$DATA" "$PROJ_ABS") || {
+      echo "error: could not read this home's project registry" >&2
+      exit 1
+    }
+    [ -n "$PROJ_REGISTERED_ALIAS" ] || {
+      echo "error: $PROJ_ABS is not a registered project of this home; register it in $DATA/projects.md (or data/project-paths.json) before spawning" >&2
+      exit 1
+    }
+    PROJ_NAME=$PROJ_REGISTERED_ALIAS
+  else
+    PROJ_NAME=$(fm_project_name_for "$FM_HOME" "$CONFIG" "$DATA" "$PROJ" "$PROJ_ABS") || {
+      echo "error: could not resolve the project name for $PROJ" >&2
+      exit 1
+    }
+  fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
@@ -2672,7 +2715,6 @@ delivery_rigor_rank() { # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task 
 # line. A spawn that disagrees would launch a worker whose instructions and whose
 # recorded task delivery differ, which is the exact drift this contract prevents.
 if [ "$KIND" = ship ]; then
-  PROJ_NAME=$(basename "$PROJ_ABS")
   BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   if [ -z "$BRIEF_MODE" ]; then
     echo "warning: $BRIEF records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2
@@ -4252,7 +4294,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project project_name harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4263,6 +4305,7 @@ preserve_relaunch_meta() {
   echo "endpoint_task_id=$ID"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
+  [ -z "$PROJ_NAME" ] || echo "project_name=$PROJ_NAME"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
@@ -4469,7 +4512,7 @@ if [ "$KIND" = secondmate ]; then
   # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_LAUNCH_DIR= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
 # Every agent this fleet launches - crewmate, scout, and secondmate, on a fresh
 # spawn and on a relaunch alike - runs with the compact-adviser kill switch on.

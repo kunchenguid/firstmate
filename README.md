@@ -85,6 +85,9 @@ git clone https://github.com/kunchenguid/firstmate
 cd firstmate
 ```
 
+Or install the `firstmate` launcher on `PATH` (symlink `bin/firstmate` from the clone) and run it from anywhere: it resolves the home from your directory - an explicit `FM_HOME`, the nearest `.firstmate/` ancestor, or the global `~/.firstmate` home - then starts the harness from the install root, with the session-start digest primed with the launch repository's identity and `AGENTS.md` or `CLAUDE.md`.
+`firstmate init --org` at an org root scaffolds `.firstmate/` so every sibling repository is a discoverable project, and `firstmate init` inside a standalone repository scaffolds a per-project home; see [docs/configuration.md](docs/configuration.md#project-local-homes-the-launcher-and-the-projects-root).
+
 Then launch one of the co-primary harnesses; AGENTS.md takes over from there:
 
 **Claude Code**

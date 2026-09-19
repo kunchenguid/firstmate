@@ -793,6 +793,108 @@ test_fleet_sync_timeout_empty_override_uses_default() {
   pass "bootstrap treats a blank timeout override as unset"
 }
 
+test_fleet_sync_failure_is_reported() {
+  local case_dir home fakebin fake_root out
+  case_dir="$TMP_ROOT/fleet-sync-failure"
+  home="$case_dir/home"
+  mkdir -p "$home/config"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  add_origin_backed_projects "$home" 1
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fake_root="$case_dir/fake-root"
+  mkdir -p "$fake_root/bin"
+  cat > "$fake_root/bin/fm-fleet-sync.sh" <<'SH'
+#!/usr/bin/env bash
+echo "error: project registry is unreadable" >&2
+exit 1
+SH
+  chmod +x "$fake_root/bin/fm-fleet-sync.sh"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$fake_root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" "FLEET_SYNC: fleet: skipped: project registry is unreadable" \
+    "a refresh that refused to run must not read as a clean fleet"
+
+  # fm-fleet-sync.sh runs fm-guard.sh, which warns on the same stream before the
+  # refresh can refuse, so the reported cause must be the error, not whatever
+  # diagnostic happened to be printed first.
+  cat > "$fake_root/bin/fm-fleet-sync.sh" <<'SH'
+#!/usr/bin/env bash
+echo "WARNING: queued wakes pending - drain them with bin/fm-wake-drain.sh before anything else." >&2
+echo "error: project registry is unreadable" >&2
+exit 1
+SH
+  chmod +x "$fake_root/bin/fm-fleet-sync.sh"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$fake_root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "FLEET_SYNC: fleet: skipped: project registry is unreadable" \
+    "an unrelated warning on stderr replaced the refusal's real cause"
+  assert_not_contains "$out" "FLEET_SYNC: fleet: skipped: WARNING" \
+    "the digest reported a guard warning as the reason the refresh refused"
+
+  # No error: line at all still reports the refusal rather than a clean fleet.
+  cat > "$fake_root/bin/fm-fleet-sync.sh" <<'SH'
+#!/usr/bin/env bash
+echo "WARNING: queued wakes pending." >&2
+exit 3
+SH
+  chmod +x "$fake_root/bin/fm-fleet-sync.sh"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$fake_root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "FLEET_SYNC: fleet: skipped: refresh failed (exit 3)" \
+    "a refusal with no error: line lost its fallback reason"
+  pass "bootstrap reports a fleet refresh that failed instead of showing nothing"
+}
+
+test_fleet_sync_runs_in_an_org_home_whose_root_is_absent() {
+  local case_dir home fakebin fake_root out
+  case_dir="$TMP_ROOT/fleet-sync-org-absent-root"
+  home="$case_dir/home"
+  mkdir -p "$home/config"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  # An org home's registered projects live wherever the registry says; the
+  # projects root itself may be absent (renamed, unmounted).
+  printf '%s\n' "$case_dir/absent-root" > "$home/config/projects-root"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  fake_root="$case_dir/fake-root"
+  mkdir -p "$fake_root/bin"
+  cat > "$fake_root/bin/fm-fleet-sync.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'ext: skipped: not a clone root'
+SH
+  chmod +x "$fake_root/bin/fm-fleet-sync.sh"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$fake_root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" "FLEET_SYNC: ext: skipped: not a clone root" \
+    "an org home's refresh must run even when its projects root is absent"
+  pass "bootstrap refreshes an org home whose projects root does not exist"
+}
+
+test_malformed_projects_root_is_reported_not_fatal() {
+  local case_dir home fakebin out rc
+  case_dir="$TMP_ROOT/fleet-sync-malformed-root"
+  home="$case_dir/home"
+  mkdir -p "$home/config"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n%s\n' "$case_dir/a" "$case_dir/b" > "$home/config/projects-root"
+  fakebin=$(make_fake_toolchain "$case_dir")
+
+  rc=0
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_LAVISH_AXI_VERSION=0.1.46 \
+    "$ROOT/bin/fm-bootstrap.sh" lavish-compatible 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "a malformed projects-root made lavish-compatible fail: $out"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "FLEET_SYNC: fleet: skipped: $home/config/projects-root must contain exactly one path line" \
+    "a malformed projects-root was not reported as the fleet refresh's cause"
+  pass "a malformed projects-root is reported by the fleet refresh, not fatal to bootstrap"
+}
+
 test_fleet_sync_timeout_is_computed_before_launch() {
   local case_dir home fakebin fake_root out started_marker git_record
   case_dir="$TMP_ROOT/fleet-timeout-launch-order"
@@ -1252,6 +1354,9 @@ test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins
 test_fleet_sync_timeout_empty_override_uses_default
+test_fleet_sync_failure_is_reported
+test_fleet_sync_runs_in_an_org_home_whose_root_is_absent
+test_malformed_projects_root_is_reported_not_fatal
 test_fleet_sync_timeout_is_computed_before_launch
 test_routine_bootstrap_confirmations_are_silent
 test_routine_bootstrap_contract_runs_under_system_bash

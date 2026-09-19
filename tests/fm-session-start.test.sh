@@ -4,6 +4,13 @@
 # (recovery) into one ordered digest.
 #
 # Coverage:
+#   - LAUNCH CONTEXT: omitted without FM_LAUNCH_DIR, when the launch dir is
+#     the install root or inside it, and outside any git repository (whose
+#     instruction file is never read); registered vs unregistered vs
+#     unreadable-registry launch repos; a linked worktree resolves its alias
+#     by its own path, then through the main worktree; AGENTS.md excerpt
+#     (line- and width-bounded, printed after the CONTEXT digest) vs
+#     CLAUDE.md fallback vs absent instructions
 #   - absent-file markers vs empty-but-present files in the context digest
 #   - the lock-refusal read-only path: banner leads, every mutating step is
 #     skipped (including bootstrap's seven mutating sweeps, verified by their
@@ -517,20 +524,29 @@ SH
 run_session_start() {
   local home=$1 root=$2 path=$3 pi_harness=${4:-}
   if [ -n "$pi_harness" ]; then
-    env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
+    env -u CLAUDECODE -u GROK_AGENT -u FM_LAUNCH_DIR PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   else
-    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT -u FM_LAUNCH_DIR \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   fi
 }
 
+# run_session_start_launched_from <home> <root> <path> <launch-dir>
+run_session_start_launched_from() {
+  local home=$1 root=$2 path=$3 launch_dir=$4
+  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
+    FM_LAUNCH_DIR="$launch_dir" \
+    "$SESSION_START"
+}
+
 run_pi_session_start() {  # <home> <root> <path> [fm-session-start args...]
   local home=$1 root=$2 path=$3
   shift 3
-  env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS=pi \
+  env -u CLAUDECODE -u GROK_AGENT -u FM_LAUNCH_DIR PI_CODING_AGENT=true FM_PI_HARNESS=pi \
     FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
     "$SESSION_START" "$@"
@@ -539,7 +555,7 @@ run_pi_session_start() {  # <home> <root> <path> [fm-session-start args...]
 run_named_harness_session_start() {  # <harness> <home> <root> <path> [fm-session-start args...]
   local harness=$1 home=$2 root=$3 path=$4
   shift 4
-  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+  env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT -u FM_LAUNCH_DIR \
     FM_FAKE_HARNESS="$harness" FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
     FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
     "$SESSION_START" "$@"
@@ -760,6 +776,274 @@ EOF
   assert_contains "$cap_section" "(present, empty)" "empty-but-present captain.md was not distinguished from ABSENT"
 
   pass "context digest distinguishes ABSENT, empty-but-present, and populated files"
+}
+
+
+# --- launch context ----------------------------------------------------------
+
+first_line_of() {  # <haystack> <needle>: 1-based line of the first match, or 0
+  printf '%s\n' "$1" | grep -nF -- "$2" | head -n 1 | cut -d: -f1 | grep . || printf '0\n'
+}
+
+write_numbered_agents() {  # <file> <first-line> <line-51>
+  local file=$1 first=$2 last=$3 i
+  {
+    printf '%s\n' "$first"
+    i=2
+    while [ "$i" -le 50 ]; do
+      printf 'agents-body-line-%s\n' "$i"
+      i=$((i + 1))
+    done
+    printf '%s\n' "$last"
+  } > "$file"
+}
+
+test_launch_context_omitted_without_launch_dir_or_at_install_root() {
+  local rec root home fakebin out
+  rec=$(new_world launch-omitted)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_not_contains "$out" "LAUNCH CONTEXT" \
+    "a direct harness launch (no FM_LAUNCH_DIR) printed a LAUNCH CONTEXT section"
+
+  out=$(run_session_start_launched_from "$home" "$root" "$fakebin:$BASE_PATH" "$root")
+  assert_not_contains "$out" "LAUNCH CONTEXT" \
+    "launching from the install root printed a LAUNCH CONTEXT section"
+
+  mkdir -p "$root/docs"
+  out=$(run_session_start_launched_from "$home" "$root" "$fakebin:$BASE_PATH" "$root/docs")
+  assert_not_contains "$out" "LAUNCH CONTEXT" \
+    "launching from a subdirectory of the install checkout printed a LAUNCH CONTEXT section"
+
+  pass "LAUNCH CONTEXT is omitted without FM_LAUNCH_DIR and when launched from within the install checkout"
+}
+
+test_launch_context_registered_project_primes_agents_excerpt() {
+  local rec root home fakebin proj launch_dir out repo_root
+  rec=$(new_world launch-registered)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  proj="${home%/home}/demo"
+  fm_git_init_commit "$proj"
+  mkdir -p "$proj/src"
+  repo_root=$(cd "$proj" && pwd -P)
+  launch_dir=$(cd "$proj/src" && pwd -P)
+  write_numbered_agents "$proj/AGENTS.md" \
+    "LAUNCH_CONTEXT_AGENTS_FIRST unique marker" \
+    "LAUNCH_CONTEXT_AGENTS_LINE_51 must not appear"
+  printf 'CLAUDE_ONLY_MARKER should not appear when AGENTS.md exists\n' > "$proj/CLAUDE.md"
+  printf -- '- demo [local-only] - demo project (added 2026-09-19)\n' > "$home/data/projects.md"
+  printf '{"demo": "%s"}\n' "$repo_root" > "$home/data/project-paths.json"
+
+  out=$(run_session_start_launched_from "$home" "$root" "$fakebin:$BASE_PATH" "$launch_dir")
+  assert_contains "$out" "LAUNCH CONTEXT" "registered launch omitted the LAUNCH CONTEXT section"
+  assert_contains "$out" "Launch dir: $launch_dir" "registered launch did not name the launch directory"
+  assert_contains "$out" "Repo root: $repo_root" "registered launch did not name the enclosing repo"
+  assert_contains "$out" "Project alias: demo" "registered launch did not resolve the registry alias"
+  assert_contains "$out" "Registry: registered in this home" "registered launch was not marked registered"
+  assert_not_contains "$out" "Project alias: unregistered" "registered launch was labeled unregistered"
+  assert_not_contains "$out" "does not auto-register" "registered launch printed the unregistered registration path"
+  assert_contains "$out" "Project instructions: $repo_root/AGENTS.md" \
+    "registered launch did not name the project's AGENTS.md"
+  assert_contains "$out" "LAUNCH_CONTEXT_AGENTS_FIRST unique marker" \
+    "registered launch omitted the AGENTS.md excerpt"
+  assert_not_contains "$out" "LAUNCH_CONTEXT_AGENTS_LINE_51 must not appear" \
+    "AGENTS.md excerpt was not bounded to the first 50 lines"
+  assert_not_contains "$out" "CLAUDE_ONLY_MARKER" \
+    "AGENTS.md did not take precedence over CLAUDE.md"
+  assert_contains "$out" "(truncated; read the file for the rest)" \
+    "a 51-line AGENTS.md did not disclose excerpt truncation"
+  assert_contains "$out" "Working project: $repo_root" \
+    "a launch inside a repository did not name it as the working project"
+
+  local identity_line fleet_line context_line excerpt_line
+  identity_line=$(first_line_of "$out" "Project instructions: $repo_root/AGENTS.md")
+  fleet_line=$(first_line_of "$out" "FLEET STATE")
+  context_line=$(printf '%s\n' "$out" | grep -nx 'CONTEXT' | head -n 1 | cut -d: -f1)
+  excerpt_line=$(first_line_of "$out" "LAUNCH_CONTEXT_AGENTS_FIRST unique marker")
+  [ "$identity_line" -gt 0 ] && [ "$fleet_line" -gt "$identity_line" ] \
+    || fail "LAUNCH CONTEXT identity lines did not precede the fleet state (identity=$identity_line fleet=$fleet_line)"
+  [ "${context_line:-0}" -gt "$fleet_line" ] && [ "$excerpt_line" -gt "$context_line" ] \
+    || fail "the instructions excerpt was not printed after the CONTEXT digest (fleet=$fleet_line context=${context_line:-none} excerpt=$excerpt_line)"
+
+  pass "LAUNCH CONTEXT names a registered launch repo and a bounded AGENTS.md excerpt"
+}
+
+test_launch_context_excerpt_caps_long_lines() {
+  local rec root home fakebin proj out repo_root long
+  rec=$(new_world launch-long-lines)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  proj="${home%/home}/wide"
+  fm_git_init_commit "$proj"
+  repo_root=$(cd "$proj" && pwd -P)
+  long="LONG_LINE_HEAD $(printf 'x%.0s' $(seq 1 3000)) LONG_LINE_TAIL_MUST_BE_CUT"
+  printf '%s\n' "$long" > "$proj/AGENTS.md"
+
+  out=$(run_session_start_launched_from "$home" "$root" "$fakebin:$BASE_PATH" "$repo_root")
+  assert_contains "$out" "LONG_LINE_HEAD" "a long AGENTS.md line was dropped instead of capped"
+  assert_contains "$out" "[truncated]" "a long AGENTS.md line was not marked truncated"
+  assert_not_contains "$out" "LONG_LINE_TAIL_MUST_BE_CUT" \
+    "a 3000-character AGENTS.md line was printed uncapped"
+
+  pass "LAUNCH CONTEXT excerpt caps each instruction line with the shared per-line cap"
+}
+
+test_launch_context_unreadable_registry_is_not_reported_unregistered() {
+  local rec root home fakebin proj out repo_root
+  rec=$(new_world launch-bad-registry)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  proj="${home%/home}/demo"
+  fm_git_init_commit "$proj"
+  repo_root=$(cd "$proj" && pwd -P)
+  printf -- '- demo [local-only] - demo project (added 2026-09-19)\n' > "$home/data/projects.md"
+  printf 'not json\n' > "$home/data/project-paths.json"
+
+  out=$(run_session_start_launched_from "$home" "$root" "$fakebin:$BASE_PATH" "$repo_root")
+  assert_contains "$out" "Registry: unreadable (" \
+    "an unreadable registry was not reported as unreadable"
+  assert_contains "$out" "project-paths.json" "the unreadable-registry reason did not name the bad file"
+  assert_not_contains "$out" "Project alias: unregistered" \
+    "an unreadable registry labeled the launch repo unregistered"
+  assert_not_contains "$out" "does not auto-register" \
+    "an unreadable registry printed the unregistered registration advice"
+
+  pass "LAUNCH CONTEXT reports an unreadable registry instead of calling the repo unregistered"
+}
+
+test_launch_context_non_repo_launch_omits_section_and_instructions() {
+  local rec root home fakebin plain out
+  rec=$(new_world launch-non-repo)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  plain="${home%/home}/plain"
+  mkdir -p "$plain"
+  plain=$(cd "$plain" && pwd -P)
+  if git -C "$plain" rev-parse --show-toplevel >/dev/null 2>&1; then
+    fail "fixture directory $plain is unexpectedly inside a git repository"
+  fi
+  printf 'PLAIN_DIR_CLAUDE_MARKER\n' > "$plain/CLAUDE.md"
+  printf 'PLAIN_DIR_AGENTS_MARKER\n' > "$plain/AGENTS.md"
+
+  out=$(run_session_start_launched_from "$home" "$root" "$fakebin:$BASE_PATH" "$plain")
+  assert_not_contains "$out" "LAUNCH CONTEXT" "a non-repo launch printed a LAUNCH CONTEXT section"
+  assert_not_contains "$out" "LAUNCH INSTRUCTIONS EXCERPT" "a non-repo launch printed an instructions excerpt"
+  assert_not_contains "$out" "PLAIN_DIR_CLAUDE_MARKER" "a non-repo launch primed the launch directory's CLAUDE.md"
+  assert_not_contains "$out" "PLAIN_DIR_AGENTS_MARKER" "a non-repo launch primed the launch directory's AGENTS.md"
+
+  pass "LAUNCH CONTEXT is omitted outside a repository and never reads launch-dir instructions"
+}
+
+test_launch_context_linked_worktree_resolves_registry_via_main_worktree() {
+  local rec root home fakebin proj out repo_root wt
+  rec=$(new_world launch-worktree)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  proj="${home%/home}/demo"
+  fm_git_init_commit "$proj"
+  repo_root=$(cd "$proj" && pwd -P)
+  git -C "$proj" worktree add -q "$proj/.worktrees/x" -b wt-x
+  wt=$(cd "$proj/.worktrees/x" && pwd -P)
+  printf 'WORKTREE_AGENTS_MARKER\n' > "$wt/AGENTS.md"
+  printf -- '- demo [local-only] - demo project (added 2026-09-19)\n' > "$home/data/projects.md"
+  printf '{"demo": "%s"}\n' "$repo_root" > "$home/data/project-paths.json"
+
+  out=$(run_session_start_launched_from "$home" "$root" "$fakebin:$BASE_PATH" "$wt")
+  assert_contains "$out" "Repo root: $wt" "a worktree launch did not name the worktree as the repo root"
+  assert_contains "$out" "Working project: $wt" "a worktree launch did not name the worktree as the working project"
+  assert_contains "$out" "Project alias: demo" "a worktree launch did not resolve the main worktree's alias"
+  assert_not_contains "$out" "Project alias: unregistered" "a worktree of a registered project was labeled unregistered"
+  assert_not_contains "$out" "does not auto-register" "a worktree of a registered project printed registration advice"
+  assert_contains "$out" "Project instructions: $wt/AGENTS.md" "a worktree launch did not name the worktree's AGENTS.md"
+  assert_contains "$out" "WORKTREE_AGENTS_MARKER" "a worktree launch omitted the worktree's instructions excerpt"
+
+  printf -- '- demo-feat [local-only] - worktree project (added 2026-09-19)\n' > "$home/data/projects.md"
+  printf '{"demo-feat": "%s"}\n' "$wt" > "$home/data/project-paths.json"
+  out=$(run_session_start_launched_from "$home" "$root" "$fakebin:$BASE_PATH" "$wt")
+  assert_contains "$out" "Project alias: demo-feat" "a worktree registered at its own path did not resolve its alias"
+  assert_not_contains "$out" "Project alias: unregistered" "a worktree registered at its own path was labeled unregistered"
+
+  pass "LAUNCH CONTEXT resolves a linked worktree's alias by its own path, then its main worktree"
+}
+
+test_launch_context_unregistered_repo_names_registration_and_absent_instructions() {
+  local rec root home fakebin proj out repo_root
+  rec=$(new_world launch-unregistered)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  proj="${home%/home}/stray"
+  fm_git_init_commit "$proj"
+  repo_root=$(cd "$proj" && pwd -P)
+
+  out=$(run_session_start_launched_from "$home" "$root" "$fakebin:$BASE_PATH" "$repo_root")
+  assert_contains "$out" "LAUNCH CONTEXT" "unregistered launch omitted the LAUNCH CONTEXT section"
+  assert_contains "$out" "Repo root: $repo_root" "unregistered launch did not name the repo root"
+  assert_contains "$out" "Project alias: unregistered" "unregistered launch was not labeled unregistered"
+  assert_contains "$out" "Registry: not registered in this home" \
+    "unregistered launch was not marked unregistered in the home registry"
+  assert_contains "$out" "firstmate init" "unregistered launch did not name firstmate init"
+  assert_contains "$out" "data/projects.md" "unregistered launch did not name the registry file"
+  assert_contains "$out" "does not auto-register" "unregistered launch did not say it will not auto-register"
+  assert_contains "$out" "Project instructions: none (no AGENTS.md or CLAUDE.md at the repo root)" \
+    "unregistered launch without instruction files did not say so plainly"
+  [ ! -f "$home/data/projects.md" ] || fail "unregistered launch auto-registered the repo in data/projects.md"
+
+  pass "LAUNCH CONTEXT names an unregistered repo, the registration path, and absent instructions"
+}
+
+test_launch_context_uses_claude_md_when_agents_absent() {
+  local rec root home fakebin proj out repo_root
+  rec=$(new_world launch-claude)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  proj="${home%/home}/claude-only"
+  fm_git_init_commit "$proj"
+  repo_root=$(cd "$proj" && pwd -P)
+  printf 'CLAUDE_CONTEXT_FIRST unique marker\n' > "$proj/CLAUDE.md"
+
+  out=$(run_session_start_launched_from "$home" "$root" "$fakebin:$BASE_PATH" "$repo_root")
+  assert_contains "$out" "Project instructions: $repo_root/CLAUDE.md" \
+    "a repo with only CLAUDE.md did not name that file"
+  assert_contains "$out" "CLAUDE_CONTEXT_FIRST unique marker" \
+    "CLAUDE.md excerpt was missing"
+  assert_not_contains "$out" "Project instructions: none" \
+    "a present CLAUDE.md was reported as absent"
+
+  pass "LAUNCH CONTEXT falls back to CLAUDE.md when AGENTS.md is absent"
 }
 
 # --- lock refusal: read-only path --------------------------------------------
@@ -2671,6 +2955,14 @@ EOF
 }
 
 test_context_digest_absent_empty_present
+test_launch_context_omitted_without_launch_dir_or_at_install_root
+test_launch_context_registered_project_primes_agents_excerpt
+test_launch_context_unregistered_repo_names_registration_and_absent_instructions
+test_launch_context_uses_claude_md_when_agents_absent
+test_launch_context_excerpt_caps_long_lines
+test_launch_context_unreadable_registry_is_not_reported_unregistered
+test_launch_context_non_repo_launch_omits_section_and_instructions
+test_launch_context_linked_worktree_resolves_registry_via_main_worktree
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
 test_trace_context_effective_state_is_frozen_after_lock

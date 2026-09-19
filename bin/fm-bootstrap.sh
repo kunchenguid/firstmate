@@ -163,10 +163,11 @@ unset TYPESAFE_API_KEY
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
-PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+# shellcheck source=bin/fm-projects-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-projects-lib.sh"
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh disable=SC1091
@@ -278,18 +279,20 @@ secondmate_note_respawned() {  # <id>
 }
 
 fleet_sync_origin_backed_project_count() {
-  local count proj
+  local count proj candidates
   count=0
-  [ -d "$PROJECTS" ] || { echo 0; return 0; }
-  for proj in "$PROJECTS"/*; do
+  candidates=$(fm_project_sync_candidates "$FM_HOME" "$CONFIG" "$DATA" 2>/dev/null) || {
+    echo "$count"
+    return 1
+  }
+  while IFS= read -r proj; do
     [ -d "$proj" ] || continue
     git -C "$proj" rev-parse --git-dir >/dev/null 2>&1 || continue
     git -C "$proj" remote get-url origin >/dev/null 2>&1 || continue
     count=$((count + 1))
-  done
+  done <<< "$candidates"
   echo "$count"
 }
-
 fleet_sync_bootstrap_timeout() {
   local count timeout
   if [ -n "${FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT:-}" ]; then
@@ -329,14 +332,24 @@ fleet_sync_relay_all_output() {
 
 fleet_sync() {
   [ -x "$FM_ROOT/bin/fm-fleet-sync.sh" ] || return 0
-  [ -d "$PROJECTS" ] || return 0
+  # An org home's registered projects live wherever the registry says, not under
+  # the projects root, so its absence - or a malformed config/projects-root - is
+  # fm-fleet-sync.sh's story to tell.
+  local projects_root
+  if projects_root=$(fm_projects_root "$FM_HOME" "$CONFIG" 2>/dev/null); then
+    fm_projects_root_is_custom "$CONFIG" || [ -d "$projects_root" ] || return 0
+  fi
 
-  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-fleet-sync.XXXXXX" 2>/dev/null) || return 0
+  # Both capture files live in one private directory: the refresh's stdout and
+  # stderr carry project paths and git error text.
+  tmpdir=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-fleet-sync.XXXXXX" 2>/dev/null) || return 0
+  tmp="$tmpdir/out"
+  err="$tmpdir/err"
   timeout=$(fleet_sync_bootstrap_timeout)
   monitor_was_on=0
   case $- in *m*) monitor_was_on=1 ;; esac
   set -m 2>/dev/null || true
-  "$FM_ROOT/bin/fm-fleet-sync.sh" >"$tmp" 2>/dev/null &
+  "$FM_ROOT/bin/fm-fleet-sync.sh" >"$tmp" 2>"$err" &
   pid=$!
 
   start=$SECONDS
@@ -348,16 +361,23 @@ fleet_sync() {
       [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
       fleet_sync_relay_all_output "$tmp"
       echo "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=${timeout}s elapsed=${elapsed}s)"
-      rm -f "$tmp"
+      rm -rf "$tmpdir"
       return 0
     fi
     sleep 1
   done
-  wait "$pid" 2>/dev/null || true
+  rc=0
+  wait "$pid" 2>/dev/null || rc=$?
   [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
 
   fleet_sync_relay_filtered_output "$tmp"
-  rm -f "$tmp"
+  if [ "$rc" -ne 0 ]; then
+    # A refresh that refused to run (an unreadable registry or projects root)
+    # must not read as a clean fleet in the digest.
+    reason=$(sed -n 's/^error: //p' "$err" 2>/dev/null | sed -n '/./{p;q;}')
+    echo "FLEET_SYNC: fleet: skipped: ${reason:-refresh failed (exit $rc)}"
+  fi
+  rm -rf "$tmpdir"
 }
 
 secondmate_sync() {

@@ -26,9 +26,21 @@
 # ORDERING, and why LOCK now runs before BOOTSTRAP (the old AGENTS.md order
 # was bootstrap-then-lock):
 #
-#   1. lock          - acquire the per-home session lock FIRST, before any
+#   1. launch-context - when FM_LAUNCH_DIR is inside a git repository other
+#                       than the install checkout, print the launch directory,
+#                       that repository as the working project, the registered
+#                       alias (a linked worktree resolves by its own path,
+#                       then its main worktree), unregistered, or an
+#                       unreadable registry, and the path of the AGENTS.md or
+#                       CLAUDE.md whose bounded excerpt the context digest
+#                       carries. A direct harness launch (no FM_LAUNCH_DIR)
+#                       or a launch outside any git repository omits this
+#                       section. An unregistered repository is named, never
+#                       auto-registered. Read-only local lookups only;
+#                       print_launch_context owns the section.
+#   2. lock          - acquire the per-home session lock FIRST, before any
 #                       mutating step runs.
-#   2. bootstrap      - home-local stale Herdr projection cleanup runs only
+#   3. bootstrap      - home-local stale Herdr projection cleanup runs only
 #                       when this session actually holds the lock. Detect-only
 #                       diagnostics always run. Bootstrap's six MUTATING sweeps
 #                       (same-home backlog reconciliation,
@@ -36,29 +48,30 @@
 #                       handoff retry, X-mode artifact writes, fleet sync) also run only when
 #                       locked; the four network sweeps run in the deferred
 #                       stage rather than this synchronous bootstrap section.
-#   3. wake-drain     - presents durable wakes and advances recovery handling
+#   4. wake-drain     - presents durable wakes and advances recovery handling
 #                       state, so it only runs when locked. The local bounded
 #                       inactive-outcome startup scan runs in the deferred worker.
-#   4. supervision-instructions - the one emitted operating block for the
+#   5. supervision-instructions - the one emitted operating block for the
 #                       detected primary harness.
-#   5. read-once contract - the do-not-re-read contract covering every source
+#   6. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
-#   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
+#   7. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
 #                       the away posture (state/.afk-contract and the legacy
 #                       state/.afk daemon flag), and a cheap per-task
 #                       endpoint-liveness read:
 #                       read-only, always runs.
-#   7. network checks - the result of the deferred network stage started back at
-#                       step 1, harvested WITHOUT waiting for it.
-#   8. context digest - data/projects.md, data/secondmates.md, data/captain.md,
-#                       data/captain-shared.md, data/learnings.md: read-only,
-#                       always safe, always runs.
-#   9. closing reminder - prints the context-specific watcher next step; this
+#   8. network checks - the result of the deferred network stage started back at
+#                       lock, harvested WITHOUT waiting for it.
+#   9. context digest - data/projects.md, data/secondmates.md, data/captain.md,
+#                       data/captain-shared.md, data/learnings.md, then the
+#                       launch instructions excerpt when launch-context named
+#                       one: read-only, always safe, always runs.
+#  10. closing reminder - prints the context-specific watcher next step; this
 #                       script points back to the emitted harness supervision
 #                       block and deliberately never arms the watcher itself.
 #
-# Those nine names are also the runtime-bound stage list below, so a truncated
+# Those ten names are also the runtime-bound stage list below, so a truncated
 # startup can name exactly which of them never ran.
 #
 # NO NETWORK ON THE BLOCKING PATH. This digest runs on a session-open hook that
@@ -70,8 +83,8 @@
 # So no step between here and the last line below makes an external-network
 # call. The five that did - `gh auth status`, secondmate liveness, secondmate
 # convergence, pending remote handoff delivery, and the fleet-sync fetch - are
-# started as one detached bounded worker right after the lock (step 1) and
-# harvested at step 7 without ever blocking on it. The bounded inactive-outcome
+# started as one detached bounded worker right after the lock and
+# harvested at network-checks without ever blocking on it. The bounded inactive-outcome
 # startup scan joins that worker because its local current-state reads can also
 # be slow. bin/fm-startup-network.sh owns that stage and its safety argument;
 # bin/fm-bootstrap.sh and bin/fm-inactive-reconcile.sh remain the owners of the
@@ -262,7 +275,7 @@ done
 # The ordered stage list is the contract behind the truncation banner: the child
 # names the stage it is entering, and the parent reports every stage at or after
 # that one as never emitted. Keep it in the exact order the digest prints.
-SESSION_START_STAGES='lock bootstrap wake-queue supervision-instructions read-once fleet-state network-checks context next-step'
+SESSION_START_STAGES='launch-context lock bootstrap wake-queue supervision-instructions read-once fleet-state network-checks context next-step'
 
 stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
   [ -n "${FM_SESSION_START_STAGE_FILE:-}" ] || return 0
@@ -344,6 +357,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# shellcheck source=bin/fm-projects-lib.sh
+. "$SCRIPT_DIR/fm-projects-lib.sh"
 
 # One tasks-axi compatibility verdict per session start. The probe costs three
 # tasks-axi subprocesses and this digest needs the same answer twice - here for
@@ -365,6 +380,93 @@ SUBRULE='-----------------------------------------------------------------------
 
 section() { printf '\n%s\n%s\n%s\n' "$RULE" "$1" "$RULE"; }
 subsection() { printf '\n%s\n%s\n' "$1" "$SUBRULE"; }
+
+# print_launch_context: when the launcher recorded a caller directory inside a
+# git repository other than the install checkout, emit the launch project's
+# identity lines and record its AGENTS.md or CLAUDE.md in LAUNCH_INSTR for
+# print_launch_instructions_excerpt. A linked worktree is named as the working
+# project and looked up in the registry by its own path, then by its main
+# worktree when its own path is not registered. A launch outside any git
+# repository, or within the install checkout, claims no project and emits
+# nothing, as does a direct harness launch (no FM_LAUNCH_DIR). Does not
+# register anything.
+LAUNCH_INSTR=
+print_launch_context() {
+  local launch_dir install_root repo_root main_root common_dir project_alias registry_out
+  [ -n "${FM_LAUNCH_DIR:-}" ] || return 0
+  [ -d "$FM_LAUNCH_DIR" ] || return 0
+  launch_dir=$(CDPATH='' cd -- "$FM_LAUNCH_DIR" && pwd -P) || return 0
+  repo_root=$(git -C "$launch_dir" rev-parse --show-toplevel 2>/dev/null) || return 0
+  repo_root=$(CDPATH='' cd -- "$repo_root" && pwd -P) || return 0
+  install_root=$(CDPATH='' cd -- "$FM_ROOT" && pwd -P) || install_root=$FM_ROOT
+  [ "$repo_root" != "$install_root" ] || return 0
+
+  main_root=$repo_root
+  common_dir=$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common_dir=
+  case $common_dir in
+    */.git)
+      common_dir=$(CDPATH='' cd -- "${common_dir%/.git}" 2>/dev/null && pwd -P) && main_root=$common_dir
+      ;;
+  esac
+
+  section "LAUNCH CONTEXT"
+  printf 'Launch dir: %s\n' "$launch_dir"
+  printf 'Repo root: %s\n' "$repo_root"
+  printf 'Working project: %s\n' "$repo_root"
+  if registry_out=$(fm_project_alias_for_path "$FM_HOME" "$CONFIG" "$DATA" "$repo_root" 2>&1) &&
+    { [ -n "$registry_out" ] || [ "$main_root" = "$repo_root" ] ||
+      registry_out=$(fm_project_alias_for_path "$FM_HOME" "$CONFIG" "$DATA" "$main_root" 2>&1); }; then
+    project_alias=$registry_out
+    if [ -n "$project_alias" ]; then
+      printf 'Project alias: %s\n' "$project_alias"
+      printf 'Registry: registered in this home\n'
+    else
+      printf 'Project alias: unregistered\n'
+      printf 'Registry: not registered in this home\n'
+      printf 'This launch is inside a repository this home has not registered. Run firstmate init in the repository for a per-project home, or add the project to data/projects.md (and data/project-paths.json when it lives outside the projects root). Firstmate does not auto-register it.\n'
+    fi
+  else
+    registry_out=${registry_out%%$'\n'*}
+    fm_cap_line_var "${registry_out#error: }"
+    printf 'Project alias: unknown\n'
+    printf 'Registry: unreadable (%s)\n' "${FM_LINE_CAP_LINE:-no reason given}"
+  fi
+
+  if [ -f "$repo_root/AGENTS.md" ]; then
+    LAUNCH_INSTR="$repo_root/AGENTS.md"
+  elif [ -f "$repo_root/CLAUDE.md" ]; then
+    LAUNCH_INSTR="$repo_root/CLAUDE.md"
+  fi
+  if [ -z "$LAUNCH_INSTR" ]; then
+    printf 'Project instructions: none (no AGENTS.md or CLAUDE.md at the repo root)\n'
+    return 0
+  fi
+  printf 'Project instructions: %s\n' "$LAUNCH_INSTR"
+  printf 'Excerpt: LAUNCH INSTRUCTIONS EXCERPT, after the CONTEXT digest below\n'
+}
+
+# print_launch_instructions_excerpt: the first 50 lines of LAUNCH_INSTR, each
+# through the shared per-line cap. Placed with the CONTEXT digest because it is
+# recoverable with one read of the path LAUNCH CONTEXT already printed.
+print_launch_instructions_excerpt() {
+  local line count extra
+  [ -n "$LAUNCH_INSTR" ] || return 0
+  subsection "LAUNCH INSTRUCTIONS EXCERPT - $LAUNCH_INSTR (first 50 lines)"
+  extra=0
+  count=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$count" -ge 50 ]; then
+      extra=1
+      break
+    fi
+    count=$((count + 1))
+    fm_cap_line_var "$line"
+    printf '  %s\n' "$FM_LINE_CAP_LINE"
+  done < "$LAUNCH_INSTR"
+  if [ "$extra" -eq 1 ]; then
+    printf '  (truncated; read the file for the rest)\n'
+  fi
+}
 
 # print_file_or_absent <path> <label>: full contents under a labeled
 # subsection, or an explicit ABSENT marker. Absence is semantically
@@ -625,7 +727,10 @@ if [ "$REEMIT" -eq 1 ]; then
 else
   section "SESSION START - $FM_HOME"
 fi
-# --- 1. lock -----------------------------------------------------------
+# --- 1. launch-context -------------------------------------------------
+stage launch-context
+print_launch_context
+# --- 2. lock -----------------------------------------------------------
 stage lock
 subsection "LOCK"
 LOCK_OUT=$("$SCRIPT_DIR/fm-lock.sh" 2>&1)
@@ -677,7 +782,7 @@ if [ "$READ_ONLY" -eq 0 ]; then
     --locked "$NETWORK_STAGE_LOCKED" --harvest-pid $$ >/dev/null 2>&1 || true
 fi
 
-# --- 2. bootstrap --------------------------------------------------------
+# --- 3. bootstrap --------------------------------------------------------
 # FM_BOOTSTRAP_NETWORK=skip on every path: bootstrap's own network half is what
 # the deferred stage above is running right now, and running it twice would both
 # re-block this digest and race the worker's sweeps against themselves.
@@ -702,7 +807,7 @@ else
   printf '(silent - all good)\n'
 fi
 
-# --- 3. wake-drain ---------------------------------------------------------
+# --- 4. wake-drain ---------------------------------------------------------
 # The inactive-outcome startup scan runs in the deferred worker launched above,
 # where its potentially slow current-state reads cannot block this digest. It
 # publishes findings through the same durable queue drained here; the watcher's
@@ -746,7 +851,7 @@ else
   fi
 fi
 
-# --- 4. supervision operating instructions ----------------------------------
+# --- 5. supervision operating instructions ----------------------------------
 stage supervision-instructions
 AFK_PRESENT=0
 [ -e "$STATE/.afk" ] && AFK_PRESENT=1
@@ -794,7 +899,7 @@ fi
   --afk-mode "$AFK_MODE" \
   --x-mode "$X_MODE_PRESENT"
 
-# --- 5. read-once contract -------------------------------------------------
+# --- 6. read-once contract -------------------------------------------------
 # Ahead of the two digests it governs, not after them: a truncated tail is
 # exactly what drops a closing reminder, and this contract is what stops the
 # next turn from re-reading everything the digest just printed. Because it now
@@ -825,7 +930,7 @@ Go to a source directly only when:
     which case that stage's sources were never emitted and must be reconciled.
 EOF
 
-# --- 6. fleet-state digest ---------------------------------------------
+# --- 7. fleet-state digest ---------------------------------------------
 # Before CONTEXT: see this file's ORDERING note. Live fleet identity is what a
 # truncated tail must never take.
 stage fleet-state
@@ -918,12 +1023,12 @@ if fm_pf_relay_active "$FM_HOME" \
   fi
 fi
 
-# --- 7. network checks ------------------------------------------------------
+# --- 8. network checks ------------------------------------------------------
 # Deliberately here and not later: these lines are actionable (a stuck clone, a
 # secondmate that could not be relaunched, broken GitHub auth), and the section
 # after this one is the curated memory a truncated tail is meant to take first.
 # Deliberately here and not earlier: this is the last point in the digest, so the
-# worker started at step 1 has had the whole composition above to finish in. It
+# worker started at lock has had the whole composition above to finish in. It
 # is a NON-BLOCKING read either way - whatever the worker has published by now is
 # printed, and whatever it has not is named as not yet confirmed.
 stage network-checks
@@ -937,7 +1042,7 @@ else
   "$SCRIPT_DIR/fm-startup-network.sh" harvest --pid $$ 2>&1 || true
 fi
 
-# --- 8. context digest -----------------------------------------------------
+# --- 9. context digest -----------------------------------------------------
 # Last of the bulk sections deliberately: curated memory is stable session to
 # session, already governed by config/startup-memory-budget, and recoverable
 # with one targeted read, so it is the cheapest thing for a truncated tail to
@@ -949,8 +1054,9 @@ print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
 print_file_or_absent "$DATA/captain.md" "data/captain.md"
 print_file_or_absent "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
 print_file_or_absent "$DATA/learnings.md" "data/learnings.md"
+print_launch_instructions_excerpt
 
-# --- 9. closing reminder -----------------------------------------------
+# --- 10. closing reminder ----------------------------------------------
 stage next-step
 section "NEXT STEP"
 if [ "$READ_ONLY" -eq 1 ]; then

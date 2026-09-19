@@ -766,6 +766,7 @@ tests/fm-pr-state.test.sh 531
 tests/fm-procevent-quota.test.sh 1900
 tests/fm-procevent-when.test.sh 23805
 tests/fm-procevent.test.sh 221745
+tests/fm-project-local.test.sh 11403
 tests/fm-project-origin.test.sh 136
 tests/fm-public-followup.test.sh 153508
 tests/fm-quota-array-dispatch-live-e2e.test.sh 71
