@@ -290,8 +290,70 @@ yolo on a ship brief|brief-refused-b1 some-proj --mode direct-PR --yolo on|--yol
 yolo=value form on a ship brief|brief-refused-b2 some-proj --mode direct-PR --yolo=off|--yolo is not a brief input
 mode on a scout brief|brief-refused-b3 some-proj --scout --mode direct-PR|--mode applies only to ship briefs
 mode on a secondmate charter|brief-refused-b4 --secondmate --no-projects --mode no-mistakes|--mode applies only to ship briefs
+base on a scout brief|brief-refused-b5 some-proj --scout --base feat/stack|--base applies only to ship briefs
+base on a secondmate charter|brief-refused-b6 --secondmate --no-projects --base feat/stack|--base applies only to ship briefs
 ROWS
-  pass "fm-brief.sh: --yolo and scout/secondmate --mode are refused, never silently dropped"
+  pass "fm-brief.sh: --yolo, --base, and scout/secondmate --mode are refused, never silently dropped"
+}
+
+# A local-only brief generated with a non-default --base must name that base in
+# the Definition of done (and in Rule 1 / Setup), so the worker is never told to
+# rebase onto main while landing onto a long-lived feature branch.
+test_local_only_base_names_the_delivery_target_in_dod() {
+  local home id base brief
+  home="$TMP_ROOT/local-only-base-home"
+  write_registry "$home"
+  id="brief-local-base-c1"
+  base="feat/vue-3"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj --mode local-only --base "$base" >/dev/null 2>&1 \
+    || fail "local-only brief with --base $base should scaffold"
+  brief="$home/data/$id/brief.md"
+  grep -qx "Delivery contract: mode=local-only base=$base" "$brief" \
+    || fail "contract line did not record the delivery target branch"
+  # shellcheck disable=SC2016 # The backticks are the brief's literal markdown.
+  assert_grep "merges it into local \`$base\`" "$brief" \
+    "Definition of done still promised a merge into main while targeting $base"
+  # shellcheck disable=SC2016 # The backticks are the brief's literal markdown.
+  assert_grep "fast-forward onto \`$base\` - if \`$base\` has advanced" "$brief" \
+    "Definition of done still told the worker to rebase onto main"
+  # shellcheck disable=SC2016 # The backticks are the brief's literal markdown.
+  assert_no_grep 'into local `main`' "$brief" \
+    "local-only brief named two different landing targets"
+  # shellcheck disable=SC2016 # The backticks are the brief's literal markdown.
+  assert_grep "firstmate handles the merge into local \`$base\`" "$brief" \
+    "Rule 1 did not name the delivery target branch"
+  # shellcheck disable=SC2016 # The backticks are the brief's literal markdown.
+  assert_grep "create your branch: \`git checkout -b fm/$id $base\`" "$brief" \
+    "Setup did not cut the task branch from the delivery target"
+  pass "fm-brief.sh: local-only --base names the delivery target in the Definition of done"
+}
+
+# Omitting --base must leave every scaffold exactly as it was before the flag
+# existed: an absent base means the repo default branch.
+test_omitted_base_keeps_the_default_branch_wording() {
+  local home brief
+  home="$TMP_ROOT/no-base-home"
+  write_registry "$home"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-nobase-d1 some-proj --mode local-only >/dev/null 2>&1 \
+    || fail "a ship brief without --base should still scaffold"
+  brief="$home/data/brief-nobase-d1/brief.md"
+  grep -qx "Delivery contract: mode=local-only" "$brief" \
+    || fail "an omitted --base changed the contract line"
+  assert_no_grep "base=" "$brief" "an omitted --base still recorded a delivery target branch"
+  # shellcheck disable=SC2016 # The backticks are the brief's literal markdown.
+  assert_grep '1. First action: create your branch: `git checkout -b fm/brief-nobase-d1`' "$brief" \
+    "an omitted --base changed the branch step"
+  assert_grep 'fast-forward onto the current default branch' "$brief" \
+    "an omitted --base changed the fast-forward wording"
+  # shellcheck disable=SC2016 # The backticks are the brief's literal markdown.
+  assert_grep 'merges it into local `main`' "$brief" \
+    "an omitted --base changed the local merge target"
+  # shellcheck disable=SC2016 # The backticks are the brief's literal markdown.
+  assert_grep 'firstmate handles the merge into local `main`' "$brief" \
+    "an omitted --base changed rule 1's local merge target"
+  pass "fm-brief.sh: an omitted --base keeps today's default-branch wording"
 }
 
 test_faster_paths_use_configured_authority_without_stacked_review() {
@@ -932,6 +994,8 @@ test_ship_modes_generate_clean_briefs
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
+test_local_only_base_names_the_delivery_target_in_dod
+test_omitted_base_keeps_the_default_branch_wording
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ask_user_escalation_format
