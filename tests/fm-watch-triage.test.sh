@@ -2802,6 +2802,50 @@ test_hold_mirror_transition_keeps_the_stale_throttle() {
   pass "a hold and its release recorded by firstmate keep the stale throttle and suppressor they found"
 }
 
+# A live idle lane whose question `complete` transferred to the captain, and
+# which the watcher already surfaced, stays inert once that call is answered:
+# the settled transfer reads back to the answered needs-decision, so the lane
+# neither re-surfaces as a first sight nor starts the wedge timer.
+test_settled_transfer_keeps_the_stale_suppressor() {
+  local dir state fakebin out capture_file statusf window key pane_hash wakes
+  local crew='state: parked · source: status-log · choose the sample route'
+  dir=$(make_case settled-transfer); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/scout.status"
+  window="test:fm-scout"
+  printf 'window=%s\nkind=scout\nharness=grok\nbackend=tmux\n' "$window" > "$state/scout.meta"
+  printf 'needs-decision [key=route]: choose the sample route\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-scout_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'idle, awaiting the answer' > "$capture_file"
+  pane_hash=$(hash_text 'idle, awaiting the answer')
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit "$crew" \
+    || fail "the scout's open decision was not surfaced on first sight"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first surface"
+
+  mirror_append "$state" "$statusf" "captain-held [key=captain-hold-scout-1]: route choice pending" \
+    || fail "the hold declaration was not self-announced"
+  mirror_append "$state" "$statusf" "captain-held [key=route]: tracked by scout" \
+    || fail "the complete transfer was not self-announced"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb "$crew" \
+    || fail "the transfer firstmate just recorded re-woke it: $(cat "$state/.wake-queue")"
+  [ -e "$state/.paused-$key" ] || fail "the transferred lane did not take the captain-held cadence"
+
+  mirror_append "$state" "$statusf" "resolved [key=route]: captain call answered by fm-captain-hold" \
+    || fail "the transfer retraction was not self-announced"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb "$crew" \
+    || fail "the answered transfer re-surfaced the lane: $(cat "$state/.wake-queue")"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 0 ] || fail "holding, transferring, and answering re-alarmed the lane $wakes time(s)"
+  [ ! -e "$state/.paused-$key" ] || fail "the answer did not lift the transfer's pause"
+  [ ! -e "$state/.stale-since-$key" ] || fail "the answered lane started the wedge timer"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null)" = "$pane_hash" ] \
+    || fail "the answer reset the surfaced lane's stale suppressor"
+  pass "an answered complete transfer reads back to its decision and leaves the surfaced lane inert"
+}
+
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
@@ -2997,12 +3041,13 @@ test_absorbed_replacement_wait_does_not_inherit_the_old_throttle() {
 # pause_state_class answers `none` for.
 # <mode> `exit` requires the watcher to surface and exit; `absorb` requires it to
 # survive whole poll cycles - enough to see the new hash, count it stable, and
-# reach the stale path. Returns 1 when the watcher does the other thing.
-parked_watch_round() {  # <state> <fakebin> <out> <capture> <window> <exit|absorb>
+# reach the stale path. Returns 1 when the watcher does the other thing. An
+# optional <crew-state> replaces the parked worker's paused crew-state verdict.
+parked_watch_round() {  # <state> <fakebin> <out> <capture> <window> <exit|absorb> [crew-state]
   local state=$1 fakebin=$2 out=$3 capture=$4 window=$5 mode=$6 pid cycles=0
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
     FM_FAKE_TMUX_CURRENT_COMMAND=grok \
-    FM_FAKE_CREW_STATE='state: paused · source: status-log · parked' \
+    FM_FAKE_CREW_STATE="${7:-state: paused · source: status-log · parked}" \
     FM_WATCH_HANDLING_SUCCESSOR=1 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
     FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -7082,6 +7127,7 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_settled_hold_mirror_over_done_lane_never_wedge_escalates
 test_settled_hold_mirror_over_paused_lane_resurfaces_once_per_cadence
 test_hold_mirror_transition_keeps_the_stale_throttle
+test_settled_transfer_keeps_the_stale_suppressor
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_own_work_wait_keeps_first_alert_then_long_cadence
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
