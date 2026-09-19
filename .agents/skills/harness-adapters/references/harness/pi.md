@@ -30,9 +30,9 @@ The router's Detection section owns how launch markers and ancestry select betwe
 Keep the instructions as one positional argument.
 Multiple positional arguments become separate queued messages; the spawn template already preserves the one-argument shape.
 
-A project trust dialog can appear on the first Pi run in any not-yet-trusted directory, including a clean worktree.
-Accept it with Enter and verify the instructions begin processing.
-The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in the same pooled slot skip it.
+A project trust dialog appears on the first Pi run in a directory with project-local resources unless that path is already trusted or the launch carries `--approve`.
+`../../../bin/fm-spawn.sh` pre-registers every Pi task worktree through `../../../bin/fm-pi-trust.sh`, which writes the same per-path decision Pi stores in `${PI_CODING_AGENT_DIR:-~/.pi/agent}/trust.json` and refuses the spawn if it cannot do so.
+The verified `--approve` flag bypasses the dialog for one run without persisting the decision, but task spawns use the durable store so upstream flag semantics are not their trust boundary.
 
 ## Worker turn-end extension
 

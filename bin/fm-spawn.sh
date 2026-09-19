@@ -326,15 +326,15 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
-# claude is the one harness whose pre-launch setup can REFUSE the spawn: before
-# any per-task state exists, and before its worktree .claude/settings.local.json
-# hooks are written, every claude launch pre-registers the directory the pane
-# starts in - the task worktree, or the secondmate home for a --secondmate spawn -
-# in the launching user's own Claude trust store through bin/fm-claude-trust.sh,
-# because Claude's interactive workspace-trust dialog gates a folder it has never
-# seen and firstmate cannot answer it. That helper's header owns the structural
-# scope test for both shapes and every refusal; a failed registration stops this
-# spawn rather than launching a worker that would wedge on the dialog.
+# Claude and Pi are the harnesses whose pre-launch trust setup can REFUSE the
+# spawn before any per-task state exists. Every claude launch pre-registers the
+# directory the pane starts in - the task worktree, or the secondmate home for a
+# --secondmate spawn - through bin/fm-claude-trust.sh. Every pi and pi-signed task
+# launch pre-registers its linked worktree through bin/fm-pi-trust.sh. Their
+# interactive project-trust dialogs otherwise gate a fresh path before the brief,
+# and firstmate cannot answer them from its steering plane. Each helper's header
+# owns its structural scope test and refusal contract; a failed registration
+# stops the spawn rather than launching a worker that would wedge on the dialog.
 # Every claude launch also carries the attribution-off policy in its per-launch
 # --settings JSON, so a spawned worker never writes a Co-Authored-By trailer,
 # Claude-Session link, or generated-with line into a commit or PR body;
@@ -3738,22 +3738,17 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
-# Pre-register Claude's workspace trust for the directory this launch starts in,
-# at the first point that directory is known and before any per-task state is
-# created below. The dialog gates the pane before the brief is ever read, and it
-# also gates loading the project settings written further down, so nothing armed
-# below takes effect without it. EVERY claude launch needs it, a secondmate's
-# included: its home is just as unseen by Claude as a fresh worktree, and
-# skipping the step for that kind left a standalone-clone secondmate home with
-# nothing registered and a pane wedged on a dialog firstmate cannot answer.
-# bin/fm-claude-trust.sh owns the structural scope test for both shapes and
-# refuses anything that is neither this project's own isolated worktree nor a
-# seeded secondmate home marked for this id; a refusal blocks the spawn rather
-# than launching a worker that would wedge. Refusing here rather than beside the
-# arm keeps this in the same class as the two worktree refusals just above: no
-# temp root, no retired relaunch wiring and no busy record exists yet to strand,
-# so the refusal names the endpoint the same way they do and leaves nothing else
-# behind.
+# Pre-register workspace trust at the first point the launch directory is known
+# and before any per-task state is created below. The Claude helper accepts this
+# project's isolated worktree or a seeded secondmate home marked for this id.
+# The Pi helper accepts only a pi or pi-signed task launch's linked worktree; Pi
+# secondmate homes have a different shape and stay outside that helper's scope.
+# Both dialogs gate the pane before the brief and project settings are read, so a
+# registration refusal blocks the launch rather than leaving a worker parked on
+# an interactive question firstmate cannot answer. Refusing here rather than by
+# the later arm means no temp root, relaunch wiring, or busy record exists yet to
+# strand. bin/fm-claude-trust.sh and bin/fm-pi-trust.sh own the structural tests
+# and store-write contracts.
 # agy gates a fresh worktree behind its own folder-trust dialog and honours a
 # trustedWorkspaces entry written ahead of launch (bin/fm-agy-trust.sh), so the
 # same pre-registration removes the dialog for it. Unlike claude's dialog, agy's
@@ -3772,6 +3767,12 @@ claude*)
   fi
   if ! "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
     echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2
+    exit 1
+  fi
+  ;;
+pi | pi-signed)
+  if [ "$KIND" != secondmate ] && ! "$FM_ROOT/bin/fm-pi-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
+    echo "error: could not pre-register Pi project trust for $WT; refusing to launch a $HARNESS worker that would wedge on the trust dialog; inspect window $T" >&2
     exit 1
   fi
   ;;
@@ -4448,6 +4449,16 @@ esac
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
+# Forward a set PI_CODING_AGENT_DIR because the endpoint daemon may predate
+# firstmate's current environment. bin/fm-pi-trust.sh accepts only absolute or
+# home-relative values, so the helper and worker are guaranteed to use one store.
+case "$HARNESS" in
+pi | pi-signed)
+  if [ -n "${PI_CODING_AGENT_DIR:-}" ]; then
+    LAUNCH="PI_CODING_AGENT_DIR=$(shell_quote "$PI_CODING_AGENT_DIR") $LAUNCH"
+  fi
+  ;;
+esac
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
