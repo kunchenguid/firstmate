@@ -11,6 +11,23 @@ SCRIPT="$ROOT/bin/fm-nm-stranded-gate.sh"
 TMP_ROOT=$(fm_test_tmproot fm-nm-stranded-gate)
 fm_git_identity
 
+# A fake gh on PATH so no test reaches the network. FAKE_GH_PRS holds the open-PR
+# URLs `gh pr list` reports (default none); FAKE_GH_FAIL=1 makes the query fail.
+# Every call is logged so tests can prove the helper only lists PRs.
+FAKEBIN=$(fm_fakebin "$TMP_ROOT")
+GH_LOG="$TMP_ROOT/gh.log"
+export GH_LOG
+cat > "$FAKEBIN/gh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GH_LOG"
+[ "${FAKE_GH_FAIL:-0}" = 1 ] && { echo 'HTTP 401: Bad credentials' >&2; exit 1; }
+[ "$1 $2" = "pr list" ] || exit 1
+[ -n "${FAKE_GH_PRS:-}" ] && printf '%s\n' "$FAKE_GH_PRS"
+exit 0
+SH
+chmod +x "$FAKEBIN/gh"
+PATH="$FAKEBIN:$PATH"
+
 # world <name>: a repo with main advanced past the task branch's base, a bare
 # gate mirror registered as the `no-mistakes` remote, and branch `task` holding
 # commit A pushed to the mirror. Leaves the repo checked out on `task` at A.
@@ -130,6 +147,39 @@ test_fresh_name_skips_taken_and_increments_suffix() {
   pass "fresh branch name increments an -rN suffix and skips taken names"
 }
 
+test_refuses_when_pr_open_for_stranded_branch() {
+  local dir before url=https://github.com/o/r/pull/7
+  dir=$(world openpr)
+  rebase_task "$dir"
+  before=$(mirror_fingerprint "$dir")
+  : > "$GH_LOG"
+  OUT=$(FAKE_GH_PRS=$url "$SCRIPT" "$dir/repo" 2>&1)
+  RC=$?
+  [ "$RC" = 1 ] || fail "an open PR on the stranded branch must refuse with exit 1, got $RC: $OUT"
+  assert_contains "$OUT" "state: refused" "open-PR refusal state"
+  assert_contains "$OUT" "open_pr: $url" "refusal names the open PR"
+  assert_contains "$OUT" "report blocked naming this PR" "refusal tells the worker to report blocked"
+  assert_not_contains "$OUT" "fresh_branch:" "open-PR refusal must not recommend a fresh branch"
+  assert_not_contains "$OUT" "git switch -c" "open-PR refusal must not print the fresh-branch command"
+  [ "$(mirror_fingerprint "$dir")" = "$before" ] || fail "open-PR refusal wrote to the mirror"
+  [ "$(cat "$GH_LOG")" = "pr list --head task --state open --json url -q .[].url" ] \
+    || fail "the helper must only list open PRs for the branch, got: $(cat "$GH_LOG")"
+  pass "refuses a fresh branch while a PR is open for the stranded branch"
+}
+
+test_refuses_when_pr_query_fails() {
+  local dir
+  dir=$(world ghfail)
+  rebase_task "$dir"
+  OUT=$(FAKE_GH_FAIL=1 "$SCRIPT" "$dir/repo" 2>&1)
+  RC=$?
+  [ "$RC" = 1 ] || fail "a failed open-PR query must refuse with exit 1, got $RC: $OUT"
+  assert_contains "$OUT" "state: refused" "query-failure refusal state"
+  assert_contains "$OUT" "could not prove no PR is open" "query-failure reason"
+  assert_not_contains "$OUT" "fresh_branch:" "query failure must not recommend a fresh branch"
+  pass "refuses a fresh branch when the open-PR query cannot complete"
+}
+
 test_not_stranded_cases() {
   local dir
   dir=$(world plain)
@@ -162,5 +212,7 @@ test_refuses_when_mirror_ref_holds_commit_head_lacks
 test_refuses_when_mirror_ref_holds_merge_commit
 test_recommends_fresh_branch_when_equivalent
 test_fresh_name_skips_taken_and_increments_suffix
+test_refuses_when_pr_open_for_stranded_branch
+test_refuses_when_pr_query_fails
 test_not_stranded_cases
 test_errors_without_mirror_or_branch

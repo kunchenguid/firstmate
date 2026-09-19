@@ -60,7 +60,7 @@ It is one instance serving every lane and home, so a restart kills other lanes' 
 Only positive socket refusal or absence is a daemon-down finding; escalate that finding, or a failed run record that names a daemon error, to the captain.
 
 A gate push refused as non-fast-forward after a crash is not a daemon finding: the worker's brief routes it through [`bin/fm-nm-stranded-gate.sh`](../../../bin/fm-nm-stranded-gate.sh), whose header owns the check and the fresh-branch remedy.
-When that helper refused, the stranded gate ref holds commits the worker's head lacks; preserve them and escalate to the captain, and never force the shared mirror ref or touch the daemon to clear it.
+When that helper refused, either the stranded gate ref holds commits the worker's head lacks, or a PR is open on the stranded branch (or its absence could not be proven) and a fresh branch would orphan it; preserve that work and PR and escalate to the captain, and never force the shared mirror ref or touch the daemon to clear it.
 
 ## Live-endpoint escalation
 

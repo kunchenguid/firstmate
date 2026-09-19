@@ -22,20 +22,25 @@
 # FRESH branch name loses nothing, and the mirror accepts it as an ordinary new
 # ref. Any left-only commit, merge commits included (they have no patch
 # identity), is work the head lacks: the script refuses and the worker must stop
-# and report blocked rather than abandon it.
+# and report blocked rather than abandon it. It also refuses while a PR is open
+# with the stranded branch as its head, or when `gh pr list` cannot prove there
+# is none: a fresh branch would open a second PR and silently orphan the first
+# one's review and recorded pr= metadata.
 #
 # Strictly read-only. The mirror is read as an alternate object store for this
 # process only (GIT_ALTERNATE_OBJECT_DIRECTORIES) and through `git --git-dir`
 # ref reads; nothing is fetched, pushed, written, or moved in the mirror or the
-# worktree, and the daemon is never contacted. It never creates the fresh
-# branch; it prints the command for the worker to run.
+# worktree, and the daemon is never contacted. The PR check only lists PRs; it
+# never closes, supersedes, comments on, or otherwise changes one. It never
+# creates the fresh branch; it prints the command for the worker to run.
 #
 # Output is key: value lines on stdout.
 # Exit codes:
-#   0  stranded, and every stranded commit is in HEAD: `fresh_branch:` and
-#      `next:` name the safe remedy
-#   1  stranded, and the mirror ref holds commits HEAD lacks: refused;
-#      `unlanded:` lines list them
+#   0  stranded, every stranded commit is in HEAD, and no PR is open for the
+#      branch: `fresh_branch:` and `next:` name the safe remedy
+#   1  stranded, and refused: the mirror ref holds commits HEAD lacks
+#      (`unlanded:` lines list them), a PR is open for the branch (`open_pr:`
+#      lines name it), or the open-PR query could not complete
 #   2  usage error, or the worktree, branch, mirror, or objects could not be read
 #   3  not stranded: the mirror has no ref for this branch, or HEAD already
 #      contains the mirror ref (a push would fast-forward)
@@ -118,6 +123,30 @@ if [ -n "$UNLANDED" ]; then
     printf 'unlanded: %s\n' "$(mgit log -1 --format='%H %s' "$sha")"
   done
   printf 'next: stop and report blocked with these commits; do not force the mirror or touch the daemon\n'
+  exit 1
+fi
+
+if ! command -v gh >/dev/null 2>&1; then
+  OPEN_PRS=
+  PR_QUERY_FAILED="gh is not installed"
+elif OPEN_PRS=$(cd "$WT" && gh pr list --head "$BRANCH" --state open --json url -q '.[].url' 2>/dev/null); then
+  PR_QUERY_FAILED=
+else
+  PR_QUERY_FAILED="gh pr list failed"
+fi
+if [ -n "$PR_QUERY_FAILED" ]; then
+  printf 'state: refused\n'
+  printf 'reason: could not prove no PR is open for %s (%s); a fresh branch could orphan it\n' "$BRANCH" "$PR_QUERY_FAILED"
+  printf 'next: stop and report blocked with this output; do not force the mirror or touch the daemon\n'
+  exit 1
+fi
+if [ -n "$OPEN_PRS" ]; then
+  printf 'state: refused\n'
+  printf 'reason: a PR is open for %s; a fresh branch would open a second PR and orphan it\n' "$BRANCH"
+  printf '%s\n' "$OPEN_PRS" | while IFS= read -r url; do
+    printf 'open_pr: %s\n' "$url"
+  done
+  printf 'next: stop and report blocked naming this PR; do not force the mirror or touch the daemon\n'
   exit 1
 fi
 

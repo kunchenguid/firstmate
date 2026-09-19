@@ -287,7 +287,8 @@ A killed or timed-out call is never evidence the daemon died: the daemon accepts
 Reattach and keep going rather than reporting the pipeline blocked; rule 7 owns the checks that decide when a pipeline block is real.
 If a run stops before its first step with \`push to gate\` rejected as non-fast-forward while \`axi sync\` reports nothing to recover, a crash stranded this branch's pre-rebase tip in the gate mirror.
 Never force that mirror ref or touch the daemon; run \`$FM_DOD_LIB_ROOT/bin/fm-nm-stranded-gate.sh\` from your worktree, which owns the safety check.
-When it prints \`fresh_branch:\`, follow its \`next:\` lines; when it refuses, append \`blocked:\` naming its \`unlanded:\` commits and stop.
+When it prints \`fresh_branch:\`, follow its \`next:\` lines; when it refuses, append \`blocked:\` with its \`reason:\` and any \`unlanded:\` commits or \`open_pr:\` URL, and stop.
+Any other outcome (not stranded, or an error) goes to rule 7's blocked report with the helper's output.
 
 Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate using rule 6's ask-user format and stop.
