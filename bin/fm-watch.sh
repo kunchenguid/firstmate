@@ -1012,7 +1012,7 @@ declared_time_passed_phrase() {  # <declared-time-token>
 }
 
 # The clause an escalation carries when the lane DID declare a wait and its own
-# declared time has passed - the `expired <epoch>` refusal above, handed straight
+# declared time has passed - the `expired <token>` refusal above, handed straight
 # to the alarm that refusal produces. Nothing about the escalation itself moves:
 # same threshold, same climbing count, same demand-deep-inspection at its bound,
 # because an expired declaration explains no silence. What changes is that the
