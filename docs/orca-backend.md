@@ -18,9 +18,14 @@ Prerequisites:
 Select Orca with local `config/backend` containing `orca`, `FM_BACKEND=orca` for one launch, or an explicit request to Firstmate.
 It is never auto-detected.
 
-Before any spawn mutates repository state, Firstmate requires `orca status --json` to report `reachable=true` and `state="ready"`.
-The first task for a project registers that repository with `orca repo add --path` when needed.
-No manual repository registration is required.
+Optional paired-environment pin: local gitignored `config/orca-environment` holds one Orca environment display name or id from `orca environment list` (for example `Daystrom Server`).
+`FM_ORCA_ENVIRONMENT` overrides that file for one process.
+When set, readiness checks target that environment, new worktrees are created with `--project <github:owner/repo> --host runtime:<environment-id>` against the remote project host setup, and every later terminal or worktree CLI call passes `--environment` using the task's recorded value.
+When unset, behavior stays on the default local Orca runtime and path-based `orca repo add`.
+
+Before any spawn mutates repository state, Firstmate requires `orca status --json` (on the selected environment when pinned) to report `reachable=true` and `state="ready"`.
+On the default local runtime, the first task for a project registers that repository with `orca repo add --path` when needed.
+A pinned environment derives the Orca project id from the local clone's GitHub `origin` remote instead of registering the local path on the remote host.
 
 Open the Orca app to watch a task's terminal.
 Routine supervision uses the recorded endpoint through `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'`.
@@ -37,11 +42,13 @@ backend=orca
 window=fm-<id>
 terminal=<orca terminal handle>
 orca_worktree_id=<orca repo id>::<absolute worktree path>
+orca_environment=<paired environment name or id>   # only when config/orca-environment or FM_ORCA_ENVIRONMENT was set at spawn
 worktree=<absolute Orca worktree path>
 ```
 
 `window=` remains the caller-facing Firstmate alias.
 `terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
+`orca_environment=` is the durable paired-runtime pin for that task; later send, peek, control, and teardown paths rebind it so a changed home config cannot retarget an in-flight task.
 Orca returns `orca_worktree_id=` as that composite of the Orca repo id and the worktree path, and cleanup validation requires both halves rather than treating the value as a simple name.
 
 ## Current lifecycle and safety
@@ -70,7 +77,8 @@ Reinstall the CLI and rerun; [`verification/runtime-backends.md`](verification/r
 ## Active limits
 
 - Orca is macOS-only and explicit-only.
-- The app must be running and report ready.
+- The app or paired environment runtime must be reachable and report ready.
+- A pinned environment requires a GitHub `origin` remote on the project clone so Firstmate can derive `github:owner/repo`.
 - Secondmate spawns are unsupported.
 - Escape is unsupported.
 - Orca exposes no stable CLI version or protocol marker, so readiness is the compatibility gate rather than a version floor.

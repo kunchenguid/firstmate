@@ -1037,6 +1037,7 @@ BACKEND=
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+ORCA_ENVIRONMENT=
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -1169,6 +1170,7 @@ spawn_abort_cleanup() {
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
+            [ -z "${ORCA_ENVIRONMENT:-}" ] || echo "orca_environment=$ORCA_ENVIRONMENT"
           } >"$SPAWN_META_TMP" 2>/dev/null &&
             fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE" ||
             true
@@ -1493,6 +1495,7 @@ if [ "$RELAUNCH" -eq 0 ]; then
   fi
   if [ "$BACKEND" = orca ]; then
     fm_backend_orca_runtime_check || exit 1
+    ORCA_ENVIRONMENT=$(fm_backend_orca_configured_environment) || exit 1
   fi
 fi
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
@@ -1536,6 +1539,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fm_backend_validate_task_endpoint "$RELAUNCH_META" "$ID" || exit 1
   BACKEND=$FM_BACKEND_VALIDATED_BACKEND
   RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET
+  if [ "$BACKEND" = orca ]; then
+    ORCA_ENVIRONMENT=$(fm_meta_get "$RELAUNCH_META" orca_environment)
+    export FM_ORCA_TASK_ENVIRONMENT="${ORCA_ENVIRONMENT:-}"
+  fi
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
   # A relaunch must PROVE the previous agent is gone before it launches another
@@ -3252,6 +3259,9 @@ EOF
     T="$CMUX_WORKSPACE_ID:$CMUX_SURFACE_ID"
     ;;
   orca)
+    # Seed the adapter's task-env binding for create and any abort cleanup in
+    # this process; empty keeps the default local runtime.
+    export FM_ORCA_TASK_ENVIRONMENT="${ORCA_ENVIRONMENT:-}"
     set +e
     ORCA_WT_RAW=$(fm_backend_orca_worktree_create "$PROJ_ABS" "$W")
     ORCA_WT_STATUS=$?
@@ -4291,6 +4301,7 @@ preserve_relaunch_meta() {
   if [ "$BACKEND" = orca ]; then
     echo "orca_worktree_id=$ORCA_WORKTREE_ID"
     echo "terminal=$ORCA_TERMINAL"
+    [ -z "${ORCA_ENVIRONMENT:-}" ] || echo "orca_environment=$ORCA_ENVIRONMENT"
   fi
   if [ "$BACKEND" = cmux ]; then
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
