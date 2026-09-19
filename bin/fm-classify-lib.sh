@@ -27,7 +27,7 @@
 # A missing, malformed, identity-mismatched, or past-end classified position reads
 # from byte 0, preferring a bounded duplicate over a lost event.
 #
-# There are three documented exceptions. The absorb classification
+# There are four documented exceptions. The absorb classification
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
 # read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
 # to decide whether a crew that just stopped its turn or went stale is working,
@@ -39,7 +39,12 @@
 # stays bounded by new appends instead of re-reading each task's whole lifetime
 # log every time. crew_worktree_written_since reads the task's meta file and walks
 # a bounded slice of its worktree instead of a status file, so callers run it only
-# at the moment they would otherwise escalate.
+# at the moment they would otherwise escalate. An optional ship-done hook
+# (fm_done_guard_accepts_status_line, owned by bin/fm-done-guard-lib.sh) may drop
+# a `done:` event that lacks a pushed branch and open PR, at the cost of one
+# bounded forge read unless the caller sets FM_DONE_GUARD_NO_FORGE=1; the hook is
+# invoked only when the consumer sourced that library, and steering the worker is
+# a watcher-side effect, not a classifier write.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -1756,7 +1761,8 @@ window_to_task() {
 # reconciliation signal and never treated here as an open decision.
 # status_open_decisions remains the single owner of open/closed semantics,
 # including same-key reopening and reserved-key handling.
-# Every other captain-relevant event is terminal and always actionable.
+# Every other captain-relevant event is terminal and always actionable, except a
+# ship `done:` that the optional done-guard hook refuses.
 _fm_decision_origin_drop() {  # <origins> <key>
   local origin
   while IFS= read -r origin; do
@@ -1803,7 +1809,9 @@ _fm_status_open_decision_origins() {  # <status-file> [<kind>]
 
 status_span_first_actionable_record() {  # <status-file> <start-offset> [record-var] [needs-decision-var]
   local f=$1 start=${2:-0} output_var=${3-} needs_var=${4-} size ident cur_ident scratch chunk_file full_file prefix_file result
-  local line verb key origins='' folded=0 rc=1 failed=0 prefix_lines=0 line_number=0 live_line='' events='' _line _key _fm_span_needs_decision=0
+  local line verb key origins='' folded=0 rc=1 failed=0 prefix_lines=0 line_number=0 live_line='' events='' _line _key _fm_span_needs_decision=0 _fm_span_done_refused=0
+  # shellcheck disable=SC2034 # Read by bin/fm-watch.sh after a same-shell span classify.
+  FM_STATUS_SPAN_DONE_REFUSED=0
   [ -e "$f" ] || { [ -L "$f" ] && return 2; return 1; }
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 2
   ident=$(_fm_open_decisions_file_ident "$f") || return 2
@@ -1885,6 +1893,12 @@ EOF
         rc=0
         ;;
       *)
+        if [ "$verb" = "done" ] \
+          && command -v fm_done_guard_accepts_status_line >/dev/null 2>&1 \
+          && ! fm_done_guard_accepts_status_line "$f" "$line"; then
+          _fm_span_done_refused=1
+          continue
+        fi
         [ -n "$events" ] && events="${events} ; "
         events="${events}${line}"
         rc=0
@@ -1893,6 +1907,8 @@ EOF
   done < "$chunk_file"
   rm -f "$chunk_file" "$full_file" "$prefix_file"
   [ "$failed" -eq 0 ] || return 2
+  # shellcheck disable=SC2034 # Read by bin/fm-watch.sh after a same-shell span classify.
+  FM_STATUS_SPAN_DONE_REFUSED=$_fm_span_done_refused
   if [ "$rc" -eq 0 ]; then result="${size}"$'\t'"${ident}"$'\t'"${events}"; else result="${size}"$'\t'"${ident}"; fi
   if [ -n "$output_var" ]; then
     printf -v "$output_var" '%s' "$result"
@@ -2102,7 +2118,23 @@ signal_crew_provably_working() {  # <file> ...
 # "non-terminal"; the always-on watcher then applies crew_is_provably_working,
 # while the away-mode daemon applies its persistence recheck.
 stale_is_terminal() {  # <window> <state>
-  local win=$1 state=$2 last
-  last=$(last_status_line "$state/$(window_to_task "$win" "$state").status")
-  [ -n "$last" ] && status_is_captain_relevant "$last"
+  local win=$1 state=$2 status
+  status="$state/$(window_to_task "$win" "$state").status"
+  status_is_captain_relevant_accepted "$status" "$(last_status_line "$status")"
+}
+
+# 0 when <line> is captain-relevant and, when it is a `done:`, the optional
+# ship-done hook accepts it. Single owner of "captain-relevant after the ship
+# done gate", so every triage owner - the always-on watcher here and the
+# away-mode daemon in bin/fm-supervise-daemon.sh - agrees on which terminal
+# lines were actually escalated. A refused ship done was dropped from the span,
+# so reading it as already-escalated terminal would strand it with nobody
+# holding it.
+status_is_captain_relevant_accepted() {  # <status-file> <line>
+  local status=$1 line=$2
+  [ -n "$line" ] || return 1
+  status_is_captain_relevant "$line" || return 1
+  [ "$(status_line_verb "$line")" = "done" ] || return 0
+  command -v fm_done_guard_accepts_status_line >/dev/null 2>&1 || return 0
+  fm_done_guard_accepts_status_line "$status" "$line"
 }

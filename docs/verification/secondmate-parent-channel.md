@@ -3,6 +3,11 @@
 Maintainer-verification record for the guarantee in [`secondmate-parent-channel.md`](../secondmate-parent-channel.md): a captain-facing outcome recorded inside a secondmate home reaches the parent channel without the mate model writing it.
 Refresh it by rerunning the fixture below after changing any publisher named in `bin/fm-parent-channel-lib.sh`.
 
+This record predates the ship-done gate ([`bin/fm-done-guard-lib.sh`](../../bin/fm-done-guard-lib.sh)) and a refresh of step 1 is due.
+The ledger pass now runs that gate offline, where a PR-requiring ship `done:` can never be confirmed, so the step 1 row reaches the parent channel only while the gate skips the child, which it does when the child's meta records no existing worktree.
+A rerun must therefore record the child's `worktree=` value and name the publisher that delivered that row.
+Steps 2 to 4, the PR registration line and the captain hold with its answer, are unchanged by the gate.
+
 ## What was run
 
 Date: 2026-09-03.

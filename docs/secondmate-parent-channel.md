@@ -22,17 +22,24 @@ Every captain-facing outcome that leaves durable evidence in the mate home is pu
 
 | Outcome | Durable evidence in the mate home | Published by |
 |---|---|---|
-| Ship child PR ready | the child's `done: PR <url> ...` line; `pr=` in the child's record once registered | `bin/fm-inactive-reconcile.sh` on the next poll with the child's line; `bin/fm-pr-check.sh` at registration with the canonical URL |
+| Ship child PR ready | the child's `done: PR <url> ...` line; `pr=` in the child's record once registered | `bin/fm-pr-check.sh` at registration with the canonical URL; `bin/fm-inactive-reconcile.sh` on a later poll only for a line the ship-done gate accepts |
 | Scout child findings | the child's `done:` line plus `data/<child>/report.md` | `bin/fm-inactive-reconcile.sh` on the next poll, with the report pointer |
 | Child failed | the child's `failed:` line | `bin/fm-inactive-reconcile.sh` on the next poll |
 | Child decision escalated to the captain | the task held for the captain in the mate backlog | `bin/fm-captain-hold.sh hold`, and its answer by `answer` |
 | PR merged | the merge poll or the mate's own merge | `bin/fm-merge-outcome-lib.sh` |
-| Child leaving the home | its final ledger line | `bin/fm-teardown.sh`, which refuses to remove the child while that line is undelivered |
+| Child leaving the home | its final ledger line | `bin/fm-teardown.sh`, which refuses to remove the child while a line the ledger owes is undelivered, and owes nothing for a `done:` the ship-done gate withholds |
 | Child ended silently | terminal current state with a silent ledger | the existing inactive-outcome scan in `bin/fm-inactive-reconcile.sh` |
 | Answer to a marked request | a correlated line guarded by the pending-reply record | `bin/fm-secondmate-report.sh`, which resolves the parent channel from the mate home; the pending-reply guard repairs a line stranded in the local mate's same-basename status file before recovery or escalation |
 | An outcome that exists only in the mate's reasoning | none | the charter and the `AGENTS.md` carve-outs only |
 
-The ledger delivery reads files only: it calls no harness, no forge, and no current-state reader, so it is identical for every harness and runtime backend.
+The ledger delivery makes no network call: it calls no harness, no forge, and no current-state reader, so it is identical for every harness and runtime backend.
+That offline discipline costs exactly one row.
+The ledger pass runs the ship-done gate offline (`FM_DONE_GUARD_NO_FORGE=1`, [`bin/fm-done-guard-lib.sh`](../bin/fm-done-guard-lib.sh)), which reads the child's local git refs but can confirm an open PR only with a forge read, and the gate is fail-closed, so a PR-requiring ship `done:` is withheld rather than published unverified.
+The pass therefore stays authoritative only for what local state settles: every `failed:` line, and a `done:` whose task requires no PR or records no worktree to check.
+A ship child's PR-ready outcome is delivered by `bin/fm-pr-check.sh` at registration, which publishes the canonical URL it pins into the child's record, so that registration path is the primary gate for the row and the ledger pass is a secondary audit surface behind it.
+The inactive-outcome fallback in the same script is the only reconcile path that can accept a ship `done:` by itself, because its `bin/fm-crew-state.sh` read leaves the gate's own bounded forge read enabled: after `FM_INACTIVE_RECONCILE_SECS` of child inactivity, a PR the forge reports open is published as an inactive terminal outcome.
+The tradeoff is deliberate and asymmetric: no unverified completion is ever published as a fact, at the cost of withholding the row for a ship child that really did push and open a PR.
+Teardown's `report` call reads a withheld row as nothing owed and removes the child, so an outcome that neither registration nor the inactivity fallback covered is left for the captain to verify by hand.
 Each delivery is keyed with the first eight hexadecimal characters of its receipt fingerprint and appended at most once by exact line, and the ledger path reuses the inactive scan's per-fingerprint receipts, so a replayed poll or restart cannot deliver an event twice while a genuinely new terminal event is delivered again.
 A duplicate line is harmless and a missed one is not, so the mate may still append its own judgement about a delivered outcome, and the parent reads the script's line as the fact and the mate's line as commentary.
 For marked replies, the report helper accepts no caller-selected destination and uses the channel resolver for both local and remote homes; its script header owns the exact invocation contract.
@@ -45,11 +52,12 @@ A missed-reply escalation includes the complete first sighting path and line num
 - No mirror of the mate's chat: chat can mix outcomes with other conversation, so choosing which sentence is an outcome would itself be model behavior, and every harness exposes turn text differently.
 - No threshold escalation of a child's open decision or blocker: a decision the mate escalates is a captain hold, which is published; a decision the mate neither answers nor escalates is a supervision-quality question, separable from channel delivery.
 - No second watcher or standalone scanner: a lightweight ledger pass runs inside the existing inactive-outcome command on every watcher poll and reuses its receipts and upstream append.
-- No orphan lifecycle: teardown refuses instead of removing an undelivered outcome, the same way it refuses on other unlanded conditions.
+- No orphan lifecycle: teardown refuses instead of removing an outcome the ledger owes but could not deliver, the same way it refuses on other unlanded conditions; a ship `done:` the gate withholds is owed to nobody and does not hold teardown.
 
 ## Regression coverage
 
 `tests/fm-inactive-reconcile.test.sh` covers the ledger delivery against real ledgers with no harness: immediate done and failed delivery with note, PR, mode, posture, and report pointer, once-only delivery across polls, a line still being appended, the remote route, the yield of the inactive path to a terminal ledger, and the real watcher poll driving it.
+Its children record a worktree path that the fixture never creates, so the ship-done gate skips them and those cases pin the ungated delivery; `tests/fm-done-guard.test.sh` pins the gate itself, and no test yet pins a ledger row the gate withholds.
 `tests/fm-captain-hold-lifecycle.test.sh` covers a mate home publishing a hold, its answer, and a distinct occurrence on re-hold, and a main home publishing nothing.
 `tests/fm-pr-merge.test.sh` covers the PR-ready line at registration and the merge outcome's upward report.
 `tests/fm-teardown.test.sh` covers teardown delivering a child's final line and refusing when the channel cannot be written.
