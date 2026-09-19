@@ -132,7 +132,7 @@ test_brief_assertion_precedes_branch() {
   brief="$home/data/tangle-brief-cc3/brief.md"
   assert_present "$brief" "brief was not scaffolded"
   # shellcheck disable=SC2016 # The generated instruction keeps the stamp literal.
-  assert_grep 'blocked [at=$(date +%s)]: launched in primary checkout, not an isolated worktree' "$brief" \
+  assert_grep 'blocked [at=<epoch>]: launched in primary checkout, not an isolated worktree' "$brief" \
     "brief is missing the isolation blocked-status contract"
   assert_grep "The path check is authoritative" "$brief" \
     "brief must make the path check authoritative"

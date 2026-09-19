@@ -184,9 +184,8 @@ test_fixture_snapshot_json() {
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "secondmate-task")
     | .paths.status_log.last_event
-    | has("emitted_at_epoch") and .emitted_at_epoch == null
-      and has("age_seconds") and .age_seconds == null
-  ' >/dev/null || fail "legacy event must have explicit unknown time and age"
+    | has("age_seconds") and .age_seconds == null
+  ' >/dev/null || fail "legacy event must have an explicit unknown age"
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "cmux-task")
     | .backend == "cmux"
@@ -201,7 +200,7 @@ test_fixture_snapshot_json() {
     | .state == "done" and .pr_url == "https://github.com/kunchenguid/firstmate/pull/7"
   ' >/dev/null || fail "done backlog PR row missing"
 
-  local line expected_epoch expected_age before after emitted epoch observed
+  local line expected_age before after emitted epoch observed
   printf 'secondmate-task\n' > "$home/secondmate-home/.fm-secondmate-home"
   printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$home" \
     > "$home/secondmate-home/.fm-secondmate-parent"
@@ -220,23 +219,23 @@ test_fixture_snapshot_json() {
     printf '%s\n\n' "$line" > "$home/state/secondmate-task.status"
     # Deliberately unrelated file age must never substitute for event age.
     touch -t 202001010000 "$home/state/secondmate-task.status"
-    expected_epoch=null; expected_age=null; observed=1700000100
+    expected_age=null; observed=1700000100
     case "$line" in
-      "$emitted") expected_epoch=$epoch; expected_age=100; observed=$((epoch + 100)) ;;
-      *1700000000*) expected_epoch=1700000000; expected_age=100 ;;
-      *1700000200*) expected_epoch=1700000200 ;;
+      "$emitted") expected_age=100; observed=$((epoch + 100)) ;;
+      *1700000000*) expected_age=100 ;;
     esac
     out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW_EPOCH=$observed "$SNAPSHOT" --json)
-    printf '%s' "$out" | jq -e --argjson epoch "$expected_epoch" --argjson age "$expected_age" '
+    printf '%s' "$out" | jq -e --argjson age "$expected_age" '
       .tasks[] | select(.id == "secondmate-task")
       | .paths.status_log.last_event
-      | has("emitted_at_epoch") and .emitted_at_epoch == $epoch
-        and has("age_seconds") and .age_seconds == $age
-    ' >/dev/null || fail "event time/age came from something other than the record: $line"
-    printf '%s' "$out" | jq -e --argjson epoch "$expected_epoch" --argjson age "$expected_age" '
+      | has("age_seconds") and .age_seconds == $age
+        and (has("emitted_at_epoch") | not)
+    ' >/dev/null || fail "event age came from something other than the record: $line"
+    printf '%s' "$out" | jq -e --argjson age "$expected_age" '
       .secondmate_current.records[] | select(.id == "secondmate-task")
       | .current.state == "unknown"
-        and .parent_event.emitted_at_epoch == $epoch and .parent_event.age_seconds == $age
+        and .parent_event.age_seconds == $age
+        and (.parent_event | has("emitted_at_epoch") | not)
         and .freshness.age_seconds == $age
     ' >/dev/null || fail "fallback confused event age and current state: $line"
     if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then

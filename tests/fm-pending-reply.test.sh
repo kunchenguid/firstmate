@@ -1322,14 +1322,12 @@ test_same_basename_self_home_corr_resolves_on_tick() {
     || fail "snapshot of the recovered reply should succeed"
   printf '%s' "$out" | jq -e '
     .tasks[] | select(.id == "mate") | .paths.status_log.last_event
-    | has("emitted_at_epoch") and .emitted_at_epoch == null
-      and has("age_seconds") and .age_seconds == null
-  ' >/dev/null || fail "recovered legacy reply must retain unknown emission time and age"
+    | has("age_seconds") and .age_seconds == null
+  ' >/dev/null || fail "recovered legacy reply must retain an unknown age"
   printf '%s' "$out" | jq -e '
     .secondmate_current.records[] | select(.id == "mate") | .parent_event
-    | has("emitted_at_epoch") and .emitted_at_epoch == null
-      and has("age_seconds") and .age_seconds == null
-  ' >/dev/null || fail "secondmate summary must retain the recovered reply's unknown time and age"
+    | has("age_seconds") and .age_seconds == null
+  ' >/dev/null || fail "secondmate summary must retain the recovered reply's unknown age"
   fm_parent_channel_report "$sm_home" "$sm_home/state" 'done: new report' \
     || fail "new publication should succeed"
   status_line_at_epoch "$(tail -1 "$parent_status")" >/dev/null \

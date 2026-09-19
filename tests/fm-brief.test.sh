@@ -395,7 +395,7 @@ test_ask_user_escalation_format() {
   assert_grep "write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority)" "$brief" \
     "ship rule 6 must limit the verbatim axi slice to ask-user findings"
   # shellcheck disable=SC2016  # single quotes are deliberate: backticks and the key/findings/file tokens must stay literal
-  assert_grep 'needs-decision [at=$(date +%s)] [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file='"$home/data/$id/nm-<run>-findings.txt" "$brief" \
+  assert_grep 'needs-decision [at=<epoch>] [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file='"$home/data/$id/nm-<run>-findings.txt" "$brief" \
     "ship rule 6 must render the exact needs-decision ask-user status line"
   assert_grep "$home/data/$id/nm-<run>-findings.txt" "$brief" \
     "ship rule 6 must point the snapshot file under this task's own data directory"
@@ -765,7 +765,7 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
 }
 
 test_pause_verb_override_renders_all_brief_scaffolds() {
-  local home kind id brief append before after epoch templates template line signals
+  local home kind id brief append now epoch templates template line signals
   home="$TMP_ROOT/pause-verb-home"
   mkdir -p "$home/data"
 
@@ -786,29 +786,31 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
         ;;
     esac
     brief="$home/data/$id/brief.md"
-    # Execute the scaffold's generated status-append interface. The shell must
-    # evaluate the stamp when appending, not while generating instructions.
+    # Fill the scaffold's generated status-append command the way a worker does
+    # and run it. The stamp must be a value the worker supplies, so the command
+    # may not carry an unevaluated substitution that a file-write tool would
+    # copy through verbatim.
     # shellcheck disable=SC2016 # Match literal backticks in the generated interface.
     append=$(sed -n '/`echo "{state}/s/.*`\(echo .*\)`.*/\1/p' "$brief")
+    now=$(date +%s)
     append=${append//\{state\}/done}
     append=${append//\{one short line\}/test event}
-    # shellcheck disable=SC2016 # The generated command must retain substitution.
-    assert_contains "$append" '$(date +%s)' "scaffold froze its event timestamp"
+    append=${append//<epoch>/$now}
+    case "$append" in
+      *'$('*) fail "$kind scaffold left an unevaluated command in its status-append line" ;;
+    esac
     mkdir -p "$home/state"
-    before=$(date +%s)
     bash -c "$append" || fail "generated status command failed"
-    after=$(date +%s)
     epoch=$(bash -c '. "$1"; status_line_at_epoch "$(cat "$2")"' _ \
       "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
-    [ -n "$epoch" ] && [ "$epoch" -ge "$before" ] && [ "$epoch" -le "$after" ] \
-      || fail "$kind scaffold emitted no append-time timestamp"
-    # Every status signal the brief instructs a worker to append is an
-    # executable template, not only rule 4's echo: render each one and read its
-    # stamp back. Extracting by "append" as well as by the stamp means dropping
-    # a stamp from any instruction fails here rather than shrinking the set.
-    # shellcheck disable=SC2016 # The extracted templates must retain substitution.
+    [ "$epoch" = "$now" ] || fail "$kind scaffold did not record the worker's event time"
+    # Every status signal the brief instructs a worker to append is a template
+    # the worker fills in and writes verbatim, with or without a shell, not only
+    # rule 4's echo: substitute each one's named placeholders and read the stamp
+    # back. Extracting by "append" as well as by the stamp means dropping a stamp
+    # from any instruction fails here rather than shrinking the set.
     templates=$(grep -o -e 'append `[^`]*: [^`]*`' \
-      -e '`[^`]*\[at=\$(date +%s)\][^`]*`' "$brief" \
+      -e '`[^`]*\[at=<epoch>\][^`]*`' "$brief" \
       | sed 's/^append //' | tr -d '`' | sort -u)
     signals=0
     while IFS= read -r template; do
@@ -816,17 +818,17 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
       case "$template" in
         'echo "'*) template=${template#echo \"}; template=${template%%\" >>*} ;;
       esac
-      template=${template//\{state\}/done}
-      template=$(printf '%s' "$template" \
+      case "$template" in
+        *'$('*) fail "$kind signal embeds an unevaluated command: $template" ;;
+      esac
+      now=$(date +%s)
+      line=${template//\{state\}/done}
+      line=${line//<epoch>/$now}
+      line=$(printf '%s' "$line" \
         | sed -e 's/{[^}]*}/one short line/g' -e 's/<[^>]*>/slug/g')
-      before=$(date +%s)
-      line=$(eval "printf '%s' \"$template\"") \
-        || fail "$kind signal template did not render: $template"
-      after=$(date +%s)
       epoch=$(bash -c '. "$1"; status_line_at_epoch "$2"' _ \
         "$ROOT/bin/fm-classify-lib.sh" "$line")
-      [ -n "$epoch" ] && [ "$epoch" -ge "$before" ] && [ "$epoch" -le "$after" ] \
-        || fail "$kind signal carries no append-time stamp: $template"
+      [ "$epoch" = "$now" ] || fail "$kind signal carries no worker-written stamp: $template"
       signals=$((signals + 1))
     done <<SIGNALS
 $templates

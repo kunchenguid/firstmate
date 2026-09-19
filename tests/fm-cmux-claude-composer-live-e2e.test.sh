@@ -60,9 +60,9 @@ brief = Path(sys.argv[1])
 status = sys.argv[2]
 brief.write_text(brief.read_text().replace("{TASK}", f'''Run a cmux communication probe.
 
-Immediately append `working [at=$(date +%s)]: cmux composer probe ready` to `{status}`.
-Then append exactly `needs-decision [at=$(date +%s)] [key=probe-decision]: awaiting codeword` to that file and stop to wait for a firstmate message.
-When you receive a firstmate message containing `ALBATROSS`, append `done [at=$(date +%s)]: received ALBATROSS` to that status file and stop.
+Immediately append `working [at=<epoch>]: cmux composer probe ready` to `{status}`, substituting `<epoch>` as rule 4 instructs.
+Then append exactly `needs-decision [at=<epoch>] [key=probe-decision]: awaiting codeword` to that file and stop to wait for a firstmate message.
+When you receive a firstmate message containing `ALBATROSS`, append `done [at=<epoch>]: received ALBATROSS` to that status file and stop.
 Do not change project files or make a commit.'''))
 PY
 
