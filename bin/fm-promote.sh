@@ -205,9 +205,11 @@ EOF
     printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
   fi
   printf '\n'
-  fm_ship_pr_readiness_block "$MODE" "$YOLO"
-  printf '\n'
-  fm_dod_block "$MODE" "$ID"
+  fm_dod_block "$MODE" "$ID" || return 1
+  if [ "$YOLO" = on ]; then
+    printf '\n' &&
+      fm_ship_pr_readiness_block "$MODE" "$YOLO"
+  fi
 }
 mkdir -p "$DATA/$ID"
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }

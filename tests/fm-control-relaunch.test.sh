@@ -970,8 +970,29 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
 }
 
+test_legacy_ship_relaunch_skips_the_readiness_override() {
+  local dir meta filtered out
+  dir=$(new_case legacy-posture rl45)
+  add_ship_task "$dir" rl45 claude
+  meta="$dir/home/state/rl45.meta"
+  filtered="$meta.filtered"
+  sed '/^mode=/d; /^yolo=/d' "$meta" > "$filtered"
+  mv "$filtered" "$meta"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl45 --relaunch) \
+    || fail "a legacy ship without recorded delivery posture should relaunch: $out"
+  assert_present "$dir/home/data/rl45/launch-brief.md" \
+    "legacy ship relaunch did not publish its launch brief"
+  assert_no_grep '# Pull request readiness' "$dir/home/data/rl45/launch-brief.md" \
+    "legacy ship relaunch invented a readiness override without recorded posture"
+  assert_contains "$out" "spawned rl45 harness=claude" \
+    "legacy ship relaunch did not start the replacement worker"
+  pass "fm-spawn --relaunch: legacy ship metadata needs no readiness posture"
+}
+
 test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
-  local dir home id brief launch out mode rule
+  local dir home id brief launch out mode rule yolo instructions dod_line readiness_line
   for mode in no-mistakes direct-PR local-only; do
     id="rl-promoted-${mode}"
     dir=$(new_case "promoted-scout-$mode" "$id")
@@ -997,13 +1018,24 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
     printf '%s\n' "fm-$id" > "$dir/fake/windows"
     printf '%s' "$dir/wt" > "$dir/fake/cwd"
 
+    yolo=on
+    [ "$mode" != local-only ] || yolo=off
     out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
-      "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1) \
+      "$PROMOTE" "$id" --mode "$mode" --yolo "$yolo" 2>&1) \
       || fail "$mode: scout promotion should succeed: $out"
     assert_grep 'This is a SCOUT task' "$brief" \
       "$mode: the reproduction fixture lost the original scout delivery text"
     assert_grep 'Never push to any remote and never open a PR' "$brief" \
       "$mode: the reproduction fixture lost the stale scout prohibition"
+    instructions="$home/data/$id/ship-instructions.md"
+    if [ "$yolo" = on ]; then
+      assert_grep '# Pull request readiness' "$instructions" \
+        "$mode: promoted yolo worker did not receive pull-request readiness"
+      dod_line=$(grep -n '^# Definition of done$' "$instructions" | tail -1 | cut -d: -f1)
+      readiness_line=$(grep -n '^# Pull request readiness$' "$instructions" | tail -1 | cut -d: -f1)
+      [ "$readiness_line" -gt "$dod_line" ] \
+        || fail "$mode: promoted readiness contract did not supersede the Definition of done"
+    fi
 
     printf 'zsh' > "$dir/fake/command"
     out=$(run_spawn "$dir" "$id" --relaunch) \
@@ -1707,6 +1739,7 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_legacy_ship_relaunch_skips_the_readiness_override
 test_promoted_scout_relaunch_receives_the_current_delivery_contract
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
