@@ -4280,6 +4280,51 @@ test_undelivered_crew_state_keeps_alarming_on_every_hash() {
 }
 
 
+# The other direction of the same precedence, and the reason the bound needs both
+# halves. bin/fm-crew-state.sh lets a PASSED run supersede the log, so a worker
+# that appended `needs-decision:`, `blocked:` or `failed:` after its run finished
+# reconciles to `state: done` while having delivered nothing. Reading the
+# reconciled state alone would absorb those panes for the whole re-surface window
+# and label them a delivery awaiting the merge word. The task's own last verb
+# must therefore be `done` too, so a declared decision or failure keeps alarming
+# on every new hash and is never recorded as delivered work.
+test_superseded_decision_or_failure_is_not_a_delivery() {
+  local line name dir state out capture round wakes i
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (superseded decision alarm)"; return 0; }
+  i=0
+  HOLD_CREW_STATE='state: done · source: run-step · checks green · status-log superseded (run done)'
+  export HOLD_CREW_STATE
+  for line in \
+    'needs-decision: open the PR against main or release?' \
+    'blocked: cannot reach the release host' \
+    'failed: cannot satisfy the review without a redesign'
+  do
+    i=$((i + 1))
+    name="superseded-$i"
+    dir=$(make_hold_home "$name" "$line" nohold) \
+      || fail "[$name] could not build a superseded-log fixture"
+    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    round=1
+    while [ "$round" -le 2 ]; do
+      hold_watch_surface "$dir" "$out" "$capture" "idle, elapsed ${round}s" \
+        || fail "[$name] a superseded $line window stopped alarming on round $round"
+      wakes=$(hold_stale_wakes "$state")
+      [ "$wakes" -eq 1 ] \
+        || fail "[$name] round $round produced $wakes wakes instead of one ($line)"
+      ack_stopped_cycle "$state" || fail "[$name] could not acknowledge round $round"
+      round=$((round + 1))
+    done
+    [ ! -e "$state/.paused-resurfaced-$(hold_key)" ] \
+      || fail "[$name] a superseded $line armed the delivery re-surface cadence"
+    ! grep -F 'terminal delivery awaiting' "$state/.watch-triage.log" >/dev/null 2>&1 \
+      || fail "[$name] a pane that delivered nothing was recorded as a delivery: $(cat "$state/.watch-triage.log")"
+  done
+  unset HOLD_CREW_STATE
+  pass "a decision or failure a passed run superseded keeps alarming and is never recorded as a delivery"
+}
+
+
 # Order between the two bounds, pinned by the one behavior that can tell them
 # apart. A delivered task that is ALSO under an open captain call keeps the call's
 # own lifecycle scope: answering and re-holding it is a second, distinct call with
@@ -6962,6 +7007,7 @@ test_stale_churn_without_a_captain_call_still_alarms
 test_terminal_delivery_bounds_stale_churn
 test_nonterminal_line_with_a_finished_run_still_alarms
 test_undelivered_crew_state_keeps_alarming_on_every_hash
+test_superseded_decision_or_failure_is_not_a_delivery
 test_captain_call_scope_survives_a_terminal_delivery
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window

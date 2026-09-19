@@ -1900,13 +1900,20 @@ captain_call_stale_bound() {  # <window-key> <task>
 # 2026-09-18 across three delivered tasks). Exiting the agent does not help: the
 # alarm keys on the endpoint, which outlives it.
 #
-# The evidence is the RECONCILED current state, not the `done:` line: a status log
-# can carry a `done:` leftover from before a validation run that is still going,
-# and fm-crew-state.sh gives that run step precedence over the log. So only a crew
-# whose authoritative state IS terminal done is bounded here
-# (crew_is_terminal_done in fm-classify-lib.sh); a stopped, parked, blocked,
-# failed or unreadable crew keeps every alarm it has today, which is what keeps a
-# genuinely wedged or dead pane surfacing.
+# The predicate is a conjunction: a reconciled current state of terminal done
+# (crew_is_terminal_done in fm-classify-lib.sh), AND the delivery verb `done` on
+# the task's own last status line, AND no open captain call, whose own bound is
+# consulted first and carries the richer throttle scope. Both halves are needed,
+# in opposite directions. The reconciled read is needed because a status log can
+# carry a `done:` leftover from before a validation run that is still going, and
+# fm-crew-state.sh gives that run step precedence over the log. The line verb is
+# needed because that precedence runs the other way too: a run that PASSED
+# supersedes a `needs-decision:`, `blocked:` or `failed:` line the worker
+# appended after it, so those panes reconcile to done while the worker delivered
+# nothing and is still owed its alarm. A crew that is stopped, parked, blocked,
+# failed or unreadable, or whose own last word is anything but `done`, keeps
+# every alarm it has today, which is what keeps a genuinely wedged or dead pane
+# surfacing.
 #
 # Same bound as the two above, for the same reason and on the same shared cadence:
 # the first sight still alarms - a delivery the captain has not seen yet is the
@@ -1919,8 +1926,10 @@ captain_call_stale_bound() {  # <window-key> <task>
 # having NO hold, and fm-afk-return.sh lists it in no section, so an absolute
 # absorb here would be the only record of the delivery going quiet.
 terminal_done_stale_bound() {  # <window-key> <task>
-  local key=$1 task=$2
+  local key=$1 task=$2 delivered
   STALE_WAIT_DECLARATION=
+  status_line_verb "$(last_status_line "$STATE/$task.status")" delivered
+  [ "$delivered" = done ] || return 1
   crew_is_terminal_done "$task" || return 1
   STALE_WAIT_DECLARATION=$(terminal_done_declaration "$task")
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
