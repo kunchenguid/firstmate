@@ -4,7 +4,7 @@
 #   - the plugin's declared shape: one hooks module and nothing else, reached from the
 #     project's .claude/skills auto-load path through the tracked symlink, so nothing
 #     of it can load while CLAUDE_CODE_ENABLE_FUNCTION_HOOKS is off;
-#   - the harness-neutral sprite core both harnesses share: the Pi widget's rendering
+#   - the harness-neutral sprite core every Calm surface shares: the Pi widget's rendering
 #     is byte-for-byte the shared frame painted with standard ANSI codes, so extracting
 #     the core changed nothing Pi draws;
 #   - the Raster packing of that frame and its base64 encoder;

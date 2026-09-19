@@ -12,7 +12,7 @@
 // hooks-module import from outside that folder, symlinks included; the Pi extension
 // reaches it through the tracked `.pi/extensions/lib/fm-calm-working-ship-sprite.ts`
 // symlink. Nothing here imports a harness: every glyph is one terminal column under
-// both harnesses' width rules, so widths are plain character counts.
+// the width rules of every harness that draws it, so widths are plain character counts.
 //
 // Cadence: one scheduler drives two linked cadences. Every tick advances the wave by
 // one quarter-cell, and every CALM_WORKING_SHIP_TICKS_PER_MOVE-th tick moves the boat
@@ -53,7 +53,7 @@ const SAIL_WIDTH = cellCount(CALM_WORKING_SHIP_SAIL);
 
 // Pi Dictation uses these bottom-aligned one-cell bars for truthful level history.
 // Calm deliberately keeps only its lower half: a long, low ocean swell rather than an
-// audio-sized waveform. Every glyph is one terminal column under both harnesses.
+// audio-sized waveform. Every glyph is one terminal column on every harness that draws it.
 export const CALM_WORKING_SHIP_WAVE_BARS = ["▁", "▂", "▃", "▄"] as const;
 const WAVE_MAX_LEVEL = CALM_WORKING_SHIP_WAVE_BARS.length - 1;
 const WAVE_HALF_LENGTH_MIN = 9;

@@ -4,10 +4,11 @@
 // logical agent run is active. The sprite geometry, bounce track, two animation
 // cadences, palette classes, and freeze/resume state are owned by the harness-neutral
 // ./fm-calm-working-ship-sprite.ts (a tracked symlink into the Claude Code Calm mod,
-// which both harnesses share); this module owns only Pi's rendering of those frames
+// which every Calm surface shares); this module owns only Pi's rendering of those frames
 // as standard ANSI escapes and the temporary TUI widget. `.pi/extensions/fm-calm.ts`
-// owns when the presentation is installed and removed, and stays the sole caller of
-// setWorkingVisible(). docs/calm.md owns the captain-facing contract.
+// owns when the presentation is installed and removed on Pi, and stays the sole caller
+// of setWorkingVisible(); `.omp/extensions/fm-calm-omp.ts` installs the same widget
+// above omp's editor. docs/calm.md owns the captain-facing contract.
 //
 // Continuity: one extension-owned animation instance survives hide/show within the same
 // Pi process and Calm extension lifetime. Disposing the widget freezes column,

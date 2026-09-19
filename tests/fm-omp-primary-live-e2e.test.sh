@@ -6,7 +6,7 @@
 #
 # It proves, against the installed omp, everything the portable suite
 # (tests/fm-omp-harness.test.sh) can only pin over a fake API:
-#   1. both tracked .omp/extensions load by auto-discovery alone;
+#   1. both tracked primary extensions load by auto-discovery alone;
 #   2. the session-start digest reaches model context before the first turn
 #      and the session lock names the omp process (ancestry detection);
 #   3. fm_watch_arm_omp starts a real watcher, an actionable close spawns a
@@ -201,7 +201,7 @@ exec 3> "$RPC_IN"
 wait_for_log '"type":"ready"' 240 || fail "omp $OMP_VERSION did not print its rpc ready frame: $(tail -5 "$RPC_ERR")"
 wait_for_file "$PROJECT/state/.omp-turnend-extension-loaded" 60 || fail "omp $OMP_VERSION did not auto-discover the turn-end guard extension"
 wait_for_file "$PROJECT/state/.omp-watch-extension-loaded" 60 || fail "omp $OMP_VERSION did not auto-discover the watch extension"
-pass "omp $OMP_VERSION: both tracked .omp/extensions loaded by auto-discovery with no -e and no trust dialog"
+pass "omp $OMP_VERSION: both tracked primary extensions loaded by auto-discovery with no -e and no trust dialog"
 
 # --- 1. session-start digest and lock identity ---------------------------------
 rpc_send '{"id":"p1","type":"prompt","message":"From the Firstmate session-start digest already in your context, reply with the single line that begins with SESSION START - and nothing else. Do not run any tool."}'

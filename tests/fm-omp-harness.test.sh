@@ -3,7 +3,7 @@
 # adapter: detection, session-lock identity, tmux liveness classification, the
 # spawn launch line and worker posture overlay, pre-launch model validation, the
 # per-task busy-state extension, the extension supervision model and ownership
-# proof, and the two tracked primary extensions driven over a fake omp API.
+# proof, and the tracked extensions driven over a fake omp API.
 #
 # omp's identity, launch, and lifecycle checks are HARNESS-DEPENDENT: their
 # verdicts come from what the vendor emits (a process name, a settings schema,
@@ -29,6 +29,10 @@
 #      stands down when the payload already carries stop_hook_active.
 #   7. The watch extension arms through fm_watch_arm_omp and delivers an
 #      actionable close as one follow-up.
+#   8. The Calm extension touches nothing while off, persists /calm to the
+#      shared preference file and reloads it on session_start and session_switch, and reports
+#      only working, waiting-for-you, quiet-age, and idle from omp's events;
+#      waiting-for-you holds while any tool approval or a built-in ask is open.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -445,8 +449,9 @@ test_ownership_proof_is_omp_keyed() {
 install_omp_extension_fixture() {  # <repo>
   local repo=$1
   mkdir -p "$repo/.omp/extensions" "$repo/.pi/extensions/lib" "$repo/bin" "$repo/node_modules/typebox"
-  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ROOT/.omp/extensions/fm-primary-omp-watch.ts" "$repo/.omp/extensions/"
-  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$repo/.pi/extensions/lib/"
+  cp "$ROOT/.omp/extensions/fm-primary-turnend-guard.ts" "$ROOT/.omp/extensions/fm-primary-omp-watch.ts" "$ROOT/.omp/extensions/fm-calm-omp.ts" "$repo/.omp/extensions/"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" \
+    "$ROOT/.pi/extensions/lib/fm-calm-preference.ts" "$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts" "$ROOT/.pi/extensions/lib/fm-calm-working-ship-sprite.ts" "$repo/.pi/extensions/lib/"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/"
   chmod +x "$repo/bin/fm-operational-input.sh"
   printf '{"name":"typebox","type":"module","exports":"./index.js"}\n' > "$repo/node_modules/typebox/package.json"
@@ -574,6 +579,151 @@ EOF
   pass ".omp watch extension: fm_watch_arm_omp arms once, repeats as a no-op, and delivers an actionable close as one follow-up"
 }
 
+test_calm_extension_presents_only_observed_run_state() {
+  local repo out status
+  repo="$TMP_ROOT/calm/repo"
+  install_omp_extension_fixture "$repo"
+  out=$(FM_CONFIG_OVERRIDE="$TMP_ROOT/calm/config" EXT="$repo/.omp/extensions/fm-calm-omp.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+const KEY = "firstmate-calm-working-ship";
+const ESC = String.fromCharCode(27);
+const preference = `${process.env.FM_CONFIG_OVERRIDE}/calm`;
+const handlers = new Map(); let calm = null;
+const pi = { on(e, h) { handlers.set(e, h); }, registerCommand(n, o) { if (n === "calm") calm = o.handler; } };
+const calls = []; const notices = []; let workingMessageCalls = 0; let toolsExpanded = true; let widget;
+const ui = {
+  setWidget(key, factory, options) {
+    calls.push(["setWidget", key, factory ? "install" : "dispose", options?.placement]);
+    widget?.dispose?.();
+    widget = factory ? factory({ requestRender() {} }, {}) : undefined;
+  },
+  setStatus(key, text) { calls.push(["setStatus", key, text ?? null]); },
+  setToolsExpanded(expanded) { calls.push(["setToolsExpanded", expanded]); toolsExpanded = expanded; },
+  getToolsExpanded() { return toolsExpanded; },
+  setWorkingMessage() { workingMessageCalls += 1; },
+  notify(message, level) { calls.push(["notify", level]); notices.push(message); },
+};
+const ctx = { ui, hasUI: true };
+const fire = (name, event = {}) => handlers.get(name)({ type: name, ...event }, ctx);
+const expect = (label, expected) => {
+  const actual = calls.splice(0);
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error(`${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+};
+const stateLine = (label, text) => {
+  const rows = widget.render(40);
+  if (rows.length !== 3 || rows[2] !== `${ESC}[2m${text}${ESC}[22m`) throw new Error(`${label}: boat rows were ${JSON.stringify(rows)}`);
+};
+const stored = () => readFileSync(preference, "utf8");
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+if (!calm) throw new Error("/calm was not registered");
+for (const name of ["session_start", "session_switch", "agent_start", "agent_end", "tool_approval_requested", "tool_approval_resolved", "tool_execution_start", "tool_execution_update", "tool_execution_end", "message_update", "session_shutdown"]) {
+  if (!handlers.has(name)) throw new Error(`${name} handler was not registered`);
+}
+const bash = (toolCallId) => ({ toolName: "bash", toolCallId });
+const ask = (toolCallId) => ({ toolName: "ask", toolCallId });
+// Calm off: a whole run, approval and ask included, touches no surface and writes nothing.
+fire("session_start"); fire("agent_start"); fire("tool_execution_start", bash("off-1")); fire("tool_approval_requested", bash("off-1")); fire("tool_approval_resolved", bash("off-1")); fire("tool_execution_end", bash("off-1"));
+fire("tool_execution_start", ask("off-2")); fire("tool_execution_end", ask("off-2")); fire("agent_end");
+expect("calm-off run", []);
+if (existsSync(preference)) throw new Error("a calm-off session wrote the preference");
+// /calm persists on, collapses tool rows, and reports idle until a run starts.
+calm("", ctx);
+if (stored() !== "on\n") throw new Error(`/calm on stored ${JSON.stringify(stored())}`);
+expect("calm on", [["setToolsExpanded", false], ["setStatus", "fm-calm", "idle"], ["notify", "info"]]);
+if (!notices[0]?.startsWith("Calm on")) throw new Error(`unexpected notice: ${notices[0]}`);
+// A run installs the boat above the editor with its state line and follows approvals.
+fire("agent_start");
+expect("agent start", [["setWidget", KEY, "install", "aboveEditor"], ["setStatus", "fm-calm", "working"]]);
+stateLine("working", "working");
+fire("tool_approval_requested", bash("a"));
+expect("approval requested", [["setStatus", "fm-calm", "waiting for you"]]);
+stateLine("waiting", "waiting for you");
+// Parallel tools hold several approvals open: answering one leaves the other waiting.
+fire("tool_approval_requested", bash("b"));
+expect("second approval requested", []);
+fire("tool_approval_resolved", bash("a"));
+expect("first approval resolved", []);
+stateLine("second approval still open", "waiting for you");
+fire("tool_approval_resolved", bash("b"));
+expect("last approval resolved", [["setStatus", "fm-calm", "working"]]);
+stateLine("approvals resolved", "working");
+fire("tool_execution_start", bash("c")); fire("tool_execution_update", bash("c")); fire("tool_execution_end", bash("c")); fire("message_update");
+expect("busy events", []);
+// A running built-in ask is a wait on the captain from its start to its end, and
+// its own approval, which shares its toolCallId, resolves without ending it.
+fire("tool_execution_start", ask("q"));
+expect("ask started", [["setStatus", "fm-calm", "waiting for you"]]);
+stateLine("ask open", "waiting for you");
+fire("tool_approval_requested", ask("q")); fire("tool_approval_resolved", ask("q"));
+expect("ask approval resolved", []);
+stateLine("ask still open", "waiting for you");
+fire("tool_execution_end", ask("q"));
+expect("ask ended", [["setStatus", "fm-calm", "working"]]);
+stateLine("ask answered", "working");
+// Silence is reported as an age, never a verdict, and the next event clears it.
+const realNow = Date.now;
+Date.now = () => realNow() + 6 * 60 * 1000;
+stateLine("quiet", "working, quiet 6m");
+fire("message_update");
+expect("event after quiet", []);
+stateLine("quiet cleared", "working");
+Date.now = realNow;
+// A continuing agent_end keeps the boat; the settling one disposes it and reports idle.
+fire("agent_end", { willContinue: true });
+expect("continuing end", []);
+stateLine("still working", "working");
+// A wait still open when the run settles ends with it and never reaches the next run.
+fire("tool_execution_start", ask("unanswered"));
+expect("ask open at settle", [["setStatus", "fm-calm", "waiting for you"]]);
+fire("agent_end", { willContinue: false });
+expect("settled end", [["setWidget", KEY, "dispose", "aboveEditor"], ["setStatus", "fm-calm", "idle"]]);
+fire("agent_start");
+expect("next run", [["setWidget", KEY, "install", "aboveEditor"], ["setStatus", "fm-calm", "working"]]);
+stateLine("next run starts clean", "working");
+fire("agent_end");
+expect("next run settled", [["setWidget", KEY, "dispose", "aboveEditor"], ["setStatus", "fm-calm", "idle"]]);
+// /calm off persists off, restores the observed tool expansion, and clears the footer.
+calm("", ctx);
+if (stored() !== "off\n") throw new Error(`/calm off stored ${JSON.stringify(stored())}`);
+expect("calm off", [["setToolsExpanded", true], ["setStatus", "fm-calm", null], ["notify", "info"]]);
+if (!notices[1]?.startsWith("Calm off")) throw new Error(`unexpected notice: ${notices[1]}`);
+// session_start reloads a choice another harness wrote: on, the legacy max, then off;
+// an in-process /new arrives as session_switch and reloads the same way.
+writeFileSync(preference, "on\n");
+fire("session_start");
+expect("reload on", [["setToolsExpanded", false], ["setStatus", "fm-calm", "idle"]]);
+fire("session_start");
+expect("reload unchanged", []);
+writeFileSync(preference, "max\n");
+fire("session_start");
+expect("legacy max stays on", []);
+writeFileSync(preference, "off\n");
+fire("session_switch");
+expect("session_switch reload off", [["setToolsExpanded", true], ["setStatus", "fm-calm", null]]);
+writeFileSync(preference, "on\n");
+fire("session_switch");
+expect("session_switch reload on", [["setToolsExpanded", false], ["setStatus", "fm-calm", "idle"]]);
+writeFileSync(preference, "off\n");
+fire("session_start");
+expect("reload off", [["setToolsExpanded", true], ["setStatus", "fm-calm", null]]);
+// Shutdown mid-run settles the boat.
+writeFileSync(preference, "on\n");
+fire("session_start"); fire("agent_start");
+expect("run after reload", [["setToolsExpanded", false], ["setStatus", "fm-calm", "idle"], ["setWidget", KEY, "install", "aboveEditor"], ["setStatus", "fm-calm", "working"]]);
+fire("session_shutdown");
+expect("shutdown", [["setWidget", KEY, "dispose", "aboveEditor"], ["setStatus", "fm-calm", "idle"]]);
+if (workingMessageCalls !== 0) throw new Error(`omp's working message was overridden ${workingMessageCalls} times`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "omp calm extension contract: $out"
+  [ -z "$out" ] || fail "omp calm extension test printed output: $out"
+  pass ".omp calm extension: silent while off, /calm persists and session_start/session_switch reload the shared preference, boat and footer report only observed run state, waiting for you holds across overlapping approvals and an open ask"
+}
+
+
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
@@ -585,3 +735,4 @@ test_control_composer_and_model_tables
 test_ownership_proof_is_omp_keyed
 test_turnend_guard_extension_compels_one_continuation
 test_watch_extension_arms_and_delivers
+test_calm_extension_presents_only_observed_run_state
