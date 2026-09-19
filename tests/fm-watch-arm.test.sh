@@ -841,6 +841,155 @@ test_arm_refuses_an_unusable_launch_confirm_window() {
   pass "watch-arm: an unusable launch confirm window refuses to arm by name"
 }
 
+# Mirror bin/ through symlinks into <dest> except for fm-watch.sh, which is
+# replaced by <fake_watch>. fm-watch-arm.sh resolves its watcher as
+# "$SCRIPT_DIR/fm-watch.sh" - a fixed path next to the arm script itself, never
+# looked up on PATH - so this is the only way to hand it a controllable
+# stand-in while every other sourced file (fm-wake-lib.sh, etc.) still
+# resolves to the real repo copy.
+make_fake_watch_arm_dir() {  # <dest-dir> <fake-watch-script>
+  local dest=$1 fake_watch=$2 f base
+  mkdir -p "$dest"
+  for f in "$ROOT"/bin/*; do
+    base=$(basename "$f")
+    [ "$base" = fm-watch.sh ] && continue
+    ln -sf "$f" "$dest/$base"
+  done
+  cp "$fake_watch" "$dest/fm-watch.sh"
+  chmod +x "$dest/fm-watch.sh"
+}
+
+# Regression test for the bug this suite's fm-watch-arm.sh change fixes: a
+# bare `&` background of the watcher shares the arm's own process group, so an
+# uncatchable, process-group-wide SIGKILL aimed at the arm (observed: a
+# background-task memory guard misfiring on a transient, non-authoritative
+# reading) used to take the watcher down with it and silently drop
+# supervision. The arm now detaches the watcher into its own process group
+# before exec (set -m around the fork) while keeping it a normal waitable
+# child, so this test launches a real arm as the leader of ITS OWN fresh
+# group - exactly how a harness's background-task supervisor would - and
+# kills that whole group the way the misfiring guard does, never sending
+# anything to this test runner's own group.
+test_watcher_survives_the_arm_process_group_being_killed() {
+  local dir home state fakebin armout armpid watcher_pid armpgid before after i
+  dir=$(make_case survive-group-kill)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+
+  set -m
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" > "$armout" 2>&1 &
+  armpid=$!
+  set +m
+
+  i=0
+  while [ "$i" -lt 100 ]; do
+    grep -q '^watcher: started ' "$armout" 2>/dev/null && break
+    is_live_non_zombie "$armpid" || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  grep -q '^watcher: started ' "$armout" \
+    || fail "arm never confirmed a started watcher: $(cat "$armout")"
+  watcher_pid=$(grep -o '^watcher: started pid=[0-9]*' "$armout" | head -1 | grep -o '[0-9]*$')
+  [ -n "$watcher_pid" ] || fail "could not parse the started watcher pid: $(cat "$armout")"
+  kill -0 "$watcher_pid" 2>/dev/null || fail "the reported watcher pid is not actually alive"
+  before=$(stat -c %Y "$state/.last-watcher-beat" 2>/dev/null || stat -f %m "$state/.last-watcher-beat" 2>/dev/null)
+
+  armpgid=$(ps -o pgid= -p "$armpid" 2>/dev/null | tr -d '[:space:]')
+  [ -n "$armpgid" ] || fail "could not read the arm's own process group"
+  [ "$armpgid" != "$$" ] \
+    || fail "the arm shares this test's own process group; the group kill below would be unsafe"
+
+  # The uncatchable kill a misfiring memory guard sends: SIGKILL to the arm's
+  # WHOLE process group, never just the arm's own pid.
+  kill -KILL -- "-$armpgid" 2>/dev/null
+
+  i=0
+  while [ "$i" -lt 50 ] && is_live_non_zombie "$armpid"; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  ! is_live_non_zombie "$armpid" \
+    || fail "the arm survived its own process-group kill; this test's setup is wrong"
+  # Reap it now so bash's job control does not print a delayed "Killed"
+  # notice at some later, unrelated point in this script.
+  wait "$armpid" 2>/dev/null || true
+
+  kill -0 "$watcher_pid" 2>/dev/null \
+    || fail "the watcher did not survive the arm's process group being killed"
+
+  sleep 2
+  after=$(stat -c %Y "$state/.last-watcher-beat" 2>/dev/null || stat -f %m "$state/.last-watcher-beat" 2>/dev/null)
+  [ -n "$after" ] && [ "$after" != "$before" ] \
+    || fail "the surviving watcher stopped beating its liveness beacon"
+
+  kill -TERM "$watcher_pid" 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 50 ] && kill -0 "$watcher_pid" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  kill -KILL "$watcher_pid" 2>/dev/null || true
+  pass "watch-arm: a detached watcher survives an uncatchable SIGKILL to the arm's process group"
+}
+
+# The other half of the same fix: a watcher that never becomes healthy before
+# FM_ARM_CONFIRM_TIMEOUT must not leak. The fake watcher below execs straight
+# into `sleep`, so its pid never changes and default SIGTERM handling applies,
+# and it never touches the singleton lock or the beacon, so the arm's
+# confirm-poll can never see it as healthy.
+test_never_healthy_spawn_is_cleaned_up() {
+  local dir home state fakebin armdir armout status hang_pid i
+  dir=$(make_case never-healthy-cleanup)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armdir="$dir/armdir"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+
+  cat > "$dir/fake-fm-watch.sh" <<'SH'
+#!/usr/bin/env bash
+exec sleep 300
+SH
+  chmod +x "$dir/fake-fm-watch.sh"
+  make_fake_watch_arm_dir "$armdir" "$dir/fake-fm-watch.sh"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_ARM_CONFIRM_TIMEOUT=1 \
+    "$armdir/fm-watch-arm.sh" > "$armout" 2>&1 &
+  ARM_PID=$!
+
+  hang_pid=
+  i=0
+  while [ "$i" -lt 50 ]; do
+    hang_pid=$(pgrep -P "$ARM_PID" 2>/dev/null | head -1)
+    [ -n "$hang_pid" ] && break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -n "$hang_pid" ] || fail "could not observe the never-healthy child while the arm was live"
+
+  wait_for_exit "$ARM_PID" 200
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "arm reported success for a watcher that never became healthy: $(cat "$armout")"
+  grep -qF 'watcher: FAILED - no live watcher with a fresh beacon' "$armout" \
+    || fail "arm did not report the expected confirmation-timeout failure: $(cat "$armout")"
+
+  sleep 0.3
+  ! kill -0 "$hang_pid" 2>/dev/null \
+    || fail "a never-healthy spawn leaked a running process: pid $hang_pid"
+  pass "watch-arm: a spawn that never becomes healthy is cleaned up, not leaked"
+}
+
+test_watcher_survives_the_arm_process_group_being_killed
+test_never_healthy_spawn_is_cleaned_up
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_arm_refuses_an_unusable_launch_confirm_window
