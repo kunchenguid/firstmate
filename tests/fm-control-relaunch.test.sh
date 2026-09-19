@@ -1620,7 +1620,59 @@ test_spawn_relaunch_refuses_contradicting_flags() {
   out=$(run_spawn "$dir" rl16 "$dir/proj" --relaunch); rc=$?
   expect_code 1 "$rc" "a project positional should be refused alongside --relaunch"
   assert_contains "$out" "takes the task id only" "the refusal should name the positional rule"
+  out=$(run_spawn "$dir" rl16 --relaunch --claude-config-dir "$dir/seat"); rc=$?
+  expect_code 1 "$rc" "--claude-config-dir should be refused alongside --relaunch"
+  assert_contains "$out" "recorded Claude config directory" "the refusal should name the recorded-seat rule"
   pass "fm-spawn --relaunch: every identity axis comes from the record, and a contradicting flag refuses"
+}
+
+test_relaunch_preserves_the_recorded_claude_config_dir() {
+  local dir out rc seat recorded
+  dir=$(new_case seat-persist rl91)
+  add_ship_task "$dir" rl91 claude
+  seat="$dir/claude-seat-b"
+  mkdir -p "$seat"
+  printf '{}' > "$seat/.claude.json"
+  seat=$(cd "$seat" && pwd -P)
+  printf 'claude_config_dir=%s\n' "$seat" >> "$dir/home/state/rl91.meta"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl91 --relaunch); rc=$?
+  expect_code 0 "$rc" "a same-harness relaunch with a recorded seat should succeed"$'\n'"$out"
+  recorded=$(meta_field "$dir" rl91 claude_config_dir)
+  [ "$recorded" = "$seat" ] \
+    || fail "the relaunch must keep the task's recorded Claude config directory, got '$recorded'"
+  assert_grep "CLAUDE_CONFIG_DIR='$seat'" "$dir/fake/literal" \
+    "the replacement launch did not use the task's recorded seat"
+  pass "fm-spawn --relaunch: reuses the task's recorded Claude config directory for the replacement launch, never a fresh flag"
+}
+
+test_relaunch_refusal_names_the_recorded_seat_not_the_flag() {
+  local dir out rc seat
+  dir=$(new_case seat-gone rl92)
+  add_ship_task "$dir" rl92 claude
+  seat="$dir/claude-seat-gone"
+  mkdir -p "$seat"
+  seat=$(cd "$seat" && pwd -P)
+  printf 'claude_config_dir=%s\n' "$seat" >> "$dir/home/state/rl92.meta"
+  # The operator removed the seat after the task was spawned, which is what a
+  # stuck-crewmate relaunch runs into. A relaunch caller never passed
+  # --claude-config-dir and is forbidden from passing it, so the refusal must
+  # point at the task's record instead of at that flag.
+  rmdir "$seat"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl92 --relaunch); rc=$?
+  expect_code 1 "$rc" "a relaunch whose recorded seat is gone should refuse"
+  assert_contains "$out" "this task's recorded Claude config directory '$seat' is not an accessible directory" \
+    "the relaunch refusal should name the task's recorded seat as the thing that is gone"
+  assert_contains "$out" "--claude-config-dir cannot override it on a relaunch" \
+    "the relaunch refusal should say the flag is not the caller's fix"
+  assert_not_contains "$out" "error: --claude-config-dir" \
+    "the relaunch refusal must not blame a flag the caller never passed"
+  [ ! -s "$dir/fake/literal" ] \
+    || fail "an unusable recorded seat must launch nothing (got: $(cat "$dir/fake/literal"))"
+  pass "fm-spawn --relaunch: an unusable recorded seat refuses in the record's own terms, not the flag's"
 }
 
 test_spawn_relaunch_refuses_an_unrecorded_task() {
@@ -1733,6 +1785,8 @@ test_spawn_relaunch_refuses_a_symlinked_task_record_before_inspection
 test_spawn_relaunch_keeps_its_early_meta_lock_continuous
 test_spawn_relaunch_refuses_a_pending_authoritative_close
 test_spawn_relaunch_refuses_contradicting_flags
+test_relaunch_preserves_the_recorded_claude_config_dir
+test_relaunch_refusal_names_the_recorded_seat_not_the_flag
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it

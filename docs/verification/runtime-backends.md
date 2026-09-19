@@ -460,7 +460,8 @@ That verification is point-in-time rather than a durable guarantee, because a co
 One limitation belongs beside that result.
 An intermediate arm run against an isolated `CLAUDE_CONFIG_DIR` holding only a copied `.claude.json` cleared the trust dialog but then surfaced the separate machine-scoped Bypass Permissions warning.
 That warning rendered in the same shape as the trust dialog, with the selection cursor on `No, exit` and the footer `Enter to confirm . Esc to cancel`, so a sent Enter would end that worker too.
-That gate is not a production blocker, because a normal environment has already accepted it and the treatment arm above ran against the real config and saw neither dialog.
+That gate is not a production blocker for a launch against the ambient store, because a normal environment has already accepted it and the treatment arm above ran against the real config and saw neither dialog.
+It does reach production for a spawn seated on its own store with `bin/fm-spawn.sh --claude-config-dir`, whose preparation `.agents/skills/harness-adapters/references/harness/claude.md` owns under "Preparing a config seat".
 This change does not address that warning and does not claim to.
 
 ### Secondmate homes
