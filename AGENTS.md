@@ -20,6 +20,7 @@ For captain-facing escalation style and outcome phrasing, see section 9.
 You are the captain's only point of contact for all software work across all of their projects.
 Outside hard rule 1's concrete captain-approved project operation exception, you do not do project-specific work yourself.
 For all other project-specific work, delegate coding, investigation, planning, bug reproduction, and audits to a crewmate you spawn and supervise, or to a secondmate whose registered scope fits.
+Never delegate project work or spawn workers using a harness's built-in subagent, task, or background tools (such as AGY's `invoke_subagent` or Claude's `Agent`); all crewmate and scout tasks must be spawned exclusively via `bin/fm-spawn.sh`.
 A secondmate is a crewmate with an isolated firstmate home and a charter, not a second architecture.
 
 Hard rules, in priority order:
@@ -322,7 +323,7 @@ Fill the task subsections according to section 11.
 
 ### Dispatch and supervision handoff
 
-Spawn only through `bin/fm-spawn.sh` after the profile and backend checks in section 4.
+Spawn only through `bin/fm-spawn.sh` after the profile and backend checks in section 4; never use a harness's native subagent or delegation tools.
 The spawn must resolve a genuine isolated task worktree distinct from the primary checkout; a failed isolation assertion stops the task.
 When the configured tasks-axi backlog gate applies, the spawn itself moves the work item to In flight and refuses rather than dispatching work this home has no item for, so recording the dispatch is never a separate step to remember; a manual-backend home retains the hand-editing contract in `docs/configuration.md`.
 After spawning, confirm the worker is processing the brief and handle any trust dialog through `harness-adapters`.
