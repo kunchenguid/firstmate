@@ -96,21 +96,26 @@ JSON
 }
 write_quota "$QUOTA" 0.7597
 
-write_response() {  # <path> <choice> <confidence>
-  cat > "$1" <<JSON
-{ "model": "jev-1.13.0",
-  "answers": {
-    "rule": { "type": "choice", "choice": "$2", "confidence": $3,
-      "probabilities": { "rule_1": 0.01, "rule_2": 0.01, "rule_3": 0.01, "rule_4": 0.96, "default": 0.01 } },
+classifier_answers() {  # the six router axes every well-formed response carries
+  cat <<'JSON'
     "intent": {"type":"choice","choice":"bugfix","confidence":0.91,"probabilities":{"implementation":0.02,"bugfix":0.91,"investigation":0.01,"review":0.01,"operations":0.01,"documentation":0.01,"design":0.01,"other":0.01}},
     "domain": {"type":"choice","choice":"project_code","confidence":0.88,"probabilities":{"firstmate":0.02,"project_code":0.88,"infrastructure":0.02,"github":0.02,"browser_visual":0.02,"docs":0.02,"unknown":0.02}},
     "difficulty": {"type":"choice","choice":"medium","confidence":0.87,"probabilities":{"low":0.05,"medium":0.87,"high":0.04,"xhigh":0.04}},
     "risk": {"type":"choice","choice":"low","confidence":0.86,"probabilities":{"low":0.86,"medium":0.08,"high":0.03,"sensitive":0.03}},
-    "effort": {"type":"choice","choice":"medium","confidence":0.89,"probabilities":{"low":0.04,"medium":0.89,"high":0.04,"xhigh":0.03}},
     "model_class": {"type":"choice","choice":"standard","confidence":0.9,"probabilities":{"small_fast":0.02,"standard":0.9,"strong_reasoning":0.02,"current_web":0.02,"vision":0.02,"code_execution":0.02}},
     "escalation": {"type":"choice","choice":"no","confidence":0.93,"probabilities":{"no":0.93,"yes":0.07}}
+JSON
+}
+
+write_response() {  # <path> <choice> <confidence> [<rule-probabilities-json>]
+  local probabilities=${4:-'{ "rule_1": 0.01, "rule_2": 0.01, "rule_3": 0.01, "rule_4": 0.96, "default": 0.01 }'}
+  cat > "$1" <<JSON
+{ "model": "jev-1.13.0",
+  "answers": {
+    "rule": { "type": "choice", "choice": "$2", "confidence": $3, "probabilities": $probabilities },
+$(classifier_answers)
   },
-  "usage": { "input_tokens": 812, "output_tokens": 60 } }
+  "usage": { "input_tokens": 812, "output_tokens": 386 } }
 JSON
 }
 
@@ -140,18 +145,6 @@ if [ "${FAKE_CURL_FAIL:-0}" = 1 ]; then
   exit 7
 fi
 cp "${FAKE_CURL_RESPONSE:?}" "$out"
-if jq -e '.answers.rule and (.answers.intent | not)' "$out" >/dev/null 2>&1; then
-  tmp="$out.add-classifier"
-  jq '.answers += {
-    intent: {"type":"choice","choice":"bugfix","confidence":0.91,"probabilities":{"implementation":0.02,"bugfix":0.91,"investigation":0.01,"review":0.01,"operations":0.01,"documentation":0.01,"design":0.01,"other":0.01}},
-    domain: {"type":"choice","choice":"project_code","confidence":0.88,"probabilities":{"firstmate":0.02,"project_code":0.88,"infrastructure":0.02,"github":0.02,"browser_visual":0.02,"docs":0.02,"unknown":0.02}},
-    difficulty: {"type":"choice","choice":"medium","confidence":0.87,"probabilities":{"low":0.05,"medium":0.87,"high":0.04,"xhigh":0.04}},
-    risk: {"type":"choice","choice":"low","confidence":0.86,"probabilities":{"low":0.86,"medium":0.08,"high":0.03,"sensitive":0.03}},
-    effort: {"type":"choice","choice":"medium","confidence":0.89,"probabilities":{"low":0.04,"medium":0.89,"high":0.04,"xhigh":0.03}},
-    model_class: {"type":"choice","choice":"standard","confidence":0.9,"probabilities":{"small_fast":0.02,"standard":0.9,"strong_reasoning":0.02,"current_web":0.02,"vision":0.02,"code_execution":0.02}},
-    escalation: {"type":"choice","choice":"no","confidence":0.93,"probabilities":{"no":0.93,"yes":0.07}}
-  }' "$out" > "$tmp" && mv "$tmp" "$out"
-fi
 printf '%s' "${FAKE_CURL_HTTP:-200}"
 SH
 chmod +x "$FAKEBIN/curl"
@@ -250,7 +243,7 @@ assert_not_contains "$out" '--effort' "cursor profile without effort emits no --
 argv=$(cat "$LOG/argv")
 assert_not_contains "$argv" "$KEY" "the key never appears on curl argv"
 assert_contains "$argv" 'https://api.typesafe.ai/v1/systemone' "the request uses the fixed typesafe.ai endpoint"
-assert_contains "$argv" $'--max-time\n5' "the request uses the fixed five-second timeout"
+assert_contains "$argv" $'--max-time\n10' "the request uses the fixed ten-second timeout"
 assert_contains "$argv" '@/dev/fd/3' "the header is read from a file descriptor"
 assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "curl receives the bearer header on fd 3"
 assert_equals $'curl:clean\nquota-axi:clean' "$(cat "$LOG/child-env")" "the API key is absent from every child environment"
@@ -258,15 +251,15 @@ body=$(cat "$LOG/body")
 assert_equals 'jev-latest' "$(jq -r .model <<<"$body")" "default model is jev-latest"
 assert_equals 'pager' "$(jq -r .state.task.project <<<"$body")" "project rides in the state"
 assert_contains "$(jq -r .state.task.brief <<<"$body")" 'off-by-one in the pager' "the whole brief rides in the state"
-assert_equals '["difficulty","domain","effort","escalation","intent","model_class","risk","rule"]' "$(jq -c '.questions | keys' <<<"$body")" "rule and router classification Choices are asked"
+assert_equals '["difficulty","domain","escalation","intent","model_class","risk","rule"]' "$(jq -c '.questions | keys' <<<"$body")" "rule and router classification Choices are asked"
 assert_equals '["default","rule_1","rule_2","rule_3","rule_4"]' "$(jq -c '.questions.rule.criteria | keys' <<<"$body")" "one option per rule plus default"
 assert_equals 'No listed rule applies to this task.' "$(jq -r '.questions.rule.criteria.default' <<<"$body")" "the fixed generic none criterion is the default option"
 assert_equals 'A simple bug fix with a stated root cause.' "$(jq -r '.questions.rule.criteria.rule_4' <<<"$body")" "rule when text is the option verbatim"
 assert_not_contains "$body" 'SECRET-WHY-TEXT' "why text never leaves the machine"
 assert_not_contains "$body" 'spendPriority' "quota never leaves the machine"
 assert_not_contains "$body" 'cursor-grok' "use profiles never leave the machine"
-assert_equals '["high","low","medium","xhigh"]' "$(jq -c '.questions.effort.criteria | keys' <<<"$body")" "effort recommendation axis is explicit and bounded"
-assert_contains "$out" '  classification: intent=bugfix(0.91) domain=project_code(0.88) difficulty=medium(0.87) risk=low(0.86) effort=medium(0.89) model_class=standard(0.9) escalation=no(0.93)' "typed classifier evidence is emitted beside the rule match"
+assert_equals '["no","yes"]' "$(jq -c '.questions.escalation.criteria | keys' <<<"$body")" "the one gating classifier axis is bounded to yes and no"
+assert_contains "$out" '  classification: intent=bugfix(0.91) domain=project_code(0.88) difficulty=medium(0.87) risk=low(0.86) model_class=standard(0.9) escalation=no(0.93)' "typed classifier evidence is emitted beside the rule match"
 pass "clear: one rule Choice request, router classifier evidence, key on the fd header only, spendPriority argmax over every candidate"
 
 # --- rules are snapshotted and line output is injection-safe -------------------
@@ -325,9 +318,7 @@ done
 AGY_RULE="$TMP_ROOT/agy-rule.json"
 printf '%s\n' '{"rules":[{"when":"Agy work.","use":{"harness":"agy"}}]}' > "$AGY_RULE"
 cp "$AGY_RULE" "$RULES"
-cat > "$RESPONSE" <<'JSON'
-{"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"rule_1","confidence":0.99,"probabilities":{"rule_1":0.99,"default":0.01}}},"usage":{"input_tokens":100,"output_tokens":60}}
-JSON
+write_response "$RESPONSE" rule_1 0.99 '{"rule_1":0.99,"default":0.01}'
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" 'candidate: agy:-  provider=agy  scope=all_models  remaining=64%  spendPriority=0.4  runway=through_reset  -> eligible' "agy uses its resolver-only authoritative quota provider"
@@ -342,9 +333,7 @@ assert_contains "$out" 'candidate: gemini:gemini-3.8-flash-high  provider=google
 assert_contains "$out" "  profile: --harness 'gemini' --model 'gemini-3.8-flash-high'" "Gemini is a typed verified dispatch harness"
 
 cp "$ROOT/docs/examples/crew-dispatch.json" "$RULES"
-cat > "$RESPONSE" <<'JSON'
-{"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"default","confidence":0.9,"probabilities":{"rule_1":0.02,"rule_2":0.02,"rule_3":0.02,"default":0.94}}},"usage":{"input_tokens":812,"output_tokens":60}}
-JSON
+write_response "$RESPONSE" default 0.9 '{"rule_1":0.02,"rule_2":0.02,"rule_3":0.02,"default":0.94}'
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: clear' "the documented example passes opted-in resolution"
@@ -364,24 +353,55 @@ assert_contains "$out" '  classification:' "ambiguous still publishes classifier
 assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=79%  spendPriority=-0.4627  runway=projected_exhaustion  -> eligible' "ambiguous preserves matched candidate evidence"
 assert_contains "$out" 'candidate: kimi:kimi-code/k3  provider=kimi  -> eligible, unranked: provider kimi unmeasured (unknown): disclosed uncertainty' "ambiguous preserves eligible unranked candidate evidence"
 assert_not_contains "$out" '  profile:' "ambiguous emits no profile line"
-CLASSIFIER_LOW="$TMP_ROOT/classifier-low.json"
-write_response "$CLASSIFIER_LOW" rule_4 0.9
-jq '.answers.risk.confidence = 0.42 | .answers.risk.probabilities = {"low":0.42,"medium":0.28,"high":0.2,"sensitive":0.1}' "$CLASSIFIER_LOW" > "$RESPONSE"
-reset_log
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
-assert_contains "$out" '  status: ambiguous' "low-confidence classifier axes fall back instead of launching"
-assert_contains "$out" '  reason: classifier confidence below floor 0.6: risk' "low-confidence classifier axis is named"
-assert_not_contains "$out" '  profile:' "low-confidence classifier evidence cannot authorize a model launch"
+pass "ambiguous: rule confidence below the fixed floor hands the decision back"
 
-CLASSIFIER_ESCALATE="$TMP_ROOT/classifier-escalate.json"
-write_response "$CLASSIFIER_ESCALATE" rule_4 0.9
-jq '.answers.risk.choice = "sensitive" | .answers.risk.confidence = 0.81 | .answers.risk.probabilities = {"low":0.04,"medium":0.05,"high":0.1,"sensitive":0.81} | .answers.escalation.choice = "yes" | .answers.escalation.confidence = 0.84 | .answers.escalation.probabilities = {"no":0.16,"yes":0.84}' "$CLASSIFIER_ESCALATE" > "$RESPONSE"
+# --- classifier axes are evidence; only the escalation axis stops dispatch ------
+CLASSIFIER="$TMP_ROOT/classifier.json"
+write_response "$CLASSIFIER" rule_4 0.9
+jq '.answers.domain.choice = "infrastructure" | .answers.domain.confidence = 0.42 | .answers.domain.probabilities = {"firstmate":0.04,"project_code":0.38,"infrastructure":0.42,"github":0.04,"browser_visual":0.04,"docs":0.04,"unknown":0.04}' "$CLASSIFIER" > "$RESPONSE"
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
-assert_contains "$out" '  status: escalate' "classifier escalation recommendation escalates before dispatch"
-assert_contains "$out" '  reason: classifier recommends escalation before dispatch' "classifier escalation reason is local policy output"
-assert_not_contains "$out" '  profile:' "sensitive classifier evidence cannot directly authorize a model launch or sensitive action"
-pass "ambiguous: confidence below the fixed floors hands the decision back"
+assert_contains "$out" '  status: clear' "low confidence on an evidence-only axis cannot veto a matched rule"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "the local route survives uncertain classifier evidence"
+assert_contains "$out" 'domain=infrastructure(0.42)' "the uncertain axis is published as evidence"
+
+jq '.answers.risk.choice = "sensitive" | .answers.risk.confidence = 0.81 | .answers.risk.probabilities = {"low":0.04,"medium":0.05,"high":0.1,"sensitive":0.81}' "$CLASSIFIER" > "$RESPONSE"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a sensitive risk classification is evidence, not a second escalation rule"
+assert_contains "$out" 'risk=sensitive(0.81)' "the sensitive risk reading is published beside the route"
+
+jq '.answers.escalation.choice = "yes" | .answers.escalation.confidence = 0.84 | .answers.escalation.probabilities = {"no":0.16,"yes":0.84}' "$CLASSIFIER" > "$RESPONSE"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 0 "$code" "classifier escalation exits 0"
+assert_contains "$out" '  status: escalate' "an explicit escalation answer escalates before dispatch"
+assert_contains "$out" '  reason: classifier recommends escalation before dispatch' "the escalation axis names itself"
+assert_not_contains "$out" '  profile:' "classifier evidence cannot authorize a model launch or sensitive action"
+
+write_response "$CLASSIFIER" rule_3 0.95
+jq '.answers.escalation.choice = "yes" | .answers.escalation.confidence = 0.84 | .answers.escalation.probabilities = {"no":0.16,"yes":0.84}' "$CLASSIFIER" > "$RESPONSE"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: escalate' "a declared approval gate and a classifier recommendation both escalate"
+assert_contains "$out" "  reason: rule requires the captain's explicit approval before dispatch" "the declared local gate is reported ahead of classifier evidence"
+
+write_response "$CLASSIFIER" rule_4 0.9
+jq '.answers.escalation.choice = "YES"' "$CLASSIFIER" > "$RESPONSE"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: error' "a classifier choice outside its offered options is an error outcome"
+assert_contains "$out" '  reason: response is not a typed dispatch classifier answer' "an unrecognized classifier choice is never read as no escalation"
+assert_not_contains "$out" '  profile:' "an unrecognized classifier choice never yields a profile"
+
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+jq 'del(.answers.risk)' "$RESPONSE" > "$TMP_ROOT/missing-axis.json"
+mv "$TMP_ROOT/missing-axis.json" "$RESPONSE"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: error' "a missing classifier axis is an error outcome"
+assert_contains "$out" '  reason: response is not a typed dispatch classifier answer' "every declared classifier axis must be present and typed"
+pass "classifier evidence never vetoes local routing, and only the escalation axis stops dispatch"
 
 # --- escalate: captain approval ------------------------------------------------
 reset_log

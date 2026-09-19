@@ -19,9 +19,9 @@
 #   config/crew-dispatch.json plus one fixed generic none option, and a small
 #   fixed set of classifier questions for model-router evidence. Jev returns
 #   the matched rule, probabilities, confidence, and typed judgments for
-#   intent, domain, difficulty, risk, effort recommendation, likely model
-#   class, and whether the request should escalate. Everything after that is
-#   jq: the confidence floor, the rule's declared `approval` and `floor`, each profile's declared
+#   intent, domain, difficulty, risk, likely model class, and whether the
+#   request should escalate. Everything after that is jq: the rule confidence
+#   floor, the rule's declared `approval` and `floor`, each profile's declared
 #   `provider` and `floor`, the quota rows from ONE quota-axi --json snapshot
 #   (schema 5 or 6; each candidate binds to one row through quota_row in
 #   bin/fm-quota-axi-lib.sh, so a Pi lane such as openai-codex-work/...
@@ -37,13 +37,14 @@
 #   dispatch-resolve:
 #     status: clear | ambiguous | escalate | error
 #     model/latency_ms/tokens, rule (when excerpt) and confidence, probabilities
-#     classification: intent/domain/difficulty/risk/effort/model_class/escalate with confidence
+#     classification: intent/domain/difficulty/risk/model_class/escalation with confidence
 #     reason: <why the status is not clear>
 #     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
 #     profile: --harness <h> [--model <m>] [--effort <e>]     (status clear only)
 #   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
-#   ambiguous -> confidence below the floor; decide as today from the probabilities
-#   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
+#   ambiguous -> rule confidence below the floor; decide as today from the probabilities
+#   escalate  -> the rule requires captain approval, the classifier recommends
+#                escalation, no candidate is rankable, or a genuine tie
 #   error     -> API, network, response, or quota-axi failure; decide as today
 #   Every outcome exits 0 so an intake is never blocked by this tool.
 #   Exit 2 only for a usage or configuration error (unreadable brief, an
@@ -80,9 +81,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 CONFIDENCE_FLOOR=0.6
 TS_MODEL=jev-latest
 TS_BASE=https://api.typesafe.ai
-TS_TIMEOUT=5
+TS_TIMEOUT=10
 DEFAULT_WHEN="No listed rule applies to this task."
-CLASSIFIER_FLOOR=0.6
 
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
 no_rules() {
@@ -247,7 +247,6 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
         domain: {type: "choice", instructions: "Classify the dominant domain for routing evidence only.", criteria: {firstmate: "Firstmate supervisor tooling or instructions.", project_code: "A registered project codebase or tests.", infrastructure: "Runtime, shell, CI, deployment, or local tooling infrastructure.", github: "GitHub issues, pull requests, reviews, or repository settings.", browser_visual: "Browser, visual, UI, or screenshot-driven work.", docs: "Documentation or prose surface.", unknown: "The domain is unclear from the brief."}},
         difficulty: {type: "choice", instructions: "Estimate implementation or reasoning difficulty; use high only for broad exploration, ambiguity, or higher risk, and do not make xhigh routine.", criteria: {low: "Small, clear, well-bounded work.", medium: "Clear objective with moderate integration or validation.", high: "Broad, ambiguous, multi-system, or high-risk reasoning.", xhigh: "Exceptionally difficult, architecture-heavy, or safety-critical reasoning."}},
         risk: {type: "choice", instructions: "Estimate the highest relevant safety or delivery risk; sensitive means a human authority boundary may be involved.", criteria: {low: "Routine reversible change with low blast radius.", medium: "Moderate complexity or user-visible impact.", high: "High blast radius, security-adjacent, data-affecting, or hard-to-reverse work.", sensitive: "Destructive, irreversible, credential, security-sensitive, payment, privacy, or merge-authority concern."}},
-        effort: {type: "choice", instructions: "Recommend reasoning effort evidence only. Prefer medium for clear objectives; high only when broad exploration, ambiguity, or higher risk justifies it; xhigh is exceptional.", criteria: {low: "Trivial or mechanical change.", medium: "Clear objective and ordinary engineering judgment.", high: "Ambiguous, broad, or high-risk work needing deeper reasoning.", xhigh: "Exceptional reasoning depth needed; not a routine default."}},
         model_class: {type: "choice", instructions: "Recommend likely model capability class as evidence only, not a concrete model launch.", criteria: {small_fast: "Small or fast model is likely sufficient.", standard: "Standard coding/reasoning model is likely sufficient.", strong_reasoning: "Stronger reasoning model is likely useful.", current_web: "Needs current external facts or web/forge context.", vision: "Needs visual/browser evidence.", code_execution: "Needs substantial local code execution or test iteration."}},
         escalation: {type: "choice", instructions: "Should Firstmate escalate before dispatch because the request may need captain approval, a sensitive decision, unclear scope, credentials, destructive or irreversible action, or a safety boundary?", criteria: {no: "No escalation appears necessary before normal Firstmate policy checks.", yes: "Escalation appears necessary before dispatch or action."}}
       }
@@ -262,22 +261,25 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
 jq -e --slurpfile rules "$RULES" '
     def choice_answer($name; $choices):
-      (.answers[$name].choice | type) == "string" and
-      (.answers[$name].confidence | type) == "number" and
-      .answers[$name].confidence >= 0 and .answers[$name].confidence <= 1 and
-      (.answers[$name].probabilities | type) == "object" and
-      ((.answers[$name].probabilities | keys | sort) == ($choices | sort)) and
-      all(.answers[$name].probabilities[]; type == "number" and . >= 0 and . <= 1) and
-      ((.answers[$name].probabilities | [.[]] | add) as $total | $total >= 0.99 and $total <= 1.01);
+      (.answers[$name]) as $a |
+      ($a.choice | type) == "string" and
+      ($a.confidence | type) == "number" and
+      $a.confidence >= 0 and $a.confidence <= 1 and
+      ($a.probabilities | type) == "object" and
+      (($a.probabilities | keys | sort) == ($choices | sort)) and
+      all($a.probabilities[]; type == "number" and . >= 0 and . <= 1) and
+      (($a.probabilities | [.[]] | add) as $total | $total >= 0.99 and $total <= 1.01);
+    def classifier_answer($name; $choices):
+      (.answers[$name].choice) as $choice |
+      choice_answer($name; $choices) and ($choices | index($choice)) != null;
     (($rules[0].rules | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"]) as $rule_choices |
     choice_answer("rule"; $rule_choices) and
-    choice_answer("intent"; ["bugfix","design","documentation","implementation","investigation","operations","other","review"]) and
-    choice_answer("domain"; ["browser_visual","docs","firstmate","github","infrastructure","project_code","unknown"]) and
-    choice_answer("difficulty"; ["high","low","medium","xhigh"]) and
-    choice_answer("risk"; ["high","low","medium","sensitive"]) and
-    choice_answer("effort"; ["high","low","medium","xhigh"]) and
-    choice_answer("model_class"; ["code_execution","current_web","small_fast","standard","strong_reasoning","vision"]) and
-    choice_answer("escalation"; ["no","yes"]) and
+    classifier_answer("intent"; ["bugfix","design","documentation","implementation","investigation","operations","other","review"]) and
+    classifier_answer("domain"; ["browser_visual","docs","firstmate","github","infrastructure","project_code","unknown"]) and
+    classifier_answer("difficulty"; ["high","low","medium","xhigh"]) and
+    classifier_answer("risk"; ["high","low","medium","sensitive"]) and
+    classifier_answer("model_class"; ["code_execution","current_web","small_fast","standard","strong_reasoning","vision"]) and
+    classifier_answer("escalation"; ["no","yes"]) and
     ((has("usage") | not) or
       ((.usage | type) == "object" and
        (.usage.input_tokens | type) == "number" and
@@ -290,12 +292,11 @@ quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
 fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
-RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --arg classifier_floor "$CLASSIFIER_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
+RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
   --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" "$FM_QUOTA_ROW_JQ"'
   ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0]) as $q | ($r.answers.rule) as $a |
   def ans($name): $r.answers[$name];
   def c($name): {choice: ans($name).choice, confidence: ans($name).confidence};
-  ([("intent"), ("domain"), ("difficulty"), ("risk"), ("effort"), ("model_class"), ("escalation")] | map(select(ans(.).confidence < ($classifier_floor | tonumber)))) as $low_classifier_axes |
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
   def prov($p; $lane): quota_row($q; $p; $lane);
   def rows($p; $lane): (prov($p; $lane) | .quotaSemantics.effectiveAvailability // []);
@@ -389,17 +390,15 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --arg classifier_floor "$CLASSIFI
     rule: $choice,
     rule_when: (if $rule == null then $none_criterion else $rule.when end | .[0:60]),
     confidence: $a.confidence, probabilities: $a.probabilities,
-    classification: {intent: c("intent"), domain: c("domain"), difficulty: c("difficulty"), risk: c("risk"), effort: c("effort"), model_class: c("model_class"), escalation: c("escalation")}
+    classification: {intent: c("intent"), domain: c("domain"), difficulty: c("difficulty"), risk: c("risk"), model_class: c("model_class"), escalation: c("escalation")}
   } as $ev |
   if $sel.invalid then $ev + {status: "error", reason: $sel.invalid}
   elif $a.confidence < ($floor | tonumber) then
     $ev + {status: "ambiguous", reason: "confidence \($a.confidence) below floor \($floor)", candidates: ($answer_use | map(evaluate(.)))}
-  elif ($low_classifier_axes | length) > 0 then
-    $ev + {status: "ambiguous", reason: "classifier confidence below floor \($classifier_floor): \($low_classifier_axes | join(","))", candidates: ($answer_use | map(evaluate(.)))}
-  elif ans("escalation").choice == "yes" or ans("risk").choice == "sensitive" then
-    $ev + {status: "escalate", reason: "classifier recommends escalation before dispatch", candidates: ($answer_use | map(evaluate(.)))}
   elif $sel.escalate then
     $ev + {status: "escalate", reason: $sel.escalate, candidates: ($answer_use | map(evaluate(.)))}
+  elif ans("escalation").choice == "yes" then
+    $ev + {status: "escalate", reason: "classifier recommends escalation before dispatch", candidates: ($answer_use | map(evaluate(.)))}
   elif ($sel.use | length) == 0 then $ev + {status: "escalate", reason: "no profiles configured for \($sel.source)", note: $sel.note, candidates: []}
   else
     ($sel.use | map(evaluate(.))) as $cands |
@@ -427,7 +426,7 @@ TEXT=$(jq -r '
   "  model: \(show(.model))   latency_ms: \(show(.latency_ms))   tokens: \(show(.tokens.input_tokens))/\(show(.tokens.output_tokens))",
   "  rule: \(.rule | flat) (\(.rule_when | flat))   confidence: \(.confidence | flat)",
   "  probabilities: \([.probabilities | to_entries[] | "\(.key | flat)=\(.value | flat)"] | join(" "))",
-  "  classification: intent=\(.classification.intent.choice | flat)(\(.classification.intent.confidence | flat)) domain=\(.classification.domain.choice | flat)(\(.classification.domain.confidence | flat)) difficulty=\(.classification.difficulty.choice | flat)(\(.classification.difficulty.confidence | flat)) risk=\(.classification.risk.choice | flat)(\(.classification.risk.confidence | flat)) effort=\(.classification.effort.choice | flat)(\(.classification.effort.confidence | flat)) model_class=\(.classification.model_class.choice | flat)(\(.classification.model_class.confidence | flat)) escalation=\(.classification.escalation.choice | flat)(\(.classification.escalation.confidence | flat))",
+  "  classification: intent=\(.classification.intent.choice | flat)(\(.classification.intent.confidence | flat)) domain=\(.classification.domain.choice | flat)(\(.classification.domain.confidence | flat)) difficulty=\(.classification.difficulty.choice | flat)(\(.classification.difficulty.confidence | flat)) risk=\(.classification.risk.choice | flat)(\(.classification.risk.confidence | flat)) model_class=\(.classification.model_class.choice | flat)(\(.classification.model_class.confidence | flat)) escalation=\(.classification.escalation.choice | flat)(\(.classification.escalation.confidence | flat))",
   (if .reason then "  reason: \(.reason | flat)" else empty end),
   (if .note then "  note: \(.note | flat)" else empty end),
   (if .unranked_note then "  note: \(.unranked_note | flat)" else empty end),
