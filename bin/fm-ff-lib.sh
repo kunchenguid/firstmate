@@ -24,9 +24,9 @@
 # A tracked-files fast-forward never touches the gitignored operational dirs
 # (data/, state/, config/, projects/, .no-mistakes/), so it cannot disturb a
 # secondmate's backlog, projects, or in-flight work.
-# The seeded .fm-secondmate-home identity marker is gitignored too; the local
-# sync tolerates only that marker during the one-time upgrade of pre-ignore
-# linked-worktree homes.
+# The seeded .fm-secondmate-home identity marker is gitignored too; like any
+# untracked-only path it never blocks the fast-forward, which lets pre-ignore
+# linked-worktree homes upgrade.
 # A clean secondmate divergence is reconciled only when a three-way tree proof
 # shows that its complete local result is already present in the target, as
 # happens after an upstream squash merge. Every other divergence stays put and
@@ -251,6 +251,9 @@ remote_sync_failure_reason() { # <exit-status> <output>
   first_line "$2"
 }
 
+# dirty_status <dir> [ignore_seed_marker]: the first `git status --porcelain`
+# line, optionally skipping the untracked seed marker (fm-config-push.sh's
+# any-change check).
 dirty_status() {
   local dir=$1 ignore_seed_marker=${2:-no}
   if [ "$ignore_seed_marker" = yes ]; then
@@ -359,15 +362,17 @@ live_secondmate_meta_records() {
 #                  already exist in the target's object store, which it always does
 #                  for a worktree of this same repo; a standalone clone that lacks
 #                  it is skipped rather than fetched.
-# Guards are identical in both modes: never force/merge/stash; skip a dirty or
-# wrong-branch target and leave its work untouched. An optional secondmate id
+# Guards are identical in both modes: ff-only (never force/merge/stash); skip a
+# target with tracked-file changes, or a diverged or wrong-branch target, and
+# leave its work untouched. Untracked-only paths never block: the ff-only merge
+# itself refuses to overwrite an untracked file. An optional secondmate id
 # enables the content-equivalent divergence proof and durable marker described
 # in this file's header.
 FF_STATUS=""
 FF_INSTR=""
 ff_target() {
-  local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no} ignore_seed_marker=${5:-no}
-  local secondmate_id=${6:-} reconciliation_state=${7:-}
+  local dir=$1 label=$2 base_mode=$3 allow_detached=${4:-no}
+  local secondmate_id=${5:-} reconciliation_state=${6:-}
   FF_STATUS="skipped"
   FF_INSTR=""
 
@@ -416,7 +421,7 @@ ff_target() {
     return 0
   fi
 
-  if [ -n "$(dirty_status "$dir" "$ignore_seed_marker")" ]; then
+  if [ -n "$(git -C "$dir" status --porcelain --untracked-files=no 2>/dev/null | head -1)" ]; then
     echo "$label: skipped: dirty working tree"
     return 0
   fi
@@ -532,7 +537,7 @@ process_secondmate() {
   esac
   FF_SEEN_HOMES="$FF_SEEN_HOMES $home_real"
 
-  ff_target "$home_real" "secondmate $id" "$base_mode" yes yes "$id" "${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+  ff_target "$home_real" "secondmate $id" "$base_mode" yes "$id" "${FM_STATE_OVERRIDE:-$FM_HOME/state}"
   if [ -n "$window" ] && { [ "$FF_STATUS" = "updated" ] || [ "$FF_STATUS" = "current" ]; } \
     && type fm_ff_after_secondmate_settled >/dev/null 2>&1; then
     fm_ff_after_secondmate_settled "$id" "$home_real" "$window" "$FF_STATUS" "$FF_INSTR"

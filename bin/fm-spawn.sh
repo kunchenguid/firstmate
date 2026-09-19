@@ -2552,7 +2552,7 @@ if [ "$KIND" = secondmate ]; then
   if [ "${FM_SKIP_SECONDMATE_SYNC:-0}" = 1 ]; then
     :
   elif sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
-    sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes yes "$ID" "$STATE" 2>&1 || true)
+    sm_ff_out=$(ff_target "$PROJ_ABS" "secondmate $ID" "$sm_primary_head" yes "$ID" "$STATE" 2>&1 || true)
     case "$sm_ff_out" in
     *': skipped:'*)
       sm_ff_line=$(first_line "$sm_ff_out")
