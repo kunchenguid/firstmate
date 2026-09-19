@@ -48,21 +48,24 @@
 # bin/fm-spawn.sh from the branch it has just placed the slot on, and
 # bin/fm-promote.sh from what that spawn recorded (fm_recorded_working_branch).
 # A slot placed on origin's own default branch leaves every sentence unchanged.
-# It renders for direct-PR and no-mistakes only, and states the base as a fact
-# rather than directing how to branch from it. A directive there would silently
-# override contracts already stated above it, and under local-only it would have
-# had the worker ship a branch descending from the registered branch while
-# bin/fm-merge-local.sh still fast-forwards the default branch, landing every
-# unrelated commit into local main: this change's own foreign-commit symptom
-# relocated into the one lane that has no PR and no forge file list to reveal it.
-# local-only with a registered working branch is filed separately, and a scout,
-# which carries no delivery mode, renders nothing here pending that decision.
-# Each mode is told how its own PR reaches that base. A direct-PR worker raises
-# the PR itself, so it is given the flag. The no-mistakes pipeline raises it
-# instead, and nothing here sets the base it opens against - plumbing one into
-# that external tool's configuration is filed as its own item - so that worker is
-# told to read the PR's base once it exists and to stop rather than let a PR
-# against another branch carry that branch's commits as this task's change.
+# It states the base as a fact rather than directing how to branch from it, and
+# every worker whose slot was placed there is told it, a scout included: a scout
+# carries no delivery mode, and its report is the only artifact that outlives the
+# task, so a report attributing branch-only state to the default branch is the
+# costliest reader this section has. local-only is the one exception and renders
+# nothing, because a directive naming another base would have had that worker
+# ship a branch descending from the registered branch while bin/fm-merge-local.sh
+# still fast-forwards the default branch, landing every unrelated commit into
+# local main: this change's own foreign-commit symptom relocated into the one
+# lane that has no PR and no forge file list to reveal it. local-only with a
+# registered working branch is filed separately.
+# Each delivery mode is then told how its own PR reaches that base, and a kind
+# that raises no PR is told nothing further. A direct-PR worker raises the PR
+# itself, so it is given the flag. The no-mistakes pipeline raises it instead,
+# and nothing here sets the base it opens against - plumbing one into that
+# external tool's configuration is filed as its own item - so that worker is told
+# to read the PR's base once it exists and to stop rather than let a PR against
+# another branch carry that branch's commits as this task's change.
 # FM_BRIEF_BASE_SECTION_HEADING names the section so an emitter can ask whether a
 # brief already carries it: bin/fm-promote.sh writes it into the durable brief so
 # a relaunch cannot revive superseded text, and bin/fm-spawn.sh therefore renders
@@ -282,8 +285,7 @@ fm_brief_base_branch_overlay() {  # <working-branch> [mode]
   local base=$1 mode=${2:-}
   [ -n "$base" ] || return 0
   case "$mode" in
-    direct-PR|no-mistakes) ;;
-    *) return 0 ;;
+    local-only) return 0 ;;
   esac
   printf '%s\n' "$FM_BRIEF_BASE_SECTION_HEADING"
   cat <<EOF

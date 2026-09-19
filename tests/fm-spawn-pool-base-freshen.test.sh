@@ -496,7 +496,8 @@ test_launch_brief_names_the_branch_the_slot_is_on() {
   assert_no_grep 'nothing in this brief sets the base it opens against' "$launch" \
     "a project registering no working branch was warned about a base it never resolved"
 
-  # A scout carries no delivery mode, so it renders no base section for now.
+  # A scout's report is the only artifact that outlives the task, so it is told
+  # which branch it is on even though it carries no delivery mode and raises no PR.
   id='pool-brief-registered-scout-r1'
   rec=$(make_case brief-registered-scout "$id")
   read_case_record "$rec"
@@ -509,9 +510,13 @@ test_launch_brief_names_the_branch_the_slot_is_on() {
   expect_code 0 "$status" \
     "a scout on a registered working branch should launch"$'\n'"$out"
   launch="$HOME_DIR/data/$id/launch-brief.md"
-  assert_no_grep 'Current worktree base contract' "$launch" \
-    "a scout was handed a base section no delivery mode of its own honours"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/develop)" ] \
+    || fail "the slot this scout brief describes is not on the registered working branch"
+  assert_grep 'This worktree is based on `develop`' "$launch" \
+    "a scout was left reading that its worktree is on the default branch"
   assert_no_grep '--base' "$launch" "a scout was handed a PR base it will never use"
+  assert_no_grep 'nothing in this brief sets the base it opens against' "$launch" \
+    "a scout was handed the pipeline PR-base check for a PR it never raises"
 
   # local-only lands through bin/fm-merge-local.sh, which still fast-forwards the
   # default branch, so a section naming another base must not reach that worker.
