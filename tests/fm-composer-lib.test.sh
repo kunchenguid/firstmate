@@ -222,6 +222,112 @@ test_matrix_muse_truecolor_glyph_survives_signal_loss() {
   pass "matrix: muse's ⟩ reads empty everywhere and survives losing the styled-glyph signal"
 }
 
+test_matrix_muse_13_titled_rule_composer() {
+  # Real idle Muse Code 1.3.0-R3401.1, captured byte-for-byte from a live pane
+  # at 100 and 44 columns: a TITLED opening rule, a truecolor `❯`
+  # (38;2;251;191;36, luminance ~191.3) on its own row, a solid closing rule,
+  # and the model/effort/cwd status row below it. Muse 0.1.0 drew an unbordered
+  # `⟩` with no rules at all, so 1.3's shape was unreadable: the lone closing
+  # rule read as a newer composer below the glyph row and every verdict was
+  # `unknown`, which refused every exit and relaunch of a live muse worker.
+  # The cwd cell is the one edit to the capture - it held a machine-local
+  # scratch path.
+  local rule glyph bottom statusrow idle idle_narrow typed out
+  rule="${ESC}[2;38;2;103;108;116m── ${ESC}[0m${ESC}[38;2;138;144;152mVoice input (⌥ + v to start)${ESC}[0m${ESC}[2;38;2;103;108;116m ────────────────────────────────────────────────────────────────────${ESC}[0m"
+  glyph="${ESC}[38;2;251;191;36m❯ ${ESC}[0m"
+  bottom="${ESC}[2;38;2;103;108;116m────────────────────────────────────────────────────────────────────────────────────────────────────${ESC}[0m"
+  statusrow="${ESC}[38;2;103;108;116m  ${ESC}[0m${ESC}[38;2;90;160;255mmuse-spark-1.3-contributor${ESC}[0m${ESC}[38;2;138;144;152m · ${ESC}[0m${ESC}[38;2;90;160;255mmax${ESC}[0m${ESC}[38;2;138;144;152m · /…/muse-ws · ${ESC}[0m${ESC}[38;2;243;139;168mYOLO${ESC}[0m"
+  idle="$rule"$'\n'"$glyph"$'\n'"$bottom"$'\n'"$statusrow"
+  idle_narrow="${ESC}[2;38;2;103;108;116m── ${ESC}[0m${ESC}[38;2;138;144;152mVoice input (⌥ + v to start)${ESC}[0m${ESC}[2;38;2;103;108;116m ────────────${ESC}[0m"$'\n'"$glyph"$'\n'"${ESC}[2;38;2;103;108;116m────────────────────────────────────────────${ESC}[0m"$'\n'"$statusrow"
+  typed="$rule"$'\n'"${ESC}[38;2;251;191;36m❯ ${ESC}[0m${ESC}[38;2;204;211;219mfix the login bug${ESC}[0m"$'\n'"$bottom"$'\n'"$statusrow"
+
+  assert_screen "muse 1.3 idle on tmux" empty "$CAPS_TMUX" "$idle" 1 "$(printf 'muse\tidle')"
+  assert_screen "muse 1.3 idle on herdr" empty "$CAPS_STYLED" "$idle" '' "$(printf 'muse\tidle')"
+  assert_screen "muse 1.3 idle on herdr with no identity probe result" empty \
+    "$CAPS_STYLED" "$idle" '' probe-absent
+  assert_screen "muse 1.3 idle on zellij" empty "$CAPS_STYLED_NOID" "$idle"
+  assert_screen "muse 1.3 idle on cmux/orca" empty "$CAPS_PLAIN" \
+    "$(printf '%s\n' "$idle" | fm_composer_strip_ansi)"
+  assert_screen "muse 1.3 idle at 44 columns" empty "$CAPS_STYLED_NOID" "$idle_narrow"
+
+  # An UNFOCUSED pane is what firstmate actually reads, and muse recolours its
+  # glyph to 38;2;90;160;255 (luminance ~149.9) on focus-out - the tightest
+  # margin over the 128 ghost ceiling in the fleet. Drive that signal away too:
+  # with the ceiling raised past the glyph's luminance the ghost strip erases
+  # it, and the verdict must survive on the unstripped plain row alone.
+  local unfocused
+  unfocused="${ESC}[38;2;90;160;255m❯ ${ESC}[0m"
+  assert_screen "muse 1.3 idle in an unfocused pane" empty "$CAPS_STYLED_NOID" \
+    "$rule"$'\n'"$unfocused"$'\n'"$bottom"$'\n'"$statusrow"
+  out=$(FM_COMPOSER_GHOST_LUMA_MAX=200 fm_composer_classify_screen "$CAPS_STYLED_NOID" \
+    "$rule"$'\n'"$unfocused"$'\n'"$bottom"$'\n'"$statusrow")
+  [ "$out" = empty ] \
+    || fail "an unfocused muse composer must stay empty when the ghost strip eats its glyph, got '$out'"
+
+  # Typed text in the same geometry must stay pending, and must never read
+  # empty on a capture that cannot prove it real.
+  assert_screen "muse 1.3 typed on zellij" pending "$CAPS_STYLED_NOID" "$typed"
+  assert_screen "muse 1.3 typed on cmux/orca" unknown "$CAPS_PLAIN" \
+    "$(printf '%s\n' "$typed" | fm_composer_strip_ansi)"
+
+  # NON-VACUOUSNESS: the titled rule is what carries the verdict. Replace it
+  # with ordinary transcript text and the identical glyph row must fall back to
+  # `unknown`, because the closing rule below it is then a composer boundary
+  # with nothing it can close.
+  out=$(fm_composer_classify_screen "$CAPS_STYLED_NOID" \
+    "transcript line"$'\n'"$glyph"$'\n'"$bottom"$'\n'"$statusrow")
+  [ "$out" = unknown ] \
+    || fail "without its titled opening rule the muse glyph row must stay unknown, got '$out'"
+
+  # A titled rule is an OPENING rule only: one drawn BELOW a bare composer is
+  # never the staleness evidence a solid rule is, so it cannot defer that
+  # composer.
+  assert_screen "a titled rule below a bare composer does not defer it" empty \
+    "$CAPS_STYLED_NOID" "$glyph"$'\n'"$rule"
+
+  # A dead shell parked in exactly this geometry must never read empty: the
+  # shell glyph is not a container proof and the separated shape has no agent
+  # identity to prove.
+  out=$(fm_composer_classify_screen "$CAPS_STYLED_NOID" \
+    "$rule"$'\n''$'$'\n'"$bottom"$'\n'"$statusrow")
+  [ "$out" != empty ] \
+    || fail "a dead shell inside muse 1.3's composer geometry must never read empty, got '$out'"
+  pass "matrix: muse 1.3's titled-rule composer reads empty, typed text stays pending, a dead shell never does"
+}
+
+test_matrix_muse_idle_hint_row_is_furniture() {
+  # Muse rotates hints from its own tip catalogue around an empty composer.
+  # Drawn at normal intensity, they survive ghost stripping, so a bare
+  # composer's wrap region used to swallow one and report an idle pane
+  # `pending` - which is what skipped three doorbells on a live muse mate on
+  # 2026-09-18, leaving durable steers unrung until the mate's own cycle read
+  # them.
+  local rule glyph bottom statusrow hint out
+  rule="${ESC}[2;38;2;103;108;116m── ${ESC}[0m${ESC}[38;2;138;144;152mVoice input (⌥ + v to start)${ESC}[0m${ESC}[2;38;2;103;108;116m ────────────────────────────────────────────────────────────────────${ESC}[0m"
+  glyph="${ESC}[38;2;251;191;36m❯ ${ESC}[0m"
+  bottom="${ESC}[2;38;2;103;108;116m────────────────────────────────────────────────────────────────────────────────────────────────────${ESC}[0m"
+  statusrow="${ESC}[38;2;103;108;116m  ${ESC}[0m${ESC}[38;2;90;160;255mmuse-spark-1.3-contributor${ESC}[0m${ESC}[38;2;138;144;152m · ${ESC}[0m${ESC}[38;2;90;160;255mmax${ESC}[0m${ESC}[38;2;138;144;152m · /…/muse-ws · ${ESC}[0m${ESC}[38;2;243;139;168mYOLO${ESC}[0m"
+  hint="${ESC}[38;2;138;144;152mType @ to search and insert workspace file paths${ESC}[0m"
+
+  # NON-VACUOUSNESS: the hint really does survive ghost stripping, so the
+  # verdict below cannot be coming from an emptied row.
+  out=$(printf '%s\n' "$hint" | fm_composer_strip_ghost)
+  fm_composer_normalize_trim_var out
+  [ "$out" = 'Type @ to search and insert workspace file paths' ] \
+    || fail "muse's hint must survive ghost stripping for this case to mean anything, got '$out'"
+
+  assert_screen "a hint row below a bare composer is furniture" empty \
+    "$CAPS_STYLED_NOID" "$glyph"$'\n'"$hint"
+  assert_screen "a hint row inside muse 1.3's composer is furniture" empty \
+    "$CAPS_STYLED_NOID" "$rule"$'\n'"$glyph"$'\n'"$hint"$'\n'"$bottom"$'\n'"$statusrow"
+
+  # The dangerous direction: a wrapped row that is NOT a hint is typed input
+  # and must still read pending.
+  assert_screen "a wrapped row that is not a hint stays pending" pending \
+    "$CAPS_STYLED_NOID" "$glyph"$'\n'"and then rename the module"
+  pass "matrix: a row that is nothing but an idle hint bounds the wrap region; real wrapped input still reads pending"
+}
+
 test_matrix_cursor_reverse_video_placeholder_remnant() {
   # Real idle cursor-agent (2026.08.11-e8db854), captured byte-for-byte from a
   # live pane: the `→ ` glyph and the placeholder tail are dim (SGR 2), but the
@@ -785,6 +891,8 @@ test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
+test_matrix_muse_13_titled_rule_composer
+test_matrix_muse_idle_hint_row_is_furniture
 test_matrix_cursor_reverse_video_placeholder_remnant
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
