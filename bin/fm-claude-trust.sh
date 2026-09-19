@@ -27,12 +27,14 @@
 # and must not try - pressing Enter would select exit. The agent wedges before
 # it ever reads the brief. Registering the trust before launch is the only
 # control that reaches an interactive pane. The same reasoning covers Claude
-# Code's separate "Allow external CLAUDE.md file imports?" dialog, which
-# `--setting-sources project,local` (firstmate PR 10's minimal worker tool
-# surface) stopped suppressing: it renders whenever a loaded CLAUDE.md chain
-# reaches outside the project tree - which every crewmate's does, through the
-# captain's own `~/.claude/CLAUDE.md` importing `~/.claude/RTK.md` - and it is
-# gated the same fail-closed way as trust: cursor on "No, disable", no arrow
+# Code's separate "Allow external CLAUDE.md file imports?" dialog, which the
+# spawn command has no flag to suppress: `--setting-sources` is not a
+# documented flag of the interactive `claude` CLI at all, only a same-named
+# Agent SDK constructor option, and it is not passed here. The dialog renders
+# whenever a loaded CLAUDE.md chain reaches outside the project tree - which
+# every crewmate's does, through the captain's own `~/.claude/CLAUDE.md`
+# importing `~/.claude/RTK.md` - and it is gated the same fail-closed way as
+# trust: cursor on "No, disable", no arrow
 # navigation from firstmate's steering plane. Only worktree mode reaches this
 # second dialog's flags: a secondmate home has no separate "project" entry to
 # carry consent forward from, so its registration stays trust-only.
