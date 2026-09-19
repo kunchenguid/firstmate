@@ -55,6 +55,13 @@ function isMidTurnAssistantMessage(message: AssistantMessage): boolean {
   return message.content.some((block) => block.type === "toolCall");
 }
 
+function isPresentationDerived(
+  message: AssistantMessage,
+  presentation: AssistantMessage | undefined,
+): boolean {
+  return presentation !== undefined && message.content === presentation.content;
+}
+
 export function installOmpCalmAssistantThinking(): void {
   const registry = globalThis as typeof globalThis & {
     [key: symbol]: CalmAssistantThinkingPatch | undefined;
@@ -135,8 +142,13 @@ export function installOmpCalmAssistantThinking(): void {
     options?: AssistantMessageUpdateOptions,
   ): void {
     patch.remember(this);
-    const isInvalidationReentry = patch.presentationMessages.get(this) === message;
-    if (!isInvalidationReentry) {
+    const presentation = patch.presentationMessages.get(this);
+    if (isPresentationDerived(message, presentation)) {
+      const originalMessage = patch.originalMessages.get(this);
+      if (originalMessage) {
+        patch.originalMessages.set(this, { ...message, content: originalMessage.content });
+      }
+    } else {
       patch.originalMessages.set(this, message);
       patch.originalOptions.set(this, options);
     }

@@ -410,6 +410,55 @@ JS
   pass "a second OMP Calm install in one process keeps one shared remembered component set"
 }
 
+test_retry_recovery_keeps_original_note() {
+  local fixture out status
+  fixture="$TMP_ROOT/retry-recovery"
+  install_omp_calm_fixture "$fixture"
+  out=$(cd "$fixture" && node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+import * as Agent from "@oh-my-pi/pi-coding-agent";
+
+const thinking = await import(pathToFileURL(`${process.cwd()}/.omp/extensions/lib/fm-calm-assistant-thinking.ts`).href);
+const vis = await import(pathToFileURL(`${process.cwd()}/.pi/extensions/lib/fm-calm-visibility-core.ts`).href);
+thinking.installOmpCalmAssistantThinking();
+vis.setCalmPresentation(true);
+const component = new Agent.AssistantMessageComponent();
+component.updateContent({
+  stopReason: "toolUse",
+  content: [
+    { type: "thinking", thinking: "secret plan" },
+    { type: "text", text: "short note" },
+    { type: "toolCall" },
+  ],
+}, { transient: true });
+if ((component.rendered || []).some((line) => line === "text:short note")) {
+  throw new Error("Calm-on must hide the working note before retry recovery");
+}
+// OMP 18.1.17 applyRetryRecovery spreads the stored presentation message into a
+// new object, so a message-identity check would treat it as a fresh original.
+component.updateContent({ ...component.lastMessage, retryRecovery: { reason: "transport" } });
+if ((component.rendered || []).some((line) => line === "text:short note")) {
+  throw new Error("Calm-on must keep the working note hidden during retry recovery");
+}
+vis.setCalmPresentation(false);
+thinking.applyOmpCalmThinkingToRememberedRows();
+if (!(component.rendered || []).some((line) => line === "text:short note")) {
+  throw new Error("Calm-off must restore the working note after retry recovery");
+}
+if (component.lastMessage?.retryRecovery?.reason !== "transport") {
+  throw new Error("Calm-off must preserve retry-recovery metadata");
+}
+if (component.lastOptions?.transient !== true) {
+  throw new Error("Calm-off must preserve the original transient update options");
+}
+JS
+)
+  status=$?
+  expect_code 0 "$status" "retry recovery contract: $out"
+  [ -z "$out" ] || fail "retry recovery contract printed output: $out"
+  pass "OMP retry recovery keeps the unfiltered original so Calm-off restores hidden working notes"
+}
+
 test_degraded_public_api_seam() {
   local fixture home out status
   fixture="$TMP_ROOT/degraded"
@@ -459,4 +508,5 @@ test_preference_read_write_contract
 test_calm_command_persists_and_reloads
 test_operational_row_hide_show_and_thinking_collapse
 test_double_install_keeps_shared_state
+test_retry_recovery_keeps_original_note
 test_degraded_public_api_seam
