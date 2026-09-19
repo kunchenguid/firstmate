@@ -289,15 +289,26 @@ status_paused_until() {  # <status-line> -> epoch on stdout
 # never infer emission time from file mtime, a wake, or observation time. Relays
 # preserve source tags and leave legacy source events unstamped. Time describes
 # event history only and must never decide current state or decision closure.
+# This parser owns that grammar; every reader below is a thin adapter over it,
+# so no second spelling of "well-formed" can drift against this one.
+# Internals carry a reserved prefix: bash locals are dynamically scoped, so a
+# plain name here would shadow the caller's out-var of the same name.
+_fm_status_at_epoch() {  # <status-line> <out-var> -> 0 and the epoch when known
+  local __fm_at_head __fm_at_value __fm_at_rest
+  printf -v "$2" '%s' ''
+  case "$1" in *:*) __fm_at_head=${1%%:*} ;; *) return 1 ;; esac
+  case "$__fm_at_head" in *\[at=*\]*) ;; *) return 1 ;; esac
+  __fm_at_rest=${__fm_at_head#*\[at=}
+  __fm_at_value=${__fm_at_rest%%\]*}
+  case "${__fm_at_rest#*\]}" in *\[at=*) return 1 ;; esac
+  case "$__fm_at_value" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
+  [ "${#__fm_at_value}" -le 12 ] || return 1
+  printf -v "$2" '%s' "$__fm_at_value"
+}
+
 status_line_at_epoch() {  # <status-line> -> epoch; nonzero when unknown
-  local head epoch rest
-  case "$1" in *:*) head=${1%%:*} ;; *) return 1 ;; esac
-  case "$head" in *\[at=*\]*) ;; *) return 1 ;; esac
-  rest=${head#*\[at=}
-  epoch=${rest%%\]*}
-  case "${rest#*\]}" in *\[at=*) return 1 ;; esac
-  case "$epoch" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac
-  [ "${#epoch}" -le 12 ] || return 1
+  local epoch
+  _fm_status_at_epoch "$1" epoch || return 1
   printf '%s' "$epoch"
 }
 
@@ -318,30 +329,28 @@ status_stamp_line() {  # <new-status-line> -> line (without newline)
   fi
 }
 
-# Strip only a well-formed optional numeric time tag before the first colon.
-# A malformed value is ordinary line bytes, never a time tag, so relevance,
-# retry dedup, key, and note all read the same line. Relevance and retry
-# matching share this normalization: one in-shell definition for every reader,
-# so the rule cannot drift against a second spelling of itself, and a sweep that
-# normalizes a line at a time never pays a fork for the match it prepares.
-_fm_status_untimed() {  # <status-line> [<out-var>] -> line without a time tag
-  local head rest keep='' prefix tail digits
-  case "$1" in
-    *:*) head=${1%%:*}; rest=:${1#*:} ;;
-    # No colon means no header, so the line carries no time tag to strip.
-    *) head=''; rest=$1 ;;
-  esac
-  while :; do
-    case "$head" in *" [at="*\]*) ;; *) break ;; esac
-    prefix=${head%%" [at="*}
-    tail=${head#*" [at="}
-    digits=${tail%%\]*}
-    case "$digits" in
-      ''|*[!0-9]*) keep=$keep$prefix' [at='; head=$tail ;;
-      *) keep=$keep$prefix; head=${tail#*\]} ;;
+# Strip the one well-formed time tag _fm_status_at_epoch accepts. Every other
+# [at=...] byte run - malformed, duplicate, or outside the canonical bounds - is
+# ordinary line bytes, never a time tag, so relevance, retry dedup, key, and note
+# all read the same line. Relevance and retry matching share this normalization:
+# it reads the grammar from that one parser rather than a second spelling of it,
+# and a sweep that normalizes a line at a time never pays a fork for the match it
+# prepares.
+_fm_status_untimed() {  # <status-line> <out-var> -> line without a time tag
+  local __fm_untimed_epoch __fm_untimed_head __fm_untimed_tag
+  if _fm_status_at_epoch "$1" __fm_untimed_epoch; then
+    __fm_untimed_head=${1%%:*}
+    __fm_untimed_tag=" [at=$__fm_untimed_epoch]"
+    case "$__fm_untimed_head" in
+      *"$__fm_untimed_tag"*)
+        printf -v "$2" '%s%s:%s' \
+          "${__fm_untimed_head%%"$__fm_untimed_tag"*}" \
+          "${__fm_untimed_head#*"$__fm_untimed_tag"}" "${1#*:}"
+        return 0
+        ;;
     esac
-  done
-  if [ "$#" -gt 1 ]; then printf -v "$2" '%s' "$keep$head$rest"; else printf '%s' "$keep$head$rest"; fi
+  fi
+  printf -v "$2" '%s' "$1"
 }
 
 # Retry deduplication ignores only a well-formed optional numeric time tag;

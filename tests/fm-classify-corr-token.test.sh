@@ -593,7 +593,9 @@ test_optional_event_time() {
   # A malformed time tag is ordinary event bytes, so it identifies the event:
   # the unstamped line is a DIFFERENT event, while re-appending the same bytes
   # is still a retry.
-  for line in 'done [at=17:00]: shipped' 'done [at=]: shipped' 'done [at=bad]: shipped'; do
+  for line in 'done [at=17:00]: shipped' 'done [at=]: shipped' 'done [at=bad]: shipped' \
+    'done [at=1] [at=2]: shipped' 'done [at=01700000000]: shipped' \
+    'done [at=99999999999999999999]: shipped'; do
     printf '%s\n' "$line" > "$dir/state/malformed.status"
     fm_parent_channel_append_once "$dir/state/malformed.status" 'done: shipped' \
       || fail "append after a malformed time failed"
@@ -627,8 +629,7 @@ test_captain_override_ignores_event_time() {
   local FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:'
   dir=$(make_case captain-override-time)
   for verb in 'done' needs-decision blocked failed; do
-    for line in "$verb: audit complete" "$verb [at=1700000000]: audit complete" \
-      "$verb [at=1] [at=2]: audit complete"; do
+    for line in "$verb: audit complete" "$verb [at=1700000000]: audit complete"; do
       status_is_captain_relevant "$line" || fail "override missed actionable event: $line"
       printf '%s\n' "$line" > "$dir/state/task.status"
       event=$(status_span_first_actionable "$dir/state/task.status" 0) \
@@ -673,7 +674,10 @@ test_malformed_event_time_is_ordinary_bytes() {
     for line in "$verb [at=]: audit complete" "$verb [at=bad]: audit complete" \
       "$verb [at=17:00]: audit complete" "$verb [at=bad] [at=17:00]: audit complete" \
       "$verb [at=\$(date +%s)]: audit complete" \
-      "$verb [at=<epoch>]: audit complete"; do
+      "$verb [at=<epoch>]: audit complete" \
+      "$verb [at=1] [at=2]: audit complete" \
+      "$verb [at=01700000000]: audit complete" \
+      "$verb [at=99999999999999999999]: audit complete"; do
       if status_line_at_epoch "$line" >/dev/null; then fail "invented time for $line"; fi
       [ "$(status_line_verb "$line")" = "$verb" ] || fail "malformed time changed verb: $line"
       status_is_captain_relevant "$line" \
