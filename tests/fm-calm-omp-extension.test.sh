@@ -904,46 +904,71 @@ const vis = await import(pathToFileURL(`${process.cwd()}/.pi/extensions/lib/fm-c
 tool.installOmpCalmOperationalToolLayout();
 
 const lines = (component) => component.render(200) || [];
-const result = (toolName, text) => ({ toolName, content: [{ type: "text", text }] });
+const finalResult = (text) => ({ content: [{ type: "text", text }], details: {}, isError: false });
 
-// The watcher-arming row is a custom tool; its name only reaches the component
-// through the toolResult message, and its output never names a script.
-const armer = new Agent.ToolExecutionComponent("tool", {});
-armer.updateResult(result("fm_watch_arm_omp", "watcher: started omp extension arm child"), false, "armer");
+// OMP announces tool calls on the unfiltered assistant message. Live rows get
+// name+args from the constructor and updateResult carries only
+// { content, details, isError } with the toolCallId as the third argument.
+const announcement = {
+  role: "assistant",
+  content: [
+    { type: "toolCall", id: "call-armer", name: "fm_watch_arm_omp", arguments: {} },
+    { type: "toolCall", id: "call-drain", name: "bash", arguments: { command: "bin/fm-wake-drain.sh" } },
+    { type: "toolCall", id: "call-watch", name: "bash", arguments: { command: "bin/fm-watch.sh" } },
+    { type: "toolCall", id: "call-watch-arm", name: "bash", arguments: { command: "bin/fm-watch-arm.sh" } },
+    { type: "toolCall", id: "call-op", name: "bash", arguments: { command: "printf '\u2063FIRSTMATE_OP: watcher: x' | bin/fm-operational-input.sh encode watcher" } },
+    { type: "toolCall", id: "call-build", name: "bash", arguments: { command: "npm run build" } },
+    { type: "toolCall", id: "call-read", name: "read", arguments: { command: "cat README.md" } },
+    { type: "toolCall", id: "call-grep", name: "bash", arguments: { command: 'grep -rn "fm-watch.sh" docs/' } },
+    { type: "toolCall", id: "call-cat", name: "bash", arguments: { command: "cat bin/fm-wake-drain.sh" } },
+  ],
+};
+tool.rememberOmpCalmToolCalls(announcement);
+// Restored transcripts also flow through InteractiveMode.addMessageToChat.
+const mode = new Agent.InteractiveMode();
+mode.addMessageToChat({ ...announcement, content: [announcement.content[1]] });
 
-// Drain/watch ceremony is bash; the command arguments are the invocation.
+// Watcher arming: no updateArgs and the live result object has no toolName.
+const armer = new Agent.ToolExecutionComponent("fm_watch_arm_omp", {});
+armer.updateResult(finalResult("watcher: started omp extension arm child"), false, "call-armer");
+
+// Rebuilt drain: constructor args only, updateResult has no toolName.
+const rebuiltDrain = new Agent.ToolExecutionComponent("bash", { command: "bin/fm-wake-drain.sh" });
+rebuiltDrain.updateResult(finalResult("drain output mentions bin/fm-wake-drain.sh"), false, "call-drain");
+
+// Live drain/watch rows: arguments arrive through updateArgs.
+const liveWatch = new Agent.ToolExecutionComponent("bash", {});
+liveWatch.updateArgs({ command: "bin/fm-watch.sh" }, "call-watch");
+liveWatch.updateResult(finalResult("watch output mentions bin/fm-watch.sh"), false, "call-watch");
+const liveWatchArm = new Agent.ToolExecutionComponent("bash", {});
+liveWatchArm.updateArgs({ command: "bin/fm-watch-arm.sh" }, "call-watch-arm");
+liveWatchArm.updateResult(finalResult("arm output mentions bin/fm-watch-arm.sh"), false, "call-watch-arm");
+const liveOp = new Agent.ToolExecutionComponent("bash", {});
+liveOp.updateArgs({ command: "printf '\u2063FIRSTMATE_OP: watcher: x' | bin/fm-operational-input.sh encode watcher" }, "call-op");
+liveOp.updateResult(finalResult("encoded FIRSTMATE_OP"), false, "call-op");
+
 const operational = [
-  ["drain", new Agent.ToolExecutionComponent("tool", {}), "bin/fm-wake-drain.sh"],
-  ["watch", new Agent.ToolExecutionComponent("tool", {}), "bin/fm-watch.sh"],
-  ["watch-arm", new Agent.ToolExecutionComponent("tool", {}), "bin/fm-watch-arm.sh"],
-  ["FIRSTMATE_OP", new Agent.ToolExecutionComponent("tool", {}), "printf '\u2063FIRSTMATE_OP: watcher: x' | bin/fm-operational-input.sh encode watcher"],
+  ["watcher-arming", armer],
+  ["rebuilt-drain", rebuiltDrain],
+  ["watch", liveWatch],
+  ["watch-arm", liveWatchArm],
+  ["FIRSTMATE_OP", liveOp],
 ];
-for (const [name, component, command] of operational) {
-  component.updateArgs({ command }, name);
-  component.updateResult(result("bash", "ceremony output that mentions bin/fm-wake-drain.sh and bin/fm-watch.sh"), false, name);
-}
 
 // Ordinary rows whose OUTPUT mentions the ceremony scripts must stay visible.
-const build = new Agent.ToolExecutionComponent("tool", {});
-build.updateArgs({ command: "npm run build" }, "build");
-build.updateResult(result("bash", "log mentions bin/fm-watch.sh and bin/fm-wake-drain.sh"), false, "build");
-const read = new Agent.ToolExecutionComponent("tool", {});
-read.updateArgs({ command: "cat README.md" }, "read");
-read.updateResult(result("read", "docs mention bin/fm-watch.sh"), false, "read");
-const grep = new Agent.ToolExecutionComponent("tool", {});
-grep.updateArgs({ command: 'grep -rn "fm-watch.sh" docs/' }, "grep");
-grep.updateResult(result("bash", "docs/calm.md: mentions fm-watch.sh"), false, "grep");
-const cat = new Agent.ToolExecutionComponent("tool", {});
-cat.updateArgs({ command: "cat bin/fm-wake-drain.sh" }, "cat");
-cat.updateResult(result("bash", "script body mentions fm-wake-drain.sh"), false, "cat");
+const build = new Agent.ToolExecutionComponent("bash", { command: "npm run build" });
+build.updateResult(finalResult("log mentions bin/fm-watch.sh and bin/fm-wake-drain.sh"), false, "call-build");
+const read = new Agent.ToolExecutionComponent("read", { command: "cat README.md" });
+read.updateResult(finalResult("docs mention bin/fm-watch.sh"), false, "call-read");
+const grep = new Agent.ToolExecutionComponent("bash", { command: 'grep -rn "fm-watch.sh" docs/' });
+grep.updateResult(finalResult("docs/calm.md: mentions fm-watch.sh"), false, "call-grep");
+const cat = new Agent.ToolExecutionComponent("bash", { command: "cat bin/fm-wake-drain.sh" });
+cat.updateResult(finalResult("script body mentions fm-wake-drain.sh"), false, "call-cat");
 
 vis.setCalmPresentation(true);
-if (lines(armer).length !== 0) {
-  throw new Error(`Calm-on must hide the fm_watch_arm_omp row, got ${JSON.stringify(lines(armer))}`);
-}
 for (const [name, component] of operational) {
   if (lines(component).length !== 0) {
-    throw new Error(`Calm-on must hide the operational ${name} tool row, got ${JSON.stringify(lines(component))}`);
+    throw new Error(`Calm-on must hide the ${name} tool row, got ${JSON.stringify(lines(component))}`);
   }
 }
 if (lines(build).length === 0) {
@@ -960,10 +985,9 @@ if (lines(cat).length === 0) {
 }
 
 vis.setCalmPresentation(false);
-if (lines(armer).length === 0) throw new Error("Calm-off must restore the fm_watch_arm_omp row");
 for (const [name, component] of operational) {
   if (lines(component).length === 0) {
-    throw new Error(`Calm-off must restore the operational ${name} tool row`);
+    throw new Error(`Calm-off must restore the ${name} tool row`);
   }
 }
 if (lines(build).length === 0) throw new Error("Calm-off must keep the ordinary build tool row visible");

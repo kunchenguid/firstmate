@@ -29,7 +29,10 @@ import {
   resetOmpCalmThinkingRememberedRows,
 } from "./lib/fm-calm-assistant-thinking.ts";
 import { installOmpCalmOperationalUserLayout } from "./lib/fm-calm-operational-user.ts";
-import { installOmpCalmOperationalToolLayout } from "./lib/fm-calm-operational-tool.ts";
+import {
+  installOmpCalmOperationalToolLayout,
+  rememberOmpCalmToolCalls,
+} from "./lib/fm-calm-operational-tool.ts";
 
 type ExtensionAPI = {
   on?: (event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => void;
@@ -142,7 +145,8 @@ export default function (pi: ExtensionAPI) {
   // before-tools message. OMP's own assistant message events carry the
   // unfiltered message; remember its tool-call state there, and in
   // InteractiveMode.addMessageToChat for restored transcripts, so Calm can still
-  // collapse a short mid-turn working note.
+  // collapse a short mid-turn working note and recover an operational tool
+  // row's constructor-supplied invocation by toolCallId.
   for (const event of ["message_start", "message_update", "message_end"]) {
     pi.on?.(event, (payload) => {
       const message = (payload as { message?: unknown } | undefined)?.message;
@@ -150,6 +154,7 @@ export default function (pi: ExtensionAPI) {
         rememberOmpCalmAssistantMessage(
           message as Parameters<typeof rememberOmpCalmAssistantMessage>[0],
         );
+        rememberOmpCalmToolCalls(message);
       }
     });
   }
