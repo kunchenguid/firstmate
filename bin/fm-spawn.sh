@@ -203,12 +203,20 @@
 #   not marked.
 #   Only after this isolation check, every fresh ship or scout requires a clean
 #   task worktree. When an origin configuration is detected, spawn fetches it,
-#   resolves the current remote default branch, and resets to its tip. When none
-#   is detected, spawn skips that remote freshness check and launches from the
-#   clean worktree's current HEAD. Relaunch reuses the recorded worktree without
-#   fetching or resetting its base. An unreachable detected origin, unresolved
-#   default branch, or non-clean worktree refuses a fresh spawn rather than
-#   risking a PR based on stale history or discarding local work.
+#   resolves the project's WORKING BRANCH, and resets the slot to that branch's
+#   tip; a pool slot never keeps whichever branch it happened to arrive on. That
+#   branch comes from the captain's registered `branch=` token in
+#   data/projects.md when the project has one, and otherwise from origin's own
+#   default branch; there is no third, guessed source. When no origin
+#   configuration is detected, spawn skips that remote freshness check and
+#   launches from the clean worktree's current HEAD. Relaunch reuses the recorded
+#   worktree without fetching or resetting its base. An unreachable detected
+#   origin, an unresolvable working branch, a working branch origin does not
+#   carry, or a non-clean worktree refuses a fresh spawn rather than risking a PR
+#   based on stale history or another branch's commits, or discarding local work.
+#   Every fresh ship or scout records the commit it started from as base_sha= in
+#   state/<id>.meta, with base_branch= naming the branch it resolved, so a wrong
+#   base is provable from the task record rather than only from a PR's file list.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -2617,12 +2625,15 @@ delivery_rigor_rank() { # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task 
   esac
 }
 
+# The registry key for this project: both registry reads below - a ship's standing
+# posture and any kind's registered working branch - look the project up by name.
+PROJ_NAME=$(basename "$PROJ_ABS")
+
 # Brief/spawn delivery agreement, checked before any endpoint exists.
 # fm-brief.sh records a ship brief's mode as a fixed "Delivery contract: mode=<mode>"
 # line. A spawn that disagrees would launch a worker whose instructions and whose
 # recorded task delivery differ, which is the exact drift this contract prevents.
 if [ "$KIND" = ship ]; then
-  PROJ_NAME=$(basename "$PROJ_ABS")
   BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   if [ -z "$BRIEF_MODE" ]; then
     echo "warning: $BRIEF records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2
@@ -2805,8 +2816,49 @@ spawn_worktree_has_origin_config() { # <worktree>
   return 1
 }
 
+# The branch a fresh ship or scout slot must start from, and the commit it
+# actually landed on. Published into state/<id>.meta below so a wrong base is
+# provable from the task record afterwards, instead of only from a PR's own file
+# list once foreign commits have already ridden along.
+SPAWN_BASE_BRANCH=
+SPAWN_BASE_SHA=
+
+# A pool hands back whatever branch its slot happens to hold, so the base is
+# decided here, never inherited. Two sources answer "which branch does this
+# project work on", in this order:
+#
+#   1. the captain's registered working branch (the data/projects.md `branch=`
+#      token, parsed by bin/fm-project-mode.sh, which owns that format). This is
+#      the only source that can be right for a project whose working branch is
+#      not the remote's own default branch.
+#   2. origin's current default branch, for the projects that never needed a
+#      registered one.
+#
+# There is deliberately no third source. The shared default_branch() helper
+# guesses local main/master when origin/HEAD cannot be read, which is exactly how
+# a lane lands on origin/main while believing it is on the project's branch, so
+# this path refuses instead of guessing.
+resolve_spawn_base_branch() { # <worktree>
+  local worktree=$1 registered ref
+  # Refresh origin/HEAD first and unconditionally, exactly as this path always
+  # has: the slot's later tooling reads that ref for its own default-branch
+  # answers, so a registered branch must not quietly leave it stale. Its failure
+  # only decides the second source below, never the first.
+  git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1 || true
+  registered=$("$FM_ROOT/bin/fm-project-mode.sh" --branch "$PROJ_NAME" 2>/dev/null) || registered=
+  if [ -n "$registered" ]; then
+    printf '%s\n' "$registered"
+    return 0
+  fi
+  ref=$(git -C "$worktree" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || ref=
+  [ -n "$ref" ] || return 1
+  printf '%s\n' "${ref#origin/}"
+}
+
 freshen_spawn_worktree_base() { # <worktree>
-  local worktree=$1 default target expected actual status
+  local worktree=$1 branch target expected actual status
+  SPAWN_BASE_BRANCH=
+  SPAWN_BASE_SHA=
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -2820,23 +2872,23 @@ freshen_spawn_worktree_base() { # <worktree>
     return 1
   fi
   if ! spawn_worktree_has_origin_config "$worktree"; then
+    # No origin to resolve a working branch against, so there is nothing to
+    # place the slot on and nothing to compare it with. The commit it launches
+    # from is still recorded, which is what makes a wrong base provable.
+    SPAWN_BASE_SHA=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
     return 0
   fi
   if ! git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
-  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
-    echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  fi
-  default=$(default_branch "$worktree") || {
-    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+  branch=$(resolve_spawn_base_branch "$worktree") || {
+    echo "error: could not resolve the working branch for project '$PROJ_NAME': neither a data/projects.md branch= token nor origin's own default branch answered for pooled worktree '$worktree'; refusing to launch on whichever branch the pool happened to hand back" >&2
     return 1
   }
-  target="origin/$default"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
-    echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+  target="origin/$branch"
+  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$branch:refs/remotes/origin/$branch"; then
+    echo "error: could not fetch '$target' for pooled worktree '$worktree'; the working branch resolved for project '$PROJ_NAME' is '$branch'; refusing to launch from another branch" >&2
     return 1
   fi
   expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
@@ -2852,6 +2904,8 @@ freshen_spawn_worktree_base() { # <worktree>
     echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
     return 1
   fi
+  SPAWN_BASE_BRANCH=$branch
+  SPAWN_BASE_SHA=$expected
 }
 
 herdr_projection_meta_field_exact() { # <meta> <key>
@@ -4212,6 +4266,11 @@ preserve_relaunch_meta() {
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
   echo "tasktmp=$TASK_TMP"
+  # Resolved only on a fresh ship or scout spawn; a relaunch reuses the recorded
+  # worktree without re-resolving, so preserve_relaunch_meta carries the original
+  # base forward rather than restating a base this run never resolved.
+  [ -z "$SPAWN_BASE_BRANCH" ] || echo "base_branch=$SPAWN_BASE_BRANCH"
+  [ -z "$SPAWN_BASE_SHA" ] || echo "base_sha=$SPAWN_BASE_SHA"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"

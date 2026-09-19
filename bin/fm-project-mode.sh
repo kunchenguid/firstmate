@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Resolve a project's REGISTERED delivery posture from the data/projects.md registry.
-# Prints two words to stdout: "<mode> <yolo>" where mode is one of
-# no-mistakes|direct-PR|local-only and yolo is on|off.
+# Parse a project's REGISTERED annotation from the data/projects.md registry.
+# This script is the one owner of that line's format.
+# Default read: the delivery posture, printed as two words "<mode> <yolo>" where
+# mode is one of no-mistakes|direct-PR|local-only and yolo is on|off.
+# --branch read: the project's registered WORKING BRANCH, printed alone.
 #
 # MECHANICAL CONSUMERS ONLY. This answers "what posture did the captain register
 # for this project", never "how does this task ship". A task's delivery mode and
@@ -15,6 +17,13 @@
 #   - <name> - <desc> (added <date>)                  -> no-mistakes off  (legacy default)
 #   - <name> [<mode>] - <desc> (added <date>)          -> <mode> off
 #   - <name> [<mode> +yolo] - <desc> (added <date>)    -> <mode> on
+#
+# The bracket annotation also carries an optional working-branch token:
+#   - <name> [<mode> branch=<branch>] - <desc> (added <date>)
+# It records which branch the captain actually works this project on, for the
+# projects whose working branch is not the remote's own default branch. The
+# tokens are order-independent, so [no-mistakes branch=develop +yolo] is the same
+# annotation as [no-mistakes +yolo branch=develop].
 #
 # Registered modes:
 #   no-mistakes            full pipeline -> PR -> configured merge authority (default)
@@ -34,7 +43,13 @@
 #
 # An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns
 # to stderr, so a typo never silently drops the gate.
-# Usage: fm-project-mode.sh [--raw] <project-name>
+#
+# --branch has no such fallback, deliberately: it prints the registered working
+# branch and exits 0, or prints nothing and exits 1 when the registry has no
+# usable branch for that project. A guessed branch is exactly the failure this
+# token exists to remove, so the caller decides what an absent one means rather
+# than receiving an invented answer. --branch and --raw are mutually exclusive.
+# Usage: fm-project-mode.sh [--raw | --branch] <project-name>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,42 +58,75 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REG="$DATA/projects.md"
 RAW=0
-if [ "${1:-}" = "--raw" ]; then
-  RAW=1
-  shift
-fi
-NAME=${1:?usage: fm-project-mode.sh [--raw] <project-name>}
+BRANCH_ONLY=0
+case "${1:-}" in
+  --raw) RAW=1; shift ;;
+  --branch) BRANCH_ONLY=1; shift ;;
+esac
+case "${1:-}" in
+  --*)
+    echo "error: fm-project-mode.sh takes at most one of --raw or --branch; got an extra \"$1\"" >&2
+    exit 2
+    ;;
+esac
+NAME=${1:?usage: fm-project-mode.sh [--raw | --branch] <project-name>}
 
 if [ ! -f "$REG" ]; then
+  if [ "$BRANCH_ONLY" -eq 1 ]; then
+    exit 1
+  fi
   echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
   echo "no-mistakes off"
   exit 0
 fi
 
-# awk emits "<mode> <yolo>" (one line) or nothing if the project is absent.
+# awk emits "<mode> <yolo> <branch>" (one line) or nothing if the project is
+# absent. An unregistered working branch is emitted as "-", which is not a legal
+# git branch name, so it can never be mistaken for a registered one.
 parsed=$(awk -v n="$NAME" '
   $1=="-" && $2==n {
-    mode="no-mistakes"; yolo="off";
+    mode="no-mistakes"; yolo="off"; branch="-";
     if ($3 ~ /^\[/) {
       s="";
       for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) break }
       gsub(/^\[|\]$/, "", s);           # strip the surrounding brackets
       k = split(s, a, " ");
-      if (a[1] != "" && a[1] != "+yolo") mode = a[1];
-      for (j=1; j<=k; j++) if (a[j]=="+yolo") yolo="on";
+      if (a[1] != "" && a[1] != "+yolo" && a[1] !~ /^branch=/) mode = a[1];
+      for (j=1; j<=k; j++) {
+        if (a[j]=="+yolo") yolo="on";
+        else if (a[j] ~ /^branch=/) { branch = substr(a[j], 8); if (branch == "") branch = "-" }
+      }
     }
-    print mode, yolo; exit
+    print mode, yolo, branch; exit
   }
 ' "$REG")
 
 if [ -z "$parsed" ]; then
+  if [ "$BRANCH_ONLY" -eq 1 ]; then
+    exit 1
+  fi
   echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
   echo "no-mistakes off"
   exit 0
 fi
 
-mode=${parsed%% *}
-yolo=${parsed##* }
+read -r mode yolo branch <<EOF
+$parsed
+EOF
+
+if [ "$BRANCH_ONLY" -eq 1 ]; then
+  # A registered branch is reported only when git's own syntax check accepts it,
+  # so a typo becomes an absent branch the caller must handle rather than a ref
+  # expression that could resolve somewhere unintended. The full refs/heads/ form
+  # keeps the check purely syntactic and usable outside any repository, unlike
+  # --branch, which also expands shorthand such as @{-1}.
+  if [ "$branch" = "-" ] || ! git check-ref-format "refs/heads/$branch" >/dev/null 2>&1; then
+    [ "$branch" = "-" ] || echo "warn: project \"$NAME\" registers branch=\"$branch\", which is not a valid branch name; ignoring it" >&2
+    exit 1
+  fi
+  echo "$branch"
+  exit 0
+fi
 case "$mode" in
   no-mistakes|direct-PR|local-only|no-mistakes-prod-only) ;;
   *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off ;;

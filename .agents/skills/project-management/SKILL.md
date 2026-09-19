@@ -30,6 +30,7 @@ Absence from the main `data/projects.md` registry is never evidence that no seco
 If the owning second mate cannot accept the route, report that concrete blocker or obtain an explicit captain redirection rather than silently duplicating the project in the main home.
 
 Resolve the project name, destination, delivery posture, and autonomy posture before changing local or remote state.
+Resolve the project's working branch in the same pass, and register it whenever that branch is not the remote's own default branch: a fresh ship or scout spawn places its pooled worktree on the registered branch and otherwise falls back to the remote default, so an unregistered deviation is what hands a worker somebody else's branch.
 Keep a newly added clone and its registry entry consistent, and roll back only artifacts created by the incomplete operation when a later initialization step fails and that rollback is safe.
 Do not overwrite or repurpose an existing path.
 

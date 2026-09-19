@@ -7,7 +7,8 @@
 # validate them against a closed set, and the spawn additionally refuses to launch
 # when the brief it is about to hand the worker records a different mode. Scout
 # spawns carry no delivery posture at all. The registry keeps only the captain's
-# standing posture, for the mechanical consumers and for one advisory notice.
+# standing posture, for the mechanical consumers and for one advisory notice,
+# plus the optional working branch a pooled worktree must be placed on.
 #
 # Every spawn case here stops before any endpoint exists: the delivery checks run
 # ahead of backend creation, and a fake `tmux` that exits non-zero backstops the
@@ -429,6 +430,53 @@ EOF
   err=$(FM_HOME="$home" "$PROJECT_MODE" typoproj 2>&1 >/dev/null)
   assert_contains "$err" "unknown mode" "a typo'd registry mode stopped warning"
   pass "fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw"
+}
+
+# The registered working branch is what tells a pooled worktree which branch the
+# project is actually worked on, so --branch never invents one: an absent, empty,
+# or malformed token leaves the caller to decide, and the posture read is
+# unaffected by the token's position in the annotation.
+test_project_mode_reads_the_registered_working_branch() {
+  local home out err status
+  home="$TMP_ROOT/project-branch/home"
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- devproj [no-mistakes branch=develop] - fixture (added 2026-09-18)
+- firstproj [no-mistakes branch=release/2026 +yolo] - fixture (added 2026-09-18)
+- plainproj [direct-PR] - fixture (added 2026-09-18)
+- legacyproj - fixture (added 2026-09-18)
+- emptyproj [no-mistakes branch=] - fixture (added 2026-09-18)
+- badproj [no-mistakes branch=bad..name] - fixture (added 2026-09-18)
+EOF
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch devproj 2>/dev/null)
+  [ "$out" = develop ] || fail "--branch did not read the registered working branch (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch firstproj 2>/dev/null)
+  [ "$out" = release/2026 ] \
+    || fail "--branch did not read a branch token written before +yolo (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" firstproj 2>/dev/null)
+  [ "$out" = "no-mistakes on" ] \
+    || fail "a branch token changed the posture read of the same line (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" devproj 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] \
+    || fail "a branch token was mistaken for a delivery mode (got '$out')"
+
+  for project in plainproj legacyproj emptyproj unregisteredproj; do
+    out=$(FM_HOME="$home" "$PROJECT_MODE" --branch "$project" 2>/dev/null)
+    status=$?
+    [ "$status" -ne 0 ] || fail "--branch answered for $project, which registers no working branch"
+    [ -z "$out" ] || fail "--branch printed '$out' for $project, which registers no working branch"
+  done
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch badproj 2>/dev/null)
+  status=$?
+  [ "$status" -ne 0 ] || fail "--branch accepted a branch name git itself rejects"
+  [ -z "$out" ] || fail "--branch printed a branch name git itself rejects (got '$out')"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" --branch badproj 2>&1 >/dev/null)
+  assert_contains "$err" "not a valid branch name" \
+    "a malformed branch token was ignored without saying so"
+  pass "fm-project-mode: --branch reads a registered working branch and never invents one"
 }
 
 # Spawn and promotion refuse leftover Task-subsection placeholders through the
@@ -891,5 +939,6 @@ test_promote_requires_and_records_the_delivery_contract
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
 test_project_mode_maps_the_conditional_policy
+test_project_mode_reads_the_registered_working_branch
 test_spawn_and_promote_require_filled_task_subsections
 echo "# all fm-task-delivery tests passed"

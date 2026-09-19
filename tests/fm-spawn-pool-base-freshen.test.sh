@@ -3,9 +3,11 @@
 #
 # A treehouse pool can return a clean detached worktree whose origin/main was
 # advanced after the worktree was allocated.
+# A pool can also hand back a slot sitting on some other branch entirely.
 # These tests drive the real spawn path with a fake terminal, then prove it
-# starts the worker from the fetched origin tip, launches a clean origin-less
-# pool as-is, or stops when a configured origin is unusable.
+# starts the worker from the tip of the project's resolved working branch,
+# records the commit it started from, launches a clean origin-less pool as-is,
+# or stops when a configured origin or that working branch is unusable.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -197,6 +199,120 @@ test_stale_pool_base_refreshes_before_branching() {
   assert_grep 'must survive a newly spawned branch' "$POOL_DIR/advanced-main.txt" \
     "the branch created after spawn omitted advanced-main content"
   pass "a stale pooled worktree refreshes to current origin/main before a crew branch is created"
+}
+
+# The captain registers a project's working branch in data/projects.md when it is
+# not the remote's own default branch. These three tests pin what a slot arriving
+# on some other branch costs: the PR carries that branch's commits as if they were
+# the task's own, and only the forge's own file list shows it.
+register_project_branch() { # <branch>
+  printf -- '- %s [no-mistakes branch=%s] - registered working branch (added 2026-09-18)\n' \
+    "$(basename "$PROJECT_DIR")" "$1" > "$HOME_DIR/data/projects.md"
+}
+
+# Publish <branch> on origin with a commit of its own, so its tip is provably not
+# the default branch's tip.
+publish_origin_branch() { # <branch>
+  local branch=$1 publisher="$CASE_DIR/publisher"
+  git -C "$publisher" checkout --quiet -b "$branch"
+  printf 'only on %s\n' "$branch" > "$publisher/$branch-marker.txt"
+  git -C "$publisher" add "$branch-marker.txt"
+  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm "advance $branch"
+  git -C "$publisher" push --quiet origin "$branch"
+  git -C "$publisher" checkout --quiet "$DEFAULT_BRANCH"
+}
+
+test_registered_working_branch_decides_the_pool_base() {
+  local rec id out status develop_tip main_tip head
+  id='pool-registered-branch-r1'
+  rec=$(make_case registered-branch "$id")
+  read_case_record "$rec"
+  publish_origin_branch develop
+  register_project_branch develop
+  # Hand the slot back holding somebody else's branch, exactly as the pool did.
+  git -C "$POOL_DIR" fetch --quiet origin
+  git -C "$POOL_DIR" reset --hard --quiet "origin/$DEFAULT_BRANCH"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should place the slot on the registered working branch"$'\n'"$out"
+  develop_tip=$(git -C "$POOL_DIR" rev-parse origin/develop)
+  main_tip=$(git -C "$POOL_DIR" rev-parse "origin/$DEFAULT_BRANCH")
+  head=$(git -C "$POOL_DIR" rev-parse HEAD)
+  [ "$develop_tip" != "$main_tip" ] \
+    || fail "fixture did not prove the registered branch differs from the default branch"
+  [ "$head" = "$develop_tip" ] \
+    || fail "spawn launched from $head, not the registered working branch tip $develop_tip"
+  assert_present "$POOL_DIR/develop-marker.txt" \
+    "the launched slot does not hold the registered working branch's content"
+  assert_grep "base_branch=develop" "$HOME_DIR/state/$id.meta" \
+    "spawn did not record the working branch it resolved"
+  assert_grep "base_sha=$develop_tip" "$HOME_DIR/state/$id.meta" \
+    "spawn did not record the commit it actually started from"
+  # The slot's own later tooling reads origin/HEAD for its default-branch
+  # answers, so a registered working branch must not leave that ref unrefreshed.
+  [ -n "$(git -C "$POOL_DIR" symbolic-ref --quiet --short refs/remotes/origin/HEAD)" ] \
+    || fail "a registered working branch left the slot's origin/HEAD unresolved"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# registered working branch: develop=%s default=%s HEAD=%s\n' \
+      "$develop_tip" "$main_tip" "$head"
+    printf 'recorded base:\n%s\n' "$(grep '^base_' "$HOME_DIR/state/$id.meta")"
+  fi
+  pass "a registered working branch decides the pooled slot's base over the remote default"
+}
+
+test_registered_working_branch_missing_on_origin_refuses() {
+  local rec id out status before
+  id='pool-registered-branch-missing-r1'
+  rec=$(make_case registered-branch-missing "$id")
+  read_case_record "$rec"
+  register_project_branch develop
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "spawn launched although origin carries no branch named develop"
+  assert_contains "$out" "could not fetch 'origin/develop'" \
+    "the refusal did not name the working branch it could not reach"
+  assert_contains "$out" "refusing to launch from another branch" \
+    "the refusal did not say it declined to fall back to another branch"
+  assert_not_contains "$out" "spawned $id" "a refused spawn reported success"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved the slot while refusing an unreachable working branch"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  pass "a registered working branch origin does not carry refuses instead of falling back"
+}
+
+test_recorded_base_sha_proves_every_launch_base() {
+  local rec id out status tip head
+  id='pool-recorded-base-r1'
+  rec=$(make_case recorded-base "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "an unregistered project should still record its base"$'\n'"$out"
+  tip=$(git -C "$POOL_DIR" rev-parse "origin/$DEFAULT_BRANCH")
+  assert_grep "base_branch=$DEFAULT_BRANCH" "$HOME_DIR/state/$id.meta" \
+    "an unregistered project did not record the default branch it resolved"
+  assert_grep "base_sha=$tip" "$HOME_DIR/state/$id.meta" \
+    "an unregistered project did not record the commit it started from"
+
+  id='pool-recorded-base-originless-r1'
+  rec=$(make_originless_case recorded-base-originless "$id")
+  read_case_record "$rec"
+  head=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "an origin-less pool should still record its base"$'\n'"$out"
+  assert_grep "base_sha=$head" "$HOME_DIR/state/$id.meta" \
+    "an origin-less pool did not record the commit it started from"
+  assert_no_grep 'base_branch=' "$HOME_DIR/state/$id.meta" \
+    "an origin-less pool named a working branch it never resolved"
+  pass "every launched slot records the commit it started from"
 }
 
 test_non_main_default_branch_refreshes_before_branching() {
@@ -443,8 +559,10 @@ test_unresolved_remote_default_refuses_pool() {
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded despite an unresolved remote default branch"
-  assert_contains "$out" "could not resolve origin's current default branch" \
+  assert_contains "$out" "could not resolve the working branch" \
     "spawn did not clearly refuse an unresolved remote default branch"
+  assert_contains "$out" "refusing to launch on whichever branch the pool happened to hand back" \
+    "the refusal did not say what it declined to do"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
     || fail "spawn moved HEAD after failing to resolve the remote default branch"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
@@ -748,6 +866,9 @@ test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
+test_registered_working_branch_decides_the_pool_base
+test_registered_working_branch_missing_on_origin_refuses
+test_recorded_base_sha_proves_every_launch_base
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
