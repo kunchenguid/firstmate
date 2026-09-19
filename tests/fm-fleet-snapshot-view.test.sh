@@ -1094,6 +1094,150 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+# --- contribution input past the argv limits --------------------------------
+#
+# --contribution-input once handed the whole backlog to jq as a single argv
+# element. Linux refuses to exec an argument over 128 KiB (MAX_ARG_STRLEN)
+# however much of the ~2 MiB total ARG_MAX is still free, so a home whose
+# backlog grew past that could no longer produce contribution input at all -
+# and because the call carried no guard ahead of an unconditional success, the
+# branch printed nothing and reported success, which every reader took as "no
+# contribution work" rather than as a broken read. Both halves are pinned here:
+# an oversized backlog still produces correct input, and a genuinely failed
+# read exits non-zero with a diagnostic instead of succeeding empty.
+
+# The largest value this platform will carry in one argv element. Linux
+# enforces the 128 KiB per-argument cap below its total; macOS enforces only
+# the total. Beating the larger of the two beats whichever one is live here.
+argv_value_cap() {
+  local total
+  total=$(getconf ARG_MAX 2>/dev/null) || total=
+  case $total in ''|*[!0-9]*) total=131072 ;; esac
+  [ "$total" -ge 131072 ] || total=131072
+  printf '%s\n' "$total"
+}
+
+write_bulk_backlog() {  # <path> <rows>
+  {
+    printf '## In flight\n'
+    awk -v n="$2" 'BEGIN {
+      for (i = 0; i < n; i++)
+        printf "- [ ] bulk-%05d - Bulk task %05d https://github.com/kunchenguid/firstmate/pull/%d (repo: alpha) (kind: ship) (priority: 2) (since 2026-07-07)\n  Note body for bulk task %05d.\n", i, i, i + 1, i
+    }'
+  } > "$1"
+}
+
+# A jq that refuses the one call assembling the contribution input from its
+# staged files, and delegates every other call to the real jq. The staged-file
+# form is the fix's own transport, so a rewrite that goes back to argv leaves
+# the marker unwritten and the test says exactly that instead of passing
+# without ever inducing the failure it claims to prove.
+write_failing_assembly_jq() {  # <fakebin> <marker>
+  local real
+  real=$(command -v jq) || return 1
+  cat > "$1/jq" <<SH
+#!/usr/bin/env bash
+set -u
+for arg in "\$@"; do
+  if [ "\$arg" = --slurpfile ]; then
+    printf 'fired\n' > '$2'
+    printf 'jq: simulated read failure\n' >&2
+    exit 5
+  fi
+done
+exec '$real' "\$@"
+SH
+  chmod +x "$1/jq"
+}
+
+test_contribution_input_survives_oversized_backlog() {
+  local home cap rows bytes attempt
+  home=$(make_home oversized-backlog)
+  cap=$(argv_value_cap)
+  # Sized from the measured record expansion, then asserted below, so a change
+  # in the parsed record shape cannot quietly shrink this under the cap.
+  rows=$(( cap / 1100 + 32 ))
+  bytes=0
+  for attempt in 1 2 3; do
+    write_bulk_backlog "$home/data/backlog.md" "$rows"
+    FM_HOME="$home" "$SNAPSHOT" --contribution-input > "$home/input.json" \
+      || fail "an oversized backlog must still produce contribution input (rows=$rows attempt=$attempt)"
+    jq -e 'type == "object" and has("backlog")' "$home/input.json" >/dev/null 2>&1 \
+      || fail "an oversized backlog reported success while producing no contribution input (rows=$rows attempt=$attempt)"
+    bytes=$(jq -c '.backlog' "$home/input.json" | LC_ALL=C wc -c | tr -d ' ')
+    [ "$bytes" -gt "$cap" ] && break
+    rows=$(( rows * 2 ))
+  done
+  [ "$bytes" -gt "$cap" ] \
+    || fail "fixture never exceeded the argv cap, so nothing was proved (backlog=$bytes cap=$cap)"
+  jq -e --argjson rows "$rows" '
+    .backlog.present == true
+      and (.backlog.records | length) == $rows
+      and ([.backlog.records[] | select(.structured == true)] | length) == $rows
+      and (.backlog.records[0].id) == "bulk-00000"
+      and (.tasks | type) == "array"
+  ' "$home/input.json" >/dev/null \
+    || fail "oversized contribution input lost or corrupted backlog records (backlog=$bytes cap=$cap)"
+  pass "a backlog past the argv cap still yields complete contribution input"
+}
+
+test_contribution_input_survives_oversized_task_set() {
+  local home rows i bytes cap=131072
+  home=$(make_home oversized-tasks)
+  printf '## In flight\n' > "$home/data/backlog.md"
+  # Only the per-argument cap is in reach here: beating the total would need
+  # thousands of task records, each one a separate metadata read. So this case
+  # reproduces the old defect on Linux, where that cap is what exec enforces,
+  # and holds the same result as a correctness check everywhere else.
+  rows=$(( cap / 180 + 48 ))
+  for (( i = 0; i < rows; i++ )); do
+    fm_write_meta "$(printf '%s/state/fleet-snapshot-bulk-task-%05d.meta' "$home" "$i")" \
+      "window=firstmate:fm-bulk-$i" \
+      "project=alpha" \
+      "harness=claude" \
+      "kind=ship" \
+      "mode=no-mistakes" \
+      "pr=https://github.com/kunchenguid/firstmate/pull/$(( i + 1 ))" \
+      "pr_head=abcdef0123456789abcdef0123456789abcdef01"
+  done
+  FM_HOME="$home" "$SNAPSHOT" --contribution-input > "$home/input.json" \
+    || fail "an oversized task set must still produce contribution input (rows=$rows)"
+  jq -e 'type == "object" and has("tasks")' "$home/input.json" >/dev/null 2>&1 \
+    || fail "an oversized task set reported success while producing no contribution input (rows=$rows)"
+  bytes=$(jq -c '.tasks' "$home/input.json" | LC_ALL=C wc -c | tr -d ' ')
+  [ "$bytes" -gt "$cap" ] \
+    || fail "fixture never exceeded the per-argument cap, so nothing was proved (tasks=$bytes cap=$cap)"
+  jq -e --argjson rows "$rows" '
+    (.tasks | length) == $rows
+      and ([.tasks[] | select(.kind == "ship" and (.pr.url | startswith("https://")))] | length) == $rows
+      and .backlog.present == true
+  ' "$home/input.json" >/dev/null \
+    || fail "oversized contribution input lost or corrupted task records (tasks=$bytes cap=$cap)"
+  pass "a task set past the per-argument cap still yields complete contribution input"
+}
+
+test_contribution_input_read_failure_is_loud() {
+  local home fakebin marker out rc err
+  home=$(make_home contribution-read-failure)
+  printf '## In flight\n- [ ] solo - Solo Task (repo: alpha) (kind: ship) (since 2026-07-07)\n' \
+    > "$home/data/backlog.md"
+  fakebin=$(fm_fakebin "$home")
+  marker="$home/assembly-attempted"
+  write_failing_assembly_jq "$fakebin" "$marker" || fail "could not stage the failing jq"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --contribution-input 2>"$home/err.txt")
+  rc=$?
+  err=$(cat "$home/err.txt")
+  [ -f "$marker" ] \
+    || fail "contribution input was never assembled from staged files, so no read failure was induced"
+  [ "$rc" -ne 0 ] \
+    || fail "a failed contribution input read reported success (output: $out)"
+  [ -z "$out" ] \
+    || fail "a failed contribution input read still printed a result: $out"
+  assert_contains "$err" "fm-fleet-snapshot: contribution" \
+    "a failed contribution input read must name the failure on stderr"
+  pass "a failed contribution input read exits non-zero instead of succeeding empty"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
@@ -1112,3 +1256,6 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_contribution_input_survives_oversized_backlog
+test_contribution_input_survives_oversized_task_set
+test_contribution_input_read_failure_is_loud
