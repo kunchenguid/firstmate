@@ -1187,6 +1187,7 @@ FM_INBOX_REGION=        # overrides config/inbox-region for fm-inbox.sh say and 
 FM_INBOX_STT_MODEL=     # overrides config/inbox-stt-model for fm-inbox.sh say
 FM_INBOX_ASK_MODEL=     # overrides config/inbox-ask-model for fm-inbox.sh ask
 FM_INBOX_PROFILE=       # overrides config/inbox-profile; explicitly empty forces ambient credentials
+SUPERWHISPER_AGENT_STATE_DIR= # state directory for Superwhisper disabled markers; defaults to /tmp/superwhisper-agent
 ```
 
 `fm-teardown.sh` retries only Git's `Unable to create '...index.lock': File exists` return failure up to `FM_TREEHOUSE_RETURN_LOCK_RETRIES` times.

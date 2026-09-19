@@ -1233,6 +1233,73 @@ ROWS
   pass "bootstrap gates resolver fields and additive harnesses on the typed key"
 }
 
+test_superwhisper_drift_detection() {
+  local case_dir fakebin pi_dir out before after
+  case_dir="$TMP_ROOT/superwhisper-drift"
+  mkdir -p "$case_dir/home/data" "$case_dir/home/state" "$case_dir/home/config" "$case_dir/home/projects" "$case_dir/pi-agent"
+  touch "$case_dir/home/data/backlog.md"
+  fakebin=$(make_fake_toolchain "$case_dir/fake")
+  pi_dir="$case_dir/pi-agent"
+
+  # Normal baseline: Pi global settings has no Superwhisper package.
+  cat > "$pi_dir/settings.json" <<'JSON'
+{
+  "packages": [
+    "git:github.com/dbachelder/pi-btw",
+    "npm:pi-antigravity"
+  ]
+}
+JSON
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    PI_CODING_AGENT_DIR="$pi_dir" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "SUPERWHISPER_DRIFT" "bootstrap reported Superwhisper drift when packages list was clean"
+
+  # Re-polluted baseline: Pi global settings has re-acquired npm:@superwhisper/pi.
+  cat > "$pi_dir/settings.json" <<'JSON'
+{
+  "packages": [
+    "git:github.com/dbachelder/pi-btw",
+    "npm:@superwhisper/pi"
+  ]
+}
+JSON
+  before=$(cat "$pi_dir/settings.json")
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    PI_CODING_AGENT_DIR="$pi_dir" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "SUPERWHISPER_DRIFT: global Pi settings re-enabled Superwhisper in $pi_dir/settings.json (remediation: pi remove npm:@superwhisper/pi)" \
+    "bootstrap did not report actionable drift diagnostic for global Pi Superwhisper"
+  after=$(cat "$pi_dir/settings.json")
+  [ "$before" = "$after" ] || fail "drift detection must be detect-only and not modify user configuration"
+
+  # Bare package spelling: @superwhisper/pi without npm: prefix.
+  cat > "$pi_dir/settings.json" <<'JSON'
+{
+  "packages": [
+    "@superwhisper/pi"
+  ]
+}
+JSON
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    PI_CODING_AGENT_DIR="$pi_dir" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "SUPERWHISPER_DRIFT: global Pi settings re-enabled Superwhisper in $pi_dir/settings.json (remediation: pi remove npm:@superwhisper/pi)" \
+    "bootstrap did not report actionable drift diagnostic for bare @superwhisper/pi"
+
+  # Version-pinned package spelling: npm:@superwhisper/pi@1.2.3.
+  cat > "$pi_dir/settings.json" <<'JSON'
+{
+  "packages": [
+    "npm:@superwhisper/pi@1.2.3"
+  ]
+}
+JSON
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    PI_CODING_AGENT_DIR="$pi_dir" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "SUPERWHISPER_DRIFT: global Pi settings re-enabled Superwhisper in $pi_dir/settings.json (remediation: pi remove npm:@superwhisper/pi)" \
+    "bootstrap did not report actionable drift diagnostic for version-pinned npm:@superwhisper/pi"
+
+  pass "bootstrap detects accidental global Pi Superwhisper re-enablement and leaves settings untouched"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
@@ -1261,3 +1328,4 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_superwhisper_drift_detection

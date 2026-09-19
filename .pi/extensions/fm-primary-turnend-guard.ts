@@ -1,7 +1,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
@@ -57,6 +57,49 @@ function lockOwnership(): LockOwnership {
 function markLoaded(): void {
   if (!existsSync(state) || lockOwnership() === "other") return;
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
+}
+
+// Keep Superwhisper enabled for Firstmate's primary session while silencing
+// non-owner ordinary Pi sessions opened at the Firstmate root.
+const swDir = "/tmp/superwhisper-agent";
+let swSilencedIds: string[] = [];
+
+function superwhisperSessionIds(ctx: any): string[] {
+  const ids: string[] = [];
+  try {
+    const file = ctx?.sessionManager?.getSessionFile?.();
+    if (file && typeof file === "string") {
+      ids.push(basename(file).replace(/[^a-zA-Z0-9_.-]/g, "_"));
+    }
+  } catch {}
+  ids.push(`pi-${process.pid}`);
+  return ids;
+}
+
+function silenceSuperwhisper(ctx: any): void {
+  if (lockOwnership() === "owned") {
+    unsilenceSuperwhisper();
+    return;
+  }
+  const ids = superwhisperSessionIds(ctx);
+  try {
+    mkdirSync(swDir, { recursive: true });
+    for (const id of ids) {
+      writeFileSync(`${swDir}/disabled-${id}`, "");
+    }
+    swSilencedIds = ids;
+  } catch {}
+}
+
+function unsilenceSuperwhisper(): void {
+  if (swSilencedIds.length === 0) return;
+  for (const id of swSilencedIds) {
+    try {
+      const markerPath = `${swDir}/disabled-${id}`;
+      if (existsSync(markerPath)) unlinkSync(markerPath);
+    } catch {}
+  }
+  swSilencedIds = [];
 }
 
 // Pi's session_start reasons are startup | reload | new | resume | fork, and a
@@ -512,6 +555,7 @@ export default function (pi: ExtensionAPI) {
   let sessionstartGeneration: SessionstartGeneration | null = null;
   let sessionstartExitListenerRegistered = false;
   const cleanupSessionstartOnProcessExit = (): void => {
+    unsilenceSuperwhisper();
     const generation = sessionstartGeneration;
     if (!generation) return;
     if (process.platform === "win32") {
@@ -541,6 +585,7 @@ export default function (pi: ExtensionAPI) {
   registerSessionstartExitListener();
 
   pi.on?.("session_start", (event, ctx) => {
+    silenceSuperwhisper(ctx);
     const reason = String((event as { reason?: unknown }).reason ?? "");
     const source = reason === "startup"
       ? startupRebuildSource(ctx) ?? "startup"
@@ -555,6 +600,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on?.("before_agent_start", async (_event, ctx) => {
+    silenceSuperwhisper(ctx);
     const generation = sessionstartGeneration;
     if (!generation) return;
     const message = await claimSessionstartMessage(generation, ctx);
@@ -578,6 +624,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on?.("session_shutdown", async () => {
+    unsilenceSuperwhisper();
     const generation = sessionstartGeneration;
     try {
       if (generation) await stopSessionstartGeneration(generation);

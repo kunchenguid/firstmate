@@ -142,6 +142,8 @@
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
+#   Every Pi-family launch appends -ne to disable package extension discovery while
+#   preserving explicit -e turn-end and supervision extensions.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
 #   never falls back to pi.
 #   For omp (Oh My Pi), fm-spawn resolves the `omp` executable from PATH once and
@@ -326,6 +328,10 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
+# codex crewmate and secondmate launches wrap the command with an EXIT trap that
+# creates and removes a cwd-scoped Superwhisper disabled marker under
+# ${SUPERWHISPER_AGENT_STATE_DIR:-/tmp/superwhisper-agent} to silence worker
+# notifications while leaving direct captain sessions enabled.
 # claude is the one harness whose pre-launch setup can REFUSE the spawn: before
 # any per-task state exists, and before its worktree .claude/settings.local.json
 # hooks are written, every claude launch pre-registers the directory the pane
@@ -1770,15 +1776,20 @@ launch_template() {
   # (docs/turnend-guard.md, docs/sessionstart-nudge.md, docs/cd-guard.md), so the
   # secondmate launch deliberately keeps hooks on.
   codex)
+    # Keep the global Codex Superwhisper plugin available for the captain's
+    # direct ChatGPT/Codex sessions, but silence sessions launched by
+    # Firstmate. The hook supports a cwd-scoped disabled marker; create it
+    # for this worker and remove it when the worker exits.
+    local sw_quiet_prefix='SUPERWHISPER_AGENT_STATE_DIR="${SUPERWHISPER_AGENT_STATE_DIR:-/tmp/superwhisper-agent}" sh -c '\''sw_dir="$SUPERWHISPER_AGENT_STATE_DIR"; sw_marker="$sw_dir/disabled-$(if command -v md5 >/dev/null 2>&1; then printf %s "$PWD" | md5 -q; else printf %s "$PWD" | md5sum | awk "{print \$1}"; fi)"; mkdir -p "$sw_dir"; : > "$sw_marker"; trap "rm -f \"$sw_marker\"" EXIT; "$@"'\'' -- '
     if [ "$kind" = secondmate ]; then
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' "$sw_quiet_prefix"'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' "$sw_quiet_prefix"'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
   opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   pi | pi-signed)
-    printf '%s' '__PIBIN____PITUIMODE__'
+    printf '%s' '__PIBIN____PITUIMODE__ -ne'
     if [ "$kind" = secondmate ]; then
       printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
