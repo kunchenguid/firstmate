@@ -1573,7 +1573,12 @@ const assistantBase = {
 const toolCall = { type: "toolCall", id: "calm-mid-turn-tool", name: "read", arguments: { path: "sample.txt" } };
 const substantiveLongText = "SUBSTANTIVE_LONG_MIDTURN_REPORT " + "context ".repeat(35);
 const substantiveMultilineText = "SUBSTANTIVE_MIDTURN_REPORT\nAdditional context needed to continue.";
-const belowThresholdText = "b".repeat(preservation.CALM_PRESERVE_MIN_CHARS - 1);
+// The just-under-threshold filler must read as narration: unrecognized short text is
+// preserved under the err-toward-showing policy, so only narration pins the boundary.
+const belowThresholdText = "Running the tests now. ".repeat(10) + "Checking.";
+if (belowThresholdText.trim().length !== preservation.CALM_PRESERVE_MIN_CHARS - 1) {
+  throw new Error(`below-threshold filler is ${belowThresholdText.trim().length} characters`);
+}
 const atThresholdText = "t".repeat(preservation.CALM_PRESERVE_MIN_CHARS);
 if (preservation.CALM_PRESERVE_MIN_CHARS !== 240) {
   throw new Error(`Pi Calm preservation threshold changed to ${preservation.CALM_PRESERVE_MIN_CHARS}`);
@@ -1583,7 +1588,7 @@ const messages = {
   midTurn: {
     ...assistantBase,
     stopReason: "toolUse",
-    content: [{ type: "text", text: "MIDTURN_WORKING_NOTE" }, toolCall],
+    content: [{ type: "text", text: "Let me check the sample file." }, toolCall],
   },
   // Substantive mid-turn content must remain visible even when the message also calls a tool.
   substantiveLong: {
@@ -1610,10 +1615,136 @@ const messages = {
     ...assistantBase,
     stopReason: "toolUse",
     content: [
-      { type: "text", text: "MIXED_SHORT_WORKING_NOTE" },
+      { type: "text", text: "Checking the file." },
       { type: "text", text: substantiveLongText },
       toolCall,
     ],
+  },
+  // Short substantive replies stay visible: a question, a confirmation, an offer,
+  // and a wait on the captain are replies, not narration, however short the text.
+  questionMidTurn: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{ type: "text", text: "Captain, which of the two fixes should I take?" }, toolCall],
+  },
+  shortConfirmation: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{ type: "text", text: "Saved." }, toolCall],
+  },
+  captainOffer: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{ type: "text", text: "Let me know if you'd like me to proceed." }, toolCall],
+  },
+  captainWait: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{ type: "text", text: "Still waiting on your reply." }, toolCall],
+  },
+  // The reported class of loss: a completed-work confirmation and its caveat in a
+  // message that also calls a tool, with no later textual reply.
+  incidentConfirmation: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [
+      {
+        type: "text",
+        text: "Recorded the project branch convention in data/project-context.md and linked it from data/preferences.md for future sessions.\n\nThis saves the convention; workspace connections have not yet been established.",
+      },
+      toolCall,
+    ],
+  },
+  // The live incident: the captain-facing reply shares its message with the
+  // acknowledgement the supervision flow requires in the same turn.
+  incidentCaptainReply: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [
+      {
+        type: "text",
+        text: "Captain, the Novelight fix is up for review upstream:\nhttps://github.com/lnreader/lnreader-plugins/pull/2527\n\nThe page partition is fixed, and the chapter-375 caveat is recorded.",
+      },
+      { type: "toolCall", id: "calm-mid-turn-branch", name: "fm_branch_processed", arguments: { through: 7 } },
+    ],
+  },
+  // One message can carry routine narration and a short substantive result; only
+  // the narration block is disposable.
+  mixedShortResult: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [
+      { type: "text", text: "Let me check the file." },
+      { type: "text", text: "Found it: the cache key is case-sensitive." },
+      toolCall,
+    ],
+  },
+  // Gerund outcome reports are findings, not progress announcements.
+  gerundOutcomeTesting: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{ type: "text", text: "Testing confirms the fix works." }, toolCall],
+  },
+  gerundOutcomeReviewing: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{ type: "text", text: "Reviewing the logs found the case-sensitivity bug." }, toolCall],
+  },
+  gerundOutcomeVerifying: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{ type: "text", text: "Verifying the partition fix: chapter 375 still fails." }, toolCall],
+  },
+  gerundOutcomeLongReview: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{ type: "text", text: "Reviewing the recent production logs from yesterday found the bug." }, toolCall],
+  },
+  gerundOutcomeCarefulReview: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{ type: "text", text: "Reviewing all of the logs very carefully today found the bug." }, toolCall],
+  },
+  // Gerund progress announcements and routine monitoring state still hide.
+  gerundProgressChecking: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{ type: "text", text: "Checking the file." }, toolCall],
+  },
+  gerundProgressRunning: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{ type: "text", text: "Running the tests now." }, toolCall],
+  },
+  gerundProgressWaiting: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{ type: "text", text: "Waiting on CI." }, toolCall],
+  },
+  gerundProgressMerging: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{ type: "text", text: "Merging both now, captain." }, toolCall],
+  },
+  gerundProgressRecording: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{ type: "text", text: "Recording the lesson so this does not recur." }, toolCall],
+  },
+  gerundProgressPreparing: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{ type: "text", text: "Preparing both public texts." }, toolCall],
+  },
+  routineMonitor: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{ type: "text", text: "No changes. Continuing to monitor." }, toolCall],
+  },
+  addressedNarration: {
+    ...assistantBase,
+    stopReason: "toolUse",
+    content: [{ type: "text", text: "Captain, let me look at that comment." }, toolCall],
   },
   // The genuine reply that ends a response, which Calm never hides.
   finalReply: {
@@ -1631,7 +1762,7 @@ const messages = {
   truncatedMidTurn: {
     ...assistantBase,
     stopReason: "length",
-    content: [{ type: "text", text: "TRUNCATED_MIDTURN_NOTE" }, toolCall],
+    content: [{ type: "text", text: "Let me run the last check." }, toolCall],
   },
   // Truncated without tool calls ended the response.
   truncatedFinal: {
@@ -1673,7 +1804,7 @@ const stockRows = snapshot();
 for (const name of Object.keys(rows)) {
   if (rendered(name).length === 0) throw new Error(`Calm-off rendering hid ${name}`);
 }
-requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm off");
+requireVisible("midTurn", "Let me check the sample file.", "Calm off");
 
 await calm.calmCommand.handler("", context);
 if (readFileSync(calmPreferencePath, "utf8") !== "on\n") {
@@ -1686,9 +1817,32 @@ requireVisible("substantiveLong", "SUBSTANTIVE_LONG_MIDTURN_REPORT", "Calm on");
 requireVisible("substantiveMultiline", "SUBSTANTIVE_MIDTURN_REPORT", "Calm on");
 requireHidden("belowThreshold", belowThresholdText.slice(0, 32), "Calm on");
 requireVisible("atThreshold", atThresholdText.slice(0, 32), "Calm on");
-requireHidden("mixedBlocks", "MIXED_SHORT_WORKING_NOTE", "Calm on");
+requireHidden("mixedBlocks", "Checking the file.", "Calm on");
 requireVisible("mixedBlocks", "SUBSTANTIVE_LONG_MIDTURN_REPORT", "Calm on");
-requireHidden("truncatedMidTurn", "TRUNCATED_MIDTURN_NOTE", "Calm on");
+requireVisible("questionMidTurn", "which of the two fixes", "Calm on");
+requireVisible("shortConfirmation", "Saved.", "Calm on");
+requireVisible("captainOffer", "Let me know if you'd like me to proceed.", "Calm on");
+requireVisible("captainWait", "Still waiting on your reply.", "Calm on");
+requireVisible("incidentConfirmation", "Recorded the project branch convention", "Calm on");
+requireVisible("incidentConfirmation", "workspace connections have not yet been established", "Calm on");
+requireVisible("incidentCaptainReply", "the Novelight fix is up for review upstream", "Calm on");
+requireVisible("incidentCaptainReply", "https://github.com/lnreader/lnreader-plugins/pull/2527", "Calm on");
+requireHidden("mixedShortResult", "Let me check the file.", "Calm on");
+requireVisible("mixedShortResult", "Found it: the cache key is case-sensitive.", "Calm on");
+requireVisible("gerundOutcomeTesting", "Testing confirms the fix works.", "Calm on");
+requireVisible("gerundOutcomeReviewing", "Reviewing the logs found the case-sensitivity bug.", "Calm on");
+requireVisible("gerundOutcomeVerifying", "Verifying the partition fix: chapter 375 still fails.", "Calm on");
+requireVisible("gerundOutcomeLongReview", "Reviewing the recent production logs from yesterday found the bug.", "Calm on");
+requireVisible("gerundOutcomeCarefulReview", "Reviewing all of the logs very carefully today found the bug.", "Calm on");
+requireHidden("gerundProgressChecking", "Checking the file.", "Calm on");
+requireHidden("gerundProgressRunning", "Running the tests now.", "Calm on");
+requireHidden("gerundProgressWaiting", "Waiting on CI.", "Calm on");
+requireHidden("gerundProgressMerging", "Merging both now", "Calm on");
+requireHidden("gerundProgressRecording", "Recording the lesson so this does not recur.", "Calm on");
+requireHidden("gerundProgressPreparing", "Preparing both public texts.", "Calm on");
+requireHidden("routineMonitor", "No changes. Continuing to monitor.", "Calm on");
+requireHidden("addressedNarration", "let me look at that comment", "Calm on");
+requireHidden("truncatedMidTurn", "Let me run the last check.", "Calm on");
 // Pi owns the wording of its truncation notice; Calm must leave that row's own notice
 // standing rather than collapsing an incomplete response to nothing.
 if (rendered("truncatedMidTurn").length === 0) {
@@ -1710,7 +1864,7 @@ await calm.calmCommand.handler("max", context);
 if (readFileSync(calmPreferencePath, "utf8") !== "off\n") {
   throw new Error("/calm max was still read as a level instead of the plain toggle");
 }
-requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm off after /calm max");
+requireVisible("midTurn", "Let me check the sample file.", "Calm off after /calm max");
 const restoredRows = snapshot();
 for (const name of Object.keys(rows)) {
   if (restoredRows[name] !== stockRows[name]) {
@@ -1734,7 +1888,7 @@ for (const persisted of ["on\n", "max\n", "max"]) {
   // extension restore from the persisted file alone.
   visibility.setCalmPresentation(false);
   ui.setHiddenThinkingLabel(undefined);
-  requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "scrambled live state");
+  requireVisible("midTurn", "Let me check the sample file.", "scrambled live state");
   calm = await loadCalmExtension();
   if (calm.registeredTools.length !== 7) {
     throw new Error(
@@ -1749,6 +1903,8 @@ for (const persisted of ["on\n", "max\n", "max"]) {
       );
     }
     requireVisible("finalReply", "FINAL_REPLY_TEXT", `${reason} session`);
+    requireVisible("incidentConfirmation", "Recorded the project branch convention", `${reason} session`);
+    requireVisible("incidentCaptainReply", "the Novelight fix is up for review upstream", `${reason} session`);
   }
   // A session restored as on toggles to off; one that had wrongly dropped to off would
   // persist "on" here instead.
@@ -1756,7 +1912,7 @@ for (const persisted of ["on\n", "max\n", "max"]) {
   if (readFileSync(calmPreferencePath, "utf8") !== "off\n") {
     throw new Error(`${JSON.stringify(persisted)} did not restore as ordinary Calm on`);
   }
-  requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm toggled off after restore");
+  requireVisible("midTurn", "Let me check the sample file.", "Calm toggled off after restore");
 }
 if (!existsSync(calmPreferencePath)) {
   throw new Error("Calm stopped persisting its preference file");
@@ -1766,7 +1922,7 @@ JS
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm mid-turn contract failed: $out"
   [ -z "$out" ] || fail "Pi calm mid-turn test printed output: $out"
-  pass "Pi calm on collapses mid-turn assistant working notes to zero height while Calm off keeps them, leaves streaming, truncated-final, and genuine final replies untouched, never mutates the messages, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on"
+  pass "Pi calm on collapses routine mid-turn assistant working notes to zero height while keeping short substantive replies, incident confirmations with their caveats, and per-block mixed results, Calm off keeps everything, streaming, truncated-final, and genuine final replies stay untouched, the messages are never mutated, every /calm argument is ignored, and a legacy persisted max restores as ordinary Calm on"
 }
 
 test_operational_followup_turn_e2e() {

@@ -252,13 +252,23 @@ check(policy.serializeCalmPreference(true) === "on\\n" && policy.serializeCalmPr
 const shortNote = "Checking briefly.";
 const multiLineReply = "The result is substantive.\\nHere is the context needed to continue.";
 const atThresholdReply = "x".repeat(240);
-const belowThresholdNote = "x".repeat(239);
+const belowThresholdNote = "Running the tests now. ".repeat(10) + "Checking.";
 check(policy.CALM_PRESERVE_MIN_CHARS === 240, "Claude preservation threshold");
 check(piPreservation.CALM_PRESERVE_MIN_CHARS === policy.CALM_PRESERVE_MIN_CHARS, "Pi and Claude preservation thresholds");
 for (const [text, expectedPreserved, label] of [
-  [belowThresholdNote, false, "239-character single line"],
+  [belowThresholdNote, false, "239-character narration"],
   [atThresholdReply, true, "240-character single line"],
   [multiLineReply, true, "multi-line text"],
+  ["Saved.", true, "short confirmation"],
+  ["Captain, which of the two fixes should I take?", true, "short captain-directed question"],
+  ["Let me know if you'd like me to proceed.", true, "short captain-directed offer"],
+  ["Still waiting on your reply.", true, "short wait on the captain"],
+  ["Found it: the cache key is case-sensitive.", true, "short finding with colon detail"],
+  ["Testing confirms the fix works.", true, "short gerund outcome report"],
+  ["Reviewing the logs found the case-sensitivity bug.", true, "short gerund finding"],
+  ["Checking the file.", false, "short gerund progress"],
+  ["Let me check the sample file.", false, "short next-step announcement"],
+  ["No changes. Continuing to monitor.", false, "short monitoring state"],
 ]) {
   const claudePreserved = !policy.stepTextIsWorkingNote({ stopReason: "tool_use", toolUses: [] }, text);
   const piPreserved = piPreservation.calmTextIsSubstantive(text);
@@ -277,7 +287,7 @@ check(policy.workingNoteKey("  note \\n") === "note\\n" && policy.workingNoteKey
 const restored = policy.classifyRestoredTranscript([
   { role: "user", text: "go", toolUses: [] },
   { role: "assistant", text: " own call ", toolUses: [{}] },
-  { role: "assistant", text: "before a tool row", toolUses: [] },
+  { role: "assistant", text: "Checking the file.", toolUses: [] },
   { role: "assistant", text: "", toolUses: [{}] },
   { role: "assistant", text: "final", toolUses: [] },
   { role: "user", text: "again", toolUses: [] },
@@ -301,14 +311,14 @@ const restored = policy.classifyRestoredTranscript([
   { role: "assistant", text: "Checking.", toolUses: [] },
   { role: "assistant", text: "", toolUses: [{}] },
 ]);
-check(JSON.stringify(restored.workingNotes) === JSON.stringify(["own call", "before a tool row", belowThresholdNote, "Checking."]), \`restored notes \${JSON.stringify(restored.workingNotes)}\`);
-check(JSON.stringify(restored.finalReplies) === JSON.stringify(["final", "collision", "plain reply", multiLineReply + "\\n", atThresholdReply, "Checking.\\n"]), \`restored final replies \${JSON.stringify(restored.finalReplies)}\`);
+check(JSON.stringify(restored.workingNotes) === JSON.stringify(["Checking the file.", belowThresholdNote, "Checking."]), \`restored notes \${JSON.stringify(restored.workingNotes)}\`);
+check(JSON.stringify(restored.finalReplies) === JSON.stringify(["own call", "final", "collision", "plain reply", multiLineReply + "\\n", atThresholdReply, "Checking.\\n"]), \`restored final replies \${JSON.stringify(restored.finalReplies)}\`);
 check(policy.userTextIsOperational("\\u2063FIRSTMATE_OP: v1 watcher: x") && !policy.userTextIsOperational("hello"), "operational recognition");
 console.log("policy-ok");
 JS
   out=$(run_node "$TMP_ROOT/policy.mjs" 2>&1) || fail "presentation policy: $out"
   assert_contains "$out" "policy-ok" "the policy check did not complete"
-  pass "the Calm policy resolves the shared preference exactly as Pi does, reads on, max, and off as Pi does, and shares Pi's 240-character-or-newline preservation behavior while classifying working notes by stop reason, tool use, and restored transcript shape"
+  pass "the Calm policy resolves the shared preference exactly as Pi does, reads on, max, and off as Pi does, and shares Pi's substantive-text preservation (length-or-newline threshold with a routine-narration content gate) while classifying working notes by stop reason, tool use, and restored transcript shape"
 }
 
 # The classifier parity corpus: envelopes the shell owner encodes itself, its legacy

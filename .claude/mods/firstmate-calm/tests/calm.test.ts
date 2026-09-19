@@ -269,47 +269,47 @@ describe("mid-turn working notes", () => {
     const set = stepper(on);
     set({
       chunks: [
-        { kind: "text", index: 0, text: "Done." },
+        { kind: "text", index: 0, text: "Checking the file." },
         { kind: "tool", index: 1, id: "t1", name: "Bash" },
         { kind: "stop", stopReason: "tool_use", usage: null },
       ],
-      result: { answer: "Done.", toolUses: [{ name: "Bash", input: {} }], stopReason: "tool_use" },
+      result: { answer: "Checking the file.", toolUses: [{ name: "Bash", input: {} }], stopReason: "tool_use" },
     });
     await runStep($);
-    expect(isHidden(await $.ui.render(assistantMessage("Done.", "working-note")))).toBe(true);
+    expect(isHidden(await $.ui.render(assistantMessage("Checking the file.", "working-note")))).toBe(true);
 
     set({
-      chunks: [{ kind: "text", index: 0, text: "Done." }, { kind: "stop", stopReason: "end_turn", usage: null }],
-      result: { answer: "Done.", toolUses: [], stopReason: "end_turn" },
+      chunks: [{ kind: "text", index: 0, text: "Checking the file." }, { kind: "stop", stopReason: "end_turn", usage: null }],
+      result: { answer: "Checking the file.", toolUses: [], stopReason: "end_turn" },
     });
     const redrawsBeforeFinal = journal.invalidations.length;
     const { result } = await runStep($);
     expect(result.stopReason).toBe("end_turn");
     expect(journal.invalidations.length).toBeGreaterThan(redrawsBeforeFinal);
-    expect(isStock(await $.ui.render(assistantMessage("Done.", "final-reply")))).toBe(true);
+    expect(isStock(await $.ui.render(assistantMessage("Checking the file.", "final-reply")))).toBe(true);
   });
 
   test("keeps an earlier final reply visible when a later working note reuses its text", async ($, on) => {
     world(on, { preference: "on\n" });
     const set = stepper(on);
     set({
-      chunks: [{ kind: "text", index: 0, text: "Done." }, { kind: "stop", stopReason: "end_turn", usage: null }],
-      result: { answer: "Done.", toolUses: [], stopReason: "end_turn" },
+      chunks: [{ kind: "text", index: 0, text: "Checking the file." }, { kind: "stop", stopReason: "end_turn", usage: null }],
+      result: { answer: "Checking the file.", toolUses: [], stopReason: "end_turn" },
     });
     await runStep($);
-    expect(isStock(await $.ui.render(assistantMessage("Done.", "final-reply")))).toBe(true);
+    expect(isStock(await $.ui.render(assistantMessage("Checking the file.", "final-reply")))).toBe(true);
 
     set({
       chunks: [
-        { kind: "text", index: 0, text: "Done." },
+        { kind: "text", index: 0, text: "Checking the file." },
         { kind: "tool", index: 1, id: "t1", name: "Bash" },
         { kind: "stop", stopReason: "tool_use", usage: null },
       ],
-      result: { answer: "Done.", toolUses: [{ name: "Bash", input: {} }], stopReason: "tool_use" },
+      result: { answer: "Checking the file.", toolUses: [{ name: "Bash", input: {} }], stopReason: "tool_use" },
     });
     await runStep($);
-    expect(isStock(await $.ui.render(assistantMessage("Done.", "earlier-final")))).toBe(true);
-    expect(isStock(await $.ui.render(assistantMessage("Done.", "later-note")))).toBe(true);
+    expect(isStock(await $.ui.render(assistantMessage("Checking the file.", "earlier-final")))).toBe(true);
+    expect(isStock(await $.ui.render(assistantMessage("Checking the file.", "later-note")))).toBe(true);
   });
 
   test("resets final-reply classifications when a new session starts", async ($, on) => {
@@ -317,36 +317,36 @@ describe("mid-turn working notes", () => {
     const set = stepper(on);
     await $.session.start(sessionStart);
     set({
-      chunks: [{ kind: "text", index: 0, text: "Done." }, { kind: "stop", stopReason: "end_turn", usage: null }],
-      result: { answer: "Done.", toolUses: [], stopReason: "end_turn" },
+      chunks: [{ kind: "text", index: 0, text: "Checking the file." }, { kind: "stop", stopReason: "end_turn", usage: null }],
+      result: { answer: "Checking the file.", toolUses: [], stopReason: "end_turn" },
     });
     await runStep($);
-    expect(isStock(await $.ui.render(assistantMessage("Done.", "session-one-final")))).toBe(true);
+    expect(isStock(await $.ui.render(assistantMessage("Checking the file.", "session-one-final")))).toBe(true);
 
     await $.session.start(sessionStart);
     set({
       chunks: [
-        { kind: "text", index: 0, text: "Done." },
+        { kind: "text", index: 0, text: "Checking the file." },
         { kind: "tool", index: 1, id: "t2", name: "Bash" },
         { kind: "stop", stopReason: "tool_use", usage: null },
       ],
-      result: { answer: "Done.", toolUses: [{ name: "Bash", input: {} }], stopReason: "tool_use" },
+      result: { answer: "Checking the file.", toolUses: [{ name: "Bash", input: {} }], stopReason: "tool_use" },
     });
     await runStep($);
     expect(journal.fsReads).toHaveLength(2);
     expect(journal.sessionMessageReads).toBe(2);
-    expect(isHidden(await $.ui.render(assistantMessage("Done.", "session-two-note")))).toBe(true);
+    expect(isHidden(await $.ui.render(assistantMessage("Checking the file.", "session-two-note")))).toBe(true);
   });
 
   test("treats a response cut off while calling tools as a working note, but not a plain cut-off", async ($, on) => {
     world(on, { preference: "on\n" });
     const set = stepper(on);
     set({
-      chunks: [{ kind: "text", index: 0, text: "Partial" }, { kind: "stop", stopReason: "max_tokens", usage: null }],
-      result: { answer: "Partial", toolUses: [{ name: "Read", input: {} }], stopReason: "max_tokens" },
+      chunks: [{ kind: "text", index: 0, text: "Let me run the last check." }, { kind: "stop", stopReason: "max_tokens", usage: null }],
+      result: { answer: "Let me run the last check.", toolUses: [{ name: "Read", input: {} }], stopReason: "max_tokens" },
     });
     await runStep($);
-    expect(isHidden(await $.ui.render(assistantMessage("Partial")))).toBe(true);
+    expect(isHidden(await $.ui.render(assistantMessage("Let me run the last check.")))).toBe(true);
     set({
       chunks: [{ kind: "text", index: 0, text: "Truncated final" }, { kind: "stop", stopReason: "max_tokens", usage: null }],
       result: { answer: "Truncated final", toolUses: [], stopReason: "max_tokens" },
@@ -382,7 +382,7 @@ describe("mid-turn working notes", () => {
   test("preserves substantive mid-turn text restored from the transcript", async ($, on) => {
     const multiLine = "The result is substantive.\nHere is the context needed to continue.";
     const atThreshold = "x".repeat(240);
-    const belowThreshold = "x".repeat(239);
+    const belowThreshold = "Running the tests now. ".repeat(10) + "Checking.";
     world(on, {
       preference: "on\n",
       messages: [
@@ -415,8 +415,8 @@ describe("mid-turn working notes", () => {
       preference: "on\n",
       messages: [
         { role: "user", text: "do it", toolUses: [] },
-        { role: "assistant", text: "Narration with its own call", toolUses: [{ name: "Bash" }] },
-        { role: "assistant", text: "Narration before a tool row", toolUses: [] },
+        { role: "assistant", text: "Checking the file.", toolUses: [{ name: "Bash" }] },
+        { role: "assistant", text: "Running the tests now.", toolUses: [] },
         { role: "assistant", text: "", toolUses: [{ name: "Read" }] },
         { role: "assistant", text: "The final answer", toolUses: [] },
         { role: "user", text: "again", toolUses: [] },
@@ -426,8 +426,8 @@ describe("mid-turn working notes", () => {
         { role: "assistant", text: "Welcome", toolUses: [] },
       ],
     });
-    expect(isHidden(await $.ui.render(assistantMessage("Narration with its own call")))).toBe(true);
-    expect(isHidden(await $.ui.render(assistantMessage("Narration before a tool row")))).toBe(true);
+    expect(isHidden(await $.ui.render(assistantMessage("Checking the file.")))).toBe(true);
+    expect(isHidden(await $.ui.render(assistantMessage("Running the tests now.")))).toBe(true);
     expect(isStock(await $.ui.render(assistantMessage("The final answer")))).toBe(true);
     expect(isStock(await $.ui.render(assistantMessage("Done.")))).toBe(true);
     expect(isStock(await $.ui.render(assistantMessage("Welcome")))).toBe(true);
