@@ -276,6 +276,7 @@ family_for_basename() {
   case "$1" in
     fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
     fm-bearings-board.test.sh|\
+    fm-alignment.test.sh|fm-align-decide.test.sh|\
     fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
     fm-classify-decision-key.test.sh|\
@@ -1447,6 +1448,12 @@ families_for_changed_path() {
       ;;
     bin/fm-quota-choose.sh)
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
+      ;;
+    bin/fm-alignment.sh|.agents/skills/align-intake/*|.agents/skills/plan-breakdown/*)
+      printf '%s\n' "__script__:fm-alignment.test.sh" "__script__:fm-align-decide.test.sh"
+      ;;
+    bin/fm-align-decide.sh)
+      printf '%s\n' "__script__:fm-align-decide.test.sh"
       ;;
     bin/fm-dispatch-resolve.sh)
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"

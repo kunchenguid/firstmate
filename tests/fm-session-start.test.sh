@@ -731,8 +731,13 @@ EOF
   printf '%s\n' '- demo [no-mistakes] - a demo project (added 2026-07-01)' > "$home/data/projects.md"
   : > "$home/data/captain.md"
   # secondmates.md, captain-shared.md, and learnings.md deliberately absent
+  mkdir -p "$home/data/alignments/2026-09-19-broken"
+  printf 'key: malformed\n' > "$home/data/alignments/2026-09-19-broken/spec.md"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" 'ALIGNMENT: malformed key' 'startup must present alignment diagnostics'
+  [ "$(< "$home/data/alignments/2026-09-19-broken/spec.md")" = 'key: malformed' ] \
+    || fail 'alignment startup check rewrote private evidence'
 
   jq -e --arg home "$home" '
     .schema == "fm-secondmate-home-summary.v1"

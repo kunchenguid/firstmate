@@ -109,6 +109,22 @@
   ],
   "surfaces": [
     {
+      "path": ".agents/skills/align-intake/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/align-intake/spec-template.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/plan-breakdown/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/plan-breakdown/plan-template.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/afk/SKILL.md",
       "audience": "agent-runtime"
     },

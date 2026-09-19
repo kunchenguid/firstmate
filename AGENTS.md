@@ -287,6 +287,7 @@ The delivery lifecycle is an always-loaded operational contract; referenced scri
 
 ### Intake and authority
 
+Load `align-intake` before every new request and on `ALIGNMENT:` diagnostics, and `plan-breakdown` after intent alignment and before implementation dispatch.
 Resolve the project independently for every request.
 An explicit project wins, a clear follow-up inherits its referent, and otherwise match the request against the registry, work under way, and project code or README.
 Proceed on one confident match while naming the project in plain language; ask one concise question when multiple or no projects plausibly match.
@@ -574,6 +575,8 @@ The skill owns the guarded fleet update and restart procedure; it never touches 
 These skills are not captain-invocable; load them only at their precise triggers.
 
 - `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap or network-checks section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `PRESENTATION_UNAVAILABLE:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `STARTUP_MEMORY_BUDGET:`, `CREW_DISPATCH: invalid`, `FLEET_SYNC:`, `NETWORK_CHECKS:`, `HOME_SUMMARY:`, `BACKLOG_RECONCILE:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `SECONDMATE_HANDOFF:`, `NUDGE_SECONDMATES:`, or `FMX:`), or when `BOOTSTRAP_INFO:` says an interrupted backlog cleanup may have left an endpoint or local copy; silence and other `BOOTSTRAP_INFO:` facts need no load.
+- `align-intake` - load before every new request and on `ALIGNMENT:` diagnostics; owns alignment, record routing, and the optional typed triviality check.
+- `plan-breakdown` - load after intent alignment and before implementation dispatch; owns approved plan units and linked execution.
 - `diagnostic-reasoning` - load before scoping a reported bug and before acting on a diagnostic report.
 - `ask-user-authority` - load before deciding any ask-user finding.
 - `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array from current quota-axi default TOON.

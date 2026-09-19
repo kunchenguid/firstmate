@@ -702,6 +702,9 @@ else
   printf '(silent - all good)\n'
 fi
 
+# Detect only: alignment diagnostics never rewrite records or bypass the lock.
+"$SCRIPT_DIR/fm-alignment.sh" validate 2>&1 || true
+
 # --- 3. wake-drain ---------------------------------------------------------
 # The inactive-outcome startup scan runs in the deferred worker launched above,
 # where its potentially slow current-state reads cannot block this digest. It

@@ -71,6 +71,8 @@
 # Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
 # fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
 # second owner of a contract that must stay current across relaunches.
+# --alignment <key> requires an approved linked alignment and includes its
+# pointer and PR-description citation contract; omitted keeps legacy behavior.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -126,6 +128,7 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+ALIGNMENT=
 POS=()
 want_value=
 for a in "$@"; do
@@ -135,12 +138,14 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      alignment) ALIGNMENT=$a ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
     continue
   fi
   case "$a" in
+    --alignment) want_value=alignment ;;
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
@@ -188,6 +193,13 @@ fi
 
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
+if [ -n "$ALIGNMENT" ]; then
+  [ "$KIND" != secondmate ] || { echo 'error: alignment applies to tasks, not charters' >&2; exit 1; }
+  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-alignment.sh" validate --ready "$ALIGNMENT"
+  ALIGNMENT_MODE=$MODE
+  [ "$KIND" != scout ] || ALIGNMENT_MODE=scout
+  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-alignment.sh" link "$ALIGNMENT" "$ID" "$ALIGNMENT_MODE"
+fi
 mkdir -p "$DATA/$ID"
 
 ASK_USER_BLOCK=
@@ -357,6 +369,14 @@ IFS= read -r -d '' TASK_SECTION <<'EOF' || true
 {FIRSTMATE_SPEC}
 EOF
 TASK_SECTION=${TASK_SECTION%$'\n'}
+if [ -n "$ALIGNMENT" ]; then
+  TASK_SECTION="$TASK_SECTION
+
+alignment: $ALIGNMENT
+Resolve the spec and plan by this key in the owning home's alignment index.
+Every PR description must include this exact line: spec: $ALIGNMENT
+Preserve this key in task evidence and cite source: alignment $ALIGNMENT in memory entries."
+fi
 
 if [ "$KIND" = scout ]; then
 if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then

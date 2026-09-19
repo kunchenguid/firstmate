@@ -3666,6 +3666,26 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+test_alignment_refuses_before_cleanup() {
+  local case_dir rc
+  case_dir=$(make_case alignment-missing)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "landed alignment fixture"
+  add_fork_with_pushed_branch "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+  tasks-axi update task-x1 --body 'alignment: 2026-09-19-missing' \
+    --file "$case_dir/data/backlog.md" >/dev/null
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail 'missing alignment must refuse completion'
+  assert_grep 'ALIGNMENT: missing alignment' "$case_dir/stderr" 'missing alignment diagnostic'
+  assert_present "$case_dir/state/task-x1.meta" 'alignment refusal must preserve task metadata'
+  [ -d "$case_dir/wt" ] || fail 'alignment refusal removed the isolated copy'
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] || fail 'alignment refusal closed the backlog'
+  pass 'alignment completion gate preserves landed task until its linked record is repaired'
+}
+
+test_alignment_refuses_before_cleanup
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator

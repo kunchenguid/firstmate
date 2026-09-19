@@ -3288,6 +3288,13 @@ if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   fi
 fi
 
+# Pointer-scoped documentary gate, additive to every existing landing guard.
+# Discard and secondmate retirement are not task completion.
+if [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ] && [ "$TEARDOWN_BACKLOG_TRANSITION" = close ]; then
+  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-alignment.sh" validate --task "$ID" || exit 1
+fi
+
 # A Herdr close may reposition shared workspace order, so the whole
 # destructive sequence below (worktree return, pane close, record removal)
 # runs under the named-session presentation lock, acquired BEFORE anything is
