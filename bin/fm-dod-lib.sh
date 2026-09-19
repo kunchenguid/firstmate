@@ -5,17 +5,9 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [state-dir] prints
-# the block on stdout with no trailing blank line. The caller validates the
-# mode; an unknown mode is refused rather than silently rendered as the pipeline
-# contract.
-# With a state-dir whose <task-id>.meta records base_branch=, the direct-PR
-# contract names that branch as the PR base, because a worker who opens a PR
-# against the remote default instead would hand the forge every commit the
-# working branch carries that the default branch does not, as if they were this
-# task's change. bin/fm-spawn.sh resolves and records base_branch= and its
-# header owns the rules that decide it; bin/fm-review-diff.sh reads the same
-# record for the review base. Without that record the block is unchanged.
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> prints the block on
+# stdout with no trailing blank line. The caller validates the mode; an unknown
+# mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
@@ -46,6 +38,16 @@
 # conflicting role is superseded rather than duplicated.
 # fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
 # ordinary ship brief and the durable contract written during scout promotion.
+# fm_brief_base_branch_overlay owns every sentence that depends on the branch a
+# task's worktree was actually placed on. Like the two sections above it is a
+# distinctly titled launch section that states its own precedence, because a
+# brief is written before any slot exists and asserts the default branch; only a
+# superseding section can correct that without a second resolver that can
+# disagree with the first. Its emitters render it once the placement is known
+# and only for a project whose registered working branch decided it:
+# bin/fm-spawn.sh from the branch it has just placed the slot on, and
+# bin/fm-promote.sh from what that spawn recorded (fm_recorded_working_branch).
+# A slot placed on origin's own default branch leaves every sentence unchanged.
 
 fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
@@ -240,31 +242,38 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
-fm_dod_recorded_base_branch() {  # <state-dir> <task-id>
+# The registered working branch a task's slot was actually placed on, or nothing
+# when it was placed on origin's own default branch. bin/fm-spawn.sh writes both
+# base_branch= and base_registered= into state/<task-id>.meta once the slot is
+# placed, and its header owns the rules that decide the branch;
+# bin/fm-review-diff.sh reads base_branch= for the review base.
+fm_recorded_working_branch() {  # <state-dir> <task-id>
   local state=$1 id=$2 meta
   [ -n "$state" ] || return 0
   meta="$state/$id.meta"
   [ -f "$meta" ] || return 0
+  grep -q '^base_registered=1$' "$meta" || return 0
   grep '^base_branch=' "$meta" | tail -1 | cut -d= -f2- || true
 }
 
-fm_dod_block() {  # <mode> <task-id> [state-dir]
-  local mode=$1 id=$2 state=${3:-} base
-  base=$(fm_dod_recorded_base_branch "$state" "$id")
+fm_brief_base_branch_overlay() {  # <working-branch> [mode]
+  local base=$1 mode=${2:-}
+  cat <<EOF
+# Current worktree base contract
+This worktree is based on \`$base\`, the working branch registered for this project.
+This section establishes that base after every Setup or promotion instruction above and supersedes any of them that names a different base, including any that calls this worktree's base the default branch.
+Cut your task branch from \`$base\` and keep it based there; rebasing or merging any other branch into it would carry that branch's own commits as if they were your change.
+EOF
+  [ "$mode" = direct-PR ] || return 0
+  cat <<EOF
+Open your PR against \`$base\` by passing \`--base $base\` to \`gh-axi\`, never the repository's default branch: a PR raised against any other branch would show that branch's own commits as this task's change.
+EOF
+}
+
+fm_dod_block() {  # <mode> <task-id>
+  local mode=$1 id=$2
   case "$mode" in
     direct-PR)
-      if [ -n "$base" ]; then
-        cat <<EOF
-# Definition of done
-Delivery contract: mode=direct-PR
-This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
-The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\` against \`$base\` (pass \`--base $base\`), then append \`done: PR {url}\` to the status file and stop.
-\`$base\` is the working branch this task was cut from, so a PR opened against any other branch would carry that branch's own commits as if they were your change.
-Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
-EOF
-        return 0
-      fi
       cat <<EOF
 # Definition of done
 Delivery contract: mode=direct-PR

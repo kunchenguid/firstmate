@@ -308,36 +308,60 @@ test_promote_refuses_a_symlinked_task_record() {
 # prints against a capturing fm-send.sh, and asserts on the message the worker would
 # actually receive - for every supported mode.
 # A direct-PR worker opens the PR itself, so the branch it targets is decided by
-# the contract it is handed. A slot placed on a registered working branch whose
-# PR still targets the remote default hands the forge every commit that branch
-# carries and the default does not, as the task's own change.
-# shellcheck disable=SC2016  # the backticks below are the contract's own literal text
-test_direct_pr_dod_targets_the_recorded_base_branch() {
-  local home id brief plain_sentence
-  home="$TMP_ROOT/direct-pr-base/home"
-  mkdir -p "$home/state"
-  plain_sentence='When it is implemented and committed, push your branch and open a PR with `gh-axi`, then append `done: PR {url}` to the status file and stop.'
+# the contract it is handed. A promoted scout's slot was already placed by its own
+# spawn, so the record that spawn left is what decides the PR base here and what
+# corrects the promotion step that would otherwise send the worker back to the
+# repository's default branch.
+test_promotion_targets_the_recorded_working_branch() {
+  local home sendroot id meta out payload
+  home="$TMP_ROOT/promote-base/home"
+  sendroot="$TMP_ROOT/promote-base/sendroot"
+  mkdir -p "$home/state" "$sendroot/bin"
+  cat > "$sendroot/bin/fm-send.sh" <<'STUB'
+#!/usr/bin/env bash
+# Capture the message a promoted worker would receive, instead of steering one.
+printf '%s' "$2" > "$FM_TEST_CAPTURE"
+STUB
+  chmod +x "$sendroot/bin/fm-send.sh"
 
-  id=direct-pr-recorded-base
-  printf 'window=fm-%s\nkind=ship\nworktree=/tmp/wt\nbase_branch=develop\n' "$id" > "$home/state/$id.meta"
-  FM_HOME="$home" "$BRIEF" "$id" fixture-project --mode direct-PR >/dev/null 2>&1 \
-    || fail "brief generation for a task with a recorded base branch should succeed"
-  brief="$home/data/$id/brief.md"
-  assert_grep 'open a PR with `gh-axi` against `develop` (pass `--base develop`)' "$brief" \
-    "a direct-PR task on a recorded working branch was not told to target that branch"
-  assert_no_grep "$plain_sentence" "$brief" \
-    "the direct-PR contract still told the worker to open a PR with no base"
+  for id in promote-base-registered promote-base-default; do
+    meta="$home/state/$id.meta"
+    if [ "$id" = promote-base-registered ]; then
+      printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nbase_branch=develop\nbase_registered=1\n' \
+        "$id" > "$meta"
+    else
+      printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nbase_branch=main\n' "$id" > "$meta"
+    fi
+    FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null 2>&1 \
+      || fail "$id: scout brief generation should succeed"
+    fill_brief_subsections "$home/data/$id/brief.md" \
+      "Ship the working-branch change." "Preserve the base the slot was placed on."
+    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo off 2>&1) \
+      || fail "$id: promotion should succeed"
+    payload="$TMP_ROOT/promote-base/payload-$id"
+    ( cd "$sendroot" \
+      && FM_TEST_CAPTURE="$payload" \
+         eval "$(printf '%s\n' "$out" | sed -n 's/^next: //p' | grep 'fm-send\.sh')" ) \
+      || fail "$id: promotion's delivery command did not run"
+    assert_present "$payload" "$id: promotion delivered no message to the worker"
+  done
 
-  id=direct-pr-no-recorded-base
-  printf 'window=fm-%s\nkind=ship\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
-  FM_HOME="$home" "$BRIEF" "$id" fixture-project --mode direct-PR >/dev/null 2>&1 \
-    || fail "brief generation for a task with no recorded base branch should succeed"
-  brief="$home/data/$id/brief.md"
-  assert_grep "$plain_sentence" "$brief" \
-    "a task with no recorded base branch did not keep the unchanged direct-PR contract"
-  assert_no_grep '--base' "$brief" \
-    "a task with no recorded base branch was handed a PR base it never resolved"
-  pass "fm-dod-lib: a direct-PR task targets its recorded base branch and is otherwise unchanged"
+  payload="$TMP_ROOT/promote-base/payload-promote-base-registered"
+  assert_grep 'Return to a clean default-branch base' "$payload" \
+    "the promotion instructions no longer carry the default-branch step being superseded"
+  assert_grep 'This worktree is based on `develop`' "$payload" \
+    "a promoted worker on a registered working branch was not told which branch it is on"
+  assert_grep 'supersedes any of them that names a different base' "$payload" \
+    "the recorded working branch did not supersede the default-branch promotion step"
+  assert_grep 'passing `--base develop`' "$payload" \
+    "a promoted direct-PR worker was not told to open its PR against the recorded branch"
+
+  payload="$TMP_ROOT/promote-base/payload-promote-base-default"
+  assert_no_grep '--base' "$payload" \
+    "a slot placed on the remote default was handed a PR base nothing asked for"
+  assert_no_grep 'Current worktree base contract' "$payload" \
+    "a slot placed on the remote default was handed a working-branch section"
+  pass "fm-promote: a promoted worker targets the working branch its own slot was placed on"
 }
 
 test_promotion_delivers_the_real_definition_of_done() {
@@ -993,7 +1017,7 @@ test_spawn_notices_a_rigor_downgrade_against_the_registry
 test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promote_refuses_a_symlinked_task_record
-test_direct_pr_dod_targets_the_recorded_base_branch
+test_promotion_targets_the_recorded_working_branch
 test_promotion_delivers_the_real_definition_of_done
 test_project_mode_maps_the_conditional_policy
 test_project_mode_reads_the_registered_working_branch

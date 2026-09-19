@@ -394,6 +394,97 @@ test_recorded_base_branch_names_every_resolved_base() {
   pass "every slot that resolves a working branch records it, and one that resolves none records nothing"
 }
 
+# A brief is scaffolded before any slot exists, so its Setup text asserts the
+# repository default branch while the slot is placed afterwards. These legs drive
+# the real intake order - bin/fm-brief.sh, then bin/fm-spawn.sh - and read the
+# launch brief the worker is actually handed, because a worker told it is on the
+# default branch is exactly the worker who stops noticing that it is not.
+fill_task_subsections() { # <brief>
+  local file=$1 content
+  content=$(cat "$file")
+  content=${content//'{TASK}'/Prove the worker is told which branch it is on.}
+  content=${content//'{FIRSTMATE_SPEC}'/Drive the real brief-then-spawn intake order.}
+  printf '%s\n' "$content" > "$file"
+}
+
+# Replace the fixture brief with one the real scaffold wrote, then fill the two
+# Task subsections exactly as firstmate does before dispatch.
+scaffold_real_brief() { # <id> <fm-brief.sh args...>
+  local id=$1
+  shift
+  rm -f "$HOME_DIR/data/$id/brief.md"
+  FM_HOME="$HOME_DIR" FM_DATA_OVERRIDE="$HOME_DIR/data" FM_STATE_OVERRIDE="$HOME_DIR/state" \
+    "$ROOT/bin/fm-brief.sh" "$id" "$(basename "$PROJECT_DIR")" "$@" >/dev/null \
+    || fail "the real brief scaffold should succeed for $id"
+  fill_task_subsections "$HOME_DIR/data/$id/brief.md"
+}
+
+test_launch_brief_names_the_branch_the_slot_is_on() {
+  local rec id out status launch source_bytes plain_pr
+  plain_pr='push your branch and open a PR with `gh-axi`, then append'
+
+  id='pool-brief-registered-r1'
+  rec=$(make_case brief-registered "$id")
+  read_case_record "$rec"
+  publish_origin_branch develop
+  register_project_branch develop
+  scaffold_real_brief "$id" --mode direct-PR
+
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
+  status=$?
+  expect_code 0 "$status" \
+    "a direct-PR ship on a registered working branch should launch"$'\n'"$out"
+  launch="$HOME_DIR/data/$id/launch-brief.md"
+  assert_present "$launch" "the spawn handed the worker no launch brief"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/develop)" ] \
+    || fail "the slot this launch brief describes is not on the registered working branch"
+  assert_grep 'This worktree is based on `develop`' "$launch" \
+    "the worker was never told which branch its worktree is actually on"
+  assert_grep 'supersedes any of them that names a different base' "$launch" \
+    "the brief's default-branch Setup text was left standing unsuperseded"
+  assert_grep 'passing `--base develop`' "$launch" \
+    "a direct-PR worker on a registered working branch was not told to target it"
+
+  # A scout raises no PR, so it is told where it is and nothing more.
+  id='pool-brief-registered-scout-r1'
+  rec=$(make_case brief-registered-scout "$id")
+  read_case_record "$rec"
+  publish_origin_branch develop
+  register_project_branch develop
+  scaffold_real_brief "$id" --scout
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" \
+    "a scout on a registered working branch should launch"$'\n'"$out"
+  launch="$HOME_DIR/data/$id/launch-brief.md"
+  assert_grep 'This worktree is based on `develop`' "$launch" \
+    "a scout was never told which branch its worktree is actually on"
+  assert_no_grep '--base' "$launch" "a scout was handed a PR base it will never use"
+
+  # A project that registers no working branch keeps the brief it was written.
+  id='pool-brief-unregistered-r1'
+  rec=$(make_case brief-unregistered "$id")
+  read_case_record "$rec"
+  scaffold_real_brief "$id" --mode direct-PR
+
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
+  status=$?
+  expect_code 0 "$status" \
+    "a direct-PR ship on a project registering no working branch should launch"$'\n'"$out"
+  launch="$HOME_DIR/data/$id/launch-brief.md"
+  assert_grep "$plain_pr" "$launch" \
+    "an unregistered project's direct-PR contract was rewritten"
+  assert_no_grep '--base' "$launch" \
+    "an unregistered project was handed a PR base nothing asked for"
+  assert_no_grep 'Current worktree base contract' "$launch" \
+    "an unregistered project was handed a working-branch section"
+  source_bytes=$(wc -c < "$HOME_DIR/data/$id/brief.md")
+  tail -c "$source_bytes" "$launch" | cmp -s - "$HOME_DIR/data/$id/brief.md" \
+    || fail "an unregistered project's launch brief no longer ends with the brief it was given"
+  pass "a launch brief names the working branch its slot was placed on, and is otherwise unchanged"
+}
+
 test_non_main_default_branch_refreshes_before_branching() {
   local rec id out status current branch_head
   id='pool-current-trunk-r2'
@@ -950,6 +1041,7 @@ test_malformed_branch_token_refuses_while_an_absent_one_falls_back
 test_unrefreshable_origin_head_refuses_unless_a_branch_is_registered
 test_registered_working_branch_missing_on_origin_refuses
 test_recorded_base_branch_names_every_resolved_base
+test_launch_brief_names_the_branch_the_slot_is_on
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool

@@ -222,7 +222,13 @@
 #   based on stale history or another branch's commits, or discarding local work.
 #   Every fresh ship or scout records the branch it resolved as base_branch= in
 #   state/<id>.meta, so a wrong base is provable from the task record rather
-#   than only from a PR's file list.
+#   than only from a PR's file list. A slot the registered working branch
+#   decided also records base_registered=1 and has bin/fm-dod-lib.sh's worktree
+#   base section appended to its launch brief. That section is rendered here,
+#   after the slot is placed, rather than in the brief: a brief is written before
+#   any slot exists and asserts the default branch, and resolving the branch a
+#   second time at brief time would let the two answers disagree. A slot placed
+#   on origin's own default branch leaves every brief sentence unchanged.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -2827,6 +2833,10 @@ spawn_worktree_has_origin_config() { # <worktree>
 # afterwards, instead of only from a PR's own file list once foreign commits
 # have already ridden along.
 SPAWN_BASE_BRANCH=
+# Whether the captain's registry decided that branch. Only then does the slot sit
+# somewhere the brief's own Setup text does not already describe, so this is what
+# the launch-brief base section and every later reader of base_registered= gate on.
+SPAWN_BASE_REGISTERED=0
 
 # A pool hands back whatever branch its slot happens to hold, so the base is
 # decided here, never inherited. Two sources answer "which branch does this
@@ -2845,6 +2855,9 @@ SPAWN_BASE_BRANCH=
 # this path refuses instead of guessing. A registry that names a branch git
 # itself rejects is a registry error, never an absent branch: it returns 2 so the
 # caller refuses rather than falling through to origin's default branch.
+# Prints "<registry|origin> <branch>": the caller needs the source as well as the
+# branch, because a registry-decided branch is the one case where the slot sits
+# somewhere the brief it was already handed does not describe.
 resolve_spawn_base_branch() { # <worktree>
   local worktree=$1 registered ref rc=0 sethead=0
   # Refresh origin/HEAD first and unconditionally, exactly as this path always
@@ -2861,18 +2874,19 @@ resolve_spawn_base_branch() { # <worktree>
     return 2
   fi
   if [ -n "$registered" ]; then
-    printf '%s\n' "$registered"
+    printf 'registry %s\n' "$registered"
     return 0
   fi
   [ "$sethead" -eq 0 ] || return 1
   ref=$(git -C "$worktree" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || ref=
   [ -n "$ref" ] || return 1
-  printf '%s\n' "${ref#origin/}"
+  printf 'origin %s\n' "${ref#origin/}"
 }
 
 freshen_spawn_worktree_base() { # <worktree>
-  local worktree=$1 branch target expected actual status rc=0
+  local worktree=$1 resolved branch target expected actual status rc=0
   SPAWN_BASE_BRANCH=
+  SPAWN_BASE_REGISTERED=0
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -2894,7 +2908,8 @@ freshen_spawn_worktree_base() { # <worktree>
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
-  branch=$(resolve_spawn_base_branch "$worktree") || rc=$?
+  resolved=$(resolve_spawn_base_branch "$worktree") || rc=$?
+  branch=${resolved#* }
   if [ "$rc" -eq 2 ]; then
     echo "error: project '$PROJ_NAME' registers a working branch its own registry entry spells in a way git rejects (named above); refusing to launch pooled worktree '$worktree' on origin's default branch instead" >&2
     return 1
@@ -2921,6 +2936,7 @@ freshen_spawn_worktree_base() { # <worktree>
     echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
     return 1
   fi
+  [ "${resolved%% *}" != registry ] || SPAWN_BASE_REGISTERED=1
   SPAWN_BASE_BRANCH=$branch
 }
 
@@ -3751,6 +3767,16 @@ fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
+# The only point that knows where the slot actually ended up. The launch-brief
+# overlay above runs before the slot is placed, so the base-dependent half of the
+# contract - which branch this worktree sits on, and which branch a direct-PR
+# worker must target - is appended here instead (bin/fm-dod-lib.sh owns it).
+if [ "$SPAWN_BASE_REGISTERED" = 1 ]; then
+  if ! { printf '\n'; fm_brief_base_branch_overlay "$SPAWN_BASE_BRANCH" "$MODE"; } >>"$BRIEF"; then
+    echo "error: could not append the working-branch contract for '$SPAWN_BASE_BRANCH' to $BRIEF; refusing to launch a worker whose brief names the wrong base" >&2
+    exit 1
+  fi
+fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,
 # at the first point that directory is known and before any per-task state is
@@ -4286,6 +4312,7 @@ preserve_relaunch_meta() {
   # worktree without re-resolving, so preserve_relaunch_meta carries the original
   # base forward rather than restating a base this run never resolved.
   [ -z "$SPAWN_BASE_BRANCH" ] || echo "base_branch=$SPAWN_BASE_BRANCH"
+  [ "$SPAWN_BASE_REGISTERED" != 1 ] || echo "base_registered=1"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
