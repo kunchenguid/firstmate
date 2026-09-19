@@ -131,6 +131,76 @@ SH
   chmod +x "$fb/sleep"
 }
 
+make_missing_herdr_stub() {  # <dir>
+  local fb="$1/fakebin"
+  cat > "$fb/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+D=$FM_FAKE_DIR
+printf '%s\n' "$*" >> "$D/herdr-calls"
+case "${1:-} ${2:-}" in
+  "status --json")
+    if [ "${FM_FAKE_HERDR_SCENARIO:-}" = stopped-missing-workspace ] \
+        && [ ! -e "$D/server-started" ]; then
+      printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":false}}\n'
+    else
+      printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
+    fi
+    ;;
+  "server --session")
+    : > "$D/server-started"
+    ;;
+  "workspace list")
+    if [ "${FM_FAKE_HERDR_SCENARIO:-}" = stopped-missing-workspace ]; then
+      printf '{"result":{"workspaces":[{"workspace_id":"workspace-home","label":"firstmate"}]}}\n'
+    else
+      printf '{"result":{"workspaces":[{"workspace_id":"workspace-1","label":"firstmate"}]}}\n'
+    fi
+    ;;
+  "tab list")
+    printf '{"result":{"tabs":[{"tab_id":"tab-sibling","label":"sibling"}]}}\n'
+    ;;
+  "tab create")
+    : > "$D/endpoint-created"
+    printf '{"result":{"tab":{"tab_id":"tab-replacement"},"root_pane":{"pane_id":"pane-recorded"}}}\n'
+    ;;
+  "pane get")
+    if [ "${FM_FAKE_HERDR_SCENARIO:-}" = stopped-missing-workspace ] \
+        && [ ! -e "$D/server-started" ]; then
+      printf '{"error":{"code":"server_not_running"}}\n'
+    elif [ -e "$D/endpoint-created" ]; then
+      printf '{"result":{"pane":{"pane_id":"pane-recorded","foreground_cwd":"%s"}}}\n' "$(cat "$D/cwd")"
+    else
+      printf '{"error":{"code":"pane_not_found"}}\n'
+    fi
+    ;;
+  "agent get")
+    if [ -e "$D/agent-launched" ]; then
+      printf '{"result":{"agent":{"agent_status":"idle"}}}\n'
+    else
+      printf '{"error":{"code":"agent_not_found"}}\n'
+    fi
+    ;;
+  "pane process-info")
+    printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"pane-recorded","shell_pid":100,"foreground_processes":[{"pid":101,"name":"claude","argv0":"claude","argv":["claude"]}]}}}\n'
+    ;;
+  "pane send-text")
+    printf '%s\n' "${4:-}" >> "$D/literal"
+    case "${4:-}" in *'encode launch-brief'*) : > "$D/launch-pending" ;; esac
+    ;;
+  "pane send-keys")
+    if [ -e "$D/launch-pending" ]; then
+      : > "$D/agent-launched"
+    fi
+    ;;
+  "pane run") ;;
+  "terminal title") printf '{"result":{"reason":"no_foreground_client"}}\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/herdr"
+}
+
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
 new_case() {
   local id=${2:-t1} dir="$TMP_ROOT/$1-$RANDOM"
@@ -176,6 +246,26 @@ EOF
   TASK_TMPS+=("/tmp/fm-$id")
 }
 
+add_missing_herdr_ship_task() {  # <case-dir> <id>
+  local dir=$1 id=$2 meta
+  add_ship_task "$dir" "$id" claude
+  make_missing_herdr_stub "$dir"
+  meta="$dir/home/state/$id.meta"
+  awk '
+    $1 ~ /^window=/ {$0="window=herdr-test:pane-recorded"}
+    {print}
+  ' "$meta" > "$meta.tmp"
+  {
+    cat "$meta.tmp"
+    echo "backend=herdr"
+    echo "herdr_session=herdr-test"
+    echo "herdr_workspace_id=workspace-1"
+    echo "herdr_tab_id=tab-recorded"
+    echo "herdr_pane_id=pane-recorded"
+  } > "$meta"
+  rm -f "$meta.tmp"
+}
+
 run_control() {  # <case-dir> <args...>
   local dir=$1; shift
   # A claude spawn pre-registers workspace trust in the launching user's own
@@ -193,6 +283,9 @@ run_control() {  # <case-dir> <args...>
     FM_FAKE_TRACE_RELEASE="${FM_FAKE_TRACE_RELEASE:-}" \
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
     FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
+    FM_FAKE_HERDR_SCENARIO="${FM_FAKE_HERDR_SCENARIO:-}" \
+    HERDR_ENV= HERDR_PANE_ID= HERDR_SOCKET_PATH= HERDR_SESSION= \
+    HERDR_TAB_ID= HERDR_WORKSPACE_ID= \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -205,6 +298,8 @@ run_spawn() {  # <case-dir> <args...>
   env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    HERDR_ENV= HERDR_PANE_ID= HERDR_SOCKET_PATH= HERDR_SESSION= \
+    HERDR_TAB_ID= HERDR_WORKSPACE_ID= \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -330,6 +425,75 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
   assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
+}
+
+test_missing_herdr_endpoint_relaunch_uses_the_control_transaction() {
+  local dir out rc meta
+  command -v jq >/dev/null 2>&1 || {
+    pass "skipped: jq is not installed, so the Herdr adapter is unavailable"
+    return 0
+  }
+  dir=$(new_case missing-herdr rl45)
+  add_missing_herdr_ship_task "$dir" rl45
+  meta="$dir/home/state/rl45.meta"
+  printf 'validation_run=run-17\n' >> "$meta"
+  printf 'unfinished bytes\n' > "$dir/wt/unfinished.txt"
+
+  out=$(FM_FAKE_HERDR_SCENARIO=stopped-missing-workspace \
+    run_control "$dir" rl45 relaunch --note "resume the preserved validation run"); rc=$?
+  expect_code 0 "$rc" "a supported relaunch should recreate a positively missing Herdr endpoint"$'\n'"$out"
+  assert_present "$dir/fake/server-started" "missing-endpoint recovery did not restore the recorded session"
+  assert_present "$dir/fake/endpoint-created" "the spawn owner did not recreate the endpoint"
+  assert_present "$dir/fake/agent-launched" "the spawn owner did not launch the replacement agent"
+  [ "$(meta_field "$dir" rl45 endpoint_task_id)" = rl45 ] \
+    || fail "missing-endpoint recovery changed the task identity"
+  [ "$(meta_field "$dir" rl45 worktree)" = "$dir/wt" ] \
+    || fail "missing-endpoint recovery changed the worktree holding the task"
+  [ "$(meta_field "$dir" rl45 validation_run)" = run-17 ] \
+    || fail "missing-endpoint recovery discarded prior validation custody"
+  [ "$(meta_field "$dir" rl45 herdr_workspace_id)" = workspace-home ] \
+    || fail "missing-endpoint recovery did not use the exact home-workspace fallback"
+  [ "$(meta_field "$dir" rl45 herdr_tab_id)" = tab-replacement ] \
+    || fail "missing-endpoint recovery did not publish the replacement endpoint"
+  [ "$(journal_field "$dir" rl45 phase)" = complete ] \
+    || fail "missing-endpoint recovery did not complete its existing transaction"
+  [ "$(journal_field "$dir" rl45 exit_result)" = already-missing ] \
+    || fail "the launching transaction lost its proven missing-endpoint result"
+  assert_grep 'unfinished bytes' "$dir/wt/unfinished.txt" \
+    "missing-endpoint recovery discarded dirty task bytes"
+  assert_not_contains "$(cat "$dir/fake/literal")" "/exit" \
+    "missing-endpoint recovery sent lifecycle input to an absent agent"
+  pass "fm-control relaunch: a missing Herdr endpoint is recreated through the existing transaction"
+}
+
+test_direct_spawn_rejects_a_forged_missing_endpoint_handoff() {
+  local dir out rc journal
+  command -v jq >/dev/null 2>&1 || {
+    pass "skipped: jq is not installed, so the Herdr adapter is unavailable"
+    return 0
+  }
+  dir=$(new_case forged-missing-herdr rl46)
+  add_missing_herdr_ship_task "$dir" rl46
+  journal="$dir/home/state/rl46.control-relaunch"
+  cat > "$journal" <<EOF
+v1
+task=rl46
+phase=launching
+backend=herdr
+endpoint=herdr-test:pane-recorded
+worktree=$dir/wt
+kind=ship
+exit_result=already-missing
+relaunch_tx=forged
+EOF
+
+  out=$(FM_CONTROL_RELAUNCH_TX=forged run_spawn "$dir" rl46 --relaunch --harness claude); rc=$?
+  expect_code 1 "$rc" "a seeded journal must not authorize missing-endpoint recreation"
+  assert_absent "$dir/fake/endpoint-created" \
+    "direct spawn accepted a forged missing-endpoint handoff"
+  [ "$(meta_field "$dir" rl46 herdr_pane_id)" = pane-recorded ] \
+    || fail "a forged handoff changed the task record"
+  pass "fm-spawn --relaunch: only its live control parent can hand off missing-endpoint recovery"
 }
 
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
@@ -1682,6 +1846,8 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_missing_herdr_endpoint_relaunch_uses_the_control_transaction
+test_direct_spawn_rejects_a_forged_missing_endpoint_handoff
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
