@@ -96,7 +96,8 @@ Both choices are local to each Firstmate home and are not part of secondmate inh
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
-The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
+Each home's own gitignored `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
+Bootstrap copies the tracked `.tasks.toml.example` into a home that has none, so a fresh clone gets those defaults, and it never reads or rewrites a `.tasks.toml` the home already has.
 A home may instead select another tasks-axi adapter such as Beads through its own `.tasks.toml` or `TASKS_AXI_BACKEND`; firstmate still uses only tasks-axi verbs for routine backlog reads and mutations, and the adapter maps `start` and evidence-bearing `done` transitions to its native statuses and evidence fields.
 Captain-hold row creation is owned by [`bin/fm-captain-hold.sh`](../bin/fm-captain-hold.sh) `hold`: when no work item exists, it creates an ordinary backlog row (`--kind captain` metadata; Beads native type `task`) and then applies the captain hold.
 Captain rows have no Beads due semantics, so that create path waives a Beads `due.required` setting rather than passing a synthetic `--due`; `--until` remains the optional hold deferral.
@@ -123,7 +124,7 @@ A `manual` home owns its backlog file outright: the lifecycle transitions above 
 Absent or `tasks-axi` selects the tasks-axi path.
 On the default markdown adapter, tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
 
-The tracked `.tasks.toml` paths resolve against the directory tasks-axi runs in, not `FM_HOME`, so a bare `tasks-axi` run from the code root addresses the code root's `data/` whenever the home lives elsewhere.
+A home's `.tasks.toml` paths resolve against the directory tasks-axi runs in, not `FM_HOME`, so whenever the home lives elsewhere a bare `tasks-axi` run from the code root addresses that root rather than this home: the code root's `data/` when it holds a `.tasks.toml` of its own, and tasks-axi's built-in defaults when it does not.
 tasks-axi writes by renaming a temp file over its target, which replaces a symlink with a regular file, so linking the code-root copy into the home forks the queue on the first such write rather than keeping the two in step.
 Every routine firstmate backlog command therefore runs through [`bin/fm-tasks-axi.sh`](../bin/fm-tasks-axi.sh), which addresses this home's backlog and archive from any working directory exactly as lifecycle transitions do, and bootstrap reports a code-root `data/backlog.md` or `data/done-archive.md` that is not this home's own file as a `BACKLOG_RECONCILE: code-root ...` line even in a read-only session.
 
