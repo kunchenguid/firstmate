@@ -251,8 +251,8 @@ status_is_captain_held() {  # <status-line>
 # Both declarations can intentionally leave a crew's endpoint idle, so both
 # supervisors give them one cadence: the away-mode daemon defers the wedge and
 # ages a pause marker instead, and the watcher applies its bounded pause cadence
-# once pause_state_class has admitted the wait (fm-watch.sh owns which liveness
-# evidence each kind of crew must supply for that).
+# once pause_state_class has admitted the wait, which it does for every
+# agent-liveness verdict unless the crew is provably working.
 status_is_paused_or_captain_held() {  # <status-line>
   local line=$1
   status_is_paused "$line" || status_is_captain_held "$line"
