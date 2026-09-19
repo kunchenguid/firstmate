@@ -226,7 +226,34 @@ test_failed_lease_creates_no_pane() {
   pass "a failed worktree lease refuses before any Herdr task pane exists"
 }
 
+# A fresh spawn over an existing record (the restart-recovery corridor) leases
+# a new worktree and republishes the record naming it. The worktree the old
+# record named is superseded, and a durable lease is never handed out again, so
+# the spawn that supersedes it has to return it or the pool loses that slot.
+test_superseded_worktree_lease_is_returned() {
+  local id=herdr-cwd-d4 out status first_wt recorded_wt
+  make_case superseded-lease "$id"
+  mkdir -p "$CASE_DIR/user-home"
+  out=$(run_herdr_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "first herdr spawn should succeed"$'\n'"$out"
+  first_wt=$WT_DIR
+  WT_DIR="$CASE_DIR/wt2"
+  git -C "$PROJ_DIR" worktree add --quiet -b wt2-superseded "$WT_DIR" \
+    || fail "could not prepare the second pool worktree"
+  out=$(run_herdr_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "respawn over the existing record should succeed"$'\n'"$out"
+  recorded_wt=$(sed -n 's/^worktree=//p' "$HOME_DIR/state/$id.meta")
+  [ "$(cd "$recorded_wt" && pwd -P)" = "$(cd "$WT_DIR" && pwd -P)" ] \
+    || fail "respawn record names worktree '$recorded_wt', expected '$WT_DIR'"
+  assert_grep "return --force --if-lease-holder fm-$id $first_wt" "$CASE_DIR/treehouse.log" \
+    "the superseded worktree stayed leased to $id with no record naming it"
+  pass "a Herdr spawn that supersedes a record returns that record's leased worktree"
+}
+
 test_task_pane_is_created_in_its_worktree
 test_aborted_spawn_returns_its_lease
 test_failed_lease_creates_no_pane
+test_superseded_worktree_lease_is_returned
 # all fm-spawn-herdr-task-cwd tests passed
