@@ -60,8 +60,8 @@ fm_harness_path_name() {  # <path>
 #   3. a bare interpreter (node, python) running a harness script path.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
-fm_harness_process_matches() {  # <comm> <args>
-  local comm=$1 args=$2 base argv0 name
+fm_harness_process_matches() {  # <comm> <args> [context]
+  local comm=$1 args=$2 context=${3:-} base argv0 name
   FM_HARNESS_IS_CLAUDE=0
   base=$(basename -- "$comm")
   if printf '%s' "$base" | grep -qE "$FM_HARNESS_RE"; then
@@ -78,6 +78,15 @@ fm_harness_process_matches() {  # <comm> <args>
     *node*|*python*)
       if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
         case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
+        return 0
+      fi
+      # Windows npm shim: on MSYS a pi session runs as node.exe with the
+      # package bundle in argv, e.g. `node .../pi-coding-agent/dist/bundle/cli.js`,
+      # so no bare harness word exists for the anchored rules above. The
+      # package-name path component is the structural identity; matching it as a
+      # whole component keeps anything shorter (pipe, api) from claiming it.
+      if [ "$context" = windows ] \
+        && printf '%s' "$args" | grep -qE '(^|[/\\])pi-coding-agent([/\\]|$)'; then
         return 0
       fi
       ;;
@@ -108,6 +117,116 @@ fm_harness_process_matches() {  # <comm> <args>
 # claude), with no non-harness process between them. Which pid in that run is the
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
+#
+# On MSYS the POSIX walk can resolve nothing (see fm_windows_walk_enabled), so
+# the windows fallback below answers the same question through PowerShell.
+
+# True when the Windows-native ancestry fallback should be attempted. MSYS and
+# its kin (MINGW, CYGWIN) run `ps` with no -o support and no view of native
+# Windows processes, so the POSIX walk above finds nothing there and the same
+# questions go through PowerShell instead. FM_TEST_WINDOWS_WALK lets the portable
+# tests drive this path on hosts that are not MSYS.
+fm_windows_walk_enabled() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW* | MSYS* | CYGWIN*) return 0 ;;
+  esac
+  [ "${FM_TEST_WINDOWS_WALK:-}" = 1 ]
+}
+
+# Print the Windows-native process chain starting at Windows pid $1, one
+# "pid<TAB>name<TAB>commandline" line per hop, innermost first, or return
+# nonzero when the query cannot complete. A start pid that is not live yields
+# no lines.
+fm_win_process_chain() {  # <winpid>
+  local out
+  # shellcheck disable=SC2016 # the PowerShell script is deliberately single-quoted so bash leaves it for PowerShell to interpret
+  out=$(FM_WINPID=$1 powershell -NoProfile -Command '
+    $p = [int]$env:FM_WINPID
+    for ($i = 0; $i -lt 16 -and $p; $i++) {
+      $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$p"
+      if (-not $proc) { break }
+      Write-Output ($proc.ProcessId.ToString() + "`t" + $proc.Name + "`t" + [string]$proc.CommandLine)
+      $p = $proc.ParentProcessId
+    }
+  ' 2>/dev/null | tr -d '\r') || return 1
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+# Print the WINPID of the topmost MSYS process above this shell. MSYS's own ps
+# table is the only reliable parent map inside MSYS space: a forked MSYS child
+# reports a short-lived fork helper (already dead by the time anyone asks) as
+# its Windows parent, so a native Win32 walk started below the boundary strands
+# immediately. The topmost row's WINPID is where Windows parentage becomes real
+# again, and that pid starts the native chain walk in fm_windows_ancestry_pids.
+fm_win_msys_top_winpid() {
+  local ps_list cur row hop=0 ppid winpid boundary=0
+  ps_list=$(ps 2>/dev/null) || return 1
+  cur=$$
+  winpid=
+  while [ "$hop" -lt 16 ]; do
+    row=$(printf '%s\n' "$ps_list" | awk -v p="$cur" '$1 == p { print $2, $4 }')
+    [ -n "$row" ] || break
+    ppid=${row%% *}
+    winpid=${row##* }
+    case "$ppid" in
+      0 | 1) boundary=1; break ;;
+    esac
+    cur=$ppid
+    hop=$((hop + 1))
+  done
+  [ "$boundary" -eq 1 ] && [ -n "$winpid" ] || return 1
+  printf '%s\n' "$winpid"
+}
+
+# Windows-native fallback for the ancestry walk: same matching rules and same
+# contiguous-run semantics, fed by a process table the POSIX walk cannot see.
+# Prints matching harness pids (Windows pids) innermost first, or returns 1.
+# The MSYS ladder rungs are not matched: every verified harness runs as a native
+# Windows process, so the native chain from the topmost MSYS process is the
+# part of the ancestry that can hold the session. FM_TEST_WIN_START pins that
+# start pid for the portable tests, which cannot reproduce the MSYS ps table.
+fm_windows_ancestry_pids() {
+  local chain pid comm args extending=0 printed=0 start_winpid
+  fm_windows_walk_enabled || return 1
+  command -v powershell >/dev/null 2>&1 || return 1
+  if [ -n "${FM_TEST_WIN_START:-}" ]; then
+    start_winpid=$FM_TEST_WIN_START
+  else
+    start_winpid=$(fm_win_msys_top_winpid) || return 1
+  fi
+  case "$start_winpid" in '' | *[!0-9]*) return 1 ;; esac
+  chain=$(fm_win_process_chain "$start_winpid") || return 1
+  while IFS=$'\t' read -r pid comm args; do
+    [ -n "$pid" ] || continue
+    if fm_harness_process_matches "$comm" "$args" windows; then
+      printf '%s\n' "$pid"
+      printed=1
+      [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
+      extending=1
+    elif [ "$extending" -eq 1 ]; then
+      break
+    fi
+  done <<EOF
+$chain
+EOF
+  [ "$printed" -eq 1 ]
+}
+
+# True when Windows pid $1 is live and looks like a verified harness.
+fm_windows_pid_harness_alive() {  # <winpid>
+  local chain first rest comm args
+  fm_windows_walk_enabled || return 1
+  command -v powershell >/dev/null 2>&1 || return 1
+  chain=$(fm_win_process_chain "$1") || return 1
+  first=${chain%%$'\n'*}
+  rest=${first#*$'\t'}
+  IFS=$'\t' read -r comm args <<EOF
+$rest
+EOF
+  fm_harness_process_matches "$comm" "$args" windows
+}
+
 fm_harness_ancestry_pids() {
   local pid=$$ comm args extending=0 printed=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
@@ -129,6 +248,9 @@ fm_harness_ancestry_pids() {
     case "$pid" in '' | *[!0-9]*) break ;; esac
     [ "$pid" -ge 1 ] || break
   done
+  if [ "$printed" -eq 0 ]; then
+    fm_windows_ancestry_pids && printed=1
+  fi
   [ "$printed" -eq 1 ]
 }
 
@@ -150,12 +272,21 @@ EOF
   printf '%s\n' "$outermost"
 }
 
-# True if $1 is a live process that looks like a verified harness.
+# True if $1 is a live process that looks like a verified harness. On MSYS
+# neither kill -0 nor `ps -o` can describe native Windows processes, so both
+# empty-answer paths fall through to the Windows-native identity query.
 fm_harness_pid_alive() {
   local pid=$1 comm args
-  kill -0 "$pid" 2>/dev/null || return 1
-  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fm_windows_pid_harness_alive "$pid" && return 0
+    return 1
+  fi
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null); comm=${comm:-}
   args=$(ps -o args= -p "$pid" 2>/dev/null)
+  if [ -z "$comm" ] && [ -z "$args" ]; then
+    fm_windows_pid_harness_alive "$pid" && return 0
+    return 1
+  fi
   fm_harness_process_matches "$comm" "$args"
 }
 

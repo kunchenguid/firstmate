@@ -459,7 +459,7 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
   out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     owner=$(fm_lock_owner_dir "$2") || exit 20
-    ln -s "$owner" "$2" || exit 21
+    fm_ln_symlink "$owner" "$2" || exit 21
     fm_lock_try_acquire "$2.steal" || exit 22
     steal_owner=${FM_LOCK_OWNER_DIR:-}
     if fm_lock_claim "$2" "$owner"; then late=won; else late=lost; fi
@@ -1141,6 +1141,40 @@ test_stale_watch_reclaim_publishes_before_clear() {
   pass "stale watcher reclaim publishes durable recovery evidence before clear"
 }
 
+test_symlink_capability_failure_is_loud() {
+  local dir state fakebin err start elapsed
+  dir=$(make_case symlink-capability)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  err="$dir/acquire.err"
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/ln"
+  start=$SECONDS
+  if PATH="$fakebin:$PATH" bash -c '. "$1"; fm_lock_acquire_wait "$2"' _ "$LIB" "$state/.lock" 2>"$err"; then
+    fail "lock acquisition succeeded when native symlink creation was unavailable"
+  fi
+  elapsed=$((SECONDS - start))
+  [ "$elapsed" -lt 2 ] || fail "symlink capability failure entered the lock wait loop"
+  grep -F 'cannot create the symlink lock on this platform; operate read-only until resolved' "$err" >/dev/null \
+    || fail "symlink capability failure did not report read-only guidance"
+
+  if PATH="$fakebin:$PATH" bash -c '
+    . "$1"
+    mkdir -p "$2"
+    printf "%s\\n" "$$" > "$2/pid"
+    fm_lock_acquire_wait "$2"
+  ' _ "$LIB" "$state/.self-held" 2>"$err"; then
+    fail "self-held lock acquisition succeeded when native symlink creation was unavailable"
+  fi
+  grep -F 'cannot create the symlink lock on this platform; operate read-only until resolved' "$err" >/dev/null \
+    || fail "self-held symlink capability failure did not report read-only guidance"
+  pass "lock acquisition fails loudly when native symlink creation is unavailable"
+
+}
+
 test_msys_pid_identity_uses_proc() {
   local live identity
   case "$(uname)" in
@@ -1167,6 +1201,7 @@ test_singleton_start
 test_pid_identity_is_locale_invariant
 test_proc_pid_identity_ignores_wall_clock_and_detects_pid_reuse
 test_msys_pid_identity_uses_proc
+test_symlink_capability_failure_is_loud
 test_stale_watch_lock_reclaimed
 test_stale_watch_reclaim_publishes_before_clear
 test_live_stale_watch_lock_is_actionable

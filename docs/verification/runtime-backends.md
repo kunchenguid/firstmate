@@ -1648,6 +1648,22 @@ FM_CMUX_CLAUDE_COMPOSER_LIVE=1 bin/fm-test-run.sh tests/fm-cmux-claude-composer-
 That guard still addresses the worker by task selector, so it no longer reaches the typed submit path and is not a current refresh entry point for this guarantee.
 The portable classifier regression is `tests/fm-backend-cmux.test.sh`.
 
+## Session lock on MSYS (Windows)
+
+Firstmate's session lock is claimed by finding the verified-harness process in the caller's process ancestry, and on MSYS that ancestry crosses two process worlds: MSYS `ps` has no `-o` support and cannot see native Windows processes at all, while a forked MSYS child reports an already-dead fork helper as its Windows parent, so neither a pure POSIX walk nor a pure Win32 walk started below the boundary can reach a natively installed harness.
+The session-lock lib therefore walks MSYS's own `ps` table to the topmost MSYS process and falls back to a PowerShell walk of the native chain from there, matching the Windows npm-shim pi shape (`node.exe .../pi-coding-agent/dist/bundle/cli.js`) by its whole package-name path component.
+The lock claim itself is an atomic symlink, and MSYS's default `ln -s` can deep-copy a directory instead of linking it, which previously turned every acquire into a failure and its wait into a hang; `fm_lock_try_create` now requests `winsymlinks:nativestrict` and fails loudly when real links are unavailable.
+
+Verified 2026-09-17 on Windows 11 (MINGW64_NT-10.0-26200, Git Bash, Herdr runtime, Pi installed via npm) with the portable regression and live acquisition:
+
+- Portable regression: `bin/fm-test-run.sh tests/fm-session-lock-ancestry.test.sh` printed `ok` for the five pre-existing identity cases plus the two new Windows cases:
+  - `ok - session-lock: a Windows npm-shim pi session (node.exe pi bundle) is identified and owns its lock`
+  - `ok - session-lock: unrelated Windows node.exe processes stay outside the harness identity`
+  The same run still reports `not ok - a version-named session must claim its home and rewake: expected exit 2, got 0`, the pre-existing MSYS limitation of the end-to-end layer, whose claude-named bash fixtures are invisible to MSYS `ps`; that case is green in the Linux serial lanes and failed identically on this host before the repair (baseline on main, 2026-09-17).
+- Live acquisition inside a real Pi session under Herdr: with `state=$(mktemp -d)` and `FM_STATE_OVERRIDE="$state" bash bin/fm-lock.sh`, the command printed `lock acquired: harness pid 23040`, where 23040 is the live `node.exe` running the pi bundle; `FM_STATE_OVERRIDE="$state" bash bin/fm-lock.sh status` then printed `lock: held by live harness pid 23040`.
+  Before the repair the same command exited 1 with `error: cannot locate harness process in ancestry`; after the ancestry repair but before the symlink repair it hung in the acquire wait, which matches the MSYS symlink custody row the Windows Herdr spike lane measured with `MSYS=winsymlinks:nativestrict`.
+- The wake-queue suite that exercises the same lock helpers completed with 5 `ok` on this MSYS host after the symlink repair, where the same suite on unpatched main never completed because it timed out inside the acquire wait; its one remaining red is the timing-sensitive four-second stall-alert checkpoint, which failed with a different detail on each run and is environmental on this host.
+
 ## Codex App host tools
 
 A reusable Desktop host-tool smoke ran on 2026-07-06 against Codex Desktop bundle version 26.623.101652, build 4674, bundle id `com.openai.codex`.

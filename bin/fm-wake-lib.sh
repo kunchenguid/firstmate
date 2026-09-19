@@ -533,6 +533,21 @@ fm_lock_claim() {
   return 0
 }
 
+# Create symlink <target> <link> with native-link semantics on MSYS. MSYS's
+# default `ln -s` deep-copies a directory instead of linking it, so the atomic
+# symlink claim in fm_lock_try_create would silently become a copy and every
+# lock acquire would fail while its wait loops forever. nativestrict instead
+# makes the claim fail loudly when the platform cannot create real links, and
+# the assignment is ignored on every other platform.
+fm_lock_symlink_unavailable() {
+  printf '%s\n' 'error: cannot create the symlink lock on this platform; operate read-only until resolved' >&2
+  exit 1
+}
+
+fm_ln_symlink() {  # <target> <link>
+  MSYS="${MSYS:+$MSYS }winsymlinks:nativestrict" ln -s "$1" "$2"
+}
+
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   FM_LOCK_OWNER_DIR=
@@ -545,16 +560,23 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
-    if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
-      FM_LOCK_OWNER_DIR=$ownerdir
-      return 0
-    fi
+  if fm_ln_symlink "$ownerdir" "$lockdir" 2>/dev/null; then
     if fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
-      rm -f "$lockdir" 2>/dev/null || true
+      if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
+        FM_LOCK_OWNER_DIR=$ownerdir
+        return 0
+      fi
+      if fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+        rm -f "$lockdir" 2>/dev/null || true
+      fi
+    else
+      fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
     fi
   else
     fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
+    if [ ! -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
+      fm_lock_symlink_unavailable
+    fi
   fi
   fm_lock_discard_owner "$ownerdir"
   return 1
@@ -921,7 +943,6 @@ fm_lock_try_acquire() {
   if fm_lock_try_create "$lockdir"; then
     return 0
   fi
-
   fm_current_pid current || return 1
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
   if [ -n "$pid" ] && [ "$pid" = "$current" ]; then
@@ -950,10 +971,12 @@ fm_lock_try_acquire() {
   fi
 
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  fm_lock_try_acquire "$steal"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
-    return 1
+    return "$rc"
   fi
   steal_owner=${FM_LOCK_OWNER_DIR:-}
 
@@ -1013,8 +1036,11 @@ fm_lock_try_acquire() {
 }
 
 fm_lock_acquire_wait() {
-  local lockdir=$1
-  while ! fm_lock_try_acquire "$lockdir"; do
+  local lockdir=$1 rc
+  while :; do
+    fm_lock_try_acquire "$lockdir"
+    rc=$?
+    [ "$rc" -eq 0 ] && return 0
     sleep 0.1
   done
 }
@@ -1064,7 +1090,6 @@ fm_lock_acquire_wait_bounded() {
   if fm_lock_try_acquire "$lockdir"; then
     return 0
   fi
-
   fm_current_pid caller_pid || return 1
   # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
   if fm_run_timed "$seconds" env \

@@ -31,7 +31,7 @@ document:
 #
 # Keep commands.test absent; the firstmate-coding-guidelines skill owns this policy.
 commands:
-  lint: 'bin/fm-lint.sh'
+  lint: 'bash bin/fm-lint.sh'
 
 # Publish each run's test evidence to the orphan no-mistakes/evidence branch linked from the PR.
 # The evidence is not committed to the feature or default branch.

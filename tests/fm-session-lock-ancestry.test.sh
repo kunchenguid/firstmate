@@ -154,6 +154,8 @@ case "$pid:$field:${FM_TEST_PATH_SHAPE:-hookdir}" in
   810:args=:hookdir) printf '%s\n' '/home/u/.claude/hooks/notify.sh --quiet' ;;
   810:comm=:piprefix) printf '%s\n' '/opt/pipeline/bin/runner' ;;
   810:args=:piprefix) printf '%s\n' '/opt/pipeline/bin/runner --once' ;;
+  810:comm=:posixpi) printf '%s\n' node ;;
+  810:args=:posixpi) printf '%s\n' '/opt/node_modules/pi-coding-agent/dist/bundle/cli.js' ;;
   810:ppid=:*) printf '%s\n' 1 ;;
   *:comm=:*) printf '%s\n' bash ;;
   *:args=:*) printf '%s\n' 'bash /repo/bin/fm-watch-arm.sh' ;;
@@ -166,7 +168,7 @@ SH
   # Identity may be read from an executable path, but only from whole path
   # components: anything merely living under ~/.claude, and any component that
   # merely starts with a harness name, must stay outside the harness identity.
-  for shape in hookdir piprefix; do
+  for shape in hookdir piprefix posixpi; do
     if FM_TEST_PATH_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_ancestry_pid'; then
       fail "$shape: an ordinary script path was treated as a harness process"
     fi
@@ -264,6 +266,85 @@ SH
   lib_eval "$fakebin" 'fm_harness_pid_alive 600' \
     || fail "a live competing version-named session was classified as a dead lock owner"
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
+}
+
+# --- unit layer: the Windows-native walk (MSYS `ps` sees no native process) ----
+
+# Build the MSYS-shaped fixture: `ps` rejects every probe exactly as MSYS
+# does (it has no -o support and cannot see native Windows processes), while a
+# fake powershell serves the Windows-native chain starting at the WINPID it is
+# asked for. FM_TEST_WINDOWS_WALK drives the same walk on non-MSYS CI hosts, and
+# FM_TEST_WIN_START pins the start pid this machine-specific listing owns live.
+install_windows_fixture() {  # <dir>; prints fakebin; chain goes in <dir>/chain
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  cat > "$fakebin/powershell" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -n "${FM_TEST_WIN_CHAIN:-}" ] || exit 1
+awk -v id="${FM_WINPID:-}" '$1 == id { found = 1 } found { print }' "$FM_TEST_WIN_CHAIN"
+exit 0
+SH
+  chmod +x "$fakebin/ps" "$fakebin/powershell"
+  printf '%s\n' "$fakebin"
+}
+
+win_chain_pi() {  # <file>
+  cat > "$1" <<'SH'
+5072	bash.exe	"C:\Program Files\Git\usr\bin\bash.exe" -c <tool-call>
+23288	bash.exe	"C:\Program Files\Git\bin\bash.exe" -c <tool-call>
+23040	node.exe	"C:\nvm4w\nodejs\node.exe" C:\nvm4w\nodejs/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js
+29720	powershell.exe	C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe -NoExit -Command <herdr prompt>
+23444	herdr.exe	"C:\Users\u\AppData\Local\Programs\Herdr\bin\herdr.exe" server
+14100	herdr.exe	herdr.exe server
+SH
+}
+
+test_windows_npm_pi_session_is_identified() {
+  local dir fakebin chain got
+  dir="$TMP_ROOT/windows-pi"
+  chain="$dir/chain"
+  fakebin=$(install_windows_fixture "$dir")
+  win_chain_pi "$chain"
+  mkdir -p "$dir/state"
+  got=$(FM_TEST_WINDOWS_WALK=1 FM_TEST_WIN_START=5072 FM_TEST_WIN_CHAIN="$chain" lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "the Windows-native pi session (node.exe running the pi bundle) was not found in the ancestry"
+  [ "$got" = 23040 ] || fail "Windows ancestry resolved '$got', expected the pi node.exe pid 23040"
+  printf '23040\n' > "$dir/state/.lock"
+  FM_TEST_WINDOWS_WALK=1 FM_TEST_WIN_START=5072 FM_TEST_WIN_CHAIN="$chain" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "the Windows-native session holding the lock did not recognize itself as the owner"
+  FM_TEST_WINDOWS_WALK=1 FM_TEST_WIN_START=5072 FM_TEST_WIN_CHAIN="$chain" lib_eval "$fakebin" 'fm_harness_pid_alive 23040' \
+    || fail "a live Windows-native pi session was not recognized as a harness"
+  FM_TEST_WINDOWS_WALK=1 FM_TEST_WIN_START=5072 FM_TEST_WIN_CHAIN="$chain" lib_eval "$fakebin" 'fm_harness_pid_alive 29720' \
+    && fail "a Windows powershell parent was mistaken for a harness"
+  pass "session-lock: a Windows npm-shim pi session (node.exe pi bundle) is identified and owns its lock"
+}
+
+# Non-vacuity for the Windows shape: the package-name component rule must not
+# claim an unrelated node server, and a component that merely starts with the
+# package name (pi-coding-agentx) must stay outside the harness identity.
+test_windows_unrelated_processes_are_never_harnesses() {
+  local dir fakebin chain
+  dir="$TMP_ROOT/windows-unrelated"
+  chain="$dir/chain"
+  fakebin=$(install_windows_fixture "$dir")
+  cat > "$chain" <<'SH'
+5072	bash.exe	"C:\Program Files\Git\usr\bin\bash.exe" -c <tool-call>
+23040	node.exe	"C:\node\node.exe" C:\apps\api-server\pi-coding-agentx\server.js
+29720	cmd.exe	C:\WINDOWS\system32\cmd.exe
+SH
+  mkdir -p "$dir/state"
+  if FM_TEST_WINDOWS_WALK=1 FM_TEST_WIN_START=5072 FM_TEST_WIN_CHAIN="$chain" lib_eval "$fakebin" 'fm_harness_ancestry_pid' >/dev/null 2>&1; then
+    fail "a Windows node.exe running an unrelated server was treated as a harness"
+  fi
+  if FM_TEST_WINDOWS_WALK=1 FM_TEST_WIN_START=5072 FM_TEST_WIN_CHAIN="$chain" lib_eval "$fakebin" 'fm_harness_pid_alive 23040'; then
+    fail "an unrelated Windows node.exe passed the harness-liveness predicate"
+  fi
+  pass "session-lock: unrelated Windows node.exe processes stay outside the harness identity"
 }
 
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
@@ -409,6 +490,20 @@ test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
-test_e2e_version_named_session_claims_the_home
-test_e2e_daemon_parented_session_claims_the_home
-test_e2e_daemon_parented_version_named_session_keeps_its_lock
+test_windows_npm_pi_session_is_identified
+test_windows_unrelated_processes_are_never_harnesses
+
+# MSYS `ps` cannot report -o comm/args/ppid, so these real POSIX process-tree
+# fixtures cannot exercise the POSIX walk on Windows. The deterministic unit
+# cases above cover the same identity rules; the end-to-end cases run on the
+# POSIX CI lanes where their process table is available.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "skip: POSIX ancestry E2E unavailable under MSYS"
+    ;;
+  *)
+    test_e2e_version_named_session_claims_the_home
+    test_e2e_daemon_parented_session_claims_the_home
+    test_e2e_daemon_parented_version_named_session_keeps_its_lock
+    ;;
+esac
