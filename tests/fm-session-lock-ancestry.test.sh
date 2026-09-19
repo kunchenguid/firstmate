@@ -94,6 +94,72 @@ SH
   pass "session-lock: a version-named Claude Code session is identified from its install path and argv[0]"
 }
 
+# The Claude desktop app launches Code sessions through its own version-named
+# executable under ~/.claude/remote/ccd-cli/<version>; no path component is a
+# harness name, so before this the app primary always refused the fleet lock.
+test_desktop_app_ccd_cli_session_is_identified() {
+  local dir fakebin got
+  dir="$TMP_ROOT/ccd-cli"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  750:comm=) printf '%s\n' '2.1.275' ;;
+  750:args=) printf '%s\n' '/root/.claude/remote/ccd-cli/2.1.275 --output-format stream-json --verbose' ;;
+  750:ppid=) printf '%s\n' 760 ;;
+  760:comm=) printf '%s\n' server ;;
+  760:args=) printf '%s\n' '/root/.claude/remote/srv/abc/server --serve' ;;
+  760:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-claude-stop-autoarm.sh' ;;
+  *:ppid=) printf '%s\n' 750 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '750\n' > "$dir/state/.lock"
+  got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "ccd-cli: the desktop-app session was not found in the ancestry at all"
+  [ "$got" = 750 ] || fail "ccd-cli: ancestry resolved '$got', expected the app session pid 750"
+  lib_eval "$fakebin" 'fm_harness_pid_alive 750' \
+    || fail "ccd-cli: a live desktop-app session was not recognized as a harness"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "ccd-cli: the app session holding the lock did not recognize itself as the owner"
+  # A hook script that merely lives under ~/.claude must still not match.
+  lib_eval "$fakebin" '! fm_harness_path_name /root/.claude/hooks/notify.sh >/dev/null' \
+    || fail "ccd-cli: a ~/.claude hook path was wrongly identified as a harness"
+  for decoy in \
+      /tmp/ccd-cli/1.2 \
+      /tmp/ccd-cli/1.2evil \
+      /tmp/ccd-cli/1/evil.2 \
+      /tmp/x/ccd-cli/1.2/other \
+      /root/.claude/remote/ccd-cli/2.1.275/extra \
+      /root/.claude/remote/ccd-cli/2.1.275-beta \
+      /root/.claude/remote/ccd-cli/2.1. \
+      /root/.claude/remote/ccd-cli/.2.1 \
+      /root/.claude/remote/ccd-cli/...; do
+    lib_eval "$fakebin" "! fm_harness_path_name '$decoy' >/dev/null" \
+      || fail "ccd-cli: decoy path '$decoy' was wrongly identified as a harness"
+  done
+  # Version numbering is not capped at one digit per component: a two-digit
+  # minor and a three-digit major are ordinary future releases of the same
+  # install tree and must keep identifying the app.
+  for version in 2.1.275 2.10.0 12.10.4 100.1.1; do
+    lib_eval "$fakebin" "fm_harness_path_name /root/.claude/remote/ccd-cli/$version >/dev/null" \
+      || fail "ccd-cli: app binary path for version '$version' was not identified"
+  done
+  pass "session-lock: a Claude desktop-app (ccd-cli) session is identified from its install path"
+}
+
 # A harness that is pid 1 of its own PID namespace - a container, or the
 # `codex sandbox` this shape was verified in - used to be invisible: the walk
 # stopped as soon as the NEXT pid was 1, so the one process that identifies the
@@ -1092,6 +1158,7 @@ test_verified_reclaim_keeps_new_sidecar() {
 }
 
 test_version_named_session_is_identified_on_both_platforms
+test_desktop_app_ccd_cli_session_is_identified
 test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock

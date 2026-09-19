@@ -33,12 +33,13 @@ FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
 FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp)
 
 # Print the exact harness name carried by executable path $1 - its own basename
-# or any directory component - or return 1.
+# or any directory component - or return 1. One named install tree that carries
+# no such component is recognized structurally instead; see below.
 #
 # This exists because Claude Code's native installer names the per-session
 # executable by its version (~/.local/share/claude/versions/2.1.220), so the
 # basename identifies nothing while the install path still says claude. Matching
-# whole path components only is what keeps that widening safe: an ordinary path
+# whole path components is what keeps that widening safe: an ordinary path
 # such as bin/fm-claude-stop-autoarm.sh or ~/.claude/hooks/notify.sh has no
 # "claude" component and is correctly not a harness process.
 fm_harness_path_name() {  # <path>
@@ -49,6 +50,27 @@ fm_harness_path_name() {  # <path>
       */"$name"/*) printf '%s' "$name"; return 0 ;;
     esac
   done
+  # The Claude desktop app (Code tab) runs its own version-named executable
+  # under ~/.claude/remote/ccd-cli/<version>. No component of that path is a
+  # harness name (".claude" is deliberately not one, see above), so a primary
+  # started from the app could never locate itself and every session start
+  # refused the fleet lock as read-only. Match only that install tree: the
+  # parent directory must end in /.claude/remote/ccd-cli and the basename must
+  # be a version of digits and dots only, first and last character a digit, so
+  # every released numbering (2.1.275, 2.10.0, 100.1.1) matches. A bare
+  # "ccd-cli" component elsewhere, extra path after the version, or a basename
+  # carrying any other character is not a harness.
+  local dir base
+  dir=${path%/*}
+  base=${path##*/}
+  case "$dir" in
+    */.claude/remote/ccd-cli)
+      case "$base" in
+        *[!0-9.]*) ;;
+        [0-9]|[0-9]*[0-9]) printf '%s' claude; return 0 ;;
+      esac
+      ;;
+  esac
   return 1
 }
 
