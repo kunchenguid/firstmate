@@ -1095,6 +1095,28 @@ test_cursor_session_binding_is_retired_on_a_harness_switch() {
 
 # --- 3 and 4. refusals before the agent is touched ---------------------------
 
+test_spawn_relaunch_refuses_a_slot_claimed_by_another_task() {
+  local dir out rc
+  dir=$(new_case reclaimed rl22)
+  add_ship_task "$dir" rl22 claude
+  printf 'zsh' > "$dir/fake/command"
+  printf 'task=other-task\nhome=%s\n' "$dir/home" > "$dir/.fm-slot-owner"
+  out=$(run_spawn "$dir" rl22 --relaunch); rc=$?
+  expect_code 1 "$rc" "a relaunch into a slot claimed by another task should refuse"
+  assert_contains "$out" "reassigned to task other-task" "the refusal should name the slot's claimant"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must send nothing to the endpoint"
+  rm -f "$dir/.fm-slot-owner"
+  printf 'slot_reassigned_to=other-task\n' >> "$dir/home/state/rl22.meta"
+  out=$(run_spawn "$dir" rl22 --relaunch); rc=$?
+  expect_code 1 "$rc" "a relaunch into a slot a claimant's teardown already returned should refuse"
+  assert_contains "$out" "reassigned to task other-task" "the refusal should name the claimant from the record's mark"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a refused relaunch must send nothing to the endpoint"
+  printf 'task=rl22\nhome=%s\n' "$dir/home" > "$dir/.fm-slot-owner"
+  out=$(run_spawn "$dir" rl22 --relaunch)
+  assert_contains "$out" "spawned rl22 harness=claude" "a relaunch into its own claimed slot should proceed"
+  pass "fm-spawn --relaunch: refuses a pool slot another task has claimed since, proceeds on its own claim"
+}
+
 test_missing_worktree_refuses_before_stopping_anything() {
   local dir out rc
   dir=$(new_case nowt rl10)
@@ -1707,6 +1729,7 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_spawn_relaunch_refuses_a_slot_claimed_by_another_task
 test_promoted_scout_relaunch_receives_the_current_delivery_contract
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
