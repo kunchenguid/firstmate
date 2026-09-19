@@ -1912,15 +1912,17 @@ captain_call_stale_bound() {  # <window-key> <task>
 # the first sight still alarms - a delivery the captain has not seen yet is the
 # one alarm that must never be swallowed - repeat sightings inside
 # PAUSE_RESURFACE_SECS are absorbed, and the window's end re-surfaces it once, so
-# a delivery nobody merged cannot rot invisibly. While the away-posture record
-# exists there is nobody to give the merge word, so the bound is absolute there
-# exactly as it is for a captain call.
+# a delivery nobody merged cannot rot invisibly. That cadence is kept under the
+# away posture too, unlike a captain call: a call is made absolute there because
+# its backlog hold row reappears in the return brief, so the recheck is owed in
+# full on return whatever the watcher skipped. This population is defined by
+# having NO hold, and fm-afk-return.sh lists it in no section, so an absolute
+# absorb here would be the only record of the delivery going quiet.
 terminal_done_stale_bound() {  # <window-key> <task>
   local key=$1 task=$2
   STALE_WAIT_DECLARATION=
   crew_is_terminal_done "$task" || return 1
   STALE_WAIT_DECLARATION=$(terminal_done_declaration "$task")
-  afk_record_present && return 0
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 

@@ -6696,6 +6696,50 @@ test_backlog_hold_never_rechecked_while_away_record_exists() {
   pass "a delivery the captain already holds is never rechecked while the away-posture record exists"
 }
 
+# The boundary of that away silence. A HELD delivery may go absolutely quiet
+# because bin/fm-afk-return.sh reprints its backlog hold row under "Waiting on
+# you", so the recheck is owed in full on return. A delivery bounded only by its
+# reconciled terminal-done state has no hold row and appears in no section of
+# that brief, so the away record must not silence it outright: it keeps the
+# ordinary re-surface cadence, alarming on first sight and again once the window
+# elapses, which is the only record that the delivery is still unmerged.
+test_terminal_delivery_keeps_its_cadence_under_the_away_record() {
+  local dir state out capture throttle wakes
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (away-record terminal delivery)"; return 0; }
+  HOLD_CREW_STATE='state: done · source: run-step · checks green'
+  export HOLD_CREW_STATE
+  dir=$(make_hold_home away-record-terminal-delivery 'done: PR https://example.test/pr/11 checks green' nohold) \
+    || fail "could not build an unheld delivered-work fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  throttle="$state/.paused-resurfaced-$(hold_key)"
+  write_away_record "$state"
+
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+    || fail "first sight of an unheld delivery did not surface under the away-posture record"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] \
+    || fail "the away-posture record swallowed the first sight of an unheld delivery ($wakes wakes)"
+  [ -e "$throttle" ] \
+    || fail "the away-posture first sight armed no re-surface cadence, so the next hash would alarm again"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the away-posture first surface"
+
+  hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 2 \
+    || fail "watcher exited while churning an unheld delivery under the away-posture record: $(cat "$out")"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 0 ] \
+    || fail "pane churn re-alarmed an away-window delivery $wakes time(s) inside its re-surface window"
+
+  set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 9s' \
+    || fail "an unmerged delivery did not re-surface once its window elapsed under the away-posture record"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] \
+    || fail "the elapsed away-window re-surface produced $wakes wakes instead of one"
+  unset HOLD_CREW_STATE
+  pass "a delivery bounded only by its terminal-done state keeps the ordinary re-surface cadence while the away-posture record exists"
+}
+
 test_afk_one_shot_never_hands_off_captain_held_under_away_record() {
   local dir state fakebin out capture_file statusf window key sig pid
   dir=$(make_case away-record-held-afk-oneshot); state="$dir/state"; fakebin="$dir/fakebin"
@@ -6953,6 +6997,7 @@ test_afk_paused_changed_pane_hands_off_plain_stale
 test_captain_held_never_rechecked_while_away_record_exists
 test_live_captain_held_first_sight_silenced_by_away_record
 test_backlog_hold_never_rechecked_while_away_record_exists
+test_terminal_delivery_keeps_its_cadence_under_the_away_record
 test_afk_one_shot_never_hands_off_captain_held_under_away_record
 test_captain_held_rechecked_under_a_quiet_record
 test_paused_until_near_future_is_quiet_before_the_cadence
