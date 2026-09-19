@@ -374,6 +374,53 @@ test_routine_working_and_covered_done_stay_silent_on_the_empty_queue() {
   pass "routine working and branch-covered done lines print nothing on an empty-queue drain"
 }
 
+test_dod_states_are_distinct_in_generated_brief_and_drain_annotations() {
+  local dir state home brief out legacy_handoff legacy_terminal new_handoff new_terminal
+  dir=$(make_case dod-state-evidence)
+  state="$dir/state"
+  home="$dir/brief-home"
+  brief="$home/data/dod-state-evidence/brief.md"
+  out="$dir/drain.out"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" dod-state-evidence evidence-proj --mode no-mistakes >/dev/null 2>&1 \
+    || fail "no-mistakes brief generation failed for state evidence"
+
+  legacy_handoff='done: implementation committed'
+  legacy_terminal='done: PR https://example.test/pr/7 checks green'
+  new_handoff='needs-validation: implementation committed'
+  new_terminal='done: PR https://example.test/pr/7 checks green'
+  printf '%s\n' "$legacy_handoff" > "$state/legacy-handoff.status"
+  printf '%s\n' "$legacy_terminal" > "$state/legacy-terminal.status"
+  printf '%s\n' "$new_handoff" > "$state/new-handoff.status"
+  printf '%s\n' "$new_terminal" > "$state/new-terminal.status"
+  append_wake "$state" signal legacy-handoff.status "signal: legacy-handoff.status" \
+    || fail "legacy handoff signal queueing failed"
+  append_wake "$state" signal legacy-terminal.status "signal: legacy-terminal.status" \
+    || fail "legacy terminal signal queueing failed"
+  append_wake "$state" signal new-handoff.status "signal: new-handoff.status" \
+    || fail "new handoff signal queueing failed"
+  append_wake "$state" signal new-terminal.status "signal: new-terminal.status" \
+    || fail "new terminal signal queueing failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed for before/after state evidence"
+
+  assert_grep "append \`needs-validation: {summary}\` to the status file and stop." "$brief" \
+    "generated brief did not emit the non-terminal handoff"
+  assert_grep "append \`done: PR {url} checks green\` and stop. You are finished." "$brief" \
+    "generated brief did not emit terminal completion"
+  assert_grep 'legacy-handoff.status: done: implementation committed' "$out" \
+    "drain did not expose the legacy handoff form"
+  assert_grep 'legacy-terminal.status: done: PR https://example.test/pr/7 checks green' "$out" \
+    "drain did not expose the legacy terminal form"
+  assert_grep 'new-handoff.status: needs-validation: implementation committed' "$out" \
+    "drain did not expose the mechanically distinct handoff form"
+  assert_grep 'new-terminal.status: done: PR https://example.test/pr/7 checks green' "$out" \
+    "drain did not expose the terminal completion form"
+  printf 'before | implementation handoff: %s | terminal completion: %s\n' "$legacy_handoff" "$legacy_terminal"
+  printf 'after  | implementation handoff: %s | terminal completion: %s\n' "$new_handoff" "$new_terminal"
+  pass "generated brief and drain annotations expose distinct before/after done states"
+}
+
 test_incident_note_answer_buried_under_routine_note_surfaces_both
 test_already_presented_notes_are_not_replayed
 test_brand_new_note_after_presentation_is_surfaced
@@ -386,4 +433,5 @@ test_weak_identity_still_presents_and_advances
 test_snapshot_failure_is_visible
 test_open_decisions_fold_is_unchanged
 test_empty_queue_does_not_swallow_later_signal_annotation
+test_dod_states_are_distinct_in_generated_brief_and_drain_annotations
 test_routine_working_and_covered_done_stay_silent_on_the_empty_queue

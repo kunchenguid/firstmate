@@ -192,6 +192,8 @@ test_status_span_actionable_classifier() {
   status_span_has_actionable "$state/d.status" 0 || fail "a failed: line was not actionable"
   printf 'merged\n' > "$state/e.status"
   status_span_has_actionable "$state/e.status" 0 || fail "a legacy merged line was not actionable"
+  printf 'needs-validation: implementation committed\n' > "$state/f.status"
+  status_span_has_actionable "$state/f.status" 0 || fail "a needs-validation: handoff was not actionable"
   # An offset past the whole log has nothing left to classify: an event already
   # classified must not re-fire on the next append.
   offset=$(size_of "$state/b.status")
@@ -300,6 +302,10 @@ test_stale_is_terminal_classifier() {
   fm_write_meta "$state/herdr-term.meta" "window=default:w1:p2" "backend=herdr"
   printf 'done: ready in branch fm/herdr\n' > "$state/herdr-term.status"
   stale_is_terminal "default:w1:p2" "$state" || fail "terminal herdr stale status not resolved through metadata"
+  printf 'needs-validation: implementation committed\n' > "$state/handoff.status"
+  stale_is_terminal "sess:fm-handoff" "$state" || fail "non-terminal validation handoff not classified actionable"
+  status_is_terminal_verb "$(last_status_line "$state/handoff.status")" \
+    && fail "actionable validation handoff was classified terminal"
   printf 'working: compiling\n' > "$state/nonterm.status"
   stale_is_terminal "sess:fm-nonterm" "$state" && fail "non-terminal stale classified terminal"
   printf 'paused: waiting on upstream PR #123 to land\nOnce it is merged I will rebase and continue.\n' > "$state/prose-pause.status"
@@ -307,11 +313,11 @@ test_stale_is_terminal_classifier() {
   status_is_paused_or_captain_held "$(last_status_line "$state/prose-pause.status")" \
     || fail "prose mentioning a legacy token hid a multi-line pause from the wait cadence"
   stale_is_terminal "sess:fm-missing" "$state" && fail "stale with no status classified terminal"
-  pass "stale_is_terminal: terminal status surfaces, non-terminal and no-status are benign"
+  pass "stale_is_terminal treats needs-validation as actionable but non-terminal"
 }
 
 test_classifier_primitives() {
-  local dir state open activity
+  local dir state open activity legacy_captain_re
   dir=$(make_case classify-primitives); state="$dir/state"
   printf 'working: a\n\ndone: b\n\n' > "$state/x.status"
   [ "$(last_status_line "$state/x.status")" = "done: b" ] || fail "last_status_line did not return the last non-blank line"
@@ -322,6 +328,12 @@ test_classifier_primitives() {
   [ "$(last_status_line "$state/x.status")" = merged ] || fail "legacy free-text status was lost"
   status_is_captain_relevant "done: b" || fail "done: not recognized as captain-relevant"
   status_is_captain_relevant "needs-decision [key=q1]: b" || fail "keyed needs-decision not recognized as captain-relevant"
+  status_is_captain_relevant "needs-validation: implementation committed" \
+    || fail "needs-validation: handoff not recognized as captain-relevant"
+  status_is_validation_handoff "needs-validation: implementation committed" \
+    || fail "needs-validation: handoff verb not recognized"
+  status_is_terminal_verb "needs-validation: implementation committed" \
+    && fail "needs-validation: implementation handoff was classed as terminal"
   status_is_captain_relevant "working: b" && fail "working: wrongly recognized as captain-relevant"
   # Incident regression: free-text "merged" inside a nonterminal working: line must
   # not become captain-relevant (AFK false-terminal path).
@@ -336,6 +348,8 @@ test_classifier_primitives() {
     || fail "genuine done: checks green not captain-relevant"
   status_is_terminal_verb "done: PR https://x/pull/76 checks green" \
     || fail "done: not a terminal verb"
+  status_is_validation_handoff "done: PR https://x/pull/76 checks green" \
+    && fail "terminal done: PR event was classed as an implementation handoff"
   status_is_terminal_verb "working: rebased onto merged #76" \
     && fail "working: wrongly classed as terminal verb"
   status_is_captain_relevant "merged" || fail "legacy bare merged free-text not captain-relevant"
@@ -346,6 +360,12 @@ test_classifier_primitives() {
   [ "$(window_to_task "default:w1:p2" "$state")" = "herdr-task" ] || fail "window_to_task did not resolve opaque backend target through metadata"
   FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "custom-verb: x" || fail "FM_CAPTAIN_RE override not honored"
   FM_CAPTAIN_RE='custom-verb:' status_is_captain_relevant "done: x" && fail "FM_CAPTAIN_RE override did not replace the default verb set"
+  legacy_captain_re='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'
+  FM_CAPTAIN_RE="$legacy_captain_re" status_is_captain_relevant "needs-validation: implementation committed" \
+    || fail "a legacy FM_CAPTAIN_RE override suppressed the required validation handoff"
+  FM_CLASSIFY_NEEDS_VALIDATION_VERB=validate-next FM_CAPTAIN_RE="$legacy_captain_re" \
+    status_is_captain_relevant "validate-next: implementation committed" \
+    || fail "the overridden validation handoff verb was suppressed by FM_CAPTAIN_RE"
   FM_CAPTAIN_RE='merged|custom-verb:' status_is_captain_relevant "working: rebased onto merged #76" \
     && fail "FM_CAPTAIN_RE override bypassed working: suppression"
   FM_CAPTAIN_RE='checks green|custom-verb:' status_is_captain_relevant "paused: checks green pending approval" \
@@ -369,6 +389,8 @@ resolved [key=phase7]: Phase 7 completed and moved to Done
 paused [key=legal]: awaiting external counsel
 resolved [key=legal]: legal item returned to the queue
 working [key=phase8]: Phase 8 started
+working [key=phase9]: Phase 9 implementation
+needs-validation [key=phase9]: Phase 9 committed
 EOF
   activity=$(status_open_activities "$state/activity.status")
   printf '%s' "$activity" | grep -F $'phase8\tworking\tPhase 8 started' >/dev/null \
@@ -379,6 +401,8 @@ EOF
     && fail "a same-key terminal event did not supersede the older working phase"
   printf '%s' "$activity" | grep -F $'legal\t' >/dev/null \
     && fail "a keyed resolved event did not close the declared pause"
+  printf '%s' "$activity" | grep -F $'phase9\t' >/dev/null \
+    && fail "a keyed needs-validation handoff did not close the implementation activity"
   printf 'working: legacy start\ndone: legacy completion\n' > "$state/legacy-activity.status"
   [ -z "$(status_open_activities "$state/legacy-activity.status")" ] \
     || fail "a legacy terminal event did not supersede the default working phase"
@@ -1904,7 +1928,7 @@ test_stale_terminal_status_overridden_by_active_run() {
   # The crew reported done BEFORE firstmate triggered no-mistakes validation;
   # this line never gets superseded by a newer status-log entry while the
   # pipeline itself runs.
-  printf 'done: implementation complete, ready to validate\n' > "$state/validating.status"
+  printf 'needs-validation: implementation complete and committed\n' > "$state/validating.status"
   sig=$(seen_sig "$state/validating.status"); printf '%s' "$sig" > "$state/.seen-validating_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "no-mistakes axi run: validating...")
@@ -4531,7 +4555,7 @@ test_terminal_first_sight_drops_a_finished_write_deferral_chain() {
   mkdir -p "$wt/src"
   printf 'no-mistakes axi run: validating...' > "$capture_file"
   printf 'window=%s\nkind=ship\nworktree=%s\n' "$window" "$wt" > "$state/chain-first.meta"
-  printf 'done: implementation complete, ready to validate\n' > "$state/chain-first.status"
+  printf 'needs-validation: implementation complete and committed\n' > "$state/chain-first.status"
   sig=$(seen_sig "$state/chain-first.status"); printf '%s' "$sig" > "$state/.seen-chain-first_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   pane_hash=$(hash_text "no-mistakes axi run: validating...")

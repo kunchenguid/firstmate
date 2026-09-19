@@ -2,7 +2,7 @@
 # fm-crew-state.sh - deterministic read of a crew's CURRENT state.
 #
 # Why this exists: state/<id>.status is an append-only, best-effort EVENT LOG.
-# Crews append only wake-worthy transitions (done/needs-decision/blocked/paused/failed)
+# Crews append only wake-worthy transitions (needs-validation/done/needs-decision/blocked/paused/failed)
 # and nothing when they silently resume, so `tail -1` of that log reports the
 # last EVENT, not the current STATE. After firstmate resolves a needs-decision
 # or blocked and the crew resumes (responds to the gate, the pipeline fixes, it
@@ -183,6 +183,10 @@ fi
 map_log_state() {  # <line>
   if status_is_paused "$1"; then
     echo paused
+    return
+  fi
+  if status_is_validation_handoff "$1"; then
+    echo parked
     return
   fi
   case "$(status_line_verb "$1")" in
@@ -906,7 +910,8 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
-  # Reconcile the status log. A needs-decision/blocked log line that the run-step
+  # Reconcile the status log. A needs-validation handoff is superseded by any
+  # attributed validation run. A needs-decision/blocked log line that the run-step
   # has moved past (anything but a genuinely parked run) is deterministically
   # stale: the gate resolved and the run resumed or finished.
   #
@@ -922,6 +927,9 @@ if [ "$HAVE_RUN" = 1 ]; then
   # reports recent activity; the answer is then to steer the crew to reattach
   # without touching the shared daemon.
   case "$LOG_VERB" in
+    "${FM_CLASSIFY_NEEDS_VALIDATION_VERB:-$FM_CLASSIFY_NEEDS_VALIDATION_VERB_DEFAULT}")
+      RUN_DETAIL="$RUN_DETAIL${SEP}status-log superseded by validation run"
+      ;;
     needs-decision|blocked)
       LOG_LATEST=$(last_status_line "$LOG")
       if [ "$LOG_VERB" = blocked ] \

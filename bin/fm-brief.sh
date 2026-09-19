@@ -95,6 +95,7 @@ esac
 # shellcheck source=bin/fm-dod-lib.sh
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+NEEDS_VALIDATION_VERB=${FM_CLASSIFY_NEEDS_VALIDATION_VERB:-$FM_CLASSIFY_NEEDS_VALIDATION_VERB_DEFAULT}
 CREWMATE_PAUSE_WAIT_EXAMPLES='an upstream release, a rate-limit reset, a scheduled window, or your own validation round'
 
 resolve_directory_input() {
@@ -433,6 +434,7 @@ fi
 # which bin/fm-promote.sh renders too so a promoted scout receives the same contract.
 # The block opens with the fixed "Delivery contract: mode=<mode>" line that
 # bin/fm-spawn.sh checks against its own explicit --mode before launching.
+STATUS_STATES="working, needs-decision, blocked, $PAUSED_VERB, done, failed"
 case "$MODE" in
   direct-PR)
     SETUP2=""
@@ -441,6 +443,7 @@ case "$MODE" in
     SETUP2=""
     ;;
   *)  # no-mistakes
+    STATUS_STATES="working, $NEEDS_VALIDATION_VERB, needs-decision, blocked, $PAUSED_VERB, done, failed"
     SETUP2="
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     ;;
@@ -470,7 +473,7 @@ $RULE1
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
    \`echo "{state}: {one short line}" >> $STATUS_FILE\`
-   States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+   States: $STATUS_STATES.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
    needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
@@ -479,7 +482,7 @@ $RULE1
    https:// URL exactly as the forge printed it, never a bare number such as "PR 108"; firstmate
    copies that URL from your line rather than assembling one.
    A mid-task \`working:\` line (including setup complete) is nonterminal: do not end the
-   turn after it; continue the same stage until a defined \`done:\` gate under Definition of done.
+   turn after it; continue the same stage until a stop/report gate defined under Definition of done.
    Use \`$PAUSED_VERB: {why}\` - distinct from \`blocked:\` - ONLY when you are deliberately idling on a
    known external wait you expect to clear on its own ($CREWMATE_PAUSE_WAIT_EXAMPLES):
    firstmate then leaves your idle pane alone and rechecks it on a long
