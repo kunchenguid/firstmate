@@ -383,9 +383,10 @@ test_resolve_reply_breaks_a_same_second_tie_by_actual_send_order() {
   printf 'second reason\n' > "$home/reason-aaa.txt"
   run_notify "$home" register aaa-notify-tie --reason-file "$home/reason-aaa.txt" >/dev/null \
     || fail "register aaa-notify-tie failed"
-  grep -q '^sent_at=1700000000$' "$home/state/hermes-notify/zzz-notify-tie.record" \
-    && grep -q '^sent_at=1700000000$' "$home/state/hermes-notify/aaa-notify-tie.record" \
-    || fail "the fixture did not actually force both sends into the same wall-clock second"
+  if ! grep -q '^sent_at=1700000000$' "$home/state/hermes-notify/zzz-notify-tie.record" \
+    || ! grep -q '^sent_at=1700000000$' "$home/state/hermes-notify/aaa-notify-tie.record"; then
+    fail "the fixture did not actually force both sends into the same wall-clock second"
+  fi
   run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] confirmed"
   note_file=$(latest_note "$home") || fail "no inbox note was written"
   tsv=$(run_notify "$home" resolve-reply "$note_file") \
