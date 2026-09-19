@@ -13,8 +13,11 @@
 # A fake tmux (window ops are logged to FM_FAKE_TMUX_LOG, list-windows returns
 # FM_FAKE_TMUX_WINDOW, capture-pane echoes FM_FAKE_TMUX_CAPTURE) plus a fake
 # treehouse (durable lease of FM_FAKE_TREEHOUSE_HOME, recording the lease holder
-# to FM_FAKE_TREEHOUSE_LEASE_FILE; `return` removes the target and lease unless
-# FM_FAKE_TREEHOUSE_RETURN_FAIL is set). Echoes the fakebin dir.
+# to FM_FAKE_TREEHOUSE_LEASE_FILE and the resolved --root to
+# FM_FAKE_TREEHOUSE_ROOT_FILE; `return` removes the target and lease unless
+# FM_FAKE_TREEHOUSE_RETURN_FAIL is set). Like the real CLI, --root is a GLOBAL
+# flag accepted before the subcommand, so the stub consumes it first rather than
+# reading the subcommand out of $1 unconditionally. Echoes the fakebin dir.
 make_fake_tmux() {
   local dir=$1 fakebin capture
   fakebin=$(fm_fakebin "$dir")
@@ -72,6 +75,17 @@ SH
 #!/usr/bin/env bash
 set -u
 printf 'treehouse %s\n' "$*" >> "${FM_FAKE_TMUX_LOG:-/dev/null}"
+root=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --root) shift; root=${1:-} ;;
+    --root=*) root=${1#--root=} ;;
+    *) break ;;
+  esac
+  shift
+done
+[ -z "$root" ] || [ -z "${FM_FAKE_TREEHOUSE_ROOT_FILE:-}" ] \
+  || printf '%s\n' "$root" > "$FM_FAKE_TREEHOUSE_ROOT_FILE"
 case "${1:-}" in
   get)
     # Durable lease: print only the worktree path to stdout (banners to stderr),
