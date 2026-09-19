@@ -54,7 +54,10 @@
 #                older claude). The bottom border may carry a TITLE (grok
 #                writes its model name there); a titled bottom border that
 #                still starts and ends with the family's rule glyph is
-#                tolerated, including Grok 1.0.5's three-column title overhang.
+#                tolerated, including Grok 1.0.5's three-column title overhang
+#                and Grok 1.0.34's same-width `Grok <model> (<effort>) ·
+#                always-approve` title (U+00B7 is title punctuation, not a
+#                geometry break).
 #   bare       - an agent prompt glyph row with no border at all (claude `❯`,
 #                codex `›`, muse `⟩`, cursor `→`). The agent glyph is itself the container
 #                proof; a bare SHELL glyph (`>` `$` `%` `#`) never is.
@@ -494,9 +497,12 @@ FM_COMPOSER_PI_MAX_LINES=${FM_COMPOSER_PI_MAX_LINES:-8}
 
 # Column overhang of Grok 1.0.5's titled bottom border over its aligned top
 # and content rows, captured live in issue #3436's 2026-09-14 idle repro
-# (see docs/verification/runtime-backends.md). Not re-verified against a live
-# Grok install since; may need to change if a future Grok release renders a
-# different overhang or scales it with title/model-name length.
+# (see docs/verification/runtime-backends.md). Grok 1.0.34's idle composer
+# is same-width and does not use this overhang; its title adds a U+00B7
+# autonomy suffix that _fm_composer_titled_bottom_ok maps as title
+# punctuation. The overhang constant may still need to change if a future
+# Grok release renders a different extra width or scales it with title
+# length.
 FM_COMPOSER_GROK_TITLE_OVERHANG=3
 
 # 0 when <content> is exactly one glyph drawn from <glyph-list>.
@@ -917,6 +923,12 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
     *) return 1 ;;
   esac
   spaces=${inner//"$dash"/ }
+  # Grok 1.0.34 embeds `Grok 4.5 (high) · always-approve` in a same-width
+  # bottom rule. U+00B7 MIDDLE DOT is title punctuation, not a geometry
+  # break: map it to a space before the ASCII-printable fold so a proven
+  # same-width title still matches the top rule. An unrecognized extra
+  # column still fails below.
+  spaces=${spaces//·/ }
   spaces=$(printf '%s' "$spaces" | LC_ALL=C sed 's/[!-~]/ /g')
   case "$spaces" in
     *[![:space:]]*) return 1 ;;
@@ -934,6 +946,13 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
   [ "$spaces" = "$expected$overhang" ] || return 1
   title=${inner//"$dash"/}
   fm_composer_normalize_trim_var title
+  # A later Grok autonomy suffix (` · always-approve`) sits after the
+  # model/effort title. Strip at the first middle-dot separator so the
+  # overhang path still recognises the typed Grok title when the bottom is
+  # again wider than the top.
+  case "$title" in
+    *' · '*) title=${title%% · *} ;;
+  esac
   case "$title" in
     'Grok '*\ \(low\)) effort=low ;;
     'Grok '*\ \(medium\)) effort=medium ;;

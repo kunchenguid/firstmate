@@ -543,6 +543,32 @@ test_matrix_grok_titled_bottom_border() {
   assert_screen "grok typed on herdr" pending "$CAPS_STYLED" "$typed"
   malformed=$'  ╭──────────────────────────────────────────────────────────────────────────╮\n  │ ❯                                                                        │\n  ╰────────────────────────────────────────────────────────── unknown surface ─╯'
   assert_screen "oversized unknown title on herdr" unknown "$CAPS_STYLED" "$malformed"
+  # Grok 1.0.34 (live 2026-09-19): same-width titled bottom carrying
+  # `Grok 4.5 (high) · always-approve`. The middle-dot autonomy suffix used
+  # to leave a non-space residue after the ASCII-only title fold, so a
+  # complete idle box read unknown on every backend. The dim `Type a
+  # message...` placeholder is Grok 1.0.34's real ghost (SGR-2, not the
+  # older dark-truecolor rendering).
+  local grok34_blank grok34_idle grok34_ghost grok34_typed grok34_overhang
+  grok34_blank=$'╭────────────────────────────────────────────────────────────╮\n│ ❯                                                          │\n╰───────────────────────── Grok 4.5 (high) · always-approve ─╯'
+  grok34_idle=$'╭────────────────────────────────────────────────────────────╮\n│ ❯ Type a message...                                        │\n╰───────────────────────── Grok 4.5 (high) · always-approve ─╯'
+  grok34_ghost=$(printf '%s\n' \
+    '╭────────────────────────────────────────────────────────────╮' \
+    "│${ESC}[2m ❯ Type a message...                                        ${ESC}[0m│" \
+    '╰───────────────────────── Grok 4.5 (high) · always-approve ─╯')
+  grok34_typed=$'╭────────────────────────────────────────────────────────────╮\n│ ❯ deploy the fix                                           │\n╰───────────────────────── Grok 4.5 (high) · always-approve ─╯'
+  grok34_overhang=$'  ╭──────────────────────────────────────────────────────────────────────────╮\n  │ ❯                                                                        │\n  ╰───────────────────────────────────────── Grok 4.6 (xhigh) · always-approve ─╯'
+  assert_screen "grok 1.0.34 blank same-width autonomy title on herdr" empty "$CAPS_STYLED" "$grok34_blank"
+  assert_screen "grok 1.0.34 blank same-width autonomy title on tmux" empty "$CAPS_TMUX" "$grok34_blank" 1
+  assert_screen "grok 1.0.34 blank same-width autonomy title on plain backends" empty "$CAPS_PLAIN" "$grok34_blank"
+  assert_screen "grok 1.0.34 bright placeholder-like draft on herdr" pending "$CAPS_STYLED" "$grok34_idle"
+  assert_screen "grok 1.0.34 known placeholder on plain backends" empty "$CAPS_PLAIN" "$grok34_idle"
+  assert_screen "grok 1.0.34 dim placeholder on herdr" empty "$CAPS_STYLED" "$grok34_ghost"
+  assert_screen "grok 1.0.34 dim placeholder on tmux" empty "$CAPS_TMUX" "$grok34_ghost" 1
+  assert_screen "grok 1.0.34 typed on herdr" pending "$CAPS_STYLED" "$grok34_typed"
+  assert_screen "grok 1.0.34 typed on tmux" pending "$CAPS_TMUX" "$grok34_typed" 1
+  assert_screen "grok 1.0.34 typed on plain backends" pending "$CAPS_PLAIN" "$grok34_typed"
+  assert_screen "grok 1.0.5 overhang plus autonomy suffix on herdr" empty "$CAPS_STYLED" "$grok34_overhang"
   pass "matrix: grok's real oversized titled bottom is empty while typed and unproved panes stay safe"
 }
 
