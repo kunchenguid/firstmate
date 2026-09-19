@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Enter away mode and run the sub-supervisor daemon in a harness-tracked
-# foreground process when one is not already alive.
+# Enter away mode and run the sub-supervisor daemon in the FOREGROUND of the
+# terminal it is already in, when one is not already alive.
 #
 # Usage: fm-afk-start.sh
 #   Sets state/.afk (mode preserved on refresh, see fm_afk_flag_write) unless
@@ -17,19 +17,17 @@
 # enables nounset and errexit; callers that need different shell options must
 # restore them explicitly.
 #
-# This is the COMMON daemon entry for every backend. HOW it becomes a tracked
-# background process differs by harness/backend and is owned elsewhere:
-#   - Harnesses with a native in-pane tracked-background tool (e.g. claude, grok)
-#     run this directly via that tool, so the daemon inherits the captain pane's
-#     env and auto-discovers it.
-#   - Harnesses with NO native background mechanism (e.g. pi) run this THROUGH
-#     bin/fm-afk-launch.sh, which creates a non-visible tracked terminal per
-#     backend (herdr tab/workspace, tmux detached session) and passes the
-#     captain pane in as FM_SUPERVISOR_TARGET so injection targets it, not the
-#     daemon's own new pane.
-# Do not wrap this in `nohup ... &`: Codex/herdr can reap fire-and-forget shell
-# children after the tool call returns, while a tracked background terminal stays
-# attached and has a real lifecycle.
+# This is the COMMON daemon entry for every backend, and nothing runs it
+# directly in production. bin/fm-afk-launch.sh creates a non-visible tracked
+# terminal per backend (herdr tab/workspace, tmux detached session) and passes
+# the captain pane in as FM_SUPERVISOR_TARGET so injection targets it rather
+# than the daemon's own new pane; inside that terminal bin/fm-afk-daemon-run.sh
+# runs this entry one generation at a time. Every daemon harness uses that path,
+# claude and grok included: a harness-native in-pane background job is reapable
+# by the harness at any time, which takes the daemon and its watcher down
+# together. Do not wrap this in `nohup ... &` either - Codex/herdr can reap
+# fire-and-forget shell children after the tool call returns, while a tracked
+# terminal stays attached and has a real lifecycle.
 set -eu
 
 FM_AFK_START_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,7 +46,8 @@ fm_afk_start_usage() {
 
 # fm_afk_clear_stale_artifacts: on a FRESH away-session entry (the daemon is not
 # already running), drop the previous away session's leftover escalation-delivery
-# artifacts so they cannot surface as stale escalations under the new session.
+# artifacts and its daemon-restart journal so neither surfaces as this session's
+# own evidence (the return brief reads that journal as a supervision gap).
 # These are session-scoped by timing: a fresh entry owns a new supervision
 # session and the new daemon has not produced anything yet, so anything present
 # here belongs to a PRIOR session. This never drops a genuinely-pending
@@ -63,7 +62,8 @@ fm_afk_clear_stale_artifacts() {  # <state-dir>
   local state=$1
   rm -f "$state/.subsuper-escalations" \
         "$state/.subsuper-escalations.since" \
-        "$state/.subsuper-inject-wedged" 2>/dev/null
+        "$state/.subsuper-inject-wedged" \
+        "$state/.afk-daemon-restarts" 2>/dev/null
 }
 
 daemon_lock_owner() {
@@ -173,7 +173,7 @@ fm_afk_start_main() {
     fm_afk_clear_stale_artifacts "$FM_AFK_STATE"
   fi
 
-  echo "afk: starting supervise daemon in foreground; keep this command as a tracked background session"
+  echo "afk: starting supervise daemon in foreground of this tracked terminal"
   exec "$FM_AFK_DAEMON"
 }
 

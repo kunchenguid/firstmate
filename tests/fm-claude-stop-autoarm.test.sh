@@ -178,7 +178,14 @@ SH
       cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 echo "$$" >> "$FM_HOME/state/arm-ran"
+# Away mode started mid-cycle AND its daemon is live. Ownership is what hands
+# triage over, so this fixture's own parent stands in for the daemon: it is
+# alive for exactly the window the hook re-checks, and leaks nothing.
 : > "$FM_HOME/state/.afk"
+mkdir -p "$FM_HOME/state/.supervise-daemon.lock"
+printf '%s\n' "$PPID" > "$FM_HOME/state/.supervise-daemon.lock/pid"
+FM_STATE_OVERRIDE="$FM_HOME/state" bash -c '. "$1"; fm_pid_identity "$2"' _ \
+  "$FM_HOME/bin/fm-wake-lib.sh" "$PPID" > "$FM_HOME/state/.supervise-daemon.lock/pid-identity"
 printf 'pending:downtime:fixture-generation\n' > "$FM_HOME/state/.watcher-down"
 touch "$FM_HOME/state/.last-watcher-beat"
 printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
@@ -225,6 +232,29 @@ watcher_identity() {
   local dir=$1 pid=$2
   FM_STATE_OVERRIDE="$dir/state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$dir/bin/fm-wake-lib.sh" "$pid"
 }
+
+# A live stand-in away daemon for this home. The hook hands triage over only
+# when a daemon PROVABLY owns supervision, so a fixture that writes state/.afk
+# alone is a home whose daemon is dead - which is its own case below, not this
+# one. Every sleeper started here is reaped at suite exit.
+AFK_DAEMON_PIDS=
+record_live_afk_daemon() {  # <dir>
+  local dir=$1 pid
+  sleep 600 &
+  pid=$!
+  AFK_DAEMON_PIDS="$AFK_DAEMON_PIDS $pid"
+  fm_test_record_daemon_lock "$dir/state" "$pid" || fail "could not record a live away daemon for $dir"
+}
+REAP_AFK_DAEMONS() {
+  local p
+  for p in $AFK_DAEMON_PIDS; do
+    kill -TERM "$p" 2>/dev/null || true
+  done
+  fm_test_cleanup
+}
+trap REAP_AFK_DAEMONS EXIT
+trap 'REAP_AFK_DAEMONS; exit 130' INT
+trap 'REAP_AFK_DAEMONS; exit 143' TERM
 
 record_watcher_lock() {
   local dir=$1 pid=$2 identity=$3 root bin_dir
@@ -313,6 +343,7 @@ test_inert_when_afk() {
   dir=$(make_primary_dir "$TMP_ROOT/afk")
   : > "$dir/state/task.meta"
   : > "$dir/state/.afk"
+  record_live_afk_daemon "$dir"
   : > "$dir/state/.claude-autoarm-failure-notified"
   : > "$dir/state/.claude-autoarm-failure-alarmed"
   write_arm_fixture "$dir" actionable
@@ -324,11 +355,29 @@ test_inert_when_afk() {
   pass "auto-arm: inert while AFK owns supervision"
 }
 
+# state/.afk outlives the daemon under every signal, so a standing flag proves
+# nothing. Before this was ownership-gated, a reaped daemon left the flag behind
+# and this hook stayed inert, which is how a home went eleven hours with no
+# supervision at all.
+test_arms_when_the_away_flag_stands_with_no_live_daemon() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/afk-dead-daemon")
+  : > "$dir/state/task.meta"
+  : > "$dir/state/.afk"
+  fm_test_record_dead_daemon_lock "$dir/state"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a standing away flag with a dead daemon must restore ordinary supervision"
+  [ -e "$dir/state/arm-ran" ] || fail "hook stayed inert behind a standing away flag with no live daemon"
+  pass "auto-arm: a standing away flag with no live daemon arms and rewakes as usual"
+}
+
 test_stale_lock_recovery_preserves_afk_and_need_gates() {
   local afk_dir idle_dir out status
   afk_dir=$(make_primary_dir "$TMP_ROOT/stale-afk")
   : > "$afk_dir/state/task.meta"
   : > "$afk_dir/state/.afk"
+  record_live_afk_daemon "$afk_dir"
   printf '9999999\n' > "$afk_dir/state/.lock"
   write_arm_fixture "$afk_dir" actionable
   out=$(printf '%s\n' '{"session_id":"stale-afk"}' | FM_HOME="$afk_dir" "$FAKE_CLAUDE" -c '"$FM_HOME/bin/fm-claude-stop-autoarm.sh"' 2>&1); status=$?
@@ -1238,6 +1287,7 @@ test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
 test_inert_when_lock_held_by_other_harness
 test_inert_when_afk
+test_arms_when_the_away_flag_stands_with_no_live_daemon
 test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle

@@ -747,8 +747,16 @@ fi
 
 # --- 4. supervision operating instructions ----------------------------------
 stage supervision-instructions
+# AFK_PRESENT is the POSTURE: it selects which supervisor this home should have,
+# and the away instruction it renders ("load /afk and ensure the daemon is
+# running") is the right repair whether or not a daemon is currently behind the
+# flag. AFK_DAEMON_OWNS is the separate ownership fact, because state/.afk
+# outlives the daemon under every signal and the AFK subsection below must not
+# report a daemon that is gone as owning the watcher.
 AFK_PRESENT=0
 [ -e "$STATE/.afk" ] && AFK_PRESENT=1
+AFK_DAEMON_OWNS=0
+fm_afk_daemon_owns_supervision "$STATE" && AFK_DAEMON_OWNS=1
 AFK_MODE=$(fm_afk_mode "$STATE")
 X_MODE_PRESENT=0
 [ -f "$CONFIG/x-mode.env" ] && X_MODE_PRESENT=1
@@ -881,7 +889,9 @@ if [ -f "$STATE/.afk-contract" ]; then
   printf 'present - away posture recorded at %s (hold-for-return only; bin/fm-afk-contract.sh readback for the mandate)' \
     "$("$SCRIPT_DIR/fm-afk-contract.sh" field entered 2>/dev/null || printf unknown)"
   if [ -e "$STATE/.afk" ]; then
-    if [ "$AFK_MODE" = quiet ]; then
+    if [ "$AFK_DAEMON_OWNS" -eq 0 ]; then
+      printf '; the daemon flag stands but NO live daemon owns supervision - ordinary supervision applies until it is restarted.\n'
+    elif [ "$AFK_MODE" = quiet ]; then
       printf '; the quiet daemon owns the watcher.\n'
     else
       printf '; the away daemon owns the watcher.\n'
@@ -890,7 +900,9 @@ if [ -f "$STATE/.afk-contract" ]; then
     printf '; no daemon runs, the ordinary supervision session continues.\n'
   fi
 elif [ -e "$STATE/.afk" ]; then
-  if [ "$AFK_MODE" = quiet ]; then
+  if [ "$AFK_DAEMON_OWNS" -eq 0 ]; then
+    printf 'present - the daemon flag stands but NO live daemon owns supervision; ordinary supervision applies until it is restarted (legacy flag with no posture record).\n'
+  elif [ "$AFK_MODE" = quiet ]; then
     printf 'present - quiet-mode supervision is active; the daemon owns the watcher, only an explicit /quiet off exits it (legacy flag with no posture record).\n'
   else
     printf 'present - away-mode supervision is active; the daemon owns the watcher (legacy flag with no posture record).\n'

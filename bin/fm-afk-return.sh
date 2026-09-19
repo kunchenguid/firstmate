@@ -250,7 +250,8 @@ clear_delivery_artifacts() {
   rm -f \
     "$STATE/.subsuper-escalations" \
     "$STATE/.subsuper-escalations.since" \
-    "$STATE/.subsuper-inject-wedged"
+    "$STATE/.subsuper-inject-wedged" \
+    "$STATE/.afk-daemon-restarts"
 }
 
 # The lifecycle retention reasons the gate kept, one per line, empty when the
@@ -312,7 +313,7 @@ return_guard() {
 # --- supervisor health, snapshotted before anything is shut down ------------
 
 health_snapshot() {  # <evidence-file>
-  local evidence=$1 beat_age lines=""
+  local evidence=$1 beat_age lines="" restarts
   beat_age=$(fm_path_age "$STATE/.last-watcher-beat")
   if [ -e "$STATE/.watcher-down" ]; then
     # The marker survives past its episode in an acked:* state
@@ -339,6 +340,13 @@ GAP: the watcher beat was ${beat_age}s old at return (grace ${RETURN_GRACE}s)"
   if [ -s "$STATE/.subsuper-inject-wedged" ]; then
     lines="$lines
 delivery wedged: $(head -1 "$STATE/.subsuper-inject-wedged" 2>/dev/null || true)"
+  fi
+  # The daemon's restart supervisor recovers a death without a turn, so the only
+  # trace of that outage is its journal. A recovered gap is still a gap.
+  if [ -s "$STATE/.afk-daemon-restarts" ]; then
+    restarts=$(grep -c '' "$STATE/.afk-daemon-restarts" 2>/dev/null || printf 0)
+    lines="$lines
+GAP: the away daemon died and was restarted ${restarts} time(s) during the away window (last: $(tail -1 "$STATE/.afk-daemon-restarts" 2>/dev/null || true))"
   fi
   if [ -z "$(printf '%s' "$lines" | tr -d '[:space:]')" ]; then
     lines="supervision ran through the away window with no detected gap (watcher beat ${beat_age}s old at return)"

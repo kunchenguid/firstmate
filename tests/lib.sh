@@ -111,6 +111,38 @@ FM_TEST_OWNER_IDENTITY=$(fm_test_pid_identity "$$") || {
   return 1
 }
 
+# fm_test_record_daemon_lock <state-dir> <pid>: record a LIVE, identity-matched
+# away daemon holding this home, exactly as bin/fm-supervise-daemon.sh does at
+# startup. Supervision reads ownership through fm_afk_daemon_owns_supervision
+# rather than the bare state/.afk flag, so a fixture that only writes the flag
+# is a home whose daemon is DEAD - useful on purpose, but never the way to say
+# "away mode is covered". This is the single owner of the covered fixture, so no
+# suite re-rolls the lock layout. A fixture with its own copied bin/ is
+# identified through that copy, the way the real daemon would be.
+fm_test_record_daemon_lock() {  # <state-dir> <pid>
+  local state=$1 pid=$2 lib identity lockdir
+  lib="$(dirname "$state")/bin/fm-wake-lib.sh"
+  [ -f "$lib" ] || lib="$ROOT/bin/fm-wake-lib.sh"
+  identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$lib" "$pid") || return 1
+  [ -n "$identity" ] || return 1
+  lockdir="$state/.supervise-daemon.lock"
+  mkdir -p "$lockdir" || return 1
+  printf '%s\n' "$pid" > "$lockdir/pid" || return 1
+  printf '%s\n' "$identity" > "$lockdir/pid-identity" || return 1
+}
+
+# fm_test_record_dead_daemon_lock <state-dir>: the inverse fixture - a daemon
+# lock left behind by a daemon that is gone, which is exactly what every signal
+# leaves next to a still-standing state/.afk. The recorded pid cannot be running
+# and the identity cannot match, so fm_afk_daemon_owns_supervision reads this
+# home as NOT covered however long the flag stands.
+fm_test_record_dead_daemon_lock() {  # <state-dir>
+  local lockdir="$1/.supervise-daemon.lock"
+  mkdir -p "$lockdir" || return 1
+  printf '%s\n' 9999999 > "$lockdir/pid" || return 1
+  printf '%s\n' dead-identity > "$lockdir/pid-identity" || return 1
+}
+
 # --- process-event runner reaping -------------------------------------------
 #
 # A process-event runner is detached into its own process group and reparents to

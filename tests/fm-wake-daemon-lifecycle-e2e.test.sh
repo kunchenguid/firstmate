@@ -33,16 +33,36 @@ fi
 
 TMP_ROOT=$(fm_test_tmproot fm-wake-daemon-e2e)
 
+# Stand-in away daemons started by run_watcher_once, reaped at suite exit.
+AFK_DAEMON_PIDS=
+REAP_AFK_DAEMONS() {
+  local p
+  for p in $AFK_DAEMON_PIDS; do
+    kill -TERM "$p" 2>/dev/null || true
+  done
+  fm_test_cleanup
+}
+trap REAP_AFK_DAEMONS EXIT
+trap 'REAP_AFK_DAEMONS; exit 130' INT
+trap 'REAP_AFK_DAEMONS; exit 143' TERM
+
 # Run the daemon-managed watcher once: under the supervise-daemon (away mode) the
 # watcher is one-shot - it exits with a single reason line on EVERY wake and the
-# daemon does the triage. This e2e exercises exactly that path, so it runs with
-# state/.afk present (which the daemon owns) to keep the watcher one-shot; the
-# always-on standalone triage is covered by fm-watch-triage.test.sh. fakebin
-# shadows tmux. Echoes nothing; the caller reads $out.
+# daemon does the triage. This e2e exercises exactly that path, so it runs with a
+# LIVE daemon owning supervision to keep the watcher one-shot; the always-on
+# standalone triage is covered by fm-watch-triage.test.sh. The flag alone would
+# not do it: the watcher hands triage over on proven daemon ownership, because
+# state/.afk outlives the daemon under every signal. fakebin shadows tmux. Echoes
+# nothing; the caller reads $out.
 run_watcher_once() {
-  local state=$1 fakebin=$2 out=$3
+  local state=$1 fakebin=$2 out=$3 daemon_pid
   mkdir -p "$state"
-  date '+%s' > "$state/.afk"
+  printf '%s\n' "$(date '+%s')" > "$state/.afk"
+  sleep 600 &
+  daemon_pid=$!
+  AFK_DAEMON_PIDS="$AFK_DAEMON_PIDS $daemon_pid"
+  fm_test_record_daemon_lock "$state" "$daemon_pid" \
+    || fail "could not record a live away daemon for $state"
   PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   wait_for_exit "$!" 50

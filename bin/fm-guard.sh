@@ -212,6 +212,9 @@ if [ "$watcher_healthy" = false ]; then
     print_full_banner=1
   fi
   if [ "$print_full_banner" -eq 1 ]; then
+    # Posture, not ownership: the banner already knows supervision is down, and
+    # this only picks which supervisor the home should have back. A standing away
+    # flag wants the daemon restored, which is what the away repair line says.
     afk=0
     [ -e "$STATE/.afk" ] && afk=1
     queue_arg=0

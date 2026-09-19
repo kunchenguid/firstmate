@@ -41,13 +41,14 @@ Hold-for-return is the default and the only reach profile this release records: 
 4. **Per harness, after the record exists:**
    - **Pi and pi-signed**: stop here.
      The away daemon is no longer launched on Pi; the ordinary supervision session (`docs/pi-supervision-branch.md`) keeps running with the record present, and `bin/fm-afk-launch.sh start` refuses on these harnesses.
-   - **Harness WITH a native in-pane tracked-background tool** (claude's background bash, grok's background tool): run `bin/fm-afk-launch.sh start-native`, then run `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` through that native tool.
-     This is a deliberate no-separate-terminal exception because the harness-hosted job creates no terminal or layout mutation, and a shell launcher cannot invoke a harness-native background tool.
-     If the native launch fails, run `bin/fm-afk-launch.sh stop` to roll back the prepared lifecycle.
-     Do not wrap it in `nohup ... &` (Codex/herdr can reap fire-and-forget shell children after a tool call returns).
-   - **Every other harness** (codex, opencode, omp, kimi, cursor): run `bin/fm-afk-launch.sh start`.
+   - **Every other harness** (claude, grok, codex, opencode, omp, kimi, cursor): run `bin/fm-afk-launch.sh start`.
      It is the single owner of the daemon terminal: it creates a NON-VISIBLE tracked terminal for the current backend and passes the captain pane in as `FM_SUPERVISOR_TARGET` so the daemon injects into the captain, not its own new pane (docs/herdr-backend.md "Away-mode supervisor support").
-   Both daemon paths require the already-confirmed record and share `bin/fm-afk-start.sh` as the daemon entry.
+     Never run `bin/fm-afk-start.sh` through a harness-native background tool, and never wrap it in `nohup ... &`.
+     Claude and grok used to take that native path on the grounds that a harness-hosted job creates no terminal or layout mutation; the lifetime was the problem, not the layout.
+     A harness reaps its own tracked background jobs with a process-group SIGTERM, routinely and without notice, which takes the daemon and its watcher child down together and leaves `state/.afk` standing behind them.
+     Away mode on claude and grok therefore now needs a spawn-capable multiplexer: `start` supports herdr and tmux and refuses loudly on zellij, orca, and cmux.
+   That path requires the already-confirmed record, uses `bin/fm-afk-start.sh` as the daemon entry, and keeps that entry alive under `bin/fm-afk-daemon-run.sh`, so a death from any cause is recovered without a model turn - the one recovery that still works when the home is out of quota.
+   Each recovered death is recorded for the return brief and raises the configured wedge alarm, so an outage is never silent.
    The daemon is **presence-gated**: it injects escalations only while `state/.afk` exists, and stays quiet otherwise.
 5. **Do not separately arm `fm-watch.sh` where the daemon runs.** The daemon manages the watcher as its child; the singleton lock no-ops a stray arm harmlessly.
    On Pi nothing changes about arming: the supervision session's own cycle continues.
@@ -153,7 +154,8 @@ The daemon wraps `fm-watch.sh`, runs the watcher as a child, presents every dura
 It self-handles the routine majority without consuming a firstmate turn.
 Captain-relevant events, plus a bounded recheck of a declared external wait that is still declared, escalate to firstmate's context as one pre-read, single-line, batched digest.
 The captain-relevant verb set, declared-wait vocabulary, status-span classifier, and presentation-marker contract live in shared `bin/fm-classify-lib.sh`, while each supervisor owns its routing and fleet scan as a consumer of that policy.
-While `state/.afk` exists the daemon owns the watcher, so the watcher reverts to one-shot and lets the daemon do the triage - the two never run their triage at the same time.
+While a live daemon owns supervision the watcher reverts to one-shot and lets the daemon do the triage - the two never run their triage at the same time.
+That hand-off is keyed on `fm_afk_daemon_owns_supervision` (`bin/fm-wake-lib.sh`), never on the bare `state/.afk` flag: the flag answers the posture question and outlives the daemon under every signal, so a standing flag with a dead daemon restores ordinary supervision and turn-end blocking instead of leaving the home unwatched.
 
 Classify each wake this way:
 
