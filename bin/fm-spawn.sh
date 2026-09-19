@@ -3579,7 +3579,7 @@ pi_pane_shows_trust_dialog() {
 }
 
 pi_wait_for_trust() {
-  local pane i=0 max=${FM_PI_TRUST_POLLS:-10} interval=${FM_PI_TRUST_POLL_INTERVAL:-0.1}
+  local pane i=0 max=${FM_PI_TRUST_POLLS:-60} interval=${FM_PI_TRUST_POLL_INTERVAL:-0.5}
   while [ "$i" -lt "$max" ]; do
     pane=$(pi_capture)
     if pi_pane_shows_trust_dialog "$pane"; then
@@ -3795,7 +3795,6 @@ fi
 # it has done so. agy is crewmate/scout only (refused above for secondmate), so
 # only the worktree shape applies.
 AGY_TRUST_PREREGISTERED=0
-PI_TRUST_PREREGISTERED=0
 case "$HARNESS" in
 claude*)
   if [ "$KIND" = secondmate ]; then
@@ -3810,9 +3809,7 @@ claude*)
   ;;
 pi | pi-signed)
   if [ "$KIND" != secondmate ]; then
-    if "$FM_ROOT/bin/fm-pi-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
-      PI_TRUST_PREREGISTERED=1
-    else
+    if ! "$FM_ROOT/bin/fm-pi-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
       echo "warning: could not pre-register Pi workspace trust for $WT; the launch will answer the folder-trust dialog in window $T instead" >&2
     fi
   fi
