@@ -17,8 +17,8 @@
 # GitHub PRs and issues are supported; other forges remain visibly unmeasured.
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
-# task and records[]. Each record contains url, kind, checked_at, attempted_at,
-# error, observation, verdict, seen event tokens, pending events, and notified tokens.
+# task and records[]. Each record contains url, kind, checked_at, error,
+# observation, verdict, seen event tokens, pending events, and notified tokens.
 # observation is one coherent forge read (a PR head is rechecked after fetching
 # checks/reviews). Checks are normalized by name, id, started_at, status and
 # conclusion; projection picks the newest attempt per distinct name. The last
@@ -33,17 +33,17 @@
 # poll consumes fm-fleet-snapshot.sh --contribution-input, a local-only read,
 # and spends at most FM_CONTRIBUTIONS_BUDGET seconds on forge reads (default 20,
 # 1..25). Each gh call is bounded by the remaining budget and five seconds.
-# Oldest attempts go first, so deferred URLs do not starve other contributions.
-# Budget exhaustion preserves the last coherent observation without a failure wake.
-# A changed API failure emits a diagnostic; recovery clears its stored error.
-# Merged PRs with no pending feedback or observation error stop polling, even
-# while retained backlog links still own them. Closed, unmerged work stays live.
-# A live captain hold or an unacknowledged maintainer signal outranks that
-# terminal state, so retirement never hides work someone still owes.
-# A retired row stays counted as checked and is left out of the projection's
-# validity floor, so a home whose owned work is all merged does not expire back
-# into fleet work.
-# FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds live observation freshness.
+# Oldest observations go first, so a large corpus progresses across polls.
+# Each distinct URL is observed once per poll and applied to every owner. A
+# final observation applies to every owner without another forge read. When
+# the budget runs out mid-observation, the poll ends with that URL's records
+# untouched; only a genuine forge failure or head change records an error.
+# API failure leaves error evidence; an expired or absent observation is not
+# silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
+# A URL whose last good observation is merged or closed is final: it is
+# never re-read, stays fresh, and a stale error beside it is cleared once.
+# A genuine failure prints its unavailable line only when it starts an episode
+# (no prior owner has an error); a successful read ends the episode.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
 # FM_CONTRIBUTIONS_READY_LABEL selects the equivalent triage label, default
 # ready-for-pr. Labels are matched case-insensitively and exactly.
@@ -134,7 +134,8 @@ project() {
     --arg all "${2:-}" '
     projected($input[0];$saved[0];$now;$max_age) as $rows
     | summary($rows;($errors + (if $input[0].backlog.present == true then 0 else 1 end)))
-    | .valid_until = ((if all($rows[]; .settled) then $now else .valid_until end) + $max_age)
+    # Final rows never expire; a home holding only final rows is valid from now.
+    | .valid_until = (if ($rows | length) > 0 and all($rows[]; .final) then $now else .valid_until end) + $max_age
     | .captain_omitted = ([0, (.captain | length) - 20] | max)
     | .captain |= .[:20]
     | . + (if $all == "--all" then {rows:$rows} else {} end)'
@@ -175,16 +176,16 @@ write_record() { # task record-json-file
 }
 
 forge() {
-  local remaining status limit
+  local remaining bounded=0 rc=0
   remaining=$((DEADLINE - $(date +%s)))
-  if [ "$remaining" -le 0 ]; then FORGE_EXHAUSTED=1; return 1; fi
-  limit=$remaining
-  [ "$limit" -le 5 ] || limit=5
-  status=0
-  fm_run_timed "$limit" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
-    gh "$@" 2> "$TMP/forge.err" || status=$?
-  if [ "$status" -eq 124 ] && [ "$remaining" -le 5 ]; then FORGE_EXHAUSTED=1; fi
-  return "$status"
+  # The budget, not the forge, refused this read.
+  [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; return 1; }
+  if [ "$remaining" -le 5 ]; then bounded=1; else remaining=5; fi
+  fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+    gh "$@" 2> "$TMP/forge.err" || rc=$?
+  # A read killed at the budget's own deadline is budget exhaustion too.
+  [ "$rc" -ne 124 ] || [ "$bounded" -eq 0 ] || BUDGET_EXHAUSTED=1
+  return "$rc"
 }
 
 observe() { # canonical GitHub URL -> normalized JSON
@@ -267,52 +268,88 @@ publish_pending() { # task canonical-url record-file
   done < <(jq -r '. as $r | .pending[] | .token | select(. as $t | ($r.notified // [] | index($t)) == null)' "$record")
 }
 
+settle_final() { # canonical-url task... : copy the URL's final observation to every owner
+  local url=$1 task
+  shift
+  jq -n --slurpfile saved "$TMP/saved.json" --arg url "$url" '
+    [$saved[0][] | .records[] | select(.url == $url
+      and (.observation.state | IN("merged","closed")))] as $final
+    | ([$final[] | select(.error == null)] | first) // ($final | first)' > "$TMP/final.json"
+  for task in "$@"; do
+    fm_pr_task_id_valid "$task" || { printf 'contributions: invalid durable task id\n'; continue; }
+    jq -n --slurpfile saved "$TMP/saved.json" --arg task "$task" --arg url "$url" '
+      [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first' > "$TMP/old.json"
+    if jq -e '. == null' "$TMP/old.json" >/dev/null; then
+      jq -n --slurpfile final "$TMP/final.json" '
+        $final[0] + {error:null,pending:[],notified:[]}' > "$TMP/row.json"
+      write_record "$task" "$TMP/row.json"
+    elif jq -e '.error != null' "$TMP/old.json" >/dev/null; then
+      jq '.error = null' "$TMP/old.json" > "$TMP/row.json"
+      write_record "$task" "$TMP/row.json"
+    fi
+  done
+}
+
 poll() {
-  local task url old kind error
+  local task url old kind error observed
+  local -a row
   acquire
   get_input
   read_saved
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
+  # One line per distinct URL: the URL, then every owning task.
   jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
-    known($input[0];$saved[0]) | map(. as $k
-      | ([$saved[0][] | select(.task == $k.task) | .records[] | select(.url == $k.url)] | first) as $r
-      | select($r | settled | not)
-      | . + {at:($r.attempted_at // "")})
-    | sort_by(.at,.task,.url)[] | [.task,.url] | @tsv' > "$TMP/known.tsv"
+    known($input[0];$saved[0]) | map(. as $k | . + {at:([$saved[0][] | select(.task == $k.task) | .records[] | select(.url == $k.url) | .checked_at] | first // "")})
+    | group_by(.url) | map({url:.[0].url,at:(map(.at) | min),tasks:(map(.task) | unique)})
+    | sort_by(.at,.tasks[0],.url)[] | [.url] + .tasks | @tsv' > "$TMP/known.tsv"
   DEADLINE=$(( $(date +%s) + BUDGET ))
-  while IFS=$'\t' read -r task url; do
-    [ -n "$task" ] || continue
+  BUDGET_EXHAUSTED=0
+  while IFS=$'\t' read -r -a row; do
+    [ "${#row[@]}" -ge 2 ] || continue
     [ "$(date +%s)" -lt "$DEADLINE" ] || break
-    fm_pr_task_id_valid "$task" || { printf 'contributions: invalid durable task id\n'; continue; }
-    case "$url" in */issues/*) kind=issue ;; *) kind="pr" ;; esac
-    old="$TMP/old.json"
-    jq -n --slurpfile saved "$TMP/saved.json" --arg task "$task" --arg url "$url" --arg kind "$kind" '
-      ([$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first)
-      // {url:$url,kind:$kind,checked_at:null,observation:null,verdict:null,seen:[],pending:[],notified:[]}' > "$old"
-    FORGE_EXHAUSTED=0
-    if observe "$url"; then
-      jq -n --arg now "$NOW" --slurpfile old "$old" --slurpfile observation "$TMP/observation.json" '
-        $old[0] as $old | $observation[0] as $o
-        | ($o.events + (if $o.ready == true and $old.observation.ready != true and (any($o.events[]; .type == "ready-for-pr") | not) then
-            [{token:("ready-for-pr:" + $now),type:"ready-for-pr",source:$old.url,head:null,body:"filed issue reached ready-for-pr"}]
-            else [] end)) as $events
-        | $old + {checked_at:$now,error:null,
-          observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
-          seen:($events | map(.token)),
-          pending:(($old.pending // []) + [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] | unique_by(.token))}' > "$TMP/row.json"
-    elif [ "${FORGE_EXHAUSTED:-0}" -eq 1 ]; then
-      cp "$old" "$TMP/row.json"
-    else
-      error='forge observation unavailable or changed during read'
-      jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .error=$error' "$old" > "$TMP/row.json"
-      if ! jq -e --arg error "$error" '.error == $error' "$old" >/dev/null; then
-        printf 'contributions: observation unavailable for %s\n' "$url"
-      fi
+    url=${row[0]}
+    # A contribution with a final observation is not re-read for any owner.
+    if jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
+      'any($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
+        . != null and (.observation.state | IN("merged","closed")))' "${row[@]:1}" >/dev/null; then
+      settle_final "$url" "${row[@]:1}"
+      continue
     fi
-    jq --arg now "$NOW" '.attempted_at=$now' "$TMP/row.json" > "$TMP/attempt.json"
-    mv "$TMP/attempt.json" "$TMP/row.json"
-    write_record "$task" "$TMP/row.json"
-    publish_pending "$task" "$url" "$TMP/row.json"
+    observed=0
+    observe "$url" || observed=$?
+    # An observation the budget cut short is unmeasured, not unavailable: keep
+    # every owner's prior record so the URL is observed first next poll.
+    [ "$BUDGET_EXHAUSTED" -eq 0 ] || break
+    # Wake once per failure episode: only when no owner has a prior error.
+    if [ "$observed" -ne 0 ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
+      'all($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
+        .error == null)' "${row[@]:1}" >/dev/null; then
+      printf 'contributions: observation unavailable for %s\n' "$url"
+    fi
+    case "$url" in */issues/*) kind=issue ;; *) kind="pr" ;; esac
+    for task in "${row[@]:1}"; do
+      fm_pr_task_id_valid "$task" || { printf 'contributions: invalid durable task id\n'; continue; }
+      old="$TMP/old.json"
+      jq -n --slurpfile saved "$TMP/saved.json" --arg task "$task" --arg url "$url" --arg kind "$kind" '
+        ([$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first)
+        // {url:$url,kind:$kind,checked_at:null,observation:null,verdict:null,seen:[],pending:[],notified:[]}' > "$old"
+      if [ "$observed" -eq 0 ]; then
+        jq -n --arg now "$NOW" --slurpfile old "$old" --slurpfile observation "$TMP/observation.json" '
+          $old[0] as $old | $observation[0] as $o
+          | ($o.events + (if $o.ready == true and $old.observation.ready != true and (any($o.events[]; .type == "ready-for-pr") | not) then
+              [{token:("ready-for-pr:" + $now),type:"ready-for-pr",source:$old.url,head:null,body:"filed issue reached ready-for-pr"}]
+              else [] end)) as $events
+          | $old + {checked_at:$now,error:null,
+            observation:($o + {absent_checks:((($old.observation.absent_checks // []) + [($old.observation.checks // [])[] | .name]) - [$o.checks[].name] | unique)}),
+            seen:($events | map(.token)),
+            pending:(($old.pending // []) + [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] | unique_by(.token))}' > "$TMP/row.json"
+      else
+        error='forge observation unavailable or changed during read'
+        jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .error=$error' "$old" > "$TMP/row.json"
+      fi
+      write_record "$task" "$TMP/row.json"
+      publish_pending "$task" "$url" "$TMP/row.json"
+    done
   done < "$TMP/known.tsv"
 }
 

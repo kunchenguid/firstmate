@@ -1328,6 +1328,182 @@ EOF
   pass "watcher-failure repair stays with main even with a live, accepting branch listener"
 }
 
+# Under the away-posture record the dispatcher offers every actionable row to
+# the branch - a check-kind trigger and a needs-decision signal included, the
+# two classes attended routing forces to main - while the two broken-queue
+# vetoes (an unresolvable task-local row, a structurally invalid row) and every
+# watcher-failure alarm still reach main exactly as attended
+# (docs/pi-supervision-branch.md "Postures").
+test_pi_away_record_collapses_eligibility_and_keeps_vetoes_on_main() {
+  local repo home plugin log stop out status label expect reason queue
+  repo="$TMP_ROOT/pi-away-root"
+  home="$TMP_ROOT/pi-away-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$home/projects/approved"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" propose >/dev/null || fail "away propose failed"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null || fail "away confirm failed"
+  [ -f "$home/state/.afk-contract" ] || fail "the away-posture record was not written"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf '%s\n' "${FM_TEST_REASON:?}"
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  while IFS='|' read -r label expect reason queue; do
+    [ -n "$label" ] || continue
+    log="$TMP_ROOT/pi-away-$label.log"
+    stop="$TMP_ROOT/pi-away-$label.stop"
+    out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
+      FM_TEST_REASON="$reason" FM_TEST_QUEUE="$queue" FM_TEST_EXPECT="$expect" node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const offers = [];
+let prompt = "";
+let tool = null;
+const handlers = new Map();
+const bus = {
+  on(channel, handler) {
+    handlers.set(channel, [...(handlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const handler of handlers.get(channel) ?? []) handler(data);
+  },
+};
+bus.on("fm-branch-supervision:dispatch", (offer) => {
+  offers.push({ message: offer.message, eligible: offer.eligible });
+  if (offer.eligible) offer.accept();
+});
+const pi = {
+  on() {},
+  events: bus,
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompt = message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(
+  `${process.env.FM_HOME}/state/.wake-queue`,
+  process.env.FM_TEST_QUEUE.replace(/\\t/g, "\t").replace(/\\n/g, "\n"),
+);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-away", {}, undefined, undefined, {});
+for (let i = 0; i < 250 && offers.length === 0 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+// Give a wrongly-routed main follow-up time to show up before asserting its absence.
+for (let i = 0; i < 25 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (process.env.FM_TEST_EXPECT === "branch") {
+  if (offers.length !== 1 || offers[0].eligible !== true) {
+    throw new Error(`under the away-posture record this wake was not offered to the branch: ${JSON.stringify(offers)}`);
+  }
+  if (prompt) throw new Error(`a branch-eligible wake still woke the parked main: ${prompt}`);
+} else {
+  if (offers.length !== 1 || offers[0].eligible !== false) {
+    throw new Error(`a broken-queue wake was offered to the branch under the record: ${JSON.stringify(offers)}`);
+  }
+  if (!prompt.includes(`FIRSTMATE WATCHER WAKE: ${process.env.FM_TEST_REASON}`)) {
+    throw new Error(`a wake the branch cannot take did not fall back to main: ${prompt}`);
+  }
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+    )
+    status=$?
+    expect_code 0 "$status" "away routing for the $label case must bind: $out"
+    [ -z "$out" ] || fail "Pi away routing test ($label) printed output: $out"
+  done <<'CASES'
+check-trigger|branch|check: task-a.check.sh: PR merged|1\t1\tsignal\ttask-a.status\tsignal: task-a.status\n2\t2\tcheck\tmain-only\tcheck: task-a.check.sh: PR merged\n
+check-only|branch|check: x-mention 1234567890|1\t1\tcheck\tmain-only\tcheck: x-mention 1234567890\n
+needs-decision|branch|signal: task-a.status|1\t1\tsignal\ttask-a.status\tneeds-decision: [key=scope] skip or re-implement\n
+unresolvable|main|signal: task-zz.status|1\t1\tsignal\ttask-zz.status\tsignal: task-zz.status\n
+corrupt|main|signal: task-a.status|not a queue row\n
+CASES
+
+  # Only main can repair supervision itself: a watcher-failure alarm still
+  # reaches main with the record present and a live, accepting branch listener.
+  repo="$TMP_ROOT/pi-away-alarm-root"
+  mkdir -p "$repo/bin"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'watcher: healthy pid=1 (beacon 0s)\n'
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const offers = [];
+let prompt = "";
+let handler = null;
+const handlers = new Map();
+const bus = {
+  on(channel, h) {
+    handlers.set(channel, [...(handlers.get(channel) ?? []), h]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const h of handlers.get(channel) ?? []) h(data);
+  },
+};
+bus.on("fm-branch-supervision:dispatch", (offer) => {
+  offers.push({ message: offer.message });
+  offer.accept();
+});
+const pi = {
+  on() {},
+  events: bus,
+  registerCommand(name, options) {
+    if (name === "fm-watch-arm-pi") handler = options.handler;
+  },
+  registerTool() {},
+  sendUserMessage: async (message) => {
+    prompt = message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handler("", { ui: { notify() {} } });
+for (let i = 0; i < 250 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!prompt.includes("external healthy watcher")) {
+  throw new Error(`a watcher failure under the away-posture record did not reach main: ${prompt}`);
+}
+if (offers.length !== 0) {
+  throw new Error(`a watcher failure was offered to the branch under the record: ${JSON.stringify(offers)}`);
+}
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "a watcher-failure alarm must still reach main under the record: $out"
+  [ -z "$out" ] || fail "Pi away alarm test printed output: $out"
+  pass "under the away-posture record every actionable row is offered to the branch while broken-queue wakes and watcher-failure alarms still reach main"
+}
+
 test_pi_handling_delivery_failure_is_typed_once() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-handling-fail-root"
@@ -4114,6 +4290,7 @@ test_pi_distinct_files_mixed_batch_routes_whole_batch_to_main
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_needs_decision
 test_pi_heartbeat_restoration_failure_stays_on_main
 test_pi_watcher_failure_never_offered_to_branch
+test_pi_away_record_collapses_eligibility_and_keeps_vetoes_on_main
 test_pi_handling_delivery_failure_is_typed_once
 test_pi_hung_successor_falls_back_to_typed_wake
 test_pi_unretired_successor_falls_back_without_retry

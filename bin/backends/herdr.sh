@@ -3028,6 +3028,15 @@ fm_backend_herdr_capture() {  # <target> <lines>
   printf '%s' "$out" | tail -n "$lines"
 }
 
+# fm_backend_herdr_visible_capture: the visible viewport only. `--source
+# visible` is herdr's viewport-bounded read, so it needs none of the --lines
+# workaround above - the bound is the pane itself, and asking for a line count
+# is what triggers the empty-read bug.
+fm_backend_herdr_visible_capture() {  # <target>
+  fm_backend_herdr_target_ready "$1" || return 1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane read "$FM_BACKEND_HERDR_PANE" --source visible 2>/dev/null
+}
+
 fm_backend_herdr_capture_ansi() {  # <target> <lines>
   fm_backend_herdr_target_ready "$1" || return 1
   local lines=${2:-200} fetch out

@@ -523,6 +523,63 @@ The lab home was deleted and the test entry was removed from the store and verif
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
+## Codex hook trust
+
+Verified 2026-09-16 on codex-cli 0.151.0, macOS arm64, in a fresh linked worktree of this repository.
+
+Codex gates hooks it has no persisted trust for behind an interactive modal.
+A crewmate launch built by `bin/fm-spawn.sh` was driven under a real PTY and stopped there before the brief was ever submitted:
+
+```text
+Hooks need review
+12 hooks are new or changed.
+Hooks can run outside the sandbox after you trust them.
+> 1. Review hooks
+  2. Trust all and continue
+  3. Continue without trusting (hooks won't run)
+Press enter to confirm or esc to go back
+```
+
+The selection starts on "Review hooks", which is neither trusting nor declining, and Firstmate's key plane carries only Enter, Escape, and C-c with no arrow navigation, so the selection cannot be moved.
+That count covers every hook Codex had no persisted trust for, drawn from both the machine's own `~/.codex/hooks.json` and this repository's tracked `.codex/hooks.json`.
+Writing Codex's own trust store to pre-accept the modal would record an operator consent that was never given, so it is not an option either.
+
+`codex --help` documents `--dangerously-bypass-hook-trust` as "Run enabled hooks without requiring persisted hook trust for this invocation", which RUNS the untrusted hooks.
+That is the opposite of what an unattended worker needs, so the control used is the hook feature flag:
+
+```sh
+codex features list | grep '^hooks'
+codex --disable hooks features list | grep '^hooks'
+codex --disable no_such_feature features list
+```
+
+```text
+hooks                                    stable             true
+hooks                                    stable             false
+Error: Unknown feature flag: no_such_feature
+```
+
+The last arm is what makes the control safe to depend on: an unknown feature name is a hard error, so a release that renames or drops the flag fails the launch loudly instead of silently restoring the modal.
+
+The same launch with the hook layer disabled reached the composer with no modal, answered the prompt, and fired the turn-end program that rides the launch rather than any hook:
+
+```sh
+codex --dangerously-bypass-approvals-and-sandbox --disable hooks \
+  -c "notify=[\"bash\",\"-c\",\"touch $TURNEND\"]" "Say ACK and stop."
+```
+
+```text
+> Say ACK and stop.
+- ACK, captain.
+$ ls "$TURNEND"
+<turn-end file present>
+```
+
+`tests/fm-codex-hook-layer-live-e2e.test.sh` is the command that refreshes this record.
+It captures the launch `bin/fm-spawn.sh` actually builds, replays those exact flags against the installed Codex, and fails naming the harness and version if the hook layer comes back on.
+It spends no model tokens, so it runs by default wherever Codex is installed.
+The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the split the launch template makes: a crewmate launches hook-free while a secondmate, which runs a primary session on this repository's own project hooks, keeps them.
+
 ## Composer classification matrix
 
 The shared composer classifier (`bin/fm-composer-lib.sh`, `fm_composer_classify_screen`) owns every composer shape fleet-wide; each backend contributes only a capture and a capability descriptor.
@@ -860,6 +917,7 @@ The CLI matrix was checked directly:
 | Literal send | `herdr pane send-text <pane> <text> --session <name>` | Left text unsubmitted until Enter. |
 | Keys | `herdr pane send-keys <pane> enter|escape|ctrl+c --session <name>` | Enter and Escape worked; Ctrl-C interrupted foreground work. |
 | Capture | `herdr pane read <pane> --source recent --lines N` | Small N could return empty below viewport height; a 200-line request plus local trim was stable. |
+| Viewport capture | `herdr pane read <pane> --source visible` | Verified on 2026-09-17 against Herdr 0.8.0 (protocol 19): `herdr pane read --help` documents `--source <SOURCE>` with `[possible values: visible, recent, recent-unwrapped, detection]`; `--source visible` exited 0 and returned 51 lines (the viewport) while `--source recent --lines 200` returned 200. This is the viewport-only read behind `fm_backend_herdr_visible_capture`, which Kimi's trust-dialog gate requires. |
 | Native state | `herdr agent get <pane>` | Working and done transitions were visible on some harnesses; live Claude Code 2.1.236 on Herdr 0.8.0 kept `agent_status=idle` for an entire landed turn, including a multi-second tool call, so submit confirmation falls through to the shared composer verdict. Native `busy` remains positive activity evidence, while native `idle` cannot close a turn and the adapter's semantic lifecycle decides worker state. |
 | Restart | guarded named-session stop then start | Workspace, tab, pane, and labels persisted; the agent process and registration did not. |
 | Close | `herdr pane close <pane> --session <name>` | The exact one-pane task tab closed; closing a final tab could remove the workspace. |
@@ -1962,6 +2020,36 @@ It names the installed version and the floor rather than degrading quietly, and 
 The same guard against the pre-change extension in the same lab measured a 676.9 ms worst keystroke echo while delivering two outcomes and a 295.3 ms worst echo with nothing to deliver, against a 49.2 ms extension-free floor, and failed as designed.
 Measured through the same real `fm_branch_report` tool and real `bin/` scripts with a 1 ms interval timer, the largest single block of the JavaScript thread fell from 273 ms to 2.0 ms for a routine outcome, from 286 ms to 2.0 ms for a captain outcome, and from 134 ms to 1.9 ms for main's acknowledgement, against a 1.3-2.2 ms idle-loop floor.
 Those absolute figures are specific to this host and Pi version; the guards assert the relationship (delivery must stay in the class of the same machine's own floor) rather than a remembered millisecond number.
+
+### 2026-09-18 away posture parks main
+
+The watcher and branch extension suites, the fleet-record, decision-answer, return, and merge suites, the credential-free live guard, and the strict typecheck were run on macOS 26.5 arm64 (Darwin 25.5.0), Node v24.13.1, against the globally installed npm `@earendil-works/pi-coding-agent` 0.81.1 package for the live guard and the npx-cached 0.85.1 package for the typecheck.
+No model was selected or prompted, no provider call was made, and the captain's own Pi session was not changed.
+
+```sh
+bin/fm-test-run.sh tests/fm-pi-watch-extension.test.sh tests/fm-pi-branch-extension.test.sh
+bin/fm-test-run.sh tests/fm-branch-supervision.test.sh tests/fm-send-resolve-key.test.sh tests/fm-afk-return.test.sh tests/fm-pr-merge.test.sh
+FM_PI_BRANCH_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-branch-live-e2e.test.sh
+FM_PI_PACKAGE_DIR=<pi-0.85.1 package> npm exec --yes --package=typescript@5.9.3 -- bash tests/fm-pi-primary-types.test.sh
+```
+
+```text
+ok - under the away-posture record every actionable row is offered to the branch while broken-queue wakes and watcher-failure alarms still reach main
+ok - under the away-posture record the wake carries the verbatim read-back tail, claims every row, opens no processing turn, cancels a pending request, and presents the accumulated rows after archive
+ok - an accepted away-only wake rejects after archive, while a drained task-local wake stays a quiet no-op
+ok - a claimed heartbeat row on a non-heartbeat away wake lifts task scoping for the fleet report
+ok - the away-posture record relocates the PR merge and a spawn under the spend cap to the branch, never local landing, and only while confirmed and valid
+ok - relocated branch spawn admits only already-queued dispatchable work, including on a manual-backend home
+ok - the away spend cap is rechecked under the task-set lock so concurrent spawns cannot both publish
+ok - fm-send --resolve-key: a decision answer refuses the attended branch before sending, a blocked: key stays steering, and the away-posture record relocates the answer
+ok - under the away-posture record the branch merges a granted green task, is held without a grant, cannot waive a red check, and is refused at the partition while attended
+ok - real Pi SDK 0.81.1 accepts the branch session construction and preserves an unpromptable wake
+ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.85.1
+```
+
+Every record read in those regressions ultimately goes through the real `bin/fm-afk-contract.sh`, with fixture wrappers used only to archive at deterministic call boundaries; a proposal, an archived record, and an invalid record are proven to restore attended guarded-action behavior rather than being assumed to.
+Against the installed 0.81.1 package the typecheck reports a pre-existing `ModelsRefreshOptions.providers` mismatch in the branch's provider-registration path that this change does not touch; the option exists from the 0.84 line on, which is why the typecheck evidence uses the newer package as the earlier entries do.
+The real Pi/Herdr return guard (`FM_AFK_PI_HERDR_E2E=1 tests/fm-afk-pi-herdr-return-e2e.test.sh`) remains the owner of the live return-brief proof; it loads no supervision extension into its synthetic primary and does not yet exercise the parked-main scenario, which is a follow-up for a Herdr-lab-guarded task.
 
 ## Native Codex through Pi
 

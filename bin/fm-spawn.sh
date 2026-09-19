@@ -244,7 +244,10 @@
 #   TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH HERDR_PANE_ID
 #   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID CMUX_SOCKET_PATH
 #   ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION, plus the task
-#   marker FM_TASK_ID that ship and scout panes receive above.
+#   marker FM_TASK_ID that ship and scout panes receive above, plus the
+#   compact-adviser kill switch COMPACT_ADVISER_DISABLE, which the floor also
+#   pins to 1 with a literal assignment so it survives the cleared environment
+#   even on a host that never had it set.
 #   An enabled task trace also retains TRACEPARENT. Explicit Firstmate launch
 #   assignments still apply inside the filtered environment. Raw commands must
 #   be POSIX sh compatible under this opt-in; the absent-file path is unchanged.
@@ -287,6 +290,15 @@
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
+# Kimi 2.0.0 also gates a fresh worktree on an interactive folder-trust dialog.
+# Its launch-readiness loop reads the visible viewport - so the spawn refuses at
+# preflight on a backend with no viewport-bounded capture - recognizes the
+# complete dialog, re-selects the already highlighted affirmative option on
+# every poll the complete dialog is still there, refuses any ready verdict while
+# dialog text is on that pane, and requires two consecutive captures that are
+# each ready and dialog-free before the ordinary readiness gates can pass. A
+# blank viewport read proves nothing either way: it costs the poll and restarts
+# that count. A viewport read that fails outright fails readiness at once.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
@@ -1337,15 +1349,63 @@ elif [ "$RELAUNCH" -eq 1 ]; then
   echo "error: spawn refused: state directory does not exist at $STATE" >&2
   exit 1
 fi
-# Role partition: spawning NEW work is MAIN-owned. A relaunch of an existing
-# task is legitimate branch recovery (fm-control drives it through this same
-# entrypoint), so only a fresh spawn refuses the branch actor (contract:
-# bin/fm-lease-lib.sh; no-op in homes without a branch actor).
+# Role partition: spawning NEW work is MAIN-owned while attended. A relaunch of
+# an existing task is legitimate branch recovery (fm-control drives it through
+# this same entrypoint), so only a fresh spawn refuses the branch actor
+# (contract: bin/fm-lease-lib.sh; no-op in homes without a branch actor). While
+# the away-posture record exists main is parked and a fresh spawn of
+# already-queued work relocates to the branch, under the record's spend cap
+# below - the same cap main meets in that posture.
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 if [ "$RELAUNCH" -ne 1 ]; then
-  fm_lease_forbid_branch "new-task spawn (fm-spawn)"
+  fm_lease_forbid_branch "new-task spawn (fm-spawn)" --away-relocated
 fi
+spawn_refuse_if_away_spend_cap() {
+  local cap live meta
+  [ "$RELAUNCH" -ne 1 ] || return 0
+  [ "$KIND" != secondmate ] || return 0
+  [ -f "$STATE/.afk-contract" ] || return 0
+  FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" validate >/dev/null 2>&1 || return 0
+  cap=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" field spend_max_concurrent_workers 2>/dev/null || true)
+  case "$cap" in
+  '' | *[!0-9]* | 0) return 0 ;;
+  esac
+  live=0
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    [ "$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-)" != secondmate ] || continue
+    live=$((live + 1))
+  done
+  if [ "$live" -ge "$cap" ]; then
+    echo "error: spawn refused - the away-posture record caps concurrent workers at $cap and $live ordinary task(s) are live in this home; task $ID stays queued for the captain's return or for a worker to finish (spend cap: bin/fm-afk-contract.sh)" >&2
+    exit 1
+  fi
+}
+# Spend cap (bin/fm-afk-contract.sh's spend_max_concurrent_workers): while the
+# away-posture record exists, a fresh ordinary spawn refuses for BOTH actors
+# once this home already holds that many ordinary task records, counted the
+# same way the return brief counts tasks live at return (every state/*.meta
+# whose kind is not secondmate). A relaunch replaces a worker that already
+# counts, and a secondmate is a persistent home rather than spend, so both are
+# exempt. Checked before any endpoint, worktree, or record exists, so a refusal
+# costs nothing to unwind; rechecked after the task-set lock so two fresh
+# spawns cannot both publish from a stale count.
+spawn_refuse_if_away_spend_cap
+spawn_require_relocated_queued_work() {
+  local actor
+  [ "$RELAUNCH" -ne 1 ] || return 0
+  actor=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
+  [ "$actor" = branch ] || return 0
+  if [ "$KIND" = secondmate ]; then
+    fm_lease_forbid_branch "new-task spawn (fm-spawn)"
+  fi
+  fm_lease_forbid_branch "new-task spawn (fm-spawn)" --away-relocated
+  if ! fm_backlog_row_probe "$DATA" "$ID" || [ "$FM_BACKLOG_ROW_STATE" != "queued no no" ]; then
+    echo "error: spawn refused - the supervision branch under the away-posture record may dispatch only already-queued unblocked work; task $ID has no dispatchable backlog item in this home" >&2
+    exit 1
+  fi
+}
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
   control_owner=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)
@@ -1397,6 +1457,8 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   SPAWN_TASK_SET_LOCK_HELD=1
+  spawn_refuse_if_away_spend_cap
+  spawn_require_relocated_queued_work
 fi
 if [ "$KIND" = secondmate ]; then
   if spawn_remote_secondmate "$ID"; then
@@ -1685,11 +1747,33 @@ launch_template() {
     fi
     printf '%s' '__MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     ;;
+  # --disable hooks (equivalent to -c features.hooks=false) turns codex's whole
+  # lifecycle-hook layer off for CREWMATE and SCOUT launches only.
+  # Without it a crewmate launch parks forever on codex's hook-trust modal
+  # ("N hooks are new or changed"), whose selection sits on "Review hooks" -
+  # neither trusting nor declining. Firstmate's key plane carries Enter, Escape
+  # and Ctrl-C with no arrow navigation, so the selection cannot be moved, and
+  # pre-accepting the prompt by writing codex's own trust store would manufacture
+  # an operator consent that was never given. The hooks it asks about are the
+  # OPERATOR's machine-level ~/.codex/hooks.json plus any project-local
+  # .codex/hooks.json, and a crewmate needs none of them: its turn-end signal is
+  # the -c notify= program on this same launch (verified still firing with hooks
+  # disabled, codex-cli 0.151.0), and firstmate's own .codex/hooks.json registers
+  # PRIMARY-session infrastructure that already stands down in a child worktree.
+  # This is the opposite of --dangerously-bypass-hook-trust, which RUNS untrusted
+  # hooks; disabling the feature runs none of them and leaves the operator's
+  # ~/.codex untouched. An unknown feature name is a hard codex error, so a future
+  # release that drops this flag fails the launch loudly instead of silently
+  # restoring the modal.
+  # A secondmate is a firstmate PRIMARY in its own home, and its turn-end guard,
+  # session-start digest, and cd/arm seatbelts are exactly those project hooks
+  # (docs/turnend-guard.md, docs/sessionstart-nudge.md, docs/cd-guard.md), so the
+  # secondmate launch deliberately keeps hooks on.
   codex)
     if [ "$kind" = secondmate ]; then
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
   opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -2224,10 +2308,11 @@ effort_flag_for_harness() {
     # opencode's interactive `opencode --prompt` launch has a verified --model
     # flag but no verified effort flag. Its `opencode run --variant` flag belongs
     # to a different, non-interactive launch mode, so fm-spawn does not pass it.
-    # kimi likewise has no reasoning-effort flag; the requested axis stays in
-    # task metadata but never reaches the launch command. Cursor encodes effort
-    # in model ids such as cursor-grok-4.5-high, so it also receives no separate
-    # effort flag.
+    # kimi provider catalogs expose supported and default effort values, but a
+    # launch flag and mapping have not been live-verified; the requested axis
+    # stays in task metadata but never reaches the launch command. Cursor encodes
+    # effort in model ids such as cursor-grok-4.5-high, so it also receives no
+    # separate effort flag.
   esac
 }
 
@@ -2255,6 +2340,10 @@ case "$LAUNCH" in
 *__KIMIBIN__*)
   KIMI_BIN=$(resolve_kimi_binary) || exit 1
   LAUNCH=${LAUNCH//__KIMIBIN__/$(shell_quote "$KIMI_BIN")}
+  fm_backend_visible_capture_supported "$BACKEND" || {
+    echo "error: refusing Kimi spawn because backend '$BACKEND' has no verified viewport-bounded capture; Kimi 2.0.0 gates a fresh worktree on a trust dialog that can only be answered and confirmed cleared from a scrollback-free read of the live pane" >&2
+    exit 1
+  }
   if [ "$KIND" != secondmate ]; then
     "$FM_ROOT/bin/fm-kimi-turnend-hook.sh" install || {
       echo "error: refusing Kimi spawn because the global turn-end hook could not be installed safely" >&2
@@ -2914,7 +3003,13 @@ if fm_backlog_transition_applies "$CONFIG" "$DATA" "$KIND"; then
     echo "error: task $ID's backlog item could not be read before dispatch ($FM_BACKLOG_ROW_ERROR)" >&2
     exit 1
   fi
-  if ! fm_backlog_row_dispatchable "$BACKLOG_ROW_STATE"; then
+  spawn_preflight_actor=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
+  if [ "$spawn_preflight_actor" = branch ] && fm_lease_away_relocated; then
+    if [ "$BACKLOG_ROW_STATE" != "queued no no" ]; then
+      echo "error: spawn refused - the supervision branch under the away-posture record may dispatch only already-queued unblocked work; task $ID has no dispatchable backlog item in this home" >&2
+      exit 1
+    fi
+  elif ! fm_backlog_row_dispatchable "$BACKLOG_ROW_STATE"; then
     echo "error: this home's backlog item $ID is not dispatchable in state $BACKLOG_ROW_STATE; refusing before creating its endpoint or local copy" >&2
     exit 1
   fi
@@ -3234,6 +3329,18 @@ kimi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
 
+# Trust decisions read the visible pane only. The dialog is a TUI frame, so a
+# scrollback-backed capture keeps reporting it long after Kimi redrew past it -
+# which would storm Enter into a live composer and then fail an already trusted
+# spawn for a dialog that did clear. There is deliberately no fallback to the
+# bounded capture: the spawn refuses at preflight on a backend that cannot read
+# the viewport, a read that fails outright fails readiness with its exit status
+# and the backend's own error on stderr, and only a successful empty read is
+# absence of evidence, which the poll loop treats as a skipped poll.
+kimi_visible_capture() {
+  fm_backend_visible_capture "$BACKEND" "$T" "$W"
+}
+
 # Kimi launch-readiness and delivery route their composer-emptiness half
 # through the shared classifier (bin/fm-composer-lib.sh via
 # fm_backend_composer_state), the same owner every steer and injection guard
@@ -3246,17 +3353,99 @@ kimi_composer_is_empty() {
   [ "$(fm_backend_composer_state "$BACKEND" "$T" "$W" 2>/dev/null)" = empty ]
 }
 
+# The navigation hint is matched as its two distinctive tokens rather than as
+# one row: a pane narrower than the row wraps it, and a wrapped hint is still
+# the complete dialog waiting for an answer.
+kimi_trust_dialog_is_visible() { # <plain-pane-capture>
+  local pane=$1
+  case "$pane" in *'Trust this folder?'*) ;; *) return 1 ;; esac
+  case "$pane" in *'↑↓ navigate'*) ;; *) return 1 ;; esac
+  case "$pane" in *'Enter select'*) ;; *) return 1 ;; esac
+  case "$pane" in *'❯ Trust this folder'*) ;; *) return 1 ;; esac
+  case "$pane" in *"Don't trust"*) ;; *) return 1 ;; esac
+}
+
+# The complete dialog above decides whether to press Enter. Any single marker
+# of it on the visible pane decides whether that pane is safe to call ready: a
+# capture caught mid-redraw and one that has painted only the dialog's box
+# title both fail the complete-dialog test while the dialog is still up and
+# waiting, with Kimi's startup banner sitting above it in that same capture.
+# Treating such a pane as ready would type the brief pointer into the dialog
+# and lose it.
+kimi_trust_marker_is_present() { # <plain-pane-capture>
+  case "$1" in *'Trust this folder'* | *"Don't trust"*) return 0 ;; esac
+  return 1
+}
+
+# A successful key send is not evidence that Kimi accepted trust. Only the
+# ordinary readiness signals in a later capture prove advancement.
+kimi_ready_signal_is_present() { # <plain-pane-capture>
+  case "$1" in *'Welcome to Kimi Code!'*) return 0 ;; esac
+  kimi_composer_is_empty
+}
+
 kimi_wait_for_ready() {
-  local pane i=0 max=${FM_KIMI_READY_POLLS:-60} interval=${FM_KIMI_POLL_INTERVAL:-0.5}
+  local pane capture_rc i=0 max=${FM_KIMI_READY_POLLS:-60} interval=${FM_KIMI_POLL_INTERVAL:-0.5}
+  local trust_enters=0 trust_seen=0 trust_still_visible=0 trust_markers_pending=0
+  local ready_captures=0
+  KIMI_READY_FAILURE_DETAIL='kimi did not show a verified ready signal before brief delivery'
   while [ "$i" -lt "$max" ]; do
-    pane=$(kimi_capture)
-    if printf '%s\n' "$pane" | grep -Fq 'Welcome to Kimi Code!' ||
-      kimi_composer_is_empty; then
-      return 0
+    capture_rc=0
+    pane=$(kimi_visible_capture) || capture_rc=$?
+    if [ "$capture_rc" -ne 0 ]; then
+      KIMI_READY_FAILURE_DETAIL="kimi readiness could not read the visible viewport of backend '$BACKEND' (viewport capture exited $capture_rc), so the trust dialog could neither be answered nor ruled out"
+      return 1
+    fi
+    if [ -z "$pane" ]; then
+      ready_captures=0
+      i=$((i + 1))
+      [ "$i" -ge "$max" ] || sleep "$interval"
+      continue
+    fi
+    if kimi_trust_dialog_is_visible "$pane"; then
+      trust_seen=1
+      trust_still_visible=1
+      trust_markers_pending=0
+      ready_captures=0
+      # Kimi swallows keypresses during its startup window - the same hazard
+      # FM_KIMI_SUBMIT_RETRIES covers for the brief pointer - so the
+      # affirmative selection is re-sent on every poll the complete dialog is
+      # still on screen. The dialog's own disappearance is the postcondition:
+      # once it clears, this branch cannot fire again.
+      if ! spawn_send_key "$T" Enter; then
+        KIMI_READY_FAILURE_DETAIL="kimi trust dialog was seen but the affirmative selection could not be submitted"
+        return 1
+      fi
+      trust_enters=$((trust_enters + 1))
+    else
+      trust_still_visible=0
+      if kimi_trust_marker_is_present "$pane"; then
+        trust_markers_pending=1
+        ready_captures=0
+      else
+        trust_markers_pending=0
+        # The banner prints before the dialog paints its first frame, so one
+        # ready-looking capture cannot be told apart from a pane whose dialog is
+        # one redraw away. Two consecutive captures that are each ready and free
+        # of dialog text can; any capture that is not ready restarts the count.
+        if kimi_ready_signal_is_present "$pane"; then
+          ready_captures=$((ready_captures + 1))
+          [ "$ready_captures" -lt 2 ] || return 0
+        else
+          ready_captures=0
+        fi
+      fi
     fi
     i=$((i + 1))
     [ "$i" -ge "$max" ] || sleep "$interval"
   done
+  if [ "$trust_still_visible" -eq 1 ]; then
+    KIMI_READY_FAILURE_DETAIL="kimi trust dialog did not clear after selecting 'Trust this folder' on $trust_enters poll(s); saw 'Trust this folder?', the navigation hint, selected 'Trust this folder', and the negative Don't trust option"
+  elif [ "$trust_seen" -eq 1 ]; then
+    KIMI_READY_FAILURE_DETAIL="kimi trust dialog was answered but the pane never advanced to a verified ready signal; saw 'Trust this folder?', the navigation hint, selected 'Trust this folder', and the negative Don't trust option"
+  elif [ "$trust_markers_pending" -eq 1 ]; then
+    KIMI_READY_FAILURE_DETAIL="kimi did not show a verified ready signal before brief delivery; trust dialog text stayed on screen without the complete dialog, so the pane was never safe to answer or to treat as ready"
+  fi
   return 1
 }
 
@@ -4282,6 +4471,19 @@ if [ "$KIND" = secondmate ]; then
   # injected carrier and this on/off snapshot are guaranteed to agree.
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
+# Every agent this fleet launches - crewmate, scout, and secondmate, on a fresh
+# spawn and on a relaunch alike - runs with the compact-adviser kill switch on.
+# This is an export statement rather than a forwarded ambient name or a
+# command-prefix assignment, so it carries the value across an entire compound
+# raw launch expression. A pane that never had it, and a remote host whose
+# transport never carried it, both still start the agent with it set. It is
+# unconditional, with no config file or flag gating it, and is inserted outside
+# every generated launch prefix; relaunch trace cleanup may execute first but
+# cannot change this value. The cleared-environment floor in the
+# LAUNCH_ENV_PREFIX construction below sets it again at the `env -i` boundary,
+# so under an enabled allowlist the switch is established before the wrapping
+# `/bin/sh` starts rather than only inside the command that shell runs.
+LAUNCH="export COMPACT_ADVISER_DISABLE=1; $LAUNCH"
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
@@ -4316,6 +4518,10 @@ spawn_record_traceparent() {
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
+# Export the compact-adviser kill switch into the pane shell through the same
+# pre-launch channel, so later commands in that shell inherit it too. The launch
+# command independently establishes the value for the agent process itself.
+spawn_send_text_line "$T" "export COMPACT_ADVISER_DISABLE=1"
 # Mark the pane as a task worker so bin/fm-test-run.sh can refuse to run the
 # suite in the repository's primary checkout. Ship and scout workers are the
 # ones assigned an isolated worktree; a secondmate runs its own home instead.
@@ -4343,11 +4549,14 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
 fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH_ENV_PREFIX='/usr/bin/env -i'
+  # COMPACT_ADVISER_DISABLE is the intentional declarative floor-membership
+  # entry; the explicit COMPACT_ADVISER_DISABLE=1 assignment below is the
+  # authoritative setter.
   for env_name in HOME PATH USER LOGNAME SHELL TERM COLORTERM LANG LC_ALL LC_CTYPE \
     TMPDIR TMP TEMP GOTMPDIR TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH \
     HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID \
     CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION \
-    FM_TASK_ID \
+    FM_TASK_ID COMPACT_ADVISER_DISABLE \
     $LAUNCH_ENV_NAMES; do
     # Only validated names enter shell syntax. Values expand once, quoted, in
     # the pane shell and never become source text or spawn-process snapshots.
@@ -4355,6 +4564,16 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     printf -v env_arg '${%s+"%s=$%s"}' "$env_name" "$env_name" "$env_name"
     LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX $env_arg"
   done
+  # COMPACT_ADVISER_DISABLE is retained by the floor loop above, which forwards
+  # whatever the pane export set, and then pinned here to the one value Firstmate
+  # launches on. The literal assignment comes last deliberately: `env` applies
+  # assignments left to right, so this one wins over a forwarded pane value, and
+  # it still delivers the switch on a pane whose export never landed. Unlike the
+  # trace carrier below it carries no gate, so it is appended unconditionally.
+  # Setting it here rather than relying on the assignment already carried by
+  # $LAUNCH is what gives the wrapping `/bin/sh` itself the switch, not only the
+  # agent command it runs.
+  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX COMPACT_ADVISER_DISABLE=1"
   if [ -n "$SPAWN_TRACEPARENT" ]; then
     # shellcheck disable=SC2016
     LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX "'${TRACEPARENT+"TRACEPARENT=$TRACEPARENT"}'
@@ -4371,7 +4590,7 @@ fi
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
-    kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
+    kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"
     exit 1
   fi
   KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."

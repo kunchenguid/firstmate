@@ -94,7 +94,9 @@ fm_test_fake_gh_axi() {
 # fm_test_fake_tmux_spawn <fakebin>
 # Spawn-world tmux: pane_current_path from FM_FAKE_PANE_PATH, session named
 # firstmate, window ops succeed, send-keys succeed. When FM_FAKE_LAUNCH_LOG is
-# set, each send-keys -l payload is appended one per line. Optional
+# set, each send-keys -l payload is appended one per line. When FM_FAKE_PANE_LOG
+# is set, each send-keys TEXT-LINE payload (the pre-launch pane exports, which
+# carry no -l) is appended there instead, one per line in send order. Optional
 # FM_FAKE_DUPLICATE_WINDOW is printed from list-windows.
 #
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
@@ -125,6 +127,25 @@ case "${1:-}" in
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
         fi
         prev=$a
+      done
+    fi
+    # The pre-launch pane exports ride the text-line form
+    # (`send-keys -t <target> <text> Enter`), which carries no -l flag, so a
+    # suite that asserts on what the pane shell received opts in with its own
+    # log. Skip the flags, the target, and the trailing key so only the payload
+    # is recorded, one per line, in send order.
+    if [ -n "${FM_FAKE_PANE_LOG:-}" ]; then
+      shift
+      skip_next=
+      literal=
+      for a in "$@"; do
+        if [ -n "$skip_next" ]; then skip_next=; continue; fi
+        case "$a" in
+          -t) skip_next=1; continue ;;
+          -l) literal=1; continue ;;
+          Enter|C-m) continue ;;
+          *) [ -n "$literal" ] || printf '%s\n' "$a" >> "$FM_FAKE_PANE_LOG" ;;
+        esac
       done
     fi
     exit 0

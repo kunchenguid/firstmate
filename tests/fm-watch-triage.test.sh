@@ -305,6 +305,10 @@ test_stale_is_terminal_classifier() {
   stale_is_terminal "default:w1:p2" "$state" || fail "terminal herdr stale status not resolved through metadata"
   printf 'working: compiling\n' > "$state/nonterm.status"
   stale_is_terminal "sess:fm-nonterm" "$state" && fail "non-terminal stale classified terminal"
+  printf 'paused: waiting on upstream PR #123 to land\nOnce it is merged I will rebase and continue.\n' > "$state/prose-pause.status"
+  stale_is_terminal "sess:fm-prose-pause" "$state" && fail "prose mentioning a legacy token escalated a multi-line pause as terminal"
+  status_is_paused_or_captain_held "$(last_status_line "$state/prose-pause.status")" \
+    || fail "prose mentioning a legacy token hid a multi-line pause from the wait cadence"
   stale_is_terminal "sess:fm-missing" "$state" && fail "stale with no status classified terminal"
   pass "stale_is_terminal: terminal status surfaces, non-terminal and no-status are benign"
 }
@@ -314,6 +318,11 @@ test_classifier_primitives() {
   dir=$(make_case classify-primitives); state="$dir/state"
   printf 'working: a\n\ndone: b\n\n' > "$state/x.status"
   [ "$(last_status_line "$state/x.status")" = "done: b" ] || fail "last_status_line did not return the last non-blank line"
+  printf 'paused [corr=aaaa1111bbbb2222]: waiting for release\nMore detail: still waiting.\n\n' > "$state/x.status"
+  [ "$(last_status_line "$state/x.status")" = 'paused [corr=aaaa1111bbbb2222]: waiting for release' ] \
+    || fail "continuation prose hid the last declared status verb"
+  printf 'merged\n\n' > "$state/x.status"
+  [ "$(last_status_line "$state/x.status")" = merged ] || fail "legacy free-text status was lost"
   status_is_captain_relevant "done: b" || fail "done: not recognized as captain-relevant"
   status_is_captain_relevant "needs-decision [key=q1]: b" || fail "keyed needs-decision not recognized as captain-relevant"
   status_is_captain_relevant "working: b" && fail "working: wrongly recognized as captain-relevant"
@@ -979,6 +988,45 @@ test_turn_ended_churn_resets_wedge_state_before_stale_poll() {
   pass "pane churn resets prior wedge escalation state before the stale-path poll"
 }
 
+# Stock-bash regression: when every churned key already holds a fresh
+# .churn-since-* marker (a second churning turn-end inside an already-open
+# deferral window), the marker-creation loop expands an empty missing_keys and
+# the cleanup expands an empty created_keys. Under `set -u`, bash 3.2 aborts the
+# whole watcher on an empty "${arr[@]}" where newer bash no-ops, so the absorb
+# must land without re-marking the window. The macos-stock-bash CI lane runs
+# this case under real /bin/bash 3.2 via FM_TEST_ONLY.
+test_turn_ended_churn_existing_marker_absorbed() {
+  local dir state fakebin out capture_file window key marker_since pid
+  dir=$(make_case turn-ended-churn-marked); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-codexmarked"
+  : > "$state/codexmarked.turn-ended"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/codexmarked.meta"
+  printf 'apply_patch: writing bin/thing.sh' > "$capture_file"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf '%s' "$(hash_text 'reading the brief')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  # The deferral window is already open from an earlier churning turn-end, so
+  # this absorb finds every churned key marked and creates no marker.
+  marker_since=$(date +%s)
+  printf '%s\n' "$marker_since" > "$state/.churn-since-$key"
+  export FM_FAKE_CREW_STATE='state: unknown · source: pane · harness state unavailable (unknown codex-unverified)'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_CONFIG_OVERRIDE="$(churn_config "$dir")" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=3 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_absorbed "$state" "$pid" "absorbed benign signal:" \
+    || { reap "$pid"; fail "a churning turn-end inside an open deferral window was not absorbed: $(cat "$out")"; }
+  [ ! -s "$out" ] || fail "an absorbed marked-churn turn-end printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "an absorbed marked-churn turn-end enqueued a durable wake record"
+  [ "$(cat "$state/.churn-since-$key" 2>/dev/null || true)" = "$marker_since" ] \
+    || { reap "$pid"; fail "an already-marked churn re-opened or lost the existing deferral window"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a churning turn-end inside an already-open deferral window is absorbed without re-marking"
+}
+
 # The safety half: the same unverifiable harness, the same fixture, but the pane
 # has NOT changed since the previous poll. There is no positive evidence, so the
 # wake must still surface - a stopped worker is exactly what the turn-end marker
@@ -1557,6 +1605,27 @@ test_secondmate_status_note_surfaced_despite_busy_agent() {
   pass "a secondmate's status note surfaces even while its own agent is busy"
 }
 
+test_secondmate_buried_block_wakes_despite_busy_agent() {
+  local dir state fakebin out suffix pid
+  for suffix in '' 'note: unrelated progress' 'resolved [key=other]: unrelated answer'; do
+    dir=$(make_case "secondmate-buried-block-${#suffix}"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"
+    printf 'kind=secondmate\n' > "$state/mate.meta"
+    printf 'blocked [key=access]: need release access\n%s\n' "$suffix" > "$state/mate.status"
+    [ "$(status_line_verb "$(status_current_line "$state/mate.status" secondmate)")" = blocked ] \
+      || fail "unrelated '$suffix' hid an open blocker from current-state resolution"
+    export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+    watch_bg "$state" "$fakebin" "$out"
+    pid=$!
+    wait_for_exit "$pid" 100 || fail "busy secondmate's blocker did not wake after '$suffix'"
+    grep -F "signal: $state/mate.status" "$out" >/dev/null \
+      || fail "busy secondmate's blocker was not surfaced"
+    grep -F "$state/mate.status" "$state/.wake-queue" >/dev/null \
+      || fail "busy secondmate's blocker was not durably queued"
+  done
+  pass "a secondmate blocker wakes despite busy evidence and later unrelated appends"
+}
+
 test_self_announced_close_does_not_rewake_but_next_note_does() {
   local dir state fakebin out status_file pid rc
   dir=$(make_case self-close-quiet); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
@@ -2053,159 +2122,6 @@ test_nonterminal_stale_not_working_surfaced() {
   pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
 }
 
-# --- stale pane whose ENDPOINT the backend proves is gone: records retired ----
-# The 2026-09-15 case: three closed Herdr panes kept waking firstmate. Nothing on
-# this path re-read a recorded window's presence, so each husk still captured,
-# hashed stably, tripped the stale threshold, and wedge-escalated with a rising
-# count - wakes no supervision action could ever clear. Proof of absence now
-# retires that window's per-window records silently, while a window the backend
-# does NOT prove gone keeps every record and still surfaces. One poll drives both
-# halves apart: state/*.meta is globbed in order, so the ghost is triaged first
-# and the live window's own stale is what ends the cycle.
-test_stale_records_retired_when_the_endpoint_is_confirmed_gone() {
-  local dir state fakebin out drain_out capture_file ghost live ghost_key live_key pane_hash sig pid retirements
-  dir=$(make_case stale-endpoint-gone); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
-  ghost="test:fm-a-ghost"; live="test:fm-z-live"
-  printf 'idle prompt, finished' > "$capture_file"
-  printf 'window=%s\nkind=ship\n' "$ghost" > "$state/a-ghost.meta"
-  printf 'window=%s\nkind=ship\n' "$live" > "$state/z-live.meta"
-  printf 'working: implementing\n' > "$state/a-ghost.status"
-  printf 'working: implementing\n' > "$state/z-live.status"
-  sig=$(seen_sig "$state/a-ghost.status"); printf '%s' "$sig" > "$state/.seen-a-ghost_status"
-  sig=$(seen_sig "$state/z-live.status"); printf '%s' "$sig" > "$state/.seen-z-live_status"
-  ghost_key=$(printf '%s' "$ghost" | tr ':/.' '___')
-  live_key=$(printf '%s' "$live" | tr ':/.' '___')
-  pane_hash=$(hash_text "idle prompt, finished")
-  # Both panes are one poll away from stale, and both already carry the marker
-  # set a long-running window accumulates.
-  for key in "$ghost_key" "$live_key"; do
-    printf '%s' "$pane_hash" > "$state/.hash-$key"
-    printf '1\n' > "$state/.count-$key"
-    printf 'an-older-hash' > "$state/.stale-$key"
-    date +%s > "$state/.stale-since-$key"
-    date +%s > "$state/.churn-since-$key"
-    printf '2\n' > "$state/.wedge-escalations-$key"
-  done
-  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
-  # The session inventory names only the live window, which is what makes the
-  # ghost's absence PROVEN rather than merely unreadable.
-  watch_bg "$state" "$fakebin" "$out" FM_FAKE_TMUX_WINDOWS=fm-z-live \
-    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STALE_ESCALATE_SECS=999
-  pid=$!
-  wait_for_exit "$pid" 150 || fail "watcher did not surface the live window's stale"
-  grep -Fx "stale: $live" "$out" >/dev/null || fail "the live window's stale was not surfaced: $(cat "$out")"
-  grep -F "$ghost" "$out" >/dev/null && fail "a window the backend proves is gone must never wake firstmate"
-  grep -F "retired stale records" "$state/.watch-triage.log" | grep -F "$ghost" >/dev/null \
-    || fail "the confirmed-gone window's retirement was not recorded in triage: $(cat "$state/.watch-triage.log" 2>/dev/null)"
-  for suffix in hash count stale stale-since churn-since wedge-escalations; do
-    [ ! -e "$state/.$suffix-$ghost_key" ] \
-      || fail ".$suffix-$ghost_key survived the retirement of a confirmed-gone endpoint"
-  done
-  [ -e "$state/.retired-$ghost_key" ] || fail "the retirement itself was not recorded durably"
-  # Retirement is scoped to that one key: the live window keeps its own records,
-  # with the stale suppressor advanced by the surface exactly as before.
-  [ -e "$state/.churn-since-$live_key" ] || fail "retirement removed a live window's records"
-  [ "$(cat "$state/.stale-$live_key" 2>/dev/null || true)" = "$pane_hash" ] \
-    || fail "the live window's stale suppressor was not advanced on surface"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the live stale failed"
-  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$live" >/dev/null || fail "the live stale wake was not queued"
-  grep -F "$ghost" "$drain_out" >/dev/null && fail "a confirmed-gone window reached the durable queue"
-
-  # Durability: a second cycle must not re-probe the backend and retire the same
-  # window again. The ghost is skipped outright, so the triage log gains no
-  # second retirement line while the live window surfaces exactly as before.
-  ack_stopped_cycle "$state" || fail "could not acknowledge the first cycle"
-  printf '%s' "$pane_hash" > "$state/.hash-$live_key"
-  printf '1\n' > "$state/.count-$live_key"
-  printf 'an-older-hash' > "$state/.stale-$live_key"
-  watch_bg "$state" "$fakebin" "$out" FM_FAKE_TMUX_WINDOWS=fm-z-live \
-    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STALE_ESCALATE_SECS=999
-  pid=$!
-  wait_for_exit "$pid" 150 || fail "the second cycle did not surface the live window's stale"
-  retirements=$(grep -c -F "retired stale records" "$state/.watch-triage.log")
-  [ "$retirements" = 1 ] \
-    || fail "a retired window was retired again on a later cycle ($retirements triage lines)"
-
-  # The marker leaves with the metadata it was recorded against, together with
-  # the rest of that key's now-orphaned records.
-  ack_stopped_cycle "$state" || fail "could not acknowledge the second cycle"
-  rm -f "$state/a-ghost.meta"
-  printf '%s' "$pane_hash" > "$state/.hash-$live_key"
-  printf '1\n' > "$state/.count-$live_key"
-  printf 'an-older-hash' > "$state/.stale-$live_key"
-  watch_bg "$state" "$fakebin" "$out" FM_FAKE_TMUX_WINDOWS=fm-z-live \
-    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_STALE_ESCALATE_SECS=999
-  pid=$!
-  wait_for_exit "$pid" 150 || fail "the third cycle did not surface the live window's stale"
-  [ ! -e "$state/.retired-$ghost_key" ] \
-    || fail "the retirement marker outlived the metadata it was recorded against"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the third cycle"
-  unset FM_FAKE_CREW_STATE
-  pass "a stale pane whose endpoint the backend proves is gone has its records retired without a wake, and a live window keeps its own"
-}
-
-# --- a retired window whose METADATA is republished rejoins triage ------------
-# The retirement marker is durable, so the one thing that must release it is a
-# relaunch onto the same recorded target. Both stamps are whole seconds on both
-# platforms, and `fm-control.sh <id> relaunch` on a window that was wedged at
-# the escalation threshold publishes the new metadata well inside the second the
-# retirement was written in: a "newer metadata" rule reads that tie as "still
-# retired" and drops a LIVE window out of triage - no stale detection, no wedge
-# timer, no steering-inbox check - in silence and for the life of that metadata.
-# The marker therefore records the metadata mtime it was taken against, and any
-# other mtime there releases it.
-test_retired_window_returns_to_triage_when_its_metadata_is_republished() {
-  local dir state fakebin out capture_file window key pane_hash sig pid
-  dir=$(make_case retired-relaunch); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-relaunch"
-  printf 'idle prompt, finished' > "$capture_file"
-  printf 'window=%s\nkind=ship\n' "$window" > "$state/relaunch.meta"
-  printf 'working: implementing\n' > "$state/relaunch.status"
-  sig=$(seen_sig "$state/relaunch.status"); printf '%s' "$sig" > "$state/.seen-relaunch_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
-  pane_hash=$(hash_text "idle prompt, finished")
-  printf '%s' "$pane_hash" > "$state/.hash-$key"
-  printf '1\n' > "$state/.count-$key"
-  # The metadata this retirement is taken against: the spawn that recorded it.
-  touch -t 202001010000 "$state/relaunch.meta"
-  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
-
-  # Phase A: a successful inventory omits the window, so it is retired against
-  # the metadata mtime above.
-  watch_bg "$state" "$fakebin" "$out" FM_FAKE_TMUX_WINDOWS=fm-someone-else \
-    FM_FAKE_TMUX_CAPTURE="$capture_file"
-  pid=$!
-  if ! wait_poll_cycle "$state" "$pid"; then
-    reap "$pid"; fail "the watcher woke for a window the backend proves is gone: $(cat "$out")"
-  fi
-  reap "$pid"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A stop"
-  [ "$(cat "$state/.retired-$key" 2>/dev/null || true)" = "$(file_mtime "$state/relaunch.meta")" ] \
-    || fail "the retirement did not record the metadata mtime it was taken against"
-
-  # Phase B: the relaunch republishes the metadata for the same recorded target,
-  # in the very second the retirement marker itself carries.
-  touch -t 202401010000 "$state/relaunch.meta" "$state/.retired-$key"
-  [ "$(file_mtime "$state/relaunch.meta")" = "$(file_mtime "$state/.retired-$key")" ] \
-    || fail "the fixture did not reproduce the same-second relaunch"
-  printf '%s' "$pane_hash" > "$state/.hash-$key"
-  printf '1\n' > "$state/.count-$key"
-  : > "$out"
-  watch_bg "$state" "$fakebin" "$out" FM_FAKE_TMUX_WINDOWS=fm-relaunch \
-    FM_FAKE_TMUX_CAPTURE="$capture_file"
-  pid=$!
-  wait_for_exit "$pid" 100 \
-    || fail "a relaunched window whose metadata ties the retirement stayed out of triage: $(cat "$out")"
-  grep -F "stale: $window" "$out" >/dev/null \
-    || fail "the relaunched window was never triaged again: $(cat "$out")"
-  [ ! -e "$state/.retired-$key" ] \
-    || fail "the retirement marker outlived the metadata it was taken against"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the relaunch cycle"
-  unset FM_FAKE_CREW_STATE
-  pass "a retirement is released when the recorded metadata is republished, including in the same second it was written"
-}
-
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
 #     cadence, never wedge-escalated ------------------------------------------
 # The live 2026-07-09/10 case: a crew intentionally held awaiting an upstream tool
@@ -2656,13 +2572,18 @@ test_live_paused_until_controls_recheck_time() {
 # the real 240s default only changes how long that takes.
 # <mode> `exit` requires the watcher to surface and exit, `absorb` requires it to
 # survive whole poll cycles at the threshold. Returns 1 when it does the other.
+# The endpoint this lane's window resolves to is a live grok agent unless a case
+# drives it elsewhere with FM_TEST_PANE_COMMAND (the pane's foreground command)
+# and FM_TEST_TMUX_WINDOWS (the session inventory the recorded window must appear
+# in), which is how the dead-endpoint cases below reach `dead` and `missing`.
 wedge_threshold_round() {  # <state> <fakebin> <out> <capture> <window> <verdict> <exit|absorb>
   local state=$1 fakebin=$2 out=$3 capture=$4 window=$5 verdict=$6 mode=$7 pid cycles=0
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture" \
-    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE="$verdict" \
+    FM_FAKE_TMUX_CURRENT_COMMAND="${FM_TEST_PANE_COMMAND-grok}" \
+    FM_FAKE_TMUX_WINDOWS="${FM_TEST_TMUX_WINDOWS-}" FM_FAKE_CREW_STATE="$verdict" \
     FM_WATCH_HANDLING_SUCCESSOR=1 \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_PAUSE_RESURFACE_SECS="${FM_TEST_PAUSE_RESURFACE:-999}" FM_STALE_ESCALATE_SECS=1 \
+    FM_PAUSE_RESURFACE_SECS="${FM_TEST_PAUSE_RESURFACE:-999}" FM_STALE_ESCALATE_SECS="${FM_TEST_STALE_ESCALATE:-1}" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
@@ -2876,6 +2797,295 @@ test_wedge_threshold_recheck_names_the_captain_for_a_held_lane() {
     || fail "the recheck owed on return did not name the captain: $(cat "$out")"
   ack_stopped_cycle "$state" || fail "could not acknowledge the on-return captain-held recheck"
   pass "a captain-held lane is rechecked as a hold on the captain, never as an external wait, and never at all while the captain is away"
+}
+
+
+# --- a record whose agent is GONE reports once, instead of alarming forever ---
+# Observed on a live fleet: two finished lanes reached 226 and 203 CONSECUTIVE
+# wedge escalations, one alarm roughly every FM_STALE_ESCALATE_SECS, indefinitely -
+# from lanes with no agent running at all. `bin/fm-control.sh <id> exit` answered
+# `already-stopped` and `bin/fm-crew-state.sh` read `failed - run failed`. Closing
+# the pane did not stop it either: with the pane gone (`herdr pane read` ->
+# `pane_not_found`) the count still climbed, because the poll is driven by the
+# durable record's `window=` line, not by the pane. The escalate path clears its
+# own idle timer and re-arms with nothing bounding the count, and a dead agent's
+# pane never churns to reset it, so the ladder had no ceiling. The cost is not the
+# repetition: it is that ~400 notifications a day from two finished lanes drown
+# the alarms that matter, and the captain stopped reading them.
+#
+# fm_backend_agent_state already separated an agent that is THINKING from one that
+# is gone; the escalation path simply never asked it. Both directions are pinned
+# below, for the reason the declared-wait cases above give: a bound proved only in
+# the quiet direction is indistinguishable from deleting wedge detection.
+# Related, and deliberately NOT closed by this: upstream #4412, #4482, #4316.
+
+# The two endpoint verdicts that are PROOF an agent is gone, as the lane fixture
+# above reaches them: `dead` is the recorded window still present in the session
+# inventory with a bare shell in front of it (the husk a crashed agent leaves),
+# and `missing` is an inventory that no longer carries that window at all.
+gone_endpoint_env() {  # <dead|missing> -> assignments for the round below
+  case "$1" in
+    dead)    FM_TEST_PANE_COMMAND=bash FM_TEST_TMUX_WINDOWS=fm-wedge ;;
+    missing) FM_TEST_PANE_COMMAND=bash FM_TEST_TMUX_WINDOWS=fm-someone-else ;;
+  esac
+}
+
+test_gone_endpoint_reports_once_instead_of_escalating_forever() {
+  local dir state fakebin out capture window key verdict round
+  local failed='state: failed · source: run-step · run failed'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  for verdict in dead missing; do
+    dir=$(wedge_threshold_fixture "gone-endpoint-$verdict" 'working: still compiling' 0)
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    gone_endpoint_env "$verdict"
+    export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
+      || fail "a $verdict endpoint was never reported at the wedge threshold: $(cat "$out")"
+    grep -F "agent $verdict" "$out" >/dev/null \
+      || fail "the $verdict report did not name the endpoint verdict: $(cat "$out")"
+    grep -F 'possible wedge' "$out" >/dev/null \
+      && fail "a $verdict endpoint was still reported as a possible wedge: $(cat "$out")"
+    [ "$(wedge_stale_wakes "$state" "$window")" -eq 1 ] \
+      || fail "a $verdict endpoint queued $(wedge_stale_wakes "$state" "$window") wakes instead of one"
+    [ ! -e "$state/.wedge-escalations-$key" ] \
+      || fail "a $verdict endpoint advanced the wedge escalation count"
+    ack_stopped_cycle "$state" || fail "could not acknowledge the $verdict report"
+
+    # The defect itself: every later threshold repeated the alarm, 226 times over.
+    # Each of these rounds is several thresholds, and every one must stay quiet.
+    round=1
+    while [ "$round" -le 3 ]; do
+      : > "$out"
+      wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" absorb \
+        || fail "a $verdict endpoint re-alarmed on later threshold $round: $(cat "$out")"
+      [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+        || fail "a $verdict endpoint queued a repeat wake on round $round: $(cat "$state/.wake-queue")"
+      [ ! -e "$state/.wedge-escalations-$key" ] \
+        || fail "a $verdict endpoint advanced the escalation count on round $round"
+      round=$((round + 1))
+    done
+    unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  done
+  pass "a record whose endpoint is dead or missing reports itself once and is never re-escalated"
+}
+
+# The load-bearing direction. A genuinely wedged LIVE agent must escalate exactly
+# as it did before, and so must every verdict short of proof: an unattributable
+# foreground process (`ambiguous`) and an unreadable endpoint keep the identical
+# schedule, reason and count, because neither shows the agent is gone.
+test_live_and_unproven_endpoints_still_wedge_escalate() {
+  local dir state fakebin out capture window key spec verdict comm inventory
+  local working='state: working · source: run-step · ci running'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  for spec in 'alive|grok|fm-wedge' 'ambiguous|node|fm-wedge' 'unreadable||fm-wedge'; do
+    verdict=${spec%%|*}; comm=${spec#*|}; inventory=${comm#*|}; comm=${comm%%|*}
+    dir=$(wedge_threshold_fixture "wedge-live-$verdict" 'working: still compiling' 0)
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    FM_TEST_PANE_COMMAND=$comm FM_TEST_TMUX_WINDOWS=$inventory
+    export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+      || fail "an $verdict endpoint stopped escalating at the wedge threshold: $(cat "$out")"
+    grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
+      || fail "an $verdict endpoint lost its wedge reason: $(cat "$out")"
+    [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = 1 ] \
+      || fail "an $verdict endpoint did not advance the escalation count"
+    ack_stopped_cycle "$state" || fail "could not acknowledge the $verdict escalation"
+
+    # And it keeps escalating, with the count climbing exactly as it always did.
+    : > "$out"
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+      || fail "an $verdict endpoint escalated only once: $(cat "$out")"
+    grep -F 'possible wedge, escalation 2' "$out" >/dev/null \
+      || fail "an $verdict endpoint did not keep counting: $(cat "$out")"
+    ack_stopped_cycle "$state" || fail "could not acknowledge the second $verdict escalation"
+    unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  done
+  pass "a live wedged agent, an unattributable one, and an unreadable endpoint escalate unchanged"
+}
+
+# Reporting once must not mean reporting once forever: a replacement launched into
+# the same window has to get the full alarm back, and its own later death has to be
+# reported again rather than silenced by the record of the first one.
+test_gone_report_rearms_when_the_endpoint_comes_back() {
+  local dir state fakebin out capture window key
+  local failed='state: failed · source: run-step · run failed'
+  local working='state: working · source: run-step · ci running'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  dir=$(wedge_threshold_fixture gone-rearm 'working: still compiling' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+
+  gone_endpoint_env missing; export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
+    || fail "the gone endpoint was never reported: $(cat "$out")"
+  [ -s "$state/.dead-reported-$key" ] || fail "the once-only report left no record of itself"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first gone report"
+
+  # A replacement is launched into the same window and then wedges for real.
+  FM_TEST_PANE_COMMAND=grok FM_TEST_TMUX_WINDOWS=fm-wedge
+  : > "$out"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+    || fail "a replacement agent's wedge was swallowed by the earlier gone report: $(cat "$out")"
+  grep -F 'possible wedge, escalation' "$out" >/dev/null \
+    || fail "a replacement agent did not escalate as a wedge: $(cat "$out")"
+  [ ! -e "$state/.dead-reported-$key" ] \
+    || fail "the once-only record survived an endpoint that reads live again"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the replacement's wedge escalation"
+
+  # And when the replacement dies too, that death is reported in full.
+  gone_endpoint_env dead
+  : > "$out"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
+    || fail "a second death in the same window was never reported: $(cat "$out")"
+  grep -F 'agent dead' "$out" >/dev/null \
+    || fail "a second death was not reported as a gone endpoint: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the second gone report"
+  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  pass "the once-only gone report re-arms when the endpoint comes back, and reports a later death again"
+}
+
+# The swallow the once-marker must be bound against: death #1 is reported, then a
+# replacement launches into the same window - churning the pane hash, which
+# resets the stale suppressor, wedge timer and escalation count while NO reset
+# site touches the once-marker - and then the replacement itself dies and the
+# pane settles static at ITS hash. The relaunch round ends before any threshold,
+# so no backend probe ever read the replacement alive; no incarnation token is
+# armed for this fixture, so the marker's pane-hash fallback is all that can tell
+# this death apart from the one already reported, and the second death must
+# report in full, while later thresholds on the SAME dead pane stay
+# silent and never advance the escalation count.
+test_second_death_after_a_same_window_relaunch_reports_in_full() {
+  local dir state fakebin out capture window key
+  local failed='state: failed · source: run-step · run failed'
+  local working='state: working · source: run-step · ci running'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  dir=$(wedge_threshold_fixture gone-relaunch-swallow 'working: still compiling' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+
+  # Death #1: the endpoint is gone and reported once, in full.
+  gone_endpoint_env missing; export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
+    || fail "the first death was never reported: $(cat "$out")"
+  grep -F 'agent missing' "$out" >/dev/null \
+    || fail "the first death report did not name the endpoint verdict: $(cat "$out")"
+  [ -s "$state/.dead-reported-$key" ] || fail "the first death left no once-record"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first death report"
+
+  # A replacement launches: the pane churns and the bookkeeping resets, but the
+  # round ends before the fresh timer could reach a threshold, so no probe runs
+  # and the once-record survives the churn untouched.
+  FM_TEST_PANE_COMMAND=grok FM_TEST_TMUX_WINDOWS=fm-wedge
+  printf '%s\n' 'waiting on the build queue' > "$capture"
+  : > "$out"
+  FM_TEST_STALE_ESCALATE=999 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" absorb \
+    || fail "a replacement launch churned the pane without absorbing: $(cat "$out")"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "the relaunch round escalated before its fresh window elapsed: $(cat "$out")"
+  [ -s "$state/.dead-reported-$key" ] \
+    || fail "the relaunch churn dropped the first death's once-record"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "the relaunch churn left a wedge escalation count behind"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "the relaunch churn queued a wake: $(cat "$state/.wake-queue")"
+
+  # The replacement dies too, without any intervening probe reading it alive:
+  # the second death must still produce its own detailed report naming the
+  # verdict, and must not be absorbed by the first death's record.
+  gone_endpoint_env missing
+  : > "$out"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
+    || fail "a second death after a same-window relaunch was never reported: $(cat "$out")"
+  grep -F 'agent missing' "$out" >/dev/null \
+    || fail "the second death was not reported as a gone endpoint: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 1 ] \
+    || fail "the second death queued $(wedge_stale_wakes "$state" "$window") wakes instead of one"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "the second death advanced the wedge escalation count"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the second death report"
+
+  # And later thresholds on the same unchanged dead pane stay silent: the
+  # bound still holds once the replacement's own death is the reported one.
+  : > "$out"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" absorb \
+    || fail "an unchanged dead pane re-alarmed after the second report: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "an unchanged dead pane queued a repeat wake: $(cat "$state/.wake-queue")"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "an unchanged dead pane advanced the escalation count"
+  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  pass "a second death after a same-window relaunch reports in full without a live probe, and an unchanged dead pane stays silent"
+}
+
+# The collision the pane-hash discriminator cannot see: a successor whose dead
+# display is BYTE-IDENTICAL to the death already reported - the common case,
+# since a dead husk display is deterministic (a bare shell in the same cwd,
+# restored empty scrollback). The successor dies without any threshold probe
+# reading it alive, so the pane never churns and no hash change can announce the
+# replacement; only the busy incarnation, re-armed through the real writer
+# (bin/fm-busy-event.sh arm, exactly as a relaunch replaces the previous one),
+# can tell this death from the reported one. It must report in full, while later
+# thresholds on the same dead pane under the SAME incarnation still absorb and
+# never advance the escalation count.
+test_identical_dead_display_of_a_successor_still_reports() {
+  local dir state fakebin out capture window key
+  local failed='state: failed · source: run-step · run failed'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  dir=$(wedge_threshold_fixture identical-dead-display 'working: still compiling' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+
+  # The lane's busy contract is armed at spawn, so the first death's once-record
+  # is keyed on that incarnation.
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" wedge >/dev/null \
+    || fail "could not arm the lane's busy incarnation"
+
+  # Death #1: the endpoint is gone and reported once, in full.
+  gone_endpoint_env missing; export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
+    || fail "the first death was never reported: $(cat "$out")"
+  grep -F 'agent missing' "$out" >/dev/null \
+    || fail "the first death report did not name the endpoint verdict: $(cat "$out")"
+  [ -s "$state/.dead-reported-$key" ] || fail "the first death left no once-record"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 1 ] \
+    || fail "the first death queued $(wedge_stale_wakes "$state" "$window") wakes instead of one"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first death report"
+
+  # A successor occupies the lane: the relaunch re-arms the busy incarnation
+  # through the real writer, and the successor stays quiet under the threshold
+  # for a round, so no probe reads it alive and the pane never churns - the
+  # display captured here and in the death rounds is byte-identical throughout.
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" wedge >/dev/null \
+    || fail "could not re-arm the successor's busy incarnation"
+  : > "$out"
+  FM_TEST_STALE_ESCALATE=999 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" absorb \
+    || fail "the successor's quiet round was never absorbed: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "the successor's quiet round queued a wake: $(cat "$state/.wake-queue")"
+
+  # The successor dies into the same byte-identical display. A pane-hash marker
+  # absorbs this death silently; the incarnation half must report it in full.
+  : > "$out"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
+    || fail "a byte-identical dead display absorbed the successor's death: $(cat "$out")"
+  grep -F 'agent missing' "$out" >/dev/null \
+    || fail "the successor's death was not reported as a gone endpoint: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 1 ] \
+    || fail "the successor's death queued $(wedge_stale_wakes "$state" "$window") wakes instead of one"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "the successor's death advanced the wedge escalation count"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the successor's death report"
+
+  # Later thresholds on the same unchanged dead pane under the SAME incarnation
+  # stay silent: the once-only bound still holds within one incarnation.
+  : > "$out"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" absorb \
+    || fail "an unchanged dead pane re-alarmed under the same incarnation: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "an unchanged dead pane queued a repeat wake: $(cat "$state/.wake-queue")"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "an unchanged dead pane advanced the escalation count"
+  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  pass "a successor's byte-identical dead display reports in full, and the same incarnation still absorbs"
 }
 
 
@@ -3307,7 +3517,7 @@ test_secondmate_paused_resurfaces_in_normal_mode() {
   window="test:fm-secondmate-held"
   printf 'idle awaiting external\n' > "$capture_file"
   printf 'window=%s\nkind=secondmate\n' "$window" > "$state/secondmate-held.meta"
-  printf 'paused: awaiting the upstream release\n' > "$statusf"
+  printf 'paused: awaiting the upstream release\nThe release window opens tomorrow.\n\n' > "$statusf"
   back=$(( $(date +%s) - 500 ))
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi
@@ -3747,59 +3957,6 @@ test_busy_pane_stable_hash_escalates_past_turn_age_bound() {
   grep -F "stale: $window" "$out" >/dev/null || fail "busy turn-age escalation did not print the stale wake"
   grep -F "possible wedge" "$out" >/dev/null || fail "busy turn-age escalation did not flag a possible wedge"
   pass "a busy worker with a stable pane hash still escalates once its completed-turn age reaches the bound"
-}
-
-# --- BUSY husk whose ENDPOINT the backend proves is gone: records retired -----
-# The sibling path of the stale-scan retirement above, and the same 2026-09-15
-# case: a pane closed mid-turn keeps its last frame, harness busy footer and all,
-# so window_is_busy still reads busy and the window never reaches the stale
-# scan's own probe. Its completed-turn bound is long past, so busy_turn_bound_check
-# hands it to the wedge timer and every FM_STALE_ESCALATE_SECS produces one more
-# stale wake with a higher escalation count for an endpoint nobody can inspect.
-# Proof of absence retires it instead, with no wake and no escalation, while a
-# window the inventory still names escalates exactly as it always did
-# (test_busy_pane_stable_hash_escalates_past_turn_age_bound covers that half).
-test_busy_husk_records_retired_when_the_endpoint_is_confirmed_gone() {
-  local dir state fakebin out capture_file window key pane_hash sig pid
-  dir=$(make_case busy-husk-endpoint-gone); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-husk"
-  printf 'Working...' > "$capture_file"
-  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-husk.meta"
-  record_pi_busy "$state" busy-husk
-  printf 'working: setup complete\n' > "$state/busy-husk.status"
-  sig=$(seen_sig "$state/busy-husk.status"); printf '%s' "$sig" > "$state/.seen-busy-husk_status"
-  key=$(printf '%s' "$window" | tr ':/.' '___')
-  pane_hash=$(hash_text "Working...")
-  printf '%s' "$pane_hash" > "$state/.hash-$key"
-  printf '1\n' > "$state/.count-$key"
-  printf 'an-older-hash' > "$state/.stale-$key"
-  printf 'date-of-birth' > "$state/.churn-since-$key"
-  # No completed turn ever recorded for this task: age the spawn record itself,
-  # and put the wedge timer past its threshold so this poll is the one that
-  # would have escalated.
-  touch -t 200001010000 "$state/busy-husk.meta"
-  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
-  printf '2\n' > "$state/.wedge-escalations-$key"
-
-  # The session inventory succeeds and names another window, which is what makes
-  # this endpoint's absence PROVEN rather than merely unreadable.
-  watch_bg "$state" "$fakebin" "$out" FM_FAKE_TMUX_WINDOWS=fm-someone-else \
-    FM_FAKE_TMUX_CAPTURE="$capture_file" FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240
-  pid=$!
-  if ! wait_poll_cycle "$state" "$pid"; then
-    reap "$pid"; fail "a busy husk whose endpoint is proven gone still woke firstmate: $(cat "$out")"
-  fi
-  reap "$pid"
-  [ ! -s "$out" ] || fail "a confirmed-gone busy husk printed a wake reason: $(cat "$out")"
-  [ ! -s "$state/.wake-queue" ] || fail "a confirmed-gone busy husk enqueued a wake: $(cat "$state/.wake-queue")"
-  grep -F "retired stale records" "$state/.watch-triage.log" | grep -F "$window" >/dev/null \
-    || fail "the confirmed-gone busy husk's retirement was not recorded in triage: $(cat "$state/.watch-triage.log" 2>/dev/null)"
-  for suffix in hash count stale stale-since churn-since wedge-escalations; do
-    [ ! -e "$state/.$suffix-$key" ] \
-      || fail ".$suffix-$key survived the retirement of a confirmed-gone busy husk"
-  done
-  [ -e "$state/.retired-$key" ] || fail "the busy husk's retirement was not recorded durably"
-  pass "a busy husk whose endpoint the backend proves is gone is retired instead of wedge-escalated"
 }
 
 # Regression fixture for the incident's actual masking condition: Pi's rendered
@@ -5504,6 +5661,12 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
 }
 
+# CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2
+# churn-deferral regression. The rest of this file is not a 3.2 snapshot suite.
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit 0
+fi
 
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
@@ -5533,6 +5696,7 @@ test_turn_ended_churning_pane_absorbed
 test_turn_ended_churn_preserves_existing_deadline
 test_turn_ended_churn_resets_prior_stale_classification
 test_turn_ended_churn_resets_wedge_state_before_stale_poll
+test_turn_ended_churn_existing_marker_absorbed
 test_turn_ended_still_pane_surfaced
 test_turn_ended_malformed_prior_hash_surfaced
 test_turn_ended_trailing_newline_prior_hash_surfaced
@@ -5551,6 +5715,7 @@ test_turn_ended_invalid_churn_deadline_surfaced
 test_turn_ended_surfaced_batch_opens_no_partial_deadline
 test_working_note_not_working_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
+test_secondmate_buried_block_wakes_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
 test_actionable_signal_surfaced
 test_needs_decision_signal_payload_marked_for_branch_exclusion
@@ -5569,9 +5734,13 @@ test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
+test_gone_endpoint_reports_once_instead_of_escalating_forever
+test_live_and_unproven_endpoints_still_wedge_escalate
+test_gone_report_rearms_when_the_endpoint_comes_back
+test_second_death_after_a_same_window_relaunch_reports_in_full
+test_identical_dead_display_of_a_successor_still_reports
 test_busy_pane_below_turn_age_bound_is_absorbed
 test_busy_pane_stable_hash_escalates_past_turn_age_bound
-test_busy_husk_records_retired_when_the_endpoint_is_confirmed_gone
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
 test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_native_progress_resets_age
@@ -5581,8 +5750,6 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
-test_stale_records_retired_when_the_endpoint_is_confirmed_gone
-test_retired_window_returns_to_triage_when_its_metadata_is_republished
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle

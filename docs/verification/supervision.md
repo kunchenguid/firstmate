@@ -323,9 +323,34 @@ That inertness result is scoped to the builds it exercised: it did not establish
 
 The secondmate-home scope and manual-repair wake path were measured with Claude Code 2.1.207 on 2026-07-12, when a native background completion re-invoked the idle model with no human input.
 The current Stop-owned main/secondmate inclusion and child-worktree exclusion are covered deterministically by `tests/fm-claude-stop-autoarm.test.sh`.
-Session-lock ownership in `bin/fm-session-lock-lib.sh` is decided against a session's whole contiguous harness ancestry rather than one chosen pid, so the Stop auto-arm reaches its lock owner wherever that owner sits: the outermost pid of Claude Code's multi-level `bg-spare` hook worker chain, or an inner pid when a harness-named daemon parents the session.
+Session-lock ownership in `bin/fm-session-lock-lib.sh` is decided against a session's whole contiguous harness ancestry rather than one chosen pid, so the Stop auto-arm reaches its lock owner wherever that owner sits: a pid of Claude Code's multi-level `bg-spare` hook worker chain, or an inner pid when a harness-named daemon parents the session.
+A background Claude session whose transient helper chain is recycled loses that contiguity while its recorded owner stays alive, so the library also accepts a trusted same-session id: `CLAUDE_CODE_SESSION_ID` counts only when `CLAUDE_PID` is a Claude-shaped member of the current run, it must equal the id `bin/fm-lock.sh` recorded in `state/.lock-session`, and the recorded pid must still be a live harness, while every weaker combination (no id, no sidecar, an untrusted id, a different id, a dead recorded pid) leaves the ancestry verdict unchanged.
+For such a session `bin/fm-lock.sh` records `CLAUDE_PID` on lock line 1 instead of the outermost chain pid, so a shared daemon or front-end that outlives the session never keeps a dead session's lock alive, and a same-session confirmation never rewrites a live line 1.
 Harness identity is read from the executable path and `argv[0]` as well as the command basename, because Claude Code's native installer names the per-session executable by its version (`.../share/claude/versions/2.1.220`): `ps -o comm=` reports that path on macOS and the bare version string on Linux, and neither basename names a harness.
 `tests/fm-session-lock-ancestry.test.sh` pins both platforms' reporting semantics behind a deterministic process table and runs the real Stop auto-arm in version-named, daemon-parented, and combined real process trees.
+The same suite drives the ancestry and session-id signals apart in that table, asserting the divergence itself so no case is vacuous, and runs a real orphaned front-end, daemon, pty-host, and bg-spare tree whose daemon is ended mid-run: the same id keeps arming through the real `bin/fm-lock.sh`, `bin/fm-claude-stop-autoarm.sh`, and `bin/fm-turnend-guard.sh --claude` with lock line 1 and the sidecar untouched, a different id, an untrusted id, and no id each keep the live-owner refusal naming the recorded id, and the dead front-end is reclaimed onto the spare's pid rather than the outermost pty-host.
+`tests/fm-turnend-foreign-owner-repro.py` keeps the genuinely foreign live owner as the negative control and adds the same-id positive control.
+Both ran on 2026-09-18 on macOS with bash 3.2.57 as the fake harness interpreter:
+
+```sh
+tests/fm-session-lock-ancestry.test.sh
+tests/fm-turnend-foreign-owner-arm-fix.test.sh
+```
+
+Observed output, bounded to the lines the new coverage adds:
+
+```text
+ok - session-lock: a trusted same-session id keeps owning a recycled background chain, and nothing weaker does
+ok - session-lock: a trusted id anchors the lock on the model-loop process, anything else on the outermost pid
+ok - session-lock e2e: a background session keeps its lock and its supervision across a recycled helper chain
+same-session acquisition rc=0 stdout='lock acquired: harness pid 41994\nlock_rc=0\n' stderr=''
+other-session acquisition rc=0 stdout='lock_rc=1\n' stderr='error: another live firstmate session holds the lock (pid 41994, session synthetic-same); operate read-only until resolved\n'
+FIXED same-session id owns the lock; a different id is still foreign
+COMPLETE
+```
+
+No live unattended Claude background session ran on the verifying machine: that topology is documented by the real process listings in issues #3902, #2314, #3398, and #4066, and the coverage above is the structural predicate plus those executable fixtures, not a live pass.
+[`sessionstart-nudge.md`](../sessionstart-nudge.md#shared-wrapper-and-safety) owns the nudge wrapper's separate ancestry check and its redundant-nudge behavior after helper-chain recycling.
 `tests/fm-watch-arm.test.sh` runs real watcher and arm cycles against durable on-disk state to verify that a delivered reason survives until post-handling acknowledgement and stops replaying after acknowledgement, while an unrelated queue append cannot make a watcher cycle that delivered nothing look successful.
 The same suite ingests a keyed remote-secondmate parent reply through the real adapter, establishes the incremental OPEN DECISIONS cursor, interrupts supervision, and proves re-arm replays every unacknowledged queue row plus the still-open decision through the ordinary drain path.
 It also covers decision-only recovery, interrupted handling, handling-window generation reuse, non-fatal moved-generation acknowledgement with sequence-bounded consumption, and a persistent successor remaining live after recovery is acknowledged.
