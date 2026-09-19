@@ -54,7 +54,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-arm-pretool-check.sh` | Stable PreToolUse transport for the watcher-arm command policy (docs/arm-pretool-check.md) |
 | `fm-arm-command-policy.mjs` | Semantic owner of the watcher-arm PreToolUse policy (docs/arm-pretool-check.md)   |
 | `fm-jev-tool-gate.sh` | Remainder Jev Choice after a deterministic arm-policy allow; shadow-log default (docs/arm-pretool-check.md) |
-| `fm-jev-skill-select.sh` | Once-per-session Jev skill suggestion; shadow-log default, no spawn injection (docs/configuration.md) |
+| `fm-jev-skill-select.sh` | Once-per-session Jev skill suggestion; shadow-log default, live overlay injection via spawn (docs/configuration.md) |
 | `fm-jev-queue-triage.sh` | Advisory heartbeat next-work signal ([configuration](configuration.md#jev-queue-triage-heartbeat)) |
 | `fm-jev-brief-preflight.sh` | Advisory spawn-path brief check ([configuration](configuration.md#jev-brief-preflight-fm_jev_brief_preflight)) |
 | `fm-jev-done-verify.sh` | Log-only shadow score of a worker done line; drain-invoked, never closes or tears down (docs/configuration.md) |

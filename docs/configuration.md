@@ -604,9 +604,18 @@ Behavioral regressions in [`tests/fm-jev-done-verify.test.sh`](../tests/fm-jev-d
 `bin/fm-jev-skill-select.sh` is a once-per-session skill suggestion, not a per-prompt router.
 Default `FM_JEV_SKILL_SELECT` is `shadow`: it writes `state/<id>.jev-skills.json` and prints that record, and it does not load skills.
 Firstmate may run it after writing a brief and before spawn, then keep the printed suggestion beside the task.
-Default spawn does not inject skills, and this tool never changes worker launch.
-Live load stays off and refuses unless `FM_JEV_SKILL_SELECT=live` and the presence file `config/jev-skill-select-live` both exist; even then this release only records the suggestion.
-The script header owns flags, the JSON file, the 0.7 confidence floor, and the live-load refusal.
+`bin/fm-spawn.sh` is the live call site for ships and scouts: after it publishes `data/<id>/launch-brief.md`, opted-in launches with a safe query invoke the selector with `--overlay` pointing at that file.
+Live load requires `FM_JEV_SKILL_SELECT=live`, the gitignored presence file `config/jev-skill-select-live`, and a nonblank safe query in `data/<id>/jev-skill-query.txt` under the active Firstmate home.
+Before spawning, write only an explicitly safe query string to that task's query file; page content, excerpts, and conflict lines must never be included.
+A missing, unreadable, or blank query file skips selection entirely without contacting Jev or injecting skills; raw captain text and legacy brief bodies are never used as fallback queries.
+Project skills are discovered from the resolved worker worktree after its freshness step; Codex launches also discover `$CODEX_HOME/skills`, defaulting to `~/.codex/skills` when `CODEX_HOME` is unset or empty.
+With these inputs present, a clear selection of installed skills is appended to that private launch overlay in the harness's skill-invocation form (`/<skill>`, `$<skill>` on Codex, or the skill id when the runtime has no verified slash form).
+`live_loaded` in `state/<id>.jev-skills.json` records verified instructions in the launch overlay, not confirmation that the worker executed them; selected skill files must be readable before injection.
+Publishing a fresh launch overlay resets an existing record's `live_loaded` to false while retaining the cached selection, including on relaunch when selection is disabled or the safe query is missing.
+An eligible relaunch reuses that selection without another Jev request and checks that its skill files are still readable before injecting them again.
+Choice `none`, `search_external`, shadow mode, a missing overlay, uncertain or error status, a Jev outage, and any write or verify failure leave `live_loaded` false and leave the overlay identical to a spawn that never called Jev.
+A Jev outage or selector failure never refuses or stalls spawn past a short bound.
+The script header owns flags, the JSON file, the 0.7 confidence floor, overlay injection, and the live-load refusal.
 
 ## Jev queue triage (heartbeat)
 
@@ -1251,7 +1260,7 @@ FM_JEV_DISPATCH_SHADOW= # 1 logs the Jev dispatch pick to state/jev-dispatch-sha
 FM_WIKI_ENGINE=         # wiki-tool executable path or command; else config/wiki-engine (docs/configuration.md "Wiki engine ask")
 FM_WIKI_CATALOG=        # private wiki-tool catalog JSON path; else config/wiki-catalog (docs/configuration.md "Wiki engine ask")
 FM_JEV_TOOL_GATE=shadow # remainder Jev tool-gate after arm-command policy; live needs this plus two opt-in files; hard-ship is a do-not (docs/configuration.md "Jev remainder tool-gate")
-FM_JEV_SKILL_SELECT=shadow # once-per-session skill suggestion; live needs this plus config/jev-skill-select-live and still does not inject skills (docs/configuration.md "Jev skill selector")
+FM_JEV_SKILL_SELECT=shadow # skill selection mode; activation and safe-query requirements: "Jev skill selector" above
 FM_JEV_BRIEF_PREFLIGHT=shadow # spawn-path Jev brief preflight; off skips; never blocks launch (docs/configuration.md "Jev brief preflight")
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread

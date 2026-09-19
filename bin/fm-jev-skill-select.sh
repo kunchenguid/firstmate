@@ -4,18 +4,19 @@
 # Usage:
 #   fm-jev-skill-select.sh --harness <name> --task-id <id> [--summary <text>]
 #     [--skills-dir <dir>] [--max <n>] [--status-note] [--stdin]
-#     [skill-id ...]
+#     [--overlay <launch-brief>] [skill-id ...]
 #
-# Input: a harness name, an optional task summary, and installed skill ids from
+# Input: a harness name, an optional privacy-safe query as --summary, and installed skill ids from
 #   --skills-dir children, positional arguments, and stdin (--stdin, or stdin
 #   when no other skill source is given and stdin is not a terminal).
+#   Never pass page content, excerpts, or conflict lines in --summary.
 #
 # One Choice question whose options are the installed skill ids (capped), plus
 #   fixed none and search_external options. Up to --max skills (default 3) are
 #   taken from the chosen primary plus remaining probabilities. Confidence
 #   floor 0.7; below the floor the recorded status is uncertain.
 #   docs/configuration.md "Jev skill selector" owns the operator contract;
-#   this header owns flags, the JSON file, and the live-load refusal.
+#   this header owns flags, the JSON file, overlay injection, and live_loaded.
 #
 # Default FM_JEV_SKILL_SELECT=shadow (also when unset): write
 #   $FM_HOME/state/<task-id>.jev-skills.json and print it on stdout. Do not
@@ -23,18 +24,17 @@
 #   A later call for the same task reuses that file and does not call Jev
 #   again (once per session/task, not per prompt).
 #
-# Live load is a future flag and stays off. FM_JEV_SKILL_SELECT=live is
-#   refused unless $FM_HOME/config/jev-skill-select-live also exists. Even
-#   with that double opt-in this release only records the suggestion;
-#   live_loaded remains false and worker launch is unchanged.
-#
-# Call site: firstmate may run this after writing a brief and before spawn,
-#   then log the printed JSON beside the task. Default spawn does not inject
-#   skills. This tool never modifies worker launch.
-#
-# Output (stdout): the JSON record. Exit 0 for clear, uncertain, error, off,
-#   and reuse so an optional call site never blocks spawn. Exit 2 for usage
-#   or a live request without the confirm file.
+# Live load requires FM_JEV_SKILL_SELECT=live and the presence file
+#   $FM_HOME/config/jev-skill-select-live. Spawn passes --overlay at the
+#   published launch-brief after profile resolution. Skills then reach the
+#   worker in that private overlay, using the harness's skill-invocation form
+#   (slash, dollar, or named-file). live_loaded is true only after those
+#   skill ids are verified in the overlay file. A missing overlay, Choice
+#   none, uncertain/error status, shadow mode, or any write/verify failure
+#   leaves live_loaded false and does not change a worker launch that would
+#   otherwise proceed. This tool never blocks spawn: exit 0 for clear,
+#   uncertain, error, off, and reuse. Exit 2 for usage or a live request
+#   without the confirm file.
 #
 # Environment:
 #   FM_HOME, FM_JEV_SKILL_SELECT (shadow|live), TYPESAFE_API_KEY,
@@ -64,7 +64,7 @@ usage() {
   ' "$0"
 }
 
-HARNESS='' TASK_ID='' SUMMARY='' STATUS_NOTE=0 READ_STDIN=0 MAX=$DEFAULT_MAX
+HARNESS='' TASK_ID='' SUMMARY='' OVERLAY='' STATUS_NOTE=0 READ_STDIN=0 MAX=$DEFAULT_MAX
 SKILLS_DIRS=()
 POSITIONAL=()
 
@@ -81,6 +81,11 @@ while [ $# -gt 0 ]; do
         0) die "--max needs a positive integer" ;;
       esac
       MAX=$2
+      shift 2
+      ;;
+    --overlay)
+      [ $# -ge 2 ] || die "--overlay needs a value"
+      OVERLAY=$2
       shift 2
       ;;
     --status-note) STATUS_NOTE=1; shift ;;
@@ -114,16 +119,104 @@ STATE_DIR="$FM_HOME/state"
 OUT="$STATE_DIR/${TASK_ID}.jev-skills.json"
 mkdir -p "$STATE_DIR" || die "could not create $STATE_DIR"
 
-reuse_existing() {
-  jq -e 'type == "object"' "$OUT" >/dev/null 2>&1 || return 1
-  jq --argjson reused true '.reused = $reused' "$OUT"
+# Harness skill-invocation form honored by the worker's launch overlay.
+# Slash and dollar forms are the verified composer commands; everything else
+# is the installed skill id for a natural-language load.
+fm_jev_skill_invoke_form() {
+  local id=$1
+  case "$HARNESS" in
+    codex) printf '$%s' "$id" ;;
+    claude|grok|kimi|cursor|gemini|muse|rovo) printf '/%s' "$id" ;;
+    *) printf '%s' "$id" ;;
+  esac
+}
+
+fm_jev_skill_file() {
+  local id=$1 dir
+  for dir in ${SKILLS_DIRS+"${SKILLS_DIRS[@]}"}; do
+    if [ -f "$dir/$id/SKILL.md" ] && [ -r "$dir/$id/SKILL.md" ]; then
+      printf '%s/%s/SKILL.md' "$dir" "$id"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Write the selected skills into the published launch-brief overlay.
+# Returns 0 only when every skill id is then present in that file.
+# A non-zero return leaves the caller's live_loaded false without failing spawn.
+overlay_apply_ok() {
+  local skills_json=$1 status=$2
+  local overlay_dir tmp heading count id skill_file
+  [ "$MODE" = live ] || return 1
+  [ -n "$OVERLAY" ] || return 1
+  [ -f "$OVERLAY" ] && [ -w "$OVERLAY" ] || return 1
+  [ "$status" = clear ] || return 1
+  count=$(jq -r 'if type == "array" then length else 0 end' <<<"$skills_json" 2>/dev/null) || return 1
+  [ "$count" -gt 0 ] || return 1
+
+  while IFS= read -r id; do
+    fm_jev_skill_file "$id" >/dev/null || return 1
+  done < <(jq -r '.[]' <<<"$skills_json")
+
+  heading='# Jev-selected skills'
+  overlay_dir=$(dirname "$OVERLAY")
+  tmp=$(mktemp "$overlay_dir/.jev-skills-overlay.XXXXXX") || return 1
+  awk -v heading="$heading" '
+    $0 == heading { skip=1; next }
+    skip && /^# / { skip=0 }
+    skip { next }
+    { print }
+  ' "$OVERLAY" > "$tmp" || { rm -f "$tmp"; return 1; }
+  {
+    printf '\n%s\n' "$heading"
+    printf '%s\n' 'This launch selected the following installed skills.'
+    printf '%s\n' 'Load them now, before doing the assigned work, using this runtime'\''s skill form when it has one, otherwise by reading the installed skill file.'
+    printf '%s\n' 'Do not speculatively search beyond these skills as part of this selection step.'
+    printf '%s\n' 'Discover and load other applicable skills whenever the task requires them.'
+    jq -r '.[]' <<<"$skills_json" | while IFS= read -r id; do
+      [ -n "$id" ] || continue
+      form=$(fm_jev_skill_invoke_form "$id")
+      skill_file=$(fm_jev_skill_file "$id") || exit 1
+      printf -- "- %s: read \`%s\`\n" "$form" "$skill_file"
+    done
+  } >> "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$OVERLAY" || { rm -f "$tmp"; return 1; }
+
+  jq -r '.[]' <<<"$skills_json" | while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    grep -F -q "$id" "$OVERLAY" || exit 1
+  done || return 1
+  grep -F -q "$heading" "$OVERLAY" || return 1
+  return 0
+}
+
+record_live_loaded() {
+  local live_loaded=$1 reused=$2 tmp
+  tmp="${OUT}.tmp.$$"
+  jq --argjson live_loaded "$live_loaded" --argjson reused "$reused" \
+    '.live_loaded = $live_loaded | .reused = $reused' "$OUT" > "$tmp" || {
+    rm -f "$tmp"
+    return 1
+  }
+  mv "$tmp" "$OUT"
 }
 
 if [ -f "$OUT" ]; then
-  if reuse_existing; then
-    exit 0
+  jq -e 'type == "object"' "$OUT" >/dev/null 2>&1 || die "existing $OUT is not a JSON object"
+  if [ -n "$OVERLAY" ]; then
+    skills_json=$(jq -c '.skills // []' "$OUT")
+    rec_status=$(jq -r '.status // "error"' "$OUT")
+    live_loaded=false
+    if overlay_apply_ok "$skills_json" "$rec_status"; then
+      live_loaded=true
+    fi
+    record_live_loaded "$live_loaded" true || true
+    cat "$OUT"
+  else
+    jq --argjson reused true '.reused = $reused' "$OUT"
   fi
-  die "existing $OUT is not a JSON object"
+  exit 0
 fi
 
 TMPDIR=$(mktemp -d) || die "mktemp failed"
@@ -144,7 +237,7 @@ for dir in ${SKILLS_DIRS+"${SKILLS_DIRS[@]}"}; do
   [ -d "$dir" ] || die "skills dir not a directory: $dir"
   [ -r "$dir" ] || die "skills dir not readable: $dir"
   for path in "$dir"/*; do
-    [ -d "$path" ] || continue
+    [ -f "$path/SKILL.md" ] && [ -r "$path/SKILL.md" ] || continue
     add_skill "$(basename "$path")"
   done
 done
@@ -202,7 +295,7 @@ fi
 
 write_record() {
   local status=$1 primary=$2 confidence=$3 probabilities=$4 skills_json=$5 reason=$6 reused=$7
-  local live_loaded=false
+  local live_loaded=${8:-false}
   jq -n \
     --arg task_id "$TASK_ID" \
     --arg harness "$HARNESS" \
@@ -250,10 +343,6 @@ maybe_status_note() {
   printf 'note: jev-skills %s primary=%s confidence=%s\n' "$status" "$label" "$confidence" \
     >> "$STATE_DIR/${TASK_ID}.status"
 }
-
-if [ "$MODE" = live ]; then
-  printf 'jev-skill-select: live injection is not implemented; recorded suggestion only\n' >&2
-fi
 
 off_without_keys() {
   printf 'jev-skill-select: off (no TYPESAFE_API_KEY or OPENROUTER_API_KEY)\n' >&2
@@ -352,6 +441,10 @@ if [ "$CHOICE" != none ] && [ "$CHOICE" != search_external ]; then
     ')
 fi
 
-write_record "$STATUS" "$CHOICE" "$CONF_JSON" "$PROBS" "$SKILLS_OUT" "$REASON" false
+LIVE_LOADED=false
+if overlay_apply_ok "$SKILLS_OUT" "$STATUS"; then
+  LIVE_LOADED=true
+fi
+write_record "$STATUS" "$CHOICE" "$CONF_JSON" "$PROBS" "$SKILLS_OUT" "$REASON" false "$LIVE_LOADED"
 maybe_status_note "$STATUS" "$CHOICE" "$CONFIDENCE"
 exit 0

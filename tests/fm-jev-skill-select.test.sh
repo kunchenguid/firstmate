@@ -21,6 +21,8 @@ SKILLS_DIR="$TMP_ROOT/skills"
 BASE_PATH=$PATH
 TS_KEY='ts-test-key-not-for-argv'
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/config" "$LOG" "$SKILLS_DIR/pager" "$SKILLS_DIR/review"
+printf "# pager\n" > "$SKILLS_DIR/pager/SKILL.md"
+printf "# review\n" > "$SKILLS_DIR/review/SKILL.md"
 
 write_response() {
   cat > "$1" <<'JSON'
@@ -199,19 +201,142 @@ test_live_without_confirm_refuses() {
   pass "live without the confirm file is refused"
 }
 
-test_live_with_confirm_still_does_not_load() {
+seed_overlay() {
+  cat > "$1" <<'EOF'
+# Current worker role contract
+You are a crewmate.
+
+# Task
+Do the work.
+EOF
+}
+
+test_live_without_overlay_stays_unloaded() {
   local code out err
   fresh_home
   : > "$HOME_DIR/config/jev-skill-select-live"
   FM_JEV_SKILL_SELECT=live TYPESAFE_API_KEY=$TS_KEY run_select code out err \
     --harness pi --task-id t-live2 --skills-dir "$SKILLS_DIR"
   expect_code 0 "$code" "live with confirm exits 0"
-  assert_contains "$err" 'live injection is not implemented' "live with confirm still does not inject"
   jq -e '.mode == "live" and .live_loaded == false and .status == "clear"' \
     "$HOME_DIR/state/t-live2.jev-skills.json" >/dev/null \
-    || fail "double opt-in still records live_loaded false"
-  [ ! -e "$HOME_DIR/state/t-live2.launch" ] || fail "live must not write a launch injection file"
-  pass "live plus confirm file still only records a suggestion"
+    || fail "live without --overlay must record live_loaded false"
+  [ ! -e "$HOME_DIR/state/t-live2.launch" ] || fail "live must not write a sidecar launch file"
+  pass "live plus confirm without --overlay only records a suggestion"
+}
+
+test_live_overlay_sets_live_loaded() {
+  local code out err overlay
+  fresh_home
+  : > "$HOME_DIR/config/jev-skill-select-live"
+  overlay="$HOME_DIR/data/t-overlay/launch-brief.md"
+  mkdir -p "$(dirname "$overlay")"
+  seed_overlay "$overlay"
+  FM_JEV_SKILL_SELECT=live TYPESAFE_API_KEY=$TS_KEY run_select code out err \
+    --harness grok --task-id t-overlay --skills-dir "$SKILLS_DIR" --overlay "$overlay"
+  expect_code 0 "$code" "live overlay select succeeds"
+  jq -e '.mode == "live" and .live_loaded == true and .status == "clear"
+      and (.skills | index("pager") != null)' \
+    "$HOME_DIR/state/t-overlay.jev-skills.json" >/dev/null \
+    || fail "live overlay must record live_loaded true once pager reached the brief"
+  assert_grep '# Jev-selected skills' "$overlay" "overlay missing skills heading"
+  assert_grep '/pager' "$overlay" "grok overlay must use slash form"
+  assert_contains "$(cat "$overlay")" 'Do not speculatively search beyond these skills as part of this selection step.' \
+    "generated launch instruction limits speculative discovery only during selection"
+  assert_contains "$(cat "$overlay")" 'Discover and load other applicable skills whenever the task requires them.' \
+    "generated launch instruction preserves task-required skill discovery"
+  assert_no_grep 'Do not search for extra skills this session' "$overlay" \
+    "generated launch instruction must not prohibit discovery for the whole session"
+  assert_grep '# Current worker role contract' "$overlay" "overlay lost the worker role"
+  assert_grep '# Task' "$overlay" "overlay lost the task"
+  pass "live overlay injects selected skills and sets live_loaded true"
+  rm "$SKILLS_DIR/pager/SKILL.md"
+  seed_overlay "$overlay"
+  FM_JEV_SKILL_SELECT=live TYPESAFE_API_KEY=$TS_KEY run_select code out err \
+    --harness grok --task-id t-overlay --skills-dir "$SKILLS_DIR" --overlay "$overlay"
+  expect_code 0 "$code" "cached selection with missing file remains fail-open"
+  jq -e '.reused == true and .live_loaded == false' \
+    "$HOME_DIR/state/t-overlay.jev-skills.json" >/dev/null || fail "missing cached skill must not be loaded"
+  assert_no_grep 'Jev-selected skills' "$overlay" "missing cached skill must not reach launch overlay"
+  assert_absent "$LOG/body" "cached selection must not repeat the request"
+  printf '# pager\n' > "$SKILLS_DIR/pager/SKILL.md"
+  pass "cached skills are revalidated against currently readable files"
+}
+
+test_shadow_overlay_does_not_change_launch() {
+  local code out err overlay before
+  fresh_home
+  overlay="$HOME_DIR/data/t-shadow-ov/launch-brief.md"
+  mkdir -p "$(dirname "$overlay")"
+  seed_overlay "$overlay"
+  before=$(cat "$overlay")
+  TYPESAFE_API_KEY=$TS_KEY run_select code out err \
+    --harness pi --task-id t-shadow-ov --skills-dir "$SKILLS_DIR" --overlay "$overlay"
+  expect_code 0 "$code" "shadow overlay select succeeds"
+  jq -e '.mode == "shadow" and .live_loaded == false' \
+    "$HOME_DIR/state/t-shadow-ov.jev-skills.json" >/dev/null \
+    || fail "shadow overlay must keep live_loaded false"
+  assert_equals "$before" "$(cat "$overlay")" "shadow must not rewrite the launch overlay"
+  pass "shadow plus --overlay leaves the launch file unchanged"
+}
+
+test_none_overlay_leaves_launch_unchanged() {
+  local code out err overlay before
+  fresh_home
+  : > "$HOME_DIR/config/jev-skill-select-live"
+  overlay="$HOME_DIR/data/t-none-ov/launch-brief.md"
+  mkdir -p "$(dirname "$overlay")"
+  seed_overlay "$overlay"
+  before=$(cat "$overlay")
+  cat > "$RESPONSE" <<'JSON'
+{ "model": "jev-1.13.0",
+  "answers": { "skill": { "type": "choice", "choice": "none", "confidence": 0.91,
+    "probabilities": { "pager": 0.05, "none": 0.9, "search_external": 0.05 } } },
+  "usage": { "input_tokens": 8, "output_tokens": 4 } }
+JSON
+  FM_JEV_SKILL_SELECT=live TYPESAFE_API_KEY=$TS_KEY run_select code out err \
+    --harness pi --task-id t-none-ov --skills-dir "$SKILLS_DIR" --overlay "$overlay"
+  write_response "$RESPONSE"
+  expect_code 0 "$code" "none overlay select succeeds"
+  jq -e '.primary == "none" and .skills == [] and .live_loaded == false' \
+    "$HOME_DIR/state/t-none-ov.jev-skills.json" >/dev/null \
+    || fail "none must not claim a live load"
+  assert_equals "$before" "$(cat "$overlay")" "none must not rewrite the launch overlay"
+  pass "Choice none leaves the launch overlay unchanged"
+}
+
+test_jev_failure_does_not_rewrite_overlay() {
+  local code out err overlay before
+  fresh_home
+  : > "$HOME_DIR/config/jev-skill-select-live"
+  overlay="$HOME_DIR/data/t-fail-ov/launch-brief.md"
+  mkdir -p "$(dirname "$overlay")"
+  seed_overlay "$overlay"
+  before=$(cat "$overlay")
+  FAKE_CURL_FAIL=1 FM_JEV_SKILL_SELECT=live TYPESAFE_API_KEY=$TS_KEY run_select code out err \
+    --harness pi --task-id t-fail-ov --skills-dir "$SKILLS_DIR" --overlay "$overlay"
+  expect_code 0 "$code" "Jev failure must not fail the selector"
+  jq -e '.status == "error" and .live_loaded == false' \
+    "$HOME_DIR/state/t-fail-ov.jev-skills.json" >/dev/null \
+    || fail "Jev failure must record error and live_loaded false"
+  assert_equals "$before" "$(cat "$overlay")" "Jev failure must not rewrite the launch overlay"
+  pass "Jev failure records error, skips load, and exits 0"
+}
+
+test_codex_overlay_uses_dollar_form() {
+  local code out err overlay
+  fresh_home
+  : > "$HOME_DIR/config/jev-skill-select-live"
+  overlay="$HOME_DIR/data/t-codex/launch-brief.md"
+  mkdir -p "$(dirname "$overlay")"
+  seed_overlay "$overlay"
+  FM_JEV_SKILL_SELECT=live TYPESAFE_API_KEY=$TS_KEY run_select code out err \
+    --harness codex --task-id t-codex --skills-dir "$SKILLS_DIR" --overlay "$overlay"
+  expect_code 0 "$code" "codex overlay select succeeds"
+  jq -e '.live_loaded == true' "$HOME_DIR/state/t-codex.jev-skills.json" >/dev/null \
+    || fail "codex overlay must set live_loaded true"
+  assert_grep "\$pager" "$overlay" "codex overlay must use dollar form"
+  pass "Codex overlay uses the dollar skill form"
 }
 
 test_skills_from_stdin() {
@@ -260,6 +385,11 @@ test_once_per_session_reuses_file
 test_below_floor_is_uncertain
 test_missing_keys_are_off_without_curl
 test_live_without_confirm_refuses
-test_live_with_confirm_still_does_not_load
+test_live_without_overlay_stays_unloaded
+test_live_overlay_sets_live_loaded
+test_shadow_overlay_does_not_change_launch
+test_none_overlay_leaves_launch_unchanged
+test_jev_failure_does_not_rewrite_overlay
+test_codex_overlay_uses_dollar_form
 test_skills_from_stdin
 test_none_choice_records_empty_skills
