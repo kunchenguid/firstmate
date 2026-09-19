@@ -4,8 +4,7 @@
 # ONE owner for the no-mistakes run-attribution primitives used by
 # fm-crew-state.sh (read-only current-state reporting) and fm-teardown.sh
 # (pre-teardown run abort, see its "Fix 1" header comment). Crew-state binds
-# an EXECUTING run (pending or running; also fixing or ci on the legacy
-# bare-status surface) on the task's branch
+# an EXECUTING run (pending, running, fixing or ci) on the task's branch
 # regardless of head (fm_nm_run_is_executing); every other run still needs
 # strict branch-and-head identity. Both callers then recognize a provable
 # pipeline-owned continuation through fm_nm_runs_status_for_worktree below:
@@ -81,9 +80,9 @@ fm_nm_resolve_commit() {  # <worktree> <sha-ish>
 # rejected; fm_nm_runs_status_for_worktree below owns the one ledger-anchored
 # recognition for that case, fm_nm_run_is_executing below is the current-state
 # exemption for a live run on this branch regardless of head, and
-# fm_nm_run_is_pipeline_owned_active below carries the custody exemption: a
-# parked run whose pipeline currently owns the branch binds without head
-# equality.
+# fm_nm_run_is_pipeline_owned_active below carries the custody exemption: ANY
+# active run - executing or parked - whose pipeline currently owns the branch
+# binds without head equality.
 #
 # This predicate binds one run at a time, and MORE THAN ONE recorded run can
 # bind to the same worktree at once: a run that died at the worktree's exact
@@ -347,16 +346,14 @@ fm_nm_run_is_parked() {  # <toon-output>
 # daemon died still saying `running`. The head-free route through it is the
 # caller's to license, and fm-crew-state.sh pairs it with an explicit
 # daemon-down probe for exactly that reason.
-# The accepted words span BOTH surfaces, which do not share a vocabulary. The
-# overview table fm_nm_select_run validates carries only
-# pending|running|completed|failed|cancelled (:196), so on the modern
-# selected-run route only pending and running ever reach here. The id-addressed
-# `axi status` DETAIL object also reports `fixing` and `ci`, which
-# fm-crew-state.sh has always classified at its full path, and on the legacy
-# bare-status route (no overview table, so the selector answers `unavailable`
-# and never validates a word) those two reach here as the crew's own live run.
-# Dropping them would report a fix round or a ci wait on a legacy surface as
-# idle, which is the misreport this predicate exists to prevent.
+# All four accepted words reach here on BOTH surfaces. The overview table
+# fm_nm_select_run validates carries a narrower column
+# (pending|running|completed|failed|cancelled, :196), but that column is not
+# what this predicate reads: the selected-run route re-reads the run by id and
+# passes that DETAIL object, whose own vocabulary check admits `fixing` and `ci`
+# as live, and the legacy bare-status route passes the same detail shape.
+# Dropping them would report a fix round or a ci wait as idle, which is the
+# misreport this predicate exists to prevent.
 fm_nm_run_is_executing() {  # <toon-output>
   fm_nm_run_is_active "$1" || return 1
   fm_nm_run_is_parked "$1" && return 1

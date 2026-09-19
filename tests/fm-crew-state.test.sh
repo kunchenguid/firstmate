@@ -3876,10 +3876,10 @@ EOF
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-cus
   out=$(run_crew_state "$d" feat-cus)
-  assert_contains "$out" "state: parked" "the open decision outranks an unverified coarse record"
-  assert_contains "$out" "daemon unreachable" "the dead instrument is named as the reason"
-  assert_not_contains "$out" "superseded" "an unverified record makes no supersede claim about the open decision"
-  pass "an unverified coarse record never claims the status log superseded"
+  assert_contains "$out" "state: working" "a head-tied coarse row keeps its working reading whatever the daemon answers"
+  assert_not_contains "$out" "superseded by active run" "a coarse row makes no supersede claim about the open decision"
+  assert_contains "$out" "cannot tell working from parked" "the coarse limit is named in the detail"
+  pass "a head-tied coarse record never claims the status log superseded"
 }
 
 # The modern selected-run route reaches the anchored-continuation rule through
@@ -4102,6 +4102,42 @@ EOF
   pass "the selected-route dead-daemon verdict names the run once"
 }
 
+# The same run, the same head, the same dead daemon must read the same way
+# whichever run the shared daemon's bare `axi status` happens to name - that is
+# routine once several crews validate one repo. The ledger row sits at this
+# worktree's own head, so the head rule exempts it either way.
+test_head_tied_row_reads_the_same_whichever_run_axi_names() {
+  local who d local_short out
+  for who in self other; do
+    reset_fakes
+    d=$(new_case "head-tied-$who")
+    make_repo_on_branch "$d/wt" fm/feat-htied
+    local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-htied.meta" "window=fm:fm-feat-htied" "worktree=$d/wt" "kind=ship" "harness=claude"
+    printf 'working: implementing\n' > "$d/state/feat-htied.status"
+    if [ "$who" = self ]; then
+      FM_FAKE_AXI_STATUS="$(run_running fm/feat-htied)
+branch_sync:
+  state: synced"
+    else
+      FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+    fi
+    FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-23 14:00
+  running    fm/feat-htied ${local_short}  2026-08-23 13:53
+EOF
+)"
+    FM_FAKE_DAEMON_DOWN=1
+    FM_FAKE_BUSY=0
+    arm_idle_record "$d/state" feat-htied
+    out=$(run_crew_state "$d" feat-htied)
+    assert_contains "$out" "state: working" "$who: a head-tied run reads working with the daemon down"
+    assert_not_contains "$out" "state: unknown" "$who: the head rule exempts a head-tied record"
+    pass "a head-tied row reads working when axi names the $who run"
+  done
+}
+
 # An unrecognised ledger word yields an unknown verdict from a LIVE daemon, so it
 # is not an unverified record: the ordinary supersede note applies, as it did
 # before the coarse-unknown special case existed.
@@ -4261,11 +4297,10 @@ EOF
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-cldd
   out=$(run_crew_state "$d" feat-cldd)
-  assert_contains "$out" "state: unknown" "a live ledger row must not read as work with the daemon answering down"
-  assert_contains "$out" "daemon unreachable" "the dead instrument is named in the verdict"
-  assert_contains "$out" "unverified" "the record is reported unverified, not working"
-  assert_not_contains "$out" "01RUN" "the foreign crew's run id must not be offered as this crew's"
-  pass "a coarse live row with the daemon down reads unverified"
+  assert_contains "$out" "state: working" "a head-tied coarse row keeps its working reading"
+  assert_not_contains "$out" "daemon unreachable" "the head rule exempts a head-tied record from the dead-instrument verdict"
+  assert_not_contains "$out" "01RUN" "the foreign crew's run id is never offered as this crew's"
+  pass "a head-tied coarse live row is exempt from the dead-daemon verdict"
 }
 
 # A coarse ledger row keeps a PARKED run's status word at `running`
@@ -4682,6 +4717,7 @@ test_unanswered_probe_does_not_turn_a_failed_coarse_record_into_a_gate
 test_answered_down_failed_coarse_record_leaves_the_decision_open
 test_coarse_failed_path_probes_the_daemon_once
 test_selected_route_dead_daemon_names_the_run_once
+test_head_tied_row_reads_the_same_whichever_run_axi_names
 test_unrecognised_ledger_word_keeps_the_ordinary_supersede_note
 test_unanswered_daemon_probe_does_not_suppress_live_run
 test_coarse_live_row_with_daemon_down_is_unverified

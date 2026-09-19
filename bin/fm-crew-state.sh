@@ -37,9 +37,9 @@
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Branch name alone is not enough: a historical run on a reused
 #      branch whose head was rewritten or diverged must not be attributed.
-#      A run EXECUTING on this crew's branch (pending or running through the
-#      overview-backed route; also fixing or ci on the legacy bare-status
-#      surface, whose detail object carries those words)
+#      A run EXECUTING on this crew's branch (pending, running, fixing or ci -
+#      every route reads the id-addressed detail object, which carries all four,
+#      not the overview table's narrower status column)
 #      is authoritative REGARDLESS of head (fm_nm_run_is_executing in
 #      bin/fm-nm-run-lib.sh) as long as an explicit probe has not ANSWERED that
 #      the daemon is down (nm_daemon_answered_down): the pipeline rebases the
@@ -57,8 +57,11 @@
 #      local work that advanced past the run head, or diverged from it,
 #      invalidates attribution. While the pipeline owns the branch
 #      (branch_sync.state=pipeline_owned), its own custody attribution also
-#      binds an ACTIVE parked run without head equality
-#      (fm_nm_run_is_pipeline_owned_active in bin/fm-nm-run-lib.sh).
+#      binds ANY ACTIVE run - executing or parked - without head equality
+#      (fm_nm_run_is_pipeline_owned_active in bin/fm-nm-run-lib.sh), and that
+#      route is deliberately OUTSIDE the daemon rule below: while the pipeline
+#      holds custody its own attribution is the attribution, and second-guessing
+#      it here is a change to a route this fix does not otherwise touch.
 #      A parked run head whose commit object the task copy never fetched cannot
 #      be verified locally; that row is recognized only as a provable
 #      pipeline-owned continuation - the branch's ACTIVE newest ledger row,
@@ -68,12 +71,15 @@
 #      branch-name-only acceptance: an executing `axi status` record is the one
 #      live bind, so a ledger row that cannot be tied to this worktree's head
 #      never answers on branch name alone. A record whose daemon has ANSWERED
-#      down reads unknown and names the dead instrument on the two routes that
-#      bind a run the worktree has MOVED OFF: the ledger-anchored continuation,
-#      and a head-tied coarse ledger row. It is deliberately NOT extended to the
-#      head-matching arm - while the run head still equals or precedes the
-#      worktree HEAD the record keeps its original working reading, as it always
-#      has, and a fleet-wide change to that is out of scope here. A record whose
+#      down reads unknown and names the dead instrument only where the worktree
+#      has provably MOVED OFF the run: the ledger-anchored continuation, on
+#      either route. It is deliberately NOT extended to a head-tied record -
+#      while the run head still equals or precedes the worktree HEAD the record
+#      keeps its original working reading, as it always has. That is also why a
+#      FOREIGN-branch coarse answer carries no verdict: the ledger reports the
+#      same status word for a head-matching row and an anchored one, so a rule
+#      there could not tell the two apart and would catch the exempt case with
+#      them. A record whose
 #      identity is proven by NEITHER head nor ledger anchor is not this
 #      worktree's run to report on: it leaves HAVE_RUN=0 so the pane and status
 #      log answer, because a stale record naming this branch must never override
@@ -878,18 +884,18 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
           # down keeps the coarse status-word detail either way: the dead
           # instrument has to be named, and the full TOON would print `working`.
           [ "$run_branch" = "$CREW_BRANCH" ] || RUN_SOURCE=coarse
-          # The ledger word alone cannot tell executing from waiting at a gate,
-          # so the run's own TOON decides: a PARKED run of THIS crew keeps its
-          # gate and findings whatever the daemon answers, because an open
-          # decision is still open when the instrument dies. A foreign-branch
-          # answer carries no gate of ours to protect.
-          if [ "$(fm_nm_run_status_class "$COARSE_STATUS")" = live ] \
-            && ! { [ "$run_branch" = "$CREW_BRANCH" ] && fm_nm_run_is_parked "$RUN_OUT"; } \
+          # Only for a row this worktree has MOVED OFF. Reaching this branch at
+          # all proves the head rule rejected the record, so a SAME-branch
+          # answer is necessarily moved-off and carries the verdict. A
+          # foreign-branch answer cannot: the ledger reports the same status
+          # word for a head-matching row and an anchored one, so applying it
+          # there would catch head-tied rows the head rule exempts. A parked run
+          # keeps its gate and findings whatever the daemon answers.
+          if [ "$run_branch" = "$CREW_BRANCH" ] \
+            && [ "$(fm_nm_run_status_class "$COARSE_STATUS")" = live ] \
+            && ! fm_nm_run_is_parked "$RUN_OUT" \
             && nm_daemon_answered_down; then
-            RUN_DEAD_DAEMON="no-mistakes daemon unreachable; last ledger record $COARSE_STATUS - unverified"
-            if [ "$run_branch" = "$CREW_BRANCH" ]; then
-              RUN_DEAD_DAEMON="$RUN_DEAD_DAEMON; run id: $(strip_quotes "$(nm_field id)")"
-            fi
+            RUN_DEAD_DAEMON="no-mistakes daemon unreachable; last ledger record $COARSE_STATUS - unverified; run id: $(strip_quotes "$(nm_field id)")"
           fi
         fi
       fi
