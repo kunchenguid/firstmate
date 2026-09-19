@@ -293,14 +293,16 @@ status_declare_hold() {  # <task-id> <occurrence> <reason>
 # declarations qualify. The mirror's own keyed declaration on the task's log
 # takes the keyed retraction; the guard matches that key, so a replay cannot
 # retract twice once last_status_line reads past the settled pair. And a
-# command_complete transfer (`captain-held [key=<k>]: tracked by <ids>`) on any
-# lane's log that names this task takes `resolved [key=<k>]` once no task it
-# names is still an open captain call: the transfer already closed <k>, so the
-# retraction changes no decision, and a lane waiting on several calls keeps
-# reading as held until the last one is answered.
+# command_complete transfer (`captain-held [key=<k>]: tracked by <ids>`) takes
+# `resolved [key=<k>]` once neither a task it names nor the lane's own task is
+# still an open captain call, when this task is either of those: the transfer
+# already closed <k>, so the retraction changes no decision, a lane waiting on
+# several calls keeps reading as held until the last one is answered, and a
+# lane held itself while its transfer was the last line (so status_declare_hold
+# wrote no mirror) keeps that transfer as its only declaration until the lane's
+# own call settles too.
 status_retract_hold() {  # <task-id> <occurrence> <note>
-  local id=$1 occurrence=$2 note=$3 f key ids named rc
-  local transfer_re='^captain-held \[key=([A-Za-z0-9._-]+)\]: tracked by ([A-Za-z0-9._,-]+)$'
+  local id=$1 occurrence=$2 note=$3 f key lane ids named rc
   local -a names
   f="$STATE/$id.status"
   if [[ $(last_status_line "$f") =~ $(_fm_hold_mirror_line_ere "$f" 'captain-held') ]]; then
@@ -308,9 +310,10 @@ status_retract_hold() {  # <task-id> <occurrence> <note>
   fi
   for f in "$STATE"/*.status; do
     [ -f "$f" ] && [ ! -L "$f" ] || continue
-    [[ $(last_status_line "$f") =~ $transfer_re ]] || continue
+    [[ $(last_status_line "$f") =~ $FM_HOLD_TRANSFER_ERE ]] || continue
     key=${BASH_REMATCH[1]}
-    ids=${BASH_REMATCH[2]}
+    lane=${f##*/}
+    ids="${BASH_REMATCH[2]},${lane%.status}"
     case ",$ids," in *",$id,"*) ;; *) continue ;; esac
     IFS=, read -r -a names <<< "$ids"
     for named in "${names[@]}"; do
