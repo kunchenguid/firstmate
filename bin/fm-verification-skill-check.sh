@@ -1,13 +1,4 @@
 #!/usr/bin/env bash
-# Validate the shape of a generated project-local verification skill.
-# The verification-skill agent skill (.agents/skills/verification-skill) is the
-# single owner of the generation contract; this script is the single owner of
-# that contract's executable shape check and is what the generator skill runs
-# on its own output before handover. It checks the directory layout, the
-# SKILL.md frontmatter name, the required H2 sections, the never-kill-by-
-# process-name cleanup rule, the feature-map index, and that no placeholder
-# survived generation. It intentionally checks shape, not behavior: proving
-# the skill live is the generator skill's own required run.
 # This is a worktree utility for crewmates, not a supervision script, so it
 # does not call fm-guard.sh.
 # Usage: fm-verification-skill-check.sh <skill-directory>
@@ -114,13 +105,11 @@ for heading in Launch Doctor Drive Evidence Cleanup Helpers; do
   has_content "$body" || fail "SKILL.md is missing a non-empty '## $heading' section"
 done
 
-# The cleanup rule is the contract point most likely to be dropped: cleanup
-# must carry the never-kill-by-process-name prohibition verbatim enough to
-# match, so a future editor cannot silently delete it. Phrase matching is
-# whitespace-tolerant so prose line wrapping cannot hide the rule.
 CLEANUP_BODY=$(section_body "$SKILL" "Cleanup" | tr '\n' ' ')
-printf '%s\n' "$CLEANUP_BODY" | grep -Eqi "kill[[:space:]]+by[[:space:]]+process[[:space:]]+name" \
-  || fail "Cleanup section must state the rule: never kill by process name; kill what you started"
+if ! printf '%s\n' "$CLEANUP_BODY" | grep -Eqi "never[[:space:]]+kill[[:space:]]+by[[:space:]]+process[[:space:]]+name" \
+    || ! printf '%s\n' "$CLEANUP_BODY" | grep -Eqi "kill[[:space:]]+what[[:space:]]+you[[:space:]]+started"; then
+  fail "Cleanup section must state the rule: never kill by process name; kill what you started"
+fi
 
 EVIDENCE_BODY=$(section_body "$SKILL" "Evidence" | tr '\n' ' ')
 printf '%s\n' "$EVIDENCE_BODY" | grep -Eqi "user[[:space:]]+path" \

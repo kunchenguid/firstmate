@@ -185,6 +185,15 @@ test_rejects_removed_kill_rule() {
   assert_contains "$out" "kill by process name" "cleanup failure names the kill rule"
 }
 
+test_rejects_process_name_kill_instruction() {
+  local dir out
+  dir="$TMP_ROOT/process-name-kill/verify-timetracker"
+  make_good_skill "$dir"
+  sed -i 's/Never kill by process name; kill what you started\./If no PID is available, kill by process name./' "$dir/SKILL.md"
+  out=$(run_check "$dir") && fail "process-name kill instruction must fail" || true
+  assert_contains "$out" "never kill by process name" "failure names the cleanup safety rule"
+}
+
 test_rejects_missing_feature_map() {
   local dir out
   dir="$TMP_ROOT/no-features/verify-timetracker"
@@ -257,6 +266,7 @@ test_rejects_invalid_descriptions
 test_rejects_duplicate_description
 test_rejects_whitespace_only_section
 test_rejects_removed_kill_rule
+test_rejects_process_name_kill_instruction
 test_rejects_missing_feature_map
 test_rejects_unreferenced_feature
 test_rejects_malformed_feature_file
