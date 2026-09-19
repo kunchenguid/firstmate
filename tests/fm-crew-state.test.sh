@@ -2774,7 +2774,10 @@ test_executing_run_binds_without_pipeline_owned_sync() {
 }
 
 # Negative control: a run PARKED at a gate keeps the strict head rule, so a
-# non-pipeline_owned parked run at an unresolvable head is not attributed.
+# non-pipeline_owned parked run at an unresolvable head is not attributed. The
+# ledger carries a live same-branch row at that same unresolvable head - the
+# coarse fallback must not revive the rejected run's gate detail through it,
+# because a bare `running` row cannot tell working from waiting at a gate.
 test_non_pipeline_owned_parked_unresolvable_head_not_attributed() {
   reset_fakes
   local d; d=$(new_case f10-parked-not-owned)
@@ -2786,11 +2789,12 @@ test_non_pipeline_owned_parked_unresolvable_head_not_attributed() {
   FM_FAKE_AXI_STATUS="$(run_parked fm/feat-f10p)
 branch_sync:
   state: synced"
-  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_RUNS_LIST="  running    fm/feat-f10p f0f0f0f0  2026-08-27 13:53"
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-f10p
   local out; out=$(run_crew_state "$d" feat-f10p)
   assert_not_contains "$out" "source: run-step" "a non-pipeline-owned parked run at an unresolvable head must not bind"
+  assert_not_contains "$out" "parked at" "a live ledger row must not revive the rejected run's gate detail"
   assert_contains "$out" "source: status-log" "falls back to the status log for the unbound parked run"
   pass "a parked run keeps the strict head rule without pipeline_owned"
 }

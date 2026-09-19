@@ -359,7 +359,10 @@ fm_nm_run_is_executing() {  # <toon-output>
 # (running or pending) is the answer whatever its head: the pipeline rebases the
 # branch, so a live row's head need not resolve to or descend from the worktree
 # head, and the older row that does match the local head is history. Only the
-# read-only current-state report passes it; teardown never does.
+# read-only current-state report passes it, and only when `axi status` answered
+# ANOTHER branch's run: a same-branch run the strict head rule rejected is
+# parked or terminal, and this coarse row cannot tell those apart. Teardown
+# never passes it.
 # Read-only: git reads resolve objects in place; custody never changes.
 fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [expected-head] [live-any-head]
   local wt=$1 branch=$2 list=$3 expected_head=${4:-} live_any_head=${5:-}

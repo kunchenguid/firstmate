@@ -56,8 +56,9 @@
 #      pipeline-owned continuation - the branch's ACTIVE newest ledger row,
 #      anchored by the row immediately before it having ended at exactly this
 #      worktree's head (rule owned by fm_nm_runs_status_for_worktree in
-#      bin/fm-nm-run-lib.sh). In the coarse runs-ledger fallback, a newest
-#      same-branch row that is running or pending answers whatever its head.
+#      bin/fm-nm-run-lib.sh). In the coarse runs-ledger fallback, and only
+#      when `axi status` answered ANOTHER branch's run, a newest same-branch
+#      row that is running or pending answers whatever its head.
 #      fm_nm_select_run in bin/fm-nm-run-lib.sh owns complete run selection
 #      and ambiguity reporting. The selected run's id-addressed status must
 #      agree on id, branch, and live/terminal class before attribution;
@@ -789,7 +790,12 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         # `[ -n "$RUN_OUT" ]`: an empty/timed-out primary call means the CLI
         # itself did not respond, so retrying it immediately with a second
         # bounded call would just double the wait for no better answer.
-        COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)" "" live-any-head)
+        # `live-any-head` only for a foreign-branch answer: a same-branch run
+        # that reached here is parked or terminal, and a bare live ledger row
+        # can neither tell those apart nor license reusing that run's detail.
+        coarse_mode=live-any-head
+        [ "$run_branch" != "$CREW_BRANCH" ] || coarse_mode=""
+        COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)" "" "$coarse_mode")
         if [ -n "$COARSE_STATUS" ]; then
           HAVE_RUN=1
           # A branch-matching answer the strict rule rejected is this branch's
