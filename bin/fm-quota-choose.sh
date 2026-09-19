@@ -24,12 +24,12 @@
 # candidate remains eligible under the captured quota evidence.
 #
 # Multi-provider limitation: this helper maps each harness to ONE primary
-# provider family (fm_quota_provider_for_harness in bin/fm-quota-axi-lib.sh)
-# and checks quota for that
-# family only. Some harnesses can run models from several providers - for
-# example, Pi and OpenCode may dispatch xAI, Anthropic, or other models - so a
-# candidate whose established provider differs from the harness's primary family
-# is checked against the wrong quota row. This is an accepted limitation of the
+# provider family (see fm_candidate_provider_for_harness in
+# bin/fm-candidate-availability-lib.sh) and checks quota for that family only.
+# Some harnesses can run models from several providers - for example, Pi and
+# OpenCode may dispatch xAI, Anthropic, or other models - so a candidate
+# whose established provider differs from the harness's primary family is
+# checked against the wrong quota row. This is an accepted limitation of the
 # optional helper. Authoritative multi-provider routing - including provider
 # discovery from the harness catalog and quota matching by that explicit
 # provider - is owned by AGENTS.md section 4 and the quota-array-dispatch skill,
@@ -39,12 +39,26 @@
 # omp (Oh My Pi) has no single primary family, so its candidate model prefix
 # selects the family: openai-codex/<id> checks the codex row and
 # claude-bridge/<id> checks the claude row, each against the bare <id> for
-# model: and product: scopes. Any other or absent prefix is refused up front,
-# the same shape as an unknown harness, because no quota-axi row measures it.
+# model: and product: scopes. ollama/<id> selects a locally-hosted model
+# instead: it carries no paid quota policy at all, so it is always eligible
+# and no quota-axi row is consulted for it. Any other or absent prefix is
+# refused up front, the same shape as an unknown harness, because no
+# quota-axi row measures it and it declares no local-model policy either.
 # quota-axi reports Codex quota unavailable on this host because omp carries
 # its own Codex login, so an openai-codex candidate reads as unknown quota here
 # and is never selected on this host; its runway is disclosed uncertainty for
 # the agent-side gates, not measured headroom.
+#
+# Pi keeps its single "pi" family for every model except one declared local
+# lane: gx10-vllm/<id> (the default local Qwen candidate is
+# gx10-vllm/qwen3.8-27b-fp8), Pi's own catalog name for its self-hosted,
+# no-paid-quota model, the same treatment as omp's ollama/<id>.
+#
+# Copilot candidates (a github-copilot/<id> model, on any harness) and local
+# candidates (omp's ollama/<id> or Pi's gx10-vllm/<id>) never consult
+# quota-axi at all; see bin/fm-candidate-availability-lib.sh for the full
+# generic layer both this script and fm-spawn.sh's final pre-launch gate
+# share.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,6 +67,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-candidate-availability-lib.sh
+. "$SCRIPT_DIR/fm-candidate-availability-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
 usage() {
@@ -309,51 +325,19 @@ fi
 
 printf '%s\n' "$QUOTA_JSON" | fm_quota_json_valid || die "invalid quota-axi provider data"
 
-# provider_for_harness <harness> [<model>]
-# The harness -> primary provider family table is owned by
-# fm_quota_provider_for_harness in bin/fm-quota-axi-lib.sh; see the header
-# limitation note for why one family per harness is all this helper checks.
-provider_for_harness() {
-  fm_quota_provider_for_harness "$@"
-}
-
-# effective_for_provider_model <provider> <model>
-# Print the most constraining applicable quota evidence for the provider/model
-# tuple, including provider-wide and exact model or product scopes.
-effective_for_provider_model() {
-  local provider=$1 model=${2:-default}
-  printf '%s\n' "$QUOTA_JSON" | jq -c --arg provider "$provider" --arg model "$model" '
-    ($model | sub("^model:"; "")) as $model_token |
-    ([.providers[]? | select(.provider == $provider)] | first) as $p |
-    if ($p // null) == null then {status: "unknown"}
-    else ($p.quotaSemantics.effectiveAvailability // []) |
-    map(select(.scope as $scope |
-      $scope == "all_models" or $scope == "all_products" or
-      ($model_token != "" and $model_token != "default" and
-       (($scope | startswith("model:")) or ($scope | startswith("product:"))) and
-       ($model_token == ($scope | sub("^(model|product):"; ""))))
-    )) as $applicable |
-    ($applicable | map(select(.status == "known"))) as $known |
-    if ($applicable | length) == 0 then {status: "unknown"}
-    elif any($applicable[]; (.runway.status // "") == "exhausted_now") then
-      ($applicable | map(select((.runway.status // "") == "exhausted_now")) | first)
-    elif ($known | length) == 0 then {status: "unknown"}
-    elif any($known[]; .effectivePercentRemaining == 0) then
-      ($known | map(select(.effectivePercentRemaining == 0)) | first)
-    else ($known | min_by(.effectivePercentRemaining))
-    end
-    end
-  ' 2>/dev/null
-}
-
+# Provider mapping (fm_candidate_provider_for_harness), the provider/model
+# quota lookup (fm_candidate_effective_for_provider_model), and the combined
+# per-candidate verdict (fm_candidate_availability) are the single owner in
+# bin/fm-candidate-availability-lib.sh, shared with fm-spawn.sh's final
+# pre-launch gate.
 for c in "${CANDIDATES[@]}"; do
   harness=${c%%:*}
   model=${c#*:}
   [ "$model" = "$c" ] && model="default"
   [ -n "$model" ] || die "invalid candidate: $c"
   fm_control_harness_supported "$harness" || die "unknown harness: $harness"
-  provider_for_harness "$harness" "$model" >/dev/null || case "$harness" in
-    omp) die "omp quota mapping covers only the openai-codex and claude-bridge prefixes: $model" ;;
+  fm_candidate_provider_for_harness "$harness" "$model" >/dev/null || case "$harness" in
+    omp) die "omp quota mapping covers only the openai-codex, claude-bridge, and ollama prefixes: $model" ;;
     *) die "unknown harness: $harness" ;;
   esac
 done
@@ -363,23 +347,8 @@ for c in "${CANDIDATES[@]}"; do
   harness=${c%%:*}
   model=${c#*:}
   [ "$model" = "$c" ] && model="default"
-  provider=$(provider_for_harness "$harness" "$model")
-  scope_model=$model
-  [ "$harness" != omp ] || scope_model=${model#*/}
-  effective=$(effective_for_provider_model "$provider" "$scope_model")
-  if [ -z "$effective" ] || [ "$effective" = "null" ]; then
-    continue
-  fi
-  if printf '%s\n' "$effective" | jq -e '
-    if (.runway.status // "") == "exhausted_now" then false
-    elif .status == "unknown" then false
-    else
-      .effectivePercentRemaining as $remaining |
-      (($remaining | type) == "number") and
-      ($remaining > 0) and
-      ((.runway.status // "") != "exhausted_now")
-    end
-  ' >/dev/null 2>&1; then
+  avail=$(fm_candidate_availability "$QUOTA_JSON" "$harness" "$model")
+  if [ "$(printf '%s\n' "$avail" | jq -r '.eligible')" = true ]; then
     chosen="$harness $model"
     break
   fi

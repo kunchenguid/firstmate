@@ -445,6 +445,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/captain-presence-telegram.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/dispatch-auth.md",
       "audience": "maintainer-verification"
     },
