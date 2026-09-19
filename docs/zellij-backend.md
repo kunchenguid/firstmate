@@ -20,6 +20,7 @@ A spawn stops before creating a session or acquiring a worktree when Zellij or `
 
 Firstmate uses one shared session named `firstmate` by default.
 `FM_ZELLIJ_SESSION` can select another name for isolated verification.
+On native Windows under Git Bash/MSYS or MinGW, the session name must match `[A-Za-z0-9._-]+`, because the headless session is launched through PowerShell there; every other platform accepts any name Zellij itself accepts.
 Attach with:
 
 ```sh
