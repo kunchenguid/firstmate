@@ -93,6 +93,9 @@ init_changed_fixture_repo() {
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
   cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  # The runner isolates itself from the ambient fleet environment at startup,
+  # so the fixture repo must carry that owner as well as the runner itself.
+  cp "$ROOT/bin/fm-test-env-lib.sh" "$repo/bin/fm-test-env-lib.sh"
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
     fm-brief.test.sh \
@@ -188,6 +191,9 @@ init_primary_and_linked_worktree() {
     mkdir -p "$tree/bin" "$tree/tests"
     cp "$RUNNER" "$tree/bin/fm-test-run.sh"
     cp "$ROOT/tests/git-config-helpers.sh" "$tree/tests/"
+    # The runner isolates itself from the ambient fleet environment at startup,
+    # so the fixture repo must carry that owner as well as the runner itself.
+    cp "$ROOT/bin/fm-test-env-lib.sh" "$tree/bin/fm-test-env-lib.sh"
     chmod +x "$tree/bin/fm-test-run.sh"
     cat >"$tree/tests/probe.test.sh" <<PROBE
 #!/usr/bin/env bash
@@ -513,6 +519,9 @@ PY
   mkdir -p "$timeout_repo/bin" "$timeout_repo/tests"
   cp "$RUNNER" "$timeout_repo/bin/fm-test-run.sh"
   cp "$ROOT/tests/git-config-helpers.sh" "$timeout_repo/tests/"
+  # The runner isolates itself from the ambient fleet environment at startup,
+  # so the fixture repo must carry that owner as well as the runner itself.
+  cp "$ROOT/bin/fm-test-env-lib.sh" "$timeout_repo/bin/fm-test-env-lib.sh"
   cat >"$timeout_repo/bin/fm-timeout-lib.sh" <<'SH'
 fm_run_timed() {
   [ "$1" -eq 900 ] || return 99
@@ -665,6 +674,7 @@ test_family_proofs_run_in_separate_concurrent_phases() {
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
   cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cp "$ROOT/bin/fm-test-env-lib.sh" "$repo/bin/fm-test-env-lib.sh"
   cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   chmod +x "$repo/bin/fm-test-run.sh"
   for script in \
@@ -1017,6 +1027,9 @@ test_list_scheduled_non_lane_selections_use_serial_weights() {
   repo="$tmp/repo"
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  # The runner isolates itself from the ambient fleet environment at startup,
+  # so the fixture repo must carry that owner as well as the runner itself.
+  cp "$ROOT/bin/fm-test-env-lib.sh" "$repo/bin/fm-test-env-lib.sh"
   for script in "${scripts[@]}"; do
     printf '#!/usr/bin/env bash\nexit 0\n' >"$repo/$script"
     chmod +x "$repo/$script"
@@ -1293,6 +1306,7 @@ test_unmapped_new_test_never_inherits_family_concurrency() {
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$repo/bin/fm-test-run.sh"
   cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  cp "$ROOT/bin/fm-test-env-lib.sh" "$repo/bin/fm-test-env-lib.sh"
   chmod +x "$repo/bin/fm-test-run.sh"
   # Two members of the proven residual family, plus a test basename the family
   # map has never seen - the shape of any test added tomorrow.
@@ -1411,6 +1425,9 @@ test_per_script_timeout_bounds_a_hang() {
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$runner"
   cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  # The runner isolates itself from the ambient fleet environment at startup,
+  # so the fixture repo must carry that owner as well as the runner itself.
+  cp "$ROOT/bin/fm-test-env-lib.sh" "$repo/bin/fm-test-env-lib.sh"
   cp "$ROOT/bin/fm-timeout-lib.sh" "$repo/bin/fm-timeout-lib.sh"
   grandchild_pid="$tmp/grandchild.pid"
   cat >"$repo/$hang" <<'SH'
@@ -1475,6 +1492,9 @@ test_max_wall_ms_is_a_result_not_advice() {
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$RUNNER" "$runner"
   cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  # The runner isolates itself from the ambient fleet environment at startup,
+  # so the fixture repo must carry that owner as well as the runner itself.
+  cp "$ROOT/bin/fm-test-env-lib.sh" "$repo/bin/fm-test-env-lib.sh"
   cat >"$repo/$fast" <<'SH'
 #!/usr/bin/env bash
 sleep 1
@@ -1540,6 +1560,9 @@ test_jobs_parallel_scheduler_and_failure_propagation() {
   mkdir -p "$repo/bin" "$repo/tests" "$evidence" "$fake_bin"
   cp "$RUNNER" "$runner"
   cp "$ROOT/tests/git-config-helpers.sh" "$repo/tests/"
+  # The runner isolates itself from the ambient fleet environment at startup,
+  # so the fixture repo must carry that owner as well as the runner itself.
+  cp "$ROOT/bin/fm-test-env-lib.sh" "$repo/bin/fm-test-env-lib.sh"
   cat >"$fake_bin/stat" <<'SH'
 #!/usr/bin/env bash
 if [ "$1" = "-c" ] && [ "$2" = "%a" ]; then
