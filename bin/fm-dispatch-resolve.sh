@@ -56,8 +56,10 @@
 #   Jev pick to state/jev-dispatch-shadow.jsonl and does not add spawn
 #   authority beyond today's optional clear-profile use.
 #   FM_JEV_DISPATCH_EXTRA=1 adds log-only home and deliverable questions.
-#   FM_JEV_DISPATCH_COMPACT=1 sends a 400-800 character intent summary
-#   instead of the whole brief (default on for the OpenRouter route).
+#   FM_JEV_DISPATCH_COMPACT is read from the process environment first, else
+#   from $FM_HOME/.env via fmx_env_get; the environment wins. A truthy value
+#   sends a 400-800 character intent summary instead of the whole brief
+#   (default on for the OpenRouter route when both are unset).
 #
 # Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
 #   the captain-approval gate, or fm-spawn.sh validation; it publishes one
@@ -132,6 +134,11 @@ fm_dispatch_route() {
 
 fm_dispatch_compact_on() {
   local v=${FM_JEV_DISPATCH_COMPACT:-}
+  if [ -n "$v" ]; then
+    fm_dispatch_truthy "$v"
+    return
+  fi
+  v=$(fmx_env_get FM_JEV_DISPATCH_COMPACT "$FM_HOME/.env")
   if [ -n "$v" ]; then
     fm_dispatch_truthy "$v"
     return

@@ -540,7 +540,8 @@ This section is the single owner of the Jev HTTP override names: each is read fr
 OpenRouter never receives that path from `JEV_BASE`.
 Every profile whose harness lacks one authoritative quota-axi provider family must declare `provider` on the live rules file; the resolver refuses that file before any request (see "Crew dispatch profiles" above).
 Pi profiles on `xai/grok-4.6` declare `provider: grok` because quota-axi families are never `xai`.
-`FM_JEV_DISPATCH_COMPACT=1` sends the compact intent summary instead of the whole brief, and that compact form is the default on the OpenRouter route.
+`FM_JEV_DISPATCH_COMPACT` is read from the process environment first, else from `$FM_HOME/.env` via `fmx_env_get`, and the environment wins.
+A truthy value sends the compact intent summary instead of the whole brief, and that compact form is the default on the OpenRouter route when both are unset.
 `FM_JEV_DISPATCH_EXTRA=1` adds log-only Choice questions for home `{main,agency,lay,frontend,zimmer}` (criteria from `data/secondmates.md` when readable) and deliverable `{ship,scout,neither}`; those answers are never auto-routing authority.
 Presence of gitignored `config/jev-dispatch-shadow`, or `FM_JEV_DISPATCH_SHADOW=1`, logs the Jev pick next to the resolved spawn axes into `state/jev-dispatch-shadow.jsonl` and does not add spawn authority beyond today's optional `clear` profile line.
 `FM_JEV_DISPATCH_SHADOW=0` turns that log off even when the config flag is present.

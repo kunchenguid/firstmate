@@ -692,6 +692,21 @@ TYPESAFE_API_KEY=$KEY FM_JEV_DISPATCH_COMPACT=1 run code out err "$LONG_BRIEF" -
 body=$(cat "$LOG/body")
 assert_not_contains "$body" 'should-never-leave-the-machine' "explicit compact redacts assigned keys"
 assert_not_contains "$body" 'Do not send this section' "explicit compact omits Firstmate spec"
+reset_log
+printf 'FM_JEV_DISPATCH_COMPACT=1\n' > "$HOME_DIR/.env"
+TYPESAFE_API_KEY=$KEY run code out err "$LONG_BRIEF" --project pager
+body=$(cat "$LOG/body")
+assert_contains "$(jq -r .state.task.brief <<<"$body")" 'Fix the pager off-by-one' ".env compact keeps the intent with process env unset"
+assert_not_contains "$body" 'Do not send this section' ".env compact omits Firstmate spec with process env unset"
+reset_log
+TYPESAFE_API_KEY=$KEY FM_JEV_DISPATCH_COMPACT=0 run code out err "$LONG_BRIEF" --project pager
+body=$(cat "$LOG/body")
+assert_contains "$body" 'Do not send this section' "process env compact=0 wins over .env=1"
+rm -f "$HOME_DIR/.env"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$LONG_BRIEF" --project pager
+body=$(cat "$LOG/body")
+assert_contains "$body" 'Do not send this section' "TypeSafe with compact unset sends the whole brief"
 pass "compact state sends project plus intent, never credentials"
 
 # --- shadow logs the Jev pick and does not change the profile line --------------
