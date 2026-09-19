@@ -46,6 +46,8 @@ Removing or upgrading the shadowing client is the durable fix; `bin/backends/her
 ## Watching and task containers
 
 The ordinary topology puts one task tab per endpoint in the exact workspace of the Firstmate or secondmate that launches it.
+A new worker's task tab keeps the historical `fm-<id>` label by default; a home that opts in through `config/herdr-task-titles` labels its new workers `<short title> (<id>)`, derived from the backlog row title or, without one, the task brief (a `--secondmate` spawn follows the secondmate home's own config, the same home-authority rule the presentation projection follows).
+Historical `fm-<id>` task tabs remain valid and discoverable, and existing task operations never rename them.
 When the launcher has no Herdr workspace to inherit, the adapter maintains one durable home-labeled workspace instead.
 The primary home label is `firstmate`.
 A secondmate home label is `2ndmate-<secondmate-id>`, derived from its validated `.fm-secondmate-home` marker.
@@ -108,7 +110,7 @@ The token is visible in the workspace title because Herdr exposes no verified hi
 
 The owning parent is the launcher's own exact workspace, resolved from the same identity the flat path uses, and falls back to a unique home-label lookup only for a Firstmate outside Herdr.
 Projected children are never collapsed back into that parent; it is the placement and ordering reference the projection is bound under.
-The normal `fm-<id>` task tab is created in the exact new workspace returned by Herdr.
+The normal task tab is created in the exact new workspace returned by Herdr.
 Only the exact seeded default tab returned by the same workspace-create response can be pruned.
 Before and after create, prune, order, abort cleanup, and normal cleanup, Firstmate verifies exact workspace, tab, pane, and active-focus ids.
 An ambiguous response grants no mutation or cleanup authority.
@@ -209,11 +211,13 @@ herdr_session=<session>
 herdr_workspace_id=<workspace-id>
 herdr_tab_id=<tab-id>
 herdr_pane_id=<pane-id>
+herdr_task_label=<task-tab label>
 ```
 
 A Herdr pane id contains a colon, so the adapter splits `window=` on the first colon only.
 The recorded pane is the operational fast path.
 Workspace and tab ids support verification and cleanup but are not inferred from mutable labels during normal operation.
+The recorded `herdr_task_label` is the exact task-tab label, `fm-<id>` by default or `<short title> (<id>)` on an opted-in home, and it survives a relaunch unchanged, because a relaunch adopts the recorded tab without renaming it.
 
 ## Current transport behavior
 
@@ -279,7 +283,8 @@ No Herdr-specific copy of that protocol exists.
 ## Restart and liveness behavior
 
 Stopping and restarting a named Herdr server preserves workspace, tab, pane, and label ids, but the underlying harness processes and live agent registrations do not survive.
-A restored same-labeled tab with a missing pane or no registered agent is a husk.
+A restored tab with a missing pane or no registered agent is a husk.
+Husk and duplicate matching covers every label the task is known by: the label the new worker would use, the legacy `fm-<id>` label, and any label an interrupted earlier attempt recorded in `state/<id>.herdr-task-labels`, so editing a task title between attempts cannot hide a live prior tab.
 Create replaces only a confidently dead or no-agent husk, creates the replacement before closing the old tab, and refuses live or unknown states.
 This prevents closing the workspace's last tab before a replacement exists.
 
