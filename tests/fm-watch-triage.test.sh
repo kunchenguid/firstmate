@@ -2938,6 +2938,70 @@ test_wedge_escalation_names_an_expired_declared_wait() {
   pass "an expired declared wait keeps the whole wedge ladder while the alarm names the declaration it used to omit"
 }
 
+# The same alarm on a host that can READ a declared time but cannot render one
+# back. The rendered `until <T>` clause is the only part that depends on that
+# render, so it is the only part allowed to go missing: the note still has to
+# say a wait was declared, that its time has passed, and that the pane is still
+# idle, and the ladder still has to fire and climb. The arm this replaced printed
+# raw epoch seconds instead, which would hand a supervisor `until 1789000000` -
+# the unreadable alarm the whole change exists to remove.
+test_wedge_escalation_note_survives_an_unrenderable_declared_time() {
+  local dir state fakebin out capture window key past epoch payload n real_date
+  local working='state: working · source: run-step · ci running'
+  epoch=$(( $(date +%s) - 7200 ))
+  past=$(iso_utc_at "$epoch")
+  dir=$(wedge_threshold_fixture expired-wait-unrenderable \
+    "paused: waiting on the build queue until $past" 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  # Every epoch -> ISO call fails on both date flavors (BSD `-r <epoch>`, GNU
+  # `-d @<epoch>`); every other call, including the read that parses the token
+  # out of the status line, is the real date.
+  real_date=$(command -v date)
+  cat > "$fakebin/date" <<SH
+#!/usr/bin/env bash
+for _arg in "\$@"; do
+  case "\$_arg" in
+    -r|@*) exit 1 ;;
+  esac
+done
+exec "$real_date" "\$@"
+SH
+  chmod +x "$fakebin/date"
+
+  n=1
+  while [ "$n" -le 2 ]; do
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
+      || fail "an unrenderable declared time stopped the escalation at threshold $n"
+    payload=$(queued_stale_payloads "$state" "$window")
+    # The ladder does not move.
+    case "$payload" in *"possible wedge, escalation $n"*) ;;
+      *) fail "an unrenderable declared time did not reach escalation $n: $payload" ;;
+    esac
+    [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" -eq "$n" ] \
+      || fail "an unrenderable declared time did not count escalation $n: $(cat "$state/.wedge-escalations-$key" 2>/dev/null)"
+    # The note survives the failed render, minus the one clause that needed it.
+    case "$payload" in *"the lane declared a wait"*) ;;
+      *) fail "escalation $n lost the whole note when the declared time could not be rendered: $payload" ;;
+    esac
+    case "$payload" in *"time passed"*) ;;
+      *) fail "escalation $n no longer says the declared time has passed: $payload" ;;
+    esac
+    case "$payload" in *"with the pane still idle"*) ;;
+      *) fail "escalation $n no longer says the lane still looks idle: $payload" ;;
+    esac
+    case "$payload" in *"$epoch"*)
+      fail "escalation $n put raw epoch seconds in front of a supervisor: $payload" ;;
+    esac
+    case "$payload" in *" until "*)
+      fail "escalation $n kept an until clause with no renderable time behind it: $payload" ;;
+    esac
+    ack_stopped_cycle "$state" || fail "could not acknowledge escalation $n"
+    n=$((n + 1))
+  done
+  pass "an escalation whose declared time cannot be rendered keeps the note, minus the time, and the whole ladder"
+}
+
 # The other status-line record. A verified `captain-held:` transfer also reaches
 # this deferral - the mate has an active run attributed to it, so pause_state_class
 # reports working and the stable hash is handed to the wedge timer - but it blocks
@@ -5826,6 +5890,7 @@ test_captain_relevant_append_during_a_declared_wait_still_alarms
 test_live_paused_until_controls_recheck_time
 test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict
 test_wedge_escalation_names_an_expired_declared_wait
+test_wedge_escalation_note_survives_an_unrenderable_declared_time
 test_wedge_threshold_recheck_names_the_captain_for_a_held_lane
 test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms

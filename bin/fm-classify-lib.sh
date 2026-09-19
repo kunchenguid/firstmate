@@ -122,13 +122,16 @@ fm_utc_iso_to_epoch() {  # <timestamp>
 }
 
 # The inverse read, so a supervisor-facing alarm can name a declared time back in
-# the shape the worker wrote it rather than as raw epoch seconds. Prints the epoch
-# itself when neither date flavor can render it: an alarm that has to say WHEN a
-# wait was due must never lose the fact that a time was declared at all.
+# the shape the worker wrote it rather than as raw epoch seconds. Returns 1 when
+# neither date flavor can render it, for the same reason the reader above refuses
+# a malformed time: emitting anything that is not this shape would put raw epoch
+# seconds in front of a reader, which is the unreadable alarm this vocabulary
+# exists to prevent. A caller that still has something to say says it without the
+# time.
 fm_utc_epoch_to_iso() {  # <epoch> -> <YYYY-MM-DDTHH:MM:SSZ>
   date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
     || date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
-    || printf '%s' "$1"
+    || return 1
 }
 
 # The resolution verb and durable-backlog-transfer verb that CLOSE a keyed

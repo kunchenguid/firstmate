@@ -979,14 +979,23 @@ wedge_wait_evidence() {  # <task> -> `declared`/`held` and 0, or `expired <epoch
 # which is how the genuinely wedged lane gets missed.
 # Prints nothing for every other evidence value, so a lane that declared nothing
 # keeps the identical wording it has today.
+# A time that cannot be rendered back into the shape the worker wrote costs the
+# alarm that one clause and nothing else: the declaration, its elapsed age and
+# the still-idle pane are all readable without it, while raw epoch seconds in
+# their place would be the unreadable alarm this note exists to replace.
 expired_wait_escalation_note() {  # <wedge_wait_evidence-output>
-  local evidence=$1 until
+  local evidence=$1 until iso
   case "$evidence" in
     'expired '*) until=${evidence#expired } ;;
     *) return 0 ;;
   esac
-  printf ', the lane declared a wait until %s and that time passed %ss ago with the pane still idle' \
-    "$(fm_utc_epoch_to_iso "$until")" "$(( $(date +%s) - until ))"
+  if iso=$(fm_utc_epoch_to_iso "$until"); then
+    printf ', the lane declared a wait until %s and that time passed %ss ago with the pane still idle' \
+      "$iso" "$(( $(date +%s) - until ))"
+    return 0
+  fi
+  printf ', the lane declared a wait whose time passed %ss ago with the pane still idle' \
+    "$(( $(date +%s) - until ))"
 }
 
 # Defer ONE wedge escalation for a pane whose own declaration explains the quiet
