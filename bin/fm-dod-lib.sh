@@ -301,7 +301,7 @@ EOF
     no-mistakes)
       cat <<EOF
 The no-mistakes pipeline opens this task's PR, and nothing in this brief sets the base it opens against.
-Read that PR's own base branch as soon as the PR exists, before you report \`done:\`.
+Read that PR's own base branch as soon as the PR exists, before you report \`done: PR {url} checks green\`.
 If it is anything other than \`$base\`, append \`blocked: PR base is {branch}, not $base\` to the status file and stop, because a PR raised against another branch would show that branch's own commits as this task's change.
 EOF
       ;;

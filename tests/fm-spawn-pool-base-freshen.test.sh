@@ -478,6 +478,10 @@ test_launch_brief_names_the_branch_the_slot_is_on() {
     "a no-mistakes worker was left to assume the pipeline targets its working branch"
   assert_grep 'blocked: PR base is {branch}, not develop' "$launch" \
     "a no-mistakes worker was not told how to stop on a PR opened against another branch"
+  # A no-mistakes worker has two `done:` gates and no PR exists at the first, so
+  # the check names the final one outright rather than a moment with two readings.
+  assert_grep 'before you report `done: PR {url} checks green`' "$launch" \
+    "the PR-base check is anchored to a gate that can be read as the pre-PR one"
 
   # Without a recorded working branch there is nothing to check the PR base
   # against, so that warning must not appear at all.
