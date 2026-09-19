@@ -135,7 +135,7 @@ FM_BACKEND_HERDR_PRESENTATION_FLOOR_MARKER_PREFIX=".herdr-presentation-floor-"
 # ->blocked edge and a reconnect level-reconcile never re-delivers a still-
 # blocked pane. Mirrors bin/fm-watch.sh's .stale-<key> naming.
 FM_BACKEND_HERDR_ESCALATED_PREFIX=".herdr-escalated-"
-# .fm-secondmate-home is written by bin/fm-home-seed.sh (AGENTS.md section 6)
+# .fm-secondmate-home is written by bin/fm-home-seed.sh (secondmate-provisioning)
 # at a seeded secondmate home's root, containing exactly that secondmate's id.
 # The primary firstmate home never carries this marker.
 FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"

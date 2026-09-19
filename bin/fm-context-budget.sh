@@ -30,7 +30,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # Budget in estimated tokens, in the ceil(bytes/3) units above.
 # Set with headroom over the measured surface so ordinary safety-rule edits fit,
 # but not so much that a whole procedure can be pasted back inline unnoticed.
-FM_CONTEXT_BUDGET_TOKENS="${FM_CONTEXT_BUDGET_TOKENS:-10000}"
+FM_CONTEXT_BUDGET_TOKENS="${FM_CONTEXT_BUDGET_TOKENS:-5000}"
 
 # Files loaded into every turn's context, relative to the tracked code root.
 FM_CONTEXT_FILES="CLAUDE.md AGENTS.md"

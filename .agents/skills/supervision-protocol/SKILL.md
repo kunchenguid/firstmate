@@ -3,7 +3,7 @@ name: supervision-protocol
 description: >-
   Agent-only procedure for handling Firstmate supervision wakes and guard warnings.
   Use when handling a signal, stale, check, or heartbeat wake, when reviewing the whole fleet on a heartbeat, when a merged PR needs a clone refresh, and when a supervision guard warning must be resolved.
-  AGENTS.md section 8 owns the always-loaded live-cycle, wake-drain, acknowledgement, and away-mode rules that apply with this skill unloaded.
+  AGENTS.md section 8 retains only single-cycle ownership, no-blind-turn, emitted-protocol, and away-ownership invariants.
 user-invocable: false
 metadata:
   internal: true
@@ -11,9 +11,10 @@ metadata:
 
 # supervision-protocol
 
-`AGENTS.md` section 8 is the always-loaded owner of the rules that must hold before this skill loads: keep exactly one live supervision cycle whenever work is under way, never end a turn blind, drain the durable wake queue before acting, never acknowledge before handling, treat a status line as a wake event rather than current state, and honor the away-mode stub.
+`AGENTS.md` section 8 retains only single-cycle ownership, no-blind-turn, emitted-protocol, and away-ownership invariants.
+`AGENTS.md` section 2 retains the pre-skill fact that a status line is a wake event rather than current-state truth.
 `docs/architecture.md`, `docs/turnend-guard.md`, the emitted session-start block, and script help own the mechanisms and harness-specific recipes.
-This skill owns per-wake handling and the guard-warning contract.
+This skill owns wake draining and acknowledgement, per-wake handling, quiet-wait behavior, and the guard-warning contract.
 
 ## The live cycle
 

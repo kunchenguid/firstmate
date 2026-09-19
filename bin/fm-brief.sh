@@ -39,7 +39,7 @@
 #   identify this repo. Briefs made without it carry a loud declaration so an
 #   omitted contract cannot be silent.
 # For ship tasks, --mode is REQUIRED and shapes the definition of done. Firstmate
-# resolves it per task at intake (AGENTS.md section 7); data/projects.md holds the
+# resolves it per task at intake through task-lifecycle; data/projects.md holds the
 # captain's standing posture as context, and this script never reads it:
 #   no-mistakes  implement -> /no-mistakes pipeline -> PR -> configured merge authority
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
@@ -156,7 +156,7 @@ for a in "$@"; do
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
 
-# Ship delivery mode is an explicit per-task decision (AGENTS.md section 7). A
+# Ship delivery mode is an explicit per-task decision (task-lifecycle). A
 # missing or invalid value stops the scaffold rather than silently defaulting.
 if [ "$KIND" = ship ]; then
   [ "$MODE_SET" -eq 1 ] || {

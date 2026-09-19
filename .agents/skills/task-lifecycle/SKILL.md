@@ -3,7 +3,7 @@ name: task-lifecycle
 description: >-
   Agent-only procedure for the full Firstmate delivery lifecycle.
   Use before dispatching, steering, validating, landing, tearing down, or promoting a task, and when filing backlog items or authoring crewmate briefs.
-  AGENTS.md section 7 owns the always-loaded intake boundary, delivery-mode resolution, and the spawn, steer, merge, and teardown invariants that hold with this skill unloaded.
+  AGENTS.md section 7 retains only the guarded-path, isolation, authority, red-merge, and unlanded-work invariants that must hold before this skill loads.
 user-invocable: false
 metadata:
   internal: true
@@ -11,12 +11,22 @@ metadata:
 
 # task-lifecycle
 
-`AGENTS.md` section 7 is the always-loaded owner of the invariants that must hold before this skill loads: spawn only through `bin/fm-spawn.sh` into a genuine isolated worktree, steer only through `bin/fm-send.sh` and drive lifecycle only through `bin/fm-control.sh`, keep delivery mode and `yolo` orthogonal, never merge red, merge only through the guarded merge scripts, load `ask-user-authority` before deciding a finding, and tear down only after landing is confirmed.
-Sections 10 and 11 own the always-loaded backlog and brief facts.
-This skill owns the procedure around them.
+`AGENTS.md` section 7 retains only the guarded-path, isolation, authority, red-merge, and unlanded-work invariants that must hold before this skill loads.
+This skill owns task intake, project and secondmate routing, task shape, delivery resolution, backlog and brief procedure, dispatch, validation, landing, and cleanup.
 Referenced scripts own exact commands, flags, and data mechanics; read their headers and `--help` rather than restating them.
 
 ## Intake and authority
+
+Resolve the project independently for every request.
+An explicit project wins, a clear follow-up inherits its referent, and otherwise match the request against the project registry, work under way, and project code.
+Proceed on one confident match while naming the project plainly, and ask one concise question when multiple or no projects plausibly match.
+Route by the nature of the work against each registered secondmate's natural-language scope, not by its non-exclusive clone list.
+Keep `local-only` work in the main home.
+For one-off or infrequent operational work, begin with the simplest direct end-to-end path and add wrappers, control planes, policy layers, or automation only after that path exposes a concrete blocker.
+
+A ship is the default deliverable and produces a project change through one selected delivery mode.
+A scout produces knowledge in `data/<id>/report.md`, never a PR, and fits only when the captain explicitly requests a separate knowledge or design deliverable or unresolved uncertainty could materially change whether or what to build.
+A diagnostic request, report, recommendation, or implementation-ready finding is evidence rather than implementation authority.
 
 Before commissioning an investigation, consult existing reports and established evidence.
 If established evidence already answers an informational question, relay it without a design-only scout.
@@ -29,6 +39,9 @@ Once implementation is authorized, dispatch a ship and keep any remaining bounde
 Route in-scope work to the fitting secondmate unless it is blocked or the captain explicitly redirects it; do not read the secondmate's chat, because marked routed replies return through its status or a referenced document.
 If no secondmate scope fits, use the main home or discuss creating an appropriate persistent secondmate.
 
+Resolve every ship's concrete delivery mode and `yolo` posture at intake, and pass both explicitly to its brief, spawn, and any scout promotion.
+A current explicit captain instruction wins; otherwise use the project's registered posture, and default an unregistered project or absent registry to `no-mistakes` with `yolo` off.
+Dropping below the registered rigor requires a reason that can be stated.
 On a `no-mistakes-prod-only` project, classify the task's surface: internal-only tooling, automation, contributor or operator process, and release or submission work ships `direct-PR`, while product-facing, mixed, and uncertain work ships `no-mistakes`.
 Never infer internal-only from file location or project name.
 Record the resulting mode, `yolo` merge posture, and the one-line reason for any deviation in the backlog item note.
@@ -39,7 +52,7 @@ Serialize only for a true semantic dependency, shared mutable external state, in
 
 ## Dispatch and supervision handoff
 
-Spawn only through `bin/fm-spawn.sh` after the profile and backend checks in `AGENTS.md` section 4.
+Spawn only through `bin/fm-spawn.sh` after applying the dispatch owners named in the `AGENTS.md` skill map.
 The spawn must resolve a genuine isolated task worktree distinct from the primary checkout; a failed isolation assertion stops the task.
 When the configured tasks-axi backlog gate applies, the spawn itself moves the work item to In flight and refuses rather than dispatching work this home has no item for, so recording the dispatch is never a separate step to remember.
 A manual-backend home retains the hand-editing contract in `docs/configuration.md`.
@@ -82,6 +95,8 @@ After an autonomous merge, give the captain a one-line full-URL or local-main ou
 For a no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
 The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
 Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
+When the captain adds or changes an ask mid-task, append their words without a speaker label or direct address to the brief's `## Captain's intent` and relay those words to the worker; keep Firstmate build constraints in `## Firstmate spec` or the steer.
+`bin/fm-dod-lib.sh` owns the worker-side no-mistakes intent contract.
 
 Once validation starts, prefer routing new requirements to follow-up work rather than expanding the current task, unless a new requirement completely invalidates the work being validated.
 The smallest downstream changes needed to keep already accepted product or engineering behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate remain within the current task even when they touch files not named at intake, and corrections required to satisfy already accepted intent are not new requirements.
@@ -99,15 +114,16 @@ Require the matching `resolved` event, forbid `--yes`, and require the worker to
 Resume fleet supervision immediately after the decision lands.
 
 Judge validation by the currently attributed run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event.
-Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed or checks-passed is done; failed or cancelled is failed.
+Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed or checks-passed is done; failed or cancelled is failed exactly as `bin/fm-crew-state.sh` prints it.
+Only that owner may reclassify an orphaned green CI monitor as held-for-merge done or a terminal failed record with an unreachable daemon as unknown.
 A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership outside the supersession sequence above; steer it back to the gate response flow.
 The worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
 
 ## PR ready, landing, and teardown
 
 For PR-based ship tasks the ready signal depends on mode: `no-mistakes` reports `done: PR <url> checks green` after CI is green, while `direct-PR` reports `done: PR <url>` after opening the PR.
-Run `bin/fm-pr-check.sh <id> <PR url>`; it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
-Tell the captain the PR's full URL, a concise outcome summary, and the no-mistakes risk level when applicable.
+Run `bin/fm-pr-check.sh <id> <PR url>` with the URL copied from the ready signal; it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
+Tell the captain the full URL copied from that ready signal or the recorded `pr=` metadata, a concise outcome summary, and the no-mistakes risk level when applicable.
 A captain instruction to merge is explicit authority; `yolo` is the only standing routine merge authority.
 
 For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
@@ -136,12 +152,15 @@ The promoted worker must inventory scratch state, return to a clean default-bran
 
 ## Backlog procedure
 
-`AGENTS.md` section 10 owns the always-loaded facts: work items only, decisions are tasks held for the captain, the spawn and teardown transitions are automatic under the configured gate, and notes stay free of rotting detail.
+The backlog tracks work items only.
+Persistent secondmates are never backlog items, and work routed to a secondmate belongs in that home's backlog.
+A decision is a task held for the captain.
+Spawn and teardown own dispatch and completion transitions under the configured gate, and backlog notes must omit temporary paths, moving versions, ephemeral identifiers, and copied state that will rot.
 
-A decision is filed as `tasks-axi hold <id> --reason "<reason>" --kind captain`, with `--until <date>` when the captain defers it.
-When a main-side thread such as a pending captain decision or relay reminder is worth durable tracking, file it as its own work item and hold it the same way.
+Create a decision task through `bin/fm-tasks-axi.sh add` when needed, then hold it through `bin/fm-captain-hold.sh hold <id> --reason "<reason>"`, with `--until <date>` when the captain defers it.
+When a main-side thread such as a pending captain decision or Relay reminder is worth durable tracking, file and hold it through those same owners.
 Re-evaluate queued work after every teardown and heartbeat, dispatching items only when dependencies and time gates have cleared.
-Use compatible `tasks-axi` when the configured backend selects it and the documented manual path otherwise; keep only the configured recent Done entries.
+Use compatible `tasks-axi` through `bin/fm-tasks-axi.sh` when the configured backend selects it and the documented manual path otherwise; keep only the configured recent Done entries.
 `secondmate-provisioning` and `bin/fm-backlog-handoff.sh` own cross-home handoff safety.
 
 Inspect the current task note before replacing its considered body, and archive the superseded body when recoverability matters rather than appending by default.
@@ -151,6 +170,9 @@ Preserve durable structured identifiers, dependencies, and completion artifact l
 ## Brief authoring
 
 `bin/fm-brief.sh` and its help own scaffold syntax, generated variants, status protocol, delivery-mode definitions of done, and exact safety mechanics.
+Fill `## Captain's intent` (`{TASK}`) with the captain's own ask, stated boundaries, and only the context needed to understand its referents; never widen it into a generalized goal or coverage list.
+Fill `## Firstmate spec` (`{FIRSTMATE_SPEC}`) with only the build instructions that ask requires, name excluded scope when the ask is narrow, and route unrequested generalization or hardening to follow-up work.
+`bin/fm-dod-lib.sh` owns intent provenance, self-sufficiency, and no-mistakes authoring without added speaker labels or direct address.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.

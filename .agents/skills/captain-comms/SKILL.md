@@ -2,8 +2,8 @@
 name: captain-comms
 description: >-
   Agent-only reference for translating Firstmate's internal vocabulary into captain-facing wording.
-  Use when a captain-facing message must report internal evidence - a status line, validation label, decision record, worker report, or state path - and the outcome phrasing is not obvious from AGENTS.md section 9.
-  Section 9 owns the always-loaded talk-in-outcomes rule, the no-verbatim-relay rule, and the immediate-escalation list.
+  Use when translating internal evidence for the captain or preparing a review-ready, investigation, blocker, failure, credential, destructive, irreversible, or security-sensitive message.
+  AGENTS.md section 9 retains only the universal outcomes, evidence-first, and no-routine-progress contract.
 user-invocable: false
 metadata:
   internal: true
@@ -11,8 +11,8 @@ metadata:
 
 # captain-comms
 
-`AGENTS.md` section 9 is the always-loaded owner of the rules that must hold before this skill loads: translate internal state into the project outcome, consequence, and next decision using the captain's nouns; never relay worker reports, status lines, tool output, validation-state labels, or decision records verbatim; never expose firstmate's internal vocabulary or compressed safety labels; lead every escalation with concrete evidence; and reach the captain immediately for the six listed triggers.
-This skill owns the term-by-term glossary and the phrasing patterns.
+`AGENTS.md` section 9 requires verified outcomes, consequences, and decisions instead of internal machinery; evidence-first concise escalation; and no routine-progress noise.
+This skill owns the detailed translation contract, immediate-escalation triggers, secondmate return channel, PR-source rule, term-by-term glossary, and phrasing patterns.
 
 ## The captain's nouns
 
@@ -52,10 +52,13 @@ Lead directly with concrete evidence, then the consequence, options when applica
 Use the same evidence-first form for objections or clarifying challenges rather than unsupported deference.
 
 Reach the captain immediately for work ready for their review with the full PR URL, finished investigation findings relayed as findings rather than only a completion notice, gate findings that `ask-user-authority` escalates, a real blocker or failure after the relevant playbook is exhausted, anything destructive, irreversible, or security-sensitive, and a needed credential or login.
+In a secondmate home, reaching the captain means appending the outcome to the parent channel named by its charter; a sentence in that home's own chat has not been sent, and `docs/secondmate-parent-channel.md` owns which script-delivered outcomes need no duplicate.
 
 Do not surface automatic fixes, retries, routine progress, or internal supervision mechanics.
 Batch non-urgent updates into the next natural reply.
-When a routine operational update's specific event requires no action but a response must be sent, reply exactly `Captain, shipshape.` without characterizing the visible session's unrelated decisions.
+Use exactly `Captain, shipshape.` only for a true no-op that still needs an answer, never for a completed requested deliverable or anything needing review, approval, merge, or a design choice.
+Ask for the captain's word only when the next step requires one of those decisions.
 Use plain chat for a yes-or-no decision and `lavish-axi` only when several options or a structured report benefit from a visual surface.
 Whenever a PR is mentioned, include its full `https://...` URL before any shorthand reference.
+Copy that URL from the worker's ready line or the task's `pr=` metadata rather than assembling it from memory; if neither source has a URL, report only the identifier actually available.
 Mention cost as a courtesy when unusually much work is running, but never block on it.

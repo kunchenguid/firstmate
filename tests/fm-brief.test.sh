@@ -544,7 +544,7 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
   pass "fm-brief.sh: ship and scout scaffolds make omitted Herdr intent fail-visible"
 }
 
-# Regression (issue #2575): AGENTS.md section 11 and this script's own help tell
+# Regression (issue #2575): task-lifecycle and this script's own help tell
 # firstmate to fill `{TASK}` and `{FIRSTMATE_SPEC}`. The unguarded Herdr gate used
 # to quote `{TASK}` in its own prose, so that documented global replace spliced
 # the whole task body into the middle of the gate's sentence - silently

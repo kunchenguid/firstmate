@@ -6,6 +6,8 @@ Load this with the selected tool reference for dispatch, start, or adapter verif
 
 Use the router's detection and safety sections for static crew and secondmate harness resolution and all explicit overrides.
 `config/crew-dispatch.json` can override that static default for one crewmate or scout with concrete harness, model, and effort axes.
+At every crewmate or scout intake, routing precedence is a current per-task captain override, the best-fitting configured natural-language rule, the configured default, then the static crewmate harness.
+Preserve malformed profile configuration as an actionable error rather than selecting around it, and pass the concrete resolved profile required by `fm-spawn`.
 For a profile array, load `quota-array-dispatch` after establishing harness and provider facts here.
 When the opt-in `bin/fm-dispatch-resolve.sh` is on, its `clear` answer already names the concrete axes; `docs/configuration.md` "Typed dispatch resolution" owns that contract.
 
@@ -14,6 +16,12 @@ Its harness consequence is that a secondmate's workers receive literal `config/c
 A concrete crew value such as `codex` carries that runtime into the secondmate home.
 Unset or `default` carries no concrete value, so its workers use that home's own or detected harness rather than the primary's effective crew harness.
 The inherited dispatch file applies the same best-fit profiles there.
+
+## Backend selection and refusal
+
+`../../../docs/configuration.md` owns backend precedence and supported values.
+An explicit per-spawn backend is authorized only for that task and creates no later-task precedent.
+A missing dependency, authentication failure, unsupported backend, or version refusal is terminal for the selected backend; report the blocker instead of silently retrying through another backend.
 
 ## Owners
 

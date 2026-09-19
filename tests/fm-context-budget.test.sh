@@ -81,6 +81,21 @@ test_only_always_loaded_files_are_counted() {
   pass "on-demand skills are excluded from the always-loaded budget"
 }
 
+test_default_budget_rejects_a_large_manual() {
+  local under over status=0
+  # Including the 30-byte pointer, these estimate to 4677 and 5010 tokens.
+  # The first leaves normal safety-edit headroom; the second is operating-manual scale.
+  under=$(make_root default-under 14000)
+  FM_ROOT_OVERRIDE="$under" env -u FM_CONTEXT_BUDGET_TOKENS "$BUDGET" check >/dev/null 2>&1 || status=$?
+  expect_code 0 "$status" "the default budget must leave bounded maintenance headroom"
+
+  status=0
+  over=$(make_root default-over 15000)
+  FM_ROOT_OVERRIDE="$over" env -u FM_CONTEXT_BUDGET_TOKENS "$BUDGET" check >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "the default budget must reject an operating-manual-sized surface"
+  pass "the default budget prevents large situational procedure from returning inline"
+}
+
 test_missing_always_loaded_file_refuses() {
   local root err status=0
   root=$(make_root missing 3000)
@@ -119,6 +134,7 @@ test_under_budget_passes
 test_over_budget_fails_with_routing_guidance
 test_boundary_is_inclusive
 test_only_always_loaded_files_are_counted
+test_default_budget_rejects_a_large_manual
 test_missing_always_loaded_file_refuses
 test_malformed_budget_refuses
 test_report_never_fails_and_budget_prints_value
