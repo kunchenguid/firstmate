@@ -106,8 +106,12 @@ for heading in Launch Doctor Drive Evidence Cleanup Helpers; do
 done
 
 CLEANUP_BODY=$(section_body "$SKILL" "Cleanup" | tr '\n' ' ')
+PROCESS_NAME_KILL_COUNT=$(printf '%s\n' "$CLEANUP_BODY" \
+  | grep -Eio "kill[[:space:]]+by[[:space:]]+process[[:space:]]+name" \
+  | wc -l)
 if ! printf '%s\n' "$CLEANUP_BODY" | grep -Eqi "never[[:space:]]+kill[[:space:]]+by[[:space:]]+process[[:space:]]+name" \
-    || ! printf '%s\n' "$CLEANUP_BODY" | grep -Eqi "kill[[:space:]]+what[[:space:]]+you[[:space:]]+started"; then
+    || ! printf '%s\n' "$CLEANUP_BODY" | grep -Eqi "kill[[:space:]]+what[[:space:]]+you[[:space:]]+started" \
+    || [ "$PROCESS_NAME_KILL_COUNT" -ne 1 ]; then
   fail "Cleanup section must state the rule: never kill by process name; kill what you started"
 fi
 
