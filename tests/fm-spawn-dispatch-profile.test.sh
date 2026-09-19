@@ -5,6 +5,7 @@
 # fake tmux pane and a real isolated git worktree. The fake tmux captures the
 # literal launch command sent with `tmux send-keys -l`, so assertions pin the
 # command firstmate would run without starting any real harness.
+# shellcheck disable=SC2100 # Test identifiers such as profile-off-z1 are string values, not arithmetic expressions.
 set -u
 
 # shellcheck source=tests/fixtures.sh

@@ -1087,6 +1087,44 @@ clear_write_tracking() {  # <window-key>
   rm -f "$STATE/.writing-since-$key" "$STATE/.writing-resurfaced-$key"
 }
 
+# Bound a DUE wedge escalation for an ordinary crew task the captain already
+# holds. A held lane whose worker has exited leaves an idle pane whose last status
+# line is not itself a declared wait - a delivery or an answer stays whatever it
+# was - so no line predicate and no .paused-* flag can see the hold. Nothing about
+# that pane says the worker is wedged, so it must not climb the wedge ladder for
+# the captain's whole thinking time; it takes the SAME bound every other stale path
+# consults, from the same owner.
+# captain_call_stale_bound owns the policy and returns 0 for both ways a sighting
+# is taken - already surfaced inside the window, and the away-posture record's
+# absolute silence - and 1 otherwise, leaving STALE_WAIT_DECLARATION naming the
+# call this sighting is bound to. An EMPTY declaration with that 1 is the case that
+# must keep behaving exactly as today: no open call bounds the pane, so the caller
+# escalates it as a possible wedge.
+# Returns 0 when it took the escalation and 1 when the caller must escalate.
+# The escalation counter is left untouched, like wedge_defer_writing's: it is
+# neither advanced (nothing here is an escalation) nor reset (a later genuine
+# escalation must still carry the history it earned).
+wedge_escalation_captain_bound() {  # <window> <task> <since-file> <window-key>
+  local win=$1 task=$2 since_file=$3 key=$4
+  if captain_call_stale_bound "$key" "$task"; then
+    date +%s > "$since_file"
+    triage_log "absorbed stale wedge escalation (open captain call already surfaced for this status): $win"
+    return 0
+  fi
+  [ -n "$STALE_WAIT_DECLARATION" ] || return 1
+  # The call is real and its own window has elapsed, so it re-surfaces - plainly,
+  # on the shared once-per-PAUSE_RESURFACE_SECS cadence and never as a wedge
+  # escalation, because nothing here says the pane is wedged. The throttle is
+  # recorded only after the append succeeded, exactly as every other bounded path
+  # does, and the idle window is re-dated rather than removed so the SAME cadence
+  # keeps running: the caller's next poll re-arms a fresh window, and the periodic
+  # recheck that keeps a forgotten call from rotting invisibly still fires.
+  fm_wake_append stale "$win" "stale: $win" || exit 1
+  stale_wait_record "$key"
+  date +%s > "$since_file"
+  wake "stale: $win"
+}
+
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
@@ -1095,13 +1133,20 @@ clear_write_tracking() {  # <window-key>
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).
-# The wait-evidence consult (wedge_wait_evidence, one status-line read) and the
-# worktree write probe run ONLY here, inside the at-threshold branch that is
-# about to escalate: at most one each per window per STALE_ESCALATE_SECS, never
-# per poll. The wait consult runs first, because a pane whose worker already said
-# why it is quiet has nothing to prove through its worktree.
-wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 since age n reason evidence
+# The wait-evidence consult (wedge_wait_evidence, one status-line read), the
+# worktree write probe, and the optional bound's backlog read run ONLY here,
+# inside the at-threshold branch that is about to escalate: at most one each per
+# window per STALE_ESCALATE_SECS, never per poll. The wait consult runs first,
+# because a pane whose worker already said why it is quiet has nothing to prove
+# through its worktree.
+# <bound> optionally names a policy that bounds this escalation. Only
+# `captain-call` is defined - an ordinary crew task already held for the captain -
+# and it is consulted here rather than on every poll for the same reason the write
+# probe is: the bound costs one backlog read, so it belongs in the branch that was
+# about to alarm, not on the poll hot path.
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> [bound]
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 bound=${6:-} since age n reason evidence key
+  key=$(window_key "$win")
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -1120,6 +1165,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         fi
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
+          return 0
+        fi
+        if [ "$bound" = captain-call ] && wedge_escalation_captain_bound "$win" "$task" "$since_file" "$key"; then
           return 0
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
@@ -2573,7 +2621,10 @@ EOF
             # wedge timer is running for it) - keep treating it that way
             # without re-reading the crew state every poll, and without
             # letting the still-captain-relevant log line re-surface it.
-            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task"
+            # A captain-relevant line makes this path reachable on a lane the
+            # captain holds too (a delivery that was provably working on a
+            # static pane, then its worker exited), so it takes the same bound.
+            wedge_timer_check "$w" "$ssf" "stale (overridden terminal status)" "$ewf" "$task" captain-call
           fi
           # else: already surfaced as genuinely terminal on a prior poll of
           # this same hash - nothing left to do (matches the original,
@@ -2621,7 +2672,15 @@ EOF
                 *)       handle_paused_stale "$w" "$task" "$h" ;;
               esac
             else
-              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$task"
+              # A crew task the captain already holds reaches here whenever its
+              # last status line is not itself a declared wait - a delivered or
+              # answered line stays whatever it was. Nothing in the status log
+              # names the hold, so this branch must consult the same backlog
+              # bound every other stale path does, or a held lane whose worker
+              # has exited re-alarms as a possible wedge for the captain's whole
+              # thinking time. The bound re-checks the call itself, so a pane
+              # with NO open call still escalates exactly as it always has.
+              wedge_timer_check "$w" "$ssf" "non-terminal stale" "$ewf" "$task" captain-call
             fi
           fi
         fi

@@ -2771,17 +2771,22 @@ make_hold_home() {  # <name> <status-line> <hold|nohold>
 # whose alarm the call must bound. The pid lands in HOLD_WATCH_PID rather than on
 # stdout: a command substitution would background the watcher inside a subshell,
 # leaving the caller unable to wait on or reap its own watcher.
+# Trailing arguments are extra environment assignments for the watcher, so a case
+# can tighten the wedge threshold it drives. They are applied as `env` operands,
+# never as a bare expansion before the command: `VAR=x "$@" cmd` would treat the
+# expanded word as the command name rather than as an assignment.
 HOLD_WATCH_PID=
-hold_watch_launch() {  # <dir> <out> <capture>
+hold_watch_launch() {  # <dir> <out> <capture> [extra env assignments...]
   local dir=$1 out=$2 capture=$3
-  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-held-merge \
+  shift 3
+  env PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-held-merge \
     FM_FAKE_TMUX_CAPTURE="$capture" FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
     FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
     FM_WATCH_HANDLING_SUCCESSOR=1 \
     FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config" \
     FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
     FM_PAUSE_RESURFACE_SECS="${FM_HOLD_PAUSE_RESURFACE_SECS:-999}" FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" 2>&1 &
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$@" "$WATCH" >> "$out" 2>&1 &
   HOLD_WATCH_PID=$!
 }
 
@@ -2975,6 +2980,150 @@ test_reheld_captain_call_starts_its_own_resurface_window() {
   [ "$wakes" -eq 1 ] \
     || fail "the second captain call produced $wakes first wakes instead of one"
   pass "a released-then-re-held task is a distinct captain call whose first sight still alarms"
+}
+
+
+
+# --- the STABLE-hash wedge path on held work: no re-alarming as a possible wedge
+# The first half of this bound already existed, but only on paths a held lane does
+# not necessarily take. A lane whose worker has exited settles on a pane hash that
+# never changes, and its last status line is not a declared wait - a delivery or an
+# answer stays whatever it was - so no line predicate and no .paused-* flag sees the
+# hold. Those lanes reached this script's wedge timer directly, which has no
+# captain-call awareness at all: past STALE_ESCALATE_SECS they re-alarmed as
+# `possible wedge, escalation N` forever, with a climbing counter, for the entire
+# time the captain was deciding. Observed live on a lane whose worker had exited.
+#
+# This is the stable-hash half, driven the way production runs it: each round is ONE
+# watcher launch over a pane that never changes, with the wedge threshold shrunk so
+# the 240s window is observable in a test. Nothing is fabricated - the watcher's own
+# bookkeeping drives every round, so a round that stops alarming can only be the
+# bound taking it.
+#
+# The three shapes below are the ones a held lane really carries. `working:` is the
+# non-terminal path that had no bound at all; `done:`/`blocked:` reach the
+# provably-working-override path, which is also reachable on a held lane (a
+# delivery that was working on a static pane, then its worker exited) and had none
+# either.
+# Drive the shape a held lane really has, in two phases, with no fabricated
+# bookkeeping - every round is one real watcher launch and the watcher's own
+# bookkeeping carries between them.
+#
+#   Phase 1 (warm-up): the worker's pipeline is provably working on a static pane,
+#     which is normal while it waits on CI. This is how the wedge timer starts and
+#     how the provably-working override is established, for BOTH line shapes.
+#   Phase 2 (<rounds> x): the worker has exited and the pane is on that same final
+#     hash, so the lane is exactly the population the captain holds: no status
+#     append is coming and the pane will never change again.
+#
+# The wedge window is shrunk to 0 for phase 2 so "the idle window has elapsed" is
+# true on the very next poll - the wait is shrunk, never the semantics, and it is
+# exactly the state a real lane reaches after STALE_ESCALATE_SECS. Per-round alarm
+# and wedge counts land in a file for the caller to assert on.
+#
+# Cost is held down deliberately: one real watcher process per phase, two rounds
+# per shape, and the minimum two poll cycles each needs to decide. Watcher startup
+# dominates a round, and this suite already runs ~80 watchers.
+hold_wedge_rounds() {  # <dir> <out> <capture> <status-line> <rounds>
+  local dir=$1 out=$2 capture=$3 line=$4 rounds=$5 state="$1/state" n pid c
+  printf '%s\n' "$line" > "$state/held-merge.status"
+  printf '%s' "$(seen_sig "$state/held-merge.status")" > "$state/.seen-held-merge_status"
+  printf 'idle, agent exited\n' > "$capture"
+  : > "$dir/rounds"
+
+  # Phase 1: absorb the pane as provably working, establishing the timer/override.
+  hold_watch_launch "$dir" "$dir/warmup.out" "$capture" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · ci running' || true
+  pid=$HOLD_WATCH_PID
+  c=0
+  while [ "$c" -lt 2 ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    wait_poll_cycle "$state" "$pid" 300 || break
+    c=$((c + 1))
+  done
+  reap "$pid"
+  rm -f "$state/.wake-queue"
+
+  # Phase 2: the worker is gone and the pane never changes again. The threshold is
+  # 0, so a repeat poll escalates on its very first sighting rather than waiting.
+  n=1
+  while [ "$n" -le "$rounds" ]; do
+    : > "$out"
+    hold_watch_launch "$dir" "$out" "$capture" FM_STALE_ESCALATE_SECS=0
+    pid=$HOLD_WATCH_PID
+    c=0
+    while [ "$c" -lt 2 ]; do
+      kill -0 "$pid" 2>/dev/null || break
+      wait_poll_cycle "$state" "$pid" 300 || break
+      c=$((c + 1))
+    done
+    reap "$pid"
+    printf '%s\t%s\t%s\n' "$n" "$(hold_stale_wakes "$state")" \
+      "$(grep -cF 'possible wedge' "$out" || true)" >> "$dir/rounds"
+    rm -f "$state/.wake-queue"
+    n=$((n + 1))
+  done
+}
+
+# Total alarms and wedge escalations recorded across the rounds a case drove.
+held_round_total() {  # <dir> <column: 2=alarms 3=wedge>
+  awk -F '\t' -v c="$2" '{ s += $c } END { print s + 0 }' "$1/rounds"
+}
+
+test_captain_held_stable_hash_never_wedge_escalates() {
+  local spec name line dir state out capture wedges
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (held stable-hash wedge bound)"; return 0; }
+  for spec in \
+    'held-working-line|working: still tidying the branch' \
+    'held-delivery-line|done: PR https://example.invalid/pull/1 checks green' \
+    'held-blocker-line|blocked [key=runtime-refresh-before-flip]: the lane is red'
+  do
+    name=${spec%%|*}; line=${spec#*|}
+    dir=$(make_hold_home "$name" "$line" hold) \
+      || fail "[$name] could not build a captain-held backlog fixture"
+    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+
+    hold_wedge_rounds "$dir" "$out" "$capture" "$line" 2
+    wedges=$(held_round_total "$dir" 3)
+    [ "$wedges" -eq 0 ] \
+      || fail "[$name] a held lane was re-alarmed as a possible wedge $wedges time(s) across 2 rounds"
+    [ ! -e "$state/.wedge-escalations-$(hold_key)" ] \
+      || fail "[$name] a held lane still climbed the wedge-escalation counter"
+    # The bound must be the captain-call one, not mere silence: the shared
+    # re-surface throttle is what proves the hold - not a stuck pane - took it.
+    [ -e "$state/.paused-resurfaced-$(hold_key)" ] \
+      || fail "[$name] a held lane was silenced without recording the captain-call cadence"
+  done
+  pass "a lane the captain holds never re-alarms as a possible wedge on a stable pane"
+}
+
+
+test_unheld_stable_hash_still_wedge_escalates() {
+  local spec name line dir state out capture wedges
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (unheld stable-hash wedge bound)"; return 0; }
+  # The other half of the same bound, and the one that decides whether bounding the
+  # held lane was safe: the SAME fixtures with NO hold must keep wedge-escalating
+  # on the existing schedule. A bound that silenced a genuinely stuck worker would
+  # be far worse than the churn it removes.
+  for spec in \
+    'unheld-working-line|working: still tidying the branch' \
+    'unheld-blocker-line|blocked [key=runtime-refresh-before-flip]: the lane is red'
+  do
+    name=${spec%%|*}; line=${spec#*|}
+    dir=$(make_hold_home "$name" "$line" nohold) \
+      || fail "[$name] could not build an unheld backlog fixture"
+    state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+
+    hold_wedge_rounds "$dir" "$out" "$capture" "$line" 2
+    wedges=$(held_round_total "$dir" 3)
+    [ "$wedges" -ge 1 ] \
+      || fail "[$name] a stale pane with no open captain call stopped wedge-escalating entirely"
+    [ ! -e "$state/.paused-resurfaced-$(hold_key)" ] \
+      || fail "[$name] an unheld pane armed the captain-call re-surface throttle"
+  done
+  pass "a stable stale pane with no open captain call keeps wedge-escalating"
 }
 
 
@@ -5404,6 +5553,8 @@ test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
+test_captain_held_stable_hash_never_wedge_escalates
+test_unheld_stable_hash_still_wedge_escalates
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
