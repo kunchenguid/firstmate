@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Perform the approved local merge for a local-only ship task: fast-forward the
-# project's default branch to the crewmate's fm/<id> branch.
+# task's DELIVERY TARGET BRANCH to the crewmate's fm/<id> branch.
+#
+# The target is the `base=` recorded in state/<id>.meta when the task has one,
+# and the project's default branch otherwise, so a project that ships onto a
+# long-lived feature branch lands through this guarded path instead of falling
+# back to a raw `git merge --ff-only` outside it. The target is never inferred:
+# an absent base= means the default branch, exactly as before. bin/fm-spawn.sh
+# owns recording it.
 #
 # This is firstmate's merge gate-action (the captain's merge authority applied
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
@@ -48,6 +55,9 @@ META="$STATE/$ID.meta"
 # actor is refused for its role whatever it says.
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
+# fm_meta_get is the one owner of "the last value of key= in a meta file".
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 fm_lease_forbid_branch "local-only landing (fm-merge-local)"
 
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
@@ -75,6 +85,7 @@ fi
 
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
+RECORDED_BASE=$(fm_meta_get "$META" base)
 [ "$MODE" = local-only ] || { echo "error: task $ID is mode=$MODE, not local-only; merge PR tasks with bin/fm-pr-merge.sh <id> <PR url> after approval" >&2; exit 1; }
 
 default_branch() {
@@ -96,25 +107,43 @@ default_branch() {
 BRANCH="fm/$ID"
 git -C "$PROJ" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $PROJ" >&2; exit 1; }
 
-DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+# Every resolution below names the target in FULL as refs/heads/<target>, and the
+# checked-out-branch guard reads HEAD's unshortened symbolic ref for the same
+# reason: git resolves a bare name through refs/tags/ first, and `symbolic-ref
+# --short` returns `heads/<name>` when a tag shadows the branch, so a bare-name
+# guard or ancestry check would measure the tag instead of the branch this lands
+# on. bin/fm-review-diff.sh states that rule in full, and this file's own
+# tag-shadow regression in tests/fm-merge-local.test.sh pins it here.
+# The bare $TARGET stays in the human-facing messages, which only name it.
+if [ -n "$RECORDED_BASE" ]; then
+  TARGET=$RECORDED_BASE
+  TARGET_REF="refs/heads/$TARGET"
+  TARGET_DESC="this task's recorded delivery target branch"
+  git -C "$PROJ" rev-parse --verify --quiet "$TARGET_REF" >/dev/null || { echo "error: recorded delivery target branch '$TARGET' does not exist in $PROJ" >&2; exit 1; }
+else
+  TARGET=$(default_branch) || { echo "error: cannot determine the delivery target branch for $PROJ; the task records none and origin/HEAD, main, and master are all absent" >&2; exit 1; }
+  TARGET_REF="refs/heads/$TARGET"
+  TARGET_DESC="this project's default branch, because the task records no delivery target branch"
+fi
 
-# The project's main checkout must be on its default branch and clean, so the
-# fast-forward lands predictably (firstmate never writes here otherwise).
-cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
-[ "$cur" = "$DEFAULT" ] || { echo "error: $PROJ is on '$cur', expected default branch '$DEFAULT'; cannot merge safely" >&2; exit 1; }
+# The project's main checkout must be on the delivery target branch and clean, so
+# the fast-forward lands predictably (firstmate never writes here otherwise).
+cur=$(git -C "$PROJ" symbolic-ref --quiet HEAD 2>/dev/null || echo "")
+[ "$cur" = "$TARGET_REF" ] || { echo "error: $PROJ is on '${cur#refs/heads/}', expected '$TARGET' ($TARGET_DESC); cannot merge safely" >&2; exit 1; }
 if [ -n "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ]; then
   echo "error: $PROJ has a dirty working tree; refusing to merge into it" >&2
   exit 1
 fi
 
-# Clean fast-forward only: DEFAULT must be an ancestor of BRANCH.
-if ! git -C "$PROJ" merge-base --is-ancestor "$DEFAULT" "$BRANCH"; then
-  echo "REFUSED: $BRANCH is not a fast-forward of $DEFAULT (it has diverged)." >&2
-  echo "Have the crewmate rebase $BRANCH onto $DEFAULT, then retry." >&2
+# Clean fast-forward only: TARGET must be an ancestor of BRANCH.
+if ! git -C "$PROJ" merge-base --is-ancestor "$TARGET_REF" "$BRANCH"; then
+  echo "REFUSED: $BRANCH is not a fast-forward of $TARGET (it has diverged)." >&2
+  echo "Measured against $TARGET - $TARGET_DESC." >&2
+  echo "Have the crewmate rebase $BRANCH onto $TARGET, then retry." >&2
   exit 1
 fi
 
-before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
+before=$(git -C "$PROJ" rev-parse --short "$TARGET_REF")
 hold_status=0
 FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
   "$SCRIPT_DIR/fm-captain-hold.sh" open "$ID" --distinguish-absent || hold_status=$?
@@ -134,5 +163,5 @@ git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null || merge_status=$?
 fm_lock_release "$MERGE_CONTROL_LOCK" || true
 MERGE_CONTROL_LOCK=
 [ "$merge_status" -eq 0 ] || exit "$merge_status"
-after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
-echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"
+after=$(git -C "$PROJ" rev-parse --short "$TARGET_REF")
+echo "merged $BRANCH into local $TARGET ($before -> $after) in $PROJ"

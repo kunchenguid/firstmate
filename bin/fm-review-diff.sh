@@ -1,9 +1,25 @@
 #!/usr/bin/env bash
 # Review a crewmate branch against the authoritative base.
 #
-# Pooled project clones do not keep their local default branch current, so this
-# helper compares remote-backed projects against origin/<default> after fetching
-# the default branch, and local-only projects against the local default branch.
+# That base is the task's DELIVERY TARGET BRANCH: the `base=` recorded in
+# state/<id>.meta at intake when the task has one, and the repo default branch
+# otherwise. A task that ships onto a long-lived feature branch is therefore
+# reviewed against that branch, not against a merge-base that predates it and
+# drags every commit the feature branch carries beyond the default into the diff.
+# The target is never inferred from a merge-base, a reflog, or the branch's shape:
+# an absent base= means the default branch, exactly as before. bin/fm-spawn.sh
+# owns recording it, and bin/fm-teardown.sh and bin/fm-merge-local.sh read it the
+# same way.
+# Pooled project clones do not keep their local branches current, so this helper
+# compares remote-backed projects against origin/<target> after fetching that
+# branch. A project with no remote, and a REACHABLE remote that simply does not
+# carry the target - the normal shape for a task stacked on a local branch its
+# own Rule 1 forbids pushing - compare against the local refs/heads/<target>
+# instead, which is the same ref bin/fm-merge-local.sh verifies and
+# bin/fm-teardown.sh measures the local-only path against. A target that resolves
+# NEITHER way is refused, and so is an UNREACHABLE remote: not knowing whether
+# the local ref lags is a stop, never a fallback, because a review against a
+# stale base silently presents other people's commits as this task's work.
 # When state/<id>.meta records pr= (URL or number) for an open PR, the compare
 # side is ALWAYS a freshly fetched refs/pull/<n>/head by default so review stays
 # current after no-mistakes fix rounds push to the PR. A recorded pr_head= is
@@ -65,7 +81,17 @@ default_branch() {
   return 1
 }
 
-DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+# The branch this task was dispatched to land on, resolved exactly as
+# bin/fm-teardown.sh and bin/fm-merge-local.sh resolve it, plus a description of
+# where it came from so an unresolvable base explains itself.
+RECORDED_BASE=$(grep '^base=' "$META" | tail -1 | cut -d= -f2-)
+if [ -n "$RECORDED_BASE" ]; then
+  TARGET=$RECORDED_BASE
+  TARGET_DESC="this task's recorded delivery target branch"
+else
+  TARGET=$(default_branch) || { echo "error: cannot determine the delivery target branch for $PROJ; the task records none and origin/HEAD, main, and master are all absent" >&2; exit 1; }
+  TARGET_DESC="this project's default branch, because the task records no delivery target branch"
+fi
 
 BRANCH="fm/$ID"
 if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
@@ -133,16 +159,49 @@ if [ -n "$PR_URL" ]; then
   fi
 fi
 
+# The FULL ref, never the bare name: git resolves a bare `<target>` through
+# refs/tags/<target> before refs/heads/<target>, so a repo holding a tag named
+# like the base branch would silently be diffed against the tag. This is the
+# base for a repo with no origin at all and for the reachable-but-absent case
+# below, and bin/fm-merge-local.sh and bin/fm-teardown.sh name the same ref.
+BASE="refs/heads/$TARGET"
 if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
-  # Update the remote-tracking ref itself; a bare single-branch fetch can leave
-  # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
-  git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
-  BASE="origin/$DEFAULT"
-else
-  BASE="$DEFAULT"
+  # `git fetch` exits non-zero both for "the remote does not carry this branch"
+  # and for "the remote could not be reached", and those two demand opposite
+  # answers: the first is a task stacked on an unpushed local branch, the second
+  # is a review that must not happen at all. ls-remote separates them - 0 the
+  # branch is present, 2 the remote is reachable and has no such branch, anything
+  # else the remote is unreachable - and its stderr is deliberately left intact
+  # so the unreachable case reports git's own reason. The pattern is the FULL ref
+  # the fetch below asks for, never the bare name: ls-remote matches a pattern
+  # against the tail of each ref on a path-component boundary, so a bare
+  # `<target>` also matches a remote `mirror/<target>` and would classify an
+  # unpushed base as present.
+  LS_REMOTE_STATUS=0
+  git -C "$WT" ls-remote --exit-code --heads origin "refs/heads/$TARGET" >/dev/null || LS_REMOTE_STATUS=$?
+  case "$LS_REMOTE_STATUS" in
+    0)
+      # Update the remote-tracking ref itself; a bare single-branch fetch can leave
+      # origin/<target> stale on some Git versions and only refresh FETCH_HEAD.
+      git -C "$WT" fetch origin "+refs/heads/$TARGET:refs/remotes/origin/$TARGET" --quiet
+      BASE="origin/$TARGET"
+      ;;
+    2)
+      # A reachable remote that does not carry the target is the normal shape for
+      # a task stacked on a local branch its own Rule 1 forbids pushing, so
+      # refs/heads/<target> is the authority there - the same ref
+      # bin/fm-merge-local.sh verifies and bin/fm-teardown.sh measures the
+      # local-only path against. The base is still never guessed: the guard below
+      # refuses when neither the remote nor the local ref resolves.
+      echo "warning: origin has no $TARGET; reviewing against the local $TARGET ($TARGET_DESC)" >&2
+      ;;
+    *)
+      echo "error: cannot reach origin for $PROJ to resolve $TARGET ($TARGET_DESC); refusing to review against a local base that may lag it" >&2
+      exit 1 ;;
+  esac
 fi
 
-git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
+git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT ($TARGET_DESC)" >&2; exit 1; }
 git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" >/dev/null || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
 
 echo "diff base: $BASE"

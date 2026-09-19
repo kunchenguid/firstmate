@@ -8,6 +8,9 @@ set -u
 
 SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh"
 VIEW="$ROOT/bin/fm-fleet-view.sh"
+# shellcheck source=bin/fm-landed-lib.sh
+# shellcheck disable=SC1091
+. "$ROOT/bin/fm-landed-lib.sh"  # FM_LANDED_JQ_DEFS: the shared landed selector
 TMP_ROOT=$(fm_test_tmproot fm-fleet-snapshot)
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
@@ -516,12 +519,18 @@ test_backlog_tasks_axi_forms_and_overrides() {
 - [ ] dated-route - Deferred sample route (repo: sample) (kind: ship) (hold: captain sent this to later) (hold-kind: captain) (hold-until: 2026-09-01)
 - [ ] captain-gated-work - Captain-gated ship work (repo: sample) (kind: ship) (hold: captain go pending) (hold-kind: captain)
 - [ ] parked-prose - Parked captain call (repo: sample) (kind: ship) (hold: DEFERRED by captain) (hold-kind: captain)
+- [ ] queued-body-words - Stage the cache (repo: beta) (kind: ship)
+  local feat/stack
 
 ## Done
 - [x] done-comma - Done Comma Task https://github.com/kunchenguid/firstmate/pull/42 (repo: gamma, merged 2026-07-09) (kind: ship)
 - [x] done-bracket-pr - Done Bracket PR - <https://github.com/kunchenguid/firstmate/pull/43> (repo: gamma, merged 2026-07-12) (kind: ship)
 - [x] reported-comma - Reported Scout data/reported-comma/report.md (repo: gamma, reported 2026-07-10) (kind: scout)
 - [x] done-note - Done Note local main (repo: delta, done 2026-07-11) (kind: ship)
+- [x] done-body-note - Done Body Note (repo: delta, done 2026-07-15) (kind: ship)
+  local feat/stack
+- [x] separated-words-done - Cache results - local only (repo: beta, done 2026-07-16) (kind: ship)
+- [x] local-words-done - Add support for local sockets (repo: beta, done 2026-07-14) (kind: ship)
 EOF
   printf '# Bold Scout\n' > "$data/bold-task/report.md"
   fm_write_meta "$home/state/bold-task.meta" \
@@ -621,6 +630,49 @@ EOF
       and .done == "2026-07-11"
       and .completion == {verb:"done",date:"2026-07-11"}
   ' >/dev/null || fail "done closure metadata did not parse"
+  # A local-only task that lands on its recorded delivery target branch notes
+  # THAT branch, not main. Reading only the literal "local main" left the note
+  # uncaptured, so the artifact column fell back to "-" for exactly the stacking
+  # tasks the note serves. The note arrives on the continuation line under the
+  # row, which is matched whole and only on a Done row.
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "done-body-note")
+    | .repo == "delta"
+      and .title == "Done Body Note"
+      and .local_note == "local feat/stack"
+      and .completion == {verb:"done",date:"2026-07-15"}
+  ' >/dev/null || fail "a continuation-line landing note naming a non-default branch did not parse"
+  # The row itself is prose, and Done is the state every completed task reaches,
+  # so these two must hold THERE: a title ending in the separated form
+  # " - local <word>", and one ending in an unseparated "local <word>", are
+  # titles. Reading either as a note costs the title its last segment and
+  # publishes a phantom artifact through bin/fm-landed-lib.sh.
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "separated-words-done")
+    | .state == "done"
+      and .title == "Cache results - local only"
+      and .local_note == null
+      and .completion == {verb:"done",date:"2026-07-16"}
+  ' >/dev/null || fail "an ordinary done title ending in - local <word> was read as a landing note"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "local-words-done")
+    | .state == "done"
+      and .title == "Add support for local sockets"
+      and .local_note == null
+  ' >/dev/null || fail "an ordinary done title ending in local <word> was read as a landing note"
+  printf '%s' "$out" | jq -e "$FM_LANDED_JQ_DEFS"'
+    [ .backlog.records[]
+      | select(.id == "separated-words-done" or .id == "local-words-done")
+      | landed_artifact ] == [null, null]
+  ' >/dev/null || fail "an ordinary done title published a phantom landed artifact"
+  printf '%s' "$out" | jq -e "$FM_LANDED_JQ_DEFS"'
+    (.backlog.records[] | select(.id == "done-body-note") | landed_artifact) == "local feat/stack"
+  ' >/dev/null || fail "a real continuation-line landing note was not published as the landed artifact"
+  printf '%s' "$out" | jq -e '
+    .backlog.records[] | select(.id == "queued-body-words")
+    | .title == "Stage the cache"
+      and .local_note == null
+  ' >/dev/null || fail "a body line on a still-open row was read as a landing note"
   printf '%s' "$out" | jq -e --arg data "$data" '
     .tasks[] | select(.id == "bold-task")
     | .backlog.id == "bold-task"
@@ -636,6 +688,12 @@ EOF
     "view should render bracketed PR artifact outside the title"
   assert_contains "$view" "| done-note | Done Note | delta | ship | - | local main |" \
     "view should render local-only done artifact outside the title"
+  assert_contains "$view" "| done-body-note | Done Body Note | delta | ship | - | local feat/stack |" \
+    "view should render a continuation-line landing note as the local-only artifact"
+  assert_contains "$view" "| separated-words-done | Cache results - local only | beta | ship | - | - |" \
+    "view should keep a done title ending in - local <word> whole and claim no artifact"
+  assert_contains "$view" "| local-words-done | Add support for local sockets | beta | ship | - | - |" \
+    "view should leave an ordinary title alone and claim no landing artifact for it"
   pass "snapshot parses tasks-axi rows and respects operational overrides"
 }
 

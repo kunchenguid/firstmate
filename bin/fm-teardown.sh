@@ -47,16 +47,25 @@
 # upstream-contribution PRs pushed to a fork satisfy this in any mode), OR - for a
 # normal ship task whose commits are not so reachable - when its PR is merged and
 # GitHub reports a PR head that contains the current local work, or its content is
-# already present in the up-to-date default branch. This recognizes the common
+# already present in the up-to-date DELIVERY TARGET BRANCH. This recognizes the common
 # squash-merge-then-delete-branch flow, where the branch's own commits live nowhere
-# on a remote yet the change is fully in main.
-# Squash merges collapse the branch's commits, so per-commit patch ids against main
-# no longer match, and a pipeline rebase can leave the local worktree diverged from
-# the PR head. A diverged copy is not treated as landed: path-set coverage, git
-# cherry, and merge-tree containment each fail to prove content landed without also
-# accepting unlanded edits to the same paths. Teardown still accepts a merged PR
-# whose head contains the current local work (ancestor or equivalent patch ids),
-# or a clean content-in-default tree match. Anything else refuses.
+# on a remote yet the change is fully in the branch it targeted.
+# That target is the `base=` recorded in state/<id>.meta at intake when the task
+# has one, and the repo default branch otherwise. Projects that ship onto a
+# long-lived feature branch would otherwise have every completed task refused as
+# unlanded, which trains the operator to reach for --force - the same flag that
+# discards genuinely unlanded work. The target is never inferred from a
+# merge-base, a reflog, or the branch's shape: an absent base= means the default
+# branch, exactly as before. Every landed-work refusal names the branch it
+# actually measured against, so a false positive explains itself.
+# Squash merges collapse the branch's commits, so per-commit patch ids against the
+# delivery target branch no longer match, and a pipeline rebase can leave the local
+# worktree diverged from the PR head. A diverged copy is not treated as landed:
+# path-set coverage, git cherry, and merge-tree containment each fail to prove
+# content landed without also accepting unlanded edits to the same paths. Teardown
+# still accepts a merged PR whose head contains the current local work (ancestor or
+# equivalent patch ids), or a clean content-in-target-branch tree match. Anything
+# else refuses.
 # The PR itself is resolved from the task's recorded pr= when present, or - when
 # no pr= was ever recorded (e.g. a yolo-authorized merge on a repo with no PR CI,
 # where the usual "checks green" fm-pr-check.sh trigger never fires) - by looking
@@ -66,9 +75,9 @@
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
-# local-only projects additionally accept work merged into the local default
-# branch (firstmate performs that merge after configured approval) as a fallback
-# for the common case where there is no remote at all.
+# local-only projects additionally accept work merged into the local delivery
+# target branch (firstmate performs that merge after configured approval) as a
+# fallback for the common case where there is no remote at all.
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
@@ -1193,6 +1202,73 @@ default_branch() {
   return 1
 }
 
+# The branch this task was dispatched to land on: the base recorded at intake
+# when the task carries one, else the repo default branch. Never inferred - an
+# absent base= is the default-branch answer, not a reason to guess from the
+# branch's shape (bin/fm-spawn.sh records it; the script header explains why).
+TEARDOWN_RECORDED_BASE=$(fm_meta_get "$META" base)
+delivery_target_branch() {
+  if [ -n "$TEARDOWN_RECORDED_BASE" ]; then
+    printf '%s\n' "$TEARDOWN_RECORDED_BASE"
+    return 0
+  fi
+  default_branch
+}
+
+# How the target above was resolved, for a refusal that must explain itself.
+delivery_target_source() {
+  if [ -n "$TEARDOWN_RECORDED_BASE" ]; then
+    printf '%s\n' "this task's recorded delivery target branch"
+  else
+    printf '%s\n' "this project's default branch, because the task records no delivery target branch"
+  fi
+}
+
+# The ref this worktree can actually measure the target branch against: the
+# local branch first, because that is the ref bin/fm-merge-local.sh lands onto,
+# then the remote-tracking copy. Prints the ref and returns 0, or returns 1 when
+# the branch resolves nowhere. A base is recorded for its ref syntax alone and
+# is never resolved at intake, so it can name a branch nobody has created here -
+# and both landed checks answer that unresolvable case with a failure that looks
+# exactly like a real one: `git log --not <missing-ref>` exits 128 as an
+# unreadable index does, and content_in_target_branch just reports "not landed".
+# Classifying it once here is what lets both refusals name the real cause.
+# A `local` scope accepts refs/heads/<branch> alone: a local-only task lands
+# through bin/fm-merge-local.sh, which fast-forwards exactly that ref and refuses
+# without it, so measuring the remote copy there would name a ref the landing
+# never touches.
+delivery_target_ref() {  # <branch> [local]
+  local name=$1 scope=${2:-any}
+  if git -C "$WT" rev-parse --verify --quiet "refs/heads/$name^{commit}" >/dev/null 2>&1; then
+    printf 'refs/heads/%s\n' "$name"
+    return 0
+  fi
+  if [ "$scope" = local ]; then
+    return 1
+  fi
+  if git -C "$WT" rev-parse --verify --quiet "refs/remotes/origin/$name^{commit}" >/dev/null 2>&1; then
+    printf 'refs/remotes/origin/%s\n' "$name"
+    return 0
+  fi
+  return 1
+}
+
+# One refusal for that one cause, so the local-only and ship paths report an
+# unresolvable delivery target branch identically. The `local` scope says which
+# ref set was required, because there the remote copy existing changes nothing.
+# It stays a refusal: --force is named only to say it is not the answer here.
+delivery_target_unresolvable_refusal() {  # <branch> <source-description> [local]
+  if [ "${3:-any}" = local ]; then
+    echo "REFUSED: cannot measure this task's landing: the delivery target branch $1 ($2) does not resolve to a local branch in worktree $WT." >&2
+    echo "A local-only task lands through bin/fm-merge-local.sh, which fast-forwards refs/heads/$1, so no remote copy can stand in for it here." >&2
+  else
+    echo "REFUSED: cannot measure this task's landing: the delivery target branch $1 ($2) does not resolve in worktree $WT." >&2
+  fi
+  echo "The git index is readable; the branch is what is missing." >&2
+  echo "Fetch or create $1, or correct the recorded base= in $META, then re-run teardown." >&2
+  echo "--force does not answer this: it would discard this worktree's work without ever measuring it." >&2
+}
+
 meta_value() {
   local meta=$1 key=$2
   fm_meta_get "$meta" "$key"
@@ -1412,21 +1488,46 @@ pr_is_merged() {
   return 0
 }
 
-# Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
-# so the caller refuses rather than guesses.
-content_in_default() {
-  local name ref default_tree merged_tree
-  name=$(default_branch) || return 1
+# Is the branch's content already present in the up-to-date delivery target
+# branch? Fetches first, then 3-way merges that branch with HEAD: when HEAD
+# introduces nothing the target does not already contain (e.g. its change landed
+# via squash) the merged tree equals the target's tree. This isolates branch-only
+# changes, so unrelated commits the target gained past the merge-base do not count
+# as "added". Returns non-zero when inconclusive (no target ref, or a merge
+# conflict), so the caller refuses rather than guesses.
+#
+# Having an origin does not mean origin carries the target: a recorded base can
+# name a branch that only ever existed locally, or one origin deleted once it
+# merged up. `git fetch` exits non-zero for that case and for an unreachable
+# remote alike, and those demand opposite answers, so ls-remote separates them
+# exactly as bin/fm-review-diff.sh does - 0 the branch is present, 2 the remote
+# is reachable and has no such branch, anything else unreachable. Its stderr is
+# left intact so the unreachable case reports git's own reason. A reachable
+# remote without the branch measures refs/heads/<base>, the same local ref
+# bin/fm-merge-local.sh lands onto; an unreachable remote stays inconclusive and
+# never falls back, because a local base that may lag origin cannot clear work
+# for deletion. The pattern is the FULL ref: ls-remote matches a pattern against
+# the tail of each ref on a path-component boundary, so a bare <base> would also
+# match a remote `mirror/<base>` and call an unpushed base present.
+content_in_target_branch() {
+  local name ref default_tree merged_tree ls_status
+  name=$(delivery_target_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
-    ref="refs/remotes/origin/$name"
-  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
-    ref="refs/heads/$name"
+    ls_status=0
+    git -C "$WT" ls-remote --exit-code --heads origin "refs/heads/$name" >/dev/null || ls_status=$?
+    case "$ls_status" in
+      0)
+        git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+        ref="refs/remotes/origin/$name"
+        ;;
+      2)
+        ref=$(delivery_target_ref "$name" local) || return 1
+        ;;
+      *)
+        return 1 ;;
+    esac
+  elif ref=$(delivery_target_ref "$name" local); then
+    :
   else
     return 1
   fi
@@ -1440,17 +1541,23 @@ content_in_default() {
 # Has the worktree's committed work actually LANDED, though its commits are not
 # reachable from any remote-tracking branch? True when a merged PR proves the
 # current local work is contained in the PR head, OR the content is already in the
-# default branch (fallback, which also covers the no-PR and gh-error paths). False
-# only for genuinely unlanded work.
+# delivery target branch (fallback, which also covers the no-PR and gh-error
+# paths). False only for genuinely unlanded work.
 work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
-  content_in_default
+  content_in_target_branch
 }
 
 # The completion links this teardown already holds locally. A scout's
-# deliverable is its report, a local-only ship lands on local main, and every
-# other ship carries the PR recorded on its own record.
+# deliverable is its report, a local-only ship lands on the local branch it was
+# dispatched to land on, and every other ship carries the PR recorded on its own
+# record. The landing note names that recorded branch, so the permanent task
+# history never claims a task landed on main when it landed on a feature branch.
+# An absent base= still writes "local main" verbatim: that is the pre-existing
+# record for every task that targets the repo default branch, and this note is
+# durable history rather than a measurement, so it is never re-derived from the
+# project's git state.
 BACKLOG_DONE_ARGS=()
 backlog_done_args() {
   local data_relative
@@ -1462,7 +1569,7 @@ backlog_done_args() {
       ;;
     *)
       if [ "$MODE" = local-only ]; then
-        BACKLOG_DONE_ARGS=(--note "local main")
+        BACKLOG_DONE_ARGS=(--note "local ${TEARDOWN_RECORDED_BASE:-main}")
       elif [ -n "$PR_URL" ]; then
         BACKLOG_DONE_ARGS=(--pr "$PR_URL")
       fi
@@ -1712,7 +1819,7 @@ teardown_treehouse_return() {
 }
 
 validate_worktree_teardown_safety() {
-  local dirty_raw dirty unpushed_raw unpushed DEFAULT unmerged_raw unmerged branch
+  local dirty_raw dirty unpushed_raw unpushed TARGET unmerged_raw unmerged branch target_desc target_ref
   [ -d "$WT" ] || return 0
   [ "$FORCE" != "--force" ] || return 0
   case "$KIND" in
@@ -1740,21 +1847,27 @@ validate_worktree_teardown_safety() {
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
 
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
-    DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
-    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
-      if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
+    TARGET=$(delivery_target_branch) || { echo "REFUSED: cannot determine the delivery target branch for $PROJ; the task records none and origin/HEAD, main, and master are all absent." >&2; return 1; }
+    target_desc=$(delivery_target_source)
+    if ! target_ref=$(delivery_target_ref "$TARGET" local); then
+      delivery_target_unresolvable_refusal "$TARGET" "$target_desc" local
+      return 1
+    fi
+    if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$target_ref" -- 2>/dev/null); then
+      if worktree_safety_blocked_by_lock "commits not on $TARGET"; then
         return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
       fi
-      echo "REFUSED: cannot inspect worktree $WT for commits not on $DEFAULT." >&2
+      echo "REFUSED: cannot inspect worktree $WT for commits not on $TARGET ($target_desc)." >&2
       echo "Restore the git index state, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
     unmerged=$(printf '%s\n' "$unmerged_raw" | head -5)
     if [ -n "$dirty" ] || [ -n "$unmerged" ]; then
-      echo "REFUSED: local-only worktree $WT has work not yet merged into $DEFAULT and not on any remote." >&2
+      echo "REFUSED: local-only worktree $WT has work not yet merged into $TARGET and not on any remote." >&2
+      echo "Measured against $TARGET - $target_desc." >&2
       [ -n "$dirty" ] && echo "uncommitted changes present" >&2
-      [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$DEFAULT" "$unmerged" >&2
-      echo "Merge the branch into local $DEFAULT first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
+      [ -n "$unmerged" ] && printf 'commits not yet on %s:\n%s\n' "$TARGET" "$unmerged" >&2
+      echo "Merge the branch into local $TARGET first (bin/fm-merge-local.sh after the captain approves), or push to a fork/remote, or get the captain's explicit OK to discard, then --force." >&2
       return 1
     fi
   elif [ -n "$dirty" ]; then
@@ -1769,7 +1882,23 @@ validate_worktree_teardown_safety() {
       TEARDOWN_WORKTREE_BRANCH_FOR_SAFETY=$branch
     fi
     if ! work_is_landed "$branch"; then
-      echo "REFUSED: worktree $WT has work not on any remote and not landed." >&2
+      if TARGET=$(delivery_target_branch); then
+        target_desc=$(delivery_target_source)
+        # work_is_landed has already asked origin for the target and fetched its
+        # remote copy when origin had it, so a branch that resolves nowhere by
+        # now resolves nowhere at all, and reporting that as unlanded work would
+        # be the same false positive on the ship path that this refusal exists
+        # to stop on the local-only one.
+        if ! delivery_target_ref "$TARGET" >/dev/null; then
+          delivery_target_unresolvable_refusal "$TARGET" "$target_desc"
+          return 1
+        fi
+        echo "REFUSED: worktree $WT has work not on any remote and not landed on $TARGET." >&2
+        echo "Measured against $TARGET - $target_desc." >&2
+      else
+        echo "REFUSED: worktree $WT has work not on any remote, and its landing could not be measured at all." >&2
+        echo "The task records no delivery target branch, and origin/HEAD, main, and master are all absent from $PROJ." >&2
+      fi
       printf 'unpushed commits:\n%s\n' "$unpushed" >&2
       echo "Push the branch, land its PR, or get the captain's explicit OK to discard, then --force." >&2
       return 1

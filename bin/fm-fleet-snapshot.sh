@@ -424,6 +424,14 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     def strip_trailing_metadata:
       reduce range(0; 20) as $_ (.;
         sub("[[:space:]]*\\([[:space:]]*(?:(?:repo|kind|priority|hold|hold-kind|hold-until):[[:space:]]*[^)]*|(?:since|merged|reported|done)[[:space:]]+[^)]*)[[:space:]]*\\)[[:space:]]*$"; ""));
+    # The ROW form of a local-only landing note stays the one literal
+    # "local main" every pre-existing row was written with. A row carries the
+    # note inside prose, where "local <word>" is how an ordinary title ends
+    # ("Cache results - local only", "Add support for local sockets"), so
+    # reading a branch name there costs a mangled title and a phantom artifact
+    # and buys nothing: the markdown backend writes a note on a continuation
+    # line under the row, never inline on it. The continuation-line read below
+    # is the one that follows the recorded delivery target branch.
     def strip_title_artifacts:
       sub("[[:space:]]+-[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
       | sub("[[:space:]]+data/[^[:space:])]+/report\\.md$"; "")
@@ -521,11 +529,19 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
     | .records |= map(
         if (.body_lines | length) > 0 then
           .hold_set = cap(.body_lines[0]; "^Captain hold set:[[:space:]]*(?<v>[0-9]{4}-[0-9]{2}-[0-9]{2}(?:T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?)$")
+          # The continuation line is where the markdown backend writes a
+          # local-only landing note, and bin/fm-teardown.sh writes it as
+          # "local <recorded delivery target branch>" rather than always
+          # "local main", so this read follows that branch. It is matched as a
+          # whole line and only on a DONE row - a note exists only at
+          # completion - so it cannot take a bite out of a title the way a row
+          # read would.
           | .local_note = (.local_note
-              // (if any(.body_lines[];
-                    test("^Resolution recorded by fm-(captain|decision)-hold\\.$"))
+              // (if .state != "done"
+                    or any(.body_lines[];
+                      test("^Resolution recorded by fm-(captain|decision)-hold\\.$"))
                   then null
-                  else cap(.body_lines[-1]; "^(?<v>local main)$")
+                  else cap(.body_lines[-1]; "^(?<v>local[[:space:]]+[^[:space:]]+)$")
                   end))
           | .body_excerpt = ((.body_lines | join(" "))[:240])
         else . end)
