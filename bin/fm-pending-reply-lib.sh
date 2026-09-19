@@ -773,13 +773,12 @@ fm_pending_reply_fallback_idle_eligible() {  # <record-path>
 # SECONDMATE endpoint, without ever reading its conversation.
 #
 # Deliberately NOT the semantic busy-state contract (bin/fm-busy-lib.sh).
-# That contract covers ordinary task workers, whose turn lifecycle firstmate
-# wires at spawn; a secondmate has no such wiring because an idle secondmate
-# pane is healthy and it runs no supervised turn sequence of its own. This
-# observation exists only to notice a busy-then-idle transition around one
-# delivered request, so it is a delivery-confirmation signal in the same
-# category as the submit acknowledgement matcher in bin/fm-composer-lib.sh - never task
-# state, and never a source consumers can confuse with semantic state.
+# Supported secondmate launches now arm that generation-bound contract and
+# report their own turn lifecycle, but this observation remains scoped to the
+# one delivered request. It notices a busy-then-idle transition for delivery
+# confirmation, in the same category as the submit acknowledgement matcher in
+# bin/fm-composer-lib.sh - never task state, and never a source consumers can
+# confuse with semantic state.
 #
 # It stays harness-scoped (fm_busy_lines_match with the recorded harness, no
 # global OR of every vendor signature), so one harness's output cannot make
@@ -1088,6 +1087,9 @@ fm_pending_reply_escalation_payload() {  # <record-path> <kind>
       case "$outcome" in failed|unknown) ;; *) return 1 ;; esac
       token="pending-reply-recovery-delivery-$outcome"
       ;;
+    agent-stopped)
+      token=pending-reply-agent-stopped
+      ;;
     *) return 1 ;;
   esac
   printf '%s: task=%s pending-reply-id=%s request=%s' "$token" "$task_id" "$corr" "$summary"
@@ -1104,7 +1106,7 @@ fm_pending_reply_escalation_line() {  # <status-file> <record-path> <corr_id>
   own_key=$(fm_pending_reply_escalation_key "$corr")
   while IFS= read -r line || [ -n "$line" ]; do
     [ "$(status_line_verb "$line")" = blocked ] || continue
-    for kind in missed delivery-unknown recovery-delivery; do
+    for kind in missed delivery-unknown recovery-delivery agent-stopped; do
       payload=$(fm_pending_reply_escalation_payload "$rec" "$kind") || continue
       case "$line" in
         "blocked [key=$own_key]: $payload"|"blocked: $payload") found=$line; break ;;
@@ -1207,8 +1209,7 @@ fm_pending_reply_maybe_escalate() {  # <state-dir> <corr_id>
 
 _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2
-  local rec phase completed now payload parent_status line kind first display
-  local delivered task_id meta sm_home remote_host
+  local rec phase completed kind
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   phase=$(fm_pending_reply_get "$rec" phase)
@@ -1229,6 +1230,19 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
     delivery_unknown|recovery_failed|recovery_unknown) ;;
     *) return 1 ;;
   esac
+  case "$phase" in
+    delivery_unknown) kind=delivery-unknown ;;
+    recovery_failed|recovery_unknown) kind='recovery-delivery' ;;
+    *) kind=missed ;;
+  esac
+  _fm_pending_reply_publish_escalation_locked "$state" "$corr" "$kind"
+}
+
+_fm_pending_reply_publish_escalation_locked() {  # <state-dir> <corr_id> <kind>
+  local state=$1 corr=$2 kind=$3
+  local rec delivered task_id meta sm_home remote_host parent_status payload line first display now
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || return 1
   delivered=$(fm_pending_reply_get "$rec" delivered_epoch)
   task_id=$(fm_pending_reply_get "$rec" task_id)
   meta="$state/${task_id}.meta"
@@ -1240,16 +1254,10 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
       fm_pending_reply_restatement_copy_same_basename "$state" "$corr" "$sm_home" || true
     fi
   fi
-  # Resolve wins if a late report arrived between completion and this call.
   if _fm_pending_reply_try_resolve_locked "$state" "$corr"; then
     return 0
   fi
   parent_status=$(fm_pending_reply_get "$rec" parent_status)
-  case "$phase" in
-    delivery_unknown) kind=delivery-unknown ;;
-    recovery_failed|recovery_unknown) kind='recovery-delivery' ;;
-    *) kind=missed ;;
-  esac
   payload=$(fm_pending_reply_escalation_payload "$rec" "$kind") || return 1
   if [ "$kind" = missed ]; then
     first=$(fm_pending_reply_get "$rec" wrong_home_first_sighting)
@@ -1267,6 +1275,47 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   fm_pending_reply_set "$rec" escalated_epoch "$now" || return 1
   fm_pending_reply_set "$rec" phase escalated || return 1
   return 0
+}
+
+fm_pending_reply_escalate_agent_stopped() {  # <state-dir> <corr_id> [<expected_spawn_gen>]
+  local state=$1 corr=$2 lock rc=0
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  STATE=$state
+  lock="$state/.pending-reply-$corr.lock"
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fm_lock_acquire_wait "$lock" || return 1
+  _fm_pending_reply_escalate_agent_stopped_locked "$@" || rc=$?
+  fm_lock_release "$lock"
+  return "$rc"
+}
+
+_fm_pending_reply_escalate_agent_stopped_locked() {  # <state-dir> <corr_id> [<expected_spawn_gen>]
+  local state=$1 corr=$2 expected_spawn_gen=${3:-} rec phase
+  local completed task_id meta current_spawn_gen
+  rec=$(fm_pending_reply_path "$state" "$corr")
+  [ -f "$rec" ] || return 1
+  phase=$(fm_pending_reply_get "$rec" phase)
+  case "$phase" in awaiting_report|recovery_sent) ;; *) return 0 ;; esac
+  if _fm_pending_reply_try_resolve_locked "$state" "$corr"; then
+    return 0
+  fi
+  task_id=$(fm_pending_reply_get "$rec" task_id)
+  meta="$state/${task_id}.meta"
+  if [ $# -ge 3 ] && [ -f "$meta" ]; then
+    current_spawn_gen=$(fm_meta_get "$meta" spawn_gen)
+    if [ "$current_spawn_gen" != "$expected_spawn_gen" ]; then
+      return 0
+    fi
+  fi
+  if fm_pending_reply_target_is_remote "$state" "$task_id"; then
+    case "$phase" in
+      awaiting_report) completed=$(fm_pending_reply_get "$rec" request_turn_completed_epoch) ;;
+      recovery_sent) completed=$(fm_pending_reply_get "$rec" recovery_turn_completed_epoch) ;;
+    esac
+    [ -n "$completed" ] || return 1
+    fm_pending_reply_missing_report_is_evidence "$state" "$task_id" "$completed" || return 1
+  fi
+  _fm_pending_reply_publish_escalation_locked "$state" "$corr" agent-stopped
 }
 
 # Detect a correlated report written under the secondmate home (wrong home)
@@ -1434,9 +1483,9 @@ fm_pending_reply_tick_one() {  # <state-dir> <corr_id> <busy_state> [secondmate-
 # Never scrapes secondmate conversation; uses only parent status, backend busy
 # state, and optional secondmate-home wrong-home path checks.
 fm_pending_reply_tick() {  # <state-dir>
-  local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host
-  local observation observation_task found i
-  local -a observation_tasks=() observation_values=()
+  local state=$1 dir rec corr task_id phase delivered meta backend target label busy sm_home harness remote_host remote_root spawn_gen
+  local observation endpoint_state endpoint_key cached_endpoint_key cached_observation_key found i
+  local -a observation_keys=() observation_values=() endpoint_keys=() endpoint_values=()
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
   for rec in "$dir"/*; do
@@ -1518,11 +1567,41 @@ fm_pending_reply_tick() {  # <state-dir>
       fi
       if [ -n "$target" ]; then
         label="fm-$task_id"
+        remote_root=$(fm_meta_get "$meta" remote_root)
+        spawn_gen=$(fm_meta_get "$meta" spawn_gen)
+        endpoint_key="$backend|$target|$remote_host|$remote_root|$spawn_gen"
+        [ -n "$spawn_gen" ] || endpoint_key="$endpoint_key|record:$corr"
+        endpoint_state=unknown
+        found=0
+        for ((i = 0; i < ${#endpoint_keys[@]}; i++)); do
+          cached_endpoint_key=${endpoint_keys[$i]}
+          [ "$cached_endpoint_key" = "$endpoint_key" ] || continue
+          endpoint_state=${endpoint_values[$i]}
+          found=1
+          break
+        done
+        if [ "$found" = 0 ]; then
+          if [ -n "$remote_host" ]; then
+            endpoint_state=$("$_FM_PENDING_REPLY_LIB_DIR/fm-on.sh" "$task_id" \
+              fm-remote-secondmate-control.sh state "$task_id" < /dev/null 2>/dev/null | tail -1)
+          else
+            endpoint_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || printf 'unknown')
+          fi
+          case "$endpoint_state" in alive|dead|missing|ambiguous|unreadable|unverified) ;; *) endpoint_state=unknown ;; esac
+          endpoint_keys+=("$endpoint_key")
+          endpoint_values+=("$endpoint_state")
+        fi
+        case "$endpoint_state" in
+          dead|missing)
+            fm_pending_reply_escalate_agent_stopped "$state" "$corr" "$spawn_gen" || true
+            continue
+            ;;
+        esac
         observation=
         found=0
-        for ((i = 0; i < ${#observation_tasks[@]}; i++)); do
-          observation_task=${observation_tasks[$i]}
-          [ "$observation_task" = "$task_id" ] || continue
+        for ((i = 0; i < ${#observation_keys[@]}; i++)); do
+          cached_observation_key=${observation_keys[$i]}
+          [ "$cached_observation_key" = "$endpoint_key" ] || continue
           observation=${observation_values[$i]}
           found=1
           break
@@ -1535,7 +1614,7 @@ fm_pending_reply_tick() {  # <state-dir>
           else
             observation=$(fm_pending_reply_backend_observation "$backend" "$target" "$label" "$harness")
           fi
-          observation_tasks+=("$task_id")
+          observation_keys+=("$endpoint_key")
           observation_values+=("$observation")
         fi
         busy=$(fm_pending_reply_busy_state_from_observation "$rec" "$observation")

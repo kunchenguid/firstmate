@@ -610,10 +610,12 @@ MODEL=$(printf '%s' "$SNAP" | jq \
            counts:{captain:([$measured[].counts.captain] | add // 0),fleet:([$measured[].counts.fleet] | add // 0),
                    maintainer:([$measured[].counts.maintainer] | add // 0),nobody:([$measured[].counts.nobody] | add // 0)},
            complete:(all($homes[]; . != null and .complete) and ($snap.secondmate_current.truncated // 0) == 0
+                     and ($snap.secondmate_current.remote_skipped // 0) == 0
                      and $snap.secondmate_current.registry.available != false
                      and $snap.secondmate_current.registry.input_truncated != true
                      and $snap.secondmate_current.registry.records_truncated != true),
            proven_clear:(all($homes[]; . != null and .proven_clear) and ($snap.secondmate_current.truncated // 0) == 0
+                     and ($snap.secondmate_current.remote_skipped // 0) == 0
                      and $snap.secondmate_current.registry.available != false
                      and $snap.secondmate_current.registry.input_truncated != true
                      and $snap.secondmate_current.registry.records_truncated != true),
@@ -666,6 +668,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | if $n > 0 then {surface:("secondmate " + $m.id + " active children omitted by snapshot bound: \($n)"), reveal:"raise FM_SNAPSHOT_SECONDMATE_CHILDREN"} else empty end),
         (if $all_secondmates == 0 and ($secondmates_all | length) > $secondmates_n then {surface:("secondmates showing \($secondmates_n) of \($secondmates_all | length)"), reveal:"--all-secondmates"} else empty end),
         (if (($snap.secondmate_current.truncated // 0) > 0) then {surface:("registered secondmates omitted by snapshot bound: \($snap.secondmate_current.truncated)"), reveal:"raise FM_SNAPSHOT_SECONDMATES"} else empty end),
+        (if (($snap.secondmate_current.remote_skipped // 0) > 0) then {surface:("remote secondmates omitted by snapshot configuration: \($snap.secondmate_current.remote_skipped)"), reveal:"run with FM_SNAPSHOT_SKIP_REMOTE=0"} else empty end),
         (if $snap.secondmate_current.registry.input_truncated == true then {surface:"secondmate registry input truncated by bounded read", reveal:"raise FM_SNAPSHOT_REGISTRY_LINES or FM_SNAPSHOT_REGISTRY_BYTES"} else empty end),
         (if $snap.secondmate_current.registry.records_truncated == true then {surface:"secondmate registry records omitted by bounded read", reveal:"raise FM_SNAPSHOT_REGISTRY_RECORDS"} else empty end),
         (if $snap.secondmate_current.registry.available == false then {surface:("secondmate registry unavailable: " + ($snap.secondmate_current.registry.reason // "read failed")), reveal:"inspect data/secondmates.md"} else empty end),

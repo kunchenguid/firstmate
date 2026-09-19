@@ -38,6 +38,20 @@ SH
   cat > "$fb/tmux" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
+  list-windows)
+    # The production tmux classifier first inventories the recorded session
+    # before trusting the pane target. Mirror that contract from the fixture's
+    # own metadata instead of making an empty successful inventory look like a
+    # missing window.
+    for meta in "${FM_HOME:-}"/state/*.meta; do
+      [ -f "$meta" ] || continue
+      window=$(sed -n 's/^window=[^:]*:\(.*\)$/\1/p' "$meta" | head -n 1)
+      case "$window" in
+        ''|*dead-*) continue ;;
+        *) printf '%s\n' "$window" ;;
+      esac
+    done
+    ;;
   display-message) case "$*" in *dead-*) exit 1 ;; *) printf '%%1\n' ;; esac ;;
   capture-pane)
     case "$*" in
@@ -730,6 +744,93 @@ test_secondmate_and_child_bounds_are_disclosed() {
   pass "secondmate and per-home child counts are bounded, disclosed, and explicitly expandable"
 }
 
+test_read_only_secondmate_cap_keeps_local_records() {
+  local home mate remote_home fakebin canonical bearings_json
+  home=$(make_home read-only-secondmate-cap)
+  mate="$TMP_ROOT/read-only-secondmate-cap-home"
+  make_valid_secondmate_home z-local "$mate"
+  remote_home="$TMP_ROOT/read-only-unregistered-remote-home"
+  mkdir -p "$remote_home/state"
+  fm_write_meta "$home/state/a-remote.meta" \
+    "kind=secondmate" "mode=secondmate" "harness=pi" \
+    "remote_host=host" "remote_root=/remote/root" "home=$remote_home"
+  append_secondmate_registry "$home" z-local "$mate"
+  mkdir -p "$mate/projects/child"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] child - Active child (repo: sample) (kind: ship) (since 2026-07-13)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$mate/state/child.meta" \
+    "window=firstmate:fm-child" "worktree=$mate/projects/child" "project=sample" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" child busy
+  printf 'working: active child\n' > "$mate/state/child.status"
+  fakebin=$(make_fakebin "$home")
+  PATH="$fakebin:$PATH" refresh_local_secondmate_ledgers "$home"
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_SKIP_REMOTE=1 \
+    FM_SNAPSHOT_SECONDMATES=1 "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.total == 2
+      and .secondmate_current.remote_skipped == 1
+      and .secondmate_current.shown == 1
+      and .secondmate_current.truncated == 0
+      and (.secondmate_current.records | any(.id == "z-local"
+        and (.active_children | any(.id == "child"))))
+  ' >/dev/null || fail "read-only secondmate cap crowded out local activity: $canonical"
+  bearings_json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_SKIP_REMOTE=1 \
+    FM_SNAPSHOT_SECONDMATES=1 "$ROOT/bin/fm-bearings-snapshot.sh" --json)
+  printf '%s' "$bearings_json" | jq -e '
+    .contributions.complete == false
+      and .contributions.proven_clear == false
+      and (.omitted | any(.surface | test("remote secondmates omitted by snapshot configuration: 1")))
+  ' >/dev/null || fail "remote secondmates omission was not disclosed or spoiled completeness: $bearings_json"
+  pass "read-only secondmate bounds preserve local activity ahead of remote records"
+}
+
+test_blocked_in_flight_child_is_captured_in_holds_and_bearings() {
+  local home mate fakebin canonical bearings_json
+  home=$(make_home blocked-child-hold)
+  mate="$TMP_ROOT/blocked-child-hold-home"
+  make_valid_secondmate_home blockedmate "$mate"
+  append_secondmate_registry "$home" blockedmate "$mate"
+  mkdir -p "$mate/projects/child"
+  cat > "$mate/data/backlog.md" <<'EOF'
+## In flight
+- [ ] child - In flight child (repo: sample) (kind: ship) (since 2026-07-11)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$mate/state/child.meta" \
+    "window=firstmate:fm-child" "worktree=$mate/projects/child" "project=sample" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
+  record_claude_state "$mate/state" child idle
+  printf 'blocked: waiting on upstream dependency\n' > "$mate/state/child.status"
+  fakebin=$(make_fakebin "$home")
+  refresh_local_secondmate_ledgers "$home"
+  canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --json)
+  printf '%s' "$canonical" | jq -e '
+    .secondmate_current.records[] | select(.id == "blockedmate")
+    | .current.state == "externally_held"
+      and .active_children == []
+      and (.holds | any(.id == "child" and .source == "child-state" and (.reason | contains("waiting on upstream dependency"))))
+  ' >/dev/null || fail "blocked in-flight child was not captured in holds: $canonical"
+  bearings_json=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
+    "$ROOT/bin/fm-bearings-snapshot.sh" --json)
+  printf '%s' "$bearings_json" | jq -e '
+    .secondmates[] | select(.id == "blockedmate")
+    | .state == "externally_held"
+      and (.doing | contains("child: waiting on upstream dependency"))
+  ' >/dev/null || fail "blocked in-flight child did not reach bearings secondmate view: $bearings_json"
+  pass "blocked in-flight child work is captured in holds and bearings"
+}
+
 test_parent_decision_is_untrusted_contradiction_only() {
   local home mate fakebin canonical json
   home=$(make_home parent-decision-only)
@@ -856,14 +957,20 @@ test_nonprogressing_child_states_are_explicit() {
 - [ ] parked - Parked child (repo: sample) (kind: ship) (since 2026-07-11)
 
 ## Queued
+- [ ] blocked - Blocked child blocked-by: dependency - Waiting on dependency (repo: sample) (kind: ship) (since 2026-07-11)
 
 ## Done
 EOF
   fm_write_meta "$mate/state/parked.meta" \
     "window=firstmate:fm-parked" "worktree=$mate/projects/parked" "project=sample" \
     "harness=claude" "kind=ship" "mode=no-mistakes"
+  fm_write_meta "$mate/state/blocked.meta" \
+    "window=firstmate:fm-blocked" "worktree=$mate/projects/done" "project=sample" \
+    "harness=claude" "kind=ship" "mode=no-mistakes"
   record_claude_state "$mate/state" parked idle
+  record_claude_state "$mate/state" blocked idle
   printf 'needs-decision [key=parked]: choose a route\n' > "$mate/state/parked.status"
+  printf 'blocked [key=blocked]: waiting on a dependency\n' > "$mate/state/blocked.status"
   fakebin=$(make_fakebin "$home")
   refresh_local_secondmate_ledgers "$home"
   canonical=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_SNAPSHOT_NOW=2026-07-11T18:00:00Z \
@@ -873,7 +980,10 @@ EOF
     | .current.state == "captain_decision"
       and .active_children == []
       and (.holds | any(.id == "parked" and .source == "child-state"))
+      and (.holds | any(.id == "blocked" and .source == "backlog" and .hold_kind == null))
+      and (.decisions_open | any(.id == "blocked"))
   ' >/dev/null || fail "parked child was classified as active work: $canonical"
+  rm "$mate/state/blocked.meta" "$mate/state/blocked.status"
   cat > "$mate/data/backlog.md" <<'EOF'
 ## In flight
 
@@ -3322,6 +3432,8 @@ test_structured_child_decision_reaches_captains_call
 test_bad_secondmate_homes_never_revive_parent_work
 test_oversized_secondmate_summary_stays_strict_unknown
 test_secondmate_and_child_bounds_are_disclosed
+test_read_only_secondmate_cap_keeps_local_records
+test_blocked_in_flight_child_is_captured_in_holds_and_bearings
 test_parent_decision_is_untrusted_contradiction_only
 test_parent_evidence_reconciles_by_verb_and_key
 test_nonprogressing_child_states_are_explicit

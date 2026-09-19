@@ -6,8 +6,8 @@
 # instead of the six-plus separate reads the old docs required: run
 # fm-bootstrap.sh, then separately read data/projects.md, data/secondmates.md,
 # data/captain.md, data/captain-shared.md, data/learnings.md, then run
-# fm-lock.sh, fm-wake-drain.sh, then read data/backlog.md, every state/*.meta,
-# and every state/*.status.
+# fm-lock.sh, fm-wake-drain.sh, then read the canonical fleet snapshot,
+# data/backlog.md, every state/*.meta, and every state/*.status.
 # Every one of those reads is UNCONDITIONAL at every session start, so they
 # belong in a script, not in N agent turns.
 #
@@ -43,11 +43,11 @@
 #                       detected primary harness.
 #   5. read-once contract - the do-not-re-read contract covering every source
 #                       represented by the two digests below.
-#   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
-#                       every state/*.meta, a bounded state/*.status tail,
-#                       the away posture (state/.afk-contract and the legacy
-#                       state/.afk daemon flag), and a cheap per-task
-#                       endpoint-liveness read:
+#   6. fleet digest   - the canonical local fleet-snapshot activity projection,
+#                       followed by retained state/*.meta records, a bounded
+#                       state/*.status tail, the away posture
+#                       (state/.afk-contract and the legacy state/.afk daemon
+#                       flag), and a cheap per-task endpoint-presence read:
 #                       read-only, always runs.
 #   7. network checks - the result of the deferred network stage started back at
 #                       step 1, harvested WITHOUT waiting for it.
@@ -61,24 +61,19 @@
 # Those nine names are also the runtime-bound stage list below, so a truncated
 # startup can name exactly which of them never ran.
 #
-# NO NETWORK ON THE BLOCKING PATH. This digest runs on a session-open hook that
+# NO UNBOUNDED NETWORK ON THE BLOCKING PATH. This digest runs on a session-open hook that
 # blocks session initialization, so anything it waits for is time the captain
 # waits before the first turn - and every external-network call it used to make
 # was individually unbounded. One unreachable remote secondmate could burn the
 # entire FM_SESSION_START_TIMEOUT and truncate the digest, so a slow network
 # could cost the work queue itself.
-# So no step between here and the last line below makes an external-network
-# call. The five that did - `gh auth status`, secondmate liveness, secondmate
-# convergence, pending remote handoff delivery, and the fleet-sync fetch - are
-# started as one detached bounded worker right after the lock (step 1) and
-# harvested at step 7 without ever blocking on it. The bounded inactive-outcome
-# startup scan joins that worker because its local current-state reads can also
-# be slow. bin/fm-startup-network.sh owns that stage and its safety argument;
-# bin/fm-bootstrap.sh and bin/fm-inactive-reconcile.sh remain the owners of the
-# work itself and still run it.
-# The digest is therefore composed from bounded local reads and local
-# subprocesses only, while slow network or inactive-state reconciliation delays
-# a reported check rather than startup.
+# The deferred network checks remain outside the digest's blocking path, while
+# the canonical fleet snapshot owns its own bounded cross-home collection and
+# the whole snapshot call has a separate local timeout. bin/fm-startup-network.sh
+# owns the deferred stage and its safety argument; bin/fm-bootstrap.sh and
+# bin/fm-inactive-reconcile.sh remain the owners of the work itself and still run it.
+# The digest is therefore composed from bounded snapshot, local, and subprocess
+# work, while slow deferred checks delay a reported check rather than startup.
 # What this deliberately trades: on a slow network the digest prints "IN
 # PROGRESS" and names exactly which checks are not yet confirmed, instead of
 # waiting for them. It never reports an unconfirmed check as passed.
@@ -91,7 +86,7 @@
 # memory is stable session to session, is already governed by a captain-set
 # budget (config/startup-memory-budget), and is recoverable with one targeted
 # read; live fleet identity - which tasks exist, their windows, worktrees,
-# backends, and endpoint liveness - changes every session and is exactly what
+# backends, and endpoint presence - changes every session and is exactly what
 # recovery depends on. So fleet state goes first and the memory files absorb the
 # truncation. The read-once contract moves ahead of both for the same reason: a
 # contract that only arrives after the payload it governs is the first thing a
@@ -162,7 +157,9 @@
 # tail prints, and bin/fm-line-cap-lib.sh bounds how long each of those lines
 # may be. Both bounds are safe because the section prints every task's full
 # status log path, and AGENTS.md section 8 treats a status line as a wake EVENT
-# rather than current state - bin/fm-crew-state.sh owns current state.
+# rather than current state - the canonical fleet snapshot owns the
+# session-start current-activity projection and delegates local reconciliation
+# to bin/fm-crew-state.sh.
 #
 # RUNTIME BOUND: the digest is now executed through a native session-open
 # adapter (see bin/fm-sessionstart-run.sh), which blocks either hook-driven
@@ -176,6 +173,10 @@
 # deliberately sits OUTSIDE that bound,
 # in its own process group under its own aggregate deadline, so a truncated
 # digest neither waits for it nor orphans it unbounded. The
+# canonical current-activity snapshot has its own bounded child call
+# (FM_SESSION_START_CANONICAL_SNAPSHOT_TIMEOUT, default 30s), so slow local
+# current-state reads report an unavailable projection instead of consuming the
+# whole session-start budget.
 # child writes the digest straight to this script's stdout, so everything it
 # emitted before the bound was hit is already delivered; the parent then prints
 # a loud STARTUP TRUNCATED banner naming the stage that did not finish and the
@@ -263,6 +264,10 @@ done
 # names the stage it is entering, and the parent reports every stage at or after
 # that one as never emitted. Keep it in the exact order the digest prints.
 SESSION_START_STAGES='lock bootstrap wake-queue supervision-instructions read-once fleet-state network-checks context next-step'
+SESSION_START_CANONICAL_SNAPSHOT_TIMEOUT=${FM_SESSION_START_CANONICAL_SNAPSHOT_TIMEOUT:-30}
+case "$SESSION_START_CANONICAL_SNAPSHOT_TIMEOUT" in
+  ''|*[!0-9]*|0) SESSION_START_CANONICAL_SNAPSHOT_TIMEOUT=30 ;;
+esac
 
 stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
   [ -n "${FM_SESSION_START_STAGE_FILE:-}" ] || return 0
@@ -537,6 +542,125 @@ print_status_tail() {
   done < <(tail -n "$STATUS_TAIL" "$status")
 }
 
+# The structured fleet snapshot owns current activity, including the bounded
+# current projections of registered secondmate homes.
+CANONICAL_SNAPSHOT_BIN=${FM_FLEET_SNAPSHOT_BIN:-$SCRIPT_DIR/fm-fleet-snapshot.sh}
+print_canonical_activity() {
+  local snapshot current projects
+  projects="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
+  subsection "Current activity (canonical fleet snapshot)"
+  if ! command -v jq >/dev/null 2>&1; then
+    printf 'current activity: unavailable (jq is not installed for the canonical fleet snapshot)\n'
+    return 0
+  fi
+  if [ ! -x "$CANONICAL_SNAPSHOT_BIN" ]; then
+    printf 'current activity: unavailable (canonical fleet snapshot is not executable: %s)\n' \
+      "$CANONICAL_SNAPSHOT_BIN"
+    return 0
+  fi
+  if ! snapshot=$(fm_run_timed "$SESSION_START_CANONICAL_SNAPSHOT_TIMEOUT" env \
+    FM_ROOT_OVERRIDE="$FM_ROOT" \
+    FM_HOME="$FM_HOME" \
+    FM_STATE_OVERRIDE="$STATE" \
+    FM_DATA_OVERRIDE="$DATA" \
+    FM_PROJECTS_OVERRIDE="$projects" \
+    FM_CONFIG_OVERRIDE="$CONFIG" \
+    FM_SNAPSHOT_SKIP_REMOTE="$READ_ONLY" \
+    "$CANONICAL_SNAPSHOT_BIN" --json 2>/dev/null); then
+    printf 'current activity: unavailable (canonical fleet snapshot failed)\n'
+    return 0
+  fi
+  if ! current=$(printf '%s\n' "$snapshot" | jq -er '
+    if .schema != "fm-fleet-snapshot.v1" then
+      error("unsupported canonical fleet snapshot schema")
+    else
+      (.secondmate_current // {}) as $secondmate_current
+      | (([.tasks[]?
+         | select(.kind != "secondmate" and .current_state.state == "working")
+         | {id:.id,state:.current_state.state,source:(.current_state.source // "unknown"),doing:(.current_state.detail // .current_state.state)}]
+        + [(.secondmate_current.records // [])[] as $mate
+           | $mate.active_children[]?
+           | {id:($mate.id + "/" + .id),state:(.state // "working"),source:(.source // "secondmate-home"),doing:(.doing // .state)}]) as $active
+       | (([.tasks[]? as $task
+           | select($task.kind != "secondmate")
+           | ($task.hints.open_decisions // [])[]
+           | {id:$task.id,verb,summary:(.summary // .reason // .verb)}]
+          + [(.secondmate_current.records // [])[] as $mate
+             | $mate.decisions_open[]?
+             | {id:($mate.id + "/" + .id),verb,summary:(.summary // .reason // .verb)}])) as $decisions
+       | (([.tasks[]?
+           | select(.kind != "secondmate" and (.current_state.state == "parked" or .current_state.state == "paused"))
+           | {id:.id,reason:(.current_state.detail // .current_state.state),source:"child-state"}]
+          + [(.secondmate_current.records // [])[] as $mate
+             | $mate.holds[]?
+             | {id:($mate.id + "/" + .id),reason:(.reason // .title // "held"),
+                source:(.source // "unknown"),hold_kind:(.hold_kind // null)}])) as $holds
+       | (([(.secondmate_current.records // [])[] as $mate
+             | $mate.omitted[]?
+             | select(.surface == "active_children" or .surface == "decisions_open" or .surface == "holds")
+             | {surface:(.surface),count:.count,owner:$mate.id}])) as $omitted
+       | ([($secondmate_current.records // [])[]
+          | select((.current.state // "") == "unknown")
+          | "current activity: unavailable (secondmate \(.id): \(.current.reason // "current state unknown"))"]) as $unknown
+       | ([.tasks[]?
+          | select(.kind != "secondmate" and .current_state.state == "unknown")
+          | "current activity: unavailable (task \(.id): \(.current_state.detail // "current state unknown"))"]) as $unknown_main
+       | ([(if (($secondmate_current.truncated // 0) > 0) then
+             "current activity incomplete: omitted \(.secondmate_current.truncated) registered secondmate record(s)"
+           else empty end),
+           (if (($secondmate_current.remote_skipped // 0) > 0) then
+             "current activity incomplete: omitted \(.secondmate_current.remote_skipped) remote secondmate record(s)"
+           else empty end)]) as $secondmate_omitted
+       | ([(if ($secondmate_current.registry.available == false) then
+              "current activity unavailable: registered secondmate registry \($secondmate_current.registry.reason // "unavailable")"
+            else empty end),
+           (if ($secondmate_current.registry.complete == false) then
+              "current activity incomplete: registered secondmate registry is incomplete"
+            else empty end),
+           (if (($secondmate_current.registry.records_truncated // false) == true) then
+              "current activity incomplete: registered secondmate registry records were truncated"
+            else empty end),
+           (if (.main_inventory.valid == false) then
+              "current activity incomplete: main task inventory \(.main_inventory.reason // "invalid")"
+            else empty end)]) as $top_incomplete
+       | any($decisions[]?; .verb == "needs-decision" or .verb == "captain-hold") as $captain_decision
+       | [
+           (if ($active | length) > 0 then
+              $active | map("active: \(.id) state=\(.state) source=\(.source) doing=\(.doing)")
+            else [] end),
+           (if ($decisions | length) > 0 then
+              [(if $captain_decision then "current activity: captain decision required" else "current activity: decisions open" end)] +
+              ($decisions | map("decision: \(.id) \(.summary // .reason // .verb)"))
+            else [] end),
+           (if ($holds | any(.source == "child-state")) then
+              ["current activity: externally held"] +
+              ($holds | map(select(.source == "child-state")
+                | "held: \(.id) \(.reason // .title // "held")"))
+            else [] end),
+           (if ($holds | any(.source == "backlog" and .hold_kind != "captain")) then
+              ["current activity: blocked work"] +
+              ($holds | map(select(.source == "backlog" and .hold_kind != "captain")
+                | "blocked: \(.id) \(.reason // .title // "blocked")"))
+            else [] end),
+           ($omitted
+            | map("current activity incomplete: omitted \(.count) \(.surface) record(s)")),
+           $unknown,
+           $unknown_main,
+           $secondmate_omitted,
+           $top_incomplete
+         ]
+       | add
+       | if length == 0 then ["current activity: no active child work proven"] else . end
+       | join("\n"))
+    end
+  '); then
+    printf 'current activity: unavailable (canonical fleet snapshot was invalid)\n'
+    return 0
+  fi
+  printf '%s\n' "$current"
+  printf 'registered secondmate current activity comes from the canonical cross-home projection, never retained parent records.\n'
+}
+
 hash_file_sha256() {
   local file=$1 digest
   [ -f "$file" ] || return 1
@@ -803,8 +927,9 @@ fi
 stage read-once
 section "READ-ONCE CONTRACT"
 cat <<'EOF'
-Everything below is printed in full for this session start: every state/*.meta,
-a compact data/backlog.md listing, a bounded tail of every state/*.status,
+Everything below is printed in full for this session start: the canonical local
+fleet-snapshot activity projection, every state/*.meta, a compact
+data/backlog.md listing, a bounded tail of every state/*.status,
 data/projects.md, data/secondmates.md, data/captain.md, data/captain-shared.md,
 and data/learnings.md.
 Do NOT re-read any of them after reading this digest, and do NOT bulk-read
@@ -832,7 +957,9 @@ stage fleet-state
 section "FLEET STATE"
 print_backlog_compact "$DATA/backlog.md" "data/backlog.md"
 
-subsection "Work under way (state/*.meta)"
+print_canonical_activity
+
+subsection "Retained task records (state/*.meta; not current activity)"
 META_FOUND=0
 for meta in "$STATE"/*.meta; do
   [ -f "$meta" ] || continue
@@ -846,9 +973,9 @@ for meta in "$STATE"/*.meta; do
   if [ -n "$window" ]; then
     backend=$(fm_backend_of_meta "$meta")
     if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
-      printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
+      printf 'endpoint: present (backend=%s window=%s)\n' "$backend" "$window"
     else
-      printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
+      printf 'endpoint: absent (backend=%s window=%s)\n' "$backend" "$window"
     fi
   else
     printf 'endpoint: unknown (no window recorded)\n'

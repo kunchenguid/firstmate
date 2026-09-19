@@ -171,13 +171,19 @@ set -u
 [ "${FM_FAKE_TMUX_UNREADABLE:-0}" = 1 ] && { printf 'no current client\n' >&2; exit 1; }
 case "${1:-}" in
   list-windows)
-    # A successful but empty inventory: it omits the crew's window, so absence
-    # is proved by the answer rather than by an addressed call failing. Only
-    # reached once display-message has already failed.
+    # The inventory includes the exact target by default so the state reader can
+    # exercise the recovery-grade agent classifier on a readable endpoint.
+    # FM_FAKE_TMUX_MISSING keeps the old positive-absence fixture.
+    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] || printf '%s\n' "${FM_FAKE_TMUX_WINDOW_NAME:-}"
     ;;
   display-message)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
-    printf '%%1\n' ;;
+    case "$*" in
+      *pane_current_command*) printf '%s\n' "${FM_FAKE_TMUX_COMMAND:-claude}" ;;
+      *pane_tty*) : ;;
+      *) printf '%%1\n' ;;
+    esac
+    ;;
   capture-pane)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\n%s\n' "${FM_FAKE_BUSY_TEXT:-esc to interrupt}"
@@ -256,7 +262,7 @@ make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
 # Run the helper for one case dir. FM_FAKE_* env (run output, busy flag) are read
 # from the caller's environment by the fakes above.
 run_crew_state() {  # <case-dir> <id>
-  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" FM_FAKE_TMUX_WINDOW_NAME="fm-$2" "$CREW_STATE" "$2"
 }
 
 new_case() {  # <name> -> echoes case dir with an empty state/
@@ -289,6 +295,7 @@ reset_fakes() {
   FM_FAKE_BUSY_TEXT=
   FM_FAKE_TMUX_MISSING=0
   FM_FAKE_TMUX_UNREADABLE=0
+  FM_FAKE_TMUX_COMMAND=claude
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_READ_FAIL=0
@@ -307,7 +314,7 @@ reset_fakes() {
   FM_FAKE_GLAB_READ_FAIL=0
   FM_FAKE_GLAB_READ_LOG=
   unset FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
-  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
+  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE FM_FAKE_TMUX_COMMAND
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
   export FM_FAKE_DAEMON_DOWN FM_FAKE_AXI_HOME
   export FM_FAKE_AXI_HOME_ERROR FM_FAKE_AXI_STATUS_RUN_ERROR FM_FAKE_AXI_STATUS_ERROR
@@ -2208,6 +2215,63 @@ test_no_run_idle_secondmate_resolved_event_not_state() {
   pass "a trailing resolved: event does not corrupt state render (idle stays idle)"
 }
 
+# The endpoint can remain as a readable shell after its agent exits. A stale
+# progress event must not make that terminal endpoint look active, while a
+# terminal or blocked event still needs to reach supervision for action.
+test_no_run_terminal_endpoint_reconciles_status_log() {
+  reset_fakes
+  local d out
+
+  d=$(new_case terminal-endpoint-reconcile)
+  make_repo_on_branch "$d/wt" fm/feat-terminal-endpoint
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-terminal-endpoint.meta" \
+    "window=fm:fm-feat-terminal-endpoint" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: old progress update\n' > "$d/state/feat-terminal-endpoint.status"
+  FM_FAKE_TMUX_COMMAND=zsh
+  out=$(run_crew_state "$d" feat-terminal-endpoint)
+  assert_contains "$out" "state: unknown" \
+    "a shell-only endpoint must not reuse a stale working report"
+  assert_contains "$out" "agent gone, pane shell remains" \
+    "the stale working reconciliation must identify the terminal endpoint"
+  assert_not_contains "$out" "source: status-log" \
+    "a stale working report must not remain current after the agent stops"
+
+  printf 'done: implementation finished\n' > "$d/state/feat-terminal-endpoint.status"
+  out=$(run_crew_state "$d" feat-terminal-endpoint)
+  assert_contains "$out" "state: done" \
+    "a terminal endpoint with a done event must still surface completion"
+  assert_contains "$out" "source: status-log" \
+    "completion from a terminal endpoint must retain its status source"
+
+  d=$(new_case terminal-blocked-secondmate)
+  mkdir -p "$d/wt"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/mate.meta" \
+    "window=fm:fm-mate" "worktree=$d/wt" "kind=secondmate" "harness=claude" "home=$d/wt"
+  printf 'blocked: waiting for implementation routing\n' > "$d/state/mate.status"
+  FM_FAKE_TMUX_COMMAND=zsh
+  out=$(run_crew_state "$d" mate)
+  assert_contains "$out" "state: blocked" \
+    "blocked terminal work must remain captain-relevant"
+  assert_contains "$out" "source: status-log" \
+    "blocked terminal work must retain its status source"
+  assert_contains "$out" "agent gone" \
+    "blocked terminal work must carry current endpoint evidence"
+
+  # An ordinary idle secondmate with a live agent remains healthy and keeps its
+  # routed status-log state; endpoint reconciliation must not turn idle into a
+  # restart or an unknown state.
+  FM_FAKE_TMUX_COMMAND=claude
+  printf 'working: routed implementation is queued\n' > "$d/state/mate.status"
+  out=$(run_crew_state "$d" mate)
+  assert_contains "$out" "state: working" \
+    "a live idle secondmate must keep its routed status-log state"
+  assert_contains "$out" "source: status-log" \
+    "a live idle secondmate must remain status-log sourced"
+  pass "readable terminal endpoints reconcile stale progress while preserving terminal/blocker outcomes and healthy idle secondmates"
+}
+
 test_dead_window_ignores_stale_status_log() {
   reset_fakes
   local d; d=$(new_case dead-window)
@@ -2314,7 +2378,7 @@ SH
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-timeout busy --gen "$gen" \
     --source claude-hook --event user-prompt-submit
   start=$SECONDS
-  out=$(FM_FAKE_NM_CALLS="$calls_file" PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_NM_TIMEOUT=1 "$CREW_STATE" feat-timeout)
+  out=$(FM_FAKE_NM_CALLS="$calls_file" FM_FAKE_TMUX_WINDOW_NAME=fm-feat-timeout PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_NM_TIMEOUT=1 "$CREW_STATE" feat-timeout)
   elapsed=$((SECONDS - start))
   assert_contains "$out" "state: working" "timed-out no-mistakes falls back to pane"
   assert_contains "$out" "source: pane" "timed-out no-mistakes -> pane source"
@@ -3600,6 +3664,7 @@ test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
+test_no_run_terminal_endpoint_reconciles_status_log
 test_dead_window_ignores_stale_status_log
 test_no_run_tmux_unreadable_reads_unreachable_not_gone
 test_dead_window_still_reports_terminal_run_step

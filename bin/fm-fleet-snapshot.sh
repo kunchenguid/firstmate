@@ -72,7 +72,7 @@
 #     current backlog rows). Does not invent live tasks; meta remains truth for
 #     workers. Bearings maps failures into omitted[] disclosure (and a Charted
 #     Next gate line) rather than silent empty Underway.
-#   secondmate_current: {records[],total,shown,truncated} - bounded current summaries
+#   secondmate_current: {records[],total,shown,truncated,remote_skipped} - bounded current summaries
 #     for registered secondmates, selected from validated structured state inside
 #     each home with explicit provenance, freshness, endpoint evidence, and unknown
 #     failure reasons. Parent status and bounded terminal evidence are historical,
@@ -165,6 +165,7 @@ FM_SNAPSHOT_REGISTRY_LINES=${FM_SNAPSHOT_REGISTRY_LINES:-256}
 FM_SNAPSHOT_REGISTRY_BYTES=${FM_SNAPSHOT_REGISTRY_BYTES:-65536}
 FM_SNAPSHOT_REGISTRY_RECORDS=${FM_SNAPSHOT_REGISTRY_RECORDS:-40}
 FM_SNAPSHOT_REGISTRY_TIMEOUT=${FM_SNAPSHOT_REGISTRY_TIMEOUT:-2}
+FM_SNAPSHOT_SKIP_REMOTE=${FM_SNAPSHOT_SKIP_REMOTE:-0}
 validate_positive_bound() {  # <name> <value>
   case "$2" in
     ''|*[!0-9]*|0)
@@ -203,6 +204,10 @@ case "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" in
     echo "fm-fleet-snapshot: FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS must be a non-negative integer" >&2
     exit 2
     ;;
+esac
+case "$FM_SNAPSHOT_SKIP_REMOTE" in
+  0|1) ;;
+  *) FM_SNAPSHOT_SKIP_REMOTE=0 ;;
 esac
 
 # shellcheck source=bin/fm-backend.sh
@@ -270,6 +275,9 @@ FM_SNAPSHOT_PARENT_ACTIVITY_TIMEOUT, with truncation disclosed in the result.
 The registered secondmate table uses FM_SNAPSHOT_REGISTRY_LINES,
 FM_SNAPSHOT_REGISTRY_BYTES, FM_SNAPSHOT_REGISTRY_RECORDS, and
 FM_SNAPSHOT_REGISTRY_TIMEOUT, with unavailability and truncation disclosed.
+FM_SNAPSHOT_SKIP_REMOTE=1 omits remote home reads and cache writes while keeping
+the local fleet projection available for read-only callers; omitted remote homes
+are disclosed in secondmate_current.remote_skipped.
 Every captain hold carries hold_bucket, decided only from structured fields and
 never from hold reason or body prose: "blocked", "dated", "aged", or "live".
 An undated hold ages once its hold-set timestamp is at least
@@ -1052,7 +1060,8 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
             blocked_by:((.unresolved_blocker_ids | join(",")) | if . == "" then null else trunc(120) end),
             blocked_by_ids:(.blocked_by_ids | map(trunc(120))),
             unresolved_blocker_ids:(.unresolved_blocker_ids | map(trunc(120))),
-            reason:((.hold_reason // .blocked_reason // "blocked") | trunc(120)),source:"backlog"} ]
+            reason:((.hold_reason // .blocked_reason // "blocked") | trunc(120)),
+            hold_kind:(.hold_kind // null),source:"backlog"} ]
        + [ $owned_in_flight[] as $work
            | $tasks[]
            | select(.id == $work.id and (.current_state.state == "parked" or .current_state.state == "paused" or .current_state.state == "blocked"))
@@ -1127,6 +1136,7 @@ secondmate_home_summary_json() {  # <backlog-json-file> <tasks-json-file>
         omitted:[
           (if ($active_all | length) > $child_n then {surface:"active_children",count:(($active_all | length) - $child_n)} else empty end),
           (if ($decisions_all | length) > $decisions_n then {surface:"decisions_open",count:(($decisions_all | length) - $decisions_n)} else empty end),
+          (if ($holds_all | length) > $queued_n then {surface:"holds",count:(($holds_all | length) - $queued_n)} else empty end),
           (if ($queued_all | length) > $queued_n then {surface:"queued",count:(($queued_all | length) - $queued_n)} else empty end),
           (if ($tasks | length) > $child_n then {surface:"endpoints",count:(($tasks | length) - $child_n)} else empty end),
           (if $landed_n > 0 and ($landed_all | length) > $landed_n then {surface:"landed",count:(($landed_all | length) - $landed_n)} else empty end)
@@ -1353,8 +1363,7 @@ snapshot_cache_store() {  # <summary-json-file> <destination>
   return 1
 }
 
-prepare_remote_summary_collection() {  # <sampled-row-json-lines>
-  local rows=$1 manifest collector row id home host cache_path remote_rows rc slot=0
+prepare_summary_collection_workspace() {
   SNAPSHOT_COLLECT_DIR=$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fm-fleet-ledgers.XXXXXX") || return 1
   SNAPSHOT_SUMMARY_FILTER="$SNAPSHOT_COLLECT_DIR/summary-filter.jq"
   cat > "$SNAPSHOT_SUMMARY_FILTER" <<'JQ'
@@ -1372,6 +1381,11 @@ length == 1 and (.[0] |
   and (.counts | type) == "object" and (.omitted | type) == "array"
 )
 JQ
+}
+
+prepare_remote_summary_collection() {  # <sampled-row-json-lines>
+  local rows=$1 manifest collector row id home host cache_path remote_rows rc slot=0
+  prepare_summary_collection_workspace || return 1
   snapshot_cache_prepare || true
   manifest="$SNAPSHOT_COLLECT_DIR/manifest.jsonl"
   : > "$manifest"
@@ -1700,7 +1714,7 @@ parent_evidence_reconciliation_json() {  # <summary-json-file> <activities-json>
 }
 
 secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
-  local tasks_file=$1 output_file=$2 registry_file union_file records_file rows total_registered total shown truncated
+  local tasks_file=$1 output_file=$2 registry_file union_file records_file rows total_registered total all_total shown truncated remote_skipped=0
   local row id home host remote registered registry_error task sampled_spawn_gen status_file status_observation_file event_raw event_note event_epoch event_age
   local activity_scan activities decisions reconciliation provenance freshness reason summary_file summary_sampled summary_valid summary_invalidity state terminal terminal_contradiction contradiction
   local summary_source summary_age summary_observed summary_freshness cache_path collection_status collection_slot summary_index=0
@@ -1717,10 +1731,14 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
     ($registry.records // []) as $registered
     | (($registered | map(.id)) // []) as $registered_ids
     | ([ $registered[] as $r
-         | $r + {parent_task:([$tasks[] | select(.id == $r.id)][0] // null)} ]
+         | ([ $tasks[] | select(.id == $r.id) ][0] // null) as $parent_task
+         | $r + {parent_task:$parent_task,
+                remote:(($r.remote == true) or (($parent_task.remote.host // "") != ""))} ]
        + [ $tasks[] | select(.kind == "secondmate") as $t
            | select(($registered_ids | index($t.id)) == null)
            | {id:$t.id,home:($t.paths.home.path // null),
+              host:($t.remote.host // null),root:($t.remote.root // null),
+              remote:(($t.remote.host // "") != ""),
               registered:(if $registry.complete == true then false else null end),
               registry_error:(if $registry.complete == true
                               then "secondmate metadata is not registered"
@@ -1729,13 +1747,22 @@ secondmate_current_json() {  # <parent-tasks-json-file> <output-file>
     | sort_by(.id)
     | {registry:$registry,records:.}' > "$union_file" || return 1
   total_registered=$(jq '[.records[] | select(.registered)] | length' "$union_file")
-  total=$(jq '.records | length' "$union_file")
-  rows=$(jq -c --argjson cap "$FM_SNAPSHOT_SECONDMATES" '(if $cap == 0 then .records else .records[:$cap] end)[]' "$union_file")
+  all_total=$(jq '.records | length' "$union_file")
+  if [ "$FM_SNAPSHOT_SKIP_REMOTE" -eq 1 ]; then
+    remote_skipped=$(jq '[.records[] | select(.remote == true)] | length' "$union_file")
+    total=$all_total
+    rows=$(jq -c --argjson cap "$FM_SNAPSHOT_SECONDMATES" '([.records[] | select(.remote != true)] | if $cap == 0 then . else .[:$cap] end)[]' "$union_file")
+  else
+    total=$all_total
+    rows=$(jq -c --argjson cap "$FM_SNAPSHOT_SECONDMATES" '(if $cap == 0 then .records else .records[:$cap] end)[]' "$union_file")
+  fi
   shown=$(printf '%s\n' "$rows" | grep -c . || true)
-  truncated=$((total - shown))
+  truncated=$((all_total - remote_skipped - shown))
   : > "$records_file"
-  if [ -n "$rows" ]; then
+  if [ -n "$rows" ] && [ "$FM_SNAPSHOT_SKIP_REMOTE" -eq 0 ]; then
     prepare_remote_summary_collection "$rows" || return 1
+  elif [ -n "$rows" ]; then
+    prepare_summary_collection_workspace || return 1
   fi
 
   while IFS= read -r row; do
@@ -1917,7 +1944,8 @@ EOF
     --argjson total "$total" \
     --argjson shown "$shown" \
     --argjson truncated "$truncated" \
-    '{registry:$registry[0],records:.,total_registered:$total_registered,total:$total,shown:$shown,truncated:$truncated}' \
+    --argjson remote_skipped "$remote_skipped" \
+    '{registry:$registry[0],records:.,total_registered:$total_registered,total:$total,shown:$shown,truncated:$truncated,remote_skipped:$remote_skipped}' \
     "$records_file" > "$output_file"
 }
 

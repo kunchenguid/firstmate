@@ -299,7 +299,8 @@ Native registration still identifies Pi by name where tmux would see a generic i
 `tests/fm-backend-herdr-agent-exit-shell-e2e.test.sh` pins the live-Pi versus leftover-shell distinction; [`verification/runtime-backends.md`](verification/runtime-backends.md#agent-lifecycle-control) owns the versioned evidence.
 
 The session-start sweep uses this probe.
-Mid-session secondmate agent-process liveness is not implemented because idle secondmates are deliberately exempt from stale-pane escalation and need a separate periodic identity signal.
+The ordinary watcher does not perform a general mid-session secondmate liveness sweep; the pending-reply guard is the narrow exception and invokes this classifier only for an unresolved local routed reply.
+Remote secondmates use their host-local control boundary and reply-channel watermark, while ambiguous or unsupported states remain unknown.
 
 ## Push events and polling fallback
 
@@ -349,7 +350,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 - Mutable labels can collide; they are never placement or destructive authority.
 - A Firstmate outside Herdr cannot resolve a launcher workspace, so a colliding home label refuses new spawns until the collision is cleared.
 - Ghost and placeholder recognition uses ANSI de-emphasis when available; an unstyled glyph row carrying trailing non-idle text fails safely to `unknown`.
-- Mid-session secondmate agent-process liveness is not implemented.
+- A general mid-session secondmate agent-process liveness sweep is not implemented; the pending-reply guard is the bounded exception for unresolved local routed replies.
 - Only tmux and Herdr can host the away-mode supervisor terminal.
 
 ## Regression entry points

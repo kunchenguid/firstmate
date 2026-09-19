@@ -20,7 +20,8 @@
 #      leaks into a worker whose ancestry holds no omp.
 #   3. Every omp launch clears foreign markers, carries the tracked posture
 #      overlay, --auto-approve, --cwd, and (for a crewmate) one -e pointing at
-#      state/<id>.omp-ext.ts; a secondmate launch names no -e at all.
+#      state/<id>.omp-ext.ts; a secondmate launch names one -e for that
+#      generated extension while its tracked primary extensions auto-discover.
 #   4. A <provider>/<id> model is validated only when `omp models --json` lists
 #      that provider; an unlisted provider passes through with a notice.
 #   5. Busy state: agent_start is busy, agent_end with willContinue stays busy,
@@ -208,11 +209,11 @@ test_spawn_model_validation_scoped_to_listed_providers() {
   pass "fm-spawn: omp model validation is scoped to providers the listing can prove"
 }
 
-test_secondmate_launch_relies_on_discovery() {
+test_secondmate_launch_loads_generated_busy_extension() {
   # A seeded secondmate home, launched for real through fm-spawn on omp: the
   # launch must carry the posture overlay and pin --cwd to the home, and must
-  # name NO -e, because omp auto-discovers the home's tracked .omp/extensions
-  # and a file named both ways loads twice.
+  # name one -e for the generated busy extension. Omp auto-discovers the home's
+  # tracked .omp/extensions, while the state-resident file is not discovered.
   local world home fakebin launchlog out status launch
   world="$TMP_ROOT/secondmate"
   home="$world/sm"
@@ -236,14 +237,105 @@ test_secondmate_launch_relies_on_discovery() {
   expect_code 0 "$status" "omp secondmate spawn should succeed: $out"
   assert_grep "harness=omp" "$world/home/state/sm.meta" "secondmate meta missing harness=omp"
   launch=$(cat "$launchlog")
-  case "$launch" in
-    *" -e "*) fail "an omp secondmate launch must name no -e: omp auto-discovers .omp/extensions and a file named both ways loads twice: $launch" ;;
-  esac
+  extension_flag="-e '$world/home/state/sm.omp-ext.ts'"
+  extension_count=$(printf '%s\n' "$launch" | grep -F -o -- "$extension_flag" | wc -l | tr -d ' ')
+  [ "$extension_count" -eq 1 ] || fail "an omp secondmate launch must load its state-resident busy extension exactly once: $launch"
   assert_contains "$launch" "--config '$ROOT/.omp/fm-worker-overlay.yml' --auto-approve --cwd '$home'" "secondmate launch lost the posture overlay or the pinned home directory: $launch"
   assert_contains "$launch" "FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 '$fakebin/omp'" "secondmate launch lost the omp marker or executable"
   assert_contains "$launch" "FM_SUPERVISION_MODEL=extension" "an omp secondmate must run the extension supervision model"
-  assert_absent "$world/home/state/sm.omp-ext.ts" "a secondmate must not receive a per-task worker extension"
-  pass "fm-spawn: a real omp secondmate launch relies on auto-discovery while crewmates load one -e"
+  assert_present "$world/home/state/sm.omp-ext.ts" "a secondmate must receive its state-resident busy extension"
+  [ "$(fm_busy_classify tmux fake:w omp sm "$world/home/state")" = "busy fm-spawn" ] \
+    || fail "an omp secondmate must seed the parent busy-state contract"
+  pass "fm-spawn: a real omp secondmate launch auto-discovers tracked extensions and loads one generated busy extension"
+}
+
+test_raw_secondmate_does_not_arm_busy_state() {
+  local world home fakebin launchlog out status
+  world="$TMP_ROOT/raw-secondmate"
+  home="$world/sm"
+  mkdir -p "$world/home/state" "$world/home/data" "$world/home/config" "$home/bin" "$home/data"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+  printf 'sm\n' > "$home/.fm-secondmate-home"
+  printf 'charter\n' > "$home/data/charter.md"
+  fakebin=$(make_spawn_fakebin "$world/fake" claude)
+  make_fake_omp "$fakebin"
+  launchlog="$world/launch.log"
+  : > "$launchlog"
+
+  out=$(PATH="$fakebin:$PATH" TMUX='fake,1,0' FM_BACKEND=tmux CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE='' FM_HOME="$world/home" \
+    FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
+    FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
+    "$ROOT/bin/fm-spawn.sh" sm "$home" 'omp --auto-approve' --secondmate 2>&1)
+  status=$?
+  expect_code 0 "$status" "raw omp secondmate spawn should succeed: $out"
+  assert_absent "$world/home/state/sm.busy-gen" "a raw secondmate must not arm an unwired busy generation"
+  assert_absent "$world/home/state/sm.busy-state" "a raw secondmate must not seed an unwired busy record"
+  assert_absent "$world/home/state/sm.omp-ext.ts" "a raw secondmate must not write an unused busy extension"
+  assert_contains "$(cat "$launchlog")" "omp --auto-approve" "the raw secondmate launch command was not delivered"
+  pass "fm-spawn: a raw secondmate launch stays outside semantic busy-state wiring"
+}
+
+test_raw_secondmate_relaunch_retires_prior_busy_state() {
+  local world home fakebin launchlog out status
+  world="$TMP_ROOT/raw-relaunch-secondmate"
+  home="$world/sm"
+  mkdir -p "$world/home/state" "$world/home/data" "$world/home/config" "$home/bin" "$home/data"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+  printf 'sm\n' > "$home/.fm-secondmate-home"
+  printf 'charter\n' > "$home/data/charter.md"
+  fakebin=$(make_spawn_fakebin "$world/fake" claude)
+  make_fake_omp "$fakebin"
+  launchlog="$world/launch.log"
+  : > "$launchlog"
+
+  out=$(PATH="$fakebin:$PATH" TMUX='fake,1,0' FM_BACKEND=tmux CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE='' FM_HOME="$world/home" \
+    FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
+    FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
+    "$ROOT/bin/fm-spawn.sh" sm "$home" omp --secondmate 2>&1)
+  status=$?
+  expect_code 0 "$status" "the semantic secondmate predecessor should launch: $out"
+  assert_present "$world/home/state/sm.busy-gen" "the semantic predecessor must arm a busy generation"
+
+  : > "$launchlog"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_command}"*) printf 'zsh\n'; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n' ;;
+  list-windows) printf 'fm-sm\n' ;;
+  send-keys)
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+      prev=
+      for arg in "$@"; do
+        if [ "$prev" = -l ]; then printf '%s\n' "$arg" >> "$FM_FAKE_LAUNCH_LOG"; fi
+        prev=$arg
+      done
+    fi
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  out=$(PATH="$fakebin:$PATH" TMUX='fake,1,0' FM_BACKEND=tmux CLAUDECODE=1 \
+    FM_ROOT_OVERRIDE='' FM_HOME="$world/home" \
+    FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
+    FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$home" FM_FAKE_LAUNCH_LOG="$launchlog" \
+    "$ROOT/bin/fm-spawn.sh" sm --relaunch --harness 'omp --auto-approve' 2>&1)
+  status=$?
+  expect_code 0 "$status" "the raw secondmate relaunch should succeed: $out"
+  assert_absent "$world/home/state/sm.busy-gen" "a raw secondmate relaunch must retire the predecessor busy generation"
+  assert_absent "$world/home/state/sm.busy-state" "a raw secondmate relaunch must remove the predecessor busy record"
+  assert_contains "$(cat "$launchlog")" "omp --auto-approve" "the raw secondmate replacement was not delivered"
+  pass "fm-spawn: a raw secondmate relaunch retires its predecessor busy state"
 }
 
 test_secondmate_config_pinned_model_is_validated() {
@@ -578,7 +670,9 @@ test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
 test_spawn_model_validation_scoped_to_listed_providers
-test_secondmate_launch_relies_on_discovery
+test_secondmate_launch_loads_generated_busy_extension
+test_raw_secondmate_does_not_arm_busy_state
+test_raw_secondmate_relaunch_retires_prior_busy_state
 test_secondmate_config_pinned_model_is_validated
 test_busy_extension_lifecycle
 test_control_composer_and_model_tables

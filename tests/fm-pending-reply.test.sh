@@ -72,7 +72,9 @@ case "${1:-}" in
     for a in "$@"; do case "$a" in *cursor_y*) printf '1\n'; exit 0 ;; esac; done
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] || printf '%s\n' "${FM_FAKE_TMUX_WINDOW_NAME:-}"
+    exit 0 ;;
 esac
 exit 0
 SH
@@ -939,11 +941,16 @@ test_unknown_backend_state_uses_capture_fallback() {
   local backend
   for backend in tmux zellij; do
     (
-      local home state corr rec sm_home
+      local home state corr rec sm_home fb
       home=$(setup_parent "fallback-$backend")
       state="$home/state"
       sm_home="$home/sm"
       mkdir -p "$sm_home/state"
+      if [ "$backend" = tmux ]; then
+        fb=$(make_stubs "$home")
+        # shellcheck disable=SC2030,SC2031
+        export PATH="$fb:$PATH" FM_FAKE_TMUX_WINDOW_NAME=fm-hibit
+      fi
       export FM_PENDING_REPLY_GRACE_SECS=10
       # These fixture overrides are intentionally scoped to the isolated subshell.
       # shellcheck disable=SC2030,SC2031
@@ -985,11 +992,14 @@ test_unknown_backend_state_uses_capture_fallback() {
 }
 
 test_kimi_capture_fallback_uses_recorded_harness() (
-  local home state corr rec sm_home
+  local home state corr rec sm_home fb
   home=$(setup_parent kimi-fallback)
   state="$home/state"
   sm_home="$home/sm"
   mkdir -p "$sm_home/state"
+  fb=$(make_stubs "$home")
+  # shellcheck disable=SC2030,SC2031
+  export PATH="$fb:$PATH" FM_FAKE_TMUX_WINDOW_NAME=fm-hibit
   # This fixture clock is intentionally scoped to the isolated subshell.
   # shellcheck disable=SC2030,SC2031
   export FM_PENDING_REPLY_NOW=10020
@@ -1017,9 +1027,12 @@ test_kimi_capture_fallback_uses_recorded_harness() (
 
 test_tick_skips_terminal_and_reuses_target_observation() {
   (
-    local home state open1 open2 resolved escalated rec probe_log probes scan_log scans snapshot
+    local home state open1 open2 resolved escalated rec probe_log probes scan_log scans snapshot fb
     home=$(setup_parent observation-cache)
     state="$home/state"
+    fb=$(make_stubs "$home")
+    # shellcheck disable=SC2030,SC2031
+    export PATH="$fb:$PATH" FM_FAKE_TMUX_WINDOW_NAME=fm-hibit
     probe_log="$home/backend-probes.log"
     scan_log="$home/status-scans.log"
     : > "$probe_log"
@@ -1042,6 +1055,7 @@ test_tick_skips_terminal_and_reuses_target_observation() {
     mkdir -p "$home/escalated/state"
     printf 'done [corr=%s]: wrong home\n' "$escalated" > "$home/escalated/state/child.status"
     fm_write_secondmate_meta "$state/hibit.meta" "$home/hibit" "sess:fm-hibit"
+    printf 'spawn_gen=stable-generation\n' >> "$state/hibit.meta"
     fm_write_secondmate_meta "$state/resolved.meta" "$home/resolved" "sess:fm-resolved"
     fm_write_secondmate_meta "$state/escalated.meta" "$home/escalated" "sess:fm-escalated"
     # Runtime overrides called indirectly by the pending-reply tick.
@@ -1084,6 +1098,159 @@ test_tick_skips_terminal_and_reuses_target_observation() {
       || fail "unchanged wrong-home logs should retain their scan signature"
   ) || fail "terminal-skip and observation-cache regression failed"
   pass "tick skips terminal records and reuses target observations"
+}
+
+test_tick_escalates_confirmed_stopped_secondmate() (
+  local home state corr sm_home
+  home=$(setup_parent stopped-secondmate)
+  state="$home/state"
+  sm_home=$(bind_local_mate "$home" hibit)
+  # shellcheck disable=SC2030,SC2031
+  export FM_PENDING_REPLY_NOW=10200
+  corr=$(fm_pending_reply_create "$home" "$state" hibit "inspect the release")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_write_secondmate_meta "$state/hibit.meta" "$sm_home" "sess:fm-hibit"
+  printf 'spawn_gen=gen-1\n' >> "$state/hibit.meta"
+  # shellcheck disable=SC2329
+  fm_backend_agent_state() { printf dead; }
+  fm_pending_reply_tick "$state" || fail "stopped secondmate tick should succeed"
+  [ "$(phase_of "$state" "$corr")" = escalated ] \
+    || fail "confirmed stopped secondmate must escalate its active routed request"
+  grep -Fq "pending-reply-agent-stopped: task=hibit pending-reply-id=$corr" "$state/hibit.status" \
+    || fail "stopped secondmate escalation must be visible to the parent"
+  pass "tick escalates active routed work when the secondmate agent stopped"
+)
+
+test_stopped_remote_secondmate_waits_for_reply_watermark() {
+  local home state corr rec
+  home=$(setup_parent stopped-remote-watermark)
+  state="$home/state"
+  fm_write_meta "$state/ios.meta" \
+    "window=fm-remote:w1:p1" "harness=claude" "kind=secondmate" "mode=secondmate" \
+    "remote_host=remote-mac" "remote_root=/remote/root" "remote_backend=herdr"
+  # shellcheck disable=SC2030,SC2031
+  export FM_PENDING_REPLY_NOW=10300
+  corr=$(fm_pending_reply_create "$home" "$state" ios "inspect the release")
+  fm_pending_reply_mark_delivered "$state" "$corr"
+  fm_pending_reply_mark_turn_completed "$state" "$corr" request
+  rec=$(fm_pending_reply_path "$state" "$corr")
+
+  fm_pending_reply_escalate_agent_stopped "$state" "$corr" || true
+  [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+    || fail "a stopped remote mate without a caught-up watermark must remain unknown"
+  [ ! -s "$state/ios.status" ] \
+    || fail "a stopped remote mate without a caught-up watermark must not escalate"
+
+  fm_pending_reply_note_remote_channel_caught_up "$state" ios 10299
+  fm_pending_reply_escalate_agent_stopped "$state" "$corr" || true
+  [ "$(phase_of "$state" "$corr")" = awaiting_report ] \
+    || fail "a watermark from before the completed turn must not escalate"
+
+  fm_pending_reply_note_remote_channel_caught_up "$state" ios \
+    "$(fm_pending_reply_get "$rec" request_turn_completed_epoch)"
+  fm_pending_reply_escalate_agent_stopped "$state" "$corr" \
+    || fail "a caught-up remote stopped endpoint should escalate"
+  [ "$(phase_of "$state" "$corr")" = escalated ] \
+    || fail "a caught-up remote stopped endpoint should enter escalated phase"
+  pass "stopped remote pending replies wait for the reply-channel watermark"
+}
+
+test_tick_endpoint_cache_is_bound_to_generation() {
+  (
+    local home state open1 open2 old_corr new_corr probe_count
+    home=$(setup_parent endpoint-generation-cache)
+    state="$home/state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=10400
+    open1=$(fm_pending_reply_create "$home" "$state" hibit "old generation")
+    open2=$(fm_pending_reply_create "$home" "$state" hibit "new generation")
+    fm_pending_reply_mark_delivered "$state" "$open1"
+    fm_pending_reply_mark_delivered "$state" "$open2"
+    if [[ "$open1" < "$open2" ]]; then
+      old_corr=$open1
+      new_corr=$open2
+    else
+      old_corr=$open2
+      new_corr=$open1
+    fi
+    fm_write_secondmate_meta "$state/hibit.meta" "$home/hibit" "sess:fm-hibit"
+    printf 'spawn_gen=old-generation\n' >> "$state/hibit.meta"
+    printf '0\n' > "$home/probe-count"
+    # shellcheck disable=SC2329
+    fm_backend_agent_state() {
+      local count
+      count=$(cat "$home/probe-count")
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$home/probe-count"
+      if [ "$count" -eq 1 ]; then
+        sed -i.bak 's/^spawn_gen=.*/spawn_gen=new-generation/' "$state/hibit.meta"
+        printf 'dead'
+      else
+        printf 'alive'
+      fi
+    }
+    # shellcheck disable=SC2329
+    fm_backend_busy_state() { printf 'busy'; }
+    fm_pending_reply_tick "$state"
+    [ "$(phase_of "$state" "$old_corr")" = awaiting_report ] \
+      || fail "a stopped verdict from an old generation must not escalate once a new generation is live"
+    [ "$(phase_of "$state" "$new_corr")" = awaiting_report ] \
+      || fail "the live replacement generation must not reuse the old stopped verdict"
+    ! grep -q "pending-reply-agent-stopped" "$state/hibit.status" 2>/dev/null \
+      || fail "stopped-endpoint escalation must not be published for a live replacement"
+    probe_count=$(cat "$home/probe-count")
+    [ "$probe_count" -eq 2 ] \
+      || fail "distinct endpoint generations must be probed separately, got $probe_count"
+  ) || fail "endpoint-generation cache regression failed"
+  pass "pending-reply endpoint verdicts stay within one generation"
+}
+
+test_tick_observation_cache_is_bound_to_generation() {
+  (
+    local home state open1 open2 old_corr new_corr observation_count
+    home=$(setup_parent observation-generation-cache)
+    state="$home/state"
+    # shellcheck disable=SC2030,SC2031
+    export FM_PENDING_REPLY_NOW=10500
+    open1=$(fm_pending_reply_create "$home" "$state" hibit "old generation")
+    open2=$(fm_pending_reply_create "$home" "$state" hibit "new generation")
+    fm_pending_reply_mark_delivered "$state" "$open1"
+    fm_pending_reply_mark_delivered "$state" "$open2"
+    if [[ "$open1" < "$open2" ]]; then
+      old_corr=$open1
+      new_corr=$open2
+    else
+      old_corr=$open2
+      new_corr=$open1
+    fi
+    fm_write_secondmate_meta "$state/hibit.meta" "$home/hibit" "sess:fm-hibit"
+    printf 'spawn_gen=old-generation\n' >> "$state/hibit.meta"
+    printf '0\n' > "$home/observation-count"
+    # shellcheck disable=SC2329
+    fm_backend_agent_state() { printf alive; }
+    # shellcheck disable=SC2329
+    fm_backend_busy_state() {
+      local count
+      count=$(cat "$home/observation-count")
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$home/observation-count"
+      if [ "$count" -eq 1 ]; then
+        sed -i.bak 's/^spawn_gen=.*/spawn_gen=new-generation/' "$state/hibit.meta"
+        printf busy
+      else
+        printf idle
+      fi
+    }
+    fm_pending_reply_tick "$state"
+    [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$old_corr")" turn_seen_busy)" = 1 ] \
+      || fail "the old generation should record its busy observation"
+    [ "$(fm_pending_reply_get "$(fm_pending_reply_path "$state" "$new_corr")" turn_seen_busy)" = 0 ] \
+      || fail "the relaunched generation must not reuse the old busy observation"
+    observation_count=$(cat "$home/observation-count")
+    [ "$observation_count" -eq 2 ] \
+      || fail "distinct endpoint generations must be observed separately, got $observation_count"
+  ) || fail "observation-generation cache regression failed"
+  pass "pending-reply observations stay within one generation"
 }
 
 test_correlations_reuse_only_for_matching_open_task() {
@@ -1599,6 +1766,10 @@ test_busy_idle_observation_via_backend_abstraction
 test_unknown_backend_state_uses_capture_fallback
 test_kimi_capture_fallback_uses_recorded_harness
 test_tick_skips_terminal_and_reuses_target_observation
+test_tick_escalates_confirmed_stopped_secondmate
+test_stopped_remote_secondmate_waits_for_reply_watermark
+test_tick_endpoint_cache_is_bound_to_generation
+test_tick_observation_cache_is_bound_to_generation
 test_correlations_reuse_only_for_matching_open_task
 test_tick_end_to_end_missed_then_escalate
 test_failed_send_discards_undelivered_expectation

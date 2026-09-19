@@ -19,8 +19,8 @@
 #     blocked row kept whole, the dispatchable queued listing bounded with an
 #     exact disclosed remainder
 #   - orphan status logs whose task meta has already disappeared
-#   - per-task endpoint-liveness lines for a live and a dead recorded target,
-#     tmux and herdr both
+#   - per-task endpoint-presence lines for a present and an absent recorded
+#     target, tmux and herdr both
 #   - composition: the script invokes the real fm-lock.sh/fm-bootstrap.sh/
 #     fm-wake-drain.sh (their real, distinctive output appears verbatim), it
 #     does not reimplement their logic
@@ -765,7 +765,7 @@ EOF
 # --- lock refusal: read-only path --------------------------------------------
 
 test_lock_refusal_read_only_path() {
-  local rec root home fakebin holder_pid out status
+  local rec root home fakebin holder_pid out status cache_dir
   rec=$(new_world lock-refusal)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -781,6 +781,9 @@ EOF
   mkdir -p "$home/other-secondmate/state"
   fm_write_secondmate_meta "$home/state/sm-x.meta" "$home/other-secondmate" "firstmate:fm-sm-x" alpha
   append_wake "$home/state" signal sm-x "done: surfaced before refusal" || fail "seed wake failed"
+  printf -- '- remote-sm - remote-sm delivery (host: remote-host; root: /remote/root; home: /remote/home; scope: test work; projects: alpha; added 2026-08-02)\n' \
+    > "$home/data/secondmates.md"
+  cache_dir="$home/secondmate-summary-cache"
   git -C "$root" checkout -q -B fm/read-only-tangle
 
   sleep 300 &
@@ -788,7 +791,8 @@ EOF
   printf '%s\n' "$holder_pid" > "$home/state/.lock"
 
   status=0
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
+  out=$(FM_FLEET_SNAPSHOT_BIN="$ROOT/bin/fm-fleet-snapshot.sh" \
+    FM_SNAPSHOT_CACHE_DIR="$cache_dir" run_session_start "$home" "$root" "$fakebin:$BASE_PATH") || status=$?
   kill "$holder_pid" 2>/dev/null || true
   wait "$holder_pid" 2>/dev/null || true
 
@@ -811,6 +815,9 @@ EOF
   # tasks-axi, so bootstrap's own read-only tool-detection line fires
   # deterministically regardless of what is installed on the test host).
   assert_contains "$out" "MISSING: tasks-axi (install:" "detect-only bootstrap diagnostics did not run on the read-only path"
+  assert_contains "$out" "current activity incomplete: omitted 1 remote secondmate record(s)" \
+    "read-only canonical activity did not disclose skipped remote secondmate coverage"
+  assert_absent "$cache_dir" "read-only canonical activity created a remote summary cache"
 
   # The mutating secondmate sweep must NOT have run: no SECONDMATE_SYNC/
   # NUDGE_SECONDMATES line, and the sowed secondmate meta's target dir is
@@ -1264,8 +1271,8 @@ EOF
     "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: existing endpoint has ambiguous agent process (backend=tmux)" \
     "session start did not distinguish an existing Pi-shaped process from a missing window"
   [ ! -s "$log" ] || fail "session start touched an ambiguous existing Pi process: $(cat "$log")"
-  assert_contains "$out" "endpoint: alive (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
-    "the later fleet read should still see the ambiguous endpoint"
+  assert_contains "$out" "endpoint: present (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
+    "the later fleet read should still see the ambiguous endpoint presence"
   pass "session start: an existing ambiguous Pi process prevents duplicate recovery"
 }
 
@@ -1283,7 +1290,7 @@ EOF
     "SECONDMATE_LIVENESS: secondmate $SESSION_START_SECOND_MATE_ID: skipped: endpoint probe unreadable (backend=tmux)" \
     "session start did not distinguish transient unreadability from absence"
   [ ! -s "$log" ] || fail "session start touched a transiently unreadable target: $(cat "$log")"
-  assert_contains "$out" "endpoint: dead (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
+  assert_contains "$out" "endpoint: absent (backend=tmux window=firstmate:fm-$SESSION_START_SECOND_MATE_ID)" \
     "the later cheap presence read should preserve the visible offline symptom"
   pass "session start: transient tmux unreadability never licenses a relaunch"
 }
@@ -1325,6 +1332,235 @@ EOF
   pass "session start: a confirmed Herdr husk is closed and relaunched"
 }
 
+# The startup digest contains retained records for recovery, but only the
+# structured fleet snapshot may describe current activity. A stale quota note
+# must remain visible as history without becoming a live worker claim.
+test_canonical_activity_is_separate_from_retained_records() {
+  local rec root home fakebin out snapshot current retained
+  rec=$(new_world canonical-activity)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  printf 'window=firstmate:stale\nkind=secondmate\nharness=claude\n' \
+    > "$home/state/goal-1.meta"
+  printf 'working: quota blocked (stale retained event)\n' \
+    > "$home/state/goal-1.status"
+  snapshot="$home/canonical-snapshot"
+  cat > "$snapshot" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"schema":"fm-fleet-snapshot.v1","tasks":[],"secondmate_current":{"records":[{"id":"sm-1","active_children":[{"id":"goal-2","state":"working","source":"pane","doing":"OCR coordinator"}],"decisions_open":[],"holds":[]}]}}'
+SH
+  chmod +x "$snapshot"
+
+  out=$(FM_FLEET_SNAPSHOT_BIN="$snapshot" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "Current activity (canonical fleet snapshot)" \
+    "the fleet digest did not label the canonical activity projection"
+  assert_contains "$out" "active: sm-1/goal-2 state=working source=pane doing=OCR coordinator" \
+    "the fleet digest did not present the canonical active child"
+  assert_contains "$out" "Retained task records (state/*.meta; not current activity)" \
+    "the fleet digest did not label retained records as non-authoritative activity"
+  assert_not_contains "$out" "Work under way (state/*.meta)" \
+    "the old activity-shaped heading still invites stale metadata to be read as current"
+
+  current=$(printf '%s\n' "$out" | awk '/^Current activity \(canonical fleet snapshot\)$/{flag=1;next}/^Retained task records \(state\/\*\.meta; not current activity\)$/{flag=0}flag')
+  assert_not_contains "$current" "quota blocked" \
+    "a retained quota event leaked into the canonical current-activity section"
+  retained=$(printf '%s\n' "$out" | awk '/^Retained task records \(state\/\*\.meta; not current activity\)$/{flag=1;next}/^Orphan status logs/{flag=0}flag')
+  assert_contains "$retained" "working: quota blocked (stale retained event)" \
+    "retained quota history disappeared from the recovery digest"
+  pass "session start presents current activity only from the canonical snapshot and keeps stale records as history"
+}
+
+test_canonical_activity_renders_decision_and_hold_surfaces() {
+  local rec root home fakebin out snapshot
+  rec=$(new_world canonical-activity-surfaces)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  snapshot="$home/canonical-snapshot"
+  cat > "$snapshot" <<'SH'
+#!/usr/bin/env bash
+case "${FM_SNAPSHOT_CASE:-decision}" in
+  decision)
+    printf '%s\n' '{"schema":"fm-fleet-snapshot.v1","tasks":[{"id":"sm-1","kind":"secondmate","hints":{"open_decisions":[{"id":"parent-stale","summary":"Stale parent question","verb":"needs-decision"}]}}],"secondmate_current":{"records":[{"id":"sm-1","active_children":[{"id":"goal-2","state":"working","source":"pane","doing":"Live worker"}],"decisions_open":[{"id":"goal-3","summary":"Choose launch route","verb":"captain-hold"}],"holds":[{"id":"goal-4","reason":"Waiting for vendor access","source":"child-state"}],"omitted":[{"surface":"active_children","count":2},{"surface":"decisions_open","count":1},{"surface":"holds","count":3}]}]}}'
+    ;;
+  hold)
+    printf '%s\n' '{"schema":"fm-fleet-snapshot.v1","tasks":[],"secondmate_current":{"records":[{"id":"sm-1","active_children":[],"decisions_open":[],"holds":[{"id":"goal-4","reason":"Waiting for vendor access","source":"child-state"}]}]}}'
+    ;;
+  backlog-holds)
+    printf '%s\n' '{"schema":"fm-fleet-snapshot.v1","tasks":[],"secondmate_current":{"records":[{"id":"sm-1","active_children":[],"decisions_open":[{"id":"captain","summary":"Choose a route","verb":"captain-hold"}],"holds":[{"id":"captain","reason":"Choose a route","source":"backlog","hold_kind":"captain"},{"id":"blocked","reason":"Waiting on dependency","source":"backlog","hold_kind":null}]}]}}'
+    ;;
+  blocked)
+    printf '%s\n' '{"schema":"fm-fleet-snapshot.v1","tasks":[{"id":"goal-6","kind":"ship","current_state":{"state":"blocked","detail":"Waiting on blocker"},"hints":{"open_decisions":[{"summary":"Waiting on blocker","verb":"blocked"}]}}],"secondmate_current":{"records":[]}}'
+    ;;
+  unknown)
+    printf '%s\n' '{"schema":"fm-fleet-snapshot.v1","tasks":[],"secondmate_current":{"records":[{"id":"sm-unknown","current":{"state":"unknown","reason":"child current state unavailable"},"active_children":[],"decisions_open":[],"holds":[]}]}}'
+    ;;
+  mixed-unknown)
+    printf '%s\n' '{"schema":"fm-fleet-snapshot.v1","tasks":[],"secondmate_current":{"records":[{"id":"sm-mixed","current":{"state":"unknown","reason":"child current state timed out"},"active_children":[{"id":"goal-live","state":"working","source":"pane","doing":"Live child"}],"decisions_open":[],"holds":[]}]}}'
+    ;;
+  unknown-main)
+    printf '%s\n' '{"schema":"fm-fleet-snapshot.v1","tasks":[{"id":"task-unknown","kind":"ship","current_state":{"state":"unknown","detail":"current state unavailable"}}],"secondmate_current":{"records":[]}}'
+    ;;
+  truncated)
+    printf '%s\n' '{"schema":"fm-fleet-snapshot.v1","tasks":[],"secondmate_current":{"records":[],"truncated":1}}'
+    ;;
+  incomplete)
+    printf '%s\n' '{"schema":"fm-fleet-snapshot.v1","tasks":[],"main_inventory":{"valid":false,"reason":"unstructured current backlog row"},"secondmate_current":{"registry":{"available":false,"complete":false,"reason":"registered secondmate table is unreadable","records_truncated":true},"records":[]}}'
+    ;;
+esac
+SH
+  chmod +x "$snapshot"
+
+  out=$(FM_SNAPSHOT_CASE=decision FM_FLEET_SNAPSHOT_BIN="$snapshot" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "current activity: captain decision required" \
+    "the canonical captain-decision state was not rendered"
+  assert_contains "$out" "decision: sm-1/goal-3 Choose launch route" \
+    "the canonical open decision was not rendered"
+  assert_not_contains "$out" "Stale parent question" \
+    "a secondmate parent decision leaked into current activity"
+  assert_contains "$out" "active: sm-1/goal-2 state=working source=pane doing=Live worker" \
+    "concurrent canonical active work was not rendered"
+  assert_contains "$out" "held: sm-1/goal-4 Waiting for vendor access" \
+    "concurrent canonical hold activity was not rendered"
+  assert_contains "$out" "current activity incomplete: omitted 2 active_children record(s)" \
+    "active-child omission was not disclosed"
+  assert_contains "$out" "current activity incomplete: omitted 1 decisions_open record(s)" \
+    "decision omission was not disclosed"
+  assert_contains "$out" "current activity incomplete: omitted 3 holds record(s)" \
+    "hold omission was not disclosed"
+  assert_not_contains "$out" "no active child work proven" \
+    "the canonical captain decision was reduced to an empty child-work state"
+
+  out=$(FM_SNAPSHOT_CASE=hold FM_FLEET_SNAPSHOT_BIN="$snapshot" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "held: sm-1/goal-4 Waiting for vendor access" \
+    "the canonical externally-held state was not rendered"
+  assert_not_contains "$out" "no active child work proven" \
+    "the canonical hold was reduced to an empty child-work state"
+
+  out=$(FM_SNAPSHOT_CASE=backlog-holds FM_FLEET_SNAPSHOT_BIN="$snapshot" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "current activity: captain decision required" \
+    "a canonical captain hold lost its decision classification"
+  assert_contains "$out" "current activity: blocked work" \
+    "a canonical backlog blocker lost its blocked classification"
+  assert_contains "$out" "blocked: sm-1/blocked Waiting on dependency" \
+    "a canonical backlog blocker was not rendered"
+  assert_not_contains "$out" "current activity: externally held" \
+    "canonical backlog holds were mislabelled as external holds"
+  assert_not_contains "$out" "held: sm-1/captain" \
+    "a canonical captain hold was duplicated as an external hold"
+
+  out=$(FM_SNAPSHOT_CASE=blocked FM_FLEET_SNAPSHOT_BIN="$snapshot" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "current activity: decisions open" \
+    "a blocked decision entry was not given a neutral activity label"
+  assert_not_contains "$out" "current activity: captain decision required" \
+    "a blocked decision entry was mislabelled as a captain decision"
+  assert_not_contains "$out" "current activity: externally held" \
+    "a blocked task was mislabelled as an external hold"
+
+  out=$(FM_SNAPSHOT_CASE=unknown FM_FLEET_SNAPSHOT_BIN="$snapshot" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "current activity: unavailable (secondmate sm-unknown: child current state unavailable)" \
+    "an unknown secondmate state was rendered as inactive"
+  assert_not_contains "$out" "no active child work proven" \
+    "an unknown secondmate state was reduced to an inactive result"
+
+  out=$(FM_SNAPSHOT_CASE=mixed-unknown FM_FLEET_SNAPSHOT_BIN="$snapshot" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "active: sm-mixed/goal-live state=working source=pane doing=Live child" \
+    "visible activity disappeared when a sibling secondmate state was unknown"
+  assert_contains "$out" "current activity: unavailable (secondmate sm-mixed: child current state timed out)" \
+    "a mixed unknown secondmate state was hidden by visible activity"
+  assert_not_contains "$out" "no active child work proven" \
+    "mixed unknown secondmate activity was reduced to complete evidence"
+
+  out=$(FM_SNAPSHOT_CASE=unknown-main FM_FLEET_SNAPSHOT_BIN="$snapshot" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "current activity: unavailable (task task-unknown: current state unavailable)" \
+    "an unknown main-task state was rendered as inactive"
+  assert_not_contains "$out" "no active child work proven" \
+    "an unknown main-task state was reduced to an inactive result"
+
+  out=$(FM_SNAPSHOT_CASE=truncated FM_FLEET_SNAPSHOT_BIN="$snapshot" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "current activity incomplete: omitted 1 registered secondmate record(s)" \
+    "secondmate snapshot truncation was not disclosed"
+  assert_not_contains "$out" "no active child work proven" \
+    "a truncated secondmate snapshot was reduced to an inactive result"
+
+  out=$(FM_SNAPSHOT_CASE=incomplete FM_FLEET_SNAPSHOT_BIN="$snapshot" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "current activity unavailable: registered secondmate registry registered secondmate table is unreadable" \
+    "an unavailable secondmate registry was hidden"
+  assert_contains "$out" "current activity incomplete: registered secondmate registry is incomplete" \
+    "an incomplete secondmate registry was hidden"
+  assert_contains "$out" "current activity incomplete: registered secondmate registry records were truncated" \
+    "secondmate registry truncation was hidden"
+  assert_contains "$out" "current activity incomplete: main task inventory unstructured current backlog row" \
+    "an incomplete main inventory was hidden"
+  assert_not_contains "$out" "no active child work proven" \
+    "top-level snapshot incompleteness was reduced to an inactive result"
+  pass "session start renders canonical decision and hold activity surfaces"
+}
+
+test_canonical_activity_snapshot_is_bounded() {
+  local rec root home fakebin out snapshot
+  rec=$(new_world canonical-activity-timeout)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  snapshot="$home/canonical-snapshot"
+  cat > "$snapshot" <<'SH'
+#!/usr/bin/env bash
+sleep 5
+printf '%s\n' '{"schema":"fm-secondmate-home-summary.v1","valid":true,"state":"no_active_work","active_children":[]}'
+SH
+  chmod +x "$snapshot"
+
+  out=$(FM_TIMEOUT_MECHANISM_OVERRIDE=bash \
+    FM_SESSION_START_CANONICAL_SNAPSHOT_TIMEOUT=1 \
+    FM_FLEET_SNAPSHOT_BIN="$snapshot" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "Current activity (canonical fleet snapshot)" \
+    "the bounded canonical snapshot lost its section heading"
+  assert_contains "$out" "current activity: unavailable (canonical fleet snapshot failed)" \
+    "a slow canonical snapshot was not reported unavailable"
+  assert_contains "$out" "Retained task records (state/*.meta; not current activity)" \
+    "a timed-out canonical snapshot consumed the rest of session start"
+  pass "session start bounds the canonical current-activity snapshot"
+}
+
+test_canonical_activity_uses_projects_override() {
+  local rec root home fakebin out snapshot projects
+  rec=$(new_world canonical-activity-projects-override)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+
+  projects="$home/alternate-projects"
+  mkdir -p "$projects"
+  snapshot="$home/canonical-snapshot"
+  cat > "$snapshot" <<SH
+#!/usr/bin/env bash
+if [ "\${FM_PROJECTS_OVERRIDE:-}" = "$projects" ]; then
+    printf '%s\\n' '{"schema":"fm-fleet-snapshot.v1","tasks":[],"secondmate_current":{"records":[{"id":"sm-1","active_children":[{"id":"goal-5","state":"working","source":"override","doing":"Alternate projects"}],"decisions_open":[],"holds":[]}]}}'
+else
+  printf '%s\\n' '{"schema":"fm-fleet-snapshot.v1","tasks":[],"secondmate_current":{"records":[]}}'
+fi
+SH
+  chmod +x "$snapshot"
+
+  out=$(FM_PROJECTS_OVERRIDE="$projects" FM_FLEET_SNAPSHOT_BIN="$snapshot" run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "active: sm-1/goal-5 state=working source=override doing=Alternate projects" \
+    "the canonical snapshot did not receive the projects override"
+  pass "session start forwards the projects override to the canonical snapshot"
+}
+
 # --- endpoint liveness: tmux and herdr, live and dead ------------------------
 
 test_endpoint_liveness_tmux() {
@@ -1341,10 +1577,10 @@ EOF
   printf 'window=fm-sess:dead-window\nkind=ship\n' > "$home/state/task-dead.meta"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:live-window)" "live tmux endpoint not reported alive"
-  assert_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:dead-window)" "dead tmux endpoint not reported dead"
+  assert_contains "$out" "endpoint: present (backend=tmux window=fm-sess:live-window)" "live tmux endpoint not reported present"
+  assert_contains "$out" "endpoint: absent (backend=tmux window=fm-sess:dead-window)" "dead tmux endpoint not reported absent"
 
-  pass "tmux endpoint liveness is reported per task: alive for a live window, dead for a gone one"
+  pass "tmux endpoint presence is reported per task: present for a live window, absent for a gone one"
 }
 
 test_endpoint_liveness_herdr() {
@@ -1361,10 +1597,10 @@ EOF
   printf 'window=sess:p-dead\nkind=ship\nbackend=herdr\n' > "$home/state/task-dead.meta"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "endpoint: alive (backend=herdr window=sess:p-live)" "live herdr endpoint not reported alive"
-  assert_contains "$out" "endpoint: dead (backend=herdr window=sess:p-dead)" "dead herdr endpoint not reported dead"
+  assert_contains "$out" "endpoint: present (backend=herdr window=sess:p-live)" "live herdr endpoint not reported present"
+  assert_contains "$out" "endpoint: absent (backend=herdr window=sess:p-dead)" "dead herdr endpoint not reported absent"
 
-  pass "herdr endpoint liveness is reported per task: alive for a live pane, dead for a gone one"
+  pass "herdr endpoint presence is reported per task: present for a live pane, absent for a gone one"
 }
 
 # --- composition: real scripts run, not reimplemented ------------------------
@@ -2689,6 +2925,10 @@ test_session_start_preserves_ambiguous_pi_process
 test_session_start_preserves_transiently_unreadable_tmux
 test_session_start_preserves_proven_bare_shell_recovery
 test_session_start_relaunches_herdr_husk_secondmate
+test_canonical_activity_is_separate_from_retained_records
+test_canonical_activity_renders_decision_and_hold_surfaces
+test_canonical_activity_snapshot_is_bounded
+test_canonical_activity_uses_projects_override
 test_status_tail_bounding
 test_status_tail_line_cap
 test_orphan_status_logs_are_printed

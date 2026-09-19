@@ -517,7 +517,7 @@ _fm_decision_key_transition_allowed() {  # <key> <note>
 _fm_is_pending_reply_escalation() {  # <key> <note>
   case "$1" in pending-reply-*) ;; *) return 1 ;; esac
   case "$2" in
-    pending-reply-missed:*|pending-reply-delivery-unknown:*|pending-reply-recovery-delivery-failed:*|pending-reply-recovery-delivery-unknown:*) return 0 ;;
+    pending-reply-missed:*|pending-reply-delivery-unknown:*|pending-reply-recovery-delivery-failed:*|pending-reply-recovery-delivery-unknown:*|pending-reply-agent-stopped:*) return 0 ;;
     *) return 1 ;;
   esac
 }

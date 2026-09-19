@@ -14,6 +14,9 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 | Effort | `--effort <low\|medium\|high\|xhigh\|max>`, verified on 2.1.196. |
 | Permissions | `--dangerously-skip-permissions` by default, or `--permission-mode auto` when `config/claude-permission-mode` is `auto`; the `auto` shape verified on 2.1.269, and `../../../../../docs/configuration.md` "Claude permission mode" owns the file. |
 
+Ordinary task workers use inline launch settings and place their busy hooks in the task worktree's `.claude/settings.local.json`.
+Persistent secondmates pass the Firstmate-owned `state/<id>.claude-settings.json` artifact with `--settings` instead; `../../../../../docs/configuration.md` owns its attribution, ownership, and cleanup boundary.
+
 ## Workspace trust
 
 Claude gates a folder it has never seen behind an interactive workspace-trust dialog (titled "Quick safety check: Is this a project you created or one you trust?"), so every fresh task worktree would hit it, and so would every secondmate home no operator has opened by hand.

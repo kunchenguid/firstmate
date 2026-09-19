@@ -1400,6 +1400,8 @@ test_dispatch_rolls_back_before_a_failed_launch_delivery() {
     "a failed launch delivery left its provisional record behind"
   assert_absent "$(home_of "$case_dir")/state/$id.busy-state" \
     "a failed launch delivery left its provisional busy generation behind"
+  assert_not_contains "$out" "could not retire busy generation after aborted spawn" \
+    "idempotent busy retirement should not report duplicate cleanup failure"
   [ "$(row_state "$case_dir" "$id")" = queued ] \
     || fail "launch delivery failed after committing backlog state $(row_state "$case_dir" "$id")"
   pass "dispatch commits neither record nor backlog state before launch delivery succeeds"

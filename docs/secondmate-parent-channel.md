@@ -40,6 +40,14 @@ The pending-reply guard may restate only the correlated line from a local mate's
 Other correlated mate-home status lines remain wrong-home evidence, while a remote home's routed `state/parent-replies.status` is already the parent channel and is not classified as wrong-home.
 A missed-reply escalation includes the complete first sighting path and line number in readable shell-escaped form.
 
+Persistent-secondmate liveness is reconciled before a status log is treated as current, so a confirmed dead or missing endpoint cannot remain `working` merely because its readable shell or stale status log survives.
+Only a recovery-grade `dead` or `missing` result changes that conclusion; ambiguous, unreadable, and unverified endpoints keep their existing conservative path.
+The pending-reply tick is the narrow mid-session exception: local routes use the recovery-grade endpoint classifier, while remote routes use their host-local control boundary.
+An unresolved remote reply remains unknown until its reply mirror watermark reaches the completed turn, even when the endpoint has stopped.
+An unresolved routed reply on a confirmed stopped endpoint is escalated as `pending-reply-agent-stopped`, so the parent receives a durable terminal boundary instead of waiting on a child that can no longer report.
+That stopped-endpoint verdict is bound to the sampled `spawn_gen` and revalidated before publication, so a relaunch suppresses the old generation's escalation instead of classifying the replacement as stopped.
+`tests/fm-crew-state.test.sh` and `tests/fm-pending-reply.test.sh` cover this boundary.
+
 ## What is deliberately not built
 
 - No mirror of the mate's chat: chat can mix outcomes with other conversation, so choosing which sentence is an outcome would itself be model behavior, and every harness exposes turn text differently.
@@ -54,7 +62,7 @@ A missed-reply escalation includes the complete first sighting path and line num
 `tests/fm-pr-merge.test.sh` covers the PR-ready line at registration and the merge outcome's upward report.
 `tests/fm-teardown.test.sh` covers teardown delivering a child's final line and refusing when the channel cannot be written.
 `tests/fm-brief.test.sh` pins the charter's channel rule.
-`tests/fm-pending-reply.test.sh` covers helper-selected local routing, remote-channel classification, same-basename restatement before false escalation, readable wrong-home diagnostics, and the rule that arbitrary mate-home sightings never acknowledge a reply.
+`tests/fm-pending-reply.test.sh` covers helper-selected local routing, remote-channel classification, same-basename restatement before false escalation, readable wrong-home diagnostics, stopped-secondmate escalation for active routed work, and the rule that arbitrary mate-home sightings never acknowledge a reply.
 
 ## Live verification
 

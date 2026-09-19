@@ -925,12 +925,12 @@ test_non_claude_harness_ignores_config_dir() {
 # spawned worker's settings sources are not guaranteed to load. Every claude
 # launch must therefore carry the policy itself, or a spawned worker writes
 # Co-Authored-By and Claude-Session trailers into commits and PR bodies.
-assert_attribution_policy() {  # <launch-command> <what>
-  local launch=$1 what=$2
-  assert_contains "$launch" '"attribution":' "$what launch carries no attribution policy"
-  assert_contains "$launch" '"commit":""' "$what launch does not silence the commit trailer"
-  assert_contains "$launch" '"pr":""' "$what launch does not silence the PR-body attribution"
-  assert_contains "$launch" '"sessionUrl":false' "$what launch does not silence the session URL"
+assert_attribution_policy() {  # <settings-json-or-inline-launch> <what>
+  local settings=$1 what=$2
+  assert_contains "$settings" '"attribution":' "$what settings carry no attribution policy"
+  assert_contains "$settings" '"commit":""' "$what settings do not silence the commit trailer"
+  assert_contains "$settings" '"pr":""' "$what settings do not silence the PR-body attribution"
+  assert_contains "$settings" '"sessionUrl":false' "$what settings do not silence the session URL"
 }
 
 test_claude_task_launch_carries_control_channel_authority() {
@@ -989,7 +989,7 @@ test_claude_crewmate_launch_carries_the_attribution_policy() {
 }
 
 test_claude_secondmate_launch_carries_the_attribution_policy() {
-  local rec id sm out status launch
+  local rec id sm out status launch settings
   id=profile-secondmate-attribution-z23
   rec=$(make_spawn_case profile-secondmate-attribution claude "$id")
   read_case_record "$rec"
@@ -1001,7 +1001,13 @@ test_claude_secondmate_launch_carries_the_attribution_policy() {
   status=$?
   expect_code 0 "$status" "secondmate claude spawn should succeed"$'\n'"$out"
   launch=$(cat "$LAUNCH_LOG")
-  assert_attribution_policy "$launch" "claude secondmate"
+  settings="$HOME_DIR/state/$id.claude-settings.json"
+  assert_contains "$launch" "--settings" \
+    "claude secondmate launch did not pass a settings artifact"
+  assert_contains "$launch" "$settings" \
+    "claude secondmate launch did not use its Firstmate-owned settings artifact"
+  jq -e '.attribution.commit == "" and .attribution.pr == "" and .attribution.sessionUrl == false' "$settings" >/dev/null 2>&1 \
+    || fail "claude secondmate settings artifact has incorrect attribution policy"
   pass "a claude secondmate launch carries the attribution-off policy too"
 }
 

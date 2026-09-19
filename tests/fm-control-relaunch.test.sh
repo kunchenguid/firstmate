@@ -799,6 +799,8 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
   mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
   printf 'sm3\n' > "$dir/smhome/.fm-secondmate-home"
   printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  mkdir -p "$dir/smhome/.claude"
+  printf '{"user":"settings"}\n' > "$dir/smhome/.claude/settings.local.json"
   {
     echo "window=fmses:fm-sm3"
     echo "endpoint_task_id=sm3"
@@ -823,6 +825,8 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
     || fail "the configured model token should come with the pin"
   [ "$(journal_field "$dir" sm3 to_effort)" = high ] \
     || fail "the configured effort token should come with the pin"
+  jq -e '.user == "settings"' "$dir/smhome/.claude/settings.local.json" >/dev/null 2>&1 \
+    || fail "a secondmate relaunch must preserve its existing Claude settings"
   assert_not_contains "$out" "not a verified harness" "codex is a verified harness"
   pass "fm-control relaunch: a secondmate relaunch re-resolves its durable configured harness pin"
 }
@@ -1290,6 +1294,8 @@ test_prepublication_abort_retires_replacement_wiring_and_busy_state() {
     || fail "an aborted replacement should retire its busy generation"
   [ ! -e "$dir/home/state/rl28.busy-state" ] \
     || fail "an aborted replacement should remove its seeded busy record"
+  assert_not_contains "$out" "could not retire busy generation after aborted spawn" \
+    "an aborted replacement should retire its busy generation only once"
   [ "$(journal_field "$dir" rl28 rollback)" = prior-record-kept ] \
     || fail "the journal should record the unpublished replacement rollback"
   pass "fm-spawn relaunch: prepublication abort removes replacement state"

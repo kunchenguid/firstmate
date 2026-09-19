@@ -1752,19 +1752,21 @@ test_captain_held_signal_payload_marked_for_branch_exclusion() {
 }
 
 test_pending_reply_escalation_signal_payload_marked_for_branch_exclusion() {
-  local dir state fakebin out status_file pid corr
-  dir=$(make_case pending-reply-escalation-payload); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"
-  status_file="$state/task.status"
+  local dir state fakebin out status_file pid corr token
   corr=0123456789abcdef
-  printf 'blocked [key=pending-reply-%s]: pending-reply-missed: task=task pending-reply-id=%s request=finish report\n' \
-    "$corr" "$corr" > "$status_file"
-  watch_bg "$state" "$fakebin" "$out"
-  pid=$!
-  wait_for_exit "$pid" 100 || fail "watcher did not exit for a pending-reply escalation"
-  grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/.wake-queue" >/dev/null \
-    || fail "a pending-reply escalation was not payload-marked for branch exclusion: $(cat "$state/.wake-queue")"
-  pass "a pending-reply second-mate escalation is marked for main-only routing"
+  for token in pending-reply-missed pending-reply-agent-stopped; do
+    dir=$(make_case "pending-reply-$token-payload"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"
+    status_file="$state/task.status"
+    printf 'blocked [key=pending-reply-%s]: %s: task=task pending-reply-id=%s request=finish report\n' \
+      "$corr" "$token" "$corr" > "$status_file"
+    watch_bg "$state" "$fakebin" "$out"
+    pid=$!
+    wait_for_exit "$pid" 100 || fail "watcher did not exit for a $token escalation"
+    grep -F "$(printf 'signal\ttask.status\tneeds-decision:')" "$state/.wake-queue" >/dev/null \
+      || fail "a $token escalation was not payload-marked for branch exclusion: $(cat "$state/.wake-queue")"
+  done
+  pass "pending-reply second-mate escalations are marked for main-only routing"
 }
 
 test_ordinary_blocked_signal_payload_remains_branch_eligible() {

@@ -30,6 +30,22 @@ make_spawn_case() {  # <name> <harness> <id>
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
 }
 
+make_secondmate_spawn_case() {  # <name> <id>
+  local name=$1 id=$2 case_dir primary mate fakebin launchlog
+  case_dir="$TMP_ROOT/$name"
+  primary="$case_dir/primary"
+  mate="$case_dir/secondmate"
+  fm_test_spawn_home "$primary" claude
+  mkdir -p "$mate/bin" "$mate/data" "$mate/state" "$mate/config" "$mate/projects"
+  printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
+  printf '# Firstmate\n' > "$mate/AGENTS.md"
+  printf 'Second mate charter.\n' > "$mate/data/charter.md"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini)
+  launchlog="$case_dir/launch.log"
+  : > "$launchlog"
+  printf '%s\n' "$case_dir|$primary|$mate|$fakebin|$launchlog"
+}
+
 run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
   # Every case here is a ship spawn, which carries an explicit delivery contract
   # (AGENTS.md section 7); these tests are about busy-state wiring, so they pass a
@@ -43,6 +59,13 @@ run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
 read_case_record() {
   # shellcheck disable=SC2034 # CASE_DIR is part of the shared record shape
   IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR <<EOF
+$1
+EOF
+}
+
+read_secondmate_case_record() {
+  # shellcheck disable=SC2034 # CASE_DIR is part of the shared record shape
+  IFS='|' read -r CASE_DIR PRIMARY_HOME MATE_HOME FAKEBIN_DIR LAUNCH_LOG <<EOF
 $1
 EOF
 }
@@ -288,6 +311,52 @@ test_claude_hooks_stale_incarnation_harmless() {
   pass "claude hook events from a superseded incarnation are rejected without breaking the hook"
 }
 
+test_secondmate_claude_hooks_write_parent_busy_state() {
+  local rec id=busy-sm-1 out state settings existing_settings
+  rec=$(make_secondmate_spawn_case secondmate-claude busy-sm-1)
+  read_secondmate_case_record "$rec"
+  mkdir -p "$MATE_HOME/.claude"
+  printf '{"custom":"keep"}\n' > "$MATE_HOME/.claude/settings.local.json"
+  existing_settings=$(cat "$MATE_HOME/.claude/settings.local.json")
+  out=$(GROK_HOME="$PRIMARY_HOME/grok-home" FM_FAKE_LAUNCH_LOG="$LAUNCH_LOG" \
+    fm_test_run_spawn "$PRIMARY_HOME" "$MATE_HOME" "$FAKEBIN_DIR" --secondmate "$id" "$MATE_HOME" claude)
+  expect_code 0 $? "secondmate claude spawn should succeed: $out"
+  state="$PRIMARY_HOME/state"
+  settings="$state/$id.claude-settings.json"
+  assert_present "$state/$id.busy-gen" "a supported secondmate must arm the parent busy generation"
+  assert_present "$settings" "a secondmate claude spawn did not write parent-bound hook settings"
+  [ "$(cat "$MATE_HOME/.claude/settings.local.json")" = "$existing_settings" ] \
+    || fail "a secondmate Claude spawn overwrote the home's existing settings"
+  assert_grep 'kind=secondmate' "$state/$id.meta" "secondmate metadata was not published in the parent home"
+
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "secondmate spawn must seed parent state as busy/fm-spawn, got '$out'"
+
+  run_claude_hook "$settings" Stop || fail "secondmate Stop hook command failed"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "idle claude-hook" ] || fail "secondmate Stop must close the parent busy state, got '$out'"
+
+  run_claude_hook "$settings" UserPromptSubmit || fail "secondmate UserPromptSubmit hook command failed"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "busy claude-hook" ] || fail "secondmate UserPromptSubmit must open the parent busy state, got '$out'"
+
+  run_claude_hook "$settings" StopFailure || fail "secondmate StopFailure hook command failed"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "idle claude-hook" ] || fail "secondmate StopFailure must close parent state, got '$out'"
+
+  run_claude_hook "$settings" UserPromptSubmit
+  run_claude_hook "$settings" SessionEnd || fail "secondmate SessionEnd hook command failed"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "idle claude-hook" ] || fail "secondmate SessionEnd must close parent state, got '$out'"
+
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
+  run_claude_hook "$settings" UserPromptSubmit \
+    || fail "a stale secondmate hook must still exit 0 so Claude's lifecycle is never broken"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "a stale secondmate hook must not change the replacement generation, got '$out'"
+  pass "secondmate Claude hooks write verified generation-bound turn state into the parent home"
+}
+
 test_codex_unverified_until_a_semantic_source_exists() {
   local rec id=busy-cx-1 out state
   rec=$(make_spawn_case codex-unverified codex "$id")
@@ -429,6 +498,7 @@ test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
 test_claude_hooks_stale_incarnation_harmless
+test_secondmate_claude_hooks_write_parent_busy_state
 test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless
 test_raw_gemini_launch_has_no_semantic_wiring
