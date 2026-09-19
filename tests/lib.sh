@@ -53,6 +53,11 @@ export FM_GATE_REFUSE_BYPASS=1
 # under the marker. A case that verifies the refusal sets FM_TASK_ID itself.
 unset FM_TASK_ID
 
+# Isolate the Jev wake-triage key. A leaked TYPESAFE_API_KEY in the operator
+# shell would send live typesafe.ai calls from watcher tests on the fail-open
+# path; those suites unset it here and the helper never reads .env.
+unset TYPESAFE_API_KEY TYPESAFE_API_KEY_PRIVATE
+
 # Clear the tasks-axi env overrides. An operator shell exports TASKS_AXI_FILE
 # (and may export TASKS_AXI_BACKEND) at its real home's backlog, and tasks-axi
 # resolves that env AHEAD of the .tasks.toml a fixture copies, so a suite that

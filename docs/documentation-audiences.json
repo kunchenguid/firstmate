@@ -453,6 +453,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/jev-wake-triage.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/lint-option-a.md",
       "audience": "maintainer-verification"
     },
