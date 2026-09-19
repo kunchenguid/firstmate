@@ -79,7 +79,7 @@ case "${1:-}" in
           -t) skip_next=1; continue ;;
           -l) continue ;;
           Enter|C-m) continue ;;
-          *) printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
+          *) "$FM_TEST_LAUNCH_PAYLOAD" "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
         esac
       done
     fi

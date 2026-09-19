@@ -560,7 +560,16 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
     "spawn should reuse the implicit terminal returned by Orca worktree creation"
   assert_contains "$(cat "$log")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-spawn'$'\x1f''--text'$'\x1f''export GOTMPDIR=/tmp/fm-orcaspawnz1/gotmp'$'\x1f''--enter'$'\x1f''--json' \
     "spawn did not export GOTMPDIR through the Orca terminal"
-  assert_contains "$(cat "$log")" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}'" \
+  # A launch command past the terminal's line cap is staged and sourced rather
+  # than sent whole (bin/fm-spawn.sh, spawn_send_launch), and whether this one
+  # crosses the cap depends on the length of this run's temp paths. Assert the
+  # command reached somewhere the pane can execute it, either branch; that the
+  # pane is actually pointed at a staged file is pinned separately by
+  # tests/fm-spawn-launch-line-limit.test.sh.
+  launch_seen=$(cat "$log")
+  staged=/tmp/fm-orcaspawnz1/launch.sh
+  [ -r "$staged" ] && launch_seen="$launch_seen$(cat "$staged")"
+  assert_contains "$launch_seen" "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}'" \
     "spawn did not send the selected harness launch command through Orca"
   rm -rf "/tmp/fm-$id"
   pass "fm-spawn.sh --backend orca: reuses implicit terminal, records metadata, launches harness"
