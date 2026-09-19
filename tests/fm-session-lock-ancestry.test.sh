@@ -137,6 +137,18 @@ SH
   # A hook script that merely lives under ~/.claude must still not match.
   lib_eval "$fakebin" '! fm_harness_path_name /root/.claude/hooks/notify.sh >/dev/null' \
     || fail "ccd-cli: a ~/.claude hook path was wrongly identified as a harness"
+  for decoy in \
+      /tmp/ccd-cli/1.2 \
+      /tmp/ccd-cli/1.2evil \
+      /tmp/ccd-cli/1/evil.2 \
+      /tmp/x/ccd-cli/1.2/other \
+      /root/.claude/remote/ccd-cli/2.1.275/extra \
+      /root/.claude/remote/ccd-cli/2.1.275-beta; do
+    lib_eval "$fakebin" "! fm_harness_path_name '$decoy' >/dev/null" \
+      || fail "ccd-cli: decoy path '$decoy' was wrongly identified as a harness"
+  done
+  lib_eval "$fakebin" 'fm_harness_path_name /root/.claude/remote/ccd-cli/2.1.275 >/dev/null' \
+    || fail "ccd-cli: the real app binary path was not identified"
   pass "session-lock: a Claude desktop-app (ccd-cli) session is identified from its install path"
 }
 
