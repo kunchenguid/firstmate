@@ -2162,9 +2162,9 @@ fm_wake_status_mark_current() {  # <state> <status-file>
 # in the very turn or tick that writes them (answerer-closes resolved lines, a
 # pending-reply escalation close, captain-held transfers). Such a close must
 # not wake the session that wrote it, so this appends one command's lines
-# together and then advances the watcher's seen marker to cover exactly the
-# appended bytes and nothing else. The advance is provenance-gated and fails
-# toward waking:
+# together and then advances the watcher's seen marker across the appended
+# bytes and no byte this home has not already read. The advance is
+# provenance-gated and fails toward waking:
 #   - the marker advances only when this home already read every pre-append
 #     byte, the post-append size equals that size plus exactly the appended
 #     bytes (no foreign write interleaved), AND the watcher's own span
