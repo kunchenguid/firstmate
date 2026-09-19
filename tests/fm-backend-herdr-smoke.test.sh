@@ -35,12 +35,23 @@ herdr_forget_inherited_pane
 SESSION="fm-lab-backend-smoke-$$"
 export HERDR_SESSION="$SESSION"
 SM_SCRATCH=
+PRIMARY_SCRATCH=
 cleanup_all() {
   [ -n "$SM_SCRATCH" ] && rm -rf "$SM_SCRATCH"
+  [ -n "$PRIMARY_SCRATCH" ] && rm -rf "$PRIMARY_SCRATCH"
   herdr_safe_stop_and_delete "$SESSION"
 }
 trap cleanup_all EXIT
 fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+
+# The home under test is a scratch primary home, never the ambient checkout:
+# FM_HOME otherwise defaults to FM_ROOT (bin/fm-backend.sh), so the captain's
+# own config/herdr-workspace-label or .fm-secondmate-home would retarget every
+# workspace label this suite asserts against.
+PRIMARY_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-smoke-primary.XXXXXX")
+PRIMARY_HOME="$PRIMARY_SCRATCH/primary-home"
+mkdir -p "$PRIMARY_HOME"
+export FM_HOME="$PRIMARY_HOME"
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"

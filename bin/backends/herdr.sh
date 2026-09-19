@@ -345,24 +345,45 @@ fm_backend_herdr_presentation_enabled() {  # <config-dir> [<state-dir>]
 }
 
 # fm_backend_herdr_workspace_label: the per-firstmate-HOME herdr workspace
-# label (docs/herdr-backend.md "Default task container shape"). The PRIMARY home (no
-# secondmate marker) resolves to the constant "firstmate", byte-identical to
-# every pre-existing task's recorded label - no forced migration. A SECONDMATE
-# home resolves to "2ndmate-<secondmate-id>", so its tasks land in their own
-# workspace, obviously distinguishable from the primary's (and from every
-# other secondmate's) in herdr's spaces sidebar. Read fresh from FM_HOME on
-# every call rather than cached at source time: FM_HOME is the home's own
-# durable identity, not env plumbing threaded through a call chain, so the
-# label is automatically stable across every respawn/recovery for the life of
-# that home. fm-spawn.sh briefly shadows FM_HOME to a secondmate's own home
-# when the PRIMARY spawns that secondmate (its own process's FM_HOME still
-# names the primary at that point) - see fm-spawn.sh's herdr case arm.
+# label (docs/herdr-backend.md "Default task container shape"). A SECONDMATE
+# home (marker present) resolves to "2ndmate-<secondmate-id>", so its tasks
+# land in their own workspace, obviously distinguishable from the primary's
+# (and from every other secondmate's) in herdr's spaces sidebar; this takes
+# precedence over everything below. Otherwise, a non-empty
+# `config/herdr-workspace-label` (docs/configuration.md) overrides the label
+# with its own trimmed contents, letting the captain name a primary home's
+# workspace (e.g. "Mate Raiz"). The override must be a SINGLE line: the label
+# is recorded as one `parent_label=` line of the exact-binding projection
+# journal, whose validated version:line-count pairing an embedded newline
+# would break, so a multi-line file is refused and falls through to the
+# default rather than emitting a label no journal can round-trip. An
+# unreadable file falls through the same way: the read is guarded because
+# fm-spawn.sh calls this under `set -eu`, where a failing command
+# substitution would abort the whole spawn with no message over a purely
+# cosmetic setting. Absent both, the PRIMARY home resolves to the constant
+# "firstmate", byte-identical to every pre-existing task's recorded label -
+# no forced migration. Read fresh from FM_HOME on every call rather
+# than cached at source time: FM_HOME is the home's own durable identity, not
+# env plumbing threaded through a call chain, so the label is automatically
+# stable across every respawn/recovery for the life of that home. fm-spawn.sh
+# briefly shadows FM_HOME to a secondmate's own home when the PRIMARY spawns
+# that secondmate (its own process's FM_HOME still names the primary at that
+# point) - see fm-spawn.sh's herdr case arm.
 fm_backend_herdr_workspace_label() {
   local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" id
+  local label_file="$FM_HOME/config/herdr-workspace-label" custom
   if [ -f "$marker" ]; then
     id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
     if [ -n "$id" ]; then
       printf '2ndmate-%s' "$id"
+      return 0
+    fi
+  fi
+  if [ -f "$label_file" ]; then
+    custom=$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/./,$!d' "$label_file" 2>/dev/null) || custom=""
+    if [ -n "$custom" ] \
+      && [ "$(printf '%s' "$custom" | wc -l | tr -d '[:space:]')" -eq 0 ]; then
+      printf '%s' "$custom"
       return 0
     fi
   fi
