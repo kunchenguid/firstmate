@@ -543,8 +543,9 @@ const pi = {
   on(e, h) { handlers.set(e, h); },
   registerCommand(n, o) { if (n === "fm-watch-arm-omp") command = o.handler; },
   registerTool(t) { tool = t; },
-  // omp sendUserMessage returns synchronously, not a promise.
-  sendUserMessage(m, o) { sent.push({ m, o }); return undefined; },
+  // omp sendMessage returns synchronously, not a promise.
+  sendMessage(m, o) { sent.push({ m, o }); },
+  sendUserMessage() { throw new Error("watcher wakes must not use user-message delivery"); },
 };
 const mod = await import(pathToFileURL(process.env.EXT).href);
 mod.default(pi);
@@ -559,10 +560,12 @@ const again = await tool.execute();
 if (!/^watcher: unchanged - omp extension already owns an arm child/.test(again.content[0].text)) throw new Error(`redundant arm was not an ownership no-op: ${again.content[0].text}`);
 await new Promise((r) => setTimeout(r, 2500));
 if (sent.length !== 1) throw new Error(`expected one follow-up wake, saw ${sent.length}: ${JSON.stringify(sent)}`);
-if (!sent[0].m.startsWith("⁣FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: signal: omp-e2e done")) throw new Error(`unexpected wake text: ${sent[0].m}`);
-if (sent[0].o?.deliverAs !== "followUp") throw new Error("wake must be delivered as a follow-up");
-// The wake is consumed when omp starts the next run with that exact prompt.
-await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: sent[0].m }, {});
+if (sent[0].m.customType !== "firstmate-watcher-wake" || sent[0].m.display !== true) throw new Error(`unexpected custom wake shape: ${JSON.stringify(sent[0].m)}`);
+if (!sent[0].m.content.startsWith("⁣FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: signal: omp-e2e done")) throw new Error(`unexpected wake text: ${sent[0].m.content}`);
+if ("attribution" in sent[0].m) throw new Error("wake must retain default agent attribution");
+if (sent[0].o?.deliverAs !== "followUp" || sent[0].o?.triggerTurn !== true) throw new Error("wake must trigger a follow-up turn");
+// The wake is consumed when omp starts its custom message.
+await handlers.get("message_start")({ type: "message_start", message: { role: "custom", customType: "firstmate-watcher-wake", content: sent[0].m.content } }, {});
 await handlers.get("session_shutdown")({}, {});
 if (existsSync(`${process.env.FM_HOME}/state/extensions/omp-primary-watch/session-replacement-actionable.json`)) throw new Error("a consumed wake must not ride the replacement handoff");
 process.exit(0);
@@ -571,7 +574,7 @@ EOF
   status=$?
   expect_code 0 "$status" "omp watch extension contract: $out"
   [ -z "$out" ] || fail "omp watch extension test printed output: $out"
-  pass ".omp watch extension: fm_watch_arm_omp arms once, repeats as a no-op, and delivers an actionable close as one follow-up"
+  pass ".omp watch extension: fm_watch_arm_omp arms once, repeats as a no-op, and delivers an actionable close as one custom-message follow-up"
 }
 
 test_detection_anchored_name_and_marker_precedence

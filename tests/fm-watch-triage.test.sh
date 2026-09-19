@@ -5120,6 +5120,42 @@ test_beacon_stays_fresh_while_absorbing() {
   pass "the liveness beacon stays fresh while the watcher absorbs benign wakes (fm-guard never false-alarms)"
 }
 
+test_extension_quiet_absorbs_routine_but_delivers_decisions() {
+  local dir state fakebin out status_file pid source marker
+  dir=$(make_case extension-quiet); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; status_file="$state/task.status"
+  printf 'quiet\n%s\n' "$(date +%s)" > "$state/.afk"
+  printf '%s\n' "$$" > "$state/.lock"
+  for source in fm-primary-omp-watch.ts fm-primary-turnend-guard.ts; do
+    case "$source" in
+      fm-primary-omp-watch.ts) marker=.omp-watch-extension-loaded ;;
+      *) marker=.omp-turnend-extension-loaded ;;
+    esac
+    {
+      FM_STATE_OVERRIDE="$state" bash -c '
+        # shellcheck disable=SC1090,SC1091
+        . "$1/bin/fm-wake-lib.sh"
+        fm_pi_extension_version "$1/.omp/extensions/$2"
+      ' _ "$ROOT" "$source"
+      printf '%s\n' "$$"
+    } > "$state/$marker"
+  done
+  printf 'working: routine activity\n' > "$status_file"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  FM_ROOT_OVERRIDE="$ROOT" watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "extension quiet surfaced routine activity: $(cat "$out")"; }
+  [ ! -s "$out" ] && [ ! -s "$state/.wake-queue" ] \
+    || { reap "$pid"; fail "extension quiet did not absorb routine activity"; }
+  printf 'needs-decision [key=release]: choose release target\n' >> "$status_file"
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "extension quiet suppressed a decision"; }
+  grep -F "signal: $status_file" "$out" >/dev/null || fail "quiet decision did not surface"
+  grep -F "$status_file" "$state/.wake-queue" >/dev/null || fail "quiet decision was not durable"
+  [ "$(head -n 1 "$state/.afk")" = quiet ] || fail "notification cleared quiet mode"
+  unset FM_FAKE_CREW_STATE
+  pass "extension-owned quiet suppresses routine activity without losing a durable decision"
+}
+
 # --- afk coherence: the daemon owns triage; the watcher does not double-triage ---
 
 test_afk_signal_records_heartbeat_endpoint() {
@@ -5544,6 +5580,7 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_heartbeat_backstop_surfaces_a_masked_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_signal_records_heartbeat_endpoint
+test_extension_quiet_absorbs_routine_but_delivers_decisions
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
 test_captain_held_never_rechecked_while_away_record_exists

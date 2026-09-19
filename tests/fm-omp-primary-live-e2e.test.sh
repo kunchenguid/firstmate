@@ -13,7 +13,10 @@
 #      ledger-linked successor, and the wake arrives as one follow-up turn;
 #   4. with the successor watcher frozen until its beacon passes the lab grace,
 #      the next turn end is genuinely unsupervised, so session_stop must compel
-#      the turn-end guard continuation and the model reaches for the tool.
+#      the turn-end guard continuation and the model reaches for the tool;
+#   5. a plain launch with no Firstmate harness marker enters and refreshes
+#      quiet without an away record, preserves it through chat, and stops it
+#      without stopping extension supervision.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -22,6 +25,8 @@ set -u
 fm_live_gate opt-in FM_OMP_LIVE_E2E omp node jq
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$ROOT/bin/fm-wake-lib.sh"
 unset NO_MISTAKES_GATE
 
 fail() {
@@ -189,8 +194,8 @@ mkfifo "$RPC_IN" || fail "could not create the rpc fifo"
 (
   cd "$PROJECT" &&
     env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
-      -u FM_HOME -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE \
-      FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 \
+      -u FM_OMP_HARNESS -u FM_HOME -u FM_ROOT_OVERRIDE -u FM_STATE_OVERRIDE -u FM_CONFIG_OVERRIDE -u FM_DATA_OVERRIDE \
+      OMP_SKIP_SETUP=1 FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 \
       FM_GUARD_GRACE="$GUARD_GRACE" \
       omp --mode rpc --no-session --cwd "$PROJECT" --config "$PROJECT/.omp/fm-worker-overlay.yml" --auto-approve \
         --model "$MODEL" --thinking low < "$RPC_IN" > "$RPC_LOG" 2> "$RPC_ERR"
@@ -258,7 +263,7 @@ kill -STOP "$successor_pid" 2>/dev/null || fail "could not freeze the successor 
 thaw() { kill -CONT "$successor_pid" 2>/dev/null || true; }
 i=0
 while [ "$i" -lt 60 ]; do
-  age=$(( $(date +%s) - $(stat -f %m "$PROJECT/state/.last-watcher-beat" 2>/dev/null || stat -c %Y "$PROJECT/state/.last-watcher-beat" 2>/dev/null || date +%s) ))
+  age=$(fm_path_age "$PROJECT/state/.last-watcher-beat")
   [ "$age" -gt "$GUARD_GRACE" ] && break
   sleep 1
   i=$((i + 1))
@@ -291,6 +296,26 @@ if [ -z "$repaired_pid" ] || ! kill -0 "$repaired_pid" 2>/dev/null; then
   fail "no live watcher after the guard stage"
 fi
 pass "omp $OMP_VERSION: session_stop compelled the guard continuation (guard rc=2, then a stop_hook_active stop) and the model reached for fm_watch_arm_omp"
+
+# --- 4. quiet entry through a real, unmarked omp tool process -----------------
+quiet_ends=$(agent_end_count)
+rpc_send '{"id":"quiet-enter","type":"prompt","message":"Run FM_AFK_MODE=quiet bin/fm-afk-launch.sh start and then bin/fm-afk-launch.sh start. Do not supply any harness-identity environment marker, create an away record, or arm another watcher. Reply QUIET_ENTERED after both commands succeed."}'
+wait_for_agent_ends "$((quiet_ends + 1))" 360 || fail "omp did not finish quiet entry"
+[ "$(sed -n '1p' "$PROJECT/state/.afk" 2>/dev/null)" = quiet ] || fail "unmarked omp did not enter durable quiet mode"
+[ ! -e "$PROJECT/state/.afk-contract" ] && [ ! -e "$PROJECT/state/.afk-daemon-terminal" ] \
+  || fail "quiet entry created an away record or daemon terminal"
+quiet_ends=$(agent_end_count)
+rpc_send '{"id":"quiet-chat","type":"prompt","message":"Reply ORDINARY_QUIET_CHAT only. This ordinary message does not exit quiet mode. Do not call tools."}'
+wait_for_agent_ends "$((quiet_ends + 1))" 360 || fail "omp did not finish ordinary quiet chat"
+[ "$(sed -n '1p' "$PROJECT/state/.afk" 2>/dev/null)" = quiet ] || fail "ordinary chat cleared quiet mode"
+quiet_ends=$(agent_end_count)
+rpc_send '{"id":"quiet-stop","type":"prompt","message":"Run bin/fm-afk-launch.sh stop to end this isolated quiet-mode probe. Reply QUIET_STOPPED after success. Do not stop or replace the extension-owned watcher."}'
+wait_for_agent_ends "$((quiet_ends + 1))" 360 || fail "omp did not finish quiet stop"
+[ ! -e "$PROJECT/state/.afk" ] || fail "quiet stop retained the posture flag"
+quiet_watcher=$(cat "$PROJECT/state/.watch.lock/pid" 2>/dev/null || true)
+[ -n "$quiet_watcher" ] || fail "quiet stop lost the watcher identity"
+kill -0 "$quiet_watcher" 2>/dev/null || fail "quiet stop lost the watcher"
+pass "omp $OMP_VERSION: unmarked quiet entry and refresh need no away record, ordinary chat preserves quiet, and stop retains supervision"
 
 # --- shutdown -------------------------------------------------------------------
 # omp documents that closing rpc stdin disposes the session and exits 0. On

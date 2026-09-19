@@ -298,12 +298,10 @@ fm_extension_pair_owns_supervision() {  # <state> <extension-dir> <source:marker
   fm_pid_alive "$session_pid"
 }
 
-# Away-mode supervision evidence. While state/.afk exists the away-mode daemon
-# (bin/fm-supervise-daemon.sh) owns supervision: it runs bin/fm-watch.sh
-# one-shot, so the watcher exits on EVERY wake and the daemon starts its
+# Daemon-owned supervision evidence. On harnesses with an away daemon,
+# bin/fm-supervise-daemon.sh runs bin/fm-watch.sh one-shot and starts its
 # replacement. Between those cycles no watcher process holds the watch lock,
-# with nothing at all wrong - the supervisor is the daemon, and the watcher is
-# its restarting child.
+# with nothing wrong. Extension-owned quiet mode keeps normal watcher triage.
 #
 # fm_afk_daemon_owns_supervision <state>
 # True when away mode is active AND a live, identity-matched daemon holds this

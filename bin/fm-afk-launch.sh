@@ -12,11 +12,13 @@
 # clause fields, the never-set, the refusal wording, and the record schema); `confirm` promotes it
 # into state/.afk-contract and prints the entry announcement (hold-for-return
 # only: no phone channel exists). The record is the posture in every harness.
-# On Pi and pi-signed the entry ENDS there: the away daemon is no longer launched
-# on Pi, the ordinary supervision session keeps running in both postures, and
-# `start` refuses on those harnesses. Every other harness still runs the daemon
-# for now, so `start` and `start-native` require the confirmed record before they
-# launch the daemon.
+# On Pi, pi-signed, and omp the entry ENDS there: no away daemon is launched,
+# the ordinary supervision session keeps running in both postures, and
+# away `start` refuses on those harnesses. Quiet `start` or `start-native`
+# writes only state/.afk with mode quiet, without an away record or daemon.
+# A bare refresh preserves quiet; a pending away return or recorded daemon
+# refuses quiet entry. Every other harness still requires a confirmed record
+# before launching its daemon.
 # `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
 # clears state/.afk last, and archives the record under state/afk-contracts/.
 #
@@ -24,7 +26,7 @@
 # bin/fm-afk-start.sh execs the supervise daemon in the FOREGROUND of whatever
 # terminal it is already in. Harnesses with a native in-pane tracked-background
 # tool (claude, grok) run it there directly and it is fine. A harness with NO
-# native background mechanism (pi) has to manufacture a terminal, and doing that
+# native background mechanism that still uses the daemon needs a terminal, and doing that
 # by SPLITTING the captain's active pane visibly shrinks it - the regression this
 # script fixes. Instead this creates a non-visible tracked terminal (a herdr tab/
 # workspace with --no-focus, or a detached tmux session) that never touches the
@@ -49,13 +51,16 @@
 #                              Repeatable --grant records captain-named task
 #                              ids that may merge-when-green while away.
 #   fm-afk-launch.sh confirm   Promote the required proposal and print the entry
-#                              announcement. On Pi this is the whole entry.
+#                              announcement. On Pi and omp this is the whole entry.
 #   fm-afk-launch.sh start     Capture the captain pane, then (unless the daemon
 #                              is already running) launch the daemon in a fresh
 #                              non-visible terminal for the detected backend and
 #                              record it. Idempotent: an already-running daemon
 #                              just refreshes state/.afk; a recorded-but-dead
 #                              terminal is reconciled (closed by id) first.
+#                              On Pi, pi-signed, and omp, FM_AFK_MODE=quiet
+#                              enters quiet mode without a daemon or away record.
+#                              An unset mode refreshes existing quiet mode.
 #   fm-afk-launch.sh start-native
 #                              Prepare lifecycle state for a harness-native
 #                              background job and record that no terminal exists.
@@ -191,13 +196,13 @@ fm_afk_launch_primary_harness() {
   "$FM_AFK_LAUNCH_DIR/fm-harness.sh" 2>/dev/null || printf unknown
 }
 
-# The away daemon is no longer launched on Pi: the posture record is the whole
+# The away daemon is no longer launched on Pi or omp: the posture record is the whole
 # entry there and the ordinary supervision session runs in both postures.
 fm_afk_launch_daemon_allowed() {
   local harness
   harness=$(fm_afk_launch_primary_harness)
   case "$harness" in
-    pi|pi-signed)
+    pi|pi-signed|omp)
       fm_afk_launch_log "the away daemon is no longer launched on $harness; the away-posture record is the posture there (run bin/fm-afk-launch.sh confirm and stop)"
       return 1 ;;
   esac
@@ -223,6 +228,36 @@ fm_afk_launch_record_require() {
     fm_afk_launch_log "the away-posture record is not confirmed; run confirm before starting the daemon"
     return 1
   }
+}
+
+fm_afk_launch_extension_quiet_requested() {
+  local mode=${FM_AFK_MODE:-}
+  [ -n "$mode" ] || mode=$(fm_afk_mode "$FM_AFK_LAUNCH_STATE")
+  [ "$mode" = quiet ] || return 1
+  case "$(fm_afk_launch_primary_harness)" in
+    pi|pi-signed|omp) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_afk_launch_extension_quiet() {
+  if fm_afk_contract_present "$FM_AFK_LAUNCH_STATE" \
+    || { [ -e "$FM_AFK_LAUNCH_STATE/.afk" ] && [ "$(fm_afk_mode "$FM_AFK_LAUNCH_STATE")" != quiet ]; }; then
+    fm_afk_launch_log "finish the away return before entering quiet mode"
+    return 1
+  fi
+  if daemon_lock_held_by_live_daemon || [ -e "$FM_AFK_LAUNCH_RECORD" ]; then
+    fm_afk_launch_log "stop the recorded away daemon before entering extension-owned quiet mode"
+    return 1
+  fi
+  if ! fm_lock_try_acquire "$FM_AFK_LOCK"; then
+    fm_afk_launch_log "daemon lock is still held or initializing; quiet entry refused"
+    return 1
+  fi
+  fm_lock_release "$FM_AFK_LOCK"
+  [ ! -e "$FM_AFK_LOCK" ] && [ ! -L "$FM_AFK_LOCK" ] || return 1
+  fm_afk_flag_write "$FM_AFK_LAUNCH_STATE" quiet || return 1
+  fm_afk_launch_log "quiet mode active; the existing extension keeps supervision, ordinary chat does not exit quiet mode"
 }
 
 fm_afk_launch_propose() {
@@ -551,6 +586,10 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
 fm_afk_launch_start() {
   local captain_target captain_backend backup artifact had_afk=0 result
   fm_afk_launch_catchup_pending && return 1
+  if fm_afk_launch_extension_quiet_requested; then
+    fm_afk_launch_extension_quiet
+    return $?
+  fi
   fm_afk_launch_daemon_allowed || return 1
   fm_afk_launch_record_require || return 1
   # Capture the captain pane FIRST, before creating anything.
@@ -622,6 +661,10 @@ fm_afk_launch_start_native() {
   local backup artifact had_afk=0 result=0
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
   fm_afk_launch_catchup_pending && return 1
+  if fm_afk_launch_extension_quiet_requested; then
+    fm_afk_launch_extension_quiet
+    return $?
+  fi
   fm_afk_launch_daemon_allowed || return 1
   fm_afk_launch_record_require || return 1
   if daemon_lock_held_by_live_daemon; then

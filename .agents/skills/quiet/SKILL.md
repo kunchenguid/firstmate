@@ -2,7 +2,7 @@
 name: quiet
 description: >-
   Enter quiet supervision mode when the captain invokes /quiet or asks for quiet mode, quiet-while-present, or fewer routine wake turns while they stay in the session.
-  It sets the same durable away/quiet-mode flag as /afk, in `quiet` mode, so the sub-supervisor daemon self-handles routine wakes and escalates captain-relevant events exactly as away mode does, but ordinary captain chat does NOT exit it - only an explicit `/quiet off` does.
+  It records durable quiet mode while preserving extension-owned supervision on Pi and omp and daemon-owned supervision elsewhere; ordinary captain chat does NOT exit it - only an explicit `/quiet off` does.
 user-invocable: true
 metadata:
   internal: true
@@ -10,32 +10,19 @@ metadata:
 
 # quiet
 
-Quiet supervision mode (kunchenguid/firstmate#2356): the same token-saving
-daemon tradeoff as `/afk`, made explicit for a captain who is staying,
-watching the session, and does not want to exit the mode just by chatting.
-
-This skill is a thin wrapper.
-Every mechanism below - the daemon, its injection, its busy/composer guards,
-its classification policy, its reliability properties - is owned once by the
-`afk` skill and is IDENTICAL in quiet mode; nothing here restates it.
-The only things quiet mode changes are which mode the flag declares and what
-exits it.
+Quiet mode keeps routine updates out of captain chat without treating ordinary messages as a return from absence.
+On Pi, pi-signed, and omp, the existing extension remains the only supervision owner.
+The watcher retains its ordinary suppression of proven-working activity; actionable notifications still reach the supervision session, which batches routine responses and surfaces decisions, failures, credentials, and review-ready work.
+This is not a promise to eliminate every model turn.
+On other harnesses, the daemon mechanisms remain owned by the `afk` skill.
 
 ## What it does
 
-1. **Enter the lifecycle through `bin/fm-afk-launch.sh`, exactly as `/afk`
-   does, with `FM_AFK_MODE=quiet` set first.**
-   Follow the `afk` skill's "What it does" steps 1-3 verbatim (terminal-
-   backed vs harness-native entry, daemon-already-running refresh, never
-   arming a separate `fm-watch.sh`) with one addition: export
-   `FM_AFK_MODE=quiet` in the shell that invokes `bin/fm-afk-launch.sh start`
-   (or `start-native`), so `state/.afk`'s first line reads `quiet` instead of
-   `away`.
-   Leaving `FM_AFK_MODE` unset on a bare refresh of an already-running quiet
-   daemon is also correct and does nothing wrong: `fm_afk_flag_write`
-   preserves the on-disk mode when no explicit mode is given, so a plain
-   `/afk`-shaped refresh call never resets quiet back to away underneath the
-   captain.
+1. **On Pi, pi-signed, and omp**, run `FM_AFK_MODE=quiet bin/fm-afk-launch.sh start`.
+   This writes the durable quiet flag without proposing or confirming an away record, starting a daemon, or replacing the existing supervision cycle.
+   Repeating the command, or a bare refresh while quiet is already active, preserves quiet mode.
+   If an away record or daemon lifecycle remains, finish its normal return before entering quiet mode; never erase those records to bypass the refusal.
+   **On other harnesses**, follow the `afk` skill's daemon lifecycle with `FM_AFK_MODE=quiet`.
 
 2. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, quiet mode is
    active; I will batch routine updates and surface only decisions, failures,
@@ -53,13 +40,11 @@ point of this mode (AGENTS.md section 8's away-mode stub, quiet branch).
   documents for its own return path (correct-ordered daemon shutdown,
   durable wake presentation and acknowledgement, escalation/wedge evidence,
   and the return-catch-up gate).
-  That script does not read or care about the flag's mode, so it needs no
-  quiet-specific variant.
 - A marked daemon escalation, or a message beginning `/quiet` while already
   in quiet mode (refresh, not exit) -> stay in quiet mode and process it, the
   same two carve-outs `/afk` documents for away mode.
 - Every other message while in quiet mode is simply answered as ordinary
-  work; the flag and daemon are left untouched.
+  work; the flag and existing supervision are left untouched.
 
 ## Orthogonal to approval authority
 

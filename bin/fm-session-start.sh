@@ -45,8 +45,8 @@
 #                       represented by the two digests below.
 #   6. fleet digest   - a compact data/backlog.md identity/metadata listing,
 #                       every state/*.meta, a bounded state/*.status tail,
-#                       the away posture (state/.afk-contract and the legacy
-#                       state/.afk daemon flag), and a cheap per-task
+#                       the away record and quiet/daemon flag (entry owned by
+#                       bin/fm-afk-launch.sh), and a cheap per-task
 #                       endpoint-liveness read:
 #                       read-only, always runs.
 #   7. network checks - the result of the deferred network stage started back at
@@ -875,8 +875,8 @@ done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
 
 subsection "AFK"
-# The away posture is the record (bin/fm-afk-contract.sh); the legacy flag
-# still marks a running daemon on the harnesses that launch one.
+# The away record and quiet flag have separate entry contracts; the rendered
+# supervision block owns the harness-specific monitoring instructions.
 if [ -f "$STATE/.afk-contract" ]; then
   printf 'present - away posture recorded at %s (hold-for-return only; bin/fm-afk-contract.sh readback for the mandate)' \
     "$("$SCRIPT_DIR/fm-afk-contract.sh" field entered 2>/dev/null || printf unknown)"
@@ -891,7 +891,7 @@ if [ -f "$STATE/.afk-contract" ]; then
   fi
 elif [ -e "$STATE/.afk" ]; then
   if [ "$AFK_MODE" = quiet ]; then
-    printf 'present - quiet-mode supervision is active; the daemon owns the watcher, only an explicit /quiet off exits it (legacy flag with no posture record).\n'
+    printf 'present - quiet-mode supervision is active; only an explicit /quiet off exits it (durable quiet flag).\n'
   else
     printf 'present - away-mode supervision is active; the daemon owns the watcher (legacy flag with no posture record).\n'
   fi
@@ -961,10 +961,9 @@ with verified fleet-lock ownership may perform mutable follow-up.
 EOF
 elif [ "$AFK_PRESENT" -eq 1 ] && [ "$AFK_MODE" = quiet ]; then
   cat <<'EOF'
-Quiet mode is active. Follow the supervision operating instructions block
-above: load /quiet and ensure the daemon is running, because the daemon owns
-watcher supervision. Ordinary captain chat does not exit it; only an
-explicit /quiet off does.
+Quiet mode is active. Load /quiet and follow the supervision operating
+instructions block above for this harness. Ordinary captain chat does not
+exit it; only an explicit /quiet off does.
 
 EOF
 elif [ "$AFK_PRESENT" -eq 1 ]; then

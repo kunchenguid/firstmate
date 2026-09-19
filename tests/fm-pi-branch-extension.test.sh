@@ -1588,11 +1588,22 @@ if (dispatch("check: unresolved fleet event", []).accepted) {
 }
 
 // Away mode still owns supervision regardless of default-on eligibility.
-writeFileSync(`${home}/state/.afk`, "");
-if (dispatch("signal: while afk").accepted) throw new Error("branch accepted a wake during away mode");
+for (const marker of ["", "away\n123\n", "123\n", "quietly\n", "quiet \n"]) {
+  writeFileSync(`${home}/state/.afk`, marker);
+  if (dispatch("signal: while afk").accepted) throw new Error(`branch accepted away marker ${JSON.stringify(marker)}`);
+}
+writeFileSync(`${home}/state/.afk`, "quiet\n123\n");
+const quietOffer = dispatch("signal: extension-owned quiet");
+if (!quietOffer.accepted) throw new Error("branch refused extension-owned quiet wake");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 3, "quiet wake prompt");
+for (const daemonMarker of [".afk-daemon-terminal", ".supervise-daemon.lock"]) {
+  writeFileSync(`${home}/state/${daemonMarker}`, "");
+  if (dispatch("signal: daemon-owned quiet").accepted) throw new Error(`branch ignored ${daemonMarker}`);
+  rmSync(`${home}/state/${daemonMarker}`);
+}
 rmSync(`${home}/state/.afk`);
 if (!dispatch("signal: gates cleared").accepted) throw new Error("branch refused a wake with gates cleared");
-await settle(() => (globalThis.__fmPrompts ?? []).length === 3, "branch wake prompts");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 4, "branch wake prompts");
 process.exit(0);
 EOF
   status=$?

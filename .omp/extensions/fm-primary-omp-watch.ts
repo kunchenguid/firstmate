@@ -6,9 +6,9 @@
 //   - omp auto-discovers this file from <cwd>/.omp/extensions with no trust
 //     gate, so an omp primary or secondmate started inside its home loads it
 //     without -e (naming it both ways loads it twice - verified, omp 18.1.11).
-//   - pi.sendUserMessage returns synchronously (no promise) in omp, so "Pi
-//     accepted the follow-up" collapses to "the call returned"; consumption is
-//     still tracked at before_agent_start / message_start exactly as on Pi.
+//   - pi.sendMessage delivers a custom follow-up rather than a user message:
+//     omp clears the TUI editor for non-local user messages, losing drafts.
+//     Acceptance is synchronous; consumption is tracked at custom message_start.
 //   - omp reports no session_shutdown reason, so EVERY shutdown with a pending
 //     actionable close persists the replacement handoff and the next owning
 //     session_start, in this process or a later one, replays it. Replaying a
@@ -31,15 +31,12 @@
 // Stale callbacks from a prior generation are no-ops against the active replacement.
 //
 // Delivery versus consumption (stated once here):
-// A main follow-up is delivered once omp accepts it (sendUserMessage returns).
-// The successor pipeline never waits for the model to read it: a follow-up
-// queued while main is streaming joins the running run without ever raising
-// before_agent_start, so waiting on that event stalls every later close.
+// A main follow-up is delivered once omp accepts it (sendMessage returns).
+// The successor pipeline never waits for the model to read it.
 // Consumption is tracked only so a replacement can replay a follow-up omp had
-// not consumed. An idle main consumes at before_agent_start; a streaming main
-// consumes at the user message_start carrying the exact wake text; either
-// event finishes the pending record, and a still-unconsumed record rides the
-// replacement handoff.
+// not consumed: the custom message_start carrying the exact wake text finishes
+// the pending record, and a still-unconsumed record rides the replacement
+// handoff. Custom wake turns do not raise before_agent_start.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -58,7 +55,7 @@ import { encodeFirstmateOperationalInput } from "../../.pi/extensions/lib/fm-ope
 // rather than imported from the Pi package name.
 type ExtensionAPI = {
   on?: (event: string, handler: (event: any, ctx: any) => unknown) => void;
-  sendUserMessage: (content: string, options?: { deliverAs?: string }) => unknown;
+  sendMessage: (message: { customType: string; content: string; display: boolean }, options?: { deliverAs?: string; triggerTurn?: boolean }) => void;
   registerCommand?: (name: string, command: { description: string; handler: (args: string, ctx: any) => Promise<void> | void }) => void;
   registerTool?: (tool: Record<string, unknown>) => void;
 };
@@ -237,8 +234,8 @@ function completedActionableLine(output: string): string {
   return newline < 0 ? "" : actionableLine(output.slice(0, newline + 1));
 }
 
-// The text omp carries in a user message_start: sendUserMessage wraps a string
-// as one text part, so the joined text parts equal the sent content.
+// The text omp carries in a custom message_start is the sent string;
+// if content arrives as text parts instead, join those parts.
 function userMessageText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -499,20 +496,21 @@ export default function (pi: ExtensionAPI) {
     );
     if (pending) owner.unconsumedWakes.set(pending.token, { content, pending });
     try {
-      await pi.sendUserMessage(content, { deliverAs: "followUp" });
+      pi.sendMessage(
+        { customType: "firstmate-watcher-wake", content, display: true },
+        { deliverAs: "followUp", triggerTurn: true },
+      );
     } catch (error) {
       if (pending) owner.unconsumedWakes.delete(pending.token);
       throw error;
     }
-    // Accepted by omp (sendUserMessage returns synchronously there; awaiting a
-    // non-promise resolves at once). A generation replaced while omp was
-    // accepting it may have lost the follow-up with the old session, so report
-    // it undelivered and let the replacement replay the still-pending record.
+    // Accepted by omp (sendMessage returns synchronously). A generation
+    // replaced while omp was accepting it may have lost the follow-up with the
+    // old session, so report it undelivered and replay the still-pending record.
     return generationIsLive(owner);
   }
 
-  // omp consumed a main follow-up: an idle main at before_agent_start, a
-  // streaming main at the user message_start that joins the running run.
+  // omp consumed a main follow-up at its custom message_start.
   function consumeWake(owner: SessionGeneration, text: string): void {
     for (const [token, wake] of owner.unconsumedWakes) {
       if (wake.content !== text) continue;
@@ -1019,12 +1017,9 @@ export default function (pi: ExtensionAPI) {
     return result;
   }
 
-  pi.on?.("before_agent_start", (event) => {
-    consumeWake(generation, String((event as { prompt?: unknown })?.prompt ?? ""));
-  });
-  pi.on?.("message_start", (event) => {
-    const message = (event as { message?: { role?: unknown; content?: unknown } })?.message;
-    if (!message || message.role !== "user") return;
+  pi.on?.("message_start", (event: { message?: { role?: unknown; customType?: unknown; content?: unknown } }) => {
+    const message = event?.message;
+    if (!message || message.role !== "custom" || message.customType !== "firstmate-watcher-wake") return;
     consumeWake(generation, userMessageText(message.content));
   });
 

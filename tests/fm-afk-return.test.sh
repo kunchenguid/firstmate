@@ -307,14 +307,16 @@ test_away_reentry_refuses_pending_return_gate() {
 }
 
 test_return_is_mode_agnostic_for_quiet_mode() {
-  # kunchenguid/firstmate#2356's /quiet off calls this exact script, unchanged
-  # - it must behave identically whether state/.afk declares "away" or
-  # "quiet", since return_guard/return_reconcile only ever test presence.
+  # Quiet is attended: ordinary read entrypoints must not force an away return.
+  # Explicit /quiet off still runs the shared shutdown and catch-up lifecycle.
   local dir out
   dir="$TMP_ROOT/quiet-mode-return"
   install_runner "$dir"
   printf 'quiet\n%s\n' "$(date +%s)" > "$dir/home/state/.afk"
   : > "$dir/home/state/.fake-drain"
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$dir/bin/fm-afk-return.sh" guard \
+    || fail "quiet mode blocked ordinary attended work"
+  [ -e "$dir/home/state/.afk" ] || fail "the read-only guard cleared quiet mode"
 
   out=$(run_return "$dir" begin) || fail "return did not succeed cleanly against a quiet-mode flag: $out"
   assert_contains "$out" 'catch-up clear' "quiet-mode return did not announce ordinary work may proceed"

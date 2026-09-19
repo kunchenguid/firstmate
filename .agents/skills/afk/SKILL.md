@@ -2,7 +2,7 @@
 name: afk
 description: >-
   Enter the away posture when the captain invokes /afk, says they are going afk, `state/.afk-contract` or `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
-  It reads the captain's away words back as a mandate, writes the durable away-posture record after their go, announces hold-for-return only at entry, keeps the one supervision session running in the away posture (no daemon on Pi; the daemon still delivers batched digests on the other harnesses for now), and on the first unmarked message renders the return brief from durable records before ordinary work resumes.
+  It reads the captain's away words back as a mandate, writes the durable away-posture record after their go, announces hold-for-return only at entry, keeps the one supervision session running in the away posture (no daemon on Pi or omp; the daemon still delivers batched digests on the other harnesses for now), and on the first unmarked message renders the return brief from durable records before ordinary work resumes.
 user-invocable: true
 metadata:
   internal: true
@@ -39,18 +39,19 @@ Hold-for-return is the default and the only reach profile this release records: 
    With no words, run `propose` and `confirm` back to back; the announcement is the same.
    Re-invoking `/afk` while already away with no new words is a refresh and leaves the standing record untouched; new words replace the mandate after the same read-back, preserve the original session entry, and archive the superseded mandate for the return brief.
 4. **Per harness, after the record exists:**
-   - **Pi and pi-signed**: stop here.
-     The away daemon is no longer launched on Pi; the ordinary supervision session (`docs/pi-supervision-branch.md`) keeps running with the record present, and `bin/fm-afk-launch.sh start` refuses on these harnesses.
+   - **Pi, pi-signed, and omp**: stop here.
+     The away daemon is no longer launched on Pi or omp; the ordinary supervision session keeps running with the record present, and away-mode `bin/fm-afk-launch.sh start` refuses on these harnesses.
+     Quiet entry and its durable chat-persistence rule are owned by the `quiet` skill, not the away-record flow.
    - **Harness WITH a native in-pane tracked-background tool** (claude's background bash, grok's background tool): run `bin/fm-afk-launch.sh start-native`, then run `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` through that native tool.
      This is a deliberate no-separate-terminal exception because the harness-hosted job creates no terminal or layout mutation, and a shell launcher cannot invoke a harness-native background tool.
      If the native launch fails, run `bin/fm-afk-launch.sh stop` to roll back the prepared lifecycle.
      Do not wrap it in `nohup ... &` (Codex/herdr can reap fire-and-forget shell children after a tool call returns).
-   - **Every other harness** (codex, opencode, omp, kimi, cursor): run `bin/fm-afk-launch.sh start`.
+   - **Every other harness** (codex, opencode, kimi, cursor): run `bin/fm-afk-launch.sh start`.
      It is the single owner of the daemon terminal: it creates a NON-VISIBLE tracked terminal for the current backend and passes the captain pane in as `FM_SUPERVISOR_TARGET` so the daemon injects into the captain, not its own new pane (docs/herdr-backend.md "Away-mode supervisor support").
    Both daemon paths require the already-confirmed record and share `bin/fm-afk-start.sh` as the daemon entry.
    The daemon is **presence-gated**: it injects escalations only while `state/.afk` exists, and stays quiet otherwise.
 5. **Do not separately arm `fm-watch.sh` where the daemon runs.** The daemon manages the watcher as its child; the singleton lock no-ops a stray arm harmlessly.
-   On Pi nothing changes about arming: the supervision session's own cycle continues.
+   On Pi and omp nothing changes about arming: the supervision session's own cycle continues.
 
 ## While away
 
@@ -77,7 +78,7 @@ No `/back` is needed. The first genuine message is the return signal:
 - Re-invoking `/afk` while already away -> stay away (refresh); this does **not** trigger an exit.
 
 Bias ambiguous cases toward exit: a present captain beats token savings, and a false exit is self-correcting (the captain re-runs `/afk`).
-When the captain wants this same token-saving supervision while staying present and chatting - ordinary messages should NOT exit it - that is `/quiet` (kunchenguid/firstmate#2356), not `/afk`.
+For supervision while the captain stays present and chats, follow the [quiet skill](../quiet/SKILL.md).
 
 ## Orthogonal to approval authority
 
@@ -94,7 +95,7 @@ This release records clauses and does not execute them.
 
 ## The daemon, where it still runs
 
-On the harnesses that still launch the daemon (every verified harness except Pi and pi-signed), the mechanics below are unchanged.
+On the harnesses that still launch the daemon (every verified harness except Pi, pi-signed, and omp), the mechanics below are unchanged.
 
 ### Operational prefix contract
 
@@ -153,7 +154,7 @@ The daemon wraps `fm-watch.sh`, runs the watcher as a child, presents every dura
 It self-handles the routine majority without consuming a firstmate turn.
 Captain-relevant events, plus a bounded recheck of a declared external wait that is still declared, escalate to firstmate's context as one pre-read, single-line, batched digest.
 The captain-relevant verb set, declared-wait vocabulary, status-span classifier, and presentation-marker contract live in shared `bin/fm-classify-lib.sh`, while each supervisor owns its routing and fleet scan as a consumer of that policy.
-While `state/.afk` exists the daemon owns the watcher, so the watcher reverts to one-shot and lets the daemon do the triage - the two never run their triage at the same time.
+`bin/fm-watch.sh` owns the one-shot handoff to daemon triage; the `quiet` skill owns extension-supervised quiet mode.
 
 Classify each wake this way:
 

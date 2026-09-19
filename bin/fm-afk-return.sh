@@ -282,7 +282,9 @@ catchup_summary() {
 
 return_guard() {
   local reasons
-  if [ -e "$STATE/.afk" ] || fm_afk_contract_present "$STATE"; then
+  # Only exact quiet is attended (fm_afk_mode); keep this guard free of wake-lib's mkdir side effect.
+  if fm_afk_contract_present "$STATE" \
+    || { [ -e "$STATE/.afk" ] && [ "$(head -n 1 "$STATE/.afk" 2>/dev/null)" != quiet ]; }; then
     printf 'fm-afk-return: away mode is still active; run bin/fm-afk-return.sh before ordinary captain work\n' >&2
     return 3
   fi
@@ -328,7 +330,8 @@ health_snapshot() {  # <evidence-file>
       lines="GAP: watcher downtime was detected during the away window (recovery marker present)"
     fi
   fi
-  if [ -e "$STATE/.afk" ] && ! fm_afk_daemon_owns_supervision "$STATE"; then
+  if [ -e "$STATE/.afk" ] && ! fm_afk_daemon_owns_supervision "$STATE" \
+    && ! { [ "$(fm_afk_mode "$STATE")" = quiet ] && fm_extension_owns_supervision "$STATE" "$FM_ROOT"; }; then
     lines="$lines
 GAP: the away daemon was not running at return (the away flag stood with no live daemon)"
   fi

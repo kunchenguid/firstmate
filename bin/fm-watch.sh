@@ -257,9 +257,9 @@ TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task
 # provably-working stale past the threshold, or anything unknown) is written to
 # the durable queue and exits. That wakes the LLM through the background-task
 # completion. The same classifier
-# (fm-classify-lib.sh) backs the away-mode daemon; while state/.afk exists the
-# daemon owns triage, so this watcher reverts to one-shot (enqueue + exit on every
-# wake) and never double-triages - and never runs the costly provably-working read.
+# (fm-classify-lib.sh) backs the away-mode daemon; in a daemon-owned posture
+# the watcher reverts to one-shot (enqueue + exit on every wake), never
+# double-triages, and never runs the costly provably-working read.
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
@@ -312,11 +312,15 @@ _event_cap_key=""
 _event_cap_ok=0
 _event_cap_fails=0
 
-# afk_present: 0 while the away-mode flag exists. When set, the daemon wraps this
-# watcher and owns triage, so the watcher must behave one-shot (enqueue + exit on
-# every wake) and let the daemon classify - never absorb here, or the daemon's
-# digest/injection layer would never see the wake.
-afk_present() { [ -e "$STATE/.afk" ]; }
+# A daemon-owned posture hands every wake to the daemon for triage.
+# Extension-owned quiet mode retains the ordinary watcher suppression policy.
+afk_present() {
+  [ -e "$STATE/.afk" ] || return 1
+  if [ "$(fm_afk_mode "$STATE")" = quiet ] && fm_extension_owns_supervision "$STATE" "$FM_ROOT"; then
+    return 1
+  fi
+  return 0
+}
 
 # afk_record_present: 0 while the away-posture record exists (the captain is
 # away, in either supervision shape). While it exists an item held for the

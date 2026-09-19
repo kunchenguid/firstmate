@@ -206,8 +206,14 @@ function offerEligible(offer: BranchDispatchOffer): boolean {
   return offer.eligible === true;
 }
 
-function afkActive(): boolean {
-  return existsSync(afkFlag);
+function deferToAwaySupervision(): boolean {
+  if (!existsSync(afkFlag)) return false;
+  if (existsSync(join(state, ".afk-daemon-terminal")) || existsSync(join(state, ".supervise-daemon.lock"))) return true;
+  try {
+    return readFileSync(afkFlag, "utf8").split("\n", 1)[0] !== "quiet";
+  } catch {
+    return true;
+  }
 }
 
 // Pi persists provider failures as ordinary assistant messages and resolves
@@ -1546,7 +1552,7 @@ ${context.command}
     // effects.
     if (!offerEligible(offer)) return;
     if (!generationOwnsLockSync(generation)) return; // cold start pre-lock, secondary session, or shutdown
-    if (afkActive()) return; // the away daemon owns supervision while afk
+    if (deferToAwaySupervision()) return;
     const recoveryProbe = Boolean(
       branchBroken &&
       providerRecovery &&
