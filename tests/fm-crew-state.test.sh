@@ -89,6 +89,10 @@ case "${1:-}" in
     case "${1:-}" in
       status)
         shift
+        if [ -n "${FM_FAKE_STATUS_APPEND_FILE:-}" ] && [ ! -e "${FM_FAKE_STATUS_APPEND_MARKER:-}" ]; then
+          : > "$FM_FAKE_STATUS_APPEND_MARKER"
+          printf '%s\n' "$FM_FAKE_STATUS_APPEND_LINE" >> "$FM_FAKE_STATUS_APPEND_FILE"
+        fi
         if [ "${1:-}" = --run ]; then
           printf '%s\n' "${FM_FAKE_AXI_STATUS_RUN:-}"
           exit "${FM_FAKE_AXI_STATUS_RUN_ERROR:-0}"
@@ -297,6 +301,9 @@ reset_fakes() {
   FM_FAKE_HERDR_PROCESS=agent
   FM_FAKE_HERDR_SHELL_PID=$$
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_STATUS_APPEND_FILE=""
+  FM_FAKE_STATUS_APPEND_MARKER=""
+  FM_FAKE_STATUS_APPEND_LINE=""
   FM_FAKE_DAEMON_DOWN=0
   FM_FAKE_PR_STATE=MERGED
   FM_FAKE_PR_MERGED=true
@@ -314,6 +321,7 @@ reset_fakes() {
   export FM_FAKE_PR_STATE FM_FAKE_PR_MERGED FM_FAKE_PR_READ_FAIL FM_FAKE_PR_READ_LOG FM_FAKE_PR_STATE_AXI
   export FM_FAKE_GLAB_STATE FM_FAKE_GLAB_READ_FAIL FM_FAKE_GLAB_READ_LOG
   export FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
+  export FM_FAKE_STATUS_APPEND_FILE FM_FAKE_STATUS_APPEND_MARKER FM_FAKE_STATUS_APPEND_LINE
 }
 
 seed_retired_pr_receipt() {  # <state> <id> <url>
@@ -502,9 +510,22 @@ run_failed() {  # <branch>
 run:
   id: "01RUN"
   branch: $1
-  status: completed
+  status: failed
   head: "${FM_FAKE_RUN_HEAD:-abc1234}"
   pr: ""
+  findings: none
+outcome: failed
+EOF
+}
+
+run_failed_with_pr() {  # <branch> <pr>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: failed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "$2"
   findings: none
 outcome: failed
 EOF
@@ -754,6 +775,31 @@ test_socket_refusal_over_terminal_run_reports_blocked() {
   assert_contains "$out" "source: status-log" "terminal run cannot suppress socket-failure evidence"
   assert_not_contains "$out" "state: failed" "terminal run state is not emitted over socket-failure evidence"
   pass "socket refusal over a terminal attributed run reports blocked"
+}
+
+# The same override against a POPULATED ledger, the shape rule 2b's precedence
+# block reads. The daemon answers another crew's run, so this crew resolves
+# coarsely from its own newest ledger row at the worktree head - a terminal
+# failed row - while its socket-down blocker is still the log's latest event.
+# An instrument failure must not read as work failure, so the blocker wins.
+test_socket_refusal_outranks_a_ledger_resolved_terminal_run() {
+  reset_fakes
+  local d short out
+  d=$(new_case daemon-socket-refused-ledger)
+  make_repo_on_branch "$d/wt" fm/feat-dql
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-dql.meta" "window=fm:fm-feat-dql" "worktree=$d/wt" "kind=ship"
+  printf 'blocked: no-mistakes daemon socket refused connections\n' \
+    > "$d/state/feat-dql.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-dql ${short}  $(ledger_stamp_minutes_ago 60)"
+  out=$(run_crew_state "$d" feat-dql)
+  assert_contains "$out" "state: blocked" "socket refusal outranks a ledger-resolved terminal run"
+  assert_contains "$out" "source: status-log" "the override remains status-log evidence"
+  assert_contains "$out" "daemon socket down despite attributed run record" "the override names its reason"
+  assert_not_contains "$out" "state: failed" "a dead instrument must not be published as a work failure"
+  pass "socket refusal outranks a ledger-resolved terminal run"
 }
 
 # The socket-down override is evidence about the log's CURRENT tip, not a latch:
@@ -2667,6 +2713,602 @@ test_failed_run_with_no_later_run_still_surfaces() {
   pass "a genuinely failed run with no later run is not hidden"
 }
 
+# --- A terminal FAILED run must be proven current before it is reported -----
+# Regression family for the 2026-08-27 incident: bin/fm-crew-state.sh matched a
+# run against the worktree's current code and so inherited whatever run last sat
+# on that head. A stale FAILED (or CANCELLED, which reads the same) run then
+# outranked every newer record - a declared pause, a terminal done line, and even
+# a live run in flight on the same branch - and that false failure was promoted
+# into a captain-facing terminal outcome. The fixtures below drive each newer
+# record apart from the failed run deliberately, and the two negative cases pin
+# the opposite direction so a real failure is never hidden.
+
+run_cancelled() {  # <branch> [pr]
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: cancelled
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "${2:-}"
+  findings: none
+outcome: cancelled
+EOF
+}
+
+# The ledger's date column is validated as a real local-time stamp, so these
+# fixtures are anchored to the same clock the reader uses rather than to a fixed
+# calendar date.
+ledger_stamp_minutes_ago() {  # <minutes>
+  local epoch
+  epoch=$(( $(date +%s) - $1 * 60 ))
+  date -r "$epoch" '+%Y-%m-%d %H:%M' 2>/dev/null || date -d "@$epoch" '+%Y-%m-%d %H:%M'
+}
+
+# The reported live shape: `axi status` answers this branch's own FAILED run at
+# exactly the worktree head, while the branch's ledger shows a newer run still in
+# flight. The failed row is history; reporting it told the captain that healthy,
+# progressing work had failed.
+# Since f5d7f5f2 (#4476) this is rule 2b's case (c), not case (a): the ledger
+# carries no run id, so a LIVE replacement cannot be proven current here and the
+# honest answer is unknown. The safety properties this case exists to pin are
+# unchanged - the stale failure must not surface, and neither must its PR.
+test_later_active_run_supersedes_failed_reading() {
+  reset_fakes
+  local d short; d=$(new_case stale-failed-later-active)
+  make_repo_on_branch "$d/wt" fm/feat-s1
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s1.meta" "window=fm:fm-feat-s1" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_with_pr fm/feat-s1 https://github.com/o/r/pull/1)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-s1 f0f0f0f0  2026-08-27 13:53
+  failed     fm/feat-s1 ${short}  2026-08-27 12:09
+EOF
+)"
+  local out; out=$(run_crew_state "$d" feat-s1)
+  assert_contains "$out" "state: unknown" "an unprovable live replacement outranks the failed reading as unknown"
+  assert_not_contains "$out" "state: failed" "the superseded failed run must not surface"
+  assert_not_contains "$out" "pull/1" "the stale failed run's pull request must not surface"
+  assert_contains "$out" "replacement run identity unavailable" "the detail names the unprovable replacement"
+  pass "a later active run supersedes a stale failed reading"
+}
+
+# The record's second requested case: failed run, then a LATER SUCCESSFUL run.
+# The completed row's head is not an object in this copy, so the strict
+# attribution bar refuses to bind it. It still proves the failed answer is
+# history. Re-pointed from `done`: that verdict came from the crew's own
+# terminal line, which the reader no longer orders against the run, so the
+# answer it owes is unknown - the stale failure is still not published, and no
+# unprovable success is published in its place.
+test_later_completed_run_leaves_the_failure_unprovable() {
+  reset_fakes
+  local d short; d=$(new_case stale-failed-later-completed)
+  make_repo_on_branch "$d/wt" fm/feat-s2
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2.meta" "window=fm:fm-feat-s2" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2890 merged\n' > "$d/state/feat-s2.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s2)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  completed  fm/feat-s2 f0f0f0f0  $(ledger_stamp_minutes_ago 30)  https://github.com/o/r/pull/2890
+  failed     fm/feat-s2 ${short}  $(ledger_stamp_minutes_ago 60)
+EOF
+)"
+  local out; out=$(run_crew_state "$d" feat-s2)
+  assert_contains "$out" "state: unknown" "an unbindable completed row leaves the current state unproven"
+  assert_not_contains "$out" "state: failed" "the superseded failed run must not surface"
+  assert_not_contains "$out" "state: done" "an unbindable completed row is never published as a success"
+  assert_not_contains "$out" "source: status-log" "the crew's own word is never published as the verdict"
+  pass "a later unbindable completed run leaves the failure unprovable"
+}
+
+# Same ledger, no status log to explain the crew. An unbindable later run is not
+# proof of any current state, but it IS proof the failed answer is history, so
+# the reader says unknown - which keeps ordinary supervision on the crew and
+# never becomes a captain-facing terminal outcome.
+test_unbindable_later_run_reports_unknown_not_failed() {
+  reset_fakes
+  local d short; d=$(new_case stale-failed-unbindable-later)
+  make_repo_on_branch "$d/wt" fm/feat-s2b
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2b.meta" "window=fm:fm-feat-s2b" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s2b)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  completed  fm/feat-s2b f0f0f0f0  2026-08-27 15:20
+  failed     fm/feat-s2b ${short}  2026-08-27 12:09
+EOF
+)"
+  local out; out=$(run_crew_state "$d" feat-s2b)
+  assert_contains "$out" "state: unknown" "an unbindable later run leaves the current state unproven"
+  assert_not_contains "$out" "state: failed" "the superseded failed run must not surface"
+  assert_contains "$out" "cannot be bound" "the detail names the unbindable ledger row, not a proven newer run"
+  pass "an unbindable later run reports unknown rather than a stale failure"
+}
+
+# A newer terminal row can be just as distinct as a newer active row. Its
+# terminal status must not make the older attributed run look current, and an
+# unbindable row supplies no replacement state or PR identity.
+test_unbindable_later_terminal_run_reports_unknown() {
+  reset_fakes
+  local d short; d=$(new_case stale-failed-unbindable-terminal)
+  make_repo_on_branch "$d/wt" fm/feat-s2c
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2c.meta" "window=fm:fm-feat-s2c" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_with_pr fm/feat-s2c https://github.com/o/r/pull/1)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  failed     fm/feat-s2c f0f0f0f0  2026-08-27 15:20  https://github.com/o/r/pull/2
+  failed     fm/feat-s2c ${short}  2026-08-27 12:09  https://github.com/o/r/pull/1
+EOF
+)"
+  local out; out=$(run_crew_state "$d" feat-s2c)
+  assert_contains "$out" "state: unknown" "a distinct unbindable terminal row leaves the current state unproven"
+  assert_not_contains "$out" "state: failed" "the older attributed failure must not surface"
+  assert_not_contains "$out" "pr=" "an unknown state must not publish either run's pull request"
+  pass "a distinct unbindable terminal row supersedes an older failure"
+}
+
+test_same_head_terminal_rerun_publishes_newest_pr() {
+  reset_fakes
+  local d short; d=$(new_case same-head-terminal-rerun)
+  make_repo_on_branch "$d/wt" fm/feat-s2d
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2d.meta" "window=fm:fm-feat-s2d" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_with_pr fm/feat-s2d https://github.com/o/r/pull/1)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  failed     fm/feat-s2d ${short}  2026-08-27 15:20  https://github.com/o/r/pull/2
+  failed     fm/feat-s2d ${short}  2026-08-27 12:09  https://github.com/o/r/pull/1
+EOF
+)"
+  local out; out=$(run_crew_state "$d" feat-s2d)
+  assert_contains "$out" "state: failed" "the newest same-head terminal run remains failed"
+  assert_contains "$out" "pr=https://github.com/o/r/pull/2" "the newest same-head run publishes its own pull request"
+  assert_not_contains "$out" "pull/1" "the stale same-head run's pull request must not surface"
+  pass "a same-head terminal rerun publishes the newest pull request"
+}
+
+# The ledger is a 200-row window, so a long-inactive crew - exactly what
+# bin/fm-inactive-reconcile.sh scans - routinely has no row for its branch at
+# all. An absent row is absence of contradicting evidence, not disproof, so the
+# reading keeps the pull request from the same record that supplied its state:
+# telling the captain the work is done while naming nothing to look at is its
+# own false report.
+test_terminal_reading_keeps_its_pr_when_the_ledger_has_no_row() {
+  reset_fakes
+  local d out; d=$(new_case terminal-pr-no-ledger-row)
+  make_repo_on_branch "$d/wt" fm/feat-s2m
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2m.meta" "window=fm:fm-feat-s2m" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed_with_pr fm/feat-s2m https://github.com/o/r/pull/4444)"
+  FM_FAKE_RUNS_LIST=""
+  out=$(run_crew_state "$d" feat-s2m)
+  assert_contains "$out" "state: done" "the attributed terminal reading still stands"
+  assert_contains "$out" "pr=https://github.com/o/r/pull/4444" \
+    "an absent ledger row does not withhold the delivered pull request"
+  assert_not_contains "$out" "state: unknown" "no ledger row means no contradiction"
+  pass "a terminal reading keeps its pull request when the ledger has no row"
+}
+
+# The run id is a FIELD of the published line, not a word inside a clause. The
+# precedence verdicts splice the reading's own detail into their sentences, so
+# the id must be appended once at the end - otherwise the ' · ' field separator
+# lands mid-clause and splits one sentence across two apparent fields. Only the
+# inventory path assigns a run id, so this needs a real overview: a plain status
+# TOON leaves the id empty and the defect invisible.
+test_precedence_verdict_reads_as_one_sentence_with_the_run_id_last() {
+  reset_fakes
+  local d out; d=$(new_case precedence-run-id-field)
+  make_repo_on_branch "$d/wt" fm/feat-s2n
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2n.meta" "window=fm:fm-feat-s2n" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  01RUN,fm/feat-s2n,failed,${FM_FAKE_RUN_HEAD},\"\""
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s2n)"
+  FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s2n f0f0f0f0  $(ledger_stamp_minutes_ago 30)"
+  out=$(run_crew_state "$d" feat-s2n)
+  assert_contains "$out" "state: unknown" "an unbindable newest row still reads unknown"
+  assert_contains "$out" "cannot be bound to the run failed; current state not provable here" \
+    "the verdict's sentence is not split by the run-id field"
+  assert_contains "$out" "not provable here · run: 01RUN" "the run id is the line's last field"
+  pass "a precedence verdict reads as one sentence with the run id last"
+}
+
+# A verdict taken from the ledger row must not be labelled with the attributed
+# run's identity. This arm fires only when the newest row is NOT provably the
+# attributed run - here it carries a different pull request at the same head -
+# so the verdict word and the pull request both come from that row, and the
+# attributed reading is named only as the reading that row could not be bound
+# to: an unbindable row does not prove a second, earlier run.
+test_ledger_sourced_verdict_never_names_the_attributed_run_as_its_own() {
+  reset_fakes
+  local d short out; d=$(new_case ledger-verdict-attribution)
+  make_repo_on_branch "$d/wt" fm/feat-s2k
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2k.meta" "window=fm:fm-feat-s2k" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_with_pr fm/feat-s2k https://github.com/o/r/pull/1111)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  failed     fm/feat-s2k ${short}  $(ledger_stamp_minutes_ago 30)  https://github.com/o/r/pull/2222
+  failed     fm/feat-s2k ${short}  $(ledger_stamp_minutes_ago 90)  https://github.com/o/r/pull/1111
+EOF
+)"
+  out=$(run_crew_state "$d" feat-s2k)
+  assert_contains "$out" "pr=https://github.com/o/r/pull/2222" "the pull request comes from the newest ledger row"
+  assert_not_contains "$out" "pull/1111" "the attributed run's pull request must not surface"
+  assert_contains "$out" "run failed from the ledger's row for this worktree" \
+    "the verdict names the row it came from"
+  assert_contains "$out" "the run failed reading could not be bound to it" \
+    "the attributed reading is named only as the one that row could not be bound to"
+  assert_not_contains "$out" "(earlier " \
+    "an unbindable ledger row must not assert a second, earlier run"
+  assert_not_contains "$out" "run failed · pr=" \
+    "a ledger-sourced verdict never stands bare beside another record's pull request"
+  pass "a ledger-sourced verdict never names the attributed run as its own"
+}
+
+# A record cannot supersede itself. On the coarse path the emitted reading is
+# already derived from the branch's newest ledger row - the same single row the
+# supersession arm would compare it against - so the reader must publish the
+# reading plainly, with no earlier clause claiming a supersession that never
+# happened.
+test_coarse_terminal_reading_claims_no_supersession() {
+  reset_fakes
+  local d short out; d=$(new_case coarse-no-self-supersession)
+  make_repo_on_branch "$d/wt" fm/feat-s2l
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2l.meta" "window=fm:fm-feat-s2l" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  $(ledger_stamp_minutes_ago 10)
+  cancelled  fm/feat-s2l ${short}  $(ledger_stamp_minutes_ago 30)  https://github.com/o/r/pull/3333
+EOF
+)"
+  out=$(run_crew_state "$d" feat-s2l)
+  assert_contains "$out" "state: failed" "the coarse terminal row still reads failed"
+  assert_contains "$out" "run cancelled" "the coarse reading keeps its own detail"
+  assert_not_contains "$out" "(earlier " "one ledger row must not be reported as superseding itself"
+  assert_contains "$out" "pr=https://github.com/o/r/pull/3333" "the coarse path keeps its own terminal pull request"
+  pass "a coarse terminal reading claims no supersession"
+}
+
+# Both readers of the `no-mistakes runs` listing must agree on when the ledger is
+# unreadable: a row the strict reader rejects must not still supply newest-row
+# evidence that unbinds the attributed run.
+test_malformed_ledger_row_supplies_no_newest_evidence() {
+  reset_fakes
+  local d short; d=$(new_case malformed-ledger-row)
+  make_repo_on_branch "$d/wt" fm/feat-s2i
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2i.meta" "window=fm:fm-feat-s2i" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s2i)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s2i ${short}  $(ledger_stamp_minutes_ago 60)  https://github.com/o/r/pull/3 stray"
+  local out; out=$(run_crew_state "$d" feat-s2i)
+  assert_contains "$out" "state: failed" "an unreadable ledger row never unbinds the attributed run"
+  assert_contains "$out" "source: run-step" "the attributed failure stays run-step sourced"
+  assert_not_contains "$out" "current state not provable here" "a rejected row supplies no supersession"
+  assert_not_contains "$out" "pull/3" "a rejected row publishes no pull request"
+  pass "a malformed ledger row supplies no newest-row evidence"
+}
+
+# Neither side's abbreviation length is fixed: the ledger may print a longer sha
+# than the run record's own head, and the current run must still bind.
+test_longer_ledger_sha_still_binds_the_current_run() {
+  reset_fakes
+  local d full url; d=$(new_case longer-ledger-sha)
+  url=https://github.com/o/r/pull/7
+  make_repo_on_branch "$d/wt" fm/feat-s2j
+  full=$(git -C "$d/wt" rev-parse HEAD)
+  FM_FAKE_RUN_HEAD=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  export FM_FAKE_RUN_HEAD
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2j.meta" "window=fm:fm-feat-s2j" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed_with_pr fm/feat-s2j "$url")"
+  FM_FAKE_RUNS_LIST="  completed  fm/feat-s2j ${full}  $(ledger_stamp_minutes_ago 60)  $url"
+  local out; out=$(FM_CREW_STATE_NO_FORGE=1 run_crew_state "$d" feat-s2j)
+  assert_contains "$out" "state: done" "the current run still reads done"
+  assert_contains "$out" "pr=$url" "a longer ledger sha still binds the run and keeps its pull request"
+  pass "a ledger sha longer than the run head still binds the current run"
+}
+
+test_foreign_status_never_hides_coarse_terminal_pr() {
+  reset_fakes
+  local d short; d=$(new_case foreign-status-terminal-pr)
+  make_repo_on_branch "$d/wt" fm/feat-s2e
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2e.meta" "window=fm:fm-feat-s2e" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed_with_pr fm/other-crew https://github.com/o/r/pull/1)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  failed     fm/other-crew ${short}  2026-08-27 15:25  https://github.com/o/r/pull/1
+  failed     fm/feat-s2e ${short}  2026-08-27 15:20  https://github.com/o/r/pull/2
+EOF
+)"
+  local out; out=$(run_crew_state "$d" feat-s2e)
+  assert_contains "$out" "state: failed" "the current branch's coarse terminal run remains failed"
+  assert_contains "$out" "pr=https://github.com/o/r/pull/2" "the coarse terminal row publishes its own pull request"
+  assert_not_contains "$out" "pull/1" "the foreign branch's pull request must not surface"
+  pass "a foreign status answer cannot hide the coarse terminal pull request"
+}
+
+test_stale_passed_run_publishes_no_pr_for_active_rerun() {
+  reset_fakes
+  local d short; d=$(new_case stale-passed-active-rerun)
+  make_repo_on_branch "$d/wt" fm/feat-s2f
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2f.meta" "window=fm:fm-feat-s2f" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-s2f)"
+  FM_FAKE_RUNS_LIST="  running    fm/feat-s2f ${short}  2026-08-27 15:20"
+  local out; out=$(run_crew_state "$d" feat-s2f)
+  # Since f5d7f5f2 (#4476) the unprovable live rerun reads unknown (case (c)).
+  assert_contains "$out" "state: unknown" "an unprovable live rerun outranks the passed reading as unknown"
+  assert_not_contains "$out" "pr=" "a stale passed reading publishes no pull request for an active rerun"
+  assert_not_contains "$out" "pull/1" "the stale passed run's pull request must not surface"
+  pass "a stale passed run publishes no pull request for an active rerun"
+}
+
+test_cancelled_run_publishes_no_pr_for_active_rerun() {
+  reset_fakes
+  local d short; d=$(new_case stale-cancelled-active-rerun)
+  make_repo_on_branch "$d/wt" fm/feat-s2g
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2g.meta" "window=fm:fm-feat-s2g" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-s2g https://github.com/o/r/pull/1)"
+  FM_FAKE_RUNS_LIST="  running    fm/feat-s2g ${short}  2026-08-27 15:20"
+  local out; out=$(run_crew_state "$d" feat-s2g)
+  # Since f5d7f5f2 (#4476) the unprovable live rerun reads unknown (case (c)).
+  assert_contains "$out" "state: unknown" "an unprovable live rerun outranks the cancelled reading as unknown"
+  assert_not_contains "$out" "pr=" "a stale cancelled reading publishes no pull request for an active rerun"
+  assert_not_contains "$out" "pull/1" "the stale cancelled run's pull request must not surface"
+  pass "a stale cancelled run publishes no pull request for an active rerun"
+}
+
+# A terminal DONE reading is exactly as stale-able as a terminal failed one:
+# head identity binds whatever run last sat on this head, and
+# bin/fm-inactive-reconcile.sh promotes either reading straight into a
+# captain-facing terminal outcome. A false success is the worse of the two,
+# because nobody goes looking, so a newer branch row the reader cannot bind to
+# this run must leave the success unprovable rather than published.
+test_contradicted_done_reading_is_never_published_as_success() {
+  reset_fakes
+  local d; d=$(new_case stale-done-newer-row)
+  make_repo_on_branch "$d/wt" fm/feat-s2h
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s2h.meta" "window=fm:fm-feat-s2h" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-s2h)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s2h f0f0f0f0  $(ledger_stamp_minutes_ago 60)"
+  local out; out=$(run_crew_state "$d" feat-s2h)
+  assert_contains "$out" "state: unknown" "an unbindable newer row leaves the done reading unprovable"
+  assert_not_contains "$out" "state: done" "a contradicted terminal success is never published"
+  assert_contains "$out" "current state not provable here" "the reader answers honestly instead of guessing"
+  assert_not_contains "$out" "pull/1" "the stale success publishes no pull request"
+  pass "a contradicted done reading is never published as a success"
+}
+
+# The original title case: the crew declared a bounded external wait after a
+# failed reading the ledger cannot bind to this run, and that stale failure was
+# reported as the crew's current state, so the pane kept producing wedge-suspect
+# wakes for healthy work. The ledger row here sits at a head this worktree does
+# not carry, so the failure is not provably current. Re-pointed from the crew's
+# own word winning: the reader no longer orders the status log against the run
+# at all, so the answer it owes here is an honest unknown - the false failure is
+# still gone, and no crew word is minted as a verdict in its place.
+test_later_declared_pause_leaves_the_failure_unprovable() {
+  reset_fakes
+  local d; d=$(new_case stale-failed-later-pause)
+  make_repo_on_branch "$d/wt" fm/feat-s3
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s3.meta" "window=fm:fm-feat-s3" "worktree=$d/wt" "kind=ship"
+  printf 'paused: polling the CI run myself\n' > "$d/state/feat-s3.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s3)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s3 f0f0f0f0  $(ledger_stamp_minutes_ago 60)"
+  local out; out=$(run_crew_state "$d" feat-s3)
+  assert_contains "$out" "state: unknown" "an unbindable failed row is never reported as the current state"
+  assert_not_contains "$out" "state: failed" "the stale failure must not be published as current"
+  assert_not_contains "$out" "source: status-log" "the crew's own word is never published as the verdict"
+  assert_contains "$out" "current state not provable here" "the reader answers honestly instead of guessing"
+  pass "a stale failed reading behind a declared pause reads unknown"
+}
+
+# CANCELLED reads FAILED through the same inheritance path, so it inherits the
+# same defect and needs the same cover.
+test_later_declared_pause_leaves_the_cancelled_reading_unprovable() {
+  reset_fakes
+  local d; d=$(new_case stale-cancelled-later-pause)
+  make_repo_on_branch "$d/wt" fm/feat-s4
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s4.meta" "window=fm:fm-feat-s4" "worktree=$d/wt" "kind=ship"
+  printf 'paused: waiting on the upstream release\n' > "$d/state/feat-s4.status"
+  FM_FAKE_AXI_STATUS="$(run_cancelled fm/feat-s4)"
+  FM_FAKE_RUNS_LIST="  cancelled  fm/feat-s4 f0f0f0f0  $(ledger_stamp_minutes_ago 60)"
+  local out; out=$(run_crew_state "$d" feat-s4)
+  assert_contains "$out" "state: unknown" "an unbindable cancelled row is never reported as the current state"
+  assert_not_contains "$out" "source: status-log" "the crew's own word is never published as the verdict"
+  pass "a stale cancelled reading behind a declared pause reads unknown"
+}
+
+# The record's other masked case: an agent that was stopped after its PR merged
+# left a terminal done line the failed run outranked. Re-pointed for the same
+# reason as the pause case - and this direction matters most, because publishing
+# the crew's `done:` over a failed run would be a captain-facing false success.
+test_later_declared_done_leaves_the_failure_unprovable() {
+  reset_fakes
+  local d; d=$(new_case stale-failed-later-done)
+  make_repo_on_branch "$d/wt" fm/feat-s5
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s5.meta" "window=fm:fm-feat-s5" "worktree=$d/wt" "kind=ship"
+  printf 'done: PR https://github.com/o/r/pull/2890 merged\n' > "$d/state/feat-s5.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s5)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s5 f0f0f0f0  $(ledger_stamp_minutes_ago 60)"
+  local out; out=$(run_crew_state "$d" feat-s5)
+  assert_contains "$out" "state: unknown" "an unbindable failed row is never reported as the current state"
+  assert_not_contains "$out" "state: done" "a crew's own word is never minted as a terminal success"
+  assert_not_contains "$out" "pull/2890" "no pull request is published from a status-log claim"
+  pass "a stale failed reading behind a declared done reads unknown"
+}
+
+# A crew's own word must never be minted as a terminal success over a
+# replacement run that is still validating: the ledger carries no run id, so a
+# live row can never be proven current. Retained after the status-log ordering
+# rules were removed, because it pins the answer the reader owes for a live row
+# it cannot bind - unknown, from neither record.
+test_live_replacement_run_outranks_a_status_log_done() {
+  reset_fakes
+  local d; d=$(new_case live-replacement-done-log)
+  make_repo_on_branch "$d/wt" fm/feat-s5d
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s5d.meta" "window=fm:fm-feat-s5d" "worktree=$d/wt" "kind=ship"
+  printf 'done: implementation complete\n' > "$d/state/feat-s5d.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s5d)"
+  FM_FAKE_RUNS_LIST="  running    fm/feat-s5d f0f0f0f0  $(ledger_stamp_minutes_ago 60)"
+  local out; out=$(run_crew_state "$d" feat-s5d)
+  assert_not_contains "$out" "state: done" "a crew's word never outranks a live replacement run"
+  assert_not_contains "$out" "source: status-log" "no status-log verdict is published against a live row"
+  assert_contains "$out" "current state not provable here" "an unbindable live replacement reads unknown"
+  pass "a live replacement run outranks a status-log done"
+}
+
+# When the ledger row IS the attributed run, no self-declared pause may outrank
+# its failure, whenever the crew wrote it. The reader no longer orders the log
+# against the run at all, so this holds for a declaration written before, during
+# or after the run.
+test_mid_run_pause_does_not_mask_current_run_failure() {
+  reset_fakes
+  local d short; d=$(new_case mid-run-pause-current-failure)
+  make_repo_on_branch "$d/wt" fm/feat-s5b
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s5b.meta" "window=fm:fm-feat-s5b" "worktree=$d/wt" "kind=ship"
+  printf 'paused: polling the CI run myself\n' > "$d/state/feat-s5b.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s5b)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s5b ${short}  $(ledger_stamp_minutes_ago 60)"
+  local out; out=$(run_crew_state "$d" feat-s5b)
+  assert_contains "$out" "state: failed" "a mid-run pause cannot mask the current run's failure"
+  assert_contains "$out" "source: run-step" "the failure stays run-step sourced"
+  assert_not_contains "$out" "state: paused" "the declaration never becomes the reported state"
+  pass "a mid-run pause does not mask the current run's failure"
+}
+
+# The routine ship shape in the same AGREES=1 shape: the crew reports its
+# implementation done while the run is still going, the run then fails, and the
+# captain must still be told the run failed. Its sibling below fixes the same
+# shape with the declaration written before the run; the reader no longer
+# distinguishes the two, and must answer failed for both.
+test_mid_run_done_log_does_not_mask_current_run_failure() {
+  reset_fakes
+  local d; d=$(new_case mid-run-done-current-failure)
+  make_repo_on_branch "$d/wt" fm/feat-s5c
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s5c.meta" "window=fm:fm-feat-s5c" "worktree=$d/wt" "kind=ship"
+  printf 'done: implementation complete\n' > "$d/state/feat-s5c.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s5c)"
+  local short; short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s5c ${short}  $(ledger_stamp_minutes_ago 60)"
+  local out; out=$(run_crew_state "$d" feat-s5c)
+  assert_contains "$out" "state: failed" "a mid-run done line cannot mask the current run's failure"
+  assert_contains "$out" "source: run-step" "the failure stays run-step sourced"
+  assert_not_contains "$out" "state: done" "the declaration never becomes the reported state"
+  pass "a mid-run done line does not mask the current run's failure"
+}
+
+# Opposite direction 1: a done line the crew appended BEFORE its validation run
+# even started must never convert a real failure into a false success. This is
+# the routine ship shape - the crew reports its implementation done, firstmate
+# starts the run, the run fails - and the ledger row is that very run.
+test_pre_run_done_log_does_not_mask_failed_run() {
+  reset_fakes
+  local d short; d=$(new_case pre-run-done-log)
+  make_repo_on_branch "$d/wt" fm/feat-s6
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s6.meta" "window=fm:fm-feat-s6" "worktree=$d/wt" "kind=ship"
+  printf 'done: implementation complete\n' > "$d/state/feat-s6.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s6)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s6 ${short}  $(ledger_stamp_minutes_ago 60)"
+  local out; out=$(run_crew_state "$d" feat-s6)
+  assert_contains "$out" "state: failed" "a done line older than the run never masks the failure"
+  assert_contains "$out" "source: run-step" "the failure stays run-step sourced"
+  assert_not_contains "$out" "state: done" "an older declaration never becomes the reported state"
+  pass "a pre-run done line does not mask a failed run"
+}
+
+# Opposite direction 2: with no ledger row to order the records against, there is
+# no evidence the status line is newer, so the failed run stands.
+test_failed_run_without_ordering_evidence_still_surfaces() {
+  reset_fakes
+  local d; d=$(new_case failed-no-ordering)
+  make_repo_on_branch "$d/wt" fm/feat-s7
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s7.meta" "window=fm:fm-feat-s7" "worktree=$d/wt" "kind=ship"
+  printf 'paused: waiting on something\n' > "$d/state/feat-s7.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s7)"
+  local out; out=$(run_crew_state "$d" feat-s7)
+  assert_contains "$out" "state: failed" "an unorderable pause never masks the failure"
+  assert_contains "$out" "source: run-step" "the failure stays run-step sourced"
+  pass "a failed run with no ordering evidence still surfaces"
+}
+
+# Opposite direction 3: a stale needs-decision line is exactly the log staleness
+# this reader exists to correct, so it must never supersede a failed run.
+test_needs_decision_log_never_supersedes_failed_run() {
+  reset_fakes
+  local d short; d=$(new_case needs-decision-vs-failed)
+  make_repo_on_branch "$d/wt" fm/feat-s8
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s8.meta" "window=fm:fm-feat-s8" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: pick A or B\n' > "$d/state/feat-s8.status"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s8)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s8 ${short}  $(ledger_stamp_minutes_ago 60)"
+  local out; out=$(run_crew_state "$d" feat-s8)
+  assert_contains "$out" "state: failed" "a needs-decision line never supersedes a failed run"
+  assert_contains "$out" "source: run-step" "the failure stays run-step sourced"
+  pass "a needs-decision log never supersedes a failed run"
+}
+
+# The terminal outcome's PR identity must come from the run that produced the
+# state. A failed run that never reached its pr step opened no pull request, so
+# the reader must not lend it one.
+test_failed_run_detail_carries_no_pr_it_never_opened() {
+  reset_fakes
+  local d short; d=$(new_case failed-no-pr)
+  make_repo_on_branch "$d/wt" fm/feat-s9
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s9.meta" "window=fm:fm-feat-s9" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-s9)"
+  FM_FAKE_RUNS_LIST="  failed     fm/feat-s9 ${short}  2026-08-27 12:09"
+  local out; out=$(run_crew_state "$d" feat-s9)
+  assert_contains "$out" "state: failed" "the genuine failure still reports failed"
+  assert_not_contains "$out" "pr=" "a run that opened no pull request advertises none"
+  pass "a failed run advertises no pull request it never opened"
+}
+
+# A terminal run that DID open a pull request publishes that identity, so the
+# terminal-outcome record can take its PR from the same source as its state.
+test_terminal_run_detail_carries_its_own_pr() {
+  reset_fakes
+  local d short; d=$(new_case terminal-run-pr)
+  make_repo_on_branch "$d/wt" fm/feat-s10
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-s10.meta" "window=fm:fm-feat-s10" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-s10)"
+  FM_FAKE_RUNS_LIST="  completed  fm/feat-s10 ${short}  2026-08-27 15:20  https://github.com/o/r/pull/1"
+  local out; out=$(run_crew_state "$d" feat-s10)
+  assert_contains "$out" "state: done" "a passed run reports done"
+  assert_contains "$out" "pr=https://github.com/o/r/pull/1" "the run publishes the pull request it opened"
+  pass "a terminal run publishes its own pull request identity"
+}
+
 # The coarse runs-list rows: the branch's newest row is ACTIVE at an
 # unresolvable head and the row immediately before it ended at exactly this
 # worktree's head - the ledger proves this is this crew's own pipeline-owned
@@ -3367,6 +4009,24 @@ test_newer_failed_run_is_not_hidden_by_older_live_run() {
   pass 'newer failed run remains failed beside an older live run'
 }
 
+# A rerun that starts between the inventory read and the ledger read leaves a
+# live head-matching row the reader has never read and cannot bind to a run id,
+# so the honest answer is unknown, never a working verdict for that run.
+test_live_ledger_row_after_selection_reports_unknown() {
+  make_competing_runs_case rerun-window failed running
+  local d=$TMP_ROOT/rerun-window out short
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01OLD/')"
+  FM_FAKE_AXI_STATUS_RUN="$(run_failed fm/competing | sed 's/01RUN/01NEW/')"
+  FM_FAKE_RUNS_LIST="  running    fm/competing $short 2026-09-14 12:02
+  failed     fm/competing $short 2026-09-14 12:01"
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: unknown' 'an unbindable live replacement is never answered as working'
+  assert_contains "$out" 'current state not provable here' 'the unbindable replacement is named as unprovable'
+  assert_not_contains "$out" 'state: working' 'a run the reader never read cannot report working'
+  pass 'a live ledger row appearing after selection reports unknown'
+}
+
 test_unverifiable_run_selection_reports_unknown() {
   local mode rc=0
   for mode in missing wrong-id wrong-branch wrong-head missing-status malformed-table inventory-error selected-error; do
@@ -3537,6 +4197,7 @@ test_stale_blocked_superseded
 test_daemon_claim_over_live_run_reads_run_alive
 test_socket_refusal_over_stale_fixing_run_reports_blocked
 test_socket_refusal_over_terminal_run_reports_blocked
+test_socket_refusal_outranks_a_ledger_resolved_terminal_run
 test_socket_refusal_override_expires_when_the_crew_moves_on
 test_ordinary_blocked_over_live_run_keeps_plain_superseded
 test_genuine_daemon_down_reports_blocked
@@ -3620,6 +4281,32 @@ test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_pipeline_owned_active_run_beats_superseded_failed_row
 test_failed_run_with_no_later_run_still_surfaces
+test_later_active_run_supersedes_failed_reading
+test_later_completed_run_leaves_the_failure_unprovable
+test_unbindable_later_run_reports_unknown_not_failed
+test_unbindable_later_terminal_run_reports_unknown
+test_same_head_terminal_rerun_publishes_newest_pr
+test_terminal_reading_keeps_its_pr_when_the_ledger_has_no_row
+test_precedence_verdict_reads_as_one_sentence_with_the_run_id_last
+test_ledger_sourced_verdict_never_names_the_attributed_run_as_its_own
+test_coarse_terminal_reading_claims_no_supersession
+test_foreign_status_never_hides_coarse_terminal_pr
+test_stale_passed_run_publishes_no_pr_for_active_rerun
+test_cancelled_run_publishes_no_pr_for_active_rerun
+test_malformed_ledger_row_supplies_no_newest_evidence
+test_longer_ledger_sha_still_binds_the_current_run
+test_later_declared_pause_leaves_the_failure_unprovable
+test_later_declared_pause_leaves_the_cancelled_reading_unprovable
+test_contradicted_done_reading_is_never_published_as_success
+test_later_declared_done_leaves_the_failure_unprovable
+test_live_replacement_run_outranks_a_status_log_done
+test_mid_run_pause_does_not_mask_current_run_failure
+test_mid_run_done_log_does_not_mask_current_run_failure
+test_pre_run_done_log_does_not_mask_failed_run
+test_failed_run_without_ordering_evidence_still_surfaces
+test_needs_decision_log_never_supersedes_failed_run
+test_failed_run_detail_carries_no_pr_it_never_opened
+test_terminal_run_detail_carries_its_own_pr
 test_coarse_unresolvable_active_row_never_falls_to_older_row
 test_coarse_mismatched_anchor_falls_to_pane_not_older_row
 test_non_pipeline_owned_unresolvable_head_not_attributed
@@ -3653,6 +4340,7 @@ test_historical_inventory_uses_current_status
 test_superseded_cancelled_run_preserves_replacement_gate
 test_competing_live_runs_report_unknown_with_both_ids
 test_newer_failed_run_is_not_hidden_by_older_live_run
+test_live_ledger_row_after_selection_reports_unknown
 test_unverifiable_run_selection_reports_unknown
 test_legacy_conflicting_run_records_report_unknown
 

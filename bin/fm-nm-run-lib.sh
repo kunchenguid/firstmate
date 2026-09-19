@@ -307,6 +307,40 @@ fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
   fm_nm_run_is_active "$1"
 }
 
+# Structural validation for one ledger row, already split into its columns.
+# Both readers of the `no-mistakes runs` listing apply exactly this rule, so a
+# row one of them rejects is never evidence for the other.
+fm_nm_runs_row_valid() {  # <status> <branch> <sha> <day> <clock> <pr> <extra>
+  local st=$1 br=$2 sha=$3 day=$4 clock=$5 pr=$6 extra=$7
+  local year_num month_num day_num max_day
+  [ -n "$st" ] && [ -n "$br" ] && [ -n "$sha" ] && [ -n "$day" ] && [ -n "$clock" ] || return 1
+  [ -z "$extra" ] || return 1
+  case "$st" in *[!a-z_-]*) return 1 ;; esac
+  case "$br" in *[!A-Za-z0-9._/-]*) return 1 ;; esac
+  case "$sha" in *[!A-Fa-f0-9]*) return 1 ;; esac
+  case "$day" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) return 1 ;; esac
+  case "$clock" in [01][0-9]:[0-5][0-9]|2[0-3]:[0-5][0-9]) ;; *) return 1 ;; esac
+  case "$pr" in ''|https://*) ;; *) return 1 ;; esac
+  [ "${#sha}" -ge 7 ] && [ "${#sha}" -le 40 ] || return 1
+  year_num=$((10#${day%%-*}))
+  month_num=${day#*-}; month_num=${month_num%%-*}; month_num=$((10#$month_num))
+  day_num=$((10#${day##*-}))
+  [ "$year_num" -gt 0 ] && [ "$month_num" -ge 1 ] && [ "$month_num" -le 12 ] || return 1
+  case "$month_num" in
+    1|3|5|7|8|10|12) max_day=31 ;;
+    4|6|9|11) max_day=30 ;;
+    2)
+      if (( year_num % 400 == 0 || (year_num % 4 == 0 && year_num % 100 != 0) )); then
+        max_day=29
+      else
+        max_day=28
+      fi
+      ;;
+  esac
+  [ "$day_num" -ge 1 ] && [ "$day_num" -le "$max_day" ] || return 1
+  return 0
+}
+
 # ONE owner for attribution from the pipeline's own runs ledger, replacing a
 # per-row scan-and-skip. The ledger is the real top-level `no-mistakes runs
 # --limit N` listing (plain text, no run id, no quoting, newest-first, columns
@@ -335,7 +369,7 @@ fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
 # Read-only: git reads resolve objects in place; custody never changes.
 fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [expected-head]
   local wt=$1 branch=$2 list=$3 expected_head=${4:-}
-  local local_full row_full row st br sha day clock pr extra year_num month_num day_num max_day pending_st=''
+  local local_full row_full row st br sha day clock pr extra pending_st=''
   local decided=''
   local_full=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || return 0
   [ -n "$list" ] || return 0
@@ -343,31 +377,7 @@ fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [ex
     row=$(fm_nm_trim "$row")
     [ -n "$row" ] || continue
     IFS=$' \t' read -r st br sha day clock pr extra <<< "$row"
-    [ -n "$st" ] && [ -n "$br" ] && [ -n "$sha" ] && [ -n "$day" ] && [ -n "$clock" ] || break
-    [ -z "$extra" ] || break
-    case "$st" in *[!a-z_-]*|'') break ;; esac
-    case "$br" in *[!A-Za-z0-9._/-]*|'') break ;; esac
-    case "$sha" in *[!A-Fa-f0-9]*|'') break ;; esac
-    case "$day" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) break ;; esac
-    case "$clock" in [01][0-9]:[0-5][0-9]|2[0-3]:[0-5][0-9]) ;; *) break ;; esac
-    case "$pr" in ''|https://*) ;; *) break ;; esac
-    [ "${#sha}" -ge 7 ] && [ "${#sha}" -le 40 ] || break
-    year_num=$((10#${day%%-*}))
-    month_num=${day#*-}; month_num=${month_num%%-*}; month_num=$((10#$month_num))
-    day_num=$((10#${day##*-}))
-    [ "$year_num" -gt 0 ] && [ "$month_num" -ge 1 ] && [ "$month_num" -le 12 ] || break
-    case "$month_num" in
-      1|3|5|7|8|10|12) max_day=31 ;;
-      4|6|9|11) max_day=30 ;;
-      2)
-        if (( year_num % 400 == 0 || (year_num % 4 == 0 && year_num % 100 != 0) )); then
-          max_day=29
-        else
-          max_day=28
-        fi
-        ;;
-    esac
-    [ "$day_num" -ge 1 ] && [ "$day_num" -le "$max_day" ] || break
+    fm_nm_runs_row_valid "$st" "$br" "$sha" "$day" "$clock" "$pr" "$extra" || break
     [ "$br" = "$branch" ] || continue
     if [ -n "$pending_st" ]; then
       # This is the row immediately older than the active unresolvable row:
@@ -397,5 +407,28 @@ fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [ex
     pending_st=$st
   done <<< "$list"
   printf '%s' "$decided"
+  return 0
+}
+
+# The branch's NEWEST ledger row as "<status>|<short-sha>|<pr>", or nothing when
+# the branch has no row. The ledger is newest-first and its newest row for a branch
+# IS that branch's current run, which is the same rule
+# fm_nm_runs_status_for_worktree applies; this accessor exists because a caller
+# holding a TERMINAL run answer needs to know whether a LATER run has since
+# superseded it, which the status word alone cannot say. The ledger has no run
+# ID, so these fields can expose disagreement with a full run answer but cannot
+# establish identity; BINDING a run still needs the strict rules above.
+fm_nm_runs_newest_for_branch() {  # <branch> <runs-list-output>
+  local branch=$1 list=$2 row st br sha day clock pr extra
+  [ -n "$list" ] || return 0
+  while IFS= read -r row; do
+    row=$(fm_nm_trim "$row")
+    [ -n "$row" ] || continue
+    IFS=$' \t' read -r st br sha day clock pr extra <<< "$row"
+    fm_nm_runs_row_valid "$st" "$br" "$sha" "$day" "$clock" "$pr" "$extra" || break
+    [ "$br" = "$branch" ] || continue
+    printf '%s|%s|%s' "$st" "$sha" "$pr"
+    return 0
+  done <<< "$list"
   return 0
 }

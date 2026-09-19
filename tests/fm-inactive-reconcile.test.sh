@@ -30,9 +30,12 @@ make_tools() { # <world>
   local world=$1 fake
   fake="$world/fakebin"
   mkdir -p "$fake"
+  # Mirrors bin/fm-crew-state.sh's one canonical line, including the source and
+  # detail fields a terminal outcome must take its PR identity from.
   cat > "$fake/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
-printf 'state: %s · source: fake\n' "${FM_FAKE_CREW_STATE:-unknown}"
+printf 'state: %s · source: %s%s\n' "${FM_FAKE_CREW_STATE:-unknown}" \
+  "${FM_FAKE_CREW_SOURCE:-fake}" "${FM_FAKE_CREW_DETAIL:+ · $FM_FAKE_CREW_DETAIL}"
 SH
   cat > "$fake/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -870,6 +873,226 @@ test_notice_recovery_does_not_duplicate_wake() {
   pass "notice recovery remains idempotent across queue acknowledgement"
 }
 
+# --- a terminal outcome must be established from its own source --------------
+# Regression family for the 2026-08-27 false failure report. The reader's
+# terminal state was promoted into a captain-facing outcome together with a PR
+# taken from an OLDER record, so one queued record was wrong twice: the work had
+# not failed, and the pull request named was not the one the current run opened.
+
+queued_payload() { # <home> <key-prefix>
+  grep -F "$2" "$1/state/.wake-queue" 2>/dev/null | tail -1
+}
+
+# wake_count above reports an empty string when the queue file does not exist at
+# all, which is the same fact as a zero count for these cases.
+assert_nothing_queued() { # <home> <key-prefix> <message>
+  case "$(wake_count "$1" "$2")" in
+    ''|0) ;;
+    *) fail "$3: $(queued_payload "$1" "$2")" ;;
+  esac
+}
+
+# The exact shape that reached the captain: the current run opened no pull
+# request at all, so the record must name none rather than borrowing the task's
+# previously recorded one.
+test_terminal_outcome_never_names_a_pr_the_run_did_not_open() {
+  local payload
+  make_world outcome-pr-absent; write_child "$MAIN" child 'working: still validating'
+  FM_FAKE_CREW_STATE='failed' FM_FAKE_CREW_SOURCE='run-step' FM_FAKE_CREW_DETAIL='run failed' \
+    run_reconcile "$MAIN" --startup
+  payload=$(queued_payload "$MAIN" 'inactive-outcome:')
+  [ -n "$payload" ] || fail "no terminal outcome was queued"
+  case "$payload" in
+    *'pull/1'*) fail "the terminal outcome named a pull request the run never opened: $payload" ;;
+  esac
+  pass "a terminal outcome names no pull request when its run opened none"
+}
+
+# When the run DID open one, that identity wins over the older recorded PR.
+test_terminal_outcome_takes_the_pr_its_run_opened() {
+  local payload
+  make_world outcome-pr-current; write_child "$MAIN" child 'working: still validating'
+  FM_FAKE_CREW_STATE='done' FM_FAKE_CREW_SOURCE='run-step' \
+    FM_FAKE_CREW_DETAIL='checks green: PR ready for review · pr=https://example.test/owner/repo/pull/42' \
+    run_reconcile "$MAIN" --startup
+  payload=$(queued_payload "$MAIN" 'inactive-outcome:')
+  [ -n "$payload" ] || fail "no terminal outcome was queued"
+  case "$payload" in
+    *'pr=https://example.test/owner/repo/pull/42'*) ;;
+    *) fail "the terminal outcome did not name the run's own pull request: $payload" ;;
+  esac
+  case "$payload" in
+    *'pull/1 '*|*'pull/1') fail "the terminal outcome kept the older recorded pull request: $payload" ;;
+  esac
+  pass "a terminal outcome names the pull request its own run opened"
+}
+
+# A state-log-sourced terminal state keeps taking its PR from that same line.
+test_status_log_sourced_outcome_keeps_its_own_pr() {
+  local payload
+  make_world outcome-pr-log
+  write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/7 checks green'
+  FM_FAKE_CREW_STATE='done' FM_FAKE_CREW_SOURCE='status-log' \
+    FM_FAKE_CREW_DETAIL='PR https://example.test/owner/repo/pull/7 checks green' \
+    run_reconcile "$MAIN" --startup
+  payload=$(queued_payload "$MAIN" 'inactive-outcome:')
+  [ -n "$payload" ] || fail "no terminal outcome was queued"
+  case "$payload" in
+    *'pr=https://example.test/owner/repo/pull/7'*) ;;
+    *) fail "the terminal outcome dropped the pull request its own record named: $payload" ;;
+  esac
+  pass "a status-log sourced outcome keeps the pull request that record named"
+}
+
+# A status-log outcome without its own PR carries none. An earlier working line
+# and the task metadata deliberately name different PRs so either provenance
+# violation is visible.
+test_status_log_outcome_never_borrows_an_earlier_pr() {
+  local payload
+  make_world outcome-pr-log-absent
+  write_child "$MAIN" child 'working: PR https://example.test/owner/repo/pull/55 still validating'
+  printf 'done: implementation complete\n' >> "$MAIN/state/child.status"
+  age "$MAIN/state/child.status"
+  FM_FAKE_CREW_STATE='done' FM_FAKE_CREW_SOURCE='status-log' \
+    FM_FAKE_CREW_DETAIL='implementation complete' run_reconcile "$MAIN" --startup
+  payload=$(queued_payload "$MAIN" 'inactive-outcome:')
+  [ -n "$payload" ] || fail "no terminal outcome was queued"
+  case "$payload" in
+    *'pr='*) fail "the terminal outcome borrowed a pull request from another record: $payload" ;;
+  esac
+  pass "a status-log outcome without its own pull request carries none"
+}
+
+test_status_log_outcome_never_borrows_the_fresh_last_line_pr() {
+  local payload
+  make_world outcome-pr-log-fresh-line
+  write_child "$MAIN" child 'done: implementation complete'
+  printf 'working: PR https://example.test/owner/repo/pull/55 resumed\n' >> "$MAIN/state/child.status"
+  age "$MAIN/state/child.status"
+  FM_FAKE_CREW_STATE='done' FM_FAKE_CREW_SOURCE='status-log' \
+    FM_FAKE_CREW_DETAIL='implementation complete' run_reconcile "$MAIN" --startup
+  payload=$(queued_payload "$MAIN" 'inactive-outcome:')
+  [ -n "$payload" ] || fail "no terminal outcome was queued"
+  case "$payload" in
+    *'pr='*) fail "the terminal outcome borrowed a pull request from the corroboration line: $payload" ;;
+  esac
+  pass "a status-log outcome takes no pull request from another line"
+}
+
+# Prose is not a delivery claim: a terminal line that merely mentions pull
+# requests names none of them as the delivery, so the abandoned one is never
+# reported to the captain.
+test_status_log_outcome_never_claims_a_mentioned_pr() {
+  local payload note
+  make_world outcome-pr-log-prose
+  note='closed https://example.test/owner/repo/pull/12, shipped instead as https://example.test/owner/repo/pull/34'
+  write_child "$MAIN" child "done: $note"
+  FM_FAKE_CREW_STATE='done' FM_FAKE_CREW_SOURCE='status-log' \
+    FM_FAKE_CREW_DETAIL="$note" run_reconcile "$MAIN" --startup
+  payload=$(queued_payload "$MAIN" 'inactive-outcome:')
+  [ -n "$payload" ] || fail "no terminal outcome was queued"
+  case "$payload" in
+    *'pr='*) fail "the terminal outcome claimed a pull request only mentioned in prose: $payload" ;;
+  esac
+  pass "a status-log outcome never claims a pull request mentioned in prose"
+}
+
+# A scout never delivers a pull request, so it never carries one - the same rule
+# the ledger-first path applies through pr_for_task. Its ready-signal-shaped
+# terminal line must therefore still produce an outcome that names no PR.
+test_scout_outcome_carries_no_pull_request() {
+  local payload
+  make_world outcome-scout-pr
+  write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/7 checks green'
+  awk '{ sub(/^kind=ship$/, "kind=scout"); print }' "$MAIN/state/child.meta" \
+    > "$MAIN/state/child.meta.tmp" && mv "$MAIN/state/child.meta.tmp" "$MAIN/state/child.meta"
+  age "$MAIN/state/child.meta"
+  FM_FAKE_CREW_STATE='done' FM_FAKE_CREW_SOURCE='status-log' \
+    FM_FAKE_CREW_DETAIL='PR https://example.test/owner/repo/pull/7 checks green' \
+    run_reconcile "$MAIN" --startup
+  payload=$(queued_payload "$MAIN" 'inactive-outcome:')
+  [ -n "$payload" ] || fail "no terminal outcome was queued for the scout"
+  case "$payload" in
+    *'pr='*) fail "a scout's terminal outcome claimed a pull request: $payload" ;;
+  esac
+  pass "a scout's terminal outcome carries no pull request"
+}
+
+# The independent captain protection, for the one source where the two records
+# are comparable: the reader read the crew's own STATUS LOG, and the crew's last
+# self-declared word disagrees with what that read reported, so nothing is
+# manufactured for presentation. Ordinary supervision still owns it. Re-pointed
+# from a run-step state: a run-step state is the pipeline's own record and no
+# longer answers to the crew's prose.
+test_contradicted_failure_is_not_promoted_for_presentation() {
+  make_world outcome-contradicted
+  write_child "$MAIN" child 'done: PR https://example.test/owner/repo/pull/1 checks green'
+  FM_FAKE_CREW_STATE='failed' FM_FAKE_CREW_SOURCE='status-log' FM_FAKE_CREW_DETAIL='the build broke' \
+    run_reconcile "$MAIN" --startup
+  assert_nothing_queued "$MAIN" 'inactive-outcome:' "a contradicted failure was queued for the captain"
+  [ "$(outcome_count "$MAIN" pending)" = 0 ] || fail "a contradicted failure minted a durable record"
+  pass "a failure the crew's own last word contradicts is never presented"
+}
+
+# The mirror direction: a success the crew's own last word calls a failure is
+# equally unsafe to present. Re-pointed to a status-log state for the same
+# reason as its sibling above. This also subsumes the removed
+# test_crew_prose_cannot_forge_the_ordering_field: the ordering field it forged
+# no longer exists, so a status-log note carrying any prose at all now reaches
+# this same guard and cannot switch it off.
+test_contradicted_success_is_not_promoted_for_presentation() {
+  make_world outcome-contradicted-done
+  write_child "$MAIN" child 'failed: the build broke'
+  FM_FAKE_CREW_STATE='done' FM_FAKE_CREW_SOURCE='status-log' FM_FAKE_CREW_DETAIL='implementation complete' \
+    run_reconcile "$MAIN" --startup
+  assert_nothing_queued "$MAIN" 'inactive-outcome:' "a contradicted success was queued for the captain"
+  pass "a success the crew's own last word contradicts is never presented"
+}
+
+# The routine ship shape, and the reason this whole path exists: the crew
+# declares implementation done, firstmate then starts the validation run, the
+# run FAILS, and the crew goes silent without appending `failed:`. The reader
+# reports that failure from the pipeline's own run step, which outranks the
+# crew's earlier word, so the captain must still be told - a failure reaching
+# nobody is the harm this path exists to remove.
+test_run_step_failure_is_not_suppressed_by_the_crews_own_word() {
+  local payload
+  make_world outcome-mid-run-done
+  write_child "$MAIN" child 'done: implementation complete'
+  FM_FAKE_CREW_STATE='failed' FM_FAKE_CREW_SOURCE='run-step' FM_FAKE_CREW_DETAIL='run failed' \
+    run_reconcile "$MAIN" --startup
+  payload=$(queued_payload "$MAIN" 'inactive-outcome:')
+  [ -n "$payload" ] || fail "a run-step failure behind the crew's own done line was dropped"
+  [ "$(outcome_count "$MAIN" pending)" = 1 ] \
+    || fail "no durable terminal outcome was minted for the failure"
+  pass "a run-step failure is not suppressed by the crew's own earlier word"
+}
+
+# The mirror shape the branch is named for: a stale `paused:` line and a real
+# run failure reported from the run step.
+test_stale_pause_does_not_suppress_the_failure() {
+  make_world outcome-stale-pause
+  write_child "$MAIN" child 'paused: waiting on the pipeline'
+  FM_FAKE_CREW_STATE='failed' FM_FAKE_CREW_SOURCE='run-step' FM_FAKE_CREW_DETAIL='run failed' \
+    run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+    || fail "a failure behind a stale pause line was dropped"
+  pass "a stale pause line does not suppress the failure that followed it"
+}
+
+# Direction guard: a crew that simply stopped mid-work has no self-declared
+# outcome to contradict the reader, so a genuine failure still reaches the
+# captain. Hiding real failures is equally wrong.
+test_uncontradicted_failure_is_still_presented() {
+  make_world outcome-genuine; write_child "$MAIN" child 'working: implementing'
+  FM_FAKE_CREW_STATE='failed' FM_FAKE_CREW_SOURCE='run-step' FM_FAKE_CREW_DETAIL='run failed' \
+    run_reconcile "$MAIN" --startup
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 1 ] \
+    || fail "a genuine failure was not queued for the captain"
+  pass "a genuine, uncontradicted failure still reaches the captain"
+}
+
+
 # Forge command shims fail loudly. A successful scan proves this path never uses
 # them while reconciling a local terminal outcome.
 test_reconciliation_never_calls_forge() {
@@ -925,6 +1148,18 @@ test_full_scan_budget_includes_wake_lock_wait
 test_notice_recovery_does_not_duplicate_wake
 test_missing_parent_binding_names_itself
 test_reconciliation_never_calls_forge
+test_terminal_outcome_never_names_a_pr_the_run_did_not_open
+test_terminal_outcome_takes_the_pr_its_run_opened
+test_status_log_sourced_outcome_keeps_its_own_pr
+test_status_log_outcome_never_borrows_an_earlier_pr
+test_status_log_outcome_never_borrows_the_fresh_last_line_pr
+test_status_log_outcome_never_claims_a_mentioned_pr
+test_scout_outcome_carries_no_pull_request
+test_contradicted_failure_is_not_promoted_for_presentation
+test_contradicted_success_is_not_promoted_for_presentation
+test_run_step_failure_is_not_suppressed_by_the_crews_own_word
+test_stale_pause_does_not_suppress_the_failure
+test_uncontradicted_failure_is_still_presented
 test_reconciliation_sets_no_forge_mode_for_state_read
 
 echo "all inactive reconciliation tests passed"

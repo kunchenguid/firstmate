@@ -49,6 +49,18 @@
 # fm-crew-state.sh as the sole current-state source.
 # Only a done or failed state is suspicious enough to create a durable terminal
 # outcome record or wake the supervisor.
+# A terminal outcome is a CAPTAIN-FACING claim, so two rules bound what may be
+# built from that read, owned by terminal_outcome_corroborated and
+# terminal_outcome_pr below. A state the reader sourced from the STATUS LOG is
+# manufactured only when the crew's own last self-declared word (done, failed,
+# or the configured paused verb) does not contradict it; a state sourced from
+# the pipeline's own RUN STEP outranks that word outright, so the routine ship
+# shape (`done:` written, the run then fails, the crew goes silent) still
+# reaches the captain. Its PR identity comes from the same record as its state -
+# the run's own published PR for a run-step state, that line's own ready-signal
+# PR for a status-log state, and never a separately recorded task PR; a scout
+# delivers no PR on either path, so it carries none. Together they
+# prevent one captain-facing record from combining claims from different runs.
 # Working, paused, parked, blocked, unknown, persistent secondmates, and
 # captain-held work retain their existing supervision semantics.
 #
@@ -311,6 +323,75 @@ meta_incarnation() { # <meta>
   printf 'legacy-%s\n' "$(sha256_text "$identity")"
 }
 
+# Parse the canonical state line described by this script's header.
+STATE_LINE_SEP=' · '
+
+state_line_source() { # <state-line>
+  local rest=${1#*"$STATE_LINE_SEP"source: }
+  [ "$rest" != "$1" ] || return 0
+  case "$rest" in *"$STATE_LINE_SEP"*) rest=${rest%%"$STATE_LINE_SEP"*} ;; esac
+  printf '%s' "$rest"
+}
+
+# Read the optional pull request published in the canonical state line.
+state_line_pr() { # <state-line>
+  local rest=${1##*"$STATE_LINE_SEP"pr=}
+  [ "$rest" != "$1" ] || return 0
+  printf '%s' "$rest"
+}
+
+# Read the status-log note the reader published as the line's first detail.
+state_line_note() { # <state-line>
+  local rest=${1#*"$STATE_LINE_SEP"source: }
+  [ "$rest" != "$1" ] || return 0
+  case "$rest" in *"$STATE_LINE_SEP"*) ;; *) return 0 ;; esac
+  rest=${rest#*"$STATE_LINE_SEP"}
+  case "$rest" in *"$STATE_LINE_SEP"*) rest=${rest%%"$STATE_LINE_SEP"*} ;; esac
+  printf '%s' "$rest"
+}
+
+# Enforce the header's same-record pull-request contract. A scout never delivers
+# a PR, so it never carries one, exactly as pr_for_task rules for the
+# ledger-first path. Otherwise a status-log state carries a PR only in a mode's
+# ready-signal shape, the same rule pr_for_task applies, so a PR a worker merely
+# mentioned in prose is never the delivery.
+terminal_outcome_pr() { # <state-line> <kind>
+  local line=$1 kind=${2:-} value
+  [ "$kind" != scout ] || return 0
+  if [ "$(state_line_source "$line")" = run-step ]; then
+    clean_field "$(state_line_pr "$line")"
+    return 0
+  fi
+  value=$(printf '%s\n' "$(state_line_note "$line")" \
+    | sed -nE 's|^PR (https?://[^[:space:])"]+/pull/[0-9]+)( checks green)?$|\1|p' \
+    | head -1 || true)
+  clean_field "$value"
+}
+
+# Enforce the header's independent captain-facing corroboration contract. A
+# RUN-STEP state is the pipeline's own record of the run that just ended, and
+# rule 2b in bin/fm-crew-state.sh guarantees any terminal reading published this
+# way - done as well as failed - is either the attributed current run or an
+# honest unknown, so a crew's own earlier prose is the weaker witness and never
+# vetoes it - otherwise the routine ship shape
+# (`done:` written, the run then fails, the crew goes silent) would reach nobody.
+# The two sources are genuinely comparable only when the state itself came from
+# the status log, and there the crew's latest word still decides.
+terminal_outcome_corroborated() { # <state> <last-status-line> <state-line>
+  local state=$1 last=$2 line=${3:-} declared
+  [ "$(state_line_source "$line")" != run-step ] || return 0
+  if status_is_paused "$last"; then
+    declared=paused
+  else
+    case "$(status_line_verb "$last")" in
+      done) declared='done' ;;
+      failed) declared=failed ;;
+      *) return 0 ;;
+    esac
+  fi
+  [ "$declared" = "$state" ]
+}
+
 # The task's delivered PR. Recorded meta pr= is the only authoritative source;
 # the fallback scrape accepts only a preferred terminal line in a mode's
 # ready-signal shape (`done: PR <url>` or `done: PR <url> checks green`), so a
@@ -504,7 +585,8 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     'state: failed '*) state='failed' ;;
     *) return 0 ;;
   esac
-  pr=$(pr_for_task "$meta")
+  terminal_outcome_corroborated "$state" "$last" "$state_line" || return 0
+  pr=$(terminal_outcome_pr "$state_line" "$kind")
   incarnation=$(meta_incarnation "$meta")
   fingerprint=$(sha256_text "$incarnation|$id|$state|$pr|$(clean_field "$last")")
   if [ -n "$self" ]; then

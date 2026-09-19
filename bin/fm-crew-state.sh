@@ -24,7 +24,16 @@
 #
 #   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
-# Logic, in order:
+# A run-step reading whose run came from inventory selection ends its detail
+# with a `run: <id>` field naming that run, and a terminal one appends
+# `pr=<url>` after it. The field is always the last clause of the detail so the
+# separator never splits a sentence. The supersession verdict labels the same id
+# `earlier run: <id>`, and a verdict taken from the ledger's own row carries no
+# run id at all, because there the id belongs to a run the verdict did not come
+# from (rule 2b).
+#
+# Logic, numbered for reference; rules 2b and 3 each record that rule 3's
+# status-log reconciliation is applied before rule 2b:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
 #      recording remote_host= is a remote secondmate: its worktree and endpoint
 #      live on that host, so the local worktree and pane reads are skipped and
@@ -72,6 +81,53 @@
 #      FAILED record whose daemon an explicit probe proves down reads unknown,
 #      never failed: an instrument failure must not read as work failure
 #      (nm_daemon_probe_down).
+#   2b. A TERMINAL reading - failed/cancelled OR done - is authoritative only
+#      while nothing newer contradicts it, because head identity binds whatever
+#      run last sat on this head, not necessarily this branch's current one -
+#      and a stale terminal reading here is promoted into a captain-facing
+#      terminal outcome by bin/fm-inactive-reconcile.sh. A false SUCCESS is the
+#      worse of the two mistakes, because nobody goes looking, so the currency
+#      test is the same in both directions: a later run on this branch that
+#      cannot be bound here is reported as unknown - history, but no proof of
+#      the present. A FAILED reading is additionally answered from a newer
+#      record where one states a terminal outcome for this worktree: a later
+#      COMPLETED run the ledger proves is current, or the ledger's own terminal
+#      verdict. A DONE reading claims no such verdict, because unknown is
+#      already the whole answer a contradicted success may publish.
+#      Because the ledger has no run ID,
+#      an equal head does not identify a rerun; a terminal row supplies newer
+#      truth when its observable status, head, or PR differs. Nothing else does,
+#      so a real failure is never hidden. The whole rule needs two records to
+#      compare, so it applies only to a run attributed from `axi status`: a
+#      coarse reading IS the ledger's own answer for this worktree, and a record
+#      cannot supersede itself.
+#      A self-declared pause or done in the status log is NOT one of those
+#      records. The reader once ordered such a declaration against the ledger's
+#      date column, let a later one supersede the failure, and published the
+#      ordering it believed it had proven as a detail field. Those rules were
+#      removed after repeated defects: the date column stamps a run's START, so
+#      it can never prove a declaration newer than the moment the run finished,
+#      and every narrowing of the rule left another shape in which a real
+#      failure was hidden or a crew's mid-run word was minted as a terminal
+#      verdict. The reader now claims no ordering between the log and the run:
+#      where a later ledger row leaves the current state unprovable it answers
+#      unknown, and otherwise the failed reading stands.
+#      Independently of outcome, a terminal reading publishes a PR only when the
+#      current-run evidence still attributes that reading, or when the ledger
+#      offers no row for this branch at all: an absent row is absence of
+#      contradicting evidence, not disproof, and one record cannot be
+#      authoritative for the verdict while being untrusted for the link that
+#      makes it actionable (the long-inactive crews bin/fm-inactive-reconcile.sh
+#      scans routinely have runs outside the listing window). A row that EXISTS
+#      and cannot be bound still publishes no PR.
+#      Every answer here is reached only AFTER rule 3 below has reconciled the
+#      status log, so rule 3's daemon-socket-down override outranks all of them,
+#      not merely a plainly attributed run record: an instrument failure must not
+#      read as work failure. A verdict taken from the ledger row also names that
+#      row's status and PR together and names the attributed run only as the
+#      reading that row could not be bound to, so a single line never labels one
+#      run's outcome with another run's identity, and never asserts a second,
+#      earlier run the unbindable row does not prove.
 #   3. Reconcile the status log through fm-classify-lib.sh's status_current_line:
 #      open decisions survive unrelated events and continuation prose cannot
 #      hide a declaration. Ship/scout terminal declarations supersede stale log
@@ -81,7 +137,8 @@
 #      agree, and are reported as parked. A `blocked:` line that reports a
 #      refused or missing daemon socket remains blocked even if an attributed
 #      run record is stale or terminal, for as long as that blocker is still the
-#      log's latest event. Other daemon, timeout, or unreachability
+#      log's latest event; this reconciliation runs BEFORE rule 2b, so that
+#      blocker also outranks rule 2b's supersession and unknown answers. Other daemon, timeout, or unreachability
 #      claims are superseded BECAUSE THE RUN IS ALIVE when the run is
 #      running/fixing with recent reported activity: a killed or timed-out drive
 #      call is not daemon death, so that claim is answered by steering the crew
@@ -150,6 +207,14 @@ emit() {  # <state> <source> [detail]
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
   exit 0
+}
+
+emit_run() {  # <state> <detail> [pr]
+  local detail=$2
+  case "$1" in
+    done|failed) [ -z "${3:-}" ] || detail="$detail${SEP}pr=$3" ;;
+  esac
+  emit "$1" run-step "$detail"
 }
 
 # --- meta resolution --------------------------------------------------------
@@ -665,6 +730,18 @@ nm_ci_checks_state() {
 nm_runs_list() {
   nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT"
 }
+# The ledger is fetched at most once per read into RUNS_LIST: the coarse
+# attribution fallback and the terminal-failed supersession cross-check below
+# both need it, and neither is worth a second bounded CLI call. Assigns rather
+# than prints, so the cache survives (a command substitution would fetch into a
+# subshell every time).
+RUNS_LIST=""
+RUNS_LIST_FETCHED=0
+runs_list_once() {
+  [ "$RUNS_LIST_FETCHED" = 1 ] && return 0
+  RUNS_LIST=$(nm_runs_list)
+  RUNS_LIST_FETCHED=1
+}
 
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
 # scratch worktree); with no branch there is no run to attribute to this crew.
@@ -734,8 +811,9 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         if nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT"; then
           HAVE_RUN=1
         elif [ -z "$(fm_nm_resolve_commit "$WT" "$(strip_quotes "$(nm_field head)")")" ]; then
+          runs_list_once
           if fm_nm_run_is_active "$RUN_OUT" \
-            && [ "$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)" "$(strip_quotes "$(nm_field head)")")" = running ]; then
+            && [ "$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$RUNS_LIST" "$(strip_quotes "$(nm_field head)")")" = running ]; then
             HAVE_RUN=1
           else
             emit unknown run-step "selected run code identity unverified; run ids: $candidate_ids"
@@ -756,7 +834,8 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         # Without run ids, contradictory liveness cannot prove precedence.
         # A live replacement also needs an id-addressed status read: a bare
         # "running" row cannot tell working from waiting at a gate.
-        ledger_status=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
+        runs_list_once
+        ledger_status=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$RUNS_LIST")
         if fm_nm_run_is_active "$RUN_OUT"; then
           if [ "$(fm_nm_run_status_class "$ledger_status")" = terminal ]; then
             emit unknown run-step "run records disagree; run ids: $(strip_quotes "$(nm_field id)"), competing identity unavailable"
@@ -778,7 +857,8 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         # `[ -n "$RUN_OUT" ]`: an empty/timed-out primary call means the CLI
         # itself did not respond, so retrying it immediately with a second
         # bounded call would just double the wait for no better answer.
-        COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
+        runs_list_once
+        COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$RUNS_LIST")
         if [ -n "$COARSE_STATUS" ]; then
           HAVE_RUN=1
           # A branch-matching answer the strict rule rejected is this branch's
@@ -798,6 +878,8 @@ fi
 if [ "$HAVE_RUN" = 1 ]; then
   RUN_STATE=working
   RUN_DETAIL=""
+  RUN_PR=""
+  RUN_BRANCH=""
   CI_STEP_STATUS=""
   CI_LOG_STATE=""
   RUN_STATUS=""
@@ -826,7 +908,21 @@ if [ "$HAVE_RUN" = 1 ]; then
   else
     status=$(strip_quotes "$(nm_field status)")
     RUN_STATUS=$status
+    RUN_ID=$(strip_quotes "$(nm_field id)")
+    RUN_HEAD=$(strip_quotes "$(nm_field head)")
+    # Read from the attributed run record itself: the inventory-selected path
+    # never assigns the coarse fallback's run_branch, so rule 2b must not
+    # depend on it.
+    RUN_BRANCH=$(strip_quotes "$(nm_field branch)")
+    # The pull request THIS run opened, if it reached its pr step at all. A run
+    # that never opened one reports no pr field, and that absence is meaningful:
+    # it is what keeps a terminal outcome from being lent an older task's PR.
+    RUN_PR=$(strip_quotes "$(nm_field pr)")
     outcome=$(strip_quotes "$(nm_field outcome)")
+    case "$status" in
+      ci|running|fixing|awaiting_approval|fix_review) ATTRIBUTED_LEDGER_STATUS=running ;;
+      *) ATTRIBUTED_LEDGER_STATUS=$status ;;
+    esac
     awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
     gate_status=$(nm_gate_status)
     has_gate=0
@@ -906,6 +1002,38 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
+  TERMINAL_PR=""
+  case "$RUN_STATE" in
+    done|failed)
+      runs_list_once
+      NEWEST_ROW=$(fm_nm_runs_newest_for_branch "$CREW_BRANCH" "$RUNS_LIST")
+      NEWEST_STATUS=${NEWEST_ROW%%|*}
+      NEWEST_REST=${NEWEST_ROW#*|}
+      NEWEST_SHA=${NEWEST_REST%%|*}
+      NEWEST_PR=${NEWEST_REST#*|}
+      NEWEST_ROW_AGREES=0
+      LEDGER_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$RUNS_LIST")
+      if [ "$RUN_SOURCE" = full ] && [ -n "$RUN_ID" ] \
+        && [ "$RUN_BRANCH" = "$CREW_BRANCH" ] \
+        && [ "$NEWEST_STATUS" = "$ATTRIBUTED_LEDGER_STATUS" ] \
+        && [ "$NEWEST_PR" = "$RUN_PR" ]; then
+        if [ -n "$NEWEST_SHA" ] && [ -n "$RUN_HEAD" ]; then
+          case "$RUN_HEAD" in
+            "$NEWEST_SHA"*) NEWEST_ROW_AGREES=1 ;;
+            *) case "$NEWEST_SHA" in "$RUN_HEAD"*) NEWEST_ROW_AGREES=1 ;; esac ;;
+          esac
+        fi
+      fi
+      if [ "$RUN_SOURCE" = coarse ]; then
+        case "$LEDGER_STATUS" in
+          completed|failed|cancelled) TERMINAL_PR=$NEWEST_PR ;;
+        esac
+      elif [ "$NEWEST_ROW_AGREES" = 1 ] || [ -z "$NEWEST_STATUS" ]; then
+        TERMINAL_PR=$RUN_PR
+      fi
+      ;;
+  esac
+
   # Reconcile the status log. A needs-decision/blocked log line that the run-step
   # has moved past (anything but a genuinely parked run) is deterministically
   # stale: the gate resolved and the run resumed or finished.
@@ -946,8 +1074,42 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
-  [ -z "$SELECTED_RUN_ID" ] || RUN_DETAIL="$RUN_DETAIL${SEP}run: $SELECTED_RUN_ID"
-  emit "$RUN_STATE" run-step "$RUN_DETAIL"
+  READING_DETAIL=$RUN_DETAIL
+  RUN_ID_FIELD=""
+  [ -z "$SELECTED_RUN_ID" ] || RUN_ID_FIELD="${SEP}run: $SELECTED_RUN_ID"
+  RUN_DETAIL="$RUN_DETAIL$RUN_ID_FIELD"
+
+  # Apply the terminal-reading precedence contract owned by header rule 2b.
+  if { [ "$RUN_STATE" = "failed" ] || [ "$RUN_STATE" = "done" ]; } \
+    && [ "$RUN_SOURCE" != coarse ]; then
+    if [ "$RUN_STATE" = "failed" ]; then
+      case "$LEDGER_STATUS" in
+        completed)
+          SUPERSEDED_DETAIL="run superseded by a newer completed run on this branch (earlier $READING_DETAIL)"
+          [ -z "$SELECTED_RUN_ID" ] \
+            || SUPERSEDED_DETAIL="$SUPERSEDED_DETAIL${SEP}earlier run: $SELECTED_RUN_ID"
+          TERMINAL_PR=$NEWEST_PR
+          emit_run "done" "$SUPERSEDED_DETAIL" "$TERMINAL_PR"
+          ;;
+        failed|cancelled)
+          if [ "$NEWEST_ROW_AGREES" != 1 ]; then
+            LEDGER_DETAIL="run $LEDGER_STATUS from the ledger's row for this worktree; the $READING_DETAIL reading could not be bound to it"
+            TERMINAL_PR=$NEWEST_PR
+            emit_run failed "$LEDGER_DETAIL" "$TERMINAL_PR"
+          fi
+          ;;
+      esac
+    fi
+    case "$NEWEST_STATUS" in
+      '') ;;
+      *)
+        [ "$NEWEST_ROW_AGREES" = 1 ] || emit unknown run-step \
+          "the newest $NEWEST_STATUS ledger row on this branch cannot be bound to the $READING_DETAIL; current state not provable here$RUN_ID_FIELD"
+        ;;
+    esac
+  fi
+
+  emit_run "$RUN_STATE" "$RUN_DETAIL" "$TERMINAL_PR"
 fi
 
 # --- fallback: no run attributed to this crew ------------------------------
