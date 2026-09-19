@@ -7,13 +7,13 @@ It records only facts that must be re-established when a producer or vendor vers
 Task chronology, incident transcripts, and credential metadata stay in private reports or PR evidence.
 
 Firstmate resolves a candidate's provider family, credential surface, and applicable quota by reading the evidence below and reasoning in the open.
-No script maps a model to a provider, a provider to a credential store, or a name prefix to a family, so the facts here are what that reasoning rests on.
+The [worker helper](../../bin/fm-quota-choose.sh) and [typed resolver](../configuration.md#typed-dispatch-resolution-env-typesafe_api_key) document their deterministic mapping boundaries; the [eligibility procedure](../../.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility) owns the remaining catalog and credential judgments.
 Credential paths below are shown with the home directory replaced by `<home>`.
 
 ## Quota granularity the judgment depends on
 
 Verified 2026-07-30 against quota-axi 0.1.16 for the provider and model-scope relationships below.
-That release's captured default output included `quotaSemantics.description`; the current default TOON and JSON fallback field placement are verified against 0.1.29 in the next section.
+That release's captured default output included `quotaSemantics.description`; the schema-5 default TOON and JSON fallback field placement are verified against 0.1.29 in the next section.
 Current dispatch reads the TOON scope and `limitedBy` fields; the JSON fallback's corresponding `scope` and `boundedBy` fields preserve the same provider/model applicability without relying on the `--full`-only description.
 
 ```json
@@ -31,9 +31,9 @@ Current dispatch reads the TOON scope and `limitedBy` fields; the JSON fallback'
 }
 ```
 
-Three properties follow and are load-bearing for dispatch:
+The [eligibility procedure](../../.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility) owns account and scope applicability; this capture illustrates those scope bounds:
 
-- An `all_models` (or `all_products`) scope is real evidence for every model in that provider family, including a model with no window of its own.
+- The captured Codex account reports an `all_models` bound of 64% even for models without their own window.
 - A `model:`-scoped entry is an additional bound for that one model. `model:codex_bengalfox` is the GPT-5.3-Codex-Spark window and bounds nothing else.
 - A named-model window can be tighter than the account bound, so it must not be read across models. In the same snapshot Claude reported `all_models` with `effectivePercentRemaining` 10 while `model:fable` reported 4, limited by the `model:fable` window itself. A non-Fable Claude model reads 10, not 4.
 
@@ -125,7 +125,7 @@ openai-codex  gpt-5.6-terra  272K     128K     yes       yes
 ```
 
 The Pi catalog is authoritative for Pi model support and reports the provider family in its own column.
-For `harness=pi`, `model=openai-codex/gpt-5.6-terra` the catalog establishes the model is supported and belongs to the `openai-codex` family, and the Codex `all_models` scope above supplies fresh, known 64 effective remaining for every model in that family.
+In this capture, the catalog lists `openai-codex/gpt-5.6-terra`, and the Codex row above reports 64% remaining at `all_models`.
 No Terra-specific window exists in the snapshot, and `quota-axi auth --json` lists no `pi:openai-codex` source.
 Both absences are missing model-level and source-level detail, not contradictory evidence, so this candidate is dispatchable with the model-level uncertainty disclosed.
 
@@ -165,7 +165,9 @@ Verified 2026-07-30 against quota-axi 0.1.16.
 Observed source statuses are `available`, `expired` (with an `error` slug), and `missing`.
 
 - A provider can carry a healthy source beside a missing or expired one, so a provider must not be collapsed to a single status. Claude's `oauth-file` is missing while its keychain source is available, and Kimi's standalone CLI credential is expired while its Pi source is available.
-- A `pi:`-prefixed source exists only where Pi holds its own credential for that family (`pi:xai`, `pi:kimi-coding`). Pi's `openai-codex` family has none, because it authenticates through the Codex store that the `codex` provider already lists. A missing `pi:` source is therefore never evidence against a Pi candidate.
+- In this captured setup, only `pi:xai` and `pi:kimi-coding` have `pi:`-prefixed sources.
+  The Pi `openai-codex` candidate used the Codex store listed above; this observation does not establish the credential source for another account or setup.
+  The [eligibility procedure](../../.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility) owns how missing authentication evidence affects dispatch.
 
 Neither this per-source shape nor `state.authStatus` exists before quota-axi 0.1.16.
 `bin/fm-bootstrap.sh` enforces the current compatibility floor through `bin/fm-quota-axi-lib.sh`.
