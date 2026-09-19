@@ -424,7 +424,7 @@ Every claude launch's inline `--settings` JSON also carries `"attribution":{"com
 
 ## Spawn setup hooks (config/spawn-setup/)
 
-A pooled worktree is handed to a worker as a bare checkout: no installed dependencies, no local environment file, no allocated ports.
+A worktree from the Treehouse pool is handed to a worker as a bare checkout: no installed dependencies, no local environment file, no allocated ports.
 For a project that needs any of that before work can start, put an executable at `config/spawn-setup/<project-directory-basename>` and Firstmate runs it as part of every ship and scout spawn into that project, so the worker's window is already provisioned instead of relying on the worker remembering a setup command.
 The optional `config/spawn-setup/` directory is local and gitignored, and it is **not** inherited into secondmate homes: provisioning steps are machine-local, and each home decides for itself whether its pool runs them.
 An absent hook is a silent no-op, which is every project that has not opted in.
@@ -448,8 +448,8 @@ exec bash /Users/suyuan/Documents/her-source/her-dev-pipeline/scripts/worktree-s
 `HER_WEB_MAIN_REPO` points that script at the clone Firstmate itself spawns from rather than its built-in default, so the files it copies into the worktree are the ones this home's own checkout carries.
 
 The spawn refuses, before any window, worktree record, or task state exists, when the hook exits nonzero, exceeds its time bound, is present but not an executable regular file, or leaves behind files Git does not ignore.
-That last rule is the important one: a hook may write only paths the worktree already ignores, because Firstmate reads any other untracked file as the worker's own unlanded work and would later refuse to clean up the slot.
-A refusal names the hook's kept log, and the same refusal class means nothing is left behind to reconcile.
+That last rule is the important one: a hook may write only paths the worktree already ignores, because Firstmate reads any other untracked file as the worker's own unlanded work and would later refuse to clean up that worktree.
+A refusal names the log file it kept from the hook, and because it happens before anything about the task is recorded, there is nothing to clean up before fixing the hook and spawning again.
 Hooks are skipped for relaunches, for secondmates, and on the Orca backend, which provisions its worktrees from its own repository hook at creation time.
 `FM_SPAWN_SETUP=off` skips a configured hook for one spawn with a notice, for the case where the environment is known good and the seconds are not wanted; any other value refuses rather than guessing.
 `FM_SPAWN_SETUP_TIMEOUT` bounds the hook in seconds and defaults to 600; invalid or zero values use 600.
