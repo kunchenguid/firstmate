@@ -1,0 +1,53 @@
+run:
+  id: "01M2SS4ZQEBBP3ZAV5WBZ5X4Z5"
+  branch: fm/fm-note-line-ends-declared-wait
+  status: running
+  head: 2d375896
+  head_sha: 2d3758963491d42624118e670ea1bd956dea2bb2
+  pr: "https://github.com/kunchenguid/firstmate/pull/4818"
+  findings: none
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,89
+    rebase,completed,0,1508
+    review,completed,0,350290
+    test,completed,0,694415
+    document,completed,0,42687
+    lint,completed,0,21508
+    push,completed,0,3849
+    pr,completed,0,33919
+    ci,running,0,0
+  active_steps[1]{step,status,active_for,round_active_for,last_activity,agent_pid,round}:
+    ci,running,22m55s,22m55s,"3m27s ago: log: all CI checks passed - still monitoring until merged or closed","",starting
+branch_sync:
+  state: dirty
+  changed: false
+  local:
+    branch: fm/fm-note-line-ends-declared-wait
+    head: 2d3758963491d42624118e670ea1bd956dea2bb2
+    clean: false
+    reason: dirty
+  pipeline:
+    run: "01M2SS4ZQEBBP3ZAV5WBZ5X4Z5"
+    status: running
+    phase: ""
+    submitted_head: 298a9bb206a5ff3f22ac70cbcdd8fbc13d2a8ba2
+    current_head: 2d3758963491d42624118e670ea1bd956dea2bb2
+    pushed_head: 2d3758963491d42624118e670ea1bd956dea2bb2
+    pushed_at: 1789720450
+    push_generation: 1
+  target:
+    kind: fork
+    remote: fork
+    url: "https://github.com/captured-fork/firstmate"
+    ref: refs/heads/fm/fm-note-line-ends-declared-wait
+  remote:
+    observed_head: 2d3758963491d42624118e670ea1bd956dea2bb2
+    freshness: pipeline_push
+    observed_at: 1789720450
+  relation: unknown
+  safety: blocked_dirty
+  pr_state: open
+  note: the invoking worktree is not completely clean; no network read or mutation was attempted
+  next_action:
+    code: inspect_worktree
+    command: git status

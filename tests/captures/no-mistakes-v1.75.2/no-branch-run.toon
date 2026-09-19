@@ -1,0 +1,15 @@
+current_branch: fm/fm-prepublish-voice-classifier
+runs_on_current_branch: 0
+count: 10 of 93 total
+runs[10]{id,branch,status,head,pr}:
+  "01M2SS4ZQEBBP3ZAV5WBZ5X4Z5",fm/fm-note-line-ends-declared-wait,running,2d375896,"https://github.com/kunchenguid/firstmate/pull/4818"
+  "01M2R420V63BKXCNFG1SYG3WWZ",fm/fm-status-write-resets-pause-cadence,running,9feea610,"https://github.com/kunchenguid/firstmate/pull/4742"
+  "01M2R2FM5365HQ6G21RMYWDZJY",fm/fm-status-write-resets-pause-cadence,failed,f4cd8c45,""
+  "01M2R1Y9J0EE05DCGEH5R3ZNMD",fm/fm-status-write-resets-pause-cadence,failed,f4cd8c45,""
+  "01M2Q89G2YC92K8EGDV2ZN4M4A",fm/fm-contributions-merged-pr-never-settles,completed,ff56b413,"https://github.com/kunchenguid/firstmate/pull/4710"
+  "01M2Q4J96JM7KVQ38X1V6DA52K",fm/fm-superseded-cancelled-run-outranks-live,failed,4495215c,"https://github.com/kunchenguid/firstmate/pull/4476"
+  "01M2NNFR74M8END4XM5ZG5EZYC",fm/fm-contributions-budget-false-unavailable,completed,"055ea956","https://github.com/kunchenguid/firstmate/pull/4661"
+  "01M2NJ6554JPZTDTTR2S71YYQ4",fm/fm-reboot-disarms-every-merge-watch,completed,0f8fa0a2,"https://github.com/kunchenguid/firstmate/pull/4656"
+  "01M2N31T5M1NJFXRYHRHFP1RQQ",fm/fm-superseded-cancelled-run-outranks-live,failed,d639d469,"https://github.com/kunchenguid/firstmate/pull/4476"
+  "01M2N2H0B7Q6ZZ09JXH4MQT51M",fm/fm-4469-suivi-contributions,completed,97e8fe0d,"https://github.com/kunchenguid/firstmate/pull/4627"
+help[2]: "Run no-mistakes axi run --intent \"the user's goal\" --yes to validate the current branch",No run exists for this branch; every run listed above is on another branch - inspect one deliberately with `no-mistakes axi status --run <id>`

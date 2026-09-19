@@ -76,9 +76,11 @@ fm_nm_resolve_commit() {  # <worktree> <sha-ish>
 #     (local work advanced outside the run, or the branch tip was rewritten)
 # A run head whose object this copy does not have cannot be proven here and is
 # rejected; fm_nm_runs_status_for_worktree below owns the one ledger-anchored
-# recognition for that case, and fm_nm_run_is_pipeline_owned_active below
+# recognition for that case, fm_nm_run_is_pipeline_owned_active below
 # carries the custody exemption: a live run whose pipeline currently owns the
-# branch binds without head equality.
+# branch binds without head equality, and
+# fm_nm_run_is_submitted_from_worktree_active below binds a live run whose own
+# record says it was submitted from exactly this worktree's HEAD.
 #
 # This predicate binds one run at a time, and MORE THAN ONE recorded run can
 # bind to the same worktree at once: a run that died at the worktree's exact
@@ -192,6 +194,9 @@ fm_nm_select_run() {  # <branch> <axi-overview> <worktree>
     }
     inrows { inrows = 0 }
     END {
+      # Compare counts numerically: an empty table leaves seen unset, and a
+      # string comparison of "" with "0" would call it unreadable.
+      seen += 0; expected += 0
       if (!found) print "unavailable"
       else if (bad || counts != 1 || seen != expected || seen != shown || total < shown)
         print "unknown|unreadable runs table; run ids: " ids
@@ -305,6 +310,38 @@ fm_nm_run_is_active() {  # <toon-output>
 fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
   [ "$(fm_nm_branch_sync_state "$1")" = pipeline_owned ] || return 1
   fm_nm_run_is_active "$1"
+}
+
+# Scalar <key> of the `pipeline:` sub-block of the top-level `branch_sync:`
+# block in captured `axi status` TOON $1; empty when either block is absent.
+fm_nm_branch_sync_pipeline_field() {  # <toon-output> <key>
+  local s
+  s=$(printf '%s\n' "$1" | awk -v key="$2" '
+    /^branch_sync:[ \t]*$/ { sync = 1; next }
+    sync && /^[^ \t]/ { exit }
+    sync && /^  [^ \t]/ { pipeline = ($0 ~ /^  pipeline:[ \t]*$/); next }
+    pipeline && index($0, "    " key ":") == 1 { sub(/^    [^:]*:[ \t]*/, ""); print; exit }
+  ')
+  fm_nm_strip_quotes "$s"
+}
+
+# The submission exemption to the head rule above: the daemon records, per
+# run, the head it was submitted from (branch_sync.pipeline.submitted_head).
+# An ACTIVE run <run-id> whose own record names exactly worktree $2's HEAD is
+# that worktree's validation of its current code, even after the pipeline's
+# rebase rewrote history (a branch stacked on an unmerged base) so the run
+# head neither equals nor descends from the local commit. It never applies to
+# a terminal run, to another run's record, or to a submitted head that is not
+# a commit id; local work after submission moves HEAD and invalidates it.
+fm_nm_run_is_submitted_from_worktree_active() {  # <toon-output> <worktree> <run-id>
+  local submitted local_full
+  fm_nm_run_is_active "$1" || return 1
+  [ -n "$3" ] && [ "$(fm_nm_branch_sync_pipeline_field "$1" run)" = "$3" ] || return 1
+  submitted=$(fm_nm_branch_sync_pipeline_field "$1" submitted_head)
+  case "$submitted" in *[!A-Fa-f0-9]*|'') return 1 ;; esac
+  [ "${#submitted}" -ge 7 ] && [ "${#submitted}" -le 40 ] || return 1
+  local_full=$(git -C "$2" rev-parse HEAD 2>/dev/null) || return 1
+  [ "$(fm_nm_resolve_commit "$2" "$submitted")" = "$local_full" ]
 }
 
 # ONE owner for attribution from the pipeline's own runs ledger, replacing a
