@@ -55,21 +55,18 @@ fm_harness_path_name() {  # <path>
   # started from the app could never locate itself and every session start
   # refused the fleet lock as read-only. Match only that install tree: the
   # parent directory must end in /.claude/remote/ccd-cli and the basename must
-  # be a dotted version (digits.digits.digits, no suffix). A bare "ccd-cli"
-  # component elsewhere, extra path after the version, or a non-version
-  # basename is not a harness.
+  # be a version of digits and dots only, first and last character a digit, so
+  # every released numbering (2.1.275, 2.10.0, 100.1.1) matches. A bare
+  # "ccd-cli" component elsewhere, extra path after the version, or a basename
+  # carrying any other character is not a harness.
   local dir base
   dir=${path%/*}
   base=${path##*/}
   case "$dir" in
     */.claude/remote/ccd-cli)
       case "$base" in
-        [0-9].[0-9].[0-9]*|[0-9][0-9].[0-9].[0-9]*)
-          case "$base" in
-            *[!0-9.]*) ;;
-            *) printf '%s' claude; return 0 ;;
-          esac
-          ;;
+        *[!0-9.]*) ;;
+        [0-9]|[0-9]*[0-9]) printf '%s' claude; return 0 ;;
       esac
       ;;
   esac

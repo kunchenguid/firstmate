@@ -143,12 +143,20 @@ SH
       /tmp/ccd-cli/1/evil.2 \
       /tmp/x/ccd-cli/1.2/other \
       /root/.claude/remote/ccd-cli/2.1.275/extra \
-      /root/.claude/remote/ccd-cli/2.1.275-beta; do
+      /root/.claude/remote/ccd-cli/2.1.275-beta \
+      /root/.claude/remote/ccd-cli/2.1. \
+      /root/.claude/remote/ccd-cli/.2.1 \
+      /root/.claude/remote/ccd-cli/...; do
     lib_eval "$fakebin" "! fm_harness_path_name '$decoy' >/dev/null" \
       || fail "ccd-cli: decoy path '$decoy' was wrongly identified as a harness"
   done
-  lib_eval "$fakebin" 'fm_harness_path_name /root/.claude/remote/ccd-cli/2.1.275 >/dev/null' \
-    || fail "ccd-cli: the real app binary path was not identified"
+  # Version numbering is not capped at one digit per component: a two-digit
+  # minor and a three-digit major are ordinary future releases of the same
+  # install tree and must keep identifying the app.
+  for version in 2.1.275 2.10.0 12.10.4 100.1.1; do
+    lib_eval "$fakebin" "fm_harness_path_name /root/.claude/remote/ccd-cli/$version >/dev/null" \
+      || fail "ccd-cli: app binary path for version '$version' was not identified"
+  done
   pass "session-lock: a Claude desktop-app (ccd-cli) session is identified from its install path"
 }
 
