@@ -52,7 +52,7 @@ If the other extension wins, a session-start console diagnostic names the tool a
 
 [`calm-mode-feasibility.md`](calm-mode-feasibility.md) owns the version-scoped renderer taxonomy, built-in override constraints, and empirical evidence.
 [`configuration.md`](configuration.md#calm-preference-configcalm) owns the persisted preference file and resolution rules.
-`.pi/extensions/lib/fm-calm-visibility-core.ts` owns the visibility policy Pi and OMP share, `.claude/mods/firstmate-calm/lib/fm-calm-preservation.ts` owns the shared substantive mid-turn text rule that Pi imports through its tracked symlink, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, and `.pi/extensions/lib/fm-calm-working-ship.ts` owns Pi's animated working presentation over the sprite geometry both harnesses share in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`.
+`.pi/extensions/lib/fm-calm-visibility-core.ts` owns the visibility policy Pi and OMP share, `.claude/mods/firstmate-calm/lib/fm-calm-preservation.ts` owns the shared substantive mid-turn text rule that Pi and OMP import through the tracked symlink, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, and `.pi/extensions/lib/fm-calm-working-ship.ts` owns Pi's animated working presentation over the sprite geometry both harnesses share in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`.
 
 Regression entry points:
 
@@ -72,7 +72,7 @@ An operational FIRSTMATE_OP / watcher / drain tool row draws at zero height when
 A session resumed after the process died during an operational tool call can show that single rebuilt row at full height, because OMP's transcript rebuild passes no tool-call identity to any method this adapter wraps; the version-specific binding seam that would close that residual was considered and declined as net-negative coupling.
 Genuine user prompts and the genuine final assistant reply stay visible.
 Presentation only: model context, session storage, `/export`, watcher arming, and the turn-end guard stay unchanged.
-The animated working boat remains Pi-only on this slice; OMP leaves the stock working row alone.
+The animated working boat is not part of the OMP slice; OMP leaves the stock working row alone.
 
 OMP's public `registerMessageRenderer` is keyed by custom message type, so the extension probes that one seam and degrades a missing one with a diagnostic. It then uses OMP-native `InteractiveMode`, `AssistantMessageComponent`, and `ToolExecutionComponent` adapters from `@oh-my-pi/pi-coding-agent` for operational user rows, thinking collapse, mid-turn working notes, and operational tool rows (`registerAssistantThinkingRenderer` is not registered).
 It never loads `.pi/extensions/fm-calm.ts` and never patches Pi packages.
