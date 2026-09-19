@@ -1367,7 +1367,10 @@ spawn_refuse_if_away_spend_cap() {
   [ "$KIND" != secondmate ] || return 0
   [ -f "$STATE/.afk-contract" ] || return 0
   FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" validate >/dev/null 2>&1 || return 0
-  cap=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" field spend_max_concurrent_workers)
+  cap=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" field spend_max_concurrent_workers 2>/dev/null || true)
+  case "$cap" in
+  '' | *[!0-9]* | 0) return 0 ;;
+  esac
   live=0
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue

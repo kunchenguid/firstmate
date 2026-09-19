@@ -1754,9 +1754,19 @@ if (aborted) throw new Error("stripping processing aborted a captain-opened turn
 if (openedByCaptain?.messages?.some((message) => message.customType === "fm-branch-process")) {
   throw new Error(`captain-opened processing was not stripped: ${JSON.stringify(openedByCaptain)}`);
 }
-await fire("agent_end", {});
-await fire("agent_start", {}, defaultSessionCtx);
 aborted = false;
+await fire("before_agent_start", { prompt: "captain typed this now" }, abortCtx);
+const stolen = await fire("context", {
+  messages: [{ role: "user", content: "captain typed this now" }, processingMsg],
+}, abortCtx);
+if (aborted) throw new Error("a captain prompt that opened the run was aborted after a queued processing request joined it");
+if (stolen?.messages?.some((message) => message.customType === "fm-branch-process")) {
+  throw new Error(`joined processing was not stripped from the captain-opened run: ${JSON.stringify(stolen)}`);
+}
+await fire("agent_end", {});
+aborted = false;
+await fire("before_agent_start", { prompt: pending.message.content }, abortCtx);
+await fire("agent_start", {}, defaultSessionCtx);
 const openedByRequest = await fire("context", { messages: [...history, processingMsg] }, abortCtx);
 if (!aborted) throw new Error("a dedicated processing turn with history was not aborted under the record");
 if (openedByRequest?.messages?.some((message) => message.customType === "fm-branch-process")) {

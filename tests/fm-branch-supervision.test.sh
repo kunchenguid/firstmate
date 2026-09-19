@@ -907,6 +907,33 @@ test_away_record_relocates_main_owned_actions_to_the_branch() {
   [ "$status" -eq 1 ] || fail "main spawn past the cap exited $status, not 1: $out"
   assert_contains "$out" "caps concurrent workers" "main was not held to the spend cap"
 
+  rm -f "$root/bin"
+  mkdir -p "$root/bin"
+  for f in "$ROOT/bin"/*; do
+    ln -s "$f" "$root/bin/${f##*/}"
+  done
+  rm -f "$root/bin/fm-afk-contract.sh"
+  cat > "$root/bin/fm-afk-contract.sh" <<WRAPPER
+#!/usr/bin/env bash
+set -eu
+REAL="$ROOT/bin/fm-afk-contract.sh"
+COUNT="$home/contract-call-count"
+n=0
+[ -f "\$COUNT" ] && n=\$(cat "\$COUNT")
+n=\$((n + 1))
+printf '%s\n' "\$n" > "\$COUNT"
+if [ "\$n" -eq 2 ]; then
+  "\$REAL" archive >/dev/null
+fi
+exec "\$REAL" "\$@"
+WRAPPER
+  chmod +x "$root/bin/fm-afk-contract.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$root/bin/fm-spawn.sh" task-new --mode no-mistakes --yolo off 2>&1) || true
+  assert_not_contains "$out" "caps concurrent workers" "a field-read after archive refused a main spawn via the spend cap"
+  assert_not_contains "$out" "no readable spend cap" "a field-read after archive killed the spawn instead of restoring attended behavior"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" propose --spend 2 >/dev/null || fail "away re-propose failed"
+  FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null || fail "away re-confirm failed"
+
   # Archive is absence: the attended refusal returns, byte for byte.
   FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null || fail "away archive failed"
   out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 2>&1)

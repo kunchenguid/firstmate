@@ -656,7 +656,7 @@ export default function (pi: ExtensionAPI) {
   // session generation.
   type ProcessingState = { sequences: string; through: number; triggered: number; pending: boolean; nextTurnQueued: boolean };
   let processing: ProcessingState | null = null;
-  let queuedTriggeringProcessing = false;
+  let queuedProcessingContent: string | null = null;
   let processingOpenedThisRun = false;
   let processedInitializedGeneration = -1;
   // One revision for BOTH selections: a model or effort change invalidates an
@@ -1092,7 +1092,7 @@ export default function (pi: ExtensionAPI) {
     if (processing.triggered < PROCESSING_TRIGGERED_ATTEMPTS) {
       processing.triggered += 1;
       processing.pending = true;
-      queuedTriggeringProcessing = true;
+      queuedProcessingContent = content;
       pi.sendMessage(message, { triggerTurn: true, deliverAs: "followUp" });
     } else if (!processing.nextTurnQueued) {
       processing.nextTurnQueued = true;
@@ -1656,12 +1656,15 @@ ${context.command}
     // getEntries() here loses the captain request that the next wake may answer.
     // Stage it verbatim and remember the future persisted index for turn_end's
     // duplicate suppression. Operational extension injections are not dialog.
-    const prompt = event.prompt.trim();
-    if (!prompt || isOperationalUserText(prompt)) return;
+    const prompt = event.prompt;
+    processingOpenedThisRun = queuedProcessingContent !== null && prompt === queuedProcessingContent;
+    if (processingOpenedThisRun) queuedProcessingContent = null;
+    const trimmed = prompt.trim();
+    if (!trimmed || isOperationalUserText(trimmed)) return;
     const file = currentMainSession.getSessionFile() ?? "";
     const index = mirrorCollection.collectAnchor?.index ?? currentMainSession.getEntries().length;
-    pendingMirror.push({ tag: "captain", text: prompt });
-    mirrorCollection.stagedCaptain = { file, index, text: prompt };
+    pendingMirror.push({ tag: "captain", text: trimmed });
+    mirrorCollection.stagedCaptain = { file, index, text: trimmed };
   });
 
   pi.on?.("agent_start", () => {
@@ -1669,8 +1672,6 @@ ${context.command}
     // Pi delivers a queued nextTurn copy with the prompt that starts this run,
     // so a fresh copy may be queued again once this run settles unacknowledged.
     if (processing) processing.nextTurnQueued = false;
-    processingOpenedThisRun = queuedTriggeringProcessing;
-    queuedTriggeringProcessing = false;
   });
   pi.on?.("context", (event, ctx) => {
     if (!afkPostureRecordPresent(state)) return;
@@ -1692,7 +1693,7 @@ ${context.command}
   // reply that only paraphrased it - and is presented again.
   pi.on?.("agent_settled", async () => {
     mainStreaming = false;
-    queuedTriggeringProcessing = false;
+    queuedProcessingContent = null;
     processingOpenedThisRun = false;
     if (processing) processing.pending = false;
     const settledGeneration = generation;
