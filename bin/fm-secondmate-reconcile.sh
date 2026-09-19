@@ -29,8 +29,8 @@
 #     snapshot replaces that target's payload across schema, relaunch, or route
 #     changes without disturbing other targets. The watcher later runs
 #     process-requests, which claims each request, invokes the normal notify path,
-#     retires delivered or stale requests, and preserves skipped or failed requests
-#     for another supervision pass;
+#     retires delivered or stale requests, and preserves skipped, deferred, or
+#     failed requests for another supervision pass;
 #   - reading the mismatch from an already-produced fleet snapshot, so nothing
 #     here re-parses another home's state or runs a second child summary;
 #   - the cooldown. One durable per-home timestamp records the last nudge, and a
@@ -65,8 +65,13 @@
 # identity guard. The current metadata must still have no spawn_gen and must still
 # name that host. A row with neither identity fails loudly.
 #
+# A mate waiting on its own open decision or blocker (status_own_open_decisions,
+# bin/fm-classify-lib.sh) is not asked at all: notify spawns no send for it and
+# its request stays queued, quietly, until the decision closes.
+#
 # Notify exits 0 when no delivery or cooldown-recording failure is known,
-# including when a home was skipped for lock contention or a stale endpoint;
+# including when a home was skipped for lock contention, a stale endpoint, or
+# its own open decision;
 # it exits 1 when at least one due send failed or its cooldown could not be
 # recorded. A known-undelivered send records no cooldown. Process-requests
 # preserves that request for the next supervision pass; an unconfirmed send
@@ -77,12 +82,16 @@
 #   sent: <mate-id> <kind>          one reconcile instruction was recorded
 #   cooldown: <mate-id> <seconds>   nudged this recently; nothing sent
 #   skipped: <mate-id> lock         a required lock was busy; cooldown unchanged
+#   deferred: <mate-id> <kind>      the mate waits on its own open decision;
+#                                   nothing sent, cooldown unchanged
 #   stale: <mate-id> <kind>         the sampled endpoint retired or changed
 #   failed: <mate-id> <kind>        the steer could not be recorded
 #   sent-unrecorded: <mate-id> <kind>  sent, but cooldown commit failed
 # Request prints `requested: <path>` or `not-needed`.
-# Process-requests prints `processed: <count> deferred: <count>` after work and
-# exits 1 when any request remains deferred; an empty queue is silent success.
+# Process-requests prints `processed: <count> deferred: <count> waiting: <count>`
+# after work and exits 1 when any request remains deferred for a skip or failure;
+# a request kept only because its mate waits on its own decision counts as
+# waiting and exits 0. An empty queue is silent success.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -91,6 +100,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 # One nudge per home per four hours.
 FM_RECONCILE_COOLDOWN_SECONDS=${FM_RECONCILE_COOLDOWN_SECONDS:-14400}
@@ -347,7 +358,7 @@ EOF
 }
 
 cmd_process_requests() {
-  local process_lock="$STATE/.reconcile-notify-process.lock" request claimed base original output rc deferred=0 processed=0 have_request=0
+  local process_lock="$STATE/.reconcile-notify-process.lock" request claimed base original output rc deferred=0 waiting=0 processed=0 have_request=0
   [ "$#" -eq 0 ] || { usage >&2; exit 2; }
   [ -d "$REQUEST_DIR" ] && [ ! -L "$REQUEST_DIR" ] || return 0
   for request in "$REQUEST_DIR"/.processing-request-*.json "$REQUEST_DIR"/request-*.json; do
@@ -384,7 +395,7 @@ cmd_process_requests() {
       "$SCRIPT_DIR/fm-secondmate-reconcile.sh" notify --snapshot "$claimed" \
       > "$output" 2>&1 || rc=$?
     if [ "$rc" -eq 0 ] \
-      && ! grep -Eq '^(skipped|failed|sent-unrecorded):' "$output" 2>/dev/null; then
+      && ! grep -Eq '^(skipped|deferred|failed|sent-unrecorded):' "$output" 2>/dev/null; then
       if rm -f -- "$claimed"; then
         processed=$((processed + 1))
       else
@@ -396,12 +407,16 @@ cmd_process_requests() {
       elif [ -f "$original" ] && [ ! -L "$original" ]; then
         rm -f -- "$claimed" 2>/dev/null || true
       fi
-      deferred=$((deferred + 1))
+      if [ "$rc" -eq 0 ] && ! grep -Eq '^(skipped|failed|sent-unrecorded):' "$output" 2>/dev/null; then
+        waiting=$((waiting + 1))
+      else
+        deferred=$((deferred + 1))
+      fi
     fi
   done
   rm -f -- "$output"
   release_active_locks
-  printf 'processed: %s deferred: %s\n' "$processed" "$deferred"
+  printf 'processed: %s deferred: %s waiting: %s\n' "$processed" "$deferred" "$waiting"
   [ "$deferred" -eq 0 ]
 }
 
@@ -483,6 +498,11 @@ cmd_notify() {
         continue
       fi
     fi
+    if [ -n "$(status_own_open_decisions "$STATE/$id.status")" ]; then
+      printf 'deferred: %s %s\n' "$id" "$kind"
+      release_active_locks
+      continue
+    fi
     control_lock="$STATE/.control-$id.lock"
     if ! fm_lock_try_acquire "$control_lock"; then
       printf 'skipped: %s lock\n' "$id"
@@ -524,8 +544,14 @@ cmd_notify() {
     send_rc=0
     FM_TASK_INBOX_LOCK_WAIT_SECS=0 FM_SEND_EXPECTED_SPAWN_GEN="$sampled_spawn_gen" \
       FM_SEND_EXPECTED_REMOTE_HOST="$expected_remote_host" \
-      "$SCRIPT_DIR/fm-send.sh" "$id" --fire-and-forget "$did" \
+      "$SCRIPT_DIR/fm-send.sh" "$id" --automatic --fire-and-forget "$did" \
       "$(reconcile_text)" >/dev/null 2>&1 || send_rc=$?
+    # exit 4: the mate opened a decision since the check above, so nothing was
+    # sent and the request stays for a later pass without starting the cooldown.
+    if [ "$send_rc" -eq 4 ]; then
+      printf 'deferred: %s %s\n' "$id" "$kind"
+      continue
+    fi
     # exit 3 is "typed but unconfirmed": the mate may already hold the ask, so
     # record the nudge rather than risk asking twice.
     if [ "$send_rc" -ne 0 ] && [ "$send_rc" -ne 3 ]; then

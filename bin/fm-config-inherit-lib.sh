@@ -869,9 +869,15 @@ fm_config_reread_publish_stage() {
 }
 
 fm_config_reread_send_failure() {
-  local id=$1 instruction_path=$2 pending_path=$3 detail=$4
+  local id=$1 instruction_path=$2 pending_path=$3 detail=$4 rc=${5:-1}
   if ! fm_config_reread_mark_pending "$instruction_path" "$pending_path"; then
     detail="$detail; could not record retry marker"
+  fi
+  # fm-send's exit status classifies the result; 4 is the mate waiting on its
+  # own open decision. Anything it printed ahead of that line is not a failure.
+  if [ "$rc" -eq 4 ]; then
+    printf 'CONFIG_REREAD: secondmate %s: %s\n' "$id" "$detail"
+    return 4
   fi
   printf 'CONFIG_REREAD: secondmate %s: send failed: %s\n' "$id" "$detail"
   return 1
@@ -879,7 +885,7 @@ fm_config_reread_send_failure() {
 
 # fm_config_reread_send_pointer <id> <instruction-path>
 fm_config_reread_send_pointer() {
-  local id=$1 instruction_path=$2 pending_path selector out rc send_bin message pending_pointer
+  local id=$1 instruction_path=$2 pending_path selector out rc detail send_bin message pending_pointer
   pending_path="$instruction_path.pending"
   if [ ! -f "$instruction_path" ] || [ -L "$instruction_path" ]; then
     printf 'CONFIG_REREAD: secondmate %s: send failed: pending instruction file is missing\n' "$id"
@@ -905,15 +911,18 @@ fm_config_reread_send_pointer() {
     FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-}" \
     FM_STATE_OVERRIDE="${FM_STATE_OVERRIDE:-}" \
     FM_SEND_SETTLE="${FM_SEND_SETTLE:-0}" \
-    "$send_bin" "$selector" "$message" 2>&1) && rc=0 || rc=$?
+    "$send_bin" "$selector" --automatic "$message" 2>&1) && rc=0 || rc=$?
   if [ "$rc" -eq 0 ]; then
     rm -f "$pending_path"
     return 0
   fi
-  out=${out%%$'\n'*}
-  [ -n "$out" ] || out="fm-send exited $rc"
-  fm_config_reread_send_failure "$id" "$instruction_path" "$pending_path" "$out"
-  return 1
+  if [ "$rc" -eq 4 ]; then
+    detail=$(printf '%s\n' "$out" | grep -m1 '^deferred:') || detail=${out%%$'\n'*}
+  else
+    detail=${out%%$'\n'*}
+  fi
+  [ -n "$detail" ] || detail="fm-send exited $rc"
+  fm_config_reread_send_failure "$id" "$instruction_path" "$pending_path" "$detail" "$rc"
 }
 
 # fm_config_reread_discard_pending <dest-home>
@@ -1066,11 +1075,12 @@ fm_config_reread_quarantine_pending() {
 # SHA values, selected profiles, or data/captain-shared.md. No-op (return 0) when
 # nothing changed and no pending delivery exists. On publication or send
 # failure, print a concrete CONFIG_REREAD retry diagnostic to stdout and return
-# non-zero - never claim the live agent reread the values.
+# non-zero - never claim the live agent reread the values. A send deferred
+# because the mate waits on its own open decision returns 4 with the retry kept.
 fm_config_send_reread_nudge() {
   local id=$1 dest_home=$2 report=$3
   local dest_home_abs state source_home_abs changed_items pending_paths stage_paths delivery_paths
-  local stage_path instruction_path current_stage_path exact_tmp
+  local stage_path instruction_path current_stage_path exact_tmp send_rc=0
   local send_failures retry_report_paths retry_report_path retry_stage_path retry_record_path
   [ -n "$id" ] || return 1
   [ -n "$dest_home" ] || return 1
@@ -1211,16 +1221,13 @@ EOF
 $stage_paths
 EOF
     else
-      send_failures=1
+      send_rc=$?
       break
     fi
   done <<EOF
 $delivery_paths
 EOF
-  if [ "$send_failures" -ne 0 ]; then
-    fm_config_reread_cleanup_sent "$dest_home_abs"
-    return 1
-  fi
   fm_config_reread_cleanup_sent "$dest_home_abs"
-  return 0
+  [ "$send_failures" -eq 0 ] || return 1
+  return "$send_rc"
 }

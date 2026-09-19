@@ -14,6 +14,28 @@ fm_secondmate_nudge_marker_path() { # <state-dir> <id>
   printf '%s/.secondmate-nudge-pending/%s.pending\n' "$state" "$id"
 }
 
+# A reread send deferred because the mate waited on its own open decision or
+# blocker (fm-send --automatic exit 4) is flagged here, whether it was a local
+# config-reread generation or a remote route's marker above. The watcher
+# delivers a flagged reread once that decision closes
+# (fm-config-push.sh --retry-deferred) instead of leaving it for the next config
+# push or session start. A failed send is never flagged; it keeps that retry.
+fm_secondmate_reread_deferred_dir() { # <state-dir>
+  printf '%s/.secondmate-reread-deferred\n' "$1"
+}
+
+fm_secondmate_reread_deferred_path() { # <state-dir> <id>
+  local state=$1 id=$2
+  case "$id" in *[!/A-Za-z0-9._-]*|''|*/*) return 1 ;; esac
+  printf '%s/%s\n' "$(fm_secondmate_reread_deferred_dir "$state")" "$id"
+}
+
+fm_secondmate_reread_mark_deferred() { # <state-dir> <id>
+  local flag
+  flag=$(fm_secondmate_reread_deferred_path "$1" "$2") || return 1
+  mkdir -p "${flag%/*}" 2>/dev/null && : > "$flag"
+}
+
 fm_remote_inherit_transaction_lock_path() { # <state-dir> <id>
   local state=$1 id=$2
   case "$id" in *[!/A-Za-z0-9._-]*|''|*/*) return 1 ;; esac

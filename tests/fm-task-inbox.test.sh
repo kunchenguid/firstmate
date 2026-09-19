@@ -26,6 +26,9 @@
 #   6. Dead panes: the doorbell line is a shell no-op when executed by a bare
 #      shell, the ring skips an agent the backend classifies dead, and the
 #      watcher surfaces such a record exactly once instead of re-ringing.
+#   7. A fire-and-forget record stays outside the ladder, but one whose first
+#      ring did not land gets exactly one retry ring and never escalates. The
+#      retry waits while the worker has an open decision of its own.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -440,6 +443,40 @@ test_fire_and_forget_records_never_enter_the_ladder() {
   pass "inbox: fire-and-forget records stay durable and outside the ladder"
 }
 
+test_fire_and_forget_retry_is_owed_once() {
+  local state fire tracked action
+  state="$TMP_ROOT/faf-retry/state"; mkdir -p "$state"
+  fire=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "one-shot steer" fire-and-forget)
+  age_path "$fire"
+  inbox_lib "$state" fm_task_inbox_mark_retry "$state" t1 "$fire"
+  action=$(FM_TASK_INBOX_GRACE_SECS=3600 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = quiet ] || fail "a retry inside grace should be quiet, got: $action"
+  age_path "$state/t1.inbox/.retry-ring"
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "retry $fire" ] || fail "an aged retry mark should be due its ring, got: $action"
+  # An ordinary record's ladder rings the same inbox, so the retry waits behind it.
+  tracked=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "tracked steer")
+  age_path "$tracked"
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "ring $tracked" ] || fail "a pending ordinary record should own the ring, got: $action"
+  mv "$tracked" "$state/t1.inbox/handled/"
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = "retry $fire" ] || fail "the retry should resume once the ordinary record is handled, got: $action"
+  # Once spent, the record is quiet for good: no second retry and no escalation.
+  inbox_lib "$state" fm_task_inbox_clear_retry "$state" t1
+  action=$(FM_TASK_INBOX_GRACE_SECS=0 FM_TASK_INBOX_RING_MAX=0 \
+    inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = quiet ] || fail "a spent retry rang or escalated again: $action"
+  # An acknowledged record drops its mark.
+  inbox_lib "$state" fm_task_inbox_mark_retry "$state" t1 "$fire"
+  age_path "$state/t1.inbox/.retry-ring"
+  mv "$fire" "$state/t1.inbox/handled/"
+  action=$(FM_TASK_INBOX_GRACE_SECS=60 inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = quiet ] || fail "an acknowledged record's retry should be dropped, got: $action"
+  [ ! -e "$state/t1.inbox/.retry-ring" ] || fail "an acknowledged record kept its retry mark"
+  pass "inbox: a fire-and-forget record whose ring did not land is owed exactly one retry"
+}
+
 test_ring_ladder_policy() {
   local state rec action
   state="$TMP_ROOT/ladder/state"; mkdir -p "$state"
@@ -617,6 +654,68 @@ test_watcher_surfaces_unwritable_ladder() {
   pass "watcher: unwritable ladder bookkeeping surfaces a stale wake after the doorbell"
 }
 
+test_watcher_pays_fire_and_forget_retry_once() {
+  local dir state out log pid fire rings i=0
+  dir=$(setup_watch_case faf-retry)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  fire=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "one-shot steer" fire-and-forget)
+  age_path "$fire"
+  inbox_lib "$state" fm_task_inbox_mark_retry "$state" t1 "$fire"
+  age_path "$state/t1.inbox/.retry-ring"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_TASK_INBOX_RING_MAX=1
+  pid=$!
+  while [ "$i" -lt 100 ]; do
+    grep -qF 'Firstmate instruction waiting' "$log" 2>/dev/null && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  sleep 3
+  kill -0 "$pid" 2>/dev/null \
+    || fail "a fire-and-forget retry must not wake firstmate (watcher exited):"$'\n'"$(cat "$out")"
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  rings=$(grep -cF 'Firstmate instruction waiting' "$log" || true)
+  [ "$rings" = 1 ] || fail "expected exactly one retry ring, got $rings:"$'\n'"$(cat "$log")"
+  [ ! -s "$state/.wake-queue" ] || fail "a fire-and-forget retry queued a wake:"$'\n'"$(cat "$state/.wake-queue")"
+  [ ! -e "$state/t1.inbox/.retry-ring" ] || fail "the watcher did not spend the retry mark"
+  [ ! -e "$state/t1.inbox/.ring-state" ] || fail "a fire-and-forget retry entered the re-ring ladder"
+  [ -f "$fire" ] || fail "the retry ring removed the durable record"
+  pass "watcher: a fire-and-forget record's owed retry rings exactly once and never escalates"
+}
+
+# One watcher inbox check against an idle pane, through the production watcher
+# functions, so a status log the case writes is not also read as a wake.
+steer_check_once() {  # <case-dir>
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" FM_SEND_LOG="$1/send.log" \
+    FM_FAKE_TMUX_CAPTURE="$(idle_capture "$1")" FM_TASK_INBOX_GRACE_SECS=1 \
+    bash -c '. "$1" && inbox_steer_check sess:fm-t1 t1' _ "$WATCH" >/dev/null 2>&1
+}
+
+test_watcher_holds_retry_while_the_worker_decides() {
+  local dir state log fire rings
+  dir=$(setup_watch_case faf-retry-decision)
+  state="$dir/state"; log="$dir/send.log"; : > "$log"
+  fire=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "one-shot steer" fire-and-forget)
+  age_path "$fire"
+  inbox_lib "$state" fm_task_inbox_mark_retry "$state" t1 "$fire"
+  age_path "$state/t1.inbox/.retry-ring"
+  printf 'needs-decision [key=pick]: ship alpha or beta?\n' > "$state/t1.status"
+  steer_check_once "$dir"
+  steer_check_once "$dir"
+  [ ! -s "$log" ] || fail "the retry rang a worker waiting on its own decision:"$'\n'"$(cat "$log")"
+  [ -e "$state/t1.inbox/.retry-ring" ] || fail "the held retry lost its mark"
+
+  printf 'resolved [key=pick]: alpha\n' >> "$state/t1.status"
+  steer_check_once "$dir"
+  steer_check_once "$dir"
+  rings=$(grep -cF 'Firstmate instruction waiting' "$log" || true)
+  [ "$rings" = 1 ] || fail "expected exactly one retry ring once the decision closed, got $rings:"$'\n'"$(cat "$log")"
+  [ ! -e "$state/t1.inbox/.retry-ring" ] || fail "the watcher did not spend the retry mark"
+  pass "watcher: a fire-and-forget retry waits out the worker's own decision, then rings once"
+}
+
 test_watcher_escalates_once_after_budget() {
   local dir state out log pid rec rings
   dir=$(setup_watch_case escalate)
@@ -703,12 +802,15 @@ test_concurrent_writers_never_clobber
 test_writer_retries_after_a_vanished_lock_collision
 test_ladder_writes_ignore_vanished_inbox
 test_fire_and_forget_records_never_enter_the_ladder
+test_fire_and_forget_retry_is_owed_once
 test_ring_ladder_policy
 test_watcher_rerings_idle_pane_quietly
 test_watcher_waits_on_busy_pane
 test_watcher_quiet_on_healthy_inbox
 test_watcher_ack_silences_unwritable_ladder
 test_watcher_surfaces_unwritable_ladder
+test_watcher_pays_fire_and_forget_retry_once
+test_watcher_holds_retry_while_the_worker_decides
 test_watcher_escalates_once_after_budget
 test_watcher_dead_pane_escalates_once_without_ringing
 test_watcher_dead_pane_ignores_stale_busy_state

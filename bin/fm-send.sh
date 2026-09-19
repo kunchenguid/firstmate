@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell line into its terminal, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] <text...>
+# Usage: fm-send.sh <target> [--resolve-key <key>]... [--automatic] [--fire-and-forget <delivery-id>] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -51,7 +51,8 @@
 # watcher re-rings an unacknowledged message while its endpoint remains
 # available, escalates after the bounded ladder, and instead routes a positively
 # dead or missing endpoint directly to recovery without typing. An explicit
-# fire-and-forget record is excluded from that ladder.
+# fire-and-forget record is excluded from that ladder; when its ring here was
+# skipped or failed, the watcher rings it exactly once more.
 # bin/fm-task-inbox-lib.sh owns the record format, the doorbell line, and the
 # re-ring ladder. The composer pre-check before the ring is ADVISORY only: when
 # the composer visibly holds pending text the ring is skipped with a notice and
@@ -205,6 +206,15 @@
 # working:, or done: event still cannot clear a captain decision. The flag is
 # refused with --key, with an explicit backend target (no task ledger in this
 # home), and with an empty message.
+#
+# Automatic senders: a script that sends on its own schedule rather than as a
+# deliberate firstmate message (a re-read, config, or reconcile nudge) passes
+# --automatic. While the target task has an open decision or blocker of its
+# own (status_own_open_decisions, bin/fm-classify-lib.sh), fm-send then sends
+# nothing, prints one "deferred: ..." line, and exits 4, so a worker waiting on
+# an answer is woken only by firstmate's deliberate message; the caller keeps
+# its retry state. The flag needs a task selector resolved through this home's
+# metadata and is refused with --key and --resolve-key.
 #
 # After a successful TYPED-plane submit fm-send pauses FM_SEND_SETTLE seconds
 # (default 1, 0 disables) before returning: submit confirmation only proves the
@@ -480,8 +490,13 @@ fm_send_add_resolve_key() { # <key>
   esac
   RESOLVE_KEYS="${RESOLVE_KEYS}${RESOLVE_KEYS:+ }$k"
 }
+AUTOMATIC=0
 while :; do
   case "${1:-}" in
+  --automatic)
+    AUTOMATIC=1
+    shift
+    ;;
   --resolve-key)
     [ $# -ge 2 ] || {
       echo "error: --resolve-key requires a key" >&2
@@ -609,6 +624,19 @@ if [ -n "$FIRE_AND_FORGET_ID" ]; then
       echo "error: --fire-and-forget cannot accompany --resolve-key" >&2
       exit 1
     }
+fi
+
+if [ "$AUTOMATIC" = 1 ]; then
+  [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] \
+    || { echo "error: --automatic needs a task selector resolved through this home's metadata" >&2; exit 1; }
+  [ "${1:-}" != "--key" ] && [ -z "$RESOLVE_KEYS" ] \
+    || { echo "error: --automatic cannot accompany --key or --resolve-key" >&2; exit 1; }
+  automatic_task_id=$(fm_send_id_from_meta "$TARGET_META")
+  automatic_open=$(status_own_open_decisions "$STATE/$automatic_task_id.status")
+  if [ -n "$automatic_open" ]; then
+    echo "deferred: $automatic_task_id is waiting on its open decision or blocker ($(printf '%s\n' "$automatic_open" | cut -f1 | paste -sd, -)); nothing was sent" >&2
+    exit 4
+  fi
 fi
 
 if [ -n "$RESOLVE_KEYS" ]; then
@@ -1076,9 +1104,21 @@ else
     # bounded re-ring ladder or direct unavailable-endpoint recovery.
     ring_rc=0
     fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" || ring_rc=$?
+    ring_retry="the watcher will re-ring"
+    if [ -n "$FIRE_AND_FORGET_ID" ]; then
+      case "$ring_rc" in
+      1|2)
+        if fm_task_inbox_mark_retry "$STATE" "$INBOX_TASK_ID" "$INBOX_RECORD"; then
+          ring_retry="the watcher will ring it once more"
+        else
+          ring_retry="its one retry ring could not be recorded, so nothing will ring it again"
+        fi
+        ;;
+      esac
+    fi
     case "$ring_rc" in
-    1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
-    2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
+    1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and $ring_retry" >&2 ;;
+    2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and $ring_retry" >&2 ;;
     3) echo "fm-send: doorbell not typed because the agent in $T has exited; the steer is durably recorded at $INBOX_RECORD for recovery (stuck-crewmate-recovery), and the watcher will not re-ring a dead pane" >&2 ;;
     esac
     exit 0

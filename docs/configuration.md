@@ -553,7 +553,7 @@ The same deferred network stage performs guarded tracked-file sync and propagate
 Local routes use direct guarded filesystem operations, while remote routes delegate sync and allowlisted transfer through their configured SSH host without probing any unconfigured fleet.
 It emits `SECONDMATE_SYNC:` only when a home was skipped for an actionable sync reason, inheritance failed, or a divergent shared captain-preference copy was quarantined.
 When a running home advances and its loaded instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) changed, bootstrap sends the re-read nudge itself through the stable `fm-<id>` selector and reports the exact completed send as `BOOTSTRAP_INFO:`.
-If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
+If that send fails, or is deferred because the secondmate waits on its own open decision or blocker, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
 It uses the same live secondmate discovery and propagation helper as bootstrap; its [help](../bin/fm-config-push.sh) owns reporting and exit semantics, and [`fm_config_inherit_items`](../bin/fm-config-inherit-lib.sh) declares the inherited items.

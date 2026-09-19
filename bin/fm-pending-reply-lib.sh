@@ -11,8 +11,9 @@
 # Safety property (captain direction 2026-07-22): a secondmate agent may ignore
 # the marker and answer only in its visible conversation. The parent must notice
 # the missing correlated report without scraping that conversation, send exactly
-# one automatic recovery request asking for a repost through the parent channel,
-# and escalate once if the recovery turn also completes without a correlated
+# one automatic recovery request asking for a repost through the parent channel
+# (held back while the mate waits on its own open decision or blocker), and
+# escalate once if the recovery turn also completes without a correlated
 # report. Never loop, never repeatedly inject, never silently expire unresolved
 # records, and never treat wrong-home or structured-home heuristics as
 # acknowledgement. A same-basename restatement-copy of the mate home's
@@ -946,6 +947,9 @@ fm_pending_reply_send_recovery() {  # <state-dir> <corr_id>
   task_id=$(fm_pending_reply_get "$rec" task_id)
   # A remote mate's report may exist and simply not have been mirrored yet.
   fm_pending_reply_missing_report_is_evidence "$state" "$task_id" "$completed" || return 1
+  # A mate waiting on its own open decision or blocker is never poked: the
+  # recovery stays unattempted until firstmate's deliberate answer lands.
+  [ -z "$(status_own_open_decisions "$state/$task_id.status")" ] || return 1
   parent_home=$(fm_pending_reply_get "$rec" parent_home)
   msg=$(fm_pending_reply_recovery_message "$rec")
   sender_pid=${BASHPID:-$$}
