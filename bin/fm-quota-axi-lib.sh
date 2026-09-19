@@ -24,7 +24,8 @@ FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
 #   quota_lane($harness; $model)   the account lane a candidate names: a Pi
 #                                  model id's auth provider prefix
 #                                  (openai-codex-work/gpt-5.6-terra ->
-#                                  openai-codex-work), else "".
+#                                  openai-codex-work), `codex-home` for native
+#                                  Codex regardless of model, else "".
 #   quota_row($snapshot; $provider; $lane)
 #                                  the one provider row the candidate binds to,
 #                                  or null. Schema 5 joins on provider alone,
@@ -38,7 +39,8 @@ FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
 # shellcheck disable=SC2016  # jq program text, not shell expansion
 FM_QUOTA_ROW_JQ='
   def quota_lane($harness; $model):
-    if ($harness == "pi" or $harness == "pi-signed") and (($model // "") | contains("/"))
+    if $harness == "codex" then "codex-home"
+    elif ($harness == "pi" or $harness == "pi-signed") and (($model // "") | contains("/"))
     then ($model | split("/") | first) else "" end;
   def quota_row($snapshot; $provider; $lane):
     ([$snapshot.providers[]? | select(.provider == $provider)]) as $rows |

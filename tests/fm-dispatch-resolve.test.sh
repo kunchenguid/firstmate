@@ -506,8 +506,8 @@ pass "no rankable candidate: the tool escalates instead of guessing"
 # --- schema 6: rows keyed by provider + accountKey bind per account ----------------
 # quota-axi emits schema 6 once a provider expands to several accounts; every
 # row then carries accountKey and one provider id may appear on several rows.
-# A Pi lane binds to its own account's row, a keyless profile of an expanded
-# provider is unmeasured, and no row is ever chosen by position or summed.
+# Native Codex and Pi lanes bind to their own account rows, with no row
+# chosen by position or summed across accounts.
 LANE_RULES="$TMP_ROOT/lane-rules.json"
 SCHEMA6="$TMP_ROOT/schema6.json"
 SCHEMA5_PAIR="$TMP_ROOT/schema5-pair.json"
@@ -553,9 +553,39 @@ expect_code 0 "$code" "schema 6 snapshot exits 0"
 assert_contains "$out" '  status: clear' "schema 6 snapshot resolves"
 assert_contains "$out" 'candidate: pi:openai-codex-work/gpt-5.6-terra  provider=codex  scope=all_models  remaining=11%  spendPriority=-5.6819  runway=projected_exhaustion  -> eligible' "a Pi lane binds to its own account row"
 assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  scope=all_models  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at all_models' "the sibling lane reads its own exhausted row"
-assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  -> eligible, unranked: provider codex has no quota row for account default: disclosed uncertainty' "a keyless profile of an expanded provider is unmeasured, never blocked"
+assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  -> eligible, unranked: provider codex has no quota row for account codex-home: disclosed uncertainty' "native Codex never infers an account from a Pi lane"
 assert_contains "$out" "  profile: --harness 'pi' --model 'openai-codex-work/gpt-5.6-terra'" "the lane with headroom is chosen"
 assert_equals '--json' "$(cat "$LOG/quota-axi.calls")" "schema 6 needs one quota-axi --json read"
+
+SCHEMA6_NATIVE="$TMP_ROOT/schema6-native.json"
+jq '
+  .providers |= map(if .provider == "codex" then
+    .quotaSemantics.effectiveAvailability |= map(.effectivePercentRemaining = 0 | .runway.status = "exhausted_now")
+    else . end) |
+  (.providers[] | select(.accountKey == "openai-codex-work")) as $account |
+  .providers += [($account | .accountKey = "default"),
+    ($account | .accountKey = "codex-home" |
+      .quotaSemantics.effectiveAvailability |= map(
+        .effectivePercentRemaining = 80 | .runway.status = "through_reset" | .selection.spendPriority = 0.8))]
+' "$SCHEMA6" > "$SCHEMA6_NATIVE"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_NATIVE" run code out err "$BRIEF"
+expect_code 0 "$code" "native Codex schema 6 snapshot exits 0"
+assert_contains "$out" '  status: clear' "native Codex headroom resolves despite exhausted Pi and default rows"
+assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=80%  spendPriority=0.8  runway=through_reset  -> eligible' "native Codex reads codex-home"
+assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-5.6-sol'" "native Codex headroom is chosen"
+
+jq '.providers |= reverse' "$SCHEMA6_NATIVE" > "$TMP_ROOT/schema6-reversed.json"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-reversed.json" run code out err "$BRIEF"
+assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-5.6-sol'" "native Codex selection ignores row order"
+
+jq '.providers |= map(select(.provider != "codex" or .accountKey != "default") |
+  if .accountKey == "codex-home" then .accountKey = "default" else . end)' "$SCHEMA6_NATIVE" > "$TMP_ROOT/schema6-default.json"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-default.json" run code out err "$BRIEF"
+assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-5.6-sol'" "native Codex falls back to the default row when codex-home is absent"
+pass "native Codex binds to codex-home before default, independently of Pi accounts and row order"
 
 jq '.schemaVersion = 5 | .providers |= map(select(.accountKey != "openai-codex")) | del(.providers[].accountKey)' "$SCHEMA6" > "$SCHEMA5_PAIR"
 reset_log

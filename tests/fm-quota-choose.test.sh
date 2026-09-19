@@ -666,7 +666,31 @@ cat > "$SCHEMA6" <<'JSON'
 JSON
 out=$(call_choose --snapshot "$SCHEMA6" --candidate codex:default --candidate cursor:default)
 [ "$out" = "cursor default" ] || fail "schema 6 snapshot returned: $out"
-ok "schema 6 snapshot is accepted and an expanded provider without a default row is not selected"
+ok "native Codex never infers an account from a Pi lane"
+
+SCHEMA6_NATIVE="$LAB/schema6-native.json"
+jq '
+  .providers |= map(if .provider == "codex" then
+    .quotaSemantics.effectiveAvailability |= map(.effectivePercentRemaining = 0 | .runway.status = "exhausted_now")
+    else . end) |
+  (.providers[] | select(.accountKey == "openai-codex-work")) as $account |
+  .providers += [($account | .accountKey = "default"),
+    ($account | .accountKey = "codex-home" |
+      .quotaSemantics.effectiveAvailability |= map(.effectivePercentRemaining = 80 | .runway.status = "through_reset"))]
+' "$SCHEMA6" > "$SCHEMA6_NATIVE"
+for model in default gpt-5.6-sol; do
+  out=$(call_choose --snapshot "$SCHEMA6_NATIVE" --candidate "codex:$model" --candidate cursor:default)
+  [ "$out" = "codex $model" ] || fail "native Codex did not select codex-home for $model: $out"
+done
+jq '.providers |= reverse' "$SCHEMA6_NATIVE" > "$LAB/schema6-reversed.json"
+out=$(call_choose --snapshot "$LAB/schema6-reversed.json" --candidate codex:default --candidate cursor:default)
+[ "$out" = "codex default" ] || fail "native Codex selection depended on row order: $out"
+
+jq '.providers |= map(select(.provider != "codex" or .accountKey != "default") |
+  if .accountKey == "codex-home" then .accountKey = "default" else . end)' "$SCHEMA6_NATIVE" > "$LAB/schema6-default.json"
+out=$(call_choose --snapshot "$LAB/schema6-default.json" --candidate codex:default --candidate cursor:default)
+[ "$out" = "codex default" ] || fail "native Codex did not fall back to the default row: $out"
+ok "native Codex binds to codex-home before default, independently of model and row order"
 
 jq '.schemaVersion = 5 | .providers |= unique_by(.provider) | del(.providers[].accountKey)' "$SCHEMA6" > "$SCHEMA5_PAIR"
 out=$(call_choose --snapshot "$SCHEMA5_PAIR" --candidate codex:default --candidate cursor:default)
