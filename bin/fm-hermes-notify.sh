@@ -194,6 +194,10 @@ route_record_path() {  # <class> <key>
   printf '%s/routes/%s--%s.record\n' "$NOTIFY_DIR" "$1" "$2"
 }
 
+route_lock_path() {  # <class> <key>
+  printf '%s/routes/.lock--%s--%s\n' "$NOTIFY_DIR" "$1" "$2"
+}
+
 cmd_route() {
   local class=${1:-} message_file='' key='' message digest record tmp chat_id
   [ -n "$class" ] || { usage; exit 2; }
@@ -221,6 +225,11 @@ cmd_route() {
   message=$(truncate_to_max_bytes "$message")
   digest=$(sha256_text "$message")
   record=$(route_record_path "$class" "$key")
+  mkdir -p "$NOTIFY_DIR/routes"
+  local lock
+  lock=$(route_lock_path "$class" "$key")
+  fm_lock_acquire_wait "$lock"
+  trap 'fm_lock_release "'"$lock"'"' EXIT
   if [ -f "$record" ] && [ "$(record_field "$record" digest)" = "$digest" ] \
       && [ "$(record_field "$record" status)" = sent ]; then
     printf 'duplicate: %s/%s already sent\n' "$class" "$key"
@@ -231,7 +240,6 @@ cmd_route() {
     printf 'skipped: hermes/telegram not configured on this home\n'
     exit 0
   fi
-  mkdir -p "$NOTIFY_DIR/routes"
   tmp=$(mktemp "$NOTIFY_DIR/routes/.staging-XXXXXX") || exit 1
   {
     printf 'class=%s\nkey=%s\ndigest=%s\nstatus=pending\nchat_id=%s\n' "$class" "$key" "$digest" "$chat_id"
@@ -298,6 +306,10 @@ next_seq() {
 
 record_path() {  # <task-id>
   printf '%s/%s.record\n' "$NOTIFY_DIR" "$1"
+}
+
+register_lock_path() {  # <task-id>
+  printf '%s/.lock.%s\n' "$NOTIFY_DIR" "$1"
 }
 
 # Read one field's value out of a record file. Empty when the file or the
@@ -425,6 +437,11 @@ cmd_register() {
   fi
 
   local record="$NOTIFY_DIR/$task.record" prior_status='' prior_lifecycle='' created_at=''
+  local lock
+  lock=$(register_lock_path "$task")
+  mkdir -p "$NOTIFY_DIR"
+  fm_lock_acquire_wait "$lock"
+  trap 'fm_lock_release "'"$lock"'"' EXIT
   prior_status=$(record_field "$record" status)
   prior_lifecycle=$(record_field "$record" lifecycle)
   if [ "$prior_lifecycle" = "$identity" ]; then
