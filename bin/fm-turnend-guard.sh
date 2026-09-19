@@ -47,6 +47,16 @@
 # are unchanged everywhere else, including for a dead daemon pid or a beacon
 # older than AFK_GRACE, which still block.
 #
+# Extension-model primaries (pi, pi-signed, omp): the watch extension owns
+# continuity the same way, retiring the watcher on every actionable wake and
+# spawning the replacement itself, so the singleton lock is legitimately unheld
+# between cycles. A live extension pair recorded at its current build by the
+# live session-lock owner, plus a genuinely unheld lock and a fresh beacon, is
+# what proves supervision there - see fm_extension_owns_supervision in
+# bin/fm-wake-lib.sh, the same proof bin/fm-guard.sh uses. That branch uses the
+# flat $GRACE rather than AFK_GRACE, so the two guards agree on the same
+# instant. See the branch comment below for why the strict check misread this.
+#
 # Loop-guard, codex/Grok (default) mode: never block twice in the same turn.
 # Codex uses stop_hook_active and Grok uses stopHookActive; typed camel-case
 # takes precedence when both spellings are present. A true value means the
@@ -221,6 +231,33 @@ fi
 AFK_GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
 if [ "$(fm_path_age "$STATE/.last-watcher-beat")" -lt "$AFK_GRACE" ] \
   && fm_afk_daemon_owns_supervision "$STATE"; then
+  allow_supervised_stop
+fi
+
+# The extension-model primaries (pi, pi-signed, omp) own continuity the same way
+# the away-mode daemon does: the watch extension retires the watcher on EVERY
+# actionable wake and spawns the replacement itself, so the singleton lock is
+# legitimately unheld between cycles and a turn boundary regularly lands in that
+# hand-off with nothing wrong. bin/fm-guard.sh learned this in #2304; this guard
+# kept the strict predicate because #1661 scoped that decision to the Claude
+# Stop-owned auto-arm, which genuinely does bring a fresh watcher up AT the turn
+# boundary. A Pi extension arms on the watcher's actionable close instead, so
+# there is no arm in progress here to cooperate with, and the strict check
+# reported healthy supervision as blind - measured on a live primary at 101 of
+# 101 cycles ending with the lock released and 14.5% of wall-clock unheld.
+# fm_extension_owns_supervision is the same structural proof the pull guard
+# uses: both of one family's primary extensions recorded in their state markers
+# at their current on-disk builds by the live process named in state/.lock.
+# It deliberately does NOT consult fm_supervision_model - the ownership proof is
+# a structural fact about this home, while harness detection reads the guard
+# child's own ancestry and would add a failure mode the predicate does not need.
+# Every other refusal is unchanged: a stale beacon still blocks once it passes
+# grace, so a cycle the extension never restores is still caught; an unloaded,
+# version-drifted, or exited session proves nothing; and fm_watcher_lock_unheld
+# keeps a lock that IS held but unhealthy on the strict path above.
+if [ "$(fm_path_age "$STATE/.last-watcher-beat")" -lt "$GRACE" ] \
+  && fm_watcher_lock_unheld "$STATE" \
+  && fm_extension_owns_supervision "$STATE" "$FM_ROOT"; then
   allow_supervised_stop
 fi
 
