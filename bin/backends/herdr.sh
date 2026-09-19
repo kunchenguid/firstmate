@@ -2065,6 +2065,16 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
   [ "$presence" = dead ]
 }
 
+fm_backend_herdr_recovery_reserve_pane() {  # <session> <pane_id>
+  fm_backend_herdr_cli "$1" pane report-agent "$2" \
+    --source firstmate-recovery --agent firstmate-recovery --state idle >/dev/null 2>&1
+}
+
+fm_backend_herdr_recovery_release_pane() {  # <session> <pane_id>
+  fm_backend_herdr_cli "$1" pane release-agent "$2" \
+    --source firstmate-recovery --agent firstmate-recovery >/dev/null 2>&1
+}
+
 # fm_backend_herdr_pane_process_state: what the operating system says is
 # running in <pane_id>, as one of agent|shell|other|unreadable, from `pane
 # process-info` plus the real process table. This is the process-level proof
@@ -2440,16 +2450,33 @@ EOF
   if [ -n "$dup_tab_ids" ]; then
     while IFS= read -r dup; do
       [ -n "$dup" ] || continue
-      fm_backend_herdr_cli "$session" tab close "$dup" >/dev/null 2>&1 || true
+      dup_pane=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$dup")
+      if [ -z "$dup_pane" ] || ! fm_backend_herdr_tab_is_husk "$session" "$dup_pane"; then
+        echo "error: herdr tab '$label' became live while replacing it in workspace $wsid (session $session)" >&2
+        fm_backend_herdr_create_task_cleanup "$session" "$pane_id"
+        return 1
+      fi
+      if ! fm_backend_herdr_recovery_reserve_pane "$session" "$dup_pane"; then
+        echo "error: could not reserve herdr tab '$label' before retiring it in workspace $wsid (session $session)" >&2
+        fm_backend_herdr_create_task_cleanup "$session" "$pane_id"
+        return 1
+      fi
+      if ! fm_backend_herdr_cli "$session" tab close "$dup" >/dev/null 2>&1; then
+        fm_backend_herdr_recovery_release_pane "$session" "$dup_pane" || true
+        fm_backend_herdr_create_task_cleanup "$session" "$pane_id"
+        return 1
+      fi
     done <<EOF
 $dup_tab_ids
 EOF
     list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || {
       echo "error: could not verify herdr husk removal for tab '$label' in workspace $wsid (session $session)" >&2
+      fm_backend_herdr_create_task_cleanup "$session" "$pane_id"
       return 1
     }
     if ! printf '%s' "$list" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1; then
       echo "error: could not parse herdr tab list output for workspace $wsid (session $session)" >&2
+      fm_backend_herdr_create_task_cleanup "$session" "$pane_id"
       return 1
     fi
     remaining_dup_tabs=$(printf '%s' "$list" | jq -r --arg want "$label" --arg replacement "$tab_id" \
@@ -2457,10 +2484,18 @@ EOF
     remaining_dup_tabs=${remaining_dup_tabs//$'\n'/ }
     if [ -n "$remaining_dup_tabs" ]; then
       echo "error: failed to remove preexisting herdr tab(s) $remaining_dup_tabs for label '$label' in workspace $wsid (session $session)" >&2
+      fm_backend_herdr_create_task_cleanup "$session" "$pane_id"
       return 1
     fi
   fi
   printf '%s %s' "$tab_id" "$pane_id"
+}
+
+fm_backend_herdr_create_task_cleanup() {
+  local session=$1 pane_id=$2
+  if ! fm_backend_herdr_explicit_close_pane_confirmed "$session" "$pane_id"; then
+    echo "warning: could not remove herdr task pane '$pane_id' after create failure" >&2
+  fi
 }
 
 # fm_backend_herdr_projection_create_task: create one disposable presentation
