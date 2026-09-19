@@ -190,6 +190,40 @@ test_register_is_idempotent_within_same_lifecycle() {
   pass "register is idempotent for a second call within the same hold lifecycle"
 }
 
+# Launches many truly concurrent `register` calls for the very same task id
+# and hold lifecycle - the shape of a caller retry racing the original call
+# before it finishes. Before cmd_register's read-decide-write duplicate check
+# was lock-protected, two overlapping calls could both read the pre-write
+# state, both pass the duplicate check, and both send a Telegram message for
+# the same hold; with the per-task lock exactly one of the N calls sends and
+# every other one is reported and recorded as a duplicate.
+test_register_suppresses_duplicates_under_concurrent_callers() {
+  local home i n=10
+  local -a pids
+  home=$(make_home register-concurrent-race)
+  configure_hermes "$home" 'telegram:Rajiv [8629896233]'
+  hold_task "$home" sample-notify-race
+  printf 'Captain, a decision is needed on sample-notify-race.\n' > "$home/reason.txt"
+  for i in $(seq 1 "$n"); do
+    ( run_notify "$home" register sample-notify-race --reason-file "$home/reason.txt" ) \
+      > "$home/register-out-$i" 2>&1 &
+    pids+=("$!")
+  done
+  for pid in "${pids[@]}"; do
+    wait "$pid" || fail "a concurrent register call exited non-zero"
+  done
+  local calls sent_count duplicate_count
+  calls=$(wc -l < "$home/hermes-send.log" | tr -d '[:space:]')
+  assert_equals 1 "$calls" "$n concurrent register calls for the same hold sent $calls Telegram messages instead of exactly 1"
+  sent_count=$(grep -l "^sent:" "$home"/register-out-* 2>/dev/null | wc -l | tr -d '[:space:]')
+  duplicate_count=$(grep -l "^duplicate:" "$home"/register-out-* 2>/dev/null | wc -l | tr -d '[:space:]')
+  assert_equals 1 "$sent_count" "expected exactly one of the $n concurrent callers to report sent:"
+  assert_equals "$((n - 1))" "$duplicate_count" "expected every other concurrent caller to report duplicate:"
+  assert_grep "status=sent" "$home/state/hermes-notify/sample-notify-race.record" \
+    "the durable record was not left as status=sent after the concurrent race"
+  pass "register serializes concurrent calls for the same hold so exactly one Telegram send happens"
+}
+
 test_register_resends_after_new_hold_lifecycle() {
   local home out calls
   home=$(make_home register-relifecycle)
@@ -551,6 +585,7 @@ test_mode_commands_do_not_answer_or_release_holds() {
 test_register_sends_and_records
 test_register_refuses_when_not_an_active_hold
 test_register_is_idempotent_within_same_lifecycle
+test_register_suppresses_duplicates_under_concurrent_callers
 test_register_resends_after_new_hold_lifecycle
 test_register_recovers_from_interrupted_send
 test_register_skips_silently_when_hermes_not_configured
