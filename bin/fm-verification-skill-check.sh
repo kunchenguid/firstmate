@@ -77,8 +77,16 @@ if ! printf '%s\n' "$FRONTMATTER" | awk '
     value = $0
     sub(/^description:[[:space:]]*/, "", value)
     if (value ~ /^[>|][-+]?$/) { block = 1; next }
+    sub(/[[:space:]]+$/, "", value)
     lower = tolower(value)
-    if (value ~ /^[[:alnum:]]/ && lower !~ /^(null|~)([[:space:]]|$)/) valid = 1
+    numeric = value ~ /^[-+]?[0-9][0-9_]*(\.[0-9_]*)?([eE][-+]?[0-9][0-9_]*)?$/ \
+      || value ~ /^[-+]?\.[0-9][0-9_]*([eE][-+]?[0-9][0-9_]*)?$/ \
+      || value ~ /^0[xX][[:xdigit:]_]+$/ \
+      || value ~ /^0[oO][0-7_]+$/
+    if (value ~ /^[[:alnum:]]/ \
+        && lower !~ /^(null|~|true|false|yes|no|on|off)$/ \
+        && !numeric \
+        && value !~ /:[[:space:]]|:$/) valid = 1
     exit
   }
   block && /^[[:space:]]+/ && /[^[:space:]]/ { valid = 1; exit }

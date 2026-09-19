@@ -148,7 +148,7 @@ test_accepts_supported_description_forms() {
 test_rejects_invalid_descriptions() {
   local dir index out value
   index=0
-  for value in '' 'null' '""' '[unfinished'; do
+  for value in '' 'null' '""' '[unfinished' 'false' '123' '1.25' 'Drive app: now'; do
     index=$((index + 1))
     dir="$TMP_ROOT/invalid-description-$index/verify-timetracker"
     make_good_skill "$dir"
