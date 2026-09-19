@@ -493,31 +493,38 @@ test_foreign_blocker_is_not_selected_as_escalation() {
   pass "foreign correlated blocker cannot impersonate a pending-reply escalation"
 }
 
+# Eight concurrent resolvers of one escalated record must append exactly one
+# keyed close (github.com/kunchenguid/firstmate/issues/3769). Each resolver
+# unsets BASHPID so every Bash takes fm_current_pid's stock Bash 3.2 fallback,
+# where sibling subshells once shared $$ as lock owner and both closed. Repeated
+# so an intermittent double-append cannot hide behind one lucky schedule.
 test_concurrent_resolution_closes_escalation_once() {
-  local home state corr rec
-  home=$(setup_parent concurrent-resolution)
-  state="$home/state"
-  export FM_PENDING_REPLY_NOW=4800
-  corr=$(fm_pending_reply_create "$home" "$state" "hibit" "concurrent resolution")
-  fm_pending_reply_mark_delivered "$state" "$corr"
-  rec=$(fm_pending_reply_path "$state" "$corr")
-  fm_pending_reply_set "$rec" phase escalated
-  fm_pending_reply_set "$rec" escalated_epoch 4750
-  printf 'blocked [key=pending-reply-%s]: pending-reply-missed: task=hibit pending-reply-id=%s request=concurrent resolution\n' \
-    "$corr" "$corr" > "$state/hibit.status"
-  printf 'done [corr=%s]: concurrent delayed reply\n' "$corr" >> "$state/hibit.status"
+  local trial home state corr rec
+  for trial in 1 2 3 4 5; do
+    home=$(setup_parent "concurrent-resolution-$trial")
+    state="$home/state"
+    export FM_PENDING_REPLY_NOW=4800
+    corr=$(fm_pending_reply_create "$home" "$state" "hibit" "concurrent resolution")
+    fm_pending_reply_mark_delivered "$state" "$corr"
+    rec=$(fm_pending_reply_path "$state" "$corr")
+    fm_pending_reply_set "$rec" phase escalated
+    fm_pending_reply_set "$rec" escalated_epoch 4750
+    printf 'blocked [key=pending-reply-%s]: pending-reply-missed: task=hibit pending-reply-id=%s request=concurrent resolution\n' \
+      "$corr" "$corr" > "$state/hibit.status"
+    printf 'done [corr=%s]: concurrent delayed reply\n' "$corr" >> "$state/hibit.status"
 
-  for _ in 1 2 3 4 5 6 7 8; do
-    fm_pending_reply_try_resolve "$state" "$corr" &
+    for _ in 1 2 3 4 5 6 7 8; do
+      ( unset BASHPID; fm_pending_reply_try_resolve "$state" "$corr" ) &
+    done
+    wait
+
+    [ "$(phase_of "$state" "$corr")" = resolved ] \
+      || fail "trial $trial: concurrent resolvers left the expectation unresolved"
+    [ "$(grep -Fc "pending-reply-resolved: task=hibit pending-reply-id=$corr" "$state/hibit.status")" -eq 1 ] \
+      || fail "trial $trial: concurrent resolvers did not append exactly one decision close"
+    [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
+      || fail "trial $trial: concurrent resolution did not record the closed escalation"
   done
-  wait
-
-  [ "$(phase_of "$state" "$corr")" = resolved ] \
-    || fail "concurrent resolvers left the expectation unresolved"
-  [ "$(grep -Fc "pending-reply-resolved: task=hibit pending-reply-id=$corr" "$state/hibit.status")" -eq 1 ] \
-    || fail "concurrent resolvers did not append exactly one decision close"
-  [ -n "$(fm_pending_reply_get "$rec" escalation_closed_epoch)" ] \
-    || fail "concurrent resolution did not record the closed escalation"
   pass "concurrent resolution closes one keyed escalation exactly once"
 }
 
