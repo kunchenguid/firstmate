@@ -100,6 +100,15 @@ test_accepts_well_shaped_skill() {
   assert_contains "$out" "ok:" "passing output names the validated directory"
 }
 
+test_accepts_skill_without_helpers() {
+  local dir out code
+  dir="$TMP_ROOT/no-helpers/verify-timetracker"
+  make_good_skill "$dir"
+  sed -i '/^## Helpers$/,$d' "$dir/SKILL.md"
+  out=$(run_check "$dir") && code=0 || code=$?
+  expect_code 0 "$code" "generated skill without helpers passes the shape check"
+}
+
 test_rejects_missing_sections() {
   local dir out
   dir="$TMP_ROOT/no-evidence/verify-timetracker"
@@ -223,13 +232,22 @@ test_rejects_unreferenced_feature() {
 
 test_rejects_malformed_feature_file() {
   local dir heading out
-  for heading in "Sub-features" "How to get to it (user POV)" "Driving it with shell" "Gotchas"; do
+  for heading in "Sub-features" "How to get to it (user POV)" "Gotchas"; do
     dir="$TMP_ROOT/malformed-${heading//[^[:alnum:]]/-}/verify-timetracker"
     make_good_skill "$dir"
     sed -i "/^## $heading$/,/^## / { /^## $heading$/d; }" "$dir/features/track-time.md"
     out=$(run_check "$dir") && fail "feature file without '$heading' must fail" || true
     assert_contains "$out" "track-time.md is missing" "failure names the malformed feature file"
   done
+}
+
+test_rejects_feature_without_driving_section() {
+  local dir out
+  dir="$TMP_ROOT/missing-driving-section/verify-timetracker"
+  make_good_skill "$dir"
+  sed -i '/^## Driving it with shell$/,/^## Gotchas$/ { /^## Driving it with shell$/d; }' "$dir/features/track-time.md"
+  out=$(run_check "$dir") && fail "feature file without a driving section must fail" || true
+  assert_contains "$out" "Driving it with <harness>" "failure names the missing driving section"
 }
 
 test_rejects_leftover_placeholders() {
@@ -267,6 +285,7 @@ test_rejects_missing_skill_file() {
 }
 
 test_accepts_well_shaped_skill
+test_accepts_skill_without_helpers
 test_rejects_missing_sections
 test_rejects_unclosed_frontmatter
 test_rejects_missing_description
@@ -280,6 +299,7 @@ test_rejects_contradictory_process_name_kill_instruction
 test_rejects_missing_feature_map
 test_rejects_unreferenced_feature
 test_rejects_malformed_feature_file
+test_rejects_feature_without_driving_section
 test_rejects_leftover_placeholders
 test_rejects_name_directory_mismatch
 test_rejects_generic_skill_name

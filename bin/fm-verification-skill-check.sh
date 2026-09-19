@@ -100,10 +100,14 @@ if [ -n "$NAME" ] && [ "$NAME" != "$BASENAME" ]; then
   fail "skill name '$NAME' does not match directory name '$BASENAME'"
 fi
 
-for heading in Launch Doctor Drive Evidence Cleanup Helpers; do
+for heading in Launch Doctor Drive Evidence Cleanup; do
   body=$(section_body "$SKILL" "$heading")
   has_content "$body" || fail "SKILL.md is missing a non-empty '## $heading' section"
 done
+if grep -qx '## Helpers' "$SKILL"; then
+  body=$(section_body "$SKILL" "Helpers")
+  has_content "$body" || fail "SKILL.md is missing a non-empty '## Helpers' section"
+fi
 
 CLEANUP_BODY=$(section_body "$SKILL" "Cleanup" | tr '\n' ' ')
 PROCESS_NAME_KILL_COUNT=$(printf '%s\n' "$CLEANUP_BODY" \
