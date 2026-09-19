@@ -9,7 +9,10 @@
 # current after no-mistakes fix rounds push to the PR. A recorded pr_head= is
 # only a fallback when fetch fails (stale recorded SHAs must never win over a
 # reachable remote PR head). If neither PR head can be resolved, fall back to
-# the local branch with a warning. Without pr=, compare the local branch.
+# the local branch with a warning. Without pr=, compare the task's immutable
+# ship branch recorded in state/<id>.meta ("fm/<id>" for records created before
+# that field existed), or the worktree's checked-out branch when that branch
+# does not exist in the worktree.
 # Usage: fm-review-diff.sh <task-id> [--stat]
 #   --stat prints only the stat summary; default prints stat summary plus full diff.
 set -eu
