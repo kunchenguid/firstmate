@@ -225,6 +225,16 @@ fm_afk_launch_record_require() {
   }
 }
 
+# Away entry proves the wedge alarm can reach the captain outside the pane before
+# the daemon is launched; the check and its channels are owned by
+# fm-supervise-daemon.sh (wedge_alarm_verify, docs/wedge-alarm.md).
+fm_afk_launch_verify_wedge_alarm() {
+  local out
+  out=$("$FM_AFK_LAUNCH_DIR/fm-supervise-daemon.sh" --verify-wedge-alarm 2>&1) && return 0
+  fm_afk_launch_log "refusing to start away mode: $out"
+  return 1
+}
+
 fm_afk_launch_propose() {
   fm_afk_launch_catchup_pending && return 1
   "$FM_AFK_CONTRACT_CMD" propose "$@"
@@ -553,6 +563,7 @@ fm_afk_launch_start() {
   fm_afk_launch_catchup_pending && return 1
   fm_afk_launch_daemon_allowed || return 1
   fm_afk_launch_record_require || return 1
+  daemon_lock_held_by_live_daemon || fm_afk_launch_verify_wedge_alarm || return 1
   # Capture the captain pane FIRST, before creating anything.
   captain_target=$(discover_supervisor_target) || {
     fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"
@@ -624,6 +635,7 @@ fm_afk_launch_start_native() {
   fm_afk_launch_catchup_pending && return 1
   fm_afk_launch_daemon_allowed || return 1
   fm_afk_launch_record_require || return 1
+  daemon_lock_held_by_live_daemon || fm_afk_launch_verify_wedge_alarm || return 1
   if daemon_lock_held_by_live_daemon; then
     fm_afk_launch_record_validate_if_present || return 1
     fm_afk_launch_flag_write || return 1
