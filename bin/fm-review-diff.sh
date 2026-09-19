@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 # Review a crewmate branch against the authoritative base.
 #
+# The base branch is the one the task was actually launched from, which is not
+# always the remote's default branch: when state/<id>.meta records base_branch=,
+# that branch is the base. bin/fm-spawn.sh owns resolving and recording it, and
+# its header owns the rules that decide it. Without that record - a task from
+# before spawn wrote one, or a slot that never resolved a branch - the base is
+# the project's default branch as it has always been.
+#
 # Pooled project clones do not keep their local default branch current, so this
-# helper compares remote-backed projects against origin/<default> after fetching
-# the default branch, and local-only projects against the local default branch.
+# helper compares remote-backed projects against origin/<base> after fetching
+# the base branch, and local-only projects against the local base branch.
 # When state/<id>.meta records pr= (URL or number) for an open PR, the compare
 # side is ALWAYS a freshly fetched refs/pull/<n>/head by default so review stays
 # current after no-mistakes fix rounds push to the PR. A recorded pr_head= is
@@ -65,7 +72,10 @@ default_branch() {
   return 1
 }
 
-DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+BASE_BRANCH=$(grep '^base_branch=' "$META" | tail -1 | cut -d= -f2- || true)
+if [ -z "$BASE_BRANCH" ]; then
+  BASE_BRANCH=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+fi
 
 BRANCH="fm/$ID"
 if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
@@ -135,11 +145,11 @@ fi
 
 if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
-  # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
-  git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet
-  BASE="origin/$DEFAULT"
+  # origin/<base> stale on some Git versions and only refresh FETCH_HEAD.
+  git -C "$WT" fetch origin "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH" --quiet
+  BASE="origin/$BASE_BRANCH"
 else
-  BASE="$DEFAULT"
+  BASE="$BASE_BRANCH"
 fi
 
 git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }

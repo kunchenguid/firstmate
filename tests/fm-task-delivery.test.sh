@@ -465,17 +465,26 @@ EOF
   for project in plainproj legacyproj emptyproj unregisteredproj; do
     out=$(FM_HOME="$home" "$PROJECT_MODE" --branch "$project" 2>/dev/null)
     status=$?
-    [ "$status" -ne 0 ] || fail "--branch answered for $project, which registers no working branch"
+    [ "$status" -eq 1 ] \
+      || fail "--branch answered $status for $project, which registers no working branch"
     [ -z "$out" ] || fail "--branch printed '$out' for $project, which registers no working branch"
+    err=$(FM_HOME="$home" "$PROJECT_MODE" --branch "$project" 2>&1 >/dev/null)
+    [ -z "$err" ] || fail "--branch diagnosed $project, which simply registers no branch: $err"
   done
 
+  # A registered branch git rejects is a different answer from an absent one, so
+  # it carries a different exit status and says which token it refused.
   out=$(FM_HOME="$home" "$PROJECT_MODE" --branch badproj 2>/dev/null)
   status=$?
   [ "$status" -ne 0 ] || fail "--branch accepted a branch name git itself rejects"
+  [ "$status" -ne 1 ] \
+    || fail "--branch reported a branch name git rejects as an absent branch"
+  [ "$status" -eq 3 ] || fail "--branch answered $status for a malformed branch token, not 3"
   [ -z "$out" ] || fail "--branch printed a branch name git itself rejects (got '$out')"
   err=$(FM_HOME="$home" "$PROJECT_MODE" --branch badproj 2>&1 >/dev/null)
   assert_contains "$err" "not a valid branch name" \
     "a malformed branch token was ignored without saying so"
+  assert_contains "$err" 'bad..name' "the diagnostic did not name the offending token"
   pass "fm-project-mode: --branch reads a registered working branch and never invents one"
 }
 

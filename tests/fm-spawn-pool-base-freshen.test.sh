@@ -262,6 +262,93 @@ test_registered_working_branch_decides_the_pool_base() {
   pass "a registered working branch decides the pooled slot's base over the remote default"
 }
 
+# "No branch is registered" and "the registered branch is one git rejects" are
+# different answers: the first falls back to origin's default branch, the second
+# is a registry error the operator has to see, because silently landing on the
+# default branch is the very failure the token exists to remove.
+test_malformed_branch_token_refuses_while_an_absent_one_falls_back() {
+  local rec id out status before default_tip
+  id='pool-malformed-branch-r1'
+  rec=$(make_case malformed-branch "$id")
+  read_case_record "$rec"
+  register_project_branch 'bad..name'
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "spawn launched on origin's default branch despite a malformed registered branch"
+  assert_contains "$out" 'not a valid branch name' \
+    "the registry parser's own diagnostic never reached the operator"
+  assert_contains "$out" 'bad..name' "the refusal did not name the offending token"
+  assert_not_contains "$out" "spawned $id" "a refused spawn reported success"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved the slot while refusing a malformed registered branch"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+
+  id='pool-absent-branch-token-r1'
+  rec=$(make_case absent-branch-token "$id")
+  read_case_record "$rec"
+  printf -- '- %s [no-mistakes] - no working branch registered (added 2026-09-18)\n' \
+    "$(basename "$PROJECT_DIR")" > "$HOME_DIR/data/projects.md"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" \
+    "a project registering no branch token should still fall back to origin's default branch"$'\n'"$out"
+  default_tip=$(git -C "$POOL_DIR" rev-parse "origin/$DEFAULT_BRANCH")
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$default_tip" ] \
+    || fail "an absent branch token did not fall back to origin's default branch"
+  assert_grep "base_branch=$DEFAULT_BRANCH" "$HOME_DIR/state/$id.meta" \
+    "an absent branch token did not record the default branch it fell back to"
+  pass "a malformed branch token refuses the spawn while an absent one falls back"
+}
+
+# Re-resolving origin's default branch is what makes it current. When that fails
+# and nothing is registered, the slot's previously recorded origin/HEAD is a
+# possibly renamed-away default branch, so it is refused rather than read.
+test_unrefreshable_origin_head_refuses_unless_a_branch_is_registered() {
+  local rec id out status before develop_tip
+  id='pool-stale-origin-head-r1'
+  rec=$(make_case stale-origin-head "$id")
+  read_case_record "$rec"
+  # Record origin/HEAD the way a clone does, then stop origin re-advertising it,
+  # so the stale recorded ref is the only remaining answer.
+  git -C "$POOL_DIR" fetch --quiet origin
+  git -C "$POOL_DIR" symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$DEFAULT_BRANCH"
+  git --git-dir="$CASE_DIR/origin.git" symbolic-ref HEAD refs/heads/missing-default
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "spawn accepted a stale recorded origin/HEAD as the project's working branch"
+  assert_contains "$out" "could not resolve the working branch" \
+    "the refusal did not say the working branch was unresolvable"
+  assert_not_contains "$out" "spawned $id" "a refused spawn reported success"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved the slot after failing to re-resolve origin's default branch"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+
+  id='pool-stale-origin-head-registered-r1'
+  rec=$(make_case stale-origin-head-registered "$id")
+  read_case_record "$rec"
+  publish_origin_branch develop
+  register_project_branch develop
+  git -C "$POOL_DIR" fetch --quiet origin
+  git -C "$POOL_DIR" symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$DEFAULT_BRANCH"
+  git --git-dir="$CASE_DIR/origin.git" symbolic-ref HEAD refs/heads/missing-default
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" \
+    "a registered working branch should not depend on re-resolving origin/HEAD"$'\n'"$out"
+  develop_tip=$(git -C "$POOL_DIR" rev-parse origin/develop)
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$develop_tip" ] \
+    || fail "a registered working branch was abandoned when origin/HEAD could not be refreshed"
+  pass "an unrefreshable origin/HEAD refuses the pool unless a working branch is registered"
+}
+
 test_registered_working_branch_missing_on_origin_refuses() {
   local rec id out status before
   id='pool-registered-branch-missing-r1'
@@ -867,6 +954,8 @@ test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_registered_working_branch_decides_the_pool_base
+test_malformed_branch_token_refuses_while_an_absent_one_falls_back
+test_unrefreshable_origin_head_refuses_unless_a_branch_is_registered
 test_registered_working_branch_missing_on_origin_refuses
 test_recorded_base_sha_proves_every_launch_base
 test_direct_pr_and_scout_refresh_before_launch

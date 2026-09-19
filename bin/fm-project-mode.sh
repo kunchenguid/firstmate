@@ -44,11 +44,17 @@
 # An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns
 # to stderr, so a typo never silently drops the gate.
 #
-# --branch has no such fallback, deliberately: it prints the registered working
-# branch and exits 0, or prints nothing and exits 1 when the registry has no
-# usable branch for that project. A guessed branch is exactly the failure this
-# token exists to remove, so the caller decides what an absent one means rather
-# than receiving an invented answer. --branch and --raw are mutually exclusive.
+# --branch has no such fallback, deliberately, and it never folds "no branch is
+# registered" together with "the registered branch is one git rejects", because
+# a caller must be free to fall back on the first and refuse on the second:
+#   exit 0  prints the registered working branch to stdout
+#   exit 1  prints nothing; the registry records no working branch here
+#   exit 3  prints nothing to stdout and names the offending token on stderr;
+#           the project registers a branch= token that git's own syntax check
+#           rejects, which is a registry error rather than an absent branch
+# A guessed branch is exactly the failure this token exists to remove, so the
+# caller receives one of those three answers rather than an invented one.
+# --branch and --raw are mutually exclusive.
 # Usage: fm-project-mode.sh [--raw | --branch] <project-name>
 set -eu
 
@@ -116,13 +122,16 @@ EOF
 
 if [ "$BRANCH_ONLY" -eq 1 ]; then
   # A registered branch is reported only when git's own syntax check accepts it,
-  # so a typo becomes an absent branch the caller must handle rather than a ref
+  # so a typo is reported as a registry error rather than passed on as a ref
   # expression that could resolve somewhere unintended. The full refs/heads/ form
   # keeps the check purely syntactic and usable outside any repository, unlike
   # --branch, which also expands shorthand such as @{-1}.
-  if [ "$branch" = "-" ] || ! git check-ref-format "refs/heads/$branch" >/dev/null 2>&1; then
-    [ "$branch" = "-" ] || echo "warn: project \"$NAME\" registers branch=\"$branch\", which is not a valid branch name; ignoring it" >&2
+  if [ "$branch" = "-" ]; then
     exit 1
+  fi
+  if ! git check-ref-format "refs/heads/$branch" >/dev/null 2>&1; then
+    echo "error: project \"$NAME\" registers branch=\"$branch\", which is not a valid branch name" >&2
+    exit 3
   fi
   echo "$branch"
   exit 0

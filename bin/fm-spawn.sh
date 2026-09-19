@@ -207,7 +207,13 @@
 #   tip; a pool slot never keeps whichever branch it happened to arrive on. That
 #   branch comes from the captain's registered `branch=` token in
 #   data/projects.md when the project has one, and otherwise from origin's own
-#   default branch; there is no third, guessed source. When no origin
+#   default branch, re-resolved for this spawn; there is no third, guessed
+#   source. A registered token git itself rejects is a registry error and
+#   refuses the spawn rather than degrading to that default branch, and when no
+#   branch is registered and origin's default cannot be re-resolved, spawn
+#   refuses rather than reading the slot's previously recorded origin/HEAD.
+#   That branch is also what a task's own review diff is taken against, through
+#   the base_branch= record described below. When no origin
 #   configuration is detected, spawn skips that remote freshness check and
 #   launches from the clean worktree's current HEAD. Relaunch reuses the recorded
 #   worktree without fetching or resetting its base. An unreachable detected
@@ -2837,26 +2843,36 @@ SPAWN_BASE_SHA=
 # There is deliberately no third source. The shared default_branch() helper
 # guesses local main/master when origin/HEAD cannot be read, which is exactly how
 # a lane lands on origin/main while believing it is on the project's branch, so
-# this path refuses instead of guessing.
+# this path refuses instead of guessing. A registry that names a branch git
+# itself rejects is a registry error, never an absent branch: it returns 2 so the
+# caller refuses rather than falling through to origin's default branch.
 resolve_spawn_base_branch() { # <worktree>
-  local worktree=$1 registered ref
+  local worktree=$1 registered ref rc=0 sethead=0
   # Refresh origin/HEAD first and unconditionally, exactly as this path always
   # has: the slot's later tooling reads that ref for its own default-branch
-  # answers, so a registered branch must not quietly leave it stale. Its failure
-  # only decides the second source below, never the first.
-  git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1 || true
-  registered=$("$FM_ROOT/bin/fm-project-mode.sh" --branch "$PROJ_NAME" 2>/dev/null) || registered=
+  # answers, so a registered branch must not quietly leave it stale. A registered
+  # branch does not depend on that refresh, but the second source below is that
+  # ref, and reading a refresh that just failed is reading a possibly renamed-away
+  # default branch, so only the second source treats the failure as fatal.
+  git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1 || sethead=1
+  # The child's own diagnostic is deliberately not suppressed: a malformed token
+  # is refused below, and the operator needs to be told which token it was.
+  registered=$("$FM_ROOT/bin/fm-project-mode.sh" --branch "$PROJ_NAME") || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+    return 2
+  fi
   if [ -n "$registered" ]; then
     printf '%s\n' "$registered"
     return 0
   fi
+  [ "$sethead" -eq 0 ] || return 1
   ref=$(git -C "$worktree" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || ref=
   [ -n "$ref" ] || return 1
   printf '%s\n' "${ref#origin/}"
 }
 
 freshen_spawn_worktree_base() { # <worktree>
-  local worktree=$1 branch target expected actual status
+  local worktree=$1 branch target expected actual status rc=0
   SPAWN_BASE_BRANCH=
   SPAWN_BASE_SHA=
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
@@ -2882,10 +2898,15 @@ freshen_spawn_worktree_base() { # <worktree>
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
-  branch=$(resolve_spawn_base_branch "$worktree") || {
+  branch=$(resolve_spawn_base_branch "$worktree") || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    echo "error: project '$PROJ_NAME' registers a working branch its own registry entry spells in a way git rejects (named above); refusing to launch pooled worktree '$worktree' on origin's default branch instead" >&2
+    return 1
+  fi
+  if [ "$rc" -ne 0 ]; then
     echo "error: could not resolve the working branch for project '$PROJ_NAME': neither a data/projects.md branch= token nor origin's own default branch answered for pooled worktree '$worktree'; refusing to launch on whichever branch the pool happened to hand back" >&2
     return 1
-  }
+  fi
   target="origin/$branch"
   if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$branch:refs/remotes/origin/$branch"; then
     echo "error: could not fetch '$target' for pooled worktree '$worktree'; the working branch resolved for project '$PROJ_NAME' is '$branch'; refusing to launch from another branch" >&2
