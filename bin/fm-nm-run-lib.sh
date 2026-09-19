@@ -130,9 +130,9 @@ fm_nm_run_status_class() {  # <status_word>
 # gate detail. This is a read-only selection, not teardown authorization.
 #
 # Prints selected|id|status|candidate-ids, unknown|reason, absent (no row
-# for this branch), or unavailable (CLI has no overview table). Malformed or
-# structurally truncated tables report unknown, retaining every readable
-# same-branch candidate id.
+# for this branch, including a consistent empty table), or unavailable
+# (CLI has no overview table). Malformed or structurally truncated tables
+# report unknown, retaining every readable same-branch candidate id.
 fm_nm_select_run() {  # <branch> <axi-overview> <worktree>
   local selection inventory available_ids
   selection=$(printf '%s\n' "$2" | awk -v branch="$1" '
@@ -192,8 +192,11 @@ fm_nm_select_run() {  # <branch> <axi-overview> <worktree>
     }
     inrows { inrows = 0 }
     END {
+      # Completeness is numeric: a consistent empty table never increments
+      # `seen`, and awk then compares "" with "0" unless both sides are
+      # coerced. That empty table is absent, not corrupt.
       if (!found) print "unavailable"
-      else if (bad || counts != 1 || seen != expected || seen != shown || total < shown)
+      else if (bad || counts != 1 || seen+0 != expected+0 || seen+0 != shown+0 || total+0 < shown+0)
         print "unknown|unreadable runs table; run ids: " ids
       else if (shown < total) print "incomplete|" ids
       else if (invalid_run) print "unknown|unreadable runs table; run ids: " ids

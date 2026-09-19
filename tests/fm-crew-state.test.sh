@@ -24,6 +24,9 @@
 #   (e2) multiple runs: creation order preserves newer failures, replacement
 #        gates retain their run identity, and competing live runs read unknown
 #   (e3) an older live sibling with an unfetched head cannot hide a newer failure
+#   (e4) a consistent empty runs table, or rows only on other branches, is
+#        absent (pane/log fallback), not an unreadable table; a malformed
+#        table or a second count line still reads unknown
 #   (f) no run + semantic busy                                    -> pane
 #   (g) no run + semantic idle falls to the status-log verb       -> status-log
 #   (h) dead pane: no run -> unknown/none; with a run -> run-step (not the shell)
@@ -3442,6 +3445,126 @@ test_legacy_conflicting_run_records_report_unknown() {
   pass 'legacy conflicting run records report unknown'
 }
 
+# fm_nm_select_run completeness is numeric. A consistent empty table never
+# increments `seen`, and a string compare of that unset value against "0"
+# used to report unreadable with an empty id list (2026-09-19 live workers
+# that had not started a run yet).
+test_runs_table_empty_is_absent_corrupt_stays_unreadable() {
+  local mode d short gen out choice overview
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-nm-run-lib.sh"
+  for mode in empty other-branch one-running malformed second-count; do
+    reset_fakes
+    d=$(new_case "runs-table-$mode")
+    make_repo_on_branch "$d/wt" fm/table-task
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/tabletask.meta" "window=fm:fm-tabletask" \
+      "worktree=$d/wt" "kind=ship" "harness=claude"
+    printf 'working: implementing\n' > "$d/state/tabletask.status"
+    short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+    gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" tabletask)
+    "$ROOT/bin/fm-busy-event.sh" apply "$d/state" tabletask busy --gen "$gen" \
+      --source claude-hook --event user-prompt-submit
+    FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+    FM_FAKE_RUNS_LIST="  running    fm/other-crew aaaaaaa  2026-09-19 12:00"
+    case "$mode" in
+      empty)
+        overview="count: 0 of 0 total
+runs[0]{id,branch,status,head,pr}:"
+        ;;
+      other-branch)
+        overview="count: 2 of 2 total
+runs[2]{id,branch,status,head,pr}:
+  \"01OTHA\",fm/other-crew,running,$short,\"\"
+  \"01OTHB\",fm/other-two,completed,$short,\"\""
+        ;;
+      one-running)
+        overview="count: 2 of 2 total
+runs[2]{id,branch,status,head,pr}:
+  \"01MINE\",fm/table-task,running,$short,\"\"
+  \"01OTHB\",fm/other-crew,completed,$short,\"\""
+        FM_FAKE_AXI_STATUS="$(run_running fm/table-task | sed 's/01RUN/01MINE/')"
+        FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
+        ;;
+      malformed)
+        overview="count: 2 of 2 total
+runs[3]{id,branch,status,head,pr}:
+  \"01MINE\",fm/table-task,running,$short,\"\"
+  \"01OTHB\",fm/other-crew,completed,$short,\"\""
+        ;;
+      second-count)
+        overview="count: 2 of 2 total
+runs[2]{id,branch,status,head,pr}:
+  \"01MINE\",fm/table-task,running,$short,\"\"
+  \"01OTHB\",fm/other-crew,completed,$short,\"\"
+count: 1 of 1 total"
+        ;;
+    esac
+    choice=$(fm_nm_select_run fm/table-task "$overview" "$d/wt")
+    out=$(FM_FAKE_AXI_HOME="$overview" run_crew_state "$d" tabletask)
+    case "$mode" in
+      empty)
+        [ "$choice" = absent ] || fail "empty table classified as '$choice', not absent"
+        assert_contains "$out" 'state: working' 'an empty table must not hide a busy worker'
+        assert_contains "$out" 'source: pane' 'no run on this branch falls through to pane evidence'
+        assert_not_contains "$out" 'unreadable runs table' 'a consistent empty table is not corrupt'
+        ;;
+      other-branch)
+        [ "$choice" = absent ] || fail "other-branch-only table classified as '$choice', not absent"
+        assert_contains "$out" 'state: working' 'other-branch rows must not hide a busy worker'
+        assert_contains "$out" 'source: pane' 'rows on other branches fall through to pane evidence'
+        assert_not_contains "$out" 'unreadable runs table' 'a complete foreign table is not corrupt'
+        ;;
+      one-running)
+        case "$choice" in
+          selected\|01MINE\|running\|*) ;;
+          *) fail "one running same-branch row classified as '$choice'" ;;
+        esac
+        assert_contains "$out" 'state: working' 'one running same-branch row is current work'
+        assert_contains "$out" 'source: run-step' 'the selected run remains authoritative'
+        assert_contains "$out" '01MINE' 'the selected run is identified'
+        ;;
+      malformed)
+        case "$choice" in
+          unknown\|unreadable\ runs\ table*) ;;
+          *) fail "malformed table classified as '$choice', not unreadable" ;;
+        esac
+        assert_contains "$out" 'state: unknown' 'a malformed table must not yield a confident state'
+        assert_contains "$out" 'unreadable runs table' 'genuine corruption still fails loudly'
+        assert_contains "$out" '01MINE' 'the readable same-branch id is retained'
+        ;;
+      second-count)
+        case "$choice" in
+          unknown\|unreadable\ runs\ table*) ;;
+          *) fail "second count line classified as '$choice', not unreadable" ;;
+        esac
+        assert_contains "$out" 'state: unknown' 'a second count line must not yield a confident state'
+        assert_contains "$out" 'unreadable runs table' 'a second count line still fails loudly'
+        assert_contains "$out" '01MINE' 'the readable same-branch id is retained'
+        ;;
+    esac
+    pass "$mode runs-table classification"
+  done
+}
+
+# Live path: capped overview, inventory reconstructs zero same-branch rows,
+# which is the empty table above rather than a truncated window hiding ids.
+test_capped_overview_with_no_same_branch_row_is_absent() {
+  make_capped_runs_case capped-empty-branch running cancelled
+  local d=$TMP_ROOT/capped-empty-branch out gen
+  git -C "$d/wt" branch -m fm/no-run-here
+  fm_write_meta "$d/state/competing.meta" "window=fm:fm-competing" \
+    "worktree=$d/wt" "kind=ship" "harness=claude"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" competing)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" competing busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: working' 'a capped window with no same-branch row must not hide a busy worker'
+  assert_contains "$out" 'source: pane' 'zero same-branch inventory rows fall through to pane evidence'
+  assert_not_contains "$out" 'unreadable runs table' 'an empty same-branch inventory is not a corrupt table'
+  pass 'capped overview with no same-branch row is absent, not unreadable'
+}
+
 # Captured AXI stdout is a serialized input contract, not implementation source.
 # Only the run identity is rebound to each disposable git repository; status,
 # outcome, steps, findings, and gate bytes stay as emitted. The capture README
@@ -3693,5 +3816,7 @@ test_competing_live_runs_report_unknown_with_both_ids
 test_newer_failed_run_is_not_hidden_by_older_live_run
 test_unverifiable_run_selection_reports_unknown
 test_legacy_conflicting_run_records_report_unknown
+test_runs_table_empty_is_absent_corrupt_stays_unreadable
+test_capped_overview_with_no_same_branch_row_is_absent
 
 echo "all fm-crew-state tests passed"
