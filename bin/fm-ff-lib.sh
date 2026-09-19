@@ -354,10 +354,13 @@ ff_sync_origin_fork() { # <dir>
 FETCHED=""
 FF_FETCH_ERROR=""
 # Sticky origin failure flag consumed by fm-update.sh after its fleet sweep.
-# Raised at exactly ONE place - the fork-synchronization branch below - so an
+# Raised at exactly TWO places, both carrying the SAME verdict - an established
+# fork that could not be synchronized: the fork-synchronization branch below,
+# for a local or local-secondmate origin update, and fm-update.sh's remote
+# sweep when a host answers REMOTE_UPDATE_FAILED_STATUS, which is that host's
+# own copy of this branch reporting across the wire. On either route an
 # ordinary transport failure (offline, VPN, an unreachable host) stays a
-# reported skip while an established fork that could not be synchronized fails
-# the run. No other site decides this.
+# reported skip. No other site decides this.
 FF_UPDATE_FAILED=0
 # Sticky run-level answer to "did this run actually verify currency". Rolled up
 # from the same per-store FF_FORK_UNVERIFIED the status labels read, at the one
@@ -421,6 +424,16 @@ remote_sync_failure_reason() { # <exit-status> <output>
   fi
   first_line "$2"
 }
+
+# cmd_update raises this distinct status when a remote host's OWN fm-update.sh
+# exits nonzero, which only happens when ITS FF_UPDATE_FAILED classifier fired
+# (a real fork-synchronization failure, never an ordinary transport hiccup).
+# fm-update.sh's remote sweep checks fm-on.sh's exit status against it so that
+# classifier's verdict crosses the remote boundary as the same sticky
+# FF_UPDATE_FAILED result the local route already sets, instead of collapsing
+# into an ordinary skip the caller cannot distinguish from ubiquitous
+# transport failure.
+REMOTE_UPDATE_FAILED_STATUS=3
 
 dirty_status() {
   local dir=$1 ignore_seed_marker=${2:-no}

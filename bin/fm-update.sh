@@ -245,8 +245,17 @@ if [ -f "$SECONDMATES_MD" ]; then
           *) echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: malformed update result" >&2 ;;
         esac
       else
+        remote_rc=$?
         FF_RUN_VERIFIED=no
-        echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: ${remote_out%%$'\n'*}" >&2
+        if [ "$remote_rc" = "$REMOTE_UPDATE_FAILED_STATUS" ]; then
+          # That host's own FF_UPDATE_FAILED classifier fired - a real fork
+          # synchronization failure, not an ordinary transport hiccup - so it
+          # fails this run exactly as a local fork-sync failure would.
+          FF_UPDATE_FAILED=1
+          echo "remote secondmate $id: fork synchronization failed on $SECONDMATE_REGISTRY_HOST: ${remote_out%%$'\n'*}" >&2
+        else
+          echo "remote secondmate $id: skipped on $SECONDMATE_REGISTRY_HOST: ${remote_out%%$'\n'*}" >&2
+        fi
       fi
     else
       process_secondmate "$id" "$home" "" origin yes

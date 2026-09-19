@@ -69,7 +69,7 @@ REMOTE_HERDR_SESSION=fm-remote
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 
-die() { printf 'error: %s\n' "$1" >&2; exit 1; }
+die() { printf 'error: %s\n' "$1" >&2; exit "${2:-1}"; }
 usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 validate_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $1" ;; esac; }
 
@@ -385,7 +385,10 @@ cmd_update() {
   if ! update_out=$(FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     "$SCRIPT_DIR/fm-update.sh" 2>&1); then
     [ -z "$update_out" ] || printf '%s\n' "$update_out" >&2
-    die "remote code root update failed"
+    # A nonzero exit here is this host's own FF_UPDATE_FAILED classifier, not a
+    # transport hiccup - raise the distinct status so the parent's fleet sweep
+    # can fail the whole run instead of reading it as an ordinary skip.
+    die "remote code root update failed" "$REMOTE_UPDATE_FAILED_STATUS"
   fi
   root_status=$(printf '%s\n' "$update_out" | grep '^firstmate:' | tail -1)
   case "$root_status" in
