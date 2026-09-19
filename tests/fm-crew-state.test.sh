@@ -1762,12 +1762,11 @@ make_unverified_case() {  # <name> <harness> <status-line> -> sets UNVERIFIED_CA
 # Write one steering record. <where> is the inbox root or handled/; <age> orders
 # it against the status log so the ordering half of the staleness test is driven
 # deliberately rather than by whatever order the fixture happened to write its
-# files in. The two files are otherwise written in the same second, and the
-# reader compares whole seconds, so a tie would silently vacate the ordering
-# case; one side is therefore pushed to a fixed past stamp. `touch -t` with an
-# absolute stamp is the portable spelling (BSD touch has no `-d <relative>`), so
-# `newer` ages the LOG rather than post-dating the record.
-write_steer() {  # <case-dir> <id> <where> <seq> <newer|older> [fire-and-forget]
+# files in. `touch -t` with an absolute stamp is the portable spelling (BSD touch
+# has no `-d <relative>`), so `newer` ages the LOG rather than post-dating the
+# record. `same` explicitly pins both observations to one whole second so the
+# conservative tie rule cannot pass only by filesystem timing luck.
+write_steer() {  # <case-dir> <id> <where> <seq> <newer|older|same> [fire-and-forget]
   local d=$1 id=$2 where=$3 seq=$4 age=$5 faf=${6:-} dir rec
   dir="$d/state/$id.inbox"
   [ "$where" = handled ] && dir="$dir/handled"
@@ -1781,6 +1780,10 @@ write_steer() {  # <case-dir> <id> <where> <seq> <newer|older> [fire-and-forget]
   case "$age" in
     newer) touch -t 202001010000 "$d/state/$id.status" ;;
     older) touch -t 202001010000 "$rec" ;;
+    same)
+      touch -t 202001010000 "$d/state/$id.status"
+      touch -t 202001010000 "$rec"
+      ;;
   esac
 }
 
@@ -1849,6 +1852,18 @@ test_unverified_harness_acknowledged_steer_after_declaration_invalidates() {
   pass "a steer acknowledged after the declaration still invalidates it"
 }
 
+test_unverified_harness_same_second_steer_stays_unknown() {
+  reset_fakes
+  local d out
+  make_unverified_case tied codex 'done: ready in branch fm/tied'
+  d=$UNVERIFIED_CASE
+  write_steer "$d" tied handled 001 same
+  out=$(run_crew_state "$d" tied)
+  assert_contains "$out" "state: unknown" "whole-second equality cannot prove the steer predates the declaration"
+  assert_not_contains "$out" "source: status-log" "an ordering tie must preserve uncertainty"
+  pass "a same-second steer cannot validate a possibly stale declaration"
+}
+
 test_status_append_after_snapshot_cannot_validate_cached_declaration() {
   reset_fakes
   local d out
@@ -1891,6 +1906,34 @@ test_unverified_harness_fire_and_forget_does_not_invalidate() {
   assert_contains "$out" "state: done" "a fire-and-forget record obliges no worker action"
   assert_contains "$out" "source: status-log" "an informational record must not suppress the declaration"
   pass "a fire-and-forget record leaves the declaration standing"
+}
+
+test_unverified_harness_body_cannot_spoof_fire_and_forget() {
+  reset_fakes
+  local d out rec
+  make_unverified_case bodyspoof codex 'done: ready in branch fm/bodyspoof'
+  d=$UNVERIFIED_CASE
+  mkdir -p "$d/state/bodyspoof.inbox/handled"
+  rec="$d/state/bodyspoof.inbox/001.msg"
+  {
+    printf 'schema=fm-task-inbox.v1\nat=2026-09-19T08:00:00Z\n--\n'
+    printf 'delivery=fire-and-forget\n'
+  } > "$rec"
+  out=$(run_crew_state "$d" bodyspoof)
+  assert_contains "$out" "state: unknown" "body text cannot turn an ordinary steer into fire-and-forget"
+  assert_not_contains "$out" "source: status-log" "an outstanding ordinary steer still invalidates completion"
+  pass "fire-and-forget detection reads only the record header"
+}
+
+test_unverified_harness_bare_declaration_has_no_trailing_separator() {
+  reset_fakes
+  local d out
+  make_unverified_case barenote codex 'done:'
+  d=$UNVERIFIED_CASE
+  out=$(run_crew_state "$d" barenote)
+  assert_contains "$out" "activity unverified (codex-unverified)" "a bare declaration keeps its uncertainty disclosure"
+  assert_not_contains "$out" "activity unverified (codex-unverified) ·" "an empty note must not leave a dangling separator"
+  pass "a bare declaration renders a token-tight uncertainty detail"
 }
 
 # An attributed run is authoritative and never reaches the fallback, so live
@@ -3864,9 +3907,12 @@ test_unverified_harness_completed_worker_reads_its_declaration
 test_unverified_harness_boundary_holds_against_a_contingent_unknown
 test_unverified_harness_unhandled_steer_invalidates_completion
 test_unverified_harness_acknowledged_steer_after_declaration_invalidates
+test_unverified_harness_same_second_steer_stays_unknown
 test_status_append_after_snapshot_cannot_validate_cached_declaration
 test_unverified_harness_steer_before_declaration_leaves_it_standing
 test_unverified_harness_fire_and_forget_does_not_invalidate
+test_unverified_harness_body_cannot_spoof_fire_and_forget
+test_unverified_harness_bare_declaration_has_no_trailing_separator
 test_unverified_harness_active_run_outranks_stale_completion
 test_unverified_harness_without_a_declaration_stays_unknown
 test_unverified_harness_blocked_declaration_reaches_the_supervisor

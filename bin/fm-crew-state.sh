@@ -1050,22 +1050,30 @@ fi
 # which catches the worker that acknowledged its steer and has not appended
 # anything yet. A fire-and-forget record is excluded from both, exactly as the
 # re-ring ladder excludes it.
+steering_record_is_fire_and_forget() {  # <record-path>
+  awk '
+    $0 == "--" { exit }
+    $0 == "delivery=fire-and-forget" { found=1 }
+    END { exit(found ? 0 : 1) }
+  ' "$1" 2>/dev/null
+}
+
 steering_outstanding_after_declaration() {
   local inbox="$STATE/$ID.inbox" f msg_mtime
   [ -d "$inbox" ] || return 1
   for f in "$inbox"/[0-9]*.msg; do
     [ -e "$f" ] || continue
-    grep -q '^delivery=fire-and-forget$' "$f" 2>/dev/null && continue
+    steering_record_is_fire_and_forget "$f" && continue
     return 0
   done
   case "$LOG_OBSERVED_MTIME" in ''|*[!0-9]*) return 0 ;; esac
   for f in "$inbox"/[0-9]*.msg "$inbox"/handled/[0-9]*.msg; do
     [ -e "$f" ] || continue
-    grep -q '^delivery=fire-and-forget$' "$f" 2>/dev/null && continue
+    steering_record_is_fire_and_forget "$f" && continue
     msg_mtime=$(file_observation "$f")
     msg_mtime=${msg_mtime%%:*}
     case "$msg_mtime" in ''|*[!0-9]*) continue ;; esac
-    [ "$msg_mtime" -gt "$LOG_OBSERVED_MTIME" ] && return 0
+    [ "$msg_mtime" -ge "$LOG_OBSERVED_MTIME" ] && return 0
   done
   return 1
 }
@@ -1134,8 +1142,13 @@ if [ -n "$LOG_VERB" ]; then
     # disclosure was the first thing cut, leaving a bare completion claim with
     # nothing saying the activity behind it was never observed. Leading with it
     # means the qualifier survives wherever the claim does.
-    [ -z "$ACTIVITY_UNVERIFIED" ] \
-      || LOG_DETAIL="activity unverified (${ACTIVITY_UNVERIFIED#* })${SEP}$LOG_DETAIL"
+    if [ -n "$ACTIVITY_UNVERIFIED" ]; then
+      if [ -n "$LOG_DETAIL" ]; then
+        LOG_DETAIL="activity unverified (${ACTIVITY_UNVERIFIED#* })${SEP}$LOG_DETAIL"
+      else
+        LOG_DETAIL="activity unverified (${ACTIVITY_UNVERIFIED#* })"
+      fi
+    fi
     emit "$LOG_STATE" status-log "$LOG_DETAIL"
   fi
 fi
