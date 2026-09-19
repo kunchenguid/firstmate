@@ -67,13 +67,12 @@ FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 
 Calm on OMP is the `.omp/extensions/fm-calm.ts` extension, auto-discovered with the existing watcher and turn-end extensions.
 It shares the same `config/calm` preference and visibility policy as Pi, and registers `/calm` through OMP's public `registerCommand` seam.
-While Calm is on, canonically classified Firstmate operational user rows draw at zero height, collapsed thinking is hidden, and short mid-turn working notes follow the shared preservation rule above.
+While Calm is on, canonically classified Firstmate operational user rows and FIRSTMATE_OP / watcher / drain tool rows draw at zero height, collapsed thinking is hidden, and short mid-turn working notes follow the shared preservation rule above.
 Genuine user prompts and the genuine final assistant reply stay visible.
 Presentation only: model context, session storage, `/export`, watcher arming, and the turn-end guard stay unchanged.
 The animated working boat remains Pi-only on this slice; OMP leaves the stock working row alone.
 
-OMP's public `registerMessageRenderer` is keyed by custom message type, and `registerAssistantThinkingRenderer` adds supplemental UI below visible thinking rather than replacing it.
-The extension probes those seams and degrades each missing one with a diagnostic, then uses OMP-native `InteractiveMode` and `AssistantMessageComponent` adapters from `@oh-my-pi/pi-coding-agent` for operational user rows and thinking collapse.
+OMP's public `registerMessageRenderer` is keyed by custom message type, so the extension probes that one seam and degrades a missing one with a diagnostic. It then uses OMP-native `InteractiveMode`, `AssistantMessageComponent`, and `ToolExecutionComponent` adapters from `@oh-my-pi/pi-coding-agent` for operational user rows, thinking collapse, mid-turn working notes, and operational tool rows (`registerAssistantThinkingRenderer` is not registered).
 It never loads `.pi/extensions/fm-calm.ts` and never patches Pi packages.
 
 Regression entry points:

@@ -58,7 +58,30 @@ const CALM_ASSISTANT_THINKING_PATCH = Symbol.for(
 
 function isMidTurnAssistantMessage(message: AssistantMessage): boolean {
   if (message.stopReason === "toolUse") return true;
-  return message.content.some((block) => block.type === "toolCall");
+  return (
+    Array.isArray(message.content) &&
+    message.content.some((block) => block.type === "toolCall")
+  );
+}
+
+function rememberMidTurn(
+  patch: CalmAssistantThinkingPatch,
+  message: AssistantMessage,
+): void {
+  if (message.role !== undefined && message.role !== "assistant") return;
+  if (!Array.isArray(message.content)) return;
+  const key = assistantMessageKey(message);
+  if (key === undefined) return;
+  const midTurn = isMidTurnAssistantMessage(message);
+  const wasMidTurn = patch.midTurnKeys.has(key);
+  if (midTurn) {
+    patch.midTurnKeys.add(key);
+  } else {
+    patch.midTurnKeys.delete(key);
+  }
+  if (midTurn && !wasMidTurn && patch.hidesWorkingNote()) {
+    patch.applyToRemembered();
+  }
 }
 
 // OMP 18.1.17 splits every assistant message at its first tool call before
@@ -147,6 +170,22 @@ export function installOmpCalmAssistantThinking(): void {
   if (typeof stockUpdateContent !== "function") {
     throw new Error("Firstmate Calm requires OMP AssistantMessageComponent.updateContent");
   }
+  const InteractiveMode = (OmpCodingAgent as { InteractiveMode?: unknown }).InteractiveMode;
+  if (typeof InteractiveMode !== "function") {
+    throw new Error("Firstmate Calm requires OMP InteractiveMode");
+  }
+  const interactivePrototype = (
+    InteractiveMode as {
+      prototype: {
+        addMessageToChat?: (message: AssistantMessage, options?: unknown) => unknown;
+      };
+    }
+  ).prototype;
+  const stockAddMessageToChat = interactivePrototype.addMessageToChat;
+  if (typeof stockAddMessageToChat !== "function") {
+    throw new Error("Firstmate Calm requires OMP InteractiveMode.addMessageToChat");
+  }
+
   patch.originalUpdateContent = stockUpdateContent;
 
   prototype.updateContent = function (
@@ -195,6 +234,15 @@ export function installOmpCalmAssistantThinking(): void {
     stockUpdateContent.call(this, presentationMessage, options);
   };
 
+  interactivePrototype.addMessageToChat = function (
+    this: unknown,
+    message: AssistantMessage,
+    options?: unknown,
+  ): unknown {
+    rememberMidTurn(patch, message);
+    return stockAddMessageToChat.call(this, message, options);
+  };
+
   registry[CALM_ASSISTANT_THINKING_PATCH] = patch;
 }
 
@@ -217,6 +265,8 @@ export function resetOmpCalmThinkingRememberedRows(): void {
  * Record whether an unfiltered assistant message from OMP's own event stream
  * ended in tool calls, so the derived before-tools message handed to the stock
  * component is still recognised as mid-turn while Calm hides working notes.
+ * The live `addMessageToChat` path seeds the same record so a restored
+ * transcript hides its stored mid-turn working notes too.
  */
 export function rememberOmpCalmAssistantMessage(message: AssistantMessage): void {
   const registry = globalThis as typeof globalThis & {
@@ -224,17 +274,5 @@ export function rememberOmpCalmAssistantMessage(message: AssistantMessage): void
   };
   const patch = registry[CALM_ASSISTANT_THINKING_PATCH];
   if (!patch) return;
-  if (message.role !== undefined && message.role !== "assistant") return;
-  const key = assistantMessageKey(message);
-  if (key === undefined) return;
-  const midTurn = isMidTurnAssistantMessage(message);
-  const wasMidTurn = patch.midTurnKeys.has(key);
-  if (midTurn) {
-    patch.midTurnKeys.add(key);
-  } else {
-    patch.midTurnKeys.delete(key);
-  }
-  if (midTurn && !wasMidTurn && patch.hidesWorkingNote()) {
-    patch.applyToRemembered();
-  }
+  rememberMidTurn(patch, message);
 }

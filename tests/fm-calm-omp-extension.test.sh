@@ -11,6 +11,7 @@ TMP_ROOT=$(fm_test_tmproot fm-calm-omp-extension)
 EXT="$ROOT/.omp/extensions/fm-calm.ts"
 OPERATIONAL_USER="$ROOT/.omp/extensions/lib/fm-calm-operational-user.ts"
 ASSISTANT_THINKING="$ROOT/.omp/extensions/lib/fm-calm-assistant-thinking.ts"
+OPERATIONAL_TOOL="$ROOT/.omp/extensions/lib/fm-calm-operational-tool.ts"
 PREFERENCE="$ROOT/.pi/extensions/lib/fm-calm-preference.ts"
 PERSISTENCE="$ROOT/.pi/extensions/lib/fm-calm-persistence.ts"
 VISIBILITY_CORE="$ROOT/.pi/extensions/lib/fm-calm-visibility-core.ts"
@@ -32,7 +33,7 @@ install_omp_calm_fixture() {  # <repo>
     "$repo/node_modules/@oh-my-pi/pi-coding-agent" \
     "$repo/node_modules/@oh-my-pi/pi-tui"
   cp "$EXT" "$repo/.omp/extensions/fm-calm.ts"
-  cp "$OPERATIONAL_USER" "$ASSISTANT_THINKING" "$repo/.omp/extensions/lib/"
+  cp "$OPERATIONAL_USER" "$ASSISTANT_THINKING" "$OPERATIONAL_TOOL" "$repo/.omp/extensions/lib/"
   cp "$PREFERENCE" "$VISIBILITY_CORE" "$PRESERVATION" "$OPERATIONAL_INPUT_TS" "$repo/.pi/extensions/lib/"
   cp "$PERSISTENCE" "$repo/.pi/extensions/lib/fm-calm-persistence.ts"
   # Preservation is a symlink in the real tree; copy the target bytes.
@@ -86,6 +87,16 @@ export class AssistantMessageComponent {
       if (block.type === "text") this.rendered.push(`text:${block.text}`);
       if (block.type === "thinking") this.rendered.push(`thinking:${block.thinking ?? block.text ?? ""}`);
     }
+  }
+}
+export class ToolExecutionComponent {
+  constructor(name, args = {}) {
+    this.name = name;
+    this.args = args;
+  }
+  render(width) {
+    const command = typeof this.args?.command === "string" ? this.args.command : "";
+    return [`$ ${command}`.slice(0, Math.max(1, width))];
   }
 }
 export class InteractiveMode {
@@ -185,7 +196,9 @@ mod.default(pi);
 if (!calmCommand) throw new Error("/calm was not registered");
 if (!handlers.has("session_start")) throw new Error("session_start was not registered");
 if (messageRenderers.size < 1) throw new Error("registerMessageRenderer was not used");
-if (typeof thinkingRenderer !== "function") throw new Error("registerAssistantThinkingRenderer was not used");
+if (thinkingRenderer !== undefined) {
+  throw new Error("the no-op registerAssistantThinkingRenderer must not be registered");
+}
 const ui = {
   notify() {},
   getToolsExpanded() { return false; },
@@ -795,6 +808,130 @@ JS
   pass "OMP Calm keeps mid-turn classification across an in-process session rebuild"
 }
 
+test_restored_transcript_seeds_midturn_classification() {
+  local fixture home out status
+  fixture="$TMP_ROOT/restore-midturn"
+  home="$fixture/home"
+  install_omp_calm_fixture "$fixture"
+  mkdir -p "$home/config"
+  printf 'on\n' >"$home/config/calm"
+  out=$(cd "$fixture" && FM_HOME="$home" EXT="$fixture/.omp/extensions/fm-calm.ts" node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+import * as Agent from "@oh-my-pi/pi-coding-agent";
+
+const handlers = new Map();
+let calmCommand;
+const pi = {
+  pi: { Container: class { render() { return []; } } },
+  events: { emit() {} },
+  on(event, handler) { handlers.set(event, handler); },
+  registerCommand(name, command) { if (name === "calm") calmCommand = command; },
+  registerMessageRenderer() {},
+  registerAssistantThinkingRenderer() {},
+};
+const mod = await import(`${pathToFileURL(process.env.EXT).href}?restore=${Date.now()}`);
+mod.default(pi);
+const ui = {
+  notify() {},
+  getToolsExpanded() { return false; },
+  setToolsExpanded() {},
+  setStatus() {},
+};
+const ctx = { ui };
+handlers.get("session_start")({ type: "session_start" }, ctx);
+
+// Fresh process restore: OMP rebuilds stored rows through
+// InteractiveMode.addMessageToChat(full message) and renders only the derived
+// before-tools message; no extension message_* event fires.
+const FULL = {
+  role: "assistant",
+  stopReason: "toolUse",
+  timestamp: 8001,
+  content: [
+    { type: "thinking", thinking: "secret plan" },
+    { type: "text", text: "CALM_RESTORED_NOTE" },
+    { type: "toolCall" },
+  ],
+};
+const BEFORE = {
+  role: "assistant",
+  stopReason: "stop",
+  timestamp: 8001,
+  content: [
+    { type: "thinking", thinking: "secret plan" },
+    { type: "text", text: "CALM_RESTORED_NOTE" },
+  ],
+};
+const mode = new Agent.InteractiveMode();
+mode.addMessageToChat(FULL);
+const restored = new Agent.AssistantMessageComponent(false);
+restored.updateContent(BEFORE, { transient: true });
+if ((restored.rendered || []).some((line) => line === "text:CALM_RESTORED_NOTE")) {
+  throw new Error(`Calm-on must hide a restored mid-turn note, got ${JSON.stringify(restored.rendered)}`);
+}
+if ((restored.rendered || []).some((line) => line.startsWith("thinking:"))) {
+  throw new Error(`Calm-on must hide thinking on a restored row, got ${JSON.stringify(restored.rendered)}`);
+}
+await calmCommand.handler("", ctx);
+if (!(restored.rendered || []).some((line) => line === "text:CALM_RESTORED_NOTE")) {
+  throw new Error("Calm-off must restore the restored mid-turn note");
+}
+JS
+)
+  status=$?
+  expect_code 0 "$status" "restored mid-turn: $out"
+  [ -z "$out" ] || fail "restored mid-turn printed output: $out"
+  pass "OMP Calm seeds mid-turn classification from addMessageToChat on a restored transcript"
+}
+
+test_operational_tool_rows_hide_show() {
+  local fixture out status
+  fixture="$TMP_ROOT/operational-tool"
+  install_omp_calm_fixture "$fixture"
+  out=$(cd "$fixture" && node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+import * as Agent from "@oh-my-pi/pi-coding-agent";
+
+const tool = await import(pathToFileURL(`${process.cwd()}/.omp/extensions/lib/fm-calm-operational-tool.ts`).href);
+const vis = await import(pathToFileURL(`${process.cwd()}/.pi/extensions/lib/fm-calm-visibility-core.ts`).href);
+tool.installOmpCalmOperationalToolLayout();
+
+const lines = (component) => component.render(200) || [];
+const operational = [
+  ["drain", new Agent.ToolExecutionComponent("bash", { command: "bin/fm-wake-drain.sh" })],
+  ["watch", new Agent.ToolExecutionComponent("bash", { command: "bin/fm-watch.sh" })],
+  ["watch-arm", new Agent.ToolExecutionComponent("bash", { command: "bin/fm-watch-arm.sh" })],
+  ["FIRSTMATE_OP", new Agent.ToolExecutionComponent("bash", {
+    command: "printf '\u2063FIRSTMATE_OP: watcher: x' | bin/fm-operational-input.sh encode watcher",
+  })],
+];
+const build = new Agent.ToolExecutionComponent("bash", { command: "npm run build" });
+const read = new Agent.ToolExecutionComponent("read", { command: "cat README.md" });
+
+vis.setCalmPresentation(true);
+for (const [name, component] of operational) {
+  if (lines(component).length !== 0) {
+    throw new Error(`Calm-on must hide the operational ${name} tool row, got ${JSON.stringify(lines(component))}`);
+  }
+}
+if (lines(build).length === 0) throw new Error("Calm-on must keep an ordinary build tool row visible");
+if (lines(read).length === 0) throw new Error("Calm-on must keep an ordinary read tool row visible");
+
+vis.setCalmPresentation(false);
+for (const [name, component] of operational) {
+  if (lines(component).length === 0) {
+    throw new Error(`Calm-off must restore the operational ${name} tool row`);
+  }
+}
+if (lines(build).length === 0) throw new Error("Calm-off must keep the ordinary build tool row visible");
+JS
+)
+  status=$?
+  expect_code 0 "$status" "operational tool rows: $out"
+  [ -z "$out" ] || fail "operational tool rows printed output: $out"
+  pass "OMP Calm hides drain/watcher operational tool rows while keeping ordinary tools, and Calm off restores them"
+}
+
 test_calm_off_retry_preserves_options() {
   local fixture out status
   fixture="$TMP_ROOT/off-retry"
@@ -854,7 +991,7 @@ const pi = {
   events: { emit() {} },
   on(event, handler) { handlers.set(event, handler); },
   registerCommand(name, command) { if (name === "calm") calmCommand = command; },
-  // Intentionally omit registerMessageRenderer and registerAssistantThinkingRenderer.
+  // Intentionally omit registerMessageRenderer so only that adapter must diagnose.
 };
 let threw = false;
 try {
@@ -869,9 +1006,8 @@ if (!calmCommand || !handlers.has("session_start")) {
   throw new Error("command and session_start must still register when renderer seams are missing");
 }
 const sawMessage = diagnostics.some((line) => line.includes("message-renderer") && /unavailable|skip/i.test(line));
-const sawThinking = diagnostics.some((line) => line.includes("assistant-thinking-renderer") && /unavailable|skip/i.test(line));
-if (!sawMessage || !sawThinking) {
-  throw new Error(`missing clear skip diagnostics; saw: ${JSON.stringify(diagnostics)}`);
+if (!sawMessage) {
+  throw new Error(`missing clear skip diagnostic; saw: ${JSON.stringify(diagnostics)}`);
 }
 JS
 )
@@ -890,5 +1026,7 @@ test_retry_recovery_keeps_original_note
 test_native_hide_thinking_is_additive
 test_session_replacement_resets_remembered
 test_session_replacement_keeps_midturn_classification
+test_restored_transcript_seeds_midturn_classification
+test_operational_tool_rows_hide_show
 test_calm_off_retry_preserves_options
 test_degraded_public_api_seam

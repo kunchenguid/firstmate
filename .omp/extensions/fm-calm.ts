@@ -1,13 +1,13 @@
 // Firstmate's home-persistent OMP transcript presentation toggle (hide-ceremony).
 //
 // Verified against omp 18.1.17 public ExtensionAPI seams:
-// registerMessageRenderer, registerAssistantThinkingRenderer, and registerCommand.
-// Each seam is probed at load; a missing seam degrades only that adapter with a
-// diagnostic. OMP-native InteractiveMode / AssistantMessageComponent adapters in
-// ./lib fill the user-row and thinking gaps those public seams cannot cover alone
-// (omp's registerMessageRenderer is customType-keyed; its thinking renderer is
-// supplemental below visible thinking). Do not load .pi/extensions/fm-calm.ts
-// from OMP, and do not port the working-ship / boat path - that stays Pi-only.
+// registerMessageRenderer and registerCommand. Each seam is probed at load; a
+// missing seam degrades only that adapter with a diagnostic. OMP-native
+// InteractiveMode / AssistantMessageComponent / ToolExecutionComponent adapters
+// in ./lib fill the user-row, thinking, working-note, and operational-tool gaps
+// those public seams cannot cover alone (omp's registerMessageRenderer is
+// customType-keyed). Do not load .pi/extensions/fm-calm.ts from OMP, and do not
+// port the working-ship / boat path - that stays Pi-only.
 // docs/configuration.md owns the shared config/calm preference contract.
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +29,7 @@ import {
   resetOmpCalmThinkingRememberedRows,
 } from "./lib/fm-calm-assistant-thinking.ts";
 import { installOmpCalmOperationalUserLayout } from "./lib/fm-calm-operational-user.ts";
+import { installOmpCalmOperationalToolLayout } from "./lib/fm-calm-operational-tool.ts";
 
 type ExtensionAPI = {
   on?: (event: string, handler: (event: unknown, ctx: ExtensionContext) => unknown) => void;
@@ -43,17 +44,6 @@ type ExtensionAPI = {
   registerMessageRenderer?: (
     customType: string,
     renderer: (message: unknown, options: { expanded: boolean }, theme: unknown) => unknown,
-  ) => void;
-  registerAssistantThinkingRenderer?: (
-    renderer: (
-      context: {
-        contentIndex: number;
-        thinkingIndex: number;
-        text: string;
-        requestRender: () => void;
-      },
-      theme: unknown,
-    ) => unknown,
   ) => void;
   pi?: { Container?: new () => { addChild?(child: unknown): void } };
 };
@@ -143,25 +133,15 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  installCalmPresentationAdapter("assistant-thinking-renderer", () => {
-    if (typeof pi.registerAssistantThinkingRenderer !== "function") {
-      throw new Error("Firstmate Calm requires OMP registerAssistantThinkingRenderer");
-    }
-    // Supplemental only: when Calm hides thinking the OMP assistant adapter has
-    // already collapsed the block, so this returns no extra UI beneath it.
-    pi.registerAssistantThinkingRenderer((_context, _theme) => {
-      if (calmPresentationHides("assistant-thinking")) return undefined;
-      return undefined;
-    });
-  });
-
   installCalmPresentationAdapter("operational-user-row", installOmpCalmOperationalUserLayout);
+  installCalmPresentationAdapter("operational-tool-row", installOmpCalmOperationalToolLayout);
   installCalmPresentationAdapter("collapsed-thinking", installOmpCalmAssistantThinking);
 
   // OMP splits every assistant message at its first tool call before feeding it
   // to AssistantMessageComponent, so the component only ever receives a derived
   // before-tools message. OMP's own assistant message events carry the
-  // unfiltered message; remember its tool-call state there so Calm can still
+  // unfiltered message; remember its tool-call state there, and in
+  // InteractiveMode.addMessageToChat for restored transcripts, so Calm can still
   // collapse a short mid-turn working note.
   for (const event of ["message_start", "message_update", "message_end"]) {
     pi.on?.(event, (payload) => {
