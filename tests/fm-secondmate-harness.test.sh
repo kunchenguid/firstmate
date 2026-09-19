@@ -879,6 +879,10 @@ test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens() {
   launch=$(cat "$launchlog")
   assert_contains "$launch" "codex --dangerously-bypass-approvals-and-sandbox" \
     "explicit-harness-no-tokens: launch did not use codex"
+  assert_contains "$launch" "--dangerously-bypass-hook-trust" \
+    "explicit-harness-no-tokens: Codex secondmate launch must skip the hook-trust modal without disabling hooks"
+  assert_not_contains "$launch" "--disable hooks" \
+    "explicit-harness-no-tokens: Codex secondmate launch must keep its supervision hooks running"
   assert_not_contains "$launch" "--model" "explicit-harness-no-tokens: launch must not carry a --model flag"
   assert_not_contains "$launch" "model_reasoning_effort" \
     "explicit-harness-no-tokens: launch must not carry a codex effort flag"
@@ -1003,6 +1007,10 @@ EOF
   [ "$(meta_field "$meta" model)" = default ] || fail "crew-unaffected: crew task must not invent a model"
   [ "$(meta_field "$meta" effort)" = default ] || fail "crew-unaffected: crew task must not invent an effort"
   launch=$(cat "$launchlog")
+  assert_contains "$launch" "--disable hooks" \
+    "crew-unaffected: ordinary Codex worker launch must retain disabled hooks"
+  assert_contains "$launch" 'notify=' \
+    "crew-unaffected: ordinary Codex worker launch must retain its turn-end notification"
   assert_not_contains "$launch" "--model" "crew-unaffected: crew launch must not carry a --model flag"
   assert_not_contains "$launch" "--effort" "crew-unaffected: crew launch must not carry an --effort flag"
   pass "C9 spawn: the harness fallback chain still resolves with no tokens; crew/scout launches are unaffected by this feature"

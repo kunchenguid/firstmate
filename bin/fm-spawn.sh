@@ -1748,8 +1748,8 @@ launch_template() {
     printf '%s' '__MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     ;;
   # --disable hooks (equivalent to -c features.hooks=false) turns codex's whole
-  # lifecycle-hook layer off for CREWMATE and SCOUT launches only.
-  # Without it a crewmate launch parks forever on codex's hook-trust modal
+  # lifecycle-hook layer off for CREWMATE, SCOUT, and SECONDMATE launches.
+  # Without it a worker launch parks forever on codex's hook-trust modal
   # ("N hooks are new or changed"), whose selection sits on "Review hooks" -
   # neither trusting nor declining. Firstmate's key plane carries Enter, Escape
   # and Ctrl-C with no arrow navigation, so the selection cannot be moved, and
@@ -1765,13 +1765,17 @@ launch_template() {
   # ~/.codex untouched. An unknown feature name is a hard codex error, so a future
   # release that drops this flag fails the launch loudly instead of silently
   # restoring the modal.
-  # A secondmate is a firstmate PRIMARY in its own home, and its turn-end guard,
-  # session-start digest, and cd/arm seatbelts are exactly those project hooks
-  # (docs/turnend-guard.md, docs/sessionstart-nudge.md, docs/cd-guard.md), so the
-  # secondmate launch deliberately keeps hooks on.
+  # A secondmate is persistent and keeps its own supervisor contract wired
+  # through .codex/hooks.json (turn-end guard, session-start digest, cd-guard
+  # seatbelt), so it must not disable the hook layer. It still needs the same
+  # unattended launch guarantee as a task worker against the hook-trust modal,
+  # so it uses --dangerously-bypass-hook-trust instead of --disable hooks:
+  # per codex's own help text this "run[s] enabled hooks without requiring
+  # persisted hook trust for this invocation" - hooks still execute, and
+  # nothing is written to the operator's ~/.codex trust store.
   codex)
     if [ "$kind" = secondmate ]; then
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi

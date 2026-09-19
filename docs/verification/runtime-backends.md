@@ -563,7 +563,7 @@ $ ls "$TURNEND"
 `tests/fm-codex-hook-layer-live-e2e.test.sh` is the command that refreshes this record.
 It captures the launch `bin/fm-spawn.sh` actually builds, replays those exact flags against the installed Codex, and fails naming the harness and version if the hook layer comes back on.
 It spends no model tokens, so it runs by default wherever Codex is installed.
-The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the split the launch template makes: a crewmate launches hook-free while a secondmate, which runs a primary session on this repository's own project hooks, keeps them.
+The portable half, `tests/fm-spawn-dispatch-profile.test.sh`, pins the split the launch template makes: a crewmate launches hook-free via `--disable hooks`, while a secondmate, which runs a primary session on this repository's own project hooks, keeps them running and instead skips the trust modal with `--dangerously-bypass-hook-trust`.
 
 ## Composer classification matrix
 

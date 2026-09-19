@@ -495,6 +495,8 @@ test_codex_secondmate_launch_keeps_the_hook_layer() {
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "--disable hooks" \
     "codex secondmate launch disabled the project hooks its own primary supervision depends on"
+  assert_contains "$launch" "--dangerously-bypass-hook-trust" \
+    "codex secondmate launch did not skip the hook-trust modal"
   pass "a codex secondmate keeps the project hook layer its primary session runs on"
 }
 
