@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Contract tests for .github/workflows/ci.yml's runner-spend safeguards.
+# Contract tests for .github/workflows/ci.yml's runner-spend safeguards and
+# stable job skeleton.
 #
 # Origin: the 2026-09-12 GitHub Actions starvation incident. firstmate CI had no
 # concurrency deduplication, so every superseded PR head kept its full job
 # fan-out, and four jobs carried no timeout at all. These tests hold both
 # safeguards: PR runs supersede within one PR while main pushes are never
 # cancelled, and every CI job carries a finite hang tripwire.
+#
+# They also hold the macos-stock-bash thin-wrapper identity (job id, display
+# name, stock Bash shell/PATH, owner script) and that the Herdr lane's pin and
+# protocol floor live only in bin/fm-install-herdr.sh.
 #
 # The workflow is parsed as YAML and its concurrency expressions are resolved
 # against simulated pull_request and push contexts, so the assertions describe
@@ -181,6 +186,97 @@ RUBY
   pass "CI matrices cover every executable serial lane and canonical lint root exactly once"
 }
 
+test_macos_stock_bash_job_identity_is_stable() {
+  local name
+  name=$(ruby -ryaml -e '
+puts YAML.load_file(ARGV[0]).fetch("jobs").fetch("macos-stock-bash").fetch("name")
+' "$CI_WORKFLOW") || fail "could not read the macos-stock-bash job name"
+  [ "$name" = "Stock macOS Bash snapshot compatibility" ] \
+    || fail "macos-stock-bash display name must stay exact, got $name"
+  pass "macos-stock-bash keeps its job id and display name"
+}
+
+test_macos_stock_bash_job_delegates_to_the_owner_script() {
+  local script="$ROOT/bin/fm-ci-macos-stock-bash.sh"
+  local runs shell path_env
+  assert_present "$script" "macos-stock-bash owner script is missing"
+  [ -x "$script" ] || fail "bin/fm-ci-macos-stock-bash.sh must be executable"
+  runs=$(ruby -ryaml -e '
+job = YAML.load_file(ARGV[0]).fetch("jobs").fetch("macos-stock-bash")
+job.fetch("steps").each do |step|
+  next unless step.key?("run")
+  puts step.fetch("run")
+end
+' "$CI_WORKFLOW") || fail "could not read macos-stock-bash run steps"
+  [ "$runs" = "bin/fm-ci-macos-stock-bash.sh" ] \
+    || fail "macos-stock-bash must run only the owner script, got: $runs"
+  shell=$(ruby -ryaml -e '
+job = YAML.load_file(ARGV[0]).fetch("jobs").fetch("macos-stock-bash")
+job.fetch("steps").each do |step|
+  next unless step.key?("run")
+  puts step.fetch("shell", "")
+end
+' "$CI_WORKFLOW") || fail "could not read macos-stock-bash shell"
+  [ "$shell" = "/bin/bash {0}" ] \
+    || fail "macos-stock-bash must keep stock /bin/bash, got: $shell"
+  path_env=$(ruby -ryaml -e '
+job = YAML.load_file(ARGV[0]).fetch("jobs").fetch("macos-stock-bash")
+job.fetch("steps").each do |step|
+  next unless step.key?("run")
+  env = step["env"] || {}
+  puts env["PATH"]
+end
+' "$CI_WORKFLOW") || fail "could not read macos-stock-bash PATH"
+  [ "$path_env" = "/bin:/usr/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin" ] \
+    || fail "macos-stock-bash must keep the stock PATH, got: $path_env"
+  pass "macos-stock-bash is a thin wrapper around the owner script"
+}
+
+test_macos_stock_bash_owner_refuses_non_stock_bash() {
+  local out rc=0
+  case "$BASH_VERSION" in
+    3.2.57*)
+      pass "host is stock Bash 3.2.57; version refusal is owned by the macos CI job"
+      return 0
+      ;;
+  esac
+  out=$(bash "$ROOT/bin/fm-ci-macos-stock-bash.sh" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "owner script accepted Bash $BASH_VERSION"
+  assert_contains "$out" "expected stock macOS Bash 3.2.57" \
+    "refusal should name the stock Bash pin"
+  pass "macos-stock-bash owner refuses non-stock Bash"
+}
+
+test_herdr_lane_keeps_install_as_the_sole_pin_gate() {
+  local names runs
+  names=$(ruby -ryaml -e '
+job = YAML.load_file(ARGV[0]).fetch("jobs").fetch("tests-herdr")
+job.fetch("steps").each { |step| puts step["name"] if step["name"] }
+' "$CI_WORKFLOW") || fail "could not read tests-herdr step names"
+  case "$names" in
+    *"Assert Herdr pin"*)
+      fail "duplicate Herdr pin assert must not remain in ci.yml"$'\n'"$names"
+      ;;
+  esac
+  runs=$(ruby -ryaml -e '
+job = YAML.load_file(ARGV[0]).fetch("jobs").fetch("tests-herdr")
+job.fetch("steps").each do |step|
+  next unless step.key?("run")
+  puts step.fetch("run")
+end
+' "$CI_WORKFLOW") || fail "could not read tests-herdr run steps"
+  case "$runs" in
+    *"fm-install-herdr.sh"*) ;;
+    *) fail "Herdr lane must still install via fm-install-herdr.sh" ;;
+  esac
+  case "$runs" in
+    *"expected exact Herdr pin"*)
+      fail "Herdr pin/protocol assert must not remain in ci.yml"
+      ;;
+  esac
+  pass "Herdr pin and protocol stay in the install script only"
+}
+
 test_ci_matrices_match_executable_partitions
 test_pr_pushes_supersede_within_one_pr
 test_separate_prs_do_not_cancel_each_other
@@ -188,3 +284,7 @@ test_main_pushes_are_never_cancelled
 test_every_job_has_a_finite_timeout
 test_previously_unbounded_jobs_keep_their_caps
 test_measured_lanes_keep_their_existing_bounds
+test_macos_stock_bash_job_identity_is_stable
+test_macos_stock_bash_job_delegates_to_the_owner_script
+test_macos_stock_bash_owner_refuses_non_stock_bash
+test_herdr_lane_keeps_install_as_the_sole_pin_gate

@@ -112,7 +112,7 @@ It delivers a `report-ready` promised-final, asserts the registration is retaine
 `retire --reason` records its private receipt before removal and is the only close; replayed registration cannot reopen that retired loop.
 The concurrency and interrupted-bind cases verify that one delivered source cannot fork and that retry converges on the same destination obligation.
 A pre-change on-disk record (no `state=`, no `request_context_b64`) is an open loop and un-rechainable rather than a crash.
-The stock macOS Bash lane in [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) sets `FM_TEST_ONLY=test_first_register_succeeds_with_empty_lock_list_under_bash32` and runs `tests/fm-public-followup.test.sh` through real `/bin/bash` 3.2, proving the first `register` path is safe when its registry lock list starts empty.
+The stock macOS Bash lane owner [`bin/fm-ci-macos-stock-bash.sh`](../../bin/fm-ci-macos-stock-bash.sh) sets `FM_TEST_ONLY=test_first_register_succeeds_with_empty_lock_list_under_bash32` and runs `tests/fm-public-followup.test.sh` through real `/bin/bash` 3.2, proving the first `register` path is safe when its registry lock list starts empty.
 
 The eight remote-route cases are the proof of guarantee 5.
 A remote secondmate home exists only on its own machine, so its registration records no local path, and every close that must first clear the bound legacy Relay link had nothing local to act on.

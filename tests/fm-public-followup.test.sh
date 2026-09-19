@@ -3137,11 +3137,12 @@ test_local_work_home_emit_path_is_unchanged() {
   pass "a local work home's emit path is unchanged"
 }
 
-# CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2 empty-lock
-# register regression. The rest of this file is not a 3.2 snapshot suite.
+# bin/fm-ci-macos-stock-bash.sh sets FM_TEST_ONLY to run just the bash-3.2
+# empty-lock register regression. The rest of this file is not a 3.2 snapshot
+# suite. Propagate the selected case's status; a missing name must not pass.
 if [ -n "${FM_TEST_ONLY:-}" ]; then
   "$FM_TEST_ONLY"
-  exit 0
+  exit
 fi
 
 test_ambient_tasks_axi_env_never_reaches_a_real_backlog
