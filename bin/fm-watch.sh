@@ -29,8 +29,13 @@
 #                          external-wait pause or verified captain-held transfer is
 #                          absorbed instead with its own long re-surface cadence,
 #                          never as a wedge, and that recheck reason names which
-#                          human the wait is on. Only when neither absorb class
-#                          applies does the log's latest recognized status event decide:
+#                          human the wait is on. Work already in a human's hands -
+#                          an open captain call, or a delivery whose reconciled
+#                          state is terminal done and which waits only on the
+#                          merge word - alarms on first sight and is then bounded
+#                          to that same re-surface cadence. Only when neither
+#                          absorb class applies does the log's latest recognized
+#                          status event decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
 #                          wedge threshold also surfaces, with an "escalation N"
@@ -1884,6 +1889,50 @@ captain_call_stale_bound() {  # <window-key> <task>
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
+# The third record of a legitimate wait, and the one no other bound can see.
+#
+# A ship task that finished and appended `done: PR <url>` waits on the captain's
+# merge word, but nothing marks that wait: the worker declared no `paused:`, its
+# line is not a `captain-held` transfer, and the backlog item stays In flight
+# until the work lands, so task_captain_call_open reads no hold. The pane is
+# deliberately idle and the work is finished, yet every new pane hash re-alarmed
+# as a possible wedge for the captain's whole deciding time (observed on
+# 2026-09-18 across three delivered tasks). Exiting the agent does not help: the
+# alarm keys on the endpoint, which outlives it.
+#
+# The evidence is the RECONCILED current state, not the `done:` line: a status log
+# can carry a `done:` leftover from before a validation run that is still going,
+# and fm-crew-state.sh gives that run step precedence over the log. So only a crew
+# whose authoritative state IS terminal done is bounded here
+# (crew_is_terminal_done in fm-classify-lib.sh); a stopped, parked, blocked,
+# failed or unreadable crew keeps every alarm it has today, which is what keeps a
+# genuinely wedged or dead pane surfacing.
+#
+# Same bound as the two above, for the same reason and on the same shared cadence:
+# the first sight still alarms - a delivery the captain has not seen yet is the
+# one alarm that must never be swallowed - repeat sightings inside
+# PAUSE_RESURFACE_SECS are absorbed, and the window's end re-surfaces it once, so
+# a delivery nobody merged cannot rot invisibly. While the away-posture record
+# exists there is nobody to give the merge word, so the bound is absolute there
+# exactly as it is for a captain call.
+terminal_done_stale_bound() {  # <window-key> <task>
+  local key=$1 task=$2
+  STALE_WAIT_DECLARATION=
+  crew_is_terminal_done "$task" || return 1
+  STALE_WAIT_DECLARATION=$(terminal_done_declaration "$task")
+  afk_record_present && return 0
+  stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
+}
+
+# The scope a terminal delivery's re-surface throttle is bound to: the task's
+# whole status-log signature, carrying its own prefix so a bounded delivery and a
+# declared wait on the same signature can never read as one another's window.
+# Any new status event - a blocker after the delivery, a replacement delivery -
+# changes it and so opens its own window instead of inheriting this one's silence.
+terminal_done_declaration() {  # <task>
+  printf 'terminal-done:%s' "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
+}
+
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
 # may have finished through an interactive menu that wrote no status, be waiting on
 # a decision, or be wedged. pause_state_class deliberately answers `none` for a
@@ -1900,9 +1949,10 @@ captain_call_stale_bound() {  # <window-key> <task>
 # and the throttle is read BEFORE anything is queued and advanced only by a wake
 # that really fires - a throttle written by the wake it should have prevented, or
 # read after that wake was already appended, bounds nothing.
-# Both records of an ordinary crew wait bound it (see task_captain_call_open
-# above): the status line the worker declared, and the backlog hold firstmate
-# recorded once the captain took the work in hand.
+# All three records of an ordinary crew wait bound it (see task_captain_call_open
+# above): the status line the worker declared, the backlog hold firstmate
+# recorded once the captain took the work in hand, and the reconciled terminal
+# done state of work already delivered (terminal_done_stale_bound).
 surface_nonterminal_stale() {  # <window> <hash>
   local win=$1 h=$2 key task last declared=1 bounded=1 throttled=1 until now
   key=$(window_key "$win")
@@ -1936,6 +1986,14 @@ surface_nonterminal_stale() {  # <window> <hash>
   elif captain_call_stale_bound "$key" "$task"; then
     bounded=0
     throttled=0
+  elif [ -z "$STALE_WAIT_DECLARATION" ] && terminal_done_stale_bound "$key" "$task"; then
+    # Reached when the reconciled state is terminal done but no record in hand
+    # says so - a pipeline that finished after the worker's last `working:` line.
+    # The same deliberate wait as a delivered `done:` pane, so it takes the same
+    # bound. Consulted only with no captain-call scope already in hand, so it can
+    # never overwrite the richer identity that bound carries.
+    bounded=0
+    throttled=0
   elif [ -n "$STALE_WAIT_DECLARATION" ]; then
     bounded=0
   fi
@@ -1961,7 +2019,7 @@ surface_nonterminal_stale() {  # <window> <hash>
     clear_pause_state "$key"
   fi
   if [ "$throttled" -eq 0 ]; then
-    triage_log "absorbed non-terminal stale (declared wait or open captain call already re-surfaced this window): $win"
+    triage_log "absorbed non-terminal stale (declared wait, open captain call, or delivered work already re-surfaced this window): $win"
     return 0
   fi
   wake "stale: $win"
@@ -3140,6 +3198,19 @@ EOF
               rm -f "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
+            elif [ -z "$STALE_WAIT_DECLARATION" ] && terminal_done_stale_bound "$key" "$task"; then
+              # Consulted only when the bound above left no captain-call scope in
+              # hand, so a call that is open but merely due cannot have its own
+              # throttle scope overwritten here before the alarm records it.
+              # The work is finished by the authoritative current-state read and
+              # waits only on the captain's merge word. The delivery itself
+              # already alarmed; further NEW pane hashes with the same status-log
+              # state have nothing to add while they decide, and the window's end
+              # re-surfaces it once so a delivery nobody merged cannot rot.
+              printf '%s' "$h" > "$sf"
+              rm -f "$ssf"
+              clear_write_tracking "$key"
+              triage_log "absorbed stale (terminal delivery awaiting the captain's merge word, already surfaced for this status): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               stale_wait_record "$key"

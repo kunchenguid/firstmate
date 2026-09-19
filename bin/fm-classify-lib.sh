@@ -2471,6 +2471,30 @@ status_span_has_actionable() {  # <status-file> <start-offset>
   status_span_first_actionable_record "$1" "${2:-0}" > /dev/null
 }
 
+# The reconciled current state, read from bin/fm-crew-state.sh's one authoritative
+# line ("state: <s> · source: <src> · <detail>") and printed as "<state> <source>".
+# Every caller below shares this read; the cost note and the FM_CREW_STATE_BIN
+# stub hook both belong to crew_absorb_class's header, which owns them.
+# Prints "unknown none" for an empty id, a failed read, or
+# any line that is not the canonical "state: ..." shape, so a reader that could
+# not answer is never mistaken for one that answered a state. Kept separate from
+# crew_absorb_class because the two ask different questions of one line: that one
+# classifies why an idle crew might still be WORKING, this one reports what the
+# crew IS. Splitting them keeps a new state from silently entering the absorb
+# vocabulary every existing caller switches on.
+crew_state_read() {  # <id> -> "<state> <source>"
+  local id=$1 line state src
+  [ -n "$id" ] || { printf 'unknown none'; return; }
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in state:*) ;; *) printf 'unknown none'; return ;; esac
+  state=${line#state: }; state=${state%% *}
+  src=${line#*source: }; src=${src%% *}
+  [ -n "$state" ] || state=unknown
+  case "$line" in *source:*) ;; *) src=none ;; esac
+  [ -n "$src" ] || src=none
+  printf '%s %s' "$state" "$src"
+}
+
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
 # from bin/fm-crew-state.sh's one authoritative current-state line
 # ("state: <s> · source: <src> · <detail>"). Prints exactly one token:
@@ -2488,17 +2512,28 @@ status_span_has_actionable() {  # <status-file> <start-offset>
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class() {  # <id>
-  local id=$1 line state src
-  [ -n "$id" ] || { printf 'none'; return; }
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
-  case "$line" in state:*) ;; *) printf 'none'; return ;; esac
-  state=${line#state: }; state=${state%% *}
+  local verdict state src
+  verdict=$(crew_state_read "$1")
+  state=${verdict%% *}; src=${verdict#* }
   if [ "$state" = paused ]; then printf 'paused'; return; fi
   if [ "$state" = working ]; then
-    src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane) printf 'working'; return ;; esac
   fi
   printf 'none'
+}
+
+# 0 when crew <id>'s reconciled current state is terminal `done`: the work is
+# finished and what remains is the captain's word on it. The positive evidence a
+# supervisor needs to read a quiet pane as a deliberate wait rather than a wedge
+# suspect - and deliberately the RECONCILED state, not the status line, because a
+# `done:` leftover in the log can predate a validation run that is still going
+# (fm-crew-state.sh gives the run step precedence over the log for exactly that
+# reason). A crew that is anything else - working, parked, blocked, failed,
+# stopped, or unreadable - is not terminal here and keeps every alarm it has.
+crew_is_terminal_done() {  # <id>
+  local verdict
+  verdict=$(crew_state_read "$1")
+  [ "${verdict%% *}" = "done" ]
 }
 
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class
