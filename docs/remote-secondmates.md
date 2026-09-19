@@ -43,7 +43,7 @@ The origin URL named for each project must be reachable from the remote account 
 
 ## Non-interactive tool contract
 
-No login or interactive shell ever runs on the remote host, so `~/.profile`, `~/.bashrc`, and `~/.zshrc` never contribute to the runtime `PATH`.
+Remote job execution never runs a login or interactive shell, so `~/.profile`, `~/.bashrc`, and `~/.zshrc` never contribute to the job worker's runtime `PATH`.
 `bin/fm-remote-job-lib.sh` is the single owner of the worker `PATH` and builds it by filesystem discovery rather than by evaluating shell startup files.
 The authorized child sees `<remote-root>/bin` first, then a genuine account `~/.local/bin`, the nvm default version bin, asdf shims and install bins, mise shims and install bins, Nix directories, Homebrew directories, and the system tail `/usr/bin:/bin:/usr/sbin:/sbin`.
 Nvm selection follows the filesystem `alias/default` chain and chooses the highest matching installed semantic version, falling back to the highest installed semantic version when the alias is absent or has no installed match.
@@ -52,6 +52,7 @@ The Nix and package-manager order after version-manager discovery is `~/.nix-pro
 Exact repeated entries are omitted.
 For the three Nix locations, a final `bin` symlink is resolved to its physical directory, while a path reached through symlinked ancestors remains in its documented position.
 Other final-component symlink directories, including `~/.local/bin`, are excluded.
+Because `~/.local/bin` precedes the package-manager directories, a stale self-updated `herdr` there shadows the one the account's login shell may resolve; the Herdr adapter steps around a client the running server refuses and `fm-remote-doctor.sh` names which client it selected ([`herdr-backend.md`](herdr-backend.md#client-selection)).
 The entrypoint resolves `git` only from the operator portion before prepending `<remote-root>/bin` for the authorized child.
 A checkout-local `bin/git` therefore cannot authorize an untracked command, and a host with no operator `git` receives an install-or-wrapper diagnostic before command execution.
 
@@ -97,6 +98,10 @@ bin/fm-on.sh <secondmate-id|ssh-alias> fm-remote-doctor.sh --fix
 ```
 
 Over the plain SSH doctor bootstrap, it writes and reloads the Firstmate-owned `dev.firstmate.remote-job` and `dev.firstmate.herdr.fm-remote` launch agents on macOS, both scoped with `LimitLoadToSessionType=Aqua` and bootstrapped in `gui/<uid>`.
+The Herdr agent runs [`bin/fm-remote-herdr-guard.sh`](../bin/fm-remote-herdr-guard.sh) through a shell in login mode with separate `-l` and `-c` arguments, resolving the remote account's executable labeled Directory Services `UserShell`, then an executable `$SHELL`, and finally `/bin/sh`, so the server inherits the account's own environment.
+The `gui/<uid>` domain, not the login shell, is what gives that server and every pane it spawns the Aqua audit session and login-keychain access; a server born in any other session cannot read the login keychain, and every claude pane under it falls back to a stale plaintext credentials file and reports "Login expired".
+Herdr's own SSH remote attach starts such a server when it finds none, and at boot it wins the `fm-remote` socket because sshd accepts connections before the login session exists, so the guard is what makes the launch agent converge: it execs the server in the foreground under launchd when nothing owns the socket, exits 0 when an Aqua-born server already does, and otherwise stops the foreign server and takes the session over, closing its panes so the parent firstmate relaunches its mates into the Aqua-born server.
+`KeepAlive={SuccessfulExit=false}` lets that exit 0 rest instead of respawning against a held socket; the guard's header owns the decision table and [`bin/fm-remote-herdr-owner-lib.sh`](../bin/fm-remote-herdr-owner-lib.sh) owns the birth markers it reads.
 It starts the same workers directly on Linux, recreates the `~/.local/bin/fm-remote-entrypoint.sh` symlink when it is absent, and creates only Firstmate-owned required-tool wrappers that it can prove resolve to a version-manager target, stopping after one harness satisfies the at-least-one requirement.
 It never installs packages or overwrites a non-Firstmate file at a reserved wrapper path.
 The dedicated Herdr launch agent owns only the remote-secondmate `fm-remote` server and does not inspect, rewrite, start, stop, or require the user's interactive `default` session or its `dev.firstmate.herdr` launch agent.
@@ -107,7 +112,7 @@ These steps are never automated and are always reported rather than silently att
 - The first console login on that Mac, and automatic login in System Settings > Users & Groups when the machine runs headless and must come back on its own after a reboot.
 - FileVault, which holds a reboot at pre-boot authentication before any login session exists.
 - Installing any missing required tool that no safe wrapper can resolve.
-- The required remote tool set is `git`, `jq`, `herdr`, compatible `tasks-axi`, `treehouse`, and at least one of `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, or `kimi`.
+- The required remote tool set is `git`, `jq`, `herdr`, compatible `tasks-axi`, `treehouse`, and at least one of `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, or `kimi`; macOS additionally requires `lsof` so the doctor and guard can prove which process owns the session socket.
 - Each worker runtime's own `/login`, and any keychain password prompt that login needs.
 
 Firstmate never writes an auto-login password, never changes FileVault, and never stores an account password.
@@ -185,11 +190,19 @@ An unreachable or unreadable remote read is unknown, not evidence that the endpo
 
 Marked requests keep the existing correlation contract.
 The remote charter appends replies to `state/parent-replies.status` in the remote home.
-A process-event source performs a non-destructive, cursor-anchored delta read, fetches only referenced `data/*.md` documents through the confined reader, mirrors every content-bearing line at most once into the primary status channel, and does not carry blank separators.
+The remote home's own outcome publishers append there too, through the channel contract in `bin/fm-parent-channel-lib.sh` ([secondmate-parent-channel.md](secondmate-parent-channel.md)).
+A process-event source performs a non-destructive, cursor-anchored delta read, fetches the documents a line explicitly offers through the confined reader, mirrors content-bearing lines into the primary status channel, and does not carry blank separators.
+Only a structured `report=data/....md` pointer offers a document; a bare path inside prose is a mention, so writing about a document - including one the mate has not created yet - never asks this channel to fetch it.
+Each normalized source line, before its delivered `report=` pointers are rewritten, is the replay identity.
+Once committed, that identity prevents an ingestion retry or whole-log recapture from appending a second spelling when document availability changes, and its record survives reply-adapter retirement alongside the parent status stream.
+For lines mirrored before this source-line record existed, exact mirrored bytes remain the compatibility fallback.
+The first whole-log recapture after upgrading can therefore append one duplicate in the original source spelling for a legacy line whose bare `data/*.md` mention was previously fetched and rewritten; if that line was a since-resolved decision, the duplicate can read as reopening it, but recording that source line prevents another duplicate on later recaptures.
 The channel carries the mate's status and decision model: an uncorrelated progress line and a newly raised `needs-decision` travel the same path as a correlated answer, and reach the parent's open-decision fold identically.
 Correlation is a per-line property that settles a pending request; it is never a gate on the stream, so no single line can stop or wedge the relay or hold the cursor back.
 Transport normalization rewrites NUL, every other C0 control except tab and newline, and DEL to `?`, while printable ASCII and all high bytes, including UTF-8, pass through unchanged.
-If the confined remote reader permanently refuses a referenced document, the mate's line is mirrored with its original pointer and the adapter appends one keyed escalation naming the gap instead of stalling the stream.
+If the confined remote reader cannot deliver an offered document, the channel fails open: the mate's line is mirrored with its original pointer, the cursor still advances, and the adapter appends one unkeyed note carrying the reader's own reason instead of stalling the stream.
+That note never enters the open-decision fold, because the reader cannot tell a report that is still being written from one that will never exist, and a decision raised on that ambiguity could stand open describing a transfer that later succeeded.
+A refused document is not re-attempted automatically; it stays on the remote, and a later structured offer of the same path fetches it.
 An SSH exit status of 255 while fetching a referenced document leaves the delta uncommitted for the process-event runner's normal retry because remote completion is unknown.
 The process-event runner applies each captured delta through this adapter as soon as it is captured, so a mirrored reply reaches the primary status channel without depending on the wake handler running the adapter itself.
 A mirrored line that carries a correlation token settles its pending-reply record and closes that request's own open escalation decision.
@@ -214,9 +227,8 @@ bin/fm-backlog-handoff.sh <id> <item-key>...
 
 For a remote route, `tasks-axi mv` first moves the dependency-closed set atomically from the primary backlog into `data/handoff/<id>.outbox.md`.
 The outbox is then copied to the remote handoff scratch directory and `fm-backlog-receive.sh` atomically ingests every destination-absent key under the remote backlog's own lock.
-After receipt, the helper sends a marked routed-work instruction through the recorded remote endpoint and removes the outbox only after that wake is confirmed.
-A failed wake leaves the remote backlog intact and the outbox available for `--resume-pending`; an unresolved send is reported without a blind resend.
-Bootstrap retries pending outboxes and emits `SECONDMATE_HANDOFF:` only when one remains.
+The [`bin/fm-backlog-handoff.sh`](../bin/fm-backlog-handoff.sh) header owns remote outbox release after receipt and stable wake-correlation retry behavior.
+Bootstrap retries pending outboxes and wakes, and emits `SECONDMATE_HANDOFF:` only when an outbox remains.
 There is no two-phase journal and no additional tasks-axi release requirement.
 
 ## Sync, update, and retirement
@@ -226,8 +238,14 @@ Changed live routes receive a marked instruction to re-read the transferred file
 The primary records that remote nudge before delivery and retries it during locked startup convergence after a failed send.
 Local secondmates retain their generation-specific local pointer contract; remote transfers do not copy those primary-local instruction paths.
 
-`/updatefirstmate` updates each remote code root from its own origin, then guardedly fast-forwards the persistent remote home to that code-root commit.
-Dirty, diverged, unavailable, or otherwise unsafe targets are reported and left untouched.
+A live remote second mate is restarted with `relaunch`, which runs the ordinary [control plane](agent-control.md) on that host: the endpoint record there was written by a host-local launch and carries no remote placement, so the transaction, its checkpoint, and its postconditions are the local ones.
+The primary passes `<harness> <model|default|-> <effort|default|->` explicitly, using `default` when an axis has no parent pin, because `config/secondmate-harness` is not inherited into a second mate's home and the file on that host belongs to a different home; letting the far side re-resolve it would silently move the mate onto another runtime.
+SSH exit 255 leaves completion unknown and the route preserved, exactly as every other verb here.
+
+Session start and every remote launch converge the persistent remote home on the primary's own default-branch commit rather than on the Firstmate copy that host keeps.
+The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the guarded convergence contract, including the distinct `/updatefirstmate` behavior, and [`bin/fm-remote-secondmate-control.sh`](../bin/fm-remote-secondmate-control.sh) owns the commit-import mechanics.
+Neither session start nor launch moves the host's own Firstmate copy, and an unsafe or unavailable target is reported and left untouched.
+A completed sync reports which watched instruction paths its advance changed, because the primary cannot diff a checkout it cannot read and needs that fact to decide whether the running remote agent must be replaced to actually reload.
 
 Retire a remote second mate with the normal guarded command:
 
@@ -255,7 +273,9 @@ bin/fm-test-run.sh tests/fm-crew-state.test.sh
 bin/fm-test-run.sh tests/fm-remote-job.test.sh
 bin/fm-test-run.sh tests/fm-remote-transport-lanes.test.sh
 bin/fm-test-run.sh tests/fm-remote-doctor.test.sh
+bin/fm-test-run.sh tests/fm-remote-herdr-guard.test.sh
 bin/fm-test-run.sh tests/fm-project-origin.test.sh
+bin/fm-test-run.sh tests/fm-secondmate-sync.test.sh
 bin/fm-test-run.sh tests/fm-remote-reply.test.sh
 bin/fm-test-run.sh tests/fm-remote-backlog-handoff.test.sh
 bin/fm-test-run.sh tests/fm-remote-secondmate-lifecycle-e2e.test.sh
@@ -263,6 +283,7 @@ bin/fm-test-run.sh tests/fm-remote-secondmate-trace-context.test.sh
 ```
 
 The account-level checks the doctor performs - a real Aqua login session, a real `launchctl` domain, and a real herdr server - are only ever exercised against fixtures here, so the readiness gate's behavior on a genuine Mac remains an operator-run smoke test.
+The audit-session facts the guard relies on are recorded with their commands in [runtime backend verification](verification/runtime-backends.md#fm-remote-server-birth-and-login-keychain-access).
 
 For a real-host smoke test, provision a disposable remote account and project, run the doctor and its repair against that account, launch the second mate, send one marked request, verify its correlated reply and structured fleet projection, simulate an unreachable host to confirm unknown-without-failover behavior, then retire only after the remote queue is empty.
 The deterministic suite is automated; real-host validation is still an operator-run smoke test and is not claimed by the repository tests.

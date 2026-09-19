@@ -44,6 +44,14 @@
 #                              tasks-axi truth.
 #   events/<event-id>.json     inbound typed terminal events awaiting
 #                              reconciliation, one file per event id.
+#   outbox/<event-id>.json     OUTBOUND typed terminal events a worker in THIS
+#                              home produced for an owning home on another
+#                              machine, which no local path can reach. Same file
+#                              shape as events/, staged here until that owning
+#                              home collects them over the route's transport
+#                              (bin/fm-public-followup-emit.sh --stage-in,
+#                              bin/fm-public-followup-collect.sh). A home whose
+#                              work is only ever local never has this directory.
 #   consumed/<event-id>        idempotency ledger: an accepted event id is never
 #                              replayed, so duplicate emits and restart replay
 #                              are no-ops.
@@ -103,6 +111,7 @@ fm_pf_relay_active() {
 fm_pf_root()       { printf '%s\n' "$1/$FM_PF_DIRNAME"; }
 fm_pf_registry_dir() { printf '%s\n' "$1/$FM_PF_DIRNAME/registry"; }
 fm_pf_events_dir()   { printf '%s\n' "$1/$FM_PF_DIRNAME/events"; }
+fm_pf_outbox_dir()   { printf '%s\n' "$1/$FM_PF_DIRNAME/outbox"; }
 fm_pf_consumed_dir() { printf '%s\n' "$1/$FM_PF_DIRNAME/consumed"; }
 fm_pf_rejected_dir() { printf '%s\n' "$1/$FM_PF_DIRNAME/rejected"; }
 fm_pf_retired_dir()  { printf '%s\n' "$1/$FM_PF_DIRNAME/retired"; }

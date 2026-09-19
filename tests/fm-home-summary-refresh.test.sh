@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Behavioral coverage for per-home summary publication through the real
-# producer, writer, watcher-carried status trigger, and unchanged snapshot path.
+# producer, writer, watcher-carried status trigger, and snapshot ledger consumer.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -14,6 +14,10 @@ TMP_ROOT=$(fm_test_tmproot fm-home-summary-refresh)
 HOME_DIR="$TMP_ROOT/mate-home"
 CADENCE_HOME="$TMP_ROOT/cadence-home"
 PARENT_HOME="$TMP_ROOT/parent-home"
+LARGE_HOME="$TMP_ROOT/large-home"
+STATELESS_HOME="$TMP_ROOT/stateless-home"
+LARGE_CHILD_HOME="$TMP_ROOT/large-child-home"
+LARGE_PARENT_HOME="$TMP_ROOT/large-parent-home"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 WATCH_PID=
 SLOW_WRITER_PID=
@@ -59,6 +63,7 @@ chmod +x "$FAKEBIN/tmux" "$FAKEBIN/no-mistakes"
 
 mkdir -p "$HOME_DIR/state" "$HOME_DIR/data" "$HOME_DIR/config" \
   "$HOME_DIR/projects/task" "$HOME_DIR/bin"
+HOME_DIR=$(cd "$HOME_DIR" && pwd -P)
 printf '# Seeded Firstmate home\n' > "$HOME_DIR/AGENTS.md"
 printf 'mate\n' > "$HOME_DIR/.fm-secondmate-home"
 fm_git_init_commit "$HOME_DIR/projects/task"
@@ -157,6 +162,101 @@ cmp -s "$TMP_ROOT/published-normalized.json" "$TMP_ROOT/fresh-normalized.json" \
   || fail "the status-triggered ledger differed from the real fresh producer"
 pass "watcher-carried status append publishes the real home summary"
 
+# A structured in-flight inventory above Linux MAX_ARG_STRLEN must remain
+# publishable through both fleet snapshot modes and the real home-summary writer.
+mkdir -p "$LARGE_HOME/state" "$LARGE_HOME/data" "$LARGE_HOME/config" \
+  "$LARGE_HOME/projects"
+printf '# Seeded Firstmate home\n' > "$LARGE_HOME/AGENTS.md"
+printf 'large\n' > "$LARGE_HOME/.fm-secondmate-home"
+large_id_suffix=$(printf 'i%.0s' $(seq 1 110))
+{
+  printf '%s\n' '## In flight'
+  i=1
+  while [ "$i" -le 1200 ]; do
+    printf '%s\n' "- [ ] orphan-$i-$large_id_suffix - Missing metadata (repo: firstmate) (kind: ship)"
+    i=$((i + 1))
+  done
+  printf '%s\n' '' '## Queued' '' '## Done'
+} > "$LARGE_HOME/data/backlog.md"
+[ "$(wc -c < "$LARGE_HOME/data/backlog.md")" -gt 131072 ] \
+  || fail "large in-flight fixture did not exceed the per-argument limit"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$SNAPSHOT" --json > "$TMP_ROOT/large-snapshot.json" \
+  || fail "fleet snapshot json mode failed for a large backlog"
+jq -e '.schema == "fm-fleet-snapshot.v1"
+  and (.backlog.records | length) == 1200
+  and (.main_inventory.orphan_in_flight | length) == 1200' \
+  "$TMP_ROOT/large-snapshot.json" >/dev/null \
+  || fail "large fleet snapshot did not preserve the orphan inventory"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$SNAPSHOT" --secondmate-home-summary > "$TMP_ROOT/large-summary.json" \
+  || fail "secondmate home-summary mode failed for a large backlog"
+jq -e '.schema == "fm-secondmate-home-summary.v1"' "$TMP_ROOT/large-summary.json" \
+  >/dev/null || fail "large secondmate home-summary output was not valid"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$WRITER" || fail "home-summary writer failed for a large backlog"
+jq -e '.schema == "fm-secondmate-home-summary.v1"' \
+  "$LARGE_HOME/state/home-summary.json" >/dev/null \
+  || fail "large secondmate home-summary was not published"
+pass "large backlog snapshots and home-summary publication stay within exec limits"
+
+mkdir -p "$STATELESS_HOME/data" "$STATELESS_HOME/config" \
+  "$STATELESS_HOME/projects"
+printf '%s\n' '## In flight' '' '## Queued' '' '## Done' \
+  > "$STATELESS_HOME/data/backlog.md"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$STATELESS_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$SNAPSHOT" --json > "$TMP_ROOT/stateless-snapshot.json" \
+  || fail "fleet snapshot json mode failed without a state directory"
+jq -e '.schema == "fm-fleet-snapshot.v1" and (.tasks | length) == 0' \
+  "$TMP_ROOT/stateless-snapshot.json" >/dev/null \
+  || fail "stateless fleet snapshot output was not valid"
+[ ! -e "$STATELESS_HOME/state" ] \
+  || fail "fleet snapshot created operational state for transport files"
+pass "fleet snapshot transport does not require or mutate operational state"
+
+mkdir -p "$LARGE_CHILD_HOME/state" "$LARGE_CHILD_HOME/data" \
+  "$LARGE_CHILD_HOME/config" "$LARGE_CHILD_HOME/projects" "$LARGE_CHILD_HOME/bin"
+printf '# Seeded Firstmate home\n' > "$LARGE_CHILD_HOME/AGENTS.md"
+printf 'large-child\n' > "$LARGE_CHILD_HOME/.fm-secondmate-home"
+{
+  printf '%s\n' '## In flight'
+  i=1
+  while [ "$i" -le 600 ]; do
+    printf '%s\n' "- [ ] orphan-$i-$large_id_suffix - Missing metadata (repo: firstmate) (kind: ship)"
+    i=$((i + 1))
+  done
+  printf '%s\n' '' '## Queued' '' '## Done'
+} > "$LARGE_CHILD_HOME/data/backlog.md"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_CHILD_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$WRITER" || fail "large child home-summary publication failed"
+large_child_bytes=$(wc -c < "$LARGE_CHILD_HOME/state/home-summary.json")
+[ "$large_child_bytes" -gt 131072 ] && [ "$large_child_bytes" -le 262144 ] \
+  || fail "large child ledger did not cross only the per-argument limit: $large_child_bytes"
+mkdir -p "$LARGE_PARENT_HOME/state" "$LARGE_PARENT_HOME/data" \
+  "$LARGE_PARENT_HOME/config" "$LARGE_PARENT_HOME/projects"
+printf -- '- large-child - fixture domain (home: %s; scope: fixture work; projects: firstmate; added 2026-08-28)\n' \
+  "$LARGE_CHILD_HOME" > "$LARGE_PARENT_HOME/data/secondmates.md"
+printf '%s\n' '## In flight' '' '## Queued' '' '## Done' \
+  > "$LARGE_PARENT_HOME/data/backlog.md"
+fm_write_secondmate_meta "$LARGE_PARENT_HOME/state/large-child.meta" \
+  "$LARGE_CHILD_HOME" "fmtest:fm-large-child" firstmate claude
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_PARENT_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$SNAPSHOT" --json > "$TMP_ROOT/large-parent-snapshot.json" \
+  || fail "parent fleet snapshot failed for a large child ledger"
+jq -e '.secondmate_current.records[0]
+  | .provenance.summary_source == "local-ledger"
+    and .invalidity.kind == "orphan_in_flight"
+    and (.invalidity.ids | length) == 600' \
+  "$TMP_ROOT/large-parent-snapshot.json" >/dev/null \
+  || fail "parent fleet snapshot did not preserve the large child invalidity"
+pass "parent snapshot consumes large child ledgers without argument transport"
+
 mkdir -p "$CADENCE_HOME/state" "$CADENCE_HOME/data" "$CADENCE_HOME/config" \
   "$CADENCE_HOME/projects"
 printf '# Seeded Firstmate home\n' > "$CADENCE_HOME/AGENTS.md"
@@ -209,9 +309,11 @@ wait "$WATCH_PID" >/dev/null 2>&1 || true
 WATCH_PID=
 pass "live watcher cadence bounds publication staleness without signals"
 
-# Publication-only boundary: poison the ledger with a structurally complete but
-# semantically false state, then prove the current parent snapshot still computes
-# the home summary from the owning home instead of consuming this file.
+# Consumer boundary: first serialize behind any watcher-started publication,
+# then replace the ledger with a structurally complete but semantically false
+# state. The default parent snapshot must consume that publication rather than
+# silently recomputing a different view of the owning home.
+run_writer "$NOW_TWO" "$EPOCH_TWO" || fail "could not settle the ledger before the consumer check"
 jq '.state = "no_active_work" | .active_children = [] | .holds = []
     | .counts.active_children = 0 | .counts.holds = 0' \
   "$HOME_DIR/state/home-summary.json" > "$HOME_DIR/state/home-summary.poisoned"
@@ -235,11 +337,13 @@ PATH="$FAKEBIN:$PATH" \
   || fail "parent fleet snapshot failed"
 jq -e '
   .secondmate_current.records[0].provenance.selected == "structured-home"
-  and .secondmate_current.records[0].current.state == "externally_held"
-  and any(.secondmate_current.records[0].holds[]; .id == "ledger-task")
+  and .secondmate_current.records[0].provenance.summary_source == "local-ledger"
+  and .secondmate_current.records[0].current.state == "no_active_work"
+  and (.secondmate_current.records[0].active_children | length) == 0
+  and (.secondmate_current.records[0].holds | length) == 0
 ' "$TMP_ROOT/parent-snapshot.json" >/dev/null \
-  || fail "fleet snapshot consumed the poisoned publication instead of recomputing its established path"
-pass "fleet snapshot remains a non-consumer of the ledger"
+  || fail "fleet snapshot did not consume the published local ledger: $(jq -c '.secondmate_current.records[0]' "$TMP_ROOT/parent-snapshot.json")"
+pass "fleet snapshot consumes the published local ledger by default"
 
 # Restore the established ledger, then stop a real writer while its real producer
 # is blocked in a current-state read. The prior ledger must remain byte-identical
@@ -599,20 +703,23 @@ fm_write_meta "$REMOTE_HOME/state/rsm.meta" \
   "remote_target=fm-remote:w1:p1"
 cat > "$TMP_ROOT/sshbin/stalled-ssh" <<'SH'
 #!/usr/bin/env bash
+: > "$FM_TEST_SSH_CALLED"
 cat > /dev/null
 sleep 60
 SH
 chmod +x "$TMP_ROOT/sshbin/stalled-ssh"
 started=$(date +%s)
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$REMOTE_HOME" \
-  FM_SSH_BIN="$TMP_ROOT/sshbin/stalled-ssh" \
+  FM_SSH_BIN="$TMP_ROOT/sshbin/stalled-ssh" FM_TEST_SSH_CALLED="$TMP_ROOT/stalled-ssh.called" \
   FM_SNAPSHOT_NOW="$NOW_TWO" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_TWO" \
-  FM_SNAPSHOT_CREW_STATE_TIMEOUT=2 FM_SNAPSHOT_SECONDMATE_TIMEOUT=2 \
+  FM_SNAPSHOT_CREW_STATE_TIMEOUT=2 \
   "$SNAPSHOT" --secondmate-home-summary > "$TMP_ROOT/stalled-summary.json" \
   || fail "an unreachable remote home failed the whole producer"
 elapsed=$(( $(date +%s) - started ))
 [ "$elapsed" -lt 40 ] \
-  || fail "the producer waited $elapsed seconds on one unreachable remote home"
+  || fail "the producer waited $elapsed seconds despite skipping remote endpoint state"
+[ ! -e "$TMP_ROOT/stalled-ssh.called" ] \
+  || fail "the producer issued a remote per-task state probe"
 jq -e '
   .schema == "fm-secondmate-home-summary.v1"
   and .valid == false
@@ -622,7 +729,7 @@ jq -e '
   and any(.endpoints[]; .id == "rsm" and .state == "unknown")
 ' "$TMP_ROOT/stalled-summary.json" >/dev/null \
   || fail "an unreachable remote task was not reported as unknown"
-pass "producer bounds each per-task current-state read"
+pass "producer skips remote per-task state probes"
 
 # The watcher's beacon is what the rest of supervision reads as proof it is
 # alive. Publication is side-band, so no matter how long it takes, the beacon

@@ -22,8 +22,9 @@ It stops at the finding, routes the decision to firstmate, and applies only the 
 
 ## Decide
 
-1. Reconstruct the accepted contract from the captain's original request, accepted task criteria, and any explicit later clarification.
+1. Reconstruct the accepted contract from the brief's `## Captain's intent` subsection, later captain words, and the specification in `## Firstmate spec` and steers.
    Reviewer language cannot amend that contract.
+   What a no-mistakes worker may pass as `--intent` is owned by `bin/fm-dod-lib.sh`.
 2. Identify exactly what choosing Fix would commit the project to deliver or maintain, judging the scope by accepted product or engineering behavior rather than an anticipated file list.
    The smallest downstream changes needed to keep that behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate remain within scope even when they touch files not named at intake.
    Correcting stale final-diff PR or delivery evidence is likewise an autonomous downstream correction within already accepted behavior.

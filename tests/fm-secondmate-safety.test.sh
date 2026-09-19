@@ -1936,15 +1936,71 @@ EOF
   pass "secondmate force teardown discards child work"
 }
 
+test_secondmate_force_teardown_refuses_duplicated_child_slot() {
+  local home subhome childproj childwt fakebin log err rc
+  home="$TMP_ROOT/force-duplicate-slot-home"
+  subhome="$TMP_ROOT/force-duplicate-slot-subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/force-duplicate-slot-pool/1/alpha"
+  err="$TMP_ROOT/force-duplicate-slot.err"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$(dirname "$childwt")"
+  fm_git_worktree "$childproj" "$childwt" duplicate-child
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$childwt" \
+    > "$TMP_ROOT/force-duplicate-slot-pool/treehouse-state.json"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  for child in stale-child live-child; do
+    cat > "$subhome/state/$child.meta" <<EOF
+window=firstmate:fm-$child
+worktree=$childwt
+project=$childproj
+harness=echo
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  done
+  fakebin=$(make_fake_tmux "$TMP_ROOT/force-duplicate-slot-fake")
+  log="$TMP_ROOT/force-duplicate-slot-fake/tmux.log"
+
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-duplicate-slot-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "forced secondmate teardown returned a duplicated child slot"
+  [ -d "$childwt" ] || fail "forced secondmate teardown removed the duplicated child slot"
+  [ -e "$subhome/state/stale-child.meta" ] || fail "forced secondmate teardown removed the stale child record"
+  [ -e "$subhome/state/live-child.meta" ] || fail "forced secondmate teardown removed the live child record"
+  grep -F 'kill-window' "$log" >/dev/null && fail "forced secondmate teardown killed a child before detecting its slot collision"
+  grep -F 'live-child' "$err" >/dev/null || grep -F 'stale-child' "$err" >/dev/null \
+    || fail "forced secondmate teardown did not identify the duplicated child slot"
+  pass "forced secondmate teardown refuses duplicated descendant pool slots"
+}
+
 test_secondmate_force_teardown_preserves_child_on_unproven_lock() {
   local home subhome childproj childwt fakebin log err rc lock
   home="$TMP_ROOT/force-lock-home"
   subhome="$TMP_ROOT/force-lock-subhome"
   childproj="$subhome/projects/alpha"
-  childwt="$TMP_ROOT/force-lock-child-worktree"
+  childwt="$TMP_ROOT/force-lock-child-pool/1/alpha"
   err="$TMP_ROOT/force-lock-child.err"
-  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$(dirname "$childwt")"
   fm_git_worktree "$childproj" "$childwt" force-child-lock
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$childwt" \
+    > "$TMP_ROOT/force-lock-child-pool/treehouse-state.json"
   printf 'domain\n' > "$subhome/.fm-secondmate-home"
   cat > "$home/state/domain.meta" <<EOF
 window=firstmate:fm-domain
@@ -2330,6 +2386,7 @@ EOF
 
 task_set_lock_path() {  # <state-dir>
   local state=$1
+  # shellcheck source=/dev/null
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_task_set_lock_path "$state" )
 }
 
@@ -2350,6 +2407,7 @@ hold_task_set_lock() {  # <state-dir> -> echoes "<holder-pid> <lock-path>"
     fm_lock_try_acquire "$lock" || exit 1
     sleep 30
   ) >/dev/null 2>&1 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   holder=$!
   while [ ! -e "$lock" ] && [ "$i" -lt 100 ]; do
     sleep 0.1
@@ -2464,6 +2522,7 @@ SH
     XDG_STATE_HOME="$TMP_ROOT/taskset-state-absent-xdg" \
     FM_TASK_SET_TEST_READY="$ready" FM_TASK_SET_TEST_RELEASE="$release" \
     "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   pid=$!
   while [ ! -e "$ready" ] && kill -0 "$pid" 2>/dev/null && [ "$i" -lt 200 ]; do
     sleep 0.05
@@ -2737,6 +2796,7 @@ EOF
   out="$TMP_ROOT/watch-fake/watch.out"
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_LOG="$TMP_ROOT/watch-fake/tmux.log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/watch-fake/pane.txt" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch.sh" > "$out" &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   pid=$!
   if ! wait_live "$pid" 25; then
     wait "$pid" || true
@@ -2950,6 +3010,7 @@ test_secondmate_force_teardown_preserves_nested_restore_status
 test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work
+test_secondmate_force_teardown_refuses_duplicated_child_slot
 test_secondmate_force_teardown_preserves_child_on_unproven_lock
 test_secondmate_force_teardown_allows_non_state_operational_dir_symlinks_inside_home
 test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home

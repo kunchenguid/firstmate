@@ -51,8 +51,27 @@
 #     home without the current Pi session lock cannot have a live lease, so
 #     the guard is a no-op there - non-Pi behavior is unchanged by construction.
 #   - Role partition (fm_lease_forbid_branch): actions MAIN alone owns -
-#     merging a PR, landing local-only work, spawning workers - refuse the
-#     branch actor outright, lease or no lease.
+#     merging a PR, landing local-only work, spawning workers, answering a
+#     decision - refuse the branch actor outright, lease or no lease, while
+#     the home is attended. While a confirmed, readable, live away-posture
+#     record exists (bin/fm-afk-contract.sh validate; docs/pi-supervision-
+#     branch.md "Postures"), main is parked and its STANDING authority
+#     relocates to the branch for exactly the actions whose guarded script
+#     opts in with --away-relocated: the PR merge (its own grant-or-yolo,
+#     live-head-green, synchronous gate still decides), a fresh spawn of
+#     already-queued work (its own spend-cap gate still decides), and a
+#     decision answer (ask-user-authority's judgment still decides). The
+#     relocation grants nothing beyond what main could do attended: it only
+#     changes which actor may reach the guarded script's own gate. An action
+#     that has no record-side gate of its own - landing local-only work - is
+#     never relocated and keeps refusing the branch in both postures. An
+#     archived, absent, unconfirmed, or unreadable record is absence: the
+#     attended refusal, byte for byte. The record is validated immediately
+#     before the guarded script's first persistent side effect and the lock is
+#     not held across the operation, so a return's archive is never blocked by
+#     a long spawn; a spawn or answer that completes seconds after archive is
+#     standing-authority work the captain had queued anyway (accepted,
+#     confused-agent-grade, like the merge residuals fm-pr-merge.sh documents).
 #   - "backlog" is a reserved claimable resource name used by the branch
 #     prompt around its own data/backlog.md writes. This is deliberately
 #     branch-side containment only; main's tasks-axi path has no executable
@@ -206,13 +225,31 @@ fm_lease_guard_release() {
   fm_lock_release "$lock"
 }
 
-# fm_lease_forbid_branch <action-label>: refuse (exit FM_LEASE_REFUSE_EXIT)
-# when the current actor is the supervision branch. Guards the main-owned role
-# partition; a home with no branch never sets the actor and always passes.
+# fm_lease_away_relocated: 0 iff main's standing authority is relocated to the
+# branch actor right now - a confirmed, readable, live away-posture record
+# exists in $STATE, as bin/fm-afk-contract.sh's own validate subcommand judges
+# it (the header's role-partition paragraph). Read fresh on every call, never
+# cached, because the record can be archived between two guarded actions.
+fm_lease_away_relocated() {
+  [ -f "$STATE/.afk-contract" ] || return 1
+  FM_STATE_OVERRIDE="$STATE" "$FM_LEASE_LIB_DIR/fm-afk-contract.sh" validate >/dev/null 2>&1
+}
+
+# fm_lease_forbid_branch <action-label> [--away-relocated]: refuse (exit
+# FM_LEASE_REFUSE_EXIT) when the current actor is the supervision branch.
+# Guards the main-owned role partition; a home with no branch never sets the
+# actor and always passes. With --away-relocated, the branch passes instead
+# while fm_lease_away_relocated holds (main is parked under the away-posture
+# record), and the calling script's own gate decides what may happen next;
+# without the flag the action is never relocated in any posture.
 fm_lease_forbid_branch() {
-  local action=$1 actor
+  local action=$1 relocatable=${2:-} actor
   actor=$(fm_lease_actor) || exit "$FM_LEASE_REFUSE_EXIT"
   [ "$actor" = branch ] || return 0
+  if [ "$relocatable" = --away-relocated ] && fm_lease_away_relocated; then
+    echo "note: $action proceeds for the supervision branch under the away-posture record: main is parked and its standing authority is relocated; this script's own gate still applies (docs/pi-supervision-branch.md \"Postures\")" >&2
+    return 0
+  fi
   echo "error: $action refused - the supervision branch never performs this action; report the outcome and leave it to main (role partition: docs/pi-supervision-branch.md)" >&2
   exit "$FM_LEASE_REFUSE_EXIT"
 }

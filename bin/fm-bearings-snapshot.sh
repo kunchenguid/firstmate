@@ -11,23 +11,45 @@
 # output, it never removes them from - or otherwise weakens - the canonical snapshot,
 # which stays complete.
 #
-# LOCAL-ONLY by default: a normal invocation makes ZERO GitHub/network/auth calls.
-# It MAY surface PR URLs already recorded locally in task meta (recorded_prs), but it
-# performs no live discovery or checks. Live PR discovery/checks happen ONLY under
-# --include-prs, which is the sole path that touches the network; all gh coupling
-# lives in that branch and never in the canonical snapshot. The default output states
-# explicitly (the prs: line and the omitted[] surfaces) what was not requested, so an
-# absence is never ambiguous.
+# By default the canonical snapshot performs bounded concurrent remote-ledger reads
+# for registered remote homes under one shared collection budget and may atomically
+# refresh its parent-side ledger cache. It MAY surface PR URLs already recorded in
+# task meta (recorded_prs), but performs no live GitHub discovery or checks. Live PR
+# discovery/checks happen ONLY under --include-prs; all gh coupling lives in that
+# branch and never in the canonical snapshot. The default output states explicitly
+# (the prs: line and the omitted[] surfaces) what was not requested, so an absence is
+# never ambiguous.
 #
 # This wrapper consumes canonical status decisions plus canonically normalized
-# backlog roles, unresolved blockers, and captain actionability. It never infers
+# backlog roles, unresolved blockers, and captain actionability.
+# Contributions project cached coverage and required actors from fm-contributions.sh;
+# only captain rows are exposed, with counts for the other actors and unmeasured homes. It never infers
 # decisions from report or visual-review prose or reimplements snapshot semantics.
-# Captain's Call is captain actionability itself: every due, unblocked task held
-# for the captain, whatever its kind. A captain hold deferred by date
-# (hold-until in the future) is not actionable and renders as a Charted Next
-# gate with its date; a row the canonical snapshot marks prose-deferred
-# (deferred_marker) leaves the default decisions and gates views and is
-# disclosed in omitted[], revealed by --all-decisions / --all-queued.
+# Underway (in_flight) projects every main live worker plus every active child
+# from every readable secondmate ledger, independently of that home's
+# bearings_state. Each row's name is the durable task title when nonblank and
+# its durable task id otherwise, so renderers always receive a task-identifying
+# label instead of having to substitute run status. A home classified
+# captain_decision because it has an open
+# captain hold still contributes each working child as its own Underway row;
+# the home row on secondmates[] keeps the decision and gate classification.
+# Captain-hold placement follows the canonical snapshot's hold_bucket and
+# nothing else; this wrapper never inspects hold reason or body prose. The
+# buckets are total and mutually exclusive, so every captain hold appears in
+# exactly one decision bucket and none can fall through both. An actively worked
+# held task may also appear in Underway. A "live" hold is a default Captain's Call
+# entry; "blocked", "dated", and "aged" leave the default Captain's Call, render
+# as Charted Next gates stating why (the blocking work, the until date, or the
+# floored age), and are counted in omitted[].
+# --all-decisions reveals every captain hold available within the bounded snapshot
+# and drops its gate, so a hold is never in both Captain's Call and Charted Next.
+# Aging is a projection safety net only; the durable
+# deferral remains re-holding with --until.
+#
+# Ordinary Charted Next gates are ordered by durable filed date, newest first,
+# before the FM_BEARINGS_GATES bound is applied. Gates without a comparable filed
+# date keep their input order after dated gates. The synthetic (return-catchup)
+# posture row is reserved ahead of that ordering and bound so it always surfaces.
 #
 # Main-home inventory validity comes from the canonical snapshot's main_inventory
 # object (orphan structured in-flight without meta, unstructured current rows).
@@ -35,33 +57,40 @@
 # gaps in omitted[] and, when invalid, a Charted Next gate line so the four-section
 # chat cannot claim an empty fleet while main current state is broken.
 #
+# An open away-return catch-up is disclosed the same way, as a single action-free
+# (return-catchup) gate row naming the blockers left to clear or the reason the
+# catch-up was retained. Reporting is not ordinary captain work, so the gate never
+# suppresses the digest; an ACTIVE away window still refuses, because the right
+# answer there is to run the return first. bin/fm-afk-return.sh owns the gate.
+#
 # The landed section merges this home's Done with the canonical snapshot's
 # secondmate_landed roll-up (fm-fleet-snapshot.sh), so merges a secondmate managed -
 # recorded in ITS OWN backlog, never the main one - are visible. It stays bounded by
 # a per-home cap and an overall cap, with omitted[] disclosure of both and of any
-# secondmate home whose backlog was unreadable; no GitHub/network call is involved.
+# secondmate home whose backlog was unreadable; no live GitHub call is involved.
 # The default landed baseline is balanced across homes: each home keeps its internal
 # newest-first ordering, homes iterate in deterministic id order, sparse homes do not
 # waste capacity, and --all-landed switches back to the complete global newest-first
-# order.
+# order. Which closed rows either side contributes is bin/fm-landed-lib.sh's rule.
 #
 # Flags:
-#   (default)        compact projection, TOON, local-only
+#   (default)        compact projection with bounded remote-ledger collection, TOON
 #   --json           the same projected model as JSON (machine/debug; parity form)
-#   --include-prs    ALSO do live open-PR discovery + checks (the only network path)
+#   --include-prs    ALSO do live GitHub open-PR discovery + checks
 #   --fields <list>  opt in to dropped surfaces: bodies,paths,actions,endpoints
 #   --all-in-flight  include every in-flight task
-#   --all-decisions  include every open decision
+#   --all-decisions  include every open decision and captain hold in the bounded snapshot
 #   --all-secondmates include every aggregated secondmate record
 #   --all-landed     include every landed record from every home (default: bounded)
 #   --all-reports    include the full scout-report inventory (default: relevant only)
-#   --all-queued     include superseded queued items (default: dropped)
+#   --all-queued     include every queued gate present in the bounded snapshot
 #   --all-recorded-prs include every locally recorded PR
 #   --all-unhealthy  include every unhealthy endpoint
 #   --all-pr-repos   query every discovered repository under --include-prs
 #   -h,--help        usage
 #
-# Output contract: `fm-bearings.v1`. Read-only; no locks, no mutation, no reports.
+# Output contract: `fm-bearings.v1`. No locks or reports; the underlying snapshot's
+# parent-side remote-ledger cache refresh is the only default fleet-state mutation.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -69,6 +98,9 @@ FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-landed-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-landed-lib.sh"  # FM_LANDED_JQ_DEFS: the shared landed selector
 
 # Bounds (overridable for tests / large fleets).
 FM_BEARINGS_LANDED=${FM_BEARINGS_LANDED:-6}
@@ -109,14 +141,18 @@ usage: fm-bearings-snapshot.sh [--json] [--include-prs] [--fields <list>]
                                [--all-pr-repos]
 
 Compact bearings projection over fm-fleet-snapshot.sh. TOON by default.
-Default is LOCAL-ONLY (no network); --include-prs is the only path that fetches.
+Default collection performs bounded concurrent remote-ledger reads for registered
+remote homes under one shared snapshot budget and may refresh the parent-side cache.
+--include-prs additionally performs live GitHub discovery and checks.
 
-Default fields: schema, home, generated, prs, in_flight{id,kind,state,doing},
+Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,doing},
   secondmates{id,state,doing,provenance,freshness,age_seconds,contradiction,reason},
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
-  gates{id,title,blocked_by,reason,owner}, reports{id,path}, recorded_prs{id,url},
+  gates{id,title,blocked_by,reason,owner,filed}, reports{id,path}, recorded_prs{id,url},
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
+Default gates are selected newest filed first before their bound; undated gates
+  retain input order after dated gates.
 landed merges this home's Done with registered secondmate homes' Done, bounded by
   a per-home cap (FM_BEARINGS_LANDED_PER_HOME) and an overall cap (FM_BEARINGS_LANDED),
   with omitted[] disclosure. Default selection is balanced across deterministic home
@@ -125,9 +161,11 @@ landed merges this home's Done with registered secondmate homes' Done, bounded b
 For every registered secondmate, readable structured facts from its own home are
   authoritative, including independently trustworthy surfaces from a partial summary.
   Parent events and bounded terminal reads are labeled fallback or contradiction
-  evidence and never become current work.
+  evidence and never become current work. The provenance and freshness fields
+  distinguish live and cached ledgers; a home without either is explicitly unreadable.
 Opt-in surfaces: --fields bodies|paths|actions|endpoints, --all-in-flight,
-  --all-decisions, --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
+  --all-decisions (all open decisions and captain holds in the bounded snapshot),
+  --all-secondmates, --all-landed, --all-reports, --all-queued, --all-recorded-prs,
   --all-unhealthy, --all-pr-repos, --include-prs (adds candidate_prs).
 Raise FM_BEARINGS_PR_LIMIT to expand per-repository open-PR results.
 EOF
@@ -168,10 +206,29 @@ done
 
 command -v jq >/dev/null 2>&1 || { echo "fm-bearings-snapshot: jq not found" >&2; exit 1; }
 
-# The deterministic return-catch-up owner must clear before this or any other
-# ordinary captain request proceeds. Bearings does not reproduce that policy;
-# it only consults the shared read-only gate.
-"$SCRIPT_DIR/fm-afk-return.sh" guard || exit $?
+# The shared read-only away-return owner is consulted, not obeyed. An active
+# away window still refuses here: the correct answer to a bearings request then
+# is to run the return first. Return CATCH-UP is different - the captain is
+# back and asking for the picture, so the catch-up posture is reported as
+# content (a Charted Next gate row) and collection continues. bin/fm-afk-return.sh
+# owns both the gate format and the branch distinction; bearings reproduces
+# neither. Acting on the fleet still waits for its `check`.
+RETURN_CATCHUP=null
+GUARD_RC=0
+GUARD_ERR=$("$SCRIPT_DIR/fm-afk-return.sh" guard 2>&1 >/dev/null) || GUARD_RC=$?
+if [ "$GUARD_RC" -ne 0 ] && [ "$GUARD_RC" -ne 4 ]; then
+  [ -z "$GUARD_ERR" ] || printf '%s\n' "$GUARD_ERR" >&2
+  exit "$GUARD_RC"
+fi
+if [ "$GUARD_RC" -eq 4 ]; then
+  CATCHUP_LINE=$("$SCRIPT_DIR/fm-afk-return.sh" catchup-summary) || CATCHUP_LINE=""
+  CATCHUP_BLOCKERS=${CATCHUP_LINE%%$'\t'*}
+  case "$CATCHUP_BLOCKERS" in ''|*[!0-9]*) CATCHUP_BLOCKERS=0 ;; esac
+  CATCHUP_REASON=""
+  case "$CATCHUP_LINE" in *"$(printf '\t')"*) CATCHUP_REASON=${CATCHUP_LINE#*$'\t'} ;; esac
+  RETURN_CATCHUP=$(jq -n --argjson blockers "$CATCHUP_BLOCKERS" --arg reason "$CATCHUP_REASON" \
+    '{pending:true,blockers:$blockers,reason:$reason}')
+fi
 
 NOW=${FM_BEARINGS_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 if [ "$ALL_LANDED" = 1 ] || [ "$ALL_SECONDMATES" = 1 ]; then
@@ -186,7 +243,7 @@ fi
 HOME_LABEL=$(printf '%s' "$SNAP" | jq -er '.fm_home | strings | split("/") | (.[-2:] | join("/"))') \
   || { echo "fm-bearings-snapshot: invalid canonical snapshot" >&2; exit 1; }
 
-# --- optional live PR enrichment (the ONLY network path) --------------------
+# --- optional live GitHub PR enrichment -------------------------------------
 PR_STATUS='not_requested (run: /bearings include PRs)'
 CANDIDATE_PRS='[]'
 PR_REPOS_TOTAL=0
@@ -311,9 +368,59 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   --argjson pr_repos_shown "$PR_REPOS_SHOWN" \
   --argjson pr_rows_capped "$PR_ROWS_CAPPED" \
   --argjson pr_rows_min_total "$PR_ROWS_MIN_TOTAL" \
-  --argjson candidate_prs "$CANDIDATE_PRS" '
+  --argjson return_catchup "$RETURN_CATCHUP" \
+  --argjson candidate_prs "$CANDIDATE_PRS" "$FM_LANDED_JQ_DEFS"'
   def trunc($n): if . == null then null else
     (tostring | gsub("\\s+"; " ") | if (length > $n) then (.[:$n] + "…") else . end) end;
+  def fit($n):
+    tostring | gsub("\\s+"; " ")
+    | if $n <= 0 then ""
+      elif length > $n then (if $n == 1 then "…" else (.[:($n - 1)] + "…") end)
+      else . end;
+  def live_captain_call: .hold_bucket == "live";
+  def projected_deferred_hold:
+    .hold_bucket != null and .hold_bucket != "live";
+  def bounded_blocker_note($n):
+    ((.unresolved_blocker_ids // []) | map(tostring)) as $ids
+    | reduce range(0; $ids | length) as $i
+        ({shown:[]};
+         ($ids[0:($i + 1)]) as $candidate
+         | (($ids | length) - ($i + 1)) as $remaining
+         | ("blocked-by " + ($candidate | join(","))
+            + (if $remaining > 0 then " +\($remaining) more" else "" end)) as $rendered
+         | if ($rendered | length) <= $n then .shown = $candidate else . end)
+    | .shown as $shown
+    | (($ids | length) - ($shown | length)) as $remaining
+    | if ($shown | length) == 0 then "blocked-by +\($remaining) more"
+      else ("blocked-by " + ($shown | join(","))
+            + (if $remaining > 0 then " +\($remaining) more" else "" end))
+      end;
+  def hold_note:
+    if .hold_bucket == "blocked" then bounded_blocker_note(70)
+    elif .hold_bucket == "dated" then ("until " + (.hold_until // "-"))
+    elif .hold_bucket == "aged" and .hold_age_days != null then
+      ("held " + (.hold_age_days | tostring) + "d")
+    else null end;
+  def hold_gate_reason:
+    (.hold_reason // .blocked_reason // "-") as $base
+    | (hold_note) as $note
+    | if $note == null then $base else ($note + ": " + $base) end;
+  def hold_summary($title; $base):
+    (hold_note) as $note
+    | if $note == null then (($title + ": " + $base) | trunc(90))
+      else ($note | length) as $note_n
+      | (86 - $note_n) as $context_n
+      | if $context_n < 2 then ($note | fit(90))
+        else ([46, ($context_n / 2 | floor)] | min) as $title_n
+        | (($title | fit($title_n)) + ": " + $note + ": "
+           + ($base | fit($context_n - $title_n)))
+        end
+      end;
+  def as_gate($owner):
+    {id, title:(.title | trunc(60)),
+     blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
+     reason:(hold_gate_reason | trunc(40)), owner:$owner,
+     filed:((.since // null) | trunc(40))};
   def round_robin_landed($n):
     . as $groups
     | [range(0; (($groups | map(length) | max) // 0)) as $i
@@ -325,8 +432,9 @@ MODEL=$(printf '%s' "$SNAP" | jq \
   | (($fl | index("paths")) != null) as $f_paths
   | (($fl | index("actions")) != null) as $f_actions
   | (($fl | index("endpoints")) != null) as $f_endpoints
-  | ([ .backlog.records[] | select(.state == "done" and .structured and .hold_kind != "captain")
-       | {id, title, pr_url, report_path, local_note, completion, home:"(main)", home_id:"(main)"} ]) as $main_done
+  | ([ .backlog.records[] | select(landed_record)
+       | {id, title, kind, hold_kind, pr_url, report_path, local_note, completion,
+          home:"(main)", home_id:"(main)"} ]) as $main_done
   | ((.secondmate_landed.records) // []) as $mate_done
   | ($main_done + $mate_done) as $all_landed_rows
   | ([ $all_landed_rows | group_by(.home_id)[]
@@ -348,7 +456,7 @@ MODEL=$(printf '%s' "$SNAP" | jq \
          | {id:($m.id + "/" + .id),backend:"secondmate-home",target:(.endpoint.target // "-"),exists:.endpoint.exists,agent:.endpoint.agent_alive} ]) as $unhealthy_all
   | ([ (.secondmate_current.records // [])[]
        | ([.decisions_open[]? | select(.source == "backlog" and .verb == "captain-hold"
-            and .deferred_marker != true)]) as $captain_holds
+            and live_captain_call)]) as $captain_holds
        | ([.holds[]? | select(.source == "backlog")]) as $backlog_holds
        | . + {
            bearings_captain_holds:$captain_holds,
@@ -377,7 +485,8 @@ MODEL=$(printf '%s' "$SNAP" | jq \
                     ([.bearings_holds[] | .id + ": " + (.reason // "held")] | join("; "))
                   elif .bearings_state == "no_active_work" then "No active child work"
                   else (.current.reason // "Current home state unavailable") end) | trunc(120)),
-          provenance:.provenance.selected,freshness:.freshness.status,
+          provenance:(if .provenance.summary_source == "remote-ledger-cache" then "structured-home-cache"
+                      else .provenance.selected end),freshness:.freshness.status,
           age_seconds:.freshness.age_seconds,contradiction:(.contradiction // false),
           reason:(.current.reason // "-")} ]) as $secondmates_all
   | ([ .tasks[]
@@ -386,70 +495,135 @@ MODEL=$(printf '%s' "$SNAP" | jq \
        | select(.backlog.current_role != "held" or .current_state.state == "working")
        | {id, kind,
         state: .current_state.state,
+        repo:(.backlog.repo // .project // null),
+        name:((.backlog.title // "") as $name
+              | (if ($name | test("[^[:space:]]")) then $name else .id end) | trunc(70)),
         doing: ((.current_state.detail // "") as $d
                 | (if $d != "" then $d else (.hints.last_event_text // "") end) | trunc(90))
       } ]
-     + [ $secondmate_views[]
-         | select(.bearings_state == "active_child_work")
-         | {id,kind:"secondmate",state:.bearings_state,
-            doing:([.active_children[] | .id + ": " + (.doing // .state)] | join("; ") | trunc(90))} ]) as $in_flight_all
+     + [ $secondmate_views[] as $m
+         | $m.active_children[]?
+         | {id:($m.id + "/" + .id),
+            kind:(.kind // "secondmate"),
+            state:(.state // "working"),
+            repo:(.repo // null),
+            name:((.name // "") as $name
+                  | (if (($name | type) == "string" and ($name | test("[^[:space:]]")))
+                     then $name else ($m.id + "/" + .id) end) | trunc(70)),
+            doing:((.doing // .state) | trunc(90))} ]) as $in_flight_all
   | ([ .backlog.records[]
-         | select(.structured and .captain_actionable == true)
-         | select(($all_decisions == 1) or (.deferred_marker != true))
+         | . as $record
+         | select(.structured and .hold_bucket != null)
+         | select(($all_decisions == 1) or live_captain_call)
          | {id,key:.id,verb:"captain-hold",
-            summary:((.title + ": " + .hold_reason) | trunc(90)),owner:"(main)"} ]
-     + [ (.secondmate_current.records // [])[] as $m | $m.decisions_open[]?
-         | select(.source == "backlog" and .verb == "captain-hold")
-         | select(($all_decisions == 1) or (.deferred_marker != true))
-         | {id:($m.id + "/" + .id),key,verb,
-            summary:(((.summary // .id) + ": " + (.reason // "captain decision pending")) | trunc(90)),owner:$m.id} ]) as $decisions_all
+            summary:hold_summary(.title; .hold_reason),owner:"(main)"} ]
+     + [ (.secondmate_current.records // [])[] as $m
+         | ([ $m.decisions_open[]?
+              | select(.source == "backlog" and .verb == "captain-hold")
+              | select(($all_decisions == 1) or live_captain_call)
+              | {id:($m.id + "/" + .id),key,verb,
+                 summary:hold_summary((.summary // .id);
+                                      (.reason // "captain decision pending")),owner:$m.id} ]
+            + [ $m.queued[]?
+                | select($all_decisions == 1 and .hold_kind == "captain")
+                | select(.id as $id
+                         | [$m.decisions_open[]?
+                            | select(.source == "backlog" and .verb == "captain-hold")
+                            | .id]
+                         | index($id) | not)
+                | {id:($m.id + "/" + .id),key:.id,verb:"captain-hold",
+                   summary:hold_summary((.title // .id);
+                                        (.hold_reason // "captain decision pending")),owner:$m.id} ])[] ]) as $decisions_all
   | ([ .backlog.records[]
-         | select(.structured and .captain_actionable == true and .deferred_marker == true) ]
-     + [ (.secondmate_current.records // [])[] | .decisions_open[]?
-         | select(.source == "backlog" and .verb == "captain-hold" and .deferred_marker == true) ]
+         | . as $record
+         | select(.structured and projected_deferred_hold) ]
+     + [ (.secondmate_current.records // [])[] | .queued[]?
+         | select(.hold_kind == "captain" and projected_deferred_hold) ]
      | length) as $decisions_marked_deferred
+  | (if ($return_catchup.pending // false) then
+       [{id:"(return-catchup)",
+         title:((if ($return_catchup.blockers // 0) > 0 then
+                   "\($return_catchup.blockers) blocker(s) to clear before ordinary work"
+                 elif (($return_catchup.reason // "") != "") then
+                   ("catch-up retained: " +
+                    ($return_catchup.reason | sub("[,;] *catch-up stays gated$"; "")))
+                 else "away-return catch-up is still open" end) | trunc(60)),
+         blocked_by:"-",
+         reason:"away-return catch-up",
+         owner:"(main)",
+         filed:null}]
+     else [] end) as $return_catchup_gate
   | ((if (.main_inventory.valid == false) then
         [{id:"(main-inventory)",
           title:((.main_inventory.reason // "main inventory invalid") | trunc(60)),
           blocked_by:"-",
           reason:"main inventory",
-          owner:"(main)"}]
+          owner:"(main)",
+          filed:null}]
       else [] end)
      + [ .backlog.records[]
          | . as $record
          | select(.structured and
-             (.state == "queued" or
+             (.hold_bucket != null or .state == "queued" or
               (.state == "in_flight" and .current_role == "held" and ($working_ids | index($record.id) | not))))
          | select(.captain_actionable != true)
-         | select(($all_queued == 1) or (.deferred_marker != true)
-                  or ((.hold_until // null) != null and .hold_until > $today))
-         | {id, title:(.title | trunc(60)),
-            blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
-            reason:((if (.hold_until // null) != null and .hold_until > $today
-                     then ("until " + .hold_until + ": " + (.hold_reason // .blocked_reason // "-"))
-                     else (.hold_reason // .blocked_reason // "-") end) | trunc(40)),owner:"(main)"} ]
+         | select((.hold_bucket == null) or ($all_decisions == 0))
+         | as_gate("(main)") ]
      + [ (.secondmate_current.records // [])[] as $m
          | select($m.provenance.selected == "structured-home")
          | $m.queued[]?
          | select(.captain_actionable != true)
-         | select(($all_queued == 1) or (.deferred_marker != true)
-                  or ((.hold_until // null) != null and .hold_until > $today))
-         | {id,title:(.title | trunc(60)),
-            blocked_by:((.unresolved_blocker_ids // []) | if length > 0 then join(",") else "-" end | trunc(120)),
-            reason:((if (.hold_until // null) != null and .hold_until > $today
-                     then ("until " + .hold_until + ": " + (.hold_reason // .blocked_reason // "-"))
-                     else (.hold_reason // .blocked_reason // "-") end) | trunc(40)),owner:$m.id} ]) as $gates_all
+         | select((.hold_bucket == null) or ($all_decisions == 0))
+         | as_gate($m.id) ]) as $gates_all
   | ([ .scout_reports[]
        | . as $r
        | select(($all_reports == 1) or (($rel_ids | index($r.id)) != null))
        | {id, path} ]) as $reports_all
   | ([ .tasks[] | select(.kind != "secondmate" and .pr.url != null and .pr.source == "meta") | {id, url:.pr.url} ]) as $recorded_prs_all
-  | . as $snap
+  | def filed_epoch:
+      (.filed // null) as $filed
+      | if ($filed | type) != "string" then null
+        elif ($filed | test("T")) then try ($filed | fromdateiso8601) catch null
+        else try (($filed + "T00:00:00Z") | fromdateiso8601) catch null end;
+    def newest_filed_first:
+      to_entries
+      | sort_by((.value | filed_epoch) as $epoch
+          | if $epoch == null then [1, 0, .key] else [0, -$epoch, .key] end)
+      | map(.value);
+    . as $snap
   | {
       schema: "fm-bearings.v1",
       home: $home,
       generated: $now,
       prs: $prs,
+      contributions:(
+        ([$snap.contributions + {owner:"(main)"}]
+          + [($snap.secondmate_current.records // [])[] as $m | if $m.contributions == null then null else $m.contributions + {owner:$m.id} end])
+        | map(if . != null and .owner != "(main)" and .known > 0 and (.valid_until // 0) < ($now | fromdateiso8601)
+              then .complete=false | .proven_clear=false | .checked=0 | .captain=[]
+                | .unmeasured=(.unmeasured // 0)
+                | .counts={captain:0,fleet:(.known - .unmeasured),maintainer:0,nobody:0}
+              else . end) as $homes
+        | ([$homes[] | select(. != null)]) as $measured
+        | {scope:"owned contributions per home",known:([$measured[].known] | add // 0),
+           checked:([$measured[].checked] | add // 0),
+           counts:{captain:([$measured[].counts.captain] | add // 0),fleet:([$measured[].counts.fleet] | add // 0),
+                   maintainer:([$measured[].counts.maintainer] | add // 0),nobody:([$measured[].counts.nobody] | add // 0)},
+           complete:(all($homes[]; . != null and .complete) and ($snap.secondmate_current.truncated // 0) == 0
+                     and $snap.secondmate_current.registry.available != false
+                     and $snap.secondmate_current.registry.input_truncated != true
+                     and $snap.secondmate_current.registry.records_truncated != true),
+           proven_clear:(all($homes[]; . != null and .proven_clear) and ($snap.secondmate_current.truncated // 0) == 0
+                     and $snap.secondmate_current.registry.available != false
+                     and $snap.secondmate_current.registry.input_truncated != true
+                     and $snap.secondmate_current.registry.records_truncated != true),
+           unmeasured_homes:([$homes[] | select(. == null)] | length),
+           unreadable_records:([$measured[].unreadable_records] | add // 0),
+           unmeasured:([$measured[].unmeasured] | add // 0),
+           stale_verdicts:([$measured[].stale_verdicts] | add // 0),
+           missing_verdicts:([$measured[].missing_verdicts] | add // 0),
+           captain_omitted:([$measured[].captain_omitted] | add // 0),
+           captain:[$measured[] as $h | $h.captain[]? | . + {owner:$h.owner}]}),
       in_flight: (if $all_in_flight == 1 then $in_flight_all else $in_flight_all[:$in_flight_n] end),
       secondmates: (if $all_secondmates == 1 then $secondmates_all else $secondmates_all[:$secondmates_n] end),
       secondmate_reconcile: [ (.secondmate_current.records // [])[]
@@ -457,8 +631,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         | {id, spawn_gen:(.spawn_gen // null), host:(.host // null), kind:(.reconcile_inventory.kind // null), ids:((.reconcile_inventory.ids // []) | map(select(type == "string")) | sort)} ],
       decisions_open: (if $all_decisions == 1 then $decisions_all else $decisions_all[:$decisions_n] end),
       landed: ($done | map({id, what:(.title | trunc(70)),
-                            artifact:(.pr_url // .report_path // .local_note // "-"),owner:.home_id})),
-      gates: (if $all_queued == 1 then $gates_all else $gates_all[:$gates_n] end),
+                            artifact:(landed_artifact // "-"),owner:.home_id})),
+      gates: ($return_catchup_gate
+              + ($gates_all | newest_filed_first
+                 | if $all_queued == 1 then . else .[:$gates_n] end)),
       reports: (if $all_reports == 1 then $reports_all else $reports_all[:$reports_n] end),
       recorded_prs: (if $all_recorded_prs == 1 then $recorded_prs_all else $recorded_prs_all[:$recorded_prs_n] end)
     }
@@ -476,25 +652,30 @@ MODEL=$(printf '%s' "$SNAP" | jq \
         (if $f_actions then empty else {surface:"watch/steer actions", reveal:"--fields actions"} end),
         (if $f_endpoints then empty else {surface:"healthy endpoint detail", reveal:"--fields endpoints"} end),
         (if $all_reports == 1 then empty else {surface:"full scout-report inventory", reveal:"--all-reports"} end),
-        (if $all_queued == 1 then empty else {surface:"superseded or prose-deferred queued items", reveal:"--all-queued"} end),
         (if $all_landed == 0 and ($per_home_capped | length) > ($done | length) then {surface:("landed showing \($done | length) of \($per_home_capped | length)" + (($done | map(.home_id) | unique | map(select(. != "(main)")) | length) as $k | if $k > 0 then " (incl. \($k) secondmate home(s))" else "" end)), reveal:"--all-landed"} else empty end),
         (if $all_landed == 0 and $home_cap_dropped > 0 then {surface:("landed per-home capped at \($landed_per_home_n) for \($home_cap_dropped) home(s)"), reveal:"--all-landed"} else empty end),
-        (if (($snap.secondmate_landed.unreadable // []) | length) > 0 then {surface:("secondmate home(s) with unreadable backlog: \(($snap.secondmate_landed.unreadable // []) | length)"), reveal:"inspect the listed secondmate home backlogs"} else empty end),
+        (if (($snap.secondmate_landed.unreadable // []) | length) > 0 then {surface:("secondmate home(s) with unreadable structured state: \(($snap.secondmate_landed.unreadable // []) | length)"), reveal:"inspect the listed secondmate home ledgers"} else empty end),
         (if $all_landed == 0 and (($snap.secondmate_landed.truncated // []) | length) > 0 then {surface:("secondmate home Done capped at the snapshot layer for \(($snap.secondmate_landed.truncated // []) | length) home(s)"), reveal:"--all-landed"} else empty end),
         ((($snap.main_inventory.orphan_in_flight // []) | length) as $n
          | if $n > 0 then {surface:("main in-flight backlog item(s) have no child metadata: \($n)"), reveal:"inspect main data/backlog.md In flight vs state/*.meta"} else empty end),
         ((($snap.main_inventory.unstructured_current_count // 0)) as $n
          | if $n > 0 then {surface:("main unstructured current backlog row(s): \($n)"), reveal:"inspect main data/backlog.md In flight and Queued free-form rows"} else empty end),
         (if $all_in_flight == 0 and ($in_flight_all | length) > $in_flight_n then {surface:("in_flight showing \($in_flight_n) of \($in_flight_all | length)"), reveal:"--all-in-flight"} else empty end),
+        (($snap.secondmate_current.records // [])[] as $m
+         | ([($m.omitted // [])[] | select(.surface == "active_children") | .count] | add // 0) as $n
+         | if $n > 0 then {surface:("secondmate " + $m.id + " active children omitted by snapshot bound: \($n)"), reveal:"raise FM_SNAPSHOT_SECONDMATE_CHILDREN"} else empty end),
         (if $all_secondmates == 0 and ($secondmates_all | length) > $secondmates_n then {surface:("secondmates showing \($secondmates_n) of \($secondmates_all | length)"), reveal:"--all-secondmates"} else empty end),
         (if (($snap.secondmate_current.truncated // 0) > 0) then {surface:("registered secondmates omitted by snapshot bound: \($snap.secondmate_current.truncated)"), reveal:"raise FM_SNAPSHOT_SECONDMATES"} else empty end),
         (if $snap.secondmate_current.registry.input_truncated == true then {surface:"secondmate registry input truncated by bounded read", reveal:"raise FM_SNAPSHOT_REGISTRY_LINES or FM_SNAPSHOT_REGISTRY_BYTES"} else empty end),
         (if $snap.secondmate_current.registry.records_truncated == true then {surface:"secondmate registry records omitted by bounded read", reveal:"raise FM_SNAPSHOT_REGISTRY_RECORDS"} else empty end),
         (if $snap.secondmate_current.registry.available == false then {surface:("secondmate registry unavailable: " + ($snap.secondmate_current.registry.reason // "read failed")), reveal:"inspect data/secondmates.md"} else empty end),
+        (($snap.secondmate_current.records // [])[]
+         | select(.provenance.summary_source == "remote-ledger-cache")
+         | {surface:("secondmate " + .id + " served from cached home ledger"),reveal:"inspect the home ledger publication and remote route"}),
         (([($snap.secondmate_current.records // [])[] | select(.parent_event.activity_scan.input_truncated == true or .parent_event.activity_scan.retained_truncated == true)] | length) as $n | if $n > 0 then {surface:("secondmate parent activity evidence truncated for \($n) record(s)"), reveal:"raise FM_SNAPSHOT_PARENT_ACTIVITY_LINES, FM_SNAPSHOT_PARENT_ACTIVITY_BYTES, or FM_SNAPSHOT_PARENT_ACTIVITIES"} else empty end),
         (([($snap.secondmate_current.records // [])[] | select(.parent_event.activity_scan.available == false)] | length) as $n | if $n > 0 then {surface:("secondmate parent activity evidence unavailable for \($n) record(s)"), reveal:"inspect the parent status logs"} else empty end),
         (if $all_decisions == 0 and ($decisions_all | length) > $decisions_n then {surface:("decisions_open showing \($decisions_n) of \($decisions_all | length)"), reveal:"--all-decisions"} else empty end),
-        (if $all_decisions == 0 and $decisions_marked_deferred > 0 then {surface:("captain holds marked deferred or superseded: \($decisions_marked_deferred)"), reveal:"--all-decisions"} else empty end),
+        (if $all_decisions == 0 and $decisions_marked_deferred > 0 then {surface:("captain holds bucketed blocked, dated, or aged: \($decisions_marked_deferred)"), reveal:"--all-decisions"} else empty end),
         (if $all_queued == 0 and ($gates_all | length) > $gates_n then {surface:("gates showing \($gates_n) of \($gates_all | length)"), reveal:"--all-queued"} else empty end),
         (if $all_reports == 0 and ($reports_all | length) > $reports_n then {surface:("reports showing \($reports_n) of \($reports_all | length)"), reveal:"--all-reports"} else empty end),
         (if $all_recorded_prs == 0 and ($recorded_prs_all | length) > $recorded_prs_n then {surface:("recorded_prs showing \($recorded_prs_n) of \($recorded_prs_all | length)"), reveal:"--all-recorded-prs"} else empty end),
@@ -510,8 +691,8 @@ if [ "$FORMAT" = json ]; then
 fi
 
 # --- TOON renderer (output boundary; parity with the JSON model) ------------
-# The model is a flat object of scalar fields plus arrays of uniform scalar
-# objects, so the encoder only needs object scalars, the tabular array form
+# Nested objects use indented keys; arrays of uniform scalar objects use
+# the tabular array form
 # (key[N]{fields}: + comma rows at +2 indent), and the empty-array form (key: []),
 # per the TOON spec. Quoting follows the spec exactly.
 TOON=$(printf '%s\n' "$MODEL" | jq -r '
@@ -532,7 +713,9 @@ TOON=$(printf '%s\n' "$MODEL" | jq -r '
     elif type == "number" then tostring
     else q end;
   def emit($k; $v):
-    if ($v | type) == "array" then
+    if ($v | type) == "object" then
+      "\($k): ", ($v | to_entries[] | emit(.key;.value) | "  " + .)
+    elif ($v | type) == "array" then
       if ($v | length) == 0 then "\($k): []"
       else
         ($v[0] | keys_unsorted) as $ks

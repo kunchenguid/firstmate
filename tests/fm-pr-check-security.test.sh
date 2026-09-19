@@ -47,6 +47,16 @@ file_mode() {
   fi
 }
 
+process_is_live_non_zombie() {
+  local pid=$1 stat
+  kill -0 "$pid" 2>/dev/null || return 1
+  stat=$(ps -p "$pid" -o stat= 2>/dev/null || true)
+  case "$stat" in
+    Z*) return 1 ;;
+  esac
+  return 0
+}
+
 LINK_KIND=
 LINK_TARGET=
 LINK_CONTENT=
@@ -128,17 +138,49 @@ printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "api graphql")
     printf '%s\n' \
-      'state=MERGED' \
-      'merged=true' \
-      'queued=false' \
+      "state=${FM_TEST_GH_GRAPHQL_STATE:-MERGED}" \
+      "merged=${FM_TEST_GH_GRAPHQL_MERGED:-true}" \
+      "queued=${FM_TEST_GH_GRAPHQL_QUEUED:-false}" \
       'base=main'
+    exit 0
+    ;;
+  "pr view")
+    case " $* " in
+      *statusCheckRollup*)
+        printf '%s\n' "{\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",\"mergeStateStatus\":\"CLEAN\",\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"baseRefName\":\"main\",\"statusCheckRollup\":[{\"__typename\":\"CheckRun\",\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}"
+        exit 0
+        ;;
+      *headRefOid,reviewDecision*)
+        printf '%s\n' "{\"headRefOid\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\",\"reviewDecision\":\"APPROVED\"}"
+        exit 0
+        ;;
+    esac
+    ;;
+  "pr merge")
+    [ -z "${FM_TEST_GH_MERGE_HOOK:-}" ] || "$FM_TEST_GH_MERGE_HOOK"
     exit 0
     ;;
 esac
 case " $* " in
+  *" api repos/"*"/issues/"*"/comments?per_page=100 "*|*" api repos/"*"/pulls/"*"/reviews?per_page=100 "*|*" api repos/"*"/pulls/"*"/comments?per_page=100 "*)
+    printf '%s\n' '[[]]'
+    ;;
+  *" api repos/"*"/commits/"*"/check-runs?filter=all&per_page=100 "*)
+    printf '%s\n' '[{"check_runs":[]}]'
+    ;;
+  *" api repos/"*"/commits/"*"/statuses?per_page=100 "*)
+    printf '%s\n' '[[]]'
+    ;;
+  *" api repos/"*"/pulls/"*)
+    printf '%s\n' "{\"state\":\"open\",\"user\":{\"login\":\"author\"},\"head\":{\"sha\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\"},\"draft\":false,\"mergeable\":true,\"merged_at\":null}"
+    ;;
+  *" api repos/"*)
+    printf '%s\n' '{"permissions":{"push":false}}'
+    ;;
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
   *" state "*)
     [ "${FM_TEST_GH_FAIL:-0}" = 0 ] || exit 1
+    [ -z "${FM_TEST_GH_STATE_STARTED:-}" ] || : > "$FM_TEST_GH_STATE_STARTED"
     [ "${FM_TEST_GH_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GH_SLEEP"
     printf '%s\n' "${FM_TEST_GH_STATE:-OPEN}"
     ;;
@@ -183,10 +225,14 @@ write_task_meta() {
     "mode=no-mistakes"
 }
 
+# Extra "field=value" arguments are written before pr=, because
+# fm_pr_metadata_identity_parse rejects an unrecognised line after it.
 write_poll_meta() {
   local state=$1 id=$2 url=$3
+  shift 3
   fm_write_meta "$state/$id.meta" \
     "window=fm-$id" \
+    "$@" \
     "pr=$url"
 }
 
@@ -505,11 +551,11 @@ test_valid_recording_and_merge_derivation() {
   count=$(grep -c '^pr_head=' "$dir/home/state/task-a.meta")
   [ "$count" -eq 1 ] || fail "duplicate pr_head metadata was appended"
 
-  : > "$dir/gh-axi.log"
+  : > "$dir/gh.log"
   run_merge_entry "$dir" task-a https://github.com/my-org/repo_name.with-dots/pull/37 -- --merge \
     >/dev/null 2>/dev/null || fail "valid merge wrapper failed"
-  grep -qxF 'pr merge 37 --repo my-org/repo_name.with-dots --merge' "$dir/gh-axi.log" \
-    || fail "merge wrapper did not preserve repository derivation and method"
+  grep -qxF "pr merge 37 --repo my-org/repo_name.with-dots --match-head-commit $expected --merge" "$dir/gh.log" \
+    || fail "merge wrapper did not preserve repository derivation, live head, and method"
   # A merge this home performed leaves its own durable outcome, so the poll's
   # confirmation is no longer the first the captain hears of it. Acknowledge that
   # record before the watcher cycle below, which is what still retires the poll.
@@ -606,9 +652,10 @@ SH
 
 run_watcher_bounded() {
   local home=$1 fakebin=$2 check_interval=${FM_TEST_CHECK_INTERVAL:-0} watch_root=${FM_TEST_WATCH_ROOT:-$ROOT}
+  local check_timeout=${FM_TEST_CHECK_TIMEOUT:-1}
   shift 2
   perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 10; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
-    env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT=1 \
+    env FM_HOME="$home" FM_ROOT_OVERRIDE="$watch_root" FM_CHECK_INTERVAL="$check_interval" FM_CHECK_TIMEOUT="$check_timeout" \
       FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$fakebin:$BASE_PATH" "$WATCH" "$@"
 }
 
@@ -954,6 +1001,12 @@ test_postrename_poll_validation_revokes_and_retries() {
   local artifact action dir state destination link_target gate
   for artifact in data registration check; do
     for action in type mode device content; do
+      # The device fault is injected by a fake stat on PATH; on Darwin the
+      # device helper now calls /usr/bin/stat directly, so the fake can never
+      # fire there. Skip the device action on Darwin.
+      if [ "$action" = device ] && [ "$(uname)" = Darwin ]; then
+        continue
+      fi
       dir=$(make_case "poll-final-$artifact-$action")
       state="$dir/home/state"
       write_poll_meta "$state" task-a https://github.com/o/r/pull/1
@@ -1133,11 +1186,11 @@ SH
     child_pid=$(cat "$child_pid_file")
     kill -TERM "$watcher_pid" 2>/dev/null || fail "could not stop $backend watcher"
     i=0
-    while kill -0 "$watcher_pid" 2>/dev/null && [ "$i" -lt 150 ]; do
+    while process_is_live_non_zombie "$watcher_pid" && [ "$i" -lt 150 ]; do
       sleep 0.02
       i=$((i + 1))
     done
-    if kill -0 "$watcher_pid" 2>/dev/null; then
+    if process_is_live_non_zombie "$watcher_pid"; then
       kill -KILL "$watcher_pid" 2>/dev/null || true
       wait "$watcher_pid" 2>/dev/null || true
       kill -KILL "$child_pid" 2>/dev/null || true
@@ -1147,7 +1200,7 @@ SH
     wait "$watcher_pid" || rc=$?
     [ "$rc" -ne 0 ] || fail "$backend signaled watcher exited successfully"
     alive=0
-    kill -0 "$child_pid" 2>/dev/null && alive=1
+    process_is_live_non_zombie "$child_pid" && alive=1
     [ "$alive" -eq 0 ] || kill -KILL "$child_pid" 2>/dev/null || true
     wait "$child_pid" 2>/dev/null || true
     [ "$alive" -eq 0 ] || fail "$backend watcher left a returned check descendant alive"
@@ -1595,8 +1648,8 @@ test_self_merge_and_poll_publish_one_outcome() {
   set -e
   [ "$rc" -eq 0 ] \
     || fail "merge-outcome-committed: watcher failed: $(cat "$dir/watch.err")"
-  [ "$(grep -c -F "$url" "$replies")" -eq 1 ] \
-    || fail "merge-outcome-committed: self and poll reports produced duplicate outcomes"
+  [ "$(grep -c -F "done [key=merged-task-a]: merged task-a $url" "$replies")" -eq 1 ] \
+    || fail "merge-outcome-committed: self and poll reports produced duplicate merge outcomes"
   assert_no_grep "check: $state/task-a.check.sh: merged" "$state/.wake-queue" \
     "merge-outcome-committed: absorbed poll published a second outcome"
   assert_poll_absent "$state" task-a
@@ -2111,12 +2164,606 @@ test_gitlab_merged_poll_retires() {
   pass "GitHub and GitLab exact merged results share one retirement path"
 }
 
+# --- poll-path merge authority ----------------------------------------------
+
+write_away_record() {  # <dir> [<fm-afk-contract.sh propose args>...]
+  local dir=$1
+  shift
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$ROOT/bin/fm-afk-contract.sh" propose "$@" >/dev/null \
+    || fail "could not propose an away-posture record"
+  FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" \
+    "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null \
+    || fail "could not confirm an away-posture record"
+}
+
+archive_away_record() {  # <dir>
+  FM_HOME="$1/home" FM_STATE_OVERRIDE="$1/home/state" \
+    "$ROOT/bin/fm-afk-contract.sh" archive >/dev/null \
+    || fail "could not archive the away-posture record"
+}
+
+# The durable queue is TSV (epoch, sequence, kind, key, payload).
+merged_ledger_row() {  # <state> <task-id>
+  awk -F'\t' -v prefix="check: merge landed: $2 " \
+    'index($5, prefix) == 1 { print $5 }' "$1/.wake-queue"
+}
+
+run_merged_poll_cycle() {  # <dir>
+  local dir=$1 rc=0
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+    > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "merged poll watcher failed: $(cat "$dir/watch.err")"
+}
+
+queue_merge() {  # <dir> <url>
+  local dir=$1 url=$2 rc=0
+  set +e
+  FM_TEST_GH_GRAPHQL_STATE=OPEN FM_TEST_GH_GRAPHQL_MERGED=false \
+    FM_TEST_GH_GRAPHQL_QUEUED=true \
+    run_merge_entry "$dir" task-a "$url" > "$dir/merge.out" 2> "$dir/merge.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "queued merge failed: $(cat "$dir/merge.err")"
+  assert_grep "is queued" "$dir/merge.out" "the forge did not queue the merge"
+  [ -f "$dir/home/state/task-a.merge-authority" ] \
+    || fail "the accepted queued merge did not persist its authority"
+}
+
+test_merged_poll_row_carries_the_merge_authority() {
+  local dir state url expected posture
+  url=https://github.com/o/r/pull/1
+
+  for posture in yolo grant; do
+    dir=$(make_case "queued-merge-authority-$posture")
+    state="$dir/home/state"
+    write_task_meta "$dir" task-a
+    if [ "$posture" = yolo ]; then
+      printf 'yolo=on\n' >> "$state/task-a.meta"
+      write_away_record "$dir"
+      expected=yolo
+    else
+      write_away_record "$dir" --grant task-a
+      expected=away-grant
+    fi
+    run_check_entry "$dir" task-a "$url" >/dev/null 2> "$dir/seed.err" \
+      || fail "$posture: could not arm the merge poll"
+    queue_merge "$dir" "$url"
+    archive_away_record "$dir"
+    run_merged_poll_cycle "$dir"
+    [ "$(merged_ledger_row "$state" task-a)" = "check: merge landed: task-a $url $expected" ] \
+      || fail "$posture: archived posture lost persisted authority: $(merged_ledger_row "$state" task-a)"
+    [ ! -e "$state/task-a.merge-authority" ] \
+      || fail "$posture: published merge left its authority record behind"
+  done
+
+  pass "queued merges retain yolo and away-grant after captain return"
+}
+
+test_merged_poll_row_names_no_authority_when_no_record_grants_one() {
+  local dir state url
+  url=https://github.com/o/r/pull/1
+
+  dir=$(make_case queued-merge-authority-attended)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  run_check_entry "$dir" task-a "$url" >/dev/null 2> "$dir/seed.err" \
+    || fail "attended: could not arm the merge poll"
+  queue_merge "$dir" "$url"
+  run_merged_poll_cycle "$dir"
+  [ "$(merged_ledger_row "$state" task-a)" = "check: merge landed: task-a $url" ] \
+    || fail "attended queued merge was tagged: $(merged_ledger_row "$state" task-a)"
+
+  dir=$(make_case merged-poll-authority-external)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a "$url" yolo=on
+  write_away_record "$dir"
+  seed_canonical_poll "$dir" task-a "$url"
+  run_merged_poll_cycle "$dir"
+  [ "$(merged_ledger_row "$state" task-a)" = "check: merge landed: task-a $url external" ] \
+    || fail "external merge was attributed from live away posture: $(merged_ledger_row "$state" task-a)"
+  assert_poll_absent "$state" task-a
+
+  pass "poll distinguishes attended authorization from external landing"
+}
+
+test_authority_persistence_refuses_rebound_metadata() {
+  local dir state url_a url_b rc
+  url_a=https://github.com/o/r/pull/1
+  url_b=https://github.com/o/r/pull/2
+  dir=$(make_case merge-authority-rebound-metadata)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  run_check_entry "$dir" task-a "$url_a" >/dev/null 2> "$dir/seed.err" \
+    || fail "rebind: could not arm the original poll"
+  cat > "$dir/rebind.sh" <<SH
+#!/usr/bin/env bash
+"$PR_CHECK" task-a "$url_b" >/dev/null
+SH
+  chmod +x "$dir/rebind.sh"
+  set +e
+  FM_TEST_GH_MERGE_HOOK="$dir/rebind.sh" \
+    FM_TEST_GH_GRAPHQL_STATE=OPEN FM_TEST_GH_GRAPHQL_MERGED=false \
+    FM_TEST_GH_GRAPHQL_QUEUED=true \
+    run_merge_entry "$dir" task-a "$url_a" > "$dir/merge.out" 2> "$dir/merge.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "rebind: accepted merge persisted against rebound metadata"
+  grep -qxF "pr=$url_b" "$state/task-a.meta" \
+    || fail "rebind: merge hook did not replace the canonical identity"
+  [ ! -e "$state/task-a.merge-authority" ] \
+    || fail "rebind: authority was published for the wrong canonical identity"
+  pass "accepted merge authority refuses rebound task metadata"
+}
+
+test_authority_persists_before_control_unlock() {
+  local dir state url
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case merge-authority-control-lock)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  run_check_entry "$dir" task-a "$url" >/dev/null 2> "$dir/seed.err" \
+    || fail "control lock: could not arm the merge poll"
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *"task-a.merge-authority "*)
+    [ -d "$FM_TEST_CONTROL_LOCK" ] || exit 91
+    ;;
+esac
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+  FM_TEST_CONTROL_LOCK="$state/.control-task-a.lock" FM_TEST_REAL_MV="$REAL_MV" \
+    queue_merge "$dir" "$url"
+  pass "accepted merge authority persists under the lifecycle lock"
+}
+
+test_teardown_cannot_race_authority_consumption() {
+  local dir state url watcher_pid rc i
+  url=https://github.com/o/r/pull/1
+  dir=$(make_case merge-authority-teardown-race)
+  state="$dir/home/state"
+  fm_write_meta "$state/task-a.meta" \
+    'window=firstmate:fm-task-a' \
+    'endpoint_task_id=task-a' \
+    "worktree=$dir/wt" \
+    "project=$dir/project" \
+    'kind=ship' \
+    'mode=local-only' \
+    'yolo=on'
+  write_away_record "$dir"
+  run_check_entry "$dir" task-a "$url" >/dev/null 2> "$dir/seed.err" \
+    || fail "teardown race: could not arm the merge poll"
+  queue_merge "$dir" "$url"
+  archive_away_record "$dir"
+  FM_TEST_GH_STATE_STARTED="$dir/poll-started" FM_TEST_GH_STATE=MERGED \
+    FM_TEST_GH_SLEEP=0.5 FM_TEST_CHECK_TIMEOUT=3 \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" \
+      > "$dir/watch.out" 2> "$dir/watch.err" &
+  watcher_pid=$!
+  i=0
+  while [ ! -e "$dir/poll-started" ]; do
+    sleep 0.01
+    i=$((i + 1))
+    if [ "$i" -ge 500 ]; then
+      kill "$watcher_pid" 2>/dev/null || true
+      wait "$watcher_pid" 2>/dev/null || true
+      fail "teardown race: watcher did not begin its validated poll"
+    fi
+  done
+  set +e
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" PATH="$dir/fakebin:$BASE_PATH" \
+    "$TEARDOWN" task-a --force > "$dir/teardown.out" 2> "$dir/teardown.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown race: cleanup crossed the active poll transaction"
+  [ -f "$state/task-a.merge-authority" ] \
+    || fail "teardown race: refused cleanup removed persisted authority"
+  rc=0
+  wait "$watcher_pid" || rc=$?
+  [ "$rc" -eq 0 ] || fail "teardown race: watcher failed with $rc: $(cat "$dir/watch.err")"
+  [ "$(merged_ledger_row "$state" task-a)" = "check: merge landed: task-a $url yolo" ] \
+    || fail "teardown race: concurrent cleanup downgraded the merge authority"
+  pass "teardown cannot race merged-poll authority consumption"
+}
+
+test_authority_retirement_preserves_replacement() {
+  local dir state url_a url_b rc i
+  url_a=https://github.com/o/r/pull/1
+  url_b=https://github.com/o/r/pull/2
+  dir=$(make_case merge-authority-retirement-replacement)
+  state="$dir/home/state"
+  write_task_meta "$dir" task-a
+  run_check_entry "$dir" task-a "$url_a" >/dev/null 2> "$dir/seed.err" \
+    || fail "replacement: could not arm the original poll"
+  queue_merge "$dir" "$url_a"
+  cat > "$dir/replace-authority.sh" <<SH
+#!/usr/bin/env bash
+"$PR_CHECK" task-a "$url_b" >/dev/null
+(
+  FM_TEST_GH_GRAPHQL_STATE=OPEN FM_TEST_GH_GRAPHQL_MERGED=false \\
+  FM_TEST_GH_GRAPHQL_QUEUED=true \\
+  "$PR_MERGE" task-a "$url_b" > "$dir/replacement-merge.out" 2> "$dir/replacement-merge.err"
+  printf '%s\n' \$? > "$dir/replacement-merge.rc"
+) &
+SH
+  chmod +x "$dir/replace-authority.sh"
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+"$FM_TEST_REAL_MV" "$@" || exit $?
+case " $* " in
+  *"task-a.pr-poll-merge-notified "*)
+    if [ ! -e "$FM_TEST_REPLACEMENT_RAN" ]; then
+      : > "$FM_TEST_REPLACEMENT_RAN"
+      "$FM_TEST_REPLACEMENT_SCRIPT"
+    fi
+    ;;
+esac
+SH
+  chmod +x "$dir/fakebin/mv"
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_REAL_MV="$REAL_MV" FM_TEST_REPLACEMENT_RAN="$dir/replacement-ran" \
+    FM_TEST_REPLACEMENT_SCRIPT="$dir/replace-authority.sh" \
+    FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" \
+      > "$dir/watch-a.out" 2> "$dir/watch-a.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "replacement: original poll failed: $(cat "$dir/watch-a.err")"
+  i=0
+  while [ ! -e "$dir/replacement-merge.rc" ]; do
+    sleep 0.01
+    i=$((i + 1))
+    [ "$i" -lt 200 ] || fail "replacement: serialized replacement merge did not finish"
+  done
+  [ "$(cat "$dir/replacement-merge.rc")" -eq 0 ] \
+    || fail "replacement: serialized replacement merge failed: $(cat "$dir/replacement-merge.err")"
+  [ -f "$state/task-a.merge-authority" ] \
+    || fail "replacement: original poll retirement deleted the replacement authority"
+  grep -qxF "pr=$url_b" "$state/task-a.meta" \
+    || fail "replacement: replacement poll was not armed"
+  ack_watcher_cycle "$state" || fail "replacement: could not acknowledge the original wake"
+  rm -f "$dir/fakebin/mv" "$state/.last-check"
+  run_merged_poll_cycle "$dir"
+  awk -F'\t' -v expected="check: merge landed: task-a $url_b" \
+    '$5 == expected { found=1 } END { exit !found }' "$state/.wake-queue" \
+    || fail "replacement: replacement merge lost its attended authority"
+  pass "poll retirement preserves a replacement authority record"
+}
+
+# A volume remount can renumber the state filesystem's st_dev while every inode
+# and byte stays put, as APFS does across a reboot. This rewrites a published
+# registration's recorded device the way that leaves it, changing no other
+# byte. <which> is both, data, or check.
+shift_registration_device() {  # <state> <id> [both|data|check]
+  local state=$1 id=$2 which=${3:-both} registration device shifted tmp
+  registration="$state/$id.pr-poll-registration"
+  device=$(fm_pr_file_device "$state") || fail "could not read the state device"
+  shifted=$((device + 1))
+  tmp=$(mktemp "$state/.test-shifted-registration.XXXXXX") || fail "could not stage a shifted registration"
+  awk -v live="$device" -v shifted="$shifted" -v which="$which" '
+    (NR == 10 && which != "check") || (NR == 11 && which != "data") { sub("^" live ":", shifted ":") }
+    { print }
+  ' "$registration" > "$tmp" || fail "could not shift the registration device"
+  chmod 0600 "$tmp"
+  mv -f -- "$tmp" "$registration"
+  case "$which" in
+    both|data) [ "$(sed -n 10p "$registration")" = "$shifted:$(fm_pr_file_inode "$state/$id.pr-poll")" ] \
+      || fail "shifted fixture did not move only the recorded sidecar device" ;;
+  esac
+  case "$which" in
+    both|check) [ "$(sed -n 11p "$registration")" = "$shifted:$(fm_pr_file_inode "$state/$id.check.sh")" ] \
+      || fail "shifted fixture did not move only the recorded check device" ;;
+  esac
+}
+
+test_device_renumbered_poll_stays_armed() {
+  local dir state out rc original
+  dir=$(make_case device-renumber-merged)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  shift_registration_device "$state" task-a
+  # Assert the divergence so the case cannot pass vacuously: only the recorded
+  # device differs, and that alone refuses the strict validation.
+  cmp -s "$POLL" "$state/task-a.check.sh" || fail "renumber fixture changed the check bytes"
+  [ "$(sed -n 8p "$state/task-a.pr-poll-registration")" = "$(fm_pr_sha256 "$state/task-a.pr-poll")" ] \
+    || fail "renumber fixture changed the sidecar hash"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "renumber fixture still authenticated before any watcher cycle"
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "renumbered poll watcher failed: $(cat "$dir/watch.err")"
+  out=$(cat "$dir/watch.out")
+  case "$out" in
+    *'rejected unauthenticated state checks'*) fail "watcher refused a poll whose only change was a renumbered volume: $out" ;;
+  esac
+  [ "$(grep -c '^check: .*task-a\.check\.sh: merged$' "$dir/watch.out")" -eq 1 ] \
+    || fail "renumbered poll did not surface its merge exactly once: $out"
+
+  dir=$(make_case device-renumber-rerecord)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  original="$dir/registration.original"
+  cp "$state/task-a.pr-poll-registration" "$original"
+  shift_registration_device "$state" task-a
+  add_stop_custom_check "$dir"
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *"task-a.pr-poll-registration "*)
+    [ -d "$FM_TEST_CONTROL_LOCK" ] || exit 91
+    [ -d "$FM_TEST_POLL_PUBLISH_LOCK" ] || exit 92
+    : > "$FM_TEST_REGISTRATION_RENAMED"
+    ;;
+esac
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+  set +e
+  FM_TEST_CONTROL_LOCK="$state/.control-task-a.lock" \
+    FM_TEST_POLL_PUBLISH_LOCK="$state/.pr-poll-publish-task-a.lock" FM_TEST_REAL_MV="$REAL_MV" \
+    FM_TEST_REGISTRATION_RENAMED="$dir/registration-renamed" \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "re-record watcher failed: $(cat "$dir/watch.err")"
+  [ -e "$dir/registration-renamed" ] || fail "re-record never replaced the registration under its locks"
+  cmp -s "$original" "$state/task-a.pr-poll-registration" \
+    || fail "re-recorded registration differs from the one published on the live device"
+  [ "$(file_mode "$state/task-a.pr-poll-registration")" = 600 ] || fail "re-recorded registration is not private"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "re-recorded poll is not strictly authenticated"
+  grep -F 'pr view https://github.com/o/r/pull/1 --json state' "$dir/gh.log" >/dev/null \
+    || fail "re-recorded poll did not run its validated check in the same cycle"
+  grep -F 're-recorded PR poll identity for task-a' "$state/.watch-triage.log" >/dev/null \
+    || fail "re-record left no triage evidence"
+  ! ls "$state"/.fm-pr-poll-registration.* >/dev/null 2>&1 || fail "re-record left a staged registration behind"
+  pass "a poll armed before a volume renumber is re-recorded under the control lock and keeps detecting merges"
+}
+
+test_device_rerecord_refuses_tampered_artifacts() {
+  local mutation dir state out rc registration_sha shifted_device replacement exercised=
+  for mutation in swapped-check altered-check swapped-sidecar altered-sidecar altered-template-hash \
+    wrong-mode hardlinked-check split-device foreign-device; do
+    # A regular file cannot sit on another device than its own directory without
+    # a file mount, which Darwin does not offer, and Darwin's device helper reads
+    # /usr/bin/stat directly, so no PATH fake can stand in there.
+    if [ "$mutation" = foreign-device ] && [ "$(uname)" = Darwin ]; then
+      exercised="$exercised (foreign-device not exercisable on Darwin)"
+      continue
+    fi
+    exercised="$exercised $mutation"
+    dir=$(make_case "device-rerecord-refuses-$mutation")
+    state="$dir/home/state"
+    write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+    seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+    if [ "$mutation" = split-device ]; then
+      shift_registration_device "$state" task-a data
+    else
+      shift_registration_device "$state" task-a
+    fi
+    shifted_device=$(( $(fm_pr_file_device "$state") + 1 ))
+    case "$mutation" in
+      swapped-check)
+        cp "$POLL" "$state/.swap"
+        chmod 0600 "$state/.swap"
+        mv -f -- "$state/.swap" "$state/task-a.check.sh"
+        ;;
+      altered-check) printf '# tampered\n' >> "$state/task-a.check.sh" ;;
+      swapped-sidecar)
+        cp "$state/task-a.pr-poll" "$state/.swap"
+        chmod 0600 "$state/.swap"
+        mv -f -- "$state/.swap" "$state/task-a.pr-poll"
+        ;;
+      altered-sidecar)
+        printf '%s\n%s\n%s\n%s\n%s\n' github https://github.com/o/r/pull/2 github.com o/r 2 \
+          > "$state/task-a.pr-poll"
+        ;;
+      altered-template-hash)
+        replacement=$(printf 'another template\n' | shasum -a 256 | awk '{print $1}')
+        awk -v hash="$replacement" 'NR == 9 { $0 = hash } { print }' \
+          "$state/task-a.pr-poll-registration" > "$state/.swap"
+        chmod 0600 "$state/.swap"
+        mv -f -- "$state/.swap" "$state/task-a.pr-poll-registration"
+        ;;
+      wrong-mode) chmod 0640 "$state/task-a.check.sh" ;;
+      hardlinked-check) ln "$state/task-a.check.sh" "$dir/check.alias" ;;
+      split-device) ;;
+      foreign-device)
+        cat > "$dir/fakebin/stat" <<'SH'
+#!/usr/bin/env bash
+last=${!#}
+if [ "$last" = "$FM_TEST_FOREIGN_PATH" ]; then
+  case " $* " in
+    *" %d "*) printf '%s\n' "$FM_TEST_FOREIGN_DEVICE"; exit 0 ;;
+  esac
+fi
+exec "$FM_TEST_REAL_STAT" "$@"
+SH
+        chmod +x "$dir/fakebin/stat"
+        ;;
+    esac
+    ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+      || fail "$mutation fixture was authenticated before any watcher cycle"
+    registration_sha=$(fm_pr_sha256 "$state/task-a.pr-poll-registration")
+    set +e
+    FM_TEST_FOREIGN_PATH="$state/task-a.check.sh" FM_TEST_FOREIGN_DEVICE="$shifted_device" \
+      FM_TEST_REAL_STAT="$REAL_STAT" FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=MERGED \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || fail "$mutation watcher failed: $(cat "$dir/watch.err")"
+    out=$(cat "$dir/watch.out")
+    case "$out" in
+      "check: rejected unauthenticated state checks:"*"task-a.check.sh"*) ;;
+      *) fail "$mutation on a renumbered registration was not refused: $out" ;;
+    esac
+    [ "$(fm_pr_sha256 "$state/task-a.pr-poll-registration")" = "$registration_sha" ] \
+      || fail "$mutation let the watcher re-record the registration"
+    ! grep -F -- '--json state' "$dir/gh.log" >/dev/null 2>&1 \
+      || fail "$mutation ran the refused poll"
+    ! ls "$state"/.fm-pr-poll-registration.* >/dev/null 2>&1 \
+      || fail "$mutation left a staged registration behind"
+  done
+
+  dir=$(make_case device-rerecord-pending-retirement)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  shift_registration_device "$state" task-a
+  fm_pr_poll_registration_device_shifted "$state" task-a "$POLL" \
+    || fail "pending-retirement fixture was not a device shift before its receipt"
+  : > "$state/task-a.pr-poll-retirement"
+  chmod 0600 "$state/task-a.pr-poll-retirement"
+  ! fm_pr_poll_registration_device_shifted "$state" task-a "$POLL" \
+    || fail "a pending retirement receipt did not keep its artifacts from being re-recorded"
+  ! fm_pr_poll_registration_rerecord_device "$state" task-a "$POLL" \
+    || fail "a pending retirement receipt was re-recorded around"
+  pass "a renumbered registration is never re-recorded around a tampered artifact:$exercised, or a pending retirement"
+}
+
+start_poll_publish_holder() {  # <dir> <state> <id>
+  local dir=$1 state=$2 id=$3 i
+  PR_POLL_HOLDER_ACQUIRED="$dir/poll-publish-holder-acquired"
+  PR_POLL_HOLDER_RELEASE="$dir/poll-publish-holder-release"
+  PR_POLL_HOLDER_LOCK="$state/.pr-poll-publish-$id.lock"
+  cat > "$dir/poll-publish-holder.sh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+. "$FM_TEST_ROOT/bin/fm-wake-lib.sh"
+trap 'fm_lock_release "$FM_TEST_LOCK" || true' EXIT
+fm_lock_acquire_wait "$FM_TEST_LOCK"
+: > "$FM_TEST_ACQUIRED"
+while [ ! -e "$FM_TEST_RELEASE" ]; do sleep 0.01; done
+SH
+  chmod +x "$dir/poll-publish-holder.sh"
+  FM_TEST_ROOT="$ROOT" FM_TEST_LOCK="$PR_POLL_HOLDER_LOCK" \
+    FM_TEST_ACQUIRED="$PR_POLL_HOLDER_ACQUIRED" FM_TEST_RELEASE="$PR_POLL_HOLDER_RELEASE" \
+    "$dir/poll-publish-holder.sh" &
+  PR_POLL_HOLDER_PID=$!
+  for i in $(seq 1 100); do
+    [ -e "$PR_POLL_HOLDER_ACQUIRED" ] && return 0
+    sleep 0.02
+  done
+  kill "$PR_POLL_HOLDER_PID" 2>/dev/null || true
+  wait "$PR_POLL_HOLDER_PID" 2>/dev/null || true
+  fail "poll publication holder did not acquire its lock"
+}
+
+release_poll_publish_holder() {
+  : > "$PR_POLL_HOLDER_RELEASE"
+  wait "$PR_POLL_HOLDER_PID" || fail "poll publication holder did not release its lock"
+}
+
+test_device_rerecord_serializes_direct_rearm() {
+  local dir state url_a url_b i rearm_pid
+  url_a=https://github.com/o/r/pull/1
+  url_b=https://github.com/o/r/pull/2
+  dir=$(make_case device-rerecord-serialized-direct-rearm)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a "$url_a"
+  seed_canonical_poll "$dir" task-a "$url_a"
+  cp "$state/task-a.pr-poll" "$dir/published.pr-poll"
+  cp "$state/task-a.pr-poll-registration" "$dir/published.registration"
+  cp "$state/task-a.check.sh" "$dir/published.check.sh"
+  start_poll_publish_holder "$dir" "$state" task-a
+  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" FM_TEST_GUARD_LOG="$dir/guard.log" \
+    PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" task-a "$url_b" > "$dir/rearm.out" 2> "$dir/rearm.err" &
+  rearm_pid=$!
+  for i in $(seq 1 100); do
+    if fm_pr_metadata_identity_parse "$state/task-a.meta" && [ "$FM_PR_META_URL" = "$url_b" ]; then
+      break
+    fi
+    sleep 0.02
+  done
+  [ "$FM_PR_META_URL" = "$url_b" ] || fail "direct re-arm did not rewrite metadata before publication"
+  sleep 1
+  process_is_live_non_zombie "$rearm_pid" || fail "direct re-arm did not wait for poll publication"
+  cmp -s "$dir/published.pr-poll" "$state/task-a.pr-poll" \
+    || fail "blocked direct re-arm replaced the published sidecar"
+  cmp -s "$dir/published.registration" "$state/task-a.pr-poll-registration" \
+    || fail "blocked direct re-arm replaced the published registration"
+  cmp -s "$dir/published.check.sh" "$state/task-a.check.sh" \
+    || fail "blocked direct re-arm replaced the published check"
+  release_poll_publish_holder
+  wait "$rearm_pid" || fail "direct re-arm failed after poll publication release: $(cat "$dir/rearm.err")"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "released direct re-arm did not publish a strict poll"
+  [ "$(sed -n 4p "$state/task-a.pr-poll-registration")" = "$url_b" ] \
+    || fail "released direct re-arm registration does not name its PR"
+  pass "direct re-arm publication waits without replacing an armed poll"
+}
+
+test_device_rerecord_serializes_rerecord() {
+  local dir state original rc watcher_pid i
+  dir=$(make_case device-rerecord-serialized-rerecord)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  cp "$state/task-a.pr-poll-registration" "$dir/registration.original"
+  shift_registration_device "$state" task-a
+  original=$(fm_pr_sha256 "$state/task-a.pr-poll-registration")
+  add_stop_custom_check "$dir"
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *"task-a.pr-poll-registration "*)
+    [ -d "$FM_TEST_CONTROL_LOCK" ] || exit 91
+    [ -d "$FM_TEST_POLL_PUBLISH_LOCK" ] || exit 92
+    : > "$FM_TEST_REGISTRATION_RENAMED"
+    ;;
+esac
+exec "$FM_TEST_REAL_MV" "$@"
+SH
+  chmod +x "$dir/fakebin/mv"
+  start_poll_publish_holder "$dir" "$state" task-a
+  FM_TEST_CONTROL_LOCK="$state/.control-task-a.lock" \
+    FM_TEST_POLL_PUBLISH_LOCK="$state/.pr-poll-publish-task-a.lock" \
+    FM_TEST_REGISTRATION_RENAMED="$dir/registration-renamed" FM_TEST_REAL_MV="$REAL_MV" \
+    FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" &
+  watcher_pid=$!
+  for i in $(seq 1 100); do
+    [ -d "$state/.control-task-a.lock" ] && break
+    sleep 0.02
+  done
+  [ -d "$state/.control-task-a.lock" ] || fail "watcher did not reach its device re-record"
+  sleep 1
+  process_is_live_non_zombie "$watcher_pid" || fail "watcher did not wait for poll publication"
+  [ "$(fm_pr_sha256 "$state/task-a.pr-poll-registration")" = "$original" ] \
+    || fail "blocked watcher rewrote a device-shifted registration"
+  [ ! -e "$dir/registration-renamed" ] || fail "blocked watcher renamed the registration"
+  release_poll_publish_holder
+  rc=0
+  wait "$watcher_pid" || rc=$?
+  [ "$rc" -eq 0 ] || fail "released watcher re-record failed: $(cat "$dir/watch.err")"
+  [ -e "$dir/registration-renamed" ] || fail "released watcher did not replace the registration"
+  cmp -s "$dir/registration.original" "$state/task-a.pr-poll-registration" \
+    || fail "released watcher did not restore the live-device registration"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" || fail "released watcher did not strictly authenticate the poll"
+  pass "device re-record publication waits without rewriting its registration"
+}
+
 test_parser_matrix
 test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report
 test_self_merge_and_poll_publish_one_outcome
+test_merged_poll_row_carries_the_merge_authority
+test_merged_poll_row_names_no_authority_when_no_record_grants_one
+test_authority_persistence_refuses_rebound_metadata
+test_authority_persists_before_control_unlock
+test_teardown_cannot_race_authority_consumption
+test_authority_retirement_preserves_replacement
 test_merged_poll_reports_upward_from_a_secondmate_home_once
 test_different_merged_pr_for_same_task_is_not_absorbed
 test_persistent_secondmate_retirement_is_poll_only
@@ -2133,6 +2780,10 @@ test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_poll_publication_refuses_unsafe_destinations
 test_live_artifact_single_link_and_privacy_validation
+test_device_renumbered_poll_stays_armed
+test_device_rerecord_refuses_tampered_artifacts
+test_device_rerecord_serializes_direct_rearm
+test_device_rerecord_serializes_rerecord
 test_postrename_poll_validation_revokes_and_retries
 test_bootstrap_leaves_unauthenticated_checks
 test_custom_snapshot_cleanup_on_signal

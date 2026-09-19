@@ -94,7 +94,9 @@ fm_test_fake_gh_axi() {
 # fm_test_fake_tmux_spawn <fakebin>
 # Spawn-world tmux: pane_current_path from FM_FAKE_PANE_PATH, session named
 # firstmate, window ops succeed, send-keys succeed. When FM_FAKE_LAUNCH_LOG is
-# set, each send-keys -l payload is appended one per line. Optional
+# set, each send-keys -l payload is appended one per line. When FM_FAKE_PANE_LOG
+# is set, each send-keys TEXT-LINE payload (the pre-launch pane exports, which
+# carry no -l) is appended there instead, one per line in send order. Optional
 # FM_FAKE_DUPLICATE_WINDOW is printed from list-windows.
 #
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
@@ -125,6 +127,25 @@ case "${1:-}" in
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
         fi
         prev=$a
+      done
+    fi
+    # The pre-launch pane exports ride the text-line form
+    # (`send-keys -t <target> <text> Enter`), which carries no -l flag, so a
+    # suite that asserts on what the pane shell received opts in with its own
+    # log. Skip the flags, the target, and the trailing key so only the payload
+    # is recorded, one per line, in send order.
+    if [ -n "${FM_FAKE_PANE_LOG:-}" ]; then
+      shift
+      skip_next=
+      literal=
+      for a in "$@"; do
+        if [ -n "$skip_next" ]; then skip_next=; continue; fi
+        case "$a" in
+          -t) skip_next=1; continue ;;
+          -l) literal=1; continue ;;
+          Enter|C-m) continue ;;
+          *) [ -n "$literal" ] || printf '%s\n' "$a" >> "$FM_FAKE_PANE_LOG" ;;
+        esac
       done
     fi
     exit 0
@@ -236,11 +257,18 @@ fm_test_spawn_home() {
   fi
 }
 
-# fm_test_spawn_brief <home> <id> [text]
+# fm_test_spawn_brief <home> <id> [captain-intent]
 fm_test_spawn_brief() {
-  local home=$1 id=$2 text=${3:-brief for $2}
+  local home=$1 id=$2 intent=${3:-brief for $2}
   mkdir -p "$home/data/$id"
-  printf '%s\n' "$text" > "$home/data/$id/brief.md"
+  cat > "$home/data/$id/brief.md" <<EOF
+# Task
+## Captain's intent
+$intent
+
+## Firstmate spec
+Exercise the spawn behavior under test.
+EOF
 }
 
 # fm_test_make_spawn_fakebin <dir> [extra-exit0-tool...]
@@ -268,7 +296,20 @@ make_spawn_fakebin() {
 fm_test_run_spawn() {
   local home=$1 pane=$2 fakebin=$3
   shift 3
-  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+  # A claude spawn pre-registers workspace trust in the launching user's own
+  # store (bin/fm-claude-trust.sh), so every spawn here runs against a throwaway
+  # HOME; without it the suite would write the developer's real ~/.claude.json.
+  # CLAUDE_CONFIG_DIR must be pinned too, and pinned EMPTY: the script resolves
+  # the store as ${CLAUDE_CONFIG_DIR:-${HOME:-}}, so a value inherited from the
+  # developer's shell would beat the throwaway HOME and the sandbox would not
+  # hold, while an empty value falls through to it. Empty rather than a path
+  # because bin/fm-spawn.sh prefixes the launch only when the value is non-empty,
+  # so every launch-shape assertion in the suite keeps reading the same command.
+  # A test that needs the set case opts in through FM_TEST_CLAUDE_CONFIG_DIR.
+  local spawn_home=$home/user-home
+  mkdir -p "$spawn_home"
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$spawn_home" \
+    CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_DIR:-}" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="${TMUX:-fake,1,0}" \

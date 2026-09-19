@@ -8,6 +8,7 @@
 #
 # This file is sourced, never executed. It defines:
 #   fmx_env_get <key> <file>   - read one KEY=VALUE from a .env-style file
+#                                (defined by bin/fm-env-lib.sh, sourced here)
 #   fmx_load_config            - resolve FMX_TOKEN, FMX_RELAY, FMX_DRY, FMX_MAX,
 #                                and FMX_THREAD_MAX (env wins over .env)
 #   fmx_auth_header_file       - write the bearer header to a 0600 temp file
@@ -56,24 +57,9 @@ if ! command -v fm_backlog_atomic_transition >/dev/null 2>&1; then
   . "$_FM_X_LIB_DIR/fm-backlog-transition-lib.sh"
 fi
 
-# Read the value of KEY from a .env-style file: last assignment wins; tolerates a
-# leading "export ", surrounding whitespace, and one layer of matching single or
-# double quotes. Prints nothing (and succeeds) when the file or key is absent, so
-# callers can treat empty output as "unset".
-fmx_env_get() {
-  local key=$1 file=$2 line val
-  [ -f "$file" ] || return 0
-  line=$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" 2>/dev/null | tail -n1) || return 0
-  [ -n "$line" ] || return 0
-  val=${line#*=}
-  val=${val#"${val%%[![:space:]]*}"}   # strip leading whitespace
-  val=${val%"${val##*[![:space:]]}"}   # strip trailing whitespace (incl. CR)
-  case "$val" in
-    \"*\") val=${val#\"}; val=${val%\"} ;;
-    \'*\') val=${val#\'}; val=${val%\'} ;;
-  esac
-  printf '%s' "$val"
-}
+# fmx_env_get lives in bin/fm-env-lib.sh, the single owner of .env parsing.
+# shellcheck source=bin/fm-env-lib.sh
+. "$_FM_X_LIB_DIR/fm-env-lib.sh"
 
 fmx_poll_shim_content() {
   local home=$1 root=$2
@@ -89,8 +75,8 @@ fmx_single_link_file_valid() {
   local file=$1 expected_device=${2-} links device
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   if [ "$(uname)" = Darwin ]; then
-    links=$(stat -f %l "$file" 2>/dev/null) || return 1
-    device=$(stat -f %d "$file" 2>/dev/null) || return 1
+    links=$(/usr/bin/stat -f %l "$file" 2>/dev/null) || return 1
+    device=$(/usr/bin/stat -f %d "$file" 2>/dev/null) || return 1
   else
     links=$(stat -c %h "$file" 2>/dev/null) || return 1
     device=$(stat -c %d "$file" 2>/dev/null) || return 1
@@ -103,7 +89,7 @@ fmx_single_link_file_mode_valid() {
   local file=$1 expected_mode=$2 expected_device=${3-} mode
   fmx_single_link_file_valid "$file" "$expected_device" || return 1
   if [ "$(uname)" = Darwin ]; then
-    mode=$(stat -f %Lp "$file" 2>/dev/null) || return 1
+    mode=$(/usr/bin/stat -f %Lp "$file" 2>/dev/null) || return 1
   else
     mode=$(stat -c %a "$file" 2>/dev/null) || return 1
   fi
@@ -114,8 +100,8 @@ fmx_private_artifact_dir_device() {
   local dir=$1 mode device
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
   if [ "$(uname)" = Darwin ]; then
-    mode=$(stat -f %Lp "$dir" 2>/dev/null) || return 1
-    device=$(stat -f %d "$dir" 2>/dev/null) || return 1
+    mode=$(/usr/bin/stat -f %Lp "$dir" 2>/dev/null) || return 1
+    device=$(/usr/bin/stat -f %d "$dir" 2>/dev/null) || return 1
   else
     mode=$(stat -c %a "$dir" 2>/dev/null) || return 1
     device=$(stat -c %d "$dir" 2>/dev/null) || return 1
@@ -410,7 +396,7 @@ fmx_request_relay_context() {
 
 fmx_context_registry_mtime() {
   local file=$1 mtime
-  mtime=$(stat -f '%m' "$file" 2>/dev/null) || mtime=$(stat -c '%Y' "$file" 2>/dev/null) || return 1
+  mtime=$(/usr/bin/stat -f '%m' "$file" 2>/dev/null) || mtime=$(stat -c '%Y' "$file" 2>/dev/null) || return 1
   case "$mtime" in
     ''|*[!0-9]*) return 1 ;;
   esac
@@ -976,18 +962,68 @@ fmx_meta_followups_set() {
   fm_lock_release "$lock"
 }
 
-# fmx_meta_link_clear <meta>: atomically remove the x_request/x_request_ts/
-# x_followups and reply-platform lines while preserving every other meta line. Idempotent:
-# succeeds whether or not a link is present, and is a no-op when <meta> is
-# missing.
+# fmx_meta_link_clear <meta> [expected-request]: atomically remove the
+# x_request/x_request_ts/x_followups and reply-platform lines while preserving
+# every other meta line. With expected-request, a present link is cleared only
+# when its request identity matches, and absence succeeds only when the
+# authorized parent directory can be inspected safely. That guarded mode also
+# bounds its lock wait (FMX_LINK_CLEAR_LOCK_TIMEOUT, default 10 seconds) so an
+# unattended remote clear refuses instead of hanging. Unguarded calls remain
+# idempotent when <meta> is missing and keep the ordinary unbounded wait.
 fmx_meta_link_clear() {
-  local meta=$1 tmp lock
+  local meta=$1 expected_set=0 expected='' tmp lock line rid='' link_present=0 parent
+  local lock_timeout
+  if [ "$#" -ge 2 ]; then
+    expected_set=1
+    expected=$2
+    parent=${meta%/*}
+    [ "$parent" != "$meta" ] || parent=.
+    [ -d "$parent" ] && [ ! -L "$parent" ] && [ -r "$parent" ] \
+      && [ -x "$parent" ] || return 1
+    fm_backlog_record_parent_authorized "$meta" "task record" "$STATE" || return 1
+  fi
   [ ! -L "$meta" ] || return 1
   [ -f "$meta" ] || return 0
+  if [ "$expected_set" -eq 1 ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        x_request=*) link_present=1; rid=${line#*=} ;;
+      esac
+    done < "$meta" || return 1
+    [ "$link_present" -eq 1 ] || return 0
+    [ -n "$expected" ] && [ -n "$rid" ] && [ "$rid" = "$expected" ] || return 1
+    [ -w "$parent" ] || return 1
+  fi
   lock=$(fm_meta_lock_path "$meta") || return 1
-  fm_lock_acquire_wait "$lock"
+  if [ "$expected_set" -eq 1 ]; then
+    # A guarded clear runs unattended over the secondmate transport, so it must
+    # refuse rather than wedge. The parent's writability can flip between the
+    # check above and lock creation, and the ordinary unbounded wait would then
+    # retry forever instead of returning the reconciliation refusal this guard
+    # exists to produce. A bounded acquire turns that race, and a live holder,
+    # into a refusal. Unguarded local callers keep the ordinary wait unchanged.
+    lock_timeout=${FMX_LINK_CLEAR_LOCK_TIMEOUT:-10}
+    case "$lock_timeout" in ''|*[!0-9]*|0) lock_timeout=10 ;; esac
+    fm_lock_acquire_wait_bounded "$lock" "$lock_timeout" || return 1
+  else
+    fm_lock_acquire_wait "$lock"
+  fi
   [ ! -L "$meta" ] || { fm_lock_release "$lock"; return 1; }
   [ -f "$meta" ] || { fm_lock_release "$lock"; return 0; }
+  if [ "$expected_set" -eq 1 ]; then
+    link_present=0
+    rid=
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        x_request=*) link_present=1; rid=${line#*=} ;;
+      esac
+    done < "$meta" || { fm_lock_release "$lock"; return 1; }
+    [ "$link_present" -eq 0 ] || {
+      [ -n "$expected" ] && [ -n "$rid" ] && [ "$rid" = "$expected" ] \
+        || { fm_lock_release "$lock"; return 1; }
+    }
+    [ "$link_present" -eq 1 ] || { fm_lock_release "$lock"; return 0; }
+  fi
   tmp=$(fmx_meta_tmp "$meta") || { fm_lock_release "$lock"; return 1; }
   if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
     rm -f "$tmp"; fm_lock_release "$lock"; return 1

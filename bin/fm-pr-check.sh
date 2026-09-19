@@ -17,6 +17,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-parent-channel-lib.sh
+. "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -81,9 +83,15 @@ fi
 META_TMP=
 META_LOCK=
 META_LOCK_HELD=0
+PR_POLL_PUBLISH_LOCK=
+PR_POLL_PUBLISH_LOCK_HELD=0
 pr_check_cleanup() {
   fm_pr_poll_cleanup
   [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
+  if [ "$PR_POLL_PUBLISH_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$PR_POLL_PUBLISH_LOCK" || true
+    PR_POLL_PUBLISH_LOCK_HELD=0
+  fi
   if [ "$META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$META_LOCK" || true
     META_LOCK_HELD=0
@@ -128,8 +136,43 @@ fm_pr_metadata_identity_parse "$META" || exit 1
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 
-fm_pr_poll_publish_prepared || {
+PR_POLL_PUBLISH_LOCK="$STATE/.pr-poll-publish-$ID.lock"
+fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK"
+PR_POLL_PUBLISH_LOCK_HELD=1
+if fm_pr_poll_publish_prepared; then
+  fm_lock_release "$PR_POLL_PUBLISH_LOCK" || exit 1
+  PR_POLL_PUBLISH_LOCK_HELD=0
+else
+  fm_lock_release "$PR_POLL_PUBLISH_LOCK" || exit 1
+  PR_POLL_PUBLISH_LOCK_HELD=0
   echo "error: could not publish PR poll" >&2
   exit 1
-}
+fi
+# The contribution observer uses the same authenticated check mechanism and
+# owns verdict freshness, required actors and external feedback separately from
+# the exact merged-state poll. Registration is local and performs no forge read.
+if command -v jq >/dev/null 2>&1; then
+  "$SCRIPT_DIR/fm-contributions.sh" arm >/dev/null \
+    || printf 'contributions: observation not armed; coverage is unconfirmed\n' >&2
+else
+  printf 'contributions: jq unavailable; coverage is unconfirmed\n' >&2
+fi
+# In a secondmate home the registration itself is a captain-facing fact:
+# publish the child's PR-ready line with the canonical URL just recorded, so it
+# reaches the parent whether or not the mate model appends anything
+# (bin/fm-parent-channel-lib.sh). A main home has no channel and this is a
+# silent no-op there. The poll is armed either way; a channel that cannot be
+# written is reported as actionable, and bin/fm-inactive-reconcile.sh still
+# delivers the child's own ready line on the next supervision poll.
+READY_LINE="done [key=child-pr-$ID]: child $ID PR ready: $URL"
+PR_MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
+PR_YOLO=$(grep '^yolo=' "$META" | tail -1 | cut -d= -f2- || true)
+[ -z "$PR_MODE" ] || READY_LINE="$READY_LINE mode=$(fm_parent_channel_clean_note "$PR_MODE")"
+[ -z "$PR_YOLO" ] || READY_LINE="$READY_LINE yolo=$(fm_parent_channel_clean_note "$PR_YOLO")"
+READY_RC=0
+fm_parent_channel_report "$FM_HOME" "$STATE" "$READY_LINE" || READY_RC=$?
+case "$READY_RC" in
+  0|1) ;;
+  *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
+esac
 printf 'armed: state/%s.check.sh\n' "$ID"
