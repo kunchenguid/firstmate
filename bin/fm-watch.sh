@@ -942,7 +942,14 @@ wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
 # That time is still PRINTED with the refusal, because both outcomes have to be
 # able to say what the lane declared: a declared time that came and went with the
 # lane otherwise quiet is MORE suspicious than no declaration at all, and an
-# alarm that omits it reads as though the worker had never said anything.
+# alarm that omits it reads as though the worker had never said anything. What is
+# printed is the worker's OWN token, character for character, so the alarm and
+# the status line read as the same thing.
+# That token is worker-authored text on its way into the tab-separated durable
+# wake queue, so it reaches this channel only after fm_utc_iso_to_epoch has
+# accepted it - status_paused_until_token's own header owns why its two shapes
+# are the whole vocabulary that can get there. A line whose time is missing or
+# malformed takes the ordinary `declared` path instead, never raw text.
 # Nothing here weakens detection for a pane with no declaration - it never runs
 # for them beyond one status-line read, and their escalation schedule, reason and
 # wording are untouched.
@@ -951,8 +958,8 @@ wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
 # external dependency the worker named, `captain-held:` on the captain themself -
 # so a recheck that named the wrong one would point the reader away from the
 # person who can clear it.
-wedge_wait_evidence() {  # <task> -> `declared`/`held` and 0, or `expired <epoch>` and 1
-  local task=$1 last until
+wedge_wait_evidence() {  # <task> -> `declared`/`held` and 0, or `expired <token>` and 1
+  local task=$1 last token until
   [ -n "$task" ] || return 1
   last=$(last_status_line "$STATE/$task.status")
   if status_is_captain_held "$last"; then
@@ -960,9 +967,9 @@ wedge_wait_evidence() {  # <task> -> `declared`/`held` and 0, or `expired <epoch
     return 0
   fi
   status_is_paused "$last" || return 1
-  if until=$(status_paused_until "$last"); then
+  if token=$(status_paused_until_token "$last") && until=$(fm_utc_iso_to_epoch "$token"); then
     if [ "$(date +%s)" -ge "$until" ]; then
-      printf 'expired %s' "$until"
+      printf 'expired %s' "$token"
       return 1
     fi
   fi
@@ -994,18 +1001,14 @@ wedge_work_evidence() {  # <task> <since-file>
   crew_worktree_written_since "$task" "$STATE" "$since_file"
 }
 
-# The expired declaration in the words both outcomes below use: the time the
-# worker named and how long ago it went by. A time that cannot be rendered back
-# into the shape the worker wrote costs the phrase that one clause and nothing
-# else - raw epoch seconds in its place would be the unreadable alarm this
-# vocabulary exists to replace.
-declared_time_passed_phrase() {  # <expired-epoch>
-  local until=$1 iso
-  if iso=$(fm_utc_epoch_to_iso "$until"); then
-    printf 'until %s and that time passed %ss ago' "$iso" "$(( $(date +%s) - until ))"
-    return 0
-  fi
-  printf 'whose time passed %ss ago' "$(( $(date +%s) - until ))"
+# The expired declaration in the words both outcomes below use: the worker's own
+# token, character for character, and how long ago that time went by. The second
+# read is total because the evidence channel only ever carries a token
+# fm_utc_iso_to_epoch already accepted.
+declared_time_passed_phrase() {  # <declared-time-token>
+  local token=$1 until
+  until=$(fm_utc_iso_to_epoch "$token")
+  printf 'until %s and that time passed %ss ago' "$token" "$(( $(date +%s) - until ))"
 }
 
 # The clause an escalation carries when the lane DID declare a wait and its own
@@ -1192,8 +1195,13 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
-# escalates once STALE_ESCALATE_SECS have elapsed. Never re-reads the crew
-# state (the costly check already ran once, at classification time). Shared by
+# escalates once STALE_ESCALATE_SECS have elapsed. Re-reads the crew state for an
+# EXPIRED declaration only, inside the at-threshold branch below, where
+# wedge_work_evidence needs the one field the classification discards (whether
+# the working verdict came from an attributed run or from the pane); on every
+# other path the costly check already ran once, at classification time, and is
+# not repeated. Threading that field out of pause_state_class would drop the
+# second read altogether and is worth doing on its own. Shared by
 # both places a hash can be absorbed this way: the plain non-terminal path,
 # and the stale_is_terminal-overridden path (a captain-relevant status-log
 # line that an active run/busy pane outranked).

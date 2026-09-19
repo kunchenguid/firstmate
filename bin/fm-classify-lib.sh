@@ -121,19 +121,6 @@ fm_utc_iso_to_epoch() {  # <timestamp>
     || return 1
 }
 
-# The inverse read, so a supervisor-facing alarm can name a declared time back in
-# the shape the worker wrote it rather than as raw epoch seconds. Returns 1 when
-# neither date flavor can render it, for the same reason the reader above refuses
-# a malformed time: emitting anything that is not this shape would put raw epoch
-# seconds in front of a reader, which is the unreadable alarm this vocabulary
-# exists to prevent. A caller that still has something to say says it without the
-# time.
-fm_utc_epoch_to_iso() {  # <epoch> -> <YYYY-MM-DDTHH:MM:SSZ>
-  date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
-    || date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
-    || return 1
-}
-
 # The resolution verb and durable-backlog-transfer verb that CLOSE a keyed
 # status decision opened by needs-decision or blocked. See status_open_decisions
 # below for the status-fold contract. The transfer verb is written only after
@@ -273,18 +260,34 @@ status_is_paused_or_captain_held() {  # <status-line>
 
 # A condition-aware declared wait: a `paused:` line may say WHEN it expects to
 # clear with `until <YYYY-MM-DDTHH:MM[:SS]Z>` anywhere in its text (UTC only, so
-# no local-zone guess is ever recorded). Prints that time as epoch seconds so a
-# supervisor rechecks the wait when the worker said it would clear instead of on
-# the flat cadence; returns 1 when the line is not a pause or declares no time,
-# or the time is malformed, so a bad token falls back to the cadence rather than
-# silencing the wait.
-status_paused_until() {  # <status-line> -> epoch on stdout
+# no local-zone guess is ever recorded), written here exactly as the worker typed
+# it. A supervisor-facing alarm quotes these characters rather than a
+# re-rendering of them, so the alarm and the status log read as one thing.
+#
+# This token is the ONLY worker-authored text such an alarm may carry into the
+# durable wake queue, which is tab-separated and pattern-matched by other
+# readers, so the two shapes below are the whole vocabulary that can ever reach
+# it: digits and `-:TZ`, no tab, no newline, no unbounded prose. They are a SHAPE
+# test only - a nonexistent date such as month 13 passes here and is refused by
+# fm_utc_iso_to_epoch - so a consumer may print this token only once THAT reader
+# has also accepted it, and must take its own no-time path otherwise.
+status_paused_until_token() {  # <status-line> -> <YYYY-MM-DDTHH:MM[:SS]Z>
   local line=$1 token
   status_is_paused "$line" || return 1
   token=$(printf '%s' "$line" \
     | sed -n 's/.*[[:space:]][Uu][Nn][Tt][Ii][Ll][[:space:]]\{1,\}\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]Z\).*/\1/p; s/.*[[:space:]][Uu][Nn][Tt][Ii][Ll][[:space:]]\{1,\}\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z\).*/\1/p' \
     | head -1)
   [ -n "$token" ] || return 1
+  printf '%s' "$token"
+}
+
+# The same declaration as epoch seconds, so a supervisor rechecks the wait when
+# the worker said it would clear instead of on the flat cadence; returns 1 when
+# the line is not a pause or declares no time, or the time is malformed, so a bad
+# token falls back to the cadence rather than silencing the wait.
+status_paused_until() {  # <status-line> -> epoch on stdout
+  local token
+  token=$(status_paused_until_token "$1") || return 1
   fm_utc_iso_to_epoch "$token"
 }
 

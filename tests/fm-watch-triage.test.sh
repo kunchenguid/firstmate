@@ -2908,7 +2908,9 @@ test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict() {
 test_wedge_escalation_names_an_expired_declared_wait() {
   local dir state fakebin out capture window key past payload n
   local working='state: working · source: pane · busy footer'
-  past=$(iso_utc_at "$(( $(date +%s) - 7200 ))")
+  # Minute precision, which is what the brief asks a worker for and what a
+  # re-rendered timestamp would silently turn into `...:00Z`.
+  past=$(iso_utc_at "$(( $(date +%s) - 7200 ))"); past="${past%:*}Z"
   dir=$(wedge_threshold_fixture expired-wait-named \
     "paused: waiting on the build queue until $past" 0)
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
@@ -2928,6 +2930,11 @@ test_wedge_escalation_names_an_expired_declared_wait() {
     # and that the time has passed with the lane still quiet.
     case "$payload" in *"declared a wait until $past"*) ;;
       *) fail "escalation $n never names the wait the lane declared, or when it was due: $payload" ;;
+    esac
+    # The supervisor reads the same characters the status line carries, so the
+    # alarm and the log are the same thing rather than two renderings of one.
+    case "$payload" in *"${past%Z}:00Z"*)
+      fail "escalation $n re-rendered the worker's declared time instead of quoting it: $payload" ;;
     esac
     case "$payload" in *"that time passed"*) ;;
       *) fail "escalation $n does not say the declared time has passed: $payload" ;;
@@ -2963,68 +2970,34 @@ test_wedge_escalation_names_an_expired_declared_wait() {
   pass "an expired declared wait keeps the whole wedge ladder while the alarm names the declaration it used to omit"
 }
 
-# The same alarm on a host that can READ a declared time but cannot render one
-# back. The rendered `until <T>` clause is the only part that depends on that
-# render, so it is the only part allowed to go missing: the note still has to
-# say a wait was declared, that its time has passed, and that the pane is still
-# idle, and the ladder still has to fire and climb. The arm this replaced printed
-# raw epoch seconds instead, which would hand a supervisor `until 1789000000` -
-# the unreadable alarm the whole change exists to remove.
-test_wedge_escalation_note_survives_an_unrenderable_declared_time() {
-  local dir state fakebin out capture window key past epoch payload n real_date
-  local working='state: working · source: pane · busy footer'
-  epoch=$(( $(date +%s) - 7200 ))
-  past=$(iso_utc_at "$epoch")
-  dir=$(wedge_threshold_fixture expired-wait-unrenderable \
-    "paused: waiting on the build queue until $past" 0)
+# The token the alarm quotes is worker-authored text on its way into the
+# tab-separated durable queue, so only a time the shared UTC reader ACCEPTS may
+# reach it. A line whose declared time has the right shape but names no real
+# instant is not a bounded wait at all: it takes the ordinary declared-wait path,
+# and nothing the worker typed is quoted anywhere.
+test_a_declared_time_that_names_no_real_instant_takes_the_no_time_path() {
+  local dir state fakebin out capture window key payload
+  local busy_pane='state: working · source: pane · busy footer'
+  dir=$(wedge_threshold_fixture declared-time-impossible \
+    'paused: waiting on the build queue until 2026-13-45T08:00Z' 2000)
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
   window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
-  # Every epoch -> ISO call fails on both date flavors (BSD `-r <epoch>`, GNU
-  # `-d @<epoch>`); every other call, including the read that parses the token
-  # out of the status line, is the real date.
-  real_date=$(command -v date)
-  cat > "$fakebin/date" <<SH
-#!/usr/bin/env bash
-for _arg in "\$@"; do
-  case "\$_arg" in
-    -r|@*) exit 1 ;;
+  FM_TEST_PAUSE_RESURFACE=240 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$busy_pane" exit \
+    || fail "a declared wait with an unreadable time was never rechecked at all"
+  payload=$(queued_stale_payloads "$state" "$window")
+  [ -n "$payload" ] || fail "the unreadable declared time queued nothing to read"
+  case "$payload" in *"declared wait, awaiting external"*) ;;
+    *) fail "an unreadable declared time did not fall back to the ordinary declared-wait recheck: $payload" ;;
   esac
-done
-exec "$real_date" "\$@"
-SH
-  chmod +x "$fakebin/date"
-
-  n=1
-  while [ "$n" -le 2 ]; do
-    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$working" exit \
-      || fail "an unrenderable declared time stopped the escalation at threshold $n"
-    payload=$(queued_stale_payloads "$state" "$window")
-    # The ladder does not move.
-    case "$payload" in *"possible wedge, escalation $n"*) ;;
-      *) fail "an unrenderable declared time did not reach escalation $n: $payload" ;;
-    esac
-    [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" -eq "$n" ] \
-      || fail "an unrenderable declared time did not count escalation $n: $(cat "$state/.wedge-escalations-$key" 2>/dev/null)"
-    # The note survives the failed render, minus the one clause that needed it.
-    case "$payload" in *"the lane declared a wait"*) ;;
-      *) fail "escalation $n lost the whole note when the declared time could not be rendered: $payload" ;;
-    esac
-    case "$payload" in *"time passed"*) ;;
-      *) fail "escalation $n no longer says the declared time has passed: $payload" ;;
-    esac
-    case "$payload" in *"with the pane still idle"*) ;;
-      *) fail "escalation $n no longer says the lane still looks idle: $payload" ;;
-    esac
-    case "$payload" in *"$epoch"*)
-      fail "escalation $n put raw epoch seconds in front of a supervisor: $payload" ;;
-    esac
-    case "$payload" in *" until "*)
-      fail "escalation $n kept an until clause with no renderable time behind it: $payload" ;;
-    esac
-    ack_stopped_cycle "$state" || fail "could not acknowledge escalation $n"
-    n=$((n + 1))
-  done
-  pass "an escalation whose declared time cannot be rendered keeps the note, minus the time, and the whole ladder"
+  case "$payload" in *"possible wedge"*)
+    fail "an unreadable declared time was escalated as a wedge: $payload" ;;
+  esac
+  case "$payload" in *"2026-13-45"*)
+    fail "a time the UTC reader refused was quoted into the durable queue anyway: $payload" ;;
+  esac
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "an unreadable declared time counted $(cat "$state/.wedge-escalations-$key") wedge escalation(s)"
+  pass "a declared time the shared UTC reader refuses takes the ordinary declared-wait path and is never quoted"
 }
 
 # --- a slipped estimate is not a wedge -------------------------------------
@@ -3041,7 +3014,7 @@ SH
 test_expired_declared_wait_with_an_active_run_is_a_slipped_estimate() {
   local dir state fakebin out capture window key past payload
   local running='state: working · source: run-step · ci running'
-  past=$(iso_utc_at "$(( $(date +%s) - 7200 ))")
+  past=$(iso_utc_at "$(( $(date +%s) - 7200 ))"); past="${past%:*}Z"
   window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
 
   # The declaration is old enough that the long cadence owes a recheck now, so
@@ -6023,7 +5996,7 @@ test_captain_relevant_append_during_a_declared_wait_still_alarms
 test_live_paused_until_controls_recheck_time
 test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict
 test_wedge_escalation_names_an_expired_declared_wait
-test_wedge_escalation_note_survives_an_unrenderable_declared_time
+test_a_declared_time_that_names_no_real_instant_takes_the_no_time_path
 test_expired_declared_wait_with_an_active_run_is_a_slipped_estimate
 test_slipped_estimate_deferral_resumes_the_ladder_where_it_left_off
 test_wedge_threshold_recheck_names_the_captain_for_a_held_lane
