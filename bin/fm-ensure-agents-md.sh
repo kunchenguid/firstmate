@@ -6,11 +6,10 @@
 # when neither file exists, promotes a real CLAUDE.md file when it is the only
 # file present (unless it is already the canonical pointer), converts a correct
 # CLAUDE.md -> AGENTS.md symlink into the pointer file, and refuses to clobber
-# distinct real files or wrong symlinks. Skips writing a brand-new CLAUDE.md
-# pointer (neither file existed, or AGENTS.md existed with no CLAUDE.md) when
-# the invoking Claude Code is >= 2.1.277, which reads AGENTS.md natively; see
-# claude_supports_native_agents_md. Existing pointers and symlink conversions
-# are left alone by this gate for now.
+# distinct real files or wrong symlinks. Never writes a brand-new CLAUDE.md
+# pointer for a fresh project (neither file existed, or AGENTS.md existed with
+# no CLAUDE.md); Claude Code reads AGENTS.md natively fleet-wide. Existing
+# pointers and symlink conversions are left alone.
 # Owns the canonical "## Maintaining this file" self-governance wording for
 # project AGENTS.md files, injecting it idempotently into created skeletons,
 # promoted CLAUDE.md files, and existing AGENTS.md files lacking both the exact
@@ -132,36 +131,6 @@ EOF
 is_canonical_claude_pointer() {
   [ -f "$CLAUDE" ] && [ ! -L "$CLAUDE" ] || return 1
   claude_pointer_content | cmp -s - "$CLAUDE"
-}
-
-fm_version_at_least() {  # <candidate> <floor>
-  local candidate=${1:-} floor=${2:-} c f
-  candidate=${candidate%%[-+]*}
-  case "$candidate" in ''|*[!0-9.]*) return 1 ;; esac
-  while [ -n "$floor" ]; do
-    c=${candidate%%.*}
-    f=${floor%%.*}
-    [ -n "$c" ] || c=0
-    [ "$c" -gt "$f" ] 2>/dev/null && return 0
-    [ "$c" -lt "$f" ] 2>/dev/null && return 1
-    case "$candidate" in *.*) candidate=${candidate#*.} ;; *) candidate= ;; esac
-    case "$floor" in *.*) floor=${floor#*.} ;; *) floor= ;; esac
-  done
-  return 0
-}
-
-# Returns 0 if local Claude Code is installed and version is >= 2.1.277.
-# Returns 1 if missing, unparseable, command errors, or version < 2.1.277.
-claude_supports_native_agents_md() {
-  command -v claude >/dev/null 2>&1 || return 1
-  local ver_str ver
-  ver_str=$(claude --version 2>/dev/null) || return 1
-  if [[ "$ver_str" =~ ([0-9]+\.[0-9]+\.[0-9]+) ]]; then
-    ver="${BASH_REMATCH[1]}"
-  else
-    return 1
-  fi
-  fm_version_at_least "$ver" "2.1.277"
 }
 
 # Write the canonical pointer as a regular file. Unlink a symlink first so the
