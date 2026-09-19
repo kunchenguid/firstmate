@@ -76,7 +76,7 @@ case "${1:-}" in
           printf 'zsh' > "$D/command"
           [ -z "${FM_FAKE_EXIT_TRANSPORT_FAIL_AFTER_STOP:-}" ] || exit 1
           ;;
-        *'encode launch-brief'*)
+        '/bin/sh '*|*'encode launch-brief'*)
           cat "$D/becomes" > "$D/command"
           [ -z "${FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START:-}" ] || exit 1
           ;;
@@ -142,6 +142,23 @@ new_case() {
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   make_tmux_stub "$dir"
   printf '%s\n' "$dir"
+}
+
+typed_launch_body() {  # <literal-file>
+  local line script
+  line=$(grep '/bin/sh ' "$1" | tail -1) || true
+  if [ -z "$line" ]; then
+    cat "$1"
+    return 0
+  fi
+  script=${line#/bin/sh }
+  script=${script#\'}
+  script=${script%\'}
+  if [ -f "$script" ]; then
+    cat "$script"
+  else
+    cat "$1"
+  fi
 }
 
 # add_ship_task <case-dir> <id> [harness]
@@ -328,7 +345,7 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   [ "$(journal_field "$dir" rl1 phase)" = complete ] \
     || fail "the transaction journal should end complete"
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
-  assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
+  assert_grep "/bin/sh " "$dir/fake/literal" "the replacement should have been launched"
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
@@ -519,10 +536,14 @@ test_disabled_relaunch_clears_prior_trace_context() {
   expect_code 0 "$rc" "disabled relaunch should succeed"$'\n'"$out"
   [ -z "$(meta_field "$dir" rl33 traceparent)" ] \
     || fail "disabled relaunch must remove the prior trace carrier from metadata"
-  grep -q '^unset TRACEPARENT; .*claude' "$dir/fake/literal" \
-    || fail "disabled relaunch must clear the pane carrier before replacement launch"
-  ! grep -q '^export TRACEPARENT=' "$dir/fake/literal" \
-    || fail "disabled relaunch must not export a replacement trace carrier"
+  if ! grep -q '^unset TRACEPARENT; .*claude' "$dir/fake/literal" \
+    && ! grep -q '^unset TRACEPARENT; .*claude' <(typed_launch_body "$dir/fake/literal"); then
+    fail "disabled relaunch must clear the pane carrier before replacement launch"
+  fi
+  if grep -q '^export TRACEPARENT=' "$dir/fake/literal" \
+    || grep -q '^export TRACEPARENT=' <(typed_launch_body "$dir/fake/literal"); then
+    fail "disabled relaunch must not export a replacement trace carrier"
+  fi
   pass "fm-control relaunch: disabling tracing clears metadata and pane context"
 }
 
@@ -584,7 +605,7 @@ test_harness_switch_moves_the_record_and_clears_prior_wiring() {
   [ "$(meta_field "$dir" rl4 harness)" = codex ] || fail "the record should follow the switch"
   [ ! -e "$dir/wt/.claude/settings.local.json" ] \
     || fail "the previous harness's per-task wiring must be cleared on a switch"
-  assert_grep "codex" "$dir/fake/literal" "the replacement launch should be the new harness"
+  assert_contains "$(typed_launch_body "$dir/fake/literal")" "codex" "the replacement launch should be the new harness"
   [ "$(journal_field "$dir" rl4 from_harness)" = claude ] || fail "the journal should record the origin harness"
   [ "$(journal_field "$dir" rl4 to_harness)" = codex ] || fail "the journal should record the target harness"
   pass "fm-control relaunch: switching harness is one ordinary relaunch, and the old wiring goes with the old agent"
@@ -699,8 +720,8 @@ test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
   expect_code 0 "$rc" "native Ultra relaunch failed: $out"
   [ "$(meta_field "$dir" "$id" effort)" = ultra ] || fail "relaunch lost Ultra metadata"
   [ "$(meta_field "$dir" "$id" model)" = codex-native/gpt-6-astra ] || fail "relaunch lost native model"
-  assert_contains "$(cat "$dir/fake/literal")" "--codex-effort 'ultra'" "relaunch lost native flag"
-  assert_not_contains "$(cat "$dir/fake/literal")" "--thinking 'ultra'" "relaunch used an invalid Pi level"
+  assert_contains "$(typed_launch_body "$dir/fake/literal")" "--codex-effort 'ultra'" "relaunch lost native flag"
+  assert_not_contains "$(typed_launch_body "$dir/fake/literal")" "--thinking 'ultra'" "relaunch used an invalid Pi level"
   pass "native Ultra relaunch preserves its profile and rejects an unsupported model before stopping"
 }
 

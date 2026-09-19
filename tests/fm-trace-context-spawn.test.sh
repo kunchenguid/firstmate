@@ -79,7 +79,22 @@ case "${1:-}" in
           -t) skip_next=1; continue ;;
           -l) continue ;;
           Enter|C-m) continue ;;
-          *) printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG" ;;
+          *)
+            payload=$a
+            script=
+            case "$payload" in
+              '/bin/sh '*)
+                script=${payload#/bin/sh }
+                script=${script#\'}
+                script=${script%\'}
+                ;;
+            esac
+            if [ -n "$script" ] && [ -f "$script" ]; then
+              cat "$script" >> "$FM_FAKE_LAUNCH_LOG"
+            else
+              printf '%s\n' "$payload" >> "$FM_FAKE_LAUNCH_LOG"
+            fi
+            ;;
         esac
       done
     fi

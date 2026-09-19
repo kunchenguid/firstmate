@@ -94,7 +94,10 @@ fm_test_fake_gh_axi() {
 # fm_test_fake_tmux_spawn <fakebin>
 # Spawn-world tmux: pane_current_path from FM_FAKE_PANE_PATH, session named
 # firstmate, window ops succeed, send-keys succeed. When FM_FAKE_LAUNCH_LOG is
-# set, each send-keys -l payload is appended one per line. When FM_FAKE_PANE_LOG
+# set, each send-keys -l payload is appended one per line. A payload of
+# `/bin/sh <script>` logs the script body instead, so assertions still see
+# the command the pane will run. Set FM_FAKE_TYPED_LAUNCH_LOG to record the
+# typed keys as sent. When FM_FAKE_PANE_LOG
 # is set, each send-keys TEXT-LINE payload (the pre-launch pane exports, which
 # carry no -l) is appended there instead, one per line in send order. Optional
 # FM_FAKE_DUPLICATE_WINDOW is printed from list-windows.
@@ -120,11 +123,29 @@ case "${1:-}" in
     ;;
   has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
   send-keys)
-    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ] || [ -n "${FM_FAKE_TYPED_LAUNCH_LOG:-}" ]; then
       prev=
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
-          printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+          if [ -n "${FM_FAKE_TYPED_LAUNCH_LOG:-}" ]; then
+            printf '%s\n' "$a" >> "$FM_FAKE_TYPED_LAUNCH_LOG"
+          fi
+          if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+            payload=$a
+            script=
+            case "$payload" in
+              '/bin/sh '*)
+                script=${payload#/bin/sh }
+                script=${script#\'}
+                script=${script%\'}
+                ;;
+            esac
+            if [ -n "$script" ] && [ -f "$script" ]; then
+              cat "$script" >> "$FM_FAKE_LAUNCH_LOG"
+            else
+              printf '%s\n' "$payload" >> "$FM_FAKE_LAUNCH_LOG"
+            fi
+          fi
         fi
         prev=$a
       done

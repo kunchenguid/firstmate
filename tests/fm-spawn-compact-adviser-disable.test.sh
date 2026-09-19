@@ -218,7 +218,7 @@ case "${1:-}" in
       printf '%s\n' "$payload" >> "$D/literal"
       case "$payload" in
         /exit|/quit) printf 'zsh' > "$D/command" ;;
-        *'encode launch-brief'*) printf 'codex' > "$D/command" ;;
+        '/bin/sh '*|*'encode launch-brief'*) printf 'codex' > "$D/command" ;;
       esac
     else
       printf '%s\n' "$payload" >> "$D/keys"
@@ -247,7 +247,7 @@ SH
 }
 
 test_relaunch_rebuilds_the_switch() {
-  local setting dir home proj wt id out status seen launch preamble
+  local setting dir home proj wt id out status seen launch preamble typed script
   for setting in absent enabled; do
     id="relaunch-$setting-a1"
     dir="$TMP_ROOT/relaunch-$setting"
@@ -289,8 +289,13 @@ test_relaunch_rebuilds_the_switch() {
 
     grep -qx 'export COMPACT_ADVISER_DISABLE=1' "$dir/fake/keys" \
       || fail "relaunch with allowlist=$setting did not re-export the compact-adviser switch into the pane"
-    launch=$(grep 'encode launch-brief' "$dir/fake/literal" | tail -1)
-    [ -n "$launch" ] || fail "relaunch with allowlist=$setting sent no replacement launch command"
+    typed=$(grep '^/bin/sh ' "$dir/fake/literal" | tail -1)
+    [ -n "$typed" ] || fail "relaunch with allowlist=$setting sent no replacement launch command"
+    script=${typed#/bin/sh }
+    script=${script#\'}
+    script=${script%\'}
+    [ -f "$script" ] || fail "relaunch with allowlist=$setting launch script is missing: $script"
+    launch=$(cat "$script")
     install_env_probe "$dir/fakebin" codex
     preamble=$(grep '^export ' "$dir/fake/keys")
     seen=$(env -i HOME="$dir/user-home" PATH="$dir/fakebin:$PATH" TERM=xterm \

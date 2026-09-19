@@ -494,9 +494,18 @@ case "${1:-}" in
       prev=$arg
     done
     if [ -n "$literal" ]; then
+      body=$literal
       case "$literal" in
+        '/bin/sh '*)
+          script=${literal#/bin/sh }
+          script=${script#\'}
+          script=${script%\'}
+          [ -f "$script" ] && body=$(cat "$script")
+          ;;
+      esac
+      case "$body" in
         *--prompt-interactive*)
-          printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
+          printf '%s\n' "$body" >> "$FM_FAKE_LAUNCH_LOG"
           printf 'launched\n' > "$FM_FAKE_AGY_STATE"
           ;;
       esac
