@@ -747,10 +747,10 @@ safe_checkpoint() {
     marker=$(cat "$WT/.fm-secondmate-home" 2>/dev/null || true)
     [ "$marker" = "$ID" ] \
       || die "task $ID's home $WT is not marked as its own seeded secondmate home (marker: ${marker:-none}); refusing to relaunch"
-    [ -d "$WT/state" ] \
+    # Do not walk state/ with find(1): watcher scratch files can vanish
+    # mid-scan and make find fail even when every child *.meta is readable.
+    [ -d "$WT/state" ] && [ -r "$WT/state" ] && [ -x "$WT/state" ] \
       || die "secondmate $ID's home has no readable state directory, so its child work cannot be accounted for; refusing to relaunch"
-    find "$WT/state" -mindepth 1 -maxdepth 1 -print >/dev/null 2>&1 \
-      || die "secondmate $ID's child records cannot be traversed; refusing to relaunch"
     children=0
     for child_meta in "$WT/state"/*.meta; do
       if [ ! -e "$child_meta" ] && [ ! -L "$child_meta" ]; then
