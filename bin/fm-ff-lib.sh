@@ -198,20 +198,196 @@ validate_secondmate_home() {
   VALIDATED_HOME="$abs_home"
 }
 
+# GitHub identity comes from the configured fetch URL, never the push URL
+# (which can be a gate or a different repository). Git still applies insteadOf
+# transport rewrites when it dials that URL. Non-GitHub origins retain ordinary
+# Git sync.
+#
+# Recognize github.com across every spelling Git accepts instead of a fixed set
+# of literals: any scheme URL, with optional userinfo and port, and the scp-like
+# [user@]host:path shorthand. Prints <owner>/<repo> for a GitHub remote; a
+# remote that definitively lives somewhere else (another host, a local path)
+# returns FF_NOT_GITHUB, and a spelling that cannot be placed at all returns
+# FF_UNCLASSIFIED so callers refuse loudly instead of skipping silently.
+FF_NOT_GITHUB=1
+FF_UNCLASSIFIED=2
+ff_github_repo() { # <url>
+  local url=$1 rest host path
+  case "$url" in
+    file://*|/*|./*|../*|~*) return "$FF_NOT_GITHUB" ;;
+    *://*) rest=${url#*://} ;;
+    *:*)
+      case "${url%%:*}" in ""|*/*) return "$FF_UNCLASSIFIED" ;; esac
+      rest="${url%%:*}/${url#*:}" ;;
+    *) return "$FF_NOT_GITHUB" ;;
+  esac
+  host=${rest%%/*}
+  [ "$host" != "$rest" ] || return "$FF_UNCLASSIFIED"
+  path=${rest#*/}
+  host=${host##*@}
+  host=${host%%:*}
+  case "$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')" in
+    github.com) ;;
+    "") return "$FF_UNCLASSIFIED" ;;
+    *) return "$FF_NOT_GITHUB" ;;
+  esac
+  path=${path#/}
+  path=${path%/}
+  path=${path%.git}
+  [[ "$path" =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]] || return "$FF_UNCLASSIFIED"
+  printf '%s\n' "$path"
+}
+
+# Fork discovery needs authenticated gh-axi and node. When they cannot answer,
+# fork-ness is UNKNOWN rather than absent, so the ordinary Git origin path stays
+# intact instead of blocking every update - but FF_FORK_UNVERIFIED records the
+# reason so no caller can read the result as proof the checkout is current.
+FF_FORK_UNVERIFIED=""
+ff_discovery_warn() { # <repo> <reason>
+  FF_FORK_UNVERIFIED="$2"
+  printf 'fork sync: discovery unavailable for %s: %s; updating from origin unverified\n' \
+    "$1" "$2" >&2
+}
+
+# Before an origin update, discover GitHub's fork relationship, even without an
+# upstream remote. Use the parent's default branch only when its name matches
+# the fork default; a different default requires operator reconciliation.
+# Fetch both tips, prove ancestry, and push the parent's existing commit to the
+# exact fork fetch URL with an ordinary non-forced push. No local branch, merge
+# commit, configured push URL, or other ref is involved. A fork ahead of its
+# parent is already synchronized; once a fork IS established, divergence and
+# every transport failure fail closed. An origin spelling that cannot be
+# classified at all also fails closed. An origin GitHub reports as authoritative
+# returns before FF_ORIGIN_DEFAULT is set, so the no-fork case stays a no-op.
+# The final origin fetch happens only after this succeeds. FF_FETCH_ERROR
+# carries an actionable failure to ff_target.
+ff_sync_origin_fork() { # <dir>
+  local dir=$1 url status repo metadata record fork name branch parent
+  local parent_branch source fork_tip parent_tip out
+  FF_ORIGIN_DEFAULT=""
+  FF_FORK_UNVERIFIED=""
+  # Several values is the ordinary push-to-mirrors config; Git fetches from the
+  # first, and the configured spelling is the identity insteadOf must not rewrite.
+  url=$(git -C "$dir" config --get-all remote.origin.url | head -1)
+  [ -n "$url" ] || return 1
+  repo=$(ff_github_repo "$url") || status=$?
+  if [ -z "$repo" ]; then
+    [ "$status" = "$FF_NOT_GITHUB" ] && return 0
+    FF_FETCH_ERROR="fork discovery failed: unrecognizable origin URL $url"
+    return 1
+  fi
+  metadata=$(gh-axi api "/repos/$repo" --hostname github.com --full --jq \
+    '{fork: .fork, name: .full_name, branch: .default_branch, parent: (.parent.full_name // "-"), parentBranch: (.parent.default_branch // "-")}' 2>&1) || {
+    ff_discovery_warn "$repo" "$(first_line "$metadata")"
+    return 0
+  }
+  # Decode only this flat, caller-selected TOON record; refuse missing, duplicate,
+  # extra, or malformed fields instead of interpreting an error body as no fork.
+  record=$(printf '%s\n' "$metadata" | node -e '
+    let input = "";
+    process.stdin.on("data", chunk => input += chunk);
+    process.stdin.on("end", () => {
+      try {
+        const keys = ["fork", "name", "branch", "parent", "parentBranch"];
+        const fields = {};
+        for (const line of input.trim().split("\n")) {
+          const match = line.match(/^([A-Za-z]+): (.+)$/);
+          if (!match || !keys.includes(match[1]) || match[1] in fields) throw Error();
+          const raw = match[2];
+          fields[match[1]] = raw.startsWith("\"") ? JSON.parse(raw) : raw;
+        }
+        if (keys.some(key => typeof fields[key] !== "string" || !fields[key] || /\s/.test(fields[key]))) throw Error();
+        if (!["true", "false"].includes(fields.fork)) throw Error();
+        process.stdout.write(keys.map(key => fields[key]).join("\t"));
+      } catch { process.exitCode = 1; }
+    });' 2>/dev/null) || {
+    ff_discovery_warn "$repo" "unreadable repository metadata"
+    return 0
+  }
+  IFS=$'\t' read -r fork name branch parent parent_branch <<< "$record"
+  if [ "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" != "$(printf '%s' "$repo" | tr '[:upper:]' '[:lower:]')" ]; then
+    ff_discovery_warn "$repo" "metadata describes $name"
+    return 0
+  fi
+  [ "$fork" = true ] || return 0
+
+  # A fork IS established from here on, so every remaining failure is a real
+  # synchronization failure and must stop the update.
+  FF_FETCH_ERROR="fork sync failed: $repo reports an unusable default branch $branch"
+  git check-ref-format "refs/heads/$branch" >/dev/null 2>&1 || return 1
+  FF_ORIGIN_DEFAULT=$branch
+  FF_FETCH_ERROR="fork sync failed: $repo reports an unusable parent $parent"
+  ff_github_repo "https://github.com/$parent" >/dev/null || return 1
+  [ "$parent" != "$name" ] || return 1
+  FF_FETCH_ERROR="fork sync refused: $repo default $branch differs from $parent default $parent_branch"
+  [ "$branch" = "$parent_branch" ] || return 1
+
+  # Derive the parent URL from origin's own transport; no separately named
+  # upstream remote is required.
+  case "$url" in
+    git@*) source="git@github.com:$parent.git" ;;
+    ssh://*) source="ssh://git@github.com/$parent.git" ;;
+    *) source="https://github.com/$parent.git" ;;
+  esac
+  FF_FETCH_ERROR="fork sync failed: cannot fetch $repo/$branch"
+  git -C "$dir" fetch --quiet --no-tags -- "$url" "refs/heads/$branch" 2>/dev/null || return 1
+  fork_tip=$(git -C "$dir" rev-parse --verify FETCH_HEAD) || return 1
+  FF_FETCH_ERROR="fork sync failed: cannot fetch $parent/$parent_branch"
+  git -C "$dir" fetch --quiet --no-tags -- "$source" "refs/heads/$parent_branch" 2>/dev/null || return 1
+  parent_tip=$(git -C "$dir" rev-parse --verify FETCH_HEAD) || return 1
+  git -C "$dir" merge-base --is-ancestor "$parent_tip" "$fork_tip" 2>/dev/null && return 0
+  FF_FETCH_ERROR="fork sync refused: $repo/$branch diverged from $parent/$parent_branch"
+  git -C "$dir" merge-base --is-ancestor "$fork_tip" "$parent_tip" 2>/dev/null || return 1
+  if ! out=$(git -C "$dir" -c push.followTags=false push --porcelain -- "$url" "$parent_tip:refs/heads/$branch" 2>&1); then
+    FF_FETCH_ERROR="fork sync failed: cannot fast-forward $repo/$branch: $(first_line "$out")"
+    return 1
+  fi
+  printf 'fork sync: fast-forwarded %s/%s from %s/%s\n' "$repo" "$branch" "$parent" "$parent_branch"
+}
+
 # A single fetch refreshes every worktree that shares an object store, so fetch
 # each distinct git-common-dir at most once. Used ONLY by the origin base mode;
-# the local-HEAD sync never fetches.
+# the local-HEAD sync never fetches. Each memo record is "<common-dir>\t<fork
+# verdict>": the verdict belongs to that store, so a later worktree of it is
+# labelled from its own discovery rather than from whichever store was most
+# recently fetched.
 FETCHED=""
+FF_FETCH_ERROR=""
+# Sticky origin failure flag consumed by fm-update.sh after its fleet sweep.
+# Raised at exactly ONE place - the fork-synchronization branch below - so an
+# ordinary transport failure (offline, VPN, an unreachable host) stays a
+# reported skip while an established fork that could not be synchronized fails
+# the run. No other site decides this.
+FF_UPDATE_FAILED=0
+# Sticky run-level answer to "did this run actually verify currency". Rolled up
+# from the same per-store FF_FORK_UNVERIFIED the status labels read, at the one
+# point where it is known, so a label and this verdict cannot disagree.
+# fm-update.sh publishes it and the remote route carries it over the wire.
+FF_RUN_VERIFIED=yes
 fetch_once() {
-  local dir=$1 common
+  local dir=$1 common record
   common=$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
   if [ -n "$common" ]; then
-    case " $FETCHED " in
-      *" $common "*) return 0 ;;
-    esac
+    while IFS= read -r record; do
+      [ "${record%%$'\t'*}" = "$common" ] || continue
+      FF_FORK_UNVERIFIED=${record#*$'\t'}
+      return 0
+    done <<< "$FETCHED"
   fi
+  FF_FETCH_ERROR="fetch failed"
+  if ! ff_sync_origin_fork "$dir"; then
+    FF_UPDATE_FAILED=1
+    return 1
+  fi
+  FF_FETCH_ERROR="fetch failed"
   if git -C "$dir" fetch origin --prune --quiet 2>/dev/null; then
-    [ -n "$common" ] && FETCHED="$FETCHED $common"
+    if [ -n "$FF_ORIGIN_DEFAULT" ]; then
+      # Fetch the actual default explicitly even with a narrow clone refspec.
+      git -C "$dir" fetch --quiet --no-tags origin \
+        "+refs/heads/$FF_ORIGIN_DEFAULT:refs/remotes/origin/$FF_ORIGIN_DEFAULT" 2>/dev/null || return 1
+      git -C "$dir" symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$FF_ORIGIN_DEFAULT" || return 1
+    fi
+    [ -n "$common" ] && FETCHED="$FETCHED$common"$'\t'"$FF_FORK_UNVERIFIED"$'\n'
     return 0
   fi
   return 1
@@ -281,8 +457,9 @@ live_secondmate_meta_records() {
 #   FF_INSTR  = comma list of changed instruction paths (only when updated)
 #
 # base_mode selects where the fast-forward base comes from:
-#   origin       - fetch origin and advance to origin/<default> (the /updatefirstmate
-#                  path); requires an origin remote and network reachability.
+#   origin       - synchronize a GitHub fork via ff_sync_origin_fork above, then
+#                  fetch origin and advance to origin/<default>; requires an
+#                  origin remote and network reachability.
 #   <commit-ish> - advance to that LOCAL commit with NO fetch and no origin
 #                  dependency (the local-HEAD secondmate sync). The commit must
 #                  already exist in the target's object store, which it always does
@@ -307,11 +484,6 @@ ff_target() {
   fi
 
   local default base cur instr local_rev base_rev before after out
-  default=$(default_branch "$dir") || {
-    echo "$label: skipped: cannot determine default branch"
-    return 0
-  }
-
   # Resolve the fast-forward base from base_mode (see header).
   if [ "$base_mode" = origin ]; then
     if ! git -C "$dir" remote get-url origin >/dev/null 2>&1; then
@@ -319,9 +491,17 @@ ff_target() {
       return 0
     fi
     if ! fetch_once "$dir"; then
-      echo "$label: skipped: fetch failed"
+      FF_RUN_VERIFIED=no
+      echo "$label: skipped: $FF_FETCH_ERROR"
       return 0
     fi
+    [ -z "$FF_FORK_UNVERIFIED" ] || FF_RUN_VERIFIED=no
+  fi
+  default=$(default_branch "$dir") || {
+    echo "$label: skipped: cannot determine default branch"
+    return 0
+  }
+  if [ "$base_mode" = origin ]; then
     base="origin/$default"
   else
     base="$base_mode"
@@ -357,7 +537,11 @@ ff_target() {
   }
   if [ "$local_rev" = "$base_rev" ]; then
     FF_STATUS="current"
-    echo "$label: already current"
+    if [ -n "$FF_FORK_UNVERIFIED" ] && [ "$base_mode" = origin ]; then
+      echo "$label: cannot confirm current: fork sync unavailable ($FF_FORK_UNVERIFIED)"
+    else
+      echo "$label: already current"
+    fi
     return 0
   fi
   if ! git -C "$dir" merge-base --is-ancestor HEAD "$base" 2>/dev/null; then

@@ -420,6 +420,9 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 ## Self-updates stay safe
 
 `/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin` without touching project clones.
+Because `origin` is the captain's own fork in a forked installation, fetching it alone can honestly report `already current` against code the fork's parent has long since moved past.
+So before that comparison the updater discovers the GitHub fork relationship from the origin URL itself - no separately named upstream remote is required - and fast-forwards the fork's default branch to the parent's existing commit with an ordinary non-forced push, never a local commit or a merge; an authoritative origin needs no such step and stays a no-op.
+Currency is never claimed on an unverified run: when fork state cannot be determined the origin update still proceeds but refuses to report the target as current, and every remote host publishes its own verdict back to the parent so a single run cannot be authoritative locally and blind about a host.
 It restarts every live second mate whose home the pass left on the target commit through a persist-gated replacement, including a home that needed no advance, because a restart is also the only thing that re-resolves launch-time harness wiring; the re-read nudge is retained only as the fallback for live agents whose runtime cannot prove a restart.
 For a remote route, the configured code root updates from its own origin on that host before the persistent home fast-forwards to the code-root commit.
 The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.

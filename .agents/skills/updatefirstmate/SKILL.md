@@ -39,11 +39,23 @@ This touches only the firstmate repo and its own worktrees, never anything under
    ```sh
    bin/fm-update.sh
    ```
-   It fast-forwards this firstmate repo's default branch from origin, then updates every registered local or remote secondmate home through its placement-specific guarded path.
-   It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by three action lines that tell you exactly what to do next:
+   It synchronizes a GitHub fork before comparing this firstmate repo with origin, then updates every registered local or remote secondmate home through its placement-specific guarded path.
+   `bin/fm-ff-lib.sh` owns fork discovery and synchronization; no separately named upstream remote is required, and an authoritative origin needs no fork synchronization.
+   Fork discovery on a GitHub origin uses `gh-axi` API access, and advancing a fork requires Git push permission to that fork's default branch.
+   Divergent forks, mismatched upstream and fork default-branch names, an unrecognizable origin URL, or a failed fork fetch or push produce a visible failure and a nonzero exit instead of an `already current` result.
+   An ordinary transport failure (offline, VPN, an unreachable remote host) is a reported skip and does not change the exit status.
+   When `gh-axi` or `node` cannot answer at all, fork-ness is unknown rather than absent: the ordinary Git origin update still runs, but the status line reads `cannot confirm current: fork sync unavailable (<reason>)` instead of `already current`, so an unverified run never claims freshness.
+   Resolve that reported failure before claiming the affected home is current.
+   It prints a fork-sync line when a fork advances and one status line per target (`updated <old>..<new>` / `already current` / `cannot confirm current: <reason>` / `skipped: <reason>`), followed by four summary lines that tell you exactly what to do next:
+   - `origin-verified: yes|no` - `no` whenever any origin fast-forward in this run, local or on a remote host, could not verify fork state; the run is then not authoritative about freshness
    - `reread-firstmate: yes|no`
    - `restart-secondmates: fm-<id>...|none`
    - `nudge-secondmates: fm-<id>...|none`
+
+   A nonzero exit does NOT mean the run did nothing and does NOT excuse you from the rest of this skill.
+   The four summary lines above are always printed and always complete, including on a nonzero exit, because the targets that did update really did update.
+   Read them and act on them either way: live secondmates may still need restarting or steering, and skipping that is exactly how a mate keeps running the stale instructions it was launched with.
+   Do not stop at step 1 because the exit code was nonzero; carry on through the steps below, and report the failure alongside what you did.
 
    The two second-mate sets are disjoint and the script owns the split; do not re-derive it.
    `restart-secondmates:` carries every live mate the pass left on the latest commit, whether it advanced or was already there.
