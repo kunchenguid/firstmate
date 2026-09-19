@@ -266,6 +266,263 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+# --- unit layer: MSYS/Windows-native ancestry fallback ------------------------
+#
+# fm_harness_ancestry_pids_windows is tried only when the POSIX ps walk above
+# finds no harness at all. It is driven directly (and through
+# fm_harness_ancestry_pids to prove the trigger condition) behind a fake
+# powershell.exe, a fake MSYS /proc tree, and an overridable starting pid, so
+# these cases run on any host without a real MSYS winpid or a real Windows
+# process table.
+
+# Run one library expression with <fakebin> shadowing PATH, and the fake MSYS
+# /proc tree and native Windows table under test. kill is stubbed identically
+# to lib_eval. <start_pid> seeds FM_MSYS_PID_OVERRIDE so the hybrid fallback's
+# logical-ancestry climb starts from a fixture-controlled pid instead of the
+# real $$ of this bash -c subshell.
+win_lib_eval() {  # <fakebin> <proc_root> <start_pid> <expression>
+  local fakebin=$1 proc_root=$2 start_pid=$3 expr=$4
+  PATH="$fakebin:$PATH" FM_PROC_ROOT_OVERRIDE="$proc_root" \
+    FM_MSYS_PID_OVERRIDE="$start_pid" bash -c "
+    . \"\$0\"
+    kill() { return 0; }
+    $expr
+  " "$LIB"
+}
+
+# Write one fake MSYS /proc/<pid> entry for the hybrid fallback's
+# logical-ancestry climb: <winpid> is always recorded, <ppid> only when this
+# hop has a further MSYS-visible parent - a real MSYS root has no /proc/1, so
+# the last hop in a chain omits it to model that boundary.
+write_msys_proc_entry() {  # <proc_root> <msys-pid> <winpid> [<msys-ppid>]
+  local root=$1 pid=$2 winpid=$3 ppid=${4:-}
+  mkdir -p "$root/$pid"
+  printf '%s\n' "$winpid" > "$root/$pid/winpid"
+  [ -n "$ppid" ] && printf '%s\n' "$ppid" > "$root/$pid/ppid"
+}
+
+# A ps fixture whose whole ancestry is ordinary shells up to a host-shaped pid
+# 1, so the POSIX walk above exhausts all 16 hops (well short of that here)
+# without ever matching, exactly the condition that must trigger the fallback.
+write_no_harness_ps_fixture() {  # <fakebin>
+  local fakebin=$1
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  1:comm=) printf '%s\n' systemd ;;
+  1:args=) printf '%s\n' systemd ;;
+  1:ppid=) printf '%s\n' 0 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' bash ;;
+  *:ppid=) printf '%s\n' 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+}
+
+test_windows_fallback_skipped_when_winpid_unreadable() {
+  local dir fakebin
+  dir="$TMP_ROOT/windows-no-winpid"
+  fakebin=$(fm_fakebin "$dir")
+  write_no_harness_ps_fixture "$fakebin"
+  # No proc tree and no powershell.exe stub at all: a powershell call would be
+  # a hard failure (command not found), proving the fallback never gets that
+  # far without a readable MSYS /proc/<pid>/winpid.
+  if win_lib_eval "$fakebin" "$dir/no-such-proc" 500 'fm_harness_ancestry_pids'; then
+    fail "ancestry succeeded with no harness in ps and no readable MSYS /proc winpid"
+  fi
+  pass "session-lock: the Windows fallback is a no-op when MSYS's /proc/<pid>/winpid is not readable"
+}
+
+test_windows_fallback_not_tried_when_posix_finds_a_harness() {
+  local dir fakebin marker got
+  dir="$TMP_ROOT/windows-not-needed"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  marker="$dir/state/powershell-called"
+  # The real invoking pid is unknown here, so the wildcard branch stands in for
+  # "whatever ordinary shell called this" and climbs straight to a harness at
+  # pid 900, exactly test_harness_beyond_a_gap_never_owns_the_lock's shape.
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  900:comm=) printf '%s\n' claude ;;
+  900:args=) printf '%s\n' claude ;;
+  900:ppid=) printf '%s\n' 910 ;;
+  910:comm=) printf '%s\n' bash ;;
+  910:args=) printf '%s\n' bash ;;
+  910:ppid=) printf '%s\n' 1 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' bash ;;
+  *:ppid=) printf '%s\n' 900 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  cat > "$fakebin/powershell.exe" <<SH
+#!/usr/bin/env bash
+touch "$marker"
+exit 1
+SH
+  chmod +x "$fakebin/powershell.exe"
+  got=$(win_lib_eval "$fakebin" "$dir/unused-proc" 900 'fm_harness_ancestry_pids') \
+    || fail "the POSIX ancestry match was lost once the Windows fallback path was wired up"
+  [ "$got" = 900 ] || fail "ancestry resolved '$got', expected the POSIX-matched harness pid 900"
+  [ -e "$marker" ] && fail "the Windows fallback ran even though the POSIX walk already found a harness"
+  pass "session-lock: the Windows fallback is never tried once the POSIX walk already found a harness"
+}
+
+test_windows_fallback_climbs_and_stops_like_posix_walk() {
+  local dir fakebin proc_root got
+  dir="$TMP_ROOT/windows-claude-chain"
+  fakebin=$(fm_fakebin "$dir")
+  write_no_harness_ps_fixture "$fakebin"
+  proc_root="$dir/proc"
+  # A single MSYS hop crossing directly to winpid 500 (no ppid entry, i.e. the
+  # MSYS boundary is reached immediately) - the native side climbs freely
+  # through an ordinary bash.exe, then hits a two-hop claude.exe chain, then
+  # stops at the first gap above it - the same "climb, extend through Claude,
+  # stop at the gap" shape as the POSIX walk.
+  write_msys_proc_entry "$proc_root" 500 500
+  cat > "$fakebin/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+cat <<'TABLE'
+500,600,bash.exe
+600,700,claude.exe
+700,800,claude.exe
+800,900,cmd.exe
+TABLE
+SH
+  chmod +x "$fakebin/powershell.exe"
+  got=$(win_lib_eval "$fakebin" "$proc_root" 500 'fm_harness_ancestry_pids') \
+    || fail "the Windows fallback found no harness in a table with a claude.exe chain"
+  [ "$got" = "$(printf '600\n700')" ] \
+    || fail "Windows fallback resolved '$got', expected the contiguous claude.exe run 600,700"
+  pass "session-lock: the Windows fallback climbs past ordinary ancestors and stops at the gap after a claude chain"
+}
+
+test_windows_fallback_single_hop_harness_stops_immediately() {
+  local dir fakebin proc_root got
+  dir="$TMP_ROOT/windows-single-hop"
+  fakebin=$(fm_fakebin "$dir")
+  write_no_harness_ps_fixture "$fakebin"
+  proc_root="$dir/proc"
+  write_msys_proc_entry "$proc_root" 500 500
+  cat > "$fakebin/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+cat <<'TABLE'
+500,600,codex.exe
+600,700,claude.exe
+TABLE
+SH
+  chmod +x "$fakebin/powershell.exe"
+  got=$(win_lib_eval "$fakebin" "$proc_root" 500 'fm_harness_ancestry_pids') \
+    || fail "the Windows fallback found no harness for a matching first hop"
+  [ "$got" = 500 ] \
+    || fail "Windows fallback resolved '$got', expected only the single non-claude match 500"
+  pass "session-lock: the Windows fallback stops at a single non-claude match without climbing further"
+}
+
+test_windows_fallback_matches_case_insensitively_and_ignores_unknown_names() {
+  local dir fakebin proc_root got
+  dir="$TMP_ROOT/windows-case-insensitive"
+  fakebin=$(fm_fakebin "$dir")
+  write_no_harness_ps_fixture "$fakebin"
+  proc_root="$dir/proc"
+  write_msys_proc_entry "$proc_root" 500 500
+  cat > "$fakebin/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+cat <<'TABLE'
+500,600,explorer.exe
+600,700,Claude.EXE
+TABLE
+SH
+  chmod +x "$fakebin/powershell.exe"
+  got=$(win_lib_eval "$fakebin" "$proc_root" 500 'fm_harness_ancestry_pids') \
+    || fail "the Windows fallback did not match a differently-cased claude executable name"
+  [ "$got" = 600 ] \
+    || fail "Windows fallback resolved '$got', expected the case-insensitive match at pid 600"
+  pass "session-lock: the Windows fallback matches harness executable names case-insensitively"
+}
+
+test_windows_fallback_reports_failure_when_no_name_matches() {
+  local dir fakebin proc_root
+  dir="$TMP_ROOT/windows-no-match"
+  fakebin=$(fm_fakebin "$dir")
+  write_no_harness_ps_fixture "$fakebin"
+  proc_root="$dir/proc"
+  write_msys_proc_entry "$proc_root" 500 500
+  cat > "$fakebin/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+cat <<'TABLE'
+500,600,explorer.exe
+600,1,winlogon.exe
+TABLE
+SH
+  chmod +x "$fakebin/powershell.exe"
+  if win_lib_eval "$fakebin" "$proc_root" 500 'fm_harness_ancestry_pids'; then
+    fail "the Windows fallback reported success from a table with no harness executable at all"
+  fi
+  pass "session-lock: the Windows fallback reports failure when nothing in the table is a known harness"
+}
+
+# The regression case for this fix: fm-lock.sh reported "cannot locate harness
+# process in ancestry" in a real Herdr + Claude session on Windows even though
+# claude.exe was genuinely a few hops up. Diagnosis showed MSYS's fork()
+# emulation does not give a forked bash.exe a Windows ParentProcessId that
+# resolves to anything live - only MSYS's own /proc/<pid>/ppid bookkeeping
+# knows the real logical parent - and the real session chain nests several
+# such MSYS-forked bash generations (one per script-calls-script hop) between
+# the innermost shell and the native claude.exe ancestor.
+test_windows_fallback_crosses_nested_msys_fork_ancestry() {
+  local dir fakebin proc_root got
+  dir="$TMP_ROOT/windows-nested-msys-fork"
+  fakebin=$(fm_fakebin "$dir")
+  write_no_harness_ps_fixture "$fakebin"
+  proc_root="$dir/proc"
+  # Three MSYS-forked bash generations (10 -> 11 -> 12) before the MSYS root
+  # boundary (12 has no further ppid file, exactly like a real MSYS root
+  # having no /proc/1). Each inner hop's own winpid (501, 502) is deliberately
+  # NOT the crossing point, and the table below gives 501 a dead-end "native
+  # parent" that a walk trusting Win32_Process.ParentProcessId for an
+  # MSYS-forked pid would wrongly try to climb from and fail - reproducing the
+  # exact shape of the real failure.
+  write_msys_proc_entry "$proc_root" 10 501 11
+  write_msys_proc_entry "$proc_root" 11 502 12
+  write_msys_proc_entry "$proc_root" 12 500
+  cat > "$fakebin/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+cat <<'TABLE'
+501,999,bash.exe
+500,600,bash.exe
+600,700,claude.exe
+TABLE
+SH
+  chmod +x "$fakebin/powershell.exe"
+  got=$(win_lib_eval "$fakebin" "$proc_root" 10 'fm_harness_ancestry_pids') \
+    || fail "the Windows fallback did not cross a nested MSYS fork ancestry to reach the native claude.exe"
+  [ "$got" = 600 ] \
+    || fail "Windows fallback resolved '$got', expected the claude.exe pid 600 reached only via the topmost MSYS hop's winpid 500"
+  pass "session-lock: the Windows fallback climbs MSYS's own /proc ancestry across nested fork() hops before crossing into the native Windows tree"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -409,6 +666,13 @@ test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_windows_fallback_skipped_when_winpid_unreadable
+test_windows_fallback_not_tried_when_posix_finds_a_harness
+test_windows_fallback_climbs_and_stops_like_posix_walk
+test_windows_fallback_single_hop_harness_stops_immediately
+test_windows_fallback_matches_case_insensitively_and_ignores_unknown_names
+test_windows_fallback_reports_failure_when_no_name_matches
+test_windows_fallback_crosses_nested_msys_fork_ancestry
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

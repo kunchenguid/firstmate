@@ -108,6 +108,10 @@ fm_harness_process_matches() {  # <comm> <args>
 # claude), with no non-harness process between them. Which pid in that run is the
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
+#
+# When this POSIX walk finds no harness at all, fm_harness_ancestry_pids_windows
+# below is tried as an MSYS/Windows-native fallback; see its own header for when
+# and why.
 fm_harness_ancestry_pids() {
   local pid=$$ comm args extending=0 printed=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
@@ -128,6 +132,99 @@ fm_harness_ancestry_pids() {
     # launchd) is not harness-shaped, so fm_harness_process_matches rejects it.
     case "$pid" in '' | *[!0-9]*) break ;; esac
     [ "$pid" -ge 1 ] || break
+  done
+  [ "$printed" -eq 1 ] && return 0
+  fm_harness_ancestry_pids_windows
+}
+
+# True when Windows process name $1 (e.g. "claude.exe") is a verified harness
+# executable. Windows-native counterpart of fm_harness_process_matches, used
+# only by the winpid fallback below: FM_HARNESS_NAMES already carries each
+# harness's exact executable basename, so exact case-insensitive matching
+# against the name minus its .exe suffix is enough - Win32_Process exposes no
+# path or argv0 to widen the POSIX walk's extra evidence with, and none is
+# needed for the smallest fallback this exists to cover.
+FM_HARNESS_IS_CLAUDE_WIN=0
+fm_harness_windows_name_matches() {  # <windows process name, e.g. claude.exe>
+  local raw=$1 base name
+  base=$(printf '%s' "${raw%.[eE][xX][eE]}" | tr '[:upper:]' '[:lower:]')
+  FM_HARNESS_IS_CLAUDE_WIN=0
+  for name in "${FM_HARNESS_NAMES[@]}"; do
+    if [ "$base" = "$name" ]; then
+      [ "$name" = claude ] && FM_HARNESS_IS_CLAUDE_WIN=1
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Windows-native ancestry fallback for fm_harness_ancestry_pids, tried only when
+# the POSIX `ps` walk above finds no harness at all.
+#
+# MSYS/Git Bash's `ps` only reports processes visible through its own emulated
+# process table, so a harness that launched the current shell as a native
+# Windows process (not a Git-Bash/MSYS one) is invisible to that walk.
+#
+# Windows' own Win32_Process.ParentProcessId cannot be trusted to climb out of
+# MSYS, though: MSYS's fork() emulation does not give the child a live,
+# resolvable ParentProcessId on the Windows side - the value Windows records is
+# a transient fork-emulation process that Win32_Process no longer lists by the
+# time it is queried, even though the real logical parent shell is still very
+# much alive (confirmed by comparing MSYS's own $PPID, translated through its
+# own /proc/<ppid>/winpid, against Win32_Process's reported ParentProcessId for
+# the same child: they are different PIDs, and only the MSYS-derived one is
+# still live). So this climbs MSYS's own /proc/<pid>/ppid bookkeeping first -
+# the platform that actually owns that part of the process graph - purely
+# inside MSYS's logical ancestry, until it runs out of readable /proc entries
+# (a real MSYS root has no /proc/1, so every chain currently ends there).
+# /proc/<pid>/winpid is read at every hop only to remember the last real
+# Windows PID reachable that way, never to walk native ancestry itself, so the
+# topmost MSYS-visible process's own winpid is the exact point to cross into
+# the native tree from. Only from that crossing point is the native Windows
+# process tree - never visible to `ps` or to MSYS's /proc at all - fetched
+# with one Get-CimInstance Win32_Process query and walked in memory using the
+# same contiguous-harness rule as the POSIX walk: climb until the first match,
+# keep climbing only through a further run of matches, stop at the first gap
+# right after one.
+fm_harness_ancestry_pids_windows() {
+  local proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc} \
+    pid=${FM_MSYS_PID_OVERRIDE:-$$} winpid='' wp table line ppid name \
+    extending=0 printed=0
+
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    wp=$(cat "$proc_root/$pid/winpid" 2>/dev/null) || break
+    case "$wp" in '' | *[!0-9]*) break ;; esac
+    winpid=$wp
+    ppid=$(cat "$proc_root/$pid/ppid" 2>/dev/null) || break
+    case "$ppid" in '' | *[!0-9]*) break ;; esac
+    [ "$ppid" = "$pid" ] && break
+    pid=$ppid
+  done
+  [ -n "$winpid" ] || return 1
+
+  table=$(powershell.exe -NoProfile -NonInteractive -Command \
+    'Get-CimInstance Win32_Process | ForEach-Object { "{0},{1},{2}" -f $_.ProcessId,$_.ParentProcessId,$_.Name }' \
+    2>/dev/null) || return 1
+  table=$(printf '%s' "$table" | tr -d '\r')
+  [ -n "$table" ] || return 1
+
+  pid=$winpid
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    line=$(printf '%s\n' "$table" | grep "^${pid}," | head -n1)
+    [ -n "$line" ] || break
+    ppid=${line#*,}; ppid=${ppid%%,*}
+    name=${line##*,}
+    if fm_harness_windows_name_matches "$name"; then
+      printf '%s\n' "$pid"
+      printed=1
+      [ "$FM_HARNESS_IS_CLAUDE_WIN" -eq 1 ] || break
+      extending=1
+    elif [ "$extending" -eq 1 ]; then
+      break
+    fi
+    case "$ppid" in '' | *[!0-9]*) break ;; esac
+    [ "$ppid" = "$pid" ] && break
+    pid=$ppid
   done
   [ "$printed" -eq 1 ]
 }
