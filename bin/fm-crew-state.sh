@@ -627,9 +627,8 @@ nm_reclassify_failed_run_as_held_green() {
 # refused socket, timeout, non-zero answer - means the daemon is not provably
 # up, which is the only fact the coarse fallback needs.
 nm_daemon_probe_down() {
-  [ "$NM_DAEMON_ANSWER" = down ] && return 0
-  fm_nm_run_checked "$WT" "$NM_TIMEOUT" daemon status >/dev/null || return 0
-  return 1
+  nm_daemon_probe
+  [ "$NM_DAEMON_ANSWER" != up ]
 }
 
 # 0 only when the probe ANSWERED and that answer was "down". Suppressing a LIVE
@@ -643,15 +642,25 @@ nm_daemon_probe_down() {
 # without a timeout tool the `axi status` read above is empty too, so this whole
 # block is skipped.
 nm_daemon_answered_down() {
-  local rc=0
-  if [ -z "$NM_DAEMON_ANSWER" ]; then
-    fm_nm_run_checked "$WT" "$NM_TIMEOUT" daemon status >/dev/null || rc=$?
-    case "$rc" in
-      0|124) NM_DAEMON_ANSWER=other ;;
-      *) NM_DAEMON_ANSWER=down ;;
-    esac
-  fi
+  nm_daemon_probe
   [ "$NM_DAEMON_ANSWER" = down ]
+}
+
+# ONE bounded `daemon status` call per crew read, cached with the three answers
+# its two readers need to stay distinguishable: `up`, `unanswered` (the bounded
+# call's own 124), and `down`. Collapsing `up` and `unanswered` into a single
+# not-down bucket is what would force a second subprocess, and on a wedged
+# daemon each probe burns the full timeout inside the supervisor's per-crew
+# polling loop.
+nm_daemon_probe() {
+  local rc=0
+  [ -n "$NM_DAEMON_ANSWER" ] && return 0
+  fm_nm_run_checked "$WT" "$NM_TIMEOUT" daemon status >/dev/null || rc=$?
+  case "$rc" in
+    0)   NM_DAEMON_ANSWER=up ;;
+    124) NM_DAEMON_ANSWER=unanswered ;;
+    *)   NM_DAEMON_ANSWER=down ;;
+  esac
 }
 
 nm_ci_step_status() {
@@ -810,7 +819,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
             # failure, and a parked run keeps its gate and findings.
             HAVE_RUN=1
             if ! fm_nm_run_is_parked "$RUN_OUT" && nm_daemon_answered_down; then
-              RUN_DEAD_DAEMON="no-mistakes daemon unreachable; last run record $(strip_quotes "$(nm_field status)") - unverified; run id: $selected_id"
+              RUN_DEAD_DAEMON="no-mistakes daemon unreachable; last run record $(strip_quotes "$(nm_field status)") - unverified"
             fi
           else
             emit unknown run-step "selected run code identity unverified; run ids: $candidate_ids"
@@ -1043,7 +1052,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       # record is reported as the reason rather than replacing it.
       LOG_TIP_STATE=$(map_log_state "$LOG_LINE")
       if [ -n "$RUN_DEAD_DAEMON" ]; then
-        emit "$LOG_TIP_STATE" status-log "$(status_line_note "$LOG_LINE")${SEP}$RUN_DEAD_DAEMON"
+        emit "$LOG_TIP_STATE" status-log "$(status_line_note "$LOG_LINE")${SEP}${RUN_DEAD_DAEMON}${SELECTED_RUN_ID:+${SEP}run: $SELECTED_RUN_ID}"
       fi
       if [ "$RUN_STATE" != parked ]; then
         if [ "$RUN_STATE" = working ]; then

@@ -107,6 +107,7 @@ case "${1:-}" in
     # `no-mistakes daemon status` does when the daemon is not running.
     # FM_FAKE_DAEMON_TIMEOUT: the probe does not answer at all, which is what
     # the bounded call reports as 124 when `timeout` kills a slow daemon status.
+    [ -z "${FM_FAKE_DAEMON_PROBE_LOG:-}" ] || printf 'probe\n' >> "$FM_FAKE_DAEMON_PROBE_LOG"
     [ "${FM_FAKE_DAEMON_TIMEOUT:-0}" = 1 ] && exit 124
     [ "${FM_FAKE_DAEMON_DOWN:-0}" = 1 ] && exit 1
     printf '%s\n' 'daemon running (pid 4242)'
@@ -302,6 +303,7 @@ reset_fakes() {
   FM_FAKE_CI_LOGS=""
   FM_FAKE_DAEMON_DOWN=0
   FM_FAKE_DAEMON_TIMEOUT=0
+  FM_FAKE_DAEMON_PROBE_LOG=
   FM_FAKE_PR_STATE=MERGED
   FM_FAKE_PR_MERGED=true
   FM_FAKE_PR_READ_FAIL=0
@@ -313,7 +315,7 @@ reset_fakes() {
   unset FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
-  export FM_FAKE_DAEMON_DOWN FM_FAKE_DAEMON_TIMEOUT FM_FAKE_AXI_HOME
+  export FM_FAKE_DAEMON_DOWN FM_FAKE_DAEMON_TIMEOUT FM_FAKE_DAEMON_PROBE_LOG FM_FAKE_AXI_HOME
   export FM_FAKE_AXI_HOME_ERROR FM_FAKE_AXI_STATUS_RUN_ERROR FM_FAKE_AXI_STATUS_ERROR
   export FM_FAKE_PR_STATE FM_FAKE_PR_MERGED FM_FAKE_PR_READ_FAIL FM_FAKE_PR_READ_LOG FM_FAKE_PR_STATE_AXI
   export FM_FAKE_GLAB_STATE FM_FAKE_GLAB_READ_FAIL FM_FAKE_GLAB_READ_LOG
@@ -3981,7 +3983,7 @@ EOF
   assert_contains "$out" "state: parked" "the open decision is not hidden behind the unverified record"
   assert_contains "$out" "approve the schema change" "the crew's own decision note reaches the supervisor"
   assert_contains "$out" "daemon unreachable" "the unverified record is named as the reason"
-  assert_contains "$out" "run id: 01RUN" "the verdict names the run so a human can go look at it"
+  assert_contains "$out" "run: 01RUN" "the verdict names the run so a human can go look at it"
   assert_not_contains "$out" "superseded" "an unverified record never supersedes an open decision"
   pass "an open decision survives the dead-daemon verdict on the selected route"
 }
@@ -4036,6 +4038,68 @@ EOF
   assert_contains "$out" "state: parked" "an answered-down record leaves the open decision open"
   assert_contains "$out" "daemon unreachable" "the dead instrument is named as the reason"
   pass "an answered-down failed coarse record leaves the decision open"
+}
+
+# One question, one bounded subprocess. This path asks the daemon twice - once to
+# degrade the terminal record, once to decide whether the verdict may be handed
+# to the status-log tip - and on a wedged daemon each call burns the full
+# timeout inside the supervisor's per-crew polling loop.
+test_coarse_failed_path_probes_the_daemon_once() {
+  reset_fakes
+  local d local_short out probes; d=$(new_case coarse-failed-probe-count)
+  make_repo_on_branch "$d/wt" fm/feat-cfpc
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cfpc.meta" "window=fm:fm-feat-cfpc" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision: approve the schema change\n' > "$d/state/feat-cfpc.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-23 14:00
+  failed     fm/feat-cfpc ${local_short}  2026-08-23 13:53
+EOF
+)"
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_DAEMON_PROBE_LOG="$d/probes.log"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-cfpc
+  out=$(run_crew_state "$d" feat-cfpc)
+  probes=$(wc -l < "$d/probes.log" | tr -d ' ')
+  assert_contains "$out" "state: parked" "the verdict is unchanged by the probe count"
+  assert_equals "1" "$probes" "one bounded daemon probe answers both readers"
+  pass "the coarse failed path probes the daemon once"
+}
+
+# The selected route already appends `run: <id>` to every ordinary verdict, so
+# the dead-daemon detail must not carry its own copy.
+test_selected_route_dead_daemon_names_the_run_once() {
+  reset_fakes
+  local d h2 short out ids; d=$(new_case selected-id-once)
+  make_repo_on_branch "$d/wt" fm/feat-selonce
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  h2=$(mint_unfetched_fix_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/selonce.meta" "window=fm:fm-selonce" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/selonce.status"
+  FM_FAKE_RUN_HEAD="$h2"
+  FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  \"01RUN\",fm/feat-selonce,running,$h2,\"\""
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-selonce)"
+  FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-selonce $(git -C "$d/wt.pipe" rev-parse --short=7 HEAD)  2026-07-30 22:05
+  failed     fm/feat-selonce ${short}  2026-07-29 20:00
+EOF
+)"
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" selonce
+  out=$(run_crew_state "$d" selonce)
+  ids=$(printf '%s\n' "$out" | grep -o '01RUN' | wc -l | tr -d ' ')
+  assert_contains "$out" "daemon unreachable" "the dead instrument is still named"
+  assert_contains "$out" "01RUN" "the verdict still names the run"
+  assert_equals "1" "$ids" "the run id appears exactly once"
+  pass "the selected-route dead-daemon verdict names the run once"
 }
 
 # An unrecognised ledger word yields an unknown verdict from a LIVE daemon, so it
@@ -4616,6 +4680,8 @@ test_selected_run_dead_daemon_leaves_the_open_decision_open
 test_coarse_pending_ledger_word_reads_unknown
 test_unanswered_probe_does_not_turn_a_failed_coarse_record_into_a_gate
 test_answered_down_failed_coarse_record_leaves_the_decision_open
+test_coarse_failed_path_probes_the_daemon_once
+test_selected_route_dead_daemon_names_the_run_once
 test_unrecognised_ledger_word_keeps_the_ordinary_supersede_note
 test_unanswered_daemon_probe_does_not_suppress_live_run
 test_coarse_live_row_with_daemon_down_is_unverified
