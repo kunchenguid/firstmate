@@ -192,6 +192,10 @@ case "${1:-}" in
     exit 0
     ;;
   capture-pane)
+    if [ "${FM_FAKE_TRUST_DIALOG:-0}" = 1 ]; then
+      printf 'Trust project folder?\n'
+      exit 0
+    fi
     if [ "${FM_FAKE_TMUX_COMPOSER:-}" = pending ]; then
       printf '╭──────────────╮\n│ leftover txt │\n╰──────────────╯\n'
     else

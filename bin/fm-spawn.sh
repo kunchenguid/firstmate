@@ -3563,6 +3563,38 @@ rovo_endpoint_cleanup() {
   fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" 2>/dev/null || true
 }
 
+# Pi carries its brief on the launch command, so it needs no delivery gate,
+# but a fresh worktree can still park the TUI on Pi's folder-trust dialog.
+# Pre-registration is best effort and the gate below answers the documented
+# default with Enter if the dialog renders anyway.
+PI_TRUST_DIALOG='Trust project folder?'
+PI_TRUST_ANSWERED=0
+
+pi_capture() {
+  fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
+}
+
+pi_pane_shows_trust_dialog() {
+  printf '%s\n' "$1" | grep -Fq "$PI_TRUST_DIALOG"
+}
+
+pi_wait_for_trust() {
+  local pane i=0 max=${FM_PI_TRUST_POLLS:-10} interval=${FM_PI_TRUST_POLL_INTERVAL:-0.1}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(pi_capture)
+    if pi_pane_shows_trust_dialog "$pane"; then
+      if [ "$PI_TRUST_ANSWERED" -eq 0 ]; then
+        spawn_send_key "$T" Enter
+        PI_TRUST_ANSWERED=1
+      fi
+      return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 0
+}
+
 # agy carries its brief on the launch command, so it needs no delivery gate,
 # but a worktree agy does not trust parks the TUI on the folder-trust dialog
 # and an unanswered dialog sends the turn into agy's scratch directory instead
@@ -3763,6 +3795,7 @@ fi
 # it has done so. agy is crewmate/scout only (refused above for secondmate), so
 # only the worktree shape applies.
 AGY_TRUST_PREREGISTERED=0
+PI_TRUST_PREREGISTERED=0
 case "$HARNESS" in
 claude*)
   if [ "$KIND" = secondmate ]; then
@@ -3773,6 +3806,15 @@ claude*)
   if ! "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
     echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2
     exit 1
+  fi
+  ;;
+pi | pi-signed)
+  if [ "$KIND" != secondmate ]; then
+    if "$FM_ROOT/bin/fm-pi-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
+      PI_TRUST_PREREGISTERED=1
+    else
+      echo "warning: could not pre-register Pi workspace trust for $WT; the launch will answer the folder-trust dialog in window $T instead" >&2
+    fi
   fi
   ;;
 agy)
@@ -4635,6 +4677,9 @@ if [ "$HARNESS" = rovo ]; then
     rovo_spawn_fail "rovo brief pointer delivery was not confirmed in window $T"
     exit 1
   fi
+fi
+if [ "$HARNESS" = pi ] || [ "$HARNESS" = pi-signed ]; then
+  pi_wait_for_trust
 fi
 if [ "$HARNESS" = agy ]; then
   if ! agy_wait_for_working; then

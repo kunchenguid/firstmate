@@ -14,6 +14,7 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-claude-trust)
 
 TRUST="$ROOT/bin/fm-claude-trust.sh"
+PI_TRUST="$ROOT/bin/fm-pi-trust.sh"
 
 # make_case <name>: a project with one linked worktree plus an isolated Claude
 # config directory. Echoes "<case>|<proj>|<wt>|<config>".
@@ -793,6 +794,85 @@ test_worktree_mode_still_refuses_a_secondmate_home() {
 # The fail-closed half for secondmates: when the home's trust genuinely cannot be
 # recorded, the spawn must refuse rather than launch a pane that would wedge on
 # the dialog. This is the guard that never fired while the step was skipped.
+test_pi_trust_registers_only_the_exact_worktree_and_preserves_existing_entries() {
+  local case_dir proj wt config before out
+  case_dir="$TMP_ROOT/pi-trust"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  config="$case_dir/home"
+  mkdir -p "$config/.pi/agent"
+  fm_git_worktree "$proj" "$wt" pi-trust
+  printf '%s\n' '{"/existing":true,"/other":false}' > "$config/.pi/agent/trust.json"
+  before=$(node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1]));console.log(JSON.stringify(j))' "$config/.pi/agent/trust.json")
+  out=$(HOME="$config" "$PI_TRUST" "$wt" "$proj" 2>&1)
+  expect_code 0 $? "Pi trust registration should succeed: $out"
+  node - "$config/.pi/agent/trust.json" "$wt" "$before" <<'NODE' || fail "Pi trust registration did not preserve existing entries"
+const fs=require("node:fs");const [store,target,before]=process.argv.slice(2);const now=JSON.parse(fs.readFileSync(store));const old=JSON.parse(before);if(now["/existing"]!==old["/existing"]||now["/other"]!==old["/other"]||now[target]!==true)process.exit(1);
+NODE
+  assert_not_trusted_pi "$config/.pi/agent/trust.json" "$proj" "Pi trust registration trusted the project root"
+  pass "fm-pi-trust.sh: registers only the exact worktree and preserves existing entries"
+}
+
+test_pi_trust_registration_failure_is_nonfatal_to_the_helper_contract() {
+  local case_dir proj wt home out
+  case_dir="$TMP_ROOT/pi-trust-failure"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  home="$case_dir/home"
+  mkdir -p "$home/.pi/agent"
+  fm_git_worktree "$proj" "$wt" pi-trust-failure
+  printf '%s\n' '{not json' > "$home/.pi/agent/trust.json"
+  out=$(HOME="$home" "$PI_TRUST" "$wt" "$proj" 2>&1)
+  expect_code 1 $? "a corrupt Pi trust store must report registration failure: $out"
+  assert_contains "$out" "could not record trust" "Pi trust failure was not actionable"
+  pass "fm-pi-trust.sh: a registration failure remains available for the spawn's Enter fallback"
+}
+
+test_pi_spawn_falls_back_to_enter_when_registration_fails() {
+  local case_dir home proj wt fakebin id out
+  case_dir="$TMP_ROOT/pi-spawn-fallback"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  id=pi-trust-fallback
+  fm_test_spawn_home "$home" pi
+  fm_git_worktree "$proj" "$wt" pi-spawn-fallback
+  fm_test_spawn_brief "$home" "$id"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi)
+  mkdir -p "$home/user-home/.pi/agent"
+  printf '%s\n' '{not json' > "$home/user-home/.pi/agent/trust.json"
+  out=$(FM_FAKE_TRUST_DIALOG=1 HOME="$home/user-home" \
+    fm_test_run_spawn "$home" "$wt" "$fakebin" "$id" "$proj" pi \
+    --mode no-mistakes --yolo off)
+  expect_code 0 $? "a Pi spawn should recover from trust registration failure: $out"
+  assert_contains "$out" "could not pre-register Pi workspace trust" "the Pi registration failure was hidden"
+  pass "fm-spawn.sh: a Pi registration failure falls back to the folder-trust Enter"
+}
+
+test_pi_spawn_pretrusts_its_worktree() {
+  local case_dir home proj wt fakebin id out store
+  case_dir="$TMP_ROOT/pi-spawn"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  id=pi-trust-spawn
+  fm_test_spawn_home "$home" pi
+  fm_git_worktree "$proj" "$wt" pi-spawn
+  fm_test_spawn_brief "$home" "$id"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi)
+  out=$(HOME="$home/user-home" FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
+    fm_test_run_spawn "$home" "$wt" "$fakebin" "$id" "$proj" pi \
+    --mode no-mistakes --yolo off)
+  expect_code 0 $? "a Pi spawn should succeed: $out"
+  store="$home/user-home/.pi/agent/trust.json"
+  assert_trusted_pi "$store" "$wt" "the Pi spawn did not pre-register its worktree"
+  assert_not_trusted_pi "$store" "$proj" "the Pi spawn trusted the project root"
+  pass "fm-spawn.sh: a Pi spawn pre-registers the exact worktree before launch"
+}
+
+assert_trusted_pi() { node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1]));process.exit(j[process.argv[2]]===true?0:1);' "$1" "$2" || fail "$3"; }
+assert_not_trusted_pi() { node -e 'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1]));process.exit(j[process.argv[2]]===true?1:0);' "$1" "$2" || fail "$3"; }
+
 test_secondmate_spawn_fails_closed_when_home_trust_cannot_be_recorded() {
   local case_dir home out
   case_dir="$TMP_ROOT/sm-failclosed"
@@ -843,4 +923,8 @@ test_secondmate_standalone_clone_home_is_trusted
 test_secondmate_leased_worktree_home_is_trusted
 test_secondmate_home_trust_refuses_everything_unseeded
 test_worktree_mode_still_refuses_a_secondmate_home
+test_pi_trust_registers_only_the_exact_worktree_and_preserves_existing_entries
+test_pi_trust_registration_failure_is_nonfatal_to_the_helper_contract
+test_pi_spawn_pretrusts_its_worktree
+test_pi_spawn_falls_back_to_enter_when_registration_fails
 test_secondmate_spawn_fails_closed_when_home_trust_cannot_be_recorded
