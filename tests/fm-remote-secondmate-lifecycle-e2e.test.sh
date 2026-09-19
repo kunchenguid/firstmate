@@ -1113,14 +1113,14 @@ pass "startup repairs remote readiness before probing without relaunching"
 # from it with protocol_mismatch. The host-local state read must still reach
 # the live endpoint through the accepted client.
 make_herdr_client_pair "$TMP_ROOT/client-pair" 0.7.1 14 0.7.5 16
-export FM_HERDR_PAIR_DIR="$TMP_ROOT/client-pair"
+export TEST_HERDR_PAIR_DIR="$TMP_ROOT/client-pair"
 SHADOWED_STATE=$(FM_HOME="$REMOTE_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
   PATH="$TMP_ROOT/client-pair/stale:$REMOTE_ROOT/bin:$TMP_ROOT/client-pair/tools:/usr/bin:/bin" \
   "$REMOTE_ROOT/bin/fm-remote-secondmate-control.sh" state ios 2>"$TMP_ROOT/shadowed-state.err")
 [ "$SHADOWED_STATE" = alive ] \
   || fail "a live endpoint behind a stale shadowing client must still read alive, got: $SHADOWED_STATE ($(cat "$TMP_ROOT/shadowed-state.err"))"
 assert_contains "$(cat "$TMP_ROOT/client-pair/stale.log")" 'pane get' "the stale client was not the one the job PATH resolved first"
-unset FM_HERDR_PAIR_DIR
+unset TEST_HERDR_PAIR_DIR
 pass "the host-local state read steps around a stale shadowing herdr client"
 
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"

@@ -19,7 +19,7 @@
 # whose pane and agent reads model one live claude agent at fm-remote:wCY:p2,
 # plus <dir>/tools/jq so a PATH made of only these directories still parses
 # JSON. Each fake appends its argv to <dir>/stale.log or <dir>/current.log;
-# callers export FM_HERDR_PAIR_DIR=<dir>.
+# callers export TEST_HERDR_PAIR_DIR=<dir>.
 
 make_herdr_client_pair() {  # <dir> [stale-version stale-protocol current-version current-protocol]
   local dir=$1 stale_version=${2:-0.8.2} stale_protocol=${3:-20} current_version=${4:-0.9.0} current_protocol=${5:-22}
@@ -27,7 +27,7 @@ make_herdr_client_pair() {  # <dir> [stale-version stale-protocol current-versio
   ln -sf "$(command -v jq)" "$dir/tools/jq"
   cat > "$dir/stale/herdr" <<SH
 #!/usr/bin/env bash
-printf '%s\\n' "\$*" >> "\${FM_HERDR_PAIR_DIR:?}/stale.log"
+printf '%s\\n' "\$*" >> "\${TEST_HERDR_PAIR_DIR:?}/stale.log"
 case "\${1:-} \${2:-}" in
   "status --json")
     printf '{"client":{"version":"$stale_version","channel":"stable","protocol":$stale_protocol},"server":{"status":"running","running":true,"version":"$current_version","protocol":$current_protocol,"compatible":false,"session":"fm-remote","restart_needed":true}}\\n'
@@ -38,7 +38,7 @@ exit 1
 SH
   cat > "$dir/current/herdr" <<SH
 #!/usr/bin/env bash
-printf '%s\\n' "\$*" >> "\${FM_HERDR_PAIR_DIR:?}/current.log"
+printf '%s\\n' "\$*" >> "\${TEST_HERDR_PAIR_DIR:?}/current.log"
 case "\${1:-} \${2:-}" in
   "status --json")
     printf '{"client":{"version":"$current_version","channel":"stable","protocol":$current_protocol},"server":{"status":"running","running":true,"version":"$current_version","protocol":$current_protocol,"compatible":true,"session":"fm-remote","restart_needed":false}}\\n' ;;

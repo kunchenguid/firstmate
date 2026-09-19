@@ -78,6 +78,11 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-composer-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-composer-lib.sh"
 
+# Launcher environment a Firstmate-birthed server must not keep; the
+# `server` branch of fm_backend_herdr_cli applies it (single owner below).
+# shellcheck source=bin/fm-backend-server-env-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-backend-server-env-lib.sh"
+
 # Shared, backend-neutral normalized-transition shape and the single-owner
 # status->action policy table (bin/fm-transition-lib.sh). This adapter's event
 # subscriber (fm_backend_herdr_wait_transition) normalizes every
@@ -394,9 +399,14 @@ fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
   # refusal can be recognized and retried once on a compatible client; see
   # "client selection" below. A failed command's stderr is replayed verbatim.
   # The long-lived `server` launch is exec'd straight through: buffering its
-  # stderr would hold this call open for the server's whole lifetime.
+  # stderr would hold this call open for the server's whole lifetime. That
+  # server hands its startup environment to every later pane, so it is born
+  # without this caller's per-call Firstmate settings or agent-session markers
+  # (bin/fm-backend-server-env-lib.sh), scrubbed only after the client binary
+  # above was resolved from them.
   if [ "${1:-}" = server ]; then
-    HERDR_SESSION="$session" "$client_bin" "$@" --session "$session"
+    ( fm_backend_server_env_scrub
+      HERDR_SESSION="$session" exec "$client_bin" "$@" --session "$session" )
     return $?
   fi
   failed_bin=$client_bin
@@ -1650,18 +1660,14 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
 # has-session || tmux new-session -d`. Verified: a bare socket CLI call does
 # NOT auto-start the server, so this must run before any workspace/tab/pane
 # call. The server outlives its launcher and passes its startup environment to
-# every later pane, so remove home, harness identity, and supervision selection
-# inherited from whichever agent happened to start it. Bounded poll for the
-# server to report running.
+# every later pane; fm_backend_herdr_cli's `server` branch births it without
+# whatever the calling script or agent session carried for itself alone.
+# Bounded poll for the server to report running.
 fm_backend_herdr_server_ensure() {  # <session>
   local session=$1 running out i
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
   [ "$running" = "true" ] && return 0
-  (
-    unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE \
-      CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL
-    fm_backend_herdr_cli "$session" server >/dev/null 2>&1 &
-  ) || return 1
+  ( fm_backend_herdr_cli "$session" server >/dev/null 2>&1 & ) || return 1
   for i in $(seq 1 20); do
     running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
     [ "$running" = "true" ] && return 0

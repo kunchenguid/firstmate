@@ -69,7 +69,7 @@ SH
   cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
 set -u
-printf '%s\n' "$*" >> "$FM_HERDR_LOG"
+printf '%s\n' "$*" >> "$TEST_HERDR_LOG"
 case "${1:-} ${2:-}" in
   "status --json") printf '{"client":{"version":"0.7.5","protocol":16},"server":{"running":true}}\n' ;;
   "pane get") printf '{"result":{"pane":{"pane_id":"%s"}}}\n' "${3:-}" ;;
@@ -175,7 +175,7 @@ test_fm_prefixed_herdr_session_is_an_explicit_target() {
   : > "$log"
   : > "$herdr_log"
 
-  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_HERDR_LOG="$herdr_log" FM_SEND_SETTLE=0 \
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" TEST_HERDR_LOG="$herdr_log" FM_SEND_SETTLE=0 \
     "$SEND" fm-remote:w1:p2 --key Enter >/dev/null 2>"$err"; rc=$?
   expect_code 0 "$rc" "an fm-prefixed Herdr session target should be accepted as explicit"
   assert_grep 'pane get w1:p2 --session fm-remote' "$herdr_log" "fm-prefixed Herdr target was not verified in its session"
