@@ -280,9 +280,6 @@ assistant.updateContent({
     { type: "toolCall" },
   ],
 }, { transient: true });
-if (assistant.hideThinkingBlock !== true) {
-  throw new Error("Calm-on must collapse thinking via setHideThinkingBlock");
-}
 if ((assistant.rendered || []).some((line) => line.startsWith("thinking:"))) {
   throw new Error(`Calm-on must not render thinking, got ${JSON.stringify(assistant.rendered)}`);
 }
@@ -337,9 +334,6 @@ assistant.updateContent({
     { type: "text", text: "final answer for the captain" },
   ],
 });
-if (assistant.hideThinkingBlock !== false) {
-  throw new Error("Calm-off must clear hideThinkingBlock for new assistant rows");
-}
 if (!(assistant.rendered || []).some((line) => line.startsWith("thinking:"))) {
   throw new Error(`Calm-off must show thinking again, got ${JSON.stringify(assistant.rendered)}`);
 }
@@ -478,48 +472,83 @@ const message = {
   ],
 };
 const showsThinking = (component) => (component.rendered || []).some((line) => line.startsWith("thinking:"));
+const trackWrites = (component) => {
+  let writes = 0;
+  const original = component.setHideThinkingBlock.bind(component);
+  component.setHideThinkingBlock = (value) => {
+    writes += 1;
+    original(value);
+  };
+  return () => writes;
+};
 
-// Calm off must be strictly additive: leave OMP's own value untouched.
+// Calm off must be strictly additive: never write OMP's hide-thinking field.
 vis.setCalmPresentation(false);
 const nativeOn = new Agent.AssistantMessageComponent(true);
+const nativeOnWrites = trackWrites(nativeOn);
 nativeOn.updateContent(message);
+nativeOn.updateContent({
+  ...message,
+  content: [...message.content, { type: "text", text: "another line" }],
+});
+nativeOn.invalidate();
+if (nativeOnWrites() !== 0) {
+  throw new Error("Calm off must not write OMP's hide-thinking field");
+}
 if (nativeOn.hideThinkingBlock !== true || showsThinking(nativeOn)) {
   throw new Error("Calm off must keep OMP's native hidden thinking hidden");
 }
-nativeOn.invalidate();
-if (nativeOn.hideThinkingBlock !== true || showsThinking(nativeOn)) {
-  throw new Error("Calm off invalidate must keep OMP's native hidden thinking hidden");
-}
 const nativeOff = new Agent.AssistantMessageComponent(false);
+const nativeOffWrites = trackWrites(nativeOff);
 nativeOff.updateContent(message);
+if (nativeOffWrites() !== 0) {
+  throw new Error("Calm off must not write OMP's hide-thinking field");
+}
 if (nativeOff.hideThinkingBlock !== false || !showsThinking(nativeOff)) {
   throw new Error("Calm off must leave OMP's native visible thinking visible");
 }
 
-// Calm on hides thinking, then restores the captured pre-Calm value.
+// Calm on collapses thinking by filtering the presentation, still never writing the field.
 vis.setCalmPresentation(true);
 const calmOn = new Agent.AssistantMessageComponent(false);
+const calmOnWrites = trackWrites(calmOn);
 calmOn.updateContent(message);
-if (calmOn.hideThinkingBlock !== true || showsThinking(calmOn)) {
-  throw new Error("Calm on must hide thinking");
+if (calmOnWrites() !== 0) {
+  throw new Error("Calm on must not write OMP's hide-thinking field");
 }
-const nativeHidden = new Agent.AssistantMessageComponent(true);
-nativeHidden.updateContent(message);
+if (showsThinking(calmOn)) {
+  throw new Error("Calm on must not render thinking");
+}
+thinking.applyOmpCalmThinkingToRememberedRows();
+if (showsThinking(calmOn)) {
+  throw new Error("Calm on re-apply must not render thinking");
+}
+
+// OMP toggles the field itself while Calm is on; Calm off must leave that value standing.
+const ompHidden = new Agent.AssistantMessageComponent(false);
+ompHidden.updateContent(message);
+ompHidden.setHideThinkingBlock(true);
 vis.setCalmPresentation(false);
 thinking.applyOmpCalmThinkingToRememberedRows();
-if (nativeHidden.hideThinkingBlock !== true) {
-  throw new Error("Calm off must restore the captured pre-Calm hide-thinking value, not false");
+if (ompHidden.hideThinkingBlock !== true || showsThinking(ompHidden)) {
+  throw new Error("Calm off must leave OMP's hidden toggle standing");
 }
-nativeHidden.updateContent(message);
-if (nativeHidden.hideThinkingBlock !== true) {
-  throw new Error("Calm off after restore must leave OMP's native hidden thinking hidden");
+
+vis.setCalmPresentation(true);
+const ompVisible = new Agent.AssistantMessageComponent(true);
+ompVisible.updateContent(message);
+ompVisible.setHideThinkingBlock(false);
+vis.setCalmPresentation(false);
+thinking.applyOmpCalmThinkingToRememberedRows();
+if (ompVisible.hideThinkingBlock !== false || !showsThinking(ompVisible)) {
+  throw new Error("Calm off must leave OMP's visible toggle standing");
 }
 JS
 )
   status=$?
   expect_code 0 "$status" "native hide-thinking contract: $out"
   [ -z "$out" ] || fail "native hide-thinking contract printed output: $out"
-  pass "OMP Calm leaves the native hide-thinking setting untouched while off, and restores it after Calm"
+  pass "OMP Calm collapses thinking by filtering only, never writing OMP's native hide-thinking field"
 }
 
 test_degraded_public_api_seam() {
