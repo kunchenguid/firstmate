@@ -242,6 +242,14 @@ Crewmates never intentionally touch your project clone; [treehouse](https://gith
 The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns ship/scout worktree isolation and fresh-base refusal rules, including spawns from linked homes.
 Portable regressions live in [`tests/fm-spawn-pool-base-freshen.test.sh`](../tests/fm-spawn-pool-base-freshen.test.sh) for spawn isolation and base freshness, and [`tests/fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh) for preserving the recorded copy on relaunch.
 
+Every home allocates from its own worktree root, so homes never share a pool.
+Treehouse keys a pool by the repository's resolved origin rather than by the clone, so without that separation two homes holding their own clones of one repository competed for the same numbered slots, and a slot could read free while its checkout was a linked worktree of the other home's clone - which the isolation assertion above correctly refuses, blocking the task until a human released the slot from the home that owned it.
+`fm_treehouse_home_root` in [`fm-wake-lib.sh`](../bin/fm-wake-lib.sh) is the single owner of that root and of why only acquisition takes it: a return resolves its pool from the worktree path it is handed, so worktrees already leased under a previously shared root stay returnable and nothing is migrated.
+A hand-run `treehouse status` or `prune` inspects whichever root it resolves for itself, so pointing one at a home's pool means passing that home's root; `return` is the exception, because it finds the pool from the worktree path.
+Pools under the previously shared root simply stop being allocated from and drain as their worktrees are returned.
+Reclaiming an emptied one is ordinary housekeeping and no part of the switch: it is Treehouse's own `destroy`/`prune` against that root, so each clone's worktree registrations are dropped with the directories, never a manual delete that would leave them stale.
+[`tests/fm-treehouse-home-root.test.sh`](../tests/fm-treehouse-home-root.test.sh) is the portable regression, and [`verification/runtime-backends.md`](verification/runtime-backends.md#treehouse-worktree-pools) owns the dated evidence and names the guard that refreshes it.
+
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
 Its operating checkout (`FM_ROOT`) and the disposable crewmate worktrees are all linked git worktrees of the same repository, so the valid discriminator is branch state, not whether the checkout is linked.
 The primary checkout is healthy on its default branch, and linked worktrees or secondmate homes are healthy at detached HEAD.

@@ -285,7 +285,7 @@ test_home_seed_uses_treehouse_acquired_home() {
     || fail "seed failed for a treehouse-acquired home"
   acquired_abs=$(cd "$acquired" && pwd -P)
   printf '%s\n' "$out" | grep -F "home=$acquired_abs" >/dev/null || fail "seed did not report acquired home"
-  grep -F 'treehouse get --lease --lease-holder dash' "$log" >/dev/null || fail "seed did not durably lease a home under the secondmate id"
+  grep -E 'treehouse( --root [^ ]+)? get --lease --lease-holder dash' "$log" >/dev/null || fail "seed did not durably lease a home under the secondmate id"
   [ -f "$lease" ] || fail "seed did not record a treehouse lease"
   [ "$(cat "$lease")" = dash ] || fail "seed did not set the lease holder to the secondmate id"
   [ -f "$acquired/.fm-secondmate-home" ] || fail "seed did not mark acquired home"
