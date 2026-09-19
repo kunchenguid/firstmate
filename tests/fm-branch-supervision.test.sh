@@ -966,6 +966,9 @@ test_away_branch_spawn_requires_queued_dispatchable_work() {
   cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
   printf 'manual\n' > "$home/config/backlog-backend"
   cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] task-inflight - orphaned in-flight work
+
 ## Queued
 - [ ] task-queued - already queued work
 
@@ -986,6 +989,12 @@ EOF
   assert_not_contains "$out" "already-queued unblocked work" "a queued item was refused as if it were arbitrary: $out"
   [ "$status" -ne 6 ] || fail "a queued branch spawn hit the partition: $out"
   assert_contains "$out" "main is parked" "the queued spawn lost its relocation note"
+
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
+    "$ROOT/bin/fm-spawn.sh" task-inflight --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -eq 1 ] || fail "an in-flight branch spawn exited $status, not 1: $out"
+  assert_contains "$out" "already-queued unblocked work" "an in-flight row was dispatched by the away branch"
 
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
     "$ROOT/bin/fm-spawn.sh" mate-new --secondmate 2>&1)
