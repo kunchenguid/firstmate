@@ -4,11 +4,44 @@
 # otherwise, including on every error, so a failed lookup can never be read as
 # a merge. The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
-# Each provider is read through its own standard CLI, gh for GitHub and glab
-# for GitLab, so an upstream checkout needs no extra tooling to follow either.
+# Each provider is read through its own standard CLI, gh for GitHub, glab for
+# GitLab, and az with the azure-devops extension for Azure DevOps, so an
+# upstream checkout needs no extra tooling to follow any of them.
 set -u
 LC_ALL=C
 export LC_ALL
+
+# Decode the percent-escapes an Azure DevOps project or repository segment
+# carries, so the name compared against the forge is the real one. Every
+# escape is already proved well formed before this runs, and the segment
+# character set has no backslash, so "%b" sees only the "\xNN" it is given.
+ado_decode() {  # <segment>
+  printf -v ADO_DECODED '%b' "${1//%/\\x}"
+}
+
+# The character rules bin/fm-pr-lib.sh applies when a URL is armed, restated
+# here because this program is byte-static and sources nothing.
+ado_segment_valid() {  # <segment>
+  local segment=$1 rest
+  [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 255 ] || return 1
+  case "$segment" in
+    _*|.*|*[!A-Za-z0-9._~%'()'-]*) return 1 ;;
+  esac
+  rest=$segment
+  while [ "${rest#*%}" != "$rest" ]; do
+    rest=${rest#*%}
+    case "$rest" in
+      00*) return 1 ;;
+      [0-9A-Fa-f][0-9A-Fa-f]*) ;;
+      *) return 1 ;;
+    esac
+  done
+  ado_decode "$segment"
+  [ "${#ADO_DECODED}" -ge 1 ] && [ "${#ADO_DECODED}" -le 255 ] || return 1
+  case "$ADO_DECODED" in
+    .|..|*/*|*\\*|*[[:cntrl:]]*|' '*|*' ') return 1 ;;
+  esac
+}
 
 if [ "$#" -eq 6 ] && [ "$1" = --validated ]; then
   provider=$2
@@ -104,6 +137,74 @@ case "$provider" in
     raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
     state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
     [ "$state" = merged ] && printf '%s\n' merged
+    ;;
+  azuredevops)
+    [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
+    [ "$host" != github.com ] || exit 0
+    case "$host" in
+      .*|*.|*..*|*[!a-z0-9.-]*) exit 0 ;;
+    esac
+    [ "${#path}" -ge 5 ] && [ "${#path}" -le 1024 ] || exit 0
+    case "$path" in
+      /*|*/|*//*) exit 0 ;;
+    esac
+    # <org>/<project>/_git/<repo>, or <org>/_git/<repo> when the repository
+    # carries its project's own name. The organisation is the first segment on
+    # dev.azure.com and the collection on a server install.
+    org=${path%%/*}
+    rest=${path#*/}
+    case "$rest" in
+      _git/*)
+        repo=${rest#_git/}
+        [ "$rest" = "_git/$repo" ] || exit 0
+        ;;
+      *)
+        project=${rest%%/*}
+        repo=${rest#*/_git/}
+        [ "$rest" = "$project/_git/$repo" ] || exit 0
+        ado_segment_valid "$project" || exit 0
+        ;;
+    esac
+    [ "${#org}" -ge 1 ] && [ "${#org}" -le 63 ] || exit 0
+    case "$org" in
+      -*|*-|*[!A-Za-z0-9-]*) exit 0 ;;
+    esac
+    ado_segment_valid "$repo" || exit 0
+    expected_repo=$ADO_DECODED
+    [ "$url" = "https://$host/$path/pullrequest/$number" ] || exit 0
+    # az repos addresses one organisation and resolves the pull request by an
+    # organisation-wide id, so the organisation URL comes from the validated
+    # record and --detect false keeps az from reaching for a git repository
+    # the watcher does not have. The query is a list, which az renders in
+    # order one value per line, and a null renders as the literal "None"; only
+    # a "completed" status with a real merge commit is the landed reading, so
+    # an abandoned or still-active pull request, a changed output format, and
+    # an unreadable pull request are all silent rather than a false merge.
+    raw=$(az repos pr show --id "$number" --organization "https://$host/$org" \
+      --detect false --only-show-errors --output tsv \
+      --query "[status, repository.name, lastMergeCommit.commitId]" 2>/dev/null) || exit 0
+    status=
+    forge_repo=
+    merge_commit=
+    { IFS= read -r status; IFS= read -r forge_repo; IFS= read -r merge_commit; } <<EOF
+$raw
+EOF
+    [ "$status" = completed ] || exit 0
+    case "$merge_commit" in
+      ''|*[!0-9a-f]*) exit 0 ;;
+    esac
+    [ "${#merge_commit}" -eq 40 ] || [ "${#merge_commit}" -eq 64 ] || exit 0
+    # A pull request id is unique per organisation rather than per repository,
+    # so az cannot be scoped to the repository the way glab is scoped by
+    # project URL. Binding the answer to the repository the URL names is what
+    # keeps an id that belongs to a different repository from being reported
+    # as this pull request's merge. Azure DevOps treats those names
+    # case-insensitively.
+    [ -n "$forge_repo" ] || exit 0
+    lc_expected=$(printf '%s' "$expected_repo" | tr '[:upper:]' '[:lower:]') || exit 0
+    lc_forge=$(printf '%s' "$forge_repo" | tr '[:upper:]' '[:lower:]') || exit 0
+    [ "$lc_expected" = "$lc_forge" ] || exit 0
+    printf '%s\n' merged
     ;;
   *) exit 0 ;;
 esac

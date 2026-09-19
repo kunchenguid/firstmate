@@ -353,6 +353,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/azure-devops-merge-watch.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/fm-test-isolation-proof.md",
       "audience": "maintainer-verification"
     },

@@ -22,9 +22,9 @@ REAL_CP=$(command -v cp)
 REAL_MV=$(command -v mv)
 REAL_STAT=$(command -v stat)
 REAL_CHMOD=$(command -v chmod)
-# The merge path reads a merge request's JSON with the real jq, and BASE_PATH is
-# deliberately restricted, so a case that needs jq exposes this one rather than
-# depending on the host keeping jq in one of those four directories.
+# The merge path reads GitHub/GitLab JSON with the real jq, and BASE_PATH is
+# deliberately restricted, so make_case links this into every case's fakebin
+# rather than depending on the host keeping jq in one of those four directories.
 REAL_JQ=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 
 ack_watcher_cycle() {  # <state>
@@ -206,10 +206,41 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
-  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
+  # az with the azure-devops extension, reproducing the real CLI's contract:
+  # a JMESPath list rendered by "-o tsv" as one value per line, a JSON null
+  # rendered as the literal "None", and a non-zero exit with no stdout on any
+  # failure. "az repos" exits non-zero when the extension is absent.
+  cat > "$fakebin/az" <<'SH'
+#!/usr/bin/env bash
+[ -z "${FM_TEST_AZ_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TEST_AZ_LOG"
+case "${1:-} ${2:-}" in
+  "extension show")
+    [ "${FM_TEST_AZ_NO_EXT:-0}" = 0 ] || exit 1
+    printf 'azure-devops\n'
+    exit 0
+    ;;
+  "repos pr")
+    [ "${3:-}" = show ] || exit 2
+    [ "${FM_TEST_AZ_NO_EXT:-0}" = 0 ] || exit 1
+    [ "${FM_TEST_AZ_FAIL:-0}" = 0 ] || exit 1
+    printf '%s\n%s\n%s\n' \
+      "${FM_TEST_AZ_STATUS:-active}" \
+      "${FM_TEST_AZ_REPO:-Field.Tools}" \
+      "${FM_TEST_AZ_MERGE_COMMIT:-None}"
+    exit 0
+    ;;
+esac
+exit 2
+SH
+  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" "$fakebin/az"
+  # The merge path reads GitHub/GitLab JSON with the real jq, and BASE_PATH is
+  # deliberately restricted to a handful of system directories, so every case
+  # carries its own jq rather than depending on the host keeping it there.
+  ln -sf "$REAL_JQ" "$fakebin/jq"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
+  : > "$dir/az.log"
   : > "$dir/guard.log"
   printf '%s\n' "$dir"
 }
@@ -243,6 +274,7 @@ run_check_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_AZ_LOG="$dir/az.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
@@ -272,6 +304,45 @@ INVALID_URLS=(
   'https://gitlab.com/g/p/-/merge_requests/1?x=1'
   'https://gitlab.com/g/p/-/merge_requests/1#note'
   'https://gitlab.com/g/p/-/issues/1'
+  'https://dev.azure.com/org/project/_git/repo/pullrequest/0'
+  'https://dev.azure.com/org/project/_git/repo/pullrequest/01'
+  'https://dev.azure.com/org/project/_git/repo/pullrequest/1/'
+  'https://dev.azure.com/org/project/_git/repo/pullrequest/1?_a=overview'
+  'https://dev.azure.com/org/project/_git/repo/pullrequest/1#f'
+  'https://dev.azure.com/org/project/_git/repo/pullrequest/'
+  'https://dev.azure.com/org/project/_git/repo/pullRequest/1'
+  'https://dev.azure.com/org/project/_git/repo/pullrequests/1'
+  'https://dev.azure.com/org/project/repo/pullrequest/1'
+  'https://dev.azure.com/org/project/_git/repo/1'
+  'https://dev.azure.com/org/_git/repo/x/pullrequest/1'
+  'https://dev.azure.com/org/a/b/_git/repo/pullrequest/1'
+  'https://dev.azure.com/org//project/_git/repo/pullrequest/1'
+  'https://dev.azure.com//project/_git/repo/pullrequest/1'
+  'https://dev.azure.com/org/project/_git/_repo/pullrequest/1'
+  'https://dev.azure.com/org/project/_git/.repo/pullrequest/1'
+  'https://dev.azure.com/org/_project/_git/repo/pullrequest/1'
+  'https://dev.azure.com/or_g/project/_git/repo/pullrequest/1'
+  'https://dev.azure.com/-org/project/_git/repo/pullrequest/1'
+  'https://dev.azure.com/org-/project/_git/repo/pullrequest/1'
+  'https://dev.azure.com/org/Deal%2FMechanic/_git/repo/pullrequest/1'
+  'https://dev.azure.com/org/Deal%5CMechanic/_git/repo/pullrequest/1'
+  'https://dev.azure.com/org/Deal%0AMechanic/_git/repo/pullrequest/1'
+  'https://dev.azure.com/org/Deal%00Mechanic/_git/repo/pullrequest/1'
+  'https://dev.azure.com/org/Deal%2Mechanic/_git/repo/pullrequest/1'
+  'https://dev.azure.com/org/Deal%zzMechanic/_git/repo/pullrequest/1'
+  'https://dev.azure.com/org/Deal%/_git/repo/pullrequest/1'
+  'https://dev.azure.com/org/%20lead/_git/repo/pullrequest/1'
+  'https://dev.azure.com/org/lead%20/_git/repo/pullrequest/1'
+  'https://dev.azure.com/org/Deal Mechanic/_git/repo/pullrequest/1'
+  'https://dev.azure.com/org/project/_git/re+po/pullrequest/1'
+  'https://dev.azure.com/org/project/_git/re&po/pullrequest/1'
+  'https://dev.azure.com/org/project/_git/re$po/pullrequest/1'
+  'https://dev.azure.com/org/project/_git/re`po/pullrequest/1'
+  'https://github.com/o/r/_git/repo/pullrequest/1'
+  'https://DEV.azure.com/org/project/_git/repo/pullrequest/1'
+  'http://dev.azure.com/org/project/_git/repo/pullrequest/1'
+  'https://user@dev.azure.com/org/project/_git/repo/pullrequest/1'
+  'https://dev.azure.com:443/org/project/_git/repo/pullrequest/1'
   'https://gitlab.com//p/-/merge_requests/1'
   'https://.gitlab.com/g/p/-/merge_requests/1'
   'https://gitlab.com./g/p/-/merge_requests/1'
@@ -411,6 +482,24 @@ https://gitlab.com/group/project/-/merge_requests/1|gitlab.com|group/project|1
 https://gitlab.com/group/sub/deep/project/-/merge_requests/42|gitlab.com|group/sub/deep/project|42
 https://gitlab.example.co.uk/g/p/-/merge_requests/7|gitlab.example.co.uk|g/p|7
 https://code.internal/team/tools/ci-runner/-/merge_requests/123456|code.internal|team/tools/ci-runner|123456
+EOF
+  while IFS='|' read -r url host path number; do
+    [ -n "$url" ] || continue
+    fm_pr_url_parse "$url" || fail "parser rejected a canonical Azure DevOps pull request URL"
+    [ "$FM_PR_PROVIDER" = azuredevops ] \
+      || fail "parser did not tag an Azure DevOps URL as azuredevops"
+    [ "$FM_PR_URL" = "$url" ] || fail "parser changed a canonical Azure DevOps URL"
+    [ "$FM_PR_HOST" = "$host" ] || fail "parser returned wrong Azure DevOps host"
+    [ "$FM_PR_PATH" = "$path" ] || fail "parser returned wrong Azure DevOps project path"
+    [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong Azure DevOps pull request number"
+    [ -z "$FM_PR_OWNER" ] && [ -z "$FM_PR_REPO" ] \
+      || fail "parser set GitHub owner/repository for an Azure DevOps URL"
+  done <<'EOF'
+https://dev.azure.com/org/Project/_git/Repo/pullrequest/1|dev.azure.com|org/Project/_git/Repo|1
+https://dev.azure.com/org/Deal%20Mechanic/_git/Field.Tools/pullrequest/2530|dev.azure.com|org/Deal%20Mechanic/_git/Field.Tools|2530
+https://dev.azure.com/org/_git/Repo/pullrequest/7|dev.azure.com|org/_git/Repo|7
+https://devops.internal/DefaultCollection/Proj/_git/ci-runner/pullrequest/123456|devops.internal|DefaultCollection/Proj/_git/ci-runner|123456
+https://dev.azure.com/org/Reports%20(2026)/_git/a~b/pullrequest/9|dev.azure.com|org/Reports%20(2026)/_git/a~b|9
 EOF
   fm_pr_url_parse https://github.com/a/b/pull/1 || fail "parser rejected canonical URL"
   [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag a pull request URL as github"
@@ -715,6 +804,7 @@ make_poll_fixture() {
 run_poll() {
   local dir=$1
   FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_AZ_LOG="$dir/az.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     bash "$dir/home/state/task-a.check.sh"
 }
@@ -1414,9 +1504,6 @@ EOF
   # state it could not read.
   write_task_meta "$dir" task-c
   : > "$dir/glab.log"
-  # The merge path needs jq before it reads anything, so this case supplies it
-  # and the refusal below is the unreadable state rather than a missing tool.
-  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   set +e
   run_merge_entry "$dir" task-c "$url" >/dev/null 2> "$dir/merge-c.err"
   rc=$?
@@ -1431,6 +1518,212 @@ EOF
     || fail "merge wrapper merged despite an unreadable merge request state"
 
   pass "GitLab merge requests are followed on any instance and never wake falsely"
+}
+
+# A search path mirroring the fixture's own, minus one tool, so a case that
+# proves an absent CLI cannot be satisfied by a real one elsewhere on PATH.
+make_path_without() {  # <dir> <tool-name>
+  local dir=$1 tool=$2 out bindir entry name
+  out="$dir/no-$tool"
+  mkdir -p "$out"
+  while IFS= read -r bindir; do
+    [ -d "$bindir" ] || continue
+    for entry in "$bindir"/*; do
+      [ -e "$entry" ] || continue
+      name=$(basename "$entry")
+      [ "$name" = "$tool" ] && continue
+      [ -e "$out/$name" ] || ln -s "$entry" "$out/$name" 2>/dev/null
+    done
+  done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+  ! PATH="$out" command -v "$tool" >/dev/null 2>&1 || fail "the $tool-free search path still resolved $tool"
+  printf '%s\n' "$out"
+}
+
+test_azure_devops_merge_watch() {
+  local dir state out rc url noaz
+  dir=$(make_case azure-devops-merge-watch)
+  state="$dir/home/state"
+  # The project segment is percent-encoded, which is the shape Azure DevOps
+  # itself produces for a project name with a space in it.
+  url='https://dev.azure.com/example-org/Deal%20Mechanic/_git/Field.Tools/pullrequest/2530'
+
+  write_task_meta "$dir" task-a
+  out=$(run_check_entry "$dir" task-a "$url") \
+    || fail "arming an Azure DevOps watch failed"
+  [ "$out" = 'armed: state/task-a.check.sh' ] || fail "arming an Azure DevOps watch printed no armed line"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "published Azure DevOps poll provenance or metadata binding was invalid"
+  grep -qxF "pr=$url" "$state/task-a.meta" \
+    || fail "arming an Azure DevOps watch recorded no canonical pr="
+  [ "$(cat "$state/task-a.pr-poll")" = "azuredevops
+$url
+dev.azure.com
+example-org/Deal%20Mechanic/_git/Field.Tools
+2530" ] || fail "published Azure DevOps sidecar bytes were not exact"
+
+  # Only a completed pull request with a real merge commit is the landed
+  # reading. An abandoned one is closed without landing and must stay silent,
+  # as must every other status and an unreadable pull request.
+  for out in active abandoned notSet '' completed-ish COMPLETED; do
+    out=$(FM_TEST_AZ_STATUS="$out" FM_TEST_AZ_REPO=Field.Tools \
+      FM_TEST_AZ_MERGE_COMMIT=0123456789abcdef0123456789abcdef01234567 run_poll "$dir")
+    [ -z "$out" ] || fail "Azure DevOps poll emitted for a status that is not completed"
+  done
+  out=$(FM_TEST_AZ_STATUS=completed FM_TEST_AZ_REPO=Field.Tools run_poll "$dir")
+  [ -z "$out" ] || fail "Azure DevOps poll emitted for a completed pull request with no merge commit"
+  out=$(FM_TEST_AZ_STATUS=completed FM_TEST_AZ_REPO=Field.Tools \
+    FM_TEST_AZ_MERGE_COMMIT=not-a-commit run_poll "$dir")
+  [ -z "$out" ] || fail "Azure DevOps poll emitted for an unreadable merge commit"
+  out=$(FM_TEST_AZ_FAIL=1 FM_TEST_AZ_STATUS=completed FM_TEST_AZ_REPO=Field.Tools \
+    FM_TEST_AZ_MERGE_COMMIT=0123456789abcdef0123456789abcdef01234567 run_poll "$dir")
+  [ -z "$out" ] || fail "Azure DevOps poll emitted after an az failure"
+
+  # A pull request id is unique per organisation rather than per repository, so
+  # the answer is bound to the repository the URL names. The comparison is
+  # against the decoded name and is case-insensitive, as Azure DevOps is.
+  out=$(FM_TEST_AZ_STATUS=completed FM_TEST_AZ_REPO=Other.Repo \
+    FM_TEST_AZ_MERGE_COMMIT=0123456789abcdef0123456789abcdef01234567 run_poll "$dir")
+  [ -z "$out" ] || fail "Azure DevOps poll emitted for a merge in another repository"
+  out=$(FM_TEST_AZ_STATUS=completed FM_TEST_AZ_REPO=field.TOOLS \
+    FM_TEST_AZ_MERGE_COMMIT=0123456789abcdef0123456789abcdef01234567 run_poll "$dir")
+  [ "$out" = merged ] || fail "Azure DevOps poll did not match its repository case-insensitively"
+  out=$(FM_TEST_AZ_STATUS=completed FM_TEST_AZ_REPO=Field.Tools \
+    FM_TEST_AZ_MERGE_COMMIT=0123456789abcdef0123456789abcdef01234567 run_poll "$dir")
+  [ "$out" = merged ] || fail "Azure DevOps poll did not emit exactly one merged line"
+
+  # az resolves the pull request by an organisation-wide id, so it is addressed
+  # by organisation URL and id and never by the pull request URL, and never
+  # allowed to detect an organisation from a repository the watcher lacks.
+  grep -qF -- '--organization https://dev.azure.com/example-org' "$dir/az.log" \
+    || fail "Azure DevOps poll did not address az by organisation URL"
+  grep -qF -- '--id 2530' "$dir/az.log" || fail "Azure DevOps poll did not address az by pull request id"
+  grep -qF -- '--detect false' "$dir/az.log" || fail "Azure DevOps poll let az detect an organisation"
+  ! grep -qF -- "$url" "$dir/az.log" || fail "Azure DevOps poll passed a pull request URL to az"
+
+  # A decoded project name with a space reaches nothing as a split argument.
+  ! grep -qF -- 'Deal Mechanic' "$dir/az.log" \
+    || fail "Azure DevOps poll passed a decoded project name to az"
+
+  # A doctored sidecar cannot redirect the poll: the stored parts must rebuild
+  # the stored URL exactly.
+  printf '%s\n%s\n%s\n%s\n%s\n' azuredevops "$url" other.example \
+    'example-org/Deal%20Mechanic/_git/Field.Tools' 2530 > "$state/task-a.pr-poll"
+  out=$(FM_TEST_AZ_STATUS=completed FM_TEST_AZ_REPO=Field.Tools \
+    FM_TEST_AZ_MERGE_COMMIT=0123456789abcdef0123456789abcdef01234567 run_poll "$dir")
+  [ -z "$out" ] || fail "Azure DevOps poll emitted for a sidecar whose host was swapped"
+  printf '%s\n%s\n%s\n%s\n%s\n' azuredevops "$url" dev.azure.com \
+    'other-org/Deal%20Mechanic/_git/Field.Tools' 2530 > "$state/task-a.pr-poll"
+  out=$(FM_TEST_AZ_STATUS=completed FM_TEST_AZ_REPO=Field.Tools \
+    FM_TEST_AZ_MERGE_COMMIT=0123456789abcdef0123456789abcdef01234567 run_poll "$dir")
+  [ -z "$out" ] || fail "Azure DevOps poll emitted for a sidecar whose organisation was swapped"
+
+  # An absent CLI produces no wake rather than a false merge, so arming is
+  # where it is reported instead.
+  noaz=$(make_path_without "$dir" az)
+  out=$(FM_TEST_AZ_STATUS=completed FM_TEST_AZ_REPO=Field.Tools \
+    FM_TEST_AZ_MERGE_COMMIT=0123456789abcdef0123456789abcdef01234567 \
+    PATH="$noaz" bash "$state/task-a.check.sh")
+  [ -z "$out" ] || fail "Azure DevOps poll emitted with az absent from PATH"
+
+  write_task_meta "$dir" task-b
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" PATH="$noaz" \
+    "$PR_CHECK" task-b "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming an Azure DevOps watch succeeded with az absent"
+  case "$out" in
+    *"requires az on PATH"*) ;;
+    *) fail "arming an Azure DevOps watch with az absent did not report the missing CLI" ;;
+  esac
+  [ ! -e "$state/task-b.check.sh" ] || fail "refused Azure DevOps arming left a poll armed"
+
+  # "az repos" lives in an extension, so an az without it can never answer the
+  # poll and is reported at arming for the same reason.
+  set +e
+  out=$(FM_TEST_AZ_NO_EXT=1 run_check_entry "$dir" task-b "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming an Azure DevOps watch succeeded without the azure-devops extension"
+  case "$out" in
+    *"requires the az azure-devops extension"*) ;;
+    *) fail "arming an Azure DevOps watch without the extension did not report it" ;;
+  esac
+  [ ! -e "$state/task-b.check.sh" ] || fail "refused Azure DevOps arming left a poll armed"
+
+  # A GitHub task is unaffected by an absent az.
+  write_task_meta "$dir" task-d
+  out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" PATH="$noaz" \
+    "$PR_CHECK" task-d https://github.com/o/r/pull/1 2>&1) \
+    || fail "arming a GitHub watch failed with az absent"
+  [ "$out" = 'armed: state/task-d.check.sh' ] || fail "an absent az changed GitHub arming"
+
+  # The merge path follows an Azure DevOps pull request but never merges one,
+  # and refuses before it records anything.
+  write_task_meta "$dir" task-e
+  set +e
+  run_merge_entry "$dir" task-e "$url" > "$dir/merge-e.out" 2> "$dir/merge-e.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "merge wrapper did not refuse an Azure DevOps pull request"
+  grep -qF 'merging an Azure DevOps pull request is not supported here' "$dir/merge-e.err" \
+    || fail "merge wrapper refused for some reason other than the unsupported forge"
+  [ ! -e "$state/task-e.check.sh" ] || fail "refused Azure DevOps merge armed a poll"
+  ! grep -q '^pr=' "$state/task-e.meta" || fail "refused Azure DevOps merge recorded a canonical pr="
+
+  pass "Azure DevOps pull requests are followed on any organisation and never wake falsely"
+}
+
+test_azure_devops_merged_poll_retires() {
+  local dir state url rc
+  dir=$(make_case azure-devops-merged-retirement)
+  state="$dir/home/state"
+  url='https://dev.azure.com/example-org/Deal%20Mechanic/_git/Field.Tools/pullrequest/17'
+  write_poll_meta "$state" task-a "$url"
+  seed_canonical_poll "$dir" task-a "$url"
+  set +e
+  FM_TEST_AZ_STATUS=completed FM_TEST_AZ_REPO=Field.Tools \
+    FM_TEST_AZ_MERGE_COMMIT=0123456789abcdef0123456789abcdef01234567 \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "Azure DevOps merged retirement watcher failed: $(cat "$dir/watch.err")"
+  case "$(cat "$dir/watch.out")" in
+    check:*task-a.check.sh:*merged) ;;
+    *) fail "Azure DevOps merged wake was missing" ;;
+  esac
+  assert_poll_absent "$state" task-a
+  grep -qxF "pr=$url" "$state/task-a.meta" || fail "Azure DevOps retirement removed canonical metadata"
+  pass "a completed Azure DevOps pull request lands one merge outcome through the shared retirement path"
+}
+
+test_azure_devops_abandoned_poll_stays_armed() {
+  local dir state url rc
+  dir=$(make_case azure-devops-abandoned)
+  state="$dir/home/state"
+  url='https://dev.azure.com/example-org/Deal%20Mechanic/_git/Field.Tools/pullrequest/18'
+  write_poll_meta "$state" task-a "$url"
+  seed_canonical_poll "$dir" task-a "$url"
+  add_stop_custom_check "$dir"
+  set +e
+  FM_TEST_AZ_STATUS=abandoned FM_TEST_AZ_REPO=Field.Tools \
+    FM_TEST_AZ_MERGE_COMMIT=0123456789abcdef0123456789abcdef01234567 \
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "Azure DevOps abandoned watcher failed: $(cat "$dir/watch.err")"
+  ! grep -qF 'task-a.check.sh' "$dir/watch.out" \
+    || fail "an abandoned Azure DevOps pull request was reported as landed"
+  [ -z "$(merged_ledger_row "$state" task-a)" ] \
+    || fail "an abandoned Azure DevOps pull request recorded a merge outcome"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "an abandoned Azure DevOps pull request retired its still-open watch"
+  pass "an abandoned Azure DevOps pull request is never reported as landed"
 }
 
 seed_canonical_poll() {
@@ -2772,6 +3065,9 @@ test_external_merge_transition_retires_only_terminal_poll
 test_retirement_refuses_replacement_and_nonterminal_results
 test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
+test_azure_devops_merge_watch
+test_azure_devops_merged_poll_retires
+test_azure_devops_abandoned_poll_stays_armed
 test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert

@@ -3,8 +3,9 @@
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
-# A GitHub pull request URL and a GitLab merge request URL are both accepted,
-# including a merge request on a self-hosted GitLab instance.
+# A GitHub pull request URL, a GitLab merge request URL, and an Azure DevOps
+# pull request URL are all accepted, including a merge request or pull request
+# on a self-hosted instance.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -51,13 +52,27 @@ fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || 
   exit 1
 }
 
-# Refuse to arm a GitLab watch with no glab on PATH. The poll is silent on
-# every error by design, so a missing CLI would be indistinguishable from a
-# merge request that is never merged. Arming is the one point where that can be
-# reported, so the absent tool stops the watch here instead of watching nothing.
+# Refuse to arm a GitLab or Azure DevOps watch with no usable CLI on PATH. The
+# poll is silent on every error by design, so a missing CLI would be
+# indistinguishable from a merge request or pull request that is never merged.
+# Arming is the one point where that can be reported, so the absent tool stops
+# the watch here instead of watching nothing.
 if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   echo "error: watching a GitLab merge request requires glab on PATH" >&2
   exit 1
+fi
+# "az repos" lives in the azure-devops extension rather than the base CLI, so
+# an az without it can never answer the poll and is reported here too. The
+# extension read is local and performs no forge call.
+if [ "$PROVIDER" = azuredevops ]; then
+  if ! command -v az >/dev/null 2>&1; then
+    echo "error: watching an Azure DevOps pull request requires az on PATH" >&2
+    exit 1
+  fi
+  if ! az extension show --name azure-devops --output tsv --query name >/dev/null 2>&1; then
+    echo "error: watching an Azure DevOps pull request requires the az azure-devops extension" >&2
+    exit 1
+  fi
 fi
 
 "$FM_ROOT/bin/fm-guard.sh" || true
@@ -65,7 +80,9 @@ fi
 # pr_head is recorded only when the forge's CLI can supply it. gh exposes the
 # head commit as a selectable field; plain glab exposes it only inside its JSON
 # output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head. Both consumers already treat it as optional:
+# GitLab task records no pr_head, and neither does an Azure DevOps task, whose
+# merge is the captain's to make rather than this fleet's. Both consumers
+# already treat it as optional:
 # bin/fm-teardown.sh reads the head from the forge at teardown rather than from
 # metadata and falls back to its provider-agnostic content check, and
 # bin/fm-review-diff.sh resolves the head from the remote when none is recorded.

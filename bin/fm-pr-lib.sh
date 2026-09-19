@@ -4,10 +4,11 @@
 # URLs before constructing task paths or performing any side effect.
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
-# "path" is the full project path, which is owner/repository on GitHub and an
-# arbitrarily nested group/subgroup/project namespace on GitLab. A GitLab
-# project can sit at any depth, so no owner/repository pair can address one and
-# the sidecar carries the whole path instead. GitLab also runs on self-hosted
+# "path" is the full project path, which is owner/repository on GitHub, an
+# arbitrarily nested group/subgroup/project namespace on GitLab, and
+# organisation[/project]/_git/repository on Azure DevOps. Neither a GitLab nor
+# an Azure DevOps project is addressable as an owner/repository pair, so the
+# sidecar carries the whole path instead. Both also run on self-hosted
 # instances, so the host is part of that identity rather than a constant. Every
 # consumer re-derives the identity from the stored URL and refuses any record
 # whose parts do not reconstruct that exact URL.
@@ -113,14 +114,15 @@ fm_task_id_creation_valid() {
   [ "${#id}" -le 64 ]
 }
 
-# GitLab serves self-hosted instances, so the host is part of the identity
-# rather than a constant. It is accepted only as a lowercase DNS name with no
-# userinfo, port, or trailing dot, which keeps one canonical spelling per MR.
+# GitLab and Azure DevOps both serve self-hosted instances, so the host is part
+# of the identity rather than a constant. It is accepted only as a lowercase
+# DNS name with no userinfo, port, or trailing dot, which keeps one canonical
+# spelling per merge request or pull request.
 # github.com is refused here even though its shape is otherwise valid: it is
-# GitHub's own host and never a GitLab instance, so a URL like
+# GitHub's own host and never one of those instances, so a URL like
 # https://github.com/o/r/-/merge_requests/1 (a typo'd or spoofed GitHub URL)
-# would otherwise be armed as a GitLab watch that can never succeed.
-fm_pr_gitlab_host_valid() {
+# would otherwise be armed as a watch that can never succeed.
+fm_pr_instance_host_valid() {
   local host=${1-} label
   local LC_ALL=C
   local -a labels
@@ -160,15 +162,79 @@ fm_pr_gitlab_path_valid() {
   done
 }
 
-# Parse a canonical PR or MR URL into the provider-tagged identity. Validation
-# is strict and per provider: the GitHub username and repository rules are
-# unchanged, and GitLab gets its own host and namespace rules rather than a
-# loosened GitHub rule.
+# An Azure DevOps project or repository name reaches a URL percent-encoded,
+# which is why "Deal%20Mechanic" is a canonical segment rather than a mangled
+# one. The decoded name is what a consumer compares against the forge, so an
+# escape must be well formed and must not decode to a slash, a backslash, a
+# control character, or a surrounding space, each of which would name a
+# different thing than the URL appears to. A NUL escape is refused while it is
+# still visible, because a decoded NUL cannot survive inside a shell string to
+# be caught afterwards. Azure DevOps forbids a project or repository name
+# starting with "_" or ".", which is also what keeps the "_git" route
+# separator unambiguous.
+fm_pr_azure_segment_valid() {
+  local segment=${1-} rest decoded
+  local LC_ALL=C
+  [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 255 ] || return 1
+  case "$segment" in
+    _*|.*|*[!A-Za-z0-9._~%'()'-]*) return 1 ;;
+  esac
+  rest=$segment
+  while [ "${rest#*%}" != "$rest" ]; do
+    rest=${rest#*%}
+    case "$rest" in
+      00*) return 1 ;;
+      [0-9A-Fa-f][0-9A-Fa-f]*) ;;
+      *) return 1 ;;
+    esac
+  done
+  # printf -v decodes in this shell, so a decoded control character survives to
+  # be refused below instead of being swallowed by a command substitution.
+  printf -v decoded '%b' "${segment//%/\\x}" || return 1
+  [ "${#decoded}" -ge 1 ] && [ "${#decoded}" -le 255 ] || return 1
+  case "$decoded" in
+    .|..|*/*|*\\*|*[[:cntrl:]]*|' '*|*' ') return 1 ;;
+  esac
+}
+
+# An Azure DevOps pull request lives under <org>/<project>/_git/<repo>, or
+# under <org>/_git/<repo> when the repository carries its project's own name.
+# The first segment is the organisation on dev.azure.com and the collection on
+# a server install, and both shapes address it the same way, so the whole path
+# is stored and the organisation is re-derived from it rather than stored
+# separately. That first segment names an account rather than a project, so it
+# keeps the unencoded character set Azure DevOps allows there.
+fm_pr_azure_path_valid() {
+  local path=${1-}
+  local LC_ALL=C
+  local -a segments
+  [ "${#path}" -ge 5 ] && [ "${#path}" -le 1024 ] || return 1
+  case "$path" in
+    /*|*/|*//*) return 1 ;;
+  esac
+  IFS=/ read -ra segments <<< "$path"
+  case "${#segments[@]}" in 3|4) ;; *) return 1 ;; esac
+  [ "${segments[$(( ${#segments[@]} - 2 ))]}" = _git ] || return 1
+  [ "${#segments[0]}" -ge 1 ] && [ "${#segments[0]}" -le 63 ] || return 1
+  case "${segments[0]}" in
+    -*|*-|*[!A-Za-z0-9-]*) return 1 ;;
+  esac
+  if [ "${#segments[@]}" -eq 4 ]; then
+    fm_pr_azure_segment_valid "${segments[1]}" || return 1
+  fi
+  fm_pr_azure_segment_valid "${segments[$(( ${#segments[@]} - 1 ))]}" || return 1
+}
+
+# Parse a canonical pull request or merge request URL into the provider-tagged
+# identity. Validation is strict and per provider: the GitHub username and
+# repository rules are unchanged, and GitLab and Azure DevOps each get their
+# own namespace rules rather than a loosened GitHub rule.
 #
 # FM_PR_OWNER and FM_PR_REPO are additionally set for github because
-# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab URL leaves
-# them empty, and that path addresses the project by FM_PR_HOST and FM_PR_PATH
-# instead, so a merge request on any instance resolves without a hardcoded host.
+# bin/fm-pr-merge.sh addresses GitHub by owner/repository. A gitlab or
+# azuredevops URL leaves them empty, and those paths address the project by
+# FM_PR_HOST and FM_PR_PATH instead, so a merge request or pull request on any
+# instance resolves without a hardcoded host.
 fm_pr_url_parse() {
   local raw=${1-} pattern host path
   local LC_ALL=C
@@ -199,12 +265,29 @@ fm_pr_url_parse() {
   # "/-/merge_requests/". Any earlier separator therefore lands inside the
   # captured path, where the reserved "-" segment is refused.
   pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._/-]+)/-/merge_requests/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    host=${BASH_REMATCH[1]}
+    path=${BASH_REMATCH[2]}
+    fm_pr_instance_host_valid "$host" || return 1
+    fm_pr_gitlab_path_valid "$path" || return 1
+    FM_PR_PROVIDER=gitlab
+    FM_PR_URL=$raw
+    FM_PR_HOST=$host
+    FM_PR_PATH=$path
+    FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
+  fi
+  # Azure DevOps produces
+  # https://<host>/<org>[/<project>]/_git/<repo>/pullrequest/<n>, and the
+  # project and repository segments arrive percent-encoded. The path class
+  # contains "/", so this match is greedy to the last "/pullrequest/".
+  pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9._~%()/-]+)/pullrequest/([1-9][0-9]*)$'
   [[ "$raw" =~ $pattern ]] || return 1
   host=${BASH_REMATCH[1]}
   path=${BASH_REMATCH[2]}
-  fm_pr_gitlab_host_valid "$host" || return 1
-  fm_pr_gitlab_path_valid "$path" || return 1
-  FM_PR_PROVIDER=gitlab
+  fm_pr_instance_host_valid "$host" || return 1
+  fm_pr_azure_path_valid "$path" || return 1
+  FM_PR_PROVIDER=azuredevops
   FM_PR_URL=$raw
   FM_PR_HOST=$host
   FM_PR_PATH=$path

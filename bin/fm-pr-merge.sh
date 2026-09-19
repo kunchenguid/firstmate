@@ -137,6 +137,14 @@ if ! fm_pr_task_id_valid "$ID" || ! fm_pr_url_parse "$RAW_URL"; then
 fi
 URL=$FM_PR_URL
 PROVIDER=$FM_PR_PROVIDER
+# The merge watch follows an Azure DevOps pull request, but nothing here
+# merges one: that forge's pull requests are landed in Azure DevOps itself.
+# Refusing before any side effect keeps a mistaken call from recording a
+# merge attempt, and the armed watch still reports the merge when it lands.
+if [ "$PROVIDER" = azuredevops ]; then
+  echo "error: merging an Azure DevOps pull request is not supported here; merge it in Azure DevOps and the armed watch reports it" >&2
+  exit 2
+fi
 PR_HOST=$FM_PR_HOST
 PR_PATH=$FM_PR_PATH
 PR_OWNER=$FM_PR_OWNER
