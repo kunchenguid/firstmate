@@ -29,8 +29,9 @@
 #     the recorded pid must BE its current holder, so a lease left by an exited
 #     Pi session goes stale even if its pid was recycled by an unrelated
 #     process, and a non-Pi home never honors a leftover Pi lease. A lease held by the
-#     live current session but an abandoned branch conversation is recovered
-#     by the branch extension's generation-activation cleanup.
+#     live current session but an abandoned or settled branch conversation is
+#     recovered by the branch extension after the turn and at generation
+#     activation.
 #
 # THREAT MODEL (deliberate, captain-decided): these guards are
 # CONFUSED-AGENT-GRADE, the same grade bin/fm-gate-refuse-lib.sh documents

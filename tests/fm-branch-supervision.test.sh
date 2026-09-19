@@ -802,7 +802,9 @@ test_release_actor_drops_only_that_actors_leases() {
   FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-lease.sh" release-actor --actor branch || fail "release-actor failed"
   [ ! -e "$home/state/.lease-task-a" ] || fail "release-actor kept the branch lease"
   [ -e "$home/state/.lease-task-b" ] || fail "release-actor dropped main's lease"
-  pass "release commands authorize the caller and bulk release drops only that actor's leases"
+  FM_HOME="$home" FM_LEASE_HOLDER_PID=$$ "$ROOT/bin/fm-lease.sh" claim task-a --actor main \
+    || fail "main could not reclaim the branch lease after release-actor cleanup"
+  pass "release commands authorize the caller, bulk release drops only that actor's leases, and main can reclaim released work"
 }
 
 # --- role-partition refinements ----------------------------------------------
