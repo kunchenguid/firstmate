@@ -1453,7 +1453,7 @@ families_for_changed_path() {
       ;;
     bin/fm-env-lib.sh)
       # The one .env accessor, sourced by bin/fm-x-lib.sh (Relay token) and
-      # bin/fm-dispatch-resolve.sh (TYPESAFE_API_KEY).
+      # bin/fm-dispatch-resolve.sh (TYPESAFE_API_KEY, OPENROUTER_API_KEY).
       printf '%s\n' pr-forge
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       ;;

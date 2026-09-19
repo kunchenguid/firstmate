@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 # fm-dispatch-resolve.sh - resolve one concrete crewmate or scout dispatch
-# profile from a task brief with typesafe.ai's System One model (Jev), opt-in.
+# profile from a task brief with a Jev decisions model, opt-in. The default
+# backend is typesafe.ai's native System One; config/jev-provider may select
+# OpenRouter's separate Jev decisions endpoint instead (see "Provider
+# selection" below).
 #
 # Usage:
 #   fm-dispatch-resolve.sh <brief-file> [--project <name>]
 #
-# Opt-in gate: TYPESAFE_API_KEY non-empty in this process environment, else a
-#   TYPESAFE_API_KEY= line in $FM_HOME/.env read with fmx_env_get, the same
-#   accessor as FMX_PAIRING_TOKEN (bin/fm-env-lib.sh). The environment wins.
-#   Absent in both: one "dispatch-resolve: off" line on stderr, nothing on
-#   stdout, exit 0, no network call, so firstmate dispatches exactly as today.
-#   The key lives in one shell variable and reaches curl as a header read from
-#   a file descriptor, never on argv; nothing logs or writes it.
+# Opt-in gate: the credential for the SELECTED provider (see "Provider
+#   selection") non-empty in this process environment, else its <VAR>= line in
+#   $FM_HOME/.env read with fmx_env_get, the same accessor as
+#   FMX_PAIRING_TOKEN (bin/fm-env-lib.sh). The environment wins. Absent in
+#   both: one "dispatch-resolve: off" line on stderr, nothing on stdout, exit
+#   0, no network call, so firstmate dispatches exactly as today. The key
+#   lives in one shell variable and reaches curl as a header read from a file
+#   descriptor, never on argv; nothing logs or writes it.
 #
-# What it does when on with at least one rule: one POST to
-#   https://api.typesafe.ai/v1/systemone with the project name and the whole brief as
+# What it does when on with at least one rule: one POST to the selected
+#   provider's endpoint with the project name and the whole brief as
 #   state and ONE Choice question whose
 #   options are every rule's `when` from config/crew-dispatch.json plus one
 #   fixed generic none option. Jev returns the matched rule, a probability per
@@ -26,6 +30,22 @@
 #   a non-clear result so firstmate keeps using the existing intake.
 #   docs/configuration.md "Crew dispatch profiles" owns the declared fields and
 #   "Typed dispatch resolution" owns this tool's operator contract.
+#
+# Provider selection (config/jev-provider, optional, LOCAL, gitignored): a
+#   single word on its first non-empty line, mirroring config/backend.
+#   Absent, or the value "typesafe", preserves today's exact default: native
+#   typesafe.ai System One at https://api.typesafe.ai/v1/systemone, model
+#   jev-latest, gated on TYPESAFE_API_KEY.
+#   The value "openrouter" instead routes through OpenRouter's dedicated Jev
+#   decisions endpoint at https://openrouter.ai/api/alpha/decisions, model
+#   typesafe/jev-latest, gated on the separate OPENROUTER_API_KEY (same
+#   env-then-.env precedence, never TYPESAFE_API_KEY). OpenRouter exposes Jev
+#   only through that decisions endpoint - its chat/completions endpoint
+#   rejects the model and the native TypeSafe SDK cannot reach OpenRouter -
+#   so this tool never sends an OpenRouter request to /v1/systemone or a
+#   native request to /alpha/decisions; each provider gets its own base URL,
+#   model id, and credential, in code. Any other config/jev-provider value is
+#   a configuration error (exit 2), never selected around.
 #
 # Output (stdout, TOON-style block):
 #   dispatch-resolve:
@@ -40,11 +60,15 @@
 #   error     -> API, network, response, or quota-axi failure; decide as today
 #   Every outcome exits 0 so an intake is never blocked by this tool.
 #   Exit 2 only for a usage or configuration error (unreadable brief, an
-#   existing unreadable rules file, malformed rules, or missing jq), which is
-#   actionable, never selected around.
+#   existing unreadable rules file, malformed rules, an unrecognized
+#   config/jev-provider value, or missing jq), which is actionable, never
+#   selected around.
 #
 # Environment:
-#   TYPESAFE_API_KEY is the only resolver-specific environment setting.
+#   TYPESAFE_API_KEY is the resolver-specific setting for the default native
+#   provider. OPENROUTER_API_KEY is the narrowly scoped companion setting
+#   consulted only when config/jev-provider selects "openrouter"; the two are
+#   never mixed for one request.
 #
 # Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
 #   the captain-approval gate, or fm-spawn.sh validation; it publishes one
@@ -54,6 +78,9 @@ set -u
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
 export -n TYPESAFE_API_KEY_PRIVATE 2>/dev/null || true
 unset TYPESAFE_API_KEY
+OPENROUTER_API_KEY_PRIVATE=${OPENROUTER_API_KEY:-}
+export -n OPENROUTER_API_KEY_PRIVATE 2>/dev/null || true
+unset OPENROUTER_API_KEY
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -70,10 +97,20 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-timing-lib.sh"
 
 CONFIDENCE_FLOOR=0.6
-TS_MODEL=jev-latest
-TS_BASE=https://api.typesafe.ai
-TS_TIMEOUT=5
+JEV_TIMEOUT=5
 DEFAULT_WHEN="No listed rule applies to this task."
+
+# Per-provider request shape: base URL, decision endpoint path (relative to
+# base), and model id. The native and OpenRouter Jev backends are distinct
+# APIs (docs/configuration.md "Typed dispatch resolution" - "Provider
+# selection"); every other value in config/jev-provider is a configuration
+# error (die below), never a silent fallback.
+TS_BASE=https://api.typesafe.ai
+TS_PATH=/v1/systemone
+TS_MODEL=jev-latest
+OR_BASE=https://openrouter.ai
+OR_PATH=/api/alpha/decisions
+OR_MODEL=typesafe/jev-latest
 
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
 no_rules() {
@@ -98,12 +135,37 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# ---- opt-in gate ---------------------------------------------------------------
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-  TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
+# ---- provider selection (config/jev-provider; absent or "typesafe" = native) ---
+JEV_PROVIDER=typesafe
+if [ -f "$CONFIG/jev-provider" ]; then
+  while IFS= read -r jp_line || [ -n "$jp_line" ]; do
+    jp_val=$(printf '%s' "$jp_line" | tr -d '[:space:]')
+    if [ -n "$jp_val" ]; then
+      JEV_PROVIDER=$jp_val
+      break
+    fi
+  done < "$CONFIG/jev-provider"
 fi
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-  echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
+case "$JEV_PROVIDER" in
+  typesafe)
+    JEV_BASE=$TS_BASE JEV_PATH=$TS_PATH JEV_MODEL=$TS_MODEL JEV_CRED_VAR=TYPESAFE_API_KEY
+    JEV_CRED=$TYPESAFE_API_KEY_PRIVATE
+    ;;
+  openrouter)
+    JEV_BASE=$OR_BASE JEV_PATH=$OR_PATH JEV_MODEL=$OR_MODEL JEV_CRED_VAR=OPENROUTER_API_KEY
+    JEV_CRED=$OPENROUTER_API_KEY_PRIVATE
+    ;;
+  *)
+    die "config/jev-provider must be typesafe or openrouter, not: $JEV_PROVIDER"
+    ;;
+esac
+
+# ---- opt-in gate: gated on the SELECTED provider's own credential only ---------
+if [ -z "$JEV_CRED" ]; then
+  JEV_CRED=$(fmx_env_get "$JEV_CRED_VAR" "$FM_HOME/.env")
+fi
+if [ -z "$JEV_CRED" ]; then
+  echo "dispatch-resolve: off ($JEV_CRED_VAR absent from the environment and $FM_HOME/.env)" >&2
   exit 0
 fi
 
@@ -221,7 +283,7 @@ QUOTA=$(mktemp) || { rm -f "$RESP_FILE"; die "mktemp failed"; }
 trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA"' EXIT
 LAT_MS=null
 command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
-  REQUEST=$(jq -n --rawfile brief "$BRIEF" --arg project "$PROJECT" --arg model "$TS_MODEL" \
+  REQUEST=$(jq -n --rawfile brief "$BRIEF" --arg project "$PROJECT" --arg model "$JEV_MODEL" \
     --arg none_criterion "$DEFAULT_WHEN" --slurpfile rules "$RULES" '
     ($rules[0]) as $cfg |
     ($cfg.rules | to_entries | map({key: ("rule_" + ((.key + 1) | tostring)), value: .value.when}) | from_entries) as $criteria |
@@ -237,9 +299,9 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
       }
     }')
   T0=$(fm_timing_now_ms)
-  HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
-    -X POST "$TS_BASE/v1/systemone" -H 'Content-Type: application/json' \
-    -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$TYPESAFE_API_KEY_PRIVATE") \
+  HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$JEV_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
+    -X POST "$JEV_BASE$JEV_PATH" -H 'Content-Type: application/json' \
+    -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$JEV_CRED") \
     --data-binary @- 2>/dev/null) || HTTP=000
   T1=$(fm_timing_now_ms)
   LAT_MS=$(( T1 - T0 ))
