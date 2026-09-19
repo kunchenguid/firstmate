@@ -131,6 +131,32 @@ zsh
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
+### Server birth environment
+
+Measured on 2026-09-13 with tmux 3.7b on Linux, on a private socket.
+The question is what a `new-session` that BIRTHS the server hands to windows created later, and whether a subsequent clean client repairs it.
+
+```sh
+env -u TMUX NO_COLOR=1 tmux -L "$S" new-session -d -s firstmate   # births the server
+tmux -L "$S" show-environment -g NO_COLOR
+tmux -L "$S" new-window -d -t firstmate: 'printenv NO_COLOR > probe'
+env -u TMUX -u NO_COLOR tmux -L "$S" new-session -d -s second     # a client with no NO_COLOR
+tmux -L "$S" new-window -d -t second: 'printenv NO_COLOR > probe2'
+```
+
+Observed output, then the contents of `probe` and `probe2`:
+
+```text
+NO_COLOR=1
+1
+1
+```
+
+The birth environment becomes the server's global environment and reaches every later window, and a later client that carries no `NO_COLOR` does not repair it, because `NO_COLOR` is not in tmux's default `update-environment` set.
+This is the tmux measurement behind the same rule already recorded for Herdr: a long-lived tmux or Herdr server hands panes the environment it was started with.
+So `fm_backend_tmux_container_ensure` drops the launcher's color control in the subshell that performs that one `new-session`, and `bin/fm-backend-launch-env-lib.sh` owns the list for the tmux, Herdr, and zellij adapters together.
+`tests/fm-backend-tmux-smoke.test.sh` keeps this active: it reproduces the leak against a real server as a control before asserting that the adapter's own birth is clean and that unrelated launch variables survive.
+
 ### Agent liveness name sources
 
 The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.
