@@ -75,7 +75,12 @@
 #                          tool process.
 #   stale: <window> (unread firstmate instruction: ...)
 #                          the steering-inbox ladder spent its delivery-attempt
-#                          budget on an idle pane without an acknowledgement
+#                          budget on an idle pane without an acknowledgement;
+#                          the reason names the worker, or, when every attempt
+#                          was suppressed by unsubmitted text in the endpoint's
+#                          input line, names that stranded line and the
+#                          operator's own delivery path instead, because the
+#                          ladder rings that record no further either way
 #   stale: <window> (steering-inbox ladder bookkeeping unwritable: ...)
 #                          an unhandled record's ladder cannot advance; quiet
 #                          successful attempts never wake firstmate

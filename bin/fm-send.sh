@@ -53,10 +53,15 @@
 # dead or missing endpoint directly to recovery without typing. An explicit
 # fire-and-forget record is excluded from that ladder.
 # bin/fm-task-inbox-lib.sh owns the record format, the doorbell line, and the
-# re-ring ladder. The composer pre-check before the ring is ADVISORY only: when
-# the composer visibly holds pending text the ring is skipped with a notice and
-# the watcher re-rings an ordinary record later; no composer verdict is
-# delivery proof on this plane, and a failed ring never fails the send.
+# re-ring ladder. The composer verdicts around the ring are ADVISORY only: when
+# the composer visibly holds pending text the ring is skipped with a notice,
+# and when the ring's own doorbell line is PROVENLY left unsubmitted after
+# its Enter (only where the endpoint can prove a swallowed Enter,
+# fm_backend_submit_pending_is_proof) a notice says that line is stranded and
+# that the ladder will surface it as stranded input rather than an unresponsive
+# worker; the watcher re-rings an ordinary record later either way. No composer
+# verdict is delivery proof on this plane, and a failed ring never fails the
+# send.
 #
 # TYPED - the LOCAL text that must reach the terminal itself: a harness-native
 # invocation (a leading "/", or a leading "$" to a codex target) must reach
