@@ -46,6 +46,7 @@
 #   fm-hermes-notify.sh register <task-id> --reason-file <path> [--label <text>]
 #   fm-hermes-notify.sh resolve-reply <note-file>
 #   fm-hermes-notify.sh inbound <note-file>
+#   fm-hermes-notify.sh confirm-retry
 #   fm-hermes-notify.sh status <task-id>
 #
 # `register` requires <task-id> to be a currently active captain hold
