@@ -116,10 +116,11 @@
 #      record itself is UNVERIFIED (its daemon answered down): the crew saw its
 #      gate or blocker first hand, so needs-decision stays parked and blocked
 #      stays blocked, with the unverified record named as the reason. A COARSE
-#      live row over an open DECISION answers the same way: the ledger keeps a
-#      parked run's word at `running`, so it cannot establish that the decision
-#      resolved, and the decision answers in the state, not only in the detail.
-#      A blocked tip is not ambiguous that way and keeps the generic reading.
+#      live row over an open DECISION is only half of that: the ledger keeps a
+#      parked run's word at `running`, so it can establish neither that the
+#      decision resolved nor that the gate is still open. It therefore records
+#      the ambiguity in the DETAIL and leaves the state working - a crew that is
+#      genuinely validating must not read as awaiting a human.
 #      Other daemon, timeout, or unreachability
 #      claims are superseded BECAUSE THE RUN IS ALIVE when the run is
 #      running/fixing with recent reported activity: a killed or timed-out drive
@@ -809,7 +810,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
             # failure, and a parked run keeps its gate and findings.
             HAVE_RUN=1
             if ! fm_nm_run_is_parked "$RUN_OUT" && nm_daemon_answered_down; then
-              RUN_DEAD_DAEMON="no-mistakes daemon unreachable; last run record $(strip_quotes "$(nm_field status)") - unverified"
+              RUN_DEAD_DAEMON="no-mistakes daemon unreachable; last run record $(strip_quotes "$(nm_field status)") - unverified; run id: $selected_id"
             fi
           else
             emit unknown run-step "selected run code identity unverified; run ids: $candidate_ids"
@@ -915,9 +916,15 @@ if [ "$HAVE_RUN" = 1 ]; then
         # here. With the daemon provably down, the row is unverified evidence
         # from a dead instrument and must not read as work failure.
         if nm_daemon_probe_down; then
-          RUN_DEAD_DAEMON="no-mistakes daemon unreachable; last ledger record failed - unverified"
           RUN_STATE=unknown
-          RUN_DETAIL=$RUN_DEAD_DAEMON
+          RUN_DETAIL="no-mistakes daemon unreachable; last ledger record failed - unverified"
+          # Only an ANSWERED down hands the verdict to the status-log tip. The
+          # probe above is fail-closed and counts a timeout as down, which is
+          # safe for degrading this record to unknown but would assert an open
+          # gate on probe latency alone.
+          if nm_daemon_answered_down; then
+            RUN_DEAD_DAEMON=$RUN_DETAIL
+          fi
         else
           RUN_STATE=failed; RUN_DETAIL="run failed"
         fi ;;
@@ -1043,10 +1050,11 @@ if [ "$HAVE_RUN" = 1 ]; then
           if [ "$RUN_SOURCE" = coarse ] && [ "$LOG_VERB" = needs-decision ]; then
             # The runs ledger keeps a parked run's status word at `running`
             # (tests/captures/no-mistakes-v1.70.1/parked.toon), so a coarse
-            # live row is equally consistent with the gate still being open
-            # and cannot establish that this decision resolved. Only a gate is
-            # ambiguous this way: a blocker keeps the generic reading below.
-            emit "$LOG_TIP_STATE" status-log "$(status_line_note "$LOG_LINE")${SEP}a coarse run record cannot tell working from parked"
+            # live row cannot establish that this decision resolved - but it
+            # cannot establish the gate is still open either, and a genuinely
+            # validating crew must not read as awaiting a human. The ambiguity
+            # is recorded in the detail; the state stays working.
+            RUN_DETAIL="$RUN_DETAIL${SEP}status-log not superseded: a coarse run record cannot tell working from parked"
           elif [ "$LOG_VERB" = blocked ] \
             && log_claims_pipeline_unreachable "$LOG_LINE" \
             && { [ "$RUN_STATUS" = running ] || [ "$RUN_STATUS" = fixing ]; } \

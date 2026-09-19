@@ -3981,8 +3981,61 @@ EOF
   assert_contains "$out" "state: parked" "the open decision is not hidden behind the unverified record"
   assert_contains "$out" "approve the schema change" "the crew's own decision note reaches the supervisor"
   assert_contains "$out" "daemon unreachable" "the unverified record is named as the reason"
+  assert_contains "$out" "run id: 01RUN" "the verdict names the run so a human can go look at it"
   assert_not_contains "$out" "superseded" "an unverified record never supersedes an open decision"
   pass "an open decision survives the dead-daemon verdict on the selected route"
+}
+
+# A probe that did not ANSWER proves nothing, so it must not hand the verdict to
+# a stale open decision: a genuinely failed run would be reported as awaiting a
+# human on probe latency alone. The record still degrades to unknown, which is
+# ambiguous but not falsely actionable.
+test_unanswered_probe_does_not_turn_a_failed_coarse_record_into_a_gate() {
+  reset_fakes
+  local d local_short out; d=$(new_case coarse-failed-probe-timeout)
+  make_repo_on_branch "$d/wt" fm/feat-cfpt
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cfpt.meta" "window=fm:fm-feat-cfpt" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision: approve the schema change\n' > "$d/state/feat-cfpt.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-23 14:00
+  failed     fm/feat-cfpt ${local_short}  2026-08-23 13:53
+EOF
+)"
+  FM_FAKE_DAEMON_TIMEOUT=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-cfpt
+  out=$(run_crew_state "$d" feat-cfpt)
+  assert_contains "$out" "state: unknown" "an unanswered probe still degrades the terminal record"
+  assert_not_contains "$out" "state: parked" "probe latency must not assert an open gate over a failed run"
+  pass "an unanswered probe never turns a failed coarse record into a gate"
+}
+
+# The same shape with the daemon ANSWERING down does hand the verdict to the
+# open decision - that is what an answered-down record licenses.
+test_answered_down_failed_coarse_record_leaves_the_decision_open() {
+  reset_fakes
+  local d local_short out; d=$(new_case coarse-failed-answered-down)
+  make_repo_on_branch "$d/wt" fm/feat-cfad
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cfad.meta" "window=fm:fm-feat-cfad" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision: approve the schema change\n' > "$d/state/feat-cfad.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-23 14:00
+  failed     fm/feat-cfad ${local_short}  2026-08-23 13:53
+EOF
+)"
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-cfad
+  out=$(run_crew_state "$d" feat-cfad)
+  assert_contains "$out" "state: parked" "an answered-down record leaves the open decision open"
+  assert_contains "$out" "daemon unreachable" "the dead instrument is named as the reason"
+  pass "an answered-down failed coarse record leaves the decision open"
 }
 
 # An unrecognised ledger word yields an unknown verdict from a LIVE daemon, so it
@@ -4172,11 +4225,10 @@ EOF
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-cg
   out=$(run_crew_state "$d" feat-cg)
-  assert_contains "$out" "state: parked" "the open decision answers in the state, not only in the detail"
-  assert_contains "$out" "review gate has an ask-user finding" "the crew's own decision note reaches the supervisor"
-  assert_not_contains "$out" "superseded" "a coarse row cannot prove the gate event resolved"
-  assert_contains "$out" "cannot tell working from parked" "the coarse limit is named as the reason"
-  pass "a coarse live row leaves the open decision open"
+  assert_contains "$out" "state: working" "a genuinely validating crew is not reported as awaiting a human"
+  assert_not_contains "$out" "superseded by active run" "a coarse row cannot prove the gate event resolved"
+  assert_contains "$out" "cannot tell working from parked" "the coarse limit is named in the detail"
+  pass "a coarse live row records the gate ambiguity without claiming supersession"
 }
 
 # Coarse negative control (axi answers another branch): a live row on the task's
@@ -4562,6 +4614,8 @@ test_selected_run_anchored_continuation_binds_while_daemon_answers
 test_selected_run_anchored_parked_keeps_its_gate_with_a_dead_daemon
 test_selected_run_dead_daemon_leaves_the_open_decision_open
 test_coarse_pending_ledger_word_reads_unknown
+test_unanswered_probe_does_not_turn_a_failed_coarse_record_into_a_gate
+test_answered_down_failed_coarse_record_leaves_the_decision_open
 test_unrecognised_ledger_word_keeps_the_ordinary_supersede_note
 test_unanswered_daemon_probe_does_not_suppress_live_run
 test_coarse_live_row_with_daemon_down_is_unverified
