@@ -914,9 +914,10 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // A replaced branch conversation must not leave its per-task leases behind
-  // (the session-lock holder pid is still alive, so the sweep alone would
-  // keep them). One bulk release per generation, at activation.
+  // A replaced or settled branch conversation must not leave its per-task
+  // leases behind (the session-lock holder pid is still alive, so the sweep
+  // alone would keep them). Activation cleans residual leases from an older
+  // conversation, and each settled turn cleans the leases it may have held.
   async function releaseBranchLeases(expectedGeneration: number): Promise<boolean> {
     if (!(await generationOwnsLock(expectedGeneration))) return false;
     const result = await runCommandAsync("bash", [leaseScript, "release-actor", "--actor", "branch"], {
@@ -929,7 +930,8 @@ export default function (pi: ExtensionAPI) {
   // Lazy, per-action ownership evaluation (see the header). Returns true only
   // when this session owns the fleet lock right now; the first true evaluation
   // of a generation also writes the diagnostic marker and clears stray branch
-  // leases from a prior generation.
+  // leases from a prior generation. Settled turns perform the same cleanup for
+  // leases claimed by the active conversation.
   async function actingAsOwner(expectedGeneration = generation): Promise<boolean> {
     if (!(await generationOwnsLock(expectedGeneration))) return false;
     if (activatedGeneration !== expectedGeneration) {
@@ -1556,8 +1558,14 @@ ${context.command}
         await releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration));
         throw error;
       })
-      .finally(() => {
+      .finally(async () => {
         if (recoveryProbe) finishProviderProbe(acceptedGeneration, acceptedSelectionRevision);
+        // A settled branch turn is no longer able to finish work it claimed.
+        // Release through the lease command surface even when the model
+        // stopped on a provider error or without a durable report; the
+        // generation check keeps a replaced session from touching its
+        // successor's leases.
+        await releaseBranchLeases(acceptedGeneration);
       });
     branchChain = delivery.catch(() => {});
     return delivery;
