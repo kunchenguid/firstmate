@@ -384,6 +384,43 @@ test_kill_refuses_when_the_orca_cli_is_absent() {
   pass "fm_backend_orca_kill: a close its missing CLI never attempted reports the failure instead of a success"
 }
 
+test_empty_terminal_handle_is_refused() {
+  local out status call
+  orca_case empty-handle
+  for call in "fm_backend_orca_send_text_line ''" "fm_backend_orca_send_literal ''" \
+              "fm_backend_orca_send_key '' Enter" "fm_backend_orca_capture '' 5" "fm_backend_orca_kill ''"; do
+    out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+      bash -c '. "$0/bin/backends/orca.sh"; eval "$1"' "$ROOT" "$call" 2>&1 )
+    status=$?
+    [ "$status" -ne 0 ] || fail "$call should fail on an empty terminal handle"
+    assert_contains "$out" "empty Orca terminal handle" "$call did not explain the refused empty handle"
+    [ ! -s "$LOG" ] || fail "$call invoked orca with an empty terminal handle"
+  done
+  pass "orca terminal primitives: refuse an empty terminal handle without invoking the CLI"
+}
+
+test_fm_orca_bin_selects_the_cli() {
+  local out status alt
+  orca_case orca-bin-override
+  alt="$CASE_DIR/alt-bin"
+  mkdir -p "$alt"
+  cp "$FB/orca" "$alt/orca-linux"
+  printf '{"ok":true,"result":{"text":"hi"}}\n' > "$RESP/1.out"
+  out=$( PATH="$(fm_test_base_path_sans "$PATH" orca)" FM_ORCA_BIN="$alt/orca-linux" \
+    FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_send_literal term-123 hello' "$ROOT" 2>&1 )
+  status=$?
+  expect_code 0 "$status" "send should work through FM_ORCA_BIN with no orca on PATH: $out"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send'$'\x1f''--terminal'$'\x1f''term-123' \
+    "the FM_ORCA_BIN stub was not invoked"
+  out=$( PATH="$(fm_test_base_path_sans "$PATH" orca)" FM_ORCA_BIN="$alt/missing-cli" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_tool_check' "$ROOT" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "tool check should fail when FM_ORCA_BIN names a missing CLI"
+  assert_contains "$out" "missing-cli" "tool check did not name the FM_ORCA_BIN CLI"
+  pass "FM_ORCA_BIN: selects the CLI the backend invokes and its tool check"
+}
+
 test_remove_worktree_refuses_empty_id() {
   local out status
   orca_case remove-empty
@@ -1364,6 +1401,8 @@ test_send_key_refuses_unknown_key
 test_send_key_refuses_escape_until_supported
 test_kill_is_best_effort_close
 test_kill_refuses_when_the_orca_cli_is_absent
+test_empty_terminal_handle_is_refused
+test_fm_orca_bin_selects_the_cli
 test_remove_worktree_refuses_empty_id
 test_remove_worktree_rejects_orca_error_json
 test_worktree_path_resolves_id
