@@ -78,6 +78,7 @@ JSON
 cat > "$FAKEBIN/curl" <<'SH'
 #!/usr/bin/env bash
 set -u
+first_arg=${1:-}
 if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
   printf 'secret-present\n' >> "${CHILD_ENV_LOG:?}"
 else
@@ -92,6 +93,12 @@ while [ $# -gt 0 ]; do
 done
 cat > "$FAKE_CURL_LOG/body"
 cat /dev/fd/3 > "$FAKE_CURL_LOG/header" 2>/dev/null || printf 'fd3 unreadable\n' > "$FAKE_CURL_LOG/header"
+if [ "$first_arg" != -q ] && [ -r "${CURL_HOME:-}/.curlrc" ]; then
+  while read -r option value; do
+    [ "$option" = trace-ascii ] || continue
+    cp "$FAKE_CURL_LOG/header" "$value"
+  done < "$CURL_HOME/.curlrc"
+fi
 if [ -n "${FAKE_CURL_MUTATE_SOURCE:-}" ]; then
   cp "$FAKE_CURL_MUTATE_SOURCE" "${FAKE_CURL_MUTATE_TARGET:?}"
 fi
@@ -169,6 +176,19 @@ TYPESAFE_API_KEY=env-wins run code out err "$BRIEF"
 assert_equals 'Authorization: Bearer env-wins' "$(cat "$LOG/header")" "process environment wins"
 rm -f "$HOME_DIR/.env"
 pass "environment activation works"
+
+CURL_HOME_DIR="$TMP_ROOT/curl-home"
+CURL_TRACE="$TMP_ROOT/curl-trace.log"
+mkdir -p "$CURL_HOME_DIR"
+printf 'trace-ascii %s\n' "$CURL_TRACE" > "$CURL_HOME_DIR/.curlrc"
+rm -f "$CURL_TRACE"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+CURL_HOME="$CURL_HOME_DIR" TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 0 "$code" "curl config isolation exits 0"
+assert_equals '-q' "$(head -n 1 "$LOG/argv")" "curl config loading is disabled by the first option"
+assert_absent "$CURL_TRACE" "curlrc cannot trace the authorization header"
+pass "curl user configuration cannot log the API key"
 
 reset_log
 write_response "$RESPONSE" rule_4 0.9

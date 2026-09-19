@@ -205,7 +205,7 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
       }
     }')
   T0=$(fm_timing_now_ms)
-  HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
+  HTTP=$(printf '%s' "$REQUEST" | curl -q -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
     -X POST "$TS_BASE/v1/systemone" -H 'Content-Type: application/json' \
     -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$TYPESAFE_API_KEY_PRIVATE") \
     --data-binary @- 2>/dev/null) || HTTP=000
