@@ -312,16 +312,24 @@ fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
   fm_nm_run_is_active "$1"
 }
 
-# 0 if the run in captured `axi status` TOON $1 carries a PARKED marker, using
-# the same gate evidence fm-crew-state.sh renders `parked at <gate>` from: a
-# top-level `gate:` line, an `awaiting_agent:` line, an awaiting_approval or
-# fix_review `status:`/`state:` scalar, or a steps/gate table row whose status
-# column is one of those. The top-level `status:` word alone does NOT decide
-# this: the CLI leaves it at `running` while a run waits at a gate, so the word
-# and the gate markers routinely disagree.
+# The gate evidence in an `axi status` TOON, as ONE set of patterns. Both
+# readers must agree exactly: fm_nm_run_is_parked below decides whether a run
+# keeps the strict head rule, and fm-crew-state.sh's nm_gate_step_row /
+# nm_gate_status / nm_has_gate render the `parked at <gate>` detail from the
+# same evidence. If a new parked marker is added to one reader only, an
+# unverified run's gate detail reaches the crew report.
+FM_NM_GATE_LINE_RE='^[[:space:]]*gate:[[:space:]]*'
+FM_NM_AWAITING_AGENT_RE='^[[:space:]]*awaiting_agent:'
+FM_NM_GATE_SCALAR_RE='^[[:space:]]*(status|state):[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*$'
+FM_NM_GATE_ROW_RE='^[[:space:]]*[^,]+,[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*,'
+
+# 0 if the run in captured `axi status` TOON $1 carries any of those PARKED
+# markers. The top-level `status:` word alone does NOT decide this: the CLI
+# leaves it at `running` while a run waits at a gate, so the word and the gate
+# markers routinely disagree.
 fm_nm_run_is_parked() {  # <toon-output>
   printf '%s\n' "$1" | grep -Eq \
-    '^[[:space:]]*(gate|awaiting_agent):[[:space:]]*|^[[:space:]]*(status|state):[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*$|^[[:space:]]*[^,]+,[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*,'
+    "$FM_NM_GATE_LINE_RE|$FM_NM_AWAITING_AGENT_RE|$FM_NM_GATE_SCALAR_RE|$FM_NM_GATE_ROW_RE"
 }
 
 # 0 if the run in captured `axi status` TOON $1 is EXECUTING: in flight and
