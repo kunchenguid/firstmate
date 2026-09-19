@@ -78,6 +78,17 @@
 # task state when that proof fails; otherwise it removes the task's check,
 # trust record, PR sidecar, and publication record with the rest of the
 # volatile state.
+# Continued worktrees (bin/fm-spawn.sh --resume-worktree): a task whose record
+# says provision=resume was dispatched into an existing worktree firstmate did
+# not create. That worktree is never returned to a pool, removed, reset, cleaned
+# or stripped of its branch here, and its processes are not swept, because the
+# committed and uncommitted state it holds is the entire reason the task
+# existed. Everything else is an ordinary teardown: the endpoint is closed, the
+# records are retired, and - importantly - the landed-work and dirty-work
+# refusals below still apply in full, so an unfinished resumed task still stops
+# teardown rather than passing silently. An ABSENT provision= line means spawn,
+# so records written before this mode existed are unaffected.
+#
 # Worktree-slot ownership (teardown-slot-collision): a treehouse pool slot is
 # reused across tasks, so a stale, duplicated, or drifted worktree= record can
 # name a slot a DIFFERENT live task now holds. Cleanup kills every process under
@@ -341,6 +352,29 @@ META="$STATE/$ID.meta"
 TREEHOUSE_PROJECT_LOCK=
 TREEHOUSE_PROJECT_LOCK_HELD=0
 TREEHOUSE_SLOT_LOCK_REQUIRED=0
+# Provisioning provenance (bin/fm-spawn.sh writes it; its header owns the
+# contract). A task spawned with --resume-worktree continues a worktree
+# firstmate did NOT create, so that worktree is not firstmate's to return to a
+# pool, remove, reset or clean - the state it holds is the whole reason the task
+# exists. An ABSENT provision= line means spawn, which is what every record
+# written before the mode existed means, so this reads false for all of them and
+# their behavior is untouched.
+#
+# This is deliberately a separate axis from teardown_owns_worktree, which means
+# "this slot was not reassigned to another task" and additionally gates the
+# unlanded-work refusal. That refusal must keep running on a resumed worktree,
+# so a resume is NOT folded into that predicate.
+TEARDOWN_PROVISION=
+if [ -f "$META" ] && [ ! -L "$META" ]; then
+  TEARDOWN_PROVISION=$(fm_meta_get "$META" provision)
+fi
+teardown_resumed_worktree() {
+  [ "$TEARDOWN_PROVISION" = resume ]
+}
+# True when this task's worktree is firstmate's to return, remove or clean.
+teardown_may_return_worktree() {
+  teardown_owns_worktree && ! teardown_resumed_worktree
+}
 if [ -f "$META" ] && [ ! -L "$META" ]; then
   TEARDOWN_LOCK_KIND=$(fm_meta_get "$META" kind)
   [ -n "$TEARDOWN_LOCK_KIND" ] || TEARDOWN_LOCK_KIND=ship
@@ -348,7 +382,10 @@ if [ -f "$META" ] && [ ! -L "$META" ]; then
   [ -n "$TEARDOWN_LOCK_BACKEND" ] || TEARDOWN_LOCK_BACKEND=tmux
   TEARDOWN_LOCK_WT=$(fm_meta_get "$META" worktree)
   TEARDOWN_LOCK_PROJECT=$(fm_meta_get "$META" project)
+  # A resumed worktree is never returned, so this teardown takes no part in
+  # pool-slot allocation contention and does not hold the allocation lock.
   if [ "$TEARDOWN_LOCK_KIND" != secondmate ] \
+     && ! teardown_resumed_worktree \
      && [ "$TEARDOWN_LOCK_BACKEND" != orca ] \
      && fm_treehouse_pool_slot "$TEARDOWN_LOCK_PROJECT" "$TEARDOWN_LOCK_WT"; then
     TREEHOUSE_SLOT_LOCK_REQUIRED=1
@@ -993,7 +1030,7 @@ CLEANUP_RECOVERY=$TEARDOWN_CLEANUP_RECOVERY
 
 KIND=$TEARDOWN_META_KIND
 EXPECTED_TREEHOUSE_PROJECT_LOCK=
-if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
+if [ "$KIND" != secondmate ] && ! teardown_resumed_worktree && [ "$BACKEND" != orca ] \
    && fm_treehouse_pool_slot "$PROJ" "$WT"; then
   EXPECTED_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ") || {
     echo "REFUSED: cannot resolve the shared Treehouse project lock for ${PROJ:-<missing>}; nothing was changed" >&2
@@ -2779,6 +2816,9 @@ preflight_descendant_treehouse_slots() {
     if [ "$kind" = secondmate ] || [ "$backend" = orca ]; then
       continue
     fi
+    if [ "$(meta_value "$meta" provision)" = resume ]; then
+      continue
+    fi
     if ! fm_treehouse_pool_slot "$project" "$worktree"; then
       continue
     fi
@@ -2810,6 +2850,9 @@ preflight_descendant_treehouse_slots() {
     worktree=$(meta_value "$meta" worktree)
     project=$(meta_value "$meta" project)
     if [ "$kind" = secondmate ] || [ "$backend" = orca ]; then
+      continue
+    fi
+    if [ "$(meta_value "$meta" provision)" = resume ]; then
       continue
     fi
     if ! fm_treehouse_pool_slot "$project" "$worktree"; then
@@ -3096,6 +3139,12 @@ cleanup_firstmate_home_children() {
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
+    elif [ "$(meta_value "$child_meta" provision)" = resume ]; then
+      # A child task that continued an existing worktree owns none of it, for
+      # the same reason the parent's own resumed worktree is left alone: the
+      # home is being retired, but a workspace firstmate never created is not
+      # part of that home to remove. Only the child's records are cleaned up.
+      :
     elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       # The same ownership determination as the parent's own slot: a child
       # slot reassigned to another task is not this child's to kill, reset,
@@ -3391,7 +3440,17 @@ fi
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   conclude_task_no_mistakes_run "$WT"
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  if teardown_may_return_worktree; then
+    reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+  else
+    # A resumed worktree is a workspace firstmate was given, not one it
+    # allocated, and the cwd sweep kills every process under the path rather
+    # than only this task's. In a pool slot about to be reset and handed on that
+    # is exactly right; in someone's live workspace it could take an editor
+    # holding unsaved buffers - the class of loss this mode exists to prevent.
+    # This task's own agent still goes down with its endpoint below.
+    reap_task_worktree_processes tasktmp "$TASK_TMP"
+  fi
 elif [ "$KIND" != secondmate ]; then
   reap_task_worktree_processes tasktmp "$TASK_TMP"
 fi
@@ -3423,6 +3482,15 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   fi
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
+  :
+elif [ "$KIND" != secondmate ] && teardown_resumed_worktree; then
+  # The destructive branch below detaches HEAD, deletes the task branch, removes
+  # hook files and then kills, hard-resets and returns the worktree. None of it
+  # may touch a resumed workspace: firstmate did not create it, its committed and
+  # uncommitted state is the reason the task existed, and returning it to a pool
+  # it never came from would hand someone else's live work away. The record is
+  # still retired and the endpoint still closed below, so the task disappears
+  # from the fleet exactly like any other - only the worktree survives.
   :
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
@@ -3642,6 +3710,8 @@ if [ -d "$STATE" ]; then
 fi
 if [ "$TEARDOWN_LEGACY_ACCEPTED" = 1 ]; then
   echo "teardown $ID complete (window $T, worktree $WT, legacy record accepted without spawn_gen: endpoint $TEARDOWN_LEGACY_ENDPOINT, incarnation $TEARDOWN_META_SPAWN_GEN)"
+elif teardown_resumed_worktree; then
+  echo "teardown $ID complete (window $T; continued worktree $WT left in place, exactly as this task found it)"
 elif teardown_owns_worktree; then
   echo "teardown $ID complete (window $T, worktree $WT)"
 else

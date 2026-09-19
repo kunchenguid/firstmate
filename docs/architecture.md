@@ -259,6 +259,7 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
 The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns ship/scout worktree isolation and fresh-base refusal rules, including spawns from linked homes.
+Isolation and freshness are separate predicates there, which is what lets a continuation dispatch keep the first unchanged while skipping the second entirely (see below).
 Portable regressions live in [`tests/fm-spawn-pool-base-freshen.test.sh`](../tests/fm-spawn-pool-base-freshen.test.sh) for spawn isolation and base freshness, and [`tests/fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh) for preserving the recorded copy on relaunch.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
@@ -271,6 +272,28 @@ Only a named non-default branch checked out in `FM_ROOT` is a worktree tangle.
 If another live session holds the fleet lock, both surfaces keep the alarm but switch to read-only wording with no repair command.
 Ship briefs also tell the crewmate to verify `pwd -P` and `git rev-parse --show-toplevel` before creating `fm/<id>`, then stop with a blocked status if it landed in the primary checkout.
 Placement is proven only at launch, so `bin/fm-spawn.sh` also exports the task id as `FM_TASK_ID` into every ship and scout pane, and `bin/fm-test-run.sh` refuses to execute the behavior suite from the primary checkout while that marker is set; the runner's header owns the predicate and [`tests/fm-test-run.test.sh`](../tests/fm-test-run.test.sh) pins it.
+
+### Provisioning a worktree, or continuing one
+
+A dispatch either PROVISIONS the worktree or AUTHENTICATES one that already exists, and those are separate modes rather than degrees of the same one.
+Fresh provisioning is the default: firstmate allocates a pooled slot, refreshes its base, and owns it from allocation through teardown.
+Continuation is `bin/fm-spawn.sh --resume-worktree <absolute-path>`, for work whose value is the committed or uncommitted state already sitting in a specific worktree.
+Its governing invariant is that authentication may never become provisioning, so the mode skips allocation and skips base freshening, issues no git write command at all, and treats a dirty workspace as the expected case rather than an error.
+Two worktrees are never interchangeable for sharing a repository or a branch: identity is the worktree's own git dir.
+The [`fm-spawn.sh` header](../bin/fm-spawn.sh) owns the mode's full contract and [`bin/fm-worktree-identity.sh`](../bin/fm-worktree-identity.sh) owns the deterministic facts and the fingerprint it authenticates against; [`tests/fm-spawn-resume-worktree.test.sh`](../tests/fm-spawn-resume-worktree.test.sh) pins both.
+
+Window and worktree are independent axes, and conflating them is the mistake this section exists to prevent.
+Reusing a terminal endpoint is not reusing a filesystem, and reusing a filesystem is not reusing a model's conversation.
+Four combinations are therefore distinguishable, and the fourth is deliberately absent:
+
+| Combination | How to get it |
+| ----------- | ------------- |
+| Fresh agent, fresh worktree | the ordinary spawn |
+| Fresh agent, existing worktree | `--resume-worktree` |
+| Fresh agent, same endpoint and same worktree | `--relaunch`, which reuses both but still starts a fresh model context |
+| Hot agent continuing its own conversation | not offered; resuming a provider's own session is a per-harness capability Firstmate does not currently expose |
+
+A request for hot model context is refused by the absence of a mode rather than quietly served with a fresh context, because silently substituting one for the other is indistinguishable from success until the worker has already lost the context the request existed for.
 
 ## No-mistakes gate authority boundary
 

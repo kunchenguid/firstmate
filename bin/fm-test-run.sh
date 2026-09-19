@@ -805,6 +805,7 @@ tests/fm-sessionstart-nudge.test.sh 66247
 tests/fm-shared-captain-inheritance.test.sh 5687
 tests/fm-spawn-dispatch-profile.test.sh 138433
 tests/fm-spawn-pool-base-freshen.test.sh 62249
+tests/fm-spawn-resume-worktree.test.sh 53455
 tests/fm-spawn-worktree-settle.test.sh 8482
 tests/fm-startup-memory-budget.test.sh 7392
 tests/fm-startup-network.test.sh 61336
