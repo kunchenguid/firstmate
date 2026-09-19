@@ -1966,7 +1966,7 @@ fi
 # defect's shape so the caller yields normally; prints its own refusal and
 # exits 1 when a corrupt lock cannot be proven safe to replace.
 watcher_corrupt_lock_takeover() {
-  local holder lock_identity fresh_identity wait_polls
+  local holder lock_identity fresh_identity watch_path_hex wait_polls
   holder=$FM_LOCK_HELD_PID
   lock_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
   [ -n "$lock_identity" ] && return 1
@@ -1978,8 +1978,9 @@ watcher_corrupt_lock_takeover() {
   # one, and ordinary singleton contention still yields instead of churning.
   [ "$(fm_path_age "$WATCH_LOCK")" -ge 5 ] || return 1
   fresh_identity=$(fm_pid_identity "$holder" 2>/dev/null || true)
+  watch_path_hex=$(printf '%s' "$WATCH_PATH" | od -An -v -tx1 | tr -d '[:space:]')
   case "$fresh_identity" in
-    *"$WATCH_PATH"*) ;;
+    *"$WATCH_PATH"*|*"$watch_path_hex"*) ;;
     *)
       echo "watcher: lock held by live pid $holder records no watcher identity and its live identity does not prove this watcher script; inspect or stop that watcher before re-arming." >&2
       exit 1
