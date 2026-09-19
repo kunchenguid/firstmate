@@ -25,7 +25,13 @@
 # It records which branch the captain actually works this project on, for the
 # projects whose working branch is not the remote's own default branch. The
 # tokens are order-independent, so [no-mistakes branch=develop +yolo] is the same
-# annotation as [no-mistakes +yolo branch=develop].
+# annotation as [no-mistakes +yolo branch=develop] and as
+# [branch=develop no-mistakes +yolo]: the mode is whichever token is neither
+# `+yolo` nor `branch=`, wherever it sits.
+# A `branch=` left with no value is a half-written registration rather than an
+# absent token, so it is refused exactly as `branch=-` is: reading it as absent
+# would send a pooled slot silently onto the remote default, the failure this
+# token exists to remove.
 #
 # Registered modes:
 #   no-mistakes            full pipeline -> PR -> configured merge authority (default)
@@ -85,19 +91,22 @@ fi
 # the project is absent. Whether a branch was registered is carried by its own
 # 0/1 field rather than by a reserved branch name: git's syntax check accepts
 # every placeholder that could be spelled here, "-" included, so no value of the
-# branch field can stand for its own absence.
+# branch field can stand for its own absence. A `branch=` written with no value
+# is present and malformed for the same reason, never absent.
+# The mode is the first token that is neither `+yolo` nor `branch=`, so every
+# token spelling of one annotation resolves to the same posture.
 parsed=$(awk -v n="$NAME" '
   $1=="-" && $2==n {
-    mode="no-mistakes"; yolo="off"; present=0; branch="-";
+    mode="no-mistakes"; yolo="off"; present=0; branch="-"; mode_set=0;
     if ($3 ~ /^\[/) {
       s="";
       for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) break }
       gsub(/^\[|\]$/, "", s);           # strip the surrounding brackets
       k = split(s, a, " ");
-      if (a[1] != "" && a[1] != "+yolo" && a[1] !~ /^branch=/) mode = a[1];
       for (j=1; j<=k; j++) {
         if (a[j]=="+yolo") yolo="on";
-        else if (a[j] ~ /^branch=/) { v = substr(a[j], 8); if (v != "") { present=1; branch=v } }
+        else if (a[j] ~ /^branch=/) { present=1; branch=substr(a[j], 8) }
+        else if (a[j] != "" && mode_set==0) { mode=a[j]; mode_set=1 }
       }
     }
     print mode, yolo, present, branch; exit

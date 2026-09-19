@@ -505,9 +505,10 @@ EOF
 }
 
 # The registered working branch is what tells a pooled worktree which branch the
-# project is actually worked on, so --branch never invents one: an absent, empty,
-# or malformed token leaves the caller to decide, and the posture read is
-# unaffected by the token's position in the annotation.
+# project is actually worked on, so --branch never invents one: only a token that
+# is not there at all leaves the caller to decide, a half-written or malformed one
+# is refused, and neither the posture nor the branch depends on where in the
+# annotation its token sits.
 test_project_mode_reads_the_registered_working_branch() {
   local home out err status
   home="$TMP_ROOT/project-branch/home"
@@ -520,6 +521,8 @@ test_project_mode_reads_the_registered_working_branch() {
 - emptyproj [no-mistakes branch=] - fixture (added 2026-09-18)
 - badproj [no-mistakes branch=bad..name] - fixture (added 2026-09-18)
 - dashproj [no-mistakes branch=-] - fixture (added 2026-09-18)
+- branchfirstproj [branch=develop local-only] - fixture (added 2026-09-18)
+- yolofirstproj [+yolo direct-PR] - fixture (added 2026-09-18)
 EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" --branch devproj 2>/dev/null)
   [ "$out" = develop ] || fail "--branch did not read the registered working branch (got '$out')"
@@ -535,7 +538,19 @@ EOF
   [ "$out" = "no-mistakes off" ] \
     || fail "a branch token was mistaken for a delivery mode (got '$out')"
 
-  for project in plainproj legacyproj emptyproj unregisteredproj; do
+  # A token's position never decides the posture, so a registration that leads
+  # with branch= or +yolo still resolves to the mode the captain wrote.
+  out=$(FM_HOME="$home" "$PROJECT_MODE" branchfirstproj 2>/dev/null)
+  [ "$out" = "local-only off" ] \
+    || fail "a branch token before the mode discarded the registered posture (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch branchfirstproj 2>/dev/null)
+  [ "$out" = develop ] \
+    || fail "--branch did not read a branch token written before the mode (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" yolofirstproj 2>/dev/null)
+  [ "$out" = "direct-PR on" ] \
+    || fail "a +yolo token before the mode discarded the registered posture (got '$out')"
+
+  for project in plainproj legacyproj unregisteredproj; do
     out=$(FM_HOME="$home" "$PROJECT_MODE" --branch "$project" 2>/dev/null)
     status=$?
     [ "$status" -eq 1 ] \
@@ -558,6 +573,19 @@ EOF
   assert_contains "$err" "not a valid branch name" \
     "a malformed branch token was ignored without saying so"
   assert_contains "$err" 'bad..name' "the diagnostic did not name the offending token"
+
+  # Somebody who typed `branch=` and stopped has stated an intention and left it
+  # unfinished, so it is refused exactly as a malformed value is; reading it as
+  # absent would turn a half-written line into a silent landing on the default
+  # branch, the failure this token exists to remove.
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch emptyproj 2>/dev/null)
+  status=$?
+  [ "$status" -eq 3 ] \
+    || fail "--branch answered $status for a valueless branch=, not the malformed-token status 3"
+  [ -z "$out" ] || fail "--branch printed something for a valueless branch= (got '$out')"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" --branch emptyproj 2>&1 >/dev/null)
+  assert_contains "$err" "not a valid branch name" \
+    "a half-written branch token was read as no branch at all"
 
   # A lone dash is a branch name git's syntax check accepts, so nothing but an
   # explicit refusal keeps it from being handed on and read as an option, and
