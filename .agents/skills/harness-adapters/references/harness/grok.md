@@ -37,11 +37,13 @@ For unavoidable non-project launch, `[hints] project_picker_disabled = true` in 
 
 ## Composer
 
-Fresh placeholder `Type a message...` uses dark 24-bit TRUECOLOR, not SGR-2.
+Fresh placeholder `Type a message...` used dark 24-bit TRUECOLOR on Grok 0.2.93, not SGR-2.
+Grok 1.0.34 draws that same placeholder as SGR-2 dim across the whole content row, including the `❯` glyph, and titles the same-width bottom rule `Grok <model> (<effort>) · always-approve`.
 `fm_composer_strip_ghost` in `../../../bin/fm-composer-lib.sh` drops dim or faint and truecolor below `FM_COMPOSER_GHOST_LUMA_MAX`, default 128.
+`_fm_composer_titled_bottom_ok` maps U+00B7 as title punctuation so that same-width autonomy title still proves the box.
 On Grok 0.2.93, real input `38;2;224;222;244` measured about 225 luminance, while borders and placeholder ranged from `38;2;50;47;70` through `38;2;110;106;134`, about 51-110, and were dropped.
 The truecolor rule assumes the fleet's dark theme; SGR-2 is theme-independent.
-Coverage is `../../../tests/fm-composer-ghost.test.sh` and `../../../tests/fm-backend-herdr.test.sh`.
+Coverage is `../../../tests/fm-composer-ghost.test.sh`, `../../../tests/fm-composer-lib.test.sh`, and `../../../tests/fm-backend-herdr.test.sh`.
 
 Tmux `#{cursor_y}` may point at the pristine composer's bottom border.
 The shared classifier locates the full box and all content rows, so border cursor and multi-row composers require no adapter offsets.

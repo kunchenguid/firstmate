@@ -265,6 +265,45 @@ test_dark_truecolor_ghost_only_composer_is_not_pending() {
   pass "fm_pane_input_pending: a dark truecolor ghost-only composer (grok placeholder) is NOT pending"
 }
 
+test_grok_1_0_34_dim_placeholder_in_autonomy_titled_box_is_not_pending() {
+  # Live grok 1.0.34 (2026-09-19): the idle composer is a same-width rounded
+  # box whose bottom rule carries `Grok 4.5 (high) · always-approve` and whose
+  # only content is SGR-2 dim `❯ Type a message...`. Before the title fold
+  # treated U+00B7 as a geometry break, this pane read unknown and blocked
+  # /exit. Ghost-only must now prove empty; the same box with bright typed
+  # text must still read pending.
+  local dir fb capture out
+  dir="$TMP_ROOT/grok-1.0.34-ghost"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  printf '%s\n' \
+    '╭────────────────────────────────────────────────────────────╮' \
+    $'│\033[2m ❯ Type a message...                                        \033[0m│' \
+    '╰───────────────────────── Grok 4.5 (high) · always-approve ─╯' \
+    > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] \
+    || fail "grok 1.0.34 dim placeholder in an autonomy-titled box must read empty, got '$out'"
+  if PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+     fm_pane_input_pending "fakepane"; then
+    fail "grok 1.0.34 dim placeholder-only composer falsely read as pending"
+  fi
+  printf '%s\n' \
+    '╭────────────────────────────────────────────────────────────╮' \
+    '│ ❯ deploy the fix                                           │' \
+    '╰───────────────────────── Grok 4.5 (high) · always-approve ─╯' \
+    > "$capture"
+  out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = pending ] \
+    || fail "typed text in a grok 1.0.34 autonomy-titled box must read pending, got '$out'"
+  PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+    fm_pane_input_pending "fakepane" \
+    || fail "typed text in a grok 1.0.34 autonomy-titled box must stay pending"
+  pass "fm_tmux_composer_state: grok 1.0.34 dim placeholder-only box is empty; typed text is pending"
+}
+
 test_dark_truecolor_bare_shell_prompt_is_unknown() {
   local dir fb capture out prompt
   dir="$TMP_ROOT/dark-shell-prompt"; mkdir -p "$dir"
@@ -691,6 +730,7 @@ test_dim_ghost_inside_bordered_composer_is_not_pending
 test_normal_text_still_pending
 test_colored_text_with_2_payload_still_pending
 test_dark_truecolor_ghost_only_composer_is_not_pending
+test_grok_1_0_34_dim_placeholder_in_autonomy_titled_box_is_not_pending
 test_dark_truecolor_bare_shell_prompt_is_unknown
 test_real_text_with_trailing_ghost_is_pending
 test_two_row_composer_reads_text_above_empty_cursor_row
