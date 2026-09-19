@@ -109,7 +109,7 @@ This live snapshot was all `through_reset`, so finite-runway fields were omitted
 There is no `projectionBasis` field; its absence means `cycle_average`.
 `runway` and `selection` are nested under each effective-availability scope, so the same provider/model applicability rules govern headroom, runway, and `spendPriority`.
 Projection confidence is not present on every known runway, so selection must preserve that absence as uncertainty rather than fabricate it.
-The older-schema fallback contract is owned by `quota-array-dispatch`; this evidence does not reinterpret an absent runway, pace, or selection field.
+The schema compatibility and account-matching contract is owned by [`quota-array-dispatch`](../../.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility); this schema-5 evidence does not reinterpret an absent runway, pace, or selection field.
 
 ## Provider-family counterfactual that this producer schema supports
 
@@ -203,4 +203,5 @@ It asserts that the script accepts no harness, model, or provider input, never c
 `tests/fm-bootstrap.test.sh` owns the quota-axi version-floor diagnostic.
 `tests/fm-quota-array-dispatch-live-e2e.test.sh` drives the public Pi skill-loading interface against one fake schema-5 snapshot per case, served as quota-axi's default TOON.
 It covers TOON-first `spendPriority` ranking among candidates that pass eligibility, reasoning-class, and runway-feasibility gates, explicit accounting for unmeasurable runway, the strongest-reasoning constraint, and the runway feasibility floor over a higher `spendPriority`.
+`tests/fm-dispatch-resolve.test.sh`, `tests/fm-quota-choose.test.sh`, and `tests/fm-procevent-quota.test.sh` cover schema-6 account-row binding, account separation, and schema-5 compatibility through the public script interfaces.
 The skill's primary path is that default TOON; `--json` is the documented defensive fallback, and this section records the producer `--json` shape that fallback consumes.
