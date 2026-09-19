@@ -108,7 +108,8 @@
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
-#                          status, unless afk is active
+#                          status or Pi has pending suppressed branch progress;
+#                          afk also requests heartbeat reviews
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
@@ -2703,8 +2704,9 @@ EOF
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
-    # turns up a captain-relevant status the per-wake path missed. Absorb the
-    # no-change case (advance the schedule and back off exactly as wake() would,
+    # turns up a captain-relevant status the per-wake path missed or Pi has
+    # suppressed progress awaiting a summary. Absorb the no-change case
+    # (advance the schedule and back off exactly as wake() would,
     # without exiting); the away-mode daemon, when present, owns triage and wants
     # every heartbeat.
     if afk_present; then
@@ -2719,6 +2721,12 @@ EOF
       fm_wake_append heartbeat heartbeat heartbeat || exit 1
       touch "$STATE/.last-heartbeat"
       mark_all_captain_relevant_surfaced || true
+      wake "heartbeat"
+    elif [ "${PI_CODING_AGENT:-}" = true ] \
+        && [ -s "$STATE/branch-outcomes.jsonl" ] \
+        && [ -n "$("$SCRIPT_DIR/fm-branch-outcome.sh" pending-progress)" ]; then
+      fm_wake_append heartbeat heartbeat heartbeat || exit 1
+      touch "$STATE/.last-heartbeat"
       wake "heartbeat"
     else
       if ! mark_all_captain_relevant_surfaced; then

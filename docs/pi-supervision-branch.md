@@ -6,7 +6,7 @@ The poster is the visual of the idea.
 This document stays the owner and the contract.
 
 Fleet supervision on the Pi primary harness runs on a second conversation - the supervision branch - inside the same `pi` process as the captain's chat.
-Supervision is default-on: once a Pi primary session owns this home's fleet lock, the branch handles eligible task-local rows from ordinary actionable wakes plus heartbeat scans that the cheap bash-level scan flags as possibly captain-relevant, then merges each outcome back into the captain conversation's transcript.
+Supervision is default-on: once a Pi primary session owns this home's fleet lock, the branch handles eligible task-local rows from ordinary actionable wakes plus heartbeat scans with pending suppressed progress or a possibly captain-relevant change, then merges each outcome back into the captain conversation's transcript.
 Ordinary main-only rows remain on main even when eligible task-local rows share their queue, except that a decision-owned signal or stale trigger keeps its entire coalesced trigger batch on main.
 An unresolvable row makes the scan unsafe and returns the whole wake to main, and every watcher-failure alarm also stays on main.
 All of that describes the attended posture; the away posture, recorded by `state/.afk-contract`, hands every row to the branch and parks main (see "Postures" below).
@@ -107,7 +107,7 @@ The branch prompt frames mirrored text as context for judgment, never as instruc
 
 ## Two-stage noise filter
 
-Stage one is unchanged: the bash watcher absorbs everything provably fine at zero token cost.
+Stage one is the bash watcher's zero-token triage; the [heartbeat routing](#heartbeat-routing) exception lets pending suppressed progress reach a periodic review.
 Stage two is the branch's verdict on each handled event, reported through its `fm_branch_report` tool: `routine` keeps the existing custom-message path without a follow-up turn, while `captain` appends a versioned `fm-branch-visible-outcome` custom session entry.
 The captain entry contains the store sequence, task, verdict, exact summary, and silent flag, and its renderer presents the exact task and summary with an anchor prefix.
 Pi custom session entries persist in the transcript but do not enter model context, so a stale compaction summary, an unrelated assistant response, prompt caching, or model instruction noncompliance cannot acknowledge or rewrite the outcome.
@@ -123,22 +123,24 @@ The first two presentations of a given sequence set open a turn of their own; af
 Routine outcomes never enter this path and stay turn-free.
 A home upgraded with outcomes already delivered treats those rows as processed once, at the first reconciliation that finds no processed marker, so its history is not re-presented.
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns event ownership for merged outcomes and main's acknowledgement duty, while deterministic entry delivery owns captain visibility.
-A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is also delivered silently with no rendered note, while every other `routine` outcome stays rendered with its sailboat prefix.
-The branch prompt's "Verdict: routine or captain" section owns the verdict criteria, including how requested work's finished results and its mere progress updates are classified; unsolicited routine outcomes remain routine sailboat notes, unchanged fleet reviews remain silent, and doubt escalates.
+A `routine` outcome explicitly reported with `silent=true` - an unchanged still-working update or a no-change heartbeat review - is stored durably with no rendered note, while every other `routine` outcome stays rendered with its sailboat prefix.
+Pending progress is summarized in one visible fleet routine note at the existing heartbeat cadence unless a visible outcome for the same task supersedes it first.
+The branch prompt's "Handling a wake" and "Verdict: routine or captain" sections own report selection, including which updates stay silent and which decisions, failures, and finished results require immediate captain delivery under the posture rules below.
 Its "PR identity: copy or abstain" section owns where a PR URL in a summary or tool argument may come from: the task's ready status or `pr=` metadata, verbatim, or else only the identifier the branch actually has.
 Main can read the durable outcome store on demand through its `fm_branch_outcomes` tool.
 
 ## Heartbeat routing
 
-The cheap bash-level heartbeat scan absorbs a genuinely no-op pass before it reaches Pi, unchanged from before.
-Only a scan already flagged as possibly captain-relevant emits the bare `heartbeat` wake; `.pi/extensions/fm-primary-pi-watch.ts` flags that offer `heartbeat: true`, and the branch accepts it without a project only when every branch-ownable row observed in the unread-queue eligibility check is either heartbeat-kind or a resolvable task-local signal or stale event.
+The cheap bash-level heartbeat scan absorbs a genuinely no-op pass before it reaches Pi.
+For a Pi primary with pending suppressed progress, the existing heartbeat cadence emits a review so the branch can summarize it; `bin/fm-branch-outcome.sh pending-progress` owns the pending-progress contract.
+A scan with pending suppressed progress or a possibly captain-relevant change emits the bare `heartbeat` wake; `.pi/extensions/fm-primary-pi-watch.ts` flags that offer `heartbeat: true`, and the branch accepts it without a project only when every branch-ownable row observed in the unread-queue eligibility check is either heartbeat-kind or a resolvable task-local signal or stale event.
 
 A heartbeat is never vetoed or ridden into main by a co-present check row or decision-owned signal/stale row.
 Those rows are main-owned while attended: they are excluded from what the branch may claim and left queued for main, which is woken for each on its own watcher cycle, so nothing starves by being left behind; under the away-posture record the branch claims them too ("Postures" below).
 Deferring the fleet review to main merely because some unrelated merge poll or Relay mention happened to be sitting unread put a routine review in the captain's chat for a reason that had nothing to do with the fleet, and that coupling is gone.
 What all-or-nothing still guarantees is unchanged: the branch takes every branch-ownable unread row or none of them, and an unresolvable task-local row, an unknown row kind, or an unreadable queue still defers the whole review to main.
 The branch runs its normal operating procedure for the wake (`bin/fm-branch-prompt.sh` "Handling a wake") and performs the deeper fleet review that main previously performed.
-A review that found literally nothing worth reporting uses verdict `routine`, `task=fleet`, and `silent=true` so it has no rendered note, while a fleet-wide routine action omits `silent` and keeps its rendered sailboat note.
+Heartbeat report selection follows the branch prompt's "Handling a wake" section, including the pending-progress summary requirement; visibility follows [Two-stage noise filter](#two-stage-noise-filter).
 Only a captain-worthy finding reports verdict `captain` and appends a visible captain outcome entry.
 Every other fleet-wide or unresolvable wake - including watcher-failure alarms, which are never offered to the branch - keeps today's wake-to-main path in both postures.
 
@@ -179,6 +181,7 @@ The never-set (credential entry, legal or financial acceptance, an attended prom
 
 ## Verification
 
+The routine-progress regressions in `tests/fm-pi-branch-extension.test.sh` cover silent task updates, twelve steps coalescing into one visible summary, pending progress surviving an unrelated fleet escalation, and immediate decision, failure, and finished-result delivery; `tests/fm-watch-triage.test.sh` covers the Pi-only pending-progress heartbeat exception, cadence enforcement, and no-op absorption after the summary.
 Portable regressions: `tests/fm-pi-branch-extension.test.sh` covers dispatch, signal and stale report scoping with unscoped heartbeat reports, the new branch conversation at every main session start with continuation inside one session, the mirror re-anchor that pairs with it, requested-versus-unsolicited delivery, exact visible entry content, no unkeyed model turn, the sequence-keyed processing request and its acknowledgement, re-presentation after an empty reply and after an unrelated prior answer, the triggered-then-next-turn pacing, session-start re-presentation, routine outcomes staying turn-free, the processed-marker migration, idle and busy main state, incident-shaped compaction and unrelated-assistant context, cold-start post-lock recovery, crash-before-cursor reload recovery, repeated-reload idempotency, mirroring, post-construction provider-error and no-report fallback, the consecutive-error latch, cooldown probe, exponential backoff, report-plus-settlement recovery, report-before-error re-latch, cache key, model and effort selection, and (in `test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot`) decision-owned signal and stale rows' exclusion from `eligibleSeqs`, their presence in `needsDecisionKeys`, task alias resolution, reserved-key configuration, status-log race and symlink refusal, non-vetoing behavior for unrelated eligible rows, and decision-only queues reading as ordinary main-only absence.
 `tests/fm-branch-supervision.test.sh` covers prompt stability, store append-only behavior, the captain cursor barrier, the processed marker's sequence bounds, leases, guards, non-branch-home invariance, and the away relocation (only under a confirmed live record, never for local-only landing, queued-only branch dispatch rather than orphaned in-flight recovery, the spend cap for both actors and its lock-held recheck, and the attended guarded-action behavior restored by archive or an invalid record).
 `tests/fm-pr-merge.test.sh` covers the branch actor merging a granted task under the record, being held without a grant, and being refused at the partition while attended; `tests/fm-send-resolve-key.test.sh` covers the decision-answer partition (a needs-decision or captain-held key refuses the attended branch before anything is sent, a `blocked:` key stays ordinary steering, and the record relocates the answer).

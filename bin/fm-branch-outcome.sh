@@ -18,7 +18,9 @@
 #   - Cursor: $STATE/.branch-outcomes-cursor holds the highest seq handed to
 #     Pi as a routine merge note, persisted as a sequence-keyed visible captain
 #     entry, emitted by the locked session-start replay, or silently consumed
-#     there because `silent` is true. Records above the cursor are unread.
+#     there because `silent` is true. `silent` is allowed only on routine
+#     outcomes; docs/pi-supervision-branch.md owns their visibility contract.
+#     Records above the cursor are unread.
 #     A captain row advances only after its matching visible entry exists in
 #     Pi's session, so reload recovery is idempotent across that crash window.
 #     A cursor beyond the validated store tail fails closed.
@@ -81,6 +83,11 @@
 #     the nested acquire so drain's bounded lock wait remains the deadline.
 #   fm-branch-outcome.sh list [--recent <n>]
 #     Print the last n records (default 20), read or not.
+#   fm-branch-outcome.sh pending-progress
+#     Print the latest silent task outcomes not superseded by a visible outcome
+#     for that task or a visible routine fleet summary, independently of the read cursor.
+#     Silent fleet reviews and fleet captain outcomes neither add nor consume
+#     pending progress.
 #   fm-branch-outcome.sh startup-replay
 #     Session-start recovery: print the leading routine unread records under a
 #     labeled header into the locked startup digest, skip rows whose `silent`
@@ -107,7 +114,7 @@ OUTCOME_INDEX_MAX_BYTES=512
 OUTCOME_INDEX_READY="$STATE/.branch-outcome-index-ready"
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init [--held-lock] | list [--recent <n>] | startup-replay" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init [--held-lock] | list [--recent <n>] | pending-progress | startup-replay" >&2
   exit 2
 }
 
@@ -193,7 +200,7 @@ last_seq() {
       and ((.epoch | type) == "number" and .epoch >= 0 and .epoch == (.epoch | floor))
       and ((.task | type) == "string" and (.wake | type) == "string")
       and ((.summary | type) == "string" and (.verdict == "routine" or .verdict == "captain"))
-      and (.silent != true or (.task == "fleet" and .verdict == "routine"));
+      and (.silent != true or .verdict == "routine");
     if endswith("\n") then split("\n")[:-1]
     else error("unterminated outcome store")
     end
@@ -442,8 +449,8 @@ case "$CMD" in
     [ -n "$SUMMARY" ] || usage
     case "$VERDICT" in routine|captain) ;; *) usage ;; esac
     case "$SILENT" in true|false) ;; *) usage ;; esac
-    if [ "$SILENT" = true ] && { [ "$TASK" != fleet ] || [ "$VERDICT" != routine ]; }; then
-      echo "error: silent outcomes must be routine fleet outcomes" >&2
+    if [ "$SILENT" = true ] && [ "$VERDICT" != routine ]; then
+      echo "error: silent outcomes must be routine outcomes" >&2
       exit 2
     fi
     fm_lock_acquire_wait "$LOCK"
@@ -610,6 +617,26 @@ case "$CMD" in
     fi
     if [ -s "$STORE" ]; then
       tail -n "$RECENT" "$STORE"
+    fi
+    fm_lock_release "$LOCK"
+    ;;
+  pending-progress)
+    [ "$#" -eq 0 ] || usage
+    fm_lock_acquire_wait "$LOCK"
+    if ! last_seq >/dev/null; then
+      fm_lock_release "$LOCK"
+      echo "error: refusing read because the outcome store is malformed or non-sequential" >&2
+      exit 1
+    fi
+    if [ -s "$STORE" ]; then
+      jq -sc '
+        reduce .[] as $row ({};
+          if $row.task == "fleet" then
+            if $row.verdict == "routine" and $row.silent != true then {} else . end
+          elif $row.silent == true then .[$row.task] = $row
+          else del(.[$row.task]) end)
+        | [.[]] | sort_by(.seq) | .[]
+      ' "$STORE"
     fi
     fm_lock_release "$LOCK"
     ;;
