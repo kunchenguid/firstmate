@@ -180,6 +180,97 @@ test_answer_close_is_self_announced() {
   pass "fm-send --resolve-key: the close never re-wakes its own home, later lines still do"
 }
 
+# Freeze the real sender after its close append but before its seen-marker
+# commit, then let the real watcher capture that transient state. The grace
+# rescan must drop it once the sender commits; a worker blocker still wakes.
+test_answer_close_during_signal_grace() (
+  local dir fb home log watcher sender i out
+  dir="$TMP_ROOT/self-announced-race"; mkdir -p "$dir/watchbin"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home self-announced-race)
+  fm_write_meta "$home/state/t9.meta" "window=sess:fm-t9" "kind=ship"
+  printf 'needs-decision [key=port-choice]: 8080 or 9090\n' > "$home/state/t9.status"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_status_mark_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t9.status" \
+    || fail "could not prime the announced baseline"
+  drain_out "$home" >/dev/null
+  # Keep transport and timing fakes outside the append/scan/queue code.
+  cat > "$dir/size-reader" <<'SH'
+#!/usr/bin/env bash
+if grep -q '^resolved ' "$1" && [ ! -e "$FM_RACE_DIR/release" ]; then
+  touch "$FM_RACE_DIR/appended"
+  for ((i=0; i<300; i++)); do
+    [ ! -e "$FM_RACE_DIR/release" ] || break
+    /bin/sleep 0.1
+  done
+  [ -e "$FM_RACE_DIR/release" ] || exit 1
+fi
+if [ "$(uname)" = Darwin ]; then /usr/bin/stat -f '%z' "$1"; else stat -c '%s' "$1"; fi
+SH
+  cat > "$dir/watchbin/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = 7 ]; then
+  touch "$FM_RACE_DIR/grace"
+  for ((i=0; i<300; i++)); do
+    [ ! -e "$FM_RACE_DIR/sent" ] || exit 0
+    /bin/sleep 0.1
+  done
+  exit 1
+fi
+[ "$1" != 1 ] || touch "$FM_RACE_DIR/poll"
+exec /bin/sleep "$@"
+SH
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$dir/watchbin/tmux"
+  chmod +x "$dir/size-reader" "$dir/watchbin/sleep" "$dir/watchbin/tmux"
+  sender='' watcher=''
+  trap '[ -z "$sender" ] || kill "$sender" 2>/dev/null; [ -z "$watcher" ] || kill "$watcher" 2>/dev/null; wait 2>/dev/null || true' EXIT
+  FM_RACE_DIR="$dir" FM_STATUS_SIZE_READER="$dir/size-reader" \
+    run_send "$fb" "$home" "$log" t9 --resolve-key port-choice "use 9090" > "$dir/send.out" &
+  sender=$!
+  for ((i=0; i<300; i++)); do
+    [ ! -e "$dir/appended" ] || break
+    /bin/sleep 0.1
+  done
+  [ -e "$dir/appended" ] || fail "sender never reached the post-append barrier"
+  FM_RACE_DIR="$dir" PATH="$dir/watchbin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_POLL=1 FM_SIGNAL_GRACE=7 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch.sh" > "$dir/watch.out" 2> "$dir/watch.err" &
+  watcher=$!
+  for ((i=0; i<300; i++)); do
+    [ ! -e "$dir/grace" ] || break
+    /bin/sleep 0.1
+  done
+  [ -e "$dir/grace" ] || fail "watcher never scanned the uncommitted close"
+  touch "$dir/release"
+  wait "$sender" || fail "answer send failed"; sender=
+  rm -f "$dir/poll"
+  touch "$dir/sent"
+  for ((i=0; i<300; i++)); do
+    [ ! -e "$dir/poll" ] || break
+    [ ! -s "$dir/watch.out" ] || break
+    /bin/sleep 0.1
+  done
+  if [ -s "$dir/watch.out" ] || [ -s "$home/state/.wake-queue" ]; then
+    out=$(drain_out "$home")
+    fail "the committed close survived the grace rescan: $(cat "$dir/watch.out")\n$out"
+  fi
+  [ -e "$dir/poll" ] || fail "watcher did not complete a quiet poll"
+  printf 'blocked [key=worker-access]: worker needs release access\n' >> "$home/state/t9.status"
+  for ((i=0; i<300; i++)); do
+    [ ! -s "$dir/watch.out" ] || break
+    /bin/sleep 0.1
+  done
+  grep -F "signal: $home/state/t9.status" "$dir/watch.out" >/dev/null \
+    || fail "worker blocker after the self-close did not signal"
+  wait "$watcher" || fail "watcher failed"; watcher=
+  out=$(drain_out "$home")
+  assert_contains "$out" 'blocked [key=worker-access]: worker needs release access' \
+    "worker blocker must appear in the wake annotation"
+  pass "fm-send --resolve-key: grace rescan drops a self-close but preserves the next worker blocker"
+)
+
 # The reported failure behind issue #2109: a worker that put the colon first
 # (needs-decision: [key=X] ...) had its key silently folded to "default", so
 # the answer's --resolve-key X refused with "no open decision or blocker with
@@ -785,6 +876,7 @@ test_decision_answer_partition_relocates_under_the_record() {
   pass "fm-send --resolve-key: a decision answer refuses the attended branch before sending, a blocked: key stays steering, and the away-posture record relocates the answer"
 }
 
+test_answer_close_during_signal_grace || exit 1
 test_answer_send_closes_open_decision
 test_answer_close_is_self_announced
 test_colon_first_key_position_is_answerable
