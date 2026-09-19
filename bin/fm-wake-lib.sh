@@ -2174,10 +2174,11 @@ fm_wake_status_mark_current() {  # <state> <status-file>
 #   - "already read" means the watcher's classified seen offset equals the
 #     pre-append size, or the OPEN DECISIONS fold cursor does and every
 #     non-blank line the watcher has not classified yet is a keyed
-#     needs-decision, blocked or resolved line. The fold reads bytes it never
-#     prints, so a worker's `failed:`, `paused:`, `working:` or verb-less line
-#     there must still wake, and so must a captain-held line, which raises the
-#     watcher's needs-decision side-band;
+#     needs-decision or blocked line, which OPEN DECISIONS listed as open. The
+#     fold reads bytes it never prints, so a worker's `failed:`, `paused:`,
+#     `working:`, `resolved` or verb-less line there must still wake, and so
+#     must a captain-held line, which raises the watcher's needs-decision
+#     side-band;
 #   - on ANY other condition - a missing file, pending foreign bytes, an
 #     interleaved writer, an unreadable size or identity - the lines are still
 #     appended but the marker is left alone, so the watcher surfaces the file
@@ -2210,7 +2211,7 @@ fm_wake_status_append_self_announced() {  # <state> <status-file> <line>...
     while IFS= read -r line || [ -n "$line" ]; do
       case "$line" in *[![:space:]]*) ;; *) continue ;; esac
       case "$(status_line_verb "$line")" in
-        needs-decision|blocked|"${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}") ;;
+        needs-decision|blocked) ;;
         *) return 1 ;;
       esac
       _fm_key_before_colon "$line" || _fm_key_at_note_head "$line" >/dev/null || return 1
