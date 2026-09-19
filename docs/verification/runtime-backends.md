@@ -603,7 +603,8 @@ Muse self-updated to 1.3.0-R3401.1 on 2026-09-19 and redrew its composer: 0.1.0 
 The classifier read every muse pane `unknown`, because the lone closing rule below the glyph row is the staleness evidence a solid rule carries, so `bin/fm-control.sh exit` and `relaunch` refused every muse target and neither second mate could be restarted without the captain typing `/exit` by hand.
 A titled rule now OPENS a separated region and does nothing else - it never closes one and never carries that staleness evidence - so muse 1.3's own rules pair around its glyph row while no composer anywhere gains a new deferral.
 The same release rotates hints from its tip catalogue around an empty composer at normal intensity, where ghost stripping cannot see them; a row that is nothing but one of those hints is now composer furniture bounding a bare composer's wrap region, which is what stops a doorbell being skipped on an idle pane.
-The guard was rerun on 2026-09-19 against the installed harnesses on this machine, on tmux 3.5a, macOS arm64, with no prompt submitted:
+Muse draws roughly twenty such hints from one catalogue, and only the two seen unrung on a live mate are in the fleet idle set, so a pane showing a different hint can still read `pending`; widening that set is deliberate work, because every entry is a string that reads as an empty composer when a human types it.
+The guard was rerun on 2026-09-19 against every harness installed on the verification machine, on tmux 3.5a, macOS arm64, with no prompt submitted:
 
 ```sh
 FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
@@ -621,7 +622,7 @@ ok - strict posture live: a blank shell row classifies unknown and injection def
 ```
 
 Muse, Claude, and Grok reached a proven `empty` against their current releases; this is also the first live result for Grok 1.0.34, superseding the refresh the 1.0.5 overhang change still owed.
-Codex is signed out on that machine, so its pane parked on a sign-in chooser rather than a composer, which the strict classifier correctly refuses to read; that result says nothing about codex's shape, which the portable byte-capture regression still covers.
+Codex was signed out on the verification machine, so its pane parked on a sign-in chooser rather than a composer, which the strict classifier correctly refuses to read; that result says nothing about codex's shape, which the portable byte-capture regression still covers.
 The guard now launches muse with `--yolo`, the same flag `bin/fm-spawn.sh` passes, because muse gates every workspace no operator has opened by hand behind its own trust dialog; a bare `muse` could only ever fail on that dialog and never exercise the composer.
 The portable half is `tests/fm-composer-lib.test.sh`, which carries the real 100-column and 44-column idle captures, the typed capture, a hint row, and a dead shell in the same geometry, and asserts that replacing the titled rule with ordinary transcript text takes the identical glyph row back to `unknown`.
 
