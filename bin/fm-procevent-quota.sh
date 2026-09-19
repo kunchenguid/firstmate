@@ -27,6 +27,12 @@
 # The canonical source id is `quota` for the aggregate tracked provider.
 # A provider named with --provider sets the tracked provider and the source id
 # becomes `quota-<provider>`.
+#
+# Snapshots may be quota-axi schema 5 or 6 (bin/fm-quota-axi-lib.sh owns the
+# validator and the row join). The aggregate watch reads every row, including
+# each account of an expanded provider, without combining them. A --provider
+# watch binds to that provider's `default` row; an expanded provider with no
+# `default` row has no single account to track and reports error.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -113,7 +119,7 @@ quota_json() {
 condition_status() {
   local json=$1 provider=${2:-} threshold=${3:-$DEFAULT_THRESHOLD}
   printf '%s\n' "$json" | fm_quota_json_valid || { printf 'error\n'; return; }
-  printf '%s\n' "$json" | jq -r --arg provider "$provider" --arg threshold "$threshold" '
+  printf '%s\n' "$json" | jq -r --arg provider "$provider" --arg threshold "$threshold" "$FM_QUOTA_ROW_JQ"'
     def classify($availability):
       ($availability | map(select(.status == "known"))) as $known |
       if ($availability | length) == 0 then "error"
@@ -129,7 +135,7 @@ condition_status() {
       else classify([.providers[]?.quotaSemantics.effectiveAvailability[]?])
       end
     else
-      ([.providers[]? | select(.provider == $provider)] | first) as $p |
+      quota_row(.; $provider; "") as $p |
       if ($p // null) == null then "error"
       elif ($p.quotaSemantics.effectiveAvailability | length) == 0 and
            ($p.quotaSemantics.status == "unknown" or $p.quotaSemantics.status == "partial") then "healthy"
@@ -143,7 +149,7 @@ condition_status() {
 # Print a one-line summary of the quota state for the result document.
 details() {
   local json=$1 provider=${2:-}
-  printf '%s\n' "$json" | jq -c --arg provider "$provider" '
+  printf '%s\n' "$json" | jq -c --arg provider "$provider" "$FM_QUOTA_ROW_JQ"'
     def best_detail($availability):
       ($availability | map(select(.status == "known"))) as $known |
       ($availability | map(select((.runway.status // "") == "exhausted_now"))) as $exhausted |
@@ -156,18 +162,17 @@ details() {
         provider: "aggregate",
         summary: [
           (.providers[]? |
-            { provider: .provider,
-              best: best_detail(.quotaSemantics.effectiveAvailability // [])
-            }
+            { provider: .provider }
+            + (if has("accountKey") then {accountKey} else {} end)
+            + { best: best_detail(.quotaSemantics.effectiveAvailability // []) }
           )
         ]
       }
     else
-      (.providers[]? | select(.provider == $provider)) as $p |
-      {
-        provider: $provider,
-        best: best_detail($p.quotaSemantics.effectiveAvailability // [])
-      }
+      quota_row(.; $provider; "") as $p |
+      { provider: $provider }
+      + (if ($p | has("accountKey")) then {accountKey: $p.accountKey} else {} end)
+      + { best: best_detail($p.quotaSemantics.effectiveAvailability // []) }
     end
   ' 2>/dev/null
 }
