@@ -351,16 +351,21 @@ notice_parent_report_failed() { # <record> <fingerprint> <payload>
   queue_notice_once "$record" "inactive-reconcile:$fingerprint" "$payload" || true
 }
 
-# The whole terminal line a child's ledger ends in, or non-zero when the ledger
-# is absent, unusable, still being appended (no trailing newline yet), or does
-# not end in a done or failed line.
+# The whole terminal line a child's ledger CURRENTLY states, or non-zero when
+# the ledger is absent, unusable, still being appended (no trailing newline
+# yet), or does not currently declare a done or failed state.
+# The outcome is read through status_current_state_line, the same current-state
+# notion bin/fm-crew-state.sh reports from, rather than from the bare last line:
+# a decision-closing resolved: or an informational note: appended after the
+# outcome does not retract it. Deriving the two differently is what lets this
+# path disown a terminal ledger that crew-state still reports as done, so the
+# inactive fallback below delivers the same outcome a second time.
 child_terminal_ledger_line() { # <status>
   local status=$1 snapshot last marker='__FM_LEDGER_SNAPSHOT_END__'
   [ -f "$status" ] && [ ! -L "$status" ] && [ -s "$status" ] || return 1
   snapshot=$(cat "$status"; printf '%s' "$marker") || return 1
   case "$snapshot" in *$'\n'"$marker") ;; *) return 1 ;; esac
-  snapshot=${snapshot%"$marker"}
-  last=$(printf '%s' "$snapshot" | grep -v '^[[:space:]]*$' | tail -1)
+  last=$(status_current_state_line "$status") || return 1
   case "$(status_line_verb "$last")" in
     done|failed) printf '%s\n' "$last" ;;
     *) return 1 ;;
@@ -406,7 +411,7 @@ report_child_ledger_locked() { # <id> <meta>
   incarnation=$(meta_incarnation "$meta")
   fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$last")
   previous=$(grep -v '^[[:space:]]*$' "$status" 2>/dev/null \
-    | tail -2 | awk 'NR == 1 { first = $0 } NR == 2 { print first }' || true)
+    | awk -v t="$last" '$0 == t { print prev } { prev = $0 }' | tail -1 || true)
   predecessor_head=$(sha256_text "$previous")
   outcome_key="child-outcome-$id-$state-${fingerprint:0:8}"
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct upstream "$pr" || return 1
@@ -492,8 +497,8 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     "$CREW_STATE_BIN" "$id" 2>/dev/null) || state_rc=$?
   [ "$state_rc" -ne 124 ] || return 3
   last=$(last_status_line "$status")
-  if [ -n "$self" ]; then
-    case "$(status_line_verb "$last")" in done|failed) return 0 ;; esac
+  if [ -n "$self" ] && child_terminal_ledger_line "$status" >/dev/null; then
+    return 0
   fi
   case "$state_line" in
     'state: done '*) state='done' ;;

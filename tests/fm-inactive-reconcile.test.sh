@@ -190,6 +190,34 @@ test_local_secondmate_delivers_terminal_ledger_line() {
   pass "secondmate delivers a child's terminal ledger line once, on the next poll, from the ledger alone"
 }
 
+# A captain answer that lands AFTER a child's terminal ledger line must not hand
+# the same outcome to the inactive fallback a second time. The child parks on a
+# keyed decision, finishes, and the answer arrives late, so the ledger's last
+# line is `resolved:` while the state it currently declares is still `done:`.
+# The ledger-first owner and bin/fm-crew-state.sh have to agree about that, or
+# the ledger disowns an outcome crew-state still reports as terminal and the
+# parent is told the same child finished twice.
+test_late_resolved_does_not_redeliver_a_terminal_ledger() {
+  make_world late-answer; bind_secondmate local
+  write_child "$MATE" child 'needs-decision [key=d1]: adopt A or B'
+  printf 'done: report ready at data/child/report.md\n' >> "$MATE/state/child.status"
+  age "$MATE/state/child.meta" "$MATE/state/child.status" "$MATE/state/child.turn-ended"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  [ "$(grep -c 'child-outcome-child-done' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "the ledger path did not deliver the child's done line once: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
+
+  printf 'resolved [key=d1]: answered: go with A\n' >> "$MATE/state/child.status"
+  age "$MATE/state/child.meta" "$MATE/state/child.status" "$MATE/state/child.turn-ended"
+  FM_FAKE_CREW_STATE='done' run_reconcile "$MATE" --startup
+  ! grep -q 'inactive-outcome-' "$MAIN/state/mate.status" \
+    || fail "a late resolved: line handed an already-delivered outcome to the inactive path: $(cat "$MAIN/state/mate.status")"
+  [ "$(grep -c 'child-outcome-child-done' "$MAIN/state/mate.status")" = 1 ] \
+    || fail "the ledger path delivered the same outcome twice"
+  [ "$(outcome_count "$MATE" reported)" = 1 ] \
+    || fail "a second receipt was minted for one child outcome"
+  pass "a captain answer landing after a terminal ledger line does not redeliver the outcome"
+}
+
 # A busy child cannot keep later ledger outcomes from being visited, and is
 # retried on the next poll after its lifecycle lock becomes available.
 test_busy_child_does_not_starve_later_ledger_outcomes() {
@@ -825,6 +853,7 @@ test_secondmate_ledger_delivery_carries_report_and_failure
 test_pr_field_requires_recorded_pr_or_ready_signal_line
 test_terminal_line_during_state_read_yields_to_ledger_delivery
 test_terminal_line_after_inactive_delivery_is_not_reported_twice
+test_late_resolved_does_not_redeliver_a_terminal_ledger
 test_progress_after_inactive_delivery_starts_a_new_event
 test_long_terminal_lines_have_distinct_receipts
 test_secondmate_partial_ledger_line_waits_for_newline

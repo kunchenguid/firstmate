@@ -4,8 +4,13 @@
 #
 # The steering inbox's one behavioral assumption is that a real worker agent
 # follows the constant self-describing doorbell line: list the inbox, read and
-# act on its records in numeric order, then mv each into handled/. A stub can
-# only confirm the assumption already
+# act on its records in numeric order, and mv each into handled/ once read,
+# that move confirming receipt rather than completion. The steer below is
+# phrased in that shipped order (acknowledge first, then do the work), but the
+# verdict requires only that BOTH legs happen within the timeout - it does not
+# observe which landed first, so it proves comprehension of the doorbell, not
+# the relative ordering of the ack and the work. A stub can only confirm
+# the assumption already
 # written into the stub, so per .agents/skills/firstmate-coding-guidelines
 # this is proven against every INSTALLED verified harness: each is launched
 # idle in an isolated tmux server, steered through the REAL fm-send (durable
@@ -144,7 +149,7 @@ check_harness_doorbell() {  # <name>
   [ "$ready_rc" -eq 0 ] || note "$name ($version): idle composer never classified empty; proceeding as production does (advisory check skips only on pending)"
   printf 'window=%s:%s\nkind=ship\nharness=%s\n' "$SESSION" "$win" "$name" > "$home/state/$task.meta"
   if ! FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/fm-send.sh" "$task" \
-    "Firstmate live check: run exactly this shell command now: touch $acted - then follow the mv instruction you were given for this message. Reply with one short line." \
+    "Firstmate live check: acknowledge this message first by following the mv instruction you were given for it, then run exactly this shell command: touch $acted - and reply with one short line." \
     >/dev/null 2>&1; then
     FAILED=1
     printf 'not ok - %s (%s): fm-send refused the live steer\n' "$name" "$version" >&2

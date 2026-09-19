@@ -238,8 +238,11 @@ JSON
   pass "fm-claude-trust.sh: preserves unrelated keys on the project-root entry"
 }
 
-# hasClaudeMdExternalIncludesApproved===false on the project-root entry is a
-# human's explicit "No, disable" answer, recorded in the SAME store their own
+# hasClaudeMdExternalIncludesApproved===false paired with
+# hasClaudeMdExternalIncludesWarningShown===true on the project-root entry is a
+# human's explicit "No, disable" answer - that pairing, and only that pairing,
+# proves the dialog actually rendered and was answered (see the consent-gating
+# block in fm-claude-trust.sh) - recorded in the SAME store their own
 # interactive sessions read. A spawn must never flip that to true on their
 # behalf: doing so would grant every later interactive session in that
 # checkout silent external-file inclusion the human declined. The whole
@@ -262,6 +265,54 @@ JSON
   [ "$before" = "$after" ] || fail "the store was modified despite the refusal"
   assert_not_trusted "$store" "$WT" "the worktree entry was registered despite the refusal"
   pass "fm-claude-trust.sh: refuses to override a project's declined external-imports consent"
+}
+
+# hasClaudeMdExternalIncludesApproved===false is also Claude Code's own
+# pre-dialog default (see the consent-gating block in fm-claude-trust.sh), so
+# a project entry that reached disk through some unrelated save - carrying
+# that default with hasClaudeMdExternalIncludesWarningShown===false, never
+# true - has never actually been asked about external imports. This is the
+# regression this task fixes: that entry must be treated exactly like an
+# absent one, not like a decline, so trust still registers and the import
+# dialog is left for the worker to wedge on rather than the whole
+# registration refusing.
+test_project_root_entry_never_asked_about_external_imports_is_not_a_decline() {
+  local rec store out
+  rec=$(make_case project-never-asked)
+  read_case "$rec"
+  store="$CONFIG/.claude.json"
+  cat > "$store" <<JSON
+{"hasCompletedOnboarding":true,"projects":{"$PROJ":{"hasTrustDialogAccepted":true,"hasClaudeMdExternalIncludesApproved":false,"hasClaudeMdExternalIncludesWarningShown":false,"allowedTools":["Read"]}}}
+JSON
+  out=$(run_trust "$CONFIG" "$WT" "$PROJ")
+  expect_code 0 $? "a project never asked about external imports must not be refused as a decline: $out"
+  assert_trust_only_no_import_consent "$store" "$WT" \
+    "the worktree entry either lost trust or gained unearned import consent"
+  assert_trust_only_no_import_consent "$store" "$PROJ" \
+    "the project-root entry either lost trust or gained unearned import consent"
+  assert_store_value "$store" '["Read"]' "the project entry's unrelated settings were lost" projects "$PROJ" allowedTools
+  pass "fm-claude-trust.sh: a project never asked about external imports is not treated as a decline"
+}
+
+# The same never-asked default with hasClaudeMdExternalIncludesWarningShown
+# absent entirely, rather than explicitly false, must be read identically -
+# the absence of the warning-shown flag is itself evidence the dialog was
+# never shown, not a third state.
+test_project_root_entry_never_asked_with_warning_shown_absent_is_not_a_decline() {
+  local rec store out
+  rec=$(make_case project-never-asked-absent)
+  read_case "$rec"
+  store="$CONFIG/.claude.json"
+  cat > "$store" <<JSON
+{"hasCompletedOnboarding":true,"projects":{"$PROJ":{"hasTrustDialogAccepted":true,"hasClaudeMdExternalIncludesApproved":false}}}
+JSON
+  out=$(run_trust "$CONFIG" "$WT" "$PROJ")
+  expect_code 0 $? "a project entry with no warning-shown flag must not be refused as a decline: $out"
+  assert_trust_only_no_import_consent "$store" "$WT" \
+    "the worktree entry either lost trust or gained unearned import consent"
+  assert_trust_only_no_import_consent "$store" "$PROJ" \
+    "the project-root entry either lost trust or gained unearned import consent"
+  pass "fm-claude-trust.sh: a never-asked project entry with warning-shown absent is not treated as a decline"
 }
 
 test_registration_is_idempotent() {
@@ -796,6 +847,8 @@ test_fresh_worktree_also_trusts_the_project_root_without_import_consent
 test_registration_carries_forward_existing_import_consent
 test_project_root_entry_preserves_other_keys
 test_project_root_entry_declined_external_imports_is_not_overridden
+test_project_root_entry_never_asked_about_external_imports_is_not_a_decline
+test_project_root_entry_never_asked_with_warning_shown_absent_is_not_a_decline
 test_registration_is_idempotent
 test_primary_checkout_is_refused
 test_cdpath_cannot_defeat_the_primary_checkout_refusal

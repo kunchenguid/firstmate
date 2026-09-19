@@ -53,6 +53,9 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 TARGET_HOME=${FM_HOME:?FM_HOME is required}
+# Proof, carried on cmd_sync's result line, that this host's origin update
+# actually verified fork state. Empty means it did not, or could not.
+SYNC_VERIFIED=""
 CONTROL_STATE="$TARGET_HOME/state/parent-route"
 CONTROL_DATA="$TARGET_HOME/data/.parent-route"
 REMOTE_HERDR_SESSION=fm-remote
@@ -66,7 +69,7 @@ REMOTE_HERDR_SESSION=fm-remote
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 
-die() { printf 'error: %s\n' "$1" >&2; exit 1; }
+die() { printf 'error: %s\n' "$1" >&2; exit "${2:-1}"; }
 usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 validate_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) die "invalid secondmate id: $1" ;; esac; }
 
@@ -282,8 +285,9 @@ cmd_send() {
   fm_lock_release "$meta_lock"
   case "$rec" in
     */handled/*)
-      # The dedup landed on a record the worker already acknowledged: the
-      # steer was delivered and acted on, so there is nothing to announce.
+      # The dedup landed on a record the worker already acknowledged, so this
+      # leg is a repeat of a transport whose steer already reached the worker;
+      # re-ringing it would only doorbell a record that is no longer waiting.
       printf 'notice: this steer was already delivered and acknowledged at %s; nothing re-rung\n' "$rec" >&2
       return 0
       ;;
@@ -368,8 +372,8 @@ cmd_sync() {
     # decide whether the running agent must reload; an older parent ignores the
     # suffix, and an older HOST omits it, which a parent must read as unknown
     # rather than as "nothing changed".
-    updated) printf 'synced: %s instr=%s\n' "$commit" "$(printf '%s' "$FF_INSTR" | tr -d ' ')" ;;
-    current) printf 'current: %s\n' "$commit" ;;
+    updated) printf 'synced: %s instr=%s%s\n' "$commit" "$(printf '%s' "$FF_INSTR" | tr -d ' ')" "$SYNC_VERIFIED" ;;
+    current) printf 'current: %s%s\n' "$commit" "$SYNC_VERIFIED" ;;
     *) die "remote secondmate home sync skipped: ${out#remote home: skipped: }" ;;
   esac
 }
@@ -381,15 +385,24 @@ cmd_update() {
   if ! update_out=$(FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     "$SCRIPT_DIR/fm-update.sh" 2>&1); then
     [ -z "$update_out" ] || printf '%s\n' "$update_out" >&2
-    die "remote code root update failed"
+    # A nonzero exit here is this host's own FF_UPDATE_FAILED classifier, not a
+    # transport hiccup - raise the distinct status so the parent's fleet sweep
+    # can fail the whole run instead of reading it as an ordinary skip.
+    die "remote code root update failed" "$REMOTE_UPDATE_FAILED_STATUS"
   fi
   root_status=$(printf '%s\n' "$update_out" | grep '^firstmate:' | tail -1)
   case "$root_status" in
-    'firstmate: updated '*|'firstmate: already current'*) ;;
+    'firstmate: updated '*|'firstmate: already current'*|'firstmate: cannot confirm current: '*) ;;
     *)
       [ -z "$update_out" ] || printf '%s\n' "$update_out" >&2
       die "remote code root did not complete a safe origin update"
       ;;
+  esac
+  # fm-update.sh publishes whether this run verified currency. Carry that verdict
+  # on the result line rather than to stderr, which the parent discards. Silence
+  # - including from a host too old to publish it - means unverified.
+  case $(printf '%s\n' "$update_out" | grep '^origin-verified:' | tail -1) in
+    'origin-verified: yes') SYNC_VERIFIED=" verified=1" ;;
   esac
   cmd_sync "$id"
 }

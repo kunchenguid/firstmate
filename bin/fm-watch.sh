@@ -1164,9 +1164,11 @@ pause_state_class() {  # <window> <task>
   # ordinary crew whose agent the gate above confirmed dead, so no live decision gate
   # is being silenced, or a secondmate, whose endpoint liveness is deliberately never
   # read and so cannot supply that confirmation. Without the mate case a mate's
-  # status-declared `captain-held` transfer - which has no current-state mapping
-  # and so arrives as `none` - would be silenced by every caller rather than taking
-  # the bounded re-surface cadence, and a forgotten declaration would rot invisibly.
+  # status-declared `captain-held` transfer - which arrives as `none` because
+  # crew_absorb_class absorbs only run-step/pane `working` and forwards no
+  # status-log verdict at all - would be silenced by every caller rather than
+  # taking the bounded re-surface cadence, and a forgotten declaration would rot
+  # invisibly.
   [ "$class" = none ] && class=paused
   case "$class" in
     paused) date +%s > "$recheck_file" ;;

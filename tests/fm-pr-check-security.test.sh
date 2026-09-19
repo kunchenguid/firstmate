@@ -206,8 +206,8 @@ write_task_meta() {
     "mode=no-mistakes"
 }
 
-# Extra "field=value" arguments are written before pr=, because
-# fm_pr_metadata_identity_parse rejects an unrecognised line after it.
+# Extra "field=value" arguments are written before pr= only by convention;
+# fm_pr_metadata_identity_parse is order-independent for non-identity keys.
 write_poll_meta() {
   local state=$1 id=$2 url=$3
   shift 3
@@ -752,6 +752,88 @@ test_static_poll_contract() {
   [ "$rc" -eq 0 ] || fail "watcher did not surface merged poll"
   [ "$(grep -c '^check: .*: merged$' "$dir/watch.out")" -eq 1 ] || fail "watcher did not convert merged output into exactly one wake"
   pass "static poll is silent except for one merged line and remains watcher-bounded"
+}
+
+# bin/fm-control.sh relaunch rebuilds the record and, via bin/fm-spawn.sh's
+# preserve_relaunch_meta, re-emits the preserved pr= block before appending
+# control_relaunch_tx= after it.
+test_relaunch_metadata_append_leaves_poll_authorized() {
+  local dir rc
+  dir=$(make_case relaunch-append)
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 \
+    > "$dir/stdout" 2> "$dir/stderr" || fail "could not arm the poll before simulating a relaunch"
+  printf 'control_relaunch_tx=%s\n' "r$(date +%s).1.1" >> "$dir/home/state/task-a.meta"
+  fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+    || fail "a relaunch append after pr= left the poll unauthorized"
+
+  rm -f "$dir/home/state/.last-check"
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "watcher did not complete after a relaunch append"
+  assert_no_grep 'rejected unauthenticated state checks' "$dir/watch.out" \
+    "a relaunch append after pr= was rejected as an unauthenticated state check"
+  [ "$(grep -c '^check: .*: merged$' "$dir/watch.out")" -eq 1 ] \
+    || fail "watcher did not surface the merged poll after a relaunch append"
+  pass "a relaunch append after pr= leaves the merge poll authorized"
+}
+
+# bin/fm-captain-hold.sh complete appends decisions_reviewed= and
+# decision_keys= to the end of the record with a plain >>, after the pr=
+# block.
+test_captain_hold_complete_append_leaves_poll_authorized() {
+  local dir rc
+  dir=$(make_case captain-hold-append)
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/1 \
+    > "$dir/stdout" 2> "$dir/stderr" || fail "could not arm the poll before simulating a captain-hold complete"
+  printf 'decisions_reviewed=1\ndecision_keys=%s\n' "example-key" >> "$dir/home/state/task-a.meta"
+  fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+    || fail "a captain-hold complete append after pr= left the poll unauthorized"
+
+  rm -f "$dir/home/state/.last-check"
+  set +e
+  FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "watcher did not complete after a captain-hold complete append"
+  assert_no_grep 'rejected unauthenticated state checks' "$dir/watch.out" \
+    "a captain-hold complete append after pr= was rejected as an unauthenticated state check"
+  [ "$(grep -c '^check: .*: merged$' "$dir/watch.out")" -eq 1 ] \
+    || fail "watcher did not surface the merged poll after a captain-hold complete append"
+  pass "a captain-hold complete append after pr= leaves the merge poll authorized"
+}
+
+# The two identity invariants the parser still enforces wherever the key
+# appears, now that non-identity keys are ignored by position: exactly one
+# parseable pr= line, and every pr_head= a well-formed commit hash.
+test_tampered_identity_keys_leave_poll_unauthorized() {
+  local dir tamper rc
+  for tamper in 'pr=https://github.com/o/r/pull/99' 'pr_head=not-a-hash'; do
+    dir=$(make_case "tampered-${tamper%%=*}")
+    write_task_meta "$dir"
+    run_check_entry "$dir" task-a https://github.com/o/r/pull/1 \
+      > "$dir/stdout" 2> "$dir/stderr" || fail "could not arm the poll before appending $tamper"
+    fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+      || fail "the armed poll was not authorized before appending $tamper"
+    printf '%s\n' "$tamper" >> "$dir/home/state/task-a.meta"
+    ! fm_pr_poll_artifacts_valid "$dir/home/state" task-a "$POLL" \
+      || fail "a record carrying $tamper remained authorized"
+
+    rm -f "$dir/home/state/.last-check"
+    set +e
+    FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || fail "watcher did not complete after appending $tamper"
+    [ "$(grep -c '^check: .*: merged$' "$dir/watch.out")" -eq 0 ] \
+      || fail "a record carrying $tamper still surfaced a merged poll"
+    assert_grep 'rejected unauthenticated state checks' "$dir/watch.out" \
+      "a record carrying $tamper was not reported as an unauthenticated state check"
+  done
+  pass "a second pr= or a malformed pr_head= leaves the merge poll unauthorized"
 }
 
 test_atomic_interruption_leaves_no_partial_artifact() {
@@ -2441,6 +2523,9 @@ test_invalid_entrypoints_have_zero_side_effects
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
+test_relaunch_metadata_append_leaves_poll_authorized
+test_captain_hold_complete_append_leaves_poll_authorized
+test_tampered_identity_keys_leave_poll_unauthorized
 test_atomic_interruption_leaves_no_partial_artifact
 test_concurrent_watcher_sees_only_complete_publication
 test_poll_publication_refuses_unsafe_destinations
