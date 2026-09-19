@@ -259,7 +259,7 @@ const realOmpPresentationContext = {
 Agent.InteractiveMode.prototype.addMessageToChat.call(realOmpPresentationContext, operational);
 const realOmpOperational = realOmpPresentationContext.chatContainer.children.at(-1);
 if (realOmpOperational.render(80).length !== 0) {
-  throw new Error("Calm-on must hide operational rows for OMP's presentation-context receiver");
+  throw new Error("Calm-on must hide operational rows for the OMP presentation-context receiver");
 }
 mode.addMessageToChat(operational);
 mode.addMessageToChat(genuine);
@@ -448,7 +448,7 @@ JS
   status=$?
   expect_code 0 "$status" "working note via OMP events: $out"
   [ -z "$out" ] || fail "working note via OMP events printed output: $out"
-  pass "OMP Calm hides the derived before-tools working note using OMP's own assistant message events"
+  pass "OMP Calm hides the derived before-tools working note using OMP assistant message events"
 }
 
 test_double_install_keeps_shared_state() {
@@ -588,7 +588,7 @@ const trackWrites = (component) => {
   return () => writes;
 };
 
-// Calm off must be strictly additive: never write OMP's hide-thinking field.
+// Calm off must be strictly additive: never write the OMP hide-thinking field.
 vis.setCalmPresentation(false);
 const nativeOn = new Agent.AssistantMessageComponent(true);
 const nativeOnWrites = trackWrites(nativeOn);
@@ -599,19 +599,19 @@ nativeOn.updateContent({
 });
 nativeOn.invalidate();
 if (nativeOnWrites() !== 0) {
-  throw new Error("Calm off must not write OMP's hide-thinking field");
+  throw new Error("Calm off must not write the OMP hide-thinking field");
 }
 if (nativeOn.hideThinkingBlock !== true || showsThinking(nativeOn)) {
-  throw new Error("Calm off must keep OMP's native hidden thinking hidden");
+  throw new Error("Calm off must keep native OMP hidden thinking hidden");
 }
 const nativeOff = new Agent.AssistantMessageComponent(false);
 const nativeOffWrites = trackWrites(nativeOff);
 nativeOff.updateContent(message);
 if (nativeOffWrites() !== 0) {
-  throw new Error("Calm off must not write OMP's hide-thinking field");
+  throw new Error("Calm off must not write the OMP hide-thinking field");
 }
 if (nativeOff.hideThinkingBlock !== false || !showsThinking(nativeOff)) {
-  throw new Error("Calm off must leave OMP's native visible thinking visible");
+  throw new Error("Calm off must leave native OMP visible thinking visible");
 }
 
 // Calm on collapses thinking by filtering the presentation, still never writing the field.
@@ -620,7 +620,7 @@ const calmOn = new Agent.AssistantMessageComponent(false);
 const calmOnWrites = trackWrites(calmOn);
 calmOn.updateContent(message);
 if (calmOnWrites() !== 0) {
-  throw new Error("Calm on must not write OMP's hide-thinking field");
+  throw new Error("Calm on must not write the OMP hide-thinking field");
 }
 if (showsThinking(calmOn)) {
   throw new Error("Calm on must not render thinking");
@@ -637,7 +637,7 @@ ompHidden.setHideThinkingBlock(true);
 vis.setCalmPresentation(false);
 thinking.applyOmpCalmThinkingToRememberedRows();
 if (ompHidden.hideThinkingBlock !== true || showsThinking(ompHidden)) {
-  throw new Error("Calm off must leave OMP's hidden toggle standing");
+  throw new Error("Calm off must leave the OMP hidden toggle standing");
 }
 
 vis.setCalmPresentation(true);
@@ -647,14 +647,14 @@ ompVisible.setHideThinkingBlock(false);
 vis.setCalmPresentation(false);
 thinking.applyOmpCalmThinkingToRememberedRows();
 if (ompVisible.hideThinkingBlock !== false || !showsThinking(ompVisible)) {
-  throw new Error("Calm off must leave OMP's visible toggle standing");
+  throw new Error("Calm off must leave the OMP visible toggle standing");
 }
 JS
 )
   status=$?
   expect_code 0 "$status" "native hide-thinking contract: $out"
   [ -z "$out" ] || fail "native hide-thinking contract printed output: $out"
-  pass "OMP Calm collapses thinking by filtering only, never writing OMP's native hide-thinking field"
+  pass "OMP Calm collapses thinking by filtering only, never writing the OMP native hide-thinking field"
 }
 
 test_session_replacement_resets_remembered() {
