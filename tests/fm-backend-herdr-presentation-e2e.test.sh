@@ -184,6 +184,25 @@ if [ "$status" -eq 0 ] && [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$POST_CREATE
     break
   done
 fi
+# An aborted task pane holds only its idle shell, so its cleanup may end that
+# shell instead of calling pane close; the first read that finds the pane gone
+# records that close in the same audit shape. An explicit pane close is already
+# recorded as a mutation, so it marks the pane closed first.
+if [ "$status" -eq 0 ] && [ "$mutation" = pane-close ] && [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
+  for task_dir in "$POST_CREATE_ABORT_CONTROL"/abort-*; do
+    [ "${3:-}" != "$(cat "$task_dir/task-pane" 2>/dev/null || true)" ] || mkdir -p "$task_dir/closed"
+  done
+fi
+if [ "$status" -ne 0 ] && [ "${1:-} ${2:-}" = "pane get" ] && [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
+  for task_dir in "$POST_CREATE_ABORT_CONTROL"/abort-*; do
+    [ -d "$task_dir" ] || continue
+    [ "${3:-}" = "$(cat "$task_dir/task-pane" 2>/dev/null || true)" ] || continue
+    mkdir "$task_dir/closed" 2>/dev/null || break
+    gone_focus=$(focus_snapshot || printf ambiguous/ambiguous)
+    printf 'pane-close\t%s\t%s\t%s\n' "$gone_focus" "$gone_focus" "${3:-}" >> "$FOCUS_AUDIT_LOG"
+    break
+  done
+fi
 if [ -n "$mutation" ]; then
   after=$(focus_snapshot || printf ambiguous/ambiguous)
   printf '%s\t%s\t%s\t%s\n' "$mutation" "$before" "$after" "$mutation_target" >> "$FOCUS_AUDIT_LOG"
@@ -1204,6 +1223,16 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
   rm -f "$ANCHOR_META"
   lab pane get "$OLD_RESTART_PANE" >/dev/null 2>&1 \
     || fail "$RESTART_ID restart did not preserve the projected pane structurally"
+  # Herdr restores a pane in the directory it was created in, so the restored
+  # shell must come back in the task worktree, never the project checkout.
+  RESTORED_CWD=""
+  for _ in $(seq 1 30); do
+    RESTORED_CWD=$(lab pane get "$OLD_RESTART_PANE" 2>/dev/null | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null)
+    [ -z "$RESTORED_CWD" ] || break
+    sleep 0.2
+  done
+  [ -n "$RESTORED_CWD" ] && [ "$(cd "$RESTORED_CWD" && pwd -P)" = "$(cd "$OLD_RESTART_WT" && pwd -P)" ] \
+    || fail "$RESTART_ID restored pane resumed in '${RESTORED_CWD:-none}', not its task worktree '$OLD_RESTART_WT'"
   if lab agent get "$OLD_RESTART_PANE" >/dev/null 2>&1; then
     fail "$RESTART_ID restart fixture unexpectedly retained a registered agent"
   fi
