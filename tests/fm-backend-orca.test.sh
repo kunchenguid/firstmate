@@ -566,31 +566,43 @@ test_spawn_writes_orca_metadata_and_launches_harness() {
   pass "fm-spawn.sh --backend orca: reuses implicit terminal, records metadata, launches harness"
 }
 
-test_spawn_refuses_orca_secondmate_before_home_mutation() {
-  local home subhome data state config id out status
+test_spawn_writes_orca_secondmate_metadata_and_launches_harness() {
+  local home subhome subhome_wt data state config id out status
   id="orcasmz1"
-  home="$TMP_ROOT/secondmate-refusal-home"
-  subhome="$TMP_ROOT/secondmate-refusal-subhome"
+  home="$TMP_ROOT/secondmate-spawn-home"
+  subhome="$TMP_ROOT/secondmate-spawn-subhome"
+  subhome_wt="$TMP_ROOT/secondmate-spawn-subhome-wt"
   data="$home/data"
   state="$home/state"
   config="$home/config"
-  mkdir -p "$data" "$state" "$config" "$subhome/bin" "$subhome/data" "$subhome/state" "$subhome/projects"
+  mkdir -p "$data" "$state" "$config" "$home/projects"
+  fm_git_worktree "$subhome" "$subhome_wt" "fm/$id"
+  mkdir -p "$subhome/bin" "$subhome/data"
   printf '%s\n' "$id" > "$subhome/.fm-secondmate-home"
-  printf 'firstmate\n' > "$subhome/AGENTS.md"
+  printf '# Firstmate\n' > "$subhome/AGENTS.md"
+  printf 'charter\n' > "$subhome/data/charter.md"
   printf 'claude\n' > "$config/crew-harness"
   touch "$state/.last-watcher-beat"
-  set +e
-  out=$( FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+  orca_case secondmate-spawn
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-sm"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-sm::%s","path":"%s"},"terminal":{"handle":"term-sm"}}}\n' "$subhome_wt" "$subhome_wt" > "$RESP/3.out"
+  out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$subhome" claude --backend orca --secondmate 2>&1 )
   status=$?
-  set +e
-  [ "$status" -ne 0 ] || fail "backend=orca --secondmate should be refused"
-  assert_contains "$out" "backend=orca does not support --secondmate spawns yet" \
-    "orca secondmate refusal should happen at backend selection"
-  assert_absent "$subhome/config/crew-harness" \
-    "orca secondmate refusal should not propagate inherited local material into the secondmate home"
-  pass "fm-spawn.sh --backend orca --secondmate: refuses before secondmate-home mutation"
+  expect_code 0 "$status" "fm-spawn.sh --backend orca --secondmate should succeed with fake Orca"$'\n'"$out"
+  assert_contains "$out" "spawned $id harness=claude kind=secondmate mode=secondmate yolo=off window=fm-$id worktree=$subhome_wt" \
+    "secondmate spawn output missing Orca window/worktree summary"
+  assert_grep "backend=orca" "$state/$id.meta" "secondmate meta missing backend=orca"
+  assert_grep "kind=secondmate" "$state/$id.meta" "secondmate meta missing kind=secondmate"
+  assert_grep "terminal=term-sm" "$state/$id.meta" "secondmate meta missing terminal handle"
+  assert_grep "orca_worktree_id=wt-sm::$subhome_wt" "$state/$id.meta" "secondmate meta missing Orca worktree id"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''send' \
+    "secondmate spawn did not send the launch command through the Orca terminal"
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh --backend orca --secondmate: now supported, records metadata, and launches the harness"
 }
 
 test_spawn_refuses_orca_when_runtime_not_ready() {
@@ -770,13 +782,14 @@ test_peek_send_and_crew_state_route_through_orca_meta() {
     FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-peek.sh" "fm-$id" 10 )
   [ "$out" = ready ] || fail "fm-peek should read through Orca metadata, got '$out'"
-  printf '{"ok":true,"result":{"send":{"handle":"term-io","accepted":true}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-io","connected":true,"agentIdentity":"claude"}}}\n' > "$RESP/2.out"
   printf '{"ok":true,"result":{"send":{"handle":"term-io","accepted":true}}}\n' > "$RESP/3.out"
-  printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"send":{"handle":"term-io","accepted":true}}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["│ > │"]}}}\n' > "$RESP/5.out"
   PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$neutral" FM_HOME="$neutral" FM_STATE_OVERRIDE="$state" FM_SEND_SETTLE=0 \
     "$ROOT/bin/fm-send.sh" "fm-$id" "hello orca"
-  printf '{"ok":true,"result":{"terminal":{"tail":["idle prompt"]}}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"terminal":{"tail":["idle prompt"]}}}\n' > "$RESP/6.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
     FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-crew-state.sh" "$id" )
   assert_contains "$out" "state: unknown" "crew-state should fall back cleanly for an idle Orca scout"
@@ -835,6 +848,256 @@ test_target_exists_rejects_orca_error_json() {
   set -e
   [ "$status" -ne 0 ] || fail "fm_backend_target_exists should reject Orca ok:false read JSON"
   pass "fm_backend_target_exists: Orca ok:false read JSON is not live"
+}
+
+# --- unit level: fm_backend_orca_agent_state ---------------------------------
+
+test_agent_state_classifies_connected_and_identity() {
+  local out
+
+  orca_case agent-state-alive
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-alive","connected":true,"agentIdentity":"claude"}}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_agent_state term-alive' "$ROOT" )
+  [ "$out" = alive ] || fail "connected=true with a verified agentIdentity should classify as alive, got '$out'"
+
+  orca_case agent-state-alive-no-identity
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-alive2","connected":true}}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_agent_state term-alive2' "$ROOT" )
+  [ "$out" = alive ] || fail "connected=true with no reported agentIdentity should still classify as alive, got '$out'"
+
+  orca_case agent-state-dead
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-dead","connected":false}}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_agent_state term-dead' "$ROOT" )
+  [ "$out" = dead ] || fail "connected=false should classify as dead, got '$out'"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_agent_alive term-dead' "$ROOT" )
+  [ "$out" = dead ] || fail "the compatibility view should keep connected=false dead, got '$out'"
+
+  orca_case agent-state-ambiguous
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-ambig","connected":true,"agentIdentity":"some-other-cli"}}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_agent_state term-ambig' "$ROOT" )
+  [ "$out" = ambiguous ] || fail "connected=true with an unrecognized agentIdentity should classify as ambiguous, got '$out'"
+
+  pass "fm_backend_orca_agent_state: classifies alive (with and without identity), dead, and ambiguous from connected/agentIdentity"
+}
+
+test_agent_state_missing_falls_back_to_runtime_readiness() {
+  local out
+
+  orca_case agent-state-missing
+  printf '{"ok":false,"error":{"code":"not_found","message":"terminal not found"}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_agent_state term-gone' "$ROOT" )
+  [ "$out" = missing ] || fail "a not-found terminal with a ready runtime should classify as missing, got '$out'"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''status'$'\x1f''--json' \
+    "a failed terminal read should fall back to an Orca runtime readiness check"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_agent_alive term-gone' "$ROOT" )
+  [ "$out" = dead ] || fail "the compatibility view should treat an authoritatively missing target as dead, got '$out'"
+
+  pass "fm_backend_orca_agent_state: a not-found terminal against a ready runtime classifies as missing"
+}
+
+test_agent_state_unreadable_when_runtime_also_unready() {
+  local out
+
+  orca_case agent-state-unreadable
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"stale"}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"runtime":{"reachable":false,"state":"starting"}}}\n' > "$RESP/2.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_ORCA_STATUS_RESPONSE=sequence \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_agent_state term-stale' "$ROOT" )
+  [ "$out" = unreadable ] || fail "a failed terminal read with an unready runtime should classify as unreadable, got '$out'"
+
+  orca_case agent-state-unreadable-alive-wrapper
+  printf '{"ok":false,"error":{"code":"terminal_handle_stale","message":"stale"}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"runtime":{"reachable":false,"state":"starting"}}}\n' > "$RESP/2.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_ORCA_STATUS_RESPONSE=sequence \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_agent_alive term-stale' "$ROOT" )
+  [ "$out" = unknown ] || fail "the compatibility view should keep an unreadable target unknown, got '$out'"
+
+  pass "fm_backend_orca_agent_state: a failed read against an unready runtime stays unreadable"
+}
+
+test_agent_state_dispatcher_routes_orca() {
+  local out
+  orca_case agent-state-dispatch
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-dispatch","connected":true,"agentIdentity":"claude"}}}\n' > "$RESP/1.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_agent_state orca term-dispatch' "$ROOT" )
+  [ "$out" = alive ] || fail "fm_backend_agent_state should route backend=orca to the Orca classifier, got '$out'"
+  pass "fm_backend_agent_state: routes backend=orca to fm_backend_orca_agent_state"
+}
+
+# --- sweep level: bin/fm-bootstrap.sh's secondmate_liveness_sweep on backend=orca ---
+
+# make_liveness_toolchain <dir>: the fixed set of stubs bin/fm-bootstrap.sh's
+# read-only diagnostics need to stay quiet (mirrors
+# tests/fm-secondmate-liveness.test.sh's make_toolchain), MINUS node - the
+# Orca classifier needs a real node to parse `orca terminal show`'s JSON, and a
+# faked no-op node would silently blind fm_backend_orca_terminal_show_fields.
+make_liveness_toolchain() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  fm_fake_exit0 "$fakebin" chrome-devtools-axi pi-signed
+  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
+  cat > "$fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '0.1.29'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/gh-axi"
+  fm_fake_exit0 "$fakebin" gh treehouse
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' 'no-mistakes version v1.46.0 (fake)'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/no-mistakes"
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "--version ") printf '%s\n' '0.2.4' ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tasks-axi"
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf '%s\n' '0.1.29'
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/quota-axi"
+  printf '%s\n' "$fakebin"
+}
+
+# new_liveness_world <name>: a scratch firstmate HOME pinned to backend=orca
+# (secondmate_liveness_one's respawn call carries no --backend of its own, so
+# it relies entirely on this static default) with a fixed crew harness, the
+# same shape as fm-secondmate-liveness.test.sh's new_world.
+new_liveness_world() {
+  local name=$1 w
+  w="$TMP_ROOT/$name"
+  mkdir -p "$w/home/state" "$w/home/config"
+  touch "$w/home/state/.last-watcher-beat"
+  printf 'claude\n' > "$w/home/config/crew-harness"
+  printf 'orca\n' > "$w/home/config/backend"
+  printf '%s\n' "$w"
+}
+
+# add_orca_sm_home <w> <id> <subhome> <subhome_wt> <terminal>: a seeded
+# secondmate home backed by a real linked git worktree (the Orca worktree-
+# creation path enforces isolation from the project it spawns from, exactly
+# like an ordinary ship/scout Orca spawn) plus its kind=secondmate meta.
+add_orca_sm_home() {
+  local w=$1 id=$2 subhome=$3 subhome_wt=$4 terminal=$5
+  fm_git_worktree "$subhome" "$subhome_wt" "fm/$id"
+  mkdir -p "$subhome/bin" "$subhome/data"
+  printf '%s\n' "$id" > "$subhome/.fm-secondmate-home"
+  printf '# Firstmate\n' > "$subhome/AGENTS.md"
+  printf 'charter\n' > "$subhome/data/charter.md"
+  {
+    printf 'window=fm-%s\n' "$id"
+    printf 'kind=secondmate\n'
+    printf 'harness=claude\n'
+    printf 'home=%s\n' "$subhome"
+    printf 'backend=orca\n'
+    printf 'terminal=%s\n' "$terminal"
+    printf 'orca_worktree_id=wt-%s::%s\n' "$id" "$subhome_wt"
+    printf 'worktree=%s\n' "$subhome_wt"
+  } > "$w/home/state/$id.meta"
+}
+
+run_liveness_bootstrap() {  # <toolchain-fakebin> <home>
+  local toolfb=$1 home=$2
+  PATH="$FB:$toolfb:$PATH" HOME="$TMP_ROOT/user-home" CLAUDE_CONFIG_DIR='' \
+    FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>&1
+}
+
+test_sweep_respawns_dead_orca_secondmate() {
+  local w subhome subhome_wt tool out
+  w=$(new_liveness_world sweep-orca-dead)
+  subhome="$TMP_ROOT/sweep-orca-dead-subhome"
+  subhome_wt="$TMP_ROOT/sweep-orca-dead-subhome-wt"
+  add_orca_sm_home "$w" sm1 "$subhome" "$subhome_wt" term-sm
+  orca_case sweep-orca-dead
+  tool=$(make_liveness_toolchain "$CASE_DIR/tools")
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-sm","connected":false}}}\n' > "$RESP/1.out"
+  printf '1\n' > "$RESP/2.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-sm"}}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-sm2::%s","path":"%s"},"terminal":{"handle":"term-sm2"}}}\n' "$subhome_wt" "$subhome_wt" > "$RESP/4.out"
+
+  out=$(run_liveness_bootstrap "$tool" "$w/home")
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawned" \
+    "a successfully respawned Orca secondmate should be handled silently"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close'$'\x1f''--terminal'$'\x1f''term-sm'$'\x1f''--json' \
+    "a confirmed-dead Orca secondmate endpoint should be closed before respawn"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''create' \
+    "a confirmed-dead Orca secondmate should actually be relaunched through Orca"
+  assert_grep "terminal=term-sm2" "$w/home/state/sm1.meta" \
+    "the respawned Orca secondmate meta should carry the new terminal handle"
+  pass "sweep: a confirmed-dead Orca secondmate endpoint is closed and respawned through Orca"
+}
+
+test_sweep_respawns_missing_orca_secondmate() {
+  local w subhome subhome_wt tool out
+  w=$(new_liveness_world sweep-orca-missing)
+  subhome="$TMP_ROOT/sweep-orca-missing-subhome"
+  subhome_wt="$TMP_ROOT/sweep-orca-missing-subhome-wt"
+  add_orca_sm_home "$w" sm1 "$subhome" "$subhome_wt" term-sm
+  orca_case sweep-orca-missing
+  tool=$(make_liveness_toolchain "$CASE_DIR/tools")
+  printf '{"ok":false,"error":{"code":"not_found","message":"terminal not found"}}\n' > "$RESP/1.out"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-sm"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-sm2::%s","path":"%s"},"terminal":{"handle":"term-sm2"}}}\n' "$subhome_wt" "$subhome_wt" > "$RESP/3.out"
+
+  out=$(run_liveness_bootstrap "$tool" "$w/home")
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawned" \
+    "a successful missing-endpoint recovery should stay silent by default"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1f''terminal'$'\x1f''close' \
+    "an authoritatively missing Orca terminal should not need a destructive pre-close"
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''create' \
+    "an authoritatively missing Orca secondmate should actually be relaunched through Orca"
+  assert_grep "terminal=term-sm2" "$w/home/state/sm1.meta" \
+    "the respawned Orca secondmate meta should carry the new terminal handle"
+  pass "sweep: an authoritatively missing Orca secondmate endpoint is relaunched without a pre-close"
+}
+
+test_sweep_leaves_alive_orca_secondmate_untouched() {
+  local w subhome subhome_wt tool out
+  w=$(new_liveness_world sweep-orca-alive)
+  subhome="$TMP_ROOT/sweep-orca-alive-subhome"
+  subhome_wt="$TMP_ROOT/sweep-orca-alive-subhome-wt"
+  add_orca_sm_home "$w" sm1 "$subhome" "$subhome_wt" term-sm
+  orca_case sweep-orca-alive
+  tool=$(make_liveness_toolchain "$CASE_DIR/tools")
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-sm","connected":true,"agentIdentity":"claude"}}}\n' > "$RESP/1.out"
+
+  out=$(run_liveness_bootstrap "$tool" "$w/home")
+
+  assert_not_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: already-live" \
+    "an already-live Orca secondmate should be handled silently"
+  [ "$(cat "$LOG")" = $'orca\x1f''terminal'$'\x1f''show'$'\x1f''--terminal'$'\x1f''term-sm'$'\x1f''--json' ] \
+    || fail "an already-live Orca secondmate must only be probed, never killed or respawned: $(cat "$LOG")"
+  assert_grep "terminal=term-sm" "$w/home/state/sm1.meta" \
+    "an already-live Orca secondmate's meta must be left untouched"
+  pass "sweep: an already-live Orca secondmate is left untouched, proven by only its liveness probe in the Orca log"
 }
 
 test_scout_teardown_removes_orca_worktree_via_helper() {
@@ -1373,7 +1636,7 @@ test_worktree_and_terminal_helpers_parse_json
 test_worktree_create_removes_worktree_when_path_missing
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
 test_spawn_writes_orca_metadata_and_launches_harness
-test_spawn_refuses_orca_secondmate_before_home_mutation
+test_spawn_writes_orca_secondmate_metadata_and_launches_harness
 test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree
 test_spawn_removes_orca_worktree_when_terminal_create_fails
@@ -1382,6 +1645,13 @@ test_spawn_releases_orca_resources_when_metadata_write_fails
 test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
 test_target_exists_rejects_orca_error_json
+test_agent_state_classifies_connected_and_identity
+test_agent_state_missing_falls_back_to_runtime_readiness
+test_agent_state_unreadable_when_runtime_also_unready
+test_agent_state_dispatcher_routes_orca
+test_sweep_respawns_dead_orca_secondmate
+test_sweep_respawns_missing_orca_secondmate
+test_sweep_leaves_alive_orca_secondmate_untouched
 test_scout_teardown_removes_orca_worktree_via_helper
 test_scout_teardown_refuses_orca_id_path_mismatch
 test_teardown_removes_orca_worktree_when_path_missing
