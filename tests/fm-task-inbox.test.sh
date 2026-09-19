@@ -26,6 +26,9 @@
 #   6. Dead panes: the doorbell line is a shell no-op when executed by a bare
 #      shell, the ring skips an agent the backend classifies dead, and the
 #      watcher surfaces such a record exactly once instead of re-ringing.
+#   7. A last status of done or failed skips inbox ring and unread-instruction
+#      escalation, including leftover handled records and leftover unhandled
+#      records on an already-finished worker.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -692,6 +695,47 @@ test_watcher_dead_pane_ignores_stale_busy_state() {
   pass "watcher: dead-pane recovery overrides stale busy state"
 }
 
+test_watcher_completed_handled_inbox_does_not_ring() {
+  local dir state out log pid rec
+  dir=$(setup_watch_case completed-handled)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "already handled")
+  mv "$rec" "$state/t1.inbox/handled/"
+  printf 'done: PR https://example.test/pr/1\n' > "$state/t1.status"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_TASK_INBOX_RING_MAX=99
+  pid=$!
+  sleep 4
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  [ ! -s "$log" ] || fail "a completed worker with handled inbox rang a doorbell:"$'\n'"$(cat "$log")"
+  if grep -qF 'unread firstmate instruction' "$state/.wake-queue" 2>/dev/null; then
+    fail "a completed handled inbox queued unread-instruction recovery:"$'\n'"$(cat "$state/.wake-queue")"
+  fi
+  pass "watcher: done plus handled inbox does not re-enter recovery ringing"
+}
+
+test_watcher_completed_unhandled_leftover_does_not_ring() {
+  local dir state out log pid rec
+  dir=$(setup_watch_case completed-unhandled)
+  state="$dir/state"; out="$dir/watch.out"; log="$dir/send.log"; : > "$log"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "leftover after done")
+  age_path "$rec"
+  printf 'done: PR https://example.test/pr/1\n' > "$state/t1.status"
+  watch_bg "$state" "$dir/fakebin" "$out" \
+    FM_SEND_LOG="$log" FM_FAKE_TMUX_CAPTURE="$(idle_capture "$dir")" \
+    FM_TASK_INBOX_RING_MAX=1
+  pid=$!
+  sleep 4
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  [ ! -s "$log" ] || fail "a completed worker with leftover unhandled inbox rang a doorbell:"$'\n'"$(cat "$log")"
+  if grep -qF 'unread firstmate instruction' "$state/.wake-queue" 2>/dev/null; then
+    fail "a completed leftover inbox queued unread-instruction recovery:"$'\n'"$(cat "$state/.wake-queue")"
+  fi
+  [ -f "$rec" ] || fail "the leftover record must survive without a recovery ring"
+  pass "watcher: done plus leftover unhandled inbox does not ring or recover-loop"
+}
+
 test_write_is_durable_and_exact
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
@@ -712,3 +756,5 @@ test_watcher_surfaces_unwritable_ladder
 test_watcher_escalates_once_after_budget
 test_watcher_dead_pane_escalates_once_without_ringing
 test_watcher_dead_pane_ignores_stale_busy_state
+test_watcher_completed_handled_inbox_does_not_ring
+test_watcher_completed_unhandled_leftover_does_not_ring

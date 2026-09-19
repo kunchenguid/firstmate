@@ -57,6 +57,9 @@
 # writing the deduplication marker: normal polls surface a message once, while a
 # crash or marker failure may produce a rare duplicate rather than silently lose
 # a wake.
+# bin/fm-watch.sh's inbox_steer_check additionally skips ring and unread-instruction
+# escalation when the task's last status verb is done or failed, so a completed
+# worker cannot re-enter recovery ringing from leftover inbox records.
 #
 # Inbox paths containing bytes outside printable ASCII are unsupported. The
 # doorbell refuses them rather than sending terminal control bytes to a pane.

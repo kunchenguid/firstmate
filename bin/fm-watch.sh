@@ -442,8 +442,19 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 # blocking. Runs for secondmates
 # too: their pane-staleness exemption is about quiet panes being healthy,
 # while an unacknowledged instruction past the ladder is a stuck steer.
+# A last status verb of done or failed is not a stuck steer: leftover handled
+# or archived records, and any unhandled leftovers on an already-finished
+# worker, must not re-enter the doorbell ladder or queue another
+# unread-instruction recovery wake.
 inbox_steer_check() {  # <window> <task>
-  local w=$1 task=$2 action verb rec count tail40 reason ring_rc backend agent_state
+  local w=$1 task=$2 action verb rec count tail40 reason ring_rc backend agent_state last
+  last=$(last_status_line "$STATE/$task.status")
+  case "$(status_line_verb "$last")" in
+    done | failed)
+      fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
+      return 0
+      ;;
+  esac
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
