@@ -248,13 +248,13 @@ printf '%s\n' "$detail" | jq -e '
 ok "aggregate watch reads every schema 6 account row without combining them"
 
 out=$(QUOTA_AXI_SCHEMA6=1 QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" "$BIN/fm-procevent-quota.sh" poll --interval 1 --threshold 10 --provider cursor --timeout 1)
-printf '%s\n' "$out" | rg -qx 'status: low' || fail "schema 6 provider watch included another provider's exhausted account"
+printf '%s\n' "$out" | grep -qx 'status: low' || fail "schema 6 provider watch included another provider's exhausted account"
 detail=$(printf '%s\n' "$out" | sed -n 's/^detail: //p')
 printf '%s\n' "$detail" | jq -e '.provider == "cursor" and .accountKey == "default" and .best.effectivePercentRemaining == 5' >/dev/null \
   || fail "schema 6 provider detail did not name the default account: $detail"
 out=$(QUOTA_AXI_SCHEMA6=1 QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" "$BIN/fm-procevent-quota.sh" poll --interval 1 --threshold 10 --provider codex --timeout 1)
-printf '%s\n' "$out" | rg -qx 'status: exhausted' || fail "expanded provider watch did not report the exhausted account"
-printf '%s\n' "$out" | rg -qx 'condition_polls: 1' || fail "expanded provider watch did not stop immediately"
+printf '%s\n' "$out" | grep -qx 'status: exhausted' || fail "expanded provider watch did not report the exhausted account"
+printf '%s\n' "$out" | grep -qx 'condition_polls: 1' || fail "expanded provider watch did not stop immediately"
 detail=$(printf '%s\n' "$out" | sed -n 's/^detail: //p')
 printf '%s\n' "$detail" | jq -e '
   .provider == "codex" and
