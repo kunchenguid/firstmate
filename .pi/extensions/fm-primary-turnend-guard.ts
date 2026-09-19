@@ -3,12 +3,20 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   classifyFirstmateCurrentOperationalText,
   encodeFirstmateOperationalInput,
   firstmateShellInvocation,
 } from "./lib/fm-operational-input.ts";
+import {
+  cursorReplayInputIsIncomplete,
+  isCursorReplayToolCallId,
+} from "./lib/fm-cursor-replay-execute.ts";
+import {
+  getSharedStuckPrimaryMonitor,
+  wakeQueueHasRecords,
+} from "./lib/fm-primary-stuck-primary.ts";
 
 let guardFollowupActive = false;
 
@@ -21,6 +29,17 @@ const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const marker = `${state}/.pi-turnend-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
+const stuckPollMs = positiveInteger("FM_PI_STUCK_POLL_MS", 5_000);
+
+let activeAgentCtx: ExtensionContext | null = null;
+let stuckPollTimer: ReturnType<typeof setInterval> | null = null;
+let piRef: ExtensionAPI;
+
+function positiveInteger(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  if (!Number.isFinite(value) || value <= 0) return fallback;
+  return Math.floor(value);
+}
 
 function parentPid(pid: string): string {
   const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
@@ -500,12 +519,46 @@ function runChecker(script: string, command: string): Promise<{ code: number; st
   });
 }
 
+function runCdCheck(command: string): Promise<{ code: number; stderr: string }> {
+  return runChecker("fm-cd-pretool-check.sh", command);
+}
+
 function runPretoolCheck(command: string): Promise<{ code: number; stderr: string }> {
   return runChecker("fm-arm-pretool-check.sh", command);
 }
 
-function runCdCheck(command: string): Promise<{ code: number; stderr: string }> {
-  return runChecker("fm-cd-pretool-check.sh", command);
+function clearStuckPoll(): void {
+  if (!stuckPollTimer) return;
+  clearInterval(stuckPollTimer);
+  stuckPollTimer = null;
+}
+
+function startStuckPoll(): void {
+  clearStuckPoll();
+  stuckPollTimer = setInterval(() => {
+    const ctx = activeAgentCtx;
+    if (!ctx) return;
+    const monitor = getSharedStuckPrimaryMonitor();
+    const action = monitor.recoveryAction(ctx);
+    if (action === "none") return;
+    monitor.markRecoveryAttempted();
+    monitor.markTriggerTurnPending();
+    void deliverStuckPrimaryResume(piRef, ctx).catch(() => {
+      monitor.consumeTriggerTurnPendingResume();
+    });
+  }, stuckPollMs);
+  stuckPollTimer.unref?.();
+}
+
+async function deliverStuckPrimaryResume(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+  const monitor = getSharedStuckPrimaryMonitor();
+  if (!monitor.consumeTriggerTurnPendingResume()) return;
+  if (!ctx.hasPendingMessages() && !wakeQueueHasRecords(state)) return;
+  const content = encodeFirstmateOperationalInput(
+    "from-firstmate",
+    "FIRSTMATE STUCK-PRIMARY RECOVERY: the prior run stalled after watcher arm with queued captain or watcher work. Run bin/fm-wake-drain.sh first, then handle the queued work.",
+  );
+  await pi.sendUserMessage(content, { deliverAs: "followUp", triggerTurn: true });
 }
 
 export default function (pi: ExtensionAPI) {
@@ -540,7 +593,8 @@ export default function (pi: ExtensionAPI) {
   };
   registerSessionstartExitListener();
 
-  pi.on?.("session_start", (event, ctx) => {
+  piRef = pi;
+  pi.on?.("session_start", async (event, ctx) => {
     const reason = String((event as { reason?: unknown }).reason ?? "");
     const source = reason === "startup"
       ? startupRebuildSource(ctx) ?? "startup"
@@ -587,10 +641,29 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  pi.on?.("session_shutdown", (event) => {
+    const reason = String((event as { reason?: unknown }).reason ?? "");
+    if (reason === "reload") return;
+    activeAgentCtx = null;
+    clearStuckPoll();
+  });
+
+  pi.on("agent_start", (_event, ctx) => {
+    activeAgentCtx = ctx;
+    getSharedStuckPrimaryMonitor().onAgentStart();
+    startStuckPoll();
+  });
+
   pi.on("tool_call", async (event) => {
-    if (event.type !== "tool_call" || event.toolName !== "bash") return {};
+    if (event.type !== "tool_call") return {};
+    const toolCallId = String(event.toolCallId ?? "");
+    if (isCursorReplayToolCallId(toolCallId) && cursorReplayInputIsIncomplete(event.input)) {
+      return { block: true, reason: "Cursor tool did not complete\nmissing completion" };
+    }
+    if (event.toolName !== "bash") return {};
     const command = String((event.input as { command?: unknown })?.command ?? "");
     if (!command) return {};
+    getSharedStuckPrimaryMonitor().onProgress();
     const cdResult = await runCdCheck(command);
     if (cdResult.code === 2) {
       return { block: true, reason: cdResult.stderr.trim() || "denied by the cd-guard PreToolUse seatbelt" };
@@ -600,7 +673,11 @@ export default function (pi: ExtensionAPI) {
     return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
   });
 
-  pi.on("agent_settled", async () => {
+  pi.on("agent_settled", async (_event, ctx) => {
+    activeAgentCtx = null;
+    clearStuckPoll();
+    getSharedStuckPrimaryMonitor().onAgentSettled();
+
     if (guardFollowupActive) {
       guardFollowupActive = false;
       return;
@@ -611,12 +688,9 @@ export default function (pi: ExtensionAPI) {
 
     guardFollowupActive = true;
     try {
-      const content = encodeFirstmateOperationalInput(
-        "turn-end-guard",
-        "TURN WOULD END BLIND - supervision is off. " +
-          "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
-          result.stderr,
-      );
+      const body = result.stderr.trim();
+      if (!body) return;
+      const content = encodeFirstmateOperationalInput("turn-end-guard", body);
       await pi.sendUserMessage(content, { deliverAs: "followUp" });
     } catch {
       guardFollowupActive = false;

@@ -305,6 +305,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/pi-cursor-sdk-integration.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/cd-guard.md",
       "audience": "maintainer-architecture"
     },

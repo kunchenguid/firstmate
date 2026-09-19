@@ -22,6 +22,7 @@ While Calm is off, Pi's stock working row is left exactly as Pi renders it.
 Calm hides collapsed thinking labels, the mid-turn assistant working-note blocks governed by the shared preservation rule above, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` and `fm_branch_outcomes` tool shells, and canonically classified Firstmate operational user rows.
 Pi applies that rule independently to each text block, so a short working note can hide beside preserved substantive content in the same message.
 A working note is briefly visible while it streams before its settled row collapses.
+Homes that run `cursor/*` models through pi-cursor-sdk may still need the extra Calm layout in [`pi-cursor-sdk-integration.md`](pi-cursor-sdk-integration.md) so the last tools-tagged recap stays visible when stock preservation alone is not enough.
 The narration is hidden only from the live transcript presentation, and remains in the message, model context, session storage, and `/export` artifacts.
 The operational inputs Calm classifies remain ordinary user-role messages, while Pi's transcript layout renders their complete rows at zero height.
 The session-start nudge remains on its existing non-displayed custom-message path.

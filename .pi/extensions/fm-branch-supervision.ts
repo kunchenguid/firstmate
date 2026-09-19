@@ -115,6 +115,11 @@ import {
   classifyFirstmateOperationalText,
   encodeFirstmateOperationalInputWith,
 } from "./lib/fm-operational-input.ts";
+import {
+  providerFromSettings,
+  readAgentSettings,
+  resolveCursorSdkLoaderPaths,
+} from "./lib/fm-branch-cursor-sdk-loader.ts";
 
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
@@ -1248,11 +1253,20 @@ export default function (pi: ExtensionAPI) {
     // The branch loads no project resources at all: extensions off (so it can
     // never spawn its own branch), skills/context files off (they vary per
     // home and would destabilize the byte-stable prefix). Its whole standing
-    // context is the generator's prompt.
+    // context is the generator's prompt. When the branch model uses Cursor,
+    // load only pi-cursor-sdk through additionalExtensionPaths so the
+    // provider registers without reloading project extensions or packages.
+    const agentDir = getAgentDir();
+    const targetProvider =
+      pinned?.model.provider ??
+      mainModel?.provider ??
+      providerFromSettings(readAgentSettings(agentDir));
+    const additionalExtensionPaths = resolveCursorSdkLoaderPaths(agentDir, targetProvider);
     const loader = new DefaultResourceLoader({
       cwd: fmRoot,
-      agentDir: getAgentDir(),
+      agentDir,
       noExtensions: true,
+      additionalExtensionPaths,
       noSkills: true,
       noPromptTemplates: true,
       noThemes: true,
@@ -1323,6 +1337,25 @@ ${context.command}
         created.session.dispose();
       } catch {}
       throw new Error("supervision session was replaced or lost lock ownership");
+    }
+    if (additionalExtensionPaths.length > 0) {
+      if (pinned) {
+        await created.session.setModel(pinned.model);
+      } else {
+        const settings = readAgentSettings(agentDir);
+        const provider = settings.defaultProvider ?? "";
+        const modelId = settings.defaultModel ?? "";
+        if (provider && modelId) {
+          const resolved = await resolveBranchModel(provider, modelId);
+          if (resolved.ok) await created.session.setModel(resolved.selection.model);
+        }
+      }
+      if (!actingAsOwner(branchGeneration)) {
+        try {
+          created.session.dispose();
+        } catch {}
+        throw new Error("supervision session was replaced or lost lock ownership");
+      }
     }
     try {
       writeFileSync(sessionPointer, `${sessionManager.getSessionFile()}\n`);

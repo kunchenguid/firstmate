@@ -29,8 +29,11 @@ export const CALM_TRANSCRIPT_CLASSES = [
 
 export type CalmTranscriptClass = (typeof CALM_TRANSCRIPT_CLASSES)[number];
 
-// Calm is on or off. "assistant-working-note" is deliberately absent from the allowlist:
-// Calm hides mid-turn assistant working notes, keeping the genuine final reply.
+// Calm is on or off. "assistant-working-note" is absent from the allowlist: Calm
+// hides superseded mid-turn narration, not the last tools-tagged recap. The layout
+// owns that successor filter (visible text, not widget identity); hiding every
+// tools-tagged row, or hiding it for an empty or tools-only successor, dropped
+// replies Pi never followed with a stop message.
 const CALM_VISIBLE_CLASSES = new Set<CalmTranscriptClass>([
   "genuine-user-prompt",
   "genuine-agent-response",

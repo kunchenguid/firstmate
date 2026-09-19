@@ -35,10 +35,13 @@ install_pi_watch_extension_fixture() {
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-primary-stuck-primary.ts" "$repo/.pi/extensions/lib/fm-primary-stuck-primary.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-watcher-beacon.ts" "$repo/.pi/extensions/lib/fm-watcher-beacon.ts"
   cp "$ROOT/.pi/extensions/lib/fm-calm-visibility.ts" "$repo/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
   mkdir -p "$repo/bin"
   cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+  cp "$ROOT/bin/fm-supervision-lib.sh" "$repo/bin/fm-supervision-lib.sh"
   chmod +x "$repo/bin/fm-operational-input.sh"
   cat > "$repo/node_modules/@earendil-works/pi-coding-agent/package.json" <<'JSON'
 {"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}
@@ -72,6 +75,71 @@ export const Type = {
   },
 };
 JS
+}
+
+test_tracked_extension_present_and_self_hashing() {
+  local text expected_config_source
+  expected_config_source="config_dir=\\\"\${FM_CONFIG_OVERRIDE:-\$FM_HOME/config}\\\""
+  assert_present "$EXT" "tracked Pi primary watcher extension is missing"
+  text=$(cat "$EXT")
+  assert_contains "$text" "fm_watch_arm_pi" "tracked extension missing tool name"
+  assert_contains "$text" "fm-watch-arm-pi" "tracked extension missing command name"
+  assert_contains "$text" "fm-watch-arm.sh" "tracked extension missing watcher arm"
+  assert_contains "$text" "sendUserMessage" "tracked extension missing Pi wake API"
+  assert_contains "$text" 'encodeFirstmateOperationalInput' "tracked extension does not construct typed synthetic user-role wakes"
+  assert_contains "$text" "deliverAs: \"followUp\"" "tracked extension missing followUp delivery"
+  assert_contains "$text" "dispatchReturnMatchesGeneration" "tracked extension missing generation-scoped dispatch-return gate"
+  assert_contains "$text" "watchGenerationMarker" "tracked extension missing Pi watch generation marker"
+  assert_contains "$text" "dispatch-return arms" "tracked extension missing dispatch-return termination comment"
+  assert_contains "$text" ".pi-watch-extension-loaded" "tracked extension missing loaded marker"
+  assert_contains "$text" 'createHash("sha256").update(readFileSync(extensionFile)).digest("hex")' "tracked extension does not self-hash its own content for extensionVersion"
+  assert_contains "$text" 'fileURLToPath(import.meta.url)' "tracked extension does not self-locate via import.meta.url"
+  assert_contains "$text" 'type LockOwnership = "owned" | "missing" | "other"' "tracked extension does not distinguish missing lock from another owner"
+  assert_contains "$text" "readFileSync(\`\${state}/.lock\`" "tracked extension does not read the effective session lock"
+  assert_contains "$text" 'return pidAlive(lockPid) ? "other" : "missing"' "tracked extension does not allow a pre-lock load marker"
+  assert_contains "$text" 'if (lockOwnership() === "other") return' "tracked extension overwrites another live session marker"
+  assert_contains "$text" 'const ownership = lockOwnership()' "tracked extension arm does not inspect the distinct lock ownership state"
+  assert_contains "$text" 'if (ownership === "other") return { ok: false' "tracked extension arm does not preserve the live-other read-only refusal"
+  assert_contains "$text" 'if (ownership === "missing")' "tracked extension arm collapses a stale or absent lock into the live-other refusal"
+  assert_contains "$text" "no live session holds the lock" "tracked extension arm missing stale-lock recovery guidance"
+  assert_contains "$text" "run bin/fm-session-start.sh to reclaim it" "tracked extension arm does not direct stale-lock reclamation"
+  assert_contains "$text" "call fm_watch_arm_pi to re-arm" "tracked extension arm does not direct supervision re-arm"
+  assert_contains "$text" "writeFileSync(marker, \`\${extensionVersion}\\n\${process.pid}\\n\`)" "tracked extension does not write the content version and process marker"
+  assert_contains "$text" "const config = process.env.FM_CONFIG_OVERRIDE" "tracked extension missing effective config resolution"
+  assert_contains "$text" "FM_CONFIG_OVERRIDE: config" "tracked extension does not pass the effective config to the watcher arm"
+  assert_contains "$text" "FM_WATCH_ARM_SCRIPT: armScript" "tracked extension does not pass the effective watcher arm script"
+  assert_contains "$text" "$expected_config_source" "tracked extension does not source the effective x-mode config"
+  assert_contains "$text" "exec \\\"\$FM_WATCH_ARM_SCRIPT\\\" --restart" "tracked extension does not restart into a Pi-owned watcher child"
+  assert_contains "$text" 'label: "Arm firstmate watcher"' "tracked extension tool is missing its human-readable label"
+  assert_not_contains "$text" "Always use this tool" "tracked extension kept broad tool-selection guidance"
+  assert_contains "$text" "after you finish the captain's current request" "tracked extension tool metadata is missing the post-work arm rule"
+  assert_contains "$text" "Do not call it after ordinary signal, stale, check, or heartbeat handling" "tracked extension prompt guidance does not prevent redundant ordinary-notification calls"
+  assert_contains "$text" 'parameters: Type.Object({})' "tracked extension tool is not using Pi's canonical TypeBox schema"
+  assert_contains "$text" 'content: [{ type: "text", text: result.message }]' "tracked extension tool is missing Pi text content"
+  assert_contains "$text" 'details: result' "tracked extension tool is missing structured result details"
+  assert_contains "$text" 'ctx.ui.notify' "tracked extension command does not notify through Pi's UI"
+  assert_contains "$text" 'process.once("exit", cleanupOnProcessExit)' "tracked extension lacks clean-process-exit cleanup"
+  assert_contains "$text" "armChildNeedsReplacement" "tracked extension does not replace stale arm children"
+  assert_contains "$text" "ownedArmChildBeaconIsStale" "tracked extension does not consult watcher beacon freshness"
+  assert_contains "$text" "owner.child !== null" "tracked extension does not suppress retry after superseding an arm child"
+  assert_contains "$text" "function activateGeneration" "tracked extension does not activate a live generation for replacement sessions"
+  assert_contains "$text" "function generationIsLive" "tracked extension does not gate arm mutations on the live generation"
+  assert_contains "$text" "watcher: not armed - Pi session is shutting down" "tracked extension missing the terminal shutdown refusal"
+  assert_not_contains "$text" "[ -f config/x-mode.env ]" "tracked extension kept a repo-relative x-mode config path"
+  pass "Pi primary watcher extension is tracked, self-hashing, and self-locating"
+}
+
+test_spawn_template_mentions_pi_watch_placeholder() {
+  local text
+  text=$(cat "$ROOT/bin/fm-spawn.sh")
+  assert_contains "$text" "-e __PITREEHOUSETRUST__ -e __PITURNEND__ -e __PIWATCH__" "Pi secondmate launch template does not include treehouse trust before primary extensions"
+  assert_contains "$text" "-e __PITREEHOUSETRUST__ -e __PIEXT__" "Pi crewmate launch template does not include treehouse trust before the turn-end extension"
+  assert_contains "$text" "\$FM_ROOT/.pi/extensions/fm-treehouse-trust.ts" "fm-spawn does not point the Pi treehouse trust placeholder at the tracked extension"
+  assert_contains "$text" "\$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts" "fm-spawn does not point the Pi secondmate watch placeholder at the tracked extension"
+  assert_not_contains "$text" "fm-pi-watch-extension.sh" "fm-spawn should no longer generate the Pi watch extension before launch"
+  assert_contains "$text" "__PITREEHOUSETRUST__" "fm-spawn does not replace the Pi treehouse trust extension placeholder"
+  assert_contains "$text" "__PIWATCH__" "fm-spawn does not replace the Pi watch extension placeholder"
+  pass "Pi secondmate launch wiring includes both tracked primary extensions"
 }
 
 test_pi_extension_reports_external_healthy_watcher() {
@@ -1889,6 +1957,134 @@ EOF
   expect_code 0 "$status" "Pi watcher arm must distinguish owned, live-other, and missing or dead session locks"
   [ -z "$out" ] || fail "Pi lock-ownership arm test printed output: $out"
   pass "Pi watcher arm distinguishes all session lock ownership states"
+}
+
+test_pi_session_start_auto_arms_when_supervision_needed() {
+  local repo home plugin child_pid_file arm_log out status
+  repo="$TMP_ROOT/pi-session-start-arm-root"
+  home="$TMP_ROOT/pi-session-start-arm-home"
+  child_pid_file="$TMP_ROOT/pi-session-start-arm-child.pid"
+  arm_log="$TMP_ROOT/pi-session-start-arm.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'watcher: started Pi extension arm child 1\n'
+printf 'pid=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf '%s\n' "$$" > "${FM_CHILD_PID_FILE:?}"
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  printf 'window=test\n' > "$home/state/inflight.meta"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_CHILD_PID_FILE="$child_pid_file" FM_ARM_LOG="$arm_log" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async () => {},
+  events: { on() {} },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
+for (let i = 0; i < 250; i += 1) {
+  if (existsSync(process.env.FM_CHILD_PID_FILE)) break;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!existsSync(process.env.FM_CHILD_PID_FILE)) {
+  throw new Error("session_start did not auto-arm when supervision was needed");
+}
+const child = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
+if (!child) throw new Error("auto-arm child pid was empty");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi session_start must auto-arm when supervision is needed"
+  [ -z "$out" ] || fail "Pi session_start auto-arm test printed output: $out"
+  pass "Pi session_start auto-arms when supervision is needed"
+}
+
+test_pi_stale_beacon_replaces_owned_arm_child() {
+  local repo home plugin arm_log stop out status
+  repo="$TMP_ROOT/pi-stale-beacon-root"
+  home="$TMP_ROOT/pi-stale-beacon-home"
+  arm_log="$TMP_ROOT/pi-stale-beacon-arm.log"
+  stop="$TMP_ROOT/pi-stale-beacon.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$arm_log" FM_STOP_FILE="$stop" FM_GUARD_GRACE=60 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync, utimesSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const handlers = new Map();
+let tool = null;
+const pi = {
+  on(event, handler) {
+    handlers.set(event, handler);
+  },
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {},
+  events: { on() {} },
+  ui: { notify() {} },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if (!tool) throw new Error("fm_watch_arm_pi was not registered");
+const ctx = { ui: { notify() {} } };
+const first = await tool.execute({}, ctx);
+if (!first.details?.ok || !String(first.details.message).includes("started Pi extension arm child")) {
+  throw new Error(`first arm failed: ${JSON.stringify(first.details)}`);
+}
+for (let i = 0; i < 50; i += 1) {
+  if (existsSync(process.env.FM_ARM_LOG)) break;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) throw new Error("first arm child never wrote FM_ARM_LOG");
+const beatPath = `${process.env.FM_HOME}/state/.last-watcher-beat`;
+writeFileSync(beatPath, "stale\n");
+utimesSync(beatPath, 0, 0);
+const second = await tool.execute({}, ctx);
+if (!second.details?.ok) throw new Error(`stale-beacon re-arm failed: ${JSON.stringify(second.details)}`);
+if (String(second.details.message).includes("unchanged")) {
+  throw new Error(`stale beacon must replace the owned arm child, not return unchanged: ${second.details.message}`);
+}
+for (let i = 0; i < 50; i += 1) {
+  const rows = existsSync(process.env.FM_ARM_LOG)
+    ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter((row) => row.startsWith("arm="))
+    : [];
+  if (rows.length >= 2) break;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter((row) => row.startsWith("arm="));
+if (rows.length < 2) throw new Error(`expected a replacement arm child, got ${rows.join(" | ")}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must replace a stale-beacon arm child instead of returning unchanged"
+  [ -z "$out" ] || fail "Pi stale-beacon arm replacement test printed output: $out"
+  pass "Pi stale watcher beacon replaces an owned arm child instead of returning unchanged"
 }
 
 test_pi_session_transition_generation_owner() {
@@ -3975,6 +4171,8 @@ EOF
 }
 
 test_pi_extension_reports_external_healthy_watcher
+test_tracked_extension_present_and_self_hashing
+test_spawn_template_mentions_pi_watch_placeholder
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
@@ -3997,6 +4195,8 @@ test_pi_empty_close_retries_instead_of_disappearing
 test_pi_established_empty_close_honors_retry_limit
 test_pi_actionable_close_rechecks_session_lock
 test_pi_arm_distinguishes_session_lock_ownership
+test_pi_session_start_auto_arms_when_supervision_needed
+test_pi_stale_beacon_replaces_owned_arm_child
 test_pi_session_transition_generation_owner
 test_pi_session_replacement_carries_inflight_actionable_close
 test_pi_streaming_followup_is_replayed_after_replacement

@@ -41,6 +41,8 @@ import {
   FIRSTMATE_CALM_PRESENTATION_EVENT,
 } from "./lib/fm-calm-visibility.ts";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
+import { getSharedStuckPrimaryMonitor } from "./lib/fm-primary-stuck-primary.ts";
+import { ownedArmChildBeaconIsStale } from "./lib/fm-watcher-beacon.ts";
 
 type ArmResult = {
   ok: boolean;
@@ -133,6 +135,8 @@ const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
+const dispatchReturnMarker = `${state}/.dispatch-return`;
+const watchGenerationMarker = `${state}/.pi-watch-generation`;
 const marker = `${state}/.pi-watch-extension-loaded`;
 const handoffDir = `${state}/extensions/pi-primary-watch`;
 const actionableHandoff = `${handoffDir}/session-replacement-actionable.json`;
@@ -228,6 +232,48 @@ function lockOwnership(): LockOwnership {
     if (!pid || pid === "1") break;
   }
   return pidAlive(lockPid) ? "other" : "missing";
+}
+
+function clearDispatchReturnPending(): void {
+  try {
+    unlinkSync(dispatchReturnMarker);
+  } catch {
+    // absent is fine
+  }
+}
+
+function publishWatchGeneration(generationId: number): void {
+  mkdirSync(state, { recursive: true });
+  writeFileSync(watchGenerationMarker, `${generationId}\n`);
+}
+
+function dispatchReturnMatchesGeneration(generationId: number): boolean {
+  try {
+    const line = readFileSync(dispatchReturnMarker, "utf8").trim();
+    if (!line) return false;
+    const tab = line.indexOf("\t");
+    if (tab < 0) return false;
+    const markerGeneration = Number(line.slice(0, tab));
+    return Number.isFinite(markerGeneration) && markerGeneration === generationId;
+  } catch {
+    return false;
+  }
+}
+
+function supervisionNeeded(): boolean {
+  const result = spawnSync(
+    "bash",
+    ["-lc", `. "${fmRoot}/bin/fm-supervision-lib.sh" && fm_supervision_needed "${state}"`],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        FM_HOME: fmHome,
+        FM_STATE_OVERRIDE: state,
+      },
+    },
+  );
+  return result.status === 0;
 }
 
 function markLoaded(): void {
@@ -426,8 +472,16 @@ function createGeneration(): SessionGeneration {
   };
 }
 
+function armChildNeedsReplacement(child: ChildProcess): boolean {
+  const pid = child.pid;
+  if (!pid || !pidAlive(String(pid))) return true;
+  return ownedArmChildBeaconIsStale(state);
+}
+
 function activateGeneration(generation: SessionGeneration): void {
   activeGeneration = generation;
+  clearDispatchReturnPending();
+  publishWatchGeneration(generation.id);
 }
 
 function generationIsLive(generation: SessionGeneration): boolean {
@@ -520,7 +574,7 @@ export default function (pi: ExtensionAPI) {
     if (!generationIsLive(owner)) return false;
     const content = encodeFirstmateOperationalInput(
       "watcher",
-      `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.`,
+      `FIRSTMATE WATCHER WAKE: ${message}`,
     );
     if (pending) owner.unconsumedWakes.set(pending.token, { content, pending });
     try {
@@ -943,10 +997,15 @@ export default function (pi: ExtensionAPI) {
     }
     markLoaded();
     if (owner.child) {
-      return {
-        ok: true,
-        message: `watcher: unchanged - Pi extension already owns an arm child; no manual re-arm needed; ${repairOnlyHint}`,
-      };
+      if (!armChildNeedsReplacement(owner.child)) {
+        return {
+          ok: true,
+          message: `watcher: unchanged - Pi extension already owns an arm child; no manual re-arm needed; ${repairOnlyHint}`,
+        };
+      }
+      const retiring = owner.child;
+      owner.child = null;
+      retiring.kill("SIGTERM");
     }
     if (owner.retryTimer) {
       return {
@@ -989,6 +1048,7 @@ export default function (pi: ExtensionAPI) {
       readinessSettled = true;
       verified = ready;
       resolveReadiness(ready);
+      if (ready) getSharedStuckPrimaryMonitor().onWatcherArmSucceeded();
     };
     const observeEstablishedArm = (): void => {
       const combined = `${stdout}\n${stderr}`;
@@ -1050,6 +1110,7 @@ export default function (pi: ExtensionAPI) {
       resolveClosed();
       settleReadiness(false);
       releaseChild();
+      if (owner.child !== null) return;
       if (!generationIsLive(owner)) return;
       if (owner.restoring) return;
       scheduleRetry(owner, `watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
@@ -1125,7 +1186,8 @@ export default function (pi: ExtensionAPI) {
     description: "Start the first required Pi watcher cycle, or repair one only after a notification says the cycle is missing, failed, or unhealthy. Do not call after ordinary work or ordinary notifications; the Pi extension re-arms automatically. Never run bin/fm-watch-arm.sh through bash.",
     promptSnippet: "Start the first required Pi watcher cycle or repair a cycle reported missing, failed, or unhealthy; ordinary re-arming is automatic.",
     promptGuidelines: [
-      "Call fm_watch_arm_pi only for the first required cycle or after a notification says the cycle is missing, failed, or unhealthy. Do not call it after ordinary work, turn completion, or ordinary signal, stale, check, or heartbeat handling because the Pi extension owns re-arming. Never run bin/fm-watch-arm.sh through bash.",
+      "Call fm_watch_arm_pi after you finish the captain's current request, including any dispatch it required, not before that work. Do not call it after ordinary signal, stale, check, or heartbeat handling because the Pi extension owns re-arming. Never run bin/fm-watch-arm.sh through bash.",
+      "After a successful dispatch-return arm (you just spawned in this session generation), do not add monitoring prose or wait for worker completion; the tool terminates the turn so the captain can continue chatting while the extension supervises in the background.",
     ],
     parameters: Type.Object({}),
     renderShell: "self",
@@ -1156,9 +1218,13 @@ export default function (pi: ExtensionAPI) {
     },
     execute: async () => {
       const result = activateOwnedWatch(generation);
+      const terminate = result.ok && dispatchReturnMatchesGeneration(generation.id);
+      if (terminate) clearDispatchReturnPending();
       return {
         content: [{ type: "text", text: result.message }],
         details: result,
+        // Pi skips the post-tool LLM follow-up only for dispatch-return arms.
+        terminate,
       };
     },
   });

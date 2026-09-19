@@ -7,13 +7,15 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-calm-pi-extension)
 EXT="$ROOT/.pi/extensions/fm-calm.ts"
-ASSISTANT_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-assistant-layout.ts"
-PRESERVATION="$ROOT/.pi/extensions/lib/fm-calm-preservation.ts"
-OPERATIONAL_USER_LAYOUT="$ROOT/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+ASSISTANT_LAYOUT="$ROOT/.pi/extensions/lib/fm-pi-cursor-calm-assistant-layout.ts"
+OPERATIONAL_USER_LAYOUT="$ROOT/.pi/extensions/lib/fm-pi-cursor-calm-operational-user-layout.ts"
 VISIBILITY="$ROOT/.pi/extensions/lib/fm-calm-visibility.ts"
 WORKING_SHIP="$ROOT/.pi/extensions/lib/fm-calm-working-ship.ts"
 WORKING_SHIP_SPRITE="$ROOT/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
 WATCH_EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
+STUCK_PRIMARY="$ROOT/.pi/extensions/lib/fm-primary-stuck-primary.ts"
+WATCHER_BEACON="$ROOT/.pi/extensions/lib/fm-watcher-beacon.ts"
+CURSOR_REPLAY="$ROOT/.pi/extensions/lib/fm-cursor-replay-execute.ts"
 OPERATIONAL_INPUT="$ROOT/bin/fm-operational-input.sh"
 PI_OPERATIONAL_INPUT="$ROOT/.pi/extensions/lib/fm-operational-input.ts"
 PI_PACKAGE_DIR=${FM_PI_PACKAGE_DIR:-"$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"}
@@ -169,9 +171,8 @@ test_home_resolution() {
     "$fixture/override" \
     "$fixture/launch-cwd"
   cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
-  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
-  cp "$PRESERVATION" "$fixture/project/.pi/extensions/lib/fm-calm-preservation.ts"
-  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-pi-cursor-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-pi-cursor-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
@@ -265,6 +266,51 @@ JS
   pass "Pi calm resolves its persistent home independently of Pi's launch directory"
 }
 
+test_fleet_calm_ownership_symbol() {
+  local fixture out status
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "skip: node or npm not found for fleet Calm ownership-symbol test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+
+  fixture="$TMP_ROOT/fleet-calm-ownership"
+  mkdir -p \
+    "$fixture/project/.pi/extensions/lib" \
+    "$fixture/project/node_modules/@earendil-works"
+  cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-pi-cursor-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-pi-cursor-calm-operational-user-layout.ts"
+  cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/project/.pi/extensions/lib/fm-operational-input.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/project/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/project/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/project/package.json"
+
+  out=$(cd "$fixture/project" && \
+    EXT="$fixture/project/.pi/extensions/fm-calm.ts" \
+    node --input-type=module 2>&1 <<'JS'
+const ownershipSymbol = Symbol.for("firstmate:calm:owns-presentation");
+if (globalThis[ownershipSymbol] !== undefined) {
+  throw new Error("fleet Calm ownership symbol was already set before import");
+}
+await import(`${new URL(process.env.EXT, "file:").href}?ownership=${Date.now()}`);
+if (globalThis[ownershipSymbol] !== true) {
+  throw new Error("importing fm-calm did not set the fleet Calm ownership symbol");
+}
+JS
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "fleet Calm ownership symbol test failed: $out"
+  [ -z "$out" ] || fail "fleet Calm ownership symbol test printed output: $out"
+  pass "importing fm-calm sets the fleet Calm presentation ownership symbol at module evaluation time"
+}
+
 test_pi_compat_no_upper_bound() {
   local version
   for version in 0.83.0 0.90.0 1.0.0 2.3.4 0.82.1 10.20.30; do
@@ -293,9 +339,8 @@ test_pi_compat_degraded_adapter() {
     "$fixture/project/.pi/extensions/lib" \
     "$fixture/project/node_modules/@earendil-works"
   cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
-  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
-  cp "$PRESERVATION" "$fixture/project/.pi/extensions/lib/fm-calm-preservation.ts"
-  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-pi-cursor-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-pi-cursor-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
@@ -394,9 +439,8 @@ test_pi_compat_missing_adapter_exports() {
   mkdir -p \
     "$fixture/project/.pi/extensions/lib" \
     "$fixture/project/node_modules/@earendil-works/pi-coding-agent"
-  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
-  cp "$PRESERVATION" "$fixture/project/.pi/extensions/lib/fm-calm-preservation.ts"
-  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-pi-cursor-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-pi-cursor-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
@@ -411,8 +455,8 @@ test_pi_compat_missing_adapter_exports() {
     >"$fixture/project/node_modules/@earendil-works/pi-coding-agent/index.js"
 
   out=$(cd "$fixture/project" && node --input-type=module 2>&1 <<'JS'
-const assistant = await import("./.pi/extensions/lib/fm-calm-assistant-layout.ts");
-const operational = await import("./.pi/extensions/lib/fm-calm-operational-user-layout.ts");
+const assistant = await import("./.pi/extensions/lib/fm-pi-cursor-calm-assistant-layout.ts");
+const operational = await import("./.pi/extensions/lib/fm-pi-cursor-calm-operational-user-layout.ts");
 
 for (const [name, install, expected] of [
   ["collapsed-thinking", assistant.installCalmAssistantLayout, "AssistantMessageComponent"],
@@ -456,9 +500,8 @@ test_builtin_gate_load_time() {
     "$fixture/home-off/config" \
     "$fixture/home-on/config"
   cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
-  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
-  cp "$PRESERVATION" "$fixture/project/.pi/extensions/lib/fm-calm-preservation.ts"
-  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-pi-cursor-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-pi-cursor-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
@@ -544,9 +587,8 @@ test_calm_activation_collision_and_regression_bound() {
     "$fixture/project/node_modules/@earendil-works" \
     "$fixture/home/config"
   cp "$EXT" "$fixture/project/.pi/extensions/fm-calm.ts"
-  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
-  cp "$PRESERVATION" "$fixture/project/.pi/extensions/lib/fm-calm-preservation.ts"
-  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-pi-cursor-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/project/.pi/extensions/lib/fm-pi-cursor-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
@@ -760,9 +802,8 @@ test_rendering_and_session_lifecycle() {
   fixture="$TMP_ROOT/renderer"
   mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
   cp "$EXT" "$fixture/fm-calm.ts"
-  cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
-  cp "$PRESERVATION" "$fixture/lib/fm-calm-preservation.ts"
-  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-pi-cursor-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-pi-cursor-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/lib/fm-calm-working-ship-sprite.ts"
@@ -770,6 +811,9 @@ test_rendering_and_session_lifecycle() {
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$fixture/lib/fm-branch-dispatch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$fixture/lib/fm-native-contract.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$fixture/lib/fm-async-exec.ts"
+  cp "$STUCK_PRIMARY" "$fixture/lib/fm-primary-stuck-primary.ts"
+  cp "$WATCHER_BEACON" "$fixture/lib/fm-watcher-beacon.ts"
+  cp "$CURSOR_REPLAY" "$fixture/lib/fm-cursor-replay-execute.ts"
   cp "$WATCH_EXT" "$fixture/fm-primary-pi-watch.ts"
   ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
   ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
@@ -1479,9 +1523,8 @@ test_calm_mid_turn_working_notes() {
   fixture="$TMP_ROOT/calm-mid-turn"
   mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
   cp "$EXT" "$fixture/fm-calm.ts"
-  cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
-  cp "$PRESERVATION" "$fixture/lib/fm-calm-preservation.ts"
-  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-pi-cursor-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-pi-cursor-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/lib/fm-calm-working-ship-sprite.ts"
@@ -1509,7 +1552,7 @@ setCapabilities({ images: null, trueColor: true, hyperlinks: false });
 // the same module URLs, so they share one live visibility policy exactly the way a
 // single Pi process does.
 const visibility = await import(pathToFileURL(`${process.cwd()}/lib/fm-calm-visibility.ts`).href);
-const preservation = await import(pathToFileURL(`${process.cwd()}/lib/fm-calm-preservation.ts`).href);
+const layout = await import(pathToFileURL(`${process.cwd()}/lib/fm-pi-cursor-calm-assistant-layout.ts`).href);
 const calmPreferencePath = `${process.env.FM_HOME}/config/calm`;
 const components = [];
 const ui = {
@@ -1523,6 +1566,7 @@ const ui = {
   setStatus() {},
   setToolsExpanded() {},
   setWorkingVisible() {},
+  setWidget() {},
   notify() {},
 };
 const context = { ui };
@@ -1571,49 +1615,12 @@ const assistantBase = {
   timestamp: 1,
 };
 const toolCall = { type: "toolCall", id: "calm-mid-turn-tool", name: "read", arguments: { path: "sample.txt" } };
-const substantiveLongText = "SUBSTANTIVE_LONG_MIDTURN_REPORT " + "context ".repeat(35);
-const substantiveMultilineText = "SUBSTANTIVE_MIDTURN_REPORT\nAdditional context needed to continue.";
-const belowThresholdText = "b".repeat(preservation.CALM_PRESERVE_MIN_CHARS - 1);
-const atThresholdText = "t".repeat(preservation.CALM_PRESERVE_MIN_CHARS);
-if (preservation.CALM_PRESERVE_MIN_CHARS !== 240) {
-  throw new Error(`Pi Calm preservation threshold changed to ${preservation.CALM_PRESERVE_MIN_CHARS}`);
-}
 const messages = {
   // The reported incident: narration emitted in the same assistant message as a tool call.
   midTurn: {
     ...assistantBase,
     stopReason: "toolUse",
     content: [{ type: "text", text: "MIDTURN_WORKING_NOTE" }, toolCall],
-  },
-  // Substantive mid-turn content must remain visible even when the message also calls a tool.
-  substantiveLong: {
-    ...assistantBase,
-    stopReason: "toolUse",
-    content: [{ type: "text", text: substantiveLongText }, toolCall],
-  },
-  substantiveMultiline: {
-    ...assistantBase,
-    stopReason: "toolUse",
-    content: [{ type: "text", text: substantiveMultilineText }, toolCall],
-  },
-  belowThreshold: {
-    ...assistantBase,
-    stopReason: "toolUse",
-    content: [{ type: "text", text: belowThresholdText }, toolCall],
-  },
-  atThreshold: {
-    ...assistantBase,
-    stopReason: "toolUse",
-    content: [{ type: "text", text: atThresholdText }, toolCall],
-  },
-  mixedBlocks: {
-    ...assistantBase,
-    stopReason: "toolUse",
-    content: [
-      { type: "text", text: "MIXED_SHORT_WORKING_NOTE" },
-      { type: "text", text: substantiveLongText },
-      toolCall,
-    ],
   },
   // The genuine reply that ends a response, which Calm never hides.
   finalReply: {
@@ -1680,14 +1687,8 @@ if (readFileSync(calmPreferencePath, "utf8") !== "on\n") {
   throw new Error("plain /calm from off did not persist on");
 }
 if (rendered("midTurn").length !== 0) {
-  throw new Error(`Calm on left short mid-turn working-note rows: ${JSON.stringify(rendered("midTurn"))}`);
+  throw new Error(`Calm on left superseded mid-turn working-note rows: ${JSON.stringify(rendered("midTurn"))}`);
 }
-requireVisible("substantiveLong", "SUBSTANTIVE_LONG_MIDTURN_REPORT", "Calm on");
-requireVisible("substantiveMultiline", "SUBSTANTIVE_MIDTURN_REPORT", "Calm on");
-requireHidden("belowThreshold", belowThresholdText.slice(0, 32), "Calm on");
-requireVisible("atThreshold", atThresholdText.slice(0, 32), "Calm on");
-requireHidden("mixedBlocks", "MIXED_SHORT_WORKING_NOTE", "Calm on");
-requireVisible("mixedBlocks", "SUBSTANTIVE_LONG_MIDTURN_REPORT", "Calm on");
 requireHidden("truncatedMidTurn", "TRUNCATED_MIDTURN_NOTE", "Calm on");
 // Pi owns the wording of its truncation notice; Calm must leave that row's own notice
 // standing rather than collapsing an incomplete response to nothing.
@@ -1704,6 +1705,88 @@ if (JSON.stringify(messages) !== messagesBefore) {
   throw new Error("Calm on mutated the assistant messages instead of a presentation copy");
 }
 
+// Last tools-tagged recap stays: Pi often ends the loop on that message.
+// A later user turn must not hide it.
+layout.noteCalmAssistantUserTurn();
+rows.terminalToolUse = new AssistantMessageComponent(
+  {
+    ...assistantBase,
+    timestamp: 50,
+    stopReason: "toolUse",
+    content: [{ type: "text", text: "TERMINAL_TOOLUSE_REPLY" }, toolCall],
+  },
+  true,
+);
+components.push(rows.terminalToolUse);
+ui.setHiddenThinkingLabel("");
+requireVisible("terminalToolUse", "TERMINAL_TOOLUSE_REPLY", "last tools-tagged recap");
+requireHidden("midTurn", "MIDTURN_WORKING_NOTE", "prior turn superseded working note");
+rows.emptyPendingSuccessor = new AssistantMessageComponent(
+  {
+    ...assistantBase,
+    timestamp: 51,
+    stopReason: "pending",
+    content: [],
+  },
+  true,
+);
+components.push(rows.emptyPendingSuccessor);
+ui.setHiddenThinkingLabel("");
+requireVisible(
+  "terminalToolUse",
+  "TERMINAL_TOOLUSE_REPLY",
+  "empty pending successor must not hide the last recap",
+);
+rows.emptyToolUseSuccessor = new AssistantMessageComponent(
+  {
+    ...assistantBase,
+    timestamp: 52,
+    stopReason: "toolUse",
+    content: [toolCall],
+  },
+  true,
+);
+components.push(rows.emptyToolUseSuccessor);
+ui.setHiddenThinkingLabel("");
+requireVisible(
+  "terminalToolUse",
+  "TERMINAL_TOOLUSE_REPLY",
+  "empty tools-only successor must not hide the last recap",
+);
+rows.incompleteSuccessor = new AssistantMessageComponent(
+  {
+    ...assistantBase,
+    timestamp: 53,
+    stopReason: "toolUse",
+    content: [
+      { type: "text", text: "Cursor shell did not complete\nmissing completion" },
+      toolCall,
+    ],
+  },
+  true,
+);
+components.push(rows.incompleteSuccessor);
+ui.setHiddenThinkingLabel("");
+requireVisible(
+  "terminalToolUse",
+  "TERMINAL_TOOLUSE_REPLY",
+  "Cursor incomplete successor text must not hide the last recap",
+);
+layout.noteCalmAssistantUserTurn();
+rows.nextTurn = new AssistantMessageComponent(
+  {
+    ...assistantBase,
+    timestamp: 80,
+    stopReason: "stop",
+    content: [{ type: "text", text: "NEXT_TURN_TEXT" }],
+  },
+  true,
+);
+components.push(rows.nextTurn);
+ui.setHiddenThinkingLabel("");
+requireVisible("terminalToolUse", "TERMINAL_TOOLUSE_REPLY", "prior recap after a later user turn");
+requireVisible("nextTurn", "NEXT_TURN_TEXT", "next-turn genuine stop reply");
+
 // The removed third level: /calm parses no argument, so every invocation is the plain
 // on/off toggle and no third literal is ever persisted.
 await calm.calmCommand.handler("max", context);
@@ -1712,7 +1795,7 @@ if (readFileSync(calmPreferencePath, "utf8") !== "off\n") {
 }
 requireVisible("midTurn", "MIDTURN_WORKING_NOTE", "Calm off after /calm max");
 const restoredRows = snapshot();
-for (const name of Object.keys(rows)) {
+for (const name of Object.keys(stockRows)) {
   if (restoredRows[name] !== stockRows[name]) {
     throw new Error(`turning Calm off did not restore byte-identical ${name} rendering`);
   }
@@ -1745,10 +1828,12 @@ for (const persisted of ["on\n", "max\n", "max"]) {
     await calm.sessionStart({ reason }, context);
     if (rendered("midTurn").length !== 0) {
       throw new Error(
-        `a ${reason} session restored from ${JSON.stringify(persisted)} did not hide mid-turn working notes`,
+        `a ${reason} session restored from ${JSON.stringify(persisted)} did not hide superseded mid-turn working notes`,
       );
     }
     requireVisible("finalReply", "FINAL_REPLY_TEXT", `${reason} session`);
+    requireVisible("terminalToolUse", "TERMINAL_TOOLUSE_REPLY", `${reason} session last recap`);
+    requireVisible("nextTurn", "NEXT_TURN_TEXT", `${reason} session next-turn reply`);
   }
   // A session restored as on toggles to off; one that had wrongly dropped to off would
   // persist "on" here instead.
@@ -1766,7 +1851,7 @@ JS
   out=$(cat "$output_file")
   [ "$status" -eq 0 ] || fail "Pi calm mid-turn contract failed: $out"
   [ -z "$out" ] || fail "Pi calm mid-turn test printed output: $out"
-  pass "Pi calm on collapses mid-turn assistant working notes to zero height while Calm off keeps them, leaves streaming, truncated-final, and genuine final replies untouched, never mutates the messages, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on"
+  pass "Pi calm on collapses superseded mid-turn assistant working notes to zero height while Calm off keeps them, keeps the last tools-tagged recap visible through a later user turn, an empty pending successor, an empty tools-only successor, and a Cursor incomplete successor, leaves streaming, truncated-final, and genuine final replies untouched, never mutates the messages, ignores every /calm argument, and restores a legacy persisted max as ordinary Calm on"
 }
 
 test_operational_followup_turn_e2e() {
@@ -1785,9 +1870,8 @@ test_operational_followup_turn_e2e() {
   mkdir -p "$project/.pi/extensions/lib" "$home/config" "$config" "$sessions"
   fm_git_init_commit "$project"
   cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
-  cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
-  cp "$PRESERVATION" "$project/.pi/extensions/lib/fm-calm-preservation.ts"
-  cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-pi-cursor-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-pi-cursor-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
@@ -2013,10 +2097,11 @@ TS
       fi
     fi
 
-    node - "$session_file" "$label" "$expected_notifications" <<'JS' \
+    node - "$session_file" "$label" "$expected_notifications" "$OPERATIONAL_INPUT" <<'JS' \
       || fail "Pi follow-up $label persisted the wrong turn or input semantics"
 const fs = require("node:fs");
-const [file, label, expectedRaw] = process.argv.slice(2);
+const { spawnSync } = require("node:child_process");
+const [file, label, expectedRaw, encoder] = process.argv.slice(2);
 const expected = Number(expectedRaw);
 const entries = fs.readFileSync(file, "utf8").trim().split("\n").map(JSON.parse);
 const text = (content) => typeof content === "string"
@@ -2027,13 +2112,23 @@ const captainAnswer = `CAPTAIN_ANSWER_${label}`;
 const handled = expected === 2
   ? `MONITOR_HANDLED_${label}_ONE_TWO`
   : `MONITOR_HANDLED_${label}_ONE`;
+const encodeWatcher = (body) => {
+  const result = spawnSync(encoder, ["encode", "watcher"], {
+    encoding: "utf8",
+    input: body,
+  });
+  if (result.status !== 0) {
+    throw new Error(`watcher encode failed: ${result.stderr || result.stdout}`);
+  }
+  return result.stdout;
+};
 const expectedOperationalTexts = Array.from({ length: expected }, (_, index) => {
   const suffix = index === 0 ? "ONE" : "TWO";
   return label === "exact_watcher" && suffix === "ONE"
     ? "\u2063FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: signal: /home/fixture/github/kunchenguid/firstmate/state/oss-triage-t4.status\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned."
     : label === "legacy_away" && suffix === "ONE"
       ? "\u2063Supervisor escalate (LEGACY_AWAY_E2E)"
-      : `\u2063FIRSTMATE_OP: v1 watcher: MONITOR_${label}_${suffix}`;
+      : encodeWatcher(`MONITOR_${label}_${suffix}`);
 });
 const matching = entries.filter((entry) => {
   const entryText = entry.type === "message"
@@ -2161,9 +2256,8 @@ test_hidden_block_geometry_e2e() {
     "$sessions"
   fm_git_init_commit "$project"
   cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
-  cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
-  cp "$PRESERVATION" "$project/.pi/extensions/lib/fm-calm-preservation.ts"
-  cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-pi-cursor-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-pi-cursor-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
@@ -2397,9 +2491,8 @@ test_working_ship_geometry_and_lifecycle() {
   fixture="$TMP_ROOT/working-ship"
   mkdir -p "$fixture/home" "$fixture/lib" "$fixture/node_modules/@earendil-works"
   cp "$EXT" "$fixture/fm-calm.ts"
-  cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
-  cp "$PRESERVATION" "$fixture/lib/fm-calm-preservation.ts"
-  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-pi-cursor-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-pi-cursor-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$fixture/lib/fm-calm-working-ship-sprite.ts"
@@ -3428,9 +3521,8 @@ test_interactive_terminal_e2e() {
   fm_git_init_commit "$project"
   : > "$project/AGENTS.md"
   cp "$EXT" "$project/.pi/extensions/fm-calm.ts"
-  cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-calm-assistant-layout.ts"
-  cp "$PRESERVATION" "$project/.pi/extensions/lib/fm-calm-preservation.ts"
-  cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-calm-operational-user-layout.ts"
+  cp "$ASSISTANT_LAYOUT" "$project/.pi/extensions/lib/fm-pi-cursor-calm-assistant-layout.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$project/.pi/extensions/lib/fm-pi-cursor-calm-operational-user-layout.ts"
   cp "$VISIBILITY" "$project/.pi/extensions/lib/fm-calm-visibility.ts"
   cp "$WORKING_SHIP" "$project/.pi/extensions/lib/fm-calm-working-ship.ts"
   cp "$WORKING_SHIP_SPRITE" "$project/.pi/extensions/lib/fm-calm-working-ship-sprite.ts"
@@ -3438,6 +3530,9 @@ test_interactive_terminal_e2e() {
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$project/.pi/extensions/lib/fm-branch-dispatch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$project/.pi/extensions/lib/fm-native-contract.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$project/.pi/extensions/lib/fm-async-exec.ts"
+  cp "$STUCK_PRIMARY" "$project/.pi/extensions/lib/fm-primary-stuck-primary.ts"
+  cp "$WATCHER_BEACON" "$project/.pi/extensions/lib/fm-watcher-beacon.ts"
+  cp "$CURSOR_REPLAY" "$project/.pi/extensions/lib/fm-cursor-replay-execute.ts"
   cp "$WATCH_EXT" "$project/.pi/extensions/fm-primary-pi-watch.ts"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$project/.pi/extensions/fm-primary-turnend-guard.ts"
   cp \
@@ -3623,14 +3718,14 @@ TS
 {"type":"message","id":"a0000006","parentId":"a0000005","timestamp":"$now","message":{"role":"toolResult","toolCallId":"call_find_e2e","toolName":"find","content":[{"type":"text","text":"CALM_EXPORT_FIND.txt"}],"details":{},"isError":false,"timestamp":6}}
 {"type":"message","id":"a0000007","parentId":"a0000006","timestamp":"$now","message":{"role":"assistant","content":[{"type":"thinking","thinking":"third internal reasoning block"},{"type":"toolCall","id":"call_watch_e2e","name":"fm_watch_arm_pi","arguments":{}}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"toolUse","timestamp":7}}
 {"type":"message","id":"a0000008","parentId":"a0000007","timestamp":"$now","message":{"role":"toolResult","toolCallId":"call_watch_e2e","toolName":"fm_watch_arm_pi","content":[{"type":"text","text":"watcher: started Pi extension arm child 1"}],"details":{"ok":true,"message":"watcher: started Pi extension arm child 1"},"isError":false,"timestamp":8}}
-{"type":"custom","id":"a0000009","parentId":"a0000008","timestamp":"$now","customType":"firstmate-synthetic-input-presentation","data":{"content":"FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status\\n\\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.","kind":"watcher"}}
+{"type":"message","id":"a0000016","parentId":"a0000008","timestamp":"$now","message":{"role":"assistant","content":[{"type":"text","text":"The deterministic tool example is complete."}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":9}}
+{"type":"custom","id":"a0000009","parentId":"a0000016","timestamp":"$now","customType":"firstmate-synthetic-input-presentation","data":{"content":"FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status\\n\\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.","kind":"watcher"}}
 {"type":"custom_message","id":"a0000010","parentId":"a0000009","timestamp":"$now","customType":"firstmate-synthetic-input","content":"FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status\\n\\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.","display":false,"details":{"kind":"watcher"}}
 {"type":"message","id":"a0000011","parentId":"a0000010","timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"FIRSTMATE WATCHER WAKE: can you explain this phrase?"}],"timestamp":11}}
 {"type":"message","id":"a0000012","parentId":"a0000011","timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"Captain quote: \u2063FIRSTMATE_OP: v1 watcher: QUOTED_CURRENT_NEAR_MISS"}],"timestamp":12}}
 {"type":"message","id":"a0000013","parentId":"a0000012","timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"FIRSTMATE_OP: v1 watcher: ASCII_ONLY_NEAR_MISS"}],"timestamp":13}}
 {"type":"message","id":"a0000014","parentId":"a0000013","timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"Ordinary captain text before \u2063FIRSTMATE_OP: v1 watcher: EMBEDDED_CURRENT_NEAR_MISS"}],"timestamp":14}}
 {"type":"message","id":"a0000015","parentId":"a0000014","timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"\u2063ordinary captain text after unrelated separator"}],"timestamp":15}}
-{"type":"message","id":"a0000016","parentId":"a0000015","timestamp":"$now","message":{"role":"assistant","content":[{"type":"text","text":"The deterministic tool example is complete."}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":16}}
 JSON
 
   tmux -L "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -x 180 -y 44 \
@@ -3709,8 +3804,9 @@ JSON
     assert_contains "$(cat "$hidden_snapshot")" "$near_miss" "/calm hid the genuine operational near miss $near_miss"
   done
   # Mid-turn narration emitted alongside the tool call is a working note, which Calm
-  # hides against the real Pi renderer; the genuine reply that ended the response stays.
-  assert_not_contains "$(cat "$hidden_snapshot")" "I will run one command." "/calm left a mid-turn assistant working note in the transcript"
+  # hides once a later same-turn assistant row has visible text. A later tools-only
+  # row is not enough. The genuine reply that ended the response stays.
+  assert_not_contains "$(cat "$hidden_snapshot")" "I will run one command." "/calm left a superseded mid-turn assistant working note in the transcript"
   assert_contains "$(cat "$hidden_snapshot")" "The deterministic tool example is complete." "/calm removed assistant conversation after a tool"
 
   tmux -L "$TMUX_SOCKET" send-keys -t "$TMUX_SESSION" -l "/calm-diagnostic-e2e"
@@ -3872,7 +3968,7 @@ JS
   assert_not_contains "$(cat "$export_settled_snapshot")" "Thinking..." \
     "/export left collapsed thinking labels in the Calm transcript"
   assert_not_contains "$(cat "$export_settled_snapshot")" "I will run one command." \
-    "/export left a mid-turn assistant working note in the Calm transcript"
+    "/export left a superseded mid-turn assistant working note in the Calm transcript"
   for hidden in \
     CURRENT_WATCHER_E2E \
     CURRENT_TURN_END_E2E \
@@ -4278,6 +4374,7 @@ JS
 }
 
 test_home_resolution
+test_fleet_calm_ownership_symbol
 test_pi_compat_no_upper_bound
 test_pi_compat_degraded_adapter
 test_pi_compat_missing_adapter_exports

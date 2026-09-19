@@ -4361,6 +4361,83 @@ JS
   pass "fm_branch_outcomes hides through ToolExecutionComponent while Calm-off and HTML export stay stock"
 }
 
+install_cursor_agent_dir() {
+  local agent_dir=$1
+  mkdir -p "$agent_dir/npm/node_modules/pi-cursor-sdk/src"
+  cat > "$agent_dir/settings.json" <<'JSON'
+{"defaultProvider":"cursor","defaultModel":"composer-2.5"}
+JSON
+  cat > "$agent_dir/npm/node_modules/pi-cursor-sdk/package.json" <<'JSON'
+{"name":"pi-cursor-sdk","pi":{"extensions":["./src/index.ts"]}}
+JSON
+  cat > "$agent_dir/npm/node_modules/pi-cursor-sdk/src/index.ts" <<'TS'
+export default function () {}
+TS
+}
+
+test_branch_loader_pins_cursor_sdk_with_no_extensions() {
+  local repo home agent_dir out status
+  repo="$TMP_ROOT/cursor-loader-root"
+  home="$TMP_ROOT/cursor-loader-home"
+  agent_dir="$TMP_ROOT/cursor-loader-agent"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  install_cursor_agent_dir "$agent_dir"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    PI_CODING_AGENT_DIR="$agent_dir" DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, settle }; })()`);
+const { dispatch, settle } = globalThis.__t;
+import { resolve } from "node:path";
+const agentDir = process.env.PI_CODING_AGENT_DIR;
+dispatch("signal: cursor loader probe");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "branch wake prompt");
+const loader = globalThis.__fmLoaders[0];
+if (loader.options.noExtensions !== true) throw new Error("branch loader must keep noExtensions true");
+const paths = loader.options.additionalExtensionPaths ?? [];
+if (paths.length !== 1) throw new Error(`expected one additionalExtensionPath, got ${JSON.stringify(paths)}`);
+const expected = resolve(`${agentDir}/npm/node_modules/pi-cursor-sdk/src/index.ts`);
+if (resolve(paths[0]) !== expected) throw new Error(`unexpected cursor sdk path: ${paths[0]}`);
+if (paths.some((p) => p.endsWith("fm-branch-supervision.ts"))) {
+  throw new Error("branch loader must not load fm-branch-supervision.ts");
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "cursor branch loader must pin pi-cursor-sdk with noExtensions true: $out"
+  pass "branch loader keeps noExtensions true and adds only pi-cursor-sdk via additionalExtensionPaths"
+}
+
+test_branch_loader_fails_closed_without_cursor_sdk() {
+  local repo home agent_dir out status
+  repo="$TMP_ROOT/cursor-missing-root"
+  home="$TMP_ROOT/cursor-missing-home"
+  agent_dir="$TMP_ROOT/cursor-missing-agent"
+  mkdir -p "$home/state" "$home/config" "$agent_dir/npm/node_modules"
+  install_pi_branch_extension_fixture "$repo"
+  cat > "$agent_dir/settings.json" <<'JSON'
+{"defaultProvider":"cursor","defaultModel":"composer-2.5"}
+JSON
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    PI_CODING_AGENT_DIR="$agent_dir" DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, settle, mainUserMessages }; })()`);
+const { dispatch, settle, mainUserMessages } = globalThis.__t;
+if (!dispatch("signal: missing sdk wake").accepted) throw new Error("first offer was not accepted");
+await settle(() => mainUserMessages.length === 1, "fallback delivery to main");
+const fallback = mainUserMessages[0].content;
+if (!fallback.includes("pi-cursor-sdk")) throw new Error(`fallback did not name missing pi-cursor-sdk: ${fallback}`);
+if (!fallback.includes("Supervision branch unavailable")) throw new Error(`fallback did not name branch failure: ${fallback}`);
+if (dispatch("signal: second wake").accepted) throw new Error("broken branch kept accepting wakes");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "missing pi-cursor-sdk must fail closed and fall back to main: $out"
+  pass "branch loader fails closed when Cursor is configured but pi-cursor-sdk is absent"
+}
+
 # The delivery path runs on Pi's single JS thread, so a delivery that blocks
 # it is a delivery the captain sees as a frozen TUI. These three cover what
 # moving that work off the thread must not cost: responsiveness during a
@@ -4964,6 +5041,8 @@ test_queued_actions_recheck_lock_ownership
 test_stale_generation_boundaries_are_side_effect_free
 test_secondary_session_stays_inert
 test_rebind_remirrors_undelivered_dialog_from_durable_cursor
+test_branch_loader_pins_cursor_sdk_with_no_extensions
+test_branch_loader_fails_closed_without_cursor_sdk
 test_delivery_keeps_the_event_loop_live_and_ordered
 test_session_replacement_during_delivery_neither_loses_nor_duplicates
 test_store_failure_during_delivery_neither_loses_nor_duplicates

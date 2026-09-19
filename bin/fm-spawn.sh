@@ -4670,4 +4670,7 @@ SPAWN_META_LOCK_HELD=0
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
+if gen=$(tr -d '[:space:]' < "$STATE/.pi-watch-generation" 2>/dev/null) && [ -n "$gen" ]; then
+  printf '%s\t%s\n' "$gen" "$ID" > "$STATE/.dispatch-return"
+fi
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"

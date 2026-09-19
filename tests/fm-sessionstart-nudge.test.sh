@@ -241,6 +241,14 @@ run_hook_pi() {  # <root> [args...]
 FULL_BANNER="SESSION START - "
 REEMIT_BANNER="SESSION START (CONTEXT RE-EMIT) - "
 
+pi_plugin=$(cat "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts")
+assert_contains "$pi_plugin" 'fm-sessionstart-run.sh' "Pi SessionStart handler does not invoke the run wrapper"
+assert_contains "$pi_plugin" 'firstmate-sessionstart-nudge' "Pi SessionStart handler does not inject a custom context message"
+assert_contains "$pi_plugin" 'details: { kind: "session-start" }' "Pi SessionStart context does not retain its exact structured kind"
+assert_contains "$pi_plugin" 'session_compact' "Pi SessionStart handler does not handle compaction"
+assert_contains "$pi_plugin" 'classifyFirstmateCurrentOperationalText' "Pi SessionStart handler does not gate operational provenance"
+assert_contains "$pi_plugin" 'getSharedStuckPrimaryMonitor' "Pi extension does not wire stuck-primary recovery"
+
 test_run_startup_runs_the_full_digest() {
   local root="$TMP_ROOT/run-startup" out status=0
   make_run_primary "$root"
@@ -366,6 +374,8 @@ test_pi_startup_classifies_cli_continuations() {
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
     "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$fixture/.pi/extensions/lib/"
+  cp "$ROOT/.pi/extensions/lib/fm-primary-stuck-primary.ts" "$fixture/.pi/extensions/lib/"
+  cp "$ROOT/.pi/extensions/lib/fm-cursor-replay-execute.ts" "$fixture/.pi/extensions/lib/"
   cat > "$fixture/bin/fm-sessionstart-run.sh" <<'SH'
 #!/usr/bin/env bash
 source_name=
@@ -924,6 +934,8 @@ test_pi_large_sessionstart_digest_is_delivered_loudly() {
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$fixture/.pi/extensions/"
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" \
     "$ROOT/.pi/extensions/lib/fm-sessionstart-supervisor.mjs" "$fixture/.pi/extensions/lib/"
+  cp "$ROOT/.pi/extensions/lib/fm-primary-stuck-primary.ts" "$fixture/.pi/extensions/lib/"
+  cp "$ROOT/.pi/extensions/lib/fm-cursor-replay-execute.ts" "$fixture/.pi/extensions/lib/"
   cp "$ROOT/bin/fm-sessionstart-run.sh" "$ROOT/bin/fm-sessionstart-nudge.sh" \
     "$ROOT/bin/fm-primary-scope-lib.sh" "$ROOT/bin/fm-gate-refuse-lib.sh" \
     "$ROOT/bin/fm-hook-host-lib.sh" \

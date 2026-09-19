@@ -4,10 +4,12 @@ When this session owns supervision and no legacy away daemon flag is active:
 1. Drain first with `bin/fm-wake-drain.sh`.
    After handling all emitted wakes and reconciling open decisions and unread status lines, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
 2. Confirm the Pi primary auto-loaded both project extensions (plain `pi` or `pi-signed`, after approving project trust once per clone); if not, restart the selected executable with `-e __FM_PI_TURNEND_EXT__ -e __FM_PI_EXT__` as a trust-free fallback.
-3. Initial process cycle only: make the one required `fm_watch_arm_pi` call; if startup already owned the fleet lock, this is an ownership-based no-op.
-   Use `/fm-watch-arm-pi` only as a human-entered fallback.
+3. The watcher extension arms supervision automatically on each session generation start when this session owns the fleet lock and the home needs a watcher (in-flight work, Relay polling, or a registered process-event source).
+   You do not need to remember `/fm-watch-arm-pi` for ordinary operation.
+   After you finish the captain's current request, call `fm_watch_arm_pi` only when a dispatch-return arm applies (you just spawned in this session generation) so Pi can end the turn while supervision continues.
+   Use `/fm-watch-arm-pi` only as a human-entered repair fallback.
    Never run `bin/fm-watch-arm.sh` through Pi's bash tool because that foreground arm can wedge the agent and bypasses extension-owned cleanup.
-4. If the extension says no live session holds the lock, run `bin/fm-session-start.sh` to reclaim the session lock, then call `fm_watch_arm_pi` again.
+4. If the extension says no live session holds the lock, run `bin/fm-session-start.sh` to reclaim the session lock; supervision re-arms on the next session generation start once the lock is yours again.
 5. The extension starts `bin/fm-watch-arm.sh --restart`, keeps the child attached to the live Pi process, and owns every later successor launch.
 6. Ordinary same-process session replacement (`/new`, `/resume`, `/fork`, reload) retires only the prior generation; when the replacement owns the fleet lock, its `session_start` arms the new generation without a model turn or another `fm_watch_arm_pi` call.
    The generation-owner contract and in-flight actionable-close handoff live in `.pi/extensions/fm-primary-pi-watch.ts`.
@@ -36,4 +38,18 @@ Read the durable outcome store with the fm_branch_outcomes tool when the captain
 
 The turn-end guard extension lives at `__FM_PI_TURNEND_EXT__`.
 The watcher extension lives at `__FM_PI_EXT__`.
-Both are tracked, project-local `.pi/extensions/*.ts` files that Pi auto-discovers once the project is trusted; `bin/fm-session-start.sh` reports when the running Pi session has not loaded both required extensions.
+Both are tracked, project-local `.pi/extensions/` files that Pi auto-discovers once the project is trusted (`fm-primary-turnend-guard.ts` and `fm-primary-pi-watch.ts`); `bin/fm-session-start.sh` reports when the running Pi session has not loaded both required extensions.
+
+12. When `fm_watch_arm_pi` succeeds after a spawn in this session generation, end the turn immediately.
+    That dispatch-return arm returns `terminate: true` so Pi skips the post-tool LLM follow-up and the captain can chat while extension-owned supervision continues.
+    Live workers without that spawn marker do not terminate: the turn continues so a captain-facing recap can still land.
+    Regression: `tests/fm-pi-dispatch-return-e2e.test.sh`.
+13. Never block the primary turn on shell loops, `sleep`, or repeated `fm-crew-state.sh` polls waiting for worker completion.
+    Foreground crew-completion polling loops are forbidden.
+14. Post-arm stuck-primary recovery is extension-owned in `.pi/extensions/lib/fm-primary-stuck-primary.ts`, wired through the turn-end guard extension.
+    Fallback only when terminate did not end the turn and the primary stalls with queued input while fleet work is in flight.
+    A Cursor SDK replay that never returns a recorded result is completed as a failed tool (`missing completion`) and aborts the SDK waiter so the Pi run can settle without Esc.
+    Calm boat and lifecycle `message_update` events do not register as stuck-primary progress.
+    A stale watcher beacon replaces an owned Pi arm child instead of returning unchanged.
+    Post-arm stuck-primary recovery uses triggerTurn only when idle; it never aborts the live turn.
+    Regression: `tests/fm-cursor-replay-execute.test.sh`, `tests/fm-pi-stuck-primary-e2e.test.sh`, `tests/fm-pi-watch-extension.test.sh`.

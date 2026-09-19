@@ -94,6 +94,11 @@ Cancelling the model picker cancels the whole command and changes neither choice
 Cancelling only the effort picker keeps the standing effort choice and still applies the model pick made in the same run, and the command's one closing message reports both choices as they will actually take effect.
 Both choices are local to each Firstmate home and are not part of secondmate inherited configuration, the same as the Calm preference; a secondmate home pins its own supervision model and effort with its own `/supervision-model`.
 
+The branch session loader keeps `noExtensions: true` so project `.pi/extensions/` and settings packages never load (that isolation prevents the branch from spawning its own branch or destabilizing the byte-stable prefix).
+When the branch model uses the Cursor provider, the loader still registers that provider by adding only the installed `pi-cursor-sdk` package extension through Pi's `additionalExtensionPaths` escape hatch, resolved from the live Pi agent dir (`~/.pi/agent/npm/node_modules/pi-cursor-sdk` by default, with a global npm install as fallback).
+If Cursor is the configured branch model and that extension cannot be resolved, branch creation fails closed with an explicit error instead of proceeding into missing API key failures.
+After `createAgentSession`, the branch re-selects the configured model once extension providers have registered, because the SDK resolves the initial model before those providers exist.
+
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
 The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
