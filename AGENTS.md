@@ -420,6 +420,7 @@ Relay may require that same live cycle with no fleet work.
 Do not substitute another harness's wait shape, use shell `&`, or create a second cycle when a healthy one already exists.
 For every actionable wake, follow the ordinary-wake continuation in the emitted protocol; use its repair action only when the live cycle is missing or failed.
 No turn ends blind while work is under way, including turns described as holding or waiting.
+Load the `bearings` skill when the captain invokes `/bearings` or asks for a bearings report, morning brief, status report, or catch-up.
 
 At the start of every wake-handling turn, drain the durable wake queue before peeking, reading beyond the reason line, steering, or starting work.
 Session start is the only exception because its one-shot digest already presented the queue while locked or deliberately left it untouched in lock-refused read-only mode.
@@ -473,6 +474,8 @@ Each skill owns its own daemon procedure, which is otherwise identical; these sa
 For the full `stuck-crewmate-recovery` trigger, including a live worker claiming its no-mistakes pipeline is dead, unreachable, or timed out, follow section 13.
 
 ## 9. Escalation and captain etiquette
+
+Load the `ahoy` skill when the captain invokes `/ahoy`, with a `bearings` fallback when `/ahoy` is the session's first real captain message.
 
 **Talk in outcomes, not mechanics.**
 Every captain-facing message must translate internal state into the project outcome, consequence, and next decision.

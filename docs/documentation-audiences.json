@@ -429,6 +429,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": "docs/system-map.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/tmux-backend.md",
       "audience": "operator-current"
     },
