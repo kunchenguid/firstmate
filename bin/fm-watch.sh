@@ -1167,16 +1167,44 @@ busy_turn_over_age() {  # <task>
   [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
 }
 
+# How long <declaration> (stale_wait_declaration) has stood for this window.
+# The anchor is recorded in .paused-since-<key> beside the declaration it belongs
+# to, taken from the status file mtime the first time that declaration is seen,
+# and kept while the declaration is unchanged; a status file mtime OLDER than the
+# recorded anchor lowers it, so the age is never younger than the log shows.
+# Anchoring on the file mtime at every read instead would let any write that
+# leaves the wait as declared - a repeated identical line, continuation prose -
+# restart the age that gates the first re-surface and that the recheck reports.
+# A declaration first seen after later no-change writes anchors on the newest
+# write, which can only delay its first re-surface, never advance it.
+# clear_pause_state drops the record with the rest of the window's pause state.
+declared_wait_age() {  # <window-key> <declaration> <status-file> <now>
+  local since="$STATE/.paused-since-$1" now=$4 record anchor mtime
+  record=$(cat "$since" 2>/dev/null || true)
+  anchor=${record%%$'\t'*}
+  case "$anchor" in ''|*[!0-9]*) record='' ;; esac
+  mtime=$(stat_mtime "$3")
+  case "$mtime" in ''|*[!0-9]*) mtime=$now ;; esac
+  if [ -z "$record" ] || [ "${record#*$'\t'}" != "$2" ] || [ "$mtime" -lt "$anchor" ]; then
+    anchor=$mtime
+    printf '%s\t%s' "$anchor" "$2" > "$since"
+  fi
+  [ "$anchor" -le "$now" ] || anchor=$now
+  printf '%s' $(( now - anchor ))
+}
+
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
 # dead-agent captain-held transfer, and re-surface it once every
 # PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
 # stale poll once pause_state_class permits the bounded cadence, so it must be
 # cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
-# status file mtime, not a per-hash marker, so a churny idle pane (a ticking
-# clock, a token counter) cannot keep resetting the cadence the way a hash-tied
-# timer would. The bounded re-surface itself is the shared resurface_absorbed
-# above, throttled by this window's own .paused-resurfaced-<key> marker. Advances
-# the stale suppressor to <hash> and flags the key paused.
+# declaration (declared_wait_age above), not a per-hash marker, so a churny idle
+# pane (a ticking clock, a token counter) cannot keep resetting the cadence the
+# way a hash-tied timer would, and neither can a status write that leaves the
+# wait as declared. The bounded re-surface itself is the shared resurface_absorbed
+# above, throttled by this window's own .paused-resurfaced-<key> marker and scoped
+# to the same declaration. Advances the stale suppressor to <hash> and flags the
+# key paused.
 #
 # The recheck names WHICH human the declared wait is on, because that is the whole
 # point of a recheck the captain reads: an external dependency for paused:, and the
@@ -1184,20 +1212,18 @@ busy_turn_over_age() {  # <task>
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age
+  local win=$1 task=$2 h=$3 key statusf age detail reason declaration last until now min_age
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   clear_write_tracking "$key"
   statusf="$STATE/$task.status"
-  mtime=$(stat_mtime "$statusf")
-  case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   now=$(date +%s)
-  age=$(( now - mtime ))
   last=$(last_status_line "$statusf")
   min_age=$PAUSE_RESURFACE_SECS
-  declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
+  declaration=$(stale_wait_declaration "$task" "$last")
+  age=$(declared_wait_age "$key" "$declaration" "$statusf" "$now")
   if status_is_captain_held "$last"; then
     if afk_record_present; then
       triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $win"
@@ -1255,8 +1281,8 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
       # decoration overrides the daemon's own pause verdict for the pane: the
       # ladder then climbs on every re-arm, escalating a crew that declared the
       # wait itself once per FM_STALE_ESCALATE_SECS for as long as the wait lasts.
-      # The one-shot is keyed on the DECLARATION (the status log's signature),
-      # never on the pane hash: a busy pane's harness footer ticks on every
+      # The one-shot is keyed on the DECLARATION (stale_wait_declaration), never
+      # on the pane hash: a busy pane's harness footer ticks on every
       # capture, so a hash-keyed one-shot would re-fire on every poll and the
       # daemon, which relaunches the watcher after each handled wake, would be
       # woken in a loop for the whole declared wait. The suppressor therefore
@@ -1270,7 +1296,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
       key=$(window_key "$win")
       rm -f "$since_file" "$escalation_file"
       clear_write_tracking "$key"
-      declared="declared:$(fm_wake_signal_sig "$statusf" || true)"
+      declared=$(stale_wait_declaration "$task")
       if captain_held_silenced "$(last_status_line "$statusf")"; then
         printf '%s' "$declared" > "$STATE/.stale-$key"
         triage_log "absorbed busy over-age pane (captain-held, never rechecked while the away-posture record exists): $win"
@@ -1292,7 +1318,8 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
 
 clear_pause_state() {  # <window-key>
   local key=$1
-  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key"
+  rm -f "$STATE/.paused-$key" "$STATE/.paused-rechecked-$key" "$STATE/.paused-resurfaced-$key" \
+    "$STATE/.paused-since-$key"
 }
 
 # The hash-scoped half of clear_pause_tracking: the stale suppressor, its wedge
@@ -1408,12 +1435,17 @@ task_captain_call_open() {  # <task>
   return 0
 }
 
-# The identity a re-surface throttle is bound to: the task's whole status-log
-# signature. Any new status event - a replacement wait, a fresh delivery, a
-# blocker - changes it and so starts its own window instead of inheriting the
-# silence of the one before it.
-stale_wait_declaration() {  # <task>
-  printf 'declared:%s' "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
+# The identity a declared wait's re-surface throttle is bound to: the declaration
+# itself, the latest status event exactly as last_status_line reads it, verb and
+# reason. A replacement wait, a changed reason, or any other new event changes it
+# and so starts its own window instead of inheriting the silence of the one
+# before it. A write that leaves that event as it was - a repeated identical
+# declaration, continuation prose - does not, so it cannot cancel the cadence.
+# Pass <last-event> when the caller already read it.
+stale_wait_declaration() {  # <task> [<last-event>]
+  local last
+  if [ "$#" -gt 1 ]; then last=$2; else last=$(last_status_line "$STATE/$1.status"); fi
+  printf 'declared:%s' "$last"
 }
 
 # The same scope for a captain call, carrying the CALL's own lifecycle identity
@@ -1498,7 +1530,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   if status_is_paused "$last"; then
     declared=0
     bounded=0
-    STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")
+    STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task" "$last")
     if until=$(status_paused_until "$last"); then
       now=$(date +%s)
       if [ "$now" -lt "$until" ]; then
@@ -1513,7 +1545,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   elif status_is_captain_held "$last"; then
     declared=0
     bounded=0
-    STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")
+    STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task" "$last")
     if captain_held_silenced "$last"; then
       throttled=0
     else
