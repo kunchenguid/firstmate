@@ -46,9 +46,13 @@
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
 #              standing charter is never rewritten.
-#              Records a durable checkpoint and that note, exits the old agent,
-#              then delegates the launch to its single owner,
-#              bin/fm-spawn.sh --relaunch. A failure before publication keeps
+#              Records a durable checkpoint and that note, runs the launch
+#              owner's own refusals (bin/fm-spawn.sh --relaunch --preflight)
+#              while the old agent still runs, exits the old agent, then
+#              delegates the launch to that single owner,
+#              bin/fm-spawn.sh --relaunch. A refusal before the stop restores
+#              the instructions and leaves the running agent exactly as it
+#              was. A failure before publication keeps
 #              the prior durable record in place and reports the concrete
 #              state; it never leaves a half-transitioned task claiming to be
 #              running.
@@ -836,6 +840,15 @@ do_relaunch() {
 
   record_note
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
+
+  # Every refusal the launch owner can raise without the old agent gone runs
+  # here, against the instructions the replacement will read, so a launch that
+  # must be refused is refused while the running agent is still untouched.
+  spawn_args=("$ID" --relaunch --preflight --harness "$TARGET_HARNESS")
+  [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
+  [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
+  "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null \
+    || die "the replacement agent for $ID cannot be launched on $TARGET_HARNESS"
 
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
   exit_result=$(do_exit)
