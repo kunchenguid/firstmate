@@ -185,6 +185,31 @@ last_worker_status_line() {  # <status-file> [<previous-event-var>]
   _fm_last_status_event "$(_fm_hold_mirror_line_ere "$1" 'captain-held|resolved')" "$@"
 }
 
+# 0 when the log's latest raw event is the hold mirror's own retraction - the
+# settled pair last_status_line reads through - so a caller can tell a lane
+# whose only lifted wait was the hold from a worker that moved on.
+status_hold_mirror_settled() {  # <status-file>
+  [[ $(_fm_last_status_event '' "$1") =~ $(_fm_hold_mirror_line_ere "$1" 'resolved') ]]
+}
+
+# status_observed_signature of the log as its worker left it: the hold
+# mirror's own lines at the end of the log are left out of its size, so a
+# throttle bound to the worker's declaration survives firstmate recording or
+# settling a hold on it, while any worker append still changes it.
+status_worker_signature() {  # <status-file>
+  local f=$1 size mirror line
+  local LC_ALL=C
+  size=$(_fm_status_file_size "$f") || size=''
+  case "$size" in ''|*[!0-9]*) status_observed_signature "$f"; return ;; esac
+  mirror=$(_fm_hold_mirror_line_ere "$f" 'captain-held|resolved')
+  while IFS= read -r line; do
+    [[ $line =~ $mirror ]] || break
+    size=$((size - ${#line} - 1))
+  done < <(tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null \
+    | awk '{ l[NR] = $0 } END { for (i = NR; i > 0; i--) print l[i] }')
+  status_observed_signature "$f" "$size"
+}
+
 _fm_last_status_event() {  # <skip-ere> <status-file> [<previous-event-var>]
   local skip=$1 f=$2 scan=''
   [ -f "$f" ] && [ -r "$f" ] || return 0

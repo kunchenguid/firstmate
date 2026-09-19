@@ -1197,7 +1197,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   age=$(( now - mtime ))
   last=$(last_status_line "$statusf")
   min_age=$PAUSE_RESURFACE_SECS
-  declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
+  declaration=$(stale_wait_declaration "$task")
   if status_is_captain_held "$last"; then
     if afk_record_present; then
       triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $win"
@@ -1270,7 +1270,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
       key=$(window_key "$win")
       rm -f "$since_file" "$escalation_file"
       clear_write_tracking "$key"
-      declared="declared:$(fm_wake_signal_sig "$statusf" || true)"
+      declared=$(stale_wait_declaration "$task")
       if captain_held_silenced "$(last_status_line "$statusf")"; then
         printf '%s' "$declared" > "$STATE/.stale-$key"
         triage_log "absorbed busy over-age pane (captain-held, never rechecked while the away-posture record exists): $win"
@@ -1411,12 +1411,13 @@ task_captain_call_open() {  # <task>
   return 0
 }
 
-# The identity a re-surface throttle is bound to: the task's whole status-log
-# signature. Any new status event - a replacement wait, a fresh delivery, a
-# blocker - changes it and so starts its own window instead of inheriting the
-# silence of the one before it.
+# The identity a re-surface throttle is bound to: the task's status-log
+# signature as its worker left it (status_worker_signature). Any new worker
+# event - a replacement wait, a fresh delivery, a blocker - changes it and so
+# starts its own window instead of inheriting the silence of the one before it,
+# while the hold mirror firstmate records itself does not.
 stale_wait_declaration() {  # <task>
-  printf 'declared:%s' "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
+  printf 'declared:%s' "$(status_worker_signature "$STATE/$1.status" || true)"
 }
 
 # The same scope for a captain call, carrying the CALL's own lifecycle identity
@@ -1428,7 +1429,7 @@ stale_wait_declaration() {  # <task>
 # waiting on the captain that is never surfaced is invisible, where a delivery
 # announced twice is merely noise.
 captain_call_declaration() {  # <task> <call-identity>
-  printf 'captain-hold:%s:%s' "$2" "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
+  printf 'captain-hold:%s:%s' "$2" "$(status_worker_signature "$STATE/$1.status" || true)"
 }
 
 # 0 when <declaration> has already been alarmed for this window inside the
@@ -2488,7 +2489,11 @@ EOF
     key=$(window_key "$w")
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
-      clear_pause_tracking "$key"
+      if status_hold_mirror_settled "$STATE/$task.status"; then
+        clear_pause_state "$key"
+      else
+        clear_pause_tracking "$key"
+      fi
     fi
     # An idle secondmate endpoint is healthy by design, so a mate is admitted to
     # the pane-stale path ONLY to serve a status-declared wait's bounded

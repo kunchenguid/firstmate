@@ -287,22 +287,49 @@ status_declare_hold() {  # <task-id> <occurrence> <reason>
   return 0
 }
 
-# Retract the declaration once the call is settled, but only while the log's
-# last event line still declares it: a worker that already moved on owns its
-# own newer state, and a matching retry must not append again. The guard
-# matches the mirror's OWN keyed declaration: once last_status_line reads
-# past a settled pair, a worker line that happens to be command_complete's
-# captain-held transfer would otherwise invite a second retraction.
+# Retract what still declares the call once it is settled, but only while that
+# declaration is a log's last event line: a worker that already moved on owns
+# its own newer state, and a matching retry must not append again. Two
+# declarations qualify. The mirror's own keyed declaration on the task's log
+# takes the keyed retraction; the guard matches that key, so a replay cannot
+# retract twice once last_status_line reads past the settled pair. And a
+# command_complete transfer (`captain-held [key=<k>]: tracked by <ids>`) on any
+# lane's log that names this task takes `resolved [key=<k>]` once no task it
+# names is still an open captain call: the transfer already closed <k>, so the
+# retraction changes no decision, and a lane waiting on several calls keeps
+# reading as held until the last one is answered.
 status_retract_hold() {  # <task-id> <occurrence> <note>
-  local id=$1 occurrence=$2 note=$3 status_file line rc=0
-  status_file="$STATE/$id.status"
-  [[ $(last_status_line "$status_file") =~ $(_fm_hold_mirror_line_ere "$status_file" 'captain-held') ]] || return 0
-  line="resolved [key=captain-hold-$id-$occurrence]: captain call $note by fm-captain-hold"
-  fm_cap_line_var "$line"
-  fm_wake_status_append_self_announced "$STATE" "$status_file" "$FM_LINE_CAP_LINE" || rc=$?
+  local id=$1 occurrence=$2 note=$3 f key ids named rc
+  local transfer_re='^captain-held \[key=([A-Za-z0-9._-]+)\]: tracked by ([A-Za-z0-9._,-]+)$'
+  local -a names
+  f="$STATE/$id.status"
+  if [[ $(last_status_line "$f") =~ $(_fm_hold_mirror_line_ere "$f" 'captain-held') ]]; then
+    status_append_retraction "$id" "$f" "captain-hold-$id-$occurrence" "$note"
+  fi
+  for f in "$STATE"/*.status; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    [[ $(last_status_line "$f") =~ $transfer_re ]] || continue
+    key=${BASH_REMATCH[1]}
+    ids=${BASH_REMATCH[2]}
+    case ",$ids," in *",$id,"*) ;; *) continue ;; esac
+    IFS=, read -r -a names <<< "$ids"
+    for named in "${names[@]}"; do
+      rc=0
+      (command_open "$named") >/dev/null 2>&1 || rc=$?
+      [ "$rc" -eq 1 ] || continue 2
+    done
+    status_append_retraction "$id" "$f" "$key" "$note"
+  done
+  return 0
+}
+
+status_append_retraction() {  # <task-id> <status-file> <key> <note>
+  local rc=0
+  fm_cap_line_var "resolved [key=$3]: captain call $4 by fm-captain-hold"
+  fm_wake_status_append_self_announced "$STATE" "$2" "$FM_LINE_CAP_LINE" || rc=$?
   [ "$rc" -ne 2 ] \
     || printf 'actionable: captain-held task %s is settled in this home but the hold retraction could not be written to %s\n' \
-      "$id" "$status_file" >&2
+      "$1" "$2" >&2
   return 0
 }
 

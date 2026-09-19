@@ -772,6 +772,14 @@ test_socket_refusal_override_expires_when_the_crew_moves_on() {
   assert_contains "$out" "source: status-log" "the override remains status-log evidence"
   assert_contains "$out" "daemon socket down despite attributed run record" "the override names its reason"
 
+  # A captain hold's standing mirror line is firstmate's, not a later crew
+  # event, so the socket-down evidence still stands while the lane is held.
+  printf 'captain-held [key=captain-hold-feat-ds-1]: operator review\n' >> "$d/state/feat-ds.status"
+  out=$(run_crew_state "$d" feat-ds)
+  assert_contains "$out" "state: blocked" "a standing hold mirror hid the socket-down blocker"
+  assert_contains "$out" "daemon socket down despite attributed run record" \
+    "a standing hold mirror retired the socket-down evidence"
+
   printf 'working: reattached and continuing\n' >> "$d/state/feat-ds.status"
   out=$(run_crew_state "$d" feat-ds)
   assert_contains "$out" "state: working" "a later working event hands the reading back to the live run"

@@ -960,8 +960,10 @@ EOF
 # captain-hold key, self-announced so the recording turn does not re-wake, and
 # never dependent on a live worker. A held lane whose last line was `paused:`
 # leaves the declared-wait cadence, a stopped worker cannot make release
-# impossible, and a worker's unrelated open decision survives both sides. A
-# decision-only hold has no lane, so it stays in the backlog alone.
+# impossible, and a worker's unrelated open decision survives both sides.
+# Settlement also retracts a `complete` transfer left as a lane's last line
+# once every call it names is settled. A decision-only hold has no lane, so it
+# stays in the backlog alone.
 test_hold_and_release_reach_the_status_log() {
   local home id lane last open diverged_out
   home=$(make_home status-mirror)
@@ -1042,28 +1044,70 @@ EOF
   [ "$(grep -c "resolved \[key=captain-hold-$id-2\]" "$home/state/$id.status")" = 1 ] \
     || fail "a replayed settlement appended a second retraction"
 
-  # The retraction guard matches the mirror's own key, so a lane whose own
-  # last line is command_complete's captain-held transfer is never retracted,
-  # even across a replayed settlement.
+  # The skill's order - hold the work item the question gates, then run
+  # complete with it - leaves command_complete's captain-held transfer as the
+  # lane's last line. Settlement retracts it under its own key, with no worker
+  # alive, and a replayed settlement appends nothing more.
   lane=sample-transfer-lane
   tasks_in "$home" add "$lane" "Guard the transfer sample" --kind scout --repo sample >/dev/null \
     || fail "could not create the transfer lane"
   write_origin_meta "$home" "$lane"
   cat > "$home/state/$lane.status" <<'EOF'
 done: report complete
-captain-held [key=route]: tracked by sample-transfer-lane
+needs-decision [key=route]: choose route north or route south
 EOF
-  run_captain "$home" hold "$lane" --reason "transfer guard" >/dev/null \
+  run_captain "$home" hold "$lane" --reason "route choice pending" >/dev/null \
     || fail "could not hold the transfer lane"
-  printf 'Close the transfer call.\n' > "$home/transfer.txt"
+  run_captain "$home" complete "$lane" "$lane" >/dev/null \
+    || fail "could not transfer the lane's decision to its captain-held task"
+  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status")
+  [ "$last" = "captain-held [key=route]: tracked by $lane" ] \
+    || fail "complete did not leave its transfer as the lane's last line: $last"
+  printf 'Take route north.\n' > "$home/transfer.txt"
   run_captain "$home" answer "$lane" --decision-file "$home/transfer.txt" >/dev/null \
     || fail "answer could not close the transfer lane"
   run_captain "$home" answer "$lane" --decision-file "$home/transfer.txt" >/dev/null \
     || fail "transfer answer retry was not idempotent"
   last=$(bash -c '. "$1"; last_status_line "$2"' _ \
     "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status")
-  [ "$last" = "captain-held [key=route]: tracked by sample-transfer-lane" ] \
-    || fail "settlement disturbed a transfer line the mirror does not own: $last"
+  [ "$last" = "resolved [key=route]: captain call answered by fm-captain-hold" ] \
+    || fail "settlement left the lane's captain-held transfer standing: $last"
+  [ "$(grep -c '^resolved \[key=route\]' "$home/state/$lane.status")" = 1 ] \
+    || fail "a replayed settlement retracted the transfer twice"
+
+  # A transfer naming several calls keeps the lane held until the last of them
+  # is settled.
+  lane=sample-inventory-lane
+  tasks_in "$home" add "$lane" "Scout the inventory sample" --kind scout --repo sample >/dev/null \
+    || fail "could not create the inventory lane"
+  write_origin_meta "$home" "$lane"
+  cat > "$home/state/$lane.status" <<'EOF'
+needs-decision [key=route]: choose route north or route south
+needs-decision [key=access]: choose open or restricted sample access
+EOF
+  run_captain "$home" hold sample-route-choice --title "Choose the sample route" \
+    --reason "route choice pending" >/dev/null || fail "could not hold the route call"
+  run_captain "$home" hold sample-access-choice --title "Choose the sample access" \
+    --reason "access choice pending" >/dev/null || fail "could not hold the access call"
+  run_captain "$home" complete "$lane" sample-route-choice sample-access-choice >/dev/null \
+    || fail "could not transfer the inventory lane's decisions"
+  run_captain "$home" answer sample-route-choice --decision-file "$home/transfer.txt" >/dev/null \
+    || fail "answer could not close the route call"
+  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status")
+  bash -c '. "$1"; status_is_captain_held "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$last" \
+    || fail "settling one call retracted a transfer that still names an open call: $last"
+  printf 'Keep sample access restricted.\n' > "$home/access.txt"
+  run_captain "$home" answer sample-access-choice --decision-file "$home/access.txt" >/dev/null \
+    || fail "answer could not close the access call"
+  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status")
+  case "$last" in
+    "resolved [key=route]: captain call answered by fm-captain-hold"|\
+    "resolved [key=access]: captain call answered by fm-captain-hold") ;;
+    *) fail "settling the last named call left the transfer standing: $last" ;;
+  esac
 
   # A decision-only hold has no lane, so it mints no status log.
   run_captain "$home" hold sample-plain-call \

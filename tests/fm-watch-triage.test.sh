@@ -2228,6 +2228,100 @@ EOF
   pass "a settled hold mirror over a paused lane resurfaces once per cadence, never once per relaunch"
 }
 
+# Append <line> the way bin/fm-captain-hold.sh writes its hold mirror: through
+# the guarded self-announced append, so the signal path stays quiet.
+mirror_append() {  # <state> <status-file> <line>
+  FM_STATE_OVERRIDE="$1" bash -c '
+    . "$1"
+    fm_wake_status_append_self_announced "$2" "$3" "$4"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$1" "$2" "$3"
+}
+
+# Holding and then releasing a lane firstmate already surfaced is recorded by
+# firstmate's own turn, so neither mirror line may re-wake it through the stale
+# path. A live worker parked on `paused:` keeps the re-surface throttle its
+# first sight recorded across both lines, and a delivered `done:` lane that was
+# already surfaced stays inert after the release instead of being re-surfaced
+# as a first sight.
+test_hold_mirror_transition_keeps_the_stale_throttle() {
+  local dir state fakebin out capture_file statusf window key wakes pid pane_hash
+  dir=$(make_case mirror-transition-paused); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/parked.status"
+  window="test:fm-parked"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/parked.meta"
+  printf 'paused: waiting on the validation run to finish\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-parked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'parked, idle' > "$capture_file"
+  printf '%s' "$(hash_text 'parked, idle')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
+    || fail "first sight of the parked live worker did not surface"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first surface"
+  [ -e "$state/.paused-resurfaced-$key" ] || fail "the first surface recorded no re-surface throttle"
+
+  mirror_append "$state" "$statusf" "captain-held [key=captain-hold-parked-1]: operator review" \
+    || fail "the hold declaration was not self-announced"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb \
+    || fail "the hold firstmate just recorded re-woke it: $(cat "$state/.wake-queue")"
+  mirror_append "$state" "$statusf" "resolved [key=captain-hold-parked-1]: captain call released by fm-captain-hold" \
+    || fail "the hold retraction was not self-announced"
+  parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb \
+    || fail "the release firstmate just recorded re-woke it: $(cat "$state/.wake-queue")"
+  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 0 ] || fail "hold and release re-alarmed the parked worker $wakes time(s)"
+
+  dir=$(make_case mirror-transition-done); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/done.status"
+  window="test:fm-done"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/done.meta"
+  printf 'done: PR https://example.test/pull/1 checks green\n' > "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-done_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'idle after the delivery' > "$capture_file"
+  pane_hash=$(hash_text 'idle after the delivery')
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "the delivered lane's first terminal stale was not surfaced"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the terminal stale"
+
+  mirror_append "$state" "$statusf" "captain-held [key=captain-hold-done-1]: merge approval" \
+    || fail "the hold declaration was not self-announced"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the held done lane re-woke firstmate: $(cat "$out")"; }
+  reap "$pid"
+  [ -e "$state/.paused-$key" ] || fail "the held done lane did not take the captain-held cadence"
+
+  mirror_append "$state" "$statusf" "resolved [key=captain-hold-done-1]: captain call released by fm-captain-hold" \
+    || fail "the hold retraction was not self-announced"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "the released done lane was re-surfaced: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -s "$out" ] || fail "the released done lane printed a wake: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "the released done lane enqueued a wake"
+  [ ! -e "$state/.paused-$key" ] || fail "the release did not lift the hold's pause"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null)" = "$pane_hash" ] \
+    || fail "the release reset the delivered lane's stale suppressor"
+  unset FM_FAKE_CREW_STATE
+  pass "a hold and its release recorded by firstmate keep the stale throttle and suppressor they found"
+}
+
 # A captain-held crew can leave a stable backend endpoint after its agent exits.
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
@@ -5629,6 +5723,7 @@ test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_settled_hold_mirror_over_done_lane_never_wedge_escalates
 test_settled_hold_mirror_over_paused_lane_resurfaces_once_per_cadence
+test_hold_mirror_transition_keeps_the_stale_throttle
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
 test_live_declared_wait_churn_honors_the_resurface_throttle
