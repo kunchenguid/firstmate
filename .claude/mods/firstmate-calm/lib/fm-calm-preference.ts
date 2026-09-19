@@ -1,16 +1,9 @@
-// Shared Calm preference path and persistence for every harness that reads
+// Shared Calm preference path and value rules for every harness that reads
 // gitignored config/calm. docs/configuration.md owns the schema; this module
-// owns the atomic write and the on/off/max parse shared by Pi, OMP, and the
-// Claude Code mod's presentation helpers.
-import { randomUUID } from "node:crypto";
-import {
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { dirname, resolve } from "node:path";
+// owns the on/off/max parse and the per-home path shared by Pi, OMP, and the
+// Claude Code mod's presentation helpers. It stays free of Node builtins so the
+// Claude Code hooks-module linker can reach it through fm-calm-presentation.ts;
+// the Node fs/crypto persistence lives in .pi/extensions/lib/fm-calm-persistence.ts.
 
 export type CalmHomeEnvironment = {
   readonly FM_HOME?: string | undefined;
@@ -18,12 +11,20 @@ export type CalmHomeEnvironment = {
   readonly FM_CONFIG_OVERRIDE?: string | undefined;
 };
 
+/** Join a base directory and one child segment with a single forward slash. */
+function joinConfigPath(base: string, child: string): string {
+  return `${base.replace(/[\\/]+$/, "")}/${child}`;
+}
+
 /** Resolve the config directory the same way every Calm surface does. */
 export function calmConfigDirectory(
   env: CalmHomeEnvironment,
   codeRoot: string,
 ): string {
-  return env.FM_CONFIG_OVERRIDE || resolve(env.FM_HOME || env.FM_ROOT_OVERRIDE || codeRoot, "config");
+  if (env.FM_CONFIG_OVERRIDE) {
+    return env.FM_CONFIG_OVERRIDE.replace(/[\\/]+$/, "");
+  }
+  return joinConfigPath(env.FM_HOME || env.FM_ROOT_OVERRIDE || codeRoot, "config");
 }
 
 /** Absolute path of the home-local Calm preference file. */
@@ -31,7 +32,7 @@ export function calmPreferencePath(
   env: CalmHomeEnvironment,
   codeRoot: string,
 ): string {
-  return resolve(calmConfigDirectory(env, codeRoot), "calm");
+  return joinConfigPath(calmConfigDirectory(env, codeRoot), "calm");
 }
 
 /**
@@ -48,34 +49,4 @@ export function parseCalmPreference(stored: string | undefined): boolean {
 /** Exact file content every harness writes for the same choice. */
 export function serializeCalmPreference(active: boolean): string {
   return active ? "on\n" : "off\n";
-}
-
-/** Read the preference file; missing or unreadable files default to off. */
-export function loadCalmPreference(path: string): boolean {
-  let stored: string;
-  try {
-    stored = readFileSync(path, "utf8");
-  } catch {
-    return false;
-  }
-  return parseCalmPreference(stored);
-}
-
-/**
- * Persist the preference atomically at mode 0600.
- * A failed write leaves the previous file untouched.
- */
-export function persistCalmPreference(path: string, active: boolean): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  try {
-    writeFileSync(temporaryPath, serializeCalmPreference(active), {
-      encoding: "utf8",
-      flag: "wx",
-      mode: 0o600,
-    });
-    renameSync(temporaryPath, path);
-  } finally {
-    rmSync(temporaryPath, { force: true });
-  }
 }

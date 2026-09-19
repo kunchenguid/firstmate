@@ -56,11 +56,11 @@ import {
   setCalmPresentation,
   setCalmStockExportRendering,
 } from "./lib/fm-calm-visibility.ts";
+import { calmPreferencePath } from "./lib/fm-calm-preference.ts";
 import {
-  calmPreferencePath,
   loadCalmPreference,
   persistCalmPreference,
-} from "./lib/fm-calm-preference.ts";
+} from "./lib/fm-calm-persistence.ts";
 
 type DefinitionFactory<TParams extends TSchema, TDetails, TState> = (
   cwd: string,

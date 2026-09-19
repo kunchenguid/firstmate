@@ -11,11 +11,11 @@
 // docs/configuration.md owns the shared config/calm preference contract.
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { calmPreferencePath } from "../../.pi/extensions/lib/fm-calm-preference.ts";
 import {
   loadCalmPreference,
   persistCalmPreference,
-  calmPreferencePath,
-} from "../../.pi/extensions/lib/fm-calm-preference.ts";
+} from "../../.pi/extensions/lib/fm-calm-persistence.ts";
 import {
   calmPresentationHides,
   calmPresentationIsActive,

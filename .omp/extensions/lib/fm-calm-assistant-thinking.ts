@@ -32,6 +32,14 @@ type AssistantMessageComponentLike = {
 };
 
 type CalmAssistantThinkingPatch = {
+  remembered: Set<AssistantMessageComponentLike>;
+  originalMessages: WeakMap<AssistantMessageComponentLike, AssistantMessage>;
+  originalOptions: WeakMap<
+    AssistantMessageComponentLike,
+    AssistantMessageUpdateOptions | undefined
+  >;
+  presentationMessages: WeakMap<AssistantMessageComponentLike, AssistantMessage>;
+  originalUpdateContent: AssistantMessageComponentLike["updateContent"] | undefined;
   hidesThinking: () => boolean;
   hidesWorkingNote: () => boolean;
   remember: (component: AssistantMessageComponentLike) => void;
@@ -51,55 +59,50 @@ export function installOmpCalmAssistantThinking(): void {
   const registry = globalThis as typeof globalThis & {
     [key: symbol]: CalmAssistantThinkingPatch | undefined;
   };
-  const remembered = new Set<AssistantMessageComponentLike>();
-  const originalMessages = new WeakMap<AssistantMessageComponentLike, AssistantMessage>();
-  const originalOptions = new WeakMap<
-    AssistantMessageComponentLike,
-    AssistantMessageUpdateOptions | undefined
-  >();
-  const presentationMessages = new WeakMap<AssistantMessageComponentLike, AssistantMessage>();
-  const hidesThinking = (): boolean => calmPresentationHides("assistant-thinking");
-  const hidesWorkingNote = (): boolean => calmPresentationHides("assistant-working-note");
-  let originalUpdateContent: AssistantMessageComponentLike["updateContent"] | undefined;
-  const applyToRemembered = (): void => {
-    const hide = hidesThinking();
-    const shouldHideWorkingNote = hidesWorkingNote();
-    for (const component of remembered) {
-      try {
-        component.setHideThinkingBlock(hide);
-        const originalMessage = originalMessages.get(component);
-        if (shouldHideWorkingNote && originalMessage) {
-          component.updateContent(originalMessage, originalOptions.get(component));
-        } else if (originalMessage && originalUpdateContent) {
-          originalUpdateContent.call(component, originalMessage, originalOptions.get(component));
-        } else {
-          component.invalidate();
-        }
-      } catch {
-        remembered.delete(component);
-      }
-    }
-  };
-  const reset = (): void => {
-    remembered.clear();
-  };
   const installed = registry[CALM_ASSISTANT_THINKING_PATCH];
   if (installed) {
-    installed.hidesThinking = hidesThinking;
-    installed.hidesWorkingNote = hidesWorkingNote;
-    installed.applyToRemembered = applyToRemembered;
-    installed.reset = reset;
+    installed.hidesThinking = () => calmPresentationHides("assistant-thinking");
+    installed.hidesWorkingNote = () => calmPresentationHides("assistant-working-note");
     return;
   }
 
   const patch: CalmAssistantThinkingPatch = {
-    hidesThinking,
-    hidesWorkingNote,
+    remembered: new Set(),
+    originalMessages: new WeakMap(),
+    originalOptions: new WeakMap(),
+    presentationMessages: new WeakMap(),
+    originalUpdateContent: undefined,
+    hidesThinking: () => calmPresentationHides("assistant-thinking"),
+    hidesWorkingNote: () => calmPresentationHides("assistant-working-note"),
     remember(component) {
-      remembered.add(component);
+      patch.remembered.add(component);
     },
-    applyToRemembered,
-    reset,
+    applyToRemembered() {
+      const hide = patch.hidesThinking();
+      const shouldHideWorkingNote = patch.hidesWorkingNote();
+      for (const component of patch.remembered) {
+        try {
+          component.setHideThinkingBlock(hide);
+          const originalMessage = patch.originalMessages.get(component);
+          if (shouldHideWorkingNote && originalMessage) {
+            component.updateContent(originalMessage, patch.originalOptions.get(component));
+          } else if (originalMessage && patch.originalUpdateContent) {
+            patch.originalUpdateContent.call(
+              component,
+              originalMessage,
+              patch.originalOptions.get(component),
+            );
+          } else {
+            component.invalidate();
+          }
+        } catch {
+          patch.remembered.delete(component);
+        }
+      }
+    },
+    reset() {
+      patch.remembered.clear();
+    },
   };
 
   const AssistantMessageComponent = (
@@ -119,7 +122,7 @@ export function installOmpCalmAssistantThinking(): void {
   if (typeof stockUpdateContent !== "function") {
     throw new Error("Firstmate Calm requires OMP AssistantMessageComponent.updateContent");
   }
-  originalUpdateContent = stockUpdateContent;
+  patch.originalUpdateContent = stockUpdateContent;
   if (typeof prototype.setHideThinkingBlock !== "function") {
     throw new Error(
       "Firstmate Calm requires OMP AssistantMessageComponent.setHideThinkingBlock",
@@ -132,10 +135,10 @@ export function installOmpCalmAssistantThinking(): void {
     options?: AssistantMessageUpdateOptions,
   ): void {
     patch.remember(this);
-    const isInvalidationReentry = presentationMessages.get(this) === message;
+    const isInvalidationReentry = patch.presentationMessages.get(this) === message;
     if (!isInvalidationReentry) {
-      originalMessages.set(this, message);
-      originalOptions.set(this, options);
+      patch.originalMessages.set(this, message);
+      patch.originalOptions.set(this, options);
     }
     const hideThinking = patch.hidesThinking();
     const hideWorkingNote =
@@ -158,7 +161,7 @@ export function installOmpCalmAssistantThinking(): void {
           }
         : message;
     this.setHideThinkingBlock(hideThinking);
-    presentationMessages.set(this, presentationMessage);
+    patch.presentationMessages.set(this, presentationMessage);
     stockUpdateContent.call(this, presentationMessage, options);
   };
 
