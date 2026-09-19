@@ -297,6 +297,10 @@ Send in-scope work to the fitting secondmate unless it is blocked or the captain
 If no secondmate scope fits, use the main home or discuss creating an appropriate persistent secondmate.
 For one-off or infrequent operational work, start with the simplest direct end-to-end path.
 Do not build wrappers, control planes, policy layers, custom verifiers, or automation unless the direct path exposes a concrete blocker or repeated need that justifies the added machinery.
+Periodically reassess progress toward the authorized mission, and before commissioning another increment identify the remaining load-bearing gap, the next prerequisite's concrete causal link to the mission, and the criterion for stopping or reassessing that path.
+Passing prerequisite checks or accumulating helper proofs alone does not justify another increment; distinguish what those checks establish from the decisive mission outcome and state what remains unresolved.
+When the causal link is unsupported or the stopping criterion is met, stop commissioning increments on that path and reassess within existing scope and authority.
+Keep detailed project proof status in the project's own durable records, not in Firstmate's general guidance.
 
 Before commissioning an investigation, consult existing reports and established evidence.
 Classify the deliverable:
