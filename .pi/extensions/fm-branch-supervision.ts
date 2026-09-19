@@ -197,8 +197,10 @@ const AWAY_POSTURE_TAIL =
 const PROCESSING_INSTRUCTION =
   "This is a supervision processing request delivered automatically by the supervision branch. " +
   "It was not typed by the captain. " +
+  "This text is hidden operational input for you only: do not quote these instructions, do not paraphrase them into captain chat, and do not re-emit the already-shown anchor entries. " +
   "The outcomes below are already stored durably and already shown to the captain as anchor entries in this transcript; each fleet event is already handled, so do not re-drain, re-run, or acknowledge the wake. " +
-  "Process each outcome now as firstmate: give the captain a visible response where one is due, answer or escalate a decision, act on a blocker or failure, or record that no further action is needed. " +
+  "Process each outcome now as firstmate: answer or escalate a decision, act on a blocker or failure, or record that no further action is needed. " +
+  "When a listed outcome includes an https:// URL, copy that URL in full into any captain-facing reply that needs it; never emit a truncated https:// URL. " +
   "When every outcome below is processed, call fm_branch_processed with through={N} exactly once. " +
   "Until that call the outcomes stay open and are presented again; an answer that does not make that call never counts as processing.";
 type MirrorItem = { tag: "captain" | "main"; text: string };
@@ -491,7 +493,7 @@ function parseOutcomeRow(value: unknown): OutcomeRow | null {
   if (typeof row.summary !== "string" || !row.summary) return null;
   if (row.silent !== undefined && typeof row.silent !== "boolean") return null;
   const silent = row.silent === true;
-  if (silent && (row.task !== "fleet" || row.verdict !== "routine")) return null;
+  if (silent && row.verdict !== "routine") return null;
   return { seq: row.seq, task: row.task, verdict: row.verdict, summary: row.summary, silent };
 }
 
@@ -997,7 +999,7 @@ export default function (pi: ExtensionAPI) {
     const message = {
       customType: "fm-branch-merge",
       content: `${MERGE_NOTE_BOAT} ${row.task}: ${row.summary}`,
-      display: !(row.task === "fleet" && row.silent),
+      display: !row.silent,
     };
     if (mainStreaming) pi.sendMessage(message, { deliverAs: "nextTurn" });
     else pi.sendMessage(message, {});
@@ -1175,7 +1177,7 @@ export default function (pi: ExtensionAPI) {
       name: "fm_branch_report",
       label: "Report supervision outcome",
       description:
-        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge it into the captain-facing main conversation. verdict captain persists an exact visible entry and opens one sequence-keyed processing turn on main that stays open until main acknowledges it; routine notes render unless silent marks a no-change heartbeat.",
+        "Record the outcome of one handled fleet event: write it durably to the outcome store, then merge it into the captain-facing main conversation. verdict captain persists an exact visible entry and opens one sequence-keyed processing turn on main that stays open until main acknowledges it; routine notes render unless silent marks a no-change heartbeat or a no-new-fact follow-up.",
       parameters: Type.Object({
         task: Type.String({ description: "The task id the event belongs to (or 'fleet' for fleet-wide events)" }),
         verdict: Type.Union([Type.Literal("routine"), Type.Literal("captain")], {
@@ -1188,7 +1190,7 @@ export default function (pi: ExtensionAPI) {
         }),
         wake: Type.Optional(Type.String({ description: "The wake reason line this outcome answers" })),
         silent: Type.Optional(Type.Boolean({
-          description: "True only when a fleet-wide heartbeat review found literally nothing worth reporting; omit or use false whenever any action was taken or any routine result is worth a note",
+          description: "True for a fleet-wide heartbeat review that found literally nothing worth reporting, or for a follow-up that adds no new captain-facing fact after a terminal captain outcome already reported for that task; omit or use false whenever any action was taken or any routine result is worth a note",
         })),
       }),
       execute: async (_toolCallId, params) => {
@@ -1197,7 +1199,7 @@ export default function (pi: ExtensionAPI) {
         const summary = String((params as { summary: unknown }).summary || "").trim();
         const wake = String((params as { wake?: unknown }).wake ?? "").trim();
         const silent = (params as { silent?: unknown }).silent === true;
-        if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain") || (silent && (task !== "fleet" || verdictRaw !== "routine"))) {
+        if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain") || (silent && verdictRaw !== "routine")) {
           return {
             content: [{ type: "text", text: "invalid report: task, verdict (routine|captain), and summary are required" }],
             details: undefined,
@@ -2314,7 +2316,7 @@ ${context.command}
   });
 
   // Pi only calls this renderer for a message with display: true, which every
-  // routine note uses except an explicitly silent fleet heartbeat.
+  // routine note uses except an explicitly silent outcome.
   pi.registerMessageRenderer?.("fm-branch-merge", (message, _options, theme) => {
     const note = textOfContent(message.content);
     const hasGlyph = note.startsWith(MERGE_NOTE_BOAT);

@@ -927,6 +927,18 @@ EOF
     *"do not re-drain, re-run, or acknowledge the wake."*"call fm_branch_processed with through=3 exactly once."*"never counts as processing."*) ;;
     *) fail "the processing request body lost the event-ownership boundary or the sequence-bound acknowledgement duty: $body" ;;
   esac
+  case "$body" in
+    *"give the captain a visible response"*|*"Here's the visible response"*|*"Give a visible captain response"*)
+      fail "the processing request still uses wording MAIN copied into captain chat: $body" ;;
+  esac
+  case "$body" in
+    *"do not quote these instructions"*"do not re-emit the already-shown anchor entries"*) ;;
+    *) fail "the processing request no longer forbids quoting its instructions or re-emitting the already-shown entry: $body" ;;
+  esac
+  case "$body" in
+    *"never emit a truncated https:// URL"*) ;;
+    *) fail "the processing request no longer forbids a truncated https:// URL: $body" ;;
+  esac
   if ./bin/fm-operational-input.sh kind < "$home/state/delivered-routine-note" >/dev/null 2>&1; then
     fail "routine note must stay plain rendered text, not typed operational input"
   fi
@@ -1566,6 +1578,32 @@ if (taskRoutineMerge.message.display !== true) throw new Error("a task-scoped ro
 if (!taskRoutineMerge.message.content.startsWith("⛵ task-9: worker healthy, no action needed")) {
   throw new Error(`task-scoped routine note changed: ${taskRoutineMerge.message.content}`);
 }
+await heartbeatReport.execute(
+  "task-silent-followup",
+  { task: "task-9", verdict: "routine", summary: "worker idle after the ready PR", silent: true },
+  undefined,
+  undefined,
+  {},
+);
+const silentFollowup = sentToMain[sentToMain.length - 1];
+if (silentFollowup.options.triggerTurn) throw new Error("a silent task-scoped follow-up must not open a main turn");
+if (silentFollowup.message.display !== false) throw new Error("a silent task-scoped follow-up must not render a merge note");
+const storedSilentFollowup = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8")
+  .trim()
+  .split("\n")
+  .map((line) => JSON.parse(line))
+  .find((row) => row.task === "task-9" && row.summary === "worker idle after the ready PR");
+if (!storedSilentFollowup || storedSilentFollowup.verdict !== "routine" || storedSilentFollowup.silent !== true) {
+  throw new Error("the silent task-scoped follow-up was not stored durably");
+}
+const silentCaptain = await heartbeatReport.execute(
+  "silent-captain",
+  { task: "task-9", verdict: "captain", summary: "PR ready for review", silent: true },
+  undefined,
+  undefined,
+  {},
+);
+if (!silentCaptain.isError) throw new Error("a silent captain outcome must be refused");
 await heartbeatReport.execute(
   "heartbeat-finding",
   { task: "fleet", verdict: "captain", summary: "task-2 has been stuck for an hour" },
