@@ -551,6 +551,109 @@ JS
   pass "OMP Calm collapses thinking by filtering only, never writing OMP's native hide-thinking field"
 }
 
+test_session_replacement_resets_remembered() {
+  local fixture home out status
+  fixture="$TMP_ROOT/session-replacement"
+  home="$fixture/home"
+  install_omp_calm_fixture "$fixture"
+  mkdir -p "$home/config"
+  printf 'on\n' >"$home/config/calm"
+  out=$(cd "$fixture" && FM_HOME="$home" EXT="$fixture/.omp/extensions/fm-calm.ts" node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+import * as Agent from "@oh-my-pi/pi-coding-agent";
+
+const handlers = new Map();
+let calmCommand;
+const pi = {
+  pi: { Container: class { render() { return []; } } },
+  events: { emit() {} },
+  on(event, handler) { handlers.set(event, handler); },
+  registerCommand(name, command) { if (name === "calm") calmCommand = command; },
+  registerMessageRenderer() {},
+  registerAssistantThinkingRenderer() {},
+};
+const mod = await import(`${pathToFileURL(process.env.EXT).href}?replacement=${Date.now()}`);
+mod.default(pi);
+for (const event of ["session_start", "session_switch", "session_branch", "session_tree"]) {
+  if (typeof handlers.get(event) !== "function") {
+    throw new Error(`Calm must register the ${event} handler for in-process session replacement`);
+  }
+}
+const ui = {
+  notify() {},
+  getToolsExpanded() { return false; },
+  setToolsExpanded() {},
+  setStatus() {},
+};
+const ctx = { ui };
+handlers.get("session_start")({ type: "session_start" }, ctx);
+
+const assistant = new Agent.AssistantMessageComponent(false);
+assistant.updateContent({
+  stopReason: "toolUse",
+  content: [
+    { type: "thinking", thinking: "secret plan" },
+    { type: "text", text: "stale note" },
+    { type: "toolCall" },
+  ],
+}, { transient: true });
+if ((assistant.rendered || []).some((line) => line === "text:stale note")) {
+  throw new Error("Calm-on must hide the working note before the session replacement");
+}
+handlers.get("session_switch")({ type: "session_switch", reason: "new" }, ctx);
+await calmCommand.handler("", ctx);
+if ((assistant.rendered || []).some((line) => line === "text:stale note")) {
+  throw new Error("session_switch must forget assistant rows remembered before the replacement");
+}
+JS
+)
+  status=$?
+  expect_code 0 "$status" "session replacement contract: $out"
+  [ -z "$out" ] || fail "session replacement contract printed output: $out"
+  pass "OMP Calm registers the in-process session replacement events and forgets remembered rows on session_switch"
+}
+
+test_calm_off_retry_preserves_options() {
+  local fixture out status
+  fixture="$TMP_ROOT/off-retry"
+  install_omp_calm_fixture "$fixture"
+  out=$(cd "$fixture" && node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+import * as Agent from "@oh-my-pi/pi-coding-agent";
+
+const thinking = await import(pathToFileURL(`${process.cwd()}/.omp/extensions/lib/fm-calm-assistant-thinking.ts`).href);
+const vis = await import(pathToFileURL(`${process.cwd()}/.pi/extensions/lib/fm-calm-visibility-core.ts`).href);
+thinking.installOmpCalmAssistantThinking();
+vis.setCalmPresentation(true);
+const component = new Agent.AssistantMessageComponent(false);
+component.updateContent({
+  stopReason: "toolUse",
+  content: [
+    { type: "thinking", thinking: "secret plan" },
+    { type: "text", text: "short note" },
+    { type: "toolCall" },
+  ],
+}, { transient: true });
+vis.setCalmPresentation(false);
+thinking.applyOmpCalmThinkingToRememberedRows();
+if (!(component.rendered || []).some((line) => line === "text:short note")) {
+  throw new Error("Calm-off restore must show the working note again");
+}
+// OMP applyRetryRecovery spreads the restored original the stock component holds.
+component.updateContent({ ...component.lastMessage, retryRecovery: { reason: "transport" } });
+vis.setCalmPresentation(true);
+thinking.applyOmpCalmThinkingToRememberedRows();
+if (component.lastOptions?.transient !== true) {
+  throw new Error("a retry after Calm-off restore must preserve the remembered transient options");
+}
+JS
+)
+  status=$?
+  expect_code 0 "$status" "off retry options contract: $out"
+  [ -z "$out" ] || fail "off retry options contract printed output: $out"
+  pass "a retry after Calm-off restore keeps the remembered transient update options"
+}
+
 test_degraded_public_api_seam() {
   local fixture home out status
   fixture="$TMP_ROOT/degraded"
@@ -602,4 +705,6 @@ test_operational_row_hide_show_and_thinking_collapse
 test_double_install_keeps_shared_state
 test_retry_recovery_keeps_original_note
 test_native_hide_thinking_is_additive
+test_session_replacement_resets_remembered
+test_calm_off_retry_preserves_options
 test_degraded_public_api_seam

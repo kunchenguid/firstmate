@@ -761,6 +761,6 @@ registerEntryRenderer: undefined
 
 `registerMessageRenderer(customType, renderer)` stores a custom-type renderer used by `CustomMessageComponent`; returning a truthy empty component replaces the default custom-message chrome.
 `registerAssistantThinkingRenderer(renderer)` appends supplemental UI below each already-visible thinking block; it does not replace or hide the thinking block itself.
-`@oh-my-pi/pi-coding-agent` on this install also exports `InteractiveMode.addMessageToChat`, `UserMessageComponent`, `AssistantMessageComponent.updateContent`, and `AssistantMessageComponent.setHideThinkingBlock`, which the shipped OMP Calm adapters probe for operational user rows and thinking collapse.
+`@oh-my-pi/pi-coding-agent` on this install also exports `InteractiveMode.addMessageToChat`, `UserMessageComponent`, and `AssistantMessageComponent.updateContent`, which the shipped OMP Calm adapters probe for operational user rows and Calm-on thinking collapse (a presentation-layer filter of the message passed to `updateContent`).
 The working-ship / boat path was not probed for OMP and remains Pi-only.
 `tests/fm-calm-omp-extension.test.sh` owns the portable contract for preference persistence, `/calm`, operational-row hide/show, thinking collapse, and Calm-off restore against a fake OMP API.
