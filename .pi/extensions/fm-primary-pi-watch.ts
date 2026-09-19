@@ -641,8 +641,12 @@ export default function (pi: ExtensionAPI) {
       scope.taskByWakeKey[key] ?? scope.taskByWakeKey[key.replace(/^fm-/, "")] ?? key;
     const needsDecisionTasks = new Set(scope.needsDecisionKeys.map(taskIdentity));
     const isNeedsDecisionTrigger = triggerKeys.some((key) => needsDecisionTasks.has(taskIdentity(key)));
-    const eligible = afk ? scope.eligible : !isCheckTrigger && !isNeedsDecisionTrigger && scope.eligible;
-    const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, eligible);
+    const attendedEligible = !isCheckTrigger && !isNeedsDecisionTrigger && (
+      afk ? scopeForUnreadWake(state, heartbeat, false).eligible : scope.eligible
+    );
+    const eligible = afk ? scope.eligible : attendedEligible;
+    const awayOnly = Boolean(eligible && !attendedEligible);
+    const offer = createBranchDispatchOffer(message, scope.projects, heartbeat, eligible, awayOnly);
     pi.events?.emit?.(FM_BRANCH_DISPATCH_EVENT, offer);
     return offer.accepted ? offer.settlement : null;
   }

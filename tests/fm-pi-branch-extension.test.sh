@@ -604,12 +604,13 @@ async function fire(event, payload, ctx) {
   for (const handler of piHandlers.get(event) ?? []) result = await handler(payload, eventCtx);
   return result;
 }
-function makeOffer(message, projects = [approvedProject], heartbeat = false, eligible = projects.length > 0 || heartbeat) {
+function makeOffer(message, projects = [approvedProject], heartbeat = false, eligible = projects.length > 0 || heartbeat, awayOnly = false) {
   const offer = {
     message,
     projects,
     heartbeat,
     eligible,
+    awayOnly,
     accepted: false,
     settlement: Promise.resolve(),
     accept(settlement = Promise.resolve()) {
@@ -1863,13 +1864,13 @@ await fire("session_start", {});
 contract(["propose"]);
 contract(["confirm"]);
 writeFileSync(`${home}/state/.wake-queue`, "1\t1\tcheck\tmain-only\tcheck: task-d.check.sh: PR merged\n");
-const offer = makeOffer("check: task-d.check.sh: PR merged", [], false, true);
+contract(["archive"]);
+const offer = makeOffer("check: task-d.check.sh: PR merged", [], false, true, true);
 bus.emit("fm-branch-supervision:dispatch", offer);
 if (!offer.accepted) throw new Error("the away check-only wake was refused at accept");
-contract(["archive"]);
 const failure = await offer.settlement.then(() => null, (error) => error);
 if (!(failure instanceof Error) || !failure.message.includes("no longer branch-eligible")) {
-  throw new Error(`an accepted away-only wake quiet-no-op'd after archive: ${String(failure)}`);
+  throw new Error(`an away-only wake archived before accept quiet-no-op'd: ${String(failure)}`);
 }
 if ((globalThis.__fmPrompts ?? []).length !== 0) {
   throw new Error(`the archived away-only wake still prompted the branch: ${JSON.stringify(globalThis.__fmPrompts)}`);

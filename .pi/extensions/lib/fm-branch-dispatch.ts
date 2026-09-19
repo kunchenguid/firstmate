@@ -484,6 +484,8 @@ export interface BranchDispatchOffer {
   heartbeat: boolean;
   /** True only when at least one currently unread row is safe for branch handling. */
   eligible: boolean;
+  /** True when routing-time eligibility existed only because of the away collapse. */
+  awayOnly: boolean;
   /** Set by accept(); read by the watcher after emit returns. */
   accepted: boolean;
   settlement: Promise<void>;
@@ -495,12 +497,14 @@ export function createBranchDispatchOffer(
   projects: readonly string[] = [],
   heartbeat = false,
   eligible = false,
+  awayOnly = false,
 ): BranchDispatchOffer {
   const offer: BranchDispatchOffer = {
     message,
     projects: [...projects],
     heartbeat,
     eligible,
+    awayOnly,
     accepted: false,
     settlement: Promise.resolve(),
     accept(settlement = Promise.resolve()) {

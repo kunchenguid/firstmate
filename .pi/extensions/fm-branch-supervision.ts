@@ -235,27 +235,6 @@ function isProcessingCustomMessage(message: { role?: string; customType?: string
   return message.role === "custom" && message.customType === PROCESSING_MESSAGE_TYPE;
 }
 
-function wakeAcceptedOnlyBecauseAway(message: string): boolean {
-  if (!afkPostureRecordPresent(state)) return false;
-  const heartbeat = /^heartbeat($|:)/.test(message);
-  if (/^check:/.test(message)) return true;
-  const attended = scopeForUnreadWake(state, heartbeat, false);
-  const triggerKeys = /^signal:/.test(message)
-    ? message
-      .slice("signal:".length)
-      .split(/\s+/)
-      .filter(Boolean)
-      .map((path) => path.split("/").pop() ?? path)
-    : /^stale:/.test(message)
-      ? [message.slice("stale:".length).trim().split(/\s+/, 1)[0]].filter(Boolean)
-      : [];
-  const taskIdentity = (key: string): string =>
-    attended.taskByWakeKey[key] ?? attended.taskByWakeKey[key.replace(/^fm-/, "")] ?? key;
-  const needsDecisionTasks = new Set(attended.needsDecisionKeys.map(taskIdentity));
-  if (triggerKeys.some((key) => needsDecisionTasks.has(taskIdentity(key)))) return true;
-  return !attended.eligible;
-}
-
 // Pi persists provider failures as ordinary assistant messages and resolves
 // AgentSession.prompt(), so promise rejection alone cannot detect them. Read
 // only the final assistant entry appended by this prompt: unlike the rebuilt
@@ -1655,7 +1634,7 @@ ${context.command}
     if (branchBroken && !recoveryProbe) return; // main owns every wake inside the cooldown window
     if (!collectCurrentMainDialog()) return;
     if (recoveryProbe && providerRecovery) providerRecovery.probeInFlight = true;
-    offer.accept(enqueueWake(offer.message, generation, recoveryProbe, wakeAcceptedOnlyBecauseAway(offer.message)));
+    offer.accept(enqueueWake(offer.message, generation, recoveryProbe, offer.awayOnly === true));
   });
 
   // Pi awaits every extension event handler, so an awaited ownership read
