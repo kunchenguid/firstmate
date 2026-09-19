@@ -1,6 +1,6 @@
 # Calm-mode harness feasibility
 
-This document owns the version-scoped feasibility evidence, Pi transcript taxonomy, and supported-API boundaries for Firstmate calm mode.
+This document owns the version-scoped feasibility evidence, Pi transcript taxonomy, OMP API evidence, and supported-API boundaries for Firstmate calm mode.
 [`calm.md`](calm.md) owns the current user-facing `/calm` usage and limitation contract.
 
 ## Required extension surface
@@ -181,7 +181,7 @@ Compaction and retry loaders remain stock because Pi exposes no supported replac
 
 ## Central visibility and input policy
 
-`.pi/extensions/lib/fm-calm-visibility.ts` owns only the allowlist-style transcript presentation policy.
+`.pi/extensions/lib/fm-calm-visibility-core.ts` owns only the allowlist-style transcript presentation policy Pi and OMP share.
 `bin/fm-operational-input.sh` owns current cross-language operational-input construction and parsing, while the thin Pi adapter lives at `.pi/extensions/lib/fm-operational-input.ts`.
 Only `genuine-user-prompt`, `genuine-agent-response`, and `working-status` are policy-visible.
 Every other audited class is policy-hidden when Pi exposes a supported presentation boundary, but semantic input is never transformed to enforce that preference.
@@ -744,3 +744,24 @@ The flag-off session's settled screen, with the preference `on` on disk, drew Cl
 
 ✻ Sautéed for 8s · done 11:07 AM
 ```
+
+## 2026-09-18 omp 18.1.17 public-API probe for hide-ceremony
+
+Probed against the installed `omp --version` binary `omp/18.1.17` by loading a throwaway extension that inspected the live `ExtensionAPI` object:
+
+```text
+$ omp --version
+omp/18.1.17
+
+registerMessageRenderer: function (arity 2)
+registerAssistantThinkingRenderer: function (arity 1)
+registerCommand: function (arity 2)
+registerEntryRenderer: undefined
+```
+
+`registerMessageRenderer(customType, renderer)` stores a custom-type renderer used by `CustomMessageComponent`; returning a truthy empty component replaces the default custom-message chrome.
+`registerAssistantThinkingRenderer(renderer)` appends supplemental UI below each already-visible thinking block; it does not replace or hide the thinking block itself.
+`@oh-my-pi/pi-coding-agent` on this install also exports `InteractiveMode.addMessageToChat`, `UserMessageComponent`, and `AssistantMessageComponent.updateContent`, which the shipped OMP Calm adapters probe for operational user rows and Calm-on thinking collapse (a presentation-layer filter of the message passed to `updateContent`).
+OMP splits every assistant message at its first tool call and hands `updateContent` only the derived before-tools message, so the Calm adapter also observes the `message_start`, `message_update`, and `message_end` extension events (whose payload carries the unfiltered assistant message) to classify a short mid-turn working note.
+The working-ship / boat path was not probed for OMP and remains Pi-only.
+`tests/fm-calm-omp-extension.test.sh` owns the portable contract for preference persistence, `/calm`, operational-row hide/show, thinking collapse, and Calm-off restore against a fake OMP API.

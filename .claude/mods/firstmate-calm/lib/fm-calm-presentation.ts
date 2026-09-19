@@ -10,6 +10,12 @@
 // the persisted preference schema. Everything here is pure so tests run it under Node.
 import { classifyFirstmateOperationalText } from "./fm-operational-input.ts";
 import {
+  calmPreferencePath as sharedCalmPreferencePath,
+  parseCalmPreference,
+  serializeCalmPreference,
+  type CalmHomeEnvironment,
+} from "./fm-calm-preference.ts";
+import {
   CALM_PRESERVE_MIN_CHARS,
   calmTextIsSubstantive,
 } from "./fm-calm-preservation.ts";
@@ -17,11 +23,7 @@ import {
 export { CALM_PRESERVE_MIN_CHARS } from "./fm-calm-preservation.ts";
 
 /** The environment variables that select the effective Firstmate home, as the mod reads them. */
-export type CalmHomeEnvironment = {
-  readonly FM_HOME?: string | undefined;
-  readonly FM_ROOT_OVERRIDE?: string | undefined;
-  readonly FM_CONFIG_OVERRIDE?: string | undefined;
-};
+export type { CalmHomeEnvironment } from "./fm-calm-preference.ts";
 
 /** The parent of a path, with either separator; a bare name resolves to itself. */
 function parentDirectory(path: string): string {
@@ -46,26 +48,10 @@ export function calmCodeRootFromPluginRoot(pluginRoot: string): string {
  * `FM_CONFIG_OVERRIDE` naming the config directory outright when present.
  */
 export function calmPreferencePath(env: CalmHomeEnvironment, pluginRoot: string): string {
-  const configDirectory =
-    env.FM_CONFIG_OVERRIDE ||
-    `${env.FM_HOME || env.FM_ROOT_OVERRIDE || calmCodeRootFromPluginRoot(pluginRoot)}/config`;
-  return `${configDirectory}/calm`;
+  return sharedCalmPreferencePath(env, calmCodeRootFromPluginRoot(pluginRoot));
 }
 
-/**
- * Whether a stored preference reads as Calm on. `max` is the legacy value of a removed
- * third level whose behavior is now ordinary Calm; absent or unrecognized reads as off.
- */
-export function parseCalmPreference(stored: string | undefined): boolean {
-  if (stored === undefined) return false;
-  const value = stored.trim();
-  return value === "on" || value === "max";
-}
-
-/** The exact file content the Pi extension writes for the same choice. */
-export function serializeCalmPreference(active: boolean): string {
-  return active ? "on\n" : "off\n";
-}
+export { parseCalmPreference, serializeCalmPreference } from "./fm-calm-preference.ts";
 
 /** The shape of one `turn.step` result this policy reads. */
 export type CalmStepOutcome = {
