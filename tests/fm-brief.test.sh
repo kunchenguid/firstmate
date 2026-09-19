@@ -428,6 +428,63 @@ test_ask_user_escalation_format() {
   pass "fm-brief.sh: no-mistakes ask-user findings use one event plus a verbatim snapshot"
 }
 
+test_finding_retention_ledger_contract() {
+  local home id brief other_id other_brief mode
+
+  home="$TMP_ROOT/finding-retention-home"
+  mkdir -p "$home/data"
+  id="brief-finding-retention-e1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "brief was not scaffolded"
+
+  # The no-mistakes DOD must render the finding-retention ledger contract:
+  # every gate that presents findings is a retention checkpoint, the ledger
+  # lives under this task's own data directory, unselected findings stay
+  # open rather than disappearing, and the final done: line must reflect the
+  # ledger rather than claim everything addressed by omission.
+  assert_grep "Every no-mistakes gate that presents findings" "$brief" \
+    "no-mistakes DOD lost the finding-retention checkpoint contract"
+  assert_grep "$home/data/$id/nm-findings-ledger.jsonl" "$brief" \
+    "no-mistakes DOD must point the retention ledger at this task's own data directory"
+  assert_grep "never rewrite or delete an existing line" "$brief" \
+    "no-mistakes DOD must require the ledger to stay append-only"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the JSON shape must stay literal
+  assert_grep '"disposition":"fixed"|"skipped-closed"|"deferred"' "$brief" \
+    "no-mistakes DOD must render the exact disposition vocabulary"
+  assert_grep "never \"deferred\" without both" "$brief" \
+    "no-mistakes DOD must require both an owner and an external id for a defer"
+  assert_grep "A finding you did not select this round gets no disposition line: it stays open in the ledger" "$brief" \
+    "no-mistakes DOD must state that an unselected finding stays open rather than vanishing"
+  assert_grep "A finding a gate presents again after you already disposed of it is open again until you append a newer disposition line for it." "$brief" \
+    "no-mistakes DOD must state that a re-presented finding reopens"
+  assert_grep "Never report every finding addressed while the ledger still holds an open one." "$brief" \
+    "no-mistakes DOD must forbid an all-addressed claim by omission"
+  assert_grep "bin/fm-nm-findings-lib.sh's header is the one owner of the exact fold rule" "$brief" \
+    "no-mistakes DOD must point at the ledger's one format owner instead of restating the fold rule"
+
+  # The ask-user escalation block (rule 6) must also point into the same
+  # ledger contract rather than treating ask-user findings as exempt from it.
+  assert_grep "Also append the finding-retention ledger contract below for every finding in that same snapshot" "$brief" \
+    "ship rule 6 must fold ask-user findings into the same retention ledger contract"
+
+  other_id="brief-no-finding-retention-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$other_id" some-proj --scout >/dev/null 2>&1
+  other_brief="$home/data/$other_id/brief.md"
+  assert_no_grep "nm-findings-ledger.jsonl" "$other_brief" \
+    "scout brief received a no-mistakes-only retention ledger contract"
+
+  for mode in direct-PR local-only; do
+    other_id="brief-no-finding-retention-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$other_id" some-proj --mode "$mode" >/dev/null 2>&1
+    other_brief="$home/data/$other_id/brief.md"
+    assert_no_grep "nm-findings-ledger.jsonl" "$other_brief" \
+      "$mode brief received a no-mistakes-only retention ledger contract"
+  done
+
+  pass "fm-brief.sh: no-mistakes DOD renders the finding-retention ledger contract"
+}
+
 test_ship_project_memory_wording() {
   local home id brief
   home="$TMP_ROOT/project-memory-home"
@@ -935,6 +992,7 @@ test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ask_user_escalation_format
+test_finding_retention_ledger_contract
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
