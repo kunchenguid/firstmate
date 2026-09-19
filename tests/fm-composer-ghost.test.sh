@@ -479,7 +479,13 @@ test_unproved_empty_geometry_fails_closed() {
           fm_tmux_composer_state "fakepane")
         ;;
       idle)
-        expected=pending-unproven
+        # A row matching the idle-placeholder regex is excused as furniture
+        # regardless of styling (issue #2483's hint-row-poisoning case), so
+        # this row casts no pending vote; furniture alone is never positive
+        # proof of emptiness though, and no other row in this single-row box
+        # reads empty on its own merits, so the box falls to unknown, same as
+        # the ghost case above.
+        expected=unknown
         printf '╭────────────╮\n│ idle hint │\n╰────────────╯\n' > "$capture"
         out=$(PATH="$fb:$PATH" FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
           FM_COMPOSER_IDLE_RE='^idle hint$' fm_tmux_composer_state "fakepane")
@@ -494,7 +500,7 @@ test_unproved_empty_geometry_fails_closed() {
     [ "$out" = "$expected" ] \
       || fail "unproved geometry '$fixture' should be $expected, got '$out'"
   done
-  pass "fm_tmux_composer_state: unproved ghost and malformed geometry stay unknown while styled placeholder-like text stays pending-unproven"
+  pass "fm_tmux_composer_state: unproved ghost, idle-placeholder, and malformed geometry all fail closed to unknown"
 }
 
 test_differing_widths_use_asymmetric_verdicts() {
@@ -528,6 +534,71 @@ test_wide_composer_text_is_pending() {
       || fail "wide composer text '$text' should be pending-unproven, got '$out'"
   done
   pass "fm_tmux_composer_state: emoji and CJK text remain pending under the C locale"
+}
+
+test_claude_nbsp_idle_row_is_empty() {
+  local dir fb capture out nbsp
+  dir="$TMP_ROOT/claude-nbsp"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  nbsp=$(printf '\302\240')
+
+  # Claude's idle bordered composer uses U+276F followed by U+00A0. The tmux
+  # daemon runs under LC_ALL=C, where POSIX whitespace matching alone does not
+  # trim that separator (issue #2483).
+  printf '╭────────────╮\n│ ❯%s         │\n╰────────────╯\n' "$nbsp" > "$capture"
+  out=$(PATH="$fb:$PATH" LC_ALL=C FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] \
+    || fail "Claude's bordered U+276F+NBSP idle row should be empty, got '$out'"
+
+  printf '╭────────────╮\n│ ❯ fix      │\n╰────────────╯\n' > "$capture"
+  out=$(PATH="$fb:$PATH" LC_ALL=C FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = pending ] \
+    || fail "Claude's bordered composer with typed text should be pending, got '$out'"
+  pass "fm_tmux_composer_state: Claude's bordered U+276F+NBSP idle row is empty while typed text stays pending"
+}
+
+test_bright_furniture_row_does_not_poison_idle_verdict() {
+  local dir fb capture out nbsp
+  dir="$TMP_ROOT/furniture-row"; mkdir -p "$dir"
+  fb=$(make_fake_tmux "$dir")
+  capture="$dir/styled.txt"
+  nbsp=$(printf '\302\240')
+
+  # A bright (non-dim, non-truecolor-ghosted) suggestion row below the idle
+  # glyph row - issue #2483's "hint-row poisoning": _fm_composer_classify_rows
+  # applies pending-beats-empty across every row in the box, so a furniture
+  # row that ghost-stripping cannot remove used to win over the otherwise-
+  # empty glyph row. A row matching the shared idle-placeholder regex is
+  # recognized furniture regardless of styling, so the box stays empty.
+  printf '╭────────────────────╮\n│ ❯%s                 │\n│ Ask anything...    │\n╰────────────────────╯\n' \
+    "$nbsp" > "$capture"
+  out=$(PATH="$fb:$PATH" LC_ALL=C FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = empty ] \
+    || fail "a bright idle-placeholder furniture row should not poison an empty composer, got '$out'"
+
+  # Real typed text on that same second row must still read pending - the
+  # furniture exception is a regex match on known placeholder text, not a
+  # blanket pass for every non-glyph row.
+  printf '╭────────────────────╮\n│ ❯%s                 │\n│ fix the login bug  │\n╰────────────────────╯\n' \
+    "$nbsp" > "$capture"
+  out=$(PATH="$fb:$PATH" LC_ALL=C FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = pending ] \
+    || fail "real typed text on a second composer row should stay pending, got '$out'"
+
+  # A draft that merely starts with a known placeholder must not be swallowed
+  # as furniture when another row independently proves the box empty.
+  printf '╭────────────────────╮\n│ ❯%s                 │\n│ Ask anything... x  │\n╰────────────────────╯\n' \
+    "$nbsp" > "$capture"
+  out=$(PATH="$fb:$PATH" LC_ALL=C FM_FAKE_STYLED="$capture" FM_FAKE_CY=1 \
+    fm_tmux_composer_state "fakepane")
+  [ "$out" = pending ] \
+    || fail "a draft extending an idle-placeholder prefix should stay pending, got '$out'"
+  pass "fm_tmux_composer_state: a bright idle-placeholder furniture row does not poison an empty composer, real text still pending"
 }
 
 test_all_tmux_harness_composers_share_classification() {
@@ -706,6 +777,8 @@ test_misaligned_box_is_unknown
 test_unproved_empty_geometry_fails_closed
 test_differing_widths_use_asymmetric_verdicts
 test_wide_composer_text_is_pending
+test_claude_nbsp_idle_row_is_empty
+test_bright_furniture_row_does_not_poison_idle_verdict
 test_all_tmux_harness_composers_share_classification
 test_unrecognized_state_defers_input_guard
 test_single_capture_leaves_no_fallback_race
