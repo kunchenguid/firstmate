@@ -57,6 +57,17 @@
 # relocated into the one lane that has no PR and no forge file list to reveal it.
 # local-only with a registered working branch is filed separately, and a scout,
 # which carries no delivery mode, renders nothing here pending that decision.
+# Each mode is told how its own PR reaches that base. A direct-PR worker raises
+# the PR itself, so it is given the flag. The no-mistakes pipeline raises it
+# instead, and nothing here sets the base it opens against - plumbing one into
+# that external tool's configuration is filed as its own item - so that worker is
+# told to read the PR's base once it exists and to stop rather than let a PR
+# against another branch carry that branch's commits as this task's change.
+# FM_BRIEF_BASE_SECTION_HEADING names the section so an emitter can ask whether a
+# brief already carries it: bin/fm-promote.sh writes it into the durable brief so
+# a relaunch cannot revive superseded text, and bin/fm-spawn.sh therefore renders
+# it only into a brief that does not already have it, keeping the contract stated
+# in full exactly once in what the worker reads.
 
 fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
@@ -265,6 +276,8 @@ fm_recorded_working_branch() {  # <state-dir> <task-id>
   grep '^base_branch=' "$meta" | tail -1 | cut -d= -f2- || true
 }
 
+FM_BRIEF_BASE_SECTION_HEADING='# Current worktree base contract'
+
 fm_brief_base_branch_overlay() {  # <working-branch> [mode]
   local base=$1 mode=${2:-}
   [ -n "$base" ] || return 0
@@ -272,15 +285,25 @@ fm_brief_base_branch_overlay() {  # <working-branch> [mode]
     direct-PR|no-mistakes) ;;
     *) return 0 ;;
   esac
+  printf '%s\n' "$FM_BRIEF_BASE_SECTION_HEADING"
   cat <<EOF
-# Current worktree base contract
 This worktree is based on \`$base\`, the working branch registered for this project.
 This section establishes that base after every Setup or promotion instruction above and supersedes any of them that names a different base, including any that calls this worktree's base the default branch.
 EOF
-  [ "$mode" = direct-PR ] || return 0
-  cat <<EOF
+  case "$mode" in
+    direct-PR)
+      cat <<EOF
 Open your PR against \`$base\` by passing \`--base $base\` to \`gh-axi\`, never the repository's default branch: a PR raised against any other branch would show that branch's own commits as this task's change.
 EOF
+      ;;
+    no-mistakes)
+      cat <<EOF
+The no-mistakes pipeline opens this task's PR, and nothing in this brief sets the base it opens against.
+Read that PR's own base branch as soon as the PR exists, before you report \`done:\`.
+If it is anything other than \`$base\`, append \`blocked: PR base is {branch}, not $base\` to the status file and stop, because a PR raised against another branch would show that branch's own commits as this task's change.
+EOF
+      ;;
+  esac
 }
 
 fm_dod_block() {  # <mode> <task-id>

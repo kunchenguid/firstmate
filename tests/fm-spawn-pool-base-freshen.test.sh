@@ -471,6 +471,30 @@ test_launch_brief_names_the_branch_the_slot_is_on() {
     "the base section landed inside the span the worker passes on as --intent"
   assert_no_grep 'This worktree is based on' "$captured" \
     "base-section prose would reach the pipeline as the captain's own words"
+  # The pipeline, not this brief, opens the PR, and nothing here sets the base it
+  # opens against, so the worker is told to check it and stop rather than let the
+  # PR carry the working branch's own commits as this task's change.
+  assert_grep 'nothing in this brief sets the base it opens against' "$launch" \
+    "a no-mistakes worker was left to assume the pipeline targets its working branch"
+  assert_grep 'blocked: PR base is {branch}, not develop' "$launch" \
+    "a no-mistakes worker was not told how to stop on a PR opened against another branch"
+
+  # Without a recorded working branch there is nothing to check the PR base
+  # against, so that warning must not appear at all.
+  id='pool-brief-no-mistakes-unregistered-r1'
+  rec=$(make_case brief-no-mistakes-unregistered "$id")
+  read_case_record "$rec"
+  scaffold_real_brief "$id" --mode no-mistakes
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" \
+    "a no-mistakes ship on a project registering no working branch should launch"$'\n'"$out"
+  launch="$HOME_DIR/data/$id/launch-brief.md"
+  assert_no_grep 'Current worktree base contract' "$launch" \
+    "a project registering no working branch was handed a base section"
+  assert_no_grep 'nothing in this brief sets the base it opens against' "$launch" \
+    "a project registering no working branch was warned about a base it never resolved"
 
   # A scout carries no delivery mode, so it renders no base section for now.
   id='pool-brief-registered-scout-r1'

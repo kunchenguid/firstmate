@@ -232,8 +232,9 @@
 #   the no-mistakes intent-capture region instead of inside the span that region
 #   hands to the pipeline as the captain's own words. A relaunch places no slot,
 #   so it renders the same section from the base_registered= record its own fresh
-#   spawn left behind. A slot placed on origin's own default branch leaves every
-#   brief sentence unchanged.
+#   spawn left behind, and only into a brief that does not already carry that
+#   section from bin/fm-promote.sh. A slot placed on origin's own default branch
+#   leaves every brief sentence unchanged.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -3789,7 +3790,9 @@ fi
 # The first point that knows where the slot actually ended up: the render above
 # runs before it is placed. A relaunch places nothing and reuses the recorded
 # worktree, so the record its own fresh spawn left is what still names the branch
-# that worktree is on.
+# that worktree is on. A promoted task's durable brief already carries the section
+# bin/fm-promote.sh wrote into it, and a worker cannot tell which of two copies is
+# authoritative, so a brief that already states this contract is left alone.
 if [ "$SPAWN_BASE_REGISTERED" = 1 ]; then
   SPAWN_BRIEF_BASE=$SPAWN_BASE_BRANCH
 elif [ "$RELAUNCH" -eq 1 ]; then
@@ -3797,7 +3800,8 @@ elif [ "$RELAUNCH" -eq 1 ]; then
 else
   SPAWN_BRIEF_BASE=
 fi
-if [ -n "$SPAWN_BRIEF_BASE" ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; }; then
+if [ -n "$SPAWN_BRIEF_BASE" ] && { [ "$KIND" = ship ] || [ "$KIND" = scout ]; } &&
+  ! fm_brief_heading_present "$SOURCE_BRIEF" "$FM_BRIEF_BASE_SECTION_HEADING"; then
   if ! render_launch_brief "$SPAWN_BRIEF_BASE"; then
     echo "error: could not render the working-branch contract for '$SPAWN_BRIEF_BASE' into $BRIEF; refusing to launch a worker whose brief names the wrong base" >&2
     exit 1
