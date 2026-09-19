@@ -332,6 +332,28 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
+test_pi_relaunch_carries_scoped_project_approval() {
+  local dir out rc launch
+  dir=$(new_case pi-approve rlpi)
+  add_ship_task "$dir" rlpi pi
+  cat > "$dir/fakebin/pi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --help ]; then
+  printf '%s\n' 'Options: --tui-mode <mode> --approve'
+fi
+SH
+  chmod +x "$dir/fakebin/pi"
+  printf 'pi' > "$dir/fake/command"
+  printf 'pi' > "$dir/fake/becomes"
+
+  out=$(run_control "$dir" rlpi relaunch --note "resuming Pi work"); rc=$?
+  expect_code 0 "$rc" "a Pi relaunch should succeed"$'\n'"$out"
+  launch=$(cat "$dir/fake/literal")
+  assert_contains "$launch" "FM_PI_HARNESS=pi '$dir/fakebin/pi' --tui-mode regular --approve -e" \
+    "a Pi relaunch omitted scoped project approval or its external task extension"
+  pass "fm-control relaunch: Pi retains scoped one-run project approval"
+}
+
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   local dir out rc
   dir=$(new_case pending-exit rl43)
@@ -685,7 +707,7 @@ test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
   add_ship_task "$dir" "$id" pi
   printf pi > "$dir/fake/command"
   printf pi > "$dir/fake/becomes"
-  printf '#!/usr/bin/env bash\nprintf "Options: --tui-mode\\n"\n' > "$dir/fakebin/pi"
+  printf '#!/usr/bin/env bash\nprintf "Options: --tui-mode --approve\\n"\n' > "$dir/fakebin/pi"
   chmod +x "$dir/fakebin/pi"
   sed 's|^model=default$|model=codex-native/gpt-6-astra|; s/^effort=default$/effort=ultra/' \
     "$dir/home/state/$id.meta" > "$dir/home/state/$id.meta.tmp"
@@ -1682,6 +1704,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_pi_relaunch_carries_scoped_project_approval
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
